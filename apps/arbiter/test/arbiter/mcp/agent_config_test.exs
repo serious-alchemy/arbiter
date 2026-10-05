@@ -406,6 +406,27 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert {:error, {:codex_mcp_list_failed, 3}} =
                Codex.check_worker_config(tmp, executable: exe)
     end
+
+    @tag :tmp_dir
+    test "times out a stalled codex command", %{tmp_dir: tmp} do
+      exe = Path.join(tmp, "codex")
+      pid_file = Path.join(tmp, "codex.pid")
+
+      File.write!(
+        exe,
+        "#!/bin/sh\necho $$ > #{pid_file}\ntrap '' TERM\nwhile :; do :; done\n"
+      )
+
+      File.chmod!(exe, 0o755)
+
+      assert {:error, {:codex_mcp_list_timed_out, 10}} =
+               Codex.check_worker_config(tmp, executable: exe, timeout_ms: 10)
+
+      assert {_out, 1} =
+               System.cmd("kill", ["-0", String.trim(File.read!(pid_file))],
+                 stderr_to_stdout: true
+               )
+    end
   end
 
   describe "Codex.config_toml/1 env-var mode" do
