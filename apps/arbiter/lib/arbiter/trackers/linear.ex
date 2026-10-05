@@ -100,6 +100,21 @@ defmodule Arbiter.Trackers.Linear do
   # ---- Tracker behaviour ---------------------------------------------------
 
   @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(workspace, repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
   def fetch(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve() do
       graphql(cfg, issue_query(), %{"id" => ref})

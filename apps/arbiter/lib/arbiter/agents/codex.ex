@@ -113,6 +113,13 @@ defmodule Arbiter.Agents.Codex do
   @impl true
   def provider, do: "codex"
 
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    role = Keyword.get(opts, :role, :agent)
+    Config.put_active(workspace, role)
+    :ok
+  end
+
   @doc """
   Whether the deny categories reach the CLI: they ride on the isolated
   `$CODEX_HOME` (`ConfigDir`), so this follows the isolation switch.

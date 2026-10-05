@@ -196,6 +196,21 @@ defmodule Arbiter.Mergers.Github do
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
   def open(branch, title, description, opts)
       when is_binary(branch) and is_binary(title) and is_map(opts) do
     with {:ok, cfg} <- Config.resolve(),

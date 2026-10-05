@@ -87,6 +87,8 @@ defmodule ArbiterWeb.BoardConcurrencyLiveTest do
     render_async(board, @async_timeout)
     assert slots(board) =~ "of 4"
     assert has_element?(board, "#board-concurrency[data-override='true']")
+    assert has_element?(settings, "#settings-concurrency[data-override='true']")
+    assert has_element?(settings, "#settings-concurrency-effective", "4")
   end
 
   test "a cap saved on the board shows on /settings without a refresh", %{conn: conn} do
