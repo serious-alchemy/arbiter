@@ -20,9 +20,9 @@ defmodule Arbiter.Agents.Routing do
       concrete-model configs).
     * `:round_robin` — cycle through `routing.adapters` per dispatch.
 
-  Only `:static`, `:by_priority`, and `:by_difficulty` are exercised on
-  the worker dispatch path today; `:by_budget` and `:round_robin` ship as
-  seams. `Arbiter.Agents.Routing.choose/3` returns the same
+  The dispatch path makes one decision per dispatch (`decide/3`) with a real
+  ledger snapshot (`ledger_snapshot/1`), so `:by_budget` and `:round_robin`
+  see consistent input. `Arbiter.Agents.Routing.choose/3` returns the same
   `%{type:, config:}` shape regardless of which policy is active.
   """
 
@@ -32,15 +32,57 @@ defmodule Arbiter.Agents.Routing do
   alias Arbiter.Tasks.Workspace
 
   @doc """
-  Choose an agent for `task`. `:ledger_snapshot` is reserved for
-  policies that read usage data (`:by_budget`); the default policies
-  ignore it.
+  Choose an agent for `task`, handing the policy `ledger_snapshot`.
+
+  A pure dispatch to the workspace's policy: it runs the policy every time it
+  is called. Anything on the dispatch path must go through `decide/3` instead,
+  so a stateful policy (`:round_robin`'s cursor, a learning policy) is asked
+  once per dispatch rather than once per question the dispatch has about it.
   """
   @spec choose(Issue.t(), Workspace.t() | nil, Policy.ledger_snapshot()) :: Policy.choice()
-  def choose(%Issue{} = task, workspace, ledger_snapshot \\ %{}) do
+  def choose(%Issue{} = task, workspace, ledger_snapshot) do
     policy = policy_for_workspace(workspace)
     policy.choose(task, workspace, ledger_snapshot)
   end
+
+  @doc """
+  `choose/3` with the real ledger snapshot for `workspace` (see
+  `ledger_snapshot/1`).
+  """
+  @spec choose(Issue.t(), Workspace.t() | nil) :: Policy.choice()
+  def choose(%Issue{} = task, workspace), do: choose(task, workspace, ledger_snapshot(workspace))
+
+  @doc """
+  The one routing decision for a dispatch: the `:routing_choice` already
+  carried in `opts` (made once by `Arbiter.Worker.Dispatch` and threaded to
+  every step that needs it), else a fresh `choose/2`.
+  """
+  @spec decide(Issue.t(), Workspace.t() | nil, keyword()) :: Policy.choice()
+  def decide(%Issue{} = task, workspace, opts) do
+    case Keyword.get(opts, :routing_choice) do
+      %{type: _, config: _} = choice -> choice
+      _ -> choose(task, workspace)
+    end
+  end
+
+  @doc """
+  The ledger snapshot handed to policies:
+
+    * `:cost_usd_today` — the workspace's priced ledger spend since 00:00 UTC.
+
+  `%{}` when there is no workspace or the ledger cannot be read — a policy
+  must treat a missing key as "no usage data" (`:by_budget` then behaves
+  exactly like its base policy).
+  """
+  @spec ledger_snapshot(Workspace.t() | nil) :: Policy.ledger_snapshot()
+  def ledger_snapshot(%Workspace{id: id}) when is_binary(id) do
+    since = DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")
+    %{cost_usd_today: Arbiter.Usage.cost_since(id, since)}
+  rescue
+    _ -> %{}
+  end
+
+  def ledger_snapshot(_workspace), do: %{}
 
   @doc """
   Returns the policy module for the given workspace, resolved from

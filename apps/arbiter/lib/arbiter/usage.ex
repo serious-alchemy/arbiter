@@ -277,6 +277,25 @@ defmodule Arbiter.Usage do
     |> group_totals()
   end
 
+  @doc """
+  Priced spend (USD) the ledger holds for one workspace since `since` — the
+  figure `Arbiter.Agents.Routing.ledger_snapshot/1` hands routing policies as
+  `:cost_usd_today`. Unpriced rows (`cost_usd: nil`) count as zero, so this is
+  a floor, never a fiction. `0.0` for a workspace with no rows.
+  """
+  @spec cost_since(String.t(), DateTime.t()) :: float()
+  def cost_since(workspace_id, %DateTime{} = since) when is_binary(workspace_id) do
+    from(e in LedgerRow,
+      where: e.workspace_id == ^workspace_id and e.occurred_at >= ^since,
+      select: sum(fragment("COALESCE(?, 0)", e.cost_usd))
+    )
+    |> Repo.one()
+    |> case do
+      nil -> 0.0
+      total -> total / 1
+    end
+  end
+
   defp group_totals(rows) do
     Enum.reduce(rows, %{}, fn {key, provider, total}, acc ->
       Map.update(acc, key, %{provider => total}, &Map.put(&1, provider, total))
