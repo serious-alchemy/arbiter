@@ -84,6 +84,13 @@ defmodule ArbiterWeb.Api.GrokTokenControllerTest do
     refute Jason.encode!(resp) =~ "refresh"
   end
 
+  test "a refine-tier token is refused", ctx do
+    session = Ash.create!(Arbiter.Sessions.Session, %{cwd: "/tmp/grok-token-refine"})
+    token = Scope.mint_refine(session.id, ctx.task.workspace_id, ctx.task.id)
+
+    assert token |> as_worker() |> post("/api/grok/token", %{}) |> json_response(403)
+  end
+
   test "the response is not cacheable", ctx do
     conn = ctx.worker_token |> as_worker() |> post("/api/grok/token", %{})
     assert get_resp_header(conn, "cache-control") == ["no-store"]
