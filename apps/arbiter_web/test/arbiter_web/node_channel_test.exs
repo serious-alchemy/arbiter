@@ -15,7 +15,7 @@ defmodule ArbiterWeb.NodeChannelTest do
   alias ArbiterWeb.NodeSocket
   alias ArbiterWeb.Spike.WsClient
 
-  @version Arbiter.Version.app_version()
+  @version "1.2.3"
 
   @moduletag :tmp_dir
 
@@ -23,6 +23,18 @@ defmodule ArbiterWeb.NodeChannelTest do
     # An outdated hello looks up the release to upgrade to: keep it on a fixture
     # tree, never the operator's real `~/.arbiter`.
     ArbiterWeb.NodeFixtures.use_data_home!(home)
+    # The skew verdict compares against the primary's version, which `git
+    # describe` makes ambient (a tagless CI clone is 0.0.0): pin it.
+    previous_version = Application.fetch_env(:arbiter, :node_primary_version)
+    Application.put_env(:arbiter, :node_primary_version, @version)
+
+    on_exit(fn ->
+      case previous_version do
+        {:ok, v} -> Application.put_env(:arbiter, :node_primary_version, v)
+        :error -> Application.delete_env(:arbiter, :node_primary_version)
+      end
+    end)
+
     RateLimit.reset()
     on_exit(&RateLimit.reset/0)
 

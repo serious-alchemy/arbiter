@@ -27,10 +27,19 @@ defmodule Arbiter.Nodes.Skew do
   @spec healths() :: [health()]
   def healths, do: [:ready, :outdated, :incompatible, :ahead]
 
-  @doc "The primary's side of the comparison: its version and the oldest proto it speaks."
+  @doc """
+  The primary's side of the comparison: its version and the oldest proto it speaks.
+
+  `config :arbiter, :node_primary_version` pins the version (tests only): the
+  real one comes from `git describe`, which in a tagless shallow clone is not
+  the version a test's "older agent" is older than.
+  """
   @spec primary() :: primary()
   def primary do
-    %{version: Arbiter.Version.app_version(), min_proto: Arbiter.Nodes.JoinScript.proto()}
+    version =
+      Application.get_env(:arbiter, :node_primary_version) || Arbiter.Version.app_version()
+
+    %{version: version, min_proto: Arbiter.Nodes.JoinScript.proto()}
   end
 
   @doc "The agent's health relative to `primary`."

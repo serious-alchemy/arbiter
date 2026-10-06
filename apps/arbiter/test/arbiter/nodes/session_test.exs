@@ -5,13 +5,25 @@ defmodule Arbiter.Nodes.SessionTest do
   alias Arbiter.Nodes.{Registry, Session}
   alias Arbiter.Workers.Run
 
-  @version Arbiter.Version.app_version()
+  @version "1.2.3"
 
   @moduletag :tmp_dir
 
   # An outdated hello looks up the release to upgrade to (`Nodes.Agent`); keep
   # that off the operator's real `~/.arbiter`.
   setup %{tmp_dir: home} do
+    # The skew verdict compares against the primary's version, which `git
+    # describe` makes ambient (a tagless CI clone is 0.0.0): pin it.
+    previous_version = Application.fetch_env(:arbiter, :node_primary_version)
+    Application.put_env(:arbiter, :node_primary_version, @version)
+
+    on_exit(fn ->
+      case previous_version do
+        {:ok, v} -> Application.put_env(:arbiter, :node_primary_version, v)
+        :error -> Application.delete_env(:arbiter, :node_primary_version)
+      end
+    end)
+
     previous = Application.fetch_env(:arbiter, :data_dir)
     Application.put_env(:arbiter, :data_dir, home)
 
