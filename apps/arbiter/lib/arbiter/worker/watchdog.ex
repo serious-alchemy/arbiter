@@ -1977,7 +1977,7 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
       ci_red_or_cancelled?(result) ->
-        detached_ci_red(state, result)
+        detached_ci_red_or_cancelled(state, result)
 
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
@@ -2001,13 +2001,15 @@ defmodule Arbiter.Worker.Watchdog do
   #
   # #360: cancelled checks are not a verdict on the code, so they wait the same way
   # but without the "CI is red" page.
-  defp detached_ci_red(state, result) do
-    if ci_cancelled?(result) do
-      detached_wait(state, "CI was cancelled; waiting for a re-run")
-    else
-      unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
-      detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
-    end
+  defp detached_ci_red_or_cancelled(state, result) do
+    if ci_cancelled?(result),
+      do: detached_wait(state, "CI was cancelled; waiting for a re-run"),
+      else: detached_ci_red(state)
+  end
+
+  defp detached_ci_red(state) do
+    unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
+    detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
   end
 
   defp ci_red_or_cancelled?(result), do: ci_failed?(result) or ci_cancelled?(result)
