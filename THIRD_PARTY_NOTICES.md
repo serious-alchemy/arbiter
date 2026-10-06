@@ -48,6 +48,7 @@ do not edit it by hand.
 | meck | 0.9.2 | Apache-2.0 |
 | mime | 2.0.7 | Apache-2.0 |
 | mint | 1.9.3 | Apache-2.0 |
+| mint_web_socket | 1.0.6 | Apache-2.0 |
 | multigraph | 0.16.1-mg.4 | MIT |
 | nimble_options | 1.1.1 | Apache-2.0 |
 | nimble_parsec | 1.4.2 | Apache-2.0 |
