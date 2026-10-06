@@ -14,7 +14,7 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
 
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Agents.ProviderRouting
-  alias Arbiter.Quota.{AnthropicQuota, CodexQuota}
+  alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota}
   alias Arbiter.Tasks.{Issue, Workspace}
 
   setup do
@@ -47,6 +47,16 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
     })
   end
 
+  defp allow_both!(ws, account, impl_pos, rev_pos) do
+    Ash.create!(WorkspaceProviderAccount, %{
+      workspace_id: ws.id,
+      provider: account.provider,
+      provider_account_id: account.id,
+      implementer_position: impl_pos,
+      reviewer_position: rev_pos
+    })
+  end
+
   defp task!(ws, attrs \\ %{}),
     do: Ash.create!(Issue, Map.merge(%{title: "score me", workspace_id: ws.id}, attrs))
 
@@ -75,6 +85,30 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       weekly_reset_at: ahead(302_400),
       limit_reached: false,
       captured_at: now()
+    }
+  end
+
+  defp agy_quota(gemini_used) do
+    bucket = fn group, window, used, reset ->
+      %{
+        "model_id" => "#{group}_#{window}",
+        "remaining_percentage" => 100.0 - used,
+        "reset_at" => DateTime.to_iso8601(reset)
+      }
+    end
+
+    %GoogleQuota{
+      provider: "antigravity",
+      captured_at: now(),
+      reset_at: ahead(9_000),
+      snapshot: %{
+        "models" => [
+          bucket.("gemini_models", "5h", gemini_used, ahead(9_000)),
+          bucket.("gemini_models", "weekly", 0.0, ahead(302_400)),
+          bucket.("claude_and_gpt_models", "5h", 0.0, ahead(9_000)),
+          bucket.("claude_and_gpt_models", "weekly", 0.0, ahead(302_400))
+        ]
+      }
     }
   end
 
@@ -116,7 +150,13 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
     end
 
     test "the config validator accepts scored and the scoring keys, and rejects bad ones" do
-      ok = config("scored", %{"mode" => "enforce", "time_weight" => %{"P0" => 10, "P1" => 2}})
+      ok =
+        config("scored", %{
+          "mode" => "enforce",
+          "time_weight" => %{"P0" => 10, "P1" => 2},
+          "competence" => true,
+          "reviewer_coupling" => false
+        })
 
       assert {:ok, _} =
                Ash.create(Workspace, %{
@@ -128,7 +168,9 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
             {%{"mode" => "yolo"}, "routing.scoring.mode"},
             {%{"time_weight" => %{"P9" => 1}}, "routing.scoring.time_weight"},
             {%{"time_weight" => %{"P0" => -1}}, "routing.scoring.time_weight"},
-            {%{"time_weight" => 3}, "routing.scoring.time_weight"}
+            {%{"time_weight" => 3}, "routing.scoring.time_weight"},
+            {%{"competence" => "yes"}, "routing.scoring.competence"},
+            {%{"reviewer_coupling" => 123}, "routing.scoring.reviewer_coupling"}
           ] do
         assert {:error, error} =
                  Ash.create(Workspace, %{
@@ -355,6 +397,268 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
         expected = slug.(pick.(most, c3, x3), c3, x3)
         assert slug.(pick.(scored_shadow, c1, x1), c1, x1) == expected
         assert slug.(pick.(scored_enforce, c2, x2), c2, x2) == expected
+      end
+    end
+  end
+
+  describe "competence matrix and reviewer coupling" do
+    test "with competence: true, candidate records include expected_runs and cell" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("agent", %{"config" => %{"tier_models" => %{"standard" => "claude-sonnet-5"}}})
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      codex = account!(:codex, "codex")
+      allow!(ws, claude, 0)
+      allow!(ws, codex, 1)
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      claude_cand = Enum.find(d["candidates"], &(&1["account_id"] == claude.id))
+      assert claude_cand["expected_runs"] == %{"author" => 2.53, "review" => 2.36}
+      assert %{"rung" => 1, "n" => 258} = claude_cand["cell"]
+
+      codex_cand = Enum.find(d["candidates"], &(&1["account_id"] == codex.id))
+      assert is_map(codex_cand["expected_runs"])
+      assert %{"rung" => 3} = codex_cand["cell"]
+    end
+
+    test "an operator rung-2 (family, tier, difficulty) row is hit through select/4" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      codex = account!(:codex, "codex")
+      allow!(ws, codex, 0)
+
+      pairs = [{codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      # Baseline: the routed tier is what the rung-2 row has to match.
+      assert {:ok, %{decision: base}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      tier = base["model_tier"]
+      assert is_binary(tier)
+
+      assert {:ok, _} =
+               Arbiter.Settings.set_competence_matrix([
+                 %{
+                   "match" => %{"family" => "openai", "tier" => tier, "difficulty" => 2},
+                   "n" => 40,
+                   "rung" => 2,
+                   "author_runs" => 3.0,
+                   "review_runs" => 1.5,
+                   "time_to_close_median_hours" => 2.0
+                 }
+               ])
+
+      on_exit(fn -> Arbiter.Settings.set_competence_matrix(nil) end)
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      [cand] = d["candidates"]
+      assert %{"rung" => 2, "n" => 40} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 3.0, "review" => 1.5}
+    end
+
+    test "a real agy account lands on the measured flash-medium D2 cell" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      agy = account!(:antigravity, "agy")
+      allow!(ws, agy, 0)
+
+      pairs = [{agy, agy_quota(10.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} =
+               ProviderRouting.select(
+                 ws,
+                 task,
+                 :main,
+                 opts(pairs, gemini_code: "antigravity")
+               )
+
+      [cand] = d["candidates"]
+      assert cand["model"] == "gemini-3.8-flash-medium"
+      assert %{"rung" => 1, "n" => 6} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 4.17, "review" => 2.83}
+    end
+
+    test "a Claude candidate on the default tier models hits the measured cells" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      allow!(ws, claude, 0)
+
+      pairs = [{claude, claude_quota(0.30)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      [cand] = d["candidates"]
+      assert cand["model"] == "sonnet"
+      assert %{"rung" => 1, "n" => 38} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 1.82, "review" => 1.66}
+    end
+
+    test "reviewer_coupling with a projected reviewer that has no account keeps the author price" do
+      cfg =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => true
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("review_agent", %{"cross_family" => true, "type" => "codex"})
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      allow!(ws, claude, 0)
+
+      pairs = [{claude, claude_quota(0.30)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      [cand] = d["candidates"]
+      assert is_number(cand["price"])
+      assert is_number(cand["score"])
+      assert cand["reviewer_unpriced"] == true
+    end
+
+    test "with reviewer_coupling: true, review draw prices on projected reviewer's pool" do
+      cfg_no_coupling =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => false
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("agent", %{"config" => %{"tier_models" => %{"standard" => "claude-sonnet-5"}}})
+        |> Map.put("review_agent", %{"cross_family" => true})
+
+      cfg_coupling =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => true
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("agent", %{"config" => %{"tier_models" => %{"standard" => "claude-sonnet-5"}}})
+        |> Map.put("review_agent", %{"cross_family" => true})
+
+      ws_uncoupled = workspace!(cfg_no_coupling)
+      ws_coupled = workspace!(cfg_coupling)
+
+      c1 = account!(:claude, "c1")
+      x1 = account!(:codex, "x1")
+      allow_both!(ws_uncoupled, c1, 0, 0)
+      allow_both!(ws_uncoupled, x1, 1, 1)
+
+      c2 = account!(:claude, "c2")
+      x2 = account!(:codex, "x2")
+      allow_both!(ws_coupled, c2, 0, 0)
+      allow_both!(ws_coupled, x2, 1, 1)
+
+      # Codex is nearly exhausted (session 90% used), so reviewer pricing onto codex will be high
+      pairs_uncoupled = [{c1, claude_quota(0.30)}, {x1, codex_quota(90.0)}]
+      pairs_coupled = [{c2, claude_quota(0.30)}, {x2, codex_quota(90.0)}]
+
+      task1 = task!(ws_uncoupled, %{difficulty: 2})
+      task2 = task!(ws_coupled, %{difficulty: 2})
+
+      {:ok, %{decision: d_uncoupled}} =
+        ProviderRouting.select(ws_uncoupled, task1, :main, opts(pairs_uncoupled))
+
+      {:ok, %{decision: d_coupled}} =
+        ProviderRouting.select(ws_coupled, task2, :main, opts(pairs_coupled))
+
+      c1_cand = Enum.find(d_uncoupled["candidates"], &(&1["account_id"] == c1.id))
+      c2_cand = Enum.find(d_coupled["candidates"], &(&1["account_id"] == c2.id))
+
+      # When reviewer coupling is on, claude's review runs are priced on codex's exhausted pool,
+      # so c2's price is significantly higher than c1's price (which only prices author runs on claude's pool).
+      assert c2_cand["price"] > c1_cand["price"]
+    end
+
+    test "the reviewer projection ignores the implementer's :exclude" do
+      cfg =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => true
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("review_agent", %{"cross_family" => true})
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      codex = account!(:codex, "codex")
+      allow_both!(ws, claude, 0, 0)
+      allow_both!(ws, codex, 1, 1)
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(90.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      price = fn extra ->
+        {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs, extra))
+        Enum.find(d["candidates"], &(&1["account_id"] == claude.id))["price"]
+      end
+
+      # `:exclude` is the implementer's rotation; the review path never sees it.
+      assert price.(exclude: [:codex]) == price.([])
+    end
+
+    test "I1 / I2: no-regression with competence: false / off" do
+      ws = workspace!(config("scored", %{"mode" => "shadow", "competence" => false}))
+      claude = account!(:claude, "claude")
+      codex = account!(:codex, "codex")
+      allow!(ws, claude, 0)
+      allow!(ws, codex, 1)
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      for cand <- d["candidates"] do
+        refute Map.has_key?(cand, "expected_runs")
+        refute Map.has_key?(cand, "cell")
+      end
+    end
+
+    test "one candidate: identical selection whether competence & reviewer_coupling are on or off" do
+      only = account!(:claude, "only")
+      pairs = [{only, claude_quota(0.30)}]
+
+      for {competence, coupling} <- [{false, false}, {true, false}, {true, true}] do
+        ws =
+          workspace!(
+            config("scored", %{
+              "mode" => "enforce",
+              "competence" => competence,
+              "reviewer_coupling" => coupling
+            })
+          )
+
+        allow_both!(ws, only, 0, 0)
+        task = task!(ws, %{difficulty: 2})
+
+        assert {:ok, %{account: picked, decision: d}} =
+                 ProviderRouting.select(ws, task, :main, opts(pairs))
+
+        assert picked.id == only.id
+        assert d["outcome"] == "selected"
       end
     end
   end

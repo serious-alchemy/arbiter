@@ -167,6 +167,28 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   def select(_ws, _task, _opts), do: :off
 
+  @doc """
+  The reviewer `ReviewerRouting` would pick for `implementer_family`, without
+  writing a pin (`pin: false`). Used by `ProviderRouting` and `Routing.Score` to
+  price review runs on the projected reviewer's pool (design §3.4).
+  """
+  @spec project(Workspace.t() | nil, ModelFamily.family() | nil, keyword()) ::
+          {:ok, selection()} | {:none, map()} | :off
+  def project(ws, implementer_family, opts \\ [])
+
+  def project(%Workspace{} = ws, implementer_family, opts) do
+    task = Keyword.get(opts, :task)
+
+    opts =
+      opts
+      |> Keyword.put(:pin, false)
+      |> Keyword.put(:implementer_family, implementer_family)
+
+    select(ws, task, opts)
+  end
+
+  def project(_ws, _implementer_family, _opts), do: :off
+
   # ---- selection ------------------------------------------------------------
 
   defp do_select(ws, task, opts) do
@@ -405,7 +427,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       ws: ws,
       task: task,
       opts: opts,
-      implementer: implementer_family(task),
+      implementer: Keyword.get(opts, :implementer_family) || implementer_family(task),
       authoring: authoring_record(task),
       tier: Keyword.get(opts, :tier),
       exclude: Keyword.get(opts, :exclude, []),
