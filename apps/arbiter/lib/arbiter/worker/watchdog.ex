@@ -1976,12 +1976,8 @@ defmodule Arbiter.Worker.Watchdog do
           "no check-runs yet for the head"
         )
 
-      ci_failed?(result) ->
-        detached_ci_red(state)
-
-      # #360: cancelled checks are not a verdict on the code — wait for a re-run.
-      Map.get(result, :pipeline) == :canceled ->
-        detached_wait(state, "CI was cancelled; waiting for a re-run")
+      ci_red_or_cancelled?(result) ->
+        detached_ci_red(state, result)
 
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
@@ -2002,10 +1998,21 @@ defmodule Arbiter.Worker.Watchdog do
   # The coordinator hears about the red pipeline once per pending merge (the
   # stamp records it, so neither a restart nor the sweeper re-arming the retry
   # repeats it) and the wait stays bounded by `max_wait_ms` like every other.
-  defp detached_ci_red(state) do
-    unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
-    detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
+  #
+  # #360: cancelled checks are not a verdict on the code, so they wait the same way
+  # but without the "CI is red" page.
+  defp detached_ci_red(state, result) do
+    if ci_cancelled?(result) do
+      detached_wait(state, "CI was cancelled; waiting for a re-run")
+    else
+      unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
+      detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
+    end
   end
+
+  defp ci_red_or_cancelled?(result), do: ci_failed?(result) or ci_cancelled?(result)
+
+  defp ci_cancelled?(result), do: Map.get(result, :pipeline) == :canceled
 
   defp notify_ci_red_once(state) do
     case PendingMerge.note_block(state.task_id, :ci_failed) do
