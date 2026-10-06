@@ -95,7 +95,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
         }
 
   @approval_blocks [:needs_approval, :needs_nonauthor_approval]
-  @auto_resolving_blocks [:behind_base, :ci_failed]
+  @auto_resolving_blocks [:behind_base, :ci_failed, :ci_cancelled]
 
   @rows [
           {:pr_closed, nil, :coordinator, :pr_decision, "its PR was closed without merging"},

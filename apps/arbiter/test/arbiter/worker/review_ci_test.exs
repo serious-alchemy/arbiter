@@ -103,6 +103,7 @@ defmodule Arbiter.Worker.ReviewCiTest do
     test "green only when the forge head IS the expected sha and the pipeline succeeded" do
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :success}, @sha) == :green
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :failed}, @sha) == :red
+      assert ReviewCi.classify(%{head_sha: @sha, pipeline: :canceled}, @sha) == :cancelled
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :running}, @sha) == :pending
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :pending}, @sha) == :pending
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :not_started}, @sha) == :not_started
@@ -289,6 +290,27 @@ defmodule Arbiter.Worker.ReviewCiTest do
       wait = ReviewCi.rerun_started(wait, [])
 
       assert {[:wait, :wait, :fix], _} = run(wait, [:red, :red, :red])
+    end
+
+    # #360: a cancelled check is an infrastructure outcome, never a code failure.
+    test "cancelled re-runs with a growing backoff, then escalates as infrastructure — never :fix" do
+      assert {[:rerun_infra], wait} = run(new_wait(30), [:cancelled])
+
+      # Inside the first backoff the forge may still list the cancelled attempt.
+      assert {[:wait, :wait], wait} = run(wait, [:cancelled, :cancelled])
+      assert {[:rerun_infra], wait} = run(wait, [:cancelled])
+
+      # The second re-run backs off twice as long.
+      assert {[:wait, :wait, :wait, :wait, :wait], wait} =
+               run(wait, List.duplicate(:cancelled, 5))
+
+      assert {[{:infra, reason}], _} = run(wait, [:cancelled])
+      assert reason =~ "cancelled"
+    end
+
+    test "cancelled that goes green on the re-run just proceeds" do
+      {[:rerun_infra], wait} = run(new_wait(), [:cancelled])
+      assert {[:wait, :green], _} = run(wait, [:pending, :green])
     end
 
     test "red then green on the re-run is a flake carrying the failing checks" do

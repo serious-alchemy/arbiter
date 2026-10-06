@@ -98,7 +98,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # The only blocks the Watchdog still clears on its own — mirrors its
   # `auto_resolvable?/1`. Everything else needs a person today.
-  @auto_resolving_block_reasons [:behind_base, :ci_failed]
+  @auto_resolving_block_reasons [:behind_base, :ci_failed, :ci_cancelled]
 
   @default_system_max 16
 
