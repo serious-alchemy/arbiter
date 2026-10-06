@@ -895,6 +895,118 @@ defmodule Arbiter.Mergers.GithubTest do
       result
     end
 
+    # #360: cancelled checks are infrastructure, not a code failure.
+    test "only cancelled checks: pipeline :canceled, block :ci_cancelled — never :ci_failed" do
+      runs = [
+        %{"id" => 1, "name" => "audit", "status" => "completed", "conclusion" => "success"},
+        %{
+          "id" => 2,
+          "name" => "mix test (a 1/2)",
+          "status" => "completed",
+          "conclusion" => "cancelled"
+        },
+        %{
+          "id" => 3,
+          "name" => "mix test (a 2/2)",
+          "status" => "completed",
+          "conclusion" => "success"
+        }
+      ]
+
+      result =
+        block_get(
+          %{"mergeable_state" => "unstable", "mergeable" => true, "head" => %{"sha" => "abc123"}},
+          runs
+        )
+
+      assert result.pipeline == :canceled
+      assert result.block_reason == :ci_cancelled
+    end
+
+    test "an aggregate job that failed only because a shard was cancelled is looked through" do
+      runs = [
+        %{
+          "id" => 2,
+          "name" => "mix test (a 1/2)",
+          "status" => "completed",
+          "conclusion" => "cancelled"
+        },
+        %{
+          "id" => 3,
+          "name" => "mix test (a 2/2)",
+          "status" => "completed",
+          "conclusion" => "success"
+        },
+        %{"id" => 4, "name" => "mix test", "status" => "completed", "conclusion" => "failure"}
+      ]
+
+      result =
+        block_get(
+          %{"mergeable_state" => "unstable", "mergeable" => true, "head" => %{"sha" => "abc123"}},
+          runs
+        )
+
+      assert result.pipeline == :canceled
+      assert result.block_reason == :ci_cancelled
+    end
+
+    test "a failed shard keeps the aggregate (and the pipeline) a real failure" do
+      runs = [
+        %{
+          "id" => 2,
+          "name" => "mix test (a 1/2)",
+          "status" => "completed",
+          "conclusion" => "cancelled"
+        },
+        %{
+          "id" => 3,
+          "name" => "mix test (a 2/2)",
+          "status" => "completed",
+          "conclusion" => "failure"
+        },
+        %{"id" => 4, "name" => "mix test", "status" => "completed", "conclusion" => "failure"}
+      ]
+
+      result =
+        block_get(
+          %{"mergeable_state" => "unstable", "mergeable" => true, "head" => %{"sha" => "abc123"}},
+          runs
+        )
+
+      assert result.pipeline == :failed
+      assert result.block_reason == :ci_failed
+    end
+
+    test "a plain failure still classifies as :ci_failed" do
+      runs = [%{"id" => 1, "name" => "lint", "status" => "completed", "conclusion" => "failure"}]
+
+      result =
+        block_get(
+          %{"mergeable_state" => "unstable", "mergeable" => true, "head" => %{"sha" => "abc123"}},
+          runs
+        )
+
+      assert result.pipeline == :failed
+      assert result.block_reason == :ci_failed
+    end
+
+    test "a cancelled check with another still running is :running, not cancelled" do
+      runs = [
+        %{"id" => 1, "name" => "a", "status" => "completed", "conclusion" => "cancelled"},
+        %{"id" => 2, "name" => "b", "status" => "in_progress", "conclusion" => nil}
+      ]
+
+      assert block_get(
+               %{
+                 "mergeable_state" => "unstable",
+                 "mergeable" => true,
+                 "head" => %{"sha" => "abc123"}
+               },
+               runs
+             ).pipeline ==
+               :running
+    end
+
     test "clean / mergeable PR has no block reason" do
       assert block_get(%{"mergeable_state" => "clean", "mergeable" => true}).block_reason == nil
     end
@@ -1934,6 +2046,60 @@ defmodule Arbiter.Mergers.GithubTest do
       end
     end
 
+    test "re-runs a cancelled run (#360) instead of erroring \"no failed workflow run\"" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+          {"GET", "/repos/octo/widget/actions/runs"} ->
+            Req.Test.json(conn, %{
+              "workflow_runs" => [
+                %{
+                  "id" => 9002,
+                  "name" => "CI",
+                  "path" => ".github/workflows/ci.yml",
+                  "status" => "completed",
+                  "conclusion" => "cancelled",
+                  "run_attempt" => 1
+                }
+              ]
+            })
+
+          {"GET", "/repos/octo/widget/actions/runs/9002/jobs"} ->
+            Req.Test.json(conn, %{"jobs" => [%{"name" => "shard", "conclusion" => "cancelled"}]})
+
+          {"POST", "/repos/octo/widget/actions/runs/9002/" <> verb} ->
+            send(test_pid, {:rerun, verb})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, %{run_id: 9002}} = Github.rerun_ci(@ref, %{})
+      assert_received {:rerun, _}
+    end
+
+    test "an in-flight run is not rerunnable, and the error says it is still running (#360)" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+          {"GET", "/repos/octo/widget/actions/runs"} ->
+            Req.Test.json(conn, %{
+              "workflow_runs" => [
+                %{"id" => 9003, "name" => "CI", "status" => "queued", "conclusion" => nil}
+              ]
+            })
+        end
+      end)
+
+      assert {:error, %Error{kind: :not_found, message: msg}} = Github.rerun_ci(@ref, %{})
+      assert msg =~ "still running"
+    end
+
     test "auto mode re-runs ALL jobs when the failing check has successful upstream jobs" do
       test_pid = self()
 
@@ -2206,7 +2372,7 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, []} = Github.failing_check_logs(@ref)
     end
 
-    test "treats timed_out / cancelled / action_required as failing" do
+    test "treats timed_out / action_required as failing, but not cancelled (#360)" do
       stub(fn conn ->
         case conn.request_path do
           "/repos/octo/widget/pulls/42" ->
@@ -2228,7 +2394,7 @@ defmodule Arbiter.Mergers.GithubTest do
       end)
 
       assert {:ok, checks} = Github.failing_check_logs(@ref)
-      assert Enum.map(checks, & &1.name) == ["a", "b", "c"]
+      assert Enum.map(checks, & &1.name) == ["a", "c"]
     end
 
     # bd-2l0hzm AC4: GitHub Actions leaves `output` empty on a failed job, so the
@@ -2403,6 +2569,42 @@ defmodule Arbiter.Mergers.GithubTest do
       ])
 
       assert {:ok, []} = Github.list_required_check_failures(@ref)
+    end
+
+    defp aggregate_with_shards(shard_conclusions) do
+      aggregate = %{
+        "__typename" => "CheckRun",
+        "name" => "mix test",
+        "status" => "COMPLETED",
+        "conclusion" => "FAILURE",
+        "isRequired" => true
+      }
+
+      shards =
+        for {c, i} <- Enum.with_index(shard_conclusions, 1) do
+          %{
+            "__typename" => "CheckRun",
+            "name" => "mix test (arbiter #{i}/3)",
+            "status" => "COMPLETED",
+            "conclusion" => c,
+            "isRequired" => false
+          }
+        end
+
+      [aggregate | shards]
+    end
+
+    test "an aggregate that failed only because a shard was cancelled is not a failure (#360)" do
+      stub_required_checks(aggregate_with_shards(["SUCCESS", "CANCELLED", "SUCCESS"]))
+
+      assert {:ok, []} = Github.list_required_check_failures(@ref)
+    end
+
+    test "an aggregate alongside a FAILURE shard is still listed (#360)" do
+      stub_required_checks(aggregate_with_shards(["SUCCESS", "CANCELLED", "FAILURE"]))
+
+      assert {:ok, [check]} = Github.list_required_check_failures(@ref)
+      assert check.name == "mix test"
     end
   end
 

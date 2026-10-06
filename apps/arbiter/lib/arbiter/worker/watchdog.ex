@@ -89,6 +89,8 @@ defmodule Arbiter.Worker.Watchdog do
       :behind_base -> `adapter.update_branch/1` (update-branch), then re-poll.
                       A failed update (conflict introduced) falls through to
                       `:conflict` handling.
+      :ci_cancelled -> re-run the cancelled checks with backoff (never a fix pass, #360);
+                      past the cap, escalate once as CI infrastructure and park
       :ci_failed   -> dispatch a fix-pass worker (briefed with the failing
                       check logs via `adapter.failing_check_logs/1`) to fix the
                       root cause and push, then re-poll.
@@ -375,6 +377,14 @@ defmodule Arbiter.Worker.Watchdog do
   # the newest one on the head. A re-run that never shows up is then treated as
   # having failed, so this can't wait forever.
   @flake_rerun_grace_polls 5
+
+  # A `:ci_cancelled` block (checks cancelled, none failed — #360) is re-run, never
+  # sent to a fix pass: at most this many re-runs per head, each backing off
+  # `@cancel_rerun_grace_polls * n` polls (the forge keeps listing the cancelled
+  # attempt for a poll or two). Then one coordinator escalation names it as CI
+  # infrastructure and the PR parks.
+  @cancel_rerun_cap 2
+  @cancel_rerun_grace_polls 3
 
   # The default dispatcher the Watchdog uses to spawn a fix-pass worker for a
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
@@ -693,6 +703,7 @@ defmodule Arbiter.Worker.Watchdog do
           :conflict
           | :behind_base
           | :ci_failed
+          | :ci_cancelled
           | :needs_approval
           | :needs_nonauthor_approval
           | :draft
@@ -1380,6 +1391,13 @@ defmodule Arbiter.Worker.Watchdog do
       # re-ran, the untouched tests that failed, the poll it ran on, and
       # whether the head has read pending since. One per head.
       flake_rerun: nil,
+      # The `:ci_cancelled` re-runs on one head (#360): `%{head, count, poll}`.
+      # Kept apart from `auto_resolve_attempts`, which a running re-run resets
+      # (the block reads nil while it is in flight) and which would never cap.
+      cancel_rerun: nil,
+      # Head whose cap-reached `:ci_cancelled` escalation already fired: the latch is
+      # its own field because `last_block_reason` is reset by every non-blocked poll.
+      ci_cancelled_escalated_head: nil,
       # The head parked as a suspected flake, and the head
       # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
       # equals a head, including a nil one.
@@ -1961,8 +1979,8 @@ defmodule Arbiter.Worker.Watchdog do
           "no check-runs yet for the head"
         )
 
-      ci_failed?(result) ->
-        detached_ci_red(state)
+      ci_red_or_cancelled?(result) ->
+        detached_ci_red_or_cancelled(state, result)
 
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
@@ -1983,10 +2001,23 @@ defmodule Arbiter.Worker.Watchdog do
   # The coordinator hears about the red pipeline once per pending merge (the
   # stamp records it, so neither a restart nor the sweeper re-arming the retry
   # repeats it) and the wait stays bounded by `max_wait_ms` like every other.
+  #
+  # #360: cancelled checks are not a verdict on the code, so they wait the same way
+  # but without the "CI is red" page.
+  defp detached_ci_red_or_cancelled(state, result) do
+    if ci_cancelled?(result),
+      do: detached_wait(state, "CI was cancelled; waiting for a re-run"),
+      else: detached_ci_red(state)
+  end
+
   defp detached_ci_red(state) do
     unless retry_wait_exhausted?(state), do: notify_ci_red_once(state)
     detached_wait(state, "CI is failing; waiting for a re-run or a new pipeline")
   end
+
+  defp ci_red_or_cancelled?(result), do: ci_failed?(result) or ci_cancelled?(result)
+
+  defp ci_cancelled?(result), do: Map.get(result, :pipeline) == :canceled
 
   defp notify_ci_red_once(state) do
     case PendingMerge.note_block(state.task_id, :ci_failed) do
@@ -2820,7 +2851,10 @@ defmodule Arbiter.Worker.Watchdog do
                 merge_stall_notified: false,
                 merge_fail_count: 0,
                 last_merge_stall_poll: 0,
-                park_reason: nil
+                park_reason: nil,
+                # Drop the backoff anchor: it is a pre-reset `poll_count`, so a
+                # re-cancel of this head would otherwise sit "backing off" (#360).
+                cancel_rerun: unanchor_cancel_rerun(state.cancel_rerun)
             }
           else
             state
@@ -2850,6 +2884,24 @@ defmodule Arbiter.Worker.Watchdog do
   defp handle_block(reason, result, %{auto_merge: false} = state) do
     state = debounce_escalate_block(state, reason)
     apply_outcome(effective_outcome(state, result), result, state)
+  end
+
+  # #360: nothing failed, so there is nothing for a fix round to fix. Re-run the
+  # cancelled checks with backoff; past the cap, escalate once as CI infrastructure.
+  defp handle_block(:ci_cancelled, result, state) do
+    head = Map.get(result, :head_sha)
+    rerun = cancel_rerun_for(state, head)
+
+    cond do
+      cancel_rerun_backing_off?(state, rerun) ->
+        reschedule(%{state | last_block_reason: :ci_cancelled})
+
+      rerun.count >= @cancel_rerun_cap ->
+        park_ci_cancelled(state)
+
+      true ->
+        rerun_cancelled(state, rerun)
+    end
   end
 
   defp handle_block(reason, result, state) do
@@ -2885,6 +2937,78 @@ defmodule Arbiter.Worker.Watchdog do
       true ->
         auto_resolve(reason, result, state)
     end
+  end
+
+  defp unanchor_cancel_rerun(%{} = rerun), do: %{rerun | poll: nil}
+  defp unanchor_cancel_rerun(other), do: other
+
+  defp cancel_rerun_for(%{cancel_rerun: %{head: head} = rerun}, head), do: rerun
+  defp cancel_rerun_for(_state, head), do: %{head: head, count: 0, poll: nil}
+
+  defp cancel_rerun_backing_off?(_state, %{poll: nil}), do: false
+
+  defp cancel_rerun_backing_off?(state, %{count: count, poll: poll}),
+    do: state.poll_count - poll < @cancel_rerun_grace_polls * count
+
+  defp rerun_cancelled(state, rerun) do
+    case safe_rerun_ci(state) do
+      {:ok, _} ->
+        Logger.warning(
+          "Worker.Watchdog: CI on task=#{state.task_id} mr=#{state.mr_ref} was cancelled, " <>
+            "not failed; re-running it (#{rerun.count + 1}/#{@cancel_rerun_cap}) — no fix pass"
+        )
+
+        reschedule(%{
+          state
+          | last_block_reason: :ci_cancelled,
+            cancel_rerun: %{rerun | count: rerun.count + 1, poll: state.poll_count}
+        })
+
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: CI re-run for cancelled checks on task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} failed (#{inspect(other)}); escalating as CI infrastructure"
+        )
+
+        park_ci_cancelled(state)
+    end
+  end
+
+  # Indefinite park-and-watch, like an exhausted `:ci_failed`: the coordinator has
+  # been paged, so the ordinary poll ceiling must not fail the worker out.
+  defp park_ci_cancelled(state) do
+    head = (state.cancel_rerun && state.cancel_rerun.head) || :unknown
+
+    state =
+      if state.ci_cancelled_escalated_head != head do
+        Logger.warning(
+          "Worker.Watchdog: merge blocked (:ci_cancelled) for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; escalating to coordinator"
+        )
+
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            :ci_cancelled
+          )
+        end)
+
+        %{
+          state
+          | ci_cancelled_escalated_head: head,
+            last_block_escalated_poll: state.poll_count
+        }
+      else
+        state
+      end
+
+    reschedule(%{
+      state
+      | last_block_reason: :ci_cancelled,
+        max_polls: :infinity,
+        park_reason: :ci_cancelled
+    })
   end
 
   # The Phase 1 debounced escalation: a given block reason escalates once when it

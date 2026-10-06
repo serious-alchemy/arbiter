@@ -190,6 +190,42 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- #360: cancelled checks are infrastructure, never a fix round -----------
+
+  describe "cancelled CI (#360)" do
+    test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do
+      rig = rig(ctx, "feature/ci-cancel-1")
+      start_forge(ctx, rig, [:canceled, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert length(StubMerger.ci_reruns()) == 1
+      assert FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) == []
+      # No fix round: the implementer fixture would have committed.
+      assert remote_head(ctx, rig) == rig.head
+    end
+
+    test "cancelled past the re-run cap escalates once as CI infrastructure and never fixes",
+         ctx do
+      rig = rig(ctx, "feature/ci-cancel-2")
+      start_forge(ctx, rig, [:canceled])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert length(StubMerger.ci_reruns()) == 2
+      assert remote_head(ctx, rig) == rig.head
+
+      assert [%{subject: subject}] =
+               gate_messages(ctx, rig) |> Enum.filter(&(&1.subject =~ "cancelled"))
+
+      assert subject =~ "not failed"
+    end
+  end
+
   # ---- AC3: a waiting ticket holds no slot ------------------------------------
 
   describe "waiting on CI (AC3)" do

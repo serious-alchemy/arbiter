@@ -53,6 +53,10 @@ defmodule Arbiter.Worker.ReviewCi do
   # re-run failed (the Watchdog's `@flake_rerun_grace_polls`, same reasoning).
   @rerun_grace_polls 3
 
+  # Infrastructure re-runs (cancelled checks, #360) before the gate gives up and
+  # escalates. Each one backs off `@rerun_grace_polls * n` polls before the next.
+  @infra_rerun_cap 2
+
   # Consecutive polls that see zero check runs for the head before the gate
   # concludes there is no CI to wait for (the Watchdog's
   # `@not_started_grace_polls`: "GitHub hasn't made the suite yet" resolves in a
@@ -71,6 +75,7 @@ defmodule Arbiter.Worker.ReviewCi do
   @type reading ::
           :green
           | :red
+          | :cancelled
           | :pending
           | :not_started
           | :unknown
@@ -246,6 +251,7 @@ defmodule Arbiter.Worker.ReviewCi do
       case Map.get(result, :pipeline) do
         :success -> :green
         :failed -> :red
+        :canceled -> :cancelled
         p when p in [:running, :pending] -> :pending
         :not_started -> :not_started
         _ -> :unknown
@@ -288,6 +294,8 @@ defmodule Arbiter.Worker.ReviewCi do
           polls: non_neg_integer(),
           not_started: non_neg_integer(),
           unavailable: non_neg_integer(),
+          infra_reruns: non_neg_integer(),
+          infra_rerun_at: non_neg_integer() | nil,
           rerun: nil | %{at_poll: non_neg_integer(), seen_pending: boolean(), checks: [map()]}
         }
 
@@ -296,6 +304,8 @@ defmodule Arbiter.Worker.ReviewCi do
           | {:flake, [map()]}
           | :wait
           | :rerun
+          | :rerun_infra
+          | {:infra, String.t()}
           | :fix
           | {:fallback, String.t()}
 
@@ -306,7 +316,16 @@ defmodule Arbiter.Worker.ReviewCi do
   @doc "A fresh wait on `sha`."
   @spec new_wait(String.t(), budget()) :: wait()
   def new_wait(sha, %{max_polls: max_polls}) do
-    %{sha: sha, max_polls: max_polls, polls: 0, not_started: 0, unavailable: 0, rerun: nil}
+    %{
+      sha: sha,
+      max_polls: max_polls,
+      polls: 0,
+      not_started: 0,
+      unavailable: 0,
+      infra_reruns: 0,
+      infra_rerun_at: nil,
+      rerun: nil
+    }
   end
 
   @doc """
@@ -317,6 +336,9 @@ defmodule Arbiter.Worker.ReviewCi do
       failed jobs were re-run and the head then went green (record it, dispatch
       no fix pass);
     * `:rerun` — first red on this head: re-run the failed jobs once;
+    * `:rerun_infra` — a check was cancelled (not failed): re-run it, backing off,
+      up to `@infra_rerun_cap` times; `{:infra, reason}` once that is spent. A
+      cancelled check is never a code failure, so neither ever reaches `:fix`;
     * `:fix` — red again after the re-run (or no re-run is possible): the
       existing fix path;
     * `:wait` — poll again;
@@ -339,6 +361,7 @@ defmodule Arbiter.Worker.ReviewCi do
   end
 
   defp step(wait, :red), do: red(wait)
+  defp step(wait, :cancelled), do: cancelled(wait)
   defp step(wait, :pending), do: wait |> see_pending() |> reset_streaks() |> spend()
   defp step(wait, :not_started), do: not_started(wait)
 
@@ -358,6 +381,24 @@ defmodule Arbiter.Worker.ReviewCi do
     else
       spend(wait)
     end
+  end
+
+  defp cancelled(%{infra_reruns: n, infra_rerun_at: at} = wait) when not is_nil(at) do
+    if wait.polls - at < @rerun_grace_polls * n,
+      do: spend(reset_streaks(wait)),
+      else: cancelled_next(wait)
+  end
+
+  defp cancelled(wait), do: cancelled_next(wait)
+
+  defp cancelled_next(%{infra_reruns: n} = wait) when n < @infra_rerun_cap do
+    {:rerun_infra, %{reset_streaks(wait) | infra_reruns: n + 1, infra_rerun_at: wait.polls}}
+  end
+
+  defp cancelled_next(wait) do
+    {{:infra,
+      "CI infrastructure: checks on #{wait.sha} were cancelled, not failed, and " <>
+        "#{wait.infra_reruns} re-run(s) did not clear it."}, wait}
   end
 
   defp red(%{rerun: nil} = wait), do: {:rerun, reset_streaks(wait)}
@@ -410,7 +451,16 @@ defmodule Arbiter.Worker.ReviewCi do
   budget bounds the whole wait, not each head.
   """
   @spec retarget(wait(), String.t()) :: wait()
-  def retarget(wait, sha), do: %{wait | sha: sha, rerun: nil, not_started: 0, unavailable: 0}
+  def retarget(wait, sha),
+    do: %{
+      wait
+      | sha: sha,
+        rerun: nil,
+        not_started: 0,
+        unavailable: 0,
+        infra_reruns: 0,
+        infra_rerun_at: nil
+    }
 
   @doc "Record that the failed jobs were re-run at the wait's current poll."
   @spec rerun_started(wait(), [map()]) :: wait()

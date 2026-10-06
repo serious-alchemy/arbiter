@@ -53,6 +53,7 @@ defmodule Arbiter.Tasks.PullRequest do
       :conflict,
       :behind_base,
       :ci_failed,
+      :ci_cancelled,
       :needs_approval,
       :needs_nonauthor_approval,
       :draft,
