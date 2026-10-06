@@ -178,7 +178,25 @@ defmodule ArbiterWeb.NodeController do
   def file(conn, %{"sha" => sha}) do
     case Agent.find_by_sha(sha) do
       {:ok, artifact} -> send_artifact(conn, artifact)
-      :error -> error(conn, 404, "Not found")
+      :error -> send_shelved(conn, sha)
+    end
+  end
+
+  # A file the primary published for a run (`Arbiter.Nodes.Files`: the provider
+  # CLI and `arb`). The path comes from the primary's own shelf; the request
+  # contributes only a hash that must already be on it.
+  # sobelow_skip ["Traversal.SendFile"]
+  defp send_shelved(conn, sha) do
+    case Arbiter.Nodes.Files.lookup(sha) do
+      {:ok, path} ->
+        conn
+        |> put_resp_content_type("application/octet-stream")
+        |> put_resp_header("x-content-sha256", sha)
+        |> put_resp_header("cache-control", "no-store")
+        |> send_file(200, path)
+
+      :error ->
+        error(conn, 404, "Not found")
     end
   end
 

@@ -26,14 +26,24 @@ defmodule Arbiter.NodeAgent.Connection do
   * **Upgrade.** A `hello_ok` (or an `upgrade` push) carrying
     `upgrade{version, sha256}` goes to `Arbiter.NodeAgent.Upgrader`; the first
     `hello_ok` of a freshly upgraded agent also confirms the upgrade.
-  * Events the later children own (`assign`, `cancel`, `reap`, `drain`,
-    `rotate`) are logged and ignored.
+  * **Runs (RW9).** `assign{run, spec}` starts a run (`Arbiter.NodeAgent.Runs`),
+    answered by the run's own `run.ready` / `run.refused` push; `cancel`,
+    `signal`, `ack{run, offset}` and `exit_ack{run}` address a run by id. The
+    run processes send `{:run_push, run, event, payload}` here, and this process
+    puts them on the channel (`stdout` as a binary `StdoutFrame`). On `hello_ok`
+    every run is re-attached (it resends what the primary has not acknowledged),
+    runs the primary does not know are cancelled, and on any loss the runs are
+    detached; a **fence** also stops every container (§10.1).
+  * Events the later children own (`reap`, `drain`, `rotate`) are logged and
+    ignored.
   """
   use GenServer
 
   alias Arbiter.NodeAgent.Backoff
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
+  alias Arbiter.NodeAgent.Run
+  alias Arbiter.NodeAgent.Runs
   alias Arbiter.NodeAgent.Status
   alias Arbiter.NodeAgent.Upgrade
   alias Arbiter.NodeAgent.Upgrader
@@ -123,6 +133,17 @@ defmodule Arbiter.NodeAgent.Connection do
   def handle_info({:ws, _stale, _kind, _a}, state), do: {:noreply, state}
   def handle_info({:ws, _stale, _kind, _a, _b}, state), do: {:noreply, state}
   def handle_info({:ws, _stale, _kind, _a, _b, _c}, state), do: {:noreply, state}
+
+  # -- runs (RW9) ----------------------------------------------------------------------
+
+  def handle_info({:run_push, _run, event, payload}, %{phase: :ready, client: client} = state)
+      when is_pid(client) do
+    WsClient.push(client, Protocol.topic(state.config), event, payload)
+    {:noreply, state}
+  end
+
+  # Not connected: the run keeps its output and resends on the next attach.
+  def handle_info({:run_push, _run, _event, _payload}, state), do: {:noreply, state}
 
   # -- readiness task ------------------------------------------------------------------
 
@@ -234,6 +255,60 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  defp push(state, "assign", %{"run" => run, "spec" => spec}) when is_map(spec) do
+    case Runs.assign(Map.put(spec, "run", run), run_opts(state)) do
+      {:ok, _run} ->
+        :ok
+
+      {:error, :already_running} ->
+        # A repeated assign (the primary asked again after a blip): say where it is.
+        Run.attach(run)
+
+      {:error, {:refused, reason}} ->
+        Logger.warning("node agent: refused run #{inspect(run)}: #{inspect(reason, limit: 5)}")
+
+        send(
+          self(),
+          {:run_push, run, "run.refused",
+           %{"run" => run, "reason" => "bad_spec", "detail" => inspect(reason, limit: 10)}}
+        )
+
+      {:error, reason} ->
+        send(
+          self(),
+          {:run_push, run, "run.refused",
+           %{"run" => run, "reason" => "unschedulable", "detail" => inspect(reason, limit: 10)}}
+        )
+    end
+
+    state
+  end
+
+  defp push(state, "cancel", %{"run" => run} = payload) do
+    case Run.cancel(run, payload["reason"] || "cancelled") do
+      :ok -> :ok
+      {:error, :not_found} -> send(self(), {:run_push, run, "run.gone", %{"run" => run}})
+    end
+
+    state
+  end
+
+  defp push(state, "signal", %{"run" => run, "signal" => signal})
+       when signal in ["TERM", "KILL"] do
+    Run.signal(run, signal)
+    state
+  end
+
+  defp push(state, "ack", %{"run" => run, "offset" => offset}) when is_integer(offset) do
+    Run.ack(run, offset)
+    state
+  end
+
+  defp push(state, "exit_ack", %{"run" => run}) do
+    Run.ack_exit(run)
+    state
+  end
+
   defp push(state, event, _payload) do
     Logger.debug("node agent: ignoring #{inspect(event)} (not handled by this agent version)")
     state
@@ -317,7 +392,28 @@ defmodule Arbiter.NodeAgent.Connection do
       do: Logger.info("node agent upgrade to #{config.version} confirmed")
 
     request_upgrade(state, payload["upgrade"])
+    attach_runs(payload["runs"])
     state
+  end
+
+  # Re-attach every run (each resends what the primary has not acknowledged).
+  # A run the primary says it does not know is not one to keep alive: its owner
+  # is gone, so the container is stopped (the restart story proper, with
+  # retained checkpoints, is RW12's).
+  defp attach_runs(verdicts) do
+    unknown = for {run, "unknown"} <- verdicts || %{}, do: run
+
+    Enum.each(unknown, fn run ->
+      Logger.warning("node agent: primary does not know run #{run}; stopping it")
+      Run.cancel(run, "unknown_to_primary")
+    end)
+
+    Runs.attach_all()
+  end
+
+  defp run_opts(state) do
+    [config: state.config, sink: self(), node_id: state.config.node_id] ++
+      (state.config.run_opts || [])
   end
 
   defp request_upgrade(_state, nil), do: :ok
@@ -345,6 +441,8 @@ defmodule Arbiter.NodeAgent.Connection do
     if now() - state.last_ack >= config.fence_after_ms do
       Logger.warning("node agent fenced: no hb_ack for #{div(config.fence_after_ms, 1000)}s")
       put_status(state, %{fenced_at: DateTime.utc_now() |> DateTime.to_iso8601()})
+      # §10.1: by the time the primary declares the node lost, the containers are stopped.
+      Runs.fence_all()
       lost(state, "fenced: no hb_ack for #{div(config.fence_after_ms, 1000)}s")
     else
       seq = state.hb_seq + 1
@@ -374,6 +472,7 @@ defmodule Arbiter.NodeAgent.Connection do
   # -- loss + retry -------------------------------------------------------------------------------
 
   defp lost(state, reason) do
+    Runs.detach_all()
     if state.client, do: WsClient.close(state.client)
     if state.client_ref, do: Process.demonitor(state.client_ref, [:flush])
     cancel(state.hb_timer)

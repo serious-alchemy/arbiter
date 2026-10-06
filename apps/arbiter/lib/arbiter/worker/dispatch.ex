@@ -3379,7 +3379,7 @@ defmodule Arbiter.Worker.Dispatch do
   # none for any other backend, so a bwrap or unsandboxed spawn is unchanged.
   defp sandbox_session_opts(policy, workspace, opts) do
     if ContainerSpawn.podman?(policy),
-      do: [security: policy, workspace: workspace] ++ Keyword.take(opts, [:repo]),
+      do: [security: policy, workspace: workspace] ++ Keyword.take(opts, [:repo, :node]),
       else: []
   end
 

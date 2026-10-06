@@ -286,7 +286,8 @@ defmodule Arbiter.Worker.ClaudeSession do
                env_pairs(opts, task_id, worker_env, tmp_dir),
                owner: owner,
                task_id: task_id,
-               tmp_dir: tmp_dir
+               tmp_dir: tmp_dir,
+               run_id: run_id_for(owner)
              ) do
         GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
       end
@@ -304,7 +305,10 @@ defmodule Arbiter.Worker.ClaudeSession do
     case Keyword.get(opts, :security) do
       %Arbiter.Agents.SecurityPolicy{} = policy ->
         if ContainerSpawn.podman?(policy) do
-          prepare_container(opts, policy, port_args, ctx)
+          case Keyword.get(opts, :node) do
+            nil -> prepare_container(opts, policy, port_args, ctx)
+            node -> prepare_remote_container(opts, policy, port_args, ctx, node)
+          end
         else
           {:ok, port_args}
         end
@@ -344,6 +348,79 @@ defmodule Arbiter.Worker.ClaudeSession do
        port_args
        |> Map.put(:sandbox, request)
        |> Map.update!(:env, &ContainerSpawn.apply_env(&1, request))}
+    end
+  end
+
+  # RW9: a run placed on a node (`opts[:node]`, from `Worker.Dispatch`'s
+  # `ensure_node_capacity/2`). The primary half runs here (egress, image plan,
+  # published CLI files), then the run is *assigned* to the node and this waits
+  # for the agent to have the container started (or to refuse). The resulting
+  # handle rides in `port_args.remote.prepared` for the first open; the request
+  # stays so a later open (a nudge, an auto-resume) places the run again.
+  defp prepare_remote_container(opts, policy, port_args, ctx, node) do
+    provider = Keyword.get(opts, :provider) || "claude"
+
+    with {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
+         {:ok, request} <-
+           ContainerSpawn.prepare_remote(
+             Keyword.take(opts, [
+               :arb_token,
+               :workspace,
+               :repo,
+               :image,
+               :podman,
+               :egress,
+               :services
+             ]) ++
+               [
+                 provider: provider,
+                 policy: policy,
+                 node: node,
+                 worktree_path: port_args.cd,
+                 argv: port_args.argv,
+                 owner: Keyword.fetch!(ctx, :owner),
+                 task_id: Keyword.fetch!(ctx, :task_id),
+                 tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
+               ]
+           ) do
+      run_id = Keyword.get(ctx, :run_id) || Ecto.UUID.generate()
+      port_args = Map.update!(port_args, :env, &ContainerSpawn.apply_env(&1, request))
+      remote = %{node: node, request: request, run_id: run_id, prepared: nil}
+
+      with {:ok, handle} <- place_remote(remote, port_args, Keyword.fetch!(ctx, :owner)) do
+        {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
+      end
+    end
+  end
+
+  defp place_remote(remote, port_args, owner) do
+    with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
+         {:ok, prepared} <- Arbiter.Worker.Executor.Node.prepare(remote.node, spec, owner: owner),
+         {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
+      {:ok, handle}
+    else
+      {:error, reason} -> {:error, {:remote_placement_failed, reason}}
+    end
+  end
+
+  # The handle of a spawn that was placed for its first open is consumed by it;
+  # what is stashed for re-opens must not carry it.
+  @doc false
+  @spec strip_prepared(map()) :: map()
+  def strip_prepared(%{remote: %{} = remote} = port_args),
+    do: %{port_args | remote: %{remote | prepared: nil}}
+
+  def strip_prepared(port_args), do: port_args
+
+  @doc false
+  @spec remote_memory_cap(map()) :: String.t() | nil
+  def remote_memory_cap(%{remote: %{request: %{limits: %{"memory" => memory}}}}), do: memory
+  def remote_memory_cap(_), do: nil
+
+  defp run_id_for(owner) do
+    case Worker.state(owner) do
+      %{run_id: id} when is_binary(id) -> id
+      _ -> nil
     end
   end
 
@@ -2004,6 +2081,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   """
   @spec open_scoped_port(map(), String.t() | nil) ::
           {port(), Arbiter.Worker.MemoryScope.scope() | nil}
+  def open_scoped_port(%{remote: %{}} = port_args, _task_id) do
+    # RW9: no local process. The first open takes the handle `start/1` placed;
+    # a re-open places the run again (from the worker's own process, so the
+    # worker is the owner of the new handle's messages).
+    case port_args.remote do
+      %{prepared: {:remote, _} = handle} -> {handle, nil}
+      remote -> {replace_remote(remote, port_args), nil}
+    end
+  end
+
   def open_scoped_port(%{sandbox: %{}} = port_args, _task_id) do
     # bd-d2o3xb: a container is not in the server's cgroup, so there is no
     # service for a runaway to take down and no scope to wrap the `podman`
@@ -2017,6 +2104,15 @@ defmodule Arbiter.Worker.ClaudeSession do
   def open_scoped_port(port_args, task_id) do
     {wrapped, scope} = Arbiter.Worker.MemoryScope.wrap(port_args, task_id)
     {open_port(wrapped), scope}
+  end
+
+  defp replace_remote(remote, port_args) do
+    # Anything the previous container of this run left on the node is gone before
+    # its exit was reported, so the same container name is free again.
+    case place_remote(remote, port_args, self()) do
+      {:ok, handle} -> handle
+      {:error, reason} -> raise "remote spawn refused: #{inspect(reason)}"
+    end
   end
 
   @doc false

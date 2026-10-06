@@ -74,7 +74,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
   @max_secret_bytes 65_536
   @max_prompt_bytes 4_194_304
   # Container-side paths a spec may never mount over.
-  @forbidden_dest ["/proc", "/sys", "/dev", "/run/arbiter", "/etc", "/boot", "/root"]
+  @forbidden_dest ["/proc", "/sys", "/dev", "/run/arbiter", "/etc"]
 
   # What no spec may ask podman for, named so the refusal says which.
   @unsafe_flags ~w(--privileged --cap-add --device --userns --pid --network --ipc --uts
