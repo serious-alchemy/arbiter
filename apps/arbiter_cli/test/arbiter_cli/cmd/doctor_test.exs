@@ -1890,6 +1890,37 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert result.detail =~ "HTTP 500"
     end
 
+    test "every server-backed endpoint fails on a 500 instead of skipping" do
+      for path <- @server_paths -- ["/api/server/migrations"] do
+        stub_routes(
+          List.keystore(
+            worker_tmp_routes(%{}),
+            {"get", path},
+            0,
+            {{"get", path}, {%{"error" => "boom"}, 500}}
+          )
+        )
+
+        assert Enum.any?(Checks.run(), &(&1.status == :fail and &1.detail =~ "HTTP 500")),
+               "#{path} hid a 500"
+      end
+    end
+
+    test "bind_address 500 fails" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/bind_address"},
+          0,
+          {{"get", "/api/server/bind_address"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "bind address is loopback"))
+      assert result.status == :fail
+      assert result.detail =~ "HTTP 500"
+    end
+
     test "warns when the temp root is on tmpfs" do
       stub_routes(worker_tmp_routes(%{"root" => "/tmp/w", "fstype" => "tmpfs", "tmpfs" => true}))
 

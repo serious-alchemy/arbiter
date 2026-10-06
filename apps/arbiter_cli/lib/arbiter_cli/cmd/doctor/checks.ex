@@ -1835,10 +1835,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
   # there is no login", so a server reachable off-loopback exposes
   # unauthenticated LiveView pages to anyone who can reach the port. This is
-  # purely informational — never fatal, never blocks readiness — and any
-  # ambiguous response (server predates this endpoint, transient error, etc.)
-  # is treated as green rather than risking a spurious [fail] on installs
-  # that are already fine.
+  # purely informational — never fatal, never blocks readiness. An ambiguous
+  # response (server predates this endpoint, unreachable) is treated as green
+  # rather than risking a spurious [fail] on installs that are already fine,
+  # but a 5xx is a [fail] like every other server-backed check.
   defp check_bind_address do
     case Client.get("/api/server/bind_address") do
       {:ok, %{"loopback" => true, "ip" => ip}} ->
@@ -1867,6 +1867,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("bind address is loopback", err)
 
       _other ->
         %Result{
