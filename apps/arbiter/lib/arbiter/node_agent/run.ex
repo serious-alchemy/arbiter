@@ -363,7 +363,7 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   defp default_image(%{tag: tag, plan: %{tag: tag} = plan}, opts) do
-    case Image.Builder.ensure(plan, runner_opts(opts)) do
+    case Image.Builder.ensure(Image.Builder, plan, runner_opts(opts)) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
