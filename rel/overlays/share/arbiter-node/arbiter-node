@@ -1,0 +1,159 @@
+#!/bin/sh
+# arbiter-node: the operator's handle on this machine's node agent
+# (docs/design/remote-workers.md §5.5). POSIX sh; the join script installs it at
+# ~/.arbiter-node/bin/arbiter-node.
+#
+#   arbiter-node status                 agent state; exit 0 only when connected and ready
+#   arbiter-node logs [journalctl args] the agent's journal (default: last 200 lines)
+#   arbiter-node leave [--yes] [--force] ask the primary to remove this node, then
+#                                       stop and disable the unit and drop the credential
+#   arbiter-node pre-start              the unit's ExecStartPre: roll back an upgrade
+#                                       that never confirmed (not for operators)
+#
+# Settings come from the environment, then ~/.config/arbiter-node/agent.env
+# (the unit's EnvironmentFile): ARB_NODE_URL, ARB_NODE_HOME,
+# ARB_NODE_CREDENTIAL_FILE. The credential is a standing secret: it is read from
+# its file and handed to curl on stdin, never on a command line.
+
+set -eu
+umask 077
+
+UNIT=arbiter-node.service
+HOME_DIR=${HOME:-}
+CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME_DIR/.config}/arbiter-node
+ENV_FILE=${ARB_NODE_ENV_FILE:-$CONFIG_DIR/agent.env}
+# A rollback waits this long for the new release to confirm (§6 step 4).
+CONFIRM_GRACE_S=180
+
+die() {
+  printf 'arbiter-node: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: arbiter-node status
+       arbiter-node logs [journalctl args]
+       arbiter-node leave [--yes] [--force]
+USAGE
+  exit 2
+}
+
+# KEY from the environment, else from agent.env (KEY=VALUE lines; the file is a
+# systemd EnvironmentFile, so it is parsed, never sourced).
+setting() {
+  key=$1
+  eval "val=\${$key:-}"
+  if [ -z "$val" ] && [ -f "$ENV_FILE" ]; then
+    val=$(sed -n "s/^$key=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+  fi
+  printf '%s' "$val"
+}
+
+NODE_HOME=$(setting ARB_NODE_HOME)
+[ -n "$NODE_HOME" ] || NODE_HOME=$HOME_DIR/.arbiter-node
+
+cmd_status() {
+  unit_state=unknown
+  if command -v systemctl >/dev/null 2>&1; then
+    unit_state=$(systemctl --user is-active "$UNIT" 2>/dev/null || true)
+    [ -n "$unit_state" ] || unit_state=unknown
+  fi
+  printf 'unit: %s\n' "$unit_state"
+
+  status_file=$NODE_HOME/status.json
+  if [ ! -f "$status_file" ]; then
+    printf 'no status file at %s (has the agent ever started?)\n' "$status_file"
+    exit 1
+  fi
+  cat "$status_file"
+
+  [ "$unit_state" = active ] || exit 1
+  grep -q '"state": "ready"' "$status_file" || exit 1
+}
+
+cmd_logs() {
+  [ "$#" -gt 0 ] || set -- -n 200 --no-pager
+  exec journalctl --user -u "$UNIT" "$@"
+}
+
+cmd_leave() {
+  yes=0
+  force=0
+  for arg in "$@"; do
+    case $arg in
+      --yes | -y) yes=1 ;;
+      --force) force=1 ;;
+      *) usage ;;
+    esac
+  done
+
+  if [ "$yes" != 1 ]; then
+    [ -t 0 ] || die "leave removes this node from the primary and stops the agent; pass --yes to confirm without a terminal"
+    printf 'Remove this node from the primary and stop the agent? [y/N] ' >&2
+    read -r answer || answer=n
+    case $answer in y | Y | yes) ;; *) die "cancelled" ;; esac
+  fi
+
+  url=$(setting ARB_NODE_URL)
+  cred_file=$(setting ARB_NODE_CREDENTIAL_FILE)
+  [ -n "$cred_file" ] || cred_file=$CONFIG_DIR/credential
+
+  # Ask the primary first: once the unit is stopped there is no one left to tell
+  # it. `DELETE /nodes/self` removes the calling node (node tier, §5.3).
+  if [ -n "$url" ] && [ -f "$cred_file" ]; then
+    credential=$(tr -d '\n' <"$cred_file")
+    if ! printf 'header = "Authorization: Bearer %s"\n' "$credential" |
+      curl --silent --show-error --fail --max-time 30 -K - -X DELETE "${url%/}/nodes/self" >/dev/null; then
+      [ "$force" = 1 ] || die "the primary could not be asked to remove this node; the agent was left running. Re-run with --force to leave anyway (then remove the node on the primary)"
+      printf 'arbiter-node: primary unreachable; leaving anyway (--force)\n' >&2
+    fi
+  elif [ "$force" != 1 ]; then
+    die "no ARB_NODE_URL or credential file; pass --force to stop the agent without telling a primary"
+  fi
+
+  systemctl --user disable --now "$UNIT" || die "could not stop and disable $UNIT"
+  rm -f "$cred_file" "$NODE_HOME/status.json"
+  printf 'arbiter-node: left; agent stopped and credential removed\n'
+}
+
+# ExecStartPre. `upgrade.pending` (from=, to=, at=<epoch s>) is written when the
+# agent flips `current` and removed by the new release after its first hello_ok.
+# Still there past the grace period means the new release never came up: point
+# `current` back at `from`.
+cmd_pre_start() {
+  pending=$NODE_HOME/upgrade.pending
+  [ -f "$pending" ] || exit 0
+
+  from=$(sed -n 's/^from=//p' "$pending" | tail -n 1)
+  to=$(sed -n 's/^to=//p' "$pending" | tail -n 1)
+  at=$(sed -n 's/^at=//p' "$pending" | tail -n 1)
+  case $at in '' | *[!0-9]*) exit 0 ;; esac
+
+  now=$(date +%s)
+  [ $((now - at)) -ge "$CONFIRM_GRACE_S" ] || exit 0
+
+  case $from in
+    '' | /* | *..*) exit 0 ;;
+  esac
+  [ -x "$NODE_HOME/$from/bin/arbiter" ] || exit 0
+
+  printf 'arbiter-node: upgrade to %s never confirmed; rolling back to %s\n' "$to" "$from"
+  tmp=$NODE_HOME/current.rollback.$$
+  ln -s "$from" "$tmp"
+  mv -fT "$tmp" "$NODE_HOME/current"
+  printf '%s %s\n' "$to" "$now" >"$NODE_HOME/rolled_back"
+  rm -f "$pending"
+}
+
+[ "$#" -ge 1 ] || usage
+command=$1
+shift
+
+case $command in
+  status) cmd_status "$@" ;;
+  logs) cmd_logs "$@" ;;
+  leave) cmd_leave "$@" ;;
+  pre-start) cmd_pre_start "$@" ;;
+  *) usage ;;
+esac

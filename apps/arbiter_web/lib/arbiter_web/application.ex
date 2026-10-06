@@ -7,6 +7,32 @@ defmodule ArbiterWeb.Application do
 
   @impl true
   def start(_type, _args) do
+    # The same positive, fail-closed role check as `Arbiter.Application.start/2`
+    # (docs/design/remote-workers.md §3). An agent-role VM runs no web tier: with
+    # no `ArbiterWeb.Endpoint` there is no listener and no port is bound.
+    with {:ok, role} <- Arbiter.NodeAgent.role(),
+         {:ok, children} <- supervisor_children(role) do
+      # See https://hexdocs.pm/elixir/Supervisor.html
+      # for other strategies and supported options
+      Supervisor.start_link(children, strategy: :one_for_one, name: ArbiterWeb.Supervisor)
+    end
+  end
+
+  @doc """
+  The web tier's top-level children for `role`. `:agent` returns `[]` and never
+  calls `primary_fun`; `:primary` returns `primary_fun.()`; any other role is an
+  error and nothing starts.
+  """
+  @spec supervisor_children(term(), (-> list())) ::
+          {:ok, list()} | {:error, {:unknown_role, term()}}
+  def supervisor_children(role, primary_fun \\ &primary_children/0)
+  def supervisor_children(:agent, _primary_fun), do: {:ok, []}
+  def supervisor_children(:primary, primary_fun), do: {:ok, primary_fun.()}
+  def supervisor_children(other, _primary_fun), do: {:error, {:unknown_role, other}}
+
+  # Boot-time side effects live here, not in `start/2`, so they run only for a
+  # role that serves the dashboard.
+  defp primary_children do
     # Resolve the running git SHA at boot so /api/version always reflects
     # the currently-checked-out commit, not a stale compile-time value.
     Application.put_env(:arbiter_web, :runtime_git_sha, resolve_git_sha())
@@ -16,27 +42,21 @@ defmodule ArbiterWeb.Application do
 
     warn_if_bound_off_loopback()
 
-    children =
-      [
-        ArbiterWeb.Telemetry,
-        # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
-        # CLI traffic to api.anthropic.com and streams SSE responses back.
-        {Finch, name: ArbiterWeb.Finch},
-        # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
-        # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
-        {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
-        # One-time dashboard login tokens (bd-3gycsz).
-        ArbiterWeb.DashboardAuth.LoginTokens,
-        # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
-        # {ArbiterWeb.Worker, arg},
-        # Start to serve requests, typically the last entry
-        ArbiterWeb.Endpoint
-      ] ++ operator_socket_children()
-
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: ArbiterWeb.Supervisor]
-    Supervisor.start_link(children, opts)
+    [
+      ArbiterWeb.Telemetry,
+      # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
+      # CLI traffic to api.anthropic.com and streams SSE responses back.
+      {Finch, name: ArbiterWeb.Finch},
+      # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
+      # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
+      {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
+      # One-time dashboard login tokens (bd-3gycsz).
+      ArbiterWeb.DashboardAuth.LoginTokens,
+      # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
+      # {ArbiterWeb.Worker, arg},
+      # Start to serve requests, typically the last entry
+      ArbiterWeb.Endpoint
+    ] ++ operator_socket_children()
   end
 
   @doc """
@@ -101,7 +121,11 @@ defmodule ArbiterWeb.Application do
   # whenever the application is updated.
   @impl true
   def config_change(changed, _new, removed) do
-    ArbiterWeb.Endpoint.config_change(changed, removed)
+    # No Endpoint runs in agent mode, so there is nothing to reconfigure.
+    if Arbiter.NodeAgent.agent?(),
+      do: :ok,
+      else: ArbiterWeb.Endpoint.config_change(changed, removed)
+
     :ok
   end
 end

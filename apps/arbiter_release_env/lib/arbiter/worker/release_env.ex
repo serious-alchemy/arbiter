@@ -69,7 +69,16 @@ defmodule Arbiter.Worker.ReleaseEnv do
   # Static release-specific var names, in addition to the RELEASE_* prefix scan.
   # ROOTDIR and BINDIR are the critical ones that hijack the Erlang runtime boot.
   # ERTS_LIB_DIR is set by some OTP release tooling and has the same effect.
-  @static_release_vars ~w(ROOTDIR BINDIR ERTS_LIB_DIR)
+  #
+  # The node agent (RW5, docs/design/remote-workers.md §3) is this release run
+  # with ARB_ROLE=agent, and its settings ride along in the unit's environment. A
+  # child that boots a BEAM from a checkout (`mix test` in a worktree) would read
+  # `config/runtime.exs`, see ARB_ROLE=agent and come up as a node agent with no
+  # Repo. So the role and the agent's own settings are scrubbed like release vars.
+  @static_release_vars ~w(
+    ROOTDIR BINDIR ERTS_LIB_DIR
+    ARB_ROLE ARB_NODE_URL ARB_NODE_HOME ARB_NODE_CREDENTIAL_FILE ARB_NODE_ENV_FILE
+  )
 
   @doc """
   Returns env pairs that unset release-specific vars and (if needed) override
