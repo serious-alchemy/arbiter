@@ -13,10 +13,28 @@ defmodule Arbiter.ActorTest do
       assert Actor.label(Actor.system("merge_queue")) == "system:merge_queue"
       assert Actor.label(Actor.refine("bd-abc")) == "refine:bd-abc"
       assert Actor.label(Actor.operator("ryan")) == "operator:ryan"
+      assert Actor.label(Actor.node("gpu-box")) == "node:gpu-box"
     end
 
     test "an operator with no verified identity says so" do
       assert Actor.label(Actor.operator(nil)) == "operator (unauthenticated)"
+    end
+  end
+
+  describe "node actors" do
+    test "a node is a machine and a valid kind" do
+      assert :node in Actor.kinds()
+      assert Actor.machine?(Actor.node("gpu-box"))
+    end
+
+    test "a node actor round-trips through its label" do
+      actor = Actor.node("gpu-box")
+      assert actor |> Actor.label() |> Actor.parse() == actor
+    end
+
+    test "a node actor without a name labels as plain node" do
+      assert Actor.label(Actor.node(nil)) == "node"
+      assert Actor.parse("node").kind == :node
     end
   end
 
@@ -53,6 +71,7 @@ defmodule Arbiter.ActorTest do
       assert Actor.parse("coordinator").kind == :coordinator
       assert Actor.parse("worker:bd-1").kind == :worker
       assert Actor.parse("autopilot").kind == :autopilot
+      assert Actor.parse("node:gpu-box") == Actor.node("gpu-box")
       assert Actor.parse("system:merge_queue").kind == :system
       assert Actor.parse("loop:proposal:abc").kind == :system
       assert Actor.parse("operator (unauthenticated)").kind == :operator

@@ -94,7 +94,9 @@ defmodule Arbiter.ApplicationTest do
         DNSCluster,
         Phoenix.PubSub.Supervisor,
         Arbiter.TaskSupervisor,
-        Arbiter.SingleInstance
+        Arbiter.SingleInstance,
+        # In-memory token buckets; never reads the Repo (RW3).
+        Arbiter.Nodes.RateLimit
       ]
 
       last_gate_ix =

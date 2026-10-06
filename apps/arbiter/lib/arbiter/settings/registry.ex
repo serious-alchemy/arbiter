@@ -93,10 +93,35 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Hours a card may wait Ready and unblocked before it escapes the finish-first " <>
           "tiebreak; null = 24. Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "nodes.public_url",
+      type: "http_url",
+      description:
+        "The https origin a remote node dials to enroll and open its socket " <>
+          "(e.g. https://<host>.<tailnet>.ts.net); null = unset. Operator-only."
+    },
+    %{
+      key: "nodes.allow_public_endpoint",
+      type: "boolean",
+      description:
+        "Tolerate a nodes.public_url that is not a private/tailnet address (internet " <>
+          "exposure); null/false = refused. Operator-only."
+    },
+    %{
+      key: "nodes.join_token_ttl_minutes",
+      type: "join_token_ttl",
+      description:
+        "Default lifetime of a minted join token, in minutes (max 1440); null = 15. " <>
+          "Operator-only."
     }
   ]
 
   @keys Enum.map(@schema, & &1.key)
+
+  # Built at compile time from the fixed schema above, so no input ever mints an
+  # atom (some keys are dotted: `:"nodes.public_url"`).
+  @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
   @doc "Every settable key, in display order."
   @spec keys() :: [key()]
@@ -130,6 +155,33 @@ defmodule Arbiter.Settings.Registry do
 
   defp do_cast("positive_integer", _),
     do: {:error, "value must be a positive integer or null"}
+
+  defp do_cast("http_url", url) when is_binary(url) do
+    case Settings.normalize_public_url(url) do
+      {:ok, normalized} ->
+        {:ok, normalized}
+
+      :error ->
+        {:error,
+         "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+    end
+  end
+
+  defp do_cast("http_url", _),
+    do:
+      {:error,
+       "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+
+  defp do_cast("join_token_ttl", n) when is_integer(n) and n > 0 do
+    max = Settings.max_join_token_ttl_minutes()
+
+    if n <= max,
+      do: {:ok, n},
+      else: {:error, "value must be at most #{max} minutes (24 hours) or null"}
+  end
+
+  defp do_cast("join_token_ttl", _),
+    do: {:error, "value must be a positive integer of minutes or null"}
 
   defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
     valid = allowed(type)
@@ -200,6 +252,14 @@ defmodule Arbiter.Settings.Registry do
   defp write("scheduling_finish_first_max_wait_hours", v),
     do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
 
+  defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
+
+  defp write("nodes.allow_public_endpoint", v),
+    do: wrap(Settings.set_nodes_allow_public_endpoint(v))
+
+  defp write("nodes.join_token_ttl_minutes", v),
+    do: wrap(Settings.set_nodes_join_token_ttl_minutes(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -224,6 +284,10 @@ defmodule Arbiter.Settings.Registry do
   def override("scheduling_finish_first_max_wait_hours"),
     do: Settings.scheduling_finish_first_max_wait_hours()
 
+  def override("nodes.public_url"), do: Settings.nodes_public_url()
+  def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
+  def override("nodes.join_token_ttl_minutes"), do: Settings.nodes_join_token_ttl_override()
+
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
   def default("conductor_system_max_concurrent"), do: Snapshot.default_system_max_concurrent()
@@ -247,6 +311,10 @@ defmodule Arbiter.Settings.Registry do
 
   # nil = max(slots_total - 1, 1), which depends on the board.
   def default("scheduling_max_lifted_in_flight"), do: nil
+
+  def default("nodes.public_url"), do: nil
+  def default("nodes.allow_public_endpoint"), do: false
+  def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
 
   def default(key) when key in ["quota_providers_shown", "quota_providers_hidden"], do: nil
 
@@ -277,5 +345,9 @@ defmodule Arbiter.Settings.Registry do
 
   @doc "`%{key_atom => override}` — what `installation_config_get` returns as `settings`."
   @spec overrides() :: %{atom() => term()}
-  def overrides, do: Map.new(@keys, &{String.to_existing_atom(&1), override(&1)})
+  def overrides, do: Map.new(@keys, &{key_atom(&1), override(&1)})
+
+  @doc "The atom a key is reported under in `overrides/0`; dotted keys are quoted atoms."
+  @spec key_atom(key()) :: atom()
+  def key_atom(key) when key in @keys, do: Map.fetch!(@key_atoms, key)
 end
