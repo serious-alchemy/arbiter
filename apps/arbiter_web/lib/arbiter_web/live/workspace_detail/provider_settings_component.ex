@@ -175,6 +175,9 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
 
     with {:ok, patch, unset} <- grok_patch(params, ws),
          {:ok, updated} <- patch_config(ws, patch, unset) do
+      # The tab bar's grok ring follows this switch; don't make it wait out the cache TTL.
+      Arbiter.Quota.QuotaCache.invalidate(ws.id)
+
       {:noreply, socket |> apply_workspace(updated) |> assign(:provider_error, nil) |> load()}
     else
       {:error, msg} -> {:noreply, assign(socket, :provider_error, msg)}
