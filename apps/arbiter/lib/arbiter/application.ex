@@ -54,9 +54,6 @@ defmodule Arbiter.Application do
       # Token-bucket limiter for the node auth tier's enrol / mint / socket-connect
       # paths (RW3, docs/design/remote-workers.md §5.4). No deps, state in memory.
       Arbiter.Nodes.RateLimit,
-      # One session per connected remote node, plus the registry that finds it
-      # (RW6, docs/design/remote-workers.md §3, §10.1). Needs PubSub and the Repo.
-      Arbiter.Nodes.Supervisor,
       # Shared, priority-aware GitHub request budget (bd-3p5vqc). Keyed on pool
       # identity (the account owning a credential), it reserves headroom so
       # background patrol traffic can never starve foreground work — a deploy,
@@ -67,6 +64,10 @@ defmodule Arbiter.Application do
     ] ++
       migration_gate(auto_start?) ++
       [
+        # One session per connected remote node, plus the registry that finds it
+        # (RW6, docs/design/remote-workers.md §3, §10.1). Sessions read the Repo,
+        # so this follows the migration gate.
+        Arbiter.Nodes.Supervisor,
         # The shared circuit breaker (bd-5jr49o). Started early and with no deps
         # so every auto-filing / auto-escalating / auto-redispatching path can
         # gate through it; callers fail open if it is somehow absent.
