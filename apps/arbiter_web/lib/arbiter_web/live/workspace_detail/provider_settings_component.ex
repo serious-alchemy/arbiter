@@ -23,6 +23,7 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
 
   alias Arbiter.Accounts
   alias Arbiter.Accounts.ProviderSettings
+  alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
@@ -54,6 +55,24 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     |> assign(:strategy, strategy(ws))
     |> assign(:ranking, ranking(ws, Map.get(socket.assigns, :routing_opts, [])))
     |> assign(:cross_family?, cfg(ws, ["review_agent", "cross_family"]) == true)
+    |> assign(:grok_enabled?, GrokRouting.enabled?(ws))
+    |> assign(:grok_difficulties, Enum.join(grok_difficulties(ws), ", "))
+    |> assign(:grok_auth, grok_auth(ws))
+  end
+
+  # Only the difficulties the workspace spelled out; blank means the default (D1).
+  defp grok_difficulties(ws) do
+    case cfg(ws, ["routing", "grok", "difficulties"]) do
+      [_ | _] = list -> list
+      _ -> []
+    end
+  end
+
+  defp grok_auth(ws) do
+    case Arbiter.Grok.AuthReport.report(workspaces: [ws]) do
+      %{enabled: true, state: state} -> state
+      _ -> nil
+    end
   end
 
   defp strategy(ws),
@@ -149,6 +168,19 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     end
   end
 
+  # ---- grok opt-in: routing.grok.enabled / routing.grok.difficulties ----
+
+  def handle_event("set_grok_routing", params, socket) do
+    ws = socket.assigns.workspace
+
+    with {:ok, patch, unset} <- grok_patch(params, ws),
+         {:ok, updated} <- patch_config(ws, patch, unset) do
+      {:noreply, socket |> apply_workspace(updated) |> assign(:provider_error, nil) |> load()}
+    else
+      {:error, msg} -> {:noreply, assign(socket, :provider_error, msg)}
+    end
+  end
+
   # ---- fallback: the agent.type / review_agent.type precedence list ----
 
   def handle_event("add_agent_type", %{"role" => role, "type" => type}, socket) do
@@ -164,6 +196,48 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
   def handle_event("move_agent_type", %{"role" => role, "type" => type, "dir" => dir}, socket) do
     update_agent_types(socket, role, &move_type(&1, type, dir))
   end
+
+  defp grok_patch(%{"enabled" => "true"} = params, ws) do
+    raw = Map.get(params, "difficulties", Enum.join(grok_difficulties(ws), ", "))
+
+    case parse_difficulties(raw) do
+      {:ok, []} ->
+        {:ok, %{"routing" => %{"grok" => %{"enabled" => true}}}, ["routing.grok.difficulties"]}
+
+      {:ok, list} ->
+        {:ok, %{"routing" => %{"grok" => %{"enabled" => true, "difficulties" => list}}}, []}
+
+      :error ->
+        {:error, "Grok difficulties must be whole numbers from 0 to 5, e.g. \"1, 2\"."}
+    end
+  end
+
+  defp grok_patch(_params, _ws), do: {:ok, %{}, ["routing.grok.enabled"]}
+
+  defp parse_difficulties(raw) do
+    raw
+    |> String.split(~r/[\s,]+/, trim: true)
+    |> Enum.reduce_while({:ok, []}, fn token, {:ok, acc} ->
+      case Integer.parse(token) do
+        {n, ""} when n in 0..5 -> {:cont, {:ok, [n | acc]}}
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, list |> Enum.reverse() |> Enum.uniq()}
+      :error -> :error
+    end
+  end
+
+  defp grok_auth_text(nil), do: "grok routing is off"
+  defp grok_auth_text(:logged_in), do: "logged in"
+  defp grok_auth_text(:expired), do: "token expired — refreshed on the next dispatch"
+
+  defp grok_auth_text(:reauth_required),
+    do: "re-login required: run `grok login --device-code` on the Arbiter host"
+
+  defp grok_auth_text(:not_logged_in),
+    do: "not logged in: run `grok login --device-code` on the Arbiter host"
 
   defp write(socket, fun) do
     case fun.(socket.assigns.workspace) do
@@ -557,6 +631,14 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
   def render(assigns) do
     ~H"""
     <div id="provider-settings" class={pane_class("providers", @section)}>
+      <p
+        id="provider-settings-help"
+        class="m-0 mb-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
+      >
+        This pane decides which providers get this workspace's work. Attaching an account on the
+        <.link navigate={~p"/providers"} class="underline">Providers page</.link>
+        only adds metering and concurrency.
+      </p>
       <.rows>
         <%= for role <- @roles do %>
           <.setting_row
@@ -663,6 +745,47 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
                 <% end %>
               </p>
             </div>
+          </:below>
+        </.setting_row>
+
+        <.setting_row
+          name="Route D1 tickets to Grok"
+          consequence="routing.grok.enabled — grok is free-tier and never takes agent.type; this opt-in is the only way work reaches it"
+        >
+          <:below>
+            <.form
+              for={%{}}
+              id="grok-routing-form"
+              phx-change="set_grok_routing"
+              phx-target={@myself}
+              class="flex flex-col gap-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--arb-text-body)]"
+            >
+              <label class="flex items-center gap-2">
+                <input type="hidden" name="enabled" value="false" />
+                <input type="checkbox" name="enabled" value="true" checked={@grok_enabled?} />
+                <span class="font-semibold">Route D1 tickets to Grok</span>
+              </label>
+              <label :if={@grok_enabled?} id="grok-difficulties" class="flex items-center gap-2">
+                <span class="text-[var(--text-label)]">difficulties</span>
+                <input
+                  type="text"
+                  name="difficulties"
+                  value={@grok_difficulties}
+                  placeholder="1"
+                  phx-debounce="blur"
+                  aria-label="Grok difficulties"
+                  class="w-[96px]"
+                />
+                <span class="text-[var(--text-label)]">blank = D1 only; 0–5, comma separated</span>
+              </label>
+              <span
+                id="grok-auth-state"
+                data-state={@grok_auth || "off"}
+                class="text-[var(--text-label)]"
+              >
+                Grok auth: {grok_auth_text(@grok_auth)}
+              </span>
+            </.form>
           </:below>
         </.setting_row>
 
