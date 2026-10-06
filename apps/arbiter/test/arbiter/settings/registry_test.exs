@@ -8,7 +8,8 @@ defmodule Arbiter.Settings.RegistryTest do
            credential_watchdog_interval_ms credential_watchdog_recovery_interval_ms
            quota_providers_shown quota_providers_hidden output_offload_enabled
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
-           scheduling_finish_first scheduling_finish_first_max_wait_hours)
+           scheduling_finish_first scheduling_finish_first_max_wait_hours
+           nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -118,6 +119,53 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:error, :invalid_value} = Settings.set_scheduling_finish_first_max_wait_hours(-3)
       assert {:error, :invalid_value} = Settings.set_scheduling_finish_first("yes")
       assert {:error, :invalid_value} = Settings.set_scheduling_epic_floors_enabled(0)
+    end
+  end
+
+  describe "nodes.* settings (RW3)" do
+    test "nodes.public_url takes an http(s) origin and normalises the trailing slash" do
+      assert {:ok, "https://box.tail1234.ts.net"} =
+               Registry.put("nodes.public_url", "https://box.tail1234.ts.net/")
+
+      assert Settings.nodes_public_url() == "https://box.tail1234.ts.net"
+      assert Registry.describe("nodes.public_url").override == "https://box.tail1234.ts.net"
+      assert {:ok, nil} = Registry.put("nodes.public_url", nil)
+      assert Settings.nodes_public_url() == nil
+    end
+
+    test "nodes.public_url refuses anything that is not a bare http(s) URL" do
+      for bad <- ["ftp://box", "box.ts.net", "https://", "https://u:p@box", "https://box/?x=1",
+                  "https://box#frag", "javascript:alert(1)", 5, ""] do
+        assert {:error, {:invalid, _}} = Registry.put("nodes.public_url", bad), inspect(bad)
+      end
+
+      assert Settings.nodes_public_url() == nil
+    end
+
+    test "nodes.allow_public_endpoint defaults off" do
+      assert Registry.describe("nodes.allow_public_endpoint").value == false
+      assert {:ok, true} = Registry.put("nodes.allow_public_endpoint", true)
+      assert Settings.nodes_allow_public_endpoint?()
+      assert {:ok, nil} = Registry.put("nodes.allow_public_endpoint", nil)
+      refute Settings.nodes_allow_public_endpoint?()
+    end
+
+    test "nodes.join_token_ttl_minutes defaults to 15 and is capped at 24 hours" do
+      assert Registry.describe("nodes.join_token_ttl_minutes").value == 15
+      assert Settings.nodes_join_token_ttl_minutes() == 15
+
+      assert {:ok, 60} = Registry.put("nodes.join_token_ttl_minutes", 60)
+      assert Settings.nodes_join_token_ttl_minutes() == 60
+
+      assert {:error, {:invalid, _}} = Registry.put("nodes.join_token_ttl_minutes", 1441)
+      assert {:error, {:invalid, _}} = Registry.put("nodes.join_token_ttl_minutes", 0)
+      assert {:ok, nil} = Registry.put("nodes.join_token_ttl_minutes", nil)
+      assert Settings.nodes_join_token_ttl_minutes() == 15
+    end
+
+    test "overrides/0 reports them under their dotted names" do
+      assert %{"nodes.public_url": nil, "nodes.allow_public_endpoint": nil} =
+               Registry.overrides()
     end
   end
 

@@ -20,7 +20,14 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # `docs/design/epic-aware-scheduling.md` §6.6: the operator alone decides how
   # much of the fleet a floor may take, so the coordinator's MCP door refuses
   # these two (REST and `arb settings` carry the operator's token).
-  @operator_only_install_keys ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight)
+  #
+  # The `nodes.*` keys (RW3, `docs/design/remote-workers.md` §15) are operator-only
+  # too: they decide where machines that receive provider tokens may enrol from
+  # and for how long a join token lives, so a coordinator *session* must not set
+  # them.
+  @operator_only_install_keys ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+                                 nodes.public_url nodes.allow_public_endpoint
+                                 nodes.join_token_ttl_minutes)
 
   # ---- workspace_show -----------------------------------------------------
 
@@ -222,7 +229,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
       key when key in @install_settings_keys ->
         {:ok,
-         %{key: key, value: Map.get(settings, String.to_existing_atom(key)), settings: settings}}
+         %{key: key, value: Map.get(settings, String.to_atom(key)), settings: settings}}
 
       key ->
         {:error, {:not_found, "unknown installation setting: #{key}"}}

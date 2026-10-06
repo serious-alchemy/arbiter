@@ -65,6 +65,7 @@ config :arbiter,
     Arbiter.Loop,
     Arbiter.Events,
     Arbiter.Alerts,
+    Arbiter.Nodes,
     Arbiter.Sessions,
     Arbiter.Guardrails.Subjects
   ]
