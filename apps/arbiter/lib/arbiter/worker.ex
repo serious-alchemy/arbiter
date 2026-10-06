@@ -234,6 +234,13 @@ defmodule Arbiter.Worker do
   # A worker re-attached to a preserved worktree via `arb resume` (bd-auma3z)
   # is `:starting` too — a subprocess that exits before the resumed agent gets
   # going is still a stop worth detecting.
+  # What an agent session is keyed by: a local `Port`, or the `{:remote, ref}`
+  # handle an `Arbiter.Worker.Executor` returns for a run placed on a node
+  # (docs/design/remote-workers.md §7.2). A handle gets the same three messages
+  # a port does, plus `{handle, {:outcome, _}}` just before its exit.
+  defguardp session_handle?(h)
+            when is_port(h) or (is_tuple(h) and tuple_size(h) == 2 and elem(h, 0) == :remote)
+
   defguardp live_run?(state, waiting_on)
             when state in [:starting, :working] or
                    (state == :waiting and waiting_on != :review_gate)
@@ -2618,10 +2625,14 @@ defmodule Arbiter.Worker do
     cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
     {port, scope} = Arbiter.Worker.ClaudeSession.open_scoped_port(spawn_args, state.task_id)
+    # A run placed on a node consumed its handle; what is stashed for re-opens
+    # must place it again (a no-op for a local spawn).
+    pristine_args = Arbiter.Worker.ClaudeSession.strip_prepared(pristine_args)
     now = DateTime.utc_now()
 
     session =
       session_config
+      |> maybe_put(:remote_memory_cap, Arbiter.Worker.ClaudeSession.remote_memory_cap(spawn_args))
       |> Map.put(:port, port)
       |> Map.put(:scope, scope)
       |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
@@ -2709,6 +2720,19 @@ defmodule Arbiter.Worker do
   # bd-6zuoo6: a scope that was OOM-killed looks like any SIGKILL (exit 137)
   # from here; systemd's `Result=oom-kill` for the scope is the only thing that
   # tells them apart. Asked once, at exit, and only for a non-zero exit.
+  # A container on a node is capped by `podman run --memory`, and the node reads
+  # `.State.OOMKilled` after the exit (RW9): that is its `oom?`.
+  defp mark_memory_cap(%{remote_outcome: %{oom?: true}} = session, status)
+       when is_integer(status) and status != 0 do
+    max = Map.get(session, :remote_memory_cap) || "the node's memory cap"
+
+    Logger.warning(
+      "Worker: agent container on a node exceeded its memory cap (#{max}) and was OOM-killed"
+    )
+
+    Map.put(session, :memory_cap_exceeded, %{max: max, peak: nil})
+  end
+
   defp mark_memory_cap(session, status) when is_integer(status) and status != 0 do
     with %{} = scope <- Map.get(session, :scope),
          {:memory_cap_exceeded, info} <- Arbiter.Worker.MemoryScope.outcome(scope) do
@@ -2724,6 +2748,10 @@ defmodule Arbiter.Worker do
   end
 
   defp mark_memory_cap(session, _status), do: session
+
+  # A remote run has ended for good: the node session can forget it.
+  defp release_remote({:remote, _} = handle), do: Arbiter.Worker.Executor.Node.release(handle)
+  defp release_remote(_port), do: :ok
 
   # bd-6zm33r: the agent has exited; anything it backgrounded is still in its
   # scope and would run on after the run ends. Stop the scope.
@@ -2847,20 +2875,37 @@ defmodule Arbiter.Worker do
   # ---- Port message routing (Claude session I/O) -------------------------
 
   @impl true
-  def handle_info({port, {:data, {:eol, line}}}, %State{} = state) when is_port(port) do
+  def handle_info({port, {:data, {:eol, line}}}, %State{} = state) when session_handle?(port) do
     {:noreply, on_port_data(state, port, line, true)}
   end
 
-  def handle_info({port, {:data, {:noeol, partial}}}, %State{} = state) when is_port(port) do
+  def handle_info({port, {:data, {:noeol, partial}}}, %State{} = state)
+      when session_handle?(port) do
     {:noreply, on_port_data(state, port, partial, false)}
   end
 
-  def handle_info({port, {:exit_status, status}}, %State{} = state) when is_port(port) do
+  # A remote run's outcome (OOM, cancelled, node lost) arrives just before its
+  # exit status; it is what `mark_memory_cap/2` reads for a node run.
+  def handle_info({{:remote, _} = handle, {:outcome, outcome}}, %State{} = state) do
+    case Map.fetch(state.claude_sessions, handle) do
+      {:ok, session} ->
+        sessions =
+          Map.put(state.claude_sessions, handle, Map.put(session, :remote_outcome, outcome))
+
+        {:noreply, %State{state | claude_sessions: sessions}}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({port, {:exit_status, status}}, %State{} = state) when session_handle?(port) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
         cleanup_prompt_tmpfile(session)
         session = mark_memory_cap(session, status)
         reap_scope(session)
+        release_remote(port)
         updated = Arbiter.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
@@ -3567,6 +3612,11 @@ defmodule Arbiter.Worker do
   end
 
   defp terminate_live_sessions(%State{} = state), do: teardown_container(state)
+
+  # A run on a node: ask the agent to remove the container by name. There is no
+  # local process to kill; the agent's fence stops it if the node is unreachable.
+  defp terminate_session_port(%State{}, {:remote, _} = handle),
+    do: Arbiter.Worker.Executor.Node.stop(handle)
 
   defp terminate_session_port(%State{task_id: task_id}, port) do
     os_pid =
@@ -8281,9 +8331,13 @@ defmodule Arbiter.Worker do
   # phase model cannot disagree with the guard about what is running.
   defp session_live?(%State{claude_sessions: sessions}) do
     Enum.any?(sessions, fn {port, session} ->
-      is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
+      is_nil(Map.get(session, :exited_at)) and handle_live?(port)
     end)
   end
+
+  defp handle_live?(port) when is_port(port), do: Port.info(port) != nil
+  defp handle_live?({:remote, _} = handle), do: Arbiter.Worker.Executor.Node.live?(handle)
+  defp handle_live?(_), do: false
 
   defp snapshot(%State{} = s) do
     %{

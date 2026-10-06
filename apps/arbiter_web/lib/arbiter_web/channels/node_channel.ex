@@ -9,8 +9,10 @@ defmodule ArbiterWeb.NodeChannel do
   |----------------|---------------------------------------------------------|
   | `hello`        | attaches this channel to the node's session; pushes `hello_ok` (`boot_epoch`, thresholds, effective `max_workers`, per-run verdicts, health, optional `upgrade`) |
   | `hb`           | pushes `hb_ack` `{seq, boot_epoch}`; a heartbeat before `hello` is replied `error: hello_required` |
+  | `run.ready`, `run.refused`, `exit`, binary `stdout` | forwarded to the session's run table (`Arbiter.Nodes.RunStreams`) |
 
-  Pushed by the primary: `drain` `{on: true | false}`, and `upgrade`
+  Pushed by the primary: the run protocol (`assign`, `cancel`, `signal`, `ack`,
+  `exit_ack`; RW9), `drain` `{on: true | false}`, and `upgrade`
   `{version, sha256}` when the operator asks for it (`Arbiter.Nodes.upgrade/2`). A node can only join its
   own topic.
 
@@ -73,6 +75,22 @@ defmodule ArbiterWeb.NodeChannel do
   def handle_in("hb", _payload, socket),
     do: {:reply, {:error, %{reason: "hello_required"}}, socket}
 
+  # The run protocol (RW9): the node's events go to the session, which owns the
+  # run table. A run event before `hello` has no session to go to and is dropped.
+  @run_events ~w(run.ready run.refused run.gone exit)
+
+  def handle_in(event, payload, %{assigns: %{session: session}} = socket)
+      when event in @run_events and is_map(payload) do
+    Session.node_event(session, event, payload)
+    {:noreply, socket}
+  end
+
+  # A binary push carries a `StdoutFrame`.
+  def handle_in("stdout", {:binary, _frame} = payload, %{assigns: %{session: session}} = socket) do
+    Session.node_event(session, "stdout", payload)
+    {:noreply, socket}
+  end
+
   def handle_in(_event, _payload, socket), do: {:noreply, socket}
 
   defp attach(node, params, socket) do
@@ -109,6 +127,12 @@ defmodule ArbiterWeb.NodeChannel do
 
   def handle_info({:node_session, :undrain}, socket) do
     push(socket, "drain", %{"on" => false})
+    {:noreply, socket}
+  end
+
+  # The run protocol, primary → node: `assign`, `cancel`, `signal`, `ack`, `exit_ack`.
+  def handle_info({:node_session, {:push, event, payload}}, socket) do
+    push(socket, event, payload)
     {:noreply, socket}
   end
 
