@@ -74,7 +74,7 @@ defmodule Arbiter.MCP.WorkerDispatchAccountCapTest do
   end
 
   test "refuses on a full account, naming the account, the cap and the holder", ctx do
-    assert {:error, {:invalid, message}} = Tools.worker_dispatch(ctx.coordinator, args(ctx, %{}))
+    assert {:error, {:conflict, message}} = Tools.worker_dispatch(ctx.coordinator, args(ctx, %{}))
 
     assert message =~ "claude:#{ctx.account.slug}"
     assert message =~ "cap is 1"
