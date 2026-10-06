@@ -1660,7 +1660,9 @@ defmodule Arbiter.Mergers.Github do
   defp fetch_pipeline_status(_cfg, _owner, _repo, ""), do: nil
 
   defp fetch_pipeline_status(cfg, owner, repo, sha) do
-    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
          |> handle_json() do
       {:ok, %{"check_runs" => [_ | _] = runs}} ->
         runs |> latest_per_check() |> map_check_run_status()
@@ -1681,7 +1683,9 @@ defmodule Arbiter.Mergers.Github do
   defp fetch_failing_checks(_cfg, _owner, _repo, sha) when sha in [nil, ""], do: {:ok, []}
 
   defp fetch_failing_checks(cfg, owner, repo, sha) do
-    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
          |> handle_json() do
       {:ok, %{"check_runs" => runs}} when is_list(runs) ->
         {:ok,
@@ -1705,15 +1709,30 @@ defmodule Arbiter.Mergers.Github do
   # failed attempt it replaces is still listed. Judging every run would call a
   # head whose re-run is queued `:failed`. Unnamed runs are kept as they are,
   # since there is nothing to group them by.
+  #
+  # A workflow run superseded by a newer one on the same SHA (concurrency
+  # cancel, bd-dtl93z) is not a verdict: its aggregate job, which fails because
+  # its shards were cancelled, is dropped, and a cancelled attempt never
+  # outranks an attempt that was not cancelled, however much newer its id.
+  # With only cancelled attempts left, the cancelled one is what is judged.
   defp latest_per_check(runs) do
+    runs = Enum.reject(runs, &cancelled_aggregate?(&1, runs))
+
     latest =
       runs
       |> Enum.filter(&is_binary(Map.get(&1, "name")))
       |> Enum.group_by(&Map.get(&1, "name"))
-      |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &run_order/1) end)
+      |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &attempt_rank/1) end)
 
     Enum.filter(runs, &(not is_binary(Map.get(&1, "name")) or &1 in latest))
   end
+
+  defp attempt_rank(run) do
+    {Map.get(run, "conclusion") not in @infra_conclusions, run_order(run)}
+  end
+
+  # The workflow run (check suite) a check-run belongs to, when the forge says.
+  defp suite_id(run), do: get_in(run, ["check_suite", "id"])
 
   defp run_order(run) do
     case Map.get(run, "id") do
@@ -1839,10 +1858,14 @@ defmodule Arbiter.Mergers.Github do
     name = Map.get(run, "name")
 
     if is_binary(name) and Map.get(run, "conclusion") == "failure" do
+      suite = suite_id(run)
+
       siblings =
         Enum.filter(runs, fn other ->
           other_name = Map.get(other, "name")
-          is_binary(other_name) and String.starts_with?(other_name, name <> " (")
+
+          is_binary(other_name) and String.starts_with?(other_name, name <> " (") and
+            (is_nil(suite) or suite_id(other) in [nil, suite])
         end)
 
       Enum.any?(siblings, &(Map.get(&1, "conclusion") in @infra_conclusions)) and

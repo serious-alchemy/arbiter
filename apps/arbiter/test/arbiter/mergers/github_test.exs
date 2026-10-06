@@ -977,6 +977,84 @@ defmodule Arbiter.Mergers.GithubTest do
       assert result.block_reason == :ci_failed
     end
 
+    # bd-dtl93z (PR #398): two `CI` runs on one SHA; concurrency cancelled the
+    # second, whose aggregate `mix test` job still concluded `failure`.
+    defp superseded_runs(live_status, live_conclusion) do
+      run = fn id, suite, name, status, conclusion ->
+        %{
+          "id" => id,
+          "name" => name,
+          "status" => status,
+          "conclusion" => conclusion,
+          "check_suite" => %{"id" => suite}
+        }
+      end
+
+      live =
+        [
+          run.(10, 1, "mix test (a 1/2)", live_status, live_conclusion),
+          run.(11, 1, "mix test (a 2/2)", live_status, live_conclusion)
+        ] ++
+          if live_status == "completed",
+            do: [run.(30, 1, "mix test", "completed", live_conclusion)],
+            else: []
+
+      live ++
+        [
+          run.(20, 2, "mix test (a 1/2)", "completed", "cancelled"),
+          run.(21, 2, "mix test (a 2/2)", "completed", "cancelled"),
+          run.(22, 2, "mix test", "completed", "failure")
+        ]
+    end
+
+    @superseded_pr %{
+      "mergeable_state" => "unstable",
+      "mergeable" => true,
+      "head" => %{"sha" => "abc1234567"}
+    }
+
+    test "a cancelled run's aggregate failure beside a live run reads pending (bd-dtl93z)" do
+      result = block_get(@superseded_pr, superseded_runs("in_progress", nil))
+
+      assert result.pipeline == :running
+      refute result.block_reason == :ci_failed
+
+      # The ReviewGate CI gate (bd-cut6uv) reads this same result: it waits.
+      assert Arbiter.Worker.ReviewCi.classify(
+               result,
+               "abc1234567"
+             ) == :pending
+    end
+
+    test "once the live run succeeds, the cancelled run's aggregate no longer blocks (bd-dtl93z)" do
+      result = block_get(@superseded_pr, superseded_runs("completed", "success"))
+
+      assert result.pipeline == :success
+    end
+
+    test "a live run that really failed is still red beside a cancelled run (bd-dtl93z)" do
+      result = block_get(@superseded_pr, superseded_runs("completed", "failure"))
+
+      assert result.pipeline == :failed
+      assert result.block_reason == :ci_failed
+    end
+
+    test "failing_check_logs ignores a cancelled run's aggregate failure (bd-dtl93z)" do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/octo/widget/pulls/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"head" => %{"sha" => "abc123"}})
+
+          String.contains?(conn.request_path, "/check-runs") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"check_runs" => superseded_runs("in_progress", nil)})
+        end
+      end)
+
+      assert {:ok, []} = Github.failing_check_logs(@ref)
+    end
+
     test "a plain failure still classifies as :ci_failed" do
       runs = [%{"id" => 1, "name" => "lint", "status" => "completed", "conclusion" => "failure"}]
 
