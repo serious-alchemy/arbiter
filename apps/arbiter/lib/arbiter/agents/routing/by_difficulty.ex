@@ -101,7 +101,6 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Floors
-  alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Loop.Canary
   alias Arbiter.Tasks.Issue
