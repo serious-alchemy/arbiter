@@ -451,9 +451,9 @@ defmodule Arbiter.Accounts.LoginRunnerTest do
       assert {:ok, %Session{status: :ended}} = Sessions.get(session.id)
     end
 
-    test "rejects unsupported / disabled providers and malformed account slugs" do
+    test "rejects unsupported / unknown providers and malformed account slugs" do
       assert {:error, :unsupported} = LoginRunner.start_login(provider: :agy, account: "x")
-      assert {:error, :disabled} = LoginRunner.start_login(provider: :grok, account: "x")
+      assert {:error, :unknown} = LoginRunner.start_login(provider: :nope, account: "x")
 
       assert {:error, :invalid_account} =
                LoginRunner.start_login(provider: :claude, account: "../etc")
