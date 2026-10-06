@@ -433,6 +433,54 @@ defmodule Arbiter.Worker.ContainerTest do
     test "an empty command is refused", %{dir: dir} do
       assert {:error, :empty_command} = Container.wrap([], opts(dir))
     end
+
+    # RW9: the node agent builds its argv through `wrap/2` so it gets the same
+    # validation as a local spawn, plus the RW8a options.
+    test "passes the RW8a limit, label, keep and mount-map options through", %{dir: dir} do
+      assert {:ok, argv} =
+               Container.wrap(
+                 ["x"],
+                 opts(dir,
+                   memory: "512m",
+                   memory_swap: "512m",
+                   cpus: "2",
+                   labels: [{"arbiter.run", "r1"}],
+                   keep: true
+                 )
+               )
+
+      refute "--rm" in flags(argv)
+      assert pairs(argv, "--memory") == ["512m"]
+      assert pairs(argv, "--memory-swap") == ["512m"]
+      assert pairs(argv, "--cpus") == ["2"]
+      assert "arbiter.run=r1" in pairs(argv, "--label")
+    end
+
+    test "a secrets file is bind-mounted read-only at /run/arbiter/secrets.env", %{dir: dir} do
+      secrets = Path.join(dir, "secrets.env")
+      File.write!(secrets, "export A='1'\n")
+
+      assert {:ok, argv} = Container.wrap(["x"], opts(dir, secrets_file: secrets))
+      assert "#{secrets}:/run/arbiter/secrets.env:ro,Z" in pairs(argv, "-v")
+
+      assert {:ok, labelless} =
+               Container.wrap(["x"], opts(dir, secrets_file: secrets, bridges: []))
+
+      assert "#{secrets}:/run/arbiter/secrets.env:ro,Z" in pairs(labelless, "-v")
+    end
+
+    test "a missing or relative secrets file is refused, never created by podman", %{dir: dir} do
+      assert {:error, {:readonly_path_missing, _}} =
+               Container.wrap(["x"], opts(dir, secrets_file: Path.join(dir, "nope")))
+
+      assert {:error, {:bad_mount_path, "rel"}} =
+               Container.wrap(["x"], opts(dir, secrets_file: "rel"))
+    end
+
+    test "Container.secrets_wrapper/1 sources the file then execs the command" do
+      assert ["sh", "-c", ". /run/arbiter/secrets.env; exec \"$@\"", "--", "claude", "--print"] ==
+               Container.secrets_wrapper(["claude", "--print"])
+    end
   end
 
   describe "teardown by name" do

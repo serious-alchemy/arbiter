@@ -104,6 +104,9 @@ defmodule Arbiter.Worker.Container do
   @env_re ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
   @default_timeout_ms 600_000
   @stop_timeout_ms 30_000
+  @secrets_path "/run/arbiter/secrets.env"
+  @memory_re ~r/\A[1-9]\d*[bkmg]?\z/i
+  @cpus_re ~r/\A\d+(\.\d+)?\z/
 
   @type mount_mode :: :ro | :rw | :rw_private | :overlay
   @type network :: :none | :pasta
@@ -132,7 +135,8 @@ defmodule Arbiter.Worker.Container do
           optional(:cpus) => String.t() | nil,
           optional(:labels) => [{String.t(), String.t()}],
           optional(:keep) => boolean(),
-          optional(:mount_map) => %{optional(String.t()) => String.t()}
+          optional(:mount_map) => %{optional(String.t()) => String.t()},
+          optional(:secrets_file) => String.t() | nil
         }
 
   # -- naming ----------------------------------------------------------------
@@ -225,8 +229,25 @@ defmodule Arbiter.Worker.Container do
     ) ++
       Enum.flat_map(Map.get(spec, :cli_mounts, []), fn {host, dest} ->
         ["-v", "#{host}:#{dest}:ro"]
-      end)
+      end) ++ secrets_mount(Map.get(spec, :secrets_file))
   end
+
+  # `:Z` gives the file a private label; harmless where SELinux is off.
+  defp secrets_mount(nil), do: []
+  defp secrets_mount(file), do: ["-v", "#{file}:#{@secrets_path}:ro,Z"]
+
+  @doc "Where a `:secrets_file` appears inside the container."
+  @spec secrets_path() :: String.t()
+  def secrets_path, do: @secrets_path
+
+  @doc """
+  `command` run by `sh` after sourcing the secrets file, so its environment
+  carries the secrets while the container's own config (`podman inspect`, the
+  OCI `config.json`, podman's state DB) never does.
+  """
+  @spec secrets_wrapper([String.t()]) :: [String.t()]
+  def secrets_wrapper(command) when is_list(command),
+    do: ["sh", "-c", ". #{@secrets_path}; exec \"$@\"", "--" | command]
 
   # `:Z` relabels the host path with a private MCS pair: right for a directory
   # only this container touches, wrong for anything shared. With the label
@@ -273,7 +294,8 @@ defmodule Arbiter.Worker.Container do
          {:ok, pod} <- fetch_pod(opts, network),
          :ok <- check_env(opts),
          {:ok, mounts} <- check_mounts(opts),
-         {:ok, bridges} <- check_bridges(opts, network) do
+         {:ok, bridges} <- check_bridges(opts, network),
+         {:ok, extras} <- check_extras(opts) do
       spec = %{
         podman: podman,
         image: image,
@@ -295,9 +317,71 @@ defmodule Arbiter.Worker.Container do
         interactive: Keyword.get(opts, :interactive, false)
       }
 
+      spec = Map.merge(spec, extras)
+
       with :ok <- check_paths([worktree | spec.tmpfs]) do
         {:ok, argv(spec, command)}
       end
+    end
+  end
+
+  # The RW8a options and RW9's secrets file. Each is only in the spec when given,
+  # so a spawn that sets none gets the argv it always did.
+  defp check_extras(opts) do
+    with :ok <- check_limit(opts, :memory, @memory_re),
+         :ok <- check_limit(opts, :memory_swap, @memory_re),
+         :ok <- check_limit(opts, :cpus, @cpus_re),
+         :ok <- check_labels(Keyword.get(opts, :labels, [])),
+         {:ok, secrets_file} <- check_secrets_file(Keyword.get(opts, :secrets_file)),
+         {:ok, mount_map} <- check_mount_map(Keyword.get(opts, :mount_map, %{})) do
+      extras =
+        opts
+        |> Keyword.take([:memory, :memory_swap, :cpus, :labels, :keep])
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+        |> Map.new()
+        |> then(&if(secrets_file, do: Map.put(&1, :secrets_file, secrets_file), else: &1))
+        |> then(&if(mount_map == %{}, do: &1, else: Map.put(&1, :mount_map, mount_map)))
+
+      {:ok, extras}
+    end
+  end
+
+  defp check_limit(opts, key, re) do
+    case Keyword.get(opts, key) do
+      nil ->
+        :ok
+
+      value ->
+        if Regex.match?(re, to_string(value)), do: :ok, else: {:error, {:bad_limit, key, value}}
+    end
+  end
+
+  defp check_labels(labels) do
+    case Enum.find(labels, fn
+           {k, v} ->
+             not (is_binary(k) and is_binary(v) and Regex.match?(~r/\A[A-Za-z0-9_.\/-]+\z/, k) and
+                    not String.contains?(v, ["\n", "\0"]))
+
+           _ ->
+             true
+         end) do
+      nil -> :ok
+      bad -> {:error, {:bad_label, bad}}
+    end
+  end
+
+  defp check_secrets_file(nil), do: {:ok, nil}
+
+  defp check_secrets_file(file) do
+    with :ok <- check_paths([file]),
+         :ok <- check_all_exist([file]),
+         do: {:ok, file}
+  end
+
+  defp check_mount_map(map) when is_map(map) do
+    case Enum.find(map, fn {host, dest} -> not (valid_path?(host) and valid_path?(dest)) end) do
+      nil -> {:ok, map}
+      {host, _} -> {:error, {:bad_mount_path, host}}
     end
   end
 

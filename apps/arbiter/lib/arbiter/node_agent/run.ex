@@ -1,0 +1,703 @@
+defmodule Arbiter.NodeAgent.Run do
+  @moduledoc """
+  One run on a node (`docs/design/remote-workers.md` §7, §10.2): a process per
+  `assign` that prepares the container from a validated `Arbiter.NodeAgent.RunSpec`,
+  runs it, ships its stdout, and reports how it ended.
+
+  ## Phases
+
+      preparing ──► running ──► exited (until the primary acks the exit) ──► stopped
+          │
+          └─► refused / cancelled
+
+  `prepare` (in a task, so a long image build never blocks a `cancel`): the
+  run's directories under `<node_home>/runs/<run>/`, the image (built from the
+  plan the spec carries when the node lacks it), the CLI files
+  (`Arbiter.NodeAgent.Files`), prompt and config-dir seeds, the secrets file on
+  tmpfs (`Arbiter.NodeAgent.Secrets`), the bridge sockets, the cgroup limits for
+  the controllers the user manager delegated (`Arbiter.NodeAgent.Cgroups`) and the
+  test-services pod. Then `Arbiter.Worker.Container.wrap/2` builds the argv
+  *here*, so the hardening is the local code, and a refusal at any step is a
+  `run.refused` push, never a half-started container.
+
+  ## stdout
+
+  The container's stdout+stderr are read as raw chunks into an
+  `Arbiter.NodeAgent.StdoutBuffer` (offset-addressed, kept until acked). Frames
+  go to the sink only while connected and while fewer than `window` bytes (256
+  KiB) are unacked, 16 KiB at a time. `ack/2` slides the window. After a blip
+  `attach/1` rewinds to the last ack and resends: the primary drops what it has.
+  A buffer that would overflow stops the run rather than drop bytes.
+
+  ## The end
+
+  `podman run` is started **without** `--rm` (`Container` `keep: true`) so
+  `.State.OOMKilled` is readable: on exit the agent inspects it, then removes
+  the container (and the pod, the secrets directory) and reports
+  `exit{run, status, oom, size, cancelled, reason}`. The exit is retained and
+  re-sent on every attach until the primary acks it (`ack_exit/1`), so a blip
+  across the exit loses neither the status nor the tail of the output. Secrets
+  are removed as soon as the container is gone.
+
+  ## Messages to the sink
+
+  `{:run_push, run_id, event, payload}` with `event` one of `"run.ready"`,
+  `"run.refused"`, `"stdout"` (`{:binary, frame}`) and `"exit"`.
+  """
+
+  use GenServer, restart: :temporary
+
+  alias Arbiter.NodeAgent.{Cgroups, Files, RunSpec, Secrets, StdoutBuffer}
+  alias Arbiter.Nodes.StdoutFrame
+  alias Arbiter.Worker.{Container, Image, TestServices}
+  alias Arbiter.Worker.ReleaseEnv
+
+  require Logger
+
+  @frame_bytes 16 * 1024
+  @window_bytes 256 * 1024
+  @default_retention_ms 30 * 60_000
+
+  defstruct [
+    :spec,
+    :opts,
+    :sink,
+    :port,
+    :task,
+    :exit,
+    :exit_timer,
+    :pod,
+    :secrets_file,
+    phase: :preparing,
+    buffer: nil,
+    sent: 0,
+    connected?: false,
+    cancelled: nil
+  ]
+
+  # ---- client ---------------------------------------------------------------------
+
+  @doc false
+  def start_link({%RunSpec{} = spec, opts}),
+    do: GenServer.start_link(__MODULE__, {spec, opts}, name: via(spec.run))
+
+  def via(run), do: {:via, Registry, {Arbiter.NodeAgent.RunRegistry, run}}
+
+  @doc "Stop the run: remove the container by name; the exit is then reported as cancelled."
+  @spec cancel(String.t(), String.t()) :: :ok | {:error, :not_found}
+  def cancel(run, reason), do: cast(run, {:cancel, reason})
+
+  @doc "Send `signal` (`\"TERM\"` | `\"KILL\"`) to the container's init."
+  @spec signal(String.t(), String.t()) :: :ok | {:error, :not_found}
+  def signal(run, signal) when signal in ["TERM", "KILL"], do: cast(run, {:signal, signal})
+
+  @doc "The primary has every stdout byte before `offset`."
+  @spec ack(String.t(), non_neg_integer()) :: :ok | {:error, :not_found}
+  def ack(run, offset), do: cast(run, {:ack, offset})
+
+  @doc "The primary has the `exit`: the run may go."
+  @spec ack_exit(String.t()) :: :ok | {:error, :not_found}
+  def ack_exit(run), do: cast(run, :ack_exit)
+
+  @doc "The channel is up (again): rewind to the last ack and resend."
+  @spec attach(String.t()) :: :ok | {:error, :not_found}
+  def attach(run), do: cast(run, :attach)
+
+  @doc "The channel went away: stop sending (output keeps accumulating, bounded)."
+  @spec detach(String.t()) :: :ok | {:error, :not_found}
+  def detach(run), do: cast(run, :detach)
+
+  @doc "What the agent reports for this run in `hello`/`hb`."
+  @spec info(String.t()) :: map() | nil
+  def info(run) do
+    GenServer.call(via(run), :info, 5_000)
+  catch
+    :exit, _ -> nil
+  end
+
+  defp cast(run, message) do
+    case Registry.lookup(Arbiter.NodeAgent.RunRegistry, run) do
+      [{pid, _}] -> GenServer.cast(pid, message)
+      [] -> {:error, :not_found}
+    end
+  end
+
+  # ---- server ---------------------------------------------------------------------
+
+  @impl true
+  def init({spec, opts}) do
+    Process.flag(:trap_exit, true)
+
+    state = %__MODULE__{
+      spec: spec,
+      opts: opts,
+      sink: Keyword.get(opts, :sink, Arbiter.NodeAgent.Connection),
+      # An `assign` arrives on a live channel.
+      connected?: Keyword.get(opts, :connected?, true),
+      buffer: StdoutBuffer.new(Keyword.get(opts, :stdout_cap, 64 * 1024 * 1024))
+    }
+
+    {:ok, start_prepare(state)}
+  end
+
+  @impl true
+  def handle_call(:info, _from, state), do: {:reply, report(state), state}
+
+  @impl true
+  def handle_cast({:cancel, reason}, %{phase: :preparing} = state),
+    do: {:noreply, %{state | cancelled: reason}}
+
+  def handle_cast({:cancel, reason}, %{phase: :running} = state) do
+    stop_container(state)
+    {:noreply, %{state | cancelled: reason}}
+  end
+
+  def handle_cast({:cancel, _reason}, state), do: {:noreply, state}
+
+  def handle_cast({:signal, signal}, %{phase: :running} = state) do
+    _ = podman(state, ["kill", "--signal", signal, state.spec.name])
+    {:noreply, state}
+  end
+
+  def handle_cast({:signal, _}, state), do: {:noreply, state}
+
+  def handle_cast({:ack, offset}, state) when is_integer(offset) do
+    {:noreply, state |> Map.update!(:buffer, &StdoutBuffer.ack(&1, offset)) |> pump()}
+  end
+
+  def handle_cast(:ack_exit, %{exit: %{}} = state), do: {:stop, :normal, state}
+  def handle_cast(:ack_exit, state), do: {:noreply, state}
+
+  def handle_cast(:attach, state) do
+    state = %{state | connected?: true, sent: StdoutBuffer.acked(state.buffer)}
+
+    state =
+      case {state.phase, state.exit} do
+        {:running, _} ->
+          push(state, "run.ready", %{"run" => state.spec.run, "container" => state.spec.name})
+
+        _ ->
+          state
+      end
+
+    {:noreply, state |> pump() |> resend_exit()}
+  end
+
+  def handle_cast(:detach, state), do: {:noreply, %{state | connected?: false}}
+
+  @impl true
+  def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    prepared(result, %{state | task: nil})
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %Task{ref: ref}} = state),
+    do: refuse(%{state | task: nil}, :unschedulable, {:prepare_crashed, inspect(reason)})
+
+  def handle_info({port, {:data, bytes}}, %{port: port} = state) do
+    case StdoutBuffer.append(state.buffer, bytes) do
+      {:ok, buffer, _offset} ->
+        {:noreply, pump(%{state | buffer: buffer})}
+
+      {:error, :overflow} ->
+        Logger.warning(
+          "node agent: run #{state.spec.run} stdout unacknowledged past the cap; stopping it"
+        )
+
+        stop_container(state)
+        {:noreply, %{state | cancelled: state.cancelled || "stdout_overflow"}}
+    end
+  end
+
+  def handle_info({port, {:exit_status, status}}, %{port: port} = state),
+    do: {:noreply, finish(%{state | port: nil}, status)}
+
+  def handle_info(:retention_expired, state), do: {:stop, :normal, state}
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+  def handle_info(_other, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    # Whatever the way out, no container and no secret outlive the process.
+    if state.phase in [:preparing, :running], do: stop_container(state)
+    cleanup(state)
+    :ok
+  end
+
+  # ---- prepare ---------------------------------------------------------------------
+
+  defp start_prepare(state) do
+    task =
+      Task.Supervisor.async_nolink(
+        Keyword.get(state.opts, :task_supervisor, Arbiter.NodeAgent.TaskSupervisor),
+        fn -> prepare(state.spec, state.opts) end
+      )
+
+    %{state | task: task}
+  end
+
+  defp prepared({:ok, prepared}, state) do
+    state = %{state | pod: prepared.pod, secrets_file: prepared.secrets_file}
+
+    if state.cancelled do
+      cancelled_before_start(state)
+    else
+      case open(state, prepared.argv) do
+        {:ok, port} ->
+          state = %{state | port: port, phase: :running}
+
+          {:noreply,
+           push(state, "run.ready", %{"run" => state.spec.run, "container" => state.spec.name})}
+
+        {:error, reason} ->
+          refuse(state, :unschedulable, {:spawn_failed, inspect(reason)})
+      end
+    end
+  end
+
+  defp prepared({:error, {code, detail}}, state), do: refuse(state, code, detail)
+
+  defp refuse(state, code, detail) do
+    Logger.warning(
+      "node agent: run #{state.spec.run} refused: #{code} #{inspect(detail, limit: 5)}"
+    )
+
+    cleanup(state)
+
+    state =
+      push(state, "run.refused", %{
+        "run" => state.spec.run,
+        "reason" => Atom.to_string(code),
+        "detail" => inspect(detail, limit: 10)
+      })
+
+    # Refusal is an answer, not a result to retain: the primary holds the run.
+    {:stop, :normal, %{state | phase: :stopped}}
+  end
+
+  defp cancelled_before_start(state) do
+    cleanup(state)
+    state = %{state | exit: exit_report(state, 137, false)}
+    state = state |> push("exit", state.exit) |> arm_retention()
+    {:noreply, %{state | phase: :exited}}
+  end
+
+  # The preparation, in dependency order. Every failure is `{:error, {code, detail}}`
+  # with `code` one of the protocol's refusal reasons.
+  defp prepare(%RunSpec{} = spec, opts) do
+    config = Keyword.fetch!(opts, :config)
+    run_dir = Path.join([config.node_home, "runs", spec.run])
+
+    with {:ok, dirs} <- make_dirs(spec, run_dir),
+         :ok <- ensure_image(spec, opts),
+         {:ok, cli} <- cli_files(spec, config, opts),
+         {:ok, prompts} <- prompt_files(spec, run_dir),
+         :ok <- seed_config(spec, dirs),
+         {:ok, limit_opts} <- limits(spec, opts),
+         {:ok, bridge_paths} <- bridges(spec, opts),
+         {:ok, secrets_file} <- secrets(spec, opts),
+         {:ok, pod, service_env} <- services(spec, opts),
+         {:ok, argv} <-
+           build_argv(
+             spec,
+             opts,
+             dirs,
+             cli,
+             prompts,
+             limit_opts,
+             bridge_paths,
+             secrets_file,
+             pod,
+             service_env
+           ) do
+      {:ok, %{argv: argv, pod: pod, secrets_file: secrets_file}}
+    else
+      {:error, {_code, _detail}} = error ->
+        # Anything partly made is removed: a refused run leaves no secret behind.
+        _ = Secrets.remove(runtime_dir(opts), spec.run)
+        error
+
+      {:error, other} ->
+        _ = Secrets.remove(runtime_dir(opts), spec.run)
+        {:error, {:unschedulable, other}}
+    end
+  end
+
+  defp make_dirs(spec, run_dir) do
+    dirs =
+      for %{kind: kind, path: path} <- spec.mounts,
+          kind in ~w(worktree home config_dir tmp),
+          into: %{} do
+        {kind, %{host: Path.join(run_dir, dir_name(kind)), container: path}}
+      end
+
+    Enum.reduce_while(dirs, {:ok, dirs}, fn {_kind, %{host: host}}, acc ->
+      case File.mkdir_p(host) do
+        :ok -> {:cont, acc}
+        {:error, reason} -> {:halt, {:error, {:unschedulable, {:run_dir, reason}}}}
+      end
+    end)
+  end
+
+  defp dir_name("config_dir"), do: "config"
+  defp dir_name(kind), do: kind
+
+  defp ensure_image(spec, opts) do
+    result =
+      case Keyword.get(opts, :image_fun) do
+        fun when is_function(fun, 2) -> fun.(spec.image, opts)
+        nil -> default_image(spec.image, opts)
+      end
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  defp default_image(%{tag: tag, plan: nil}, opts) do
+    case Container.cmd(runner_opts(opts), podman_path(opts), ["image", "exists", tag],
+           timeout: 30_000
+         ) do
+      {_, 0} -> :ok
+      _ -> {:error, {:image_missing, tag}}
+    end
+  end
+
+  defp default_image(%{tag: tag, plan: %{tag: tag} = plan}, opts) do
+    case Image.Builder.ensure(plan, runner_opts(opts)) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp default_image(_image, _opts), do: {:error, :plan_tag_mismatch}
+
+  defp cli_files(spec, config, opts) do
+    fetch = Keyword.get(opts, :files_fun, &Files.ensure(config, &1, &2))
+
+    Enum.reduce_while(spec.mounts, {:ok, []}, fn
+      %{kind: "cli", sha256: sha, name: name, path: dest}, {:ok, acc} ->
+        case fetch.(sha, name) do
+          {:ok, host} -> {:cont, {:ok, acc ++ [{host, dest}]}}
+          {:error, reason} -> {:halt, {:error, {:image_unavailable, {:cli_file, name, reason}}}}
+        end
+
+      _other, acc ->
+        {:cont, acc}
+    end)
+  end
+
+  defp prompt_files(spec, run_dir) do
+    prompts = Enum.filter(spec.mounts, &(&1.kind == "prompt"))
+    dir = Path.join(run_dir, "prompt")
+
+    Enum.reduce_while(Enum.with_index(prompts), {:ok, []}, fn {%{path: dest, content: content}, i},
+                                                              {:ok, acc} ->
+      host = Path.join(dir, "prompt-#{i}")
+
+      with :ok <- File.mkdir_p(dir),
+           :ok <- File.write(host, content),
+           :ok <- File.chmod(host, 0o644) do
+        {:cont, {:ok, acc ++ [{host, dest}]}}
+      else
+        {:error, reason} -> {:halt, {:error, {:unschedulable, {:prompt, reason}}}}
+      end
+    end)
+  end
+
+  defp seed_config(spec, dirs) do
+    with %{files: files} when map_size(files) > 0 <-
+           Enum.find(spec.mounts, &(&1.kind == "config_dir")),
+         %{host: host} <- dirs["config_dir"] do
+      Enum.reduce_while(files, :ok, fn {name, bytes}, :ok ->
+        case File.write(Path.join(host, name), bytes) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:unschedulable, {:config_seed, reason}}}}
+        end
+      end)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp limits(spec, opts) do
+    delegated =
+      case Keyword.get(opts, :delegated_fun) do
+        fun when is_function(fun, 0) -> fun.()
+        nil -> Cgroups.delegated()
+      end
+
+    case Cgroups.limit_opts(spec.limits, delegated) do
+      {:ok, limit_opts, dropped} ->
+        if dropped != [],
+          do:
+            Logger.info(
+              "node agent: run #{spec.run}: limits #{inspect(dropped)} not delegated; not applied"
+            )
+
+        {:ok, limit_opts}
+
+      {:error, :memory_not_delegated} ->
+        {:error, {:unschedulable, :memory_not_delegated}}
+    end
+  end
+
+  # The per-run bridge sockets are RW10's. Until a listener provider is wired a
+  # spec that names bridges cannot run here, and says so.
+  defp bridges(%{bridges: []}, _opts), do: {:ok, []}
+
+  defp bridges(spec, opts) do
+    case Keyword.get(opts, :bridges_fun) do
+      fun when is_function(fun, 2) ->
+        case fun.(spec.run, spec.bridges) do
+          {:ok, paths} when is_list(paths) -> {:ok, Enum.zip(spec.bridges, paths)}
+          {:error, reason} -> {:error, {:unschedulable, {:bridges, reason}}}
+        end
+
+      nil ->
+        {:error, {:unschedulable, :bridges_unavailable}}
+    end
+  end
+
+  defp secrets(spec, opts) do
+    case Secrets.write(
+           spec.run,
+           spec.secrets,
+           Keyword.take(opts, [:runtime_dir, :require_tmpfs, :mountinfo])
+         ) do
+      {:ok, file} -> {:ok, file}
+      {:error, reason} -> {:error, {:unschedulable, reason}}
+    end
+  end
+
+  defp services(%{services: []}, _opts), do: {:ok, nil, []}
+
+  defp services(spec, opts) do
+    with {:ok, services} <- TestServices.resolve(spec.services),
+         {:ok, started} <-
+           TestServices.start(
+             Keyword.merge(runner_opts(opts),
+               name: spec.name,
+               services: services,
+               podman: podman_path(opts)
+             )
+           ) do
+      {:ok, started && started.pod, (started && started.env) || []}
+    else
+      {:error, reason} -> {:error, {:unschedulable, {:test_services, reason}}}
+    end
+  end
+
+  defp build_argv(
+         spec,
+         opts,
+         dirs,
+         cli,
+         prompts,
+         limit_opts,
+         bridge_paths,
+         secrets_file,
+         pod,
+         service_env
+       ) do
+    worktree = dirs["worktree"]
+    home = dirs["home"]
+
+    host_dirs = Map.values(dirs)
+
+    mount_map =
+      Map.new(
+        for(%{host: host, container: container} <- host_dirs, do: {host, container}) ++
+          for({host, dest} <- prompts, do: {host, dest}) ++
+          for({%{path: path}, host} <- bridge_paths, do: {host, path})
+      )
+
+    writable = for kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host
+
+    wrap_opts =
+      [
+        worktree: worktree.host,
+        name: spec.name,
+        image: spec.image.tag,
+        podman: podman_path(opts),
+        home: home && home.host,
+        writable_paths: writable,
+        readonly_paths: Enum.map(prompts, &elem(&1, 0)),
+        cli_mounts: cli,
+        bridges: Enum.map(bridge_paths, &elem(&1, 1)),
+        env: Map.to_list(spec.env) ++ service_env,
+        network: spec.network,
+        keep: true,
+        labels: labels(spec, opts),
+        mount_map: mount_map,
+        secrets_file: secrets_file
+      ]
+      |> Keyword.merge(limit_opts)
+      |> then(&if(pod, do: Keyword.put(&1, :pod, pod), else: &1))
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+    command = if secrets_file, do: Container.secrets_wrapper(spec.command), else: spec.command
+
+    case Container.wrap(command, wrap_opts) do
+      {:ok, argv} -> {:ok, argv}
+      {:error, reason} -> {:error, {:unschedulable, {:wrap, reason}}}
+    end
+  end
+
+  defp labels(spec, opts) do
+    node = Keyword.get(opts, :node_id) || "unknown"
+
+    [{"arbiter.run", spec.run}, {"arbiter.node", node}] ++
+      if(spec.task, do: [{"arbiter.task", spec.task}], else: []) ++
+      if(spec.install, do: [{"arbiter.install", spec.install}], else: [])
+  end
+
+  # ---- running ---------------------------------------------------------------------
+
+  # sobelow_skip ["CI.System"]
+  defp open(state, [podman | args]) do
+    env = ReleaseEnv.port_env([]) |> Enum.map(&env_charlist/1)
+
+    port =
+      Port.open(
+        {:spawn_executable, podman},
+        [{:args, args}, :binary, :exit_status, :stderr_to_stdout] ++
+          if(env == [], do: [], else: [{:env, env}])
+      )
+
+    _ = state
+    {:ok, port}
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp env_charlist({name, false}), do: {to_charlist(name), false}
+  defp env_charlist({name, value}), do: {to_charlist(name), to_charlist(value)}
+
+  # Frames go out only while attached and inside the window of unacked bytes.
+  defp pump(%{connected?: false} = state), do: state
+
+  defp pump(state) do
+    target =
+      min(StdoutBuffer.size(state.buffer), StdoutBuffer.acked(state.buffer) + @window_bytes)
+
+    if state.sent < target do
+      {:ok, chunks} = StdoutBuffer.from(state.buffer, state.sent)
+      body = chunks |> Enum.map(&elem(&1, 1)) |> IO.iodata_to_binary()
+      send_frames(state, state.sent, binary_part(body, 0, target - state.sent))
+      %{state | sent: target}
+    else
+      state
+    end
+  end
+
+  defp send_frames(_state, offset, ""), do: offset
+
+  defp send_frames(state, offset, body) do
+    size = min(@frame_bytes, byte_size(body))
+    <<head::binary-size(size), rest::binary>> = body
+    push(state, "stdout", {:binary, StdoutFrame.encode(state.spec.run, offset, head)})
+    send_frames(state, offset + size, rest)
+  end
+
+  # ---- exit --------------------------------------------------------------------------
+
+  defp finish(state, status) do
+    oom? = oom?(state)
+    stop_container(state)
+    cleanup(state)
+
+    exit = exit_report(state, status, oom?)
+    state = %{state | exit: exit, phase: :exited}
+    state = state |> push("exit", exit) |> arm_retention()
+    state
+  end
+
+  defp exit_report(state, status, oom?) do
+    %{
+      "run" => state.spec.run,
+      "status" => status,
+      "oom" => oom?,
+      "size" => StdoutBuffer.size(state.buffer),
+      "container" => state.spec.name,
+      "cancelled" => not is_nil(state.cancelled),
+      "reason" => state.cancelled
+    }
+  end
+
+  defp resend_exit(%{exit: %{} = exit} = state), do: push(state, "exit", exit)
+  defp resend_exit(state), do: state
+
+  defp arm_retention(state) do
+    ms = Keyword.get(state.opts, :exit_retention_ms, @default_retention_ms)
+    %{state | exit_timer: Process.send_after(self(), :retention_expired, ms)}
+  end
+
+  defp oom?(state) do
+    args = ["inspect", "--format", "{{.State.OOMKilled}}", state.spec.name]
+
+    case podman(state, args) do
+      {out, 0} -> String.trim(out) == "true"
+      _ -> false
+    end
+  end
+
+  defp stop_container(state) do
+    _ =
+      Container.stop(
+        state.spec.name,
+        runner_opts(state.opts) ++ [podman: podman_path(state.opts)]
+      )
+
+    :ok
+  end
+
+  defp cleanup(state) do
+    if state.pod,
+      do:
+        TestServices.stop(state.pod, runner_opts(state.opts) ++ [podman: podman_path(state.opts)])
+
+    Secrets.remove(runtime_dir(state.opts), state.spec.run)
+    :ok
+  end
+
+  defp report(state) do
+    %{
+      "id" => state.spec.run,
+      "state" => Atom.to_string(state.phase),
+      "container" => state.spec.name,
+      "stdout_offset" => StdoutBuffer.size(state.buffer),
+      "acked" => StdoutBuffer.acked(state.buffer),
+      "exited" => not is_nil(state.exit)
+    }
+  end
+
+  # ---- plumbing ----------------------------------------------------------------------
+
+  defp push(%{connected?: false} = state, "run.refused" = event, payload),
+    do: deliver(state, event, payload)
+
+  defp push(%{connected?: false} = state, _event, _payload), do: state
+  defp push(state, event, payload), do: deliver(state, event, payload)
+
+  defp deliver(state, event, payload) do
+    send(state.sink, {:run_push, state.spec.run, event, payload})
+    state
+  end
+
+  defp podman(state, args),
+    do: Container.cmd(runner_opts(state.opts), podman_path(state.opts), args, timeout: 30_000)
+
+  defp podman_path(opts),
+    do: Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
+
+  defp runner_opts(opts), do: Keyword.take(opts, [:runner])
+
+  defp runtime_dir(opts) do
+    case Secrets.runtime_dir(opts) do
+      {:ok, dir} -> dir
+      _ -> nil
+    end
+  end
+end
