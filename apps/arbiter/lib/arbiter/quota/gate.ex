@@ -570,10 +570,33 @@ defmodule Arbiter.Quota.Gate do
 
     1. the account's `quota_config["window_seconds"][label]` — custom
        contracts and non-standard tiers;
-    2. the built-in table: `"5h"` → 18_000, `"7d"` / `"weekly"` → 604_800,
-       `"30d"` → 2_592_000 (Codex free); a `"<n>m"` label is n minutes;
-    3. `nil` — Codex `"session"` (a session reset, not a fixed-length window)
+    2. a length the provider reports: a Codex `"<n>m"` label, derived from the
+       reported `limit_window_seconds` (see below);
+    3. the built-in table: `"5h"` → 18_000, `"7d"` / `"weekly"` → 604_800,
+       `"30d"` → 2_592_000 (Codex free);
+    4. `nil` — Codex `"session"` (a session reset, not a fixed-length window)
        and Antigravity's collapsed `"used"` (no time window) by default.
+
+  ## Provider-reported lengths (bd-38h291)
+
+  A length the provider itself reports ranks between the account override and
+  the built-in table. Only Codex does, and it already flows through this
+  function: `wham/usage` reports `limit_window_seconds`, stored as
+  `session_window_minutes` / `weekly_window_minutes` and carried into the
+  snapshot as its named label (`5h` / `weekly` / `30d`) or, for a non-standard
+  length, a `"<n>m"` label (step 2), with `CodexPlanWindows` as the fallback
+  for rows that report none. A standard length is thus resolved by the
+  built-in table; only a non-standard one is a distinct reported length. An
+  account override keyed by that label still wins.
+
+  Confirmed by the coordinator on 2026-10-06 from the live `/api/quota`
+  snapshots: only Codex reports a window length (`limit_window_seconds` →
+  `pacing.window_seconds`). The other providers report reset timestamps only:
+
+    * Claude — `reset_5h_at` / `reset_7d_at`, no duration.
+    * Antigravity — `models[].reset_at`, no duration.
+    * Gemini CLI — no window-length field is parsed (derived from the code, not
+      from the live-snapshot confirmation above).
 
   There is deliberately no workspace step: window length is a property of the
   account's plan, not of who is spending it.
