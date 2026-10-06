@@ -37,16 +37,14 @@ defmodule Arbiter.NodeAgent.Supervisor do
     case Config.load(opts) do
       {:ok, config} ->
         # The run table before the connection: `Connection` addresses runs.
-        # `Image.Builder` builds a plan's image on this node (RW9).
         config = %{config | live_runs_fun: config.live_runs_fun || (&Runs.inventory/0)}
 
         Supervisor.init(
           [
             task_supervisor,
             {Status, path: config.status_path},
-            {Upgrader, config: config},
-            {Image.Builder, []}
-          ] ++ Runs.child_specs() ++ [{Connection, config: config}],
+            {Upgrader, config: config}
+          ] ++ image_builder() ++ Runs.child_specs() ++ [{Connection, config: config}],
           strategy: :one_for_one
         )
 
@@ -55,6 +53,13 @@ defmodule Arbiter.NodeAgent.Supervisor do
         record_unconfigured(opts, reason)
         Supervisor.init([task_supervisor], strategy: :one_for_one)
     end
+  end
+
+  # `Image.Builder` builds a plan's image on this node (RW9). An agent boots
+  # without the primary's application tree, so it starts its own; an
+  # embedded one (a test that runs the primary tree alongside) already has it.
+  defp image_builder do
+    if Process.whereis(Image.Builder), do: [], else: [{Image.Builder, []}]
   end
 
   defp record_unconfigured(opts, reason) do
