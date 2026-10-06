@@ -131,7 +131,11 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   """
   attr :name, :string, required: true
   attr :id, :string, default: nil
-  attr :options, :list, required: true, doc: "list of strings or {label, value} tuples"
+
+  attr :options, :list,
+    required: true,
+    doc: "list of strings, {label, value} or {label, value, disabled: true} tuples"
+
   attr :label, :string, default: nil, doc: "field label"
   attr :value, :any, default: nil
   attr :prompt, :string, default: nil, doc: "placeholder option text"
@@ -176,6 +180,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
             :for={opt <- @options}
             value={option_value(opt)}
             selected={option_value(opt) == @value}
+            disabled={option_disabled?(opt)}
           >
             {option_label(opt)}
           </option>
@@ -218,6 +223,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
           :for={opt <- @options}
           value={option_value(opt)}
           selected={option_value(opt) == @value}
+          disabled={option_disabled?(opt)}
         >
           {option_label(opt)}
         </option>
@@ -232,11 +238,16 @@ defmodule ArbiterWeb.CoreComponents.Forms do
     """
   end
 
+  defp option_label({label, _value, _opts}), do: label
   defp option_label({label, _value}), do: label
   defp option_label(string), do: string
 
+  defp option_value({_label, value, _opts}), do: value
   defp option_value({_label, value}), do: value
   defp option_value(string), do: string
+
+  defp option_disabled?({_label, _value, opts}), do: Keyword.get(opts, :disabled, false)
+  defp option_disabled?(_), do: false
 
   @doc """
   Multi-line text input.
