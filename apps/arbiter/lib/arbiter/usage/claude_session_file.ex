@@ -140,6 +140,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   option and is unchanged.
   """
 
+  alias Arbiter.Pricing
   alias Arbiter.Usage.ClaudePricing
 
   @typedoc """
@@ -703,7 +704,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           :cache_read_tokens
         ])
 
-      case ClaudePricing.cost_usd(totals.model, buckets) do
+      case Pricing.cost_usd(:claude, totals.model, buckets) do
         nil -> totals
         cost -> %{totals | cost_usd: cost, cost_source: :estimated}
       end
@@ -783,7 +784,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   # model is in the table, raw token volume otherwise (still far better than an
   # even split across days of wildly different size).
   defp weight(model, bucket) do
-    case ClaudePricing.cost_usd(model, bucket) do
+    case Pricing.cost_usd(:claude, model, bucket) do
       nil ->
         bucket.tokens_in + bucket.tokens_out + bucket.cache_creation_tokens +
           bucket.cache_read_tokens

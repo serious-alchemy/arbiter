@@ -85,8 +85,6 @@ defmodule Arbiter.Agents.Gemini.Stream do
   `:cost_note` saying so.
   """
 
-  alias Arbiter.Agents.Gemini.Pricing
-
   # agy reports no model in any event (confirmed live, bd-2fzwlc round 2 —
   # `init` carries only cwd/tools/permission_mode, and `result` carries no
   # model field either), and its v1.1.11 catalogue does not overlap the
@@ -131,7 +129,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
       # analogue to Claude's cache-creation tokens, so that slot stays nil.
       cache_read_tokens: number(stats["cached"]),
       duration_ms: number(stats["duration_ms"]),
-      cost_usd: Pricing.cost_usd(stats),
+      cost_usd: Arbiter.Pricing.cost_usd(:gemini, nil, stats),
       model: result_model(stats, fallback_model),
       result_status: event["status"],
       is_error: event["status"] == "error",
@@ -465,7 +463,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
       end
 
     parts =
-      case Pricing.cost_usd(stats) do
+      case Arbiter.Pricing.cost_usd(:gemini, nil, stats) do
         cost when is_number(cost) -> parts ++ ["~$#{Float.round(cost, 4)}"]
         _ -> parts
       end
