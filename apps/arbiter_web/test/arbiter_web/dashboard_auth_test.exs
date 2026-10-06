@@ -126,15 +126,40 @@ defmodule ArbiterWeb.DashboardAuthTest do
       assert conn |> recycle() |> get("/") |> redirected_to() == "/login"
     end
 
-    test "POST /api/dashboard/login_tokens mints a URL for a coordinator token only" do
-      body = conn() |> post("/api/dashboard/login_tokens") |> json_response(200)
+    test "POST /api/dashboard/login_tokens mints a URL for an operator-proof token only" do
+      body = operator_conn() |> post("/api/dashboard/login_tokens") |> json_response(200)
       assert %{"token" => token, "path" => "/login?token=" <> _} = body
       assert {:ok, _} = LoginTokens.consume(token)
 
       assert build_conn() |> post("/api/dashboard/login_tokens") |> json_response(401)
     end
 
-    defp conn, do: coordinator_conn()
+    test "a coordinator token without operator proof cannot mint a dashboard grant (P-28)" do
+      resp = coordinator_conn() |> post("/api/dashboard/login_tokens") |> json_response(403)
+      assert inspect(resp) =~ "operator proof"
+    end
+
+    test "a worker token cannot mint a dashboard grant" do
+      n = System.unique_integer([:positive])
+      {:ok, ws} = Ash.create(Arbiter.Tasks.Workspace, %{name: "dl-ws-#{n}", prefix: "dl"})
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> Arbiter.MCP.Scope.mint_worker(task))
+        |> post("/api/dashboard/login_tokens")
+
+      assert json_response(conn, 403)
+    end
+
+    defp operator_conn do
+      build_conn()
+      |> put_req_header(
+        "authorization",
+        "Bearer " <> Arbiter.MCP.Scope.mint_coordinator(nil, operator: true)
+      )
+    end
+
   end
 
   describe "tailscale identity" do
