@@ -129,6 +129,20 @@ defmodule ArbiterWeb.Api.WorkerController do
          {:conflict, Arbiter.Accounts.Admission.refusal_message(info),
           %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}}
 
+      # RW8: no node has a free slot (`remote_only`), or the primary's own cap
+      # holds a local run. A 409 like the account cap: held, not failed — it
+      # starts when capacity frees. `over_cap` overrides the primary's cap.
+      {:error, {:no_node_capacity, info}} ->
+        {:error,
+         {:conflict, Arbiter.Nodes.Placement.refusal_message(info),
+          %{
+            task_id: task_id,
+            node: info[:node],
+            mode: info[:mode] && to_string(info.mode),
+            cap: info[:cap],
+            holders: info[:holders] || []
+          }}}
+
       # bd-13pqcp: the ticket's provider constraint leaves no eligible provider
       # (or the one named is excluded). A 409 — the request is fine, the ticket's
       # own rule refuses it; edit or clear the constraint, or wait for capacity.

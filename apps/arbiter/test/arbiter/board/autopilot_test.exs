@@ -275,6 +275,49 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # RW8: a `{:no_node_capacity, _}` refusal (a remote_only workspace with no
+    # node free, or the primary's own cap at 0) is held briefly like a full
+    # account — held, never failed, never paged.
+    test "a no-node-capacity refusal holds briefly and never escalates" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+
+      info = %{
+        task_id: "bd-1",
+        node: "local",
+        cap: 0,
+        holders: [],
+        phrase: "held — local capacity 0",
+        message: "held — local capacity 0: bd-1 waits"
+      }
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:no_node_capacity, info}}
+          end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      assert {:error, {:no_node_capacity, ^info}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
+      refute_receive {:dispatch_attempt, _}, 50
+
+      for _ <- 1..5 do
+        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
+        Autopilot.tick(pid)
+        assert_receive {:dispatch_attempt, "bd-1"}
+      end
+
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
     # bd-13pqcp: a dispatch the ticket's provider constraint refused (a stale
     # plan — the board holds such a card itself) is held briefly like a full
     # account, and never pages.

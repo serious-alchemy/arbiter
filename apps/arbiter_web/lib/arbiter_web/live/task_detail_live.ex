@@ -1072,6 +1072,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
 
+  # RW8: no node free, or the primary's own cap holds a local run.
+  defp dispatch_failure({:no_node_capacity, info}),
+    do: Arbiter.Nodes.Placement.refusal_message(info)
+
   # bd-13pqcp: the ticket's provider constraint refused the dispatch.
   defp dispatch_failure({:provider_constraint, _provider, phrase}),
     do: "#{phrase} — edit the ticket's provider constraint, or wait for an eligible account."

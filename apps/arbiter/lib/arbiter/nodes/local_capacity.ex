@@ -30,7 +30,8 @@ defmodule Arbiter.Nodes.LocalCapacity do
     * `:at_cap` — a **fresh implementer** (`Worker.Dispatch.dispatch/2` of a
       ticket not yet In progress): refused when the primary is at its cap, and
       at 0;
-    * `:zero_only` — **follow-up roles of work already in flight**: a review
+    * `:zero_only` — **follow-up roles of work already in flight**: a
+      re-dispatch of a ticket already In progress (`:redispatch`), a review
       dispatch, ReviewGate reviewers and fix rounds, merge-queue fix and
       conflict passes. They are counted, but held only when the cap is 0, never
       for merely being at it: a ticket's follow-up replaces the ticket's own
@@ -68,6 +69,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   # `Arbiter.Nodes.Placement.kinds/0`; the guard test checks both.
   @kinds %{
     implementer: :at_cap,
+    redispatch: :zero_only,
     resume: :never,
     review: :zero_only,
     reviewer: :zero_only,

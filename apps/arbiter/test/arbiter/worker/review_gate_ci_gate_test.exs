@@ -123,6 +123,45 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- RW8: the primary's own worker cap ----------------------------------------
+
+  describe "the primary's worker cap at 0 (RW8)" do
+    setup do
+      on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(nil) end)
+      :ok
+    end
+
+    test "holds the reviewer (nothing spawned, no verdict) and starts it once the cap rises",
+         ctx do
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+      rig = rig(ctx, "feature/rw8-hold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      assert :sys.get_state(gate).local_hold.info.phrase =~ "held — local capacity 0"
+      assert passes(rig) == 0
+      assert Process.alive?(gate)
+
+      # Held, not failed: no verdict was written to the ticket.
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] == nil
+
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "with no override the gate is unaffected", ctx do
+      rig = rig(ctx, "feature/rw8-nohold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+  end
+
   # ---- AC2: red CI reruns once ----------------------------------------------
 
   describe "red CI (AC2)" do

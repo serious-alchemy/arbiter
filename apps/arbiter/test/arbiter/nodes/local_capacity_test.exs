@@ -62,6 +62,7 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     test "names how each spawn kind is capped" do
       assert LocalCapacity.kinds() == %{
                implementer: :at_cap,
+               redispatch: :zero_only,
                resume: :never,
                review: :zero_only,
                reviewer: :zero_only,

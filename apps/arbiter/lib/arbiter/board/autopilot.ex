@@ -268,7 +268,12 @@ defmodule Arbiter.Board.Autopilot do
   # holds such a card itself (`Arbiter.Board.Snapshot`), so this is a stale
   # plan; it lifts when an eligible account frees or the constraint is edited,
   # and is held as briefly as a full account.
-  @self_clearing_dispatch_errors [:account_at_capacity, :provider_constraint]
+  #
+  # `:no_node_capacity` (RW8): no node had a free slot for a `remote_only`
+  # workspace, or the primary's own cap (`Arbiter.Nodes.LocalCapacity`) held a
+  # local run. Held, never failed: it lifts when a slot frees or the operator
+  # raises the cap, and is held as briefly as a full account.
+  @self_clearing_dispatch_errors [:account_at_capacity, :provider_constraint, :no_node_capacity]
   @account_cap_retry_ms 15_000
 
   # How many consecutive same-shape failures a non-deterministic error (a
@@ -1046,6 +1051,9 @@ defmodule Arbiter.Board.Autopilot do
   # bd-8suxac: a full account is held briefly — a slot frees when any run on
   # it ends, which no reset time predicts.
   defp preflight_retry_not_before({:account_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:no_node_capacity, _info}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),

@@ -65,6 +65,7 @@ defmodule Arbiter.Nodes.Placement do
   @modes [:local_only, :prefer_remote, :remote_only]
   @kinds [
     :implementer,
+    :redispatch,
     :resume,
     :review,
     :reviewer,
@@ -257,8 +258,15 @@ defmodule Arbiter.Nodes.Placement do
     end)
   end
 
-  @doc "The operator-facing refusal for `{:error, {:no_node_capacity, info}}`."
-  @spec refusal_message(info()) :: String.t()
+  @doc """
+  The operator-facing refusal for `{:error, {:no_node_capacity, info}}` — one
+  source of truth for MCP, the REST API (and so the CLI) and the dashboard. It
+  covers both shapes of that error: no node free (`info.node == nil`) and the
+  primary's own cap (`Arbiter.Nodes.LocalCapacity`, `info.node == "local"`).
+  """
+  @spec refusal_message(map()) :: String.t()
+  def refusal_message(%{message: message}) when is_binary(message), do: message
+
   def refusal_message(%{task_id: task_id, mode: mode} = info) do
     "held — no node has capacity for #{task_id} (worker.placement is #{mode}; " <>
       "#{Map.get(info, :nodes_known, 0)} node(s) known). It starts when a node " <>

@@ -226,6 +226,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.CircuitBreaker
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Reviews.ConflictResolution
@@ -402,6 +403,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:ci_gate, boolean() | nil}
           | {:ci_adapter, module() | nil}
           | {:ci_poll_ms, pos_integer() | nil}
+          | {:local_capacity_retry_ms, pos_integer()}
           | {:ci_max_polls, pos_integer() | nil}
           | {:round, pos_integer()}
           | {:rearmed, boolean()}
@@ -1146,6 +1148,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # token that identifies its poll timer. nil whenever no reviewer is being
       # held back.
       ci_wait: nil,
+      # RW8: a pass held because the primary's own worker cap is 0
+      # (`Arbiter.Nodes.LocalCapacity`): `%{token:, info:, resume:}`, else nil.
+      # The retry timer re-enters `resume` (a reviewer's `ci_gate/2` entry, or a
+      # fix round's `launch_implementer/3` arguments).
+      local_hold: nil,
+      local_capacity_retry_ms: Keyword.get(opts, :local_capacity_retry_ms, 15_000),
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
       ci_entry: nil,
@@ -1431,6 +1439,42 @@ defmodule Arbiter.Worker.ReviewGate do
   #   {:revise, state}   CI is red: the fix path launched an implementer
   #   {:done, state}     CI is red with no round left: reported to the author
   defp ci_gate(state, entry) do
+    case hold_for_local_capacity(state, :reviewer, {:reviewer, entry}) do
+      {:held, state} -> {:wait, %{state | ci_entry: entry}}
+      :ok -> ci_gate_open(state, entry)
+    end
+  end
+
+  # RW8: every way into a reviewer passes through `ci_gate/2`, so this is where
+  # the primary's own worker cap holds one. Only a cap of 0 holds a reviewer
+  # (`Arbiter.Nodes.LocalCapacity`: a follow-up replaces its own ticket's slot,
+  # so being at the cap never holds it). The hold spawns nothing, writes no
+  # verdict and consumes no round: a timer asks again, and the gate carries on
+  # the moment the cap rises. A fix round's implementer is held the same way
+  # (`launch_implementer/3`).
+  defp hold_for_local_capacity(state, kind, resume) do
+    opts = [reason: {:local_only, :follow_up}, workspace_id: state.workspace_id]
+
+    case LocalCapacity.admit(state.task_id, kind, opts) do
+      :ok ->
+        :ok
+
+      {:error, {:no_node_capacity, info}} ->
+        token = make_ref()
+        Process.send_after(self(), {:local_capacity_retry, token}, state.local_capacity_retry_ms)
+
+        if is_nil(state.local_hold) do
+          Logger.warning(
+            "ReviewGate: task=#{state.task_id} round #{state.round} #{kind} not started — " <>
+              info.phrase
+          )
+        end
+
+        {:held, %{state | local_hold: %{token: token, info: info, resume: resume}}}
+    end
+  end
+
+  defp ci_gate_open(state, entry) do
     state = %{state | ci_entry: entry, ci_green: nil, ci_fallback: nil, ci_wait: nil}
 
     case ci_plan(state) do
@@ -2393,6 +2437,28 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def handle_info({:ci_poll, _stale}, state), do: {:noreply, state}
 
+  # RW8: the retry timer of a pass held for the primary's worker cap. The token
+  # says which hold armed it; a stale one is ignored.
+  def handle_info(
+        {:local_capacity_retry, token},
+        %{local_hold: %{token: token, resume: resume}, reported?: false} = state
+      ) do
+    state = %{state | local_hold: nil}
+
+    case resume do
+      {:reviewer, entry} ->
+        state |> ci_gate(entry) |> ci_reply()
+
+      {:implementer, findings, prefix} ->
+        case launch_implementer(state, findings, prefix) do
+          {:revise, state} -> {:noreply, state}
+          {:done, state} -> {:stop, :normal, state}
+        end
+    end
+  end
+
+  def handle_info({:local_capacity_retry, _stale}, state), do: {:noreply, state}
+
   # Timeouts are tagged with the {round, attempt} pair that scheduled them so
   # a stale timer from a prior pass can't escalate a pass that has already
   # advanced. `attempt` alone is not enough (bd-28u8v4): it resets to 0 at the
@@ -2982,6 +3048,17 @@ defmodule Arbiter.Worker.ReviewGate do
     do: record_thread(state, :system, "Round #{state.round}: CI is red", findings)
 
   defp launch_implementer(state, findings, prompt_prefix \\ "") do
+    case hold_for_local_capacity(
+           state,
+           :review_fix_round,
+           {:implementer, findings, prompt_prefix}
+         ) do
+      {:held, state} -> {:revise, %{state | phase: :revising, current_id: nil}}
+      :ok -> launch_implementer_now(state, findings, prompt_prefix)
+    end
+  end
+
+  defp launch_implementer_now(state, findings, prompt_prefix) do
     impl_id = implementer_task_id(state.review_id, state.round)
 
     case launch_worker(
@@ -6230,6 +6307,8 @@ defmodule Arbiter.Worker.ReviewGate do
       reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid),
       # bd-cut6uv: the head a reviewer is being held back for, while it is.
       awaiting_ci: match?(%{wait: %{sha: _}}, state.ci_wait) && state.ci_wait.wait.sha,
+      # RW8: why a pass is held for the primary's worker cap, while it is.
+      local_hold: state.local_hold && state.local_hold.info.phrase,
       # bd-3hb4ih: the reviewer provider this round is pinned to (nil = the
       # workspace's own first choice) and the providers that have already timed
       # out in it, so a rotation in progress is visible without reading logs.

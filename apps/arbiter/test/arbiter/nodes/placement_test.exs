@@ -62,7 +62,15 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
 
     test "every other spawn kind stays local" do
-      for kind <- [:resume, :review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round] do
+      for kind <- [
+            :redispatch,
+            :resume,
+            :review,
+            :reviewer,
+            :fix_pass,
+            :conflict_pass,
+            :review_fix_round
+          ] do
         assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: kind})
       end
     end
