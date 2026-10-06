@@ -73,6 +73,23 @@ defmodule ArbiterWeb.Router do
     plug(ArbiterWeb.Plugs.NodeAuth)
   end
 
+  # Node routes reachable without a node credential: the join script, the
+  # reachability ping and enrolment (a join token in the body). Rate limited and
+  # audited in `ArbiterWeb.NodeController`.
+  scope "/nodes", ArbiterWeb do
+    get("/join", NodeController, :join)
+    get("/ping", NodeController, :ping)
+    post("/enroll", NodeController, :enroll)
+  end
+
+  # Node routes behind `ArbiterWeb.Plugs.NodeAuth`.
+  scope "/nodes", ArbiterWeb do
+    pipe_through(:node)
+
+    get("/agent/:file", NodeController, :agent)
+    get("/files/:sha", NodeController, :file)
+  end
+
   scope "/", ArbiterWeb do
     pipe_through(:browser)
 
