@@ -299,41 +299,11 @@ defmodule Arbiter.Application do
   defp resume_gate(true), do: [Arbiter.Boot.ResumeGate]
   defp resume_gate(false), do: []
 
-  # The gated boot children. The two `Task` children each MUST carry a distinct
+  # The gated boot tasks (after `migration_gate/1`). The two `Task` children each MUST carry a distinct
   # explicit `:id` — without one they both collapse to the default `:Task` id
   # and the whole app fails to boot ("more than one child specification has the
   # id: Task").
   #
-  #   * SingleInstance: hold a session advisory lock that identifies the one
-  #     canonical instance per DB. Started FIRST (and synchronously, via its
-  #     init) so the migrator and reconcile Task below can read its verdict.
-  #     See bd-9rouwh.
-  #   * migrator: run pending Ecto migrations to head, SYNCHRONOUSLY, before any
-  #     later child (or the :arbiter_web endpoint) comes up against a stale
-  #     schema. Gated on the SingleInstance primary verdict so only the one
-  #     canonical instance migrates. A migration failure aborts the boot. Placed
-  #     before reconcile/merge_queue so those run against the current schema. It is
-  #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
-  #     the boot until the schema is current. See Arbiter.Boot.Migrator.
-  #   * config_migrator: run workspace-config DATA migrations (config lives in a
-  #     JSON column, so Ecto migrations never touch it) once the schema is at
-  #     head — currently the retired `rig_paths` -> `repo_paths` key rename.
-  #     Same primary-instance gate and same synchronous one-shot shape as the
-  #     migrator, and placed right after it so every later child (patrols,
-  #     queues) enumerates workspaces whose repo config is already current.
-  #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
-  #   * provider_accounts: classify the install from the migration state —
-  #     fresh, migrated, or un-migrated with legacy credentials (a boot
-  #     warning naming them; accounts are always on since P13, bd-9gqj8e) —
-  #     and, on a fresh primary, join each workspace to `<provider>:default`.
-  #     Synchronous and after the migrators, so every later child dispatches
-  #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
-  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
-  #     for every ticket whose history predates the live triggers (one indexed
-  #     query once done). Primary-gated, synchronous, never fatal; after the
-  #     migrator that creates the table and before the queues, so no dispatch
-  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
-  #     and bd-d8fi92.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -379,6 +349,38 @@ defmodule Arbiter.Application do
   # `competence_matrix`. Each step is synchronous (`:ignore` after running), so
   # the supervisor does not start the next child until it finishes. Gated off in
   # test with the other boot steps (no migrations to run under the sandbox).
+  #
+  # Steps, in order:
+  #   * SingleInstance: hold a session advisory lock that identifies the one
+  #     canonical instance per DB. Started FIRST (and synchronously, via its
+  #     init) so the migrator and reconcile Task below can read its verdict.
+  #     See bd-9rouwh.
+  #   * migrator: run pending Ecto migrations to head, SYNCHRONOUSLY, before any
+  #     later child (or the :arbiter_web endpoint) comes up against a stale
+  #     schema. Gated on the SingleInstance primary verdict so only the one
+  #     canonical instance migrates. A migration failure aborts the boot. Placed
+  #     before reconcile/merge_queue so those run against the current schema. It is
+  #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
+  #     the boot until the schema is current. See Arbiter.Boot.Migrator.
+  #   * config_migrator: run workspace-config DATA migrations (config lives in a
+  #     JSON column, so Ecto migrations never touch it) once the schema is at
+  #     head — currently the retired `rig_paths` -> `repo_paths` key rename.
+  #     Same primary-instance gate and same synchronous one-shot shape as the
+  #     migrator, and placed right after it so every later child (patrols,
+  #     queues) enumerates workspaces whose repo config is already current.
+  #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
+  #   * provider_accounts: classify the install from the migration state —
+  #     fresh, migrated, or un-migrated with legacy credentials (a boot
+  #     warning naming them; accounts are always on since P13, bd-9gqj8e) —
+  #     and, on a fresh primary, join each workspace to `<provider>:default`.
+  #     Synchronous and after the migrators, so every later child dispatches
+  #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
+  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
+  #     for every ticket whose history predates the live triggers (one indexed
+  #     query once done). Primary-gated, synchronous, never fatal; after the
+  #     migrator that creates the table and before the queues, so no dispatch
+  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
+  #     and bd-d8fi92.
   defp migration_gate(false), do: []
 
   defp migration_gate(true) do

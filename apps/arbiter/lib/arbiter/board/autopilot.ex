@@ -1177,7 +1177,10 @@ defmodule Arbiter.Board.Autopilot do
     }
   end
 
-  defp adopt_persisted(state, _unset), do: %{state | state_load: :settled}
+  # Nothing persisted: the read recovered, so the fail-closed boot value gives
+  # way to the config default, exactly as a first-try read would have.
+  defp adopt_persisted(state, unset),
+    do: adopt_persisted(state, Map.put(unset, :paused, configured_paused?()))
 
   defp actor_parts({actor, surface}) when is_binary(actor) and is_binary(surface),
     do: {"#{actor} via #{surface}", actor, surface}

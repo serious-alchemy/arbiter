@@ -137,6 +137,21 @@ defmodule Arbiter.Board.AutopilotConfigTest do
       end)
     end
 
+    test "unreadable at boot, then readable with nothing persisted: adopts the config default" do
+      Application.put_env(:arbiter, :board_autopilot, enabled: true)
+      unset = %{paused: nil, changed_at: nil, changed_by: nil}
+
+      capture_log(fn ->
+        pid = start(read_status: flaky_read(1, unset), state_retry_ms: 60_000)
+        assert true === Autopilot.paused?(pid)
+
+        send(pid, :reload_paused_state)
+        _ = :sys.get_state(pid)
+        assert false === Autopilot.paused?(pid)
+        assert %{state_load: :settled} = :sys.get_state(pid)
+      end)
+    end
+
     test "an unreadable row raises a coordinator-visible notice after repeated failures" do
       test = self()
 
