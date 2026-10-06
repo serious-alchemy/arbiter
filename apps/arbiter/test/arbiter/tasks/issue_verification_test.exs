@@ -157,6 +157,29 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       assert Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id) == []
     end
 
+    test "a merged ticket's recorded merge status says merged, not the stale open snapshot",
+         %{ws: ws} do
+      for flagged <- [false, true] do
+        issue = task(ws, %{verify_after_deploy: flagged})
+
+        :ok =
+          Arbiter.Tasks.PullRequest.record_merger_status(issue.id, %{
+            status: :open,
+            pipeline: :success,
+            approved: false
+          })
+
+        {:ok, issue} = Ash.get(Issue, issue.id)
+        assert {:ok, _, done} = Verification.finalize_merged(issue, close_upstream: false)
+
+        # What the REST show (`IssueJson`) and CLI read, and the dashboard's decode.
+        assert done.merger_status["status"] == "merged"
+        assert done.merger_status["pipeline"] == "success"
+        assert {:ok, reread} = Ash.get(Issue, issue.id)
+        assert Arbiter.Tasks.PullRequest.merger_status(reread).status == :merged
+      end
+    end
+
     test "a flagged task parks and escalates exactly once", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true})
 
