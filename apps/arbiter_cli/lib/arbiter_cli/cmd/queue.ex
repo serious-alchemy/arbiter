@@ -125,34 +125,33 @@ defmodule ArbiterCli.Cmd.Queue do
           )
         end
 
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        Output.die(
+      {:error, %Client.Error{kind: :http, status: 404} = err} ->
+        Output.die_as(
+          err,
           "no merge watchdog is currently running for task #{task_id}.\n" <>
             "Either the task never opened an MR, or its watchdog has already stopped.\n" <>
             "If the MR is still open, its watchdog died — start a replacement with:\n" <>
             "  arb queue restart-watchdog #{task_id}"
         )
 
-      {:error, %Client.Error{kind: :http, status: 400}} ->
-        Output.die(
+      {:error, %Client.Error{kind: :http, status: status} = err} when status in [400, 409] ->
+        Output.die_as(
+          err,
           "task #{task_id} is not currently parked on an exhausted :ci_failed block or " <>
             "an exhausted conflict auto-resolve — there is nothing to re-arm."
         )
 
-      {:error, %Client.Error{kind: :http, status: 503}} ->
-        Output.die(
+      {:error, %Client.Error{kind: :http, status: 503} = err} ->
+        Output.die_as(
+          err,
           "task #{task_id}'s watchdog is busy polling — try again in a moment.\n" <>
             "This request may still be delivered once the current poll finishes, so wait " <>
             "and check the escalation clears before re-running this command — repeating it " <>
             "immediately risks bumping the budget more than once."
         )
 
-      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
-        msg = get_in(body, ["error", "message"]) || inspect(body)
-        Output.die(msg)
-
-      {:error, %Client.Error{message: msg}} ->
-        Output.die(msg)
+      {:error, %Client.Error{} = err} ->
+        Output.die(err)
     end
   end
 
@@ -168,29 +167,14 @@ defmodule ArbiterCli.Cmd.Queue do
           )
         end
 
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        Output.die(
-          "no worker is running for task #{task_id}, so there is nothing to attach a " <>
-            "watchdog to.\n" <>
-            "The worker process is gone too — recover the task with `arb worker resume " <>
-            "#{task_id}` instead."
+      {:error, %Client.Error{kind: :http, status: 503} = err} ->
+        Output.die_as(
+          err,
+          "task #{task_id}'s worker did not answer in time — try again in a moment."
         )
 
-      {:error, %Client.Error{kind: :http, status: 409}} ->
-        Output.die(
-          "a merge watchdog is already running for task #{task_id}. Nothing to restart.\n" <>
-            "Starting a second one would race the first to merge the same MR."
-        )
-
-      {:error, %Client.Error{kind: :http, status: 503}} ->
-        Output.die("task #{task_id}'s worker did not answer in time — try again in a moment.")
-
-      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
-        msg = get_in(body, ["error", "message"]) || inspect(body)
-        Output.die(msg)
-
-      {:error, %Client.Error{message: msg}} ->
-        Output.die(msg)
+      {:error, %Client.Error{} = err} ->
+        Output.die(err)
     end
   end
 
@@ -208,23 +192,20 @@ defmodule ArbiterCli.Cmd.Queue do
           IO.puts(rerun_summary(task_id, body))
         end
 
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        Output.die(
+      {:error, %Client.Error{kind: :http, status: 404} = err} ->
+        Output.die_as(
+          err,
           "no merge watchdog is currently running for task #{task_id}, so there is nothing " <>
             "holding its PR to re-run CI for.\n" <>
             "If the PR is still open, its watchdog died — start a replacement with:\n" <>
             "  arb queue restart-watchdog #{task_id}"
         )
 
-      {:error, %Client.Error{kind: :http, status: 503}} ->
-        Output.die("task #{task_id}'s watchdog is busy polling — try again in a moment.")
+      {:error, %Client.Error{kind: :http, status: 503} = err} ->
+        Output.die_as(err, "task #{task_id}'s watchdog is busy polling — try again in a moment.")
 
-      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
-        msg = get_in(body, ["error", "message"]) || inspect(body)
-        Output.die(msg)
-
-      {:error, %Client.Error{message: msg}} ->
-        Output.die(msg)
+      {:error, %Client.Error{} = err} ->
+        Output.die(err)
     end
   end
 
@@ -289,21 +270,18 @@ defmodule ArbiterCli.Cmd.Queue do
           )
         end
 
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        Output.die(
+      {:error, %Client.Error{kind: :http, status: 404} = err} ->
+        Output.die_as(
+          err,
           "no merge watchdog is currently running for task #{task_id} — there is no park " <>
             "to reclassify."
         )
 
-      {:error, %Client.Error{kind: :http, status: 503}} ->
-        Output.die("task #{task_id}'s watchdog is busy polling — try again in a moment.")
+      {:error, %Client.Error{kind: :http, status: 503} = err} ->
+        Output.die_as(err, "task #{task_id}'s watchdog is busy polling — try again in a moment.")
 
-      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
-        msg = get_in(body, ["error", "message"]) || inspect(body)
-        Output.die(msg)
-
-      {:error, %Client.Error{message: msg}} ->
-        Output.die(msg)
+      {:error, %Client.Error{} = err} ->
+        Output.die(err)
     end
   end
 end

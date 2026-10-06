@@ -71,7 +71,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
         end
 
       {:error, err} ->
-        die(err)
+        Output.die(err)
     end
   end
 
@@ -85,7 +85,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
         end
 
       {:error, err} ->
-        die(err)
+        Output.die(err)
     end
   end
 
@@ -102,7 +102,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
         end
 
       {:error, err} ->
-        die(err)
+        Output.die(err)
     end
   end
 
@@ -124,7 +124,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   defp poll(ctx) do
     case SchedulerState.fetch() do
       {:ok, body} -> step(SchedulerState.state(body), body, ctx)
-      {:error, err} -> die(err)
+      {:error, err} -> Output.die(err)
     end
   end
 
@@ -206,13 +206,4 @@ defmodule ArbiterCli.Cmd.Scheduler do
   defp emit_entries(body) do
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("  " <> &1))
   end
-
-  # Terminates the VM on every clause — spelled out so dialyzer does not
-  # report it as an accidental "no local return".
-  @spec die(Client.Error.t()) :: no_return()
-  defp die(%Client.Error{kind: :http, body: body}) when is_map(body) do
-    Output.die(get_in(body, ["error", "message"]) || inspect(body))
-  end
-
-  defp die(%Client.Error{message: msg}), do: Output.die(msg)
 end

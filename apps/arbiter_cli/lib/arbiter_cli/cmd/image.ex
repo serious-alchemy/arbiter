@@ -55,7 +55,7 @@ defmodule ArbiterCli.Cmd.Image do
   defp list(mode) do
     case Client.get("/api/images") do
       {:ok, body} -> emit(body, mode, &print_list/1)
-      error -> die(error)
+      {:error, %Client.Error{} = err} -> Output.die(err)
     end
   end
 
@@ -74,14 +74,14 @@ defmodule ArbiterCli.Cmd.Image do
 
     case Client.post("/api/images/build", body, receive_timeout: @build_timeout_ms) do
       {:ok, resp} -> emit(resp, mode, &print_build/1)
-      error -> die(error)
+      {:error, %Client.Error{} = err} -> Output.die(err)
     end
   end
 
   defp post(path, body, mode, printer) do
     case Client.post(path, body, receive_timeout: @build_timeout_ms) do
       {:ok, resp} -> emit(resp, mode, printer)
-      error -> die(error)
+      {:error, %Client.Error{} = err} -> Output.die(err)
     end
   end
 
@@ -187,11 +187,4 @@ defmodule ArbiterCli.Cmd.Image do
       idx -> Enum.at(args, idx + 1)
     end
   end
-
-  @spec die({:error, Client.Error.t()}) :: no_return()
-  defp die({:error, %Client.Error{kind: :http, body: body}}) when is_map(body) do
-    Output.die(get_in(body, ["error", "message"]) || inspect(body))
-  end
-
-  defp die({:error, %Client.Error{message: msg}}), do: Output.die(msg)
 end

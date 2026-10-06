@@ -499,6 +499,18 @@ defmodule ArbiterCli.Output do
     do_halt(exit_code_for(err))
   end
 
+  @doc """
+  Print `msg` (a command's own, friendlier phrasing of `err`) and halt with the
+  exit code `err` earns: 3 when the server is unreachable, 4 for an HTTP 404,
+  1 otherwise — so a command that rewrites a refusal into advice still keeps
+  the exit-code contract scripts branch on.
+  """
+  @spec die_as(Client.Error.t(), String.t()) :: no_return()
+  def die_as(%Client.Error{} = err, msg) when is_binary(msg) do
+    IO.puts(:stderr, "arb: error: " <> msg)
+    do_halt(exit_code_for(err))
+  end
+
   @spec die(String.t(), String.t()) :: no_return()
   def die(msg, hint) do
     IO.puts(:stderr, "arb: error: " <> msg)
