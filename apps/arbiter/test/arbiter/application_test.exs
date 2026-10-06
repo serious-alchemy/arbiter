@@ -82,6 +82,45 @@ defmodule Arbiter.ApplicationTest do
       assert migrator_ix < pr_patrol_ix
     end
 
+    test "no Repo-reading child starts before the migrators (bd-2hwm9e)" do
+      # v0.2.18 booted Autopilot (and the quota/credential readers) ~5s before
+      # the migration adding `competence_matrix`. Only the Repo itself and
+      # children that never touch a migrated table may precede the migrators.
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      allowed_before = [
+        Arbiter.Repo,
+        Arbiter.Vault,
+        DNSCluster,
+        Phoenix.PubSub.Supervisor,
+        Arbiter.TaskSupervisor,
+        Arbiter.SingleInstance
+      ]
+
+      last_gate_ix =
+        [
+          Arbiter.Boot.Migrator,
+          Arbiter.Boot.ConfigMigrator,
+          Arbiter.Boot.ProviderAccounts,
+          Arbiter.Boot.TicketTransitions
+        ]
+        |> Enum.map(fn id -> Enum.find_index(ids, &(&1 == id)) end)
+        |> Enum.max()
+
+      early = Enum.take(ids, last_gate_ix + 1)
+
+      assert early -- allowed_before ==
+               [
+                 Arbiter.Boot.Migrator,
+                 Arbiter.Boot.ConfigMigrator,
+                 Arbiter.Boot.ProviderAccounts,
+                 Arbiter.Boot.TicketTransitions
+               ]
+
+      autopilot_ix = Enum.find_index(ids, &(&1 == Arbiter.Board.Autopilot))
+      assert last_gate_ix < autopilot_ix
+    end
+
     test "the config migrator runs after the schema migrator and before workspace enumeration" do
       # bd-3pqzsa: workspace config lives in a JSON column, so the retired
       # `rig_paths` -> `repo_paths` rename needs a DATA migration at boot. It
