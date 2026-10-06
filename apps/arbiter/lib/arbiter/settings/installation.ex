@@ -39,6 +39,12 @@ defmodule Arbiter.Settings.Installation do
       flag was last changed and, where known, by what caller (an MCP tool, the
       REST API, the dashboard). `nil` until the first pause/resume.
 
+    * `:nodes_public_url` / `:nodes_allow_public_endpoint` /
+      `:nodes_join_token_ttl_minutes` — the `nodes.*` settings of the remote-worker
+      node tier (`docs/design/remote-workers.md` §4.3, §5.1): the URL a node dials,
+      whether a non-private endpoint is tolerated, and the join-token TTL
+      (`nil` = off / refused / 15 minutes).
+
   Every field is nullable and `nil` always means "no override" — a fresh
   install that never writes here behaves exactly as it did before the setting
   existed.
@@ -71,7 +77,10 @@ defmodule Arbiter.Settings.Installation do
     :scheduling_epic_floors_enabled,
     :scheduling_max_lifted_in_flight,
     :scheduling_finish_first,
-    :scheduling_finish_first_max_wait_hours
+    :scheduling_finish_first_max_wait_hours,
+    :nodes_public_url,
+    :nodes_allow_public_endpoint,
+    :nodes_join_token_ttl_minutes
   ]
 
   actions do
@@ -214,6 +223,28 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1
 
       description "Hours a card may wait Ready and unblocked before it escapes the finish-first tiebreak (ES3); nil = 24."
+    end
+
+    attribute :nodes_public_url, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.public_url: the origin an agent dials for enrollment and its socket (RW3); nil = unset."
+    end
+
+    attribute :nodes_allow_public_endpoint, :boolean do
+      public? true
+      allow_nil? true
+
+      description "nodes.allow_public_endpoint: tolerate a non-private nodes.public_url (RW3); nil / false = refused."
+    end
+
+    attribute :nodes_join_token_ttl_minutes, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 1, max: 1440
+
+      description "nodes.join_token_ttl_minutes: default join-token lifetime (RW3); nil = 15, max 1440."
     end
 
     create_timestamp :created_at

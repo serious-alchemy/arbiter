@@ -13,7 +13,8 @@ defmodule Arbiter.Actor do
 
   `kind` is one of `:operator | :coordinator | :worker | :autopilot | :system`
   (plus `:refine`, the browser-hosted refinement session, which keeps the
-  `refine:<issue>` label it already had); `id` narrows it (the worker's ticket,
+  `refine:<issue>` label it already had, and `:node`, an enrolled remote node
+  acting with its own `arbn_` credential — `node:<name>`); `id` narrows it (the worker's ticket,
   the operator's dashboard identity, the name of the reconciler). The stable
   string form is `label/1`: `"coordinator"`, `"worker:bd-xxxx"`,
   `"operator:ryan"`, `"operator (unauthenticated)"`, `"autopilot"`,
@@ -40,9 +41,12 @@ defmodule Arbiter.Actor do
   ambient value is deliberately not inherited by spawned tasks.
   """
 
+  # `node/0,1` below is the actor constructor, not the Erlang node name.
+  import Kernel, except: [node: 0, node: 1]
+
   alias Arbiter.MCP.Scope
 
-  @kinds [:operator, :coordinator, :worker, :autopilot, :system, :refine]
+  @kinds [:operator, :coordinator, :worker, :autopilot, :system, :refine, :node]
   @pdict_key :arbiter_actor
   @unauthenticated "operator (unauthenticated)"
   @cli_id "cli"
@@ -50,7 +54,7 @@ defmodule Arbiter.Actor do
   @enforce_keys [:kind]
   defstruct [:kind, :id]
 
-  @type kind :: :operator | :coordinator | :worker | :autopilot | :system | :refine
+  @type kind :: :operator | :coordinator | :worker | :autopilot | :system | :refine | :node
   @type t :: %__MODULE__{kind: kind(), id: String.t() | nil}
 
   @doc "The valid kinds."
@@ -73,6 +77,14 @@ defmodule Arbiter.Actor do
   @doc "A browser-hosted refinement session bound to one issue."
   @spec refine(String.t()) :: t()
   def refine(issue_id) when is_binary(issue_id), do: %__MODULE__{kind: :refine, id: issue_id}
+
+  @doc """
+  An enrolled remote node (`Arbiter.Nodes`), named by its operator-visible name
+  (or `nil` before it has one). It is not a `Scope` tier: a node credential
+  never decodes to a scope, so this is only ever built by the node edge.
+  """
+  @spec node(String.t() | nil) :: t()
+  def node(name \\ nil), do: %__MODULE__{kind: :node, id: name}
 
   @spec autopilot() :: t()
   def autopilot, do: %__MODULE__{kind: :autopilot}
@@ -101,6 +113,8 @@ defmodule Arbiter.Actor do
   def parse("system"), do: system()
   def parse("worker:" <> id) when id != "", do: worker(id)
   def parse("refine:" <> id) when id != "", do: refine(id)
+  def parse("node"), do: node()
+  def parse("node:" <> name) when name != "", do: node(name)
   def parse("system:" <> name) when name != "", do: system(name)
   def parse("operator:" <> id) when id != "", do: operator(id)
   # The loop's apply path (`"loop:proposal:<id>"`, `"loop"`) is server-internal.

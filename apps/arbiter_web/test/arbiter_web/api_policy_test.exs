@@ -82,4 +82,38 @@ defmodule ArbiterWeb.ApiPolicyTest do
       refute conn.status in [401, 403], "#{route.path} rejected an anonymous caller"
     end
   end
+
+  describe ":operator policy (node administration, RW3)" do
+    alias Arbiter.MCP.Scope
+
+    test "admits only an operator-proof coordinator token" do
+      operator = %Scope{tier: :coordinator, operator: true}
+      assert ApiPolicy.authorize(:operator, operator, %{}) == :ok
+    end
+
+    test "refuses a coordinator session without operator proof (403), so an LLM cannot enrol machines" do
+      session = %Scope{tier: :coordinator, operator: false}
+
+      assert {:error, :forbidden, message} = ApiPolicy.authorize(:operator, session, %{})
+      assert message =~ "operator"
+    end
+
+    test "refuses worker and refine tokens (403) and a missing token (401)" do
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:operator, %Scope{tier: :worker, task_id: "bd-1"}, %{})
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:operator, %Scope{tier: :refine, issue_id: "bd-1"}, %{})
+
+      assert {:error, :unauthenticated, _} = ApiPolicy.authorize(:operator, nil, %{})
+    end
+
+    test "a real operator-proof token and a real coordinator token are told apart" do
+      {:ok, operator} = Scope.from_token(Scope.mint_coordinator(nil, operator: true))
+      {:ok, session} = Scope.from_token(Scope.mint_coordinator(nil))
+
+      assert ApiPolicy.authorize(:operator, operator, %{}) == :ok
+      assert {:error, :forbidden, _} = ApiPolicy.authorize(:operator, session, %{})
+    end
+  end
 end

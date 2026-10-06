@@ -1919,7 +1919,8 @@ defmodule Arbiter.MCP.Catalog do
           "`scheduling_finish_first` (boolean) and `scheduling_finish_first_max_wait_hours` " <>
           "(positive integer) tune the epic-aware Ready order's finish-first tiebreak " <>
           "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
-          "`scheduling_max_lifted_in_flight` are operator-only and refused here. " <>
+          "`scheduling_max_lifted_in_flight` and the `nodes.*` keys (remote-node enrolment) " <>
+          "are operator-only and refused here. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -1937,7 +1938,10 @@ defmodule Arbiter.MCP.Catalog do
               "scheduling_epic_floors_enabled",
               "scheduling_max_lifted_in_flight",
               "scheduling_finish_first",
-              "scheduling_finish_first_max_wait_hours"
+              "scheduling_finish_first_max_wait_hours",
+              "nodes.public_url",
+              "nodes.allow_public_endpoint",
+              "nodes.join_token_ttl_minutes"
             ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },

@@ -63,6 +63,16 @@ defmodule ArbiterWeb.Router do
     plug(ArbiterWeb.Plugs.ApiAuth)
   end
 
+  # The node tier (RW3, docs/design/remote-workers.md §5.3): `/nodes/*` and
+  # `/node/*`, outside `/api` and `/mcp`, authenticated by an `arbn_` node
+  # credential and nothing else. Routes (RW4 onward) pipe through this and
+  # must not also pipe through `:api`, so `ArbiterWeb.ApiPolicy` and the node
+  # tier stay disjoint. `ArbiterWeb.NodeTierGuardTest` walks every route here.
+  pipeline :node do
+    plug(:accepts, ["json"])
+    plug(ArbiterWeb.Plugs.NodeAuth)
+  end
+
   scope "/", ArbiterWeb do
     pipe_through(:browser)
 

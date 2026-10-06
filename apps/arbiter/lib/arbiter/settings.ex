@@ -449,6 +449,86 @@ defmodule Arbiter.Settings do
 
   def set_scheduling_finish_first_max_wait_hours(_), do: {:error, :invalid_value}
 
+  # ---- nodes (RW3, docs/design/remote-workers.md §4.3, §5.1) -----------------
+
+  @default_join_token_ttl_minutes 15
+  @max_join_token_ttl_minutes 24 * 60
+
+  @doc "The join-token TTL in force when none is overridden, in minutes."
+  @spec default_join_token_ttl_minutes() :: pos_integer()
+  def default_join_token_ttl_minutes, do: @default_join_token_ttl_minutes
+
+  @doc "The longest join-token TTL a setting may name, in minutes."
+  @spec max_join_token_ttl_minutes() :: pos_integer()
+  def max_join_token_ttl_minutes, do: @max_join_token_ttl_minutes
+
+  @doc "`nodes.public_url` (no trailing slash), or `nil` when unset."
+  @spec nodes_public_url() :: String.t() | nil
+  def nodes_public_url, do: read_setting(:nodes_public_url)
+
+  @doc "Persist `nodes.public_url`; `nil` clears it. Must be a bare http(s) origin/path."
+  @spec set_nodes_public_url(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_public_url(nil), do: write_setting(:nodes_public_url, nil)
+
+  def set_nodes_public_url(url) when is_binary(url) do
+    case normalize_public_url(url) do
+      {:ok, normalized} -> write_setting(:nodes_public_url, normalized)
+      :error -> {:error, :invalid_value}
+    end
+  end
+
+  def set_nodes_public_url(_), do: {:error, :invalid_value}
+
+  @doc """
+  Normalise a `nodes.public_url`: `http` or `https`, a host, no credentials,
+  query or fragment; the trailing slash is dropped. `:error` otherwise.
+  """
+  @spec normalize_public_url(term()) :: {:ok, String.t()} | :error
+  def normalize_public_url(url) when is_binary(url) do
+    case URI.new(String.trim(url)) do
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil} = uri}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+        {:ok, uri |> URI.to_string() |> String.trim_trailing("/")}
+
+      _ ->
+        :error
+    end
+  end
+
+  def normalize_public_url(_), do: :error
+
+  @doc "Whether a non-private `nodes.public_url` is tolerated (`nodes.allow_public_endpoint`)."
+  @spec nodes_allow_public_endpoint?() :: boolean()
+  def nodes_allow_public_endpoint?, do: read_setting(:nodes_allow_public_endpoint) == true
+
+  @doc "The persisted `nodes.allow_public_endpoint` override; `nil` = refused."
+  @spec nodes_allow_public_endpoint() :: boolean() | nil
+  def nodes_allow_public_endpoint, do: read_setting(:nodes_allow_public_endpoint)
+
+  @spec set_nodes_allow_public_endpoint(boolean() | nil) ::
+          {:ok, boolean() | nil} | {:error, term()}
+  def set_nodes_allow_public_endpoint(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:nodes_allow_public_endpoint, v)
+
+  def set_nodes_allow_public_endpoint(_), do: {:error, :invalid_value}
+
+  @doc "The join-token TTL override in minutes, or `nil`."
+  @spec nodes_join_token_ttl_override() :: pos_integer() | nil
+  def nodes_join_token_ttl_override, do: read_setting(:nodes_join_token_ttl_minutes)
+
+  @doc "The join-token TTL in force, in minutes (override, else 15)."
+  @spec nodes_join_token_ttl_minutes() :: pos_integer()
+  def nodes_join_token_ttl_minutes,
+    do: nodes_join_token_ttl_override() || @default_join_token_ttl_minutes
+
+  @spec set_nodes_join_token_ttl_minutes(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_nodes_join_token_ttl_minutes(n)
+      when is_nil(n) or (is_integer(n) and n > 0 and n <= @max_join_token_ttl_minutes),
+      do: write_setting(:nodes_join_token_ttl_minutes, n)
+
+  def set_nodes_join_token_ttl_minutes(_), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other
