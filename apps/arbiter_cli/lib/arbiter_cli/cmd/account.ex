@@ -113,7 +113,7 @@ defmodule ArbiterCli.Cmd.Account do
   All verbs go through the REST API at `/api/accounts`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
   alias ArbiterCli.Cmd.Account.Login
 
   @switches [
@@ -149,7 +149,7 @@ defmodule ArbiterCli.Cmd.Account do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb account", switches: @switches)
       mode = if opts[:json], do: :json, else: :text
 
       case rest do

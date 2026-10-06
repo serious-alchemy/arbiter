@@ -23,7 +23,7 @@ defmodule ArbiterCli.Cmd.Image do
   a worker's branch is never built.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   # A cold build installs a toolchain over the network.
   @build_timeout_ms 25 * 60_000
@@ -32,12 +32,12 @@ defmodule ArbiterCli.Cmd.Image do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      rest = Output.drop_json(argv)
-      mode = Output.mode(argv)
+      {opts, rest, mode} =
+        ArgParser.parse(argv, command: "arb image", switches: [workspace: :string])
 
       case rest do
         ["list" | _] -> list(mode)
-        ["build" | args] -> build(args, mode)
+        ["build" | args] -> build(args, opts, mode)
         ["refresh" | _] -> post("/api/images/refresh", %{}, mode, &print_refresh/1)
         ["prune" | _] -> post("/api/images/prune", %{}, mode, &print_prune/1)
         _ -> unknown()
@@ -59,15 +59,15 @@ defmodule ArbiterCli.Cmd.Image do
     end
   end
 
-  defp build(args, mode) do
+  defp build(args, opts, mode) do
     repo =
-      case positional(args) do
+      case List.first(args) do
         nil -> Output.die("arb image build needs a repo", "Run `arb repo list` for the names.")
         repo -> repo
       end
 
     body =
-      case flag_value(args, "--workspace") do
+      case opts[:workspace] do
         nil -> %{repo: repo}
         workspace -> %{repo: repo, workspace: workspace}
       end
@@ -171,20 +171,4 @@ defmodule ArbiterCli.Cmd.Image do
     do: unix |> DateTime.from_unix!() |> Calendar.strftime("%Y-%m-%d %H:%M")
 
   defp created(_), do: "?"
-
-  # -- args --------------------------------------------------------------------
-
-  @value_flags ~w(--workspace)
-
-  defp positional([]), do: nil
-  defp positional([flag, _value | rest]) when flag in @value_flags, do: positional(rest)
-  defp positional(["--" <> _ | rest]), do: positional(rest)
-  defp positional([arg | _rest]), do: arg
-
-  defp flag_value(args, flag) do
-    case Enum.find_index(args, &(&1 == flag)) do
-      nil -> nil
-      idx -> Enum.at(args, idx + 1)
-    end
-  end
 end

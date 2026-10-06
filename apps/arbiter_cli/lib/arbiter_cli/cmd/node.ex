@@ -56,20 +56,21 @@ defmodule ArbiterCli.Cmd.Node do
         ["add" | rest] ->
           add(rest, Output.mode(argv))
 
-        ["list" | _] ->
+        ["list" | rest] ->
+          _ = positional!(rest, "arb node list")
           list(Output.mode(argv))
 
         ["show" | rest] ->
-          show(rest, Output.mode(argv))
+          show(positional!(rest, "arb node show"), Output.mode(argv))
 
         ["set" | rest] ->
           set(rest, Output.mode(argv))
 
         ["events" | rest] ->
-          events(rest, Output.mode(argv))
+          events(positional!(rest, "arb node events"), Output.mode(argv))
 
         [verb | rest] when verb in @verbs ->
-          verb(verb, rest, Output.mode(argv))
+          verb(verb, positional!(rest, "arb node #{verb}"), Output.mode(argv))
 
         _ ->
           IO.puts(:stderr, "arb: unknown node subcommand")
@@ -77,6 +78,13 @@ defmodule ArbiterCli.Cmd.Node do
           Output.halt(2)
       end
     end
+  end
+
+  # The positional args of a verb that takes no flags of its own: anything
+  # flag-shaped is an error rather than a node reference.
+  defp positional!(args, command) do
+    {_opts, rest, _mode} = ArgParser.parse(args, command: command, switches: [])
+    rest
   end
 
   # ---- add -------------------------------------------------------------------

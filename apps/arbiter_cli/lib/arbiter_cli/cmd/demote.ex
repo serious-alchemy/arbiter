@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Demote do
   Refused if the task has a live worker, or is `verifying` or `closed`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean]
 
@@ -22,7 +22,7 @@ defmodule ArbiterCli.Cmd.Demote do
   end
 
   defp do_run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    {opts, rest, _mode} = ArgParser.parse(argv, command: "arb ticket demote", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     id = parse_id(rest)
 

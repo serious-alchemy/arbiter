@@ -50,7 +50,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   with every form, including the targeted `clear <id>` and `clear --task`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @coordinator "coordinator"
   @all_limit 20
@@ -65,55 +65,44 @@ defmodule ArbiterCli.Cmd.Inbox do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {opts, rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb message inbox",
+          switches: [all: :boolean, task: :string, session: :string]
+        )
 
-      {session, rest} = take_session(Output.drop_json(argv))
+      session = opts[:session]
+      all? = opts[:all] == true
+      task = opts[:task]
 
-      case rest do
-        [] ->
+      case {rest, all?, task} do
+        {[], false, nil} ->
           coordinator_inbox_view(true, mode, session)
 
-        ["--all"] ->
+        {[], true, nil} ->
           coordinator_inbox_view(false, mode, session)
 
-        ["read", id] ->
+        {["read", id], false, nil} ->
           read_one(id, mode, session)
 
-        ["read"] ->
+        {["read"], false, nil} ->
           Output.die("inbox read requires a message id: `arb inbox read <id>`")
 
-        ["clear"] ->
-          clear(false, mode, session)
+        {["clear"], all?, nil} ->
+          clear(all?, mode, session)
 
-        ["clear", "--all"] ->
-          clear(true, mode, session)
-
-        ["clear", "--task"] ->
-          Output.die("inbox clear --task requires a task id: `arb inbox clear --task <task-id>`")
-
-        ["clear", "--task", task_id] ->
+        {["clear"], false, task_id} when is_binary(task_id) ->
           clear_task(task_id, mode, session)
 
-        ["clear" | ids] when ids != [] ->
+        {["clear" | ids], false, nil} when ids != [] ->
           clear_ids(ids, mode, session)
 
-        [task_id] ->
+        {[task_id], false, nil} ->
           task_inbox(task_id, mode)
 
         _ ->
           Output.die("inbox: unrecognized arguments. See `arb help`.")
       end
-    end
-  end
-
-  # Pull `--session <id>` out of argv wherever it sits, so it composes with the
-  # positional subcommands (`clear`, `read <id>`) rather than needing a slot in
-  # each of their patterns. Returns `{session_id | nil, remaining_argv}`.
-  defp take_session(argv) do
-    case Enum.split_while(argv, &(&1 != "--session")) do
-      {before, ["--session", id | rest]} -> {id, before ++ rest}
-      {_before, ["--session"]} -> Output.die("inbox --session requires a session id")
-      {argv, []} -> {nil, argv}
     end
   end
 

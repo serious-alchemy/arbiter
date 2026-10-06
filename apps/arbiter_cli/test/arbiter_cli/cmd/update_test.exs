@@ -256,4 +256,40 @@ defmodule ArbiterCli.Cmd.UpdateTest do
       assert {:ok, %{"verify_after_deploy" => false}} = Jason.decode(out)
     end
   end
+
+  for spelling <- ["3", "D3", "d3"] do
+    test "--difficulty #{spelling} PATCHes difficulty 3" do
+      parent = self()
+
+      stub_routes([
+        {{"patch", "/api/issues/bd-001"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:patched, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => "bd-001", "difficulty" => 3})
+         end}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn -> Update.run(["bd-001", "--difficulty", unquote(spelling)]) end)
+
+      assert exit_code == 0
+      assert_received {:patched, %{"difficulty" => 3}}
+    end
+  end
+
+  test "--priority with a non-integer value errors before patching" do
+    {_out, err, exit_code} = capture(fn -> Update.run(["bd-001", "--priority", "abc"]) end)
+    assert exit_code == 1
+    assert err =~ "invalid value \"abc\" for --priority"
+  end
+
+  test "an unknown flag on the edit path exits 1 naming the flag" do
+    {_out, err, exit_code} = capture(fn -> Update.run(["bd-001", "--nope", "x"]) end)
+    assert exit_code == 1
+    assert err =~ "unknown option --nope for arb ticket update"
+  end
 end

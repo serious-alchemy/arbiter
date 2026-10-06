@@ -30,18 +30,27 @@ defmodule ArbiterCli.Cmd.Breaker do
   live simply trips again, and in the meantime the flood resumes.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      rest = Output.drop_json(argv)
-      mode = Output.mode(argv)
+      {opts, rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb breaker",
+          switches: [
+            workspace: :string,
+            kind: :string,
+            open: :boolean,
+            all: :boolean,
+            auth_hold: :string
+          ]
+        )
 
       case rest do
-        ["list" | args] -> list(args, mode)
-        ["reset" | args] -> reset(args, mode)
+        ["list" | _] -> list(opts, mode)
+        ["reset" | args] -> reset(args, opts, mode)
         _ -> unknown()
       end
     end
@@ -54,12 +63,12 @@ defmodule ArbiterCli.Cmd.Breaker do
     Output.halt(2)
   end
 
-  defp list(args, mode) do
+  defp list(opts, mode) do
     params =
       []
-      |> put_flag(args, "--workspace", :workspace)
-      |> put_flag(args, "--kind", :kind)
-      |> then(fn p -> if "--open" in args, do: [{:open_only, "true"} | p], else: p end)
+      |> put_flag(opts, :workspace)
+      |> put_flag(opts, :kind)
+      |> then(fn p -> if opts[:open], do: [{:open_only, "true"} | p], else: p end)
 
     case Client.get("/api/breakers", params) do
       {:ok, body} ->
@@ -70,18 +79,18 @@ defmodule ArbiterCli.Cmd.Breaker do
     end
   end
 
-  defp reset(args, mode) do
+  defp reset(args, opts, mode) do
     body =
       cond do
-        provider = flag_value(args, "--auth-hold") ->
+        provider = opts[:auth_hold] ->
           %{provider: provider}
 
-        "--all" in args ->
+        opts[:all] ->
           %{all: true}
-          |> put_opt(args, "--workspace", :workspace)
-          |> put_opt(args, "--kind", :kind)
+          |> put_opt(opts, :workspace)
+          |> put_opt(opts, :kind)
 
-        signature = positional(args) ->
+        signature = List.first(args) ->
           %{signature: signature}
 
         true ->
@@ -198,36 +207,17 @@ defmodule ArbiterCli.Cmd.Breaker do
   defp shell_quote(other), do: inspect(other)
 
   # `--flag value` → a query param, when present.
-  defp put_flag(params, args, flag, key) do
-    case flag_value(args, flag) do
+  defp put_flag(params, opts, key) do
+    case opts[key] do
       nil -> params
       value -> [{key, value} | params]
     end
   end
 
-  defp put_opt(body, args, flag, key) do
-    case flag_value(args, flag) do
+  defp put_opt(body, opts, key) do
+    case opts[key] do
       nil -> body
       value -> Map.put(body, key, value)
-    end
-  end
-
-  # Flags whose *value* is the next token. Those values are not positional
-  # arguments even though they don't start with `--`, so a naive "first
-  # non-flag token" scan would read `arb breaker reset --workspace ws-1` as
-  # a reset of the signature "ws-1".
-  @value_flags ~w(--workspace --kind)
-
-  # The first token that is neither a flag nor a flag's value.
-  defp positional([]), do: nil
-  defp positional([flag, _value | rest]) when flag in @value_flags, do: positional(rest)
-  defp positional(["--" <> _ | rest]), do: positional(rest)
-  defp positional([arg | _rest]), do: arg
-
-  defp flag_value(args, flag) do
-    case Enum.find_index(args, &(&1 == flag)) do
-      nil -> nil
-      idx -> Enum.at(args, idx + 1)
     end
   end
 end

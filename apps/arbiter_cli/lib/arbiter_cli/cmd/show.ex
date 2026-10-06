@@ -6,14 +6,13 @@ defmodule ArbiterCli.Cmd.Show do
     --json    emit JSON instead of human-readable text
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb ticket show", switches: [])
 
       case rest do
         [id] -> show(id, mode)

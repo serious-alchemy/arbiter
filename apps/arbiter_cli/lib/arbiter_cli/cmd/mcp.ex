@@ -19,7 +19,7 @@ defmodule ArbiterCli.Cmd.Mcp do
           Decode and display the claims from a scope token (expiry, tier, workspace).
   """
 
-  alias ArbiterCli.{Client, OperatorSocket, Output}
+  alias ArbiterCli.{ArgParser, Client, OperatorSocket, Output}
 
   @default_ttl 2_592_000
 
@@ -59,8 +59,9 @@ defmodule ArbiterCli.Cmd.Mcp do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} =
-        OptionParser.parse(argv,
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv,
+          command: "arb mcp token mint",
           switches: [tier: :string, ttl: :integer, json: :boolean]
         )
 
@@ -123,13 +124,14 @@ defmodule ArbiterCli.Cmd.Mcp do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
+      {_opts, rest, mode} =
+        ArgParser.parse(argv, command: "arb mcp token verify", switches: [])
 
       token =
-        case Enum.reject(rest, &String.starts_with?(&1, "-")) do
-          [t | _] -> t
+        case rest do
+          [t] -> t
           [] -> Output.die("mcp token verify requires a token argument")
+          _ -> Output.die("mcp token verify takes exactly one argument: the token")
         end
 
       case Client.post("/api/mcp/tokens/verify", %{"token" => token}) do

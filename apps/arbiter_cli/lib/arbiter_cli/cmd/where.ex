@@ -4,13 +4,13 @@ defmodule ArbiterCli.Cmd.Where do
   Phoenix host it's talking to and which workspace it resolves to.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb where", switches: [])
       base = Client.base_url()
       bd2_ws_env = System.get_env("ARB_WORKSPACE")
 

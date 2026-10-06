@@ -45,7 +45,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
     --json           emit JSON instead of human-readable text
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [
     json: :boolean,
@@ -71,7 +71,9 @@ defmodule ArbiterCli.Cmd.Dispatch do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket dispatch", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]
 

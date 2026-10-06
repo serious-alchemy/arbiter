@@ -29,13 +29,13 @@ defmodule ArbiterCli.Cmd.PreflipGate do
   Reads from `GET /api/coverage_shadow/preflip_gate`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb preflip-gate", switches: [])
 
       case Client.get("/api/coverage_shadow/preflip_gate", []) do
         {:ok, %{"data" => data}} -> emit(data, mode)

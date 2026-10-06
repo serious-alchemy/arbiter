@@ -35,7 +35,7 @@ defmodule ArbiterCli.Cmd.Start do
   """
 
   alias Arbiter.Worker.ReleaseEnv
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Restart}
+  alias ArbiterCli.{ArgParser, Client, Cmd.Doctor, Cmd.Restart}
   alias ArbiterCli.Output
 
   @switches [json: :boolean, timeout: :integer]
@@ -49,7 +49,9 @@ defmodule ArbiterCli.Cmd.Start do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb server start", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
       timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
 

@@ -35,21 +35,22 @@ defmodule ArbiterCli.Cmd.Scheduler do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      rest = Output.drop_json(argv)
-      mode = Output.mode(argv)
+      case Output.drop_json(argv) do
+        [verb | rest] when verb in ["pause", "resume", "status"] ->
+          {_opts, _rest, mode} =
+            ArgParser.parse(rest ++ json_flag(argv),
+              command: "arb scheduler #{verb}",
+              switches: []
+            )
 
-      case rest do
-        ["pause" | _] ->
-          pause(mode)
-
-        ["resume" | _] ->
-          resume(mode)
-
-        ["status" | _] ->
-          status(mode)
+          case verb do
+            "pause" -> pause(mode)
+            "resume" -> resume(mode)
+            "status" -> status(mode)
+          end
 
         ["wait" | wait_argv] ->
-          wait(wait_argv, mode)
+          wait(wait_argv, Output.mode(argv))
 
         _ ->
           IO.puts(:stderr, "arb: unknown scheduler subcommand")
@@ -58,6 +59,8 @@ defmodule ArbiterCli.Cmd.Scheduler do
       end
     end
   end
+
+  defp json_flag(argv), do: if("--json" in argv, do: ["--json"], else: [])
 
   defp pause(mode) do
     case Client.post("/api/scheduler/pause", %{"surface" => "cli"}) do
