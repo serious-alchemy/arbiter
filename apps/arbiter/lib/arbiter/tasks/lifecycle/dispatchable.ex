@@ -24,7 +24,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
 
   ## ctx
 
-    * `:blocked_by`, `:runs` — as for `Arbiter.Tasks.Lifecycle.view/2`;
+    * `:blocked_by`, `:runs`, `:held` — as for `Arbiter.Tasks.Lifecycle.view/2`;
     * `:conflicts_with` — the ticket's `:conflicts_with` counterparts, and
       `:claimed` — `%{id => label}` (or a list of ids) of what is in flight;
     * `:scope` — the ticket's declared file scope, and `:in_flight` —
@@ -81,7 +81,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   @doc "May `ticket` be dispatched, given `ctx`? See the moduledoc."
   @spec dispatchable(map(), map()) :: result()
   def dispatchable(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
-    with :ok <- column_hold(View.view(ticket, Map.take(ctx, [:blocked_by, :runs]))),
+    with :ok <- column_hold(View.view(ticket, Map.take(ctx, [:blocked_by, :runs, :held]))),
          :ok <- mutex_hold(ctx),
          :ok <- overlap_hold(ctx),
          :ok <- provider_constraint_hold(ctx) do
@@ -110,6 +110,9 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   # ---- holds ----------------------------------------------------------------
 
   defp column_hold(%{column: :ready}), do: :ok
+  # bd-abg443: a quota-held active ticket reads Blocked on the board but is
+  # already In progress as far as dispatch goes — never fresh work.
+  defp column_hold(%{column: :blocked, hold: %{}}), do: {:held, {:column, :in_progress}}
   defp column_hold(%{column: :blocked, blocked_by: ids}), do: {:held, {:blocked_by, ids}}
   defp column_hold(%{column: column}), do: {:held, {:column, column}}
 

@@ -229,7 +229,7 @@ defmodule Arbiter.Board.Snapshot do
     # Epics stay off the board.
     views =
       issues
-      |> ticket_views(workers, blocked_by, now, watchdog_live)
+      |> ticket_views(workers, blocked_by, now, watchdog_live, Map.get(input, :held, %{}))
       |> Map.reject(fn {id, _view} -> epic?(Map.get(issues_by_id, id)) end)
 
     columns = Map.new(views, fn {id, view} -> {id, view.column} end)
@@ -1001,7 +1001,11 @@ defmodule Arbiter.Board.Snapshot do
   # blockers and attention — with its runs, its blockers, the clock and its
   # Watchdog's liveness. An author worker whose issue was not read still gets
   # a bare `%{id: task_id}` ticket, so its card lands somewhere.
-  defp ticket_views(issues, workers, blocked_by, now, watchdog_live) do
+  #
+  # bd-abg443: `held` is `%{ticket_id => DispatchQueue.describe/1 map}` for a
+  # caller that already knows the quota holds; a ticket it does not name is
+  # asked of the workspace's queue by `Lifecycle.view/2`.
+  defp ticket_views(issues, workers, blocked_by, now, watchdog_live, held) do
     runs = runs_by_ticket(workers)
     known = MapSet.new(issues, & &1.id)
 
@@ -1020,6 +1024,8 @@ defmodule Arbiter.Board.Snapshot do
         watchdog_alive: ticket_watchdog_alive(ticket.id, watchdog_live)
       }
 
+      ctx = if Map.has_key?(held, ticket.id), do: Map.put(ctx, :held, held[ticket.id]), else: ctx
+
       {ticket.id, Lifecycle.view(ticket, ctx)}
     end)
   end
@@ -1035,6 +1041,8 @@ defmodule Arbiter.Board.Snapshot do
     |> Map.merge(%{
       step: Map.get(view, :step),
       attention: Map.get(view, :attention),
+      # bd-abg443: the quota hold on a Blocked card of an :active ticket.
+      hold: Map.get(view, :hold),
       # bd-cut6uv: the head the ticket's ReviewGate is waiting on CI for, if any.
       ci_wait: Map.get(view, :ci_wait)
     })

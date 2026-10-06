@@ -235,6 +235,44 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
       fix = run(:working, %{registry_key: "bd-t:fix", role: :fix_pass, agent_live: true})
       assert %{step: :fixing_ci} = view(ticket(:active), %{runs: [fix]})
     end
+
+    # bd-abg443: an :active ticket the quota gate holds releases its slot
+    # (bd-zkmvia), so it reads Blocked with the hold's reason and resume time.
+    test "an :active ticket held by the quota gate is Blocked with a hold" do
+      held = %{
+        reason: "claude:default 5h ≥ paced line",
+        retry_not_before: ~U[2026-09-27 15:30:00Z],
+        intent: "resume"
+      }
+
+      author = run(:failed, %{agent_live: false})
+
+      assert %{
+               state: :active,
+               column: :blocked,
+               step: nil,
+               attention: nil,
+               hold: %{
+                 reason: "held — quota (claude:default 5h ≥ paced line; resumes ~15:30Z)",
+                 resumes_at: ~U[2026-09-27 15:30:00Z]
+               }
+             } = view(ticket(:active), %{runs: [author], held: held})
+
+      # An unreadable resume time still reads as a hold.
+      assert %{column: :blocked, hold: %{reason: reason, resumes_at: nil}} =
+               view(ticket(:active), %{held: %{reason: "7d quota 91% ≥ 90%"}})
+
+      assert reason == "held — quota (7d quota 91% ≥ 90%)"
+
+      # Not held: the stored state decides, as before.
+      assert %{column: :in_progress, hold: nil} = view(ticket(:active), %{held: false})
+
+      # Display only: a queued ticket stays Ready, and the stored state is untouched.
+      assert %{state: :queued, column: :ready, hold: nil} = view(ticket(:queued), %{held: held})
+
+      # The epic mini-board keeps a held ticket out of Ready.
+      assert Lifecycle.board_column(ticket(:active), %{held: held}) in [:running, :waiting]
+    end
   end
 
   describe "view/2 — the step of a merging ticket" do

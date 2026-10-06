@@ -18,6 +18,20 @@ defmodule Arbiter.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.dispatchable?(ticket(:queued), %{})
     end
 
+    # bd-abg443: the board shows a quota-held active ticket as Blocked, which
+    # must never make it fresh work.
+    test "a quota-held :active ticket is never dispatchable, whatever column it displays" do
+      held = %{reason: "claude:default 5h ≥ paced line"}
+
+      assert %{column: :blocked} = Lifecycle.view(ticket(:active), %{held: held})
+
+      # `dispatchable/2` re-derives the view from the queue, which holds nothing here.
+      assert Lifecycle.dispatchable(ticket(:active), %{}) == {:held, {:column, :in_progress}}
+
+      assert Lifecycle.dispatchable(ticket(:active), %{held: held}) ==
+               {:held, {:column, :in_progress}}
+    end
+
     test "a :backlog ticket is held in Backlog" do
       assert Lifecycle.dispatchable(ticket(:backlog), %{}) == {:held, {:column, :backlog}}
       refute Lifecycle.dispatchable?(ticket(:backlog), %{})
