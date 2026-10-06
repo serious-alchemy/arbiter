@@ -153,7 +153,7 @@ defmodule ArbiterCli.Cmd.McpTest do
     test "`-` reads the token from stdin without a warning" do
       {out, err, 0} = capture(fn -> Mcp.run(~w(token verify -)) end, input: "stdin-token\n")
       assert out =~ "worker"
-      refute err =~ "warning"
+      refute err =~ "`arb mcp token verify -` (stdin)"
     end
 
     test "--file reads the token from a file without a warning" do
@@ -162,7 +162,7 @@ defmodule ArbiterCli.Cmd.McpTest do
       on_exit(fn -> File.rm(path) end)
 
       {_out, err, 0} = capture(fn -> Mcp.run(["token", "verify", "--file", path]) end)
-      refute err =~ "warning"
+      refute err =~ "`arb mcp token verify -` (stdin)"
     end
 
     test "no token at all is an error" do

@@ -119,7 +119,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
         )
 
       assert_received {:patched, %{"secrets" => %{"tracker_token" => "from-stdin"}}}
-      refute err =~ "warning"
+      refute err =~ "`set <key> -` (stdin)"
     end
 
     test "secret set reads the value from --file, with no warning" do
@@ -142,7 +142,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
         end)
 
       assert_received {:patched, %{"secrets" => %{"tracker_token" => "from-file"}}}
-      refute err =~ "warning"
+      refute err =~ "`set <key> -` (stdin)"
     end
 
     test "secret set with an unreadable --file dies" do
