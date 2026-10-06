@@ -22,6 +22,38 @@ defmodule ArbiterWeb.Api.NodeJSON do
     }
   end
 
+  @doc """
+  A node as the operator sees it: the stored fields plus the live ones from
+  `Arbiter.Nodes.Overview` (`state`, `health`, versions, `live`, and the cap
+  breakdown `suggested` / `override` / `ceiling` / `max`). `max_workers` stays
+  the operator's override, as before.
+  """
+  def node(%Node{} = node, %{} = row) do
+    Map.merge(__MODULE__.node(node), overview(row))
+  end
+
+  @doc "The `local` (primary) row, in the same shape as a node."
+  def local(%{} = row), do: overview(row)
+
+  defp overview(row) do
+    Map.take(row, [
+      :id,
+      :name,
+      :kind,
+      :state,
+      :health,
+      :agent_version,
+      :server_version,
+      :last_heartbeat_at,
+      :live,
+      :max,
+      :suggested,
+      :override,
+      :ceiling
+    ])
+    |> Map.put(:max_workers, row.override)
+  end
+
   def join_token(%JoinToken{} = t) do
     %{
       id: t.id,

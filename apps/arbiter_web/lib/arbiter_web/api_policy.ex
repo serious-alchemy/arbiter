@@ -25,7 +25,7 @@ defmodule ArbiterWeb.ApiPolicy do
       human's own `arb`). Node administration over REST (join-token minting,
       drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
       coordinator *session* (an LLM) is refused, so it cannot enrol machines
-      that will receive provider tokens. Used by `/api/nodes/join-tokens` and `PATCH /api/nodes/:ref`.
+      that will receive provider tokens. Used by every `/api/nodes` route: the list, minting, edits, drain, revoke, remove, upgrade.
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
     * `:dispatch` — `:coordinator` plus `can_dispatch` (the recursion
@@ -147,12 +147,17 @@ defmodule ArbiterWeb.ApiPolicy do
     # ---- providers / accounts (credential-bearing) -------------------------
     {:get, "/api/providers/paused"} => :coordinator,
 
-    # ---- nodes (RW4): minting/editing are operator-proof only ------------------
+    # ---- nodes (RW4, RW7): operator-proof only, reads included ---------------
     {:post, "/api/nodes/join-tokens"} => :operator,
-    {:get, "/api/nodes"} => :coordinator,
-    {:get, "/api/nodes/:ref"} => :coordinator,
-    {:get, "/api/nodes/:ref/events"} => :coordinator,
+    {:get, "/api/nodes"} => :operator,
+    {:get, "/api/nodes/:ref"} => :operator,
+    {:get, "/api/nodes/:ref/events"} => :operator,
     {:patch, "/api/nodes/:ref"} => :operator,
+    {:post, "/api/nodes/:ref/drain"} => :operator,
+    {:post, "/api/nodes/:ref/undrain"} => :operator,
+    {:post, "/api/nodes/:ref/revoke"} => :operator,
+    {:post, "/api/nodes/:ref/upgrade"} => :operator,
+    {:delete, "/api/nodes/:ref"} => :operator,
     {:post, "/api/providers/pause"} => :coordinator,
     {:post, "/api/providers/resume"} => :coordinator,
     {:get, "/api/accounts"} => :coordinator,

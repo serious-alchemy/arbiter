@@ -256,6 +256,11 @@ defmodule ArbiterWeb.Router do
     get("/nodes/:ref", NodeController, :show)
     get("/nodes/:ref/events", NodeController, :events)
     patch("/nodes/:ref", NodeController, :update)
+    post("/nodes/:ref/drain", NodeController, :drain)
+    post("/nodes/:ref/undrain", NodeController, :undrain)
+    post("/nodes/:ref/revoke", NodeController, :revoke)
+    post("/nodes/:ref/upgrade", NodeController, :upgrade)
+    delete("/nodes/:ref", NodeController, :delete)
 
     # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
     # backs `arb account list|show|create|attach|rotate|merge|delete`.
