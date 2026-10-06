@@ -21,6 +21,7 @@ defmodule Arbiter.Settings do
 
   use Ash.Domain
 
+  alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Settings.Installation
   alias Arbiter.Settings.SchedulerChange
 
@@ -268,6 +269,26 @@ defmodule Arbiter.Settings do
   def set_capability_matrix(rows) do
     with {:ok, rows} <- Arbiter.Agents.CapabilityMatrix.normalize_rows(rows) do
       write_setting(:capability_matrix, rows)
+    end
+  end
+
+  @doc """
+  The install-wide competence matrix override (`nil` = code defaults only).
+  """
+  @spec competence_matrix() :: [map()] | nil
+  def competence_matrix, do: read_setting(:competence_matrix)
+
+  @doc """
+  Set the competence-matrix override. Rows are validated and normalised by
+  `Arbiter.Agents.Routing.Competence.normalize_rows/1`; an invalid row refuses
+  the whole write. `nil` clears the override. Operator-owned.
+  """
+  @spec set_competence_matrix([map()] | nil) :: {:ok, [map()] | nil} | {:error, term()}
+  def set_competence_matrix(nil), do: write_setting(:competence_matrix, nil)
+
+  def set_competence_matrix(rows) do
+    with {:ok, rows} <- Competence.normalize_rows(rows) do
+      write_setting(:competence_matrix, rows)
     end
   end
 

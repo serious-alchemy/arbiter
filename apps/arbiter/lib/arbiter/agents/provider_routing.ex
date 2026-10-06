@@ -129,6 +129,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ReviewerRouting
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Agents.Routing.Score
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Quota.Gate
@@ -666,12 +667,33 @@ defmodule Arbiter.Agents.ProviderRouting do
     if scored?(ws) do
       config = Score.config(ws)
 
+      estimate_fun =
+        case Keyword.fetch(opts, :estimate_fun) do
+          {:ok, fun} -> fun
+          :error -> default_estimate_fun(ws, task, opts)
+        end
+
       %{
         mode: config.mode,
         weight: Score.weight(config, task),
-        estimate_fun: Keyword.get(opts, :estimate_fun)
+        estimate_fun: estimate_fun
       }
     end
+  end
+
+  defp default_estimate_fun(ws, task, opts) do
+    if competence?(ws) do
+      # One matrix read per evaluation, not one per candidate (the board
+      # snapshot calls `availability/3` per issue).
+      opts = Keyword.put_new_lazy(opts, :rows, &Competence.rows/0)
+      fn entry -> Competence.estimate(ws, entry, task, opts) end
+    else
+      nil
+    end
+  end
+
+  defp competence?(%Workspace{config: config}) do
+    get_in(config || %{}, ["routing", "scoring", "competence"]) == true
   end
 
   # bd-57uzkl: `nil` (the default) is the whole off path — no check runs.
@@ -710,7 +732,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       index: index,
       model: model,
       family: family,
-      pool: pool
+      pool: pool,
+      tier: ctx.tier
     }
   end
 
@@ -921,7 +944,8 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp order(entries, %{scoring: nil}), do: {rank(entries), %{}}
 
   defp order(entries, %{scoring: scoring}) do
-    scored = entries |> Enum.map(&estimate(&1, scoring)) |> Score.rank(weight: scoring.weight)
+    estimated = Enum.map(entries, &estimate(&1, scoring))
+    scored = Score.rank(estimated, weight: scoring.weight)
     base = %{"scoring_mode" => to_string(scoring.mode), "time_weight" => scoring.weight}
 
     case scoring.mode do
@@ -930,7 +954,7 @@ defmodule Arbiter.Agents.ProviderRouting do
 
       :shadow ->
         scores = Map.new(scored, &{&1.index, &1.score})
-        headroom_order = entries |> rank() |> Enum.map(&annotate(&1, scores))
+        headroom_order = estimated |> rank() |> Enum.map(&annotate(&1, scores))
 
         {headroom_order,
          Map.put(base, "shadow", %{"ranking" => Enum.map(scored, &ranking_row/1)})}
@@ -944,8 +968,11 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp estimate(entry, %{estimate_fun: fun}) do
     case fun.(entry) do
-      %{} = estimate -> Map.merge(entry, Map.take(estimate, [:draw, :time_h]))
-      _ -> entry
+      %{} = estimate ->
+        Map.merge(entry, Map.take(estimate, [:draw, :time_h, :sides, :reviewer_windows, :cell]))
+
+      _ ->
+        entry
     end
   end
 
@@ -998,19 +1025,45 @@ defmodule Arbiter.Agents.ProviderRouting do
       "mode" => headroom && to_string(headroom.mode)
     }
     |> Map.merge(score_fields(Map.get(entry, :score)))
+    |> maybe_put_cell(entry)
   end
 
   defp score_fields(nil), do: %{}
 
   defp score_fields(%{} = score) do
-    %{
+    base = %{
       "price" => finite4(score.price),
       "draw" => round4(score.draw),
       "time_h" => round4(score.time_h),
       "score" => finite4(score.score),
       "over_line" => score.over_line?
     }
+
+    base =
+      if Map.get(score, :reviewer_unpriced?),
+        do: Map.put(base, "reviewer_unpriced", true),
+        else: base
+
+    if score.sides do
+      runs =
+        %{
+          "author" => round4(Map.get(score.sides, :author))
+        }
+        |> then(fn m ->
+          case Map.get(score.sides, :review) do
+            rev when is_number(rev) -> Map.put(m, "review", round4(rev))
+            _ -> m
+          end
+        end)
+
+      Map.put(base, "expected_runs", runs)
+    else
+      base
+    end
   end
+
+  defp maybe_put_cell(record, %{cell: %{} = cell}), do: Map.put(record, "cell", cell)
+  defp maybe_put_cell(record, _), do: record
 
   defp ranking_row(entry) do
     %{

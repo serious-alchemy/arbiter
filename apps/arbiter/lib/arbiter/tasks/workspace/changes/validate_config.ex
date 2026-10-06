@@ -709,12 +709,27 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_scoring_mode(Map.get(scoring, "mode"))
     |> validate_time_weight(Map.get(scoring, "time_weight"))
+    |> validate_scoring_bool(Map.get(scoring, "competence"), "routing.scoring.competence")
+    |> validate_scoring_bool(
+      Map.get(scoring, "reviewer_coupling"),
+      "routing.scoring.reviewer_coupling"
+    )
   end
 
   defp validate_scoring(changeset, other) do
     Changeset.add_error(changeset,
       field: :config,
       message: "routing.scoring must be a map; got: #{inspect(other)}"
+    )
+  end
+
+  defp validate_scoring_bool(changeset, value, _field) when is_boolean(value) or is_nil(value),
+    do: changeset
+
+  defp validate_scoring_bool(changeset, value, field) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "#{field} must be true or false; got: #{inspect(value)}"
     )
   end
 
