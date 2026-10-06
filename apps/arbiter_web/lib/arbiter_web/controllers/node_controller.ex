@@ -96,6 +96,7 @@ defmodule ArbiterWeb.NodeController do
 
   defp redeem(conn, body, key, url, artifact) do
     params = body
+
     case Nodes.redeem_join_token(params["token"], attrs(params), remote_addr_hint: key) do
       {:ok, %{node: node, credential: credential}} ->
         respond_enrolled(conn, node, credential, url, artifact)
