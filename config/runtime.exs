@@ -3,13 +3,36 @@ import Config
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4848"))]
 
+# The VM's role (docs/design/remote-workers.md §3). `ARB_ROLE=agent` makes this
+# release a node agent: it starts only `Arbiter.NodeAgent.Supervisor`, so none
+# of the primary's runtime config below applies — no SECRET_KEY_BASE, no Repo,
+# no Endpoint. Unset (or empty) leaves the application default, `:primary`, and
+# an unrecognised value refuses to boot instead of quietly becoming a primary.
+# `Arbiter.NodeAgent.role/0` reads this back at boot.
+agent? =
+  case System.get_env("ARB_ROLE") do
+    role when role in [nil, ""] ->
+      false
+
+    "primary" ->
+      config :arbiter, role: :primary
+      false
+
+    "agent" ->
+      config :arbiter, role: :agent
+      true
+
+    other ->
+      raise "ARB_ROLE must be \"primary\" or \"agent\", got: #{inspect(other)}"
+  end
+
 # Single source of truth for the SQLite DB path. Applies to all environments
 # (dev, prod) except test, which sets its own tmp path in config/test.exs.
 #
 # Default: ~/.arbiter/arbiter.sqlite3 (the canonical post-cutover location).
 # Until T7 (DB-copy cutover) completes, set DATABASE_PATH to point at the
 # live database so the server never boots against an empty file.
-if config_env() != :test do
+if config_env() != :test and not agent? do
   database_path =
     System.get_env("DATABASE_PATH") ||
       Path.expand("~/.arbiter/arbiter.sqlite3")
@@ -23,7 +46,7 @@ if config_env() != :test do
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
 end
 
-if config_env() == :prod do
+if config_env() == :prod and not agent? do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
       raise "environment variable SECRET_KEY_BASE is missing."
@@ -58,7 +81,7 @@ if config_env() == :prod do
   config :arbiter, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 end
 
-if config_env() == :dev do
+if config_env() == :dev and not agent? do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
       raise """
