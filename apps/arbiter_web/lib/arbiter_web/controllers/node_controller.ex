@@ -189,6 +189,11 @@ defmodule ArbiterWeb.NodeController do
     end
   end
 
+  # `artifact.path` is never request input: `Arbiter.Nodes.Agent` derives it
+  # from the deploy data home and the running release's tag (validated against
+  # a character set), and `file/2` matches the request's hash against that
+  # artifact's own hash. The request chooses nothing about the path.
+  # sobelow_skip ["Traversal.SendFile"]
   defp send_artifact(conn, artifact) do
     conn
     |> put_resp_content_type("application/gzip")
