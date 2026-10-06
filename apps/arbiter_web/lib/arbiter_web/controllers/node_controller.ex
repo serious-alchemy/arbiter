@@ -107,9 +107,6 @@ defmodule ArbiterWeb.NodeController do
 
       {:error, :name_taken} ->
         error(conn, 409, "A node with that name already exists")
-
-      {:error, _other} ->
-        error(conn, 500, "Enrolment failed")
     end
   end
 

@@ -35,20 +35,27 @@ defmodule ArbiterCli.Cmd.Node do
       IO.puts(@moduledoc)
     else
       case Output.drop_json(argv) do
-        ["add" | rest] -> add(rest, Output.mode(argv))
-        ["list" | _] -> list(Output.mode(argv))
-        ["show" | rest] -> show(rest, Output.mode(argv))
-        ["set" | rest] -> set(rest, Output.mode(argv))
-        ["events" | rest] -> events(rest, Output.mode(argv))
-        _ -> unknown()
+        ["add" | rest] ->
+          add(rest, Output.mode(argv))
+
+        ["list" | _] ->
+          list(Output.mode(argv))
+
+        ["show" | rest] ->
+          show(rest, Output.mode(argv))
+
+        ["set" | rest] ->
+          set(rest, Output.mode(argv))
+
+        ["events" | rest] ->
+          events(rest, Output.mode(argv))
+
+        _ ->
+          IO.puts(:stderr, "arb: unknown node subcommand")
+          IO.puts(:stderr, "Run `arb node --help` for usage.")
+          Output.halt(2)
       end
     end
-  end
-
-  defp unknown do
-    IO.puts(:stderr, "arb: unknown node subcommand")
-    IO.puts(:stderr, "Run `arb node --help` for usage.")
-    Output.halt(2)
   end
 
   # ---- add -------------------------------------------------------------------
