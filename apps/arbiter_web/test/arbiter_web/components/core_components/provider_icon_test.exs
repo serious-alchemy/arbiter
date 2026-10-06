@@ -24,6 +24,17 @@ defmodule ArbiterWeb.CoreComponents.ProviderIconTest do
       assert html =~ "text-[var(--text-title)]"
     end
 
+    test "renders the xAI Grok mark, theme-aware and distinct from the ollama slot" do
+      html = render_component(&provider_icon/1, provider: "grok")
+
+      assert html =~ ~s(<title>Grok</title>)
+      assert html =~ ~s(aria-label="Grok")
+      assert html =~ "text-[var(--text-title)]"
+      assert html =~ ~s(fill="currentColor")
+      refute html =~ "<circle"
+      refute html == render_component(&provider_icon/1, provider: "ollama")
+    end
+
     test "renders the Google Antigravity mark for gemini, titled Antigravity" do
       html = render_component(&provider_icon/1, provider: "gemini")
 
