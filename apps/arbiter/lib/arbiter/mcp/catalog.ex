@@ -1941,7 +1941,9 @@ defmodule Arbiter.MCP.Catalog do
               "scheduling_finish_first_max_wait_hours",
               "nodes.public_url",
               "nodes.allow_public_endpoint",
-              "nodes.join_token_ttl_minutes"
+              "nodes.join_token_ttl_minutes",
+              "nodes.fence_after_s",
+              "nodes.lost_after_s"
             ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },

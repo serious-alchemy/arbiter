@@ -44,6 +44,8 @@ defmodule Arbiter.Settings.Installation do
       node tier (`docs/design/remote-workers.md` §4.3, §5.1): the URL a node dials,
       whether a non-private endpoint is tolerated, and the join-token TTL
       (`nil` = off / refused / 15 minutes).
+    * `:nodes_fence_after_s` / `:nodes_lost_after_s` — the liveness thresholds
+      (§10.1; `Arbiter.Nodes.Liveness`): `nil` = 60 s / fence + 30 s.
 
   Every field is nullable and `nil` always means "no override" — a fresh
   install that never writes here behaves exactly as it did before the setting
@@ -80,7 +82,9 @@ defmodule Arbiter.Settings.Installation do
     :scheduling_finish_first_max_wait_hours,
     :nodes_public_url,
     :nodes_allow_public_endpoint,
-    :nodes_join_token_ttl_minutes
+    :nodes_join_token_ttl_minutes,
+    :nodes_fence_after_s,
+    :nodes_lost_after_s
   ]
 
   actions do
@@ -245,6 +249,22 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1, max: 1440
 
       description "nodes.join_token_ttl_minutes: default join-token lifetime (RW3); nil = 15, max 1440."
+    end
+
+    attribute :nodes_fence_after_s, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 30, max: 90
+
+      description "nodes.fence_after_s: silence after which a node agent stops its containers (RW6); nil = 60, 30-90."
+    end
+
+    attribute :nodes_lost_after_s, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 31, max: 3600
+
+      description "nodes.lost_after_s: silence after which the primary declares a node lost (RW6); must exceed the fence; nil = fence + 30."
     end
 
     create_timestamp :created_at

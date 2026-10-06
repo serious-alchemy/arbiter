@@ -27,7 +27,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # them.
   @operator_only_install_keys ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                                  nodes.public_url nodes.allow_public_endpoint
-                                 nodes.join_token_ttl_minutes)
+                                 nodes.join_token_ttl_minutes nodes.fence_after_s
+                                 nodes.lost_after_s)
 
   # ---- workspace_show -----------------------------------------------------
 

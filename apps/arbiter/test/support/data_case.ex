@@ -118,7 +118,8 @@ defmodule Arbiter.DataCase do
     Arbiter.Workflows.PRPatrolSupervisor,
     Arbiter.Workflows.ReviewPatrolSupervisor,
     Arbiter.Workflows.MergedPRFinalizerSupervisor,
-    Arbiter.Workflows.DispatchQueueSupervisor
+    Arbiter.Workflows.DispatchQueueSupervisor,
+    Arbiter.Nodes.SessionSupervisor
   ]
 
   # Deliberately NOT here: `Arbiter.Sessions.Stream.Supervisor` (bd-3ymdvi).
