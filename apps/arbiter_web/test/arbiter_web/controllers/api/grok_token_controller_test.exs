@@ -115,4 +115,19 @@ defmodule ArbiterWeb.Api.GrokTokenControllerTest do
     assert resp["error"]["message"] =~ "grok login"
     refute Jason.encode!(resp) =~ "secret"
   end
+
+  test "the request is logged with the asking worker's task and no token (bd-8rvkqd)", ctx do
+    previous = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        ctx.worker_token |> as_worker() |> post("/api/grok/token", %{}) |> json_response(200)
+      end)
+
+    assert log =~ "token request task=#{ctx.task.id} run=- force=false outcome=ok"
+    refute log =~ "access-secret"
+    refute log =~ "refresh-secret"
+  end
 end

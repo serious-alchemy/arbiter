@@ -43,8 +43,11 @@ defmodule ArbiterWeb.Api.ServerController do
       than a false all-clear.
     * `GET /api/server/grok_auth` — grok's login state (bd-dpv4vt,
       `Arbiter.Grok.AuthReport`): `enabled: false` unless a workspace routes to
-      or pins grok, else `state` (`logged_in` / `expired` / `reauth_required` /
-      `not_logged_in`) and the fix. `arb server doctor` reports it.
+      or pins grok, else `state` (`logged_in` / `expired` / `refresh_unverified` /
+      `refresh_failed` / `reauth_required` / `not_logged_in`), the `path` the
+      broker reads and its `expires_at` (bd-8rvkqd), and the fix. An expired
+      token the broker has not refreshed yet is refreshed here (`probe: true`),
+      through the broker. `arb server doctor` reports it.
     * `GET /api/server/provider_accounts` — how this boot classified the
       install's provider accounts (bd-cvvb02, P13 bd-9gqj8e,
       `Arbiter.Accounts.Enablement.status/0`): the decision, and — re-read
@@ -167,7 +170,7 @@ defmodule ArbiterWeb.Api.ServerController do
   end
 
   # bd-dpv4vt: grok's login state, reported only when a workspace uses grok.
-  def grok_auth(conn, _params), do: json(conn, Arbiter.Grok.AuthReport.report())
+  def grok_auth(conn, _params), do: json(conn, Arbiter.Grok.AuthReport.report(probe: true))
 
   # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
   def worker_tmp(conn, _params), do: json(conn, Arbiter.Worker.RunTmp.diagnosis())

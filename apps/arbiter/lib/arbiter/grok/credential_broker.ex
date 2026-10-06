@@ -10,9 +10,12 @@ defmodule Arbiter.Grok.CredentialBroker do
   refresh token at all:
 
     * This process is the **only** holder of it. The canonical credential is
-      one `auth.json` (`Arbiter.Grok.CredentialStore`; the operator's
-      `~/.grok/auth.json` unless `:auth_path` says otherwise), and this is the
-      only code that refreshes it.
+      one `auth.json`, resolved by `Arbiter.Grok.CredentialStore.resolve/1`:
+      the grok provider account's `<accounts_root>/grok-<slug>/auth.json` (what
+      the dashboard login relay writes, bd-8rvkqd), the operator's
+      `~/.grok/auth.json` only when no grok account exists, or an explicit
+      `:auth_path`. This is the only code that refreshes it. The path is logged
+      at boot, whenever it changes and at the first refresh; never a token.
     * A worker gets a short-lived **access token** through grok's documented
       `GROK_AUTH_PROVIDER_COMMAND` contract (see `Arbiter.Grok.AuthProvider`):
       the command asks the server over the worker's own API token, and
@@ -65,12 +68,14 @@ defmodule Arbiter.Grok.CredentialBroker do
       it would force a re-login.
 
   Token values are never logged. Logs carry fingerprints, expiry times and OAuth
-  error codes only.
+  error codes only. Every request `fetch_token/2` answers is logged too, with
+  the task and run that asked and the outcome (bd-8rvkqd), so a worker that
+  never asked for a token is visible as the absence of a line.
 
   ## Configuration
 
       config :arbiter, :grok_broker,
-        auth_path: "~/.grok/auth.json",
+        auth_path: "/explicit/pin/auth.json",   # optional; default: the grok account's
         refresh_margin_s: 600,
         min_force_interval_s: 60,
         hold_check_ms: 30_000
@@ -106,22 +111,52 @@ defmodule Arbiter.Grok.CredentialBroker do
   @doc """
   A current access token for a worker.
 
-  `opts`: `force: true` for grok's `GROK_AUTH_EXPIRED=1` (see the moduledoc).
+  `opts`: `force: true` for grok's `GROK_AUTH_EXPIRED=1` (see the moduledoc);
+  `task_id` / `run_id` name the worker that asked, for the request log line.
   Returns the access token and the seconds it has left, and nothing else: in
   particular never the refresh token.
   """
   @spec fetch_token(keyword(), GenServer.server()) :: {:ok, token()} | {:error, error()}
   def fetch_token(opts \\ [], server \\ server()) do
-    GenServer.call(server, {:fetch, Keyword.get(opts, :force, false) == true}, @call_timeout)
-  catch
-    :exit, _ -> {:error, :unavailable}
+    force? = Keyword.get(opts, :force, false) == true
+
+    reply =
+      try do
+        GenServer.call(server, {:fetch, force?}, @call_timeout)
+      catch
+        :exit, _ -> {:error, :unavailable}
+      end
+
+    log_request(opts, force?, reply)
+    reply
+  end
+
+  # One line per served request. Only the lifetime and the error tag: the token
+  # is never interpolated.
+  defp log_request(opts, force?, reply) do
+    who =
+      "task=#{Keyword.get(opts, :task_id) || "-"} run=#{Keyword.get(opts, :run_id) || "-"} " <>
+        "force=#{force?}"
+
+    case reply do
+      {:ok, %{expires_in: expires_in}} ->
+        Logger.info(
+          "grok credential broker: token request #{who} outcome=ok expires_in=#{expires_in}s"
+        )
+
+      {:error, reason} ->
+        Logger.warning("grok credential broker: token request #{who} outcome=#{reason}")
+    end
   end
 
   @doc "Non-secret state for the doctor / operator surfaces."
   @spec status(GenServer.server()) :: %{
           reauth_required?: boolean(),
           refreshing?: boolean(),
-          last_refresh_at: DateTime.t() | nil
+          last_refresh_at: DateTime.t() | nil,
+          last_attempt: nil | :ok | :transient | :permanent,
+          auth_path: String.t(),
+          path_source: CredentialStore.path_source()
         }
   def status(server \\ server()), do: GenServer.call(server, :status)
 
@@ -136,9 +171,16 @@ defmodule Arbiter.Grok.CredentialBroker do
     env = Application.get_env(:arbiter, :grok_broker, [])
     get = fn key, default -> Keyword.get(opts, key, Keyword.get(env, key, default)) end
 
+    path_opts =
+      [auth_path: get.(:auth_path, nil)] ++ Keyword.take(opts, [:accounts, :accounts_root])
+
     {:ok,
      %{
-       auth_path: Path.expand(get.(:auth_path, CredentialStore.default_path())),
+       path_opts: path_opts,
+       auth_path: nil,
+       path_source: nil,
+       logged_refresh_path: nil,
+       last_attempt: nil,
        margin_s: get.(:refresh_margin_s, @default_margin_s),
        min_force_s: get.(:min_force_interval_s, @default_min_force_s),
        now_fun: get.(:now_fun, &DateTime.utc_now/0),
@@ -151,21 +193,29 @@ defmodule Arbiter.Grok.CredentialBroker do
        last_refresh_at: nil,
        hold: nil,
        hold_timer: nil
-     }}
+     }, {:continue, :log_path}}
   end
 
   @impl true
+  def handle_continue(:log_path, state), do: {:noreply, refresh_path(state)}
+
+  @impl true
   def handle_call(:status, _from, state) do
+    state = refresh_path(state)
+
     {:reply,
      %{
        reauth_required?: state.hold != nil,
        refreshing?: state.refreshing != nil,
-       last_refresh_at: state.last_refresh_at
+       last_refresh_at: state.last_refresh_at,
+       last_attempt: state.last_attempt,
+       auth_path: state.auth_path,
+       path_source: state.path_source
      }, state}
   end
 
   def handle_call({:fetch, force?}, from, state) do
-    {:noreply, serve(from, force?, retry_pending(state))}
+    {:noreply, serve(from, force?, state |> refresh_path() |> retry_pending())}
   end
 
   @impl true
@@ -183,7 +233,7 @@ defmodule Arbiter.Grok.CredentialBroker do
   def handle_info(:check_hold, %{hold: nil} = state), do: {:noreply, %{state | hold_timer: nil}}
 
   def handle_info(:check_hold, state) do
-    state = retry_pending(%{state | hold_timer: nil})
+    state = %{state | hold_timer: nil} |> refresh_path() |> retry_pending()
 
     state =
       case load(state) do
@@ -195,6 +245,32 @@ defmodule Arbiter.Grok.CredentialBroker do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ---- the canonical path -------------------------------------------------------------
+
+  # Re-resolved on every request: a first dashboard login creates the grok
+  # account (and so the canonical file) while the server is already running.
+  defp refresh_path(state) do
+    {path, source} = CredentialStore.resolve(state.path_opts)
+
+    if path != state.auth_path or source != state.path_source do
+      Logger.info(
+        "grok credential broker: canonical credential is #{path} (#{describe_source(source)})"
+      )
+    end
+
+    # An unwritten rotation belongs to the file it came from; a different
+    # canonical file (a first account login) supersedes it.
+    pending = if match?(%{path: ^path}, state.pending), do: state.pending
+
+    %{state | auth_path: path, path_source: source, pending: pending}
+  end
+
+  defp describe_source(:explicit), do: "pinned by :auth_path"
+  defp describe_source(:account), do: "the grok provider account's login"
+
+  defp describe_source(:fallback),
+    do: "no grok provider account exists; the operator's ~/.grok login"
 
   # ---- serving a request ------------------------------------------------------------
 
@@ -269,15 +345,33 @@ defmodule Arbiter.Grok.CredentialBroker do
         Oidc.refresh(creds, now, req_options)
       end)
 
-    %{state | refreshing: %{ref: task.ref, creds: creds, waiters: waiters}}
+    %{
+      state
+      | refreshing: %{ref: task.ref, creds: creds, waiters: waiters, path: state.auth_path}
+    }
+    |> log_first_refresh()
   end
 
-  defp finish_refresh({:ok, rotated}, %{refreshing: %{creds: creds, waiters: waiters}} = state) do
+  defp log_first_refresh(%{logged_refresh_path: path, auth_path: path} = state), do: state
+
+  defp log_first_refresh(state) do
+    Logger.info(
+      "grok credential broker: first refresh from #{state.auth_path} " <>
+        "(#{describe_source(state.path_source)})"
+    )
+
+    %{state | logged_refresh_path: state.auth_path}
+  end
+
+  defp finish_refresh(
+         {:ok, rotated},
+         %{refreshing: %{creds: creds, waiters: waiters, path: path}} = state
+       ) do
     now = state.now_fun.()
-    state = %{state | refreshing: nil, last_refresh_at: now}
+    state = %{state | refreshing: nil, last_refresh_at: now, last_attempt: :ok}
 
     state =
-      case CredentialStore.persist(state.auth_path, creds, rotated) do
+      case CredentialStore.persist(path, creds, rotated) do
         :ok ->
           %{state | pending: nil}
 
@@ -286,13 +380,14 @@ defmodule Arbiter.Grok.CredentialBroker do
           # credential now. Keep it, and keep trying to write it.
           Logger.error(
             "grok credential broker: refreshed the credential but could not write " <>
-              "#{state.auth_path} (#{inspect(reason)}); holding the rotated token in memory " <>
+              "#{path} (#{inspect(reason)}); holding the rotated token in memory " <>
               "and retrying the write on the next request"
           )
 
           %{
             state
             | pending: %{
+                path: path,
                 base: CredentialStore.fingerprint(creds.refresh_token),
                 creds: creds,
                 rotated: rotated
@@ -312,11 +407,11 @@ defmodule Arbiter.Grok.CredentialBroker do
   end
 
   defp finish_refresh({:error, {:permanent, code}}, %{refreshing: refreshing} = state) do
-    %{creds: creds, waiters: waiters} = refreshing
-    state = %{state | refreshing: nil}
+    %{creds: creds, waiters: waiters, path: path} = refreshing
+    state = %{state | refreshing: nil, last_attempt: :permanent}
     sent = CredentialStore.fingerprint(creds.refresh_token)
 
-    case CredentialStore.read(state.auth_path) do
+    case CredentialStore.read(path) do
       {:ok, newer} ->
         if rotated_meanwhile?(state, newer, sent) do
           # Someone else (the operator's own grok) rotated the file while our
@@ -339,7 +434,7 @@ defmodule Arbiter.Grok.CredentialBroker do
 
   defp finish_refresh({:error, {:transient, why}}, %{refreshing: refreshing} = state) do
     %{waiters: waiters} = refreshing
-    state = %{state | refreshing: nil}
+    state = %{state | refreshing: nil, last_attempt: :transient}
     Logger.warning("grok credential broker: refresh failed transiently (#{inspect(why)})")
 
     now = state.now_fun.()
@@ -388,10 +483,10 @@ defmodule Arbiter.Grok.CredentialBroker do
   defp retry_pending(%{pending: nil} = state), do: state
 
   defp retry_pending(%{pending: pending} = state) do
-    case CredentialStore.read(state.auth_path) do
+    case CredentialStore.read(pending.path) do
       {:ok, on_disk} ->
         if CredentialStore.fingerprint(on_disk.refresh_token) == pending.base do
-          case CredentialStore.persist(state.auth_path, pending.creds, pending.rotated) do
+          case CredentialStore.persist(pending.path, pending.creds, pending.rotated) do
             :ok ->
               Logger.info(
                 "grok credential broker: wrote the previously unwritten rotated credential"
@@ -430,8 +525,7 @@ defmodule Arbiter.Grok.CredentialBroker do
 
     Logger.error(
       "grok credential broker: #{why}; grok workers are held until the operator logs in " <>
-        "again (re-login: `grok login --device-code` on the Arbiter host). The canonical " <>
-        "credential file was left untouched."
+        "again (#{relogin_hint(state)}). The canonical credential file was left untouched."
     )
 
     CredentialWatchdog.mark_expired(hold_adapter(state), stop_reason(why, state), state.watchdog)
@@ -469,12 +563,20 @@ defmodule Arbiter.Grok.CredentialBroker do
 
   defp hold_adapter(_state), do: Map.get(Arbiter.Agents.adapters(), :grok, Arbiter.Agents.Grok)
 
+  # Where the login has to land: the file the broker reads, not whatever
+  # `grok login` on the host happens to write.
+  defp relogin_hint(%{path_source: :fallback, auth_path: path}),
+    do: "re-login: `grok login --device-code` on the Arbiter host, which writes #{path}"
+
+  defp relogin_hint(%{auth_path: path}),
+    do: "re-login from the dashboard (the grok provider account's login), which writes #{path}"
+
   defp stop_reason(why, state) do
     %StopReason{
       category: :auth_expired,
       summary: "grok login is dead: #{why}",
       remediation:
-        "Log in to grok again on the Arbiter host (`grok login --device-code`). Arbiter's " <>
+        "#{relogin_hint(state)}. Arbiter's " <>
           "credential broker is the only refresher and has not touched the credential file. " <>
           "The broker checks the credential file every #{max(div(state.hold_check_ms, 1000), 1)}s " <>
           "and lifts the hold itself once the new login is there, or clear it with `arb breaker reset --auth-hold grok`.",

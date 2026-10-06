@@ -17,8 +17,18 @@ defmodule Arbiter.Agents.GrokRouting do
   keeps quota/scored provider routing from overriding it. A workspace that never sets `routing.grok.enabled` sees no
   change. A workspace can still pin `agent.type: "grok"` outright, which is
   the explicit override.
+
+  ## An open auth hold stops routing (bd-8rvkqd)
+
+  While grok's `Arbiter.Agents.AuthHold` (or a `CredentialWatchdog` expiry) is
+  open, `route?/3` is `false`: grok is not selected, so the policy's own choice
+  stands and a ticket reopened by `Arbiter.Worker.AuthDeath` goes to the next
+  eligible provider instead of back into the dead login. The routing comes
+  back by itself when the hold clears.
   """
 
+  alias Arbiter.Agents.AuthHold
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Tasks.Workspace
 
   @default_difficulties [1]
@@ -58,10 +68,29 @@ defmodule Arbiter.Agents.GrokRouting do
       else: choice
   end
 
-  @doc "Whether a task of `difficulty` (already clamped, 0..5) goes to grok."
-  @spec route?(Workspace.t() | nil, 0..5) :: boolean()
-  def route?(workspace, difficulty),
-    do: enabled?(workspace) and difficulty in difficulties(workspace)
+  @doc """
+  Whether a task of `difficulty` (already clamped, 0..5) goes to grok: opted in,
+  a routed difficulty, and no open grok auth hold. Options (tests): `:auth_hold`
+  and `:credential_watchdog`, the servers to ask.
+  """
+  @spec route?(Workspace.t() | nil, 0..5, keyword()) :: boolean()
+  def route?(workspace, difficulty, opts \\ []),
+    do: enabled?(workspace) and difficulty in difficulties(workspace) and not held?(opts)
+
+  @doc """
+  Whether grok dispatch is held on its credential: an open `AuthHold`
+  (fail-closed when unreadable) or a `CredentialWatchdog` expiry.
+  """
+  @spec held?(keyword()) :: boolean()
+  def held?(opts \\ []) do
+    adapter = Arbiter.Agents.Grok
+
+    AuthHold.open?(adapter, Keyword.get(opts, :auth_hold, AuthHold)) or
+      CredentialWatchdog.expired?(
+        adapter,
+        Keyword.get(opts, :credential_watchdog, CredentialWatchdog)
+      )
+  end
 
   @doc """
   Whether grok can run in `workspace` at all: routed to (`enabled?/1`) or

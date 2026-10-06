@@ -11,7 +11,11 @@ defmodule Arbiter.Worker.GrokStopHoldsTest do
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.Grok
+  alias Arbiter.Agents.GrokRouting
+  alias Arbiter.Agents.Routing
   alias Arbiter.Quota.GrokLedger
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.StopReason
@@ -39,7 +43,7 @@ defmodule Arbiter.Worker.GrokStopHoldsTest do
 
   # Run a fake grok that prints `events` then exits 1, under a real Worker, and
   # return the finished Run row.
-  defp stop_with(errors) do
+  defp stop_with(errors, opts \\ []) do
     task_id = "bd-grokstop-#{System.unique_integer([:positive])}"
     {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-grok")
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -65,6 +69,9 @@ defmodule Arbiter.Worker.GrokStopHoldsTest do
         &Jason.encode!/1
       ) <> "\n"
     )
+
+    if Keyword.get(opts, :routed?, false),
+      do: Worker.report(pid, :routing_config, %{provider: "grok"})
 
     :ok = Worker.advance(pid, :implement)
 
@@ -129,7 +136,7 @@ defmodule Arbiter.Worker.GrokStopHoldsTest do
     assert GrokLedger.snapshot().status == nil
   end
 
-  test "auth deaths open the grok AuthHold" do
+  test "the first 'Not signed in' death opens the grok AuthHold (bd-8rvkqd)" do
     {:ok, watchdog} =
       start_supervised(%{
         id: make_ref(),
@@ -152,8 +159,47 @@ defmodule Arbiter.Worker.GrokStopHoldsTest do
       )
 
     assert reason.category == :auth_expired
-    assert AuthHold.record_death(Grok, reason, hold) == :counted
     assert AuthHold.record_death(Grok, reason, hold) == :opened
     assert AuthHold.open?(Grok, hold)
+    assert AuthHold.record_death(Grok, reason, hold) == :held
+    assert %{threshold: 1} = AuthHold.status(Grok, hold)
+  end
+
+  describe "a grok worker that dies 'Not signed in' at spawn (bd-8rvkqd)" do
+    setup do
+      # The application singleton: the worker reports to it, the router reads it.
+      AuthHold.reset(Grok)
+      on_exit(fn -> AuthHold.reset(Grok) end)
+    end
+
+    test "opens the grok auth hold at once, and grok is no longer routed to" do
+      workspace = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{"policy" => "by_difficulty", "grok" => %{"enabled" => true}}
+        }
+      }
+
+      d1 = %Issue{difficulty: 1}
+      assert %{type: :grok} = Routing.choose(d1, workspace, %{})
+      refute AuthHold.open?(Grok)
+
+      run =
+        stop_with(
+          ["Not signed in. To authenticate without a browser, run: grok login --device-code"],
+          routed?: true
+        )
+
+      assert run.stop_category == "auth_expired"
+      assert AuthHold.open?(Grok)
+      assert GrokRouting.held?()
+
+      # The reopened ticket (still a D1) routes to the next eligible provider...
+      assert %{type: :claude} = Routing.choose(d1, workspace, %{})
+
+      # ...and routing to grok resumes once the hold is cleared.
+      AuthHold.reset(Grok)
+      assert %{type: :grok} = Routing.choose(d1, workspace, %{})
+    end
   end
 end

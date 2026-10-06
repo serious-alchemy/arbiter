@@ -120,6 +120,8 @@ defmodule Arbiter.Grok.CredentialBrokerTest do
     pid
   end
 
+  defp account(slug), do: %Arbiter.Accounts.ProviderAccount{provider: :grok, slug: slug}
+
   defp assert_no_secret_in(log) do
     for secret <- @secrets, do: refute(log =~ secret, "log leaked #{secret}")
   end
@@ -143,6 +145,123 @@ defmodule Arbiter.Grok.CredentialBrokerTest do
 
       {:ok, reply} = CredentialBroker.fetch_token([], broker)
       assert Map.keys(reply) |> Enum.sort() == [:access_token, :expires_in]
+    end
+
+    test "refreshes from the grok account's auth.json (the login relay's file), not ~/.grok",
+         ctx do
+      root = Path.dirname(ctx.path)
+      account_auth = Path.join([root, "grok-default", "auth.json"])
+      File.mkdir_p!(Path.dirname(account_auth))
+      write_auth!(account_auth)
+      # the fallback file exists too and must be left alone
+      write_auth!(ctx.path, %{"key" => "access-0", "refresh_token" => "operator-new-refresh"})
+      stub_issuer(ctx)
+      advance(ctx.clock, 6 * 3600 - 300)
+
+      log =
+        capture_log(fn ->
+          broker =
+            start_broker(ctx, auth_path: nil, accounts: [account("default")], accounts_root: root)
+
+          assert {:ok, %{access_token: "access-1"}} = CredentialBroker.fetch_token([], broker)
+
+          assert %{auth_path: ^account_auth, path_source: :account} =
+                   CredentialBroker.status(broker)
+        end)
+
+      assert [%{"refresh_token" => "refresh-0"}] =
+               grants(ctx) |> Enum.map(&Map.take(&1, ["refresh_token"]))
+
+      assert {:ok, %{refresh_token: "refresh-1"}} = CredentialStore.read(account_auth)
+      assert {:ok, %{refresh_token: "operator-new-refresh"}} = CredentialStore.read(ctx.path)
+      assert log =~ "canonical credential is #{account_auth}"
+      assert log =~ "first refresh from #{account_auth}"
+      assert_no_secret_in(log)
+    end
+
+    test "a login that creates the account after boot is picked up without a restart", ctx do
+      root = Path.dirname(ctx.path)
+      account_auth = Path.join([root, "grok-default", "auth.json"])
+      accounts = start_supervised!(Supervisor.child_spec({Agent, fn -> [] end}, id: :accounts))
+
+      broker =
+        start_broker(ctx,
+          auth_path: nil,
+          accounts: fn -> Agent.get(accounts, & &1) end,
+          accounts_root: root
+        )
+
+      assert %{path_source: :fallback} = CredentialBroker.status(broker)
+
+      File.mkdir_p!(Path.dirname(account_auth))
+      write_auth!(account_auth)
+      Agent.update(accounts, fn _ -> [account("default")] end)
+
+      assert {:ok, %{access_token: "access-0"}} = CredentialBroker.fetch_token([], broker)
+      assert %{auth_path: ^account_auth, path_source: :account} = CredentialBroker.status(broker)
+    end
+
+    test "every request is logged with task, run and outcome and no token material", ctx do
+      write_auth!(ctx.path)
+      stub_issuer(ctx)
+      broker = start_broker(ctx)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, _} =
+                   CredentialBroker.fetch_token([task_id: "bd-abc", run_id: "run-7"], broker)
+
+          advance(ctx.clock, 6 * 3600 - 300)
+
+          assert {:ok, _} =
+                   CredentialBroker.fetch_token(
+                     [task_id: "bd-abc", run_id: "run-7", force: true],
+                     broker
+                   )
+        end)
+
+      assert log =~ "token request task=bd-abc run=run-7 force=false outcome=ok expires_in="
+      assert log =~ "token request task=bd-abc run=run-7 force=true outcome=ok expires_in="
+      assert_no_secret_in(log)
+    end
+
+    test "a refused request is logged with its error, and a run that never asked has no line",
+         ctx do
+      stub_issuer(ctx,
+        responder: fn conn, _n, _grant ->
+          conn |> Plug.Conn.put_status(400) |> Req.Test.json(%{"error" => "invalid_grant"})
+        end
+      )
+
+      write_auth!(ctx.path)
+      advance(ctx.clock, 6 * 3600 - 300)
+      broker = start_broker(ctx)
+
+      log =
+        capture_log(fn ->
+          assert {:error, :reauth_required} =
+                   CredentialBroker.fetch_token([task_id: "bd-abc", run_id: "run-7"], broker)
+        end)
+
+      assert log =~ "token request task=bd-abc run=run-7 force=false outcome=reauth_required"
+      refute log =~ "task=bd-other"
+      assert_no_secret_in(log)
+      assert %{last_attempt: :permanent, reauth_required?: true} = CredentialBroker.status(broker)
+    end
+
+    test "status reports the last refresh attempt", ctx do
+      write_auth!(ctx.path)
+      stub_issuer(ctx)
+      broker = start_broker(ctx)
+
+      assert %{last_attempt: nil, auth_path: path, path_source: :explicit} =
+               CredentialBroker.status(broker)
+
+      assert path == ctx.path
+
+      advance(ctx.clock, 6 * 3600 - 300)
+      assert {:ok, _} = CredentialBroker.fetch_token([], broker)
+      assert %{last_attempt: :ok, last_refresh_at: %DateTime{}} = CredentialBroker.status(broker)
     end
 
     test "a token inside the refresh margin is refreshed once and persisted", ctx do

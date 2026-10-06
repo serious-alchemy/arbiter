@@ -128,4 +128,58 @@ defmodule Arbiter.Grok.CredentialStoreTest do
       assert byte_size(fp) == 12
     end
   end
+
+  describe "resolve/1 (bd-8rvkqd)" do
+    defp account(slug), do: %Arbiter.Accounts.ProviderAccount{provider: :grok, slug: slug}
+
+    test "an :auth_path in opts is explicit and wins over any account", %{path: path} do
+      assert {^path, :explicit} =
+               CredentialStore.resolve(auth_path: path, accounts: [account("default")])
+    end
+
+    test "the grok account's dir is canonical: <accounts_root>/grok-<slug>/auth.json", %{
+      path: path
+    } do
+      root = Path.dirname(path)
+
+      assert {resolved, :account} =
+               CredentialStore.resolve(
+                 auth_path: nil,
+                 accounts: [account("default")],
+                 accounts_root: root
+               )
+
+      assert resolved == Path.join([root, "grok-default", "auth.json"])
+    end
+
+    test "with several accounts: the default slug, else the first file that exists", %{
+      path: path
+    } do
+      root = Path.dirname(path)
+      opts = [auth_path: nil, accounts_root: root]
+
+      assert CredentialStore.resolve_path([accounts: [account("a"), account("default")]] ++ opts) ==
+               Path.join([root, "grok-default", "auth.json"])
+
+      File.mkdir_p!(Path.join(root, "grok-b"))
+      write_auth!(Path.join([root, "grok-b", "auth.json"]))
+
+      assert CredentialStore.resolve_path([accounts: [account("a"), account("b")]] ++ opts) ==
+               Path.join([root, "grok-b", "auth.json"])
+
+      assert CredentialStore.resolve_path([accounts: [account("a"), account("c")]] ++ opts) ==
+               Path.join([root, "grok-a", "auth.json"])
+    end
+
+    test "falls back to ~/.grok/auth.json only when no grok account exists" do
+      assert {path, :fallback} = CredentialStore.resolve(auth_path: nil, accounts: [])
+      assert path == CredentialStore.default_path()
+    end
+
+    test "resolving never creates or copies a file", %{path: path} do
+      root = Path.dirname(path)
+      CredentialStore.resolve(auth_path: nil, accounts: [account("default")], accounts_root: root)
+      assert File.ls!(root) == []
+    end
+  end
 end
