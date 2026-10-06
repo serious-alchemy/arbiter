@@ -67,7 +67,11 @@ max_cases_opts =
   |> then(& &1.(System.get_env()))
 
 ExUnit.start(
-  [exclude: [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman] ++ tmux_exclude] ++
+  [
+    exclude:
+      [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman, :spike_rw] ++
+        tmux_exclude
+  ] ++
     max_cases_opts
 )
 
