@@ -22,6 +22,7 @@ defmodule Arbiter.Settings do
   use Ash.Domain
 
   alias Arbiter.Agents.Routing.Competence
+  alias Arbiter.Nodes.Liveness
   alias Arbiter.Settings.Installation
   alias Arbiter.Settings.SchedulerChange
 
@@ -528,6 +529,47 @@ defmodule Arbiter.Settings do
       do: write_setting(:nodes_join_token_ttl_minutes, n)
 
   def set_nodes_join_token_ttl_minutes(_), do: {:error, :invalid_value}
+
+  @doc "The `nodes.fence_after_s` override in seconds, or `nil` (60)."
+  @spec nodes_fence_after_s() :: pos_integer() | nil
+  def nodes_fence_after_s, do: read_setting(:nodes_fence_after_s)
+
+  @doc "The `nodes.lost_after_s` override in seconds, or `nil` (fence + 30)."
+  @spec nodes_lost_after_s_override() :: pos_integer() | nil
+  def nodes_lost_after_s_override, do: read_setting(:nodes_lost_after_s)
+
+  @doc """
+  Persist `nodes.fence_after_s` (30-90; `nil` clears it). Refused when it would
+  reach the `lost_after_s` in force: `fence_after_s < lost_after_s` is the
+  design's invariant (§10.1) and is checked on every write of either value.
+  """
+  @spec set_nodes_fence_after_s(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_nodes_fence_after_s(n) when is_nil(n) or is_integer(n) do
+    effective = n || Liveness.default_fence_after_s()
+
+    with {:ok, _} <- Liveness.validate(effective, nodes_lost_after_s_override()) do
+      write_setting(:nodes_fence_after_s, n)
+    end
+  end
+
+  def set_nodes_fence_after_s(_), do: {:error, :invalid_value}
+
+  @doc """
+  Persist `nodes.lost_after_s` (`nil` clears it back to fence + 30). Refused
+  unless it is strictly above the fence in force.
+  """
+  @spec set_nodes_lost_after_s(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_nodes_lost_after_s(n) when is_nil(n) or is_integer(n) do
+    fence = nodes_fence_after_s() || Liveness.default_fence_after_s()
+
+    with {:ok, _} <- Liveness.validate(fence, n) do
+      write_setting(:nodes_lost_after_s, n)
+    end
+  end
+
+  def set_nodes_lost_after_s(_), do: {:error, :invalid_value}
 
   # ---- singleton plumbing --------------------------------------------------
 

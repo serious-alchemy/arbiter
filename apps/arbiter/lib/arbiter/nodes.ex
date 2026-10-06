@@ -30,7 +30,7 @@ defmodule Arbiter.Nodes do
   require Ash.Query
 
   alias Arbiter.Actor
-  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent}
+  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, Registry}
   alias Arbiter.Repo
   alias Arbiter.Settings
 
@@ -331,8 +331,13 @@ defmodule Arbiter.Nodes do
 
   @doc """
   Revoke a node: status `:revoked`, both credential hashes cleared, so its next
-  request fails. Idempotent (one `revoked` event). Closing a live socket and
-  interrupting its runs is the session's job (RW6).
+  request fails. Idempotent (one `revoked` event).
+
+  A node with a live session is disconnected at once: the session is told to go
+  (it tells its channel, which closes the socket through
+  `ArbiterWeb.NodeSocket.id/1`, design §4.1/U14) and `{:node_revoked, id}` goes
+  out on `topic/0`. Should that notification be lost the session stops itself on
+  its next heartbeat. Interrupting the node's runs is the placement layer's job.
   """
   @spec revoke(Node.t(), Actor.t() | String.t() | nil) :: {:ok, Node.t()} | {:error, term()}
   def revoke(%Node{id: id}, actor) do
@@ -343,11 +348,48 @@ defmodule Arbiter.Nodes do
       %Node{} = node ->
         with {:ok, revoked} <- Ash.update(node, %{}, action: :revoke) do
           record(:revoked, node.id, Actor.resolve_label(actor), %{})
+          Registry.notify(node.id, {:disconnect, :revoked})
+          broadcast({:node_revoked, node.id})
           {:ok, revoked}
         end
 
       nil ->
         {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Put a node into drain: no new assignments, runs already live untouched
+  (§13). Idempotent. A revoked node is `{:error, :revoked}`. Writes a `drained`
+  event (`detail.drain` true) and tells the node's live session.
+  """
+  @spec drain(Node.t(), Actor.t() | String.t() | nil) :: {:ok, Node.t()} | {:error, term()}
+  def drain(%Node{id: id}, actor), do: set_drain(id, true, actor)
+
+  @doc "Leave drain (`drained` event with `detail.drain` false). A revoked node is `{:error, :revoked}`."
+  @spec undrain(Node.t(), Actor.t() | String.t() | nil) :: {:ok, Node.t()} | {:error, term()}
+  def undrain(%Node{id: id}, actor), do: set_drain(id, false, actor)
+
+  defp set_drain(id, on?, actor) do
+    {action, wanted, message} =
+      if on?, do: {:drain, :draining, :drain}, else: {:undrain, :active, :undrain}
+
+    case get_node(id) do
+      nil ->
+        {:error, :not_found}
+
+      %Node{status: :revoked} ->
+        {:error, :revoked}
+
+      %Node{status: ^wanted} = node ->
+        {:ok, node}
+
+      %Node{} = node ->
+        with {:ok, updated} <- Ash.update(node, %{}, action: action) do
+          record(:drained, id, Actor.resolve_label(actor), %{"drain" => on?})
+          Registry.notify(id, message)
+          {:ok, updated}
+        end
     end
   end
 
@@ -429,6 +471,53 @@ defmodule Arbiter.Nodes do
     do: Enum.any?(errors, &(Map.get(&1, :field) == :name))
 
   defp name_conflict?(_), do: false
+
+  # ---- live sessions -----------------------------------------------------
+
+  @doc "The PubSub topic node session events are broadcast on (see `Arbiter.Nodes.Session`)."
+  @spec topic() :: String.t()
+  def topic, do: "nodes"
+
+  @doc """
+  The Phoenix socket id of a node's connection: `ArbiterWeb.NodeSocket.id/1`.
+  `Endpoint.broadcast(socket_id(id), "disconnect", %{})` closes it.
+  """
+  @spec socket_id(String.t()) :: String.t()
+  def socket_id(node_id), do: "node_socket:" <> node_id
+
+  @boot_epoch_key {__MODULE__, :boot_epoch}
+
+  @doc """
+  The primary's `boot_epoch`: 128 random bits (URL-safe base64) fixed once per
+  BEAM start (`Arbiter.Nodes.Supervisor` forces it at boot). Carried in `hello_ok`
+  and every `hb_ack`: an agent that sees it change knows the primary restarted
+  and that its runs were not carried across (design §10.4).
+  """
+  @spec boot_epoch() :: String.t()
+  def boot_epoch do
+    case :persistent_term.get(@boot_epoch_key, nil) do
+      nil ->
+        epoch = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+
+        :global.trans({@boot_epoch_key, self()}, fn ->
+          case :persistent_term.get(@boot_epoch_key, nil) do
+            nil ->
+              :persistent_term.put(@boot_epoch_key, epoch)
+              epoch
+
+            existing ->
+              existing
+          end
+        end)
+
+      epoch ->
+        epoch
+    end
+  end
+
+  defp broadcast(message) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(), message)
+  end
 
   # ---- reads -------------------------------------------------------------
 
