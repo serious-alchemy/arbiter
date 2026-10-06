@@ -51,7 +51,7 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   def states_for_column(:backlog), do: [:backlog]
   def states_for_column(column) when column in [:blocked, :ready], do: [:queued]
   def states_for_column(:in_progress), do: [:active, :backlog, :queued]
-  def states_for_column(:merging), do: [:merging]
+  def states_for_column(:merging), do: [:merging, :active]
   def states_for_column(:verifying), do: [:verifying]
   def states_for_column(:closed), do: [:closed]
 

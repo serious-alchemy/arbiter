@@ -88,7 +88,7 @@ defmodule Arbiter.Tasks.SlotGate do
 
   A ticket whose ReviewGate is holding its reviewer back until CI is green on
   the head (bd-cut6uv, `Arbiter.Worker.ReviewCi.waiting/2`) is the one exception
-  to "`:active` holds a slot": it is still In progress on the board, but no agent
+  to "`:active` holds a slot": it appears in Merging on the board (bd-dc468g), but no agent
   is live for it and it is waiting on a machine, exactly like a Merging PR waiting
   on CI — so it releases its slot while it waits. The marker expires, so a gate
   that died mid-wait cannot hold a ticket out of the count forever.
