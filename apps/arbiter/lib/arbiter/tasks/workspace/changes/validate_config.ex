@@ -624,6 +624,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_grok_routing(Map.get(routing, "grok"))
   end
 
+  defp validate_routing(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "routing must be a map")
+  end
+
   # bd-dpv4vt: `routing.grok` is `%{"enabled" => bool, "difficulties" => [0..5]}`.
   defp validate_grok_routing(changeset, nil), do: changeset
 
@@ -657,10 +661,6 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       field: :config,
       message: "routing.grok must be a map; got: #{inspect(other)}"
     )
-  end
-
-  defp validate_routing(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "routing must be a map")
   end
 
   # bd-40pzpj: `most_quota` routes the implementer to the attached account
