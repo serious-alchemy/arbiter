@@ -1,0 +1,53 @@
+phase=Succeeded reason=
+worker: exit=0 reason=Completed started=2026-10-06T10:17:39Z finished=2026-10-06T10:17:39Z
+worker: exit=0 reason=Completed started=2026-10-06T10:17:39Z finished=2026-10-06T10:17:39Z
+=== k1b/seed
+seed: id=10001:10001 uid_map= 0 1524826112 65536;
+total 24
+-rw-r--r-- 1 10001 10001   21 Oct  6 10:17 HEAD
+-rw-r--r-- 1 10001 10001    2 Oct  6 10:17 commondir
+-rw-r--r-- 1 10001 10001   36 Oct  6 10:17 config
+drwxr-sr-x 2 10001 10001 4096 Oct  6 10:17 hooks
+drwxr-sr-x 3 10001 10001 4096 Oct  6 10:17 objects
+drwxr-sr-x 3 10001 10001 4096 Oct  6 10:17 refs
+=== k1b/snapshotter
+snap: start 1791281858.917318537 id=10001 uid_map= 0 1524826112 65536;
+snap: guard check: /spike/snapshotter.sh: 4: cannot create /wt/proj/.git/config: Read-only file system
+snap: GOT SIGTERM at 1791281859.642944542
+snap: uploading tick 1 at 1791281860.644918710
+snap: uploading tick 2 at 1791281861.646760673
+snap: uploading tick 3 at 1791281862.648763518
+snap: uploading tick 4 at 1791281863.650633034
+snap: uploading tick 5 at 1791281864.652821502
+snap: final snapshot done at 1791281864.653866051
+=== k1b/worker
+worker: start 1791281859.182858687 mode=exit0 id=10001:10001 groups=10001
+worker: uid_map= 0 1524826112 65536;
+worker: apparmor=cri-containerd.apparmor.d (enforce) seccomp=Seccomp:2
+worker: NoNewPrivs=NoNewPrivs:1 CapEff=CapEff:0000000000000000
+worker: ro rootfs: touch: cannot touch '/rootfs-probe': Read-only file system
+total 24
+-rw-r--r-- 1 10001 10001   21 Oct  6 10:17 HEAD
+-rw-r--r-- 1 10001 10001    2 Oct  6 10:17 commondir
+-rw-r--r-- 1 10001 10001   36 Oct  6 10:17 config
+drwxr-sr-x 2 10001 10001 4096 Oct  6 10:17 hooks
+drwxr-sr-x 3 10001 10001 4096 Oct  6 10:17 objects
+drwxr-sr-x 3 10001 10001 4096 Oct  6 10:17 refs
+--- K8 guard probes (expected: every line says an error) ---
+probe mv .git/config .git/config.x: mv: cannot move '.git/config' to '.git/config.x': Device or resource busy [rc=0]
+probe rm -f .git/config: rm: cannot remove '.git/config': Device or resource busy [rc=0]
+probe echo evil >> .git/config: /spike/worker.sh: 1: eval: cannot create .git/config: Read-only file system [rc=0]
+probe mv .git/hooks .git/hooks.x: mv: cannot move '.git/hooks' to '.git/hooks.x': Device or resource busy [rc=0]
+probe rm -rf .git/hooks: rm: cannot remove '.git/hooks': Device or resource busy [rc=0]
+probe echo evil > .git/hooks/pre-commit: /spike/worker.sh: 1: eval: cannot create .git/hooks/pre-commit: Read-only file system [rc=0]
+probe rm -f .git/commondir: rm: cannot remove '.git/commondir': Device or resource busy [rc=0]
+probe echo evil > .git/commondir: /spike/worker.sh: 1: eval: cannot create .git/commondir: Read-only file system [rc=0]
+probe echo /x >> .git/objects/info/alternates: /spike/worker.sh: 1: eval: cannot create .git/objects/info/alternates: Read-only file system [rc=0]
+probe mv .git/objects/info/alternates .git/objects/info/alt2: mv: cannot move '.git/objects/info/alternates' to '.git/objects/info/alt2': Device or resource busy [rc=0]
+probe mv .git .git2: mv: cannot move '.git' to '.git2': Device or resource busy [rc=0]
+--- controls (expected: succeed) ---
+control: write HEAD: ok
+control: write file in tree: ok
+control: git add/commit: 2fc5e4d x
+control: config still intact: [core]|	repositoryformatversion = 0|
+worker: exiting 0 at 1791281859.232314491

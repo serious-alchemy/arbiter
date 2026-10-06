@@ -1,0 +1,9 @@
+# k2-stability.sh output, 360 s, 1 Hz, policies applied at t=10 s. NOTE: the 'ingress' line is INVALID (probe argument bug in that run:
+# it was BLOCKED before the policies existed); ingress is evidenced by k2-ingress-loop-70s.txt and the 6 passes in k2-run.txt.
+0s ingress BLOCKED
+1s egress-internet CONNECTED
+1s worker-to-controller CONNECTED
+1s controller-to-api CONNECTED
+10 APPLIED
+13s egress-internet BLOCKED
+end 360s final: ingress=BLOCKED controller-to-api=CONNECTED worker-to-controller=CONNECTED egress-internet=BLOCKED 

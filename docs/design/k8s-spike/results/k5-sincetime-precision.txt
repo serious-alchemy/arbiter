@@ -1,0 +1,5 @@
+total lines 30007; distinct timestamps 30007; max lines sharing one timestamp 1; lines in a shared-timestamp group 0
+sinceTime sent (ns precision): 2026-10-06T10:52:28.411249500Z
+first line returned has timestamp 2026-10-06T10:52:28.099989406Z  (older than the sinceTime sent: True)
+lines in the same second but BEFORE the sinceTime: 601; returned-from-that-second-before-since: 601
+truncated-to-the-second sinceTime 2026-10-06T10:52:28Z returns 15605 lines vs 15605 for the ns value

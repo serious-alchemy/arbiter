@@ -1,0 +1,5 @@
+sequential: 300 connections, 300 replied, 14.53 ms each (full TLS handshake each)
+concurrent: 500 connections in waves of 100, 369 replied, wall 47.46 s
+bulk: 200 MiB in 1.119 s => 178.58 MiB/s; server saw: BYTES 209033728 cn=run-0123456789ab ou=proxy
+socat container CPU/mem: 14.27% cpu 1.544MB / 33.34GB
+server ACCEPTs added: 801

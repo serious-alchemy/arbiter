@@ -1,0 +1,7 @@
+phase=Failed reason=Evicted
+snapshotter: exit=137 reason=Error started=2026-10-06T10:18:50Z finished=2026-10-06T10:19:45Z
+worker: exit=137 reason=ContainerStatusUnknown started=- finished=-
+=== k1-evict/seed
+unable to retrieve container logs for containerd://d0112bbbb151ec96ccf554e6ae7a6adaa00cb13849a6bd7376133d5441f8db43=== k1-evict/snapshotter
+unable to retrieve container logs for containerd://37bfce521022efba7b5521c4b239e4c049e286f28ae31ed38a8da12549906edb=== k1-evict/worker
+Error from server (BadRequest): container "worker" in pod "k1-evict" is terminated

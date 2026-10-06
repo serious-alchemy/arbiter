@@ -46,9 +46,14 @@ defmodule ArbiterWeb.Spike.WsClient do
     headers = Keyword.get(opts, :headers, [])
 
     with {:ok, conn} <-
-           Mint.HTTP.connect(http_scheme, uri.host, port,
-             protocols: [:http1],
-             transport_opts: Keyword.get(opts, :transport_opts, nodelay: true)
+           Mint.HTTP.connect(
+             http_scheme,
+             uri.host,
+             port,
+             [
+               protocols: [:http1],
+               transport_opts: Keyword.get(opts, :transport_opts, nodelay: true)
+             ] ++ proxy_opt(opts)
            ),
          {:ok, conn, ref} <- Mint.WebSocket.upgrade(scheme, conn, path, headers) do
       {:ok,
@@ -69,6 +74,15 @@ defmodule ArbiterWeb.Spike.WsClient do
     else
       {:error, reason} -> {:stop, {:connect_failed, reason}}
       {:error, _conn, reason} -> {:stop, {:upgrade_failed, reason}}
+    end
+  end
+
+  # K11 spike (bd-6zl538): an HTTP CONNECT proxy, e.g. tailscaled's userspace
+  # `--outbound-http-proxy-listen`: `proxy: {:http, "127.0.0.1", 1055, []}`.
+  defp proxy_opt(opts) do
+    case Keyword.get(opts, :proxy) do
+      nil -> []
+      proxy -> [proxy: proxy]
     end
   end
 

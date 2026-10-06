@@ -1,0 +1,8 @@
+0s ingress CONNECTED
+0s egress-internet CONNECTED
+0s worker-to-controller CONNECTED
+0s controller-to-api CONNECTED
+10 APPLIED
+11s ingress BLOCKED
+13s egress-internet BLOCKED
+end 40s final: ingress=BLOCKED controller-to-api=CONNECTED worker-to-controller=CONNECTED egress-internet=BLOCKED 

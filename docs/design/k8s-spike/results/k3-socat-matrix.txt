@@ -1,0 +1,10 @@
+socat: socat version 1.8.0.3 on 03 Sep 2026 20:58:48
+OPENSSL option support: 
+valid-proxy-leaf                   rc=0 reply=2026/10/06 10:29:27 socat[3] W OpenSSL: Warning: this implementation does not check CRLs HELLO cn=run-01234567
+valid-arb-leaf                     rc=0 reply=2026/10/06 10:29:30 socat[3] W OpenSSL: Warning: this implementation does not check CRLs HELLO cn=run-01234567
+no-client-cert                     rc=0 reply=2026/10/06 10:29:33 socat[3] W OpenSSL: Warning: this implementation does not check CRLs 
+expired-leaf                       rc=0 reply=2026/10/06 10:29:33 socat[3] W OpenSSL: Warning: this implementation does not check CRLs 
+leaf-from-other-CA                 rc=0 reply=2026/10/06 10:29:34 socat[3] W OpenSSL: Warning: this implementation does not check CRLs 
+eku-serverauth-only-leaf           rc=0 reply=2026/10/06 10:29:34 socat[3] W OpenSSL: Warning: this implementation does not check CRLs 
+wrong-server-name                  rc=1 reply=2026/10/06 10:29:34 socat[3] W OpenSSL: Warning: this implementation does not check CRLs 2026/10/06 10:29:34 s
+verify-disabled-WRONG-name         rc=0 reply=HELLO cn=run-0123456789ab ou=proxy 

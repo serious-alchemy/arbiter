@@ -1,0 +1,14 @@
+context: default   server: https://127.0.0.1:16443
+nodes:
+NAME        KERNEL                       RUNTIME                      OS
+localhost   6.12.111+deb13-cloud-amd64   containerd://2.3.4-k3s1.36   Debian GNU/Linux 13 (trixie)
+phase=Succeeded
+{"terminated":{"containerID":"containerd://037c50dfe98df05dd7d6b4fd502a23f7b880a561100f2f7605679651811aa077","exitCode":0,"finishedAt":"2026-10-06T11:23:30Z","reason":"Completed","startedAt":"2026-10-06T11:23:30Z"}}
+{"terminated":{"containerID":"containerd://53527bbc09ea7aceb1452415cb5ea4646bf5d4dfc2f2dbf4457efa266880b1c6","exitCode":0,"finishedAt":"2026-10-06T11:23:29Z","reason":"Completed","startedAt":"2026-10-06T11:23:29Z"}} {"terminated":{"containerID":"containerd://7dc6959477f2f7fbcd998696fe1d5803ac9922c5c
+seeded-by-10001
+uid_map:  0 1743650816 65536   (a host-user pod shows '0 0 4294967295')
+disk emptyDir + subPath: -rw-r--r--    1 10001    10001            6 Oct  6 11:23 /wt/proj/.git/config  content=guard
+guard write: sh: can't create /wt/proj/.git/config: Read-only file system
+guard mv:    mv: can't rename '/wt/proj/.git/config': Device or resource busy
+memory emptyDir write: 8388608 bytes (8.0MB) copied, 0.002856 seconds, 2.7GB/s
+RESULT: PASS

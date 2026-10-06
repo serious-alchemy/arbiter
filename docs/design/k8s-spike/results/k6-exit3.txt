@@ -1,0 +1,17 @@
+phase=Failed reason=
+worker: exit=3 reason=Error started=2026-10-06T10:18:01Z finished=2026-10-06T10:18:01Z
+worker: exit=3 reason=Error started=2026-10-06T10:18:01Z finished=2026-10-06T10:18:01Z
+=== k1-exit3/seed
+=== k1-exit3/snapshotter
+snap: start 1791281880.840144574 id=10001 uid_map= 0 940572672 65536;
+snap: guard check: /spike/snapshotter.sh: 4: cannot create /wt/proj/.git/config: Read-only file system
+snap: GOT SIGTERM at 1791281881.682219533
+snap: uploading tick 1 at 1791281882.684412430
+snap: uploading tick 2 at 1791281883.686449383
+snap: uploading tick 3 at 1791281884.688258599
+snap: uploading tick 4 at 1791281885.690264010
+snap: uploading tick 5 at 1791281886.692265435
+snap: final snapshot done at 1791281886.693255123
+=== k1-exit3/worker
+worker: start 1791281881.062364698 mode=exit3 id=10001:10001 groups=10001
+worker: exiting 3 at 1791281881.103674710

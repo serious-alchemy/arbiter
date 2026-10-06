@@ -1,0 +1,40 @@
+# K§9.1 verbatim, with the survey's placeholders filled for this VM: API node IP 10.0.2.15, kubernetes ClusterIP 10.43.0.1.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: arbiter-workers}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: worker-to-controller, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: worker}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app.kubernetes.io/component: controller}}}]
+    ports: [{protocol: TCP, port: 9443}, {protocol: TCP, port: 9444}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: controller-ingress-from-workers, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/component: worker}}}]
+    ports: [{protocol: TCP, port: 9443}, {protocol: TCP, port: 9444}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: controller-egress, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{ipBlock: {cidr: 10.0.2.15/32}}, {ipBlock: {cidr: 10.43.0.1/32}}]
+    ports: [{protocol: TCP, port: 6443}, {protocol: TCP, port: 443}]
+  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}},
+          podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.42.0.0/16, 10.43.0.0/16]}}]
+    ports: [{protocol: TCP, port: 443}, {protocol: UDP, port: 41641}, {protocol: UDP, port: 3478}]

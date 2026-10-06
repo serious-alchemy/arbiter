@@ -1,0 +1,3 @@
+in-pod loop, other-ns pod -> controller pod :9443 every 0.25 s; policies applied after 8 s
+before apply: 32 connected / 0 rejected; kubectl apply took 0.10 s
+first rejected probe +1.23 s after the apply started; last connected probe +-0.02 s; connected after the first reject: 0

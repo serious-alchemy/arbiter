@@ -1,0 +1,45 @@
+context: default   server: https://127.0.0.1:16443
+discovered: api ClusterIP=10.43.0.1 node=10.0.2.15 dns=10.43.0.10 podCIDR=10.42.0.0/24 svcCIDR(assumed /16)=10.43.0.0/16
+CNI/netpol hints: 
+kernel/iptables per node: localhost 6.12.111+deb13-cloud-amd64 Debian GNU/Linux 13 (trixie); 
+
+== 1. baseline, no policies: every target must be reachable (otherwise the probes prove nothing)
+PASS  baseline controller svc 9443                   10.43.130.115:9443 -> CONNECTED
+PASS  baseline controller pod 8080                   10.42.0.61:8080 -> CONNECTED
+PASS  baseline pod in other ns                       10.42.0.64:8080 -> CONNECTED
+PASS  baseline other worker pod                      10.42.0.63:7000 -> CONNECTED
+
+== 2. apply the K§9.1 policies (default-deny + worker->controller 9443/9444 + controller egress)
+-- worker egress (want: only the controller on 9443/9444)
+PASS  worker -> controller svc 9443 (bridge)         10.43.130.115:9443 -> CONNECTED
+PASS  worker -> controller svc 9444 (boot)           10.43.130.115:9444 -> CONNECTED
+PASS  worker -> controller POD IP 9443               10.42.0.61:9443 -> CONNECTED
+PASS  worker -> controller svc 8080 (non-bridge)     10.43.130.115:8080 -> BLOCKED
+PASS  worker -> controller POD IP 8080               10.42.0.61:8080 -> BLOCKED
+PASS  worker -> pod in another namespace             10.42.0.64:8080 -> BLOCKED
+PASS  worker -> other worker pod                     10.42.0.63:7000 -> BLOCKED
+PASS  worker -> kube-dns ClusterIP tcp/53            10.43.0.10:53 -> BLOCKED
+PASS  worker -> API server ClusterIP :443            10.43.0.1:443 -> BLOCKED
+PASS  worker -> node IP :6443 (API server)           10.0.2.15:6443 -> BLOCKED
+PASS  worker -> node IP :10250 (kubelet)             10.0.2.15:10250 -> BLOCKED
+PASS  worker -> 1.1.1.1:443                          1.1.1.1:443 -> BLOCKED
+-- ingress (want: only workers reach the controller, nothing reaches a worker)
+PASS  other-ns pod -> controller pod 9443            10.42.0.61:9443 -> BLOCKED
+PASS  other-ns pod -> controller svc 9443            10.43.130.115:9443 -> BLOCKED
+PASS  other-ns pod -> worker pod 7000                10.42.0.62:7000 -> BLOCKED
+PASS  worker2 -> worker pod 7000                     10.42.0.62:7000 -> BLOCKED
+-- controller egress (want: API via node IP and ClusterIP, DNS, internet 443; not the pod network)
+PASS  controller -> API ClusterIP :443               10.43.0.1:443 -> CONNECTED
+PASS  controller -> node IP :6443                    10.0.2.15:6443 -> CONNECTED
+PASS  controller -> pod in another namespace         10.42.0.64:8080 -> BLOCKED
+PASS  controller -> worker pod                       10.42.0.62:7000 -> BLOCKED
+
+== 3. fail-open window: 5 fresh worker pods probe the API ClusterIP from their first instruction for 4 s
+startup-1: connections that succeeded before/while the policy engaged: 53
+startup-2: connections that succeeded before/while the policy engaged: 37
+startup-3: connections that succeeded before/while the policy engaged: 40
+startup-4: connections that succeeded before/while the policy engaged: 63
+startup-5: connections that succeeded before/while the policy engaged: 51
+NOTE  5/5 fresh pods reached the API server while starting: a fail-open window exists on this CNI; the seed gate (K§16.15 K2) is REQUIRED
+
+RESULT: PASS (NetworkPolicy deny-all enforced as designed)
