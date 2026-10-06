@@ -1213,13 +1213,19 @@ defmodule Arbiter.Worker do
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
   defp broadcast_done(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
+    # The MergeQueue message is skipped for review-only and no-PR tickets (see
+    # above); the `/events` `worker_done` event is skipped only for review-only
+    # ones. bd-6dxqkg (#372): a research/task completion must still reach the
+    # coordinator's `/events` stream and Autopilot's slot-freed trigger.
     unless review_only?(meta) or no_pr_type?(meta) do
       Phoenix.PubSub.broadcast(
         Arbiter.PubSub,
         "worker:done:" <> ws_id,
         {:worker_done, task_id}
       )
+    end
 
+    unless review_only?(meta) do
       Arbiter.Events.broadcast(ws_id, "worker_done", %{
         task_id: task_id,
         kind: to_string(state.kind),
