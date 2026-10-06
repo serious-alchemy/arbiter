@@ -26,6 +26,10 @@ System.delete_env("ARBITER_MEMORY_ROOT")
 # the same reason, plus a credential one — see the test's moduledoc:
 #
 #     mix test --include live_claude test/integration/session_onboarding_test.exs
+# bd-50d5j6: `:live_codex` runs a REAL `codex exec` turn in a podman container
+# with the operator's ChatGPT login (it spends a few tokens, and the login's
+# refresh token may rotate, which `AuthSync` then writes back). Opt-in on top of
+# `:podman`: see `test/arbiter/worker/container_spawn_codex_podman_test.exs`.
 # bd-3ymdvi: `:tmux` tests run a real tmux server on a scratch socket in the
 # test's own `tmp_dir` — no systemd, no session row, torn down by exact socket
 # path. They are cheap and they are the only proof that phase 4's tmux argv is
@@ -63,7 +67,7 @@ max_cases_opts =
   |> then(& &1.(System.get_env()))
 
 ExUnit.start(
-  [exclude: [:live_systemd, :live_claude, :systemd_user, :podman] ++ tmux_exclude] ++
+  [exclude: [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman] ++ tmux_exclude] ++
     max_cases_opts
 )
 

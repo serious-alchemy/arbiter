@@ -1805,6 +1805,7 @@ defmodule Arbiter.Worker.Dispatch do
         # cleared (bd-7gt8rm). One indexed read when none is active. No
         # snapshot is not evidence either way, so it leaves the alert alone.
         if quota, do: CoordinatorNotifier.overage_cleared(ws_id, provider)
+        record_pace_exempt(task, ws_id, provider, account, quota, workspace, gate_opts)
         :ok
 
       {:hold, reason} ->
@@ -1829,6 +1830,53 @@ defmodule Arbiter.Worker.Dispatch do
         :ok
     end
   end
+
+  # The P0 pace exemption (bd-6bxv7h, design §4.2): a dispatch the gate let
+  # through only because its own priority is exempt is audited — the same
+  # `pace_exempt` the routing decision carries, as a `quota_pace_exempt` event
+  # next to `quota_gate_bypass`. Best-effort: the audit must never fail a
+  # dispatch the gate allowed.
+  defp record_pace_exempt(
+         %Issue{priority: priority} = task,
+         ws_id,
+         provider,
+         account,
+         quota,
+         workspace,
+         gate_opts
+       )
+       when is_integer(priority) do
+    case Arbiter.Quota.Gate.pace_exemption(
+           quota,
+           {account, workspace},
+           Keyword.put(gate_opts, :priority, priority)
+         ) do
+      nil ->
+        :ok
+
+      exemption ->
+        Arbiter.Events.broadcast(ws_id, "quota_pace_exempt", %{
+          "task_id" => task.id,
+          "priority" => priority,
+          "provider" => to_string(provider),
+          "account" => account && account.slug,
+          "pace_exempt" => %{
+            "window" => exemption.window,
+            "used" => exemption.used,
+            "paced" => exemption.paced,
+            "cap" => exemption.cap
+          }
+        })
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Dispatch: pace-exempt audit failed for #{task.id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp record_pace_exempt(_task, _ws_id, _provider, _account, _quota, _workspace, _gate_opts),
+    do: :ok
 
   # bd-cwq8b0: grok has no provider account (the free tier's cap belongs to the
   # one xAI account), so its ledger snapshot is served whatever `account` is.
@@ -3454,11 +3502,11 @@ defmodule Arbiter.Worker.Dispatch do
   defp guardrail_need(:egress_unenforceable, policy),
     do: "network egress confinement (egress: #{SecurityPolicy.egress(policy)})"
 
-  # bd-d2o3xb (P7): `sandbox.backend: podman` has a wrap point for Claude only,
-  # so under it the pool is Claude or nothing. An explicit `--provider` that is
-  # not Claude is refused; automatic routing falls to Claude when it is in the
-  # pool. Anything else would run unsandboxed under a backend the operator
-  # chose precisely so that it would not.
+  # bd-d2o3xb (P7), bd-50d5j6 (P8): `sandbox.backend: podman` has a wrap point
+  # for Claude and Codex only, so under it the pool is those two or nothing. An
+  # explicit `--provider` with no wrap point is refused; automatic routing falls
+  # to Claude when it is in the pool. Anything else would run unsandboxed under
+  # a backend the operator chose precisely so that it would not.
   defp sandbox_checked_provider(preferred, policy, pool, opts) do
     case Sandbox.module(policy, preferred) do
       {:ok, _sandbox} ->
@@ -3473,7 +3521,9 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp sandbox_pool(policy, pool) do
-    if ContainerSpawn.podman?(policy), do: Enum.filter(pool, &(&1 == :claude)), else: pool
+    if ContainerSpawn.podman?(policy),
+      do: Enum.filter(pool, &match?({:ok, _}, Sandbox.module(policy, &1))),
+      else: pool
   end
 
   # Why no provider was eligible: the sandbox/strict gate (`:ineligible`), or a

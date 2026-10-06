@@ -27,7 +27,11 @@ defmodule ArbiterWeb.SessionIndexLive do
   ## The §9.5 pre-launch options (phase 11)
 
   `launch_form/1` carries the whole option set: session name, provider
-  (Claude Code by default, or agy — bd-7xuvfl), auth mode, Remote Control
+  (derived, not hardcoded — bd-8qoxst: `Arbiter.Sessions.LaunchProviders` lists
+  only configured providers, greys out unhealthy ones with the reason, and
+  `launch_defaults/1` refuses a hidden or disabled one server-side; Claude Code
+  is pre-selected when healthy, else the first healthy provider; agy is
+  bd-7xuvfl), auth mode, Remote Control
   (§8, gated to mode B), workspace binding, and `can_dispatch`. Choosing agy
   disables auth mode and Remote Control with the reason shown, for the same
   §8.3 "never a toggle that silently does nothing" rule: an agy session runs
@@ -92,6 +96,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Sessions.LaunchProviders
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
@@ -127,6 +132,9 @@ defmodule ArbiterWeb.SessionIndexLive do
       |> assign(:kill_candidate, nil)
       |> assign(:usage_refresh_ref, nil)
       |> assign(:launch_provider, "claude_code")
+      # bd-8qoxst: `nil` until the connected mount's read lands — see
+      # `LaunchProviders` and `put_launch_providers/3`.
+      |> assign(:launch_providers, nil)
       |> assign(:launch_auth_mode, "seeded_credentials")
       |> assign(:launch_name, nil)
       |> assign(:launch_workspace_id, nil)
@@ -162,13 +170,15 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   def handle_event("launch", params, socket) do
-    case Sessions.launch(launch_defaults(params)) do
-      {:ok, session} ->
-        # Straight into the dock rather than off to a page of its own: the
-        # terminal is in the strip at the bottom of every page, and a redirect
-        # would only have thrown away whatever the operator was reading.
-        {:noreply, socket |> refresh() |> reset_launch_params() |> open_in_dock(session.id)}
-
+    # `launch_defaults/1` is the server-side provider gate (bd-8qoxst): a hidden
+    # or disabled provider is an error here, never launched.
+    with {:ok, opts} <- launch_defaults(params),
+         {:ok, session} <- Sessions.launch(opts) do
+      # Straight into the dock rather than off to a page of its own: the
+      # terminal is in the strip at the bottom of every page, and a redirect
+      # would only have thrown away whatever the operator was reading.
+      {:noreply, socket |> refresh() |> reset_launch_params() |> open_in_dock(session.id)}
+    else
       {:error, reason} ->
         Logger.error("SessionIndexLive: launch failed: #{inspect(reason)}")
 
@@ -287,8 +297,17 @@ defmodule ArbiterWeb.SessionIndexLive do
     |> sessions_read_done()
   end
 
-  def handle_async(:workspaces, {:ok, workspaces}, socket) do
-    {:noreply, assign(socket, :workspaces, workspaces)}
+  def handle_async(:workspaces, {:ok, {workspaces, providers}}, socket) do
+    socket = assign(socket, :workspaces, workspaces)
+
+    # The read was for the cross-workspace form; a pick made while it was out
+    # re-derives (see `assign_launch_params/2`) rather than taking its answer.
+    socket =
+      if is_nil(socket.assigns.launch_workspace_id),
+        do: put_launch_providers(socket, providers, socket.assigns.launch_provider),
+        else: refresh_launch_providers(socket)
+
+    {:noreply, socket}
   end
 
   def handle_async(:workspaces, {:exit, reason}, socket) do
@@ -340,7 +359,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp load_workspaces_task do
     Process.flag(:trap_exit, true)
-    result = workspaces()
+    result = {workspaces(), LaunchProviders.list(nil)}
     exit_if_view_gone()
     result
   end
@@ -387,8 +406,24 @@ defmodule ArbiterWeb.SessionIndexLive do
   # not styling, and a fork of it is the one thing bd-cdut29 was asked not to
   # build.
   @doc false
+  @spec launch_defaults(map()) :: {:ok, keyword()} | {:error, {:provider_unavailable, term()}}
   def launch_defaults(params) do
-    provider = launch_provider_param(params)
+    workspace_id = launch_workspace_id(params, Enum.map(workspaces(), & &1.id))
+    entries = LaunchProviders.list(workspace_id)
+
+    # The server-side half of bd-8qoxst: whatever the browser sent, only a
+    # provider the form would offer *enabled* for this workspace launches. No
+    # `provider` at all is the form's own default.
+    requested = Map.get(params, "provider") || LaunchProviders.default(entries)
+
+    if enabled_provider?(entries, requested) do
+      {:ok, launch_opts(params, requested, workspace_id)}
+    else
+      {:error, {:provider_unavailable, requested}}
+    end
+  end
+
+  defp launch_opts(params, provider, workspace_id) do
     auth_mode = launch_auth_mode_param(params, provider)
 
     [
@@ -400,7 +435,7 @@ defmodule ArbiterWeb.SessionIndexLive do
       # attribute still cannot request it.
       remote_control:
         remote_control_available?(provider, auth_mode) and launch_remote_control?(params),
-      workspace_id: launch_workspace_id(params, Enum.map(workspaces(), & &1.id)),
+      workspace_id: workspace_id,
       # §10.1: off unless the operator explicitly checks the box. A session
       # that could dispatch workers by default is the wrong thing to ship
       # turned on.
@@ -438,7 +473,20 @@ defmodule ArbiterWeb.SessionIndexLive do
     previous_available? =
       remote_control_available?(socket.assigns.launch_provider, socket.assigns.launch_auth_mode)
 
-    provider = launch_provider_param(params)
+    valid_workspace_ids = Enum.map(socket.assigns.workspaces, & &1.id)
+    workspace_id = launch_workspace_id(params, valid_workspace_ids)
+
+    # The provider list depends on the workspace picked (a workspace is only
+    # offered the providers it is joined to), so every change re-derives it —
+    # and a pick that is no longer offered falls back to the first healthy one.
+    socket =
+      put_launch_providers(
+        socket,
+        LaunchProviders.list(workspace_id),
+        Map.get(params, "provider")
+      )
+
+    provider = socket.assigns.launch_provider
     auth_mode = launch_auth_mode_param(params, provider)
     available? = remote_control_available?(provider, auth_mode)
 
@@ -451,16 +499,10 @@ defmodule ArbiterWeb.SessionIndexLive do
     # and so is agy -> Claude Code, which disables the box the same way.
     entering_mode_b? = available? and not previous_available?
 
-    valid_workspace_ids = Enum.map(socket.assigns.workspaces, & &1.id)
-
     socket
-    |> Phoenix.Component.assign(:launch_provider, provider)
     |> Phoenix.Component.assign(:launch_auth_mode, auth_mode)
     |> Phoenix.Component.assign(:launch_name, launch_name(params))
-    |> Phoenix.Component.assign(
-      :launch_workspace_id,
-      launch_workspace_id(params, valid_workspace_ids)
-    )
+    |> Phoenix.Component.assign(:launch_workspace_id, workspace_id)
     |> Phoenix.Component.assign(:launch_can_dispatch?, launch_can_dispatch?(params))
     # Mode A never shows Remote Control as checked, even if the box was
     # ticked under mode B before the operator switched — otherwise the
@@ -484,7 +526,8 @@ defmodule ArbiterWeb.SessionIndexLive do
   """
   def reset_launch_params(socket) do
     socket
-    |> Phoenix.Component.assign(:launch_provider, "claude_code")
+    |> Phoenix.Component.assign(:launch_workspace_id, nil)
+    |> refresh_launch_providers(nil)
     |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
     |> Phoenix.Component.assign(:launch_name, nil)
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
@@ -500,14 +543,42 @@ defmodule ArbiterWeb.SessionIndexLive do
   def launch_auth_mode_param(%{"auth_mode" => "oauth_token"}, _provider), do: "oauth_token"
   def launch_auth_mode_param(_params, _provider), do: "seeded_credentials"
 
-  # Only the providers the form offers; anything else is Claude Code, so a
-  # crafted value never reaches `String.to_existing_atom/1` unvetted.
-  @launch_providers ~w(claude_code agy)
-  @doc false
-  def launch_provider_param(%{"provider" => provider}) when provider in @launch_providers,
-    do: provider
+  @doc """
+  Re-derive the launch form's provider list (`Arbiter.Sessions.LaunchProviders`)
+  for the workspace currently picked and re-validate the selected provider
+  against it. Public so `ArbiterWeb.SessionDockLive` — which refreshes it when
+  its panel opens, since health and accounts change under a long-lived view —
+  shares the one rule.
+  """
+  def refresh_launch_providers(socket, requested \\ :current) do
+    requested =
+      if requested == :current, do: socket.assigns.launch_provider, else: requested
 
-  def launch_provider_param(_params), do: "claude_code"
+    put_launch_providers(
+      socket,
+      LaunchProviders.list(socket.assigns.launch_workspace_id),
+      requested
+    )
+  end
+
+  @doc false
+  # Stores `entries` and the provider to show selected: `requested` while it is
+  # offered and enabled, else the first healthy one (`claude_code` preferred).
+  # With nothing healthy the selection is left at the default value and the
+  # form disables Launch.
+  def put_launch_providers(socket, entries, requested) do
+    provider =
+      if enabled_provider?(entries, requested),
+        do: requested,
+        else: LaunchProviders.default(entries) || "claude_code"
+
+    socket
+    |> Phoenix.Component.assign(:launch_providers, entries)
+    |> Phoenix.Component.assign(:launch_provider, provider)
+  end
+
+  defp enabled_provider?(entries, provider),
+    do: Enum.any?(entries, &(&1.provider == provider and not &1.disabled?))
 
   defp remote_control_available?(provider, auth_mode),
     do: provider == "claude_code" and auth_mode == "seeded_credentials"
@@ -544,6 +615,9 @@ defmodule ArbiterWeb.SessionIndexLive do
   defp launch_name(_params), do: nil
 
   @doc false
+  def describe({:provider_unavailable, provider}),
+    do: "provider #{inspect(provider)} is not available here (not configured, or unhealthy)"
+
   def describe({:provisioning_failed, reason}), do: "provisioning failed (#{inspect(reason)})"
   def describe({:launch_failed, status, _out}), do: "the launch command exited #{status}"
   def describe(reason), do: inspect(reason)
@@ -574,6 +648,7 @@ defmodule ArbiterWeb.SessionIndexLive do
             <.launch_form
               prefix="launch-session"
               launch_provider={@launch_provider}
+              launch_providers={@launch_providers}
               launch_auth_mode={@launch_auth_mode}
               launch_name={@launch_name}
               launch_workspace_id={@launch_workspace_id}
@@ -756,6 +831,12 @@ defmodule ArbiterWeb.SessionIndexLive do
   """
   attr :prefix, :string, required: true
   attr :launch_provider, :string, default: "claude_code"
+
+  attr :launch_providers, :list,
+    default: nil,
+    doc:
+      "`Arbiter.Sessions.LaunchProviders.list/2` entries, or nil while they load (Launch stays disabled)"
+
   attr :launch_auth_mode, :string, required: true
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
@@ -786,8 +867,34 @@ defmodule ArbiterWeb.SessionIndexLive do
         id={"#{@prefix}-provider"}
         size="sm"
         value={@launch_provider}
-        options={[{"Claude Code", "claude_code"}, {"agy (Antigravity)", "agy"}]}
+        disabled={is_nil(@launch_providers)}
+        options={provider_options(@launch_providers)}
       />
+      <%!-- bd-8qoxst, §8.3's rule again: a provider that cannot launch right now
+            is greyed out in the select *and* says why in words — a select
+            option's own text is the only place a native control can say it,
+            and a screen reader reads this. --%>
+      <span
+        :for={entry <- unavailable_providers(@launch_providers)}
+        id={"#{@prefix}-provider-#{entry.provider}-unavailable"}
+        class="text-[11px] text-[var(--arb-attention)]"
+      >
+        {entry.label}: {entry.reason}
+      </span>
+      <span
+        :if={launch_blocked?(@launch_providers) and not is_nil(@launch_providers)}
+        id={"#{@prefix}-providers-empty"}
+        class="text-[11px] text-[var(--text-label)]"
+      >
+        No provider can launch here —
+        <.link
+          navigate={~p"/providers"}
+          id={"#{@prefix}-providers-link"}
+          class="underline hover:text-[var(--text-primary)]"
+        >
+          configure providers
+        </.link>
+      </span>
       <Forms.select
         name="auth_mode"
         id={"#{@prefix}-auth-mode"}
@@ -850,6 +957,7 @@ defmodule ArbiterWeb.SessionIndexLive do
         id={@prefix}
         type="submit"
         variant="primary"
+        disabled={launch_blocked?(@launch_providers)}
         phx-disable-with="Launching…"
       >
         <:icon><.icon name="hero-plus" class="size-4" /></:icon>
@@ -866,6 +974,28 @@ defmodule ArbiterWeb.SessionIndexLive do
     </form>
     """
   end
+
+  # `Forms.select` options: a disabled provider is a greyed `<option>` carrying
+  # its reason, so it is visibly unselectable and cannot be chosen from the UI.
+  defp provider_options(nil), do: [{"Loading providers…", ""}]
+
+  defp provider_options(entries) do
+    Enum.map(entries, fn
+      %{disabled?: true} = entry ->
+        {"#{entry.label} — unavailable", entry.provider, disabled: true}
+
+      entry ->
+        {entry.label, entry.provider}
+    end)
+  end
+
+  defp unavailable_providers(nil), do: []
+  defp unavailable_providers(entries), do: Enum.filter(entries, & &1.disabled?)
+
+  # Nothing to launch with: still loading, or no provider is both configured
+  # and healthy.
+  defp launch_blocked?(nil), do: true
+  defp launch_blocked?(entries), do: Enum.all?(entries, & &1.disabled?)
 
   @doc """
   The kill confirmation, shared with `ArbiterWeb.SessionDockLive`.

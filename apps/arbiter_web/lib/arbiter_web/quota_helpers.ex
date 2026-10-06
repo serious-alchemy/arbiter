@@ -53,6 +53,12 @@ defmodule ArbiterWeb.QuotaHelpers do
     * `nil` — not holding.
 
   Paid overage (`overage_status == "in_overage"`) is always `:red`.
+
+  `exempt` is `nil`, or — when the account grants the P0 pace exemption
+  (bd-6bxv7h, design §4.2) and it actually lifts this window's ceiling —
+  `%{ceiling:, label:}`: the exempt ceiling and the "P0 exempt" label the
+  tooltip shows. It is a note only; the colour and `holding` stay those of
+  an ordinary dispatch.
   """
   def quota_pace(bar, gate_policy \\ nil, now \\ DateTime.utc_now()) do
     %{policy: {account, _workspace} = policy, enforcing?: enforcing?} =
@@ -74,11 +80,34 @@ defmodule ArbiterWeb.QuotaHelpers do
       ceiling: pace.ceiling,
       mode: pace.mode,
       elapsed: pace.elapsed,
+      exempt: exempt_pace(policy, enforcing?, kind, label, bar, opts),
       holding: holding(pace.verdict, holding_now?),
       window_seconds: Gate.window_seconds(label, account),
       state: pace_state(pace.verdict, Map.get(bar, :overage_status))
     }
   end
+
+  defp exempt_pace(policy, true, kind, label, bar, opts) do
+    with lowest when is_integer(lowest) <- Gate.pace_exempt_priority(policy),
+         %{mode: :exempt, ceiling: ceiling} <-
+           Gate.pace(
+             policy,
+             kind,
+             label,
+             bar.utilization,
+             bar.reset_at,
+             Keyword.put(opts, :priority, 0)
+           ) do
+      %{ceiling: ceiling, label: exempt_label(lowest)}
+    else
+      _ -> nil
+    end
+  end
+
+  defp exempt_pace(_policy, false, _kind, _label, _bar, _opts), do: nil
+
+  defp exempt_label(0), do: "P0 exempt"
+  defp exempt_label(lowest), do: "P0–P#{lowest} exempt"
 
   defp holding(:holding, true), do: :enforcing
   defp holding(:holding, false), do: :not_enforcing
@@ -99,20 +128,32 @@ defmodule ArbiterWeb.QuotaHelpers do
       "approaching paced ceiling 35%"
   """
   def quota_hold_text(%{holding: :enforcing} = pace, utilization),
-    do: "holding dispatch — #{used_vs_ceiling(pace, utilization)}"
+    do:
+      "holding dispatch — #{used_vs_ceiling(pace, utilization)}" <> exempt_text(pace, utilization)
 
   def quota_hold_text(%{holding: :not_enforcing} = pace, utilization),
     do: "would hold — #{used_vs_ceiling(pace, utilization)} (gate not enforcing)"
 
-  def quota_hold_text(%{verdict: :approaching} = pace, _utilization),
-    do: "approaching #{ceiling_text(pace)}"
+  def quota_hold_text(%{verdict: :approaching} = pace, utilization),
+    do: "approaching #{ceiling_text(pace)}" <> exempt_text(pace, utilization)
 
   def quota_hold_text(_pace, _utilization), do: nil
+
+  # "; P0 exempt up to 90%" — what the exemption would still let through
+  # (bd-6bxv7h), or that its cap is reached too.
+  defp exempt_text(%{exempt: %{ceiling: c, label: label}}, utilization) do
+    if is_number(utilization) and utilization >= c,
+      do: "; #{label} cap #{round(c * 100)}% reached",
+      else: "; #{label} up to #{round(c * 100)}%"
+  end
+
+  defp exempt_text(_pace, _utilization), do: ""
 
   defp used_vs_ceiling(pace, utilization),
     do: "#{quota_pct(utilization)}% used ≥ #{ceiling_text(pace)}"
 
   defp ceiling_text(%{mode: :paced, ceiling: c}), do: "paced ceiling #{round(c * 100)}%"
+
   defp ceiling_text(%{ceiling: c}), do: "ceiling #{round(c * 100)}%"
 
   @doc """

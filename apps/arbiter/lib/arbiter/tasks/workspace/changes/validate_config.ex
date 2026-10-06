@@ -1318,6 +1318,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   #   * threshold_mode ∈ {"flat","paced"} (bd-2daof2; default "flat")
   #   * paced_floor / weekly_paced_floor numbers in (0, 1] — the paced-mode
   #     head start on the 5h/session and 7d/weekly windows
+  #   * pace_exempt_threshold / weekly_pace_exempt_threshold numbers in (0, 1] —
+  #     the dedicated cap of the P0 pace exemption on the 5h and 7d windows
+  #     (bd-6bxv7h; tighten-only against the account's)
+  #   * pace_exempt_priority an integer 0..4, or "none" — narrows the account's
   # `window_seconds` is deliberately not a workspace key: window length belongs
   # to the provider account (see Arbiter.Quota.Gate.window_seconds/2).
   @valid_quota_modes ~w[throttle continue]
@@ -1390,6 +1394,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs -> validate_threshold_mode(cs, quota) end)
     |> then(fn cs -> validate_fraction(cs, quota, "paced_floor") end)
     |> then(fn cs -> validate_fraction(cs, quota, "weekly_paced_floor") end)
+    |> then(fn cs -> validate_fraction(cs, quota, "pace_exempt_threshold") end)
+    |> then(fn cs -> validate_fraction(cs, quota, "weekly_pace_exempt_threshold") end)
+    |> then(fn cs -> validate_pace_exempt_priority(cs, quota) end)
   end
 
   defp validate_quota(changeset, _) do
@@ -1414,6 +1421,34 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset,
       field: :config,
       message: "quota.#{key} must be a number in (0, 1]; got: #{inspect(got)}"
+    )
+  end
+
+  # `0..4` as an integer or its string form, or "none" (switch the exemption off
+  # for this workspace). The workspace can only narrow the account's value; the
+  # composition is `Arbiter.Quota.Gate.pace_exempt_priority/1`.
+  defp validate_pace_exempt_priority(changeset, quota) do
+    case Map.get(quota, "pace_exempt_priority") do
+      nil -> changeset
+      "none" -> changeset
+      p when is_integer(p) and p in 0..4 -> changeset
+      p when is_binary(p) -> validate_pace_exempt_priority_string(changeset, p)
+      other -> pace_exempt_priority_error(changeset, other)
+    end
+  end
+
+  defp validate_pace_exempt_priority_string(changeset, value) do
+    case Integer.parse(value) do
+      {n, ""} when n in 0..4 -> changeset
+      _ -> pace_exempt_priority_error(changeset, value)
+    end
+  end
+
+  defp pace_exempt_priority_error(changeset, got) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "quota.pace_exempt_priority must be an integer in 0..4 or \"none\"; got: #{inspect(got)}"
     )
   end
 

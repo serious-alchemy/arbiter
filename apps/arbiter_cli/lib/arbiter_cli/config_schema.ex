@@ -253,6 +253,15 @@ defmodule ArbiterCli.ConfigSchema do
                           `weekly_threshold` is the control. `hold` treats the
                           warning like a reject. A 7d `rejected` always holds
                           either way.
+      pace_exempt_priority  0–4 or "none" — narrows the account's P0 pace
+                          exemption (the account's `pace_exempt_priority`
+                          grants it; a workspace can only narrow it, never
+                          grant it). "none" switches it off here.
+      pace_exempt_threshold, weekly_pace_exempt_threshold
+                          number in (0, 1] — lowers the account's 5h / 7d
+                          exempt cap, the ceiling an exempt dispatch may lift
+                          the paced line to. Never raises it; never above the
+                          flat ceiling.
 
     conductor  (map)
       max_concurrent  positive integer — cap on concurrently-dispatched workers

@@ -90,8 +90,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   Which OS sandbox a jailed worker runs in (`docs/design/podman-worker-containers.md`
   §7.1): `:bwrap` (the default; `Arbiter.Worker.Jail`) or `:podman` (a rootless
-  container, implemented for Claude only: `Arbiter.Worker.ContainerSpawn`,
-  bd-d2o3xb). Every spawn path that jails goes through
+  container, implemented for Claude and Codex only: `Arbiter.Worker.ContainerSpawn`,
+  bd-d2o3xb, bd-50d5j6). Every spawn path that jails goes through
   `Arbiter.Worker.Sandbox`, which resolves the backend from this field.
   `:podman` for a provider or a spawn site with no wrap point is **refused**,
   not run unjailed.

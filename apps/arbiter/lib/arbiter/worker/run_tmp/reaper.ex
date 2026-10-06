@@ -13,6 +13,7 @@ defmodule Arbiter.Worker.RunTmp.Reaper do
 
   use GenServer
 
+  alias Arbiter.Agents.Codex.AuthSync
   alias Arbiter.Worker.RunTmp
 
   def start_link(opts \\ []),
@@ -38,8 +39,12 @@ defmodule Arbiter.Worker.RunTmp.Reaper do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{refs: refs} = state) do
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{refs: refs} = state) do
     {{_owner, dirs}, refs} = Map.pop(refs, ref, {nil, []})
+
+    # bd-50d5j6: a podman Codex run keeps a rotated auth.json in this dir; it is
+    # persisted to the operator's login before the dir goes (a no-op otherwise).
+    AuthSync.Reaper.flush(pid)
 
     # A raise here would restart the reaper and forget every live run's dir.
     Enum.each(dirs, fn dir ->
