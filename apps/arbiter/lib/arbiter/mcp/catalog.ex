@@ -300,7 +300,8 @@ defmodule Arbiter.MCP.Catalog do
       name: "workspace_show",
       tiers: @both,
       description:
-        "Show the scope's own workspace: config and the resolved worker security posture.",
+        "Show the scope's own workspace: config, the resolved worker security posture, and " <>
+          "the release `update` block (update_available, latest, current version).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.workspace_show/2
     },

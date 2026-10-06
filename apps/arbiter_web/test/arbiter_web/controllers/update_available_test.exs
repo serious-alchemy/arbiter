@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.UpdateAvailableTest do
   use ArbiterWeb.ConnCase, async: false
 
+  import Phoenix.LiveViewTest
+
   alias Arbiter.Release.UpdateCheck
 
   defp start_checker(body, running_version) do
@@ -65,5 +67,36 @@ defmodule ArbiterWeb.UpdateAvailableTest do
 
     doc = conn |> get(~p"/about") |> html_response(200) |> LazyHTML.from_fragment()
     assert LazyHTML.query(doc, "#update-available") |> Enum.count() == 0
+  end
+
+  describe "shared layout" do
+    test "the board shows the update notice", %{conn: conn} do
+      start_checker(%{"tag_name" => "v99.0.0", "html_url" => "https://example.test/r"}, "0.2.0")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert has_element?(view, "#update-available")
+      assert has_element?(view, "#update-release-link[href='https://example.test/r']")
+      assert has_element?(view, "#update-deploy-command", "arb server deploy")
+    end
+
+    test "another LiveView page shows the update notice too", %{conn: conn} do
+      start_checker(%{"tag_name" => "v99.0.0"}, "0.2.0")
+
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      assert has_element?(view, "#update-available")
+    end
+
+    test "the board renders nothing extra when up to date", %{conn: conn} do
+      start_checker(%{"tag_name" => "v0.2.0"}, "0.2.0")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      refute has_element?(view, "#update-available")
+    end
+
+    test "the layout links to /about", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert has_element?(view, "#about-link[href='/about']")
+    end
   end
 end
