@@ -121,7 +121,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   @active_steps [:implementing, :in_review, :addressing_review, :fixing_ci, :resolving_conflict]
 
   @ci_pending [:running, :pending, :not_started]
-  @hard_blocks [:conflict, :ci_failed, :draft]
+  @hard_blocks [:conflict, :ci_failed, :ci_cancelled, :draft]
 
   # Dispatch moves a ticket to :active before its run registers (worktree
   # provisioning, fetch). Below this age a workerless :active ticket is still

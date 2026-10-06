@@ -1821,6 +1821,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "CI checks are failing"
 
+  defp block_label(:ci_cancelled),
+    do: "CI infrastructure: checks were cancelled, not failed"
+
   defp block_label(:ci_failed_external),
     do:
       "CI checks are failing for reasons outside this branch " <>
@@ -1852,6 +1855,15 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp block_remediation(:ci_failed, _auto_merge?),
     do: "fix the failing checks (or re-run flaky ones), then re-push."
+
+  # Nothing in the diff failed, so a fix round cannot help (#360): the fleet
+  # re-ran the cancelled checks with backoff and they were cancelled again.
+  defp block_remediation(:ci_cancelled, _auto_merge?),
+    do:
+      "no check failed — they were cancelled (a superseded duplicate run, or a CI " <>
+        "provider incident), so no code change will clear this and no fix round was " <>
+        "dispatched. Check the provider's status, then re-run the cancelled checks " <>
+        "(`ci_rerun`) or push an empty commit."
 
   # Pointedly different advice from `:ci_failed`: pushing a fix to *this* branch
   # cannot clear a failure that isn't this branch's fault, and re-running only

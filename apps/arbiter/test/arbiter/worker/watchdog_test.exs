@@ -854,6 +854,36 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert length(reruns("!flk3")) == 1
     end
 
+    # #360: a cancelled pipeline is infrastructure — re-run it with backoff, never
+    # dispatch a fix round, then escalate once as CI infrastructure.
+    defp cancelled(head),
+      do: %{
+        status: :open,
+        approved: true,
+        block_reason: :ci_cancelled,
+        pipeline: :canceled,
+        head_sha: head
+      }
+
+    test "a cancelled pipeline re-runs up to the cap, never a fix pass, then parks as :ci_cancelled" do
+      StubMerger.queue_get("!can1", [cancelled("h1")])
+
+      {wpid, _task_id} = flake_watchdog("!can1")
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_cancelled end)
+      assert length(reruns("!can1")) == 2
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "a real failure alongside the same harness still dispatches a fix pass" do
+      StubMerger.set_failing_checks("!can2", [%{name: "mix test", summary: "boom", files: []}])
+      StubMerger.queue_get("!can2", [red("h1")])
+
+      flake_watchdog("!can2")
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+    end
+
     test "retry_auto_resolve/1 after a suspected-flake park dispatches the fix pass" do
       StubMerger.set_failing_checks("!flk4", failing_in(@drain))
       StubMerger.queue_get("!flk4", [red("h1"), pending("h1")])
