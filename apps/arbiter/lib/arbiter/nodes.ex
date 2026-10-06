@@ -46,6 +46,18 @@ defmodule Arbiter.Nodes do
 
   @type enrolled :: %{node: Node.t(), credential: String.t()}
 
+  # The characters the join script accepts in a node name. A name outside this
+  # set would be spent at enroll and then rejected on the node, so it is
+  # refused up front: at mint, at enroll and at edit.
+  @name_pattern ~r/\A[A-Za-z0-9._=:\/@-]{1,128}\z/
+
+  @doc "Whether `name` is a well-formed node name (`A-Za-z0-9._=:/@-`, 1-128 chars)."
+  @spec valid_name?(term()) :: boolean()
+  def valid_name?(name), do: is_binary(name) and Regex.match?(@name_pattern, name)
+
+  defp name_ok?(nil), do: true
+  defp name_ok?(name), do: valid_name?(name)
+
   # ---- join tokens -------------------------------------------------------
 
   @doc """
@@ -61,30 +73,39 @@ defmodule Arbiter.Nodes do
   def mint_join_token(opts \\ [], actor) do
     ttl = Keyword.get(opts, :ttl_seconds, default_ttl_seconds())
 
-    if is_integer(ttl) and ttl > 0 and ttl <= @max_ttl_seconds do
-      {secret, hash} = Credentials.generate_join_token()
-      label = Actor.resolve_label(actor)
-      now = Keyword.get(opts, :now, DateTime.utc_now())
+    cond do
+      not name_ok?(Keyword.get(opts, :name)) ->
+        {:error, :invalid_name}
 
-      attrs = %{
-        token_hash: hash,
-        expires_at: DateTime.add(now, ttl, :second),
-        name: Keyword.get(opts, :name),
-        labels: Keyword.get(opts, :labels, []),
-        max_workers: Keyword.get(opts, :max_workers),
-        created_by: label
-      }
+      is_integer(ttl) and ttl > 0 and ttl <= @max_ttl_seconds ->
+        do_mint(opts, ttl, actor)
 
-      with {:ok, row} <- Ash.create(JoinToken, attrs, action: :mint) do
-        record(:token_minted, nil, label, %{
-          "join_token_id" => row.id,
-          "expires_at" => DateTime.to_iso8601(row.expires_at)
-        })
+      true ->
+        {:error, :invalid_ttl}
+    end
+  end
 
-        {:ok, %{token: secret, join_token: row}}
-      end
-    else
-      {:error, :invalid_ttl}
+  defp do_mint(opts, ttl, actor) do
+    {secret, hash} = Credentials.generate_join_token()
+    label = Actor.resolve_label(actor)
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    attrs = %{
+      token_hash: hash,
+      expires_at: DateTime.add(now, ttl, :second),
+      name: Keyword.get(opts, :name),
+      labels: Keyword.get(opts, :labels, []),
+      max_workers: Keyword.get(opts, :max_workers),
+      created_by: label
+    }
+
+    with {:ok, row} <- Ash.create(JoinToken, attrs, action: :mint) do
+      record(:token_minted, nil, label, %{
+        "join_token_id" => row.id,
+        "expires_at" => DateTime.to_iso8601(row.expires_at)
+      })
+
+      {:ok, %{token: secret, join_token: row}}
     end
   end
 
@@ -96,10 +117,11 @@ defmodule Arbiter.Nodes do
   Returns `{:ok, %{node: node, credential: "arbn_…"}}` — the credential is
   shown once — or `{:error, :invalid_token}` for an unknown, expired, used or
   malformed token (one error, so a caller can answer one generic 401), or
-  `{:error, :name_taken}`, which does not consume the token.
+  `{:error, :name_taken}` / `{:error, :invalid_name}`, which do not consume the
+  token.
   """
   @spec redeem_join_token(term(), map(), keyword()) ::
-          {:ok, enrolled()} | {:error, :invalid_token | :name_taken | term()}
+          {:ok, enrolled()} | {:error, :invalid_token | :name_taken | :invalid_name | term()}
   def redeem_join_token(secret, attrs \\ %{}, opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     hint = Keyword.get(opts, :remote_addr_hint)
@@ -120,6 +142,7 @@ defmodule Arbiter.Nodes do
            find_join_token(Credentials.hash(secret)) || {:error, :invalid_token},
          node_id = Ash.UUIDv7.generate(),
          name = bound_name(token, attrs, node_id),
+         :ok <- ensure_name_valid(name),
          :ok <- ensure_name_free(name),
          :ok <- claim(token, node_id, now) do
       enroll(token, node_id, name, attrs, now, hint)
@@ -215,6 +238,10 @@ defmodule Arbiter.Nodes do
   end
 
   defp attr(attrs, key), do: Map.get(attrs, key, Map.get(attrs, Atom.to_string(key)))
+
+  # Before the claim: a name the node script would reject must not spend the token.
+  defp ensure_name_valid(name),
+    do: if(valid_name?(name), do: :ok, else: {:error, :invalid_name})
 
   defp ensure_name_free(name) do
     case Node |> Ash.Query.filter(name == ^name) |> Ash.read_one!() do
@@ -354,7 +381,8 @@ defmodule Arbiter.Nodes do
   Writes an `updated` event naming the fields that actually changed.
   """
   @spec update_node(Node.t(), map(), Actor.t() | String.t() | nil) ::
-          {:ok, Node.t()} | {:error, :revoked | :name_taken | :not_found | term()}
+          {:ok, Node.t()}
+          | {:error, :revoked | :name_taken | :invalid_name | :not_found | term()}
   def update_node(%Node{id: id}, changes, actor) do
     case get_node(id) do
       nil ->
@@ -369,10 +397,10 @@ defmodule Arbiter.Nodes do
 
         delta = Map.reject(wanted, fn {k, v} -> Map.get(node, k) == v end)
 
-        if delta == %{} do
-          {:ok, node}
-        else
-          apply_set(node, delta, actor)
+        cond do
+          not name_ok?(Map.get(delta, :name)) -> {:error, :invalid_name}
+          delta == %{} -> {:ok, node}
+          true -> apply_set(node, delta, actor)
         end
     end
   end

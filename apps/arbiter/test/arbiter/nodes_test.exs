@@ -58,6 +58,15 @@ defmodule Arbiter.NodesTest do
       assert is_nil(event.node_id)
     end
 
+    test "refuses a name the join script would reject, minting nothing" do
+      for bad <- ["gpu box", "caf\u00e9", "a\nb", "q\"uote", String.duplicate("a", 129), ""] do
+        assert {:error, :invalid_name} = Nodes.mint_join_token([name: bad], @operator)
+      end
+
+      assert {:ok, _} = Nodes.mint_join_token([name: "gpu-box.1:a=b/c@d"], @operator)
+      assert Nodes.events(kind: :token_minted) |> length() == 1
+    end
+
     test "the minting secret never lands in an event" do
       {token, _} = mint!()
 
@@ -148,6 +157,14 @@ defmodule Arbiter.NodesTest do
       {token, _} = mint!()
 
       assert {:error, :name_taken} = Nodes.redeem_join_token(token, %{name: "taken"})
+      assert {:ok, %{node: %{name: "fresh"}}} = Nodes.redeem_join_token(token, %{name: "fresh"})
+    end
+
+    test "an invalid joiner-supplied name is refused without burning the token" do
+      {token, _} = mint!()
+
+      assert {:error, :invalid_name} = Nodes.redeem_join_token(token, %{name: "gpu box"})
+      assert Nodes.list_nodes() == []
       assert {:ok, %{node: %{name: "fresh"}}} = Nodes.redeem_join_token(token, %{name: "fresh"})
     end
 

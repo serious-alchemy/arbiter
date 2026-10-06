@@ -37,6 +37,14 @@ defmodule Arbiter.Nodes.UpdateTest do
                Nodes.update_node(Nodes.get_node(node.id), %{name: "b"}, @operator)
     end
 
+    test "refuses a name outside the join script's character set" do
+      node = enroll!()
+
+      for bad <- ["gpu box", "caf\u00e9", "a\nb", ""] do
+        assert {:error, :invalid_name} = Nodes.update_node(node, %{name: bad}, @operator)
+      end
+    end
+
     test "max_workers: nil clears the cap; zero is refused" do
       node = enroll!()
       {:ok, node} = Nodes.update_node(node, %{max_workers: 2}, @operator)

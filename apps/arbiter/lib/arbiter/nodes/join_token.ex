@@ -40,7 +40,10 @@ defmodule Arbiter.Nodes.JoinToken do
       public? true
     end
 
-    attribute :name, :string, public?: true
+    attribute :name, :string do
+      public? true
+      constraints min_length: 1, max_length: 128, match: ~r/\A[A-Za-z0-9._=:\/@-]+\z/
+    end
 
     attribute :labels, {:array, :string} do
       allow_nil? false

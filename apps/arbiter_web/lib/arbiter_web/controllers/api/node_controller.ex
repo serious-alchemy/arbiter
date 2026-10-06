@@ -24,6 +24,8 @@ defmodule ArbiterWeb.Api.NodeController do
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
+  @name_message "name may only contain A-Za-z0-9._=:/@- and be 1-128 characters"
+
   def create_join_token(conn, params) do
     with {:ok, url} <- public_url(),
          {:ok, opts} <- mint_opts(params),
@@ -40,6 +42,7 @@ defmodule ArbiterWeb.Api.NodeController do
       })
     else
       {:error, :invalid_ttl} -> unprocessable(conn, "ttl_seconds must be between 1 and 86400")
+      {:error, :invalid_name} -> unprocessable(conn, @name_message)
       {:error, {:rate_limited, seconds}} -> rate_limited(conn, seconds)
       {:error, {:unprocessable, message}} -> unprocessable(conn, message)
       {:error, other} -> {:error, other}
@@ -69,6 +72,7 @@ defmodule ArbiterWeb.Api.NodeController do
          {:ok, updated} <- Nodes.update_node(node, changes, nil) do
       json(conn, %{node: NodeJSON.node(updated)})
     else
+      {:error, :invalid_name} -> unprocessable(conn, @name_message)
       {:error, :name_taken} -> {:error, {:conflict, "a node with that name already exists"}}
       {:error, :revoked} -> {:error, {:conflict, "the node is revoked and cannot be edited"}}
       {:error, {:unprocessable, message}} -> unprocessable(conn, message)
@@ -124,8 +128,13 @@ defmodule ArbiterWeb.Api.NodeController do
     end)
   end
 
-  defp check("name", v, acc) when is_binary(v) and v != "",
-    do: {:cont, {:ok, Map.put(acc, :name, String.trim(v))}}
+  defp check("name", v, acc) when is_binary(v) do
+    name = String.trim(v)
+
+    if Nodes.valid_name?(name),
+      do: {:cont, {:ok, Map.put(acc, :name, name)}},
+      else: {:halt, {:error, {:unprocessable, @name_message}}}
+  end
 
   defp check("labels", v, acc) when is_list(v) do
     if Enum.all?(v, &is_binary/1),

@@ -391,6 +391,7 @@ enroll() {
     200) ;;
     401) die "the primary refused the join token (unknown, expired or already used); create a new one" ;;
     409) die "a node with that name already exists; pick another ARB_NODE_NAME, or remove the old node on the primary" ;;
+    422) die "the primary refused the node name (allowed: A-Za-z0-9._=:/@-, up to 128 characters); the token was not used" ;;
     429) die "the primary is rate limiting enrolment; wait a minute and retry with a fresh token" ;;
     503) die "the primary cannot serve an agent build yet (the token was not used)" ;;
     *) die "enrolment failed (HTTP ${code:-none})" ;;

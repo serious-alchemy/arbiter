@@ -37,6 +37,15 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
   end
 
   describe "POST /api/nodes/join-tokens" do
+    test "a name outside the join script's character set is a 422 and mints nothing" do
+      for bad <- ["gpu box", "caf\u00e9", "a\nb"] do
+        conn = post(operator_conn(), "/api/nodes/join-tokens", %{name: bad})
+        assert conn.status == 422
+      end
+
+      assert Nodes.events(kind: :token_minted) == []
+    end
+
     test "an operator mints a token and gets the one-liner separately" do
       conn = post(operator_conn(), "/api/nodes/join-tokens", %{name: "box-1", max_workers: 2})
       body = json_response(conn, 201)
@@ -173,6 +182,8 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert patch(operator_conn(), "/api/nodes/alpha", %{name: "beta"}).status == 409
       assert patch(operator_conn(), "/api/nodes/ghost", %{max_workers: 1}).status == 404
       assert patch(operator_conn(), "/api/nodes/alpha", %{labels: "nope"}).status == 422
+      assert patch(operator_conn(), "/api/nodes/alpha", %{name: "gpu box"}).status == 422
+      assert Nodes.find_node("alpha")
     end
 
     test "a revoked node is not editable (409)" do

@@ -107,6 +107,9 @@ defmodule ArbiterWeb.NodeController do
 
       {:error, :name_taken} ->
         error(conn, 409, "A node with that name already exists")
+
+      {:error, :invalid_name} ->
+        error(conn, 422, "The node name may only contain A-Za-z0-9._=:/@- (1-128 characters)")
     end
   end
 

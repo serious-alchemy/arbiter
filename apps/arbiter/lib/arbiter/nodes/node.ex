@@ -90,7 +90,7 @@ defmodule Arbiter.Nodes.Node do
     attribute :name, :string do
       allow_nil? false
       public? true
-      constraints min_length: 1, max_length: 128
+      constraints min_length: 1, max_length: 128, match: ~r/\A[A-Za-z0-9._=:\/@-]+\z/
     end
 
     attribute :status, :atom do

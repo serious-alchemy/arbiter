@@ -171,6 +171,13 @@ defmodule ArbiterWeb.NodeJoinTest do
       assert enroll(token, extra: %{"name" => "other"}).status == 200
     end
 
+    test "an invalid joiner-supplied name is a 422 and does not spend the token" do
+      token = mint()
+      assert enroll(token, extra: %{"name" => "gpu box"}).status == 422
+      assert Nodes.list_nodes() == []
+      assert enroll(token, extra: %{"name" => "gpu-box"}).status == 200
+    end
+
     test "with no agent build to serve it refuses and does not spend the token",
          %{tmp_dir: home} do
       File.rm!(Path.join(home, "current"))
