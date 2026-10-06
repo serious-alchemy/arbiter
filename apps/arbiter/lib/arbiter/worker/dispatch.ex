@@ -3502,11 +3502,11 @@ defmodule Arbiter.Worker.Dispatch do
   defp guardrail_need(:egress_unenforceable, policy),
     do: "network egress confinement (egress: #{SecurityPolicy.egress(policy)})"
 
-  # bd-d2o3xb (P7): `sandbox.backend: podman` has a wrap point for Claude only,
-  # so under it the pool is Claude or nothing. An explicit `--provider` that is
-  # not Claude is refused; automatic routing falls to Claude when it is in the
-  # pool. Anything else would run unsandboxed under a backend the operator
-  # chose precisely so that it would not.
+  # bd-d2o3xb (P7), bd-50d5j6 (P8): `sandbox.backend: podman` has a wrap point
+  # for Claude and Codex only, so under it the pool is those two or nothing. An
+  # explicit `--provider` with no wrap point is refused; automatic routing falls
+  # to Claude when it is in the pool. Anything else would run unsandboxed under
+  # a backend the operator chose precisely so that it would not.
   defp sandbox_checked_provider(preferred, policy, pool, opts) do
     case Sandbox.module(policy, preferred) do
       {:ok, _sandbox} ->
@@ -3521,7 +3521,9 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp sandbox_pool(policy, pool) do
-    if ContainerSpawn.podman?(policy), do: Enum.filter(pool, &(&1 == :claude)), else: pool
+    if ContainerSpawn.podman?(policy),
+      do: Enum.filter(pool, &match?({:ok, _}, Sandbox.module(policy, &1))),
+      else: pool
   end
 
   # Why no provider was eligible: the sandbox/strict gate (`:ineligible`), or a

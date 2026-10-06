@@ -133,6 +133,25 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert :ok = Shortcut.transition(@ref, :closed)
     end
 
+    test "a story already on the closed state is a silent no-op" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
+
+          {"PUT", _} ->
+            flunk("must not rewrite the state the story is already in")
+        end
+      end)
+
+      assert :ok = Shortcut.transition(@ref, :closed)
+    end
+
     test "a close is declined when the story is already past the closed state" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
@@ -140,14 +159,69 @@ defmodule Arbiter.Trackers.ShortcutTest do
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
 
           {"GET", "/api/v3/stories/" <> _} ->
-            # Already in Done (502): the closed target itself.
+            # In Done (502), past the intermediate closed target (501).
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
         end
       end)
 
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{"closed" => "In Progress"}
+      })
+
       assert {:error, %Error{kind: :upstream_past_target}} = Shortcut.transition(@ref, :closed)
+    end
+
+    test "a non-close event is guarded too: a story past In Progress is not moved back" do
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{"in_progress" => "In Progress"}
+      })
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            # Already in Done (502), past In Progress (501).
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
+        end
+      end)
+
+      assert {:error, %Error{kind: :upstream_past_target}} =
+               Shortcut.transition(@ref, :in_progress)
+    end
+
+    test "a story in another workflow at an equal state type is declined, not moved across" do
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{"in_progress" => "In Progress"}
+      })
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            # Design's "Some Unmapped State" (601, started) vs Engineering's
+            # "In Progress" (501, started): equal rank, positions incomparable.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 601})
+
+          {"PUT", _} ->
+            flunk("must not write a cross-workflow move")
+        end
+      end)
+
+      assert {:error, %Error{kind: :upstream_past_target}} =
+               Shortcut.transition(@ref, :in_progress)
     end
 
     test "a close the guard cannot place (story state in no workflow) proceeds" do
@@ -190,6 +264,13 @@ defmodule Arbiter.Trackers.ShortcutTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            # Current state unplaceable: the guard has nothing to compare, so
+            # the move proceeds.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => nil})
 
           {"PUT", "/api/v3/stories/" <> _} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)

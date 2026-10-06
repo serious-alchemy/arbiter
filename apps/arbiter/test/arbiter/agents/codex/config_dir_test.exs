@@ -319,6 +319,79 @@ defmodule Arbiter.Agents.Codex.ConfigDirTest do
     end
   end
 
+  describe "seed_run_home/2 (podman backend, bd-50d5j6)" do
+    alias Arbiter.Agents.SecurityPolicy
+
+    setup ctx do
+      %{run_home: Path.join(ctx.base, "run/codex-home")}
+    end
+
+    test "seeds a home of generated files and a COPY of auth.json", ctx do
+      assert {:ok, %{dir: dir, auth: {src, run}}} = ConfigDir.seed_run_home(ctx.run_home, [])
+
+      assert dir == ctx.run_home
+      assert src == Path.join(ctx.source, "auth.json")
+      assert run == Path.join(ctx.run_home, "auth.json")
+
+      # A regular file with the source's content: never a link to the real one.
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(run)
+      assert File.read!(run) == File.read!(src)
+
+      config = File.read!(Path.join(dir, "config.toml"))
+      assert config =~ ~s(model_provider = "ollama")
+      assert config =~ "[model_providers.ollama]"
+      refute config =~ "personality"
+      refute config =~ "mcp_servers"
+
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+      assert agents =~ "Arbiter Worker"
+      refute agents =~ "Darth"
+
+      # None of the operator's state or history.
+      refute File.exists?(Path.join(dir, "state_5.sqlite"))
+    end
+
+    test "the copy is independent of the source", ctx do
+      {:ok, %{auth: {src, run}}} = ConfigDir.seed_run_home(ctx.run_home, [])
+      File.write!(run, ~s({"tokens":{"refresh_token":"rotated"}}))
+      assert File.read!(src) == ~s({"tokens":{"refresh_token":"r1"}})
+    end
+
+    test "writes the deny baseline as execpolicy rules", ctx do
+      policy = SecurityPolicy.base()
+      assert {:ok, _} = ConfigDir.seed_run_home(ctx.run_home, security: policy)
+      assert File.regular?(Path.join(ctx.run_home, "rules/arbiter.rules"))
+    end
+
+    test "does not touch the per-worktree host home", ctx do
+      assert {:ok, _} = ConfigDir.seed_run_home(ctx.run_home, worktree_path: ctx.worktree)
+      refute File.exists?(ctx.root)
+    end
+
+    test "is not gated on the worker_isolate_config switch", ctx do
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      assert {:ok, %{auth: {_, _}}} = ConfigDir.seed_run_home(ctx.run_home, [])
+    end
+
+    test "a source with no login (keyless backend) seeds no auth.json", ctx do
+      File.rm!(Path.join(ctx.source, "auth.json"))
+      assert {:ok, %{auth: nil}} = ConfigDir.seed_run_home(ctx.run_home, [])
+      refute File.exists?(Path.join(ctx.run_home, "auth.json"))
+    end
+
+    test "honours an explicit :source_home", ctx do
+      other = Path.join(ctx.base, "other")
+      File.mkdir_p!(other)
+      File.write!(Path.join(other, "auth.json"), ~s({"tokens":{"refresh_token":"other"}}))
+
+      assert {:ok, %{auth: {src, run}}} =
+               ConfigDir.seed_run_home(ctx.run_home, source_home: other)
+
+      assert src == Path.join(other, "auth.json")
+      assert File.read!(run) =~ "other"
+    end
+  end
+
   describe "writable_paths/1" do
     test "binds the worker home and the real auth.json the link resolves to", ctx do
       {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)

@@ -129,41 +129,59 @@ defmodule Arbiter.Trackers.Linear do
          team_id = get_in(raw_issue, ["team", "id"]),
          {:ok, states} <- fetch_team_states(cfg, team_id),
          {:ok, state_id} <- resolve_state_id(cfg, states, status),
-         :ok <- guard_close(raw_issue, states, status, state_id) do
-      vars = %{"id" => raw_issue["id"], "stateId" => state_id}
+         guard <- guard_forward(raw_issue, states, status, state_id) do
+      case guard do
+        :ok ->
+          vars = %{"id" => raw_issue["id"], "stateId" => state_id}
 
-      graphql(cfg, update_issue_mutation(), vars)
-      |> extract_success(["issueUpdate"])
+          graphql(cfg, update_issue_mutation(), vars)
+          |> extract_success(["issueUpdate"])
+
+        :noop ->
+          :ok
+
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
-  # A close must never move an issue backwards (bd-4i7kky): `closed` can map to
+  # A forward transition must never move an issue backwards (bd-4i7kky for
+  # `:closed`, every lifecycle event since bd-30ukqo): a status can map to
   # an intermediate state, and an issue already further along the team's
   # workflow — a later `started` state, or any `completed`/`cancelled` one when
   # the target is not — is left where it is. Linear orders states by `type`
   # (backlog < unstarted < started < completed/cancelled) then `position`.
   # An issue whose current state can't be placed is closed as before.
-  defp guard_close(raw_issue, states, :closed, target_id) do
+  #
+  # `:open` is exempt (the deliberate `:requeue` / `:reopen` reset, bd-36ytcl),
+  # and an issue already exactly on the target is `:noop` — nothing declined.
+  defp guard_forward(_raw_issue, _states, :open, _target_id), do: :ok
+
+  defp guard_forward(raw_issue, states, status, target_id) do
     current_id = get_in(raw_issue, ["state", "id"])
     current = Enum.find(states, &(&1["id"] == current_id))
     target = Enum.find(states, &(&1["id"] == target_id))
 
-    if current && target && state_at_or_past?(current, target) do
-      {:error,
-       %Error{
-         kind: :upstream_past_target,
-         status: nil,
-         message:
-           "#{raw_issue["identifier"]} is in #{inspect(current["name"])}, already at or past " <>
-             "the closed-mapped state #{inspect(target["name"])} — leaving it where it is",
-         raw: nil
-       }}
-    else
-      :ok
+    cond do
+      current_id == target_id ->
+        :noop
+
+      current && target && state_at_or_past?(current, target) ->
+        {:error,
+         %Error{
+           kind: :upstream_past_target,
+           status: nil,
+           message:
+             "#{raw_issue["identifier"]} is in #{inspect(current["name"])}, already at or past " <>
+               "the #{status}-mapped state #{inspect(target["name"])} — leaving it where it is",
+           raw: nil
+         }}
+
+      true ->
+        :ok
     end
   end
-
-  defp guard_close(_raw_issue, _states, _status, _target_id), do: :ok
 
   @state_type_rank %{
     "backlog" => 0,

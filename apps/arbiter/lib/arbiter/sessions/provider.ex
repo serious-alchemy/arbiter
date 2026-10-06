@@ -45,6 +45,30 @@ defmodule Arbiter.Sessions.Provider do
   """
   @callback config_dir?() :: boolean()
 
+  @doc "The launch form's label for this provider."
+  @callback label() :: String.t()
+
+  @doc """
+  The `Arbiter.Accounts.ProviderAccount` provider the launch form requires an
+  account for (`:claude`, `:antigravity`, …). Omitted: no account is required.
+  """
+  @callback account_provider() :: atom()
+
+  @doc """
+  The CLI the pane `exec`s, looked up on `PATH` by the launch form
+  (`Arbiter.Sessions.LaunchProviders`). Omitted: no host check.
+  """
+  @callback executable() :: String.t()
+
+  @doc """
+  The `Arbiter.Agents` adapter whose credential health (`AuthHold`,
+  `CredentialWatchdog`) and write confinement cover this provider. Omitted:
+  no health or confinement check.
+  """
+  @callback agent_adapter() :: module()
+
+  @optional_callbacks label: 0, account_provider: 0, executable: 0, agent_adapter: 0
+
   @fallback_shell "/bin/sh"
 
   @doc "The adapter module for a session's provider."
