@@ -6482,7 +6482,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "maps a handler not-found into a tool error (not a JSON-RPC error)", ctx do
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(ctx.coordinator, "ticket_show", %{"id" => "bd-does-not-exist"})
 
       assert message =~ "not found"

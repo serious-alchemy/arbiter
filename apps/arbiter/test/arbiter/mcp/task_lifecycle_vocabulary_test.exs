@@ -152,10 +152,10 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
     end
 
     test "rejects an unknown state or column", ctx do
-      assert {:tool_error, "`state` must be one of" <> _} =
+      assert {:tool_error, "`state` must be one of" <> _, _type} =
                Catalog.call(ctx.coordinator, "ticket_list", %{"state" => "in_progress"})
 
-      assert {:tool_error, "`column` must be one of" <> _} =
+      assert {:tool_error, "`column` must be one of" <> _, _type} =
                Catalog.call(ctx.coordinator, "ticket_list", %{"column" => "waiting"})
     end
   end

@@ -1126,9 +1126,9 @@ defmodule Arbiter.Worker.Dispatch do
   @spec refusal_kind(term()) :: Arbiter.Errors.kind()
   def refusal_kind(reason) when is_tuple(reason), do: reason |> elem(0) |> refusal_kind()
   def refusal_kind(:task_not_found), do: :not_found
+
   def refusal_kind(reason) when reason in [:pending_migrations, :migrations_check_failed],
     do: :busy
-
 
   def refusal_kind(reason)
       when reason in [:no_repo_configured, :repo_not_found, :ambiguous_repo, :repo_unknown],

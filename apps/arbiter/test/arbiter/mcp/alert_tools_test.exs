@@ -43,7 +43,7 @@ defmodule Arbiter.MCP.AlertToolsTest do
              Catalog.call(@coordinator, "alert_list", %{"kind" => "overage_alert"})
 
     assert id == b.id
-    assert {:tool_error, _} = Catalog.call(@coordinator, "alert_list", %{"kind" => "nope"})
+    assert {:tool_error, _, _type} = Catalog.call(@coordinator, "alert_list", %{"kind" => "nope"})
   end
 
   test "is coordinator-only" do

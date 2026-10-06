@@ -141,7 +141,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
     test "a stale candidate is refused with the reasons", ctx do
       candidate!("sess-1", "proj.md", "project", "See lib/short.ex:100.", workspace_id: ctx.ws.id)
 
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(@coordinator, "memory_pending_apply", %{"id" => "sess-1/proj.md"})
 
       assert message =~ "lib/short.ex:100"
@@ -151,7 +151,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
       candidate!("sess-1", "habit.md", "feedback", "Prefer small PRs.")
       File.write!(Path.join(ctx.memory_root, "habit.md"), "old\n")
 
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(@coordinator, "memory_pending_apply", %{"id" => "sess-1/habit.md"})
 
       assert message =~ "overwrite"
@@ -166,7 +166,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
     test "rejects with a reason, and a missing reason is a usable error", _ctx do
       candidate!("sess-1", "habit.md", "feedback", "Prefer small PRs.")
 
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(@coordinator, "memory_pending_reject", %{"id" => "sess-1/habit.md"})
 
       assert message =~ "reason"
@@ -189,7 +189,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
 
       assert reason =~ "lib/short.ex:99"
 
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(@coordinator, "memory_quarantine_restore", %{"name" => name})
 
       assert message =~ "lib/short.ex:99"
@@ -290,7 +290,8 @@ defmodule Arbiter.MCP.MemoryToolsTest do
         {:ok, "Not logged in · Please run /login", %{cost_usd: 0.0, is_error: true}}
       end)
 
-      assert {:tool_error, "the model call failed: Not logged in · Please run /login." <> _} =
+      assert {:tool_error, "the model call failed: Not logged in · Please run /login." <> _,
+              _type} =
                Catalog.call(@coordinator, "memory_distill", %{"session_id" => @distill_sid})
     end
 
@@ -305,7 +306,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
       ]
 
       for {args, expected} <- refusals do
-        assert {:tool_error, message} = Catalog.call(@coordinator, "memory_distill", args)
+        assert {:tool_error, message, _type} = Catalog.call(@coordinator, "memory_distill", args)
         assert message =~ expected
       end
 
