@@ -581,9 +581,11 @@ defmodule Arbiter.Quota.Gate do
   the built-in table. Only Codex does, and it already flows through this
   function: `wham/usage` reports `limit_window_seconds`, stored as
   `session_window_minutes` / `weekly_window_minutes` and carried into the
-  snapshot as a `"<n>m"` label (step 2), with `CodexPlanWindows` as the
-  fallback for rows that report none. An account override keyed by that label
-  still wins.
+  snapshot as its named label (`5h` / `weekly` / `30d`) or, for a non-standard
+  length, a `"<n>m"` label (step 2), with `CodexPlanWindows` as the fallback
+  for rows that report none. A standard length is thus resolved by the
+  built-in table; only a non-standard one is a distinct reported length. An
+  account override keyed by that label still wins.
 
   No other provider is known to report a length. This is from the checked-in
   code and fixtures only — no live sample payload was captured, so treat each
