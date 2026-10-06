@@ -35,24 +35,32 @@ defmodule ArbiterWeb.Api.EventControllerTest do
   describe "GET /events — auth" do
     test "returns 401 when token is missing", %{conn: conn} do
       conn = get(conn, "/events")
-      assert json_response(conn, 401)["error"] == "unauthorized"
+
+      assert %{"type" => "unauthenticated", "message" => "unauthorized"} =
+               json_response(conn, 401)["error"]
     end
 
     test "returns 401 when token is blank", %{conn: conn} do
       conn = get(conn, "/events?token=")
-      assert json_response(conn, 401)["error"] == "unauthorized"
+
+      assert %{"type" => "unauthenticated", "message" => "unauthorized"} =
+               json_response(conn, 401)["error"]
     end
 
     test "returns 401 when token is invalid", %{conn: conn} do
       conn = get(conn, "/events?token=not-a-real-token")
-      assert json_response(conn, 401)["error"] == "unauthorized"
+
+      assert %{"type" => "unauthenticated", "message" => "unauthorized"} =
+               json_response(conn, 401)["error"]
     end
 
     test "returns 401 for a worker-tier token (only coordinator allowed)", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
       token = Scope.mint_worker(task, "test-repo")
       conn = get(conn, "/events?token=#{token}")
-      assert json_response(conn, 401)["error"] == "unauthorized"
+
+      assert %{"type" => "unauthenticated", "message" => "unauthorized"} =
+               json_response(conn, 401)["error"]
     end
   end
 
@@ -102,7 +110,8 @@ defmodule ArbiterWeb.Api.EventControllerTest do
         |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
         |> get("/events")
 
-      assert json_response(conn, 401)["error"] == "unauthorized"
+      assert %{"type" => "unauthenticated", "message" => "unauthorized"} =
+               json_response(conn, 401)["error"]
     end
 
     test "malformed Authorization header falls back to query token", %{ws: ws} do
@@ -183,20 +192,20 @@ defmodule ArbiterWeb.Api.EventControllerTest do
     test "returns 400 for an unknown topic name", %{conn: conn, token: token} do
       conn = get(conn, "/events?token=#{token}&subscribe=inbox,notarealthing")
       body = json_response(conn, 400)
-      assert body["error"] =~ "unknown topics"
-      assert body["error"] =~ "notarealthing"
+      assert body["error"]["message"] =~ "unknown topics"
+      assert body["error"]["message"] =~ "notarealthing"
     end
 
     test "returns 400 when all topics are unknown", %{conn: conn, token: token} do
       conn = get(conn, "/events?token=#{token}&subscribe=foo,bar")
       body = json_response(conn, 400)
-      assert body["error"] =~ "unknown topics"
+      assert body["error"]["message"] =~ "unknown topics"
     end
 
     test "returns 400 for a mixed valid/invalid subscribe list", %{conn: conn, token: token} do
       conn = get(conn, "/events?token=#{token}&subscribe=inbox,INVALID")
       body = json_response(conn, 400)
-      assert body["error"] =~ "INVALID"
+      assert body["error"]["message"] =~ "INVALID"
     end
   end
 
@@ -211,7 +220,7 @@ defmodule ArbiterWeb.Api.EventControllerTest do
          %{conn: conn, token: token} do
       conn = get(conn, "/events?token=#{token}&since=not-a-cursor")
       body = json_response(conn, 400)
-      assert body["error"] =~ "invalid since"
+      assert body["error"]["message"] =~ "invalid since"
     end
 
     test "enters the stream for a valid integer cursor", %{token: token} do

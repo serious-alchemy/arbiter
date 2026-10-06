@@ -29,6 +29,7 @@ defmodule ArbiterWeb.Plugs.NodeAuth do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
+  alias ArbiterWeb.ErrorResponse
 
   @message "Invalid node credential"
 
@@ -56,9 +57,6 @@ defmodule ArbiterWeb.Plugs.NodeAuth do
   end
 
   defp unauthorized(conn) do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(401, Jason.encode!(%{"error" => %{"message" => @message}}))
-    |> halt()
+    ErrorResponse.halt_with(conn, :unauthenticated, @message)
   end
 end
