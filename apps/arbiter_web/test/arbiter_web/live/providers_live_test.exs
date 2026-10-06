@@ -554,4 +554,25 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert has_element?(view, "#pause-toggle-codex", "Resume")
     end
   end
+
+  describe "stray PubSub messages (bd-5spvgy)" do
+    test "mailbox broadcasts and unrelated messages do not crash the page", %{conn: conn} do
+      {:ok, view, _html} = live_providers(conn)
+      pid = view.pid
+
+      message = %Arbiter.Messages.Message{
+        kind: :escalation,
+        from_ref: "system",
+        to_ref: "coordinator"
+      }
+
+      send(pid, {:new_message, message})
+      send(pid, {:message_read, message})
+      send(pid, :totally_unrelated)
+
+      _ = :sys.get_state(pid)
+      assert Process.alive?(pid)
+      assert render(view) =~ "Providers"
+    end
+  end
 end
