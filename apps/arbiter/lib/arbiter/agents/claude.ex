@@ -327,8 +327,15 @@ defmodule Arbiter.Agents.Claude do
     # both put `:workspace` on the adapter opts, so that account answers; a
     # bare adapter call (no workspace) takes the install-wide account
     # credential (P13, bd-9gqj8e — there is no legacy chain).
-    ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts)
+    #
+    # bd-9zi4ok: `KUBECONFIG=/dev/null` stops a bare `kubectl`/`helm`/`k9s`
+    # falling back to the operator's `~/.kube/config` (a cluster-admin grant).
+    # A worker that wants a cluster (a disposable kind/k3d one) still sets its
+    # own `KUBECONFIG`/`--kubeconfig` on the command, which wins over this.
+    ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts) ++ kube_env()
   end
+
+  defp kube_env, do: [{"KUBECONFIG", "/dev/null"}]
 
   defp api_key_env(opts) do
     case Keyword.get(opts, :api_key) || Config.resolve_api_key() do

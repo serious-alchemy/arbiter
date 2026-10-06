@@ -325,6 +325,12 @@ defmodule Arbiter.Agents.ClaudeTest do
     argv |> Enum.at(idx + 1) |> Jason.decode!()
   end
 
+  # bd-9zi4ok: every spawn_env also carries the KUBECONFIG redirect, asserted
+  # in `Arbiter.Worker.CredentialPathsTest`; drop it so the credential-focused
+  # exact-match assertions below stay about credentials.
+  defp spawn_env_sans_kube(opts),
+    do: Enum.reject(Claude.spawn_env(opts), &match?({"KUBECONFIG", _}, &1))
+
   describe "spawn_env/1 (key rotation)" do
     setup do
       # Isolate from any real CLAUDE_CODE_OAUTH_TOKEN set in the dev/CI shell
@@ -345,11 +351,11 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     test "returns just the explicit token unset when no api_key is configured (CLI uses ambient auth)" do
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert spawn_env_sans_kube([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "exports `ANTHROPIC_API_KEY` from `opts[:api_key]`" do
-      assert Claude.spawn_env(api_key: "literal-token") ==
+      assert spawn_env_sans_kube(api_key: "literal-token") ==
                [{"CLAUDE_CODE_OAUTH_TOKEN", false}, {"ANTHROPIC_API_KEY", "literal-token"}]
     end
 
@@ -366,18 +372,18 @@ defmodule Arbiter.Agents.ClaudeTest do
         "api_keys" => ["env:ARB_TEST_KEY_A", "env:ARB_TEST_KEY_B"]
       })
 
-      assert Claude.spawn_env([]) == [
+      assert spawn_env_sans_kube([]) == [
                {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "key-a"}
              ]
 
-      assert Claude.spawn_env([]) == [
+      assert spawn_env_sans_kube([]) == [
                {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "key-b"}
              ]
 
       # Wraps back to the first key on the next call.
-      assert Claude.spawn_env([]) == [
+      assert spawn_env_sans_kube([]) == [
                {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "key-a"}
              ]
@@ -399,7 +405,7 @@ defmodule Arbiter.Agents.ClaudeTest do
       end)
 
       # Config-dir isolation comes first; the API key composes on top.
-      assert Claude.spawn_env(api_key: "literal-token") == [
+      assert spawn_env_sans_kube(api_key: "literal-token") == [
                {"CLAUDE_CONFIG_DIR", target},
                {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "literal-token"}
@@ -407,11 +413,11 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     test "spawn_env ignores a stray `:anthropic_base_url` opt (proxy removed, bd-7cvh8z)" do
-      assert Claude.spawn_env(anthropic_base_url: "http://localhost/whatever") == [
+      assert spawn_env_sans_kube(anthropic_base_url: "http://localhost/whatever") == [
                {"CLAUDE_CODE_OAUTH_TOKEN", false}
              ]
 
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert spawn_env_sans_kube([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
   end
 
@@ -438,20 +444,20 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     test "emits an explicit unset when the OS env var is unset" do
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert spawn_env_sans_kube([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "a server env token is never exported: the pair stays an explicit unset" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
-      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert spawn_env_sans_kube([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert spawn_env_sans_kube(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      env = Claude.spawn_env([])
+      env = spawn_env_sans_kube([])
 
       refute List.keyfind(env, "ANTHROPIC_API_KEY", 0)
     end
@@ -459,7 +465,7 @@ defmodule Arbiter.Agents.ClaudeTest do
     test "composes alongside ANTHROPIC_API_KEY without disturbing it" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert Claude.spawn_env(api_key: "literal-token") == [
+      assert spawn_env_sans_kube(api_key: "literal-token") == [
                {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]

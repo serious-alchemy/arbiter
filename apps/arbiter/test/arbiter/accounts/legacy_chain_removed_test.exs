@@ -147,7 +147,10 @@ defmodule Arbiter.Accounts.LegacyChainRemovedTest do
       on_account(ws, "worker-account-token")
       {:ok, task} = Ash.create(Issue, %{title: "p13", workspace_id: ws.id})
 
-      assert Claude.spawn_env(workspace: ws) == [{@oauth_var, "worker-account-token"}]
+      assert Claude.spawn_env(workspace: ws) == [
+               {@oauth_var, "worker-account-token"},
+               {"KUBECONFIG", "/dev/null"}
+             ]
 
       {pairs, secrets} = WorkerEnv.resolve(task.id)
       assert pairs == [{@oauth_var, "worker-account-token"}]

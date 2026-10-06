@@ -50,6 +50,7 @@ defmodule Arbiter.Agents.Claude.Security do
   """
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.CredentialPaths
 
   @doc """
   The permission-mode argv fragment for a policy.
@@ -157,7 +158,7 @@ defmodule Arbiter.Agents.Claude.Security do
       "Read(**/secrets/**)",
       "Bash(cat .env:*)",
       "Bash(cat ~/.ssh:*)"
-    ]
+    ] ++ credential_path_rules()
   end
 
   # Writes to sensitive paths outside a worktree. Full out-of-worktree write
@@ -229,6 +230,23 @@ defmodule Arbiter.Agents.Claude.Security do
   end
 
   defp expand_category(_unknown), do: []
+
+  # bd-9zi4ok: the operator-home credential list shared with Jail.Hide. A
+  # permission-layer worker has no mount namespace, so deny the Read tool on
+  # each path plus the shell read-tools that would carry the same bytes
+  # (`kubectl --kubeconfig ~/.kube/config` included). Prefix matching is
+  # approximate, as everywhere in this module; the env-level `KUBECONFIG`
+  # redirect in `Claude.spawn_env/1` covers the bare-`kubectl` fallback.
+  @read_tools ~w(cat less more head tail grep cp base64 kubectl helm k9s)
+
+  defp credential_path_rules do
+    paths = CredentialPaths.dirs() ++ CredentialPaths.files()
+
+    Enum.map(CredentialPaths.dirs(), &"Read(~/#{&1}/**)") ++
+      Enum.map(CredentialPaths.files(), &"Read(~/#{&1})") ++
+      for(tool <- @read_tools, path <- paths, do: "Bash(#{tool} *~/#{path}*)") ++
+      for(tool <- @read_tools, do: "Bash(#{tool} *.kube/*)")
+  end
 
   # When the policy cuts network, deny the agent's network-egress tools.
   # (Permission-level: git/package-manager traffic isn't blocked here — that
