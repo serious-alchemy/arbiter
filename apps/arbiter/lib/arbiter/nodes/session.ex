@@ -34,7 +34,7 @@ defmodule Arbiter.Nodes.Session do
 
   `{:node_state, id, :online | :suspect}`, `{:node_connection, id, :up | :down}`,
   `{:node_draining, id, boolean}`, `{:node_lost, id, run_ids}` and — from
-  `Arbiter.Nodes.revoke/2` — `{:node_revoked, id}`.
+  `Arbiter.Nodes` — `{:node_revoked, id}` and `{:node_enrolled, id, join_token_id}`.
   """
 
   use GenServer, restart: :temporary

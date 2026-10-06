@@ -60,6 +60,18 @@ defmodule Arbiter.Nodes.OperatorTest do
     %{tag: tag, sha256: sha}
   end
 
+  describe "enrolment" do
+    test "broadcasts {:node_enrolled, id, join_token_id} on the nodes topic" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Nodes.topic())
+      {:ok, %{token: token, join_token: jt}} = Nodes.mint_join_token([name: "fresh"], @operator)
+      {:ok, %{node: node}} = Nodes.redeem_join_token(token)
+
+      assert_receive {:node_enrolled, id, jt_id}
+      assert id == node.id
+      assert jt_id == jt.id
+    end
+  end
+
   describe "the reserved name" do
     test "`local` names the primary, so no node may take it" do
       refute Nodes.valid_name?("local")

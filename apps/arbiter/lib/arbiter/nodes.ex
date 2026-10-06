@@ -225,6 +225,7 @@ defmodule Arbiter.Nodes do
           hint
         )
 
+        broadcast({:node_enrolled, node.id, token.id})
         {:ok, %{node: node, credential: cred.credential}}
 
       {:error, _} ->

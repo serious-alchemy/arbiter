@@ -8,6 +8,7 @@ defmodule ArbiterWeb.RunDetailLive do
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Nodes.Overview
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
@@ -35,6 +36,7 @@ defmodule ArbiterWeb.RunDetailLive do
       |> assign(:run, nil)
       |> assign(:workspace, nil)
       |> assign(:live_worker?, false)
+      |> assign(:node, nil)
       |> assign(:run_loaded?, false)
       |> assign(:run_error, nil)
 
@@ -55,6 +57,7 @@ defmodule ArbiterWeb.RunDetailLive do
      |> assign(:run, result.run)
      |> assign(:workspace, result.workspace)
      |> assign(:live_worker?, result.live_worker?)
+     |> assign(:node, result.node)
      |> assign(:run_loaded?, true)
      |> assign(:run_error, nil)}
   end
@@ -75,11 +78,12 @@ defmodule ArbiterWeb.RunDetailLive do
         %{
           run: run,
           workspace: lookup_workspace(run.workspace_id),
-          live_worker?: !is_nil(Worker.whereis(run.task_id))
+          live_worker?: !is_nil(Worker.whereis(run.task_id)),
+          node: Overview.node_for_run(run.id)
         }
 
       _ ->
-        %{run: nil, workspace: nil, live_worker?: false}
+        %{run: nil, workspace: nil, live_worker?: false, node: nil}
     end
   end
 
@@ -244,6 +248,22 @@ defmodule ArbiterWeb.RunDetailLive do
                   </span>
                 </div>
               </div>
+            </div>
+
+            <%!-- ── Node (remote runs) ──────────────────────────────── --%>
+            <div
+              :if={@node}
+              id="run-node"
+              class="flex items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
+            >
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-server-stack" size={14} />
+              Running on node
+              <.link
+                navigate={~p"/nodes/#{@node.id}"}
+                class="font-medium text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors"
+              >
+                {@node.name}
+              </.link>
             </div>
 
             <%!-- ── Live worker link ────────────────────────────────── --%>

@@ -192,7 +192,10 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
   describe "PATCH /api/nodes/local" do
     test "sets the primary's cap, 0 included, and audits it" do
       conn = patch(operator_conn(), "/api/nodes/local", %{max_workers: 0})
-      assert %{"node" => %{"name" => "local", "override" => 0, "max" => 0}} = json_response(conn, 200)
+
+      assert %{"node" => %{"name" => "local", "override" => 0, "max" => 0}} =
+               json_response(conn, 200)
+
       assert Arbiter.Settings.nodes_local_max_workers() == 0
       assert [%{detail: %{"node" => "local"}}] = Nodes.events(kind: :updated)
 

@@ -162,6 +162,12 @@ defmodule ArbiterWeb.Router do
       # health and cost per account.
       live("/providers", ProvidersLive)
 
+      # Remote worker nodes (RW7): the fleet with the primary as `local`, Add
+      # node, and one node's detail. `/nodes/join` and `/nodes/ping` are the
+      # node tier's own GETs, declared above and matched first.
+      live("/nodes", NodesLive, :index)
+      live("/nodes/:id", NodesLive, :show)
+
       # Install-wide settings (bd-3tnoi9): scheduler cap and autopilot, the
       # credential watchdog, theme, and a read-only About.
       live("/settings", SettingsLive)

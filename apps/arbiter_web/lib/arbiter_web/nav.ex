@@ -118,6 +118,7 @@ defmodule ArbiterWeb.Nav do
             badge: nil
           },
           %{label: "Providers", href: ~p"/providers", icon: "hero-key", badge: nil},
+          %{label: "Nodes", href: ~p"/nodes", icon: "hero-server-stack", badge: nil},
           %{
             label: cap_plural("skill"),
             href: ~p"/skills",
