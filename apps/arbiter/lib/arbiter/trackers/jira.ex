@@ -114,8 +114,10 @@ defmodule Arbiter.Trackers.Jira do
         {:ok, id} ->
           # Single-hop fast path: a live transition lands directly on the
           # target status (its `to` already equals the target).
-          with :ok <- guard_forward(cfg, ref, status, target_status, transitions) do
-            post_transition(cfg, ref, id)
+          case guard_forward(cfg, ref, status, target_status, transitions) do
+            :ok -> post_transition(cfg, ref, id)
+            :noop -> :ok
+            {:error, _} = err -> err
           end
 
         :none ->
@@ -143,14 +145,25 @@ defmodule Arbiter.Trackers.Jira do
   #
   # The target's category comes from the live transition's own `to` block; a
   # transition without one (never the case on real Jira) skips the guard.
+  #
+  # `:open` is exempt: it is the deliberate reset `:requeue` / `:reopen` push
+  # (bd-36ytcl), not a forward move. A ticket already exactly on the target
+  # returns `:noop` — nothing to write, nothing declined, so no notice.
+  defp guard_forward(_cfg, _ref, :open, _target_status, _transitions), do: :ok
+
   defp guard_forward(cfg, ref, status, target_status, transitions) do
     case target_category(transitions, target_status) do
       category when is_binary(category) and category != "done" ->
         with {:ok, current, current_category} <- current_status_info(cfg, ref) do
-          if may_proceed?(cfg, status, target_status, current, current_category) do
-            :ok
-          else
-            {:error, past_target_error(ref, status, current, target_status)}
+          cond do
+            current == target_status ->
+              :noop
+
+            may_proceed?(cfg, status, target_status, current, current_category) ->
+              :ok
+
+            true ->
+              {:error, past_target_error(ref, status, current, target_status)}
           end
         end
 
@@ -911,7 +924,8 @@ defmodule Arbiter.Trackers.Jira do
           # Jira tickets were already Done.
           :ok
 
-        not may_proceed?(cfg, status, target_status, current_status, current_category) ->
+        status != :open and
+            not may_proceed?(cfg, status, target_status, current_status, current_category) ->
           # A route in the graph from here is not proof the ticket is still
           # short of the target — with a rework edge it can lead backwards
           # (bd-4i7kky). Same rule as the single-hop fast path.

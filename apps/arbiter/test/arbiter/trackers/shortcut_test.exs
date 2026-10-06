@@ -133,6 +133,25 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert :ok = Shortcut.transition(@ref, :closed)
     end
 
+    test "a story already on the closed state is a silent no-op" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
+
+          {"PUT", _} ->
+            flunk("must not rewrite the state the story is already in")
+        end
+      end)
+
+      assert :ok = Shortcut.transition(@ref, :closed)
+    end
+
     test "a close is declined when the story is already past the closed state" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
@@ -140,12 +159,17 @@ defmodule Arbiter.Trackers.ShortcutTest do
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
 
           {"GET", "/api/v3/stories/" <> _} ->
-            # Already in Done (502): the closed target itself.
+            # In Done (502), past the intermediate closed target (501).
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
         end
       end)
+
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{"closed" => "In Progress"}
+      })
 
       assert {:error, %Error{kind: :upstream_past_target}} = Shortcut.transition(@ref, :closed)
     end

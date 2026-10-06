@@ -531,6 +531,30 @@ defmodule Arbiter.Trackers.LinearTest do
       refute_received {:wrote, _}
     end
 
+    test ":open (requeue/reopen) deliberately moves a started or done issue back" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"open" => "Todo"}
+      })
+
+      stub_linear("s-done")
+
+      assert :ok = Linear.transition("ENG-1", :open)
+      assert_received {:wrote, %{"stateId" => "s-todo"}}
+    end
+
+    test "an issue already exactly on the target is a silent no-op" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"in_progress" => "In Progress"}
+      })
+
+      stub_linear("s-prog")
+
+      assert :ok = Linear.transition("ENG-1", :in_progress)
+      refute_received {:wrote, _}
+    end
+
     test "a non-close event still moves an issue that is genuinely earlier" do
       Config.put_active(%{
         "credentials_ref" => "test-token",

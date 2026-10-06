@@ -247,14 +247,44 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
       assert [{:jira_transition, %{"transition" => %{"id" => "100"}}} | _] = writes()
     end
 
-    test "an :open push does not drag an In Progress ticket back to To Do" do
+    test "an :open push (requeue) deliberately moves an In Progress ticket back to To Do" do
       ws = jira_ws(%{})
       issue = issue(ws, :jira, @jira_ref)
 
       stub_jira({"In Progress", "indeterminate"}, [{"To Do", "new"}])
 
       assert :ok = Sync.lifecycle(issue, :open)
+      assert [{:jira_transition, %{"transition" => %{"id" => "100"}}} | _] = writes()
+    end
+
+    test "an :open push (reopen) moves a Done ticket back to To Do, with no skip notice" do
+      ws = jira_ws(%{})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"Done", "done"}, [{"To Do", "new"}])
+
+      assert :ok = Sync.lifecycle(issue, :open)
+      assert [{:jira_transition, _} | _] = writes()
+
+      assert [] =
+               Message
+               |> Ash.read!()
+               |> Enum.filter(&(&1.task_ref == issue.id and &1.subject =~ "skipped"))
+    end
+
+    test "a ticket already on the merged target is not rewritten and posts no skip notice" do
+      ws = jira_ws(%{"merged" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"Code Complete", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.lifecycle(issue, :merged)
       assert writes() == []
+
+      assert [] =
+               Message
+               |> Ash.read!()
+               |> Enum.filter(&(&1.task_ref == issue.id and &1.subject =~ "skipped"))
     end
 
     test "a skipped close leaves a record on the ticket, not only a log line" do
@@ -480,6 +510,21 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
                |> Enum.filter(
                  &(&1.task_ref == issue.id and &1.subject =~ "in_progress transition skipped")
                )
+    end
+
+    test "an :open push (requeue) moves a started story back to Unstarted" do
+      ws =
+        workspace("shortcut", %{
+          "credentials_ref" => "env:#{@shortcut_env}",
+          "status_map" => %{"open" => "Unstarted"}
+        })
+
+      issue = issue(ws, :shortcut, "1234")
+
+      stub_shortcut(503)
+
+      assert :ok = Sync.lifecycle(issue, :open)
+      assert [{:shortcut_put, %{"workflow_state_id" => 500}} | _] = writes()
     end
 
     test "closed => Done still closes a story from any earlier state" do
