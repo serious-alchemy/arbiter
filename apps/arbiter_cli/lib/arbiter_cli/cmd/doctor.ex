@@ -19,6 +19,11 @@ defmodule ArbiterCli.Cmd.Doctor do
     9. Is it safe to restart? (the scheduler drain state — `[fail]` while a
        paused scheduler is still draining; informational, never fatal)
 
+   10. Nodes (RW7): is `nodes.public_url` reachable (an anonymous `GET
+       /nodes/ping`) and a private endpoint, is each enrolled node online,
+       current and within its cap, is the local worker cap above 0, and do the
+       caps fit `conductor.max_concurrent`? (`[fail]` but never fatal)
+
   Exit code 0 on all green, 1 on any failure.
   """
 

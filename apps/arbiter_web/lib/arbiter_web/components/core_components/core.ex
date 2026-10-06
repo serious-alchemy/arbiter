@@ -202,6 +202,10 @@ defmodule ArbiterWeb.CoreComponents.Core do
         "can appear more than once in the same page (e.g. a page header plus a " <>
         "detail panel), since the default is derived from `id` alone"
 
+  attr :label, :string,
+    default: nil,
+    doc: ~s(accessible name; defaults to "Copy ticket id <id>". Set it when copying anything else)
+
   attr :class, :any, default: nil
   attr :rest, :global
 
@@ -212,7 +216,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
       id={@dom_id || "copy-id-#{@id}"}
       phx-hook=".CopyId"
       data-copy-value={@id}
-      aria-label={"Copy ticket id #{@id}"}
+      aria-label={@label || "Copy ticket id #{@id}"}
       class={[
         "copy-id-btn inline-flex items-center justify-center rounded-[4px] p-[3px]",
         "text-[var(--text-label)] hover:text-[var(--text-title)] hover:bg-[var(--arb-panel-alt)]",

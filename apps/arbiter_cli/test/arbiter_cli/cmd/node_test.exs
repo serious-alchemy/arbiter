@@ -1,5 +1,8 @@
 defmodule ArbiterCli.Cmd.NodeTest do
-  @moduledoc "RW4: `arb node add|list|show|set|events` (`docs/design/remote-workers.md` §5.6)."
+  @moduledoc """
+  `arb node add|list|show|set|events` (RW4) and `drain|undrain|revoke|remove|upgrade`
+  plus the per-node caps, `local` included (RW7), `docs/design/remote-workers.md` §5.6, §14.
+  """
   use ArbiterCli.CliCase, async: true
 
   alias ArbiterCli.Cmd.Node
@@ -174,15 +177,80 @@ defmodule ArbiterCli.Cmd.NodeTest do
     end
   end
 
+  @local %{
+    "id" => "local",
+    "name" => "local",
+    "kind" => "local",
+    "state" => "online",
+    "live" => 1,
+    "max" => 3,
+    "suggested" => 3,
+    "override" => nil,
+    "ceiling" => nil
+  }
+
+  @live_node Map.merge(@node, %{
+               "state" => "online",
+               "health" => "ready",
+               "agent_version" => "1.2.3",
+               "live" => 1,
+               "max" => 2,
+               "suggested" => 4,
+               "override" => 2,
+               "ceiling" => 3,
+               "last_heartbeat_at" => nil
+             })
+
   describe "list" do
-    test "shows name, status, workers, labels and last seen" do
+    test "shows the local row first, then name, state, caps, labels and last seen" do
+      stub_get("/api/nodes", %{
+        "nodes" => [@live_node],
+        "local" => @local,
+        "total" => 5,
+        "ceiling" => 8,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+
+      [header, first, second | _] = String.split(out, "\n")
+      assert header =~ "NAME" and header =~ "SUGGESTED" and header =~ "OVERRIDE"
+      assert first =~ "local" and first =~ "1/3"
+      assert second =~ "box-1" and second =~ "online" and second =~ "1/2"
+      assert out =~ "zone=a"
+      assert out =~ "never"
+      assert out =~ "local 3 + nodes 2 = 5"
+      assert out =~ "conductor.max_concurrent = 8"
+    end
+
+    test "prints the warnings" do
+      stub_get("/api/nodes", %{
+        "nodes" => [],
+        "local" => %{@local | "max" => 0, "override" => 0},
+        "total" => 0,
+        "ceiling" => 3,
+        "warnings" => ["local_cap_zero"]
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "local cap is 0"
+      assert out =~ "wait"
+    end
+
+    test "with only the primary it says there are no remote nodes" do
+      stub_get("/api/nodes", %{"nodes" => [], "local" => @local, "total" => 3, "ceiling" => 3})
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "local"
+      assert out =~ "No remote nodes"
+      assert out =~ "arb node add"
+    end
+
+    test "an older server's list (no local row) still renders" do
       stub_get("/api/nodes", %{"nodes" => [@node]})
       {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
 
       assert out =~ "box-1"
       assert out =~ "active"
-      assert out =~ "zone=a"
-      assert out =~ "never"
     end
 
     test "says so when there are none" do
@@ -258,6 +326,95 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert code != 0
       assert err =~ "nothing to set"
       refute_received {:request, _, _, _}
+    end
+  end
+
+  describe "set local" do
+    test "sets the primary's cap, 0 included" do
+      capture_request(:patch, "/api/nodes/local", 200, %{"node" => @local})
+
+      {out, _err, 0} = capture(fn -> Node.run(["set", "local", "--max-workers", "0"]) end)
+
+      assert_receive {:request, "PATCH", "/api/nodes/local", raw}
+      assert Jason.decode!(raw) == %{"max_workers" => 0}
+      assert out =~ "Updated local"
+    end
+
+    test "none clears the override" do
+      capture_request(:patch, "/api/nodes/local", 200, %{"node" => @local})
+      {_out, _err, 0} = capture(fn -> Node.run(["set", "local", "--max-workers", "none"]) end)
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"max_workers" => nil}
+    end
+
+    test "local takes no other field, and a node's cap cannot be 0" do
+      {_out, err, code} = capture(fn -> Node.run(["set", "local", "--name", "x"]) end)
+      assert code != 0
+      assert err =~ "local"
+
+      {_out, err, code} = capture(fn -> Node.run(["set", "box-1", "--max-workers", "0"]) end)
+      assert code != 0
+      assert err =~ "positive"
+      refute_received {:request, _, _, _}
+    end
+  end
+
+  describe "lifecycle verbs" do
+    for {verb, past} <- [
+          {"drain", "Draining"},
+          {"undrain", "Undrained"},
+          {"revoke", "Revoked"},
+          {"upgrade", "Upgrade requested for"}
+        ] do
+      test "#{verb} posts to the node and says so" do
+        capture_request(:post, "/api/nodes/box-1/#{unquote(verb)}", 200, %{
+          "node" => @node,
+          "upgrading_to" => "v9"
+        })
+
+        {out, _err, 0} = capture(fn -> Node.run([unquote(verb), "box-1"]) end)
+
+        assert_receive {:request, "POST", "/api/nodes/box-1/" <> unquote(verb), _}
+        assert out =~ unquote(past)
+        assert out =~ "box-1"
+      end
+    end
+
+    test "remove deletes the node" do
+      capture_request(:delete, "/api/nodes/box-1", 200, %{"removed" => "box-1"})
+
+      {out, _err, 0} = capture(fn -> Node.run(["remove", "box-1"]) end)
+
+      assert_receive {:request, "DELETE", "/api/nodes/box-1", _}
+      assert out =~ "Removed box-1"
+    end
+
+    test "a refusal is reported with the server's message and a non-zero exit" do
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        conn
+        |> Plug.Conn.put_status(409)
+        |> Req.Test.json(%{
+          "error" => %{"type" => "conflict", "message" => "revoke the node before removing it"}
+        })
+      end)
+
+      {_out, err, code} = capture(fn -> Node.run(["remove", "box-1"]) end)
+      assert code != 0
+      assert err =~ "revoke the node before removing it"
+    end
+
+    test "each needs a node" do
+      for verb <- ["drain", "undrain", "revoke", "remove", "upgrade"] do
+        {_out, err, code} = capture(fn -> Node.run([verb]) end)
+        assert code != 0
+        assert err =~ "node name or id"
+      end
+    end
+
+    test "a node named by an id with odd characters is path-escaped" do
+      capture_request(:post, "/api/nodes/a%2Fb/drain", 200, %{"node" => @node})
+      {_out, _err, 0} = capture(fn -> Node.run(["drain", "a/b"]) end)
+      assert_receive {:request, "POST", _, _}
     end
   end
 

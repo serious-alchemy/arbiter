@@ -10,7 +10,8 @@ defmodule ArbiterWeb.NodeChannel do
   | `hello`        | attaches this channel to the node's session; pushes `hello_ok` (`boot_epoch`, thresholds, effective `max_workers`, per-run verdicts, health, optional `upgrade`) |
   | `hb`           | pushes `hb_ack` `{seq, boot_epoch}`; a heartbeat before `hello` is replied `error: hello_required` |
 
-  Pushed by the primary: `drain` `{on: true | false}`. A node can only join its
+  Pushed by the primary: `drain` `{on: true | false}`, and `upgrade`
+  `{version, sha256}` when the operator asks for it (`Arbiter.Nodes.upgrade/2`). A node can only join its
   own topic.
 
   ## Closing
@@ -108,6 +109,11 @@ defmodule ArbiterWeb.NodeChannel do
 
   def handle_info({:node_session, :undrain}, socket) do
     push(socket, "drain", %{"on" => false})
+    {:noreply, socket}
+  end
+
+  def handle_info({:node_session, {:upgrade, payload}}, socket) do
+    push(socket, "upgrade", payload)
     {:noreply, socket}
   end
 

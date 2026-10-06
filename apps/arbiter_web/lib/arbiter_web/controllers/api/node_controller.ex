@@ -7,9 +7,16 @@ defmodule ArbiterWeb.Api.NodeController do
       response carries the token (shown once) and the one-liner, which holds no
       secret. Rate limited per actor (`Nodes.RateLimit`, 20/hour).
     * `GET /api/nodes`, `GET /api/nodes/:ref`, `GET /api/nodes/:ref/events` —
-      coordinator reads. `:ref` is a node id or its name.
+      **operator** reads. `:ref` is a node id or its name, or `local` for the
+      primary. The list also carries the `local` row, the `total` of
+      `local + Σ remote caps` against the `ceiling` (`conductor.max_concurrent`),
+      `warnings`, and the `nodes.public_url` with its `exposure`
+      (`private | public | unset`) for `arb server doctor`.
     * `PATCH /api/nodes/:ref` — **operator**: edit `name`, `labels`,
-      `max_workers`.
+      `max_workers`. `local` takes `max_workers` only (0 allowed, `null` clears).
+    * `POST /api/nodes/:ref/{drain,undrain,revoke,upgrade}` and
+      `DELETE /api/nodes/:ref` (a revoked node only) — **operator**; each
+      writes a `NodeEvent`.
 
   Credentials and token hashes are never rendered (`ArbiterWeb.Api.NodeJSON`).
   """
@@ -18,12 +25,13 @@ defmodule ArbiterWeb.Api.NodeController do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{JoinScript, RateLimit}
+  alias Arbiter.Nodes.{JoinScript, Overview, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.Api.NodeJSON
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
+  @local_cap_message "local takes max_workers only: a whole number, 0 or more, or null to clear"
   @name_message "name may only contain A-Za-z0-9._=:/@- and be 1-128 characters"
 
   def create_join_token(conn, params) do
@@ -50,11 +58,27 @@ defmodule ArbiterWeb.Api.NodeController do
   end
 
   def index(conn, _params) do
-    json(conn, %{nodes: Enum.map(Nodes.list_nodes(), &NodeJSON.node/1)})
+    overview = Overview.build()
+    rows = Map.new(overview.nodes, &{&1.id, &1})
+    url = Settings.nodes_public_url()
+
+    json(conn, %{
+      nodes: Enum.map(Nodes.list_nodes(), &NodeJSON.node(&1, Map.fetch!(rows, &1.id))),
+      local: NodeJSON.local(overview.local),
+      total: overview.total,
+      ceiling: overview.ceiling,
+      warnings: overview.warnings,
+      public_url: url,
+      exposure: Overview.exposure(url),
+      allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
+    })
   end
 
+  def show(conn, %{"ref" => "local"}),
+    do: json(conn, %{node: NodeJSON.local(Overview.build().local)})
+
   def show(conn, %{"ref" => ref}) do
-    with {:ok, node} <- fetch(ref), do: json(conn, %{node: NodeJSON.node(node)})
+    with {:ok, node} <- fetch(ref), do: json(conn, %{node: node_view(node)})
   end
 
   def events(conn, %{"ref" => ref}) do
@@ -66,11 +90,22 @@ defmodule ArbiterWeb.Api.NodeController do
   defp node_events(node),
     do: Nodes.events(node_id: node.id) |> Enum.map(&NodeJSON.event/1)
 
+  def update(conn, %{"ref" => "local"} = params) do
+    with {:ok, n} <- local_cap(params),
+         {:ok, _} <- Nodes.set_local_max_workers(n, nil) do
+      json(conn, %{node: NodeJSON.local(Overview.build().local)})
+    else
+      {:error, :invalid_value} -> unprocessable(conn, @local_cap_message)
+      {:error, {:unprocessable, message}} -> unprocessable(conn, message)
+      {:error, other} -> {:error, other}
+    end
+  end
+
   def update(conn, %{"ref" => ref} = params) do
     with {:ok, node} <- fetch(ref),
          {:ok, changes} <- changes(params),
          {:ok, updated} <- Nodes.update_node(node, changes, nil) do
-      json(conn, %{node: NodeJSON.node(updated)})
+      json(conn, %{node: node_view(updated)})
     else
       {:error, :invalid_name} -> unprocessable(conn, @name_message)
       {:error, :name_taken} -> {:error, {:conflict, "a node with that name already exists"}}
@@ -80,7 +115,54 @@ defmodule ArbiterWeb.Api.NodeController do
     end
   end
 
+  def drain(conn, %{"ref" => ref}), do: lifecycle(conn, ref, &Nodes.drain/2)
+  def undrain(conn, %{"ref" => ref}), do: lifecycle(conn, ref, &Nodes.undrain/2)
+  def revoke(conn, %{"ref" => ref}), do: lifecycle(conn, ref, &Nodes.revoke/2)
+
+  def upgrade(conn, %{"ref" => ref}) do
+    with {:ok, node} <- fetch(ref),
+         {:ok, %{version: version}} <- Nodes.upgrade(node, nil) do
+      json(conn, %{node: node_view(node), upgrading_to: version})
+    else
+      {:error, :offline} -> {:error, {:conflict, "the node is not connected"}}
+      {:error, :revoked} -> {:error, {:conflict, "the node is revoked"}}
+      {:error, :unavailable} -> {:error, {:conflict, "this install has no release to serve"}}
+      {:error, other} -> {:error, other}
+    end
+  end
+
+  def delete(conn, %{"ref" => ref}) do
+    with {:ok, node} <- fetch(ref),
+         :ok <- Nodes.remove(node, nil) do
+      json(conn, %{removed: node.name})
+    else
+      {:error, :not_revoked} -> {:error, {:conflict, "revoke the node before removing it"}}
+      {:error, other} -> {:error, other}
+    end
+  end
+
+  defp lifecycle(conn, ref, fun) do
+    with {:ok, node} <- fetch(ref),
+         {:ok, updated} <- fun.(node, nil) do
+      json(conn, %{node: node_view(updated)})
+    else
+      {:error, :revoked} -> {:error, {:conflict, "the node is revoked"}}
+      {:error, other} -> {:error, other}
+    end
+  end
+
   # ---- helpers ---------------------------------------------------------------
+
+  defp node_view(%Arbiter.Nodes.Node{} = node),
+    do: NodeJSON.node(node, Overview.get(node.id) || %{})
+
+  defp local_cap(params) do
+    case Map.fetch(params, "max_workers") do
+      {:ok, n} when is_nil(n) or (is_integer(n) and n >= 0) -> {:ok, n}
+      {:ok, _} -> {:error, :invalid_value}
+      :error -> {:error, {:unprocessable, @local_cap_message}}
+    end
+  end
 
   defp fetch(ref) do
     case Nodes.find_node(ref) do

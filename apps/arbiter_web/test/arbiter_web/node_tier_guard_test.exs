@@ -25,6 +25,14 @@ defmodule ArbiterWeb.NodeTierGuardTest do
 
   @moduletag :tmp_dir
 
+  # `/nodes/*` and `/node/*` minus the operator's own pages: `/nodes` and
+  # `/nodes/:id` (RW7's `NodesLive`) are dashboard LiveViews behind
+  # `:dashboard_auth`, a different tier by design, not node-credential routes.
+  defp node_namespace?(r) do
+    (String.starts_with?(r.path, "/nodes") or String.starts_with?(r.path, "/node/")) and
+      r.plug != Phoenix.LiveView.Plug
+  end
+
   setup %{tmp_dir: home} do
     # Enrolment answers 503 until the primary has a public URL and an agent
     # build to hand out, which would hide the 401 these tests are after.
@@ -143,9 +151,7 @@ defmodule ArbiterWeb.NodeTierGuardTest do
   describe "the node namespace" do
     setup do
       node_routes =
-        Enum.filter(routes(), fn r ->
-          String.starts_with?(r.path, "/nodes") or String.starts_with?(r.path, "/node/")
-        end)
+        Enum.filter(routes(), &node_namespace?/1)
         |> Enum.reject(&("#{&1.verb} #{&1.path}" in @anonymous_node_routes))
 
       {:ok, node_routes: node_routes}
@@ -185,7 +191,7 @@ defmodule ArbiterWeb.NodeTierGuardTest do
     test "the anonymous routes are exactly the join script, the ping and enrolment" do
       anon =
         for r <- routes(),
-            String.starts_with?(r.path, "/nodes") or String.starts_with?(r.path, "/node/"),
+            node_namespace?(r),
             "#{r.verb} #{r.path}" in @anonymous_node_routes,
             do: "#{r.verb} #{r.path}"
 

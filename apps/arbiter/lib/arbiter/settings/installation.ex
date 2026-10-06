@@ -44,6 +44,8 @@ defmodule Arbiter.Settings.Installation do
       node tier (`docs/design/remote-workers.md` §4.3, §5.1): the URL a node dials,
       whether a non-private endpoint is tolerated, and the join-token TTL
       (`nil` = off / refused / 15 minutes).
+    * `:nodes_local_max_workers` — the override of the primary's own worker cap
+      (the nodes page's `local` row); nil = no override, 0 allowed.
     * `:nodes_fence_after_s` / `:nodes_lost_after_s` — the liveness thresholds
       (§10.1; `Arbiter.Nodes.Liveness`): `nil` = 60 s / fence + 30 s.
 
@@ -84,7 +86,8 @@ defmodule Arbiter.Settings.Installation do
     :nodes_allow_public_endpoint,
     :nodes_join_token_ttl_minutes,
     :nodes_fence_after_s,
-    :nodes_lost_after_s
+    :nodes_lost_after_s,
+    :nodes_local_max_workers
   ]
 
   actions do
@@ -265,6 +268,14 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 31, max: 3600
 
       description "nodes.lost_after_s: silence after which the primary declares a node lost (RW6); must exceed the fence; nil = fence + 30."
+    end
+
+    attribute :nodes_local_max_workers, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 0
+
+      description "nodes.local_max_workers: the operator's cap on the primary's own workers (RW7); nil = the install's local concurrency, 0 = run nothing locally."
     end
 
     create_timestamp :created_at
