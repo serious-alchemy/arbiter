@@ -89,6 +89,8 @@ New primary-side namespace **`Arbiter.Nodes`** (Ash domain, **new**): `Node`, `J
 | node→primary | `stdout` (binary) | `ARB1` frame of line records; primary `ack`s cumulative offsets |
 | node→primary | `exit` | status, `oom?`, container id; `checkpoint{run, bundle_ref}`; `bridge.open{run, name, stream}` / `bridge.data` / `bridge.close` / `bridge.credit` (both directions) |
 
+**Cluster-node additions *(A1, A3, A4; K§3.2, K§14)*.** `hello.kind ∈ {machine, cluster}` and `caps` as K§3.2 lists them (`backend: podman|k8s`, `image: build|pull|registry`, `limits: cgroup|pod`, `upgrade: tarball|image`); skew rules unchanged. Per-run states are `pending | starting | running | terminating`, and the node may answer an `assign` with `refuse{reason ∈ no_capacity, unschedulable, image_unavailable, bad_spec}`. New node→primary event `capacity` and a `capacity{ceiling, running, pending, headroom, constrained}` field on `hb`; `hello_ok.limits.prepare_timeout_s`. The stdout cursor and its `ack` are an **opaque backend-defined string** (podman: decimal offset, as above; cluster: RFC 3339 nano timestamp); the primary stores and echoes it without interpreting it.
+
 Backpressure: Phoenix channels have none, so streams use a credit window (256 KiB per stream, 16 KiB frames, max 64 streams per run and 256 per node, total in-flight per node capped at **256 KiB [RW2: was 1 MiB; U4]**). The sender must schedule streams **fairly** (round-robin over streams with credit): under a small node cap a bulk push that is served first starves the SSE streams of other runs (a spike run with a 64 KiB cap lost one SSE client to a 60 s receive timeout; the cause was not captured and starvation is the suspect). Stdout replay after a blip uses the offset+ack scheme `Sessions.Stream` already uses.
 
 **Single socket vs two [RW2: U4 GO, U3 GO-WITH-FALLBACK]:** one socket with credits. The risk was bridge traffic starving the heartbeat; fence/lost thresholds (60/90 s) leave 30 s of slack. Measured: a 5 MiB push in either direction moves the heartbeat round trip by at most 2.3 s on any link of 2 Mbit/s or more (4.1 s at 1 Mbit/s), and the worst combined case (5 MiB up + 5 MiB down + 8 SSE runs) stays under the 5 s threshold with the 256 KiB cap (§17.1). The queue that delays a heartbeat is the link's own (everything in flight is ahead of it), so **a second socket for bridge data does not help** and is no longer the fallback; what helps is the smaller in-flight cap above. The fallback for a *lossy* link (one TCP stall delays every run on the socket; U3) is **sharding runs over K sockets by run id**, hello advertising `caps.bridge_sockets`, same credential, no protocol change; the spike measured it (§17.1) but v1 ships one socket.
@@ -157,6 +159,7 @@ Backpressure: Phoenix channels have none, so streams use a credit window (256 Ki
 
 **Artifact.** The agent is the release tarball the primary is running. The primary serves it: `GET /nodes/agent/<version>.tar.gz` (node credential; the enroll response carries the expected sha256).
 * **Source of the bytes.** Today `ArbiterCli.Cmd.ReleaseDeploy` holds the downloaded tarball in memory (`Github.download_binary/1`, `release_deploy.ex:208`), verifies the `.sha256`, and unpacks it (`ReleaseFiles.unpack!/2`); it keeps no tarball. Change (child 4): retain `<data-home>/releases/<tag>.tar.gz` + `.sha256` next to the unpacked tree and prune with it (`ReleaseFiles.prune_old_releases/3`). Serving the **pristine** published bytes means the checksum equals the published `.sha256`. For `arb server deploy --local <dir>` (no tarball exists) the primary packs the tree on first request with an **allowlist** (`bin/`, `erts-*`, `lib/`, `releases/<vsn>/` minus `COOKIE`/`tmp`), never a denylist, and caches by sha. Rejected: nodes downloading from GitHub Releases (a private repo needs `GITHUB_TOKEN` on every node; a local build is not published).
+* **Upgrade path *(A1)*.** `hello_ok.upgrade` is `tarball` (machine nodes, above) or `image` (cluster nodes: the operator rolls the controller Deployment to the new image; the primary never pushes bytes to it). `caps.upgrade` declares which a node supports; version-skew rules are unchanged.
 * **Platform.** `.github/workflows/release.yml` builds one `arbiter-<tag>-linux.tar.gz` on `ubuntu-latest` inside `redhat/ubi8` (glibc 2.28 baseline, enforced by `scripts/check-release-glibc.sh`); I found no arm64 job **[U11]**. So v1 nodes are x86_64 Linux and the join script refuses anything else. A second release job is a separate ticket.
 * **Integrity.** Trust root is TLS to the primary; the sha256 detects corruption/truncation, not a malicious primary. No code signing in v1 (a compromised primary can already do anything to its nodes; §15).
 
@@ -192,6 +195,8 @@ The primary never sends a `podman` argv. Today `ContainerSpawn.prepare/1` return
 * **Why spec, not argv:** the agent can refuse what it does not build. Its allowlist: mounts only under its own root, no `--privileged`, `--cap-add`, `--device`, `--userns=host`, `--pid=host`, `--network=host`. A compromised or mistaken primary then cannot turn the node into an arbitrary-container host, and the hardening (read-only root, dropped caps, `no-new-privileges`, `label=disable` only with bridges) is the *same code* as local.
 * `ContainerSpawn.prepare/1` splits into a primary half (secret resolution, worker-tier token mint, `Egress.JailRun.start/1`, spec assembly) and a node half (shadow clone, image/CLI/deps, run dirs, listeners). The existing request map's `inherit_env` (names whose values ride the client's environment so they never hit argv) is exactly the secret list. **[RW2: U13]** For a remote run that list is **not** passed to podman as `-e NAME`: podman writes the resolved value into the container's OCI `config.json` and its state DB under the persistent graph root (§17.1). The node half instead writes the values to `$XDG_RUNTIME_DIR/arbiter-node/<run>/secrets.env` (dir 0700, file 0600, tmpfs), bind-mounts it read-only at `/run/arbiter/secrets.env`, and the container command is wrapped as `sh -c '. /run/arbiter/secrets.env; exec "$@"' -- <command…>`; the agent unlinks the file when the container exits (or earlier, once the wrapper has sourced it, if a FIFO is used instead of a file). The toolchain image has `sh`; the allowlist in the bullet above gains "the secrets file is the only mount allowed outside the run's own dirs".
 
+* **Registry image reference *(A2)*.** When the node's `caps.image = "registry"`, `assign.image` is `{tag, ref}` where `ref` is a **digest-pinned** reference the primary has already pushed (new primary-side `Image.Publisher`, settings `nodes.registry.*`); the node never receives a build plan and refuses with `image_unavailable` if it cannot pull `ref`.
+
 ### 7.2 Port-shaped handle in `Arbiter.Worker`
 
 `Worker` is Port-owned. The surface a remote run must satisfy is small and grep-verified: the three `handle_info({port, …})` clauses (`worker.ex:2844` eol, `:2848` noeol, `:2852` exit_status, all `when is_port(port)`), and the port-specific sites: private `terminate_session_port/2` (`safe_port_os_pid/1` at `:3605`, `OsProcess.kill_tree/1`, `Port.close/1` at `:3593`) and private `session_live?/1` (`:8232`, `is_port(port) and Port.info(port) != nil`). `ClaudeSession.open_scoped_port/2` (`claude_session.ex:1995`) is the single open point. Design: `Executor.Node.open/1` returns a **remote handle** (a `{:remote, ref}` tuple) and the `Nodes.Session` process sends `{handle, {:data, {:eol, line}}}`, `{handle, {:data, {:noeol, partial}}}` and `{handle, {:exit_status, n}}` with the same shapes (the line framing is `{:line, 65_536}` today, `open_port/1`). The guards relax to `is_port(p) or match?({:remote, _}, p)`; those two functions branch. **Rejected:** a local shim OS process that echoes channel data into a real Port (the Port owner is the Worker, so the relay cannot `Port.command`; needs FIFOs and exit-status gymnastics for no benefit).
@@ -199,6 +204,7 @@ The primary never sends a `podman` argv. Today `ContainerSpawn.prepare/1` return
 ### 7.3 Images, CLI binaries, deps cache (replaces bd-aowisc's warm repo)
 
 * **Images.** Tags are content hashes of a digest-pinned Containerfile plus build args (`Image.plan/3`, `Image.Builder.ensure/3`; empty build context). The primary ships the **plan** (pinned Containerfile text, args, tag), and the node builds it with its own podman and verifies the resulting tag name. Measured sizes on this host: toolchain image 843 MB, of which the base is 464 MB. `podman save | load` through the primary would move 0.5–1 GB per toolchain per node and again whenever the weekly base refresh moves the tag. Chosen: **build from plan** (public upstream images only, deterministic inputs); `save`/`load` over HTTPS as an opt-in fallback for air-gapped nodes. Cost: first dispatch to a fresh node waits for a build **[U12]**; `ensure_ready` is synchronous with a bounded timeout and then `prefer_remote` falls back to local, `remote_only` holds the card.
+* **Registry nodes *(A2)*.** For `caps.image = "registry"` the build-from-plan bullet above does not apply: the primary builds/pushes via `Image.Publisher` and sends `{tag, ref}` (§7.1); `image_unavailable` is the refusal.
 * **CLI binaries.** `claude` and `arb` are mounted read-only at `/opt/arbiter/cli` today (private `ContainerSpawn.cli_mounts/1`). The primary exposes them content-addressed: `GET /nodes/files/<sha256>`; the node caches under `root/files/<sha12>/` and verifies the hash. Same-arch constraint as §6.
 * **Deps cache.** `DepsCache` (`key/4`: `<root>/<lock12>-<image12>`; `ensure/4` runs a seed job inside the image; `install/3` does `cp -a --reflink`) is a *node-local* concern now: the agent runs it against its own root and podman. Inputs it needs from the primary (it must not read the primary's DB; `DepsCache` aliases `Arbiter.Mergers`, **[U6]**): the default-branch `mix.lock` hash, `seed_paths` resolved by `Worker.SeedPaths.resolve/2`, and the default-branch tree as a bundle (below). **The "warm repo" is gone**; what remains is a per-node bare **object store** `root/repos/<slug>.git` that bundles fetch into and shadow clones borrow from (alternates + `:O` overlay), exactly as `PrivateClone.mounts/1` already guards for the local main repo.
 * **Thin home clone for remote placement.** For a remote-placed run the primary provisions the home clone **without** `seed_compiled_deps/3` and `ensure_deps_fetched/1` (`PrivateClone.provision/1` calls both at `private_clone.ex:231-232`), via a `seed: false` option threaded through `Worktree.create/4`. Otherwise the primary pays the cost remote exists to avoid.
@@ -268,11 +274,11 @@ The home/shadow model (bd-aowisc §4.4) is unchanged: while a container runs the
 
 ### 10.2 Channel blip (survives) versus restart (does not)
 
-A socket drop shorter than `fence_after` with an unchanged primary `boot_epoch` is a **blip**: the primary's `Worker` process is alive (its remote handle is held by `Nodes.Session`, whose state is the run table), the container keeps running (stalled only for bridged network), and on reconnect the node resends unacked stdout from the last acked offset and re-listens bridges. No state is lost. Worker output lines are never dropped and never duplicated (offset+ack, the `Sessions.Stream` scheme). **[RW2: U19 GO]** What the in-container CLI sees during a blip was measured against the real Claude CLI (2.1.291, `HTTPS_PROXY` through a CONNECT relay and TLS, a fake API, no real credential; §17.1): it rides through a proxy that **stalls** new connections for at least 120 s, **refuses** them for at least 180 s, or **resets** them for at least 90 s (it gives up at about 177 s of resets), and resumes 0.2–0.3 s after a stall releases but only after its own backoff (0–36 s later) after a refuse or reset. So while the channel is down the agent's per-run listeners should **accept and hold** (not read) new connections up to `fence_after`, and reset them when the fence fires; **`nodes.fence_after_s` is capped at 90 s** (the design's 30–300 s range is narrowed). A drop **mid-response** is not resumed: the CLI re-sends the whole request (two POSTs seen), so the partial answer is discarded and the request is billed again.
+A socket drop shorter than `fence_after` with an unchanged primary `boot_epoch` is a **blip**: the primary's `Worker` process is alive (its remote handle is held by `Nodes.Session`, whose state is the run table), the container keeps running (stalled only for bridged network), and on reconnect the node resends unacked stdout from the last acked offset and re-listens bridges. No state is lost. Worker output lines are never dropped and never duplicated (offset+ack, the `Sessions.Stream` scheme). **[RW2: U19 GO]** What the in-container CLI sees during a blip was measured against the real Claude CLI (2.1.291, `HTTPS_PROXY` through a CONNECT relay and TLS, a fake API, no real credential; §17.1): it rides through a proxy that **stalls** new connections for at least 120 s, **refuses** them for at least 180 s, or **resets** them for at least 90 s (it gives up at about 177 s of resets), and resumes 0.2–0.3 s after a stall releases but only after its own backoff (0–36 s later) after a refuse or reset. So while the channel is down the agent's per-run listeners should **accept and hold** (not read) new connections up to `fence_after`, and reset them when the fence fires; **`nodes.fence_after_s` is capped at 90 s** (the design's 30–300 s range is narrowed). The stdout replay cursor is the opaque string of §4.2 *(A4)*: the node resends everything after the last acked cursor whatever its form. A drop **mid-response** is not resumed: the CLI re-sends the whole request (two POSTs seen), so the partial answer is discarded and the request is billed again.
 
 ### 10.3 Node lost
 
-`Nodes.Session` gives up (`lost_after`) → every run on it is stamped **interrupted** ("node lost: <name>"), **not failed**, and **no resume attempt is consumed** (the policy `Reconciler` applies to "server shutdown" runs, `reconcile_shutdown_casualties/1`). New classification `:node_lost` in `StopReason.classify/3` (`stop_reason.ex:456`) distinguishes it from an ordinary agent failure. The node is marked offline; auto-resume re-dispatches via `Placement` (another node or local per mode); the new spawn builds a fresh shadow from the home clone and `claude --resume` finds the mirrored transcript at the same cwd slug (bd-aowisc §6.2). Work since the last checkpoint is lost unless the node returns (below). One coordinator escalation per outage over 15 min, not per tick (`Messages.Escalation`).
+`Nodes.Session` gives up (`lost_after`) → every run on it is stamped **interrupted** ("node lost: <name>"), **not failed**, and **no resume attempt is consumed** (the policy `Reconciler` applies to "server shutdown" runs, `reconcile_shutdown_casualties/1`). New classification `:node_lost` in `StopReason.classify/3` (`stop_reason.ex:456`) distinguishes it from an ordinary agent failure. **`pod_disrupted` *(A5)*:** a second new cause for cluster nodes (pod evicted, preempted, or deleted externally) with the same policy as `node_lost`: interrupted, no resume attempt consumed. The node is marked offline; auto-resume re-dispatches via `Placement` (another node or local per mode); the new spawn builds a fresh shadow from the home clone and `claude --resume` finds the mirrored transcript at the same cwd slug (bd-aowisc §6.2). Work since the last checkpoint is lost unless the node returns (below). One coordinator escalation per outage over 15 min, not per tick (`Messages.Escalation`).
 
 **Improvement over SSH:** a returning node reports its **retained** shadows/transcripts in `hello`; the primary may pull them as a *salvage* ref (`refs/arbiter/salvage/<run>` in the main repo) instead of leaving them for a human. Optional hardening child.
 
@@ -335,18 +341,20 @@ Everything above the Executor is backend-agnostic: `Node` state, `Placement`, th
 ## 13. Placement and capacity
 
 * **Two gates, in order** (bd-aowisc §4.9 unchanged): (1) today's board plan (`Board.Snapshot.effective_max_concurrent/3`) and `Accounts.Admission.admit/3` (reservation under `:global.trans/3` with `[node()]`, registry-derived `Accounts.Concurrency.live_count/2`); (2) new `Nodes.Placement.place/2`, called from a new `ensure_node_capacity/2` step in `Worker.Dispatch.dispatch/2`'s `with` chain **right after `ensure_account_capacity/2` and before `transition_to_active/2`** (`dispatch.ex:~205-210`), so a refused placement leaves the ticket untouched, as `{:account_at_capacity, info}` does; it reserves a per-node slot the same way and the chosen node rides in `opts` to the private `maybe_provision_worktree/2` (`dispatch.ex:2096`). Eligibility first (`Placement.eligible/1`, pure; §5 of bd-aowisc). Mode from `worker.placement` (`local_only` default, `prefer_remote`, `remote_only` → `{:no_node_capacity, info}` and the card is held, not failed, same treatment as `{:account_at_capacity, info}`).
-* **Candidates:** enabled ∧ `online` ∧ not `draining`/`revoked` ∧ health `ready` (not `outdated`/`incompatible`/`ahead`/`degraded: :uncapped`) ∧ label match ∧ provider-account filter ∧ `live < effective_max`; rank by lowest `live/effective_max`, then reported free memory, then name.
+* **Candidates:** enabled ∧ `online` ∧ not `draining`/`revoked` ∧ health `ready` (not `outdated`/`incompatible`/`ahead`/`degraded: :uncapped`/`degraded: netpol_unenforced` *(A7)*, the latter overridable per node by `allow_unenforced_network`) ∧ not `hb.capacity.constrained` *(A3; a constrained node is skipped, or ranked last when it is the only candidate)* ∧ label match ∧ provider-account filter ∧ `live < effective_max`; rank by lowest `live/effective_max`, then reported free memory, then name.
 * **Capacity sources:**
   * **Node-reported** (`hello`): cpus, `MemTotal`, a **suggestion** = `min(floor(cpus / cpus_per_worker), floor(0.8 × MemTotal / worker_mem_cap))`, and an optional **node-owner ceiling** from the node's own config (`ARB_NODE_MAX_WORKERS` in `agent.env`; the machine's owner says "never more than N here").
   * **Operator-set** `max_workers` on the node row (nullable).
   * **Effective** = `min(operator, node ceiling)` over whichever are set; if neither, the suggestion. So the operator can lower below the ceiling but never raise above what the node's owner allows. A drain sets effective to 0 for new work.
 * **`conductor.max_concurrent`** (`Board.Snapshot.system_max_concurrent/0`, `Arbiter.Settings.Installation` field `conductor_system_max_concurrent`) stays the install-wide ceiling on workers anywhere (local plus all nodes) and stays **operator-owned**: it is also the quota/billing valve, so auto-raising it on join would raise spend without the operator asking. The node list shows `local + Σ effective = M` against `conductor.max_concurrent = K` and warns when K < M (nodes idle) or K much greater (over-planned). A later child adds a placement-headroom term to `effective_max_concurrent/3` so the board stops promising slots no node can serve (board planning cannot know which Ready card is remote-eligible, so a plan can exceed capacity and a brief `{:no_node_capacity, _}` hold results).
+* **Cluster capacity *(A3)*.** The primary counts a run as started only when the node reports it `running` (not at `assign`); `Executor.prepare` returns at *container running*, not at "agent finished image/CLI/deps/shadow". `hb.capacity{ceiling, running, pending, headroom, constrained}` feeds the effective-max calculation above, and `hello_ok.limits.prepare_timeout_s` bounds the wait.
 * Memory-weighted capacity is out of scope; load is advisory.
 
 ## 14. Operator surface
 
 * **Nodes page** `/nodes` (**new** `ArbiterWeb.NodesLive`, in the `live_session :default` block of `router.ex` so it inherits the `:dashboard_auth` on_mount gate and the nav). One row per node (`#node-<id>` in a `#nodes-table`): name, state chip (`online | offline | draining | revoked`), health chip (`ready | degraded | outdated | incompatible | ahead`), **live/max** (live from the registry; max shown as effective with its sources on hover: operator, node ceiling, suggestion), agent version against server version, arch, labels, last seen, readiness summary. Row actions: Drain/Undrain, Upgrade (when `outdated`), Revoke (confirm), Remove (only revoked/offline with no live runs), Set max/labels. Footer line: `local N + nodes Σ effective = M` against `conductor.max_concurrent = K` with the §13 warning. Before editing list headers, check which `index_header` component the page actually renders: two exist with the same name (`Domain.index_header` is the rendered one).
-* **Add node** (`#add-node-button` → `#add-node-modal`): name, labels, max workers, TTL → mints a `JoinToken` → shows the one-liner (`#join-command`, copy button), the token separately (`#join-token`, shown once, copy button), a countdown (`#join-countdown`) and a "Waiting for node…" state that flips to "Connected" when the node enrolls (PubSub on a `nodes` topic, no polling). Closing the modal after redemption or expiry discards the secret. Requires the dashboard grant (`ArbiterWeb.DashboardAuth`): the dashboard is operator-only, so this is the "authenticated user" of the brief.
+* **Add node** (`#add-node-button` → `#add-node-modal`): a **kind selector** (machine | cluster, *A7*), name, labels, max workers, TTL → mints a `JoinToken` → shows the one-liner (`#join-command`, copy button), the token separately (`#join-token`, shown once, copy button), a countdown (`#join-countdown`) and a "Waiting for node…" state that flips to "Connected" when the node enrolls (PubSub on a `nodes` topic, no polling). Closing the modal after redemption or expiry discards the secret. Requires the dashboard grant (`ArbiterWeb.DashboardAuth`): the dashboard is operator-only, so this is the "authenticated user" of the brief.
+* **Cluster nodes *(A7)*.** The node row and `NodeEvent` carry `kind`; cluster rows show `k8s_version`, the `degraded: netpol_unenforced` chip, and `hb.capacity.constrained` (A3).
 * **Node detail** `/nodes/:id`: `NodeEvent` timeline (join, connect, upgrade, drain, revoke, fence, lost), live runs, the agent's readiness checks with hints (the `PodmanReadiness.diagnose/1` report plus the join-script prereqs), capacity breakdown, version/proto.
 * **`arb server doctor`** (`ArbiterCli.Cmd.Doctor`, checks in `doctor/checks.ex`) gains a "nodes" section fed by a new `GET /api/nodes` (`:coordinator`): `nodes.public_url set and reachable` (anonymous `GET /nodes/ping`), per node `online` and last-seen age, version vs server, readiness (`fail` on `degraded`), effective capacity, and the exposure heuristic of §4.3. The existing `bind address is loopback` check is unchanged and still the invariant.
 * **CLI** (§5.6) for every page action; **run page** shows the node; a `{:no_node_capacity, _}` hold shows as a board chip like the account-capacity hold.
@@ -360,7 +368,7 @@ Everything above the Executor is backend-agnostic: `Node` state, `Placement`, th
 | nothing | `version`, `migrations` only | 401 | login only | 401 (no token) | 401 |
 | join token `arbj_` | 401 | 401 | none | **yes, once** | 401 |
 | node credential `arbn_` | **401** | **401** | none | 401 | own node and its assigned runs only |
-| run transfer token `arbr_` (§16) | 401 | 401 | none | 401 | that one run's `/nodes/runs/:run/*` only |
+| run transfer token `arbr_` (§16; *not used by cluster nodes, A6*) | 401 | 401 | none | 401 | that one run's `/nodes/runs/:run/*` only |
 | worker token (`Scope`) | own task | own task | none | 401 | 401 |
 | coordinator token | per `ApiPolicy` | yes | none | 401 | 401 |
 | operator-proof token | `:operator` node admin | yes | none | 401 | 401 |
@@ -385,15 +393,671 @@ Structural, not a flag: a distinct token format with its own plug (`NodeAuth`), 
 * **A tailnet peer without credentials:** reaches the app's public routes (`/nodes/join` script, `/nodes/ping`, `/api/version`) and can burn limiter budget, but cannot enroll without a token, nor download the 54 MB tarball (credential required). The tailnet ACL (§4.3) shrinks this further.
 * **Same-UID process on the primary:** unchanged from today's trust assumption (`docs/remote-access.md`). A same-UID process on a **node** can read the credential file and the agent's memory; nodes are single-owner machines by assumption.
 
-## 16. Kubernetes in-cluster agent: what it needs from this design (bd-1nfuq5 depends on this)
+## 16. Kubernetes in-cluster agent (bd-1nfuq5; replaces the earlier "what it needs" stub)
 
-An in-cluster **controller pod** is one node that speaks the same protocol, presenting its own concurrency config as capacity. The design leaves it room, and the Executor needs no new implementation (§12):
-* **Identity/enrollment:** same join token → node credential; the credential lives in a Kubernetes Secret instead of `~/.config`. `hello` carries `kind: "cluster"` and `caps` (`backend: "k8s"`, `image: "registry"`, `limits: "pod"`, `bridge_streams`, `bundle`).
-* **Capacity:** the controller's own configured concurrency is its node ceiling (§13); the operator may only lower it.
-* **Run spec:** declarative (§7.1), no podman argv, mount *kinds* map to volumes/`emptyDir`, resource limits to pod resources; the controller does what `Container.argv/2` does locally (a pod-spec builder with the equivalent hardening: read-only root, dropped capabilities, no service-account token, deny-all `NetworkPolicy`; the `label=disable` bridge reasoning is SELinux-specific and needs its own review).
-* **Pods never hold the node credential.** `assign` includes a **run transfer token** `arbr_…` (**new**: per run, in memory on the primary, expires at run end) that authorises only `/nodes/runs/:run/*` (seed bundle, checkpoint upload, transcript upload), so an init container can fetch the seed bundle and a sidecar can push a checkpoint with no standing secret. The same token path is available to podman nodes but unused there.
-* **Bridges:** the stream protocol is independent of how the agent got the bytes. The controller exposes a per-run in-cluster endpoint to the pod and relays into `bridge.open`; that endpoint needs per-run mTLS or a bearer (the unix-socket permissions the podman path gets for free), which is the k8s agent's own work.
-* **Not in this design:** image distribution via a registry (`caps.image: registry`), Secrets with their own RBAC/rotation instead of in-memory `assign` secrets, owner-reference/TTL reaping in place of the label sweep, log streaming as `stdout` frames, test services as sidecars. All are agent-internal; none changes the primary.
+> Committed by bd-dkwn9e. Status: **proposed**. Section numbers `§N` *inside* this section (headings `### 0.` … `### 17.`) are local to it and are cited as **K§N** from outside; a bare `bd-bw8a0m §N` is a section of this document's other parts. Its amendments A1–A7 (K§14) have been applied to §4.2, §6, §7.1, §7.3, §10.2, §10.3, §13 and §14 above and below; each is marked *(A#)*.
+>
+> **Operator rulings, 2026-10-06 (epic bd-2dvh9q):** (1) the existing k3s (mesanna/aginor) is a **test bed only**: the K1 spike runs on a disposable kind/k3d cluster, and the operator's k3s is touched only with an explicit go-ahead (the kubeconfig is cluster-admin and the cluster hosts vstim prod and CI). (2) The operator's spare laptop starts as a machine node and joins a cluster later. (3) P3: nothing is promoted until RW1 (bd-dufrgb) and the RW2 spike (bd-6tx1xv) land; then K0 and K1 are promoted.
+
+Research (no code, no cluster contact). It reuses bd-bw8a0m's node protocol, enrollment and auth tier; every change it needs from them is listed in K§14 as a numbered amendment (A1–A7), now applied to the sections of this document marked *(A#)*.
+
+Sources: bd-bw8a0m `notes` (read in full), bd-aowisc `notes` §7 (the eight "what k8s still needs" items; §5 below maps each), bd-2jerqw (seed paths, shipped), the repo at `9b5fb0733` (names verified, §17), and the admiral memory `reference-mesaana-cluster-survey-2026-10-04` plus `reference-k3s-cluster-node-ip-is-load-bearing` / `reference-vstim-k8s-cluster`. **I ran no `kubectl` and touched nothing in any cluster**; every cluster fact below is from that 2026-10-04 survey and may have drifted. Anything relied on but not observed is **[K#]**, indexed in §15.
+
+### 0. Decisions in one screen
+
+| # | Decision | Losing option(s) |
+|---|---|---|
+| 1 | **The controller is the Arbiter release in `ARB_ROLE=agent` with `ARB_AGENT_BACKEND=k8s`**: one `Deployment` (1 replica, `Recreate`, plus a `Lease` guard) in a dedicated namespace. To the primary it is an ordinary node (`kind: cluster`), same socket, same credential, same `hello`/`hb`/`assign`. | A separate Go/Rust controller (second build, skew, re-implements the hardening builder); a CRD + operator (cluster-scoped install, nothing a single config object needs). |
+| 2 | **One bare `Pod` per run, `restartPolicy: Never`**, not a `Job`. | `Job` (§3.1). |
+| 3 | **Install = primary-rendered plain manifests** (two documents: admin bootstrap, node), join token supplied separately as a Secret. | Helm chart (separately versioned, needs hosting, `genCA` pitfalls); Kustomize. |
+| 4 | **Config = a ConfigMap with a closed schema**, mounted as a file; operator knobs only, security fields are not configurable. | CRD-lite; a raw `PodTemplate` (would let the operator bypass the hardening builder). |
+| 5 | **Capacity = the in-cluster ceiling** (`max_concurrent`) reported as the node ceiling; the controller is a second admission gate that sees `ResourceQuota`; a pod that is not scheduled is `pending`, never `running`. | Reporting node CPU/RAM sums (the controller cannot even read `nodes`). |
+| 6 | **Bridges: controller-hosted mTLS listener, no per-pod sidecar.** Pods connect to the controller's `Service`; the controller relays each connection into the existing `bridge.open` stream. Policy, audit and `BridgeIdentity` stay on the primary, unchanged. | Per-pod relay sidecar (same TLS client, plus a container per pod on a CPU-tight cluster); reaching into pods with `pods/exec`/`portforward`; plain TCP (cleartext on the pod network). |
+| 7 | **Checkout: init container pulls a git bundle from the controller into an `emptyDir`; a native sidecar (`snapshotter`) pushes checkpoint and final bundles back through the controller.** No `pods/exec`, no PVC for the tree. | PVC (RWO node pinning on local-path); the controller running `git` on the pod's tree; `kubectl cp`/exec. |
+| 8 | **Warm deps/`_build` seed = an image layer** built on the primary from `DepsCache` output and pushed to the registry; `bd-2jerqw` `seed_paths` outside `deps`/`_build` ride in the same layer. | PVC cache (node-pinned, RWX absent); fetching per run (minutes + needs egress); in-cluster seed Job. |
+| 9 | **Images: the primary builds and pushes to an operator registry** (`nodes.registry`), the pod pins a digest. Controller image is built from the retained release tarball and pushed the same way. | Node/in-cluster builds (kaniko/buildah need privilege); `save | load`; CI-published GHCR images (private-repo auth, `--local` deploys have none). |
+| 10 | **Test services = native sidecars in the run pod** (`restartPolicy: Always` init containers with a `startupProbe` running the existing `ready` argv), translated from the existing `TestServices` service specs. | A per-run service pod (separate network namespace: `127.0.0.1` stops working). |
+| 11 | **Secrets: nothing per-run is stored in etcd.** The pod carries only a single-use boot nonce; the init container redeems it from the controller over TLS into a memory `emptyDir`. The cluster holds long-term only the node credential, the CA key and (optionally) a tailscale auth key. | Per-run Kubernetes `Secret`s (readable by anyone with `get secrets`, at rest in etcd/sqlite); secrets as pod-spec env (visible in `kubectl describe`). |
+| 12 | **Hardening: a pure pod-spec builder with a one-to-one mapping from `Container.argv/2`** (§8), enforced server-side by Pod Security `restricted` on the namespace and, optionally, a `ValidatingAdmissionPolicy` that bounds the controller's service account. `label=disable` is **not** carried over. | Trusting the builder alone. |
+| 13 | **`--network=none` has no Kubernetes equal; it is replaced by NetworkPolicy plus a controller-run canary that fails closed** (`degraded: netpol_unenforced` excludes the node from placement). | Assuming the CNI enforces. |
+| 14 | **First target: the existing k3s is a test bed, not yet a production target** (§13). Ceiling 2 pods. | — |
+| 15 | **Breakdown: 14 children (K0–K13), none above D3** (§16). | — |
+
+### 1. What the protocol already gives, and what a cluster is not
+
+bd-bw8a0m §16 already reserved the shape: `hello.kind = "cluster"`, `caps.backend = "k8s"`, `caps.image = "registry"`, `caps.limits = "pod"`, capacity = the controller's own ceiling (§13 there), a declarative run spec with mount **kinds** (§7.1 there), no podman argv. This design takes that literally. The agent polymorphism sits in an agent-internal behaviour, `Arbiter.NodeAgent.Backend` (**new**, K2: `inventory/0, start_run/1, signal/2, stop/1, outcome/1, collect/2, list_owned/0, reap/1, capacity/0, readiness/0`); the podman run supervisor of bd-bw8a0m child 9 is the first implementation, `Backend.K8s` the second. The primary's `Executor.Node` is untouched.
+
+Differences a cluster forces (each is a section below):
+
+| Machine node | Cluster node | Where |
+|---|---|---|
+| agent installed as a user systemd unit by a script | a `Deployment` applied by an admin | §2 |
+| ceiling = `ARB_NODE_MAX_WORKERS` + suggestion from cpus/mem | ceiling = ConfigMap `max_concurrent`; the cluster scheduler decides placement | §4 |
+| `--network=none` is a kernel guarantee | NetworkPolicy, enforcement depends on the CNI | §8, §9 |
+| bridges are unix sockets bind-mounted into the container | bridges are mTLS TCP to the controller `Service` | §9 |
+| shadow clone on the node's disk, retained after exit | `emptyDir` dies with the pod, so the final snapshot must leave *before* the pod does | §10 |
+| image built on the node from a plan | image pulled from a registry, pushed by the primary | §11 |
+| node credential in `~/.config` | node credential in a Secret, rotated in place | §2, §12 |
+| agent self-upgrades its tarball | agent image is immutable; upgrade = patch own Deployment's image | §2.4 |
+| node may not be on the tailnet by definition | **a cluster usually is not on the tailnet** | §2.3 |
+
+### 2. Installation
+
+#### 2.1 What "Add node" emits
+
+The modal gains a kind selector, **Machine | Kubernetes cluster**. The machine flow (bd-bw8a0m §5.5/§14) is unchanged. For a cluster it asks for: node name, namespace (default `arbiter-workers`), max concurrent pods, per-pod CPU/memory, optional node selector, optional `imagePullSecrets` name, join-token TTL. It **refuses to continue** when `nodes.registry` is unset (§11) and shows the doctor hint, because a cluster node cannot take a run without an image it can pull.
+
+It mints the same `JoinToken` (single-use, hashed, 15 min, shown once), with `kind: cluster` and the form values pre-bound to the future node row, and shows three things:
+
+1. **Manifests**: a **Download** button and a copy-able command, `kubectl apply -f <(curl -fsSL "<public_url>/nodes/join/k8s.yaml?name=…&max=2")`. The route is anonymous like `/nodes/join` and renders from query parameters; **it contains no secret** (no token, no credential, no CA key), so it can be cached, diffed and committed. Download exists because the machine running `kubectl` may not be on the tailnet.
+2. **The join Secret command**, token read from the terminal, never in history or argv: `read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`.
+3. The same "Waiting for node…" → "Connected" countdown, and a **cluster readiness line** fed by the controller's first `hello` (netpol canary, quota, registry pull test, PSA, §9).
+
+`arb node add --kind cluster [--name N --namespace NS --max-workers N …] -o manifests.yaml` is the CLI equivalent (operator-proof token, as for machines); the token goes to `--token-file` or a TTY.
+
+**Why plain manifests rather than Helm.** The server already knows its version, `public_url`, registry and the exact image digests, and renders them in; a chart is a second versioned artifact with its own hosting and skew, and `genCA` regenerates on upgrade unless fought. Helm can be layered on the same manifests later; nothing here precludes it.
+
+#### 2.2 The manifests
+
+One rendered file, two parts, applied in order (separate files via `?part=bootstrap|node`):
+
+* **bootstrap (needs cluster-admin once):** `Namespace arbiter-workers` with `pod-security.kubernetes.io/enforce: restricted` (+ `enforce-version: latest`, `audit`/`warn: restricted`); `PriorityClass arbiter-worker` (value `-100`, `preemptionPolicy: Never`, so prod workloads and CI win every contention); `ResourceQuota`; `LimitRange` (defaults so a pod missing limits cannot slip in); the NetworkPolicies of §9; optionally the `ValidatingAdmissionPolicy` of §7.
+* **node (namespace-scoped):** ServiceAccounts `arbiter-controller` and `arbiter-worker`, `Role` + `RoleBinding` (§7), placeholder Secrets `arbiter-node-credential` and `arbiter-controller-ca` (empty; the controller fills them, so the Role needs only `get`/`update` on those names), ConfigMap `arbiter-controller-config` and `arbiter-ca`, `Lease arbiter-controller`, `Service arbiter-controller` (ClusterIP, ports 9443 bridge / 9444 boot+checkout), and `Deployment arbiter-controller`.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: arbiter-controller, namespace: arbiter-workers}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}              # never two controllers with one credential
+  selector: {matchLabels: {app.kubernetes.io/name: arbiter-controller}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: arbiter-controller, app.kubernetes.io/component: controller}}
+    spec:
+      serviceAccountName: arbiter-controller
+      priorityClassName: arbiter-worker
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: controller
+        image: <registry>/arbiter-agent@sha256:<digest>    # = server version, pinned by the renderer
+        env:
+        - {name: ARB_ROLE, value: agent}
+        - {name: ARB_AGENT_BACKEND, value: k8s}
+        - {name: ARB_PRIMARY_URL, value: https://<primary>.<tailnet>.ts.net}
+        - {name: ARB_NODE_NAME, value: mesaana-k3s}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+        resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+        volumeMounts: [{name: join, mountPath: /etc/arb/join, readOnly: true},
+                       {name: config, mountPath: /etc/arb/config, readOnly: true},
+                       {name: tmp, mountPath: /tmp}]
+      volumes:
+      - {name: join,   secret: {secretName: arbiter-join, optional: true}}
+      - {name: config, configMap: {name: arbiter-controller-config}}
+      - {name: tmp,    emptyDir: {sizeLimit: 512Mi}}
+```
+
+The controller runs under the same hardening as a worker; it has a service-account token (it needs the API) and it does not run untrusted code.
+
+#### 2.3 Reaching the primary (the part a machine does not have)
+
+The controller needs the same thing a machine needs: outbound HTTPS to `nodes.public_url` (bd-bw8a0m §4.3). **A cluster is generally not on the tailnet** (vstim's workers reach the tailnet through their own tailscale sidecar, per `reference-vstim-k8s-cluster`). Two supported paths, the second being the "private overlay with TLS in front of loopback" path 2 of bd-bw8a0m §4.3:
+
+* **A (recommended, matches existing practice): a tailscale sidecar in the controller pod, userspace networking** (`TS_USERSPACE=true`, no `NET_ADMIN`, no `/dev/net/tun`), exposing an outbound HTTP proxy on `127.0.0.1:1055`. The agent's WebSocket client connects through it (Mint supports an HTTP proxy; **[K11]**). The auth key is an **ephemeral, pre-authorised, tagged** key (`tag:arbiter-node`, ACL to `tag:arbiter-primary:443` only) in a Secret `arbiter-tailscale`; this is the one standing secret the cluster holds besides the node credential (§12). The manifests include the sidecar only when `?reach=tailscale` is chosen.
+* **B: a reachable HTTPS endpoint** for the primary (a reverse proxy with a valid certificate on a private overlay or LAN) given as `nodes.public_url`. The controller accepts only `https` with a verified chain; plain `http` is refused (the loopback-only exception of bd-bw8a0m does not apply in a pod).
+
+Public-internet exposure stays refused by default (bd-bw8a0m §4.3 item 4). A cluster-egress NetworkPolicy for the controller (§9) limits *where* this traffic may go, which is a second reason to prefer A: the controller then needs egress to the tailscale control/DERP endpoints, not to the primary's LAN address.
+
+#### 2.4 First boot, credential, upgrade
+
+1. The controller reads `/etc/arb/join/token`; if `arbiter-node-credential` is empty it `POST /nodes/enroll` (token in the body, as bd-bw8a0m §5.2; body adds `kind: cluster`, `k8s_version`, `proto`, `agent_version`). It gets the node credential back and writes it to the Secret `arbiter-node-credential` (RBAC `update` on that one name). Subsequent starts read the Secret and skip enroll. The join Secret is then spent; the admin may delete it (the controller deliberately has no verb for that).
+2. On first boot it also generates the CA (§9.2) into `arbiter-controller-ca` and publishes the public certificate to ConfigMap `arbiter-ca` (mounted into worker pods).
+3. **Upgrade.** The image is immutable, so bd-bw8a0m's tarball self-upgrade (§6 there) does not apply. `hello_ok` carries `upgrade{version, sha256, image}` (A1) for `caps.upgrade = "image"`; with `rbac.selfUpgrade` on (the default in the rendered manifests) the controller patches **its own Deployment's** image (`get`/`patch` on `deployments/arbiter-controller` only) when idle (`auto_upgrade: when_idle`, as for machines), and `Recreate` restarts it. Because worker pods **survive a controller restart and are re-adopted** (§3.5), an upgrade does not even need to wait for idle in principle; `when_idle` is kept as the conservative default. Without the verb the node shows `outdated` plus the exact `kubectl set image …` command, and the skew rules of bd-bw8a0m §6 keep new work off it. The primary publishes the controller image of its own version to the registry at deploy time (§11), so the target always exists.
+   *Why default-on:* the server is redeployed often (this repo is dogfooded); a cluster node that stalls after every deploy until a human acts would be unusable. *Why it adds no blast radius:* the controller can already create arbitrary pods in its namespace (and §7's admission policy bounds even that); patching its own image grants nothing beyond that.
+
+### 3. The controller
+
+#### 3.1 Job vs bare Pod: **bare Pod**
+
+| | Bare Pod | Job |
+|---|---|---|
+| Retry | none; Arbiter owns resume | `backoffLimit: 0` plus `podFailurePolicy` is needed just to neuter the default; any default retry would start a **second run on an empty `emptyDir`**, racing Arbiter's own resume of the same task |
+| Deadline | `spec.activeDeadlineSeconds` (native) | the same, on the Job |
+| TTL cleanup | none: the controller deletes after it has the outcome | `ttlSecondsAfterFinished` |
+| Status | the Pod carries everything we read (`OOMKilled`, `DisruptionTarget`, `Unschedulable`) | the same Pod, plus a second object and a second watch |
+| RBAC | `pods` verbs | `jobs` verbs **and** `pods` verbs (logs, watch) |
+| Kueue | plain-Pod integration (**[K18]**) | the most mature integration |
+
+Decided: Pod. A Job is an indirection whose one real benefit (TTL GC that survives a controller outage) is replaced by `activeDeadlineSeconds` (kills the process) plus owner-reference GC and the sweeper (§3.6); the lingering terminated Pod object is a few KB. **What would change this:** adopting Kueue before its plain-Pod integration is acceptable, or an operator who wants `kubectl get jobs` as the audit view.
+
+#### 3.2 Mapping the node protocol
+
+| Protocol (bd-bw8a0m §4.2) | Cluster behaviour |
+|---|---|
+| `hello` | `kind: cluster`, `caps{backend: k8s, image: registry, limits: pod, bridge_streams, bundle, upgrade: image}`; **inventory** = the pods carrying this install/node labels (run id, phase, log cursor) from a list; readiness report (§9.4); `ceiling` = `max_concurrent`; no cpu/mem facts |
+| `hello_ok` | effective `max_workers`, per-run "known: yes/no", `fence_after`, `upgrade` |
+| `hb` (10 s) | per-run state with the vocabulary `pending | starting | running | terminating`, plus `capacity{ceiling, running, pending, headroom, constrained}` (A3) |
+| `assign` | admission (§4.2), build the pod (§8), create it, reply `ready` at **container `Running`** or `refuse{reason}` |
+| `cancel{run, reason, collect?}` | `collect` → delete with the pod's grace period (the snapshotter finalises on SIGTERM, §10.3); otherwise `gracePeriodSeconds: 0` |
+| `signal(:term \| :kill)` | delete with grace / delete with `gracePeriodSeconds: 0` (no `exec` anywhere) |
+| `stdout` (binary, `ARB1`) | `pods/log` follow of the `worker` container (§3.4) |
+| `exit{status, oom?}` | from `containerStatuses[worker].state.terminated` (`exitCode`, `reason == "OOMKilled"`), sent **after** the final checkpoint has been forwarded or timed out |
+| `checkpoint` | forwarded from the in-pod snapshotter (§10.3) |
+| `bridge.*` | relayed from the TLS listener (§9.3) |
+| `reap{live_set}` | §3.6 |
+| `drain` / `rotate` / `upgrade` | `drain`: no new pods, in-flight finish. `rotate`: rewrite the credential Secret **before** acking (bd-bw8a0m §5.2). `upgrade`: §2.4 |
+
+#### 3.3 Watch-based status
+
+One informer over `pods` in the namespace, selector `arbiter.dev/install=<id>,arbiter.dev/node=<node>` (list, then watch from `resourceVersion` with bookmarks; 410 Gone → relist; a relist diff produces the same transitions as the watch). The state function is pure (and is K3's test target):
+
+| Pod observation | Run state reported |
+|---|---|
+| `Pending`, `PodScheduled=False`, `reason: Unschedulable` (message kept verbatim) | **`pending`** (`reason: unschedulable`) |
+| `PodScheduled=False`, `reason: SchedulingGated` (Kueue) | `pending` (`reason: queued`) |
+| scheduled, `Init:*`, `ContainerCreating`, `PodInitializing` | `starting` (phase detail: `pulling | seeding | services`) |
+| waiting `ImagePullBackOff`/`ErrImagePull`/`InvalidImageName`/`CreateContainerConfigError` for longer than `pull_timeout_s` | `refuse{image_unavailable, detail}` (pod deleted) |
+| `containerStatuses[worker].state.running` | `running` |
+| `worker` terminated | `exit`; `reason == OOMKilled` → `oom?: true` |
+| `DisruptionTarget` condition, `status.reason == Evicted`, `Preempting`, or the pod object deleted by someone else | **interrupted** with new cause `pod_disrupted` (A5): same policy as `node_lost`, **no resume attempt consumed** |
+| `phase: Failed`, `status.reason: DeadlineExceeded` | `exit` with `reason: deadline` (the run exceeded `activeDeadlineSeconds`; the primary classifies it like its own wall-clock stop) |
+
+The pending/starting/running split is the point: **the primary only treats a run as started at `running`** (A3). Until then the `Worker` stays in its starting state and a node slot stays reserved (so effective capacity is honest), but no `stdout` or `exit` exists and nothing about the run is counted as usage.
+
+#### 3.4 Log streaming as the agent stream
+
+`GET /api/v1/namespaces/<ns>/pods/<pod>/log?container=worker&follow=true&timestamps=true[&sinceTime=<cursor>]`. The controller strips the timestamp, re-frames lines the way `Worker` expects (`{:line, 65_536}`: a longer line becomes `noeol` chunks followed by an `eol`), and emits `stdout` frames. The stream **cursor is the RFC 3339 nano timestamp** of the last acked line (A4: cursors become opaque strings, decimal offsets for podman); after a reconnect or a controller restart it resumes from `sinceTime = cursor`, de-duplicating lines with the identical `(timestamp, line hash)`. After the container terminates, one non-follow read from the cursor to EOF drains the tail before `exit` is sent. Backpressure is TCP's: if the primary stops acking, the controller stops reading and the kubelet stops being drained.
+
+*Why logs and not `attach`:* the worker's stdin is `/dev/null` (`ClaudeSession` wraps the command in `exec "$@" < /dev/null`), so nothing flows the other way; `attach` is not resumable and needs another privileged verb. *Known weakness:* output lives in kubelet's rotated log files (default 10 MiB × 5); a controller outage longer than the rotation window under heavy output loses lines **[K5]**. Mitigation if measurements show it: a `tee` in the entry wrapper to `/run/arb`, served by the snapshotter, as a later child.
+
+#### 3.5 Cancel, teardown, restart
+
+* **Cancel/teardown** is one `DELETE` of the Pod (grace 120 s when `collect`, else 0). Test-service sidecars, the snapshotter and the `emptyDir`s die with it; there is no separate service pod to reap (`TestServices.teardown/2` has no cluster analogue).
+* **Controller restart does not kill runs.** On start the controller lists its pods, reports them in `hello.inventory`, re-attaches log follows at the primary's cursor, and the primary treats it as a *blip* if it returns within `fence_after` with the same `boot_epoch` (bd-bw8a0m §10.2). Bridges are reconnect-on-next-connection (each in-pod `socat` dials fresh per connection), so a restart costs the run a few seconds of stalled network.
+* **Why this satisfies the fence invariant** (`fence_after < lost_after`, bd-bw8a0m §10.1) without a self-fence: a live controller that loses the primary deletes its pods at `fence_after`, as a machine agent stops its containers. A **dead** controller cannot, but a pod with no controller has **no exit**: it has no forge credential, no route to the primary, and its only network path is the controller's bridge listener. It stalls until `activeDeadlineSeconds`. When the controller returns and the primary no longer knows the run, the verdict is "quiesce" (§3.6). **[K21]**.
+* **One active controller:** a `Lease` (`coordination.k8s.io`, `get`/`update` on the single pre-created name) is renewed every 10 s; a controller that cannot renew steps down (stops assigning and reaping, drops the primary socket) so a node partition cannot leave two controllers sharing one credential. `Recreate` handles the ordinary case; the Lease handles the partition.
+
+#### 3.6 Reaping leftovers
+
+Four layers, cheapest first:
+
+1. **`activeDeadlineSeconds`** = the run's wall-clock cap + 30 min, kills runaway pods with no controller.
+2. **Owner reference** from each pod to the controller **Deployment** (not its ReplicaSet or Pod: those change on every restart and would GC every run), `blockOwnerDeletion: false`. `kubectl delete deploy arbiter-controller` / uninstall removes every worker pod.
+3. **The sweeper**, on `hello_ok` and every 60 s: pods with this install's and this node's labels whose run is **not** in the primary's `live_set` (bd-bw8a0m §10.6) are quiesced (SIGTERM path, so the snapshotter uploads a *salvage* checkpoint if the primary will take it) and deleted; terminated pods are deleted once their outcome is acked (`retain_failed_s`, default 300, `0` for succeeded: a retained pod keeps its `emptyDir` and kubelet log for `kubectl describe`/`logs`). The sweeper **never deletes a pod without all three labels** (RBAC cannot scope `delete` by label, which is the main reason the namespace is dedicated, §7), and never its own pod.
+4. **Primary-gated:** like bd-bw8a0m, `reap` only arrives when `SingleInstance.primary?/1` is true.
+
+### 4. Capacity and configuration
+
+#### 4.1 Where it lives: ConfigMap `arbiter-controller-config`
+
+Mounted at `/etc/arb/config/controller.yaml`, re-read every 30 s (kubelet propagates ConfigMap volume edits within roughly a minute; no API verb needed, so no RBAC). **Closed schema**; unknown keys fail validation; an invalid file keeps the last good config and reports `degraded: bad_config` in `hb`.
+
+```yaml
+max_concurrent: 2                  # the node ceiling reported to the primary
+namespace: arbiter-workers
+worker:
+  requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}
+  limits:   {cpu: "2", memory: 4Gi}
+  work_size_limit: 8Gi             # emptyDir "work"
+  tmp_size_limit: 1Gi              # memory emptyDir, counted against the memory limit
+services_resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
+placement:
+  node_selector: {kubernetes.io/hostname: mesanna}
+  tolerations: []
+  priority_class: arbiter-worker
+  runtime_class: ""                # set to gvisor/kata where it exists; empty on runc-only
+  queue: ""                        # Kueue LocalQueue name, later (§4.4)
+image_pull_secrets: [gitlab-registry]
+timeouts: {schedule_s: 120, pull_s: 600, boot_s: 120, grace_s: 120, retain_failed_s: 300}
+snapshot_interval_s: 300
+```
+
+Only these are operator-settable. **Not settable, ever:** anything in the security context, volumes, service account, network, host namespaces, image. The builder owns them (§8). *Why not a CRD:* it needs cluster-scoped install and RBAC, and one object per node does not need a schema server. *Why not `PodTemplate`:* it would let the operator write fields the builder is supposed to own. A CRD for named worker **classes** (several profiles on one cluster) is the future shape; it would be a later amendment, not a rewrite.
+
+The run spec's own resource hints (bd-bw8a0m §7.4's per-run memory cap) are advisory for cluster nodes: the effective limit is `min(spec, config)`, the in-cluster config is authoritative. A spec field the builder cannot represent (`network: pasta`, an unknown mount kind) is refused with `refuse{bad_spec}`; the pasta network is only ever used by the primary's own deps-seed job.
+
+#### 4.2 How capacity is reported and enforced
+
+* **Reported:** `hello.ceiling = max_concurrent`; the operator may only lower it (bd-bw8a0m §13: `min(operator, node ceiling)`). `hb.capacity = {ceiling, running, pending, headroom, constrained}`; a `capacity` event is pushed when the ConfigMap changes (A3). `headroom` is how many more pods **fit the namespace's ResourceQuota** right now: `min over resources of floor((hard - used) / per-pod request)` read from `resourcequotas` (`get/list/watch`, namespaced, read-only). The controller **cannot read `nodes`** (cluster-scoped, deliberately not granted), so there is no CPU/RAM-sum suggestion for a cluster; that is the design, not a gap: the cluster's schedulable room is the scheduler's business.
+* **Second admission gate.** The primary's `Placement` reserves a slot against effective max (gate 2 of bd-bw8a0m §13). The controller re-checks on `assign`: `running + pending < max_concurrent` **and** `headroom ≥ 1`, else `refuse{no_capacity}`, which the primary maps to `{:no_node_capacity, _}` (a hold, the card is not failed, the reserved slot is released), exactly the existing account-capacity treatment. Quota is also enforced by the API server: a `POST pods` over quota fails synchronously with 403 `exceeded quota` and is mapped to the same refusal; quota counts **Pending** pods' requests too.
+* **Pending-unschedulable never looks like running.** After creation the controller waits up to `schedule_s` for `PodScheduled=True`. `Unschedulable` appears within about a second and persists while the scheduler retries; at the timeout the pod is deleted and the assign is refused as `refuse{unschedulable, message}` (A3), no resume attempt consumed. While pending, the node's `hb.capacity.pending` shows it, `constrained: true` is set, and `Placement` ranks a constrained node last and skips it when another node or local capacity can take the run. The primary's startup/stall watchdogs must not run during `pending|starting` (`hello_ok.limits.prepare_timeout_s`, A3; **[K17]** verifies what `Worker` does today).
+* **Interaction with `conductor.max_concurrent`:** unchanged and operator-owned (bd-bw8a0m §13); the nodes page shows `local + Σ effective`. A cluster's effective figure is `min(operator, max_concurrent)`.
+
+#### 4.3 The quota that backs it (bootstrap manifest)
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: arbiter-workers, namespace: arbiter-workers}
+spec:
+  hard:
+    pods: "4"                         # max_concurrent + controller + 1 spare
+    requests.cpu: "3"                 # 2 x (1 + 0.1 + 0.05) + controller (and tailscale), rounded up
+    requests.memory: 6Gi
+    limits.cpu: "6"
+    limits.memory: 10Gi
+    requests.ephemeral-storage: 12Gi
+```
+The renderer derives these numbers from `max_concurrent` and the per-pod figures, so the two cannot disagree at install time; a later edit of one without the other is what the headroom number makes visible.
+
+#### 4.4 Kueue (a later option)
+
+Add `placement.queue`: the builder labels the pod `kueue.x-k8s.io/queue-name`; Kueue's pod integration gates it (`SchedulingGated`), which the state function already maps to `pending{queued}`, with a separate `queue_timeout_s` instead of `schedule_s`. `headroom` would then come from the ClusterQueue's quota instead of the namespace quota. Nothing else changes, which is the reason to keep bare Pods **[K18]**.
+
+### 5. Checklist: bd-aowisc §7's eight "what k8s still needs" items
+
+| # | bd-aowisc §7 item | Decision | Where |
+|---|---|---|---|
+| 1 | Bridge transport with its own authentication | controller-hosted mTLS listener, per-run per-bridge client certificates, `bridge.open` relay; policy/audit/`BridgeIdentity` stay on the primary | §9 |
+| 2 | Image distribution via a registry; base/toolchain built elsewhere | the primary builds and pushes; digest-pinned `ref` in `assign` | §11 |
+| 3 | Checkout transport; PVC vs `emptyDir` | `seed` init container fetches a bundle from the controller; `emptyDir`; snapshotter sidecar pushes back | §10 |
+| 4 | Secrets as Kubernetes Secrets, RBAC, rotation | per-run values never stored in the cluster; single-use boot nonce; long-term holdings enumerated | §12 |
+| 5 | Lifecycle and reaping: owner refs, `activeDeadlineSeconds`, TTL, native limits | bare Pod, owner reference to the Deployment, deadline, controller-driven delete, sweeper | §3 |
+| 6 | Capacity: scheduling is the cluster's; `Placement` becomes advisory | ceiling + quota-aware second gate, `pending` state, Kueue later | §4 |
+| 7 | Hardening mapping and the `label=disable` review | one-to-one builder table; `label=disable` dropped with reasons; NetworkPolicy + canary | §8, §9 |
+| 8 | Output streaming; test services as sidecars | `pods/log` follow with timestamp cursors; native sidecars | §3.4, §6 |
+
+### 6. Test services
+
+`TestServices` today builds a podman **pod** (`--network none`, `--userns keep-id`) so the worker and its services share `lo`, starts each service with `--read-only --cap-drop=all no-new-privileges` and tmpfs mounts, and polls the service's `ready` argv with `podman exec`. A Kubernetes pod already is a shared-network-namespace group, so the translation is direct and reuses the **service specs** (`TestServices.resolve/1`, the `postgres/1` and `s3/1` presets), not the podman argv:
+
+| Service spec field | Pod field |
+|---|---|
+| `name`, `image` | native sidecar (init container with `restartPolicy: Always`) `svc-<name>`; `imagePullPolicy: IfNotPresent` |
+| `env` | `env:` (non-secret literals by construction; the presets use fixed dev credentials) |
+| `command` | `command`/`args` |
+| `tmpfs` entries (`/var/lib/postgresql/data`, `/var/run/postgresql`, `/data`) | `emptyDir{medium: Memory, sizeLimit}` mounted at that path; the sidecar still has `readOnlyRootFilesystem: true` |
+| `ready` argv | `startupProbe.exec.command` (`periodSeconds: 1`); the next init container, and so the worker, does not start until it passes, replacing the readiness loop |
+| `worker_env` (`DATABASE_URL=postgres://…@127.0.0.1:5432/…`, `S3_ENDPOINT=http://127.0.0.1:9000`) | the worker container's `env:` unchanged: `127.0.0.1` works because the pod shares `lo` |
+| hardening | same container `securityContext` as the worker, **but the uid comes from a new optional spec field `uid`** (Postgres alpine: 70, `silo`: its image user) because the podman path relies on `--userns keep-id` plus an injected passwd entry that Kubernetes does not give; PSA `restricted` requires `runAsNonRoot` **[K10]** |
+
+Resource requests for services come from `services_resources` in the config (§4.1) and count towards the pod's request; teardown is the pod's deletion; there is nothing to reap separately (the `TestServices.Reaper`/`reap_orphans/1` machinery has no cluster analogue). The services' images are public (`docker.io/library/postgres`), so the namespace's `ValidatingAdmissionPolicy` allowlist (§7) admits `docker.io/library/` and the operator's registry only; a service with another image needs an explicit allowlist entry in the config (`service_image_allowlist`).
+
+### 7. RBAC
+
+**Namespaced only.** The controller needs no `ClusterRole`. Worker pods run as `arbiter-worker`, a ServiceAccount with **no bindings and `automountServiceAccountToken: false` on both the account and every pod**, so even a builder bug that mounted a token would mount a powerless one. The namespace's `default` account is likewise unbound.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arbiter-controller, namespace: arbiter-workers}
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [create, get, list, watch, delete]       # no update/patch: pod specs are immutable to us
+- apiGroups: [""]
+  resources: [pods/log]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [resourcequotas]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [services]
+  resourceNames: [arbiter-controller]             # to learn its own stable ClusterIP
+  verbs: [get]
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [arbiter-node-credential, arbiter-controller-ca]
+  verbs: [get, update]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [arbiter-ca]
+  verbs: [get, update]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  resourceNames: [arbiter-controller]
+  verbs: [get, update]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [arbiter-controller]
+  verbs: [get]                                    # owner-reference UID
+  # + patch only when rbac.selfUpgrade is on (§2.4)
+```
+
+**Deliberately absent:** `pods/exec`, `pods/attach`, `pods/portforward`, `pods/eviction`, `secrets` create/list/watch/delete, `configmaps` list/watch, `events`, `nodes`, `namespaces`, `tokenreviews`, anything cluster-scoped. Notes:
+
+* `create pods` with no field restriction **is** a broad grant (a pod can mount any Secret in its namespace, including the node credential). RBAC cannot narrow it, so two server-side backstops bound it: **Pod Security `restricted`** on the namespace (the builder's output must pass it, which is also a conformance test, K4) and, optionally, a `ValidatingAdmissionPolicy` that applies only to requests from the controller's service account:
+
+  ```yaml
+  apiVersion: admissionregistration.k8s.io/v1
+  kind: ValidatingAdmissionPolicy
+  metadata: {name: arbiter-worker-pods}
+  spec:
+    failurePolicy: Fail
+    matchConstraints: {resourceRules: [{apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods]}]}
+    matchConditions:
+    - name: from-controller
+      expression: request.userInfo.username == 'system:serviceaccount:arbiter-workers:arbiter-controller'
+    validations:
+    - expression: object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false
+    - expression: "!has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)"
+    - expression: object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))   # no Secret, hostPath, PVC
+    - expression: (object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)
+    - expression: (object.spec.containers + object.spec.initContainers).all(c, c.image.startsWith('<registry>/') || c.image.startsWith('docker.io/library/'))
+  ```
+  With it, a **compromised controller can only create pods shaped like worker pods**; without it, the Pod Security level still blocks the worst fields but not Secret mounts. It is optional because it needs a cluster-admin object and Kubernetes ≥ 1.30; the manifest renderer includes it when `?admission=policy` is chosen and the doctor reports whether it is present.
+* **`delete` and `list` on pods cannot be restricted by label.** A compromised or buggy controller could delete other pods in its namespace. Hence the dedicated namespace and the controller's own all-three-labels guard (§3.6); neither is a security boundary, both are blast-radius reducers.
+* Reading the quota needs `resourcequotas` read; that is the whole of its cluster visibility.
+
+### 8. Hardening: the pod-spec builder, one line per `Container.argv/2` guarantee
+
+`Arbiter.NodeAgent.K8s.PodSpec.build/2` is **pure** (run spec + config → a map), like `Container.argv/2`, and is table-tested exactly the way the argv builder is. Mapping:
+
+| `Container.argv/2` | Pod field |
+|---|---|
+| `--read-only` | `securityContext.readOnlyRootFilesystem: true` on **every** container (init, services, snapshotter, worker) |
+| `--cap-drop=all` | `capabilities.drop: [ALL]`, no `add` |
+| `--security-opt no-new-privileges` | `allowPrivilegeEscalation: false`; `privileged: false`; `procMount: Default` |
+| `--userns=keep-id` (in-container uid = host uid; no chown) | `runAsNonRoot: true`, `runAsUser/Group: 10001`, `fsGroup: 10001`, `fsGroupChangePolicy: OnRootMismatch`, **and `hostUsers: false`** (a user namespace on top: the survey reports it works on this cluster) |
+| podman's default seccomp | `seccompProfile: {type: RuntimeDefault}` (Kubernetes' default is **Unconfined**, so this must be set) and `appArmorProfile: {type: RuntimeDefault}` |
+| `--network=none` | no equal; §9 (NetworkPolicy, `dnsPolicy: None` with `127.0.0.1`, no service links, canary) |
+| `-v <worktree>:<worktree>:rw,Z` at the primary's **own absolute path** (path transparency) | `emptyDir` `work` (`sizeLimit`) mounted at that path via `subPath: wt` |
+| `.git` guards: `config`, `hooks`, `commondir`, `objects/info/alternates` read-only bind mounts (`PrivateClone.mounts/1`) | the same four paths as **`readOnly: true` `subPath` mounts of the same `work` volume** over the writable mount; the seed script creates the files first. **[K8]** (a `mv .git/config` must fail `EBUSY`, as the podman bind does) |
+| `-v <objects>:O` overlay of the main repo's objects | not applicable: the clone is **self-contained** (full object store from the bundle, §10.1) |
+| per-run `HOME`, `CLAUDE_CONFIG_DIR` | `emptyDir` paths at the primary's paths (path transparency: `claude --resume` keys on the cwd slug) |
+| `--tmpfs /tmp:rw,nosuid,nodev`, `/dev/shm … noexec 64m` | `emptyDir{medium: Memory, sizeLimit}` for `/tmp` (counted against the memory limit, like tmpfs); `/dev/shm` left at the runtime default (64 MiB, `noexec,nosuid,nodev` on containerd). `noexec` cannot be set on an `emptyDir`, but `/tmp` has no `noexec` in the podman argv either |
+| `-e NAME` (inherit; value never on argv) | values live only in a memory `emptyDir` file sourced and deleted by the entry wrapper (§12); never in the spec |
+| `-e NAME=value` (literals) | `env:` entries (non-secret only) |
+| `-v <cli>:/opt/arbiter/cli:ro` | an image layer (§11), read-only by the root filesystem |
+| `--memory/--memory-swap/--cpus` | `resources.limits.memory/cpu` (+ requests); swap is off on k3s by default **[K22]** |
+| `--pull=never` | `imagePullPolicy: IfNotPresent` with a **digest-pinned** reference |
+| `--init` | PID-1 reaper: `tini` as the container entrypoint. **The base image does not have it today** (`Image` base installs `bc build-essential ca-certificates curl git … procps socat sqlite3`); K7 adds `tini` and a `arbiter:10001` passwd entry (openssh-client, used for the git-over-bridge `ProxyCommand`, fails for a uid with no passwd entry; podman's keep-id injects one, Kubernetes does not). **[K9]** |
+| `--security-opt label=disable` **only when bridges exist** | **not carried over**; see below |
+| — | `automountServiceAccountToken: false`, `serviceAccountName: arbiter-worker`, `enableServiceLinks: false`, `hostNetwork/hostPID/hostIPC: false`, `shareProcessNamespace: false`, no `hostPath`/`hostPort`, no `subPath` from a Secret; `priorityClassName`, `activeDeadlineSeconds`, `terminationGracePeriodSeconds` |
+
+#### 8.1 Review of the `label=disable` reasoning
+
+`Container`'s moduledoc gives the reason: a confined SELinux `container_t` cannot `connect()` to an **unconfined host listener socket**, and bridges are host unix sockets bind-mounted in. Every premise is absent here. Nothing in a pod connects to a host socket: the bridge is **TCP to a Service**, and `container_t` may `name_connect` to unreserved ports. The init container, snapshotter and worker are in **one pod**, so the runtime gives them one MCS pair and they share `emptyDir`s with no relabelling. Shared state between pods does not exist. Conclusion: **there is never a reason to relax SELinux, so the builder emits no `seLinuxOptions` at all and treats a spec asking for one (or for `spc_t`) as `bad_spec`**; the admission policy and PSA (which forbids `spc_t`) back that up. The k3s survey node (Pop!_OS) has no SELinux, so on that cluster this is simply moot; on an RHEL/Rocky cluster the default container policy applies unmodified **[K23]**. The `:Z` private-relabel option disappears for the same reason.
+
+#### 8.2 The pod, concretely
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: arb-<run12>
+  namespace: arbiter-workers
+  labels: {app.kubernetes.io/name: arbiter-worker, app.kubernetes.io/component: worker,
+           arbiter.dev/install: <install-id>, arbiter.dev/node: <node-id>,
+           arbiter.dev/run: <run-id>, arbiter.dev/task: bd-1nfuq5}
+  ownerReferences: [{apiVersion: apps/v1, kind: Deployment, name: arbiter-controller, uid: <uid>}]
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: <spec.max_wall_s + 1800>
+  terminationGracePeriodSeconds: 120
+  serviceAccountName: arbiter-worker
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  hostUsers: false
+  dnsPolicy: None
+  dnsConfig: {nameservers: ["127.0.0.1"]}          # nothing listens: name resolution fails closed
+  priorityClassName: arbiter-worker
+  imagePullSecrets: [{name: gitlab-registry}]
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: {type: RuntimeDefault}
+    appArmorProfile: {type: RuntimeDefault}
+  initContainers:                                    # run in order
+  - name: seed                                       # regular init: redeem nonce, fetch bundle, copy seed layer
+    image: <run image @digest>
+    env: [{name: ARB_BOOT_NONCE, value: <256-bit, single use>}, {name: ARB_BRIDGE_ADDR, value: 10.43.x.y}]
+    command: [sh, -c, "<seed script>"]
+  - name: svc-postgres                               # native sidecar (K10)
+    image: docker.io/library/postgres:16-alpine
+    restartPolicy: Always
+    securityContext: {runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false,
+                      readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+    startupProbe: {exec: {command: [pg_isready, -h, 127.0.0.1, -p, "5432", -U, postgres, -d, app_test]},
+                   periodSeconds: 1, failureThreshold: 120}
+  - name: snapshotter                                # native sidecar (§10.3)
+    image: <run image @digest>
+    restartPolicy: Always
+    command: [tini, --, /opt/arbiter/bin/snapshotter]
+  containers:
+  - name: worker
+    image: <run image @digest>
+    command: [tini, --, sh, -c, "<entry wrapper: source+rm /run/arb/env; socat bridges (Jail's @network_script, OPENSSL targets); exec \"$@\">", sh, claude, ...]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                      capabilities: {drop: [ALL]}, privileged: false}
+    resources: {requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}, limits: {cpu: "2", memory: 4Gi}}
+    volumeMounts:
+    - {name: work, mountPath: <wt>, subPath: wt}
+    - {name: work, mountPath: <wt>/.git/config, subPath: wt/.git/config, readOnly: true}
+    - {name: work, mountPath: <wt>/.git/hooks, subPath: wt/.git/hooks, readOnly: true}
+    - {name: work, mountPath: <wt>/.git/commondir, subPath: wt/.git/commondir, readOnly: true}
+    - {name: work, mountPath: <wt>/.git/objects/info/alternates, subPath: wt/.git/objects/info/alternates, readOnly: true}
+    - {name: work, mountPath: <home>, subPath: home}
+    - {name: work, mountPath: <config_dir>, subPath: claude-config}
+    - {name: tmp,  mountPath: /tmp}
+    - {name: run,  mountPath: /run/arb}
+    - {name: ca,   mountPath: /etc/arb/ca, readOnly: true}
+  volumes:
+  - {name: work, emptyDir: {sizeLimit: 8Gi}}
+  - {name: tmp,  emptyDir: {medium: Memory, sizeLimit: 1Gi}}
+  - {name: run,  emptyDir: {medium: Memory, sizeLimit: 64Mi}}
+  - {name: ca,   configMap: {name: arbiter-ca}}
+```
+The init pass is deliberately sequential: `seed` finishes (secrets and tree in place) → services start and report ready (replacing the `TestServices` readiness loop) → the snapshotter starts → `worker` starts. Native sidecars (Kubernetes ≥ 1.29 beta, GA since 1.33) are the reason a service or the snapshotter does not hold a pod open after the worker exits **[K1]**.
+
+### 9. Network isolation and the bridges
+
+#### 9.1 Deny-all, except the bridge path (bootstrap manifest)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: arbiter-workers}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+kind: NetworkPolicy
+metadata: {name: worker-to-controller, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: worker}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app.kubernetes.io/component: controller}}}]
+    ports: [{protocol: TCP, port: 9443}, {protocol: TCP, port: 9444}]      # no DNS rule on purpose
+---
+kind: NetworkPolicy
+metadata: {name: controller-ingress-from-workers, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/component: worker}}}]
+    ports: [{protocol: TCP, port: 9443}, {protocol: TCP, port: 9444}]
+---
+kind: NetworkPolicy
+metadata: {name: controller-egress, namespace: arbiter-workers}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{ipBlock: {cidr: <API server node IP>/32}}, {ipBlock: {cidr: 10.43.0.1/32}}]   # API: node IP:6443 and the kubernetes ClusterIP
+    ports: [{protocol: TCP, port: 6443}, {protocol: TCP, port: 443}]
+  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}},
+          podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.42.0.0/16, 10.43.0.0/16]}}]           # primary / tailscale control; never the pod or service CIDR
+    ports: [{protocol: TCP, port: 443}, {protocol: UDP, port: 41641}, {protocol: UDP, port: 3478}]
+```
+Workers get **no** DNS and no other destination; they address the controller by the `Service` ClusterIP injected as `ARB_BRIDGE_ADDR` (the controller reads its own Service at start). NetworkPolicy semantics for ClusterIP targets and API-server egress differ by CNI **[K2, K19]**; the two policies above are what the canary exercises.
+
+#### 9.2 Identity: a per-install CA and per-bridge client certificates
+
+The controller creates an EC P-256 CA on first boot (`arbiter-controller-ca`; public cert in `arbiter-ca`). For each run it mints, in memory, **one leaf certificate per bridge** with `CN = <run id>`, `OU = <bridge name>` (`proxy`, `arb`, `git`, …), valid until the run's deadline, and a server certificate with SANs `arbiter-controller` and the Service ClusterIP. The cert identifies *run and bridge*, which is the same granularity the podman design gets from the per-run socket path. Minting needs an X.509 builder in Elixir (the small `x509` package over `:public_key`, **[K4]**).
+
+#### 9.3 Controller-hosted relay (chosen) vs per-pod sidecar
+
+* **Chosen: controller-hosted.** Two listeners on the controller: **9443** raw TLS (`verify_peer`, `fail_if_no_peer_cert`) for bridge connections; **9444** HTTPS for `/boot` (server-auth only, nonce in body), `/seed.bundle`, `/checkpoint`, `/transcripts`, `/commands` (client cert required). Inside the worker the existing in-container `socat` start-up (`Jail.network_command/2`'s `@network_script`: `TCP-LISTEN:<port>,bind=127.0.0.1,fork` per bridge) is kept, with each `UNIX-CONNECT:<sock>` target replaced by `OPENSSL:$ARB_BRIDGE_ADDR:9443,cert=/run/arb/tls/<name>.crt,key=…,cafile=/etc/arb/ca/ca.crt,commonname=arbiter-controller,verify=1`. `HTTPS_PROXY`, `ARB_HOST`, the ssh `ProxyCommand` env are byte-identical to the podman container's. The controller reads CN/OU from the peer certificate and calls the **same** `bridge.open{run, name, stream}` the machine agent calls; `Nodes.Bridge` on the primary dials its own `Egress` listener. **Egress policy, `egress_events` audit and `BridgeIdentity` are untouched**, which is the property the ticket asks to keep. Checks: the controller verifies the run is one it assigned and is live, and that `OU` is a bridge name in that run's spec.
+* **Rejected: a per-pod relay sidecar** (unix sockets in a shared `emptyDir`, a relay process dialling the controller). It needs the same TLS client and the same certificates, adds a container per pod on a CPU-tight cluster, and only moves the key out of the worker container, where it buys nothing: the worker can already use the bridge it was given, and an impersonated bridge is still only *its own run's* bridge. The sidecar variant becomes worthwhile only if a future bridge must be unreachable by the worker itself; nothing in today's list is.
+* **Rejected: the controller reaching into pods** (`pods/portforward`/`exec`): needs powerful verbs, one API-server stream per connection, and the connections originate inside the pod anyway.
+* **Rejected: plain TCP** (cleartext: the `arb`/MCP bridge carries the worker-tier bearer across an unencrypted overlay).
+
+Cost, as an estimate for the spike (**[K24]**): one extra TLS handshake per bridged connection (about a millisecond of CPU, one LAN RTT), then the same relay hop the machine agent already pays (bd-bw8a0m §8); node → primary RTT dominates exactly as there.
+
+#### 9.4 `--network=none` has no equal: the canary
+
+A pod always has `eth0`. The kernel guarantee of the podman path becomes "the CNI enforces the policies above", which on k3s depends on the bundled kube-router controller actually being active for this CNI and kernel. The survey says the controller is on and **zero policies exist today**, so enforcement has never been exercised. So the controller **proves it**: at start, on every config change and every 10 minutes it creates a short-lived canary pod using the **worker pod's own labels and spec builder** (so it is subject to the real policies) running a hardened `sh -c` that attempts (a) the `kubernetes.default` ClusterIP, (b) the controller Service on a **non-bridge** port, (c) a pod IP in another namespace, (d) `1.1.1.1:443`, (e) the node IP. All must fail while the bridge port connects. Any success sets **`degraded: netpol_unenforced`** in `hello`/`hb`; like `degraded: uncapped` for a machine, `Placement` excludes the node unless the operator sets `allow_unenforced_network` per node (an explicit, audited override). The same readiness block reports: PSA `restricted` enforced on the namespace (a server-side dry-run of the builder's own pod), quota present, `priorityClass` exists, registry pull works (a `pause`-style dry pull), admission policy present (informational), clock/skew. **[K2]**
+
+### 10. Checkout: getting the tree in and the snapshot out
+
+#### 10.1 In: `seed` init container, bundle from the controller, `emptyDir`
+
+* **Transport.** The pod never talks to the primary. `seed` redeems the boot nonce and then `GET https://$ARB_BRIDGE_ADDR:9444/seed.bundle` (mTLS with the client cert it just received). The controller streams `GET /nodes/runs/:run/seed.bundle` from the primary with the node credential (bd-bw8a0m §9; no temp file, back-pressure end to end). v1 sends a **full** bundle (`have: []`; measured on this repo: 15.6 MB of history since 2026-09-01, 29.6 MB full pack), which is a few seconds on a LAN; a thin bundle against a per-node object store would need persistence that `emptyDir` does not have (§10.4).
+* **The run's `arbr_` token is not needed.** bd-bw8a0m §16 proposed a per-run transfer token so an init container could fetch from the primary. Here the pod never reaches the primary, so the controller's node credential does that job and the **mTLS leg replaces the token**. Recommend bd-bw8a0m not build `arbr_` for this purpose (A6); if it builds it for another reason it stays unused here.
+* **The script** (rendered into the init container's `command`, so no image change; shell + `git` + `curl` + `tar`, all in the base image): redeem (`/boot` returns a **tar**, so no `jq` is needed) into `/run/arb` (memory); `git init`, `git fetch <bundle> 'refs/*:refs/*'`, check out the run branch, write the same `.git` layout `PrivateClone` builds by hand (a private `.git` directory, a `commondir` guard file containing `.\n`, an `objects/info/alternates` file, an empty `hooks` directory, `config` from a fixed template: **the config never comes from the bundle**); the one deliberate difference is that the object store is the clone's own, so `alternates` is created empty instead of naming the main repo's objects; copy `/opt/arbiter/seed/.` from the image layer into the tree (§11.3); write seed files delivered by `/boot` (`.mcp.json` with the worker-tier bearer, the per-run `settings.json`/`CLAUDE.md` into `config_dir`, the prompt file). Exec bits and symlinks follow bd-bw8a0m **[U7]**.
+* **A second implementation of the shadow-clone layout** (shell here, Elixir in `PrivateClone`) can drift. K7 adds a **contract test**: build the layout both ways from one fixture and compare `git ls-files -s`, `.git/config` (modulo the object-store line), the four guard files and `git fsck`. Note for bd-bw8a0m: it says the machine agent runs `PrivateClone`'s builder unmodified, but `build/1` is **private** (`defp build(plan)`, `private_clone.ex:247`) and its plan names the main repo's `objects` for `alternates`; the public entry points are `create/4` and `attach/4`. Reusing it on a node needs a small public, plan-parameterised seam (bw#9 should list it); for the cluster it would not apply anyway (no main repo to borrow from).
+* **Rejected: the controller builds the tree with `PrivateClone` (after the seam above) and streams a tar.** One implementation, but the controller pays CPU, disk and 100+ MB of tar per run and needs scratch space it otherwise does not have. Acceptable as the fallback if the contract test keeps failing.
+* **Rejected: PVC for the tree.** `local-path` is RWO and node-bound (every pod is pinned to the node holding the volume), there is no RWX, and a PVC survives what should die with the run.
+
+#### 10.2 `emptyDir` vs PVC for the tree
+
+`emptyDir` (disk-backed, `sizeLimit: 8Gi`, `requests.ephemeral-storage: 4Gi`) for `work`; memory-backed for `/tmp` and `/run/arb`. The disk limit is enforced by the kubelet's periodic eviction, not as a hard quota, so a runaway write can trigger an eviction (which the state function reports as `pod_disrupted`, and the snapshotter has until the end of the grace period to save) **[K7]**. Node ephemeral-storage headroom on the survey nodes is unknown **[K25]**.
+
+#### 10.3 Out: the `snapshotter` native sidecar
+
+The tree is **untrusted**, and the primary already treats every bundle as such (quarantine repo, fsck, ref allowlist, primary-side path filter, no config or hooks crossing: bd-bw8a0m §9). The only new question is *which component runs `git` against the container-writable `.git`*. Chosen: **a sidecar in the pod, with exactly the worker's hardening and credentials, never the controller.** A compromise of git by the tree then lands in a container with no more power than the worker already has; the controller (which holds the node credential and CA key) never touches pod state.
+
+* The snapshotter shares the `work` volume (`.git/config`, `hooks`, `commondir`, `alternates` are read-only for it too), every `checkpoint_interval` (300 s) and on a `checkpoint now` pushed through `/commands`, it writes the snapshot commit with a temporary index (`GIT_INDEX_FILE=<tmp>`, `git add -A`, `git write-tree`, `git commit-tree -p HEAD`, honouring `.git/info/exclude`, `-c core.hooksPath=/dev/null -c core.fsmonitor=false`) to `refs/arbiter/snapshot/<run>`, makes a bundle of the branch, the snapshot ref and the tracking branch with prerequisites `^<known>`, and `PUT`s it to `https://$ARB_BRIDGE_ADDR:9444/checkpoint`; likewise `tar` of `projects/**` to `/transcripts`. The controller streams both to `PUT /nodes/runs/:run/checkout` and `…/transcripts` with the node credential. **The controller never parses either.**
+* **Final snapshot without `exec`.** When the `worker` container ends (success, failure, OOM-kill, eviction, deletion), the kubelet stops native sidecars **after** all regular containers have terminated and sends them SIGTERM with the pod's grace period. The snapshotter's SIGTERM handler *is* the "main is done" signal: it takes the final snapshot, uploads it, and exits 0. The controller therefore holds `exit` until the checkpoint forward completes (or `grace_s` passes), then deletes the pod. **[K6]**: that the sidecar gets SIGTERM and a usable grace window after a natural, OOM or eviction exit of the only regular container.
+* **Loss model.** Node death or a hard `emptyDir` loss loses at most one `snapshot_interval_s` of work, the same as a machine node lost (bd-bw8a0m §10.3). An un-acked pod whose primary no longer knows the run is quiesced and its final checkpoint offered as a **salvage** ref (the optional hardening child of bd-bw8a0m §10.3) rather than discarded.
+* **Rejected: `kubectl cp`/`pods/exec`** (a broad verb, SPDY streams, runs a binary in a pod the controller does not control). **Rejected: the worker's own entry wrapper taking the final snapshot** (it does not run when the process is OOM-killed or SIGKILLed, which are exactly the runs whose work matters most).
+
+#### 10.4 Warm deps/`_build`: **image layer**, given bd-2jerqw
+
+What exists on `main`: `DepsCache` (`<root>/<lock12>-<image12>`) seeds `deps/` and `_build/` **inside the worker image** on the primary (`ContainerSpawn.prepare/1` calls `DepsCache.seed_worktree/3`), and `worker.repos.<repo>.seed_paths` (`SeedPaths.resolve/2`, bd-2jerqw, shipped) lists the repo-relative paths `Worktree.seed_compiled_deps/3` copies in for host-style seeding. bd-bw8a0m already makes the primary's thin home clone for a remote run skip seeding (`seed: false`).
+
+| Option | Verdict |
+|---|---|
+| **Seed layer in the image** | **Chosen.** Node-agnostic; the kubelet already caches layers per node (so "per-node cache" is free); immutable; the key `(lock12, image12)` already exists. Size here: `deps` 51 MB + `_build` 293 MB uncompressed (the host's own checkout; a container build is the same order). Cost: registry storage per lock change (a retention rule is the operator's), a copy into the `emptyDir` at start (seconds; no reflink on `emptyDir`). |
+| PVC cache + copy | RWO `local-path` pins every run to one node; no RWX; a second copy hop. |
+| In-cluster seed Job | needs network egress (Hex) that the deny-all policy removes, a PVC to hold the result, and a second build path. |
+| Fetch per run | minutes of compile and an open egress path per run. |
+
+**How the layer is built.** On the primary, after `DepsCache.ensure/4` has produced the cache directory for `(lock, image)`: `podman build` of `FROM <run image base> / COPY seed/ /opt/arbiter/seed/` with the cache directory as the build context (build time only; the cache directory is still never mounted into a container), tagged `<image12>-cli<sha8>-seed<lock12>-<seedpaths8>`, pushed (§11). The seed script copies `/opt/arbiter/seed/.` into the tree.
+
+**What `seed_paths` means for a cluster.** The resolved list is intersected with what the layer builder can legitimately ship: entries equal to or under `deps` and `_build` are satisfied by `DepsCache` (so a container-ABI build, not the host's); **other entries** (for example `priv/plts` in the example in `SeedPaths`' moduledoc) are copied verbatim from the primary's checkout into the same layer, subject to a per-entry size cap (default 500 MB) with a doctor warning when skipped. Honest limit: a toolchain-bound artifact built on the host (a dialyzer PLT from the host's OTP) can be wrong for the image's OTP, which is the very reason `DepsCache` exists; the layer builder cannot know which `seed_paths` entries are toolchain-bound, so the recommendation is to leave them out for cluster-placed workspaces until a `seed_commands` mechanism (run inside the image, like `DepsCache.ensure/4`) exists **[K26]**.
+
+### 11. Images and where they are built
+
+* **Worker image.** Built where it is today: `Image.Builder.ensure/3` on the primary (content-hash tag; digest-pinned `FROM`s). New primary-side `Image.Publisher` (**new**, K8) pushes it to `nodes.registry` (`podman push`/`skopeo copy`; credential in the Cloak-encrypted settings, never on argv) and returns a **digest-pinned reference**; `assign.image.ref` carries it (A2). Because `assign` is refused with `image_unavailable` rather than building, `ensure_ready` on the primary is "published or publish now, bounded timeout, then `prefer_remote` falls back to local, `remote_only` holds the card".
+* **Layers pushed:** base+toolchain (843 MB on this host, 464 MB of it base; pushed once per tag, deduplicated by layer), a **CLI layer** (`claude` and `arb` copied to `/opt/arbiter/cli`, replacing the host bind mount; keyed by the sha256 of both so a Claude update pushes one layer), the **seed layer** (§10.4). The run image is the last of these; the kubelet pulls only layers it lacks.
+* **Controller image.** Built by the primary from the retained release tarball (bd-bw8a0m child 4 keeps it): `FROM <public glibc-≥2.28 base>`, unpack to `/opt/arbiter`, `USER 10001`, `ENTRYPOINT [/opt/arbiter/bin/arbiter, start]`, tag = server version. Pushed at `arb server deploy` so the upgrade target exists before any node is told to move.
+* **Base image changes needed (K7):** `tini`; user `arbiter` uid/gid 10001 with a passwd entry and home; confirm `socat` has `OPENSSL` support **[K3]**. The base tag changes with its Containerfile, so every dependent image rebuilds once.
+* **Service images** (`postgres:16-alpine`, `pgsty/silo`) are pulled by the kubelet from their registries (or mirrored into `nodes.registry`; the renderer rewrites the reference when a mirror is configured). The `TestServices.ensure_images` pre-pull step has no counterpart; `imagePullPolicy: IfNotPresent` replaces it.
+* **Rejected:** building in-cluster (kaniko/buildah need either privileges or user namespaces + fuse the hardened namespace forbids; a push credential would live in the cluster); `podman save | load` (impossible, and 0.5–1 GB per toolchain per node); CI-published GHCR images (a private repo needs pull credentials in every cluster, and a `--local` deploy has no published image). Pushing real `claude` binaries belongs only in the operator's **private** registry; the setting's help text says so.
+
+### 12. Secrets
+
+| Material | Where it lives | Notes |
+|---|---|---|
+| Node credential `arbn_…` | Secret `arbiter-node-credential` (controller-only RBAC) | Rotated in place over the channel; revoked on the primary closes the socket at once |
+| CA private key | Secret `arbiter-controller-ca` (controller-only) | 5-year CA, per-run leaves expire with the run; only the public certificate is in a ConfigMap |
+| Tailscale auth key (path A only) | Secret `arbiter-tailscale` | ephemeral, tagged, pre-authorised; the one extra standing secret |
+| Registry pull secret | operator-created `kubernetes.io/dockerconfigjson` referenced by `imagePullSecrets` | read-only credentials |
+| Join token | Secret `arbiter-join` | spent after first boot; delete it |
+| **Provider token, `worker_env` values (incl. forge tokens for in-container `git push`), `.mcp.json` bearer, prompt** | **never a Kubernetes object** | delivered per run: the primary's `assign` → controller memory → pod `seed` container via `/boot` over TLS → a memory `emptyDir` file → sourced and **deleted** by the entry wrapper, so the values exist only in the `worker` process's environment, as they do under podman |
+| Session transcripts | in the pod's `emptyDir`, then uploaded | gone when the pod is deleted |
+
+**The boot nonce.** The pod spec carries `ARB_BOOT_NONCE`, 256 bits, **single-use**, expiring at `boot_s` (120 s), bound by the controller to the pod's `status.podIP` (the informer gives it) and the run. It is visible via `kubectl get pod` for that window, but a spent or expired nonce is worthless, and the reachable surface is a TLS endpoint that only worker pods may connect to (§9.1). This is the same single-use pattern as the join token. *Rejected: per-run Secrets*: readable by any `get secrets` in the namespace for the run's whole life, at rest in etcd/sqlite (k3s secrets encryption is opt-in), and they would force `secrets create/delete` onto the controller, which RBAC cannot restrict by name. *Rejected: a projected service-account token with `TokenReview`*: needs a `ClusterRole` and contradicts "worker pods get no token".
+
+**Where the guarantee is weaker than podman (state it, do not hide it):** (1) memory `emptyDir` is node RAM-backed tmpfs, not "never touches storage" (swap is off on k3s by default; **[K22]**); (2) **the agent stream is written to the kubelet's container log files on the node's disk** and is readable by anyone with `pods/log` or node access until the pod is deleted (podman `--rm` and a Port leave no such file); anything the CLI prints, including a tool's accidental secret echo, lands there, so pods are deleted promptly (§3.6) and the doctor states the exposure; (3) a cluster admin can read pod memory; as with a machine node, per-run delivery bounds *persistence*, not *exposure* (bd-bw8a0m §11), and the mitigation is the same: a dedicated provider account for the cluster node.
+
+### 13. A real target: the existing k3s cluster
+
+**Facts used (admiral memory, 2026-10-04; not re-checked):** plain k3s v1.36.5, one server (`mesanna`, 8 CPU / 32 GiB, about 68% of CPU already requested) + a worker (`aginor`, 4 CPU / 7.7 GiB, on Wi-Fi, about 53% requested), room for roughly two 2-CPU pods; **runc only**; `hostUsers: false` works; **no PSA enforcement configured, zero NetworkPolicies though the built-in controller is on**; `local-path` storage only; images from the GitLab registry via a `gitlab-registry` pull secret; API LAN-only (`192.168.1.169:6443`; certificate SANs `10.43.0.1`, `127.0.0.1`, `192.168.1.169`, `::1`); the cluster also hosts the vstim prod workers and the GitLab CI runner, whose loss on `mesanna` takes vstim CI with it.
+
+| Design need | On this cluster |
+|---|---|
+| Native sidecars, `hostUsers`, `ValidatingAdmissionPolicy`, PSA | all available at v1.36 (labels per namespace turn PSA on; the survey's "none" means unlabelled) **[K1, K12]** |
+| NetworkPolicy deny-all | the controller exists; **never exercised**, and a Wi-Fi-latched flannel (memory: interface-name latching) is exactly the kind of setup where it should be proven, not assumed: the §9.4 canary is the gate **[K2]** |
+| Strong isolation for untrusted LLM code | runc only: no gVisor/Kata `runtimeClass`; the isolation is userns + seccomp + dropped caps + netpol, a notch below the podman path |
+| Reaching the primary | the cluster is **not on the tailnet** (vstim uses a per-pod tailscale sidecar): path A of §2.3, which adds a tagged tailscale auth key to the cluster |
+| Registry | GitLab registry exists; the primary pushes to it (LAN) **[K20]** |
+| CPU | tight: `max_concurrent` **2** at requests 1 CPU / 2 GiB each is the honest ceiling; Elixir test suites want more |
+| Image pulls | the 843 MB toolchain image to `aginor` over Wi-Fi; pin to `mesanna` with `node_selector` and pre-pull **[K14]** |
+| Shared tenancy | prod workers and CI share the nodes; ResourceQuota + `PriorityClass` (value `-100`, no preemption of others) + dedicated namespace ring-fence it, they do not remove the shared-kernel risk |
+
+**Verdict: a sensible *test bed*; not yet a production target for sensitive workspaces.** It is the right place to prove the controller, RBAC, pod builder, bridge relay, canary and quota behaviour on real Kubernetes, and a ceiling of 2 is enough for that. It should take real task runs only after (1) the canary shows NetworkPolicy enforcement end to end, (2) the namespace has quota, low priority and PSA `restricted` applied by the operator, (3) the operator accepts that untrusted code shares a kernel with vstim prod and CI, with the `worker.placement` default (`local_only`) left on for sensitive workspaces, and (4) a `node_selector` pins pods to `mesanna`. A dedicated spare machine running k3s with a tainted `arbiter-workers` pool would remove (3) and is the better first *production* cluster; the design does not change for it.
+
+**Nothing in the cluster was changed or contacted by this ticket.** The spike (K1) should use a **disposable** cluster (kind/k3d under rootless podman on the dev host); a throwaway namespace on the operator's k3s only with an explicit go-ahead, since the operator's kubeconfig there is cluster-admin and the cluster hosts production.
+
+### 14. Proposed amendments to bd-bw8a0m (each is a change, not an assumption)
+
+| # | Amends | Change |
+|---|---|---|
+| **A1** | §4.2 `hello`/`hello_ok`, §6 | `kind` and `caps` as listed in §3.2; `caps.upgrade ∈ {tarball, image}` and `hello_ok.upgrade` gains `image` for cluster nodes. Skew rules unchanged. |
+| **A2** | §7.1, §7.3 | For `caps.image = "registry"`, `assign.image` is `{tag, ref}` with a **digest-pinned `ref`** the primary has already pushed; the node never receives a build plan. New primary-side `Image.Publisher` and settings `nodes.registry.*`. A node refuses with `image_unavailable`. |
+| **A3** | §4.2 table, §13 | Per-run states `pending | starting | running | terminating`; `refuse{reason ∈ no_capacity, unschedulable, image_unavailable, bad_spec}`; node→primary `capacity` event and `hb.capacity{ceiling, running, pending, headroom, constrained}`; `hello_ok.limits.prepare_timeout_s`. The primary counts a run as started only at `running`; `Placement` skips/ranks-last a `constrained` node. `Executor.prepare` returns at *container running* rather than "agent finished image/CLI/deps/shadow". |
+| **A4** | §4.2, §10.2 | Stdout frame cursor and ack become an **opaque backend-defined string** (podman: decimal offset; cluster: RFC 3339 nano timestamp). |
+| **A5** | §10.3, `StopReason.classify/3` | New interruption cause **`pod_disrupted`** (evicted, preempted, pod deleted externally) with the `node_lost` policy: interrupted, no resume attempt consumed. |
+| **A6** | §16 | The run transfer token `arbr_` is **not used** by cluster nodes (the pod never reaches the primary); build it only if another consumer exists. |
+| **A7** | §13, §3, §14 | Node `degraded: netpol_unenforced` (excluded like `uncapped`), per-node `allow_unenforced_network` override, node row/`NodeEvent` carry `kind` and show `k8s_version`; the join modal gains the kind selector; `hb.capacity.constrained` surfaces on the nodes page. |
+
+Not amendments but worth a flag for bd-bw8a0m's own children: the podman agent runs `git` on the container-writable shadow `.git` from the node's trusted side. `PrivateClone.mounts/1`'s read-only `config`, `hooks`, `commondir` and `alternates` make that safe **today**; child 11 should keep that guard explicit (and pass `-c core.hooksPath=/dev/null -c core.fsmonitor=false`) rather than rely on it implicitly, because the agent runs as the same host user as the container's keep-id mapping.
+
+### 15. Unverified assumptions (K-series; bd-bw8a0m's U1–U20 still apply)
+
+| ID | Assumption | If it fails |
+|---|---|---|
+| K1 | k3s v1.36.5 supports native sidecars, `hostUsers: false` **with `emptyDir`/`subPath` mounts under runc** (id-mapped mounts), `ValidatingAdmissionPolicy`, `appArmorProfile`, and honours `terminationGracePeriodSeconds` for sidecars | drop `hostUsers` (keep the rest); fall back to a regular `snapshotter` container + `flock` main-exited detection |
+| K2 | The bundled kube-router NetworkPolicy controller enforces deny-all egress **including to ClusterIPs and pod IPs**, and the allow rule to the controller Service works after DNAT | `degraded: netpol_unenforced`: the cluster is test-bed only; or install a CNI with enforcement |
+| K3 | The base image's `socat` has `OPENSSL:` with `cert/key/cafile/commonname/verify`, and sustains fork-per-connection for the `arb`/proxy/git bridges | add `openssl` s_client wrapper or a different relay in the base image |
+| K4 | `x509` (or OTP `:public_key`) can mint the CA and per-run leaves; OTP `:ssl` extracts CN/OU and enforces `verify_peer` on the listener | hand-rolled minimal DER builder, or HMAC bearer + `socat` `EXEC` preamble |
+| K5 | `pods/log?follow&timestamps&sinceTime` resumes without loss/duplication, including 16 KiB partial-line boundaries, and typical run output stays under the kubelet rotation window during a controller outage | `tee` file served by the snapshotter; raise `containerLogMaxSize` |
+| K6 | A native sidecar receives SIGTERM and the pod's grace period after the only regular container exits (naturally, OOM-killed, or evicted), enough to bundle and upload | regular sidecar + `flock` detector; larger grace |
+| K7 | `emptyDir` `sizeLimit` eviction behaves acceptably; the snapshotter survives the eviction long enough; `tini` and the `arbiter:10001` user are added to the base image without breaking local podman workers | per-run disk quota; base image variant for clusters |
+| K8 | Read-only `subPath` file mounts over a writable mount of the same `emptyDir` behave as bind guards (`mv` fails) and kubelet accepts files created by the init container as `subPath` sources | mount the guard files from a separate read-only `emptyDir` populated by init |
+| K9 | A fixed uid 10001 with a passwd entry is enough for `git`, `ssh` (ProxyCommand), `mix`, `claude` | per-image uid override in the spec |
+| K10 | Test-service sidecars: Postgres runs as uid 70 on `readOnlyRootFilesystem` with memory `emptyDir`s and the `pg_isready` `startupProbe`; `silo` likewise (`ServiceSpec` gains an optional `uid`) | per-service passwd shim volume |
+| K11 | Mint `connect(proxy: …)` carries a Phoenix WebSocket through tailscale's userspace HTTP proxy for 30 min of quiet heartbeats | reverse-proxy path B; or a `tailscale serve`-style sidecar listener |
+| K12 | PSA `restricted` admits the pod as built (native sidecars, `hostUsers:false`, `subPath`) | adjust the builder, not the namespace level |
+| K13 | `watch` with `resourceVersion`+bookmarks and `resourceNames`-scoped verbs behave as assumed under RBAC | relist-only informer |
+| K14 | Pulling the 843 MB toolchain layer and the seed layer to `mesanna`/`aginor` takes an acceptable time (Wi-Fi on `aginor`) | pre-pull job; pin to `mesanna` |
+| K15 | Namespace quota counts Pending pods' requests and rejects over-quota creates synchronously with 403 | derive `headroom` from the informer instead |
+| K16 | The `ARB_ROLE=agent` release (bd-bw8a0m U5) fits the controller's 256 Mi/512 Mi budget and starts without a database | raise limits; a thinner release |
+| K17 | The primary's `Worker` startup/stall watchdogs do not count `pending|starting` time (A3 needs them not to) | add a `prepare_timeout_s` aware stage |
+| K18 | Kueue's plain-Pod integration is acceptable (A `Job` would otherwise be the mature path) | revisit Job-vs-Pod |
+| K19 | The controller's egress to the API server works under the §9.1 `controller-egress` policy on k3s (node IP:6443 and `10.43.0.1:443`) | broaden to the node CIDR |
+| K20 | The GitLab registry accepts 300–800 MB layers and the primary can push over the LAN at acceptable speed | smaller layers; mirror |
+| K21 | A pod whose controller is gone makes no external effect (no forge credential, no route except the controller) | add an in-pod deadman (snapshotter-driven) |
+| K22 | k3s nodes have swap off and the kubelet's memory-backed `emptyDir`s are not swapped | document, or require swap off in readiness |
+| K23 | On an SELinux cluster the default container policy admits the pod unmodified (no relabelling needed because nothing is shared across pods) | per-distro notes |
+| K24 | The bridge relay's added latency and CPU are acceptable (bd-bw8a0m U3 thresholds) | second data socket, as there |
+| K25 | The survey nodes have enough ephemeral storage for 2 × 4 GiB working sets plus image layers | smaller `work_size_limit` |
+| K26 | `seed_paths` entries outside `deps`/`_build` (for example `priv/plts`) are safe to ship verbatim | leave them out of cluster seed layers until `seed_commands` exists |
+
+### 16. Implementation breakdown (the coordinator files these; none above D3)
+
+Numbering is this ticket's; "bw#N" means bd-bw8a0m's child N (its §18). The spike gates K3–K9.
+
+| # | Title | Diff. | depends_on | Notes |
+|---|---|---|---|---|
+| K0 | Commit this section into `docs/design/remote-workers.md` (replacing §16 there) and apply amendments A1–A7 to the document | D1 | bw#1 | status "proposed" |
+| K1 | **Spike: go/no-go** on a disposable cluster (kind/k3d under rootless podman) | D3 | K0, bw#2 | covers K1, K2 (also on the operator's k3s **only with explicit go-ahead**), K3, K4, K5, K6, K8, K10, K11; real API server, PSA `restricted`, native sidecars, `socat` mTLS, log resume, sidecar SIGTERM; **GO / NO-GO / GO-WITH-FALLBACK per K-row**; amends §15 |
+| K2 | `Arbiter.NodeAgent.Backend` behaviour and the `ARB_AGENT_BACKEND` switch | D2 | bw#5 | extract the podman run supervisor's seam; no behaviour change; guard-test inventory entries |
+| K3 | Kubernetes API client on `Req` + pod informer + the pure pod-state function | D3 | K2 | in-cluster auth, list/watch/create/delete/log-follow, relist, a fake API server (Plug under Bandit in ExUnit); state-table tests for every §3.3 row |
+| K4 | `K8s.PodSpec` builder + conformance tests | D3 | K1 | pure; one test per §8 row; a table-driven PSA-`restricted` checker; golden pod YAML; refuses `network: pasta`, `seLinuxOptions`, unknown mount kinds; admission-policy CEL tests where possible |
+| K5 | Controller core: config loader, admission/capacity, run lifecycle, cancel/teardown, adoption, reaper, Lease | D3 | K3, K4, bw#9 | §3, §4; restart-survival and `pending`-never-`running` tests; `hb.capacity`; ConfigMap closed schema |
+| K6 | Pod channel: per-install CA, leaf minting, TLS listeners 9443/9444, `/boot` nonce, bridge relay into `bridge.open`, seed/checkpoint/transcript streaming | D3 | K1, bw#10, bw#11 | §9.2/§9.3, §10; end-to-end test that `BridgeIdentity`, policy decisions and `egress_events` are unchanged |
+| K7 | Pod runtime: seed script, entry wrapper, snapshotter, base-image changes (`tini`, uid 10001, passwd), layout contract test vs `PrivateClone`'s builder | D3 | K1, K4 | shellcheck + podman-run harness; guard-file read-only checks |
+| K8 | Image publication on the primary: `Image.Publisher`, `nodes.registry` settings (Cloak), CLI layer, seed layer from `DepsCache` + `seed_paths` handling, controller image | D3 | bw#4 | §10.4, §11; `ensure_ready` timeout + fallback; doctor row |
+| K9 | Install and "Add node": kind selector, manifest renderer (bootstrap/node, tailscale and admission-policy variants), `arb node add --kind cluster`, enroll `kind: cluster`, self-upgrade, join Secret flow | D3 | bw#4, bw#7, K5 | §2; manifests golden-tested; no-secret-in-render test |
+| K10 | Test services as native sidecars (`ServiceSpec` → container, `uid`, `startupProbe` from `ready`) | D2 | K4 | §8.2 |
+| K11 | Reachability: tailscale-sidecar variant and Mint HTTP-proxy support in the agent WebSocket client | D2 | bw#5 | §2.3 |
+| K12 | Primary-side protocol amendments: `pending`/`refuse`/`capacity`/cursors/`pod_disrupted`, `Placement` constrained handling, `Worker` startup-watchdog stage | D3 | bw#6, bw#8, K0 | A3–A5, A7; **[K17]** first |
+| K13 | Readiness canary + `arb server doctor` cluster section + end-to-end verification + `docs/remote-workers-k8s-runbook.md` + the k3s test-bed rollout checklist | D3 | K5, K6, K9, K12 | §9.4, §13; `:k8s`-tagged tests excluded by default |
+
+Order: K0 → K1 → {K2, K11} → {K3, K4} → {K5, K6, K7, K8} → {K9, K10, K12} → K13. The spike's verdict on K2/K6 (NetworkPolicy and sidecar SIGTERM) decides whether the later children are worth starting at all on any given cluster.
+
+### 17. How names in this document were checked
+
+Read at `9b5fb0733`: `Arbiter.Worker.Container` (`argv/2` :145, `placement/1`, `mounts/2`, `mount_opts/2`, moduledoc label policy), `Container.wrap/2` option set, `PrivateClone.mounts/1` and `@readonly_in_git_dir ~w(config hooks commondir objects/info/alternates)`, `ContainerSpawn.prepare/1` (request map: `name`, `image`, `mounts`, `home`, `config_dir`, `writable_paths`, `cli_mounts`, `prompt_paths`, `network`, `env`, `pod`, `deps_cache`), `ContainerSpawn.run_dirs/2`, `Jail.network_command/2` and its `@network_script` (per-listener `TCP-LISTEN:…,bind=127.0.0.1,fork` → `UNIX-CONNECT`), `Jail.network_env/1`, `TestServices` service shape (`name`, `image`, `env`, `command`, `tmpfs`, `ready`, `worker_env`; `postgres/1` and `s3/1` presets; `service_run_argv/4` with `--read-only --cap-drop=all no-new-privileges`), `DepsCache` moduledoc (key `<lock12>-<image12>`, seed job, never mounted), `SeedPaths` (`resolve/2`, `effective/2`), `Worktree.seed_compiled_deps/3`, `Image` base Containerfile (`debian:trixie-slim`, `bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 openssh-client procps socat sqlite3`; no `tini`, no named user), `ClaudeSession` stdin handling (`exec "$@" < /dev/null`). Measured on this host: `deps` 51 MB, `_build` 293 MB (main checkout), toolchain image 843 MB / base 464 MB (`podman images`); bundle sizes from bd-bw8a0m. Cluster facts: the three admiral memory files named at the top, **not re-verified**. Names that do not exist yet are marked **new**: `Arbiter.NodeAgent.Backend`/`Backend.K8s`, `Arbiter.NodeAgent.K8s.PodSpec`, `Image.Publisher`, settings `nodes.registry.*`, `allow_unenforced_network`, the `arbiter.dev/*` labels, routes `/nodes/join/k8s.yaml`, the controller's `:9443`/`:9444` endpoints, `ARB_AGENT_BACKEND`, `ARB_BRIDGE_ADDR`, `ARB_BOOT_NONCE`.
 
 ## 17. Unverified assumptions (replaces bd-aowisc §10)
 
