@@ -342,8 +342,8 @@ the ticket.
 - Merging: `awaiting_ci` (bd-cut6uv, bd-dc468g) is `in_review` while the
   ReviewGate holds its reviewer back until CI is green on the head: the ticket
   carries a `ci_wait` marker (`Arbiter.Worker.ReviewCi.waiting/2`), the card
-  reads `waiting on CI <sha>`, it appears in Merging so In progress matches the
-  slot-holding set, and the ticket holds no slot (below); `behind_base` for a
+  reads `waiting on CI <sha>`, it appears in Merging, and the ticket holds no
+  slot (below); `behind_base` for a
   PR behind its base; `merge_blocked` for a conflict, red CI, a draft, or an
   approved PR the forge still refuses; `waiting_ci` while CI runs (or a
   deferred merge on record is `ci_pending`); otherwise `in_merge_queue`.
@@ -371,6 +371,9 @@ sharing its id; a ticket gets exactly one card.
 
 ### A slot is a ticket In progress
 
+(In progress is a superset of the slot holders: a quota-held `:active` ticket
+releases its slot but stays In progress until the follow-up decides its column.)
+
 `SlotGate.slots_used/1` counts the tickets whose stored state is `:active`
 (`holds_slot?/1`; epics never count). The worker rows are not an input:
 
@@ -381,6 +384,7 @@ sharing its id; a ticket gets exactly one card.
 | open PR (`waiting_ci_merge`) | held | released — `:merging` |
 | `:unknown` liveness probe | held | whatever the state says |
 | ReviewGate waiting on CI before dispatching a reviewer (bd-cut6uv, bd-dc468g) | held | released — `:merging` on board; `holds_slot?/1` skips a ticket with a live `ci_wait` marker |
+| held for quota (`DispatchQueue`) | held | released (`held_for_quota?`), still In progress on the board; column TBD, follow-up (bd-dc468g) |
 | merged, waiting on verification | released | released — `:verifying` |
 
 This replaces the operator's 2026-09-21 rule "another slot doesn't open until
