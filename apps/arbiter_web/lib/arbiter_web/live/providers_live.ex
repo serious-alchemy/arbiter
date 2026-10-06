@@ -50,6 +50,7 @@ defmodule ArbiterWeb.ProvidersLive do
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Accounts.Logins
   alias Arbiter.Accounts.Overview
+  alias ArbiterWeb.ProvidersLive.AccountEditForm
 
   @refresh_ms 15_000
 
@@ -86,6 +87,10 @@ defmodule ArbiterWeb.ProvidersLive do
       |> assign(:creating?, false)
       |> assign(:account_form, account_form())
       |> assign(:account_error, nil)
+      |> assign(:edit_for, nil)
+      |> assign(:edit_form, nil)
+      |> assign(:edit_errors, %{})
+      |> assign(:edit_error, nil)
       |> assign(:credential_for, nil)
       |> assign(:credential_form, nil)
       |> assign(:credential_error, nil)
@@ -178,6 +183,58 @@ defmodule ArbiterWeb.ProvidersLive do
            creating?: true,
            account_form: account_form(params),
            account_error: error_message(error)
+         )}
+    end
+  end
+
+  # bd-8vkqd3: edit an existing account. The whole submission is validated
+  # before any write (`AccountEditForm.parse/1`), so a bad value leaves the
+  # account untouched and the form open with what was typed.
+  def handle_event("open_edit", %{"id" => id}, socket) do
+    case find_row(socket, id) do
+      %{account: account} ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(AccountEditForm.params(account)),
+           edit_errors: %{},
+           edit_error: nil
+         )}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_edit", _params, socket),
+    do: {:noreply, assign(socket, edit_for: nil, edit_errors: %{}, edit_error: nil)}
+
+  def handle_event("save_edit", %{"account_id" => id, "edit" => params}, socket) do
+    with %{account: account} <- find_row(socket, id) || {:error, "This account no longer exists."},
+         {:ok, edit} <- AccountEditForm.parse(params),
+         {:ok, _account} <- AccountEditForm.save(account.id, edit) do
+      {:noreply,
+       socket
+       |> assign(edit_for: nil, edit_form: nil, edit_errors: %{}, edit_error: nil)
+       |> put_flash(:info, "Saved #{account.provider}:#{account.slug}.")
+       |> fetch_providers()}
+    else
+      {:error, errors} when is_map(errors) ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(params),
+           edit_errors: errors,
+           edit_error: nil
+         )}
+
+      {:error, message} when is_binary(message) ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(params),
+           edit_errors: %{},
+           edit_error: message
          )}
     end
   end
@@ -494,6 +551,7 @@ defmodule ArbiterWeb.ProvidersLive do
 
   defp account_form(params \\ %{"provider" => "claude"}), do: to_form(params, as: :account)
   defp credential_form(params), do: to_form(params, as: :credential)
+  defp edit_form(params), do: to_form(params, as: :edit)
   # grok routes only through `routing.grok.enabled`, as the workspace pane does.
   defp not_grok(%{provider: :grok}), do: {:error, :grok_routed_by_opt_in}
   defp not_grok(_), do: :ok
@@ -895,6 +953,7 @@ defmodule ArbiterWeb.ProvidersLive do
                 </div>
                 <span
                   :if={not row.account.enabled}
+                  id={"account-#{row.account.id}-parked"}
                   class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)]"
                 >
                   parked
@@ -962,6 +1021,20 @@ defmodule ArbiterWeb.ProvidersLive do
                 >
                   {if row.credentials == [], do: "Log in", else: "Re-authenticate"}
                 </ArbiterWeb.CoreComponents.Core.button>
+                <ArbiterWeb.CoreComponents.Core.button
+                  :if={@edit_for != row.account.id}
+                  id={"account-#{row.account.id}-edit-button"}
+                  type="button"
+                  phx-click="open_edit"
+                  phx-value-id={row.account.id}
+                  variant="ghost"
+                  size="sm"
+                >
+                  <:icon>
+                    <ArbiterWeb.CoreComponents.Core.icon name="hero-pencil-square" size={13} />
+                  </:icon>
+                  Edit
+                </ArbiterWeb.CoreComponents.Core.button>
                 <button
                   id={"delete-account-#{row.account.id}"}
                   type="button"
@@ -974,6 +1047,14 @@ defmodule ArbiterWeb.ProvidersLive do
                   Delete
                 </button>
               </header>
+
+              <AccountEditForm.edit_form
+                :if={@edit_for == row.account.id}
+                row={row}
+                form={@edit_form}
+                errors={@edit_errors}
+                save_error={@edit_error}
+              />
 
               <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">
                 <section

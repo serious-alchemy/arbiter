@@ -55,6 +55,10 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     |> assign(:strategy, strategy(ws))
     |> assign(:ranking, ranking(ws, Map.get(socket.assigns, :routing_opts, [])))
     |> assign(:cross_family?, cfg(ws, ["review_agent", "cross_family"]) == true)
+    |> assign(:scoring_mode, scoring_mode(ws))
+    |> assign(:scoring_competence?, cfg(ws, ["routing", "scoring", "competence"]) == true)
+    |> assign(:pace_exempt, pace_exempt_value(ws))
+    |> assign(:pace_exempt_rows, pace_exempt_rows(ws, ProviderSettings.attachments(ws)))
     |> assign(:grok_enabled?, GrokRouting.enabled?(ws))
     |> assign(:grok_difficulties, Enum.join(grok_difficulties(ws), ", "))
     |> assign(:grok_auth, grok_auth(ws))
@@ -168,6 +172,32 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     end
   end
 
+  # ---- scoring: routing.provider_selection "scored" + routing.scoring.* ----
+
+  def handle_event("set_scoring", params, socket) do
+    ws = socket.assigns.workspace
+
+    with {:ok, patch, unset} <- scoring_patch(params, ws),
+         {:ok, updated} <- patch_config(ws, patch, unset) do
+      {:noreply, socket |> apply_workspace(updated) |> assign(:provider_error, nil) |> load()}
+    else
+      {:error, msg} -> {:noreply, assign(socket, :provider_error, msg)}
+    end
+  end
+
+  # ---- workspace pace exemption: quota.pace_exempt_priority ----
+
+  def handle_event("set_pace_exempt", %{"pace_exempt_priority" => raw}, socket) do
+    ws = socket.assigns.workspace
+
+    with {:ok, patch, unset} <- pace_exempt_patch(raw),
+         {:ok, updated} <- patch_config(ws, patch, unset) do
+      {:noreply, socket |> apply_workspace(updated) |> assign(:provider_error, nil) |> load()}
+    else
+      {:error, msg} -> {:noreply, assign(socket, :provider_error, msg)}
+    end
+  end
+
   # ---- grok opt-in: routing.grok.enabled / routing.grok.difficulties ----
 
   def handle_event("set_grok_routing", params, socket) do
@@ -199,6 +229,88 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
   def handle_event("move_agent_type", %{"role" => role, "type" => type, "dir" => dir}, socket) do
     update_agent_types(socket, role, &move_type(&1, type, dir))
   end
+
+  # `off` is "not the scored strategy", so it never turns routing off: a
+  # workspace that was scored falls back to most_quota, the strategy scoring
+  # is built on. The mode key is unset rather than written, so it can't linger
+  # and be read back if scored is chosen again.
+  defp scoring_patch(%{"scoring_mode" => "off"}, ws) do
+    patch =
+      if ProviderRouting.scored?(ws),
+        do: %{"routing" => %{"provider_selection" => "most_quota"}},
+        else: %{}
+
+    {:ok, patch, ["routing.scoring.mode"]}
+  end
+
+  defp scoring_patch(%{"scoring_mode" => mode} = params, _ws)
+       when mode in ["shadow", "enforce"] do
+    scoring = %{"mode" => mode}
+
+    case Map.get(params, "competence") do
+      "false" ->
+        {:ok, scoring_map(scoring), ["routing.scoring.competence"]}
+
+      "true" ->
+        {:ok, scoring_map(Map.put(scoring, "competence", true)), []}
+
+      _ ->
+        {:ok, scoring_map(scoring), []}
+    end
+  end
+
+  defp scoring_patch(_params, _ws), do: {:error, "Scoring must be off, shadow or enforce."}
+
+  defp scoring_map(scoring),
+    do: %{"routing" => %{"provider_selection" => "scored", "scoring" => scoring}}
+
+  # Blank hands the decision back to the account (unset), `none` switches the
+  # exemption off for this workspace, a priority narrows it.
+  defp pace_exempt_patch(""), do: {:ok, %{}, ["quota.pace_exempt_priority"]}
+  defp pace_exempt_patch("none"), do: {:ok, %{"quota" => %{"pace_exempt_priority" => "none"}}, []}
+
+  defp pace_exempt_patch(raw) when raw in ~w(0 1 2 3 4),
+    do: {:ok, %{"quota" => %{"pace_exempt_priority" => String.to_integer(raw)}}, []}
+
+  defp pace_exempt_patch(_raw),
+    do: {:error, "Pace exemption must be blank, none, or a priority from 0 to 4."}
+
+  defp scoring_mode(ws) do
+    if ProviderRouting.scored?(ws) do
+      if cfg(ws, ["routing", "scoring", "mode"]) == "enforce", do: "enforce", else: "shadow"
+    else
+      "off"
+    end
+  end
+
+  defp pace_exempt_value(ws) do
+    case cfg(ws, ["quota", "pace_exempt_priority"]) do
+      nil -> ""
+      value -> to_string(value)
+    end
+  end
+
+  # What each attached account ends up with: the account grants, this
+  # workspace may only narrow — `Quota.Gate.pace_exempt_priority/1`'s own math.
+  defp pace_exempt_rows(ws, attachments) do
+    for link <- attachments do
+      account = link.provider_account
+
+      %{
+        account: account,
+        granted: account_exempt(account),
+        effective: Arbiter.Quota.Gate.pace_exempt_priority({account, ws})
+      }
+    end
+  end
+
+  defp account_exempt(account) do
+    Arbiter.Quota.Gate.pace_exempt_priority({account, nil})
+  end
+
+  defp exempt_text(nil), do: "off"
+  defp exempt_text(0), do: "P0 only"
+  defp exempt_text(n), do: "P0 to P#{n}"
 
   defp grok_patch(%{"enabled" => "true"} = params, ws) do
     raw = Map.get(params, "difficulties", Enum.join(grok_difficulties(ws), ", "))
@@ -378,6 +490,25 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
        "the order above decides: the first healthy provider wins. A quota-held provider still counts as healthy."},
       {"most_quota",
        "the attached implementer account with the most headroom against its pace wins; the order only breaks ties."}
+    ]
+
+  defp scoring_options,
+    do: [
+      {"off", "no scoring: the strategy above decides."},
+      {"shadow",
+       "dispatch by most_quota and record what the scorer would have picked, to compare before trusting it."},
+      {"enforce", "dispatch by the scorer's order."}
+    ]
+
+  defp pace_exempt_options,
+    do: [
+      {"Inherit the account's grant", ""},
+      {"None — switch it off here", "none"},
+      {"P0 only", "0"},
+      {"P0 to P1", "1"},
+      {"P0 to P2", "2"},
+      {"P0 to P3", "3"},
+      {"P0 to P4", "4"}
     ]
 
   defp cap_text(nil), do: "∞"
@@ -746,6 +877,104 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
                 <% else %>
                   Reviewer: first healthy entry in its own order (review_agent.type / reviewer accounts); routing.provider_selection does not apply.
                 <% end %>
+              </p>
+            </div>
+          </:below>
+        </.setting_row>
+
+        <.setting_row
+          name="Scoring"
+          consequence="routing.provider_selection: scored + routing.scoring.mode — price each implementer account by headroom ÷ expected draw instead of headroom alone. Shadow dispatches like most_quota and only records the scorer's pick; enforce dispatches by it"
+        >
+          <:below>
+            <.form
+              for={%{}}
+              id="scoring-form"
+              phx-change="set_scoring"
+              phx-target={@myself}
+              class="flex flex-col gap-1"
+            >
+              <label
+                :for={{value, text} <- scoring_options()}
+                class="flex items-start gap-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--arb-text-body)]"
+              >
+                <input
+                  type="radio"
+                  name="scoring_mode"
+                  value={value}
+                  checked={@scoring_mode == value}
+                  class="mt-[2px]"
+                />
+                <span>
+                  <span class="font-semibold">{value}</span>
+                  <span id={"scoring-help-#{value}"} class="text-[var(--text-label)]">
+                    — {text}
+                  </span>
+                </span>
+              </label>
+              <label
+                :if={@scoring_mode != "off"}
+                id="scoring-competence"
+                class="mt-1 flex items-start gap-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--arb-text-body)]"
+              >
+                <input type="hidden" name="competence" value="false" />
+                <input
+                  type="checkbox"
+                  name="competence"
+                  value="true"
+                  checked={@scoring_competence?}
+                  class="mt-[2px]"
+                />
+                <span>
+                  <span class="font-semibold">Use the competence matrix</span>
+                  <span class="text-[var(--text-label)]">
+                    — estimate each model's draw and time to close by task difficulty (routing.scoring.competence)
+                  </span>
+                </span>
+              </label>
+            </.form>
+          </:below>
+        </.setting_row>
+
+        <.setting_row
+          name="Pace exemption"
+          consequence="quota.pace_exempt_priority — narrows which tickets may run past an account's paced line. The account grants the exemption; this workspace can only narrow it, never grant it"
+        >
+          <:below>
+            <div class="flex flex-col gap-2">
+              <.form
+                for={%{}}
+                id="pace-exempt-form"
+                phx-change="set_pace_exempt"
+                phx-target={@myself}
+                class="flex items-center gap-2 font-[family-name:var(--font-mono)] text-[11px]"
+              >
+                <Forms.select
+                  id="pace-exempt-priority"
+                  name="pace_exempt_priority"
+                  value={@pace_exempt}
+                  size="sm"
+                  aria-label="Pace exemption for this workspace"
+                  options={pace_exempt_options()}
+                />
+              </.form>
+              <ul
+                :if={@pace_exempt_rows != []}
+                id="pace-exempt-effective"
+                class="m-0 flex flex-col gap-1 p-0 list-none font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
+              >
+                <li :for={row <- @pace_exempt_rows} id={"pace-exempt-effective-#{row.account.id}"}>
+                  {row.account.provider}:{row.account.slug} grants {exempt_text(row.granted)} →
+                  <span class="text-[var(--arb-text-body)]">
+                    effective {exempt_text(row.effective)}
+                  </span>
+                </li>
+              </ul>
+              <p class="m-0 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
+                An account that grants nothing exempts nothing, whatever is set here. Change what an account grants on the <.link
+                  navigate={~p"/providers"}
+                  class="underline"
+                >Providers page</.link>.
               </p>
             </div>
           </:below>

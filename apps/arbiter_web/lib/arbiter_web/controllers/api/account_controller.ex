@@ -9,9 +9,10 @@ defmodule ArbiterWeb.Api.AccountController do
       `?include_deleted=true`)
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
-    * `PATCH  /api/accounts/:ref`       — :update (`max_concurrent`, nullable;
-      `quota_config`, a partial merge — `threshold_mode`, `weekly_threshold`,
-      `paced_floor`, `weekly_paced_floor`)
+    * `PATCH  /api/accounts/:ref`       — :update (`label`, `plan`, `enabled`;
+      `max_concurrent`, nullable; `quota_config`, a partial merge —
+      `threshold_mode`, `weekly_threshold`, `paced_floor`, `weekly_paced_floor`,
+      the pace-exempt keys; a `null` value clears that key)
     * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
     * `POST   /api/accounts/:ref/merge`   — :merge  (`into` — the surviving account ref)
@@ -97,15 +98,34 @@ defmodule ArbiterWeb.Api.AccountController do
   only be edited with `bin/arbiter eval` (bd-5ps98m) — `PATCH` accepted only
   `max_concurrent`, and `quota_config` was settable solely at `create`.
 
+  `label`, `plan` and `enabled` (bd-8vkqd3) go through
+  `Arbiter.Accounts.update_account/2`; a blank `label`/`plan` clears it. A
+  `null` `quota_config` value clears that key rather than being rejected.
+
   `provider`/`slug` are still never accepted here — they are the account's
   identity (§3.1) and changing either is a new account, not an edit.
   """
   def update(conn, %{"ref" => ref} = params) do
-    with {:ok, max_concurrent} <- fetch_max_concurrent(params),
+    with {:ok, attrs} <- fetch_account_attrs(params),
+         {:ok, max_concurrent} <- fetch_max_concurrent(params),
          {:ok, quota_config} <- fetch_quota_config(params),
-         :ok <- require_an_update(max_concurrent, quota_config),
-         {:ok, account} <- apply_updates(ref, max_concurrent, quota_config) do
+         :ok <- require_an_update(attrs, max_concurrent, quota_config),
+         {:ok, account} <- apply_updates(ref, attrs, max_concurrent, quota_config) do
       render(conn, :show, account: account)
+    end
+  end
+
+  # `label` / `plan` / `enabled` (bd-8vkqd3), validated up front like the
+  # other two halves. A `slug` / `provider` here is not silently ignored: it
+  # is the account's identity, so it is rejected by name.
+  defp fetch_account_attrs(params) do
+    attrs = Map.take(params, ~w(label plan enabled slug provider))
+
+    if attrs == %{} do
+      {:ok, :absent}
+    else
+      with {:ok, _changes} <- attrs |> Accounts.validate_account_attrs() |> friendly(),
+           do: {:ok, {:set, attrs}}
     end
   end
 
@@ -142,7 +162,7 @@ defmodule ArbiterWeb.Api.AccountController do
         {:ok, :absent}
 
       {:ok, %{} = updates} ->
-        case Arbiter.Quota.Gate.validate_quota_config(updates) |> friendly() do
+        case Arbiter.Quota.Gate.validate_quota_config_patch(updates) |> friendly() do
           {:ok, validated} -> {:ok, {:set, validated}}
           {:error, _} = err -> err
         end
@@ -152,16 +172,23 @@ defmodule ArbiterWeb.Api.AccountController do
     end
   end
 
-  defp require_an_update(:absent, :absent),
-    do: {:error, {:invalid_request, "missing required parameter: max_concurrent or quota_config"}}
+  defp require_an_update(:absent, :absent, :absent) do
+    {:error,
+     {:invalid_request,
+      "missing required parameter: one of label, plan, enabled, max_concurrent or quota_config"}}
+  end
 
-  defp require_an_update(_max_concurrent, _quota_config), do: :ok
+  defp require_an_update(_attrs, _max_concurrent, _quota_config), do: :ok
 
-  defp apply_updates(ref, max_concurrent, quota_config) do
-    with {:ok, account} <- ref |> apply_max_concurrent(max_concurrent) |> friendly() do
+  defp apply_updates(ref, attrs, max_concurrent, quota_config) do
+    with {:ok, account} <- ref |> apply_attrs(attrs) |> friendly(),
+         {:ok, account} <- account.id |> apply_max_concurrent(max_concurrent) |> friendly() do
       account |> apply_quota_config(quota_config) |> friendly()
     end
   end
+
+  defp apply_attrs(ref, :absent), do: Accounts.get_account(ref)
+  defp apply_attrs(ref, {:set, attrs}), do: Accounts.update_account(ref, attrs)
 
   defp apply_max_concurrent(ref, :absent), do: Accounts.get_account(ref)
   defp apply_max_concurrent(ref, {:set, value}), do: Accounts.set_max_concurrent(ref, value)
@@ -317,6 +344,9 @@ defmodule ArbiterWeb.Api.AccountController do
     do: {:error, {:invalid_request, "missing required field: #{key}"}}
 
   defp friendly({:error, {:invalid_quota_config, message}}),
+    do: {:error, {:invalid_request, message}}
+
+  defp friendly({:error, {:invalid_account, message}}),
     do: {:error, {:invalid_request, message}}
 
   defp friendly(other), do: other

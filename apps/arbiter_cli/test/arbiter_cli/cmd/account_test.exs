@@ -249,6 +249,81 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "account set requires at least one of"
   end
 
+  test "account set --label/--plan/--disable PATCHes the account attributes (bd-8vkqd3)" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+         assert Jason.decode!(body) ==
+                  %{"label" => "Work Max", "plan" => "max_20x", "enabled" => false}
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "label" => "Work Max",
+           "plan" => "max_20x",
+           "max_concurrent" => nil,
+           "enabled" => false,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Account.run([
+          "set",
+          "personal-max",
+          "--label",
+          "Work Max",
+          "--plan",
+          "max_20x",
+          "--disable"
+        ])
+      end)
+
+    assert exit_code == 0
+    assert out =~ "enabled=false"
+  end
+
+  test "account set --enable sends enabled true; an empty --label clears it" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"label" => "", "enabled" => true}
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "max_concurrent" => nil,
+           "enabled" => true,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--label", "", "--enable"]) end)
+
+    assert exit_code == 0
+  end
+
+  test "account set refuses --enable together with --disable" do
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--enable", "--disable"]) end)
+
+    assert exit_code != 0
+    assert err =~ "--enable and --disable"
+  end
+
   test "account show prints credentials and workspaces, never a secret" do
     stub_get("/api/accounts/personal-max", %{
       "id" => "acct-1",
