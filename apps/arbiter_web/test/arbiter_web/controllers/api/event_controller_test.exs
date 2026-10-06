@@ -54,6 +54,23 @@ defmodule ArbiterWeb.Api.EventControllerTest do
                json_response(conn, 401)["error"]
     end
 
+    test "a ?token= credential never reaches the logs (P-28)", %{conn: conn} do
+      previous = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous) end)
+      secret = "evt-secret-token-value"
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          conn = get(conn, "/events?token=#{secret}")
+          assert json_response(conn, 401)
+        end)
+
+      assert log =~ "GET /events"
+      assert log =~ ~s("token" => "[FILTERED]")
+      refute log =~ secret
+    end
+
     test "returns 401 for a worker-tier token (only coordinator allowed)", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
       token = Scope.mint_worker(task, "test-repo")

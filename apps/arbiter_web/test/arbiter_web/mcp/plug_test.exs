@@ -204,6 +204,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
         end)
 
       refute log =~ ctx.worker_token
+      assert log =~ "POST /mcp"
+      assert log =~ ~s("token" => "[FILTERED]")
     end
 
     test "a garbage token in the query parameter is 401", ctx do
