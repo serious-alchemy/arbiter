@@ -815,6 +815,31 @@ defmodule Arbiter.MCP.ToolsTest do
       assert %{enabled: _, update_available: false, latest: nil, current: current} = update
       assert current == Arbiter.Version.app_version()
     end
+
+    test "reports a detected update (update_available, latest, release_url)", ctx do
+      Req.Test.stub(Arbiter.Release.UpdateCheck, fn conn ->
+        Req.Test.json(conn, %{"tag_name" => "v99.0.0", "html_url" => "https://example.test/r"})
+      end)
+
+      pid =
+        start_supervised!(
+          {Arbiter.Release.UpdateCheck,
+           enabled: true,
+           repo: "acme/arbiter",
+           running_version: "0.2.0",
+           initial_delay_ms: :infinity,
+           req_options: [plug: {Req.Test, Arbiter.Release.UpdateCheck}]}
+        )
+
+      Req.Test.allow(Arbiter.Release.UpdateCheck, self(), pid)
+      Arbiter.Release.UpdateCheck.check_now()
+
+      assert {:ok, %{update: update}} = Tools.workspace_show(ctx.worker, %{})
+      assert update.update_available == true
+      assert update.latest == "v99.0.0"
+      assert update.release_url == "https://example.test/r"
+      assert update.current == Arbiter.Version.app_version()
+    end
   end
 
   describe "serialize_workspace/1 egress posture (bd-5yydxh)" do
