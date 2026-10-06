@@ -360,7 +360,7 @@ defmodule Arbiter.Reviews.PushState do
   # normal state here (it was cleaned up, the path came from stale meta), not
   # an exception.
   defp git(path, args) do
-    case System.cmd("git", args, cd: path, stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(path, args, stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.trim(out)}
       {_out, _code} -> :error
     end

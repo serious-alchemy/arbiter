@@ -153,6 +153,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "no worktree was ever provisioned for the run: infrastructure"},
     {Arbiter.Worker, :fail_workspace_destroyed, 3,
      "the workspace was deleted under a running worker: infrastructure (bd-b6noq9)"},
+    {Arbiter.Worker, :fail_tampered_clone, 2,
+     "the worker replaced its clone's .git: a security refusal of the tree, not a review " <>
+       "guard — there is nothing to review or retry (bd-6t7u81)"},
     {Arbiter.Worker, :broadcast_done, 1, "completion notification"},
     {Arbiter.Worker, :handle_call, 3, "awaiting-review status notification"},
     {Arbiter.Worker, :escalate_output_log_failure, 2,

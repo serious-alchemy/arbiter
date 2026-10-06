@@ -38,7 +38,7 @@ defmodule ArbiterWeb.LayoutsTest do
   end
 
   describe "app/1 — nav" do
-    test "the rail renders the 15 nav entries in order, with their hrefs and group headers" do
+    test "the rail renders the 17 nav entries in order, with their hrefs and group headers" do
       rail = render_app() |> LazyHTML.from_fragment() |> LazyHTML.query("#nav-rail")
 
       entries =
@@ -56,6 +56,7 @@ defmodule ArbiterWeb.LayoutsTest do
                {"Workers", "/workers"},
                {"Run history", "/workers/history"},
                {"Sessions", "/sessions"},
+               {"Nodes", "/nodes"},
                {"Usage", "/usage"},
                {"Reports", "/reports"},
                {"Reviews", "/reviews"},

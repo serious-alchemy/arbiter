@@ -35,6 +35,66 @@ defmodule ArbiterWeb.RunDetailLiveTest do
     {:ok, view, render_async(view, @async_timeout)}
   end
 
+  describe "node (RW7)" do
+    alias Arbiter.Nodes
+    alias Arbiter.Nodes.Registry
+
+    setup do
+      previous = Application.fetch_env(:arbiter, :node_primary_version)
+      Application.put_env(:arbiter, :node_primary_version, "1.2.3")
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:arbiter, :node_primary_version, v)
+          :error -> Application.delete_env(:arbiter, :node_primary_version)
+        end
+
+        for {pid, _} <- Registry.list(),
+            do: Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
+      end)
+    end
+
+    defp connected_node!(name, run_ids) do
+      {:ok, %{token: t}} = Nodes.mint_join_token([name: name], Arbiter.Actor.operator("test"))
+      {:ok, %{node: node}} = Nodes.redeem_join_token(t)
+
+      {:ok, _} =
+        Registry.attach(
+          node,
+          self(),
+          %{
+            "agent_version" => "1.2.3",
+            "proto" => 1,
+            "caps" => %{},
+            "capacity" => %{"suggestion" => 2},
+            "runs" => Enum.map(run_ids, &%{"id" => &1})
+          },
+          tick_ms: :infinity
+        )
+
+      node
+    end
+
+    test "a run on a node names the node and links to it", %{conn: conn} do
+      r = run(%{task_id: "bd-on-node", state: :working, completed_at: nil, outcome: nil})
+      node = connected_node!("gpu-1", [r.id])
+
+      {:ok, view, _html} = live_run(conn, r.id)
+
+      assert has_element?(view, "#run-node", "gpu-1")
+      assert has_element?(view, ~s(#run-node a[href="/nodes/#{node.id}"]))
+    end
+
+    test "a run on the primary shows no node", %{conn: conn} do
+      r = run(%{task_id: "bd-local-run"})
+      _node = connected_node!("idle", [])
+
+      {:ok, view, _html} = live_run(conn, r.id)
+
+      refute has_element?(view, "#run-node")
+    end
+  end
+
   describe "mount" do
     test "renders the loading state then the run", %{conn: conn} do
       r = run(%{task_id: "bd-detail-ok", task_title: "the-good-run", output_lines: ["hello"]})

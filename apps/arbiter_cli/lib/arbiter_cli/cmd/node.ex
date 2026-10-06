@@ -11,9 +11,19 @@ defmodule ArbiterCli.Cmd.Node do
       arb node list   [--json]
       arb node show   <name|id> [--json]
       arb node set    <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+      arb node set    local --max-workers N|none       (N may be 0: nodes do the work)
       arb node events <name|id> [--json]
+      arb node drain|undrain|revoke|upgrade <name|id>
+      arb node remove <name|id>                        (a revoked node only)
 
-  `add` and `set` need the operator's own token (the human's `arb`, not a
+  `list` shows the primary first as `local`, then each node's state, live/max
+  capacity, the node's own suggestion, your override, any ceiling set on the node
+  itself (which the override cannot beat) and its last heartbeat, with
+  `local + Σ remote caps` against `conductor.max_concurrent`. `drain` stops new
+  work, `revoke` cuts the node off, `upgrade` asks a connected node to move to
+  the release this install serves. Each writes a node event (`arb node events`).
+
+  Everything but `list`, `show` and `events` — and those too — needs the operator's own token (the human's `arb`, not a
   coordinator session): enrolling a machine hands it provider credentials.
   The node enrols by running the printed command; the token is typed at its
   prompt, or supplied with `ARB_JOIN_TOKEN_FILE=<path>` for unattended installs.
@@ -29,6 +39,8 @@ defmodule ArbiterCli.Cmd.Node do
     token_file: :string
   ]
   @set_switches [name: :string, label: [:string, :keep], max_workers: :string]
+
+  @verbs ~w(drain undrain revoke upgrade remove)
 
   def run(argv) do
     if Output.help?(argv) do
@@ -49,6 +61,9 @@ defmodule ArbiterCli.Cmd.Node do
 
         ["events" | rest] ->
           events(rest, Output.mode(argv))
+
+        [verb | rest] when verb in @verbs ->
+          verb(verb, rest, Output.mode(argv))
 
         _ ->
           IO.puts(:stderr, "arb: unknown node subcommand")
@@ -171,34 +186,91 @@ defmodule ArbiterCli.Cmd.Node do
       {:ok, resp} when mode == :json ->
         Output.emit_json(resp)
 
-      {:ok, %{"nodes" => []}} ->
+      {:ok, %{"nodes" => []} = resp} when not is_map_key(resp, "local") ->
         IO.puts("No nodes. Add one with `arb node add`.")
 
-      {:ok, %{"nodes" => nodes}} ->
+      {:ok, %{"nodes" => nodes} = resp} ->
+        rows = Enum.reject([resp["local"]], &is_nil/1) ++ nodes
+
         IO.puts(
-          row(["NAME", "STATUS", "WORKERS", "LAST SEEN", "LABELS"])
+          row([
+            "NAME",
+            "STATE",
+            "LIVE/MAX",
+            "SUGGESTED",
+            "OVERRIDE",
+            "CEILING",
+            "LAST HEARTBEAT",
+            "LABELS"
+          ])
           |> String.trim_trailing()
         )
 
-        for n <- nodes, do: IO.puts(row(node_cells(n)) |> String.trim_trailing())
+        for n <- rows, do: IO.puts(row(node_cells(n)) |> String.trim_trailing())
+        print_totals(resp)
+        if nodes == [], do: IO.puts("\nNo remote nodes. Add one with `arb node add`.")
 
       {:error, err} ->
         Output.die(err)
     end
   end
 
+  defp node_cells(%{"kind" => "local"} = n) do
+    [n["name"], n["state"], live_max(n), dash(n["suggested"]), dash(n["override"]), "-", "-", ""]
+  end
+
   defp node_cells(n) do
     [
       n["name"],
-      n["status"],
-      to_string(n["max_workers"] || "-"),
-      n["last_seen_at"] || "never",
+      n["state"] || n["status"],
+      live_max(n),
+      dash(n["suggested"]),
+      dash(n["override"] || n["max_workers"]),
+      dash(n["ceiling"]),
+      n["last_heartbeat_at"] || n["last_seen_at"] || "never",
       Enum.join(n["labels"] || [], ",")
     ]
   end
 
+  defp live_max(%{"live" => live, "max" => max}), do: "#{live}/#{max || "?"}"
+  defp live_max(_), do: "-"
+
+  defp dash(nil), do: "-"
+  defp dash(value), do: to_string(value)
+
+  defp print_totals(
+         %{"local" => %{"max" => local}, "total" => total, "ceiling" => ceiling} = resp
+       ) do
+    IO.puts("")
+
+    IO.puts(
+      "local #{local} + nodes #{total - local} = #{total}, against conductor.max_concurrent = #{ceiling}"
+    )
+
+    for w <- resp["warnings"] || [], do: IO.puts("warning: " <> warning(w, resp))
+  end
+
+  defp print_totals(_), do: :ok
+
+  defp warning("local_cap_zero", _),
+    do:
+      "the local cap is 0: work that can only run on this machine (reviewers, fix and " <>
+        "conflict passes, agy/codex, research) will wait"
+
+  defp warning("ceiling_below_total", resp),
+    do:
+      "conductor.max_concurrent (#{resp["ceiling"]}) is below #{resp["total"]}, the sum " <>
+        "of the caps: the extra capacity will sit idle"
+
+  defp warning("ceiling_far_above_total", resp),
+    do:
+      "conductor.max_concurrent (#{resp["ceiling"]}) is far above #{resp["total"]}, the sum " <>
+        "of the caps: the board will plan more than any machine can start"
+
+  defp warning(other, _), do: other
+
   defp row(cells) do
-    widths = [24, 10, 8, 26, 0]
+    widths = [24, 10, 9, 10, 9, 8, 26, 0]
 
     cells
     |> Enum.zip(widths)
@@ -258,11 +330,14 @@ defmodule ArbiterCli.Cmd.Node do
     {opts, rest, mode} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
+    if ref == "local" and (opts[:name] || labels(opts) != []),
+      do: Output.die("arb node set local: only --max-workers applies to local")
+
     body =
       %{}
       |> put(:name, opts[:name])
       |> put(:labels, labels(opts))
-      |> put_max_workers(opts[:max_workers])
+      |> put_max_workers(opts[:max_workers], ref == "local")
 
     if body == %{},
       do: Output.die("arb node set: nothing to set (--name, --label, --max-workers)")
@@ -274,15 +349,54 @@ defmodule ArbiterCli.Cmd.Node do
     end
   end
 
-  defp put_max_workers(body, nil), do: body
-  defp put_max_workers(body, "none"), do: Map.put(body, :max_workers, nil)
+  defp put_max_workers(body, nil, _local?), do: body
+  defp put_max_workers(body, "none", _local?), do: Map.put(body, :max_workers, nil)
 
-  defp put_max_workers(body, value) do
+  defp put_max_workers(body, value, local?) do
+    min = if local?, do: 0, else: 1
+
     case Integer.parse(value) do
-      {n, ""} when n >= 1 -> Map.put(body, :max_workers, n)
-      _ -> Output.die("--max-workers must be a positive number, or `none`")
+      {n, ""} when n >= min ->
+        Map.put(body, :max_workers, n)
+
+      _ when local? ->
+        Output.die("--max-workers must be 0 or more, or `none`")
+
+      _ ->
+        Output.die("--max-workers must be a positive number, or `none` (drain a node to stop it)")
     end
   end
+
+  # ---- drain / undrain / revoke / upgrade / remove ---------------------------
+
+  defp verb("remove", argv, mode) do
+    ref = ref!(argv, "remove")
+
+    case Client.delete(path(ref)) do
+      {:ok, resp} when mode == :json -> Output.emit_json(resp)
+      {:ok, _} -> IO.puts("Removed #{ref}.")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp verb(verb, argv, mode) do
+    ref = ref!(argv, verb)
+
+    case Client.post(path(ref) <> "/" <> verb, %{}) do
+      {:ok, resp} when mode == :json -> Output.emit_json(resp)
+      {:ok, resp} -> IO.puts(done_line(verb, resp["node"]["name"] || ref, resp))
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp done_line("drain", name, _), do: "Draining #{name}: no new work; its live runs continue."
+  defp done_line("undrain", name, _), do: "Undrained #{name}."
+  defp done_line("revoke", name, _), do: "Revoked #{name}: its credential no longer works."
+
+  defp done_line("upgrade", name, resp),
+    do:
+      "Upgrade requested for #{name}" <>
+        if(resp["upgrading_to"], do: " (to #{resp["upgrading_to"]}).", else: ".")
 
   # ---- helpers ---------------------------------------------------------------
 

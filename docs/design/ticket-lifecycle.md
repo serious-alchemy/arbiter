@@ -386,7 +386,7 @@ releases its slot but stays In progress until the follow-up decides its column.)
 | open PR (`waiting_ci_merge`) | held | released — `:merging` |
 | `:unknown` liveness probe | held | whatever the state says |
 | ReviewGate waiting on CI before dispatching a reviewer (bd-cut6uv, bd-dc468g) | held | released — `:merging` on board; `holds_slot?/1` skips a ticket with a live `ci_wait` marker |
-| held for quota (`DispatchQueue`) | held | released (`held_for_quota?`), still In progress on the board; column TBD, follow-up (bd-dc468g) |
+| held for quota (`DispatchQueue`) | held | released (`held_for_quota?`); shows in **Blocked** with the hold reason and resume time (`hold`, display only — state, slots and the queue's resume are untouched; `Dispatchable` still refuses it) (bd-abg443) |
 | merged, waiting on verification | released | released — `:verifying` |
 
 This replaces the operator's 2026-09-21 rule "another slot doesn't open until

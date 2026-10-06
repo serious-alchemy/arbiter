@@ -123,6 +123,33 @@ defmodule ArbiterCli.Client do
   @spec anonymous(atom(), String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def anonymous(method, path, opts \\ []), do: do_request(method, path, nil, opts)
 
+  @doc """
+  An anonymous `GET` of an absolute `url` — no token, no redirects — for `arb
+  server doctor`'s `nodes.public_url reachable` probe, which must dial the
+  address a node would, not `base_url/0`. `{:ok, body}` on a 2xx; otherwise
+  `{:error, {:status, n}}` or `{:error, reason}` for a transport failure.
+  """
+  @spec probe_url(String.t(), keyword()) :: {:ok, any()} | {:error, term()}
+  def probe_url(url, opts \\ []) when is_binary(url) do
+    req_opts =
+      [
+        method: :get,
+        url: url,
+        receive_timeout: 5_000,
+        connect_options: [timeout: 5_000],
+        retry: false,
+        redirect: false,
+        headers: []
+      ] ++ opts ++ test_opts()
+
+    case Req.request(req_opts) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 -> {:ok, body}
+      {:ok, %Req.Response{status: status}} -> {:error, {:status, status}}
+      {:error, %{reason: reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp request(method, path, opts) do
     with {:ok, token} <- request_token() do
       method

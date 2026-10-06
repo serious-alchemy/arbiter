@@ -124,7 +124,6 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/podman_readiness.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
-    "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,
     # bd-svczq4: the OS-process-tree kill helpers extracted out of `worker.ex`
     # (and now shared with `Arbiter.Agents.Preflight`'s probe teardown). Spawns
     # only `kill` and `pgrep`.
@@ -138,12 +137,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/prepush_check.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
-    "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/gitlab.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/local_compare.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/conflict_resolution.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
-    "apps/arbiter/lib/arbiter/mergers/net_diff.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,
     # bd-1lszsc: git only (rev-parse / worktree add) to build a refine
     # session's read-only grounding checkout. Same classification as
@@ -154,11 +151,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/sessions/memory/staleness.ex" => :pure_tool,
     # bd-2jkrqu: git only (rev-parse / fetch / push / merge-base), which never
     # reads ROOTDIR or BINDIR.
-    "apps/arbiter/lib/arbiter/reviews/push_state.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/tasks/status_backfill.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/primary_sync.ex" => :pure_tool,
-    "apps/arbiter/lib/arbiter/worker/resume_context.ex" => :pure_tool,
-    "apps/arbiter/lib/arbiter/worker/review_gate.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/workflows/code_review.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/workflows/code_review/consumer_trace.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/workflows/merge_queue/conflict_resolver.ex" => :pure_tool,

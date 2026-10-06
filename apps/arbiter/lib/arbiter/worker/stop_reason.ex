@@ -112,6 +112,13 @@ defmodule Arbiter.Worker.StopReason do
       classification — synthesized by the completion path to refuse closing a
       task that produced no deliverable. Remediation: investigate why
       provisioning was skipped, then re-dispatch.
+    * `:tampered_clone` — the worker signalled `arb done` but the private clone's
+      `.git` is no longer the directory the clone was created with: it renamed it
+      and put its own in place (bd-6t7u81). Synthesized by the completion path,
+      never by `classify/2`. A replacement `.git` carries a config the host's git
+      would act on (`core.fsmonitor`, a hook, a diff driver), so the tree is not
+      diffed, reviewed or merged: the original `.git` is put back and the run
+      fails for the coordinator.
     * `:workspace_destroyed` — the worker's workspace **was** provisioned and
       then vanished from disk while the run was alive (bd-b6noq9). The exact
       opposite of `:missing_worktree`: there was a worktree, a branch and work
@@ -195,6 +202,7 @@ defmodule Arbiter.Worker.StopReason do
           | :preflight_timeout
           | :missing_worktree
           | :workspace_destroyed
+          | :tampered_clone
           | :spawn_failed
           | :model_unavailable
 
@@ -808,6 +816,28 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:tampered_clone` reason (bd-6t7u81): the worker replaced the `.git`
+  of its private clone at `path`, and `why` is what `PrivateClone` found.
+  """
+  @spec tampered_clone(String.t(), String.t()) :: t()
+  def tampered_clone(path, why) when is_binary(path) and is_binary(why) do
+    %__MODULE__{
+      category: :tampered_clone,
+      summary:
+        "the worker replaced the .git of its checkout #{path} (#{why}) — the tree is not " <>
+          "trusted, so nothing was diffed, reviewed or merged from it",
+      remediation:
+        "Do NOT merge or re-run git in #{path} by hand: a replacement .git can carry a " <>
+          "config or hook that runs code as the host user. The original .git was put back " <>
+          "when it could be found, and the replacement is kept beside it as .git.tampered " <>
+          "for inspection (read it as data, never `cd` in and run git). Establish what the " <>
+          "worker was doing before re-dispatching the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
   Build a `:workspace_destroyed` reason (bd-b6noq9): the run's provisioned
   workspace is gone from disk while the run is still alive.
 
@@ -909,6 +939,7 @@ defmodule Arbiter.Worker.StopReason do
         :preflight_timeout -> "auth pre-flight probe timed out"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
         :workspace_destroyed -> "workspace destroyed mid-run (worktree gone from disk)"
+        :tampered_clone -> "the worker replaced its clone's .git (refused, not trusted)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
         :model_unavailable -> "model unavailable for this account"
       end

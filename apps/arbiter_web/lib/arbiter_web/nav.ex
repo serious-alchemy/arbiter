@@ -81,7 +81,8 @@ defmodule ArbiterWeb.Nav do
             href: ~p"/sessions",
             icon: "hero-command-line",
             badge: nil
-          }
+          },
+          %{label: "Nodes", href: ~p"/nodes", icon: "hero-server-stack", badge: nil}
         ]
       },
       %{

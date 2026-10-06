@@ -28,7 +28,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   |---|---|
   | `:backlog` | `:backlog` |
   | `:queued` | `:blocked` when `:blocked_by` is non-empty, else `:ready` |
-  | `:active` | `:in_progress` (or `:merging` when waiting on ReviewGate CI, bd-dc468g) |
+  | `:active` | `:in_progress` (`:merging` when waiting on ReviewGate CI, bd-dc468g; `:blocked` when the quota gate holds it, bd-abg443) |
   | `:merging` | `:merging` |
   | `:verifying` | `:verifying` |
   | `:closed` | `:closed` |
@@ -41,7 +41,12 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   or Blocked. The exceptions are:
     * a *live* author run on a `:backlog` or `:queued` ticket (reads as `:in_progress`);
     * an `:active` ticket whose ReviewGate is waiting on CI (`:awaiting_ci`, bd-dc468g)
-      which appears in `:merging` because it holds no scheduler slot.
+      which appears in `:merging` because it holds no scheduler slot;
+    * an `:active` ticket the quota gate is holding (`Arbiter.Workflows.DispatchQueue`,
+      bd-zkmvia) which appears in `:blocked`, with a `hold` (reason + resume time),
+      because it holds no scheduler slot either. Display only: the stored state,
+      slot accounting and the queue's resume are untouched, and `Dispatchable`
+      still refuses it as already In progress.
 
   A row with no stored state at all (a bare `%{id: ...}` for a run whose ticket
   was not read) is claimed by any non-completed author row.
@@ -102,12 +107,16 @@ defmodule Arbiter.Tasks.Lifecycle.View do
           | :behind_base
           | :merge_blocked
 
+  @typedoc "A quota hold on an `:active` ticket: the operator-facing reason and when it resumes."
+  @type hold :: %{reason: String.t(), resumes_at: DateTime.t() | nil}
+
   @type t :: %{
           state: Lifecycle.state() | nil,
           column: column() | nil,
           step: step() | nil,
           blocked_by: [String.t()],
           attention: Attention.t() | nil,
+          hold: hold() | nil,
           ci_wait: %{sha: String.t(), since: String.t() | nil, round: term()} | nil
         }
 
@@ -143,16 +152,21 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     initial_step = step(initial_column, ticket, runs, ctx)
     step = awaiting_ci(initial_step, ci_wait, runs)
 
-    column =
-      if initial_column == :in_progress and not is_nil(ci_wait),
-        do: :merging,
-        else: initial_column
+    hold = if is_nil(ci_wait), do: quota_hold(initial_column, state, ticket, ctx)
+
+    {column, step} =
+      cond do
+        initial_column == :in_progress and not is_nil(ci_wait) -> {:merging, step}
+        not is_nil(hold) -> {:blocked, nil}
+        true -> {initial_column, step}
+      end
 
     %{
       state: state,
       column: column,
       step: step,
       blocked_by: blocked_by,
+      hold: hold,
       attention:
         Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait, cut_off)),
       ci_wait: ci_wait
@@ -200,13 +214,29 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   """
   @spec board_column(map(), map()) :: board_column() | nil
   def board_column(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
-    case view(ticket, ctx).column do
-      nil -> nil
-      :backlog -> :backlog
-      column when column in [:blocked, :ready] -> :ready
-      :in_progress -> in_progress_board_column(ticket, runs_for(ticket, ctx), ctx)
-      column when column in [:merging, :verifying] -> :waiting
-      :closed -> :closed
+    view = view(ticket, ctx)
+
+    case view.column do
+      nil ->
+        nil
+
+      :backlog ->
+        :backlog
+
+      :blocked when not is_nil(view.hold) ->
+        in_progress_board_column(ticket, runs_for(ticket, ctx), ctx)
+
+      column when column in [:blocked, :ready] ->
+        :ready
+
+      :in_progress ->
+        in_progress_board_column(ticket, runs_for(ticket, ctx), ctx)
+
+      column when column in [:merging, :verifying] ->
+        :waiting
+
+      :closed ->
+        :closed
     end
   end
 
@@ -245,6 +275,49 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       state ->
         state
     end
+  end
+
+  # bd-abg443: a stored-`:active` ticket (a non-epic: it is a slot-holder but for
+  # the hold) the quota gate is holding. `ctx.held` is the hold, its
+  # `DispatchQueue.describe/1` map (or `true`, with no detail); absent, the
+  # workspace's queue is asked.
+  defp quota_hold(:in_progress, :active, ticket, ctx) do
+    if Map.get(ticket, :state) == :active and
+         Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() do
+      ctx |> held_for(ticket) |> hold_of()
+    end
+  end
+
+  defp quota_hold(_column, _state, _ticket, _ctx), do: nil
+
+  defp held_for(ctx, ticket) do
+    case Map.fetch(ctx, :held) do
+      {:ok, held} -> held
+      :error -> held_item(ticket)
+    end
+  end
+
+  defp held_item(ticket) do
+    case DispatchQueue.held_item(Map.get(ticket, :workspace_id), Map.get(ticket, :id)) do
+      nil -> false
+      item -> DispatchQueue.describe(item)
+    end
+  end
+
+  defp hold_of(held) when held in [nil, false], do: nil
+  defp hold_of(true), do: hold_of(%{})
+
+  defp hold_of(%{} = held) do
+    reason = held |> Map.get(:reason) |> DispatchQueue.reason_text()
+    resumes_at = Map.get(held, :retry_not_before)
+
+    resume =
+      case resumes_at do
+        %DateTime{} = at -> "; resumes ~#{Calendar.strftime(at, "%H:%MZ")}"
+        _ -> ""
+      end
+
+    %{reason: "held — quota (#{reason}#{resume})", resumes_at: resumes_at}
   end
 
   defp column(nil, _blocked_by), do: nil
@@ -429,7 +502,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   defp held_or(fact, ticket, ctx) do
     held =
       case Map.fetch(ctx, :held) do
-        {:ok, held} -> held == true
+        {:ok, held} -> held not in [nil, false]
         :error -> DispatchQueue.held?(Map.get(ticket, :workspace_id), Map.get(ticket, :id))
       end
 

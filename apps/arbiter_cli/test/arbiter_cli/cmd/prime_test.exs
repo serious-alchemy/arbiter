@@ -247,6 +247,26 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert Enum.map(ws["in_progress"], & &1["id"]) == ["bd-active"]
     end
 
+    # bd-abg443: a quota-held active ticket reads Blocked with its hold.
+    test "a quota-held ticket appears under Blocked with its hold reason and resume time" do
+      reason = "held — quota (claude:default 5h ≥ paced line; resumes ~15:30Z)"
+
+      stub_with_tickets([
+        ticket("bd-held", "blocked", %{
+          "blocked_by" => [],
+          "hold" => %{"reason" => reason, "resumes_at" => "2026-10-06T15:30:00Z"}
+        })
+      ])
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      sec = Map.new(sections(out))
+
+      assert sec |> Map.get("== Blocked", []) |> Enum.join("\n") =~
+               ~r/bd-held .*#{Regex.escape(reason)}/u
+
+      assert sec |> Map.get("== In progress", []) |> Enum.join("\n") =~ "(none)"
+    end
+
     test "an unreadable lifecycle read is marked, not omitted" do
       stub_routes([
         {{"get", "/api/workspaces"},

@@ -33,7 +33,8 @@ defmodule ArbiterWeb.NavTest do
       assert Enum.map(fleet.items, &{&1.label, &1.href}) == [
                {"Workers", "/workers"},
                {"Run history", "/workers/history"},
-               {"Sessions", "/sessions"}
+               {"Sessions", "/sessions"},
+               {"Nodes", "/nodes"}
              ]
 
       assert Enum.map(analysis.items, &{&1.label, &1.href}) == [
@@ -57,7 +58,7 @@ defmodule ArbiterWeb.NavTest do
       groups = Nav.groups(count)
       all_items = Nav.flat_items(groups)
 
-      assert length(all_items) == 16
+      assert length(all_items) == 17
 
       epics_item = Enum.find(all_items, &(&1.href == "/epics"))
       assert epics_item.badge == count
@@ -88,7 +89,7 @@ defmodule ArbiterWeb.NavTest do
       groups = Nav.groups(10)
       flat = Nav.flat_items(groups)
 
-      assert length(flat) == 16
+      assert length(flat) == 17
 
       expected_hrefs = [
         "/",
@@ -98,6 +99,7 @@ defmodule ArbiterWeb.NavTest do
         "/workers",
         "/workers/history",
         "/sessions",
+        "/nodes",
         "/usage",
         "/reports",
         "/reviews",

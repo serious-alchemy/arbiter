@@ -624,6 +624,12 @@ defmodule ArbiterCli.Cmd.Prime do
     "#{t["id"]}  P#{t["priority"]}  #{t["issue_type"]}  #{truncate(t["title"], 80)}#{hold}"
   end
 
+  # bd-abg443: an active ticket the quota gate holds reads Blocked, saying why
+  # and when it resumes; its slot is already released.
+  defp blocked_line(%{"hold" => %{"reason" => reason}} = t) do
+    "#{t["id"]}  P#{t["priority"]}  #{truncate(t["title"], 60)}  ← #{reason}"
+  end
+
   defp blocked_line(t) do
     "#{t["id"]}  P#{t["priority"]}  #{truncate(t["title"], 60)}  ← waiting on " <>
       Enum.join(List.wrap(t["blocked_by"]), ", ")

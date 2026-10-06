@@ -2185,13 +2185,19 @@ defmodule Arbiter.Worker.Worktree do
   defp run_git(args, opts) do
     cd = Keyword.get(opts, :cd)
 
-    if is_binary(cd) and not File.dir?(cd) do
-      {:error, {:git_failed, "cwd does not exist: #{cd}"}}
-    else
-      case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
-        {output, 0} -> {:ok, output}
-        {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
-      end
+    cond do
+      is_binary(cd) and not File.dir?(cd) ->
+        {:error, {:git_failed, "cwd does not exist: #{cd}"}}
+
+      # A worker's replacement `.git` (bd-6t7u81) is never run git in.
+      match?({:error, _}, PrivateClone.guard(cd)) ->
+        {:error, {:git_failed, ".git of #{cd} is not the one it was created with"}}
+
+      true ->
+        case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+          {output, 0} -> {:ok, output}
+          {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
+        end
     end
   rescue
     e in ErlangError ->

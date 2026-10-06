@@ -75,7 +75,7 @@ defmodule Arbiter.Worker.PrivateClonePodmanTest do
 
     Container.run(
       ["bash", "-c", script],
-      mounts ++ [name: ctx.name, image: ctx.image, timeout: 120_000] ++ extra
+      Keyword.merge(mounts, [name: ctx.name, image: ctx.image, timeout: 120_000] ++ extra)
     )
   end
 
@@ -143,6 +143,81 @@ defmodule Arbiter.Worker.PrivateClonePodmanTest do
     assert git!(ctx.checkout, ["rev-parse", "refs/heads/" <> @branch]) == head
     # Sync-back carries the task branch only, not the clone's sibling ref.
     refute git!(ctx.checkout, ["rev-parse", "refs/heads/feature/sibling"]) == head
+  end
+
+  # bd-6t7u81 (#390): the K1 spike's probe. With only the four guard files
+  # bound read-only (no mount of `.git` itself), `mv .git .git2` succeeds and
+  # the worker can recreate `.git` with its own config and hooks. The mount set
+  # `PrivateClone.mounts/1` returns binds `.git` too, so the rename fails
+  # `EBUSY`; whatever the worker then manages to write, nothing host-side runs.
+  test "mv .git .git2 and a recreated .git with fsmonitor and hooks never run host-side", ctx do
+    dot_git = Path.join(ctx.path, ".git")
+    marker = Path.join(System.tmp_dir!(), "arb-6t7u81-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(marker) end)
+
+    script = """
+    cd #{ctx.path}
+    mv .git .git2 2>/dev/null; echo "gitdir_move=$?"
+    mkdir .git 2>/dev/null; echo "gitdir_mkdir=$?"
+    git config core.fsmonitor "touch #{marker}" 2>/dev/null; echo "config_write=$?"
+    printf '#!/bin/sh\\ntouch #{marker}\\n' > .git/hooks/reference-transaction 2>/dev/null
+    echo "hook_write=$?"
+    ls -a . | tr '\\n' ' '
+    """
+
+    assert {:ok, {out, 0}} = run_in_clone(ctx, script)
+    assert out =~ "gitdir_move=1"
+    refute out =~ "config_write=0"
+    refute out =~ "hook_write=0"
+    refute File.exists?(Path.join(ctx.path, ".git2"))
+
+    # Host side, the clone is what it was: verified, and git in it runs nothing.
+    assert :ok = PrivateClone.verify(ctx.path)
+    assert {:ok, %File.Stat{type: :directory}} = File.lstat(dot_git)
+    git!(ctx.path, ["status", "--porcelain"])
+    git!(ctx.path, ["update-ref", "refs/heads/#{@branch}", "HEAD"])
+    assert {:ok, _} = PrivateClone.sync_back(ctx.path)
+    refute File.exists?(marker)
+  end
+
+  # The same probe without the `.git` mount, as the spike ran it (and as a
+  # shadow clone mounted by something else than `mounts/1` would be): the
+  # rename succeeds, and `reclaim/1` is what keeps the host from trusting it.
+  test "without the .git mount the rename succeeds, and the host reclaims the real .git", ctx do
+    marker = Path.join(System.tmp_dir!(), "arb-6t7u81-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(marker) end)
+    {:ok, mounts} = PrivateClone.mounts(ctx.path)
+
+    script = """
+    cd #{ctx.path}
+    mv .git .git2 && echo MOVED
+    mkdir -p .git/hooks .git/objects/info .git/refs
+    cp .git2/HEAD .git2/commondir .git/ && cp .git2/objects/info/alternates .git/objects/info/
+    cp .git2/config .git/config
+    printf '[core]\\n\\tfsmonitor = touch #{marker}; echo\\n' >> .git/config
+    printf '#!/bin/sh\\ntouch #{marker}\\n' > .git/hooks/reference-transaction
+    chmod +x .git/hooks/reference-transaction
+    echo SWAPPED
+    """
+
+    assert {:ok, {out, 0}} =
+             run_in_clone(ctx, script, git_dir: nil)
+
+    assert out =~ "MOVED"
+    assert out =~ "SWAPPED"
+    assert mounts[:git_dir] == Path.join(ctx.path, ".git")
+    assert {:error, {:tampered, _}} = PrivateClone.verify(ctx.path)
+    assert {:error, {:tampered, _}} = PrivateClone.sync_back(ctx.path)
+    refute File.exists?(marker)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, {:tampered, _}} = PrivateClone.reclaim(ctx.path)
+    end)
+
+    assert :ok = PrivateClone.verify(ctx.path)
+    git!(ctx.path, ["status", "--porcelain"])
+    git!(ctx.path, ["update-ref", "refs/heads/#{@branch}", "HEAD"])
+    refute File.exists?(marker)
   end
 
   # The container reads its borrowed history, signals, waits for the host to
