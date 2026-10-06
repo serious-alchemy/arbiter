@@ -58,6 +58,42 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     |> Enum.flat_map(&LazyHTML.attribute(&1, "data-ring-provider"))
   end
 
+  describe "grok's estimate ring (bd-co08p2)" do
+    defp grok_routing!(ws, enabled) do
+      Workspace
+      |> Ash.get!(ws.id)
+      |> Ash.update!(
+        %{patch: %{"routing" => %{"grok" => %{"enabled" => enabled}}}, unset_paths: []},
+        action: :patch_config
+      )
+
+      Quota.QuotaCache.invalidate(ws.id)
+    end
+
+    test "appears only while routing.grok.enabled, labelled as an estimate", %{conn: conn, ws: ws} do
+      claude!(ws)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_wait)
+      refute "grok" in rings(view)
+
+      grok_routing!(ws, true)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_wait)
+      assert "grok" in rings(view)
+      assert has_element?(view, "#quota-ring-grok-5h")
+      refute has_element?(view, "#quota-ring-grok-7d")
+      assert has_element?(view, ~s(#quota-ring-grok[title*="estimate"]))
+
+      grok_routing!(ws, false)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_wait)
+      refute "grok" in rings(view)
+    end
+  end
+
   describe "which providers are shown (the shared visibility rule)" do
     test "a Claude-only installation shows only Claude, even with an Antigravity row", %{
       conn: conn,

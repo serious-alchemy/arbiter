@@ -548,7 +548,7 @@ defmodule ArbiterWeb.QuotaHelpers do
   empty outer ring out.
   """
   def quota_ring_summary(view, %{inner: inner, outer: outer} = rings) do
-    name = quota_provider_label(view.provider)
+    name = quota_provider_label(view.provider) <> if(estimate?(view), do: " (estimate)", else: "")
 
     if quota_object_state(view, rings) == :no_data do
       "#{name}: no data yet"
@@ -561,6 +561,14 @@ defmodule ArbiterWeb.QuotaHelpers do
       "#{name}: #{windows}"
     end
   end
+
+  defp estimate?(view), do: is_map(Map.get(view, :estimate))
+
+  defp estimate_note(%{estimate: %{window: window, used_tokens: used, cap_tokens: cap}}),
+    do:
+      "estimated from Arbiter's usage ledger, rolling #{window}: #{used} of #{cap} tokens; no fixed reset"
+
+  defp estimate_note(_view), do: nil
 
   defp single_window?(view), do: Map.get(view, :secondary_label, "7d") == nil
 
@@ -577,7 +585,8 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_ring_title(view, rings) do
     quota_bar_title([
       quota_ring_summary(view, rings),
-      Map.get(view, :message) && "stale reading: #{view.message}"
+      Map.get(view, :message) && "stale reading: #{view.message}",
+      estimate_note(view)
     ])
   end
 

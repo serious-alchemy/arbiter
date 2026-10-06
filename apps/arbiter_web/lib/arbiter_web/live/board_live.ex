@@ -364,9 +364,22 @@ defmodule ArbiterWeb.BoardLive do
   # A card put back down on the column it came from did nothing.
   defp dropped(socket, _id, same, same), do: socket
 
-  defp dropped(socket, id, "backlog", to) when to in @queued_columns, do: promote(socket, id)
-  defp dropped(socket, id, from, "backlog") when from in @queued_columns, do: demote(socket, id)
-  defp dropped(socket, id, from, to), do: put_flash(socket, :error, refusal(id, from, to))
+  # bd-abg443: a quota-held ticket reads Blocked but is still active work the
+  # queue resumes by itself; no drag turns it into queued or backlog work.
+  defp dropped(%{assigns: %{board: board}} = socket, id, "blocked", to) do
+    if Enum.any?(board.blocked, &(&1.id == id and is_map(&1[:hold]))),
+      do: put_flash(socket, :error, "#{id} is held by the quota gate and resumes by itself."),
+      else: drop_other(socket, id, "blocked", to)
+  end
+
+  defp dropped(socket, id, from, to), do: drop_other(socket, id, from, to)
+
+  defp drop_other(socket, id, "backlog", to) when to in @queued_columns, do: promote(socket, id)
+
+  defp drop_other(socket, id, from, "backlog") when from in @queued_columns,
+    do: demote(socket, id)
+
+  defp drop_other(socket, id, from, to), do: put_flash(socket, :error, refusal(id, from, to))
 
   defp refusal(id, from, to) do
     "#{id} cannot be dragged from #{column_label(from)} to #{column_label(to)}: " <>
@@ -864,6 +877,7 @@ defmodule ArbiterWeb.BoardLive do
   # ---- card content, per column ----------------------------------------------
 
   # The column's one line about the card (see the moduledoc).
+  defp detail("blocked", %{hold: %{reason: reason}}), do: reason
   defp detail("blocked", card), do: EdgeGate.describe({:waiting_on, card.blocked_by})
   defp detail("ready", card), do: ready_reason(card.reason)
 

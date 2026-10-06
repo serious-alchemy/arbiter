@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.CoreComponents.ProviderIcon do
   @moduledoc """
-  Renders the logo of the AI provider (Claude / OpenAI / Antigravity) a worker is
+  Renders the logo of the AI provider (Claude / OpenAI / Antigravity / Grok) a worker is
   running on.
 
   This is the single place in the codebase that maps a provider string to a
@@ -26,7 +26,15 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
   #   filters and mask are reproduced unmodified below; only the wordmark letterform paths
   #   were dropped, since this component renders the icon standalone next to a text label.
   #   Full-colour Google gradient on blue arch. Nominative use to identify Google Antigravity.
-  # - Grok: neutral placeholder glyph; no official xAI asset is bundled.
+  # - Grok: the Grok mark from xAI. Source: xAI's own site, https://grok.com/images/favicon.svg
+  #   (the `<link rel="icon">` of https://grok.com/, fetched 2026-10-06). xAI's brand-guidelines
+  #   page (https://x.ai/legal/brand-guidelines) answered 403 to every automated request, so
+  #   the mark could not be taken from a brand kit. That file is a 512x512 app-icon tile (dark
+  #   rounded square, backdrop blur, gradient rim) with the glyph on top in #FCFCFC. Only the
+  #   glyph's two fill paths are reproduced, unmodified; the viewBox is cropped to their
+  #   bounds. The tile, blur filter and rim are dropped and the white fill becomes
+  #   `currentColor` under `text-[var(--text-title)]` (black on light theme, white on dark).
+  #   Nominative use to identify the Grok provider.
   # - Ollama: Placeholder slot for future Ollama adapter (bd-942qbz).
 
   @providers %{
@@ -44,7 +52,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
     },
     "grok" => %{
       name: "Grok",
-      view_box: "0 0 24 24"
+      view_box: "56 56 400 400"
     },
     "ollama" => %{
       name: "Ollama",
@@ -57,6 +65,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
 
   - Claude renders the official full-colour terracotta/coral mark (`#d97757`).
   - Gemini family renders the official Google Antigravity mark, labelled Antigravity.
+  - Grok renders xAI's mark, black/white with the app theme like OpenAI's.
   - OpenAI/Codex renders its official mark, switching black/white with the app theme
     (`text-[var(--text-title)]` which resolves to oklch 22% on light, 96% on dark).
   - Unknown or `nil` providers get a generic fallback icon.
@@ -398,24 +407,19 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
   end
 
   def provider_icon(%{provider: "grok"} = assigns) do
-    # Grok (bd-dpv4vt): a neutral placeholder glyph, not xAI's brand mark. No
-    # official asset was sourced, so none is reproduced here.
+    # Grok (bd-dpv4vt, bd-co08p2): xAI's mark, monochrome like the OpenAI mark.
     ~H"""
     <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.5"
-      stroke-linecap="round"
-      stroke-linejoin="round"
+      viewBox="56 56 400 400"
+      fill="currentColor"
       role="img"
       aria-label="Grok"
-      class={@class}
+      class={["text-[var(--text-title)]", @class]}
       {@rest}
     >
       <title>Grok</title>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M8.5 15.5l7-7" />
+      <path d="M210.484 312.759L343.465 210.383C349.984 205.364 359.302 207.322 362.408 215.117C378.758 256.231 371.454 305.64 338.925 339.563C306.397 373.487 261.137 380.927 219.768 363.983L174.577 385.803C239.394 432.008 318.104 420.581 367.289 369.251C406.303 328.564 418.386 273.104 407.088 223.091L407.19 223.198C390.807 149.726 411.218 120.359 453.03 60.3072C454.02 58.8833 455.01 57.4595 456 56L400.978 113.382V113.204L210.45 312.794" />
+      <path d="M183.042 337.641C136.519 291.294 144.54 219.567 184.236 178.203C213.59 147.59 261.683 135.096 303.666 153.464L348.755 131.75C340.632 125.627 330.221 119.042 318.275 114.414C264.277 91.2407 199.63 102.774 155.735 148.516C113.513 192.549 100.236 260.254 123.036 318.027C140.069 361.206 112.148 391.748 84.0229 422.575C74.0561 433.503 64.0553 444.431 56 456L183.007 337.677" />
     </svg>
     """
   end
