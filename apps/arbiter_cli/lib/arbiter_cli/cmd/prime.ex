@@ -617,8 +617,12 @@ defmodule ArbiterCli.Cmd.Prime do
   defp verifying_line(t),
     do: "#{t["id"]}  #{truncate(t["title"], 70)}#{age_suffix(t["awaiting_verification_at"])}"
 
-  defp ready_line(t),
-    do: "#{t["id"]}  P#{t["priority"]}  #{t["issue_type"]}  #{truncate(t["title"], 80)}"
+  # bd-dtdeff: a card the scheduler is holding says why, so a Ready queue that
+  # is not draining reads as a hold and not as a stopped Autopilot.
+  defp ready_line(t) do
+    hold = if blank?(t["hold_reason"]), do: "", else: "  ← #{t["hold_reason"]}"
+    "#{t["id"]}  P#{t["priority"]}  #{t["issue_type"]}  #{truncate(t["title"], 80)}#{hold}"
+  end
 
   defp blocked_line(t) do
     "#{t["id"]}  P#{t["priority"]}  #{truncate(t["title"], 60)}  ← waiting on " <>

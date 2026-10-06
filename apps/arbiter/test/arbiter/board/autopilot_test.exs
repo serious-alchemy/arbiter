@@ -728,6 +728,57 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:dispatched, "bd-1"}, 500
     end
 
+    # bd-dtdeff: an account slot frees without a worker finishing or failing —
+    # a ticket parks on CI (`released: true`), a review round ends — and the
+    # only signal is the phase change. A plan that waited for the fallback
+    # tick left Ready work idle against a free slot.
+    test "a worker phase change (a released slot) runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "worker_phase", phase: "in_review", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a worker releasing its account slot runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "worker_slot_released", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a ticket leaving In progress for Merging runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "task_state", state: "merging", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
+    test "a pass that promotes nothing reports why each Ready card is held" do
+      held = %{
+        ready: [
+          %{
+            id: "bd-7",
+            state: :blocked,
+            reason: "held — provider constraint (require claude: claude:default at capacity)",
+            card: %{id: "bd-7"}
+          },
+          %{id: "bd-8", state: :queued, reason: "1 ahead in queue", card: %{id: "bd-8"}}
+        ],
+        promote: nil,
+        paused: false
+      }
+
+      pid = start(paused: false, snapshot: fn _ -> Map.merge(board(nil), held) end)
+
+      assert :idle = Autopilot.tick(pid)
+
+      assert %{holds: [%{id: "bd-7", reason: "held — provider constraint" <> _}]} =
+               Autopilot.status(pid)
+    end
+
     test "an unrelated event topic does not run a pass" do
       pid = start(paused: false)
 

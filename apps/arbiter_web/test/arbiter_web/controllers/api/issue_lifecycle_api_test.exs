@@ -71,6 +71,23 @@ defmodule ArbiterWeb.Api.IssueLifecycleApiTest do
                by_id[verifying.id]["attention"]
     end
 
+    # bd-dtdeff: a Ready card the scheduler is not dispatching says why, in the
+    # same words the board card uses, so `arb prime` can print it. Cards in other
+    # columns carry none.
+    test "a Ready card carries the board's hold reason; other columns carry none", ctx do
+      %{conn: conn, ws: ws} = ctx
+      ready = in_state(ws, :queued, %{priority: 0})
+      active = in_state(ws, :active, %{priority: 1})
+
+      conn = get(conn, ~p"/api/issues/lifecycle", workspace_id: ws.id)
+      assert %{"data" => rows} = json_response(conn, 200)
+      by_id = Map.new(rows, &{&1["id"], &1})
+
+      # No scheduler runs under test, so the board reads the queue as held.
+      assert by_id[ready.id]["hold_reason"] == "scheduler paused"
+      refute Map.has_key?(by_id[active.id], "hold_reason")
+    end
+
     test "requires a workspace_id", %{conn: conn} do
       conn = get(conn, ~p"/api/issues/lifecycle")
       assert %{"error" => _} = json_response(conn, 422)

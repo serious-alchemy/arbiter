@@ -229,6 +229,20 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
   # ---- AC3: a waiting ticket holds no slot ------------------------------------
 
   describe "waiting on CI (AC3)" do
+    # bd-dtdeff: the release changes no phase, so this event is the Autopilot's
+    # only cue to re-plan against the freed provider slot.
+    test "announces the released slot so the Autopilot re-plans", ctx do
+      rig = rig(ctx, "feature/ci-slot-released")
+      start_forge(ctx, rig, [:running])
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "events")
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      task_id = rig.task.id
+      assert_receive {:event, %{topic: "worker_slot_released", task_id: ^task_id}}, 2_000
+    end
+
     test "holds no scheduler slot and no agent, and shows its state", ctx do
       rig = rig(ctx, "feature/ci-6")
       start_forge(ctx, rig, [:running])

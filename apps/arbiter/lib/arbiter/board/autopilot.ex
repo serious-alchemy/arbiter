@@ -228,7 +228,7 @@ defmodule Arbiter.Board.Autopilot do
   @topic "board"
   @tasks_topic "tasks"
   @events_topic "events"
-  @worker_slot_events ~w(worker_done worker_failed)
+  @worker_slot_events ~w(worker_done worker_failed worker_slot_released)
   @default_interval_ms 60_000
   @default_debounce_ms 300
 
@@ -511,6 +511,9 @@ defmodule Arbiter.Board.Autopilot do
       # See "A dispatch that keeps failing gets escalated" above, and
       # "A quota-exhausted pre-flight failure is held, not retried" below.
       failures: %{},
+      # bd-dtdeff: why the last pass promoted nothing — `[%{id:, reason:}]` for
+      # every Ready card the board holds, empty when none is or a card went out.
+      holds: [],
       # bd-92mx1m: automatic resumes waiting for a free slot, oldest first:
       # [%{task_id:, kind:, opts:}]. See "Deferred resumes go first" above.
       deferred_resumes: [],
@@ -554,6 +557,7 @@ defmodule Arbiter.Board.Autopilot do
        changed_at: state.paused_changed_at,
        changed_by: state.paused_changed_by,
        dispatching: dispatching_id(state),
+       holds: state.holds,
        deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id)
      }, state}
   end
@@ -641,15 +645,20 @@ defmodule Arbiter.Board.Autopilot do
     {:noreply, request_plan(state)}
   end
 
-  # bd-92mx1m: a task parking for a human releases its slot without finishing
-  # or failing (a `worker_phase` to `waiting_on_you`), and so does a dropped
-  # slot hand-off. Only worth a pass while a deferred resume is waiting on
-  # exactly that.
-  def handle_info(
-        {:event, %{topic: "worker_phase", phase: phase}},
-        %{deferred_resumes: [_ | _]} = state
-      )
-      when phase in ["waiting_on_you", "done"] do
+  # bd-dtdeff: a slot can free with no worker finishing or failing — a ticket
+  # leaving In progress for Merging/Verifying (`task_state`), or a worker
+  # moving to a phase that holds no slot (`worker_phase`, which covers
+  # bd-92mx1m's park-for-a-human release a deferred resume waits on). The
+  # CI-wait release changes no phase; it has its own `worker_slot_released`
+  # event. `task_state` duplicates the `:task_lifecycle` message above (defence
+  # in depth). All are debounced like every other trigger, and
+  # a pass that finds nothing to promote does not reschedule itself.
+  def handle_info({:event, %{topic: "worker_phase"} = event}, state) do
+    if slot_releasing_phase?(event), do: {:noreply, request_plan(state)}, else: {:noreply, state}
+  end
+
+  def handle_info({:event, %{topic: "task_state", state: ticket_state}}, state)
+      when is_binary(ticket_state) and ticket_state != "active" do
     {:noreply, request_plan(state)}
   end
 
@@ -688,6 +697,14 @@ defmodule Arbiter.Board.Autopilot do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ---- reactive triggers -----------------------------------------------
+
+  # A phase that holds no slot: the worker is waiting (on review, CI or a
+  # human) or finished. Mid-work phases fire constantly and free nothing.
+  @slot_releasing_phases ~w(waiting_on_you done in_review held_for_quota)
+
+  defp slot_releasing_phase?(%{phase: phase}) when phase in @slot_releasing_phases, do: true
+  defp slot_releasing_phase?(%{state: state}) when state in ["waiting", "finished"], do: true
+  defp slot_releasing_phase?(_event), do: false
 
   # Coalesce a burst of triggers into one debounced pass. Paused: do nothing,
   # not even schedule — a resume with nothing pending is right, since a pass
@@ -782,11 +799,42 @@ defmodule Arbiter.Board.Autopilot do
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     cond do
-      state.deferred_resumes != [] -> resume_or_wait(state, read_status, snapshot)
-      state.paused? -> {:paused, state}
-      is_binary(Map.get(snapshot, :promote)) -> promote_or_hold(state, snapshot.promote)
-      true -> {:idle, state}
+      state.deferred_resumes != [] ->
+        resume_or_wait(state, read_status, snapshot)
+
+      state.paused? ->
+        {:paused, state}
+
+      is_binary(Map.get(snapshot, :promote)) ->
+        promote_or_hold(%{state | holds: []}, snapshot.promote)
+
+      true ->
+        {:idle, note_holds(state, snapshot, read_status)}
     end
+  end
+
+  # bd-dtdeff: an idle pass with Ready cards behind it was silent — no log, no
+  # status — so a board holding work for a reason read as an Autopilot that had
+  # stopped looking. Record each card's reason (the one the board shows) and log
+  # it when it changes, so a held queue is one line per change, not per tick.
+  # An unreadable board says nothing about the queue; keep the last answer.
+  defp note_holds(state, _snapshot, :error), do: state
+
+  defp note_holds(state, snapshot, :ok) do
+    holds =
+      snapshot
+      |> Map.get(:ready, [])
+      |> Enum.filter(&(&1.state == :blocked))
+      |> Enum.map(&%{id: &1.id, reason: &1.reason})
+
+    if holds != state.holds and holds != [] do
+      Logger.info(
+        "board autopilot: nothing to dispatch, #{length(holds)} Ready held — " <>
+          Enum.map_join(Enum.take(holds, 5), "; ", &"#{&1.id}: #{&1.reason}")
+      )
+    end
+
+    %{state | holds: holds}
   end
 
   # bd-92mx1m: the oldest deferred resume takes the first free slot. Until one
