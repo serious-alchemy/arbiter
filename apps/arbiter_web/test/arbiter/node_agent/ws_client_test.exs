@@ -5,6 +5,8 @@ defmodule Arbiter.NodeAgent.WsClientTest do
   """
   use ExUnit.Case, async: false
 
+  @moduletag :capture_log
+
   alias Arbiter.NodeAgent.WsClient
   alias ArbiterWeb.FakeNode
 

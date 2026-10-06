@@ -44,6 +44,7 @@ defmodule Arbiter.NodeAgent.ConfigTest do
     {:ok, config} =
       Config.load(
         env: %{"ARB_NODE_URL" => "https://p.example.ts.net", "HOME" => "/home/x"},
+        app_config: [],
         read_credential: fn path ->
           send(self(), {:read, path})
           {:ok, @credential}
@@ -52,6 +53,26 @@ defmodule Arbiter.NodeAgent.ConfigTest do
 
     assert config.node_home == "/home/x/.arbiter-node"
     assert_received {:read, "/home/x/.config/arbiter-node/credential"}
+  end
+
+  test "the environment wins over application config, keyword options win over both", %{
+    home: home,
+    cred: cred
+  } do
+    app = [node_home: "/from/app/config", primary_url: "https://app.example.ts.net"]
+
+    assert {:ok, config} = Config.load(env: env(home, cred), app_config: app)
+    assert config.node_home == home
+    assert config.primary_url == "https://primary.tail1234.ts.net"
+
+    assert {:ok, config} =
+             Config.load(
+               env: env(home, cred),
+               app_config: app,
+               primary_url: "https://kw.example.ts.net"
+             )
+
+    assert config.primary_url == "https://kw.example.ts.net"
   end
 
   test "keyword options win over the environment", %{home: home, cred: cred} do

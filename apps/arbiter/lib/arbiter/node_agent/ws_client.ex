@@ -52,14 +52,23 @@ defmodule Arbiter.NodeAgent.WsClient do
     end
   end
 
-  @doc "Join `topic`; returns the ref the `:reply` will carry."
-  @spec join(t(), String.t(), map()) :: String.t()
-  def join(client, topic, params \\ %{}), do: GenServer.call(client, {:join, topic, params})
+  @doc """
+  Join `topic`; returns the ref the `:reply` will carry, or `{:error, :closed}`
+  when the connection is already gone (the owner gets, or already has, `:closed`).
+  """
+  @spec join(t(), String.t(), map()) :: String.t() | {:error, :closed}
+  def join(client, topic, params \\ %{}), do: call(client, {:join, topic, params})
 
-  @doc "Push on a joined topic; returns the ref a reply will carry."
-  @spec push(t(), String.t(), String.t(), map() | {:binary, binary()}) :: String.t()
-  def push(client, topic, event, payload),
-    do: GenServer.call(client, {:push, topic, event, payload})
+  @doc "Push on a joined topic; returns the ref a reply will carry, or `{:error, :closed}`."
+  @spec push(t(), String.t(), String.t(), map() | {:binary, binary()}) ::
+          String.t() | {:error, :closed}
+  def push(client, topic, event, payload), do: call(client, {:push, topic, event, payload})
+
+  defp call(client, request) do
+    GenServer.call(client, request)
+  catch
+    :exit, _ -> {:error, :closed}
+  end
 
   @doc "Close the connection with a normal WebSocket close."
   @spec close(t()) :: :ok
@@ -314,6 +323,8 @@ defmodule Arbiter.NodeAgent.WsClient do
     do: {Integer.to_string(state.next_ref), %{state | next_ref: state.next_ref + 1}}
 
   defp closed(state, reason) do
+    # Callers still waiting on an upgrade that will never finish.
+    Enum.each(state.queued, fn {_request, from} -> GenServer.reply(from, {:error, :closed}) end)
     notify(state, :closed, [reason])
     {:stop, :normal, state}
   end

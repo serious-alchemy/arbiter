@@ -2,6 +2,8 @@ defmodule Arbiter.NodeAgent.RoleBootTest do
   # Not async: starts supervision trees and flips process-wide application env.
   use ExUnit.Case, async: false
 
+  @moduletag :capture_log
+
   alias Arbiter.NodeAgent
   alias Arbiter.NodeAgent.Supervisor, as: AgentSupervisor
 

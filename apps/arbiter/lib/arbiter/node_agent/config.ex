@@ -1,8 +1,9 @@
 defmodule Arbiter.NodeAgent.Config do
   @moduledoc """
   What the agent needs to reach its primary (`docs/design/remote-workers.md`
-  §4.3, §5.2), resolved once at boot from keyword options, then
-  `config :arbiter, Arbiter.NodeAgent, …`, then the environment:
+  §4.3, §5.2), resolved once at boot. Precedence: keyword options, then the
+  environment, then `config :arbiter, Arbiter.NodeAgent, …` (the test suite's
+  safety net, see `config/test.exs`):
 
     * `ARB_NODE_URL` — the primary's base URL. `https` for anything but
       loopback; plain `http` is accepted **only** for a loopback host (a
@@ -37,6 +38,7 @@ defmodule Arbiter.NodeAgent.Config do
     fence_after_ms: 60_000,
     readiness_ttl_ms: 600_000,
     connect_timeout_ms: 10_000,
+    hello_timeout_ms: 240_000,
     idle_poll_ms: 5_000,
     backoff: []
   ]
@@ -50,22 +52,18 @@ defmodule Arbiter.NodeAgent.Config do
   def proto, do: @proto
 
   @doc """
-  Resolve the config. Options override `config :arbiter, Arbiter.NodeAgent`,
-  which overrides the environment. `:env` (a map) and `:read_credential`
-  (`path -> {:ok, binary} | {:error, term}`) exist so tests need no real files.
+  Resolve the config (precedence in the moduledoc). `:env` (a map), `:app_config`
+  (a keyword list) and `:read_credential` (`path -> {:ok, binary} | {:error, term}`) exist so tests
+  need no real files.
   """
   @spec load(keyword()) :: {:ok, t()} | {:error, term()}
   def load(opts \\ []) do
-    opts = Keyword.merge(Application.get_env(:arbiter, Arbiter.NodeAgent, []), opts)
-    env = Keyword.get_lazy(opts, :env, &System.get_env/0)
-    home = env["HOME"] || System.user_home() || "."
-
-    node_home =
-      Keyword.get(opts, :node_home) || env["ARB_NODE_HOME"] || Path.join(home, ".arbiter-node")
+    node_home = node_home(opts)
+    env = env(opts)
 
     credential_file =
-      Keyword.get(opts, :credential_file) || env["ARB_NODE_CREDENTIAL_FILE"] ||
-        Path.join([home, ".config", "arbiter-node", "credential"])
+      setting(opts, env, :credential_file, "ARB_NODE_CREDENTIAL_FILE") ||
+        Path.join([home(env), ".config", "arbiter-node", "credential"])
 
     with {:ok, url} <- primary_url(opts, env),
          {:ok, credential} <- read_credential(credential_file, opts),
@@ -74,8 +72,11 @@ defmodule Arbiter.NodeAgent.Config do
        struct!(
          __MODULE__,
          opts
-         |> Keyword.take(~w(hb_interval_ms fence_after_ms readiness_ttl_ms connect_timeout_ms
-            idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun)a)
+         |> merged_opts()
+         |> Keyword.take(
+           ~w(hb_interval_ms fence_after_ms readiness_ttl_ms connect_timeout_ms hello_timeout_ms
+            idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun)a
+         )
          |> Keyword.merge(
            primary_url: url,
            node_home: node_home,
@@ -87,6 +88,13 @@ defmodule Arbiter.NodeAgent.Config do
          )
        )}
     end
+  end
+
+  @doc "The data dir alone (`ARB_NODE_HOME`, default `~/.arbiter-node`); needs no valid config."
+  @spec node_home(keyword()) :: Path.t()
+  def node_home(opts \\ []) do
+    env = env(opts)
+    setting(opts, env, :node_home, "ARB_NODE_HOME") || Path.join(home(env), ".arbiter-node")
   end
 
   @doc """
@@ -123,9 +131,29 @@ defmodule Arbiter.NodeAgent.Config do
 
   # -- private ----------------------------------------------------------------
 
+  defp app_config(opts),
+    do:
+      Keyword.get_lazy(opts, :app_config, fn ->
+        Application.get_env(:arbiter, Arbiter.NodeAgent, [])
+      end)
+
+  defp merged_opts(opts), do: Keyword.merge(app_config(opts), opts)
+
+  # keyword option, then the environment, then application config
+  defp setting(opts, env, key, env_name) do
+    non_empty(Keyword.get(opts, key)) || non_empty(env[env_name]) ||
+      non_empty(app_config(opts)[key])
+  end
+
+  defp non_empty(value) when value in [nil, ""], do: nil
+  defp non_empty(value), do: value
+
+  defp env(opts), do: Keyword.get_lazy(opts, :env, &System.get_env/0)
+  defp home(env), do: env["HOME"] || System.user_home() || "."
+
   defp primary_url(opts, env) do
-    case Keyword.get(opts, :primary_url) || env["ARB_NODE_URL"] do
-      url when url in [nil, ""] -> {:error, {:missing, "ARB_NODE_URL"}}
+    case setting(opts, env, :primary_url, "ARB_NODE_URL") do
+      nil -> {:error, {:missing, "ARB_NODE_URL"}}
       url -> validate_url(url)
     end
   end
