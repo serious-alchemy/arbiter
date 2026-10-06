@@ -269,6 +269,12 @@ defmodule Arbiter.Spike.BundleRoundtripTest do
     assert {out, code} = git(strict, ["fetch", "-q", bundle, "+refs/heads/evil:refs/heads/evil"])
     assert code != 0
     assert out =~ ~r/hasDotgit|\.git|fsck/i
+
+    IO.puts(
+      "SPIKE_RESULT " <>
+        Jason.encode!(%{u7_fsck_rejection: out |> String.split("\n", trim: true) |> Enum.take(4)})
+    )
+
     assert {_, 1} = git(strict, ["rev-parse", "--verify", "-q", "refs/heads/evil"])
   end
 

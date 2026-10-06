@@ -13,7 +13,8 @@ defmodule Arbiter.NodeAgent.Probe do
     Arbiter.Worker.TestServices,
     Arbiter.Worker.PodmanReadiness,
     Arbiter.Worker.Image,
-    Arbiter.Egress.Listener
+    Arbiter.Worker.Egress.Listener,
+    Arbiter.Worker.Egress.Forward
   ]
 
   @impl true
@@ -40,7 +41,8 @@ defmodule Arbiter.NodeAgent.Probe do
       repo_running: Process.whereis(Arbiter.Repo) != nil,
       vault_running: Process.whereis(Arbiter.Vault) != nil,
       endpoint_running: Process.whereis(ArbiterWeb.Endpoint) != nil,
-      secret_key_base_configured: Application.get_env(:arbiter_web, ArbiterWeb.Endpoint)[:secret_key_base] != nil,
+      secret_key_base_configured:
+        Application.get_env(:arbiter_web, ArbiterWeb.Endpoint)[:secret_key_base] != nil,
       cloak_key_env_present: System.get_env("ARBITER_CLOAK_KEY") != nil,
       started_apps: length(Application.started_applications()),
       loaded_modules: length(:code.all_loaded()),

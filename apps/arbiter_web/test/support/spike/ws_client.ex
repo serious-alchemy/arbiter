@@ -11,6 +11,8 @@ defmodule ArbiterWeb.Spike.WsClient do
     * `{:ws, :push, topic, event, payload}` — `payload` is a map or `{:binary, bin}`
     * `{:ws, :reply, ref, status, payload}`
     * `{:ws, :closed, reason}`
+
+  With `tag: t` every message carries `t` after `:ws` (`{:ws, t, :push, ...}`).
   """
   use GenServer
 
@@ -52,6 +54,7 @@ defmodule ArbiterWeb.Spike.WsClient do
       {:ok,
        %{
          owner: Keyword.fetch!(opts, :owner),
+         tag: Keyword.get(opts, :tag),
          conn: conn,
          ref: ref,
          ws: nil,
@@ -221,7 +224,7 @@ defmodule ArbiterWeb.Spike.WsClient do
        ) do
     case Map.pop(state.pending_joins, ref) do
       {nil, _} ->
-        send(state.owner, {:ws, :reply, ref, status, response})
+        notify(state, {:reply, ref, status, response})
         {:noreply, state}
 
       {from, pending} ->
@@ -231,7 +234,7 @@ defmodule ArbiterWeb.Spike.WsClient do
   end
 
   defp dispatch(state, {_jr, _ref, topic, event, payload}) do
-    send(state.owner, {:ws, :push, topic, event, payload})
+    notify(state, {:push, topic, event, payload})
     {:noreply, state}
   end
 
@@ -258,10 +261,18 @@ defmodule ArbiterWeb.Spike.WsClient do
     end
   end
 
+  # `tag:` (optional) lets one owner multiplex several clients: `{:ws, tag, kind, ...}`.
+  defp notify(state, msg) do
+    case state.tag do
+      nil -> send(state.owner, Tuple.insert_at(msg, 0, :ws))
+      tag -> send(state.owner, msg |> Tuple.insert_at(0, tag) |> Tuple.insert_at(0, :ws))
+    end
+  end
+
   defp bump(state), do: {state.next_ref, %{state | next_ref: state.next_ref + 1}}
 
   defp closed(state, reason) do
-    send(state.owner, {:ws, :closed, reason})
+    notify(state, {:closed, reason})
     {:stop, :normal, state}
   end
 end

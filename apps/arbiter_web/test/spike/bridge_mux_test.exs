@@ -60,10 +60,12 @@ defmodule ArbiterWeb.Spike.BridgeMuxTest do
       start_supervised!({
         AgentMux,
         # SPIKE_NODELAY=0 reproduces the Nagle/delayed-ACK stall the finding is about.
+        # SPIKE_SOCKETS=K shards runs over K WebSockets (the lossy-link fallback).
         url: "ws://127.0.0.1:#{Endpoint.port()}/node/socket/websocket?vsn=2.0.0&token=spike-token",
         listeners: node_paths,
         transport_opts: if(System.get_env("SPIKE_NODELAY") == "0", do: [], else: [nodelay: true]),
         mux: [node_cap: node_cap],
+        sockets: String.to_integer(System.get_env("SPIKE_SOCKETS", "1")),
         hb_ms: @hb_ms
       })
 
