@@ -27,8 +27,9 @@ defmodule Arbiter.Agents.Routing do
   """
 
   alias Arbiter.Agents.Floors
+  alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ProviderPool
-  alias Arbiter.Agents.Routing.{Policy, Static}
+  alias Arbiter.Agents.Routing.{ByDifficulty, Policy, Static}
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -49,6 +50,7 @@ defmodule Arbiter.Agents.Routing do
     # clamp is idempotent and a no-op with no `routing.floors` config.
     task
     |> policy.choose(workspace, ledger_snapshot)
+    |> GrokRouting.apply_choice(workspace, ByDifficulty.effective_difficulty(task.difficulty))
     |> Floors.clamp(workspace, task.repo)
   end
 
