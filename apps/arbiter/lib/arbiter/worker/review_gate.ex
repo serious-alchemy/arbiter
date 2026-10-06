@@ -3648,7 +3648,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp record_touched_files(%{worktree_path: wt} = state, old_sha, new_sha)
        when is_binary(wt) and is_binary(old_sha) and is_binary(new_sha) do
     changed =
-      case System.cmd("git", ["-C", wt, "diff", "--name-only", "#{old_sha}..#{new_sha}"],
+      case Arbiter.Worker.PrivateClone.cmd(wt, ["diff", "--name-only", "#{old_sha}..#{new_sha}"],
              stderr_to_stdout: true
            ) do
         {out, 0} -> out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
@@ -5068,7 +5068,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # escalation is still useful without it. Diffs against the merge-base
   # (`diff_range/1`) so the target's later commits never appear in the payload.
   defp current_diff(%{worktree_path: wt} = state) when is_binary(wt) do
-    case System.cmd("git", ["-C", wt, "diff", diff_range(state)], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(wt, ["diff", diff_range(state)], stderr_to_stdout: true) do
       {out, 0} -> cap(out, @diff_cap_bytes)
       {out, _} -> "(could not compute diff)\n" <> cap(out, 2_000)
     end
@@ -5095,7 +5095,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # rather than the misdiagnosis the Worker's commit gate already guards
   # against. The gate is the primary defense; this is the backstop.
   defp worktree_status(%{worktree_path: wt}) when is_binary(wt) do
-    case System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(wt, ["status", "--porcelain"], stderr_to_stdout: true) do
       {"", 0} -> "(clean — no uncommitted changes)"
       {out, 0} -> cap(out, 4_000)
       {out, _} -> "(could not run git status)\n" <> cap(out, 2_000)
@@ -5181,7 +5181,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # Return the short HEAD SHA for the worktree at `path`, or nil on any error.
   defp current_head_sha_in(path) when is_binary(path) do
-    case System.cmd("git", ["-C", path, "rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(path, ["rev-parse", "--short", "HEAD"],
+           stderr_to_stdout: true
+         ) do
       {sha, 0} -> String.trim(sha)
       _ -> nil
     end
@@ -5202,7 +5204,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # otherwise. Never raises: a missing worktree, a git that isn't there and a
   # non-zero exit are all the same "cannot answer" to `remote_advance/1`.
   defp git_out(path, args) do
-    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(path, args, stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.trim(out)}
       _ -> :error
     end

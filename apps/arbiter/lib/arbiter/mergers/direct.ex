@@ -395,7 +395,7 @@ defmodule Arbiter.Mergers.Direct do
   end
 
   defp run_git(args, cd) do
-    case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+    case Arbiter.Worker.PrivateClone.cmd(cd, args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
       {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
     end

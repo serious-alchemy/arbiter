@@ -86,8 +86,19 @@ defmodule Arbiter.Worker.PrivateClone do
       write (no `core.fsmonitor`, `core.hooksPath`, `filter.*`, transport-helper
       urls, ...), and its `hooks/` holds no hook. `mounts/1`, `sync_back/1`,
       `refresh_base/2` and `Worktree`'s own git calls in a clone run it first;
-    * `reclaim/1` (a container's teardown) puts the recorded directory back and
-      sets an impostor aside as `.git.tampered`.
+    * `cmd/3` runs a host-side git in a worker checkout behind `guard/1` (the
+      ReviewGate's diff and status, the mergers, `PushState`, the commit gate's
+      status and fingerprint all do);
+    * `settle/1` runs when the worker signals `arb done`, with its container
+      stopped and before the commit gate: it puts the recorded directory back,
+      sets an impostor aside as `.git.tampered`, and the run fails
+      `:tampered_clone` instead of routing the tree on to review or merge.
+      `reclaim/1` is the same undo at a container's teardown.
+
+  A git the host runs through none of these (a call site added later that uses
+  `System.cmd("git", ...)` directly in a worker checkout) is not covered: use
+  `cmd/3`. Between `settle/1` and a later `cmd/3` the worker has nothing
+  running (its container is removed first), so the check is not racing it.
   """
 
   require Logger
@@ -749,9 +760,7 @@ defmodule Arbiter.Worker.PrivateClone do
   """
   @spec guard(term()) :: :ok | {:error, {:tampered, String.t()}}
   def guard(path) when is_binary(path) do
-    root = Arbiter.Config.Paths.worktree_root()
-
-    with true <- Path.dirname(Path.expand(path)) == Path.expand(root),
+    with true <- checkout_leaf?(path),
          {:ok, %File.Stat{type: :directory}} <- File.lstat(Path.join(path, ".git")) do
       case verify(path) do
         {:error, :not_a_private_clone} -> tampered(".git names no main repo")
@@ -763,6 +772,51 @@ defmodule Arbiter.Worker.PrivateClone do
   end
 
   def guard(_), do: :ok
+
+  @doc """
+  `System.cmd("git", args, [cd: path] ++ opts)` for host-side git run in a
+  worker's checkout: `guard/1` first, so a worker's replacement `.git` (whose
+  config would make `git status` / `git diff` run `core.fsmonitor`, a diff or
+  textconv driver, or a hook) is never run git in. A refused path answers like
+  a failed git (`{message, 128}`), so a caller's non-zero branch handles it
+  and a gate built on the answer cannot read it as a pass. Every host-side
+  git that runs in a worker checkout goes through this or `Worktree`'s runner
+  (bd-6t7u81).
+  """
+  @spec cmd(term(), [String.t()], keyword()) :: {String.t(), non_neg_integer()}
+  def cmd(path, args, opts \\ []) when is_list(args) do
+    case guard(path) do
+      :ok ->
+        System.cmd("git", args, [cd: path] ++ opts)
+
+      {:error, {:tampered, why}} ->
+        {"refusing to run git in #{path}: .git is not the one it was created with (#{why})", 128}
+    end
+  end
+
+  @doc """
+  The completion-time check on the checkout at `path`, once nothing of the
+  worker's runs any more: `:ok` for a path that is not a checkout leaf of the
+  worktree root or whose `.git` is a file (a linked worktree), otherwise
+  `reclaim/1`. `{:error, {:tampered, why}}` means the worker swapped the clone's
+  `.git` (it has been put right, but the run is not to be trusted: the caller
+  fails closed rather than routing the tree on to review or merge).
+  """
+  @spec settle(term()) :: :ok | {:error, {:tampered, String.t()}}
+  def settle(path) when is_binary(path) do
+    with true <- checkout_leaf?(path),
+         false <- match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(path, ".git"))) do
+      reclaim(path)
+    else
+      _ -> :ok
+    end
+  end
+
+  def settle(_), do: :ok
+
+  # A direct child of the worktree root: where a private clone lives.
+  defp checkout_leaf?(path),
+    do: Path.dirname(Path.expand(path)) == Path.expand(Arbiter.Config.Paths.worktree_root())
 
   defp tampered(why), do: {:error, {:tampered, why}}
 

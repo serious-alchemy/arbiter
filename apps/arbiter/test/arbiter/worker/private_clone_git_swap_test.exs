@@ -212,6 +212,55 @@ defmodule Arbiter.Worker.PrivateCloneGitSwapTest do
     end
   end
 
+  describe "host-side git run through PrivateClone.cmd/3" do
+    test "refuses a swapped tree for the commands that read the config", ctx do
+      swap_git!(ctx)
+
+      for args <- [["status", "--porcelain"], ["diff", "main..HEAD"], ["rev-parse", "HEAD"]] do
+        assert {out, 128} = PrivateClone.cmd(ctx.path, args, stderr_to_stdout: true)
+        assert out =~ "refusing to run git"
+      end
+
+      assert fired(ctx) == []
+    end
+
+    test "runs in an untouched clone and in a path that is not a private clone", ctx do
+      assert {"", 0} = PrivateClone.cmd(ctx.path, ["status", "--porcelain"])
+      assert {_, 0} = PrivateClone.cmd(ctx.checkout, ["status", "--porcelain"])
+    end
+  end
+
+  describe "settle/1 (the completion-time check)" do
+    test "is :ok for an untouched clone and a path that is not a checkout leaf", ctx do
+      assert :ok = PrivateClone.settle(ctx.path)
+      assert :ok = PrivateClone.settle(ctx.checkout)
+      assert :ok = PrivateClone.settle(nil)
+    end
+
+    test "reports a swapped .git, restores the real one, and nothing fires", ctx do
+      original = File.lstat!(Path.join(ctx.path, ".git")).inode
+      swap_git!(ctx)
+
+      log = capture_log(fn -> send(self(), {:settled, PrivateClone.settle(ctx.path)}) end)
+
+      assert_received {:settled, {:error, {:tampered, _}}}
+      assert log =~ "the recorded .git is back"
+      assert File.lstat!(Path.join(ctx.path, ".git")).inode == original
+      assert :ok = PrivateClone.verify(ctx.path)
+      assert fired(ctx) == []
+    end
+
+    test "reports a clone left with no .git at all, and puts the real one back", ctx do
+      dot_git = Path.join(ctx.path, ".git")
+      File.rename!(dot_git, dot_git <> "2")
+
+      capture_log(fn -> send(self(), {:settled, PrivateClone.settle(ctx.path)}) end)
+
+      assert_received {:settled, {:error, {:tampered, _}}}
+      assert :ok = PrivateClone.verify(ctx.path)
+    end
+  end
+
   describe "a config edited in place (no rename)" do
     test "is not trusted: a fsmonitor, hooksPath or alternateRefsCommand added to it", ctx do
       dot_git = Path.join(ctx.path, ".git")

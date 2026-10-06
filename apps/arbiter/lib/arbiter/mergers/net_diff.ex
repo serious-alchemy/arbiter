@@ -120,7 +120,7 @@ defmodule Arbiter.Mergers.NetDiff do
   @spec fingerprint_local(String.t(), String.t()) :: t()
   def fingerprint_local(worktree_path, range)
       when is_binary(worktree_path) and is_binary(range) do
-    case System.cmd("git", ["-C", worktree_path, "diff", range], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(worktree_path, ["diff", range], stderr_to_stdout: true) do
       {out, 0} -> fingerprint(out)
       _ -> nil
     end
@@ -148,7 +148,7 @@ defmodule Arbiter.Mergers.NetDiff do
   @spec local_diff_blank?(String.t(), String.t()) :: {:ok, boolean()} | :error
   def local_diff_blank?(worktree_path, range)
       when is_binary(worktree_path) and is_binary(range) do
-    case System.cmd("git", ["-C", worktree_path, "diff", range], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(worktree_path, ["diff", range], stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.trim(out) == ""}
       _ -> :error
     end

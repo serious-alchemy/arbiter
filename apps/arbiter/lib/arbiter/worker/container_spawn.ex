@@ -727,6 +727,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   def teardown(_), do: :ok
 
+  @doc """
+  Remove just the container of `port_args` (a spawn's args, or `nil`), so
+  nothing of the worker's is left running in its clone. `teardown/1` is this
+  plus the pod, the auth sync and the clone check.
+  """
+  @spec stop(map() | nil) :: :ok
+  def stop(%{sandbox: %{name: name}}) when is_binary(name), do: Container.teardown(name)
+  def stop(_), do: :ok
+
   # With the container gone, whatever it left at the clone's `.git` is checked
   # before any host-side git runs there again (bd-6t7u81): the `.git` mount
   # stops a rename while it ran, this covers a layout without one.

@@ -3905,9 +3905,45 @@ defmodule Arbiter.Worker do
     # used to sail past the gate into the review gate / merger and fail there
     # as a generic "merge failed" page. Catch it here and name it.
     case destroyed_workspace(state) do
-      nil -> on_claude_done_live_workspace(state, meta)
+      nil -> on_claude_done_untampered(state, meta)
       {kind, path} -> fail_workspace_destroyed(state, kind, path)
     end
+  end
+
+  # bd-6t7u81: before any host-side git (the commit gate, the ReviewGate's
+  # diff, the merger) runs in the checkout, the worker's container is gone and
+  # the clone's `.git` is the one the host made. A worker that renamed it and
+  # put its own in place has the original put back and the run fails: its tree
+  # is never routed on to review or merge.
+  defp on_claude_done_untampered(%State{} = state, meta) do
+    _ = Arbiter.Worker.ContainerSpawn.stop(meta && Map.get(meta, :claude_spawn))
+
+    case Arbiter.Worker.PrivateClone.settle(meta && Map.get(meta, :worktree_path)) do
+      :ok -> on_claude_done_live_workspace(state, meta)
+      {:error, {:tampered, why}} -> fail_tampered_clone(state, why)
+    end
+  end
+
+  defp fail_tampered_clone(%State{} = state, why) do
+    path = state.meta.worktree_path
+    reason = Arbiter.Worker.StopReason.tampered_clone(path, why)
+
+    Logger.error(
+      "Worker: task=#{state.task_id} replaced the .git of #{path} (#{why}); " <>
+        "failing + escalating (bd-6t7u81)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
   end
 
   defp on_claude_done_live_workspace(%State{} = state, meta) do
@@ -5733,7 +5769,7 @@ defmodule Arbiter.Worker do
   end
 
   defp git_out(worktree, args) do
-    case System.cmd("git", ["-C", worktree | args], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(worktree, args, stderr_to_stdout: true) do
       {out, 0} -> out
       _ -> ""
     end
@@ -5877,7 +5913,7 @@ defmodule Arbiter.Worker do
   end
 
   defp commit_gate_git_status(path) when is_binary(path) do
-    case System.cmd("git", ["-C", path, "status", "--porcelain"], stderr_to_stdout: true) do
+    case Arbiter.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do
       {"", 0} -> "  (clean)"
       {out, 0} -> indent(out)
       {out, _} -> "  (could not run git status: " <> String.trim(out) <> ")"
