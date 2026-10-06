@@ -110,7 +110,7 @@ Verifying, Closed**.
 |---|---|
 | `backlog` | Backlog |
 | `queued` | **Blocked** or **Ready**, computed from the ticket's dependency edges |
-| `active` | In progress |
+| `active` | In progress (Merging while its ReviewGate waits on CI, bd-dc468g) |
 | `merging` | Merging |
 | `verifying` | Verifying |
 | `closed` | Closed |
@@ -142,8 +142,10 @@ attention too (bd-8if9zt).
 
 ## 5. Slots
 
-- **In progress is exactly the set of tickets holding a slot.** No slot is
-  held from anywhere else, and none invisibly.
+- **Every slot-holding ticket is In progress.** No slot is held from
+  anywhere else, and none invisibly. In progress may also hold slot-free
+  tickets (quota-held, see the slot table below); a ticket whose ReviewGate
+  is waiting on CI holds no slot and is in Merging.
 - **Merging and Verifying release the slot.** This replaces the 2026-09-21
   rule "another slot doesn't open until the issue occupying it is merged".
 - **A CI failure or a conflict moves the ticket back to In progress**
@@ -369,7 +371,7 @@ sharing its id; a ticket gets exactly one card.
 
 ## Child 3 (bd-asxw4e): the scheduler on ticket state
 
-### A slot is a ticket In progress
+### Slots and the In progress column
 
 (In progress is a superset of the slot holders: a quota-held `:active` ticket
 releases its slot but stays In progress until the follow-up decides its column.)
@@ -549,7 +551,7 @@ starts, unless another run holds the ticket by then. A pass whose agent fails
 to start is failed rather than left `:idle` holding the ticket's key.
 
 The slot hand-off (`meta[:slot_handoff]`) and `Worker.Phase`'s
-`:handing_off` are gone: a ticket In progress is the slot.
+`:handing_off` are gone: a slot-holding ticket is In progress.
 
 ### The ReviewGate reports to the ticket
 
@@ -866,7 +868,8 @@ anyway, so `promote` is unchanged. Every card carries the view's `step` and
 | Verifying | awaiting verification |
 | Closed | `close_reason`: completed / won't do / duplicate |
 
-In progress holds every `:active` ticket, whatever its run is doing: a parked
+In progress holds every `:active` ticket, whatever its run is doing (except
+one whose ReviewGate is waiting on CI, which is in Merging): a parked
 or crashed run keeps its card there, wearing the coordinator's attention.
 
 ### The Needs-attention swimlane
