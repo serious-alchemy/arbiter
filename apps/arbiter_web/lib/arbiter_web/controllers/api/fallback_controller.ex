@@ -22,7 +22,6 @@ defmodule ArbiterWeb.Api.FallbackController do
     * `"tracker_error"` — varies — a normalised error struct from any tracker
       adapter (`GitHub`, `Jira`, `Shortcut`, …). The HTTP status is derived
       from the error `kind` so every tracker reports failures the same way.
-
     * `"unauthorized"` / `"forbidden"` — 403, `"unauthenticated"` — 401.
     * `"internal_error"` — 500 — `{:server_error, msg, details}` keeps the real
       message; anything unrecognised falls through to a generic 500.
