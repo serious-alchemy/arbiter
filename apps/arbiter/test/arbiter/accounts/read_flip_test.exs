@@ -203,7 +203,10 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       # `Arbiter.Agents.Claude.spawn_env/1` is what actually builds a worker
       # spawn's environment (`claude.ex:258` → `ConfigDir.env/1`), so this is
       # the flip observed where it matters rather than one function down.
-      assert Claude.spawn_env(workspace: ws) == [{@oauth_var, "account-token"}]
+      assert Claude.spawn_env(workspace: ws) == [
+               {@oauth_var, "account-token"},
+               {"KUBECONFIG", "/dev/null"}
+             ]
     end
   end
 
