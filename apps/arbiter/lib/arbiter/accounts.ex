@@ -140,7 +140,7 @@ defmodule Arbiter.Accounts do
   @spec parse_provider(String.t()) :: {:ok, atom()} | :error
   def parse_provider(str) do
     case str do
-      s when s in ~w(claude codex antigravity) -> {:ok, String.to_existing_atom(s)}
+      s when s in ~w(claude codex antigravity grok) -> {:ok, String.to_existing_atom(s)}
       _ -> :error
     end
   end

@@ -40,7 +40,7 @@ defmodule Arbiter.Accounts.LoginCompletion do
   require Logger
 
   @alert_sources [:worker_report, :usage_poll, :periodic_probe]
-  @account_providers [:claude, :codex, :antigravity]
+  @account_providers [:claude, :codex, :antigravity, :grok]
 
   @type info :: %{
           required(:provider) => atom(),
