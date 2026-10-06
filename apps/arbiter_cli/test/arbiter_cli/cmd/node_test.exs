@@ -278,6 +278,24 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert out =~ "max workers: 2"
     end
 
+    test "shows the cap's sources, the ceiling that wins, and the workspace pin" do
+      node =
+        Map.merge(@node, %{
+          "max" => 2,
+          "suggested" => 4,
+          "override" => 8,
+          "ceiling" => 2,
+          "cap_source" => "ceiling",
+          "workspace_ids" => ["ws-a"]
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+
+      assert out =~ "max workers: 2 (suggested 4, override 8, ceiling 2 — the ceiling wins)"
+      assert out =~ "pinned to:     ws-a"
+    end
+
     test "needs a name or id" do
       {_out, err, code} = capture(fn -> Node.run(["show"]) end)
       assert code != 0
@@ -319,6 +337,22 @@ defmodule ArbiterCli.Cmd.NodeTest do
 
       assert_receive {:request, "PATCH", _, raw}
       assert Jason.decode!(raw) == %{"max_workers" => nil, "name" => "box-2"}
+    end
+
+    test "--workspace pins the node to workspaces; `--workspace none` clears the pin" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(["set", "box-1", "--workspace", "ws-a", "--workspace", "ws-b"])
+        end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"workspace_ids" => ["ws-a", "ws-b"]}
+
+      {_out, _err, 0} = capture(fn -> Node.run(["set", "box-1", "--workspace", "none"]) end)
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"workspace_ids" => []}
     end
 
     test "with nothing to change it says so and sends nothing" do

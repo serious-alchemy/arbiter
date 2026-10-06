@@ -964,6 +964,11 @@ defmodule Arbiter.MCP.Tools.Worker do
   defp dispatch_error_message({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
 
+  # RW8: no node had a free slot (`remote_only`), or the primary's own cap held
+  # a local run. Held, not failed — it starts when capacity frees.
+  defp dispatch_error_message({:no_node_capacity, info}),
+    do: Arbiter.Nodes.Placement.refusal_message(info)
+
   # bd-13pqcp: the ticket's provider constraint refused the provider (or left
   # none eligible with capacity). The phrase already reads `held — provider
   # constraint (<detail>)`.

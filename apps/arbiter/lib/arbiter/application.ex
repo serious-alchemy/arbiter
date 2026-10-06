@@ -116,6 +116,10 @@ defmodule Arbiter.Application do
         # `max_concurrent`, counted from admission until its worker registers —
         # see Arbiter.Accounts.Admission.
         {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
+        # RW8: a dispatch placed on a node (or admitted onto the primary's own
+        # cap), counted from placement until its worker registers — see
+        # Arbiter.Nodes.Placement and Arbiter.Nodes.LocalCapacity.
+        {Registry, keys: :unique, name: Arbiter.Nodes.Placement.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
         {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},

@@ -272,6 +272,13 @@ defmodule ArbiterCli.ConfigSchema do
       max_concurrent  positive integer — cap on concurrently-dispatched workers
 
     worker  (map — how a worker checkout is provisioned, bd-2jerqw)
+      placement       "local_only" (default — every run stays on this machine),
+                      "prefer_remote" (the podman-backed Claude implementer
+                      goes to an enrolled node with a free slot, else runs
+                      here) or "remote_only" (never here: held when no node
+                      has a free slot). Reviewers, fix/conflict passes, other
+                      providers and bwrap-jailed runs always stay local
+                      whatever this says. See `arb node`.
       seed_paths      list of repo-relative paths — copied (cp -a --reflink=auto,
                       never symlinked, so a worker's build cannot write through
                       to the source repo or race a sibling) from the source repo

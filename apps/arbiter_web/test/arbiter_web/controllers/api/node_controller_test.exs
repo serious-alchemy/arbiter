@@ -189,6 +189,34 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
     end
   end
 
+  describe "PATCH /api/nodes/:ref workspace pin (RW8)" do
+    test "sets and clears the node's workspace allowlist" do
+      enroll!("alpha")
+
+      body =
+        json_response(patch(operator_conn(), "/api/nodes/alpha", %{workspace_ids: ["ws-1"]}), 200)
+
+      assert body["node"]["workspace_ids"] == ["ws-1"]
+
+      body = json_response(patch(operator_conn(), "/api/nodes/alpha", %{workspace_ids: []}), 200)
+      assert body["node"]["workspace_ids"] == []
+    end
+
+    test "refuses anything that is not a list of ids" do
+      enroll!("alpha")
+      assert patch(operator_conn(), "/api/nodes/alpha", %{workspace_ids: "ws-1"}).status == 422
+      assert patch(operator_conn(), "/api/nodes/alpha", %{workspace_ids: [1]}).status == 422
+    end
+
+    test "a node's cap reports what bound it" do
+      node = enroll!("alpha")
+      {:ok, _} = Nodes.update_node(node, %{max_workers: 8}, @operator)
+      body = json_response(get(operator_conn(), "/api/nodes/alpha"), 200)
+      assert body["node"]["max_workers"] == 8
+      assert body["node"]["cap_source"] == "override"
+    end
+  end
+
   describe "PATCH /api/nodes/local" do
     test "sets the primary's cap, 0 included, and audits it" do
       conn = patch(operator_conn(), "/api/nodes/local", %{max_workers: 0})

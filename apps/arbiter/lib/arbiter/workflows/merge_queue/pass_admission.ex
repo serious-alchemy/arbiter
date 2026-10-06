@@ -19,12 +19,17 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
   (`with_slot/2`), not from the moment its agent is up. A ticket pulled out
   of the merge queue (`Arbiter.Tasks.PullRequest.pull/1`) gets no pass.
 
+  A pass runs on the primary, so with the primary's worker cap at 0
+  (`Arbiter.Nodes.LocalCapacity`) it is held with `{:error, {:no_node_capacity,
+  info}}` before any slot is taken; the ticket stays in Merging.
+
   The replay carries `slot_admitted: true` and is not re-checked. Like every
   deferral, the queue is in memory: a restart loses it, and the ticket's
   Watchdog — restarted from the row by the boot reconciler — sees the same red
   CI or conflict and asks again.
   """
 
+  alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker
@@ -55,8 +60,22 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
 
       {:error, :pulled}
     else
-      admit_slot(task, kind, args)
+      with :ok <- local_capacity(task, kind), do: admit_slot(task, kind, args)
     end
+  end
+
+  # RW8: a pass runs on the primary, and the primary's cap covers it
+  # (`Arbiter.Nodes.LocalCapacity`). Only a cap of 0 holds one — a pass replaces
+  # its own ticket's slot, so it is never held for merely being at the cap — and
+  # the hold is `{:error, {:no_node_capacity, info}}`: the Watchdog counts no
+  # attempt for it and asks again on its next poll.
+  defp local_capacity(%Issue{id: id, workspace_id: ws_id}, kind) do
+    local_kind = if kind == :conflict, do: :conflict_pass, else: :fix_pass
+
+    LocalCapacity.admit(id, local_kind,
+      reason: {:local_only, :follow_up},
+      workspace_id: ws_id
+    )
   end
 
   defp admit_slot(task, kind, args) do

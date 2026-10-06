@@ -11,6 +11,7 @@ defmodule ArbiterCli.Cmd.Node do
       arb node list   [--json]
       arb node show   <name|id> [--json]
       arb node set    <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+                      [--workspace ID ... | --workspace none]   (pin: only these workspaces run here)
       arb node set    local --max-workers N|none       (N may be 0: nodes do the work)
       arb node events <name|id> [--json]
       arb node drain|undrain|revoke|upgrade <name|id>
@@ -38,7 +39,12 @@ defmodule ArbiterCli.Cmd.Node do
     ttl: :string,
     token_file: :string
   ]
-  @set_switches [name: :string, label: [:string, :keep], max_workers: :string]
+  @set_switches [
+    name: :string,
+    label: [:string, :keep],
+    max_workers: :string,
+    workspace: [:string, :keep]
+  ]
 
   @verbs ~w(drain undrain revoke upgrade remove)
 
@@ -287,11 +293,30 @@ defmodule ArbiterCli.Cmd.Node do
     end
   end
 
+  # Where the effective cap came from: the node's suggestion, your override, and
+  # a ceiling set on the node itself, which wins over an override above it.
+  defp cap_detail(n) do
+    parts =
+      [
+        n["suggested"] && "suggested #{n["suggested"]}",
+        n["override"] && "override #{n["override"]}",
+        n["ceiling"] && "ceiling #{n["ceiling"]}"
+      ]
+      |> Enum.filter(& &1)
+
+    suffix = if n["cap_source"] == "ceiling", do: " — the ceiling wins", else: ""
+    if parts == [], do: "", else: " (#{Enum.join(parts, ", ")}#{suffix})"
+  end
+
+  defp pinned(ids) when is_list(ids) and ids != [], do: Enum.join(ids, ", ")
+  defp pinned(_), do: "any workspace"
+
   defp print_node(n) do
     IO.puts("#{n["name"]}")
     IO.puts("  id:            #{n["id"]}")
     IO.puts("  status:        #{n["status"]}")
-    IO.puts("  max workers: #{n["max_workers"] || "unlimited"}")
+    IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
+    IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")
     IO.puts("  labels:        #{Enum.join(n["labels"] || [], ", ")}")
     IO.puts("  credential:    #{n["credential_prefix"] || "-"}…")
     IO.puts("  enrolled:      #{n["enrolled_at"]}")
@@ -330,17 +355,18 @@ defmodule ArbiterCli.Cmd.Node do
     {opts, rest, mode} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
-    if ref == "local" and (opts[:name] || labels(opts) != []),
+    if ref == "local" and (opts[:name] || labels(opts) != [] || pins(opts) != []),
       do: Output.die("arb node set local: only --max-workers applies to local")
 
     body =
       %{}
       |> put(:name, opts[:name])
       |> put(:labels, labels(opts))
+      |> put_pins(pins(opts))
       |> put_max_workers(opts[:max_workers], ref == "local")
 
     if body == %{},
-      do: Output.die("arb node set: nothing to set (--name, --label, --max-workers)")
+      do: Output.die("arb node set: nothing to set (--name, --label, --max-workers, --workspace)")
 
     case Client.patch(path(ref), stringify(body)) do
       {:ok, resp} when mode == :json -> Output.emit_json(resp)
@@ -348,6 +374,11 @@ defmodule ArbiterCli.Cmd.Node do
       {:error, err} -> Output.die(err)
     end
   end
+
+  # `--workspace none` clears the pin (any workspace may run on the node).
+  defp put_pins(body, []), do: body
+  defp put_pins(body, ["none"]), do: Map.put(body, :workspace_ids, [])
+  defp put_pins(body, ids), do: Map.put(body, :workspace_ids, ids)
 
   defp put_max_workers(body, nil, _local?), do: body
   defp put_max_workers(body, "none", _local?), do: Map.put(body, :max_workers, nil)
@@ -410,6 +441,7 @@ defmodule ArbiterCli.Cmd.Node do
   defp put(map, key, value), do: Map.put(map, key, value)
 
   defp labels(opts), do: Keyword.get_values(opts, :label)
+  defp pins(opts), do: Keyword.get_values(opts, :workspace)
 
   defp stringify(map), do: Map.new(map, fn {k, v} -> {Atom.to_string(k), v} end)
 

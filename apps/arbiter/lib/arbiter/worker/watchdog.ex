@@ -3365,6 +3365,16 @@ defmodule Arbiter.Worker.Watchdog do
 
         reschedule(%{state | last_block_reason: :ci_failed})
 
+      # RW8: the primary's own worker cap is 0 (`Arbiter.Nodes.LocalCapacity`).
+      # Held, not failed: nothing ran, so no attempt and no budget are spent.
+      {:error, {:no_node_capacity, info}} ->
+        Logger.warning(
+          "Worker.Watchdog: fix pass for task=#{state.task_id} mr=#{state.mr_ref} not " <>
+            "dispatched — #{info.phrase}"
+        )
+
+        reschedule(%{state | last_block_reason: :ci_failed})
+
       _ ->
         reschedule(%{
           state
@@ -3777,6 +3787,15 @@ defmodule Arbiter.Worker.Watchdog do
         Logger.warning(
           "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
             "mr=#{state.mr_ref} not dispatched — #{phrase}"
+        )
+
+        state
+
+      # RW8: the primary's own worker cap is 0. Held, not failed.
+      {:error, {:no_node_capacity, info}} ->
+        Logger.warning(
+          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} not dispatched — #{info.phrase}"
         )
 
         state

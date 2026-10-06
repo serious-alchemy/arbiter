@@ -123,6 +123,102 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- RW8: the primary's own worker cap ----------------------------------------
+
+  describe "the primary's worker cap at 0 (RW8)" do
+    setup do
+      on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(nil) end)
+      :ok
+    end
+
+    test "holds the reviewer (nothing spawned, no verdict) and starts it once the cap rises",
+         ctx do
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+      rig = rig(ctx, "feature/rw8-hold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      assert :sys.get_state(gate).local_hold.info.phrase =~ "held — local capacity 0"
+      assert passes(rig) == 0
+      assert Process.alive?(gate)
+
+      # Held, not failed: no verdict was written to the ticket.
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] == nil
+
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "a fix round held at cap 0 stays held past the reviewer's timer, then starts on resume",
+         ctx do
+      rig = rig(ctx, "feature/rw8-fix-hold")
+      start_forge(ctx, rig, [:success])
+
+      # A reviewer that waits for the flag, then answers REQUEST_CHANGES, so the
+      # test can drop the cap to 0 while the reviewer is still running.
+      flag = Path.join(ctx.tmp, "rw8-reviewer-go")
+      wrapper = Path.join(ctx.tmp, "rw8-reviewer.sh")
+
+      File.write!(wrapper, """
+      #!/bin/sh
+      until [ -f "#{flag}" ]; do sleep 0.05; done
+      exec "#{@probe}" RC_SUITE
+      """)
+
+      File.chmod!(wrapper, 0o755)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [wrapper],
+          revise_command: [@revise_commit],
+          rounds: 3,
+          timeout_ms: 1_500,
+          local_capacity_retry_ms: 25
+        )
+
+      ref = Process.monitor(gate)
+      wait_until(fn -> :sys.get_state(gate).phase == :reviewing end)
+
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+      File.write!(flag, "go")
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      held = :sys.get_state(gate)
+      assert held.phase == :revising
+      assert held.local_hold.info.phrase =~ "held — local capacity 0"
+      assert remote_head(ctx, rig) == rig.head
+
+      # The reviewer's own timer (1.5s) fires inside this window. It must be
+      # stale: a hold is not a reviewer timeout.
+      refute_receive {:DOWN, ^ref, :process, ^gate, _}, 2_500
+      still = :sys.get_state(gate)
+      assert still.local_hold != nil
+      refute still.reported?
+
+      assert Arbiter.ReviewGate.Round
+             |> Ash.read!()
+             |> Enum.filter(&(&1.task_id == rig.task.id and &1.verdict == :timed_out)) == []
+
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+
+      # The fix round's implementer ran (the fixture commits) and the gate pushed it.
+      wait_until(fn -> remote_head(ctx, rig) != rig.head end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "with no override the gate is unaffected", ctx do
+      rig = rig(ctx, "feature/rw8-nohold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+  end
+
   # ---- AC2: red CI reruns once ----------------------------------------------
 
   describe "red CI (AC2)" do

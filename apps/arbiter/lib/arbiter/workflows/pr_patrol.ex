@@ -534,7 +534,16 @@ defmodule Arbiter.Workflows.PRPatrol do
         clear_dispatch_failure(pr_number, state)
 
       {:error, {:account_at_capacity, info}} ->
-        queue_for_autopilot(task, pr_number, state, info)
+        queue_for_autopilot(
+          task,
+          pr_number,
+          state,
+          Arbiter.Accounts.Admission.refusal_message(info)
+        )
+
+      # RW8: no node free, or the primary's own cap: held like a full account.
+      {:error, {:no_node_capacity, info}} ->
+        queue_for_autopilot(task, pr_number, state, Arbiter.Nodes.Placement.refusal_message(info))
 
       {:error, reason} ->
         record_dispatch_failure(task, pr_number, state, reason)
@@ -547,12 +556,12 @@ defmodule Arbiter.Workflows.PRPatrol do
   # goes to Ready instead, and Autopilot — the one dispatcher that waits for a
   # slot — admits it when one frees. The open ticket keeps `deduped?/2` from
   # filing a second one meanwhile.
-  defp queue_for_autopilot(task, pr_number, state, info) do
+  defp queue_for_autopilot(task, pr_number, state, refusal) do
     case Ash.update(task, %{}, action: :promote_to_ready) do
       {:ok, _ready} ->
         Logger.info(
           "PRPatrol: #{task.id} (#{state.repo}##{pr_number}) left Ready for Autopilot — " <>
-            Arbiter.Accounts.Admission.refusal_message(info)
+            refusal
         )
 
         clear_dispatch_failure(pr_number, state)

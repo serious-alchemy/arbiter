@@ -956,6 +956,10 @@ defmodule ArbiterWeb.NodesLive do
           <.fact label="ceiling (set on the node)" value={@row.ceiling || "none"} />
           <.fact label="effective max" value={@row.max || "?"} />
           <.fact label="live" value={@row.live} />
+          <.fact
+            label="pinned to workspaces"
+            value={if @row.workspace_ids == [], do: "any", else: Enum.join(@row.workspace_ids, ", ")}
+          />
         </section>
       </div>
 

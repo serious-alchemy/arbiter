@@ -55,6 +55,10 @@ defmodule Arbiter.Worker.Registry do
   the account is free for other work; the worker clears it again
   (`released: false`, the default) when the wait ends.
 
+  `node_id:` (RW8, `Arbiter.Nodes.Placement`) names the remote node the run was
+  placed on; `nil` (the default) is the primary. `Arbiter.Nodes.LocalCapacity`
+  counts only the runs with no node against the primary's own cap.
+
   Must be called *from* the registered process; `Registry.update_value/3` only
   lets an owner rewrite its own value. A non-owner (or an unregistered key) is
   a no-op rather than an error — the dispatch context is an optimisation for
@@ -66,7 +70,8 @@ defmodule Arbiter.Worker.Registry do
     value = %{
       workspace_id: workspace_id,
       provider: normalize_provider(provider),
-      released: Keyword.get(opts, :released, false)
+      released: Keyword.get(opts, :released, false),
+      node_id: Keyword.get(opts, :node_id)
     }
 
     Registry.update_value(__MODULE__, registry_key, fn _ -> value end)
@@ -83,7 +88,7 @@ defmodule Arbiter.Worker.Registry do
 
   @doc """
   Every **live** registry entry that recorded a dispatch context via
-  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:, released:}`.
+  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:, released:, node_id:}`.
 
   Entries whose process has already died are dropped here rather than by the
   caller: Registry's monitor-based cleanup is asynchronous, so a killed worker
@@ -96,7 +101,8 @@ defmodule Arbiter.Worker.Registry do
             pid: pid(),
             workspace_id: String.t() | nil,
             provider: String.t() | nil,
-            released: boolean()
+            released: boolean(),
+            node_id: String.t() | nil
           }
         ]
   def live_dispatches do
@@ -111,7 +117,8 @@ defmodule Arbiter.Worker.Registry do
               pid: pid,
               workspace_id: ws_id,
               provider: provider,
-              released: Map.get(value, :released, false)
+              released: Map.get(value, :released, false),
+              node_id: Map.get(value, :node_id)
             }
           ]
         else

@@ -293,6 +293,18 @@ defmodule Arbiter.Accounts.Concurrency do
     end
   end
 
+  @doc """
+  Everything currently holding a slot, whatever the account: the live workers
+  (less parked primaries, released holds and quota-held rounds) plus every
+  admitted dispatch whose worker does not count yet. Each is
+  `%{registry_key:, workspace_id:, provider:, ...}`; a worker's entry also has
+  `:node_id` (`nil` for the primary). The one occupancy read
+  `Arbiter.Nodes.LocalCapacity` shares with `holders/2`, so the two can never
+  disagree about who is running.
+  """
+  @spec live_occupants() :: [map()]
+  def live_occupants, do: occupants()
+
   # Everything holding a slot on some account: the live workers, less parked
   # primaries, plus every admitted dispatch (bd-8suxac) whose worker does not
   # count yet. A worker counts only once `Worker.init/1` has stamped its
