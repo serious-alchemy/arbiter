@@ -164,7 +164,7 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
                view(waiting, %{runs: [author]})
 
       # The marker only renames the step while no agent is live: with a reviewer
-      # live the step is whatever it was, and the column is :in_progress.
+      # live the step is whatever it was (:in_review), and column is :merging (ci_wait != nil).
       reviewer =
         run(:working, %{
           task_id: "bd-t#review",
@@ -172,7 +172,7 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
           meta: %{role: :reviewer, reviews: "bd-t"}
         })
 
-      assert %{column: :in_progress, step: :in_review} =
+      assert %{column: :merging, step: :in_review} =
                view(waiting, %{runs: [author, reviewer]})
 
       # bd-2gc809: after a restart the gate is re-armed with no author row at all

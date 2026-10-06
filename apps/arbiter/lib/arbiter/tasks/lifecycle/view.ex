@@ -142,7 +142,11 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     cut_off = if initial_column == :in_progress, do: ReviewPass.current(ticket, ctx_now(ctx))
     initial_step = step(initial_column, ticket, runs, ctx)
     step = awaiting_ci(initial_step, ci_wait, runs)
-    column = if step == :awaiting_ci, do: :merging, else: initial_column
+
+    column =
+      if initial_column == :in_progress and not is_nil(ci_wait),
+        do: :merging,
+        else: initial_column
 
     %{
       state: state,
