@@ -26,6 +26,7 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
   #   filters and mask are reproduced unmodified below; only the wordmark letterform paths
   #   were dropped, since this component renders the icon standalone next to a text label.
   #   Full-colour Google gradient on blue arch. Nominative use to identify Google Antigravity.
+  # - Grok: neutral placeholder glyph; no official xAI asset is bundled.
   # - Ollama: Placeholder slot for future Ollama adapter (bd-942qbz).
 
   @providers %{
@@ -40,6 +41,10 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
     "gemini" => %{
       name: "Antigravity",
       view_box: "0 0 112 112"
+    },
+    "grok" => %{
+      name: "Grok",
+      view_box: "0 0 24 24"
     },
     "ollama" => %{
       name: "Ollama",
@@ -388,6 +393,29 @@ defmodule ArbiterWeb.CoreComponents.ProviderIcon do
           />
         </g>
       </g>
+    </svg>
+    """
+  end
+
+  def provider_icon(%{provider: "grok"} = assigns) do
+    # Grok (bd-dpv4vt): a neutral placeholder glyph, not xAI's brand mark. No
+    # official asset was sourced, so none is reproduced here.
+    ~H"""
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      role="img"
+      aria-label="Grok"
+      class={@class}
+      {@rest}
+    >
+      <title>Grok</title>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M8.5 15.5l7-7" />
     </svg>
     """
   end
