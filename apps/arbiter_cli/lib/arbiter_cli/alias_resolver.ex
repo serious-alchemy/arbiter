@@ -18,24 +18,21 @@ defmodule ArbiterCli.AliasResolver do
   in `ArbiterCli.Main`, not here.)
   """
 
-  # The canonical command surface: resources, plus the flat meta commands that
-  # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
-  # `ticket dispatch`; `issue` is the deprecated alias of `ticket`).
-  @known_verbs ~w(ticket issue epic worker repo dep config server workspace message usage loop queue scheduler settings quota provider breaker image install mcp skill session account node dashboard dispatch verify prime where init help version self-update upgrade preflip-gate grok-token)
-
   @doc "The set of canonical resources/commands that arb dispatches to."
   @spec known_verbs() :: [String.t()]
-  def known_verbs, do: @known_verbs
+  def known_verbs, do: ArbiterCli.Verbs.known_verbs()
 
   @typedoc "Result of resolution: a canonical verb or an `:unknown` with suggestions."
   @type t :: {:ok, String.t()} | {:unknown, [String.t()]}
 
   @spec resolve(String.t()) :: t
   def resolve(verb) when is_binary(verb) do
-    if verb in @known_verbs do
+    known = known_verbs()
+
+    if verb in known do
       {:ok, verb}
     else
-      {:unknown, suggest(verb, @known_verbs)}
+      {:unknown, suggest(verb, known)}
     end
   end
 
