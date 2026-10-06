@@ -57,227 +57,231 @@ defmodule Arbiter.Application do
       # dispatch, PR open/merge/finalize, or tracker transition. Started early
       # (no deps) so every GitHub-calling path can gate through it. See
       # Arbiter.GitHub.Limiter.
-      {Task.Supervisor, name: Arbiter.TaskSupervisor},
-      # The shared circuit breaker (bd-5jr49o). Started early and with no deps
-      # so every auto-filing / auto-escalating / auto-redispatching path can
-      # gate through it; callers fail open if it is somehow absent.
-      Arbiter.CircuitBreaker,
-      Arbiter.GitHub.Limiter,
-      Arbiter.Agents.ProviderPool,
-      # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
-      # no I/O), so the dispatch guard's fail-closed read of it never blocks.
-      Arbiter.Agents.AuthHold,
-      Arbiter.Agents.CredentialWatchdog,
-      # bd-9p4lx9: the one process that refreshes grok's rotating OIDC
-      # credential and hands workers short-lived access tokens. Idle (no I/O)
-      # until a grok worker asks for a token.
-      Arbiter.Grok.CredentialBroker,
-      {Registry, keys: :unique, name: Arbiter.Worker.Registry},
-      # bd-9fgg04: live agent work that runs outside Arbiter.Worker.Supervisor
-      # (a dispatch still provisioning, a PR review/reply shelling out to the
-      # agent CLI) registers here for its duration — see Arbiter.Board.Drain.
-      {Registry, keys: :unique, name: Arbiter.Board.Drain.Registry},
-      # bd-8suxac: a dispatch admitted against its provider account's
-      # `max_concurrent`, counted from admission until its worker registers —
-      # see Arbiter.Accounts.Admission.
-      {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
-      {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
-      {Registry, keys: :unique, name: Arbiter.Workflows.MergeQueueRegistry},
-      # Runs background external-PR reviews (`arb review --pr`) off the request
-      # path: the CLI/MCP call returns a "dispatched" ack immediately while the
-      # CodeReview adapter workflow posts findings + a verdict to the PR.
-      {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
-      # Periodic background resolver that walks non-terminal ExternalReview
-      # records and refreshes their pr_state (bd-3jjk0e), so the Review History
-      # panel stays accurate even when no dashboard LiveView is open. The
-      # dashboard is a reader of pr_state; this is the writer of record.
-      Arbiter.Reviews.PrStatePoller,
-      # Transitions abandoned ExternalReview records out of :running (bd-4vc2bo).
-      # A reviewer process that dies mid-flight (killed, crashed, host restart)
-      # never writes the terminal update, so without this the row sits at
-      # :running forever and external_review_list(status: "running") overstates
-      # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
-      Arbiter.Reviews.StaleReviewReaper,
-      # Re-arms the merge of approved PRs whose owning worker exited while the
-      # merge was waiting on CI / a draft / a transient forge refusal
-      # (bd-a370ak / #2002). Reads the durable `issues.pending_merge` stamp, so
-      # its first sweep after boot is also what picks a pending merge back up
-      # across a restart. Primary-instance only; disabled in test. See
-      # Arbiter.Workflows.PendingMergeSweeper.
-      Arbiter.Workflows.PendingMergeSweeper,
-      # Owns the ETS table backing P3 shadow mode's since-boot counters and
-      # its report-once dedup set (#1635 §6.3). Inert until
-      # `Arbiter.Reviews.CoverageShadow.observe/1` is called from a merge
-      # guard, and never on the merge path itself — every read and write is
-      # a direct public-table operation, not a call into this process.
-      Arbiter.Reviews.CoverageShadow.Tally,
-      # Judges any running Stage 3 routing canary and reverts it automatically
-      # if first-pass convergence regressed (bd-6edc0u). Inert for every
-      # workspace that has not set `loop.autonomous_routing_enabled`, which is
-      # all of them by default.
-      Arbiter.Loop.CanaryTicker,
-      # bd-8j9i9p: pages the coordinator once when an open task's worker spend
-      # crosses its estimate group's p90. Informational — it stops nothing.
-      Arbiter.Usage.BudgetPatrol,
-      # Polls GitHub for a newer published release and records "update available"
-      # (check + notify only; never deploys). Off in dev/test. See
-      # Arbiter.Release.UpdateCheck.
-      Arbiter.Release.UpdateCheck,
-      # bd-8nlez1: moves a coordinator-owned attention item the coordinator
-      # left unresolved past its workspace's limit to the operator. Disabled in
-      # test, where tests drive `AttentionSweep.run/1` with their own clock.
-      Arbiter.Tasks.AttentionSweep,
-      # bd-b1b3mp (ES8): once a day, tells the coordinator which unblocked
-      # Backlog leaves of floored / in-progress epics have sat over 24h.
-      # Read-only — it never promotes. Disabled in test.
-      Arbiter.Tasks.BacklogTailDigest,
-      # Prunes `Arbiter.Events.Record` rows past the retention window
-      # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
-      # grow without bound. See `Arbiter.Events.Retention` for config.
-      Arbiter.Events.Retention,
-      # Clears `worker_runs.output_lines` / `worker_run_steps.output_summary`
-      # for old runs once their on-disk transcript / session archive is
-      # verified present (bd-6jcebm). See `Arbiter.Workers.OutputOffload`.
-      Arbiter.Workers.OutputOffload,
-      # Meters the coordinator's OWN Claude Code sessions (bd-be804c) by
-      # sweeping the session JSONLs the CLI writes to disk, and writing the
-      # per-session delta as `source: :coordinator_session`. Inert until an
-      # install names its session directories
-      # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
-      # `Arbiter.Sessions.UsageIngest`.
-      Arbiter.Sessions.UsageIngest,
-      # Touches arbiter's own liveness file (bd-3qkbch, phase 10, §4.6.3) so
-      # every session's in-scope dead-man's switch can tell whether arbiter is
-      # around without ever connecting to it. Inert wherever
-      # XDG_RUNTIME_DIR is unset. See Arbiter.Sessions.Heartbeat.
-      Arbiter.Sessions.Heartbeat,
-      # Idle-TTL sweep (bd-3qkbch, phase 10, §4.6 item 2): terminates
-      # coordinator sessions with no client or turn activity for
-      # `:idle_ttl_ms` (default 24h), unless pinned `keep_alive`. See
-      # Arbiter.Sessions.IdleReaper.
-      Arbiter.Sessions.IdleReaper,
-      # Kill-after-grace policy for orphan scopes (bd-3qkbch, phase 10, §4.6
-      # item 1): re-sweeps `Arbiter.Sessions.Adoption` periodically and kills
-      # an orphan only once it has persisted across a full grace window —
-      # never on the sweep that first notices it. See
-      # Arbiter.Sessions.OrphanReaper.
-      Arbiter.Sessions.OrphanReaper,
-      # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
-      Arbiter.Worker.WorktreeSweeper,
-      # bd-9r5jdt: single-flight worker-image builds, and the weekly base
-      # refresh + prune (inert until an image has been built).
-      Arbiter.Worker.Image.Builder,
-      Arbiter.Worker.Image.Refresher,
-      # bd-50d5j6: persists a podman Codex run's rotated auth.json when its
-      # worker dies. Before RunTmp.Reaper, which flushes it ahead of removal.
-      Arbiter.Agents.Codex.AuthSync.Reaper,
-      # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
-      Arbiter.Worker.RunTmp.Reaper,
-      Arbiter.Worker.RunTmp.Sweeper,
-      # bd-dmcbos: removes a worker's test-services pod when it dies, and orphaned ones at boot.
-      Arbiter.Worker.TestServices.Reaper,
-      # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
-      Arbiter.Repo.OptimizeSweeper,
-      # Deletes a session's persisted raw transcript once it has been :ended
-      # past the retention window (phase 9, RFC §11). See
-      # Arbiter.Sessions.TranscriptRetention.
-      Arbiter.Sessions.TranscriptRetention,
-      # Verifies the shared memory layer's citations off the mount path and
-      # quarantines memories that no longer resolve (bd-19qve3, RFC §9.4
-      # phase 13). Disabled in test. See Arbiter.Sessions.Memory.Checker.
-      Arbiter.Sessions.Memory.Checker,
-      # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
-      # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
-      # started on first attach and stopped when the last client leaves — so
-      # the tree holds only the registry and a dynamic supervisor, never a
-      # handle on a session. A reader dying (or this whole app restarting)
-      # drops the reader, never the tmux session: that lives in its own
-      # systemd scope, which is the property phases 1-2 exist to protect.
-      {Registry, keys: :unique, name: Arbiter.Sessions.Stream.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Sessions.Stream.Supervisor},
-      # Dashboard login relay (bd-c99hys): one supervised `LoginRunner` per
-      # in-flight provider-account login, registered by account so a second
-      # login for the same account is refused. `:temporary` children — a login
-      # is never restarted (its tmux session and one-time codes are gone).
-      {Registry, keys: :unique, name: Arbiter.Accounts.LoginRunner.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Accounts.LoginRunner.Supervisor},
-      # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
-      # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
-      # it starts without error but never reaches the MCP server — so a worker
-      # dispatch fires this off the dispatch path right after injecting the
-      # config, rather than requiring live debugging to notice a wedged worker.
-      {Task.Supervisor, name: Arbiter.Worker.MCPVerifySupervisor},
-      MergeQueueSupervisor,
-      {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
-      PRPatrolSupervisor,
-      {Registry, keys: :unique, name: Arbiter.Workflows.ReviewPatrolRegistry},
-      ReviewPatrolSupervisor,
-      # Event-driven half of lazy patrolling (bd-7tr11p): subscribes to task
-      # lifecycle and starts a patrol when a repo gains its first fleet PR /
-      # engagement, and reaps one when its last watched item closes — so a
-      # newly-opened engagement resurrects a patrol with no server restart.
-      # Inert in test (auto_start? false → does not subscribe). Placed after both
-      # patrol supervisors + registries so they exist when it reacts.
-      Arbiter.Workflows.PatrolLifecycle,
-      # Ends a refine session when its bound issue is promoted or closed
-      # (bd-cvfjms, child 4 of epic bd-cksar2): subscribes to the same
-      # `"tasks"` topic as `PatrolLifecycle` above and shares its
-      # `:auto_start_refineries` gate for the same reason — inert in test so
-      # a global instance never touches an issue/session outside whatever
-      # sandbox connection a given test allowed it. See
-      # Arbiter.Sessions.RefineLifecycle.
-      Arbiter.Sessions.RefineLifecycle,
-      {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
-      MergedPRFinalizerSupervisor,
-      # Per-workspace quota-aware dispatch queues (bd-7cd38f). Holds dispatches
-      # near the 5h cap and drains them as headroom frees; also carries the
-      # per-workspace overage-alert debounce state for :continue mode.
-      {Registry, keys: :unique, name: Arbiter.Workflows.DispatchQueueRegistry},
-      # Runs each drained dispatch off the DispatchQueue GenServer's process so a
-      # slow dispatch (repo resolution, preflight, worker spawn, DB writes)
-      # doesn't block the queue — and any concurrent hold/4 / record_overage/3 —
-      # for its duration (bd-7cd38f, reviewer round 1 finding 3).
-      {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
-      DispatchQueueSupervisor,
-      # Periodic refresh of every quota provider (bd-atyrrq: Anthropic's own
-      # `/api/oauth/usage` poll now drives the primary + long-window columns
-      # `Arbiter.Quota.Gate` reads, alongside Codex and
-      # Antigravity, which have no passive proxy signal — bd-ajh7bd). Each
-      # cycle fetches per workspace, upserts the persisted snapshot, and
-      # broadcasts a quota_updated event so the web dashboard updates live,
-      # `GET /api/quota` stays a pure DB read, and any held DispatchQueue
-      # intents drain.
-      {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
-      Arbiter.Quota.CloudProbe,
-      # Has the `claude` CLI renew the quota poller's dedicated OAuth grant
-      # before it expires, so CloudProbe keeps polling `/api/oauth/usage`
-      # with no interactive session (bd-b632tz).
-      Arbiter.Quota.GrantRefresher,
-      # Alerts when the Claude quota snapshot itself has gone stale — quota
-      # accounting blind, the 5h gate failing open — on its own timer, so it
-      # still fires when CloudProbe has stopped reporting anything
-      # (bd-2wnkoq).
-      Arbiter.Quota.StalenessWatch,
-      # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
-      # `workspace_spend/1` read their memoized 30-day ledger aggregates
-      # from (bd-4p6pw7) — see that module's docs.
-      Arbiter.Quota.SpendCache,
-      # Owns the ETS table the top-bar `:quota` LiveView hook's fully
-      # decorated `list_latest_for_workspace/2` result is memoized in
-      # (bd-4p6pw7 round 2) — see that module's docs.
-      Arbiter.Quota.QuotaCache,
-      # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
-      # (bd-3d1zge) — see that module's docs.
-      Arbiter.Usage.EstimateCache,
-      # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
-      Arbiter.Reports.Cache,
-      # The egress proxy's grant cache, registry and per-run supervisor
-      # (bd-aspkyr). Idle: nothing starts a proxy until G6 wires it.
-      Arbiter.Worker.Egress.Supervisor
+      {Task.Supervisor, name: Arbiter.TaskSupervisor}
     ] ++
+      migration_gate(auto_start?) ++
+      [
+        # The shared circuit breaker (bd-5jr49o). Started early and with no deps
+        # so every auto-filing / auto-escalating / auto-redispatching path can
+        # gate through it; callers fail open if it is somehow absent.
+        Arbiter.CircuitBreaker,
+        Arbiter.GitHub.Limiter,
+        Arbiter.Agents.ProviderPool,
+        # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
+        # no I/O), so the dispatch guard's fail-closed read of it never blocks.
+        Arbiter.Agents.AuthHold,
+        Arbiter.Agents.CredentialWatchdog,
+        # bd-9p4lx9: the one process that refreshes grok's rotating OIDC
+        # credential and hands workers short-lived access tokens. Idle (no I/O)
+        # until a grok worker asks for a token.
+        Arbiter.Grok.CredentialBroker,
+        {Registry, keys: :unique, name: Arbiter.Worker.Registry},
+        # bd-9fgg04: live agent work that runs outside Arbiter.Worker.Supervisor
+        # (a dispatch still provisioning, a PR review/reply shelling out to the
+        # agent CLI) registers here for its duration — see Arbiter.Board.Drain.
+        {Registry, keys: :unique, name: Arbiter.Board.Drain.Registry},
+        # bd-8suxac: a dispatch admitted against its provider account's
+        # `max_concurrent`, counted from admission until its worker registers —
+        # see Arbiter.Accounts.Admission.
+        {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
+        {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
+        {Registry, keys: :unique, name: Arbiter.Workflows.MergeQueueRegistry},
+        # Runs background external-PR reviews (`arb review --pr`) off the request
+        # path: the CLI/MCP call returns a "dispatched" ack immediately while the
+        # CodeReview adapter workflow posts findings + a verdict to the PR.
+        {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
+        # Periodic background resolver that walks non-terminal ExternalReview
+        # records and refreshes their pr_state (bd-3jjk0e), so the Review History
+        # panel stays accurate even when no dashboard LiveView is open. The
+        # dashboard is a reader of pr_state; this is the writer of record.
+        Arbiter.Reviews.PrStatePoller,
+        # Transitions abandoned ExternalReview records out of :running (bd-4vc2bo).
+        # A reviewer process that dies mid-flight (killed, crashed, host restart)
+        # never writes the terminal update, so without this the row sits at
+        # :running forever and external_review_list(status: "running") overstates
+        # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
+        Arbiter.Reviews.StaleReviewReaper,
+        # Re-arms the merge of approved PRs whose owning worker exited while the
+        # merge was waiting on CI / a draft / a transient forge refusal
+        # (bd-a370ak / #2002). Reads the durable `issues.pending_merge` stamp, so
+        # its first sweep after boot is also what picks a pending merge back up
+        # across a restart. Primary-instance only; disabled in test. See
+        # Arbiter.Workflows.PendingMergeSweeper.
+        Arbiter.Workflows.PendingMergeSweeper,
+        # Owns the ETS table backing P3 shadow mode's since-boot counters and
+        # its report-once dedup set (#1635 §6.3). Inert until
+        # `Arbiter.Reviews.CoverageShadow.observe/1` is called from a merge
+        # guard, and never on the merge path itself — every read and write is
+        # a direct public-table operation, not a call into this process.
+        Arbiter.Reviews.CoverageShadow.Tally,
+        # Judges any running Stage 3 routing canary and reverts it automatically
+        # if first-pass convergence regressed (bd-6edc0u). Inert for every
+        # workspace that has not set `loop.autonomous_routing_enabled`, which is
+        # all of them by default.
+        Arbiter.Loop.CanaryTicker,
+        # bd-8j9i9p: pages the coordinator once when an open task's worker spend
+        # crosses its estimate group's p90. Informational — it stops nothing.
+        Arbiter.Usage.BudgetPatrol,
+        # Polls GitHub for a newer published release and records "update available"
+        # (check + notify only; never deploys). Off in dev/test. See
+        # Arbiter.Release.UpdateCheck.
+        Arbiter.Release.UpdateCheck,
+        # bd-8nlez1: moves a coordinator-owned attention item the coordinator
+        # left unresolved past its workspace's limit to the operator. Disabled in
+        # test, where tests drive `AttentionSweep.run/1` with their own clock.
+        Arbiter.Tasks.AttentionSweep,
+        # bd-b1b3mp (ES8): once a day, tells the coordinator which unblocked
+        # Backlog leaves of floored / in-progress epics have sat over 24h.
+        # Read-only — it never promotes. Disabled in test.
+        Arbiter.Tasks.BacklogTailDigest,
+        # Prunes `Arbiter.Events.Record` rows past the retention window
+        # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
+        # grow without bound. See `Arbiter.Events.Retention` for config.
+        Arbiter.Events.Retention,
+        # Clears `worker_runs.output_lines` / `worker_run_steps.output_summary`
+        # for old runs once their on-disk transcript / session archive is
+        # verified present (bd-6jcebm). See `Arbiter.Workers.OutputOffload`.
+        Arbiter.Workers.OutputOffload,
+        # Meters the coordinator's OWN Claude Code sessions (bd-be804c) by
+        # sweeping the session JSONLs the CLI writes to disk, and writing the
+        # per-session delta as `source: :coordinator_session`. Inert until an
+        # install names its session directories
+        # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
+        # `Arbiter.Sessions.UsageIngest`.
+        Arbiter.Sessions.UsageIngest,
+        # Touches arbiter's own liveness file (bd-3qkbch, phase 10, §4.6.3) so
+        # every session's in-scope dead-man's switch can tell whether arbiter is
+        # around without ever connecting to it. Inert wherever
+        # XDG_RUNTIME_DIR is unset. See Arbiter.Sessions.Heartbeat.
+        Arbiter.Sessions.Heartbeat,
+        # Idle-TTL sweep (bd-3qkbch, phase 10, §4.6 item 2): terminates
+        # coordinator sessions with no client or turn activity for
+        # `:idle_ttl_ms` (default 24h), unless pinned `keep_alive`. See
+        # Arbiter.Sessions.IdleReaper.
+        Arbiter.Sessions.IdleReaper,
+        # Kill-after-grace policy for orphan scopes (bd-3qkbch, phase 10, §4.6
+        # item 1): re-sweeps `Arbiter.Sessions.Adoption` periodically and kills
+        # an orphan only once it has persisted across a full grace window —
+        # never on the sweep that first notices it. See
+        # Arbiter.Sessions.OrphanReaper.
+        Arbiter.Sessions.OrphanReaper,
+        # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
+        Arbiter.Worker.WorktreeSweeper,
+        # bd-9r5jdt: single-flight worker-image builds, and the weekly base
+        # refresh + prune (inert until an image has been built).
+        Arbiter.Worker.Image.Builder,
+        Arbiter.Worker.Image.Refresher,
+        # bd-50d5j6: persists a podman Codex run's rotated auth.json when its
+        # worker dies. Before RunTmp.Reaper, which flushes it ahead of removal.
+        Arbiter.Agents.Codex.AuthSync.Reaper,
+        # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
+        Arbiter.Worker.RunTmp.Reaper,
+        Arbiter.Worker.RunTmp.Sweeper,
+        # bd-dmcbos: removes a worker's test-services pod when it dies, and orphaned ones at boot.
+        Arbiter.Worker.TestServices.Reaper,
+        # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
+        Arbiter.Repo.OptimizeSweeper,
+        # Deletes a session's persisted raw transcript once it has been :ended
+        # past the retention window (phase 9, RFC §11). See
+        # Arbiter.Sessions.TranscriptRetention.
+        Arbiter.Sessions.TranscriptRetention,
+        # Verifies the shared memory layer's citations off the mount path and
+        # quarantines memories that no longer resolve (bd-19qve3, RFC §9.4
+        # phase 13). Disabled in test. See Arbiter.Sessions.Memory.Checker.
+        Arbiter.Sessions.Memory.Checker,
+        # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
+        # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
+        # started on first attach and stopped when the last client leaves — so
+        # the tree holds only the registry and a dynamic supervisor, never a
+        # handle on a session. A reader dying (or this whole app restarting)
+        # drops the reader, never the tmux session: that lives in its own
+        # systemd scope, which is the property phases 1-2 exist to protect.
+        {Registry, keys: :unique, name: Arbiter.Sessions.Stream.Registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Sessions.Stream.Supervisor},
+        # Dashboard login relay (bd-c99hys): one supervised `LoginRunner` per
+        # in-flight provider-account login, registered by account so a second
+        # login for the same account is refused. `:temporary` children — a login
+        # is never restarted (its tmux session and one-time codes are gone).
+        {Registry, keys: :unique, name: Arbiter.Accounts.LoginRunner.Registry},
+        {DynamicSupervisor,
+         strategy: :one_for_one, name: Arbiter.Accounts.LoginRunner.Supervisor},
+        # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
+        # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
+        # it starts without error but never reaches the MCP server — so a worker
+        # dispatch fires this off the dispatch path right after injecting the
+        # config, rather than requiring live debugging to notice a wedged worker.
+        {Task.Supervisor, name: Arbiter.Worker.MCPVerifySupervisor},
+        MergeQueueSupervisor,
+        {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
+        PRPatrolSupervisor,
+        {Registry, keys: :unique, name: Arbiter.Workflows.ReviewPatrolRegistry},
+        ReviewPatrolSupervisor,
+        # Event-driven half of lazy patrolling (bd-7tr11p): subscribes to task
+        # lifecycle and starts a patrol when a repo gains its first fleet PR /
+        # engagement, and reaps one when its last watched item closes — so a
+        # newly-opened engagement resurrects a patrol with no server restart.
+        # Inert in test (auto_start? false → does not subscribe). Placed after both
+        # patrol supervisors + registries so they exist when it reacts.
+        Arbiter.Workflows.PatrolLifecycle,
+        # Ends a refine session when its bound issue is promoted or closed
+        # (bd-cvfjms, child 4 of epic bd-cksar2): subscribes to the same
+        # `"tasks"` topic as `PatrolLifecycle` above and shares its
+        # `:auto_start_refineries` gate for the same reason — inert in test so
+        # a global instance never touches an issue/session outside whatever
+        # sandbox connection a given test allowed it. See
+        # Arbiter.Sessions.RefineLifecycle.
+        Arbiter.Sessions.RefineLifecycle,
+        {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
+        MergedPRFinalizerSupervisor,
+        # Per-workspace quota-aware dispatch queues (bd-7cd38f). Holds dispatches
+        # near the 5h cap and drains them as headroom frees; also carries the
+        # per-workspace overage-alert debounce state for :continue mode.
+        {Registry, keys: :unique, name: Arbiter.Workflows.DispatchQueueRegistry},
+        # Runs each drained dispatch off the DispatchQueue GenServer's process so a
+        # slow dispatch (repo resolution, preflight, worker spawn, DB writes)
+        # doesn't block the queue — and any concurrent hold/4 / record_overage/3 —
+        # for its duration (bd-7cd38f, reviewer round 1 finding 3).
+        {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
+        DispatchQueueSupervisor,
+        # Periodic refresh of every quota provider (bd-atyrrq: Anthropic's own
+        # `/api/oauth/usage` poll now drives the primary + long-window columns
+        # `Arbiter.Quota.Gate` reads, alongside Codex and
+        # Antigravity, which have no passive proxy signal — bd-ajh7bd). Each
+        # cycle fetches per workspace, upserts the persisted snapshot, and
+        # broadcasts a quota_updated event so the web dashboard updates live,
+        # `GET /api/quota` stays a pure DB read, and any held DispatchQueue
+        # intents drain.
+        {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
+        Arbiter.Quota.CloudProbe,
+        # Has the `claude` CLI renew the quota poller's dedicated OAuth grant
+        # before it expires, so CloudProbe keeps polling `/api/oauth/usage`
+        # with no interactive session (bd-b632tz).
+        Arbiter.Quota.GrantRefresher,
+        # Alerts when the Claude quota snapshot itself has gone stale — quota
+        # accounting blind, the 5h gate failing open — on its own timer, so it
+        # still fires when CloudProbe has stopped reporting anything
+        # (bd-2wnkoq).
+        Arbiter.Quota.StalenessWatch,
+        # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
+        # `workspace_spend/1` read their memoized 30-day ledger aggregates
+        # from (bd-4p6pw7) — see that module's docs.
+        Arbiter.Quota.SpendCache,
+        # Owns the ETS table the top-bar `:quota` LiveView hook's fully
+        # decorated `list_latest_for_workspace/2` result is memoized in
+        # (bd-4p6pw7 round 2) — see that module's docs.
+        Arbiter.Quota.QuotaCache,
+        # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
+        # (bd-3d1zge) — see that module's docs.
+        Arbiter.Usage.EstimateCache,
+        # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
+        Arbiter.Reports.Cache,
+        # The egress proxy's grant cache, registry and per-run supervisor
+        # (bd-aspkyr). Idle: nothing starts a proxy until G6 wires it.
+        Arbiter.Worker.Egress.Supervisor
+      ] ++
       resume_gate(auto_start?) ++
       [
         # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
@@ -295,41 +299,11 @@ defmodule Arbiter.Application do
   defp resume_gate(true), do: [Arbiter.Boot.ResumeGate]
   defp resume_gate(false), do: []
 
-  # The gated boot children. The two `Task` children each MUST carry a distinct
+  # The gated boot tasks (after `migration_gate/1`). The two `Task` children each MUST carry a distinct
   # explicit `:id` — without one they both collapse to the default `:Task` id
   # and the whole app fails to boot ("more than one child specification has the
   # id: Task").
   #
-  #   * SingleInstance: hold a session advisory lock that identifies the one
-  #     canonical instance per DB. Started FIRST (and synchronously, via its
-  #     init) so the migrator and reconcile Task below can read its verdict.
-  #     See bd-9rouwh.
-  #   * migrator: run pending Ecto migrations to head, SYNCHRONOUSLY, before any
-  #     later child (or the :arbiter_web endpoint) comes up against a stale
-  #     schema. Gated on the SingleInstance primary verdict so only the one
-  #     canonical instance migrates. A migration failure aborts the boot. Placed
-  #     before reconcile/merge_queue so those run against the current schema. It is
-  #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
-  #     the boot until the schema is current. See Arbiter.Boot.Migrator.
-  #   * config_migrator: run workspace-config DATA migrations (config lives in a
-  #     JSON column, so Ecto migrations never touch it) once the schema is at
-  #     head — currently the retired `rig_paths` -> `repo_paths` key rename.
-  #     Same primary-instance gate and same synchronous one-shot shape as the
-  #     migrator, and placed right after it so every later child (patrols,
-  #     queues) enumerates workspaces whose repo config is already current.
-  #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
-  #   * provider_accounts: classify the install from the migration state —
-  #     fresh, migrated, or un-migrated with legacy credentials (a boot
-  #     warning naming them; accounts are always on since P13, bd-9gqj8e) —
-  #     and, on a fresh primary, join each workspace to `<provider>:default`.
-  #     Synchronous and after the migrators, so every later child dispatches
-  #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
-  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
-  #     for every ticket whose history predates the live triggers (one indexed
-  #     query once done). Primary-gated, synchronous, never fatal; after the
-  #     migrator that creates the table and before the queues, so no dispatch
-  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
-  #     and bd-d8fi92.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -368,15 +342,61 @@ defmodule Arbiter.Application do
   # own stubs. That gating is exactly why an id collision here is invisible to
   # the suite — `Arbiter.ApplicationTest` forces `auto_start?: true` to close
   # the gap.
-  defp boot_tasks(false), do: []
+  # bd-2hwm9e: the schema-dependent one-shot steps run right after the Repo and
+  # its dependency-free neighbours, BEFORE every child that reads the database
+  # (Autopilot, CredentialWatchdog, quota probes, queues, patrols). On v0.2.18
+  # Autopilot read `installation_settings` ~5s ahead of the migration adding
+  # `competence_matrix`. Each step is synchronous (`:ignore` after running), so
+  # the supervisor does not start the next child until it finishes. Gated off in
+  # test with the other boot steps (no migrations to run under the sandbox).
+  #
+  # Steps, in order:
+  #   * SingleInstance: hold a session advisory lock that identifies the one
+  #     canonical instance per DB. Started FIRST (and synchronously, via its
+  #     init) so the migrator and reconcile Task below can read its verdict.
+  #     See bd-9rouwh.
+  #   * migrator: run pending Ecto migrations to head, SYNCHRONOUSLY, before any
+  #     later child (or the :arbiter_web endpoint) comes up against a stale
+  #     schema. Gated on the SingleInstance primary verdict so only the one
+  #     canonical instance migrates. A migration failure aborts the boot. Placed
+  #     before reconcile/merge_queue so those run against the current schema. It is
+  #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
+  #     the boot until the schema is current. See Arbiter.Boot.Migrator.
+  #   * config_migrator: run workspace-config DATA migrations (config lives in a
+  #     JSON column, so Ecto migrations never touch it) once the schema is at
+  #     head — currently the retired `rig_paths` -> `repo_paths` key rename.
+  #     Same primary-instance gate and same synchronous one-shot shape as the
+  #     migrator, and placed right after it so every later child (patrols,
+  #     queues) enumerates workspaces whose repo config is already current.
+  #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
+  #   * provider_accounts: classify the install from the migration state —
+  #     fresh, migrated, or un-migrated with legacy credentials (a boot
+  #     warning naming them; accounts are always on since P13, bd-9gqj8e) —
+  #     and, on a fresh primary, join each workspace to `<provider>:default`.
+  #     Synchronous and after the migrators, so every later child dispatches
+  #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
+  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
+  #     for every ticket whose history predates the live triggers (one indexed
+  #     query once done). Primary-gated, synchronous, never fatal; after the
+  #     migrator that creates the table and before the queues, so no dispatch
+  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
+  #     and bd-d8fi92.
+  defp migration_gate(false), do: []
 
-  defp boot_tasks(true) do
+  defp migration_gate(true) do
     [
       Arbiter.SingleInstance,
       Arbiter.Boot.Migrator,
       Arbiter.Boot.ConfigMigrator,
       Arbiter.Boot.ProviderAccounts,
-      Arbiter.Boot.TicketTransitions,
+      Arbiter.Boot.TicketTransitions
+    ]
+  end
+
+  defp boot_tasks(false), do: []
+
+  defp boot_tasks(true) do
+    [
       Arbiter.Boot.Optimize,
       Supervisor.child_spec(
         {Task,
