@@ -21,7 +21,10 @@ defmodule ArbiterWeb.Api.GrokTokenController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Errors
   alias Arbiter.Grok.CredentialBroker
+
+  action_fallback(ArbiterWeb.Api.FallbackController)
 
   @relogin "Log in to grok again from the dashboard (the grok provider account's login); " <>
              "with no grok account, run `grok login --device-code` on the Arbiter host."
@@ -70,9 +73,14 @@ defmodule ArbiterWeb.Api.GrokTokenController do
     fail(conn, "grok_unavailable", "x.ai could not be reached to refresh the grok token; retry.")
   end
 
+  # A reason the broker does not name still reports through the one taxonomy
+  # (a 500 with the reason), never as a function-clause crash.
+  defp failure(_conn, reason),
+    do: {:error, {:server_error, "grok token fetch failed", %{reason: inspect(reason)}}}
+
   defp fail(conn, type, message) do
     conn
-    |> put_status(:service_unavailable)
-    |> json(%{error: %{type: type, message: message, details: %{}}})
+    |> put_status(Errors.http_status(:busy))
+    |> json(Errors.body(:busy, message, %{}, type: type))
   end
 end

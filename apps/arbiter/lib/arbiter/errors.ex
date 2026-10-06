@@ -48,10 +48,17 @@ defmodule Arbiter.Errors do
   @spec http_status(kind()) :: pos_integer()
   def http_status(kind), do: kind |> lookup() |> elem(1)
 
-  @doc "The `{error: {type, message, details}}` envelope every REST error carries."
-  @spec body(kind(), String.t(), map()) :: %{error: %{type: String.t(), message: String.t(), details: map()}}
-  def body(kind, message, details \\ %{}) do
-    %{error: %{type: type(kind), message: message, details: details}}
+  @doc """
+  The `{error: {type, message, details}}` envelope every REST error carries.
+  `type:` overrides the kind's own `type` for the few endpoints whose callers
+  branch on a finer, documented one (e.g. `grok_reauth_required`); the status
+  still comes from the kind.
+  """
+  @spec body(kind(), String.t(), map(), keyword()) :: %{
+          error: %{type: String.t(), message: String.t(), details: map()}
+        }
+  def body(kind, message, details \\ %{}, opts \\ []) do
+    %{error: %{type: Keyword.get(opts, :type, type(kind)), message: message, details: details}}
   end
 
   defp lookup(kind), do: Map.get(@kinds, kind, {"internal_error", 500})

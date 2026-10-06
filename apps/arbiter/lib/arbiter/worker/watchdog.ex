@@ -877,7 +877,7 @@ defmodule Arbiter.Worker.Watchdog do
          "watch. Dispatch or resume it instead."}
 
   def restart_refusal(task_id, {:not_open, state}),
-    do: {:invalid, "Ticket #{task_id} is #{state}, not Merging — it has no open PR to watch."}
+    do: {:conflict, "Ticket #{task_id} is #{state}, not Merging — it has no open PR to watch."}
 
   def restart_refusal(task_id, :pulled),
     do:
