@@ -35,8 +35,8 @@ defmodule ArbiterWeb.Api.LoopController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Loop
-  alias Arbiter.Params
   alias Arbiter.Loop.Analysis
+  alias Arbiter.Params
 
   # Documented `limit` cap for the loop list/analysis routes.
   @max_limit 500
