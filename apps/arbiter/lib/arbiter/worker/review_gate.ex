@@ -3053,8 +3053,15 @@ defmodule Arbiter.Worker.ReviewGate do
            :review_fix_round,
            {:implementer, findings, prompt_prefix}
          ) do
-      {:held, state} -> {:revise, %{state | phase: :revising, current_id: nil}}
-      :ok -> launch_implementer_now(state, findings, prompt_prefix)
+      {:held, state} ->
+        # The reviewer pass that returned these findings armed a
+        # `{:timeout, round, attempt}` timer that is still live. Nothing was
+        # launched here, so bump `attempt` to make it stale: a hold has no time
+        # limit and must not end as a reviewer timeout.
+        {:revise, %{state | phase: :revising, current_id: nil, attempt: state.attempt + 1}}
+
+      :ok ->
+        launch_implementer_now(state, findings, prompt_prefix)
     end
   end
 
