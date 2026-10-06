@@ -17,8 +17,8 @@ defmodule Arbiter.Trackers.Jira.Error do
       through a status the issue can't reach from where it is)
     * `:no_transition_path` — the target status is mapped, but no route to it
       exists in the configured `transition_graph`
-    * `:upstream_past_target` — a `:closed` transition was declined because the
-      ticket is not known to still precede the closed-mapped status (it may
+    * `:upstream_past_target` — a forward transition was declined because the
+      ticket is not known to still precede the mapped status (it may
       have been moved past it by someone else); writing would move it backwards
     * `:status_unmapped` — the lifecycle event has no `status_map` entry; a
       benign "this tracker doesn't model that" skip

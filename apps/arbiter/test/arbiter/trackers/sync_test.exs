@@ -537,7 +537,11 @@ defmodule Arbiter.Trackers.SyncTest do
           # current-status fetch
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "In Progress"}}})
+          |> Req.Test.json(%{
+            "fields" => %{
+              "status" => %{"name" => "To Do", "statusCategory" => %{"key" => "new"}}
+            }
+          })
         end
       end)
 
@@ -580,7 +584,11 @@ defmodule Arbiter.Trackers.SyncTest do
           # current-status fetch
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "Backlog"}}})
+          |> Req.Test.json(%{
+            "fields" => %{
+              "status" => %{"name" => "Backlog", "statusCategory" => %{"key" => "new"}}
+            }
+          })
         end
       end)
 
