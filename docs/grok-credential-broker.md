@@ -72,3 +72,29 @@ The hold's identity is the module `Arbiter.Agents.adapters()[:grok]`, else
 Access and refresh tokens never reach a log line, error tuple or API error
 body. Logs carry 12-hex-digit SHA-256 fingerprints, expiry times and OAuth
 error codes.
+
+## Enabling grok per workspace (bd-dpv4vt)
+
+grok is registered as an agent type (`grok`) and a provider-account provider, but
+it is **off by default**: free tier only, about 500K tokens per rolling 24 h
+(cached tokens counted), so a small task costs roughly an eighth of a day.
+
+    arb config set routing.grok.enabled true          # default false
+    arb config set routing.grok.difficulties '[1]'    # default [1]
+
+Under the `by_difficulty` routing policy an enabled workspace sends only D1
+tickets to grok; every other difficulty keeps the workspace's own agent.
+Override `routing.grok.difficulties` to widen the set, or pin `agent.type:
+"grok"` to send everything. Other routing policies are unaffected.
+
+- **Login relay.** The dashboard Providers page can run `grok login
+  --device-code` (the login runs with its own `GROK_HOME`; the device URL and
+  code are shown on the page). The broker reads `~/.grok/auth.json` unless
+  `config :arbiter, :grok_broker, auth_path:` says otherwise, so a login made
+  through the relay lands in that account's dir under the accounts root, not in
+  the broker's file; use `grok login --device-code` on the host for the
+  canonical login.
+- **Doctor.** `arb server doctor` prints a `grok auth` line from
+  `GET /api/server/grok_auth`: silent-ok when no workspace uses grok, else
+  `logged in` / `expired` (the broker refreshes it at the next dispatch) or a
+  failure with the re-login command for `not logged in` / `reauth required`.

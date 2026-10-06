@@ -17,7 +17,7 @@ defmodule ArbiterCli.ConfigSchema do
 
   @tracker_types ~w(none jira shortcut linear github gitlab)
   @merger_strategies ~w(direct gitlab github)
-  @agent_types ~w(claude gemini codex)
+  @agent_types ~w(claude gemini codex grok)
   @routing_policies ~w(static by_priority by_difficulty by_budget round_robin)
   @security_modes ~w(auto strict bypass)
   @sandbox_filesystems ~w(worktree none)
@@ -192,6 +192,11 @@ defmodule ArbiterCli.ConfigSchema do
       scoring.reviewer_coupling bool (default: false) — under competence, project
                           the cross-family reviewer and price review runs on the
                           projected reviewer's quota pool.
+      grok.enabled        bool (default: false) — send D1 tickets to grok (free tier,
+                          ~500K tokens/day). Applies under every policy and over
+                          provider_selection; a caller-named provider still wins.
+      grok.difficulties   list of 0..5 (default: [1]) — the difficulties grok takes
+                          when grok.enabled is true.
       capability_gates    bool (default: false) — drop a candidate that lacks a required
                           capability (reason capability_missing) before quota is
                           weighed, in both routers and on the unrouted dispatch

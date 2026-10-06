@@ -149,12 +149,13 @@ defmodule Arbiter.AgentsTest do
       assert Agents.adapters() == %{
                claude: Claude,
                gemini: Arbiter.Agents.Gemini,
-               codex: Arbiter.Agents.Codex
+               codex: Arbiter.Agents.Codex,
+               grok: Arbiter.Agents.Grok
              }
     end
 
-    test "valid_agent_types/0 is `[\"claude\", \"gemini\", \"codex\"]`" do
-      assert Agents.valid_agent_types() == ["claude", "gemini", "codex"]
+    test "valid_agent_types/0 is `[\"claude\", \"gemini\", \"codex\", \"grok\"]`" do
+      assert Agents.valid_agent_types() == ["claude", "gemini", "codex", "grok"]
     end
   end
 
