@@ -172,7 +172,7 @@ defmodule Arbiter.Worker.Container do
       if(label_disabled?, do: ["--security-opt", "label=disable"], else: []),
       Enum.flat_map(["/tmp", "/dev/shm"] ++ Map.get(spec, :tmpfs, []), &tmpfs_args/1),
       mounts(spec, label_disabled?),
-      env_args(spec, home),
+      env_args(spec, home && mapped(spec, home)),
       limit_args(spec),
       Enum.flat_map(Map.get(spec, :labels, []), fn {k, v} -> ["--label", "#{k}=#{v}"] end),
       if(Map.get(spec, :interactive, false), do: ["-i"], else: []),

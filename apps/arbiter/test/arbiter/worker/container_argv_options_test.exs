@@ -186,11 +186,19 @@ defmodule Arbiter.Worker.ContainerArgvOptionsTest do
       assert pairs(a, "-v") |> Enum.member?("/work/tree:/mnt/wt:rw,Z")
       assert pairs(a, "-v") |> Enum.member?("/h:/mnt/h:rw,Z")
       assert pairs(a, "-w") == ["/mnt/wt"]
+      assert "HOME=/mnt/h" in pairs(a, "-e")
     end
 
     test "cli mounts keep their destination; unmapped paths are identity" do
-      a = argv(%{readonly_paths: ["/r"], mount_map: %{"/work/tree" => "/mnt/wt"}})
+      a =
+        argv(%{
+          readonly_paths: ["/r"],
+          cli_mounts: [{"/cli", "/opt/arbiter/cli/x"}],
+          mount_map: %{"/work/tree" => "/mnt/wt", "/cli" => "/elsewhere"}
+        })
+
       assert "/r:/r:ro" in pairs(a, "-v")
+      assert "/cli:/opt/arbiter/cli/x:ro" in pairs(a, "-v")
     end
   end
 
