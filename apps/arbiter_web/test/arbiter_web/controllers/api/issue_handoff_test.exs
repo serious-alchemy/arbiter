@@ -44,4 +44,18 @@ defmodule ArbiterWeb.Api.IssueHandoffTest do
     assert body["attention_note"] == "done, retry"
     assert Ash.get!(Issue, task.id).attention_owner == :coordinator
   end
+
+  test "a hand-off to the owner it already has is a 409 conflict", %{conn: conn, task: task} do
+    {:ok, _} = Attention.hand_off(task.id, :operator, "yours")
+
+    conn = post(conn, ~p"/api/issues/#{task.id}/handoff", %{note: "again"})
+
+    assert %{"error" => %{"type" => "conflict"}} = json_response(conn, 409)
+  end
+
+  test "a hand-off on an unknown ticket is a 404", %{conn: conn} do
+    conn = post(conn, ~p"/api/issues/no-such-ticket/handoff", %{note: "x"})
+
+    assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+  end
 end

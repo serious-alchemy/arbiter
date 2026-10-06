@@ -65,6 +65,8 @@ defmodule ArbiterWeb.Api.QuotaController do
   alias Arbiter.Workflows.DispatchQueue
   require Ash.Query
 
+  action_fallback(ArbiterWeb.Api.FallbackController)
+
   def show(conn, %{"account" => account_ref}) when is_binary(account_ref) and account_ref != "" do
     show_by_account(conn, account_ref)
   end
@@ -124,10 +126,8 @@ defmodule ArbiterWeb.Api.QuotaController do
           paused_providers: Arbiter.Providers.Pause.to_json()
         )
 
-      {:error, message} ->
-        conn
-        |> put_status(:not_found)
-        |> json(%{error: %{type: "not_found", message: message}})
+      {:error, message} when is_binary(message) ->
+        {:error, {:not_found, message}}
     end
   end
 
@@ -173,21 +173,13 @@ defmodule ArbiterWeb.Api.QuotaController do
         )
 
       {:error, :not_found} ->
-        conn
-        |> put_status(:not_found)
-        |> json(%{
-          error: %{type: "not_found", message: "account #{inspect(account_ref)} not found"}
-        })
+        {:error, {:not_found, "account #{inspect(account_ref)} not found"}}
 
+      # The same ambiguity `/api/usage` and `/api/accounts` report.
       {:error, :ambiguous} ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{
-          error: %{
-            type: "ambiguous",
-            message: "account #{inspect(account_ref)} is ambiguous; use \"provider:slug\""
-          }
-        })
+        {:error,
+         {:invalid_request, "account #{inspect(account_ref)} is ambiguous; use \"provider:slug\"",
+          %{}}}
     end
   end
 

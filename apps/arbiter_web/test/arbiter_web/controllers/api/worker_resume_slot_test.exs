@@ -62,4 +62,29 @@ defmodule ArbiterWeb.Api.WorkerResumeSlotTest do
     assert event.payload["holders"] == [ctx.b.id]
     assert event.payload["actor"] == "api"
   end
+
+  describe "refusals the endpoint used to answer with a generic 500 (bd-5fc29i)" do
+    test "a resume while migrations are pending is a 503 busy naming the count", ctx do
+      Application.put_env(:arbiter, :migrations_module, ArbiterWeb.Test.PendingMigrations)
+      on_exit(fn -> Application.delete_env(:arbiter, :migrations_module) end)
+
+      conn = post(ctx.conn, ~p"/api/workers/#{ctx.a.id}/resume", %{"force" => true})
+
+      assert %{"error" => %{"type" => "busy", "message" => message, "details" => details}} =
+               json_response(conn, 503)
+
+      assert message =~ "pending migration"
+      assert details["pending_migrations"] == 3
+    end
+
+    test "a resume when the migration check itself fails is a 503 busy, not a 500", ctx do
+      Application.put_env(:arbiter, :migrations_module, ArbiterWeb.Test.UnreachableMigrations)
+      on_exit(fn -> Application.delete_env(:arbiter, :migrations_module) end)
+
+      conn = post(ctx.conn, ~p"/api/workers/#{ctx.a.id}/resume", %{"force" => true})
+
+      assert %{"error" => %{"type" => "busy", "details" => %{"reason" => ":unreachable"}}} =
+               json_response(conn, 503)
+    end
+  end
 end

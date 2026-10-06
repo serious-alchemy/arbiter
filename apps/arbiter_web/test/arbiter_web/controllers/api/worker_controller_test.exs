@@ -209,7 +209,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       conn =
         post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
 
-      body = json_response(conn, 400)
+      body = json_response(conn, 409)
+      assert body["error"]["type"] == "conflict"
       assert inspect(body) =~ "#{task.id} is in Backlog"
       assert inspect(body) =~ "--force"
       assert Ash.get!(Issue, task.id).state == :backlog
@@ -280,7 +281,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           "repo" => "no-such-repo"
         })
 
-      body = json_response(conn, 400)
+      body = json_response(conn, 422)
       assert body["error"]["message"] =~ "repo"
     end
 
@@ -300,7 +301,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           "repo" => "no-such-repo"
         })
 
-      body = json_response(conn, 400)
+      body = json_response(conn, 422)
       assert body["error"]["message"] =~ "repo"
     end
 
@@ -400,20 +401,23 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "a task with no prior run nor repo can't be resumed (400)", %{conn: conn, ws: ws} do
+    test "a task with no prior run nor repo can't be resumed (422 validation_error)", %{
+      conn: conn,
+      ws: ws
+    } do
       {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
 
       conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{})
-      body = json_response(conn, 400)
+      body = json_response(conn, 422)
       assert body["error"]["message"] =~ "repo"
     end
 
-    test "a closed task can't be resumed (400)", %{conn: conn, ws: ws} do
+    test "a closed task can't be resumed (409 conflict)", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
       conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo"})
-      body = json_response(conn, 400)
+      body = json_response(conn, 409)
       assert body["error"]["message"] =~ "closed"
     end
 
@@ -429,7 +433,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           "force_quota" => true
         })
 
-      body = json_response(conn, 400)
+      body = json_response(conn, 422)
       # The specific error varies (no session, no outpost) — the test is that force_quota
       # is accepted without error and the request proceeds to the expected dispatch path.
       assert body["error"]["message"] =~ "resume"

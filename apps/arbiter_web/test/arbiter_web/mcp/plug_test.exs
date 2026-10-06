@@ -294,6 +294,29 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
       result = json_response(conn, 200)["result"]
       assert result["isError"] == true
+
+      # bd-5fc29i: the error `kind` rides next to the text, so a client can
+      # branch on it instead of parsing prose.
+      assert result["_meta"]["type"] == "not_found"
+
+      assert %{"error" => %{"type" => "not_found", "message" => message}} =
+               result["structuredContent"]
+
+      assert [%{"type" => "text", "text" => ^message}] = result["content"]
+    end
+
+    test "a bad argument is an isError result typed validation_error", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{"name" => "ticket_list", "arguments" => %{"state" => "nonsense"}})
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == true
+      assert result["_meta"]["type"] == "validation_error"
+      assert result["structuredContent"]["error"]["type"] == "validation_error"
     end
 
     test "an unknown tool is a JSON-RPC invalid-params error", ctx do

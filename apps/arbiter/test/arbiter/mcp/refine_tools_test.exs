@@ -91,7 +91,9 @@ defmodule Arbiter.MCP.RefineToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "refine-other-ws", prefix: "rfo"})
       {:ok, stranger} = Ash.create(Issue, %{title: "stranger", workspace_id: other_ws.id})
 
-      assert {:tool_error, message} = call(ctx.refine, "ticket_show", %{"id" => stranger.id})
+      assert {:tool_error, message, _type} =
+               call(ctx.refine, "ticket_show", %{"id" => stranger.id})
+
       assert message =~ "not found"
     end
   end
@@ -132,7 +134,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
     # which a refine session is denied), so there is nothing to write.
     test "cannot move the state even inside the subtree", ctx do
       for field <- ["status", "state"] do
-        assert {:tool_error, _} =
+        assert {:tool_error, _, _type} =
                  call(ctx.refine, "ticket_update", %{"id" => ctx.root.id, field => "closed"})
       end
 
@@ -446,7 +448,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
       assert {:ok, %{id: new_id}} =
                call(ctx.refine, "ticket_create", %{"title" => "no ACs", "issue_type" => "feature"})
 
-      assert {:tool_error, message} = call(ctx.refine, "ticket_promote", %{"id" => new_id})
+      assert {:tool_error, message, _type} = call(ctx.refine, "ticket_promote", %{"id" => new_id})
       assert message =~ "acceptance"
       assert Ash.get!(Issue, new_id).state == :backlog
     end

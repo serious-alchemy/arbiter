@@ -3587,7 +3587,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
 
       assert msg =~ ":ci_failed"
@@ -3663,7 +3663,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{restarted: true}} =
                Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
       assert msg =~ ~r/already running/i
@@ -3680,7 +3680,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, merging} = Issue.pr_opened(ctx.task.id, "!rw3")
       {:ok, _closed} = Ash.update(merging, %{}, action: :close)
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
       assert msg =~ ~r/not Merging/i
@@ -4893,7 +4893,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "a Backlog ticket is refused, naming why and how to force it", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ctx.ws.id})
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
                  "task_id" => task.id,
                  "repo" => "test/repo",
@@ -4921,7 +4921,7 @@ defmodule Arbiter.MCP.ToolsTest do
           type: :depends_on
         })
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "no_agent" => true})
 
       assert msg =~ "blocked by #{blocker.id}"
@@ -5198,7 +5198,7 @@ defmodule Arbiter.MCP.ToolsTest do
       :ok =
         wait_until(fn -> Worker.agent_session_live?(task.id) end)
 
-      assert {:error, {:invalid, msg}} = Tools.worker_dispatch(ctx.coordinator, args)
+      assert {:error, {:conflict, msg}} = Tools.worker_dispatch(ctx.coordinator, args)
 
       assert msg =~ "live agent session"
       assert msg =~ "arb worker stop #{task.id}"
@@ -6482,7 +6482,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "maps a handler not-found into a tool error (not a JSON-RPC error)", ctx do
-      assert {:tool_error, message} =
+      assert {:tool_error, message, _type} =
                Catalog.call(ctx.coordinator, "ticket_show", %{"id" => "bd-does-not-exist"})
 
       assert message =~ "not found"

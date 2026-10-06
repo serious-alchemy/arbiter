@@ -31,6 +31,7 @@ defmodule ArbiterWeb.Plugs.WorkerBridge do
   import Plug.Conn
 
   alias Arbiter.Worker.Egress.BridgeIdentity
+  alias ArbiterWeb.ErrorResponse
 
   @allowed_prefixes ["api", "mcp"]
 
@@ -69,14 +70,10 @@ defmodule ArbiterWeb.Plugs.WorkerBridge do
   defp allowed_path?([]), do: false
 
   defp refuse(conn) do
-    body =
-      Jason.encode!(%{
-        "error" => %{"message" => "not available to a worker through the Arbiter bridge"}
-      })
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(403, body)
-    |> halt()
+    ErrorResponse.halt_with(
+      conn,
+      :forbidden,
+      "not available to a worker through the Arbiter bridge"
+    )
   end
 end

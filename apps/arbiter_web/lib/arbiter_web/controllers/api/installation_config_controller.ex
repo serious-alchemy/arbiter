@@ -42,17 +42,10 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
          {:ok, _} <- Registry.put(key, Map.get(params, "value")) do
       json(conn, %{data: Registry.describe(key)})
     else
-      {:invalid, message} -> invalid(conn, message)
-      {:error, {:invalid, message}} -> invalid(conn, message)
+      {:invalid, message} -> {:error, {:invalid, message}}
+      {:error, _} = error -> error
     end
   end
 
-  def update(conn, _params), do: invalid(conn, "key is required")
-
-  # Same message the MCP tool returns as `{:invalid, message}`.
-  defp invalid(conn, message) do
-    conn
-    |> put_status(:unprocessable_entity)
-    |> json(%{error: %{type: "validation_error", message: message, details: %{}}})
-  end
+  def update(_conn, _params), do: {:error, {:invalid, "key is required"}}
 end

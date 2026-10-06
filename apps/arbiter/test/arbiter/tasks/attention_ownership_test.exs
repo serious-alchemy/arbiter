@@ -97,7 +97,7 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       raise_crash(ctx.task)
       assert {:error, :note_required} = Attention.hand_off(ctx.task.id, :operator, "  ")
 
-      assert {:tool_error, _} =
+      assert {:tool_error, _, _type} =
                Catalog.call(ctx.coordinator, "ticket_handoff", %{"id" => ctx.task.id})
     end
 

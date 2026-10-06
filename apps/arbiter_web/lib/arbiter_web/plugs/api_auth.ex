@@ -21,7 +21,8 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
     * a valid token whose tier or scope the route's policy refuses → 403
       (`ArbiterWeb.ApiPolicy.authorize/3`).
 
-  Errors use the API error shape: `%{"error" => %{"message" => "..."}}`.
+  Errors use the one API error shape, `%{"error" => %{"type", "message", "details"}}`
+  (`ArbiterWeb.ErrorResponse`).
 
   A request that arrived through a jailed worker's Arbiter bridge
   (`ArbiterWeb.Plugs.WorkerBridge`, bd-c1qq7l) is authenticated as that
@@ -44,6 +45,7 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   alias Arbiter.MCP.Scope
   alias ArbiterWeb.ApiPolicy
+  alias ArbiterWeb.ErrorResponse
   alias ArbiterWeb.Loopback
   alias ArbiterWeb.Plugs.WorkerBridge
 
@@ -64,8 +66,8 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
          :ok <- ApiPolicy.authorize(route_policy(conn), scope, conn.params) do
       conn
     else
-      {:error, :unauthenticated, message} -> halt_with(conn, 401, message)
-      {:error, :forbidden, message} -> halt_with(conn, 403, message)
+      {:error, :unauthenticated, message} -> halt_with(conn, :unauthenticated, message)
+      {:error, :forbidden, message} -> halt_with(conn, :forbidden, message)
     end
   end
 
@@ -111,12 +113,5 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   @verbs %{"GET" => :get, "POST" => :post, "PUT" => :put, "PATCH" => :patch, "DELETE" => :delete}
   defp verb(method), do: Map.get(@verbs, method, :unknown)
 
-  defp halt_with(conn, status, message) do
-    body = Jason.encode!(%{"error" => %{"message" => message}})
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(status, body)
-    |> halt()
-  end
+  defp halt_with(conn, kind, message), do: ErrorResponse.halt_with(conn, kind, message)
 end

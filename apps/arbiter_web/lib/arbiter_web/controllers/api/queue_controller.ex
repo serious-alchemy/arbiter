@@ -32,9 +32,10 @@ defmodule ArbiterWeb.Api.QueueController do
   Errors:
 
     * 404 — no Watchdog is currently running for this task.
-    * 400 — the Watchdog exists but isn't parked on an exhausted `:ci_failed`
+    * 409 — the Watchdog exists but isn't parked on an exhausted `:ci_failed`
       block or an exhausted conflict auto-resolve (bd-4olwyg), so there's
       nothing to re-arm.
+    * 503 — the Watchdog is busy polling; retry in a moment.
   """
   def retry_auto_resolve(conn, %{"task_id" => task_id})
       when is_binary(task_id) and task_id != "" do
@@ -47,7 +48,7 @@ defmodule ArbiterWeb.Api.QueueController do
 
       {:error, :not_parked_on_ci_failed} ->
         {:error,
-         {:invalid_request,
+         {:conflict,
           "task #{task_id} isn't parked on an exhausted :ci_failed block or an exhausted " <>
             "conflict auto-resolve — nothing to re-arm"}}
 
@@ -76,8 +77,11 @@ defmodule ArbiterWeb.Api.QueueController do
     * 409 — a Watchdog is already running. Refused rather than stacked: two
       Watchdogs polling one MR would race the merge and double-dispatch fix
       passes.
-    * 400 — the ticket is not Merging, has no PR on record, or its merger
-      adapter cannot be resolved; or the Watchdog failed to start.
+    * 409 — a Watchdog is already running, or the ticket was pulled from the
+      queue (see above).
+    * 422 — the ticket is not Merging, has no PR on record, or its merger
+      adapter cannot be resolved.
+    * 500 — the Watchdog failed to start.
 
   An explicit restart (`arb queue restart-watchdog`): a ticket pulled out of
   the merge queue (`Arbiter.Tasks.PullRequest.pull/1`) goes back in it.
@@ -89,11 +93,10 @@ defmodule ArbiterWeb.Api.QueueController do
         json(conn, %{restarted: true, task_id: task_id})
 
       {:error, reason} ->
-        case Watchdog.restart_refusal(task_id, reason) do
-          {:not_found, _message} -> {:error, :not_found}
-          {:conflict, message} -> {:error, {:conflict, message}}
-          {_invalid_or_internal, message} -> {:error, {:invalid_request, message}}
-        end
+        # `restart_refusal/2` speaks the shared taxonomy
+        # (`:not_found | :conflict | :invalid | :internal`), so a genuine start
+        # failure is a 500, not a 400.
+        {:error, Watchdog.restart_refusal(task_id, reason)}
     end
   end
 
@@ -155,14 +158,14 @@ defmodule ArbiterWeb.Api.QueueController do
 
         {:error, :unsupported} ->
           {:error,
-           {:invalid_request,
+           {:conflict,
             "task #{task_id}'s merger has no CI re-run primitive — re-run it from the forge UI"}}
 
         {:error, :busy} ->
           {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
 
         {:error, reason} ->
-          {:error, {:invalid_request, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+          {:error, {:server_error, "CI re-run failed for #{task_id}", %{reason: inspect(reason)}}}
       end
     end
   end
@@ -209,7 +212,7 @@ defmodule ArbiterWeb.Api.QueueController do
 
           {:error, :not_parked_on_ci_failed} ->
             {:error,
-             {:invalid_request,
+             {:conflict,
               "task #{task_id} is not parked on a :ci_failed block — there is nothing to " <>
                 "reclassify as external"}}
 
@@ -236,7 +239,7 @@ defmodule ArbiterWeb.Api.QueueController do
 
           :error ->
             {:error,
-             {:invalid_request,
+             {:invalid,
               "unknown mode #{inspect(raw)} — expected one of: " <>
                 (@rerun_modes |> Map.keys() |> Enum.sort() |> Enum.join(", "))}}
         end

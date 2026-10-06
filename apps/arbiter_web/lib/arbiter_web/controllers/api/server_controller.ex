@@ -81,6 +81,8 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.MemoryScope.Diagnosis, as: MemoryDiagnosis
 
+  action_fallback(ArbiterWeb.Api.FallbackController)
+
   def migrations(conn, _params) do
     case Arbiter.Migrations.count_pending() do
       {:ok, 0} ->
