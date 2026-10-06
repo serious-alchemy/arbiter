@@ -47,10 +47,16 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
     if f = System.get_env("SPIKE_RESULTS_FILE"), do: File.write!(f, line <> "\n", [:append])
   end
 
-  defp tls(certdir), do: [nodelay: true, cacertfile: String.to_charlist(Path.join(certdir, "ca.crt"))]
+  defp tls(certdir),
+    do: [nodelay: true, cacertfile: String.to_charlist(Path.join(certdir, "ca.crt"))]
+
   defp proxy(port \\ @proxy_port), do: {:http, "127.0.0.1", port, []}
-  defp via_proxy_url, do: "wss://#{@target_host}:#{@target_port}/node/socket/websocket?vsn=2.0.0&token=spike-token"
-  defp direct_url, do: "wss://127.0.0.1:#{@listen_port}/node/socket/websocket?vsn=2.0.0&token=spike-token"
+
+  defp via_proxy_url,
+    do: "wss://#{@target_host}:#{@target_port}/node/socket/websocket?vsn=2.0.0&token=spike-token"
+
+  defp direct_url,
+    do: "wss://127.0.0.1:#{@listen_port}/node/socket/websocket?vsn=2.0.0&token=spike-token"
 
   test "baseline: the same TLS WebSocket with no proxy (loopback)", %{certdir: certdir} do
     {:ok, c} = WsClient.start_link(url: direct_url(), owner: self(), transport_opts: tls(certdir))
@@ -60,11 +66,17 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
     report("baseline_direct", %{joined: true})
   end
 
-  test "through tailscaled's userspace HTTP proxy: join, heartbeat, 1 MB binary echo byte-exact", %{certdir: certdir} do
+  test "through tailscaled's userspace HTTP proxy: join, heartbeat, 1 MB binary echo byte-exact",
+       %{certdir: certdir} do
     t0 = System.monotonic_time(:millisecond)
 
     {:ok, c} =
-      WsClient.start_link(url: via_proxy_url(), owner: self(), transport_opts: tls(certdir), proxy: proxy())
+      WsClient.start_link(
+        url: via_proxy_url(),
+        owner: self(),
+        transport_opts: tls(certdir),
+        proxy: proxy()
+      )
 
     assert {:ok, _} = WsClient.join(c, "node:spike")
     connect_ms = System.monotonic_time(:millisecond) - t0
@@ -75,15 +87,35 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
     t1 = System.monotonic_time(:millisecond)
     WsClient.push(c, "node:spike", "echo_bin", {:binary, payload})
     assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}}, 30_000
-    report("proxy_ws", %{connect_join_ms: connect_ms, echo_1MB_ms: System.monotonic_time(:millisecond) - t1, byte_exact: true})
+
+    report("proxy_ws", %{
+      connect_join_ms: connect_ms,
+      echo_1MB_ms: System.monotonic_time(:millisecond) - t1,
+      byte_exact: true
+    })
   end
 
   test "failure shapes: proxy port closed, and a CONNECT target nothing listens on" do
     Process.flag(:trap_exit, true)
 
-    r1 = WsClient.start_link(url: via_proxy_url(), owner: self(), proxy: proxy(1), transport_opts: [nodelay: true])
-    r2 = WsClient.start_link(url: "wss://#{@target_host}:9/node/socket/websocket", owner: self(), proxy: proxy(), transport_opts: [nodelay: true])
+    r1 =
+      WsClient.start_link(
+        url: via_proxy_url(),
+        owner: self(),
+        proxy: proxy(1),
+        transport_opts: [nodelay: true]
+      )
+
+    r2 =
+      WsClient.start_link(
+        url: "wss://#{@target_host}:9/node/socket/websocket",
+        owner: self(),
+        proxy: proxy(),
+        transport_opts: [nodelay: true]
+      )
+
     report("proxy_failures", %{proxy_port_closed: inspect(r1), connect_target_closed: inspect(r2)})
+
     assert match?({:error, _}, r1)
     assert match?({:error, _}, r2)
   end
@@ -100,7 +132,16 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
 
     if now >= deadline do
       WsClient.close(c)
-      %{label: label, hb_ms: hb_ms, sent: seq, acked: length(rtts), alive_s: div(now - started, 1000), closed?: false, rtt_ms: rtt_summary(rtts)}
+
+      %{
+        label: label,
+        hb_ms: hb_ms,
+        sent: seq,
+        acked: length(rtts),
+        alive_s: div(now - started, 1000),
+        closed?: false,
+        rtt_ms: rtt_summary(rtts)
+      }
     else
       seq = seq + 1
       WsClient.push(c, "node:spike", "hb", %{"seq" => seq, "t" => now})
@@ -113,10 +154,27 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
           loop(c, hb_ms, deadline, seq, [rtt | rtts], started, label)
 
         {:ws, :closed, reason} ->
-          %{label: label, hb_ms: hb_ms, sent: seq, acked: length(rtts), alive_s: div(System.monotonic_time(:millisecond) - started, 1000), closed?: true, reason: inspect(reason)}
+          %{
+            label: label,
+            hb_ms: hb_ms,
+            sent: seq,
+            acked: length(rtts),
+            alive_s: div(System.monotonic_time(:millisecond) - started, 1000),
+            closed?: true,
+            reason: inspect(reason)
+          }
       after
         20_000 ->
-          %{label: label, hb_ms: hb_ms, sent: seq, acked: length(rtts), alive_s: div(System.monotonic_time(:millisecond) - started, 1000), closed?: false, reason: "hb_ack timeout", rtt_ms: rtt_summary(rtts)}
+          %{
+            label: label,
+            hb_ms: hb_ms,
+            sent: seq,
+            acked: length(rtts),
+            alive_s: div(System.monotonic_time(:millisecond) - started, 1000),
+            closed?: false,
+            reason: "hb_ack timeout",
+            rtt_ms: rtt_summary(rtts)
+          }
       end
     end
   end
@@ -135,7 +193,13 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
 
   defp rtt_summary(rtts) do
     sorted = Enum.sort(rtts)
-    %{min: hd(sorted), p50: Enum.at(sorted, div(length(sorted), 2)), p99: Enum.at(sorted, max(ceil(length(sorted) * 0.99) - 1, 0)), max: List.last(sorted)}
+
+    %{
+      min: hd(sorted),
+      p50: Enum.at(sorted, div(length(sorted), 2)),
+      p99: Enum.at(sorted, max(ceil(length(sorted) * 0.99) - 1, 0)),
+      max: List.last(sorted)
+    }
   end
 
   @tag timeout: 4_000_000
@@ -144,13 +208,25 @@ defmodule ArbiterWeb.Spike.K11ProxyWsTest do
     opts = [transport_opts: tls(certdir), proxy: proxy()]
 
     tasks = [
-      Task.async(fn -> heartbeat_socket(via_proxy_url(), opts, 10_000, @soak_s, "hb10s-via-proxy") end),
-      Task.async(fn -> heartbeat_socket(via_proxy_url(), opts, 50_000, @soak_s, "hb50s-via-proxy") end)
+      Task.async(fn ->
+        heartbeat_socket(via_proxy_url(), opts, 10_000, @soak_s, "hb10s-via-proxy")
+      end),
+      Task.async(fn ->
+        heartbeat_socket(via_proxy_url(), opts, 50_000, @soak_s, "hb50s-via-proxy")
+      end)
     ]
 
     results = Task.await_many(tasks, (@soak_s + 120) * 1000)
     report("soak", %{seconds: @soak_s, sockets: results})
-    for r <- results, do: refute(r.closed?, "socket #{r.label} was closed during the soak: #{inspect(r)}")
-    for r <- results, do: assert(r.acked >= div(@soak_s * 1000, r.hb_ms) - 2, "socket #{r.label} missed heartbeats: #{inspect(r)}")
+
+    for r <- results,
+        do: refute(r.closed?, "socket #{r.label} was closed during the soak: #{inspect(r)}")
+
+    for r <- results,
+        do:
+          assert(
+            r.acked >= div(@soak_s * 1000, r.hb_ms) - 2,
+            "socket #{r.label} missed heartbeats: #{inspect(r)}"
+          )
   end
 end
