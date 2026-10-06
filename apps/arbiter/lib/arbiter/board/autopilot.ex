@@ -651,7 +651,9 @@ defmodule Arbiter.Board.Autopilot do
   # (`worker_phase`, which also covers bd-92mx1m's park-for-a-human release a
   # deferred resume waits on). Both are debounced like every other trigger, and
   # a pass that finds nothing to promote does not reschedule itself.
-  def handle_info({:event, %{topic: "worker_phase"}}, state), do: {:noreply, request_plan(state)}
+  def handle_info({:event, %{topic: "worker_phase"} = event}, state) do
+    if slot_releasing_phase?(event), do: {:noreply, request_plan(state)}, else: {:noreply, state}
+  end
 
   def handle_info({:event, %{topic: "task_state", state: ticket_state}}, state)
       when is_binary(ticket_state) and ticket_state != "active" do
@@ -693,6 +695,14 @@ defmodule Arbiter.Board.Autopilot do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ---- reactive triggers -----------------------------------------------
+
+  # A phase that holds no slot: the worker is waiting (on review, CI or a
+  # human) or finished. Mid-work phases fire constantly and free nothing.
+  @slot_releasing_phases ~w(waiting_on_you done in_review awaiting_ci ci_wait)
+
+  defp slot_releasing_phase?(%{phase: phase}) when phase in @slot_releasing_phases, do: true
+  defp slot_releasing_phase?(%{state: state}) when state in ["waiting", "finished"], do: true
+  defp slot_releasing_phase?(_event), do: false
 
   # Coalesce a burst of triggers into one debounced pass. Paused: do nothing,
   # not even schedule — a resume with nothing pending is right, since a pass
