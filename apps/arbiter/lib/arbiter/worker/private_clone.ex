@@ -991,8 +991,7 @@ defmodule Arbiter.Worker.PrivateClone do
          :ok <- File.write(file, id <> "\n") do
       :ok
     else
-      {:error, reason} when is_atom(reason) -> {:error, {:git_failed, inspect(reason)}}
-      {:error, _} = error -> error
+      {:error, reason} -> {:error, {:git_failed, inspect(reason)}}
     end
   end
 
