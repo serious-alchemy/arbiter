@@ -91,10 +91,6 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
-  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp dispatch_task(conn, task_id, opts) do
     case Dispatch.dispatch(task_id, opts) do
       {:ok, result} ->
@@ -102,109 +98,8 @@ defmodule ArbiterWeb.Api.WorkerController do
         |> put_status(:created)
         |> render(:dispatch, result: result)
 
-      {:error, {:task_not_found, _}} ->
-        {:error, :not_found}
-
-      {:error, {:task_closed, _}} ->
-        {:error,
-         {:invalid_request, "task is closed; reopen it before dispatching", %{task_id: task_id}}}
-
-      # bd-asxw4e: a Backlog or Blocked ticket, dispatched without `force`.
-      {:error, {:not_dispatchable, _, hold}} ->
-        {:error,
-         {:invalid_request, Dispatch.refusal_message(task_id, hold),
-          %{task_id: task_id, reason: Arbiter.Tasks.Lifecycle.describe_hold(hold)}}}
-
-      {:error, {:task_awaiting_review, _}} ->
-        {:error,
-         {:invalid_request,
-          "task is already awaiting review; the Watchdog will close it on MR merge",
-          %{task_id: task_id}}}
-
-      # bd-8suxac: the provider account the run would use has no free slot. A
-      # 409, like a resume at a full cap: the request is fine, the fleet's
-      # state refuses it. `over_cap` (`arb dispatch --over-cap`) overrides.
-      {:error, {:account_at_capacity, info}} ->
-        {:error,
-         {:conflict, Arbiter.Accounts.Admission.refusal_message(info),
-          %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}}
-
-      # RW8: no node has a free slot (`remote_only`), or the primary's own cap
-      # holds a local run. A 409 like the account cap: held, not failed — it
-      # starts when capacity frees. `over_cap` overrides the primary's cap.
-      {:error, {:no_node_capacity, info}} ->
-        {:error,
-         {:conflict, Arbiter.Nodes.Placement.refusal_message(info),
-          %{
-            task_id: task_id,
-            node: info[:node],
-            mode: info[:mode] && to_string(info.mode),
-            cap: info[:cap],
-            holders: info[:holders] || []
-          }}}
-
-      # bd-13pqcp: the ticket's provider constraint leaves no eligible provider
-      # (or the one named is excluded). A 409 — the request is fine, the ticket's
-      # own rule refuses it; edit or clear the constraint, or wait for capacity.
-      {:error, {:provider_constraint, provider, phrase}} ->
-        {:error,
-         {:conflict, "#{phrase} — dispatch refused; it never runs on an excluded provider",
-          %{task_id: task_id, provider: provider && to_string(provider)}}}
-
-      # bd-57uzkl: the provider lacks a capability the role or repo requires.
-      # A 409, like the provider constraint: the request is fine, the rule
-      # refuses it.
-      {:error, {:capability_missing, provider, phrase}} ->
-        {:error,
-         {:conflict, "#{phrase} — dispatch refused",
-          %{task_id: task_id, provider: provider && to_string(provider)}}}
-
-      # bd-c675ny: the model it would run is below the repo's routing floor.
-      {:error, {:below_floor, provider, phrase}} ->
-        {:error,
-         {:conflict, "#{phrase} — dispatch refused",
-          %{task_id: task_id, provider: provider && to_string(provider)}}}
-
-      # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
-      # worker is mid-session used to silently open a second paid CLI inside the
-      # same worker run. It is now refused, with a message that names the live
-      # session so a retrying caller can tell "still busy" from a bad request.
-      {:error, {:agent_session_active, _}} ->
-        {:error,
-         {:invalid_request,
-          "task already has a live agent session; wait for it to finish or stop the " <>
-            "worker before dispatching again", %{task_id: task_id}}}
-
-      {:error, :no_repo_configured} ->
-        {:error,
-         {:invalid_request,
-          "no repos configured — add at least one repo to your workspace config " <>
-            "(repo_paths) or application env (:arbiter, :repo_paths), " <>
-            "or pass a repo explicitly: `arb ticket dispatch #{task_id} <repo>`",
-          %{task_id: task_id}}}
-
-      {:error, {:repo_not_found, repo}} ->
-        {:error,
-         {:invalid_request,
-          "repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
-            "application env (:arbiter, :repo_paths)", %{task_id: task_id, repo: repo}}}
-
-      {:error, {:ambiguous_repo, repos}} ->
-        {:error,
-         {:invalid_request,
-          "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
-            "`arb ticket dispatch #{task_id} <repo>`",
-          %{task_id: task_id, available_repos: repos}}}
-
-      {:error, {:pending_migrations, count}} ->
-        {:error,
-         {:invalid_request,
-          "#{count} pending migration(s) — the server is currently applying schema changes. " <>
-            "Wait for the deployment to complete before dispatching work.",
-          %{task_id: task_id, pending_migrations: count}}}
-
       {:error, reason} ->
-        {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
+        refusal(reason, task_id, :dispatch)
     end
   end
 
@@ -238,29 +133,8 @@ defmodule ArbiterWeb.Api.WorkerController do
               |> put_status(:created)
               |> render(:dispatch, result: result)
 
-            {:error, {:task_not_found, _}} ->
-              {:error, :not_found}
-
-            {:error, {:task_closed, _}} ->
-              {:error,
-               {:invalid_request, "task is closed; reopen it before reviewing",
-                %{task_id: task_id}}}
-
-            {:error, {:task_awaiting_review, _}} ->
-              {:error,
-               {:invalid_request,
-                "task is already awaiting review; a Watchdog is active and will close it on MR merge",
-                %{task_id: task_id}}}
-
-            # bd-2aslx6 (#1428): see the dispatch action above.
-            {:error, {:agent_session_active, _}} ->
-              {:error,
-               {:invalid_request,
-                "task already has a live agent session; wait for it to finish or stop the " <>
-                  "worker before dispatching a review", %{task_id: task_id}}}
-
             {:error, reason} ->
-              {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
+              refusal(reason, task_id, :review)
           end
 
         _ ->
@@ -337,66 +211,166 @@ defmodule ArbiterWeb.Api.WorkerController do
         |> render(:dispatch, result: result)
 
       {:error, reason} ->
-        {:error, resume_error(reason, task_id)}
+        refusal(reason, task_id, :resume)
     end
   end
 
-  defp resume_error({:task_not_found, _}, _task_id), do: :not_found
+  # One mapping for every refusal `Dispatch.dispatch/2` and `resume_session/2`
+  # return (bd-5fc29i). The kind comes from `Dispatch.refusal_kind/1` — the
+  # same classifier the MCP tools use — so a closed ticket, a live session or a
+  # full account is a 409 `conflict` whichever verb hit it, a bad repo is a 422,
+  # a migrating server is a 503 `busy`, and nothing falls to a bare 500 with the
+  # real reason hidden in `details`.
+  defp refusal({:task_not_found, _}, _task_id, _verb), do: {:error, :not_found}
 
-  defp resume_error({:task_closed, _}, task_id),
-    do: {:invalid_request, "task is closed; reopen it before resuming", %{task_id: task_id}}
+  defp refusal(reason, task_id, verb) do
+    case refusal_text(reason, task_id, verb) do
+      {message, details} ->
+        {:error, {Dispatch.refusal_kind(reason), message, details}}
 
-  defp resume_error(:no_outpost, task_id),
+      nil ->
+        {:error, {:server_error, "#{verb_label(verb)} failed", %{reason: inspect(reason)}}}
+    end
+  end
+
+  defp verb_label(:dispatch), do: "dispatch"
+  defp verb_label(:review), do: "review dispatch"
+  defp verb_label(:resume), do: "resume"
+
+  defp gerund(:dispatch), do: "dispatching"
+  defp gerund(:review), do: "reviewing"
+  defp gerund(:resume), do: "resuming"
+
+  # A review is a dispatch as far as "refused" reads.
+  defp noun(:resume), do: "resume"
+  defp noun(_verb), do: "dispatch"
+
+  defp refusal_text({:task_closed, _}, task_id, verb),
+    do: {"task is closed; reopen it before #{gerund(verb)}", %{task_id: task_id}}
+
+  # bd-asxw4e: a Backlog or Blocked ticket, dispatched without `force`.
+  defp refusal_text({:not_dispatchable, _, hold}, task_id, _verb),
     do:
-      {:invalid_request,
-       "no preserved worktree for this task — nothing to resume; start fresh with " <>
+      {Dispatch.refusal_message(task_id, hold),
+       %{task_id: task_id, reason: Arbiter.Tasks.Lifecycle.describe_hold(hold)}}
+
+  defp refusal_text({:task_awaiting_review, _}, task_id, :review),
+    do:
+      {"task is already awaiting review; a Watchdog is active and will close it on MR merge",
+       %{task_id: task_id}}
+
+  defp refusal_text({:task_awaiting_review, _}, task_id, _verb),
+    do:
+      {"task is already awaiting review; the Watchdog will close it on MR merge",
+       %{task_id: task_id}}
+
+  # bd-8suxac: the provider account the run would use has no free slot — the
+  # request is fine, the fleet's state refuses it. `over_cap`
+  # (`arb dispatch --over-cap`) overrides.
+  defp refusal_text({:account_at_capacity, info}, task_id, _verb),
+    do:
+      {Arbiter.Accounts.Admission.refusal_message(info),
+       %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}
+
+  # RW8: no node has a free slot (`remote_only`), or the primary's own cap holds
+  # a local run. Held, not failed — it starts when capacity frees.
+  defp refusal_text({:no_node_capacity, info}, task_id, _verb),
+    do:
+      {Arbiter.Nodes.Placement.refusal_message(info),
+       %{
+         task_id: task_id,
+         node: info[:node],
+         mode: info[:mode] && to_string(info.mode),
+         cap: info[:cap],
+         holders: info[:holders] || []
+       }}
+
+  # bd-13pqcp: the ticket's provider constraint leaves no eligible provider (or
+  # the one named is excluded).
+  defp refusal_text({:provider_constraint, provider, phrase}, task_id, verb),
+    do:
+      {"#{phrase} — #{noun(verb)} refused; it never runs on an excluded provider",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
+  # bd-57uzkl: the provider lacks a capability the role or repo requires.
+  defp refusal_text({:capability_missing, provider, phrase}, task_id, verb),
+    do:
+      {"#{phrase} — #{noun(verb)} refused",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
+  # bd-c675ny: the model it would run is below the repo's routing floor.
+  defp refusal_text({:below_floor, provider, phrase}, task_id, verb),
+    do:
+      {"#{phrase} — #{noun(verb)} refused",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
+  # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose worker
+  # is mid-session is refused, naming the live session so a retrying caller can
+  # tell "still busy" from a bad request.
+  defp refusal_text({:agent_session_active, _}, task_id, verb),
+    do:
+      {"task already has a live agent session; wait for it to finish or stop the " <>
+         "worker before " <>
+         if(verb == :review, do: "dispatching a review", else: "dispatching again"),
+       %{task_id: task_id}}
+
+  defp refusal_text(:no_repo_configured, task_id, _verb),
+    do:
+      {"no repos configured — add at least one repo to your workspace config " <>
+         "(repo_paths) or application env (:arbiter, :repo_paths), " <>
+         "or pass a repo explicitly: `arb ticket dispatch #{task_id} <repo>`",
+       %{task_id: task_id}}
+
+  defp refusal_text({:repo_not_found, repo}, task_id, _verb),
+    do:
+      {"repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
+         "application env (:arbiter, :repo_paths)", %{task_id: task_id, repo: repo}}
+
+  defp refusal_text({:ambiguous_repo, repos}, task_id, _verb),
+    do:
+      {"multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
+         "`arb ticket dispatch #{task_id} <repo>`", %{task_id: task_id, available_repos: repos}}
+
+  # The server is applying schema changes: transient, so a 503 `busy`.
+  defp refusal_text({:pending_migrations, count}, task_id, _verb),
+    do:
+      {"#{count} pending migration(s) — the server is currently applying schema changes. " <>
+         "Wait for the deployment to complete before dispatching work.",
+       %{task_id: task_id, pending_migrations: count}}
+
+  # The migration check itself failed (database unreachable, odd shape): the
+  # dispatcher fails closed, and so is a retryable `busy`, not a bug.
+  defp refusal_text({:migrations_check_failed, reason}, task_id, _verb),
+    do:
+      {"could not verify the database schema is current — retry shortly",
+       %{task_id: task_id, reason: inspect(reason)}}
+
+  defp refusal_text(:no_outpost, task_id, _verb),
+    do:
+      {"no preserved worktree for this task — nothing to resume; start fresh with " <>
          "`arb dispatch #{task_id}`", %{task_id: task_id}}
 
-  defp resume_error(:no_session, task_id),
+  defp refusal_text(:no_session, task_id, _verb),
     do:
-      {:invalid_request,
-       "no prior Claude session recorded for this task — nothing to resume at the " <>
+      {"no prior Claude session recorded for this task — nothing to resume at the " <>
          "session level; start fresh with `arb dispatch #{task_id}`", %{task_id: task_id}}
 
-  defp resume_error(:repo_unknown, task_id),
+  defp refusal_text(:repo_unknown, task_id, _verb),
     do:
-      {:invalid_request,
-       "could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
+      {"could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
        %{task_id: task_id}}
 
-  defp resume_error({:worker_active, status}, task_id),
-    do:
-      {:invalid_request, Arbiter.Worker.Dispatch.worker_active_message(status, task_id),
-       %{task_id: task_id}}
+  defp refusal_text({:worker_active, status}, task_id, _verb),
+    do: {Dispatch.worker_active_message(status, task_id), %{task_id: task_id}}
 
-  # bd-13pqcp: the ticket's provider constraint refused the resume's provider.
-  defp resume_error({:provider_constraint, provider, phrase}, task_id),
+  # bd-92mx1m: the task released its slot and the cap is full; `force`
+  # (`arb worker resume --force`) overrides.
+  defp refusal_text({:slot_cap_full, info}, task_id, _verb),
     do:
-      {:conflict, "#{phrase} — resume refused; it never runs on an excluded provider",
-       %{task_id: task_id, provider: provider && to_string(provider)}}
-
-  # bd-57uzkl: the resume's provider lacks a capability the repo requires.
-  defp resume_error({:capability_missing, provider, phrase}, task_id),
-    do:
-      {:conflict, "#{phrase} — resume refused",
-       %{task_id: task_id, provider: provider && to_string(provider)}}
-
-  # bd-c675ny: the resume's model is below the repo's routing floor.
-  defp resume_error({:below_floor, provider, phrase}, task_id),
-    do:
-      {:conflict, "#{phrase} — resume refused",
-       %{task_id: task_id, provider: provider && to_string(provider)}}
-
-  # bd-92mx1m: the task released its slot and the cap is full. A 409 — the
-  # request is fine, the fleet's state refuses it — naming the cap and the
-  # holders; `force` (`arb worker resume --force`) overrides.
-  defp resume_error({:slot_cap_full, info}, task_id),
-    do:
-      {:conflict, Arbiter.Worker.ResumeSlot.refusal_message(info),
+      {Arbiter.Worker.ResumeSlot.refusal_message(info),
        %{task_id: task_id, cap: info.cap, holders: info.holders}}
 
-  defp resume_error(reason, _task_id),
-    do: {:server_error, "resume failed", %{reason: inspect(reason)}}
+  defp refusal_text(_reason, _task_id, _verb), do: nil
 
   def index(conn, params) do
     runs = Current.list(workspace_id: blank_to_nil(params["workspace_id"]))

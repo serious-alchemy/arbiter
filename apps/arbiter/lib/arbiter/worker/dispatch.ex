@@ -1111,6 +1111,50 @@ defmodule Arbiter.Worker.Dispatch do
   defp forced_blockers(_hold), do: []
 
   @doc """
+  Which `Arbiter.Errors` kind a `dispatch/2` / `resume/2` / `resume_session/2`
+  refusal is (bd-5fc29i). One classifier for REST and MCP so the same refusal is
+  the same status and `type` on both:
+
+    * `:not_found` — the task does not exist;
+    * `:conflict` — the request is fine, the task's or the fleet's state refuses
+      it (closed, parked, a live session, a full account/node/slot cap, a
+      provider rule);
+    * `:invalid` — an argument names no usable repo;
+    * `:busy` — the server is applying migrations (or cannot check); retry shortly;
+    * `:internal` — anything this classifier does not know.
+  """
+  @spec refusal_kind(term()) :: Arbiter.Errors.kind()
+  def refusal_kind(reason) when is_tuple(reason), do: reason |> elem(0) |> refusal_kind()
+  def refusal_kind(:task_not_found), do: :not_found
+  def refusal_kind(reason) when reason in [:pending_migrations, :migrations_check_failed],
+    do: :busy
+
+
+  def refusal_kind(reason)
+      when reason in [:no_repo_configured, :repo_not_found, :ambiguous_repo, :repo_unknown],
+      do: :invalid
+
+  def refusal_kind(reason)
+      when reason in [
+             :task_closed,
+             :not_dispatchable,
+             :task_awaiting_review,
+             :agent_session_active,
+             :worker_active,
+             :no_outpost,
+             :no_session,
+             :account_at_capacity,
+             :no_node_capacity,
+             :provider_constraint,
+             :capability_missing,
+             :below_floor,
+             :slot_cap_full
+           ],
+      do: :conflict
+
+  def refusal_kind(_reason), do: :internal
+
+  @doc """
   The operator-facing refusal for `{:error, {:not_dispatchable, task_id, hold}}`
   (bd-asxw4e). One source of truth for MCP, the REST API (and so the CLI) and
   the task page.
