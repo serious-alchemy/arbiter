@@ -131,6 +131,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.Score
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -563,7 +564,21 @@ defmodule Arbiter.Agents.ProviderRouting do
       "model" => entry.model,
       "headroom" => entry |> Map.get(:headroom) |> headroom_value()
     })
+    |> put_pace_exempt_record(entry)
   end
+
+  # Present only when the P0 exemption decided the dispatch (design §4.2) — a
+  # decision with the layer off is byte-identical to what it was.
+  defp put_pace_exempt_record(decision, %{pace_exempt: %{} = exemption}) do
+    Map.put(decision, "pace_exempt", %{
+      "window" => exemption.window,
+      "used" => round4(exemption.used),
+      "paced" => round4(exemption.paced),
+      "cap" => round4(exemption.cap)
+    })
+  end
+
+  defp put_pace_exempt_record(decision, _entry), do: decision
 
   @doc """
   Refuse to start a pass on a paused provider/account (bd-5ef587). The legacy
@@ -866,7 +881,13 @@ defmodule Arbiter.Agents.ProviderRouting do
         {:drop, "quota_held", Map.get(reason, :phrase)}
 
       _ ->
-        headroom_opts = [model: model, now: ctx.now]
+        # The P0 pace exemption (bd-6bxv7h) reads the task's own priority: an
+        # exempt dispatch's headroom is against the lifted line, the same one
+        # the gate just allowed it through, and a dispatch that only got
+        # through on the exemption says so on its candidate.
+        priority = task_priority(ctx.task)
+        headroom_opts = [model: model, now: ctx.now, priority: priority]
+        entry = put_pace_exempt(entry, quota, account, ctx, headroom_opts)
 
         if ctx.scoring do
           windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
@@ -876,6 +897,16 @@ defmodule Arbiter.Agents.ProviderRouting do
           headroom = Headroom.binding(quota, {account, ctx.ws}, headroom_opts)
           {:ok, Map.put(entry, :headroom, headroom)}
         end
+    end
+  end
+
+  defp task_priority(%{priority: priority}) when is_integer(priority), do: priority
+  defp task_priority(_task), do: nil
+
+  defp put_pace_exempt(entry, quota, account, ctx, opts) do
+    case Gate.pace_exemption(quota, {account, ctx.ws}, opts) do
+      nil -> entry
+      exemption -> Map.put(entry, :pace_exempt, exemption)
     end
   end
 

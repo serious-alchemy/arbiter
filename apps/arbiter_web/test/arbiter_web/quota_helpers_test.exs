@@ -272,6 +272,49 @@ defmodule ArbiterWeb.QuotaHelpersTest do
   # AC4: a red bar always means the gate holds (or, for an account that is
   # not paced, that the paced gate would), and an enforcing gate that holds
   # is always red. Both sides run over the same inputs.
+  describe "quota_pace/3 — the P0 exemption note (bd-6bxv7h)" do
+    @exempt %{"pace_exempt_priority" => 0, "pace_exempt_threshold" => 0.8}
+
+    test "no pace_exempt_priority: no exempt note, hold text unchanged" do
+      pace = pace(bar("claude", "5h", 0.4, 0.1), paced())
+
+      assert pace.exempt == nil
+      assert quota_hold_text(pace, 0.4) == "holding dispatch — 40% used ≥ paced ceiling 35%"
+    end
+
+    test "an exempting account says P0 exempt, and how far up" do
+      pace = pace(bar("claude", "5h", 0.4, 0.1), paced(@exempt))
+
+      assert %{exempt: %{ceiling: 0.8, label: "P0 exempt"}} = pace
+      # The colour and holding flag are an ordinary dispatch's.
+      assert %{state: :red, holding: :enforcing} = pace
+
+      assert quota_hold_text(pace, 0.4) ==
+               "holding dispatch — 40% used ≥ paced ceiling 35%; P0 exempt up to 80%"
+    end
+
+    test "past the exempt cap the note says so" do
+      pace = pace(bar("claude", "5h", 0.85, 0.1), paced(@exempt))
+
+      assert quota_hold_text(pace, 0.85) =~ "P0 exempt cap 80% reached"
+    end
+
+    test "a wider exempt priority is labelled with its range" do
+      pace =
+        pace(bar("claude", "5h", 0.4, 0.1), paced(Map.put(@exempt, "pace_exempt_priority", 2)))
+
+      assert %{exempt: %{label: "P0–P2 exempt"}} = pace
+    end
+
+    test "no note when the exemption lifts nothing (late window: the line is above the cap)" do
+      assert %{exempt: nil} = pace(bar("claude", "5h", 0.96, 0.95), paced(@exempt))
+    end
+
+    test "no note when the gate is not enforcing (:continue)" do
+      assert %{exempt: nil} = pace(bar("claude", "5h", 0.4, 0.1), paced(@exempt), false)
+    end
+  end
+
   describe "red ⇔ the gate holds, over a grid of inputs" do
     @utilizations [0.0, 0.04, 0.1, 0.19, 0.2, 0.25, 0.3, 0.34, 0.35, 0.36, 0.5] ++
                     [0.6, 0.75, 0.84, 0.85, 0.9, 0.99, 1.0]

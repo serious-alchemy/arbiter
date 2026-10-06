@@ -36,6 +36,12 @@ defmodule Arbiter.Quota.Pace do
       `elapsed` is the elapsed fraction of the window; without a known
       `elapsed` (no window length, no reset) it falls back to the side's own
       flat ceiling, or drops out when it has none.
+    * `{:paced_exempt, floor, flat_fallback, cap}` — a `:paced` side for an
+      exempt dispatch (bd-6bxv7h, design §4.2): `max(max(floor, elapsed), cap)`,
+      where `cap` is `min(exempt_cap, flat)` already resolved by the gate. It
+      only ever raises the paced line, never lowers it, and reports mode
+      `:exempt` only when it actually lifted the line. Without a known
+      `elapsed` it falls back exactly like `:paced`.
     * `{:flat, ceiling}` — a fixed ceiling.
 
   Each side is turned into a number for *now* and the smallest wins, ties
@@ -44,7 +50,10 @@ defmodule Arbiter.Quota.Pace do
   """
 
   @type verdict :: :ok | :approaching | :holding | :sampling
-  @type side :: {:paced, float(), float() | nil} | {:flat, float()}
+  @type side ::
+          {:paced, float(), float() | nil}
+          | {:paced_exempt, float(), float() | nil, float()}
+          | {:flat, float()}
   @type thresholds :: %{sides: [side()], default: float()}
 
   @typedoc """
@@ -55,7 +64,7 @@ defmodule Arbiter.Quota.Pace do
   @type t :: %{
           verdict: verdict(),
           ceiling: float(),
-          mode: :paced | :flat,
+          mode: :paced | :flat | :exempt,
           elapsed: float() | nil
         }
 
@@ -119,9 +128,17 @@ defmodule Arbiter.Quota.Pace do
   `min(account, workspace)` the same way `evaluate/4` picks the smallest —
   there is deliberately only one place a paced side turns into a number.
   """
-  @spec side_ceiling(side(), float() | nil) :: {float(), :paced | :flat} | nil
+  @spec side_ceiling(side(), float() | nil) :: {float(), :paced | :flat | :exempt} | nil
   def side_ceiling({:paced, floor, _flat}, elapsed) when is_float(elapsed),
     do: {max(floor, elapsed), :paced}
+
+  def side_ceiling({:paced_exempt, floor, _flat, cap}, elapsed) when is_float(elapsed) do
+    line = max(floor, elapsed)
+    if cap > line, do: {cap, :exempt}, else: {line, :paced}
+  end
+
+  def side_ceiling({:paced_exempt, floor, flat, _cap}, elapsed),
+    do: side_ceiling({:paced, floor, flat}, elapsed)
 
   def side_ceiling({:paced, _floor, nil}, _elapsed), do: nil
   def side_ceiling({:paced, _floor, flat}, _elapsed), do: {flat, :flat}
