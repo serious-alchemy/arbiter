@@ -1,0 +1,17 @@
+phase=Failed reason=
+snapshotter: exit=0 reason=Completed started=2026-10-06T10:18:17Z finished=2026-10-06T10:18:23Z
+worker: exit=137 reason=OOMKilled started=2026-10-06T10:18:18Z finished=2026-10-06T10:18:18Z
+=== k1-oom/seed
+=== k1-oom/snapshotter
+snap: start 1791281897.898764723 id=10001 uid_map= 0 960561152 65536;
+snap: guard check: /spike/snapshotter.sh: 4: cannot create /wt/proj/.git/config: Read-only file system
+snap: GOT SIGTERM at 1791281898.710059892
+snap: uploading tick 1 at 1791281899.712067714
+snap: uploading tick 2 at 1791281900.714124411
+snap: uploading tick 3 at 1791281901.716043706
+snap: uploading tick 4 at 1791281902.718031723
+snap: uploading tick 5 at 1791281903.720044677
+snap: final snapshot done at 1791281903.721137289
+=== k1-oom/worker
+worker: start 1791281898.120390765 mode=oom id=10001:10001 groups=10001
+worker: filling /tmp (memory-backed) at 1791281898.156184737

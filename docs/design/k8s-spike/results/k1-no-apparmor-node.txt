@@ -1,0 +1,18 @@
+node: AppArmor module enabled = N
+-- pod WITH appArmorProfile: RuntimeDefault (as K§8.2 builds it)
+phase=Failed reason=AppArmor message=Pod was rejected: Cannot enforce AppArmor: AppArmor is not enabled on the host
+R           M
+Scheduled   Successfully assigned arbiter-workers/noaa1 to localhost
+AppArmor    Cannot enforce AppArmor: AppArmor is not enabled on the host
+phase=Succeeded reason=
+seed: exit=0 reason=Completed started=2026-10-06T11:12:47Z finished=2026-10-06T11:12:47Z
+snapshotter: exit=0 reason=Completed started=2026-10-06T11:12:47Z finished=2026-10-06T11:12:49Z
+worker: exit=0 reason=Completed started=2026-10-06T11:12:48Z finished=2026-10-06T11:12:48Z
+seed: id=10001:10001 uid_map= 0 620494848 65536;
+snap: start 1791285167.969746838 id=10001 uid_map= 0 620494848 65536;
+worker: uid_map= 0 620494848 65536;
+worker: apparmor=kernel seccomp=Seccomp:2
+probe mv .git .git2: mv: cannot move '.git' to '.git2': Device or resource busy [rc=0]
+AppArmor-enabled node again: AppArmor enabled = Y; field OMITTED:
+phase=Succeeded reason=
+worker: apparmor=cri-containerd.apparmor.d (enforce) seccomp=Seccomp:2

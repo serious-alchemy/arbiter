@@ -1,0 +1,4 @@
+NEGATIVE CONTROL: preset 'command' rendered as k8s 'command:' (entrypoint bypassed)
+phase=Pending svc-postgres={"waiting":{"message":"back-off 40s restarting failed container=svc-postgres pod=k10-neg_arbiter-workers(9bf72cb2-8e16-419c-8327-4d23d64d6e67)","reason":"CrashLoopBackOff"}}
+postgres: could not access directory "/var/lib/postgresql/data/pgdata": No such file or directory
+Run initdb or pg_basebackup to initialize a PostgreSQL data directory.

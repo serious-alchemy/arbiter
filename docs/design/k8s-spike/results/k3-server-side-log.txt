@@ -1,0 +1,16 @@
+ACCEPT cn=run-0123456789ab ou=proxy
+BYTES 22 cn=run-0123456789ab ou=proxy
+ACCEPT cn=run-0123456789ab ou=arb
+BYTES 20 cn=run-0123456789ab ou=arb
+06:29:33.594 [notice] tls_handshake_1_3.erl:446 generated SERVER ALERT: Fatal - Certificate required
+REJECT {:tls_alert, {:certificate_required, ~c"TLS server: In state wait_cert at tls_handshake_1_3.erl:446 generated SERVER ALERT: Fatal - Certificate required\n certificate_required"}}
+06:29:33.797 [notice] ssl_handshake.erl:2157 generated SERVER ALERT: Fatal - Certificate Expired
+REJECT {:tls_alert, {:certificate_expired, ~c"TLS server: In state wait_cert at ssl_handshake.erl:2157 generated SERVER ALERT: Fatal - Certificate Expired\n"}}
+06:29:34.031 [notice] ssl_handshake.erl:2175 generated SERVER ALERT: Fatal - Unknown CA
+REJECT {:tls_alert, {:unknown_ca, ~c"TLS server: In state wait_cert at ssl_handshake.erl:2175 generated SERVER ALERT: Fatal - Unknown CA\n"}}
+06:29:34.236 [notice] ssl_handshake.erl:2186 generated SERVER ALERT: Fatal - Unsupported Certificate
+REJECT {:tls_alert, {:unsupported_certificate, ~c"TLS server: In state wait_cert at ssl_handshake.erl:2186 generated SERVER ALERT: Fatal - Unsupported Certificate\n {invalid_ext_keyusage,[\"id-kp-serverAuth\"]}"}}
+ACCEPT cn=run-0123456789ab ou=proxy
+BYTES 0 cn=run-0123456789ab ou=proxy
+ACCEPT cn=run-0123456789ab ou=proxy
+BYTES 32 cn=run-0123456789ab ou=proxy

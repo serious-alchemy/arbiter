@@ -1,0 +1,4 @@
+snap: start 1791282007.172418792 id=10001 uid_map= 0 1353580544 65536;
+snap: guard check: /spike/snapshotter.sh: 6: cannot create /wt/proj/.git/config: Read-only file system
+snap: GOT SIGTERM at 1791282047.776071843
+snap: uploading tick 1 at 1791282048.781438904

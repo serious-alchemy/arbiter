@@ -1,0 +1,31 @@
+# K1: ValidatingAdmissionPolicy (K§7) — image allowlist + the hardening fields the builder always sets.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: arbiter-worker-pods}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods]}
+  variables:
+  - name: all
+    expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
+  validations:
+  - expression: "variables.all.all(c, c.image.startsWith('localhost/arbiter-dev/') || c.image.startsWith('docker.io/library/') || c.image.startsWith('docker.io/pgsty/'))"
+    message: "image is not on the allowlist"
+  - expression: "has(object.spec.hostUsers) && object.spec.hostUsers == false"
+    message: "hostUsers must be false"
+  - expression: "variables.all.all(c, has(c.securityContext) && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem)"
+    message: "readOnlyRootFilesystem is required on every container"
+  # PSA `restricted` stops enforcing non-root once hostUsers is false (spike finding), so this is ours:
+  - expression: "has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot && (!has(object.spec.securityContext.runAsUser) || object.spec.securityContext.runAsUser != 0) && variables.all.all(c, !has(c.securityContext) || ((!has(c.securityContext.runAsUser) || c.securityContext.runAsUser != 0) && (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot)))"
+    message: "pods must run as non-root (pod runAsNonRoot=true, no uid 0)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: arbiter-worker-pods}
+spec:
+  policyName: arbiter-worker-pods
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: arbiter-workers}}

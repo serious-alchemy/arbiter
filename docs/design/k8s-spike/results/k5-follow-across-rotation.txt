@@ -1,0 +1,1 @@
+{"lines_accepted": 165014, "raw_lines_received": 165015, "duplicates_dropped_by_dedupe": 1, "resumes": 0, "producer_last_seq": 165013, "missing": 0, "missing_first": [], "duplicate_sequence_numbers_accepted": 0, "corrupt_lines": 0, "long_lines_intact": 13, "sinceTime_values_sent_first3": []}

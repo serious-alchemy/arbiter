@@ -1,0 +1,26 @@
+-- allowPrivilegeEscalation: false, runAsNonRoot: false
+Error from server (Forbidden): error when creating "$TMPDIR/p0.yaml": pods "p0" is forbidden: violates PodSecurity "restricted:latest": runAsNonRoot != true (container "c" must not set securityContext.runAsNonRoot=false)
+-- allowPrivilegeEscalation: false, runAsUser: 0
+Error from server (Forbidden): error when creating "$TMPDIR/p0.yaml": pods "p0" is forbidden: violates PodSecurity "restricted:latest": runAsNonRoot != true (pod or container "c" must set securityContext.runAsNonRoot=true), runAsUser=0 (container "c" must not set runAsUser=0)
+-- privileged: true
+Error from server (Forbidden): error when creating "$TMPDIR/p0.yaml": pods "p0" is forbidden: violates PodSecurity "restricted:latest": privileged (container "c" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "c" must set securityContext.allowPrivilegeEscalation=false), runAsNonRoot != true
+-- allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 10001
+The pods "p0" is invalid: : ValidatingAdmissionPolicy 'arbiter-worker-pods' with binding 'arbiter-worker-pods' denied request: hostUsers must be false
+-- allowPrivilegeEscalation: true, runAsNonRoot: true
+Error from server (Forbidden): error when creating "$TMPDIR/p0.yaml": pods "p0" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "c" must set securityContext.allowPrivilegeEscalation=false)
+-- POD-level: runAsNonRoot: false, runAsUser: 0
+pod/p0 created (server dry run)
+-- POD-level: runAsUser: 0
+pod/p0 created (server dry run)
+-- POD-level: runAsNonRoot: true, runAsUser: 0
+pod/p0 created (server dry run)
+
+## after adding the VAP non-root rule
+-- pod-level {runAsUser: 0} container-level {}
+The pods "p0" is invalid: : ValidatingAdmissionPolicy 'arbiter-worker-pods' with binding 'arbiter-worker-pods' denied request: pods must run as non-root (pod runAsNonRoot=true, no uid 0)
+-- pod-level {runAsNonRoot: true, runAsUser: 0} container-level {}
+The pods "p0" is invalid: : ValidatingAdmissionPolicy 'arbiter-worker-pods' with binding 'arbiter-worker-pods' denied request: pods must run as non-root (pod runAsNonRoot=true, no uid 0)
+-- pod-level {runAsNonRoot: true} container-level {, runAsUser: 0}
+The pods "p0" is invalid: : ValidatingAdmissionPolicy 'arbiter-worker-pods' with binding 'arbiter-worker-pods' denied request: pods must run as non-root (pod runAsNonRoot=true, no uid 0)
+-- pod-level {runAsNonRoot: true, runAsUser: 10001} container-level {}
+pod/p0 created (server dry run)

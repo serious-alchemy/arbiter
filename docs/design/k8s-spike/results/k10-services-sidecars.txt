@@ -1,0 +1,103 @@
+phase=Succeeded reason=
+svc-postgres: exit=0 reason=Completed started=2026-10-06T10:58:30Z finished=2026-10-06T10:58:36Z
+svc-s3: exit=0 reason=Completed started=2026-10-06T10:58:33Z finished=2026-10-06T10:58:36Z
+pgcheck: exit=0 reason=Completed started=2026-10-06T10:58:34Z finished=2026-10-06T10:58:34Z
+worker: exit=0 reason=Completed started=2026-10-06T10:58:35Z finished=2026-10-06T10:58:36Z
+=== k10/svc-postgres
+chmod: /var/run/postgresql: Operation not permitted
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are disabled.
+
+fixing permissions on existing directory /var/lib/postgresql/data/pgdata ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default max_connections ... 100
+selecting default shared_buffers ... 128MB
+selecting default time zone ... UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+sh: locale: not found
+2026-10-06 10:58:31.592 UTC [22] WARNING:  no usable system locales were found
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/data/pgdata -l logfile start
+
+waiting for server to start....2026-10-06 10:58:32.271 UTC [35] LOG:  starting PostgreSQL 16.15 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-10-06 10:58:32.271 UTC [35] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-06 10:58:32.273 UTC [38] LOG:  database system was shut down at 2026-10-06 10:58:32 UTC
+2026-10-06 10:58:32.278 UTC [35] LOG:  database system is ready to accept connections
+ done
+server started
+CREATE DATABASE
+
+
+/usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+
+waiting for server to shut down....2026-10-06 10:58:32.408 UTC [35] LOG:  received fast shutdown request
+2026-10-06 10:58:32.408 UTC [35] LOG:  aborting any active transactions
+2026-10-06 10:58:32.410 UTC [35] LOG:  background worker "logical replication launcher" (PID 41) exited with exit code 1
+2026-10-06 10:58:32.413 UTC [36] LOG:  shutting down
+2026-10-06 10:58:32.413 UTC [36] LOG:  checkpoint starting: shutdown immediate
+2026-10-06 10:58:32.421 UTC [36] LOG:  checkpoint complete: wrote 926 buffers (5.7%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.008 s; sync files=0, longest=0.000 s, average=0.000 s; distance=4283 kB, estimate=4283 kB; lsn=0/1925D68, redo lsn=0/1925D68
+2026-10-06 10:58:32.427 UTC [35] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-10-06 10:58:32.533 UTC [1] LOG:  starting PostgreSQL 16.15 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-10-06 10:58:32.533 UTC [1] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+2026-10-06 10:58:32.533 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-06 10:58:32.536 UTC [57] LOG:  database system was shut down at 2026-10-06 10:58:32 UTC
+2026-10-06 10:58:32.541 UTC [1] LOG:  database system is ready to accept connections
+2026-10-06 10:58:36.844 UTC [1] LOG:  received fast shutdown request
+2026-10-06 10:58:36.844 UTC [1] LOG:  aborting any active transactions
+2026-10-06 10:58:36.849 UTC [1] LOG:  background worker "logical replication launcher" (PID 60) exited with exit code 1
+2026-10-06 10:58:36.849 UTC [55] LOG:  shutting down
+2026-10-06 10:58:36.849 UTC [55] LOG:  checkpoint starting: shutdown immediate
+2026-10-06 10:58:36.850 UTC [55] LOG:  checkpoint complete: wrote 31 buffers (0.2%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=155 kB, estimate=155 kB; lsn=0/194CCA8, redo lsn=0/194CCA8
+2026-10-06 10:58:36.854 UTC [1] LOG:  database system is shut down
+=== k10/svc-s3
+INFO: Formatting 1st pool, 1 set(s), 1 drives per set.
+INFO: WARNING: Host local has more than 0 drives of set. A host failure will result in data becoming unavailable.
+Silo Object Storage Server
+Copyright: 2015-2025 MinIO, Inc.
+Modifications: Copyright 2025-2026 PGSTY
+License: GNU AGPLv3 - https://www.gnu.org/licenses/agpl-3.0.html
+Version: RELEASE.2026-09-16T00-00-00Z (go1.27.1 linux/amd64)
+
+API: http://127.0.0.1:9000 
+WebUI: http://127.0.0.1:9001 
+
+Docs: https://silo.pgsty.com/docs/
+WARN: Detected default credentials 'minioadmin:minioadmin', we recommend that you change these values with 'MINIO_ROOT_USER' and 'MINIO_ROOT_PASSWORD' environment variables
+INFO: Exiting on signal: TERMINATED
+=== k10/pgcheck
+CREATE TABLE
+INSERT 0 1000
+ rows_through_lo 
+-----------------
+            1000
+(1 row)
+
+=== k10/worker
+worker uid=10001 uid_map= 0 1313472512 65536;
+s3 health: 200
+s3 make bucket: 200
+s3 put object:  200
+s3 get object:  hello from the worker
+s3 SSE-S3 put (tonic sends x-amz-server-side-encryption: AES256): 200
+postgres SSLRequest reply byte: 'N' (N = no TLS, server alive on the pod lo)
+worker done at 1791284316.064977817

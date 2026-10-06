@@ -1,0 +1,81 @@
+# K10: TestServices presets (postgres/1, s3/1) as native sidecars, translated per K§6. `command:` of the preset is the
+# image's ARGS (podman appends it to the entrypoint), so it maps to `args:`, never to `command:`.
+apiVersion: v1
+kind: Pod
+metadata: {name: k10, namespace: arbiter-workers, labels: {app.kubernetes.io/name: arbiter-worker, app.kubernetes.io/component: worker}}
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  hostUsers: false
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: {type: RuntimeDefault}
+    appArmorProfile: {type: RuntimeDefault}
+  initContainers:
+  - name: svc-postgres
+    image: docker.io/library/postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    restartPolicy: Always
+    args: [postgres, -c, fsync=off, -c, listen_addresses=127.0.0.1]
+    env:
+    - {name: POSTGRES_USER, value: postgres}
+    - {name: POSTGRES_PASSWORD, value: postgres}
+    - {name: POSTGRES_DB, value: app_test}
+    - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+    securityContext: {runAsUser: 70, runAsGroup: 70, runAsNonRoot: true, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, privileged: false, capabilities: {drop: [ALL]}}
+    startupProbe: {exec: {command: [pg_isready, -h, 127.0.0.1, -p, "5432", -U, postgres, -d, app_test]}, periodSeconds: 1, failureThreshold: 120}
+    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+    volumeMounts:
+    - {name: pgdata, mountPath: /var/lib/postgresql/data}
+    - {name: pgrun, mountPath: /var/run/postgresql}
+  - name: svc-s3
+    image: docker.io/pgsty/silo:latest
+    imagePullPolicy: IfNotPresent
+    restartPolicy: Always
+    args: [server, /data, --address, "127.0.0.1:9000", --console-address, "127.0.0.1:9001"]
+    env:
+    - {name: MINIO_ROOT_USER, value: minioadmin}
+    - {name: MINIO_ROOT_PASSWORD, value: minioadmin}
+    - {name: MINIO_KMS_SECRET_KEY, value: "tonic-dev-key:DeVeLYqwANQlgD5S1i+5+EKa0Qemll5hfObx4DeRPd0="}
+    - {name: HOME, value: /tmp}
+    securityContext: {runAsUser: ${S3_UID}, runAsGroup: ${S3_UID}, runAsNonRoot: true, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, privileged: false, capabilities: {drop: [ALL]}}
+    startupProbe: {exec: {command: [curl, -fsS, -o, /dev/null, "http://127.0.0.1:9000/minio/health/ready"]}, periodSeconds: 1, failureThreshold: 120}
+    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 768Mi}}
+    volumeMounts:
+    - {name: s3data, mountPath: /data}
+    - {name: s3tmp, mountPath: /tmp}
+  - name: pgcheck
+    image: docker.io/library/postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    command: [sh, -c, "psql -h 127.0.0.1 -U postgres -d app_test -v ON_ERROR_STOP=1 -c 'create table t(i int)' -c 'insert into t select generate_series(1,1000)' -c 'select count(*) as rows_through_lo from t'"]
+    env: [{name: PGPASSWORD, value: postgres}]
+    securityContext: {runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, privileged: false, capabilities: {drop: [ALL]}}
+  containers:
+  - name: worker
+    image: localhost/arbiter-dev/base:f2add20f54da
+    imagePullPolicy: IfNotPresent
+    command:
+    - bash
+    - -c
+    - |
+      echo "worker uid=$(id -u) uid_map=$(tr -s ' ' < /proc/self/uid_map | tr '\n' ';')"
+      A="--aws-sigv4 aws:amz:us-east-1:s3 --user minioadmin:minioadmin"
+      echo "s3 health: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/minio/health/ready)"
+      echo "s3 make bucket: $(curl -s -o /dev/null -w '%{http_code}' $A -X PUT http://127.0.0.1:9000/spike)"
+      echo "s3 put object:  $(curl -s -o /dev/null -w '%{http_code}' $A -X PUT --data-binary 'hello from the worker' http://127.0.0.1:9000/spike/obj.txt)"
+      echo "s3 get object:  $(curl -s $A http://127.0.0.1:9000/spike/obj.txt)"
+      echo "s3 SSE-S3 put (tonic sends x-amz-server-side-encryption: AES256): $(curl -s -o /dev/null -w '%{http_code}' $A -H 'x-amz-server-side-encryption: AES256' -X PUT --data-binary phi http://127.0.0.1:9000/spike/sse.txt)"
+      exec 3<>/dev/tcp/127.0.0.1/5432; printf '\x00\x00\x00\x08\x04\xd2\x16\x2f' >&3; read -r -n1 -t3 r <&3; echo "postgres SSLRequest reply byte: '$r' (N = no TLS, server alive on the pod lo)"
+      echo "worker done at $(date +%s.%N)"
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, privileged: false, capabilities: {drop: [ALL]}}
+  volumes:
+  - {name: pgdata, emptyDir: {medium: Memory, sizeLimit: 256Mi}}
+  - {name: pgrun, emptyDir: {medium: Memory, sizeLimit: 8Mi}}
+  - {name: s3data, emptyDir: {medium: Memory, sizeLimit: 256Mi}}
+  - {name: s3tmp, emptyDir: {medium: Memory, sizeLimit: 64Mi}}

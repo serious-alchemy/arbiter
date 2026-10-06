@@ -1,0 +1,13 @@
+== the K§8.2 pod and one-field mutations (namespace: PSA enforce=restricted; VAP arbiter-worker-pods: Deny)
+as built (native sidecars, hostUsers:false, subPath)       ADMITTED  ok         pod/adm created (server dry run)
+PSA: appArmorProfile omitted (restricted does not need it) ADMITTED  ok         pod/adm created (server dry run)
+PSA: seccompProfile omitted                                DENIED    ok         Error from server (Forbidden): error when creating "STDIN": pods "adm" is forbidden: violates PodSecurity "restricted:la
+PSA: seccompProfile Unconfined                             DENIED    ok         Error from server (Forbidden): error when creating "STDIN": pods "adm" is forbidden: violates PodSecurity "restricted:la
+PSA: a hostPath volume                                     DENIED    ok         Error from server (Forbidden): error when creating "STDIN": pods "adm" is forbidden: violates PodSecurity "restricted:la
+PSA: privileged worker (allowPrivilegeEscalation also true) DENIED    ok         Error from server (Forbidden): error when creating "STDIN": pods "adm" is forbidden: violates PodSecurity "restricted:la
+PSA: hostNetwork                                           DENIED    ok         The Pod "adm" is invalid: spec.hostNetwork: Forbidden: when `hostUsers` is false
+VAP: image not on the allowlist                            DENIED    ok         image is not on the allowlist
+VAP: hostUsers true                                        DENIED    ok         hostUsers must be false
+VAP: readOnlyRootFilesystem false on the worker            DENIED    ok         readOnlyRootFilesystem is required on every container
+VAP: pod-level runAsUser 0 + runAsNonRoot false (PSA lets it by: hostUsers=false) DENIED    ok         pods must run as non-root (pod runAsNonRoot=true, no uid 0)
+VAP: runAsUser 0 on the worker container only              DENIED    ok         pods must run as non-root (pod runAsNonRoot=true, no uid 0)

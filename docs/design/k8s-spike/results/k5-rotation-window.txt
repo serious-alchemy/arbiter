@@ -1,0 +1,3 @@
+producer: 165013 numbered lines of ~1 KiB (~158 MiB) at ~1.6 MB/s for ~100 s; nobody following
+retained: 12501 lines, first seq 152513, last seq 165013; lost from the head: 152512 lines (92 % of the run); retained ~12 MiB
+No directory
