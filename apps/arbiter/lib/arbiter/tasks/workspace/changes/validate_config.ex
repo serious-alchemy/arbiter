@@ -91,6 +91,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"prepush_check_timeout_seconds"` (a positive integer) and
       `"prepush_check_on_timeout"` (`"proceed"` or `"fail"`) — bd-28c6qo,
       `Arbiter.Worker.PrepushCheck`.
+    * If `"worker.placement"` is present it must be `"local_only"` (the default),
+      `"prefer_remote"` or `"remote_only"` (RW8, `Arbiter.Nodes.Placement`).
     * If `"attention"` is present, it must be a map whose
       `"coordinator_limit_minutes"` / `"run_crashed_max_resumes"` are
       non-negative integers — `0` turns a limit off (bd-8nlez1,
@@ -166,11 +168,29 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_worker(changeset, worker) when is_map(worker) do
     changeset
     |> validate_worker_block(worker, "worker")
+    |> validate_placement(worker)
     |> validate_worker_repos(Map.get(worker, "repos"))
   end
 
   defp validate_worker(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "worker must be a map")
+  end
+
+  # RW8 (bd-3igo6h): `worker.placement`, workspace-wide only (`Arbiter.Nodes.Placement`).
+  defp validate_placement(changeset, worker) do
+    case Map.fetch(worker, "placement") do
+      :error ->
+        changeset
+
+      {:ok, mode} when mode in ["local_only", "prefer_remote", "remote_only"] ->
+        changeset
+
+      {:ok, _} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+        )
+    end
   end
 
   defp validate_worker_repos(changeset, nil), do: changeset

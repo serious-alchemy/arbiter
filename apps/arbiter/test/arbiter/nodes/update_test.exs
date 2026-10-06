@@ -52,6 +52,23 @@ defmodule Arbiter.Nodes.UpdateTest do
       assert {:ok, %{max_workers: nil}} = Nodes.update_node(node, %{max_workers: nil}, @operator)
     end
 
+    test "pins a node to workspaces (an allowlist) and clears the pin with []" do
+      node = enroll!()
+      assert node.workspace_ids == []
+
+      assert {:ok, pinned} =
+               Nodes.update_node(node, %{workspace_ids: ["ws-a", "ws-b"]}, @operator)
+
+      assert pinned.workspace_ids == ["ws-a", "ws-b"]
+      assert Nodes.get_node(node.id).workspace_ids == ["ws-a", "ws-b"]
+
+      assert [event] = Nodes.events(node_id: node.id, kind: :updated)
+      assert event.detail["changes"] == %{"workspace_ids" => ["ws-a", "ws-b"]}
+
+      assert {:ok, %{workspace_ids: []}} =
+               Nodes.update_node(pinned, %{workspace_ids: []}, @operator)
+    end
+
     test "cannot touch credentials or status" do
       node = enroll!()
 

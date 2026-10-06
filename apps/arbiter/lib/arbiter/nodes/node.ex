@@ -42,6 +42,7 @@ defmodule Arbiter.Nodes.Node do
         :name,
         :labels,
         :max_workers,
+        :workspace_ids,
         :credential_hash,
         :credential_prefix,
         :join_token_id,
@@ -76,7 +77,7 @@ defmodule Arbiter.Nodes.Node do
     # The operator's edit surface (`arb node set`): what the node is called and
     # how much it may run. Never credentials or status.
     update :set do
-      accept [:name, :labels, :max_workers]
+      accept [:name, :labels, :max_workers, :workspace_ids]
     end
 
     # Drain: no new assignments, live runs untouched (§13). Revoked stays revoked,
@@ -116,6 +117,15 @@ defmodule Arbiter.Nodes.Node do
       allow_nil? false
       public? true
       default []
+    end
+
+    attribute :workspace_ids, {:array, :string} do
+      allow_nil? false
+      public? true
+      default []
+
+      description "Node-to-workspace pin (RW8): empty means any workspace may be placed here, " <>
+                    "otherwise only runs of the listed workspaces."
     end
 
     attribute :max_workers, :integer do

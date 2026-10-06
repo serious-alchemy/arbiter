@@ -674,6 +674,30 @@ defmodule Arbiter.Tasks.WorkspaceTest do
                })
     end
 
+    # RW8 (bd-3igo6h): `worker.placement`, the node placement mode.
+    test "accepts worker.placement local_only, prefer_remote and remote_only" do
+      for mode <- ~w(local_only prefer_remote remote_only) do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "pl-ok-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement" => mode}}
+                 })
+      end
+    end
+
+    test "rejects any other worker.placement value, naming the key" do
+      for bad <- ["everywhere", "remote", 3, nil, ["local_only"]] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pl-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement" => bad}}
+                 })
+
+        assert Exception.message(err) =~
+                 ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+      end
+    end
+
     test "rejects anything else, naming the key" do
       for {label, block} <- [
             {"worker.prepush_check must be a non-empty string", %{"prepush_check" => ["x"]}},

@@ -86,6 +86,49 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert_received {:posted, %{"parent_id" => "bd-epic"}}
   end
 
+  test "--acceptance is sent in the create payload and documented in --help" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-010", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} =
+      capture(fn -> Create.run(["X", "--type", "feature", "--acceptance", "it works"]) end)
+
+    assert_received {:posted, %{"acceptance" => "it works"}}
+
+    {out, _err, 0} = capture(fn -> Create.run(["--help"]) end)
+    assert out =~ "--acceptance"
+  end
+
+  test "an unknown flag exits non-zero naming the flag and creates nothing" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         send(parent, :posted)
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-011"})
+       end}
+    ])
+
+    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--bogus-flag", "y"]) end)
+
+    assert exit_code != 0
+    assert err =~ "--bogus-flag"
+    refute_received :posted
+  end
+
   test "without --parent no parent_id is sent" do
     parent = self()
 

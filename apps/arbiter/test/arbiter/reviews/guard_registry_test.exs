@@ -50,6 +50,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :rearm_pass, 2,
      "bd-2yt0d2: a boot lookup miss (no marker, no worktree); the reconciler clears the " <>
        "marker and the ordinary resume takes the ticket — nothing is refused or escalated"},
+    {Arbiter.Worker.ReviewGate, :hold_for_local_capacity, 3,
+     "RW8: `{:no_node_capacity, …}` holds the pass while the primary's own worker cap is 0 " <>
+       "(retry timer; no verdict, no round consumed, no escalation) until the operator " <>
+       "raises it — an operator capacity choice, not a guard"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,

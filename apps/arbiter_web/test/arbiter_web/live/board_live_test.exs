@@ -152,6 +152,27 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
+  describe "local cap 0 (RW8)" do
+    setup do
+      on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(nil) end)
+      :ok
+    end
+
+    test "a persistent chip shows while the primary's cap is 0 and clears when it rises",
+         %{conn: conn} do
+      {:ok, view, _html} = live_board(conn)
+      refute has_element?(view, "#board-local-cap-zero")
+
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+      render_async(view, @async_timeout)
+      assert has_element?(view, "#board-local-cap-zero")
+
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      render_async(view, @async_timeout)
+      refute has_element?(view, "#board-local-cap-zero")
+    end
+  end
+
   describe "columns" do
     test "renders the seven lifecycle columns", %{conn: conn} do
       {:ok, view, html} = live_board(conn)

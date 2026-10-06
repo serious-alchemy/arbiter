@@ -427,10 +427,11 @@ defmodule Arbiter.Nodes do
     end
   end
 
-  @settable [:name, :labels, :max_workers]
+  @settable [:name, :labels, :max_workers, :workspace_ids]
 
   @doc """
-  Edit a node's `name`, `labels` and `max_workers` (anything else in `changes`
+  Edit a node's `name`, `labels`, `max_workers` and `workspace_ids` (the
+  workspace pin, RW8; `[]` is "any workspace") (anything else in `changes`
   is ignored: credentials and status have their own verbs). A revoked node is
   `{:error, :revoked}`, a name another node holds `{:error, :name_taken}`.
   Writes an `updated` event naming the fields that actually changed.

@@ -114,6 +114,39 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert %{override: 1, ceiling: 3, max: 1} = row(overview, "below")
     end
 
+    test "a node's cap defaults to its suggestion and the override goes up or down" do
+      up = enroll!("up", max_workers: 9)
+      down = enroll!("down", max_workers: 1)
+      plain = enroll!("plain")
+      params = hello(%{"capacity" => %{"suggestion" => 4}})
+      for node <- [up, down, plain], do: connect!(node, params)
+
+      overview = Overview.build()
+      assert %{max: 9, cap_source: :override, ceiling: nil} = row(overview, "up")
+      assert %{max: 1, cap_source: :override} = row(overview, "down")
+      assert %{max: 4, cap_source: :suggestion, override: nil} = row(overview, "plain")
+    end
+
+    test "a ceiling is what bound the cap when it wins" do
+      node = enroll!("capped", max_workers: 8)
+      connect!(node, hello(%{"capacity" => %{"suggestion" => 4, "ceiling" => 3}}))
+      assert %{max: 3, cap_source: :ceiling} = row(Overview.build(), "capped")
+    end
+
+    test "enrolling and connecting nodes never changes conductor.max_concurrent" do
+      before = Arbiter.Settings.conductor_system_max_concurrent()
+      ceiling = Arbiter.Board.Snapshot.system_max_concurrent()
+
+      node = enroll!("big", max_workers: 50)
+      connect!(node, hello(%{"capacity" => %{"suggestion" => 32, "ceiling" => 64}}))
+
+      assert Arbiter.Settings.conductor_system_max_concurrent() == before
+      assert Arbiter.Board.Snapshot.system_max_concurrent() == ceiling
+      assert Overview.build().ceiling == ceiling
+      # The sum is shown beside it, and the ceiling being lower is flagged.
+      assert :ceiling_below_total in Overview.build().warnings
+    end
+
     test "draining and revoked nodes show those states" do
       drained = enroll!("drained")
       revoked = enroll!("gone")

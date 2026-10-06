@@ -43,23 +43,44 @@ defmodule Arbiter.Nodes.Hello do
   end
 
   @doc """
-  The effective `max_workers` (§13): `min(operator, node ceiling)` over whichever
-  are set; when neither is, the node's own suggestion. `nil` when nothing is known.
-  """
-  @spec effective_max_workers(pos_integer() | nil, map()) :: non_neg_integer() | nil
-  def effective_max_workers(operator, capacity) when is_map(capacity) do
-    ceiling = positive(capacity["ceiling"])
+  The effective `max_workers` of a node (§13, with the RW8 operator amendment).
 
-    case Enum.reject([positive(operator), ceiling], &is_nil/1) do
-      [] -> positive(capacity["suggestion"])
-      limits -> Enum.min(limits)
+  The node's cap is the operator's override when there is one, else the node's
+  own suggestion: the operator can go **up or down** from the suggestion. A
+  ceiling the node's owner set on the node itself (`ARB_NODE_MAX_WORKERS`, the
+  ConfigMap's `max_concurrent`) is a hard bound on that cap, so an override
+  above it loses to it. `nil` when nothing is known.
+  """
+  @spec effective_max_workers(pos_integer() | nil, map() | nil) :: non_neg_integer() | nil
+  def effective_max_workers(override, capacity) do
+    capacity = if is_map(capacity), do: capacity, else: %{}
+    base = positive(override) || positive(capacity["suggestion"])
+
+    case {base, positive(capacity["ceiling"])} do
+      {nil, ceiling} -> ceiling
+      {base, nil} -> base
+      {base, ceiling} -> min(base, ceiling)
     end
   end
 
-  def effective_max_workers(operator, _), do: positive(operator)
+  @doc """
+  What decided `effective_max_workers/2`: `:ceiling` when the node owner's bound
+  is the binding term (so the UI can show the override and the bound that beat
+  it), `:override`, `:suggestion`, or `nil` when nothing is known.
+  """
+  @spec cap_source(pos_integer() | nil, map() | nil) :: :ceiling | :override | :suggestion | nil
+  def cap_source(override, capacity) do
+    capacity = if is_map(capacity), do: capacity, else: %{}
+    base = positive(override) || positive(capacity["suggestion"])
+    ceiling = positive(capacity["ceiling"])
 
-  defp positive(n) when is_integer(n) and n > 0, do: n
-  defp positive(_), do: nil
+    cond do
+      ceiling != nil and (base == nil or ceiling <= base) -> :ceiling
+      positive(override) -> :override
+      base -> :suggestion
+      true -> nil
+    end
+  end
 
   @doc "The run ids a `hello` lists (`runs: [%{\"id\" => …}]`), in order, ignoring malformed entries."
   @spec run_ids(term()) :: [String.t()]
@@ -68,4 +89,7 @@ defmodule Arbiter.Nodes.Hello do
   end
 
   def run_ids(_), do: []
+
+  defp positive(n) when is_integer(n) and n > 0, do: n
+  defp positive(_), do: nil
 end

@@ -65,6 +65,16 @@ defmodule Arbiter.Nodes.Overview do
     }
   end
 
+  @doc """
+  The remote node rows alone (what `Arbiter.Nodes.Placement` picks among), each
+  with its live run count and effective cap.
+  """
+  @spec node_rows() :: [row()]
+  def node_rows do
+    snapshots = Map.new(Registry.list(), fn {_pid, id} -> {id, safe_snapshot(id)} end)
+    Enum.map(Nodes.list_nodes(), &node_row(&1, Map.get(snapshots, &1.id)))
+  end
+
   @doc "The row for one node, by id, or `nil`."
   @spec get(String.t()) :: row() | nil
   def get(id) do
@@ -111,9 +121,12 @@ defmodule Arbiter.Nodes.Overview do
       caps: (snapshot && snapshot.caps) || %{},
       capacity: capacity,
       max: Hello.effective_max_workers(node.max_workers, capacity),
+      cap_source: Hello.cap_source(node.max_workers, capacity),
       suggested: positive(capacity["suggestion"]),
       override: node.max_workers,
-      ceiling: positive(capacity["ceiling"])
+      ceiling: positive(capacity["ceiling"]),
+      workspace_ids: node.workspace_ids,
+      draining?: node.status == :draining
     }
   end
 
@@ -134,9 +147,12 @@ defmodule Arbiter.Nodes.Overview do
       last_heartbeat_at: nil,
       live: local_live(remote_run_ids),
       max: override || suggested,
+      cap_source: if(override, do: :override, else: :suggestion),
       suggested: suggested,
       override: override,
-      ceiling: nil
+      ceiling: nil,
+      workspace_ids: [],
+      draining?: false
     }
   end
 

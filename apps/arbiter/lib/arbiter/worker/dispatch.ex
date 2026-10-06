@@ -84,6 +84,8 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Nodes.LocalCapacity
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
@@ -117,6 +119,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Workflows.Work
 
   require Ash.Query
+  require Logger
 
   @type dispatch_opts :: [
           repo: String.t() | nil,
@@ -187,6 +190,7 @@ defmodule Arbiter.Worker.Dispatch do
     dispatch_steps(task_id, opts)
   after
     Admission.release(task_id)
+    LocalCapacity.release(task_id)
   end
 
   defp dispatch_steps(task_id, opts) do
@@ -205,6 +209,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_account_capacity(task, opts),
+         {:ok, opts} <- ensure_node_capacity(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
@@ -1751,6 +1756,73 @@ defmodule Arbiter.Worker.Dispatch do
     else
       :ok
     end
+  end
+
+  # RW8 (bd-3igo6h): the second admission gate, after the provider account's.
+  # Where does this run go — a node, or the primary — and has that place room?
+  # `{:error, {:no_node_capacity, info}}` holds the card (never fails it): a
+  # `remote_only` workspace with no node free, or the primary's own cap
+  # (`Arbiter.Nodes.LocalCapacity`) at 0 / full for a run that has to stay local.
+  # A placed node rides in `opts[:node]` for `maybe_provision_worktree/2`
+  # (RW9). The slot reserved here is released when the dispatch returns, by
+  # which point the worker is registered and counted in its place.
+  #
+  # With `worker.placement` unset (`local_only`) and no override of the
+  # primary's cap there is nothing to decide, and nothing is read: dispatch is
+  # exactly what it was.
+  defp ensure_node_capacity(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+
+    if Placement.mode(workspace) == :local_only and not LocalCapacity.cap().enforced? do
+      {:ok, opts}
+    else
+      request = node_request(task, workspace, opts)
+
+      case LocalCapacity.gate(request, node_gate_opts(opts)) do
+        {:ok, {:node, node}} -> {:ok, Keyword.put(opts, :node, node)}
+        {:ok, :local} -> {:ok, opts}
+        {:error, _} = held -> held
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("Dispatch: node placement crashed for #{task.id}: #{Exception.message(e)}")
+      {:ok, opts}
+  end
+
+  defp node_request(%Issue{} = task, workspace, opts) do
+    %{
+      task_id: task.id,
+      workspace_id: task.workspace_id,
+      kind: node_kind(task, opts),
+      provider: quota_gate_provider(task, workspace, opts),
+      layout: git_layout(task, opts),
+      no_pr?: no_private_clone?(task, opts),
+      mode: Placement.mode(workspace)
+    }
+  end
+
+  # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
+  defp node_kind(%Issue{id: id, state: state}, opts) do
+    cond do
+      Keyword.get(opts, :resume) == true -> :resume
+      Keyword.get(opts, :review) == true -> :review
+      Arbiter.Worker.ReviewGate.base_task_id(id) != id -> :reviewer
+      state == :active -> :redispatch
+      true -> :implementer
+    end
+  end
+
+  defp no_private_clone?(%Issue{} = task, opts) do
+    Keyword.get(opts, :provision_worktree, true) == false or
+      (Issue.no_pr_type?(task.issue_type) and Keyword.get(opts, :provision_worktree) != true)
+  end
+
+  defp node_gate_opts(opts) do
+    [
+      force: Keyword.get(opts, :force_slot) == true,
+      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
+    ]
   end
 
   # Not admissions: a ticket already In progress (a re-dispatch or resume of

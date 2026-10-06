@@ -119,6 +119,7 @@ defmodule Arbiter.Workers.Run do
         :provider,
         :provider_fallback,
         :provider_account_id,
+        :node_id,
         :model_family,
         :routing_decision
       ]
@@ -249,6 +250,13 @@ defmodule Arbiter.Workers.Run do
 
       description "The provider account routing chose for this run (bd-40pzpj); " <>
                     "nil when the workspace does not route by quota."
+    end
+
+    attribute :node_id, :uuid do
+      public? true
+
+      description "The remote node the run was placed on (RW8, `Arbiter.Nodes.Placement`); " <>
+                    "nil for a run on the primary."
     end
 
     attribute :model_family, :string do
