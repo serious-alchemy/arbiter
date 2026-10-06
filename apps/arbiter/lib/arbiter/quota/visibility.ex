@@ -131,28 +131,33 @@ defmodule Arbiter.Quota.Visibility do
   `Arbiter.Quota.list_latest_for_workspace/2` narrowed to `providers/0`, in
   that order, with a `no_data: true` blank view (carrying the workspace and
   its install-default `gate_policy`) for a shown provider that has no snapshot
-  row yet.
+  row yet, then grok's ledger estimate when the workspace has it enabled.
   """
   @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
   def list_latest_for_workspace(workspace_id, opts \\ []) do
-    case providers() do
+    visible = providers()
+    excluded = provider_codes() -- visible
+
+    views =
+      Quota.list_latest_for_workspace(
+        workspace_id,
+        Keyword.put(opts, :exclude_providers, excluded)
+      )
+
+    by_provider = Map.new(views, &{&1.provider, &1})
+
+    # grok is not a quota provider code: its entry is the workspace opt-in's
+    # ledger estimate, listed after the polled providers when switched on.
+    grok = Enum.filter(views, &(&1.provider == "grok"))
+
+    case visible do
       [] ->
-        []
+        grok
 
       visible ->
-        excluded = provider_codes() -- visible
-
-        views =
-          Quota.list_latest_for_workspace(
-            workspace_id,
-            Keyword.put(opts, :exclude_providers, excluded)
-          )
-
-        by_provider = Map.new(views, &{&1.provider, &1})
-
         Enum.map(visible, fn provider ->
           Map.get_lazy(by_provider, provider, fn -> no_data_view(workspace_id, provider) end)
-        end)
+        end) ++ grok
     end
   end
 

@@ -342,6 +342,35 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "attach and detach" do
+    test "says attaching is metering only and points at workspace settings", %{conn: conn} do
+      workspace!("pv-help-ws")
+      account = account!(:claude, "pv-help")
+      {:ok, view, _html} = live_providers(conn)
+
+      assert has_element?(view, "#providers-routing-help")
+      assert has_element?(view, "#account-#{account.id}-attach-button")
+
+      view |> element("#account-#{account.id}-attach-button") |> render_click()
+      assert has_element?(view, "#attach-form-#{account.id}-help")
+    end
+
+    test "a grok account cannot be attached; the card points at the workspace toggle",
+         %{conn: conn} do
+      ws = workspace!("pv-grok-ws")
+      account = account!(:grok, "pv-grok")
+      {:ok, view, _html} = live_providers(conn)
+
+      refute has_element?(view, "#account-#{account.id}-attach-button")
+      assert has_element?(view, "#account-#{account.id}-grok-routing-note")
+
+      render_hook(view, "attach", %{
+        "account_id" => account.id,
+        "attach" => %{"workspace_id" => ws.id}
+      })
+
+      assert links(account) == []
+    end
+
     test "attaches a workspace to the account", %{conn: conn} do
       ws = workspace!("pv-attach-me")
       account = account!(:claude, "pv-attach")

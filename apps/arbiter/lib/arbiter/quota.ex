@@ -1273,23 +1273,66 @@ defmodule Arbiter.Quota do
   """
   @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
   def list_latest_for_workspace(workspace_id, opts \\ []) do
-    case workspace_id |> account_ids() |> list_latest(opts) do
-      [] ->
-        []
+    workspace =
+      Keyword.get_lazy(opts, :workspace, fn -> workspace_id && safe_workspace(workspace_id) end)
 
-      views ->
-        workspace =
-          Keyword.get_lazy(opts, :workspace, fn ->
-            workspace_id && safe_workspace(workspace_id)
+    views =
+      case workspace_id |> account_ids() |> list_latest(opts) do
+        [] ->
+          []
+
+        views ->
+          Enum.map(views, fn view ->
+            view
+            |> Map.put(:workspace_id, workspace_id)
+            |> Map.put(:gate_policy, gate_policy(view.provider_account_id, workspace))
           end)
+      end
 
-        Enum.map(views, fn view ->
-          view
-          |> Map.put(:workspace_id, workspace_id)
-          |> Map.put(:gate_policy, gate_policy(view.provider_account_id, workspace))
-        end)
+    views ++ grok_views(workspace_id, workspace)
+  end
+
+  @doc """
+  grok's entry in a workspace's quota list (bd-co08p2), present only while the
+  workspace has `routing.grok.enabled` (`Arbiter.Agents.GrokRouting`). It is
+  the `Arbiter.Quota.GrokLedger` estimate, not a polled number: the view
+  carries an `:estimate` map (`%{window: "24h", used_tokens:, cap_tokens:}`)
+  and no `message`, so it never reads as stale. The window is rolling, so
+  `reset_5h_at` is when enough usage has aged out to fall under the gate, not
+  a fixed reset. `[]` when grok routing is off or the ledger cannot be read.
+  """
+  @spec grok_views(String.t() | nil, Workspace.t() | nil) :: [map()]
+  def grok_views(workspace_id, %Workspace{} = workspace) do
+    with true <- Arbiter.Agents.GrokRouting.enabled?(workspace),
+         %Snapshot{} = snap <- Arbiter.Quota.GrokLedger.snapshot() do
+      cap = Arbiter.Quota.GrokLedger.cap()
+
+      [
+        "grok"
+        |> blank_view()
+        |> Map.merge(%{
+          workspace_id: workspace_id,
+          gate_policy: gate_policy(nil, workspace),
+          utilization_5h: snap.utilization,
+          reset_5h_at: snap.reset_at,
+          captured_at: snap.captured_at,
+          primary_label: snap.window_label,
+          secondary_label: nil,
+          plan: "free",
+          capture_source: "ledger_estimate",
+          estimate: %{
+            window: snap.window_label,
+            used_tokens: round(snap.utilization * cap),
+            cap_tokens: cap
+          }
+        })
+      ]
+    else
+      _ -> []
     end
   end
+
+  def grok_views(_workspace_id, _workspace), do: []
 
   @doc """
   The policy `Arbiter.Quota.Gate` resolves for dispatch on `account_id` from
@@ -1477,7 +1520,8 @@ defmodule Arbiter.Quota do
       :plan,
       :message,
       :models,
-      :cost_usd
+      :cost_usd,
+      :estimate
     ])
     |> Map.merge(%{
       reset_5h_at: iso(view[:reset_5h_at]),
