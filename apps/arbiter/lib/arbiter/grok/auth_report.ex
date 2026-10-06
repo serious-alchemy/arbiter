@@ -17,7 +17,7 @@ defmodule Arbiter.Grok.AuthReport do
   alias Arbiter.Grok.CredentialStore
   alias Arbiter.Tasks.Workspace
 
-  @fix "Run `grok login --device-code` on the Arbiter host (or log in from the dashboard's Providers page)."
+  @fix "Run `grok login --device-code` on the Arbiter host."
 
   @type state :: :logged_in | :expired | :reauth_required | :not_logged_in
 

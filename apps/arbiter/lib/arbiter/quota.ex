@@ -213,7 +213,8 @@ defmodule Arbiter.Quota do
     "anthropic" => "claude",
     "codex" => "codex",
     "openai" => "codex",
-    "antigravity" => "antigravity"
+    "antigravity" => "antigravity",
+    "grok" => "grok"
   }
 
   @doc """

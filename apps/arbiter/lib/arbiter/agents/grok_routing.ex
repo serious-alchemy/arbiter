@@ -12,8 +12,9 @@ defmodule Arbiter.Agents.GrokRouting do
           enabled: true          # default false
           difficulties: [1]      # default [1] — D1 tickets only
 
-  `Arbiter.Agents.Routing.ByDifficulty` consults `route?/2` after it has
-  merged its rule; a workspace that never sets `routing.grok.enabled` sees no
+  `Arbiter.Agents.Routing.choose/3` consults `route?/2` after the policy has
+  chosen, so it holds under every routing policy, and `Dispatch.maybe_route/3`
+  keeps quota/scored provider routing from overriding it. A workspace that never sets `routing.grok.enabled` sees no
   change. A workspace can still pin `agent.type: "grok"` outright, which is
   the explicit override.
   """
@@ -45,6 +46,17 @@ defmodule Arbiter.Agents.GrokRouting do
   end
 
   def difficulties(_), do: @default_difficulties
+
+  @doc """
+  Moves `choice` to grok when `route?/2` holds. The pinned `"model"` is
+  dropped — it belongs to the provider the policy picked, not to grok.
+  """
+  @spec apply_choice(map(), Workspace.t() | nil, 0..5) :: map()
+  def apply_choice(choice, workspace, difficulty) do
+    if route?(workspace, difficulty),
+      do: %{choice | type: :grok, config: Map.drop(choice.config, ["model"])},
+      else: choice
+  end
 
   @doc "Whether a task of `difficulty` (already clamped, 0..5) goes to grok."
   @spec route?(Workspace.t() | nil, 0..5) :: boolean()

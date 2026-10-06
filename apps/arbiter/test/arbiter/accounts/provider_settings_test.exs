@@ -193,6 +193,20 @@ defmodule Arbiter.Accounts.ProviderSettingsTest do
       assert {:error, {:merged_away, _}} = ProviderSettings.add(ws, :implementer, merged.id)
     end
 
+    test "refuses a grok account: grok is opt-in via routing.grok, D1 only" do
+      ws = workspace!()
+      grok = account!(:grok, "ps-grok")
+
+      assert {:error, :grok_routed_by_opt_in} = ProviderSettings.add(ws, :implementer, grok.id)
+    end
+
+    test "agent.type grok resolves to a grok provider candidate" do
+      ws = workspace!(%{"agent" => %{"type" => "grok"}})
+
+      assert [%{agent_type: "grok", provider: :grok}] =
+               ProviderSettings.effective(ws, :implementer).candidates
+    end
+
     test "adding an account already in the role is a no-op" do
       ws = workspace!()
       acct = account!(:codex, "ps-dupe")
