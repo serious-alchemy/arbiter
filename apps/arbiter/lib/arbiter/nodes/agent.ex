@@ -166,26 +166,31 @@ defmodule Arbiter.Nodes.Agent do
   # ---- digest ----------------------------------------------------------------
 
   defp digest(path) do
-    with {:ok, %File.Stat{size: size, mtime: mtime}} <- File.stat(path, time: :posix) do
-      key = {path, size, mtime}
-
-      case Map.fetch(:persistent_term.get(@cache_key, %{}), key) do
-        {:ok, sha} ->
-          {:ok, sha, size}
-
-        :error ->
-          sha =
-            path
-            |> File.stream!(65_536)
-            |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
-            |> :crypto.hash_final()
-            |> Base.encode16(case: :lower)
-
-          :persistent_term.put(@cache_key, %{key => sha})
-          {:ok, sha, size}
-      end
-    else
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{size: size, mtime: mtime}} -> {:ok, cached_sha(path, size, mtime), size}
       _ -> :error
+    end
+  end
+
+  # One entry, keyed by what identifies the bytes: a replaced file (new size or
+  # mtime) is re-hashed, an unchanged one is not read again.
+  defp cached_sha(path, size, mtime) do
+    key = {path, size, mtime}
+
+    case Map.fetch(:persistent_term.get(@cache_key, %{}), key) do
+      {:ok, sha} ->
+        sha
+
+      :error ->
+        sha =
+          path
+          |> File.stream!(65_536)
+          |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+          |> :crypto.hash_final()
+          |> Base.encode16(case: :lower)
+
+        :persistent_term.put(@cache_key, %{key => sha})
+        sha
     end
   end
 end
