@@ -31,6 +31,20 @@ defmodule ArbiterWeb.Endpoint do
   socket "/session", ArbiterWeb.SessionSocket,
     websocket: [connect_info: [:peer_data, session: @session_options], max_frame_size: 1_048_576]
 
+  # The node agent's socket (RW6, docs/design/remote-workers.md §4.1): one
+  # outbound WebSocket per node, authenticated by an `arbn_` node credential
+  # (`ArbiterWeb.NodeSocket`) and nothing else. Binary frames carry the bridge
+  # and stdout streams (RW10), so the frame cap matches `/session`; no longpoll,
+  # which the design does not build in v1. `timeout` is Phoenix's idle close and
+  # sits far above the 10 s heartbeat.
+  socket "/node/socket", ArbiterWeb.NodeSocket,
+    websocket: [
+      connect_info: [:peer_data, :x_headers],
+      max_frame_size: 1_048_576,
+      timeout: 60_000
+    ],
+    longpoll: false
+
   # bd-c1qq7l (G9): before anything serves a byte, pin a request that came
   # through a jailed worker's Arbiter bridge to that worker.
   plug ArbiterWeb.Plugs.WorkerBridge

@@ -7,7 +7,21 @@ defmodule Arbiter.Nodes.SessionTest do
 
   @version Arbiter.Version.app_version()
 
-  setup do
+  @moduletag :tmp_dir
+
+  # An outdated hello looks up the release to upgrade to (`Nodes.Agent`); keep
+  # that off the operator's real `~/.arbiter`.
+  setup %{tmp_dir: home} do
+    previous = Application.fetch_env(:arbiter, :data_dir)
+    Application.put_env(:arbiter, :data_dir, home)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :data_dir, v)
+        :error -> Application.delete_env(:arbiter, :data_dir)
+      end
+    end)
+
     {:ok, clock} = Agent.start_link(fn -> 1_000_000 end)
     Phoenix.PubSub.subscribe(Arbiter.PubSub, Nodes.topic())
 
