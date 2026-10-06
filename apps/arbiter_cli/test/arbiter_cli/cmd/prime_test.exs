@@ -263,6 +263,38 @@ defmodule ArbiterCli.Cmd.PrimeTest do
   end
 
   describe "text mode" do
+    # bd-dtdeff: a Ready card the scheduler is holding names the hold.
+    test "a held Ready card shows its hold reason; an unheld one shows none" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [
+          %{
+            "id" => "bd-held",
+            "priority" => 3,
+            "issue_type" => "feature",
+            "title" => "Held card",
+            "column" => "ready",
+            "hold_reason" => "held — provider constraint (require claude: at capacity)"
+          },
+          %{
+            "id" => "bd-free",
+            "priority" => 3,
+            "issue_type" => "feature",
+            "title" => "Free card",
+            "column" => "ready"
+          }
+        ]
+      )
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      [held] = Regex.run(~r/^.*bd-held.*$/m, out)
+      [free] = Regex.run(~r/^.*bd-free.*$/m, out)
+      assert held =~ "held — provider constraint (require claude: at capacity)"
+      refute free =~ "held"
+    end
+
     test "prints workspace header, workers, and ready tasks" do
       stub_all(
         [

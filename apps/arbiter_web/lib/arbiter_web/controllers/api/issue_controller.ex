@@ -33,6 +33,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
@@ -45,6 +46,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Usage.Estimate
   alias Arbiter.Workers.Current
+  alias ArbiterWeb.InstallationSettings
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -83,10 +85,27 @@ defmodule ArbiterWeb.Api.IssueController do
   # (state, column, step, blocked_by, attention), epics excluded as on the
   # board, in dispatch order — what `arb prime` groups into its sections.
   def lifecycle(conn, %{"workspace_id" => ws_id}) when is_binary(ws_id) and ws_id != "" do
-    render(conn, :lifecycle, tickets: Projection.open(ws_id))
+    render(conn, :lifecycle, tickets: Projection.open(ws_id), holds: ready_holds(ws_id))
   end
 
   def lifecycle(conn, _params), do: unprocessable(conn, "workspace_id is required")
+
+  # bd-dtdeff: why the scheduler is not dispatching each Ready card, from the
+  # board's own plan (the reason its card shows), so a card Autopilot is
+  # skipping reads the same on `arb prime`. Only cards the board holds appear;
+  # a failed board read yields none rather than failing the listing.
+  defp ready_holds(ws_id) do
+    paused? =
+      not InstallationSettings.scheduler_running?() or InstallationSettings.scheduler_paused?()
+
+    [workspace_id: ws_id, paused: paused?, exclude_engagements?: true]
+    |> Snapshot.load()
+    |> Map.get(:ready, [])
+    |> Enum.filter(&(&1.state == :blocked))
+    |> Map.new(&{&1.id, &1.reason})
+  rescue
+    _ -> %{}
+  end
 
   def show(conn, %{"id" => id}) do
     case Ash.get(Issue, id, load: [:child_total, :child_closed]) do

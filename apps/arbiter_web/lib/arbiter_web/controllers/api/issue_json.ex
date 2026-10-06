@@ -53,7 +53,9 @@ defmodule ArbiterWeb.Api.IssueJSON do
   lifecycle projection, in the order given (dispatch order). A slim row — what
   `arb prime` prints — not the full record.
   """
-  def lifecycle(%{tickets: tickets}) do
+  def lifecycle(%{tickets: tickets} = assigns) do
+    holds = Map.get(assigns, :holds, %{})
+
     %{
       data:
         Enum.map(tickets, fn {issue, view} ->
@@ -72,6 +74,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
             updated_at: iso(issue.updated_at)
           }
           |> Map.merge(Projection.payload(view))
+          |> put_hold_reason(Map.get(holds, issue.id))
         end)
     }
   end
@@ -97,6 +100,10 @@ defmodule ArbiterWeb.Api.IssueJSON do
       end)
     )
   end
+
+  # bd-dtdeff: why a Ready card is not being dispatched; absent when it is not held.
+  defp put_hold_reason(map, nil), do: map
+  defp put_hold_reason(map, reason), do: Map.put(map, :hold_reason, reason)
 
   defp put_lifecycle(map, nil), do: map
   defp put_lifecycle(map, view), do: Map.merge(map, Projection.payload(view))
