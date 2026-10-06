@@ -1,0 +1,76 @@
+# K2 fixtures: a stand-in controller (listeners on the two bridge ports and one non-bridge port), its Service,
+# a worker-labelled prober, a second worker (worker-to-worker), and a listener in another namespace.
+apiVersion: v1
+kind: Namespace
+metadata: {name: other-ns}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: controller
+  namespace: arbiter-workers
+  labels: {app.kubernetes.io/name: arbiter-controller, app.kubernetes.io/component: controller}
+spec:
+  hostUsers: false
+  automountServiceAccountToken: false
+  securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: c
+    image: localhost/arbiter-dev/base:f2add20f54da
+    imagePullPolicy: IfNotPresent
+    command: [sh, -c, "for p in 9443 9444 8080; do socat TCP-LISTEN:$p,fork,reuseaddr SYSTEM:'echo HELLO-$p' & done; wait"]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: arbiter-controller, namespace: arbiter-workers}
+spec:
+  selector: {app.kubernetes.io/component: controller}
+  ports: [{name: boot, port: 9444, targetPort: 9444}, {name: bridge, port: 9443, targetPort: 9443}, {name: other, port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prober
+  namespace: arbiter-workers
+  labels: {app.kubernetes.io/name: arbiter-worker, app.kubernetes.io/component: worker}
+spec:
+  hostUsers: false
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  dnsPolicy: None
+  dnsConfig: {nameservers: ["127.0.0.1"]}
+  securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: c
+    image: localhost/arbiter-dev/base:f2add20f54da
+    imagePullPolicy: IfNotPresent
+    command: [sh, -c, "socat TCP-LISTEN:7000,fork,reuseaddr SYSTEM:'echo HELLO-worker' & wait"]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prober2
+  namespace: arbiter-workers
+  labels: {app.kubernetes.io/name: arbiter-worker, app.kubernetes.io/component: worker}
+spec:
+  hostUsers: false
+  automountServiceAccountToken: false
+  securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: c
+    image: localhost/arbiter-dev/base:f2add20f54da
+    imagePullPolicy: IfNotPresent
+    command: [sh, -c, "socat TCP-LISTEN:7000,fork,reuseaddr SYSTEM:'echo HELLO-worker2' & wait"]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: bystander, namespace: other-ns}
+spec:
+  containers:
+  - name: c
+    image: localhost/arbiter-dev/base:f2add20f54da
+    imagePullPolicy: IfNotPresent
+    command: [sh, -c, "socat TCP-LISTEN:8080,fork,reuseaddr SYSTEM:'echo HELLO-bystander' & wait"]

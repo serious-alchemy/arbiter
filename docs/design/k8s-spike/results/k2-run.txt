@@ -1,0 +1,94 @@
+fixtures: controller pod 10.42.0.81 svc 10.43.6.231 | worker2 10.42.0.83 | other-ns pod 10.42.0.84 | coredns pod 10.42.0.77 svc 10.43.0.10 | API ClusterIP 10.43.0.1 | node 10.0.2.15 | cni gateway 10.42.0.1
+
+### 1. BASELINE, no policies: every worker target must be reachable
+controller-svc-bridge-9443         10.43.6.231:9443       CONNECTED  expect=open   ok
+controller-svc-boot-9444           10.43.6.231:9444       CONNECTED  expect=open   ok
+controller-pod-bridge-9443         10.42.0.81:9443        CONNECTED  expect=open   ok
+controller-svc-NONBRIDGE-8080      10.43.6.231:8080       CONNECTED  expect=open   ok
+controller-pod-NONBRIDGE-8080      10.42.0.81:8080        CONNECTED  expect=open   ok
+api-clusterip-443                  10.43.0.1:443          CONNECTED  expect=open   ok
+node-ip-apiserver-6443             10.0.2.15:6443         CONNECTED  expect=open   ok
+node-ip-ssh-22                     10.0.2.15:22           CONNECTED  expect=open   ok
+node-cni-gateway-ssh-22            10.42.0.1:22           CONNECTED  expect=open   ok
+node-kubelet-10250                 10.0.2.15:10250        CONNECTED  expect=open   ok
+other-namespace-pod-8080           10.42.0.84:8080        CONNECTED  expect=open   ok
+other-worker-pod-7000              10.42.0.83:7000        CONNECTED  expect=open   ok
+coredns-clusterip-tcp53            10.43.0.10:53          CONNECTED  expect=open   ok
+coredns-pod-tcp53                  10.42.0.77:53          CONNECTED  expect=open   ok
+internet-1.1.1.1-443               1.1.1.1:443            CONNECTED  expect=open   ok
+internet-8.8.8.8-53                8.8.8.8:53             CONNECTED  expect=open   ok
+
+### 2. WORKER egress with the K§9.1 policies (expect open: 3 bridge-path targets; closed: everything else)
+controller-svc-bridge-9443         10.43.6.231:9443       CONNECTED  expect=open   ok
+controller-svc-boot-9444           10.43.6.231:9444       CONNECTED  expect=open   ok
+controller-pod-bridge-9443         10.42.0.81:9443        CONNECTED  expect=open   ok
+controller-svc-NONBRIDGE-8080      10.43.6.231:8080       REJECTED   expect=closed ok
+controller-pod-NONBRIDGE-8080      10.42.0.81:8080        REJECTED   expect=closed ok
+api-clusterip-443                  10.43.0.1:443          REJECTED   expect=closed ok
+node-ip-apiserver-6443             10.0.2.15:6443         REJECTED   expect=closed ok
+node-ip-ssh-22                     10.0.2.15:22           REJECTED   expect=closed ok
+node-cni-gateway-ssh-22            10.42.0.1:22           REJECTED   expect=closed ok
+node-kubelet-10250                 10.0.2.15:10250        REJECTED   expect=closed ok
+other-namespace-pod-8080           10.42.0.84:8080        REJECTED   expect=closed ok
+other-worker-pod-7000              10.42.0.83:7000        REJECTED   expect=closed ok
+coredns-clusterip-tcp53            10.43.0.10:53          REJECTED   expect=closed ok
+coredns-pod-tcp53                  10.42.0.77:53          REJECTED   expect=closed ok
+internet-1.1.1.1-443               1.1.1.1:443            REJECTED   expect=closed ok
+internet-8.8.8.8-53                8.8.8.8:53             REJECTED   expect=closed ok
+
+### 3. CONTROLLER egress
+api-clusterip-443                  10.43.0.1:443          CONNECTED  expect=open   ok
+node-ip-apiserver-6443             10.0.2.15:6443         CONNECTED  expect=open   ok
+coredns-clusterip-tcp53            10.43.0.10:53          CONNECTED  expect=open   ok
+coredns-pod-tcp53                  10.42.0.77:53          CONNECTED  expect=open   ok
+internet-1.1.1.1-443               1.1.1.1:443            CONNECTED  expect=open   ok
+internet-8.8.8.8-53                8.8.8.8:53             REJECTED   expect=closed ok
+node-ip-ssh-22                     10.0.2.15:22           REJECTED   expect=closed ok
+node-kubelet-10250                 10.0.2.15:10250        REJECTED   expect=closed ok
+other-namespace-pod-8080           10.42.0.84:8080        REJECTED   expect=closed ok
+worker-pod-7000                    10.42.0.82:7000        REJECTED   expect=closed ok
+kube-dns-metrics-clusterip-9153    10.43.0.10:9153        REJECTED   expect=closed ok
+
+### 4. INGRESS and worker-to-worker, 6 passes (REJECTED = enforced)
+[pass 1]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API
+[pass 2]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API
+[pass 3]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API
+[pass 4]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API
+[pass 5]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API
+[pass 6]
+other-namespace pod -> controller pod :9443  want=REJECTED REJECTED
+other-namespace pod -> controller svc :9443  want=REJECTED REJECTED
+other-namespace pod -> worker pod :7000      want=REJECTED REJECTED
+worker2 -> worker pod :7000                  want=REJECTED REJECTED
+worker -> controller pod :9443 (allowed)     want=CONNECTED CONNECTED
+node host netns -> controller pod :9443: CONNECTED HELLO-  (kubelet-originated traffic is always admitted by the NetworkPolicy API

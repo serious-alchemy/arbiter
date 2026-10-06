@@ -1,0 +1,27 @@
+# The K§7 admission policy exactly as written in the design (validations verbatim), except: matchConditions (the controller
+# service-account gate) is dropped because the spike creates pods as the cluster admin, and the registry prefix is the spike's.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: design-k7-verbatim}
+spec:
+  failurePolicy: Fail
+  matchConstraints: {resourceRules: [{apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods]}]}
+  validations:
+  - expression: object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false
+    message: "service account"
+  - expression: "!has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)"
+    message: "host namespaces"
+  - expression: object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))
+    message: "volumes: no Secret, hostPath, PVC"
+  - expression: (object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)
+    message: "container hardening"
+  - expression: (object.spec.containers + object.spec.initContainers).all(c, c.image.startsWith('localhost/arbiter-dev/') || c.image.startsWith('docker.io/library/'))
+    message: "image allowlist"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: design-k7-verbatim}
+spec:
+  policyName: design-k7-verbatim
+  validationActions: [Deny]
+  matchResources: {namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vap-test}}}

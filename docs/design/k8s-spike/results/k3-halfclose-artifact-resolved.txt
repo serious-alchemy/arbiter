@@ -1,0 +1,3 @@
+bidirectional client (reads the banner), run 1 sent 104857600; counted: BYTES 104857600
+bidirectional client (reads the banner), run 2 sent 104857600; counted: BYTES 104857600
+bidirectional client (reads the banner), run 3 sent 104857600; counted: BYTES 104857600

@@ -1,0 +1,11 @@
+snap: start 1791282066.232350153 id=10001 uid_map= 0 2077229056 65536;
+worker: sleeping 1791282066.472218164
+worker: got TERM 1791282069.077584351
+worker: exiting after TERM 1791282072.082624757
+snap: GOT SIGTERM at 1791282072.142257260
+snap: uploading tick 1 at 1791282073.146787984
+snap: uploading tick 2 at 1791282074.152230432
+snap: uploading tick 3 at 1791282075.156977616
+snap: uploading tick 4 at 1791282076.162607682
+snap: uploading tick 5 at 1791282077.168383597
+snap: final snapshot done at 1791282077.176513688

@@ -1,0 +1,5 @@
+startup-1: gate: canary rejected at +.459080658s done: tried=21 open=0 
+startup-2: gate: canary rejected at +.525589403s done: tried=21 open=0 
+startup-3: gate: canary rejected at +.553008035s done: tried=21 open=0 
+startup-4: gate: canary rejected at +.413420123s done: tried=21 open=0 
+startup-5: gate: canary rejected at +.373232928s done: tried=18 open=0 

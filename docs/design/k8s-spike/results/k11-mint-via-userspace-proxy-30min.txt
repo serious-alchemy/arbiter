@@ -1,0 +1,18 @@
+# K11: mix test --include spike_k8s test/spike/k11_proxy_ws_test.exs, SPIKE_SOAK_SECONDS=1800 (2026-10-06 07:08-07:37 local)
+# path: Mint (proxy: {:http,127.0.0.1,18055}) -> tailscaled userspace HTTP proxy (node agent-a) -> WireGuard (direct, same host) -> node primary-b 'tailscale serve --tcp 8443' -> Bandit/Phoenix TLS endpoint
+SPIKE_RESULT {"detail":{"joined":true},"k11":"baseline_direct"}
+SPIKE_RESULT {"detail":{"proxy_port_closed":"{:error, {:connect_failed, %Mint.TransportError{reason: :econnrefused}}}","connect_target_closed":"{:error, {:connect_failed, %Mint.HTTPError{reason: {:proxy, {:unexpected_status, 500}}, module: Mint.TunnelProxy}}}"},"k11":"proxy_failures"}
+SPIKE_RESULT {"detail":{"seconds":1800,"sockets":[{"label":"hb10s-via-proxy","sent":180,"hb_ms":10000,"acked":180,"alive_s":1800,"closed?":false,"rtt_ms":{"max":6,"min":0,"p50":1,"p99":5}},{"label":"hb50s-via-proxy","sent":36,"hb_ms":50000,"acked":36,"alive_s":1800,"closed?":false,"rtt_ms":{"max":3,"min":0,"p50":1,"p99":3}}]},"k11":"soak"}
+SPIKE_RESULT {"detail":{"connect_join_ms":47,"echo_1MB_ms":38,"byte_exact":true},"k11":"proxy_ws"}
+Finished in 1800.7 seconds (0.00s async, 1800.7s sync)
+4 tests, 0 failures
+
+# 60 s dry run of the earlier build of the same test (baseline failed on a hostname-mismatch fixture, fixed before the soak)
+SPIKE_RESULT {"detail":{"seconds":60,"sockets":[{"label":"hb10s-via-proxy","sent":6,"closed?":false,"hb_ms":10000,"acked":6,"alive_s":60,"rtt_ms":{"max":1,"min":0,"p50":1,"p99":1}},{"label":"hb50s-via-proxy","sent":2,"closed?":false,"hb_ms":50000,"acked":2,"alive_s":100,"rtt_ms":{"max":1,"min":0,"p50":1,"p99":1}}]},"k11":"soak"}
+SPIKE_RESULT {"detail":{"connect_join_ms":46,"echo_1MB_ms":32,"byte_exact":true},"k11":"proxy_ws"}
+SPIKE_RESULT {"detail":{"proxy_port_closed":"{:error, {:connect_failed, %Mint.TransportError{reason: :econnrefused}}}","connect_target_closed":"{:error, {:connect_failed, %Mint.HTTPError{reason: {:proxy, {:unexpected_status, 500}}, module: Mint.TunnelProxy}}}"},"k11":"proxy_failures"}
+4 tests, 1 failure
+
+# tailnet state at the end
+100.64.0.1  agent-a    spike  linux  -                                                       
+100.64.0.2  primary-b  spike  linux  active; direct 172.20.0.1:52092, tx 2296700 rx 2280156  

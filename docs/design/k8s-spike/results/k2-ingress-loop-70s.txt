@@ -1,0 +1,2 @@
+# in-pod 1 Hz loop (other-ns pod -> worker pod :7000 and -> controller pod :9443), policies in place, 70 consecutive probes each
+{'worker7000=R': 70, 'ctrl9443=R': 70} (R = rejected, C = connected)

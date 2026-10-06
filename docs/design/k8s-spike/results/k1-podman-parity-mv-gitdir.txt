@@ -1,0 +1,5 @@
+mv: cannot move '.git/config' to 'x': Device or resource busy
+podman: mv .git .git2 SUCCEEDED
+.
+..
+.git2

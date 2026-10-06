@@ -1,0 +1,11 @@
+== design K§7 CEL, verbatim, against the K§8.2 pod (namespace vap-test)
+as built                                             pod/v1 created (server dry run) 
+Secret volume                                        denied request: volumes: no Secret, hostPath, PVC 
+hostPath volume                                      Error from server (Forbidden): error when creating "STDIN": pods "v1" is forbidden: violates PodSecurity "restricted:latest": restricted vol
+other service account                                denied request: service account 
+image off the allowlist                              denied request: image allowlist 
+no readOnlyRootFilesystem on an init container       denied request: container hardening 
+capabilities.drop missing on the worker              Error from server (Forbidden): error when creating "STDIN": pods "v1" is forbidden: violates PodSecurity "restricted:latest": unrestricted c
+-- pod with NO initContainers (does the design's `containers + initContainers` still evaluate?)
+The pods "noinit" is invalid: : ValidatingAdmissionPolicy 'design-k7-verbatim' with binding 'design-k7-verbatim' denied request: expression 'object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))' resulted in erro
+
