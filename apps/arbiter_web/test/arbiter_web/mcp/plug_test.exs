@@ -192,6 +192,20 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert json_response(conn, 200)["result"]["tools"] != nil
     end
 
+    test "a ?token= credential never reaches the logs (P-28)", ctx do
+      previous = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          conn = rpc_with_query_token(ctx.conn, ctx.worker_token, req("tools/list"))
+          assert json_response(conn, 200)
+        end)
+
+      refute log =~ ctx.worker_token
+    end
+
     test "a garbage token in the query parameter is 401", ctx do
       conn = rpc_with_query_token(ctx.conn, "garbage", req("tools/list"))
       assert json_response(conn, 401)["error"]["type"] == "unauthorized"

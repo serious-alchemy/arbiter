@@ -309,7 +309,11 @@ defmodule ArbiterWeb.ApiPolicy do
   def authorize(:operator, %Scope{} = scope, _params) do
     if Scope.operator?(scope),
       do: :ok,
-      else: forbidden(scope, "lacks operator proof (this route is operator-only: node administration, dashboard login)")
+      else:
+        forbidden(
+          scope,
+          "lacks operator proof (this route is operator-only: node administration, dashboard login)"
+        )
   end
 
   def authorize(:grok_token, %Scope{tier: tier}, _params) when tier in [:coordinator, :worker],

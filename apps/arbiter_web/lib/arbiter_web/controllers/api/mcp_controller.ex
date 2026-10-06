@@ -180,8 +180,38 @@ defmodule ArbiterWeb.Api.McpController do
     - `token` (required) — the signed scope token to verify
 
   Returns `{"valid": true, ...claims}` or `{"valid": false, "reason": "..."}`.
+
+  P-28: a coordinator may verify any token; every other tier only its own
+  (the presented token must be the caller's own bearer), so a worker cannot
+  use this route as an oracle on another principal's token. See
+  `docs/design/tier-proof-boundaries.md`.
   """
   def verify_token(conn, %{"token" => token}) when is_binary(token) and token != "" do
+    if may_verify?(conn, token), do: do_verify(conn, token), else: not_own_token(conn)
+  end
+
+  def verify_token(conn, _params) do
+    ErrorResponse.send_error(conn, :invalid, "token is required")
+  end
+
+  defp may_verify?(%{assigns: %{mcp_scope: %Scope{tier: :coordinator}}}, _token), do: true
+
+  defp may_verify?(conn, token) do
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> bearer] -> Plug.Crypto.secure_compare(String.trim(bearer), token)
+      _ -> false
+    end
+  end
+
+  defp not_own_token(conn) do
+    ErrorResponse.send_error(
+      conn,
+      :forbidden,
+      "only a coordinator token may verify a token other than its own"
+    )
+  end
+
+  defp do_verify(conn, token) do
     case Scope.from_token(token) do
       {:ok, scope} ->
         json(conn, %{
@@ -205,9 +235,5 @@ defmodule ArbiterWeb.Api.McpController do
         |> put_status(:ok)
         |> json(%{"valid" => false, "reason" => "invalid"})
     end
-  end
-
-  def verify_token(conn, _params) do
-    ErrorResponse.send_error(conn, :invalid, "token is required")
   end
 end

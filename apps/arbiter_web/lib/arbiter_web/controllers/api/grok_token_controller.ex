@@ -23,6 +23,8 @@ defmodule ArbiterWeb.Api.GrokTokenController do
 
   alias Arbiter.Errors
   alias Arbiter.Grok.CredentialBroker
+  alias Arbiter.MCP.Scope
+  alias Arbiter.Tasks.Issue
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -32,6 +34,10 @@ defmodule ArbiterWeb.Api.GrokTokenController do
   def create(conn, params) do
     conn = put_resp_header(conn, "cache-control", "no-store")
 
+    if worker_in_workspace?(conn), do: fetch(conn, params), else: refuse(conn)
+  end
+
+  defp fetch(conn, params) do
     case CredentialBroker.fetch_token(
            force: params["force"] == true,
            task_id: requester_task(conn),
@@ -43,6 +49,31 @@ defmodule ArbiterWeb.Api.GrokTokenController do
       {:error, reason} ->
         failure(conn, reason)
     end
+  end
+
+  # P-28: a worker token is honoured only while its task still exists and sits
+  # in the workspace the token names, so a stale or forged-claim token cannot
+  # draw the installation's grok login. A coordinator token is not workspace-
+  # bound and passes (`docs/design/tier-proof-boundaries.md`).
+  defp worker_in_workspace?(%{assigns: %{mcp_scope: %Scope{tier: :worker} = scope}}) do
+    case is_binary(scope.task_id) && Ash.get(Issue, scope.task_id, error?: false) do
+      {:ok, %Issue{workspace_id: ws}} -> is_binary(ws) and ws == scope.workspace_id
+      _ -> false
+    end
+  end
+
+  defp worker_in_workspace?(_conn), do: true
+
+  defp refuse(conn) do
+    conn
+    |> put_status(:forbidden)
+    |> json(%{
+      error: %{
+        type: "forbidden",
+        message: "this worker token's task is not in its workspace (or no longer exists)",
+        details: %{}
+      }
+    })
   end
 
   # Who asked, for the broker's per-request log line (bd-8rvkqd). A worker

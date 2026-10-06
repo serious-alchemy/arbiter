@@ -91,6 +91,29 @@ defmodule ArbiterWeb.Api.GrokTokenControllerTest do
     assert token |> as_worker() |> post("/api/grok/token", %{}) |> json_response(403)
   end
 
+  test "a worker token whose task is not in its workspace is refused (P-28)", ctx do
+    {:ok, other} = Ash.create(Workspace, %{name: "grok-other-#{ctx.task.id}", prefix: "go"})
+    token = Scope.mint_worker(%{ctx.task | workspace_id: other.id})
+
+    resp = token |> as_worker() |> post("/api/grok/token", %{}) |> json_response(403)
+    refute Jason.encode!(resp) =~ "access-secret"
+  end
+
+  test "a worker token for a task that no longer exists is refused (P-28)", ctx do
+    token = Scope.mint_worker(%{ctx.task | id: "bd-gone00"})
+
+    assert token |> as_worker() |> post("/api/grok/token", %{}) |> json_response(403)
+  end
+
+  test "a coordinator token is not workspace-checked", _ctx do
+    conn =
+      coordinator_conn()
+      |> Map.put(:remote_ip, {127, 0, 0, 1})
+      |> post("/api/grok/token", %{})
+
+    assert json_response(conn, 200)["access_token"] == "access-secret-0"
+  end
+
   test "the response is not cacheable", ctx do
     conn = ctx.worker_token |> as_worker() |> post("/api/grok/token", %{})
     assert get_resp_header(conn, "cache-control") == ["no-store"]

@@ -159,7 +159,6 @@ defmodule ArbiterWeb.DashboardAuthTest do
         "Bearer " <> Arbiter.MCP.Scope.mint_coordinator(nil, operator: true)
       )
     end
-
   end
 
   describe "tailscale identity" do

@@ -113,7 +113,7 @@ defmodule ArbiterCli.Cmd.Account do
   All verbs go through the REST API at `/api/accounts`.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, SecretInput}
   alias ArbiterCli.Cmd.Account.Login
 
   @switches [
@@ -461,19 +461,14 @@ defmodule ArbiterCli.Cmd.Account do
         Output.die("pass only one of --secret / --secret-file")
 
       is_binary(opts[:secret]) ->
+        SecretInput.warn_argv("--secret-file <path> or - (stdin)")
         opts[:secret]
 
       is_binary(opts[:secret_file]) ->
-        case File.read(opts[:secret_file]) do
-          {:ok, contents} ->
-            String.trim(contents)
-
-          {:error, reason} ->
-            Output.die("cannot read --secret-file: #{:file.format_error(reason)}")
-        end
+        SecretInput.from_file!(opts[:secret_file], "--secret-file")
 
       "-" in args ->
-        IO.read(:stdio, :eof) |> to_string() |> String.trim()
+        SecretInput.from_stdin!()
 
       true ->
         Output.die(
