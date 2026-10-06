@@ -9,9 +9,11 @@ defmodule ArbiterWeb.Api.FallbackController do
 
   Where `type` is one of:
 
-    * `"validation_error"` — 422 — `%Ash.Error.Invalid{}` (validation failures)
+    * `"validation_error"` — 422 — `%Ash.Error.Invalid{}` or `{:invalid, msg}`:
+      the request is well formed but an argument is unacceptable.
     * `"not_found"` — 404 — `%Ash.Error.Query.NotFound{}`
-    * `"invalid_request"` — 400 — malformed params (bad atom values etc.)
+    * `"invalid_request"` — 400 — malformed params (missing, mistyped, bad atom
+      values etc.)
     * `"conflict"` — 409 — the request is well-formed but the resource is
       already in the state it asks for, and doing it twice would be harmful
       (e.g. starting a second merge Watchdog on one MR).
@@ -21,10 +23,20 @@ defmodule ArbiterWeb.Api.FallbackController do
       adapter (`GitHub`, `Jira`, `Shortcut`, …). The HTTP status is derived
       from the error `kind` so every tracker reports failures the same way.
 
-  Anything else falls through to a generic 500.
+    * `"unauthorized"` / `"forbidden"` — 403, `"unauthenticated"` — 401.
+    * `"internal_error"` — 500 — `{:server_error, msg, details}` keeps the real
+      message; anything unrecognised falls through to a generic 500.
+
+  The kind → type/status table is `Arbiter.Errors`, shared with the MCP
+  transport so a client can branch on `type` on either surface.
   """
 
   use ArbiterWeb, :controller
+
+  alias Arbiter.Errors
+
+  @domain_kinds ~w(not_found invalid invalid_request conflict busy forbidden unauthorized
+                   unauthenticated internal server_error)a
 
   def call(conn, {:error, %Ash.Error.Invalid{} = err}) do
     if contains_not_found?(err) do
@@ -70,59 +82,15 @@ defmodule ArbiterWeb.Api.FallbackController do
     })
   end
 
-  def call(conn, {:error, {:invalid_request, message}}) when is_binary(message) do
-    conn
-    |> put_status(:bad_request)
-    |> json(%{
-      error: %{type: "invalid_request", message: message, details: %{}}
-    })
-  end
+  # Every domain refusal tuple — `{kind, message}` or `{kind, message, details}` —
+  # renders through `Arbiter.Errors`, so one kind is one status and one `type`
+  # on every controller (and the MCP transport reads the same table).
+  def call(conn, {:error, {kind, message}}) when kind in @domain_kinds and is_binary(message),
+    do: render_error(conn, kind, message, %{})
 
-  def call(conn, {:error, {:invalid_request, message, details}}) when is_binary(message) do
-    conn
-    |> put_status(:bad_request)
-    |> json(%{
-      error: %{type: "invalid_request", message: message, details: details}
-    })
-  end
-
-  def call(conn, {:error, {:conflict, message}}) when is_binary(message) do
-    conn
-    |> put_status(:conflict)
-    |> json(%{
-      error: %{type: "conflict", message: message, details: %{}}
-    })
-  end
-
-  def call(conn, {:error, {:conflict, message, details}}) when is_binary(message) do
-    conn
-    |> put_status(:conflict)
-    |> json(%{
-      error: %{type: "conflict", message: message, details: details}
-    })
-  end
-
-  def call(conn, {:error, {:busy, message}}) when is_binary(message) do
-    conn
-    |> put_status(:service_unavailable)
-    |> json(%{
-      error: %{type: "busy", message: message, details: %{}}
-    })
-  end
-
-  # A caller presented a valid, decoded token (`conn.assigns[:mcp_scope]`,
-  # `ArbiterWeb.Plugs.ApiAuth`) that this action refuses on its own merits —
-  # e.g. `can_dispatch: false` (bd-5b5hq7). Same shape the `:conflict` /
-  # `:busy` tuples use, kept out of Ash's own Forbidden clause because there's
-  # no Ash policy involved: this is a REST-layer check mirroring the MCP
-  # tool-layer `Arbiter.MCP.Tools.ensure_can_dispatch/1`.
-  def call(conn, {:error, {:unauthorized, message}}) when is_binary(message) do
-    conn
-    |> put_status(:forbidden)
-    |> json(%{
-      error: %{type: "unauthorized", message: message, details: %{}}
-    })
-  end
+  def call(conn, {:error, {kind, message, details}})
+      when kind in @domain_kinds and is_binary(message) and is_map(details),
+      do: render_error(conn, kind, message, details)
 
   # Tracker adapter errors share an identical normalised shape
   # (`%{kind, status, message, raw}`) across every backend. Render them all
@@ -165,6 +133,12 @@ defmodule ArbiterWeb.Api.FallbackController do
   end
 
   # --- helpers ---
+
+  defp render_error(conn, kind, message, details) do
+    conn
+    |> put_status(Errors.http_status(kind))
+    |> json(Errors.body(kind, message, details))
+  end
 
   # Map a normalised tracker error to a JSON response. The struct shape is
   # identical across adapters, so we match structurally on the fields rather
