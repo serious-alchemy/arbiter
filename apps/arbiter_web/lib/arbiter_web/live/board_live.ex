@@ -151,6 +151,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:board, Snapshot.empty(now))
       |> assign(:alerts, [])
       |> assign(:paused_providers, [])
+      |> assign(:local_cap_zero?, false)
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
@@ -222,6 +223,7 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:board, loaded.board)
     |> assign(:alerts, loaded.alerts)
     |> assign(:paused_providers, loaded.paused_providers)
+    |> assign(:local_cap_zero?, loaded.local_cap_zero?)
     |> assign(:scheduler_running, loaded.scheduler_running)
     |> assign(:system_cap, loaded.system_cap)
     |> assign(:system_cap_override?, loaded.system_cap_override?)
@@ -692,11 +694,19 @@ defmodule ArbiterWeb.BoardLive do
       board: board,
       alerts: alerts,
       paused_providers: Arbiter.Providers.Pause.list(),
+      local_cap_zero?: local_cap_zero?(),
       scheduler_running: running?,
       workspaces: workspaces,
       system_cap: Snapshot.system_max_concurrent(),
       system_cap_override?: is_integer(Settings.conductor_system_max_concurrent())
     }
+  end
+
+  # RW8: the primary's own worker cap is overridden to 0 — nothing runs on this
+  # machine, so local-only work (reviewers, fix and conflict passes, agy/codex,
+  # research) is held until a node or the cap frees a slot.
+  defp local_cap_zero? do
+    match?(%{cap: 0, enforced?: true}, Arbiter.Nodes.LocalCapacity.cap())
   end
 
   defp exit_if_view_gone do
@@ -1058,6 +1068,16 @@ defmodule ArbiterWeb.BoardLive do
                   board limited to {@board.slots_total} by workspace/account cap
                 </span>
               </form>
+
+              <.link
+                :if={@board_loaded? and @local_cap_zero?}
+                id="board-local-cap-zero"
+                navigate={~p"/nodes"}
+                title="The local cap is 0: nothing runs on this machine. Work that can only run here (reviewers, fix and conflict passes, agy/codex runs, research) is held until a local slot opens."
+                class="px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid border-[var(--arb-attention)] text-[10px] font-medium font-[family-name:var(--font-mono)] uppercase tracking-[0.08em] text-[var(--arb-attention)]"
+              >
+                local cap 0 — local-only work waits
+              </.link>
 
               <.link
                 :if={@board_loaded? and @paused_providers != []}

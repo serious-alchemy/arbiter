@@ -202,7 +202,9 @@ defmodule ArbiterWeb.Api.NodeController do
   # Well-typed `name` / `labels` / `max_workers`, or a 422. `max_workers: null`
   # clears the cap; an invalid number is left to the resource's constraint.
   defp changes(params) do
-    Enum.reduce_while(["name", "labels", "max_workers"], {:ok, %{}}, fn key, {:ok, acc} ->
+    Enum.reduce_while(["name", "labels", "max_workers", "workspace_ids"], {:ok, %{}}, fn key,
+                                                                                         {:ok,
+                                                                                          acc} ->
       case Map.fetch(params, key) do
         :error -> {:cont, {:ok, acc}}
         {:ok, value} -> check(key, value, acc)
@@ -222,6 +224,12 @@ defmodule ArbiterWeb.Api.NodeController do
     if Enum.all?(v, &is_binary/1),
       do: {:cont, {:ok, Map.put(acc, :labels, v)}},
       else: {:halt, {:error, {:unprocessable, "labels must be a list of strings"}}}
+  end
+
+  defp check("workspace_ids", v, acc) when is_list(v) do
+    if Enum.all?(v, &is_binary/1),
+      do: {:cont, {:ok, Map.put(acc, :workspace_ids, v)}},
+      else: {:halt, {:error, {:unprocessable, "workspace_ids must be a list of workspace ids"}}}
   end
 
   defp check("max_workers", v, acc) when is_nil(v) or is_integer(v),

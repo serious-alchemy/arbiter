@@ -127,6 +127,32 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert info.phrase =~ "held — local capacity 0 (no node had a free slot)"
     end
 
+    test "an agy/codex implementer is held with its provider as the reason", %{ws: ws} do
+      issue = ready!(ws, "codex run")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, agent_type: :codex)
+
+      assert info.phrase ==
+               "held — local capacity 0 (run is local-only: provider codex has no podman path)"
+
+      assert Ash.get!(Issue, issue.id).state == :queued
+    end
+
+    test "a research dispatch (no private clone) is held with that reason", %{ws: ws} do
+      {:ok, created} =
+        Ash.create(Issue, %{
+          title: "research it",
+          workspace_id: ws.id,
+          issue_type: :research,
+          acceptance: "- findings in notes"
+        })
+
+      {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman)
+      assert info.phrase =~ "run is local-only: no private clone (task or research dispatch)"
+    end
+
     test "force_slot goes over the cap", %{ws: ws} do
       issue = ready!(ws, "forced")
       assert {:ok, _} = dispatch(issue, force_slot: true, slot_override_actor: "test")
