@@ -15,7 +15,7 @@ defmodule Arbiter.NodeAgent.Runs do
   @supervisor Arbiter.NodeAgent.RunSupervisor
 
   @doc "The children the agent supervisor starts for the run table."
-  @spec child_specs() :: [Supervisor.child_spec()]
+  @spec child_specs() :: [{module(), keyword()}]
   def child_specs do
     [
       {Registry, keys: :unique, name: @registry},

@@ -286,8 +286,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                env_pairs(opts, task_id, worker_env, tmp_dir),
                owner: owner,
                task_id: task_id,
-               tmp_dir: tmp_dir,
-               run_id: run_id_for(owner)
+               tmp_dir: tmp_dir
              ) do
         GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
       end
@@ -416,13 +415,6 @@ defmodule Arbiter.Worker.ClaudeSession do
   @spec remote_memory_cap(map()) :: String.t() | nil
   def remote_memory_cap(%{remote: %{request: %{limits: %{"memory" => memory}}}}), do: memory
   def remote_memory_cap(_), do: nil
-
-  defp run_id_for(owner) do
-    case Worker.state(owner) do
-      %{run_id: id} when is_binary(id) -> id
-      _ -> nil
-    end
-  end
 
   # ---- option resolution -------------------------------------------------
 
