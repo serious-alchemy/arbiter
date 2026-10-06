@@ -148,7 +148,10 @@ defmodule Arbiter.ReviewGate.ResolutionTest do
       assert [%Resolution{decision: :amend}] = Resolutions.list(task.id)
     end
 
-    test "a caller-supplied actor is ignored; attribution comes from the caller", %{task: task, coordinator: coord} do
+    test "a caller-supplied actor is ignored; attribution comes from the caller", %{
+      task: task,
+      coordinator: coord
+    } do
       assert {:ok, %{resolution: res}} =
                Tools.review_gate_resolve(coord, %{
                  "task_id" => task.id,
