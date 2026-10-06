@@ -38,7 +38,10 @@ max_cases_opts =
   |> elem(0)
   |> then(& &1.(System.get_env()))
 
-ExUnit.start([exclude: [:podman] ++ node_exclude ++ browser_exclude] ++ max_cases_opts)
+# bd-6tx1xv (RW2 spike): the remote-workers go/no-go prototypes move real bytes
+# over real sockets (and, for some, `tc netem` / `tailscale serve`); opt in with
+# `mix test --include spike_rw <file>`. See docs/design/remote-workers.md §17.
+ExUnit.start([exclude: [:podman, :spike_rw, :spike_serve] ++ node_exclude ++ browser_exclude] ++ max_cases_opts)
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while
