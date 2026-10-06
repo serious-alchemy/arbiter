@@ -372,8 +372,6 @@ defmodule Arbiter.Application do
   # own stubs. That gating is exactly why an id collision here is invisible to
   # the suite — `Arbiter.ApplicationTest` forces `auto_start?: true` to close
   # the gap.
-  defp boot_tasks(false), do: []
-
   # bd-2hwm9e: the schema-dependent one-shot steps run right after the Repo and
   # its dependency-free neighbours, BEFORE every child that reads the database
   # (Autopilot, CredentialWatchdog, quota probes, queues, patrols). On v0.2.18
@@ -392,6 +390,8 @@ defmodule Arbiter.Application do
       Arbiter.Boot.TicketTransitions
     ]
   end
+
+  defp boot_tasks(false), do: []
 
   defp boot_tasks(true) do
     [
