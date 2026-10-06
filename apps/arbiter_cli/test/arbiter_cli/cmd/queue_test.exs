@@ -134,34 +134,31 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert err =~ "requires: <task-id>"
     end
 
-    test "reports a friendly error when no worker is registered" do
+    # D-W-19: the server's 404 means "No ticket X" — the CLI no longer guesses
+    # it meant "no worker", it prints the server's own sentence, and exits 4.
+    test "a 404 prints the server's message and exits 4" do
       stub_routes([
         {{"post", "/api/queue/bd-2/restart_watchdog"},
-         {%{"error" => %{"message" => "no worker"}}, 404}}
+         {%{"error" => %{"message" => "No ticket bd-2."}}, 404}}
       ])
 
       {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-2"]) end)
 
-      assert exit_code != 0
-      assert err =~ "no worker is running"
-      # The fallback it names has to be a command that exists: `arb resume` /
-      # `arb worker resume`, never `arb task resume` (there is no task resource).
-      assert err =~ "arb worker resume bd-2"
-      refute err =~ "arb task resume"
+      assert exit_code == 4
+      assert err =~ "No ticket bd-2."
     end
 
     # Refusing is the point: two watchdogs on one MR race the merge.
-    test "reports a friendly error when a watchdog is already running" do
+    test "a refusal (already running) prints the server's message and exits 1" do
       stub_routes([
         {{"post", "/api/queue/bd-3/restart_watchdog"},
-         {%{"error" => %{"message" => "already running"}}, 409}}
+         {%{"error" => %{"message" => "A merge watchdog is already running for bd-3"}}, 409}}
       ])
 
       {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-3"]) end)
 
-      assert exit_code != 0
+      assert exit_code == 1
       assert err =~ "already running"
-      assert err =~ "Nothing to restart"
     end
 
     test "surfaces the server message when the worker is not parked" do

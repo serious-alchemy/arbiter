@@ -16,6 +16,7 @@ defmodule ArbiterWeb.Api.McpController do
 
   alias Arbiter.MCP
   alias Arbiter.MCP.{OperatorSocket, Scope}
+  alias ArbiterWeb.ErrorResponse
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -75,13 +76,11 @@ defmodule ArbiterWeb.Api.McpController do
       # even a narrower one. Refused on the connection, before the scope is
       # looked at, so it holds for any scope the bridge could carry.
       _ when is_map_key(conn.assigns, :worker_bridge) ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{
-          "error" => %{
-            "message" => "token minting is refused through a worker's Arbiter bridge"
-          }
-        })
+        ErrorResponse.send_error(
+          conn,
+          :forbidden,
+          "token minting is refused through a worker's Arbiter bridge"
+        )
 
       # bd-8381tk: loopback is not an identity. Every worker shares this host
       # and Unix user, so an anonymous loopback caller could be any of them.
@@ -89,23 +88,20 @@ defmodule ArbiterWeb.Api.McpController do
       # coordinator); the operator proves who they are over the peer-checked
       # operator socket instead (`Arbiter.MCP.OperatorSocket`).
       nil ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{
-          "error" => %{
-            "message" =>
-              "anonymous token minting is disabled: run `arb mcp token mint` on the " <>
-                "server host (it proves operator identity over the local operator " <>
-                "socket), or present an existing coordinator token as Authorization: Bearer"
-          }
-        })
+        ErrorResponse.send_error(
+          conn,
+          :forbidden,
+          "anonymous token minting is disabled: run `arb mcp token mint` on the " <>
+            "server host (it proves operator identity over the local operator " <>
+            "socket), or present an existing coordinator token as Authorization: Bearer"
+        )
 
       %Scope{tier: :worker} ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{
-          "error" => %{"message" => "a worker-tier token cannot mint new tokens"}
-        })
+        ErrorResponse.send_error(
+          conn,
+          :forbidden,
+          "a worker-tier token cannot mint new tokens"
+        )
 
       # bd-3uy2hn: the same rule, for the same reason. This endpoint caps what it
       # mints at the caller's own authority, but it can only mint `:coordinator`
@@ -114,14 +110,11 @@ defmodule ArbiterWeb.Api.McpController do
       # workspace, none of which a refine session may do. There is nothing safe to
       # hand back, so it hands back nothing.
       %Scope{tier: :refine} ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{
-          "error" => %{
-            "message" =>
-              "a refine-tier token cannot mint new tokens — it would widen, not narrow, its scope"
-          }
-        })
+        ErrorResponse.send_error(
+          conn,
+          :forbidden,
+          "a refine-tier token cannot mint new tokens — it would widen, not narrow, its scope"
+        )
 
       %Scope{} = caller ->
         workspace_id =
@@ -215,8 +208,6 @@ defmodule ArbiterWeb.Api.McpController do
   end
 
   def verify_token(conn, _params) do
-    conn
-    |> put_status(:unprocessable_entity)
-    |> json(%{"error" => %{"message" => "token is required"}})
+    ErrorResponse.send_error(conn, :invalid, "token is required")
   end
 end

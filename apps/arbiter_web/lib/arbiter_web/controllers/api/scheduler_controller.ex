@@ -31,14 +31,15 @@ defmodule ArbiterWeb.Api.SchedulerController do
         json(conn, status_json())
 
       {:error, reason} ->
-        {:error, {:invalid_request, "pause failed: #{inspect(reason)}"}}
+        {:error, {:server_error, "pause failed", %{reason: inspect(reason)}}}
     end
   rescue
     e ->
-      {:error, {:invalid_request, "pause failed: #{inspect(e)}"}}
+      {:error, {:server_error, "pause failed", %{reason: Exception.message(e)}}}
   catch
     :exit, reason ->
-      {:error, {:invalid_request, "pause failed: process error #{inspect(reason)}"}}
+      {:error,
+       {:busy, "the scheduler is not responding; retry shortly", %{reason: inspect(reason)}}}
   end
 
   @doc """
@@ -53,14 +54,15 @@ defmodule ArbiterWeb.Api.SchedulerController do
         json(conn, status_json())
 
       {:error, reason} ->
-        {:error, {:invalid_request, "resume failed: #{inspect(reason)}"}}
+        {:error, {:server_error, "resume failed", %{reason: inspect(reason)}}}
     end
   rescue
     e ->
-      {:error, {:invalid_request, "resume failed: #{inspect(e)}"}}
+      {:error, {:server_error, "resume failed", %{reason: Exception.message(e)}}}
   catch
     :exit, reason ->
-      {:error, {:invalid_request, "resume failed: process error #{inspect(reason)}"}}
+      {:error,
+       {:busy, "the scheduler is not responding; retry shortly", %{reason: inspect(reason)}}}
   end
 
   @doc """
@@ -76,10 +78,11 @@ defmodule ArbiterWeb.Api.SchedulerController do
     json(conn, status_json())
   rescue
     e ->
-      {:error, {:invalid_request, "status check failed: #{inspect(e)}"}}
+      {:error, {:server_error, "status check failed", %{reason: Exception.message(e)}}}
   catch
     :exit, reason ->
-      {:error, {:invalid_request, "status check failed: process error #{inspect(reason)}"}}
+      {:error,
+       {:busy, "the scheduler is not responding; retry shortly", %{reason: inspect(reason)}}}
   end
 
   # bd-cl6zjn: `arb scheduler` says `"surface": "cli"`; any other caller is the

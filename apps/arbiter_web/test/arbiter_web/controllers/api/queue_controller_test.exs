@@ -95,12 +95,12 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert_receive {:conflict_resolve_called, _}, 1_000
     end
 
-    test "400s when the watchdog has nothing to re-arm", %{conn: conn, ws: ws} do
+    test "409s when the watchdog has nothing to re-arm", %{conn: conn, ws: ws} do
       task = merging_ticket(ws, "!qc-idle")
       :ok = Watchdog.restart(task.id)
       on_exit(fn -> stop_watchdog(task.id) end)
 
-      body = conn |> post("/api/queue/#{task.id}/retry_auto_resolve") |> json_response(400)
+      body = conn |> post("/api/queue/#{task.id}/retry_auto_resolve") |> json_response(409)
       assert inspect(body) =~ "conflict"
     end
   end
@@ -154,24 +154,24 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert msg =~ "already running"
     end
 
-    test "400s when the ticket has no PR on record", %{conn: conn, ws: ws} do
+    test "422s when the ticket has no PR on record", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no PR yet", workspace_id: ws.id})
       put_state!(task, :active)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
 
-      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 422)
       assert msg =~ "no PR on record"
       refute Watchdog.alive?(task.id)
     end
 
-    test "400s once the ticket has left Merging", %{conn: conn, ws: ws} do
+    test "409s once the ticket has left Merging", %{conn: conn, ws: ws} do
       task = merging_ticket(ws, "!qc3")
       Ash.update!(Ash.get!(Issue, task.id), %{}, action: :close)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
 
-      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 409)
       assert msg =~ "not Merging"
       refute Watchdog.alive?(task.id)
     end
@@ -223,13 +223,13 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "400s on an unknown mode before touching the forge", %{conn: conn, ws: ws} do
+    test "422s on an unknown mode before touching the forge", %{conn: conn, ws: ws} do
       task = merging_ticket(ws, "!qc-rerun2")
       assert :ok = Watchdog.restart(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "sideways"})
 
-      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 422)
       assert msg =~ "mode"
       assert StubMerger.ci_reruns() == []
     end
@@ -253,14 +253,14 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert msg =~ "note"
     end
 
-    test "400s when the task is not parked on a CI-failed block", %{conn: conn, ws: ws} do
+    test "409s when the task is not parked on a CI-failed block", %{conn: conn, ws: ws} do
       task = merging_ticket(ws, "!qc-ext2")
       assert :ok = Watchdog.restart(task.id)
 
       conn =
         post(conn, ~p"/api/queue/#{task.id}/mark_ci_external", %{"note" => "infra is down today"})
 
-      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 409)
       assert msg =~ "ci_failed"
     end
   end

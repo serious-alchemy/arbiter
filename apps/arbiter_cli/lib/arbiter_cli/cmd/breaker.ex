@@ -74,8 +74,8 @@ defmodule ArbiterCli.Cmd.Breaker do
       {:ok, body} ->
         if mode == :json, do: IO.puts(Jason.encode!(body)), else: print_list(body)
 
-      error ->
-        die(error)
+      {:error, err} ->
+        Output.die(err)
     end
   end
 
@@ -104,8 +104,8 @@ defmodule ArbiterCli.Cmd.Breaker do
       {:ok, resp} ->
         if mode == :json, do: IO.puts(Jason.encode!(resp)), else: print_reset(resp)
 
-      error ->
-        die(error)
+      {:error, err} ->
+        Output.die(err)
     end
   end
 
@@ -220,11 +220,4 @@ defmodule ArbiterCli.Cmd.Breaker do
       value -> Map.put(body, key, value)
     end
   end
-
-  @spec die({:error, Client.Error.t()}) :: no_return()
-  defp die({:error, %Client.Error{kind: :http, body: body}}) when is_map(body) do
-    Output.die(get_in(body, ["error", "message"]) || inspect(body))
-  end
-
-  defp die({:error, %Client.Error{message: msg}}), do: Output.die(msg)
 end

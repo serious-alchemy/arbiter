@@ -403,10 +403,16 @@ defmodule ArbiterWeb.MCP.Plug do
   end
 
   # Operational failure (not-found / bad args): an isError tool result, so the
-  # agent gets a usable message and can adjust, not a dropped call.
-  defp render_call(id, {:tool_error, message}) do
+  # agent gets a usable message and can adjust, not a dropped call. The error
+  # `type` (`Arbiter.Errors`, the vocabulary REST's `{error: {type}}` uses)
+  # rides in `structuredContent` and `_meta.type` next to the text, so a client
+  # can branch on not_found / validation_error / conflict / busy without
+  # parsing prose.
+  defp render_call(id, {:tool_error, message, type}) do
     result(id, %{
       "content" => [%{"type" => "text", "text" => message}],
+      "structuredContent" => %{"error" => %{"type" => type, "message" => message}},
+      "_meta" => %{"type" => type},
       "isError" => true
     })
   end

@@ -54,7 +54,7 @@ defmodule Arbiter.MCP.Tools.Worker do
          {:ok, opts} <- worker_dispatch_opts(scope, args) do
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
+        {:error, reason} -> dispatch_error(reason, task_id)
       end
     end
   end
@@ -90,7 +90,7 @@ defmodule Arbiter.MCP.Tools.Worker do
 
       case Dispatch.resume(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
+        {:error, reason} -> dispatch_error(reason, task_id)
       end
     end
   end
@@ -138,7 +138,7 @@ defmodule Arbiter.MCP.Tools.Worker do
 
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
+        {:error, reason} -> dispatch_error(reason, task_id)
       end
     end
   end
@@ -919,6 +919,21 @@ defmodule Arbiter.MCP.Tools.Worker do
       _ -> Keyword.put(opts, :start_claude, true)
     end
   end
+
+  # One kind per refusal (`Dispatch.refusal_kind/1`, shared with the REST
+  # controller), so a client can tell busy / conflict / invalid / not_found apart.
+  defp dispatch_error(reason, task_id),
+    do: {:error, {Dispatch.refusal_kind(reason), dispatch_error_message(reason, task_id)}}
+
+  defp dispatch_error_message({:task_not_found, id}), do: "task #{id} not found"
+
+  defp dispatch_error_message({:pending_migrations, count}),
+    do:
+      "#{count} pending migration(s) — the server is applying schema changes; retry " <>
+        "once the deployment completes"
+
+  defp dispatch_error_message(:no_session),
+    do: "no prior session recorded for this task — nothing to resume; dispatch it fresh instead"
 
   # bd-asxw4e: a Backlog or Blocked ticket, dispatched without `force`.
   defp dispatch_error_message({:not_dispatchable, id, hold}),

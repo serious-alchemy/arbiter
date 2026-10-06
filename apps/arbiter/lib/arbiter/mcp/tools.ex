@@ -22,7 +22,7 @@ defmodule Arbiter.MCP.Tools do
     * `{:ok, map}` — structured result (serialized to `structuredContent`);
     * `{:error, {:unauthorized, msg}}` — a scope violation (the transport maps it
       to a JSON-RPC error, per `docs/mcp-server-design.md` §4.2);
-    * `{:error, {:not_found | :invalid | :busy, msg}}` — an operational failure
+    * `{:error, {:not_found | :invalid | :conflict | :busy | :internal, msg}}` — an operational failure
       (returned as an `isError: true` tool result so the agent gets a usable
       message).
 
@@ -824,7 +824,7 @@ defmodule Arbiter.MCP.Tools do
 
         {:error, :not_parked_on_ci_failed} ->
           {:error,
-           {:invalid,
+           {:conflict,
             "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
               "or an exhausted conflict auto-resolve — there is nothing to re-arm"}}
 
@@ -868,11 +868,9 @@ defmodule Arbiter.MCP.Tools do
           {:ok, %{restarted: true, task_id: task_id}}
 
         {:error, reason} ->
-          case Arbiter.Worker.Watchdog.restart_refusal(task_id, reason) do
-            {:not_found, message} -> {:error, {:not_found, message}}
-            {:internal, message} -> {:error, {:internal, message}}
-            {_conflict_or_invalid, message} -> {:error, {:invalid, message}}
-          end
+          # `restart_refusal/2` speaks the shared taxonomy
+          # (`:not_found | :conflict | :invalid | :internal`): pass the kind through.
+          {:error, Arbiter.Worker.Watchdog.restart_refusal(task_id, reason)}
       end
     end
   end
@@ -925,7 +923,7 @@ defmodule Arbiter.MCP.Tools do
           rerun_via_workspace(scope, args, task_id, opts)
 
         {:error, :unsupported} ->
-          {:error, {:invalid, unsupported_rerun_message(task_id)}}
+          {:error, {:conflict, unsupported_rerun_message(task_id)}}
 
         {:error, :busy} ->
           {:error,
@@ -934,7 +932,7 @@ defmodule Arbiter.MCP.Tools do
               "than repeating the call, since the original request may still land"}}
 
         {:error, reason} ->
-          {:error, {:invalid, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+          {:error, {:internal, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
       end
     end
   end
@@ -958,7 +956,7 @@ defmodule Arbiter.MCP.Tools do
             {:ok, Map.merge(%{task_id: task_id, via: "workspace"}, result)}
 
           {:error, reason} ->
-            {:error, {:invalid, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+            {:error, {:internal, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
         end
       else
         {:error, {:invalid, unsupported_rerun_message(task_id)}}
@@ -1000,7 +998,7 @@ defmodule Arbiter.MCP.Tools do
 
         {:error, :not_parked_on_ci_failed} ->
           {:error,
-           {:invalid,
+           {:conflict,
             "task #{task_id} is not parked on a :ci_failed block — there is no CI failure " <>
               "to reclassify as external"}}
 
@@ -1269,14 +1267,16 @@ defmodule Arbiter.MCP.Tools do
         {:ok, scheduler_status_data()}
 
       {:error, reason} ->
-        {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
+        {:error, {:internal, "pause failed: #{inspect(reason)}"}}
     end
   rescue
     e ->
-      {:error, {:invalid, "pause failed: #{inspect(e)}"}}
+      {:error, {:internal, "pause failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
-      {:error, {:invalid, "pause failed: process error #{inspect(reason)}"}}
+      {:error,
+       {:busy,
+        "pause failed: the scheduler is not responding (#{inspect(reason)}); retry shortly"}}
   end
 
   @doc """
@@ -1292,14 +1292,16 @@ defmodule Arbiter.MCP.Tools do
         {:ok, scheduler_status_data()}
 
       {:error, reason} ->
-        {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+        {:error, {:internal, "resume failed: #{inspect(reason)}"}}
     end
   rescue
     e ->
-      {:error, {:invalid, "resume failed: #{inspect(e)}"}}
+      {:error, {:internal, "resume failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
-      {:error, {:invalid, "resume failed: process error #{inspect(reason)}"}}
+      {:error,
+       {:busy,
+        "resume failed: the scheduler is not responding (#{inspect(reason)}); retry shortly"}}
   end
 
   @doc """

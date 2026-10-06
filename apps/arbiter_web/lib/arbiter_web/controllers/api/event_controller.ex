@@ -75,6 +75,7 @@ defmodule ArbiterWeb.Api.EventController do
 
   alias Arbiter.Events
   alias Arbiter.MCP.Scope
+  alias ArbiterWeb.ErrorResponse
 
   @default_topics ~w(inbox review_gate worker_failed)
   @default_keepalive_ms 30_000
@@ -106,19 +107,22 @@ defmodule ArbiterWeb.Api.EventController do
       event_loop(conn, topic_set, last_cursor, scope, next_revocation_check())
     else
       {:error, :unauthorized} ->
-        conn
-        |> put_status(401)
-        |> json(%{"error" => "unauthorized"})
+        ErrorResponse.send_error(conn, :unauthenticated, "unauthorized")
 
       {:error, :invalid_topics, invalid} ->
-        conn
-        |> put_status(400)
-        |> json(%{"error" => "unknown topics: #{Enum.join(invalid, ", ")}"})
+        ErrorResponse.send_error(
+          conn,
+          :invalid_request,
+          "unknown topics: #{Enum.join(invalid, ", ")}",
+          %{topics: invalid}
+        )
 
       {:error, :invalid_since} ->
-        conn
-        |> put_status(400)
-        |> json(%{"error" => "invalid since: must be an integer cursor or an ISO-8601 timestamp"})
+        ErrorResponse.send_error(
+          conn,
+          :invalid_request,
+          "invalid since: must be an integer cursor or an ISO-8601 timestamp"
+        )
     end
   end
 

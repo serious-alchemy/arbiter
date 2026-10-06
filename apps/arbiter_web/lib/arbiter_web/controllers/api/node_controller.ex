@@ -49,10 +49,9 @@ defmodule ArbiterWeb.Api.NodeController do
         public_url: url
       })
     else
-      {:error, :invalid_ttl} -> unprocessable(conn, "ttl_seconds must be between 1 and 86400")
-      {:error, :invalid_name} -> unprocessable(conn, @name_message)
+      {:error, :invalid_ttl} -> {:error, {:invalid, "ttl_seconds must be between 1 and 86400"}}
+      {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
       {:error, {:rate_limited, seconds}} -> rate_limited(conn, seconds)
-      {:error, {:unprocessable, message}} -> unprocessable(conn, message)
       {:error, other} -> {:error, other}
     end
   end
@@ -95,8 +94,7 @@ defmodule ArbiterWeb.Api.NodeController do
          {:ok, _} <- Nodes.set_local_max_workers(n, nil) do
       json(conn, %{node: NodeJSON.local(Overview.build().local)})
     else
-      {:error, :invalid_value} -> unprocessable(conn, @local_cap_message)
-      {:error, {:unprocessable, message}} -> unprocessable(conn, message)
+      {:error, :invalid_value} -> {:error, {:invalid, @local_cap_message}}
       {:error, other} -> {:error, other}
     end
   end
@@ -107,10 +105,9 @@ defmodule ArbiterWeb.Api.NodeController do
          {:ok, updated} <- Nodes.update_node(node, changes, nil) do
       json(conn, %{node: node_view(updated)})
     else
-      {:error, :invalid_name} -> unprocessable(conn, @name_message)
+      {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
       {:error, :name_taken} -> {:error, {:conflict, "a node with that name already exists"}}
       {:error, :revoked} -> {:error, {:conflict, "the node is revoked and cannot be edited"}}
-      {:error, {:unprocessable, message}} -> unprocessable(conn, message)
       {:error, other} -> {:error, other}
     end
   end
@@ -160,7 +157,7 @@ defmodule ArbiterWeb.Api.NodeController do
     case Map.fetch(params, "max_workers") do
       {:ok, n} when is_nil(n) or (is_integer(n) and n >= 0) -> {:ok, n}
       {:ok, _} -> {:error, :invalid_value}
-      :error -> {:error, {:unprocessable, @local_cap_message}}
+      :error -> {:error, {:invalid, @local_cap_message}}
     end
   end
 
@@ -173,7 +170,7 @@ defmodule ArbiterWeb.Api.NodeController do
 
   defp public_url do
     case Settings.nodes_public_url() do
-      nil -> {:error, {:unprocessable, "nodes.public_url is not set; set it before adding nodes"}}
+      nil -> {:error, {:invalid, "nodes.public_url is not set; set it before adding nodes"}}
       url -> {:ok, url}
     end
   end
@@ -217,32 +214,26 @@ defmodule ArbiterWeb.Api.NodeController do
 
     if Nodes.valid_name?(name),
       do: {:cont, {:ok, Map.put(acc, :name, name)}},
-      else: {:halt, {:error, {:unprocessable, @name_message}}}
+      else: {:halt, {:error, {:invalid, @name_message}}}
   end
 
   defp check("labels", v, acc) when is_list(v) do
     if Enum.all?(v, &is_binary/1),
       do: {:cont, {:ok, Map.put(acc, :labels, v)}},
-      else: {:halt, {:error, {:unprocessable, "labels must be a list of strings"}}}
+      else: {:halt, {:error, {:invalid, "labels must be a list of strings"}}}
   end
 
   defp check("workspace_ids", v, acc) when is_list(v) do
     if Enum.all?(v, &is_binary/1),
       do: {:cont, {:ok, Map.put(acc, :workspace_ids, v)}},
-      else: {:halt, {:error, {:unprocessable, "workspace_ids must be a list of workspace ids"}}}
+      else: {:halt, {:error, {:invalid, "workspace_ids must be a list of workspace ids"}}}
   end
 
   defp check("max_workers", v, acc) when is_nil(v) or is_integer(v),
     do: {:cont, {:ok, Map.put(acc, :max_workers, v)}}
 
   defp check(key, _v, _acc),
-    do: {:halt, {:error, {:unprocessable, "#{key} has the wrong type"}}}
-
-  defp unprocessable(conn, message) do
-    conn
-    |> put_status(:unprocessable_entity)
-    |> json(%{error: %{type: "validation_error", message: message, details: %{}}})
-  end
+    do: {:halt, {:error, {:invalid, "#{key} has the wrong type"}}}
 
   defp rate_limited(conn, seconds) do
     conn

@@ -28,7 +28,7 @@ defmodule Arbiter.MCP.WorkerResumeSlotTest do
   end
 
   test "refuses at a full cap, naming the cap and the holder", ctx do
-    assert {:error, {:invalid, message}} =
+    assert {:error, {:conflict, message}} =
              Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.a.id})
 
     assert message =~ "cap is 1"

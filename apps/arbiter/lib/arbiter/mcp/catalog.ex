@@ -113,7 +113,7 @@ defmodule Arbiter.MCP.Catalog do
   @type call_result ::
           {:ok, map()}
           | {:rpc_error, integer(), String.t()}
-          | {:tool_error, String.t()}
+          | {:tool_error, String.t(), String.t()}
 
   @both [:worker, :coordinator]
   @coordinator [:coordinator]
@@ -3020,8 +3020,11 @@ defmodule Arbiter.MCP.Catalog do
     * `{:ok, data}` — success (→ a tool result with `structuredContent`);
     * `{:rpc_error, code, message}` — unknown tool, or a scope/tier violation
       (→ a JSON-RPC error object, never a transport error);
-    * `{:tool_error, message}` — an operational failure such as not-found or bad
-      arguments (→ a tool result with `isError: true`).
+    * `{:tool_error, message, type}` — an operational failure such as not-found or
+      bad arguments (→ a tool result with `isError: true`). `type` is the
+      `Arbiter.Errors` type of the handler's error kind (`not_found`,
+      `validation_error`, `conflict`, `busy`, `internal_error`, ...) — the same
+      vocabulary REST's `{error: {type}}` uses, so a client can branch on it.
   """
   @spec call(Scope.t(), String.t(), map()) :: call_result()
   def call(%Scope{} = scope, name, arguments) when is_binary(name) do
@@ -3062,11 +3065,21 @@ defmodule Arbiter.MCP.Catalog do
     case Arbiter.Actor.with_actor(Arbiter.Actor.from_scope(scope), fn ->
            tool.handler.(scope, args)
          end) do
-      {:ok, data} when is_map(data) -> {:ok, data}
-      {:error, {:unauthorized, msg}} -> {:rpc_error, @code_not_permitted, msg}
-      {:error, {_kind, msg}} when is_binary(msg) -> {:tool_error, msg}
+      {:ok, data} when is_map(data) ->
+        {:ok, data}
+
+      {:error, {:unauthorized, msg}} ->
+        {:rpc_error, @code_not_permitted, msg}
+
+      {:error, {kind, msg}} when is_atom(kind) and is_binary(msg) ->
+        {:tool_error, msg, Arbiter.Errors.type(kind)}
+
+      {:error, {kind, msg, _details}} when is_atom(kind) and is_binary(msg) ->
+        {:tool_error, msg, Arbiter.Errors.type(kind)}
     end
   rescue
-    e -> {:tool_error, "tool #{tool.name} failed: #{Exception.message(e)}"}
+    e ->
+      {:tool_error, "tool #{tool.name} failed: #{Exception.message(e)}",
+       Arbiter.Errors.type(:internal)}
   end
 end
