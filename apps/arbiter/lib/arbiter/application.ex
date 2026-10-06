@@ -171,6 +171,9 @@ defmodule Arbiter.Application do
       # refresh + prune (inert until an image has been built).
       Arbiter.Worker.Image.Builder,
       Arbiter.Worker.Image.Refresher,
+      # bd-50d5j6: persists a podman Codex run's rotated auth.json when its
+      # worker dies. Before RunTmp.Reaper, which flushes it ahead of removal.
+      Arbiter.Agents.Codex.AuthSync.Reaper,
       # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
       Arbiter.Worker.RunTmp.Reaper,
       Arbiter.Worker.RunTmp.Sweeper,

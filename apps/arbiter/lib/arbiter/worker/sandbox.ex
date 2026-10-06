@@ -7,8 +7,8 @@ defmodule Arbiter.Worker.Sandbox do
   `Arbiter.Worker.Container` (rootless podman, bd-bu4ye2). `module/1` resolves
   only `:bwrap`: the adapters only check that gate and would otherwise spawn
   unsandboxed under `backend: podman`. A provider that has a podman wrap point
-  asks `module/2` by name instead, and today that is Claude alone (P7,
-  bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`). Callers
+  asks `module/2` by name instead, and today that is Claude (P7, bd-d2o3xb) and
+  Codex (P8, bd-50d5j6), both through `Arbiter.Worker.ContainerSpawn`. Callers
   that jail a spawn go through this module with the resolved
   `Arbiter.Agents.SecurityPolicy`, which names the backend in `sandbox.backend`
   (`:bwrap` by default). They never call `Jail` for a spawn directly.
@@ -29,7 +29,7 @@ defmodule Arbiter.Worker.Sandbox do
 
   `module/1` and `module/2` are the only places a backend atom becomes a
   module. A backend that is not wired for the provider asking (`:podman` for
-  anything but Claude, until P8 and the agy decision) resolves to
+  anything but Claude and Codex, per the agy decision) resolves to
   `{:error, {:sandbox_backend_unavailable, backend, message}}` and every
   function here passes that through. Callers must treat it as fatal for the
   spawn: it is **not** "the sandbox is unavailable on this host", which some
@@ -70,7 +70,7 @@ defmodule Arbiter.Worker.Sandbox do
   @doc """
   `module/1` for a spawn of `provider`: the same, except that `:podman`
   resolves to `Arbiter.Worker.Container` for the providers that have a wrap
-  point for it (`:claude`, P7). Every other provider under `:podman` is the
+  point for it (`:claude`, P7; `:codex`, P8). Every other provider under `:podman` is the
   refusal, so an adapter that only checks the gate can never spawn
   unsandboxed because another provider got a container.
   """
@@ -79,12 +79,13 @@ defmodule Arbiter.Worker.Sandbox do
   def module(%SecurityPolicy{} = policy, provider),
     do: policy |> SecurityPolicy.sandbox_backend() |> module(provider)
 
-  def module(:podman, provider) when provider in [:claude, "claude"], do: {:ok, Container}
+  def module(:podman, provider) when provider in [:claude, "claude", :codex, "codex"],
+    do: {:ok, Container}
 
   def module(:podman, provider) do
     {:error,
      {:sandbox_backend_unavailable, :podman,
-      "sandbox.backend podman is wired for claude only (P7); #{provider} has no container " <>
+      "sandbox.backend podman is wired for claude and codex only (P7, P8); #{provider} has no container " <>
         "wrap point yet, so it is refused rather than run unsandboxed. Dispatch it to " <>
         "claude, or set sandbox.backend to bwrap."}}
   end

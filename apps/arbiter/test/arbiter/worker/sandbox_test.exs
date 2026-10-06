@@ -59,17 +59,18 @@ defmodule Arbiter.Worker.SandboxTest do
       assert Sandbox.module(policy(:podman)) == Sandbox.module(:podman)
     end
 
-    # bd-d2o3xb (P7): Claude alone has a podman wrap point.
-    test "module/2 resolves podman for claude only" do
-      assert Sandbox.module(:podman, :claude) == {:ok, Arbiter.Worker.Container}
-      assert Sandbox.module(:podman, "claude") == {:ok, Arbiter.Worker.Container}
-      assert Sandbox.module(policy(:podman), :claude) == {:ok, Arbiter.Worker.Container}
+    # bd-d2o3xb (P7), bd-50d5j6 (P8): Claude and Codex have a podman wrap point.
+    test "module/2 resolves podman for claude and codex only" do
+      for provider <- [:claude, "claude", :codex, "codex"] do
+        assert Sandbox.module(:podman, provider) == {:ok, Arbiter.Worker.Container}
+        assert Sandbox.module(policy(:podman), provider) == {:ok, Arbiter.Worker.Container}
+      end
 
-      for provider <- [:gemini, :codex, "gemini"] do
+      for provider <- [:gemini, "gemini"] do
         assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
                  Sandbox.module(policy(:podman), provider)
 
-        assert message =~ "claude only"
+        assert message =~ "claude and codex only"
       end
     end
 
