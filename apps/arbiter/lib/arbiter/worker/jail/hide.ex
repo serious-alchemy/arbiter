@@ -64,6 +64,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   """
 
   alias Arbiter.Config.Paths
+  alias Arbiter.Worker.CredentialPaths
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
 
@@ -71,8 +72,8 @@ defmodule Arbiter.Worker.Jail.Hide do
 
   @type t :: %{dirs: [String.t()], files: [String.t()], keep: [String.t()]}
 
-  @credential_dirs ~w(.claude .codex .grok .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
-  @credential_files ~w(.netrc .pgpass .git-credentials)
+  @credential_dirs CredentialPaths.dirs()
+  @credential_files CredentialPaths.files()
 
   @identities ~w(id_rsa id_ecdsa id_ed25519 id_dsa id_ecdsa_sk id_ed25519_sk)
   @ssh_keep ~w(known_hosts config config.d) ++
