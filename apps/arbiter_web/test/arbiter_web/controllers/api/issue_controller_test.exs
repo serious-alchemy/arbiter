@@ -1207,7 +1207,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       conn = post(conn, ~p"/api/issues/#{other.id}/verify", %{outcome: "observed", evidence: "x"})
 
-      assert json_response(conn, 422)
+      assert %{"error" => %{"type" => "conflict"}} = json_response(conn, 409)
     end
 
     test "blank evidence is rejected", %{conn: conn, awaiting: task} do

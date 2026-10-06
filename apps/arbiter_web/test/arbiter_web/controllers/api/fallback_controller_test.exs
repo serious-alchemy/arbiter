@@ -43,7 +43,10 @@ defmodule ArbiterWeb.Api.FallbackControllerTest do
     test "#{inspect(error)} -> #{status} #{type}" do
       {status, body} = render(unquote(Macro.escape(error)))
       assert status == unquote(status)
-      assert %{"error" => %{"type" => unquote(type), "message" => msg, "details" => details}} = body
+
+      assert %{"error" => %{"type" => unquote(type), "message" => msg, "details" => details}} =
+               body
+
       assert is_binary(msg) and is_map(details)
     end
   end

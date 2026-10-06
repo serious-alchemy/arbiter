@@ -88,7 +88,7 @@ defmodule ArbiterWeb.Api.IssueController do
     render(conn, :lifecycle, tickets: Projection.open(ws_id), holds: ready_holds(ws_id))
   end
 
-  def lifecycle(conn, _params), do: unprocessable(conn, "workspace_id is required")
+  def lifecycle(_conn, _params), do: {:error, {:invalid, "workspace_id is required"}}
 
   # bd-dtdeff: why the scheduler is not dispatching each Ready card, from the
   # board's own plan (the reason its card shows), so a card Autopilot is
@@ -409,10 +409,10 @@ defmodule ArbiterWeb.Api.IssueController do
   was actually seen on the running server). `observed` closes the task,
   `failed` reopens it; either way the evidence is persisted.
 
-  The verification errors are rendered here rather than through the fallback
-  controller because they are domain answers ("this task isn't parked",
-  "evidence is required"), not changeset validation — the caller needs the
-  specific sentence, not a generic `validation failed`.
+  The verification refusals are domain answers ("this task isn't parked" is a
+  409, "evidence is required" a 422) carrying their own sentence, not a
+  changeset's generic `validation failed`; they reach the fallback controller as
+  `{:conflict, msg}` / `{:invalid, msg}`.
   """
   def verify(conn, %{"id" => id} = params) do
     outcome = params["outcome"]
@@ -421,27 +421,28 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, issue} <- Ash.get(Issue, id) do
       case Verification.record_outcome(issue, outcome, evidence) do
         {:ok, updated} -> render(conn, :show, issue: updated)
-        {:error, reason} -> verify_error(conn, reason)
+        {:error, reason} -> verify_error(reason)
       end
     end
   end
 
-  defp verify_error(conn, :not_awaiting_verification) do
-    unprocessable(
-      conn,
+  # The task is not in the state that accepts a verdict: the request is fine,
+  # the ticket's state refuses it — a 409, like every other state refusal.
+  defp verify_error(:not_awaiting_verification) do
+    {:error,
+     {:conflict,
       "task is not awaiting verification — only a ticket in state " <>
-        ":verifying can record a verify result"
-    )
+        ":verifying can record a verify result"}}
   end
 
-  defp verify_error(conn, :evidence_required) do
-    unprocessable(conn, "evidence is required: say what you observed on the running server")
+  defp verify_error(:evidence_required) do
+    {:error, {:invalid, "evidence is required: say what you observed on the running server"}}
   end
 
-  defp verify_error(conn, {:invalid, message}) when is_binary(message),
-    do: unprocessable(conn, message)
+  defp verify_error({:invalid, message}) when is_binary(message),
+    do: {:error, {:invalid, message}}
 
-  defp verify_error(conn, {:invalid, err}), do: unprocessable(conn, Exception.message(err))
+  defp verify_error({:invalid, err}), do: {:error, {:invalid, Exception.message(err)}}
 
   @doc """
   Record the coordinator's answer to a gate escalation (bd-4qjl0q) — what
@@ -462,13 +463,8 @@ defmodule ArbiterWeb.Api.IssueController do
         |> put_status(:created)
         |> json(Arbiter.ReviewGate.Resolutions.serialize(resolution))
 
-      {:error, {:not_found, message}} ->
-        conn
-        |> put_status(:not_found)
-        |> json(%{error: %{type: "not_found", message: message, details: %{}}})
-
-      {:error, {:invalid, message}} ->
-        unprocessable(conn, message)
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -491,16 +487,21 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, _issue} <- Ash.get(Issue, id) do
       case Arbiter.Tasks.Attention.hand_off(id, to, note) do
         {:ok, _attention} -> render(conn, :show, issue: Ash.get!(Issue, id))
-        {:error, reason} -> unprocessable(conn, Arbiter.Tasks.Attention.describe_error(reason))
+        {:error, reason} -> attention_error(reason)
       end
     end
   end
 
-  defp unprocessable(conn, message) do
-    conn
-    |> put_status(:unprocessable_entity)
-    |> json(%{error: %{type: "validation_error", message: message, details: %{}}})
-  end
+  # `Attention.hand_off/4` refusals: no such ticket → 404; the ticket's state
+  # refuses a hand-off (nothing to hand off, already owned) → 409; a hand-off to
+  # the operator with no note is a bad argument → 422.
+  defp attention_error(:not_found), do: {:error, :not_found}
+
+  defp attention_error(reason) when reason == :no_attention or elem(reason, 0) == :already_owned,
+    do: {:error, {:conflict, Arbiter.Tasks.Attention.describe_error(reason)}}
+
+  defp attention_error(reason),
+    do: {:error, {:invalid, Arbiter.Tasks.Attention.describe_error(reason)}}
 
   # ---- helpers ----
 

@@ -401,7 +401,10 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "a task with no prior run nor repo can't be resumed (422 validation_error)", %{conn: conn, ws: ws} do
+    test "a task with no prior run nor repo can't be resumed (422 validation_error)", %{
+      conn: conn,
+      ws: ws
+    } do
       {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
 
       conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{})
