@@ -79,6 +79,23 @@ defmodule Arbiter.Quota.Gate do
   `max(floor, elapsed)`) and the smaller one binds, so a workspace can only
   ever be stricter than its account. `window_seconds` is account-only.
 
+  ## The P0 pace exemption (bd-6bxv7h, design §4.2)
+
+  For a dispatch whose own priority is exempt (`pace_exempt_priority/1`), a
+  *paced* side's ceiling lifts from the paced line up to a dedicated cap:
+
+      exempt ceiling = max(max(floor, elapsed), min(exempt_cap, flat))
+
+  `exempt_cap` is the side's `pace_exempt_threshold` (5h) /
+  `weekly_pace_exempt_threshold` (7d), composed `min(account, workspace)`;
+  unset, it is `flat` — the side's own flat threshold, else the window's flat
+  default. It never lifts past the flat ceiling and never lowers the paced
+  line. Flat sides don't move, and neither do the status rules, the
+  `allowed_warning` hold or staleness. Off by default: an account with no
+  `pace_exempt_priority` exempts nothing, whatever the workspace sets.
+  `:priority` is the ticket's **own** priority, passed as an option to
+  `pace/6` and `gating_window/3`.
+
   Everything else is the same in both modes: the primary past-plan status
   and long-window `rejected` rules, `weekly_warning_policy/1`, and the
   staleness semantics of `stale?/1` / `long_window_stale?/1`. The gate is
@@ -201,8 +218,9 @@ defmodule Arbiter.Quota.Gate do
   neither key, so its shape is exactly what it was before paced mode existed.
   """
   @type binding_window :: %{
-          optional(:mode) => :paced,
+          optional(:mode) => :paced | :exempt,
           optional(:elapsed) => float(),
+          optional(:priority) => 0..4,
           provider: String.t() | nil,
           window: String.t(),
           signal: :status | :utilization | :warning,
@@ -362,15 +380,17 @@ defmodule Arbiter.Quota.Gate do
   @spec threshold_modes() :: [String.t()]
   def threshold_modes, do: @threshold_modes
 
-  @quota_config_settable_keys ~w(threshold_mode weekly_threshold paced_floor weekly_paced_floor)
+  @quota_config_settable_keys ~w(threshold_mode weekly_threshold paced_floor weekly_paced_floor pace_exempt_priority pace_exempt_threshold weekly_pace_exempt_threshold)
 
   @doc """
   Validate a partial `quota_config` update (bd-c7ll4t) — the fields `arb
   account set --threshold-mode ...` / `PATCH /api/accounts/:ref` may write.
   `threshold_mode` must be one of `threshold_modes/0`; `weekly_threshold`,
-  `paced_floor` and `weekly_paced_floor` must be a number (or its string
-  form) in `0..1`, the same fraction shape every other `quota_config` reader
-  in this module expects. An unknown key is rejected outright rather than
+  `paced_floor`, `weekly_paced_floor`, `pace_exempt_threshold` and
+  `weekly_pace_exempt_threshold` must be a number (or its string form) in
+  `(0, 1]`, the same fraction shape every other `quota_config` reader in this
+  module expects; `pace_exempt_priority` an integer `0..4` (or its string
+  form). An unknown key is rejected outright rather than
   silently accepted and then never read by anything here — the failure mode
   that let `bd-5ps98m` set an account's `quota_config` only via `bin/arbiter
   eval`.
@@ -411,8 +431,20 @@ defmodule Arbiter.Quota.Gate do
       "threshold_mode must be one of #{Enum.join(@threshold_modes, ", ")} (got #{inspect(mode)})"}}
   end
 
+  defp validate_quota_config_field("pace_exempt_priority", value) do
+    case parse_priority(value) do
+      nil ->
+        {:error,
+         {:invalid_quota_config,
+          "pace_exempt_priority must be an integer in 0..4 (got #{inspect(value)})"}}
+
+      priority ->
+        {:ok, priority}
+    end
+  end
+
   defp validate_quota_config_field(key, value)
-       when key in ~w(weekly_threshold paced_floor weekly_paced_floor) do
+       when key in ~w(weekly_threshold paced_floor weekly_paced_floor pace_exempt_threshold weekly_pace_exempt_threshold) do
     case strict_fraction(value) do
       {:ok, f} ->
         {:ok, f}
@@ -608,8 +640,10 @@ defmodule Arbiter.Quota.Gate do
   and are not a pace question.
 
   Options: `:now` (default `DateTime.utc_now/0`) and `:account`, as in
-  `gating_window/3`. To colour by the paced thresholds for an account that
-  has not opted into them, pass `paced_policy/1`.
+  `gating_window/3`, and `:priority` — the dispatch's own priority, which
+  lifts a paced side for an exempt one (see "The P0 pace exemption"). To
+  colour by the paced thresholds for an account that has not opted into
+  them, pass `paced_policy/1`.
   """
   @spec pace(
           policy(),
@@ -630,8 +664,112 @@ defmodule Arbiter.Quota.Gate do
       utilization,
       Pace.elapsed_seconds(reset_at, seconds, now),
       seconds,
-      pace_thresholds(policy, window)
+      pace_thresholds(policy, window, Keyword.get(opts, :priority))
     )
+  end
+
+  @doc """
+  The effective `pace_exempt_priority` under `policy` (design §4.2): the
+  lowest-urgency priority (`0..4`) whose dispatches are exempt from the paced
+  line, or `nil` for no exemption.
+
+  `min(account, workspace)`, with one deliberate difference from the
+  thresholds: the **account must grant** the exemption. An account without
+  the setting exempts nothing, whatever the workspace says. The workspace
+  (`quota.pace_exempt_priority`: `0..4` or `"none"`) can only narrow it;
+  `"none"`, or a value that does not parse, switches it off.
+  """
+  @spec pace_exempt_priority(policy()) :: 0..4 | nil
+  def pace_exempt_priority(policy) do
+    {account, workspace} = split_policy(policy)
+
+    case account |> account_config() |> Map.get("pace_exempt_priority") |> parse_priority() do
+      nil ->
+        nil
+
+      granted ->
+        case ws_quota(workspace) do
+          %{"pace_exempt_priority" => value} -> ws_exempt_priority(value, granted)
+          _ -> granted
+        end
+    end
+  end
+
+  defp ws_exempt_priority(value, granted) do
+    case parse_priority(value) do
+      nil -> nil
+      narrowed -> min(granted, narrowed)
+    end
+  end
+
+  @doc """
+  Whether a dispatch of `priority` (the ticket's own, `0..4`; `nil` when not
+  known) is exempt from the paced line under `policy`. See
+  `pace_exempt_priority/1`.
+  """
+  @spec pace_exempt?(policy(), integer() | nil) :: boolean()
+  def pace_exempt?(policy, priority) when is_integer(priority) do
+    case pace_exempt_priority(policy) do
+      nil -> false
+      lowest -> priority <= lowest
+    end
+  end
+
+  def pace_exempt?(_policy, _priority), do: false
+
+  defp parse_priority(n) when is_integer(n) and n >= 0 and n <= 4, do: n
+
+  defp parse_priority(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> parse_priority(n)
+      _ -> nil
+    end
+  end
+
+  defp parse_priority(_), do: nil
+
+  @doc """
+  The exemption's audit record for a dispatch that **went ahead** on it
+  (design §4.2): `%{window, used, paced, cap}` for the first trusted window
+  where the dispatch is past the paced line but under the exempt ceiling —
+  the window the exemption decided — or `nil` when the exemption did not
+  matter (not exempt, off, or under the paced line anyway).
+
+  `paced` is the ceiling the same dispatch would have held at without the
+  exemption; `cap` is the exempt ceiling in force. Options as for
+  `gating_window/3`, with `:priority`. Call it only for a dispatch the gate
+  allowed: it does not look at the status rules.
+  """
+  @spec pace_exemption(quota_source(), policy(), keyword()) :: map() | nil
+  def pace_exemption(quota, policy, opts) do
+    policy = merge_account(policy, Keyword.get(opts, :account))
+    priority = Keyword.get(opts, :priority)
+
+    with true <- pace_exempt?(policy, priority),
+         %Snapshot{} = s <- Snapshot.normalize(quota, opts) do
+      now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+
+      [
+        {:primary, not snapshot_stale?(s, now), s.window_label, s.utilization, s.reset_at},
+        {:long, not snapshot_long_stale?(s, now) and s.secondary_window_label != nil,
+         s.secondary_window_label, s.secondary_utilization, s.secondary_reset_at}
+      ]
+      |> Enum.find_value(fn {window, trusted?, label, used, reset_at} ->
+        trusted? and is_number(used) and
+          exemption_decided(policy, window, label, used, reset_at, now, priority)
+      end)
+    else
+      _ -> nil
+    end
+  end
+
+  defp exemption_decided(policy, window, label, used, reset_at, now, priority) do
+    plain = pace(policy, window, label, used, reset_at, now: now)
+    exempt = pace(policy, window, label, used, reset_at, now: now, priority: priority)
+
+    if plain.verdict == :holding and exempt.verdict != :holding do
+      %{window: label, used: used * 1.0, paced: plain.ceiling, cap: exempt.ceiling}
+    end
   end
 
   @doc """
@@ -663,16 +801,47 @@ defmodule Arbiter.Quota.Gate do
   # whose elapsed fraction is unknown (no length, no `reset_at`). Neither side
   # configured anything → no sides, and the flat global / built-in default
   # applies, exactly as `threshold/1` / `weekly_threshold/1` resolve it.
-  defp pace_thresholds({account, workspace}, window) do
-    %{
-      sides:
-        Enum.reject(
-          [side(account_config(account), window), side(ws_quota(workspace), window)],
-          &is_nil/1
-        ),
-      default: flat_default(window)
-    }
+  #
+  # For an exempt dispatch (`pace_exempt?/2`) each *paced* side becomes a
+  # `{:paced_exempt, ...}` side whose cap is `min(exempt_cap, flat)`; the cap is
+  # composed `min(account, workspace)` across both sides, so a workspace that
+  # sets one tightens the account's. A flat side is already the hard ceiling and
+  # is left alone.
+  defp pace_thresholds({account, workspace} = policy, window, priority) do
+    sides =
+      Enum.reject(
+        [side(account_config(account), window), side(ws_quota(workspace), window)],
+        &is_nil/1
+      )
+
+    sides =
+      if pace_exempt?(policy, priority) do
+        cap =
+          strictest(
+            exempt_cap(account_config(account), window),
+            exempt_cap(ws_quota(workspace), window)
+          )
+
+        Enum.map(sides, &exempt_side(&1, cap, window))
+      else
+        sides
+      end
+
+    %{sides: sides, default: flat_default(window)}
   end
+
+  defp exempt_side({:paced, floor, flat}, cap, window) do
+    flat_ceiling = flat || flat_default(window)
+    {:paced_exempt, floor, flat, min(cap || flat_ceiling, flat_ceiling)}
+  end
+
+  defp exempt_side(side, _cap, _window), do: side
+
+  defp exempt_cap(config, window),
+    do: config |> Map.get(exempt_cap_key(window)) |> parse_fraction()
+
+  defp exempt_cap_key(:primary), do: "pace_exempt_threshold"
+  defp exempt_cap_key(:long), do: "weekly_pace_exempt_threshold"
 
   defp side(config, window) do
     flat = config |> Map.get(flat_key(window)) |> parse_fraction()
@@ -1051,10 +1220,13 @@ defmodule Arbiter.Quota.Gate do
         nil
 
       %Snapshot{} = snapshot ->
+        now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+
         binding(
           snapshot,
           merge_account(policy, Keyword.get(opts, :account)),
-          Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+          now,
+          Keyword.get(opts, :priority)
         )
     end
   end
@@ -1067,7 +1239,8 @@ defmodule Arbiter.Quota.Gate do
   defp merge_account(%ProviderAccount{}, account), do: {account, nil}
   defp merge_account(workspace, account), do: {account, workspace}
 
-  defp binding(%Snapshot{} = s, policy, now) do
+  defp binding(%Snapshot{} = s, policy, now, priority) do
+    pace_opts = [now: now, priority: priority]
     primary? = not snapshot_stale?(s, now)
     long? = not snapshot_long_stale?(s, now)
 
@@ -1079,10 +1252,10 @@ defmodule Arbiter.Quota.Gate do
       {long?, &secondary_warning_binding/3}
     ]
     |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
-    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, now) end)
+    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, pace_opts) end)
   end
 
-  defp primary_status_binding(%Snapshot{} = s, _policy, _now) do
+  defp primary_status_binding(%Snapshot{} = s, _policy, _pace_opts) do
     if status_not_allowed?(s.status) do
       %{
         provider: s.provider,
@@ -1095,7 +1268,7 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp secondary_status_binding(%Snapshot{} = s, _policy, _now) do
+  defp secondary_status_binding(%Snapshot{} = s, _policy, _pace_opts) do
     if secondary_rejected?(s.secondary_status) do
       %{
         provider: s.provider,
@@ -1108,8 +1281,8 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
-  defp primary_utilization_binding(%Snapshot{} = s, policy, now) do
-    case pace(policy, :primary, s.window_label, s.utilization, s.reset_at, now: now) do
+  defp primary_utilization_binding(%Snapshot{} = s, policy, pace_opts) do
+    case pace(policy, :primary, s.window_label, s.utilization, s.reset_at, pace_opts) do
       %{verdict: :holding} = pace ->
         %{
           provider: s.provider,
@@ -1119,18 +1292,18 @@ defmodule Arbiter.Quota.Gate do
           utilization: s.utilization,
           threshold: pace.ceiling
         }
-        |> put_pace(pace)
+        |> put_pace(pace, pace_opts)
 
       _ ->
         nil
     end
   end
 
-  defp secondary_utilization_binding(%Snapshot{secondary_window_label: nil}, _policy, _now),
+  defp secondary_utilization_binding(%Snapshot{secondary_window_label: nil}, _policy, _opts),
     do: nil
 
-  defp secondary_utilization_binding(%Snapshot{} = s, policy, now) do
-    case long_pace(s, policy, now) do
+  defp secondary_utilization_binding(%Snapshot{} = s, policy, pace_opts) do
+    case long_pace(s, policy, pace_opts) do
       %{verdict: :holding} = pace ->
         %{
           provider: s.provider,
@@ -1140,14 +1313,14 @@ defmodule Arbiter.Quota.Gate do
           utilization: s.secondary_utilization,
           threshold: pace.ceiling
         }
-        |> put_pace(pace)
+        |> put_pace(pace, pace_opts)
 
       _ ->
         nil
     end
   end
 
-  defp secondary_warning_binding(%Snapshot{} = s, policy, now) do
+  defp secondary_warning_binding(%Snapshot{} = s, policy, pace_opts) do
     if s.secondary_status == "allowed_warning" and weekly_warning_policy(policy) == :hold do
       %{
         provider: s.provider,
@@ -1155,26 +1328,35 @@ defmodule Arbiter.Quota.Gate do
         signal: :warning,
         status: s.secondary_status,
         utilization: s.secondary_utilization,
-        threshold: long_pace(s, policy, now).ceiling
+        threshold: long_pace(s, policy, pace_opts).ceiling
       }
     end
   end
 
-  defp long_pace(%Snapshot{} = s, policy, now) do
+  defp long_pace(%Snapshot{} = s, policy, pace_opts) do
     pace(
       policy,
       :long,
       s.secondary_window_label,
       s.secondary_utilization,
       s.secondary_reset_at,
-      now: now
+      pace_opts
     )
   end
 
-  defp put_pace(binding, %{mode: :paced, elapsed: elapsed}),
+  defp put_pace(binding, %{mode: :paced, elapsed: elapsed}, _pace_opts),
     do: Map.merge(binding, %{mode: :paced, elapsed: elapsed})
 
-  defp put_pace(binding, %{mode: :flat}), do: binding
+  # An exempt dispatch held at the lifted ceiling says so, and for whom.
+  defp put_pace(binding, %{mode: :exempt, elapsed: elapsed}, pace_opts),
+    do:
+      Map.merge(binding, %{
+        mode: :exempt,
+        elapsed: elapsed,
+        priority: Keyword.get(pace_opts, :priority)
+      })
+
+  defp put_pace(binding, %{mode: :flat}, _pace_opts), do: binding
 
   # Long-window statuses: nil / "allowed" are fine, "allowed_warning" is the
   # policy-governed warning tier, everything else ("rejected", …) is a hard stop.
@@ -1263,6 +1445,11 @@ defmodule Arbiter.Quota.Gate do
   defp long_head(nil, window), do: "#{window} quota"
   defp long_head(label, window), do: "#{label} #{window}"
 
+  defp primary_utilization(%{mode: :exempt, utilization: u, threshold: t, elapsed: e} = b) do
+    "quota past #{exempt_label(b)} ceiling (#{percent(u)} of window used, " <>
+      "ceiling #{percent(t)}, #{percent(e)} elapsed)"
+  end
+
   defp primary_utilization(%{mode: :paced, utilization: u, threshold: t, elapsed: e}) do
     "quota ahead of pace (#{percent(u)} of window used, paced ceiling #{percent(t)}, " <>
       "#{percent(e)} elapsed)"
@@ -1271,10 +1458,16 @@ defmodule Arbiter.Quota.Gate do
   defp primary_utilization(%{utilization: u, threshold: t}),
     do: "quota near exhaustion (#{percent(u)} of window used, ceiling #{percent(t)})"
 
+  defp long_utilization(%{mode: :exempt, utilization: u, threshold: t, elapsed: e} = b),
+    do: "#{percent(u)} ≥ #{exempt_label(b)} #{percent(t)} (#{percent(e)} elapsed)"
+
   defp long_utilization(%{mode: :paced, utilization: u, threshold: t, elapsed: e}),
     do: "#{percent(u)} ≥ paced #{percent(t)} (#{percent(e)} elapsed)"
 
   defp long_utilization(%{utilization: u, threshold: t}), do: "#{percent(u)} ≥ #{percent(t)}"
+
+  defp exempt_label(%{priority: p}) when is_integer(p), do: "P#{p} exempt"
+  defp exempt_label(_binding), do: "P0 exempt"
 
   # The long windows are the ones the secondary mapping names; everything else
   # ("5h", "session", "used", "primary") is the short/primary window.
