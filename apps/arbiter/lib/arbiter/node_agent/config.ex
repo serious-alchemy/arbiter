@@ -116,13 +116,7 @@ defmodule Arbiter.NodeAgent.Config do
         "agent_version" => config.version
       })
 
-    URI.to_string(%URI{
-      scheme: scheme,
-      host: uri.host,
-      port: uri.port,
-      path: base <> "/node/socket/websocket",
-      query: query
-    })
+    URI.to_string(%{uri | scheme: scheme, path: base <> "/node/socket/websocket", query: query})
   end
 
   @doc "`GET`/`DELETE` URL for a node-tier HTTP route (`/nodes/…`) on the primary."

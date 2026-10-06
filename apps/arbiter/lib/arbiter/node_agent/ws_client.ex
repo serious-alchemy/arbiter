@@ -305,13 +305,17 @@ defmodule Arbiter.NodeAgent.WsClient do
     do: {:text, Jason.encode!([join_ref, ref, topic, event, payload])}
 
   defp send_frame(state, frame) do
-    with {:ok, ws, data} <- Mint.WebSocket.encode(state.ws, frame),
-         {:ok, conn} <- Mint.WebSocket.stream_request_body(state.conn, state.ref, data) do
-      %{state | ws: ws, conn: conn}
-    else
-      # A write that fails means the socket is gone; the read side reports the
-      # close, so there is nothing to do here.
-      {:error, %Mint.WebSocket{} = ws, _reason} -> %{state | ws: ws}
+    # A write that fails means the socket is gone; the read side reports the
+    # close, so a failure here changes nothing.
+    case Mint.WebSocket.encode(state.ws, frame) do
+      {:ok, ws, data} -> stream_frame(%{state | ws: ws}, data)
+      {:error, ws, _reason} -> %{state | ws: ws}
+    end
+  end
+
+  defp stream_frame(state, data) do
+    case Mint.WebSocket.stream_request_body(state.conn, state.ref, data) do
+      {:ok, conn} -> %{state | conn: conn}
       {:error, conn, _reason} -> %{state | conn: conn}
     end
   end
