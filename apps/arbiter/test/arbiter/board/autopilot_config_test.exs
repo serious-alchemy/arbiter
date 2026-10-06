@@ -121,6 +121,22 @@ defmodule Arbiter.Board.AutopilotConfigTest do
       assert log =~ "could not read the persisted paused state at boot"
     end
 
+    test "fails closed: enabled in config but unreadable state boots paused and dispatches nothing" do
+      Application.put_env(:arbiter, :board_autopilot, enabled: true)
+
+      capture_log(fn ->
+        pid = start(read_status: fn -> {:error, :no_such_column} end, state_retry_ms: 60_000)
+
+        assert true === Autopilot.paused?(pid)
+        assert %{state_load: {:retrying, 1}} = :sys.get_state(pid)
+
+        send(pid, :tick)
+        _ = :sys.get_state(pid)
+        refute_received {:dispatched, _}
+        assert true === Autopilot.paused?(pid)
+      end)
+    end
+
     test "an unreadable row raises a coordinator-visible notice after repeated failures" do
       test = self()
 
@@ -197,7 +213,13 @@ defmodule Arbiter.Board.AutopilotConfigTest do
         Application.put_env(:arbiter, :board_autopilot, enabled: true)
 
         # Start autopilot without explicit :paused option — should use the app config default
-        pid = start(name: nil, interval_ms: :never, snapshot: fn _ -> board("bd-1") end)
+        pid =
+          start(
+            name: nil,
+            interval_ms: :never,
+            read_status: fn -> {:ok, %{paused: nil, changed_at: nil, changed_by: nil}} end,
+            snapshot: fn _ -> board("bd-1") end
+          )
 
         # With enabled: true, it should start unpaused
         assert false === Autopilot.paused?(pid)

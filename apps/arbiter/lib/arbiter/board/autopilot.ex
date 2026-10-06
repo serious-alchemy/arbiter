@@ -1136,9 +1136,10 @@ defmodule Arbiter.Board.Autopilot do
   # No persisted value (fresh install) falls back to the app-env default, with
   # no recorded change — that is the config's default, not something an
   # operator chose. A row that cannot be *read* is different: the default is
-  # only a safe stand-in (bd-c3b30g — v0.2.7 booted paused over a persisted
-  # `paused = false` because this ran before the migration finished), so it is
-  # logged loudly and re-read by `:reload_paused_state`.
+  # unknown, and an operator may have paused the scheduler (bd-2hwm9e), so it
+  # fails closed: paused until the row can be read (bd-c3b30g — v0.2.7 booted
+  # paused over a persisted `paused = false`). Logged loudly and re-read by
+  # `:reload_paused_state`.
   defp initial_paused_state(read_status) do
     case read_status.() do
       {:ok, %{paused: paused?} = status} when is_boolean(paused?) ->
@@ -1150,11 +1151,10 @@ defmodule Arbiter.Board.Autopilot do
       {:error, reason} ->
         Logger.warning(
           "board autopilot: could not read the persisted paused state at boot " <>
-            "(#{inspect(reason)}); starting #{if configured_paused?(), do: "paused", else: "running"} " <>
-            "by config default and retrying"
+            "(#{inspect(reason)}); starting paused (fail closed) and retrying"
         )
 
-        {{configured_paused?(), nil, nil}, {:retrying, 1}}
+        {{true, nil, nil}, {:retrying, 1}}
     end
   end
 
