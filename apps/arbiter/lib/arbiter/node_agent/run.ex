@@ -87,7 +87,7 @@ defmodule Arbiter.NodeAgent.Run do
   @spec cancel(String.t(), String.t()) :: :ok | {:error, :not_found}
   def cancel(run, reason), do: cast(run, {:cancel, reason})
 
-  @doc "Send `signal` (`\"TERM\"` | `\"KILL\"`) to the container's init."
+  @doc "Send `signal` (TERM or KILL) to the container's init."
   @spec signal(String.t(), String.t()) :: :ok | {:error, :not_found}
   def signal(run, signal) when signal in ["TERM", "KILL"], do: cast(run, {:signal, signal})
 
@@ -298,18 +298,16 @@ defmodule Arbiter.NodeAgent.Run do
          {:ok, secrets_file} <- secrets(spec, opts),
          {:ok, pod, service_env} <- services(spec, opts),
          {:ok, argv} <-
-           build_argv(
-             spec,
-             opts,
-             dirs,
-             cli,
-             prompts,
-             limit_opts,
-             bridge_paths,
-             secrets_file,
-             pod,
-             service_env
-           ) do
+           build_argv(spec, opts, %{
+             dirs: dirs,
+             cli: cli,
+             prompts: prompts,
+             limit_opts: limit_opts,
+             bridge_paths: bridge_paths,
+             secrets_file: secrets_file,
+             pod: pod,
+             service_env: service_env
+           }) do
       {:ok, %{argv: argv, pod: pod, secrets_file: secrets_file}}
     else
       {:error, {_code, _detail}} = error ->
@@ -489,52 +487,30 @@ defmodule Arbiter.NodeAgent.Run do
     end
   end
 
-  defp build_argv(
-         spec,
-         opts,
-         dirs,
-         cli,
-         prompts,
-         limit_opts,
-         bridge_paths,
-         secrets_file,
-         pod,
-         service_env
-       ) do
-    worktree = dirs["worktree"]
-    home = dirs["home"]
-
-    host_dirs = Map.values(dirs)
-
-    mount_map =
-      Map.new(
-        for(%{host: host, container: container} <- host_dirs, do: {host, container}) ++
-          for({host, dest} <- prompts, do: {host, dest}) ++
-          for({%{path: path}, host} <- bridge_paths, do: {host, path})
-      )
-
-    writable = for kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host
+  defp build_argv(spec, opts, parts) do
+    %{dirs: dirs, prompts: prompts, bridge_paths: bridge_paths, secrets_file: secrets_file} =
+      parts
 
     wrap_opts =
       [
-        worktree: worktree.host,
+        worktree: dirs["worktree"].host,
         name: spec.name,
         image: spec.image.tag,
         podman: podman_path(opts),
-        home: home && home.host,
-        writable_paths: writable,
+        home: dirs["home"] && dirs["home"].host,
+        writable_paths: for(kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host),
         readonly_paths: Enum.map(prompts, &elem(&1, 0)),
-        cli_mounts: cli,
+        cli_mounts: parts.cli,
         bridges: Enum.map(bridge_paths, &elem(&1, 1)),
-        env: Map.to_list(spec.env) ++ service_env,
+        env: Map.to_list(spec.env) ++ parts.service_env,
         network: spec.network,
         keep: true,
         labels: labels(spec, opts),
-        mount_map: mount_map,
+        mount_map: mount_map(dirs, prompts, bridge_paths),
         secrets_file: secrets_file
       ]
-      |> Keyword.merge(limit_opts)
-      |> then(&if(pod, do: Keyword.put(&1, :pod, pod), else: &1))
+      |> Keyword.merge(parts.limit_opts)
+      |> then(&if(parts.pod, do: Keyword.put(&1, :pod, parts.pod), else: &1))
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     command = if secrets_file, do: Container.secrets_wrapper(spec.command), else: spec.command
@@ -543,6 +519,14 @@ defmodule Arbiter.NodeAgent.Run do
       {:ok, argv} -> {:ok, argv}
       {:error, reason} -> {:error, {:unschedulable, {:wrap, reason}}}
     end
+  end
+
+  defp mount_map(dirs, prompts, bridge_paths) do
+    Map.new(
+      for(%{host: host, container: container} <- Map.values(dirs), do: {host, container}) ++
+        for({host, dest} <- prompts, do: {host, dest}) ++
+        for({%{path: path}, host} <- bridge_paths, do: {host, path})
+    )
   end
 
   defp labels(spec, opts) do

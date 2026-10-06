@@ -23,10 +23,9 @@ defmodule Arbiter.NodeAgent.Files do
          true <- Regex.match?(@name_re, name) or {:error, :bad_name} do
       path = Path.join(dir(config, sha), name)
 
-      cond do
-        File.regular?(path) and hash(path) == sha -> {:ok, path}
-        true -> fetch(config, sha, path)
-      end
+      if File.regular?(path) and hash(path) == sha,
+        do: {:ok, path},
+        else: fetch(config, sha, path)
     end
   end
 

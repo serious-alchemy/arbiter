@@ -39,18 +39,16 @@ defmodule Arbiter.NodeAgent.Cgroups do
   def limit_opts(limits, delegated) do
     wants_memory? = Map.has_key?(limits, :memory) or Map.has_key?(limits, :memory_swap)
 
-    cond do
-      wants_memory? and "memory" not in delegated ->
-        {:error, :memory_not_delegated}
+    if wants_memory? and "memory" not in delegated do
+      {:error, :memory_not_delegated}
+    else
+      {keep, dropped} =
+        Enum.split_with(limits, fn
+          {:cpus, _} -> "cpu" in delegated
+          {_memory, _} -> true
+        end)
 
-      true ->
-        {keep, dropped} =
-          Enum.split_with(limits, fn
-            {:cpus, _} -> "cpu" in delegated
-            {_memory, _} -> true
-          end)
-
-        {:ok, keep, Enum.map(dropped, &elem(&1, 0))}
+      {:ok, keep, Enum.map(dropped, &elem(&1, 0))}
     end
   end
 

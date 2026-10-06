@@ -194,12 +194,10 @@ defmodule Arbiter.NodeAgent.RunSpec do
       )
 
   defp image(%{"tag" => tag} = image) when is_binary(tag) do
-    cond do
-      String.starts_with?(tag, "-") or not Regex.match?(@tag_re, tag) ->
-        refuse({:bad_value, "image.tag"})
-
-      true ->
-        with {:ok, plan} <- plan(image["plan"]), do: {:ok, %{tag: tag, plan: plan}}
+    if String.starts_with?(tag, "-") or not Regex.match?(@tag_re, tag) do
+      refuse({:bad_value, "image.tag"})
+    else
+      with {:ok, plan} <- plan(image["plan"]), do: {:ok, %{tag: tag, plan: plan}}
     end
   end
 

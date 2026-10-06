@@ -165,7 +165,7 @@ defmodule Arbiter.Nodes.Session do
   @spec cancel_run(pid(), String.t(), String.t()) :: :ok
   def cancel_run(pid, run, reason), do: GenServer.cast(pid, {:cancel_run, run, reason})
 
-  @doc "Send `signal` (`\"TERM\"` | `\"KILL\"`) to the run's container."
+  @doc "Send `signal` (TERM or KILL) to the run's container."
   @spec signal_run(pid(), String.t(), String.t()) :: :ok
   def signal_run(pid, run, signal), do: GenServer.cast(pid, {:signal_run, run, signal})
 
