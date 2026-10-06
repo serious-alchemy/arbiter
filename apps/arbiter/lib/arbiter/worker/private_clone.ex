@@ -305,6 +305,7 @@ defmodule Arbiter.Worker.PrivateClone do
            ),
          :ok <- set_markers(path, repo, plan.branch, plan.base),
          :ok <- record_identity(repo, path, leaf),
+         :ok <- record_ledger(path, repo),
          :ok <- File.write(Path.join(dot_git, "objects/info/alternates"), plan.objects <> "\n"),
          :ok <- File.write(Path.join(dot_git, "commondir"), @commondir_guard),
          :ok <- File.mkdir_p(Path.join(dot_git, "hooks")),
@@ -627,6 +628,7 @@ defmodule Arbiter.Worker.PrivateClone do
         case File.rm_rf(path) do
           {:ok, _} ->
             if File.dir?(repo), do: unpin(repo, leaf)
+            _ = File.rm(ledger_file(path))
             Logger.info("PrivateClone: removed #{path}")
             :ok
 
@@ -675,6 +677,9 @@ defmodule Arbiter.Worker.PrivateClone do
 
     with {:ok, repo, _branch} <- trusted_identity(path),
          {:ok, objects} <- objects_dir(repo),
+         # Every clone a container is handed is on the ledger (one made before
+         # the ledger existed gets its entry here), so `guard/1` knows it.
+         :ok <- record_ledger(path, repo),
          :ok <- check_alternates(dot_git, objects),
          readonly = Enum.map(@readonly_in_git_dir, &Path.join(dot_git, &1)),
          :ok <- check_guards(readonly) do
@@ -754,10 +759,15 @@ defmodule Arbiter.Worker.PrivateClone do
   @doc """
   `verify/1` for a git about to run in `path`, when `path` is a checkout leaf
   of the worktree root (a private clone, or something posing as one). A `.git`
-  directory must verify (one that names no main repo is refused too); a
-  `.git` file is a linked worktree's and is accepted only when its `gitdir:`
-  names a `<repo>/.git/worktrees/<name>` outside the checkout (`linked_gitdir/1`),
-  so a worker's `mv .git evil; echo 'gitdir: ./evil' > .git` is refused; a
+  directory must verify (one that names no main repo is refused too). A
+  `.git` file or symlink at a leaf that is on the private-clone ledger
+  (`ledgered?/1`: `create/3` built it, or a container was handed it) is refused
+  whatever it says, since a worker can write a `gitdir:` file naming a fake
+  `<repo>/.git/worktrees/<name>` in any directory it can write, and nothing in
+  such a file shows the repo is not the worker's. At a leaf that was never a
+  private clone (a layout-A linked worktree, which no container is handed) a
+  `.git` file is accepted when its `gitdir:` names a
+  `<repo>/.git/worktrees/<name>` outside the checkout (`linked_gitdir/1`); a
   `.git` symlink is refused outright. `:ok` for a path that is not a checkout
   leaf (a repo outside the root is not a worker's) or has no `.git` at all.
   """
@@ -773,7 +783,9 @@ defmodule Arbiter.Worker.PrivateClone do
           end
 
         :regular ->
-          linked_gitdir(path)
+          if ledgered?(path),
+            do: tampered(".git is a file, and this checkout is a private clone"),
+            else: linked_gitdir(path)
 
         other ->
           tampered(".git is a #{other}, not a directory or a worktree file")
@@ -809,9 +821,10 @@ defmodule Arbiter.Worker.PrivateClone do
   @doc """
   The completion-time check on the checkout at `path`, once nothing of the
   worker's runs any more: `:ok` for a path that is not a checkout leaf of the
-  worktree root or whose `.git` is a linked worktree's file (`guard/1`'s
-  rule: a `gitdir:` file that points anywhere else is not one), otherwise
-  `reclaim/1`. `{:error, {:tampered, why}}` means the worker swapped the
+  worktree root or is a layout-A linked worktree (never a private clone: a
+  `.git` file at a ledgered leaf is a swap, however it reads; at any other
+  leaf `guard/1`'s rule applies, a `gitdir:` file that points anywhere else is
+  not one), otherwise `reclaim/1`. `{:error, {:tampered, why}}` means the worker swapped the
   clone's `.git` (it has been put right, but the run is not to be trusted: the
   caller fails closed rather than routing the tree on to review or merge).
   """
@@ -825,7 +838,43 @@ defmodule Arbiter.Worker.PrivateClone do
   defp linked_worktree?(path),
     do:
       match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(path, ".git"))) and
-        linked_gitdir(path) == :ok
+        not ledgered?(path) and linked_gitdir(path) == :ok
+
+  # -- the private-clone ledger ------------------------------------------------------------
+
+  # What `.git` cannot say about itself: a worker can replace it with a file
+  # naming a "linked worktree" of a repo it built in a directory it can write,
+  # which `linked_gitdir/1` cannot tell from a real one. So the host keeps,
+  # beside the worktree root (a container is handed one clone, never the root
+  # or its parent), one file per private-clone leaf naming its main repo. A
+  # leaf is a private clone when that file exists and the main repo still holds
+  # the identity record for it (which `unpin/2` drops with the clone, so a
+  # leaf name reused for a layout-A worktree is not taken for one).
+  defp ledger_file(path) do
+    expanded = Path.expand(path)
+    Path.join(Path.dirname(expanded) <> ".private-clones", Path.basename(expanded))
+  end
+
+  defp record_ledger(path, repo) do
+    file = ledger_file(path)
+
+    with :ok <- File.mkdir_p(Path.dirname(file)),
+         :ok <- File.write(file, repo <> "\n") do
+      :ok
+    else
+      {:error, reason} -> {:error, {:git_failed, "private-clone ledger: #{inspect(reason)}"}}
+    end
+  end
+
+  defp ledgered?(path) do
+    with {:ok, repo} <- File.read(ledger_file(path)),
+         repo = String.trim(repo),
+         true <- repo != "" and File.dir?(repo) do
+      File.exists?(identity_file(repo, Path.basename(Path.expand(path))))
+    else
+      _ -> false
+    end
+  end
 
   # A `.git` file the host may follow: `gitdir: <repo>/.git/worktrees/<name>`
   # with the target outside the checkout, so the config git reads is the main

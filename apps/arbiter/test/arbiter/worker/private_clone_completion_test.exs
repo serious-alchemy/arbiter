@@ -83,8 +83,25 @@ defmodule Arbiter.Worker.PrivateCloneCompletionTest do
     )
 
     case kind do
-      :gitdir_file -> File.write!(dot_git, "gitdir: ./evil\n")
-      :symlink -> File.ln_s!(evil, dot_git)
+      :gitdir_file ->
+        File.write!(dot_git, "gitdir: ./evil\n")
+
+      :symlink ->
+        File.ln_s!(evil, dot_git)
+
+      # A fake `<repo>/.git/worktrees/<name>` in a directory the worker can
+      # write outside the checkout: a linked worktree by its shape alone.
+      :fake_linked_worktree ->
+        scratch = ctx.marker_dir <> "-worker-tmp"
+        fake_repo = Path.join([scratch, "x", ".git"])
+        entry = Path.join([fake_repo, "worktrees", "y"])
+        File.mkdir_p!(entry)
+        on_exit(fn -> File.rm_rf!(scratch) end)
+        File.cp_r!(evil, fake_repo)
+        File.write!(Path.join(entry, "commondir"), "../..\n")
+        File.write!(Path.join(entry, "gitdir"), dot_git <> "\n")
+        File.cp!(Path.join(evil, "HEAD"), Path.join(entry, "HEAD"))
+        File.write!(dot_git, "gitdir: #{entry}\n")
     end
   end
 
@@ -155,7 +172,7 @@ defmodule Arbiter.Worker.PrivateCloneCompletionTest do
            |> Enum.any?(&(&1.kind == :escalation and &1.directive_ref == ctx.task.id))
   end
 
-  for kind <- [:gitdir_file, :symlink] do
+  for kind <- [:gitdir_file, :symlink, :fake_linked_worktree] do
     test "arb done from a .git replaced by a #{kind} fails :tampered_clone before any git runs",
          ctx do
       original = File.lstat!(Path.join(ctx.path, ".git")).inode

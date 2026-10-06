@@ -215,6 +215,34 @@ defmodule Arbiter.Worker.PrivateCloneGitSwapTest do
   describe "a .git replaced by a file or symlink that leads to the worker's own gitdir" do
     # `mv .git evil; echo "gitdir: ./evil" > .git`: git follows the file to a
     # config the worker wrote (reproduced with a plain `git status`).
+    defp indirect_git!(ctx, :fake_linked_worktree) do
+      # What a worker can do from inside the container with a directory it can
+      # write outside the checkout (`$TMPDIR`, `$HOME`): a repo of its own with
+      # a hostile config and a `worktrees/<name>` entry, and a `.git` file that
+      # names it. The path has the shape of a real linked worktree's.
+      dot_git = Path.join(ctx.path, ".git")
+      scratch = ctx.marker_dir <> "-worker-tmp"
+      fake_repo = Path.join([scratch, "x", ".git"])
+      entry = Path.join([fake_repo, "worktrees", "y"])
+      File.mkdir_p!(Path.dirname(fake_repo))
+      on_exit(fn -> File.rm_rf!(scratch) end)
+
+      File.cp_r!(dot_git, fake_repo)
+
+      File.write!(
+        Path.join(fake_repo, "config"),
+        File.read!(Path.join(fake_repo, "config")) <> payload_config(ctx)
+      )
+
+      File.mkdir_p!(entry)
+      File.write!(Path.join(entry, "commondir"), "../..\n")
+      File.write!(Path.join(entry, "gitdir"), dot_git <> "\n")
+      File.cp!(Path.join(dot_git, "HEAD"), Path.join(entry, "HEAD"))
+
+      File.rename!(dot_git, dot_git <> "2")
+      File.write!(dot_git, "gitdir: #{entry}\n")
+    end
+
     defp indirect_git!(ctx, kind) do
       dot_git = Path.join(ctx.path, ".git")
       evil = Path.join(ctx.path, "evil")
@@ -233,7 +261,7 @@ defmodule Arbiter.Worker.PrivateCloneGitSwapTest do
       end
     end
 
-    for kind <- [:gitdir_file, :absolute_gitdir_file, :symlink] do
+    for kind <- [:gitdir_file, :absolute_gitdir_file, :symlink, :fake_linked_worktree] do
       test "#{kind}: cmd/3 refuses, settle/1 reports and restores, nothing fires", ctx do
         original = File.lstat!(Path.join(ctx.path, ".git")).inode
         indirect_git!(ctx, unquote(kind))
@@ -257,7 +285,8 @@ defmodule Arbiter.Worker.PrivateCloneGitSwapTest do
       end
     end
 
-    test "a .git file naming another repo's linked worktree is still a linked worktree", ctx do
+    test "a .git file naming a linked worktree is accepted at a leaf that is not a private clone",
+         ctx do
       linked = Path.join(Path.dirname(ctx.path), "linked-#{System.unique_integer([:positive])}")
       git!(ctx.checkout, ["worktree", "add", "-q", "-b", "linked-wt", linked])
       on_exit(fn -> File.rm_rf!(linked) end)
