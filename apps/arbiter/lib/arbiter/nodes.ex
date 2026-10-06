@@ -30,7 +30,7 @@ defmodule Arbiter.Nodes do
   require Ash.Query
 
   alias Arbiter.Actor
-  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, Registry}
+  alias Arbiter.Nodes.{Agent, Credentials, JoinToken, Node, NodeEvent, Registry}
   alias Arbiter.Repo
   alias Arbiter.Settings
 
@@ -51,9 +51,21 @@ defmodule Arbiter.Nodes do
   # refused up front: at mint, at enroll and at edit.
   @name_pattern ~r/\A[A-Za-z0-9._=:\/@-]{1,128}\z/
 
-  @doc "Whether `name` is a well-formed node name (`A-Za-z0-9._=:/@-`, 1-128 chars)."
+  # The nodes page and `arb node set` call the primary `local`; a real node
+  # taking the name would make the reference ambiguous.
+  @local_name "local"
+
+  @doc "The name the primary goes by in the nodes list and `arb node set`."
+  @spec local_name() :: String.t()
+  def local_name, do: @local_name
+
+  @doc """
+  Whether `name` is a well-formed node name (`A-Za-z0-9._=:/@-`, 1-128 chars,
+  and not `local`, which is the primary's own).
+  """
   @spec valid_name?(term()) :: boolean()
-  def valid_name?(name), do: is_binary(name) and Regex.match?(@name_pattern, name)
+  def valid_name?(name),
+    do: is_binary(name) and name != @local_name and Regex.match?(@name_pattern, name)
 
   defp name_ok?(nil), do: true
   defp name_ok?(name), do: valid_name?(name)
@@ -460,6 +472,10 @@ defmodule Arbiter.Nodes do
       {:ok, updated} ->
         detail = %{"changes" => Map.new(delta, fn {k, v} -> {Atom.to_string(k), v} end)}
         record(:updated, node.id, Actor.resolve_label(actor), detail)
+
+        if Map.has_key?(delta, :max_workers),
+          do: Registry.notify(node.id, {:operator_max, updated.max_workers})
+
         {:ok, updated}
 
       {:error, error} ->
@@ -471,6 +487,69 @@ defmodule Arbiter.Nodes do
     do: Enum.any?(errors, &(Map.get(&1, :field) == :name))
 
   defp name_conflict?(_), do: false
+
+  @doc """
+  Override the primary's own worker cap, the `local` row of the nodes page.
+  `0` is allowed (the primary runs nothing; nodes do), `nil` clears the
+  override. An unchanged value is a no-op; a change writes an `updated` event
+  with no node id and `detail.node == "local"`. Enforcing the cap on dispatch
+  is the placement layer's job.
+  """
+  @spec set_local_max_workers(non_neg_integer() | nil, Actor.t() | String.t() | nil) ::
+          {:ok, non_neg_integer() | nil} | {:error, :invalid_value | term()}
+  def set_local_max_workers(n, actor) when is_nil(n) or (is_integer(n) and n >= 0) do
+    if Settings.nodes_local_max_workers() == n do
+      {:ok, n}
+    else
+      with {:ok, _} <- Settings.set_nodes_local_max_workers(n) do
+        record(:updated, nil, Actor.resolve_label(actor), %{
+          "node" => @local_name,
+          "changes" => %{"max_workers" => n}
+        })
+
+        {:ok, n}
+      end
+    end
+  end
+
+  def set_local_max_workers(_n, _actor), do: {:error, :invalid_value}
+
+  @doc """
+  Ask a connected node to move to the release the primary serves
+  (`Nodes.Agent.artifact/0`): its channel pushes `upgrade{version, sha256}` and
+  the agent's own upgrader takes it from there (§6). Writes an `upgraded`
+  event. `{:error, :offline}` with no live session, `{:error, :revoked}` for a
+  revoked node, `{:error, :unavailable}` when the primary has no release to serve.
+  """
+  @spec upgrade(Node.t(), Actor.t() | String.t() | nil) ::
+          {:ok, %{version: String.t(), sha256: String.t()}}
+          | {:error, :offline | :revoked | :unavailable | :not_found}
+  def upgrade(%Node{id: id}, actor) do
+    case get_node(id) do
+      nil ->
+        {:error, :not_found}
+
+      %Node{status: :revoked} ->
+        {:error, :revoked}
+
+      %Node{} = node ->
+        with pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline},
+             {:ok, %{version: version, sha256: sha}} <-
+               Agent.artifact() |> unavailable() do
+          Registry.notify(node.id, {:upgrade, %{"version" => version, "sha256" => sha}})
+
+          record(:upgraded, node.id, Actor.resolve_label(actor), %{
+            "version" => version,
+            "requested" => true
+          })
+
+          {:ok, %{version: version, sha256: sha}}
+        end
+    end
+  end
+
+  defp unavailable({:ok, _} = ok), do: ok
+  defp unavailable(_), do: {:error, :unavailable}
 
   # ---- live sessions -----------------------------------------------------
 

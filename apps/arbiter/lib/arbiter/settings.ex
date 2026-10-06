@@ -571,6 +571,18 @@ defmodule Arbiter.Settings do
 
   def set_nodes_lost_after_s(_), do: {:error, :invalid_value}
 
+  @doc "The operator's override of the primary's own worker cap (`local` on the nodes page), or `nil`."
+  @spec nodes_local_max_workers() :: non_neg_integer() | nil
+  def nodes_local_max_workers, do: read_setting(:nodes_local_max_workers)
+
+  @doc "Persist the local worker cap; `0` is allowed (run nothing here), `nil` clears the override."
+  @spec set_nodes_local_max_workers(non_neg_integer() | nil) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def set_nodes_local_max_workers(n) when is_nil(n) or (is_integer(n) and n >= 0),
+    do: write_setting(:nodes_local_max_workers, n)
+
+  def set_nodes_local_max_workers(_), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other

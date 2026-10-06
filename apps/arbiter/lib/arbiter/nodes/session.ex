@@ -27,7 +27,7 @@ defmodule Arbiter.Nodes.Session do
 
   `{:node_session, :drain}` / `{:node_session, :undrain}` and
   `{:node_session, {:disconnect, reason}}` with `reason` one of `:revoked`,
-  `:lost`, `:superseded`. The channel owns turning those into pushes and a
+  `:lost`, `:superseded`, and `{:node_session, {:upgrade, payload}}`. The channel owns turning those into pushes and a
   socket close; the session never touches a socket.
 
   ## Events broadcast on `Arbiter.Nodes.topic/0`
@@ -115,11 +115,19 @@ defmodule Arbiter.Nodes.Session do
   def assignable?(pid), do: GenServer.call(pid, :assignable?)
 
   @doc """
-  Out-of-band news for the session: `:drain`, `:undrain` or
-  `{:disconnect, reason}` (revoke). Asynchronous; a call made afterwards *by the
-  same process* observes it.
+  Out-of-band news for the session: `:drain`, `:undrain`, `{:disconnect, reason}`
+  (revoke), `{:operator_max, n | nil}` (the operator edited the node's cap) or
+  `{:upgrade, %{"version", "sha256"}}` (forwarded to the channel). Asynchronous;
+  a call made afterwards *by the same process* observes it.
   """
-  @spec notify(pid(), :drain | :undrain | {:disconnect, atom()}) :: :ok
+  @spec notify(
+          pid(),
+          :drain
+          | :undrain
+          | {:disconnect, atom()}
+          | {:operator_max, pos_integer() | nil}
+          | {:upgrade, map()}
+        ) :: :ok
   def notify(pid, message), do: GenServer.cast(pid, message)
 
   @doc "Run the liveness check now (what the timer does). Returns the resulting state."
@@ -190,6 +198,12 @@ defmodule Arbiter.Nodes.Session do
   @impl true
   def handle_cast(:drain, state), do: {:noreply, set_draining(state, true)}
   def handle_cast(:undrain, state), do: {:noreply, set_draining(state, false)}
+  def handle_cast({:operator_max, n}, state), do: {:noreply, %{state | operator_max: n}}
+
+  def handle_cast({:upgrade, payload}, state) do
+    notify_channel(state, {:upgrade, payload})
+    {:noreply, state}
+  end
 
   def handle_cast({:disconnect, reason}, state) do
     notify_channel(state, {:disconnect, reason})
