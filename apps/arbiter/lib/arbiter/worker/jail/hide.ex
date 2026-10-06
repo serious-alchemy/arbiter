@@ -64,9 +64,9 @@ defmodule Arbiter.Worker.Jail.Hide do
   """
 
   alias Arbiter.Config.Paths
-  alias Arbiter.Worker.CredentialPaths
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.CredentialPaths
 
   require Logger
 
