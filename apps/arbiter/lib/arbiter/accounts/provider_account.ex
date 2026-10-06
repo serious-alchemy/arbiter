@@ -153,7 +153,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
       public? true
       default %{}
 
-      description "Account-scoped gate settings: throttle_threshold, weekly_threshold, weekly_warning_policy, threshold_mode (flat | paced), paced_floor, weekly_paced_floor, window_seconds (window label => seconds), overage opt-in."
+      description "Account-scoped gate settings: throttle_threshold, weekly_threshold, weekly_warning_policy, threshold_mode (flat | paced), paced_floor, weekly_paced_floor, pace_exempt_priority (0-4, the P0 pace exemption), pace_exempt_threshold / weekly_pace_exempt_threshold (its 5h / 7d caps), window_seconds (window label => seconds), overage opt-in."
     end
 
     attribute :enabled, :boolean do

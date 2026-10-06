@@ -222,6 +222,50 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "P0 pace exemption (bd-6bxv7h) — the drain reads the held ticket's own priority" do
+    test "a held P0 drains once under its exempt cap while a held P2 stays held" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+
+      {:ok, _} =
+        Arbiter.Accounts.set_quota_config(quota_account_id!(ws.id), %{
+          "threshold_mode" => "paced",
+          "pace_exempt_priority" => 0,
+          "pace_exempt_threshold" => 0.8
+        })
+
+      pid = start_queue(ws, dispatcher: RecordingDispatcher, auto_subscribe: false)
+      p2 = make_task(ws, %{priority: 2})
+      p0 = make_task(ws, %{priority: 0})
+
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(p2.id, force: true, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(p0.id, force: true, start_driver: false)
+
+      # 40% used, ~2% elapsed: past the paced 0.35 line, under the 0.8 cap.
+      seed_quota(ws, %{
+        status_5h: "allowed",
+        utilization_5h: 0.40,
+        reset_5h_at:
+          DateTime.utc_now() |> DateTime.add(17_640, :second) |> DateTime.truncate(:second)
+      })
+
+      :ok = DispatchQueue.drain(pid)
+
+      assert_receive {:dispatched, dispatched, _opts}
+      assert dispatched == p0.id
+      refute_receive {:dispatched, _, _}, 100
+      assert [%{task_id: held}] = DispatchQueue.state(pid).items
+      assert held == p2.id
+    end
+  end
+
   describe "epic floors (ES4, bd-4sw689) — held intents queue by effective priority" do
     setup do
       Application.put_env(:arbiter, :test_dispatch_pid, self())

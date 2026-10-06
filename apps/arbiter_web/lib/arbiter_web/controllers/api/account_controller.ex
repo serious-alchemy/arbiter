@@ -87,7 +87,8 @@ defmodule ArbiterWeb.Api.AccountController do
   "no ceiling" has to be reachable, and giving the key an absent value is a
   malformed request rather than a clear. `quota_config` is a **partial**
   merge — `threshold_mode`, `weekly_threshold`, `paced_floor`,
-  `weekly_paced_floor` — validated against `Arbiter.Quota.Gate
+  `weekly_paced_floor`, `pace_exempt_priority`, `pace_exempt_threshold`,
+  `weekly_pace_exempt_threshold` — validated against `Arbiter.Quota.Gate
   .threshold_modes/0` and 0..1 floats; keys not mentioned (e.g.
   `throttle_threshold`) are left untouched. At least one of the two must be
   given.
