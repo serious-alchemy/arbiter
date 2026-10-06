@@ -439,11 +439,50 @@ defmodule Arbiter.Worker.DriverTest do
         ref = Process.monitor(driver_pid)
         refute_receive {:DOWN, ^ref, :process, _pid, _}, 100
 
-        :ok = Worker.complete(worker_pid, :claude_done)
+        :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+        # The real completion path: the session reader's `arb done` message.
+        send(worker_pid, {:__claude_session_done__, "arb done"})
         assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
         assert Ash.get!(Issue, task.id).state == :closed
+
+        # The coordinator's /events stream hears about it too.
+        task_id = task.id
+        assert_receive {:event, %{topic: "worker_done", task_id: ^task_id}}, 1_000
       end
+    end
+
+    test "past the tick budget, an auth-death failure returns the task to Ready", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "cd-auth", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      put_state!(task, :active)
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          max_ticks: 3,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      refute_receive {:DOWN, ^ref, :process, _pid, _}, 100
+
+      :ok =
+        Worker.fail(worker_pid, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401"
+        })
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+      assert Ash.get!(Issue, task.id).state == :queued
     end
 
     test "past the tick budget, a worker that fails stops the driver and leaves the task :active",

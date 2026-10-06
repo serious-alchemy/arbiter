@@ -150,6 +150,29 @@ defmodule Arbiter.Worker.Driver do
   defp default_max_ticks_for(true), do: @claude_default_max_ticks
   defp default_max_ticks_for(false), do: @workflow_default_max_ticks
 
+  # bd-21bmdh: an auth death reclaims its debris and returns the task to Ready
+  # (behind the provider's AuthHold). Every other failure keeps the task
+  # :active. Shared by the in-budget and past-budget (#372) paths.
+  defp handle_failed_worker(state, worker_state) do
+    case AuthDeath.handle(
+           state.task_id,
+           state.worker_pid,
+           worker_state,
+           blocking_workers(state)
+         ) do
+      :not_auth ->
+        Logger.warning(
+          "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :active"
+        )
+
+      {:auth, _outcome} ->
+        :ok
+    end
+
+    maybe_cleanup_worktree(state)
+    {:stop, :normal, state}
+  end
+
   defp schedule_first(%{claude_driven: true}), do: Process.send_after(self(), :check_worker, 0)
   defp schedule_first(%{claude_driven: false}), do: Process.send_after(self(), :tick, 0)
 
@@ -208,6 +231,9 @@ defmodule Arbiter.Worker.Driver do
         Process.send_after(self(), :check_worker, state.interval_ms)
         {:noreply, %{state | overrun_logged: true}}
 
+      %{state: :finished} = worker_state ->
+        handle_failed_worker(state, worker_state)
+
       _ ->
         Logger.warning(
           "Worker.Driver (claude_driven) hit max_ticks=#{m} for task=#{state.task_id}; stopping"
@@ -233,26 +259,7 @@ defmodule Arbiter.Worker.Driver do
         {:stop, :normal, state}
 
       %{state: :finished} = worker_state ->
-        # bd-21bmdh: an auth death reclaims its debris and returns the task to
-        # Ready (behind the provider's AuthHold). Every other failure keeps the
-        # task :active exactly as before.
-        case AuthDeath.handle(
-               state.task_id,
-               state.worker_pid,
-               worker_state,
-               blocking_workers(state)
-             ) do
-          :not_auth ->
-            Logger.warning(
-              "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :active"
-            )
-
-          {:auth, _outcome} ->
-            :ok
-        end
-
-        maybe_cleanup_worktree(state)
-        {:stop, :normal, state}
+        handle_failed_worker(state, worker_state)
 
       %{state: :waiting, waiting_on: :review_gate} ->
         # A distinct reviewer worker (ReviewGate) is evaluating the diff; it
