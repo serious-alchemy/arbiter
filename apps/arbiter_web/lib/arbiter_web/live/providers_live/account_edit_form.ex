@@ -249,7 +249,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     >
       <input type="hidden" name="account_id" value={@account.id} />
 
-      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
         <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
           Account
         </legend>
@@ -290,7 +290,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
         />
       </fieldset>
 
-      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
         <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
           Quota ceilings
         </legend>
@@ -356,7 +356,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
         </p>
       </fieldset>
 
-      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
         <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
           Pace exemption
         </legend>
