@@ -137,6 +137,8 @@ defmodule Arbiter.Tasks.Verification do
   def finalize_merged(task, opts \\ [])
 
   def finalize_merged(%Issue{verify_after_deploy: true} = task, opts) do
+    task = stamp_merged(task)
+
     # The park is attempted FIRST. Only once the local transition has actually
     # landed do we push the upstream close — otherwise a refused park (the task
     # raced to `:closed`, a DB error) would leave the tracker issue closed with
@@ -176,6 +178,7 @@ defmodule Arbiter.Tasks.Verification do
   end
 
   def finalize_merged(%Issue{} = task, opts) do
+    task = stamp_merged(task)
     close_upstream = Keyword.get(opts, :close_upstream, true)
 
     case Ash.update(task, %{close_upstream: close_upstream, pr_merged: true}, action: :close) do
@@ -200,6 +203,19 @@ defmodule Arbiter.Tasks.Verification do
   end
 
   # ---- internals ---------------------------------------------------------
+
+  # The Watchdog's last poll saw the PR open; every merge path funnels through
+  # `finalize_merged/2`, so the recorded snapshot is finalized here and every
+  # surface that reads `merger_status` (CLI, REST, MCP, dashboard) agrees.
+  # Best effort: a failed write must not block the merge's own transition.
+  defp stamp_merged(%Issue{} = task) do
+    status = Map.put(task.merger_status || %{}, "status", "merged")
+
+    case Ash.update(task, %{merger_status: status}, action: :record_merger_status) do
+      {:ok, updated} -> updated
+      {:error, _} -> task
+    end
+  end
 
   # `start_work/2` is a no-op for a ticket already at work and refuses one that
   # is verifying or closed — so a second finalize still errors without paging.
