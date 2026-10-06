@@ -231,7 +231,7 @@ defmodule Arbiter.ExtensionsTest do
                grok: Arbiter.Agents.Grok
              }
 
-      assert Enum.sort(Agents.valid_agent_types()) == ~w(claude codex gemini)
+      assert Enum.sort(Agents.valid_agent_types()) == ~w(claude codex gemini grok)
 
       assert Enum.sort(Routing.valid_policies()) ==
                ~w(by_budget by_difficulty by_priority round_robin static)
