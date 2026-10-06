@@ -27,10 +27,10 @@ defmodule Arbiter.Nodes.Hello do
     uuids = Enum.filter(ids, &match?({:ok, _}, Ecto.UUID.cast(&1)))
     live = live_run_ids(uuids)
 
-    Map.new(ids, fn id -> {id, if(MapSet.member?(live, id), do: "known", else: "unknown")} end)
+    Map.new(ids, fn id -> {id, if(id in live, do: "known", else: "unknown")} end)
   end
 
-  defp live_run_ids([]), do: MapSet.new()
+  defp live_run_ids([]), do: []
 
   defp live_run_ids(uuids) do
     live_states = Enum.filter(RunState.states(), &RunState.live?/1)
@@ -39,7 +39,7 @@ defmodule Arbiter.Nodes.Hello do
     |> Ash.Query.filter(id in ^uuids and state in ^live_states)
     |> Ash.Query.select([:id])
     |> Ash.read!()
-    |> MapSet.new(& &1.id)
+    |> Enum.map(& &1.id)
   end
 
   @doc """
