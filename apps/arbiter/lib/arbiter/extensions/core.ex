@@ -19,6 +19,7 @@ defmodule Arbiter.Extensions.Core do
       {:agent, "claude", Arbiter.Agents.Claude},
       {:agent, "gemini", Arbiter.Agents.Gemini},
       {:agent, "codex", Arbiter.Agents.Codex},
+      {:agent, "grok", Arbiter.Agents.Grok},
       {:tracker, "none", Arbiter.Trackers.None},
       {:tracker, "jira", Arbiter.Trackers.Jira},
       {:tracker, "shortcut", Arbiter.Trackers.Shortcut},

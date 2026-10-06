@@ -275,6 +275,7 @@ defmodule ArbiterWeb.Router do
     get("/server/egress_jail", ServerController, :egress_jail)
     get("/server/guardrails", ServerController, :guardrails)
     get("/server/claude_credentials", ServerController, :claude_credentials)
+    get("/server/grok_auth", ServerController, :grok_auth)
     get("/server/provider_accounts", ServerController, :provider_accounts)
     get("/server/merge_routing", ServerController, :merge_routing)
     get("/server/tmux", ServerController, :tmux)

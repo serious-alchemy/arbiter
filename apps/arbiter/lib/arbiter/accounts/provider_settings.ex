@@ -81,7 +81,8 @@ defmodule Arbiter.Accounts.ProviderSettings do
   @agent_types %{
     claude: "claude",
     codex: "codex",
-    antigravity: "gemini"
+    antigravity: "gemini",
+    grok: "grok"
   }
 
   @doc "The roles a workspace configures accounts for."

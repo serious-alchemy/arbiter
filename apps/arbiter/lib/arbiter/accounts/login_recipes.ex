@@ -4,7 +4,7 @@ defmodule Arbiter.Accounts.LoginRecipes do
   bd-dqvv90 / bd-82yxz2). Patterns come from spike bd-29ycw1.
 
     * `:claude` / `:codex` — enabled.
-    * `:grok` — defined but disabled until its adapter exists.
+    * `:grok` — enabled; `grok login --device-code` (bd-dpv4vt).
     * `:agy` — explicitly unsupported: no login subcommand, full-screen TUI,
       and `--gemini_dir` did not isolate it (it reused the operator's real
       identity), so there is deliberately no recipe.
@@ -98,7 +98,7 @@ defmodule Arbiter.Accounts.LoginRecipes do
     %LoginRecipe{
       provider: :grok,
       command: "grok",
-      args: ["login", "--device-auth"],
+      args: ["login", "--device-code"],
       config_dir_env: "GROK_HOME",
       flow: :device_code,
       # No status command exists: fall back to the credential file existing.
@@ -112,8 +112,7 @@ defmodule Arbiter.Accounts.LoginRecipes do
       # Only a poll line is shown: "Waiting for authorization..."
       success_pattern: nil,
       failure_pattern: ~r/(?:Login failed|expired|denied)/i,
-      credential_path: "auth.json",
-      enabled?: false
+      credential_path: "auth.json"
     }
   end
 end

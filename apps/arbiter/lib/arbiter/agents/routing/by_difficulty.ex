@@ -101,6 +101,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Floors
+  alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Loop.Canary
   alias Arbiter.Tasks.Issue
@@ -139,7 +140,16 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
     # overlay, so a canaried rule cannot route a floored repo below its floor.
     # A no-op (and no `:floor` key) for every workspace with no floors config.
     %{default | config: Map.merge(default.config, rule)}
+    |> maybe_grok(workspace, difficulty)
     |> Floors.clamp(workspace, task.repo)
+  end
+
+  # bd-dpv4vt: grok is free-tier only, so it is off unless the workspace sets
+  # `routing.grok.enabled`, and then takes D1 (or `routing.grok.difficulties`).
+  defp maybe_grok(choice, workspace, difficulty) do
+    if GrokRouting.route?(workspace, difficulty),
+      do: %{choice | type: :grok},
+      else: choice
   end
 
   # A Stage 3 canary (bd-6edc0u) overlays its candidate rule on *half* the

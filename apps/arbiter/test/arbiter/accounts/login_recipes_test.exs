@@ -26,13 +26,13 @@ defmodule Arbiter.Accounts.LoginRecipesTest do
   end
 
   describe "registry" do
-    test "claude and codex enabled, grok disabled, agy unsupported" do
+    test "claude, codex and grok enabled, agy unsupported" do
       assert {:ok, %LoginRecipe{provider: :claude}} = LoginRecipes.fetch(:claude)
       assert {:ok, %LoginRecipe{provider: :codex}} = LoginRecipes.fetch(:codex)
-      assert {:error, :disabled} = LoginRecipes.fetch(:grok)
+      assert {:ok, %LoginRecipe{provider: :grok}} = LoginRecipes.fetch(:grok)
       assert {:error, :unsupported} = LoginRecipes.fetch(:agy)
       assert {:error, :unknown} = LoginRecipes.fetch(:nope)
-      assert Enum.map(LoginRecipes.enabled(), & &1.provider) == [:claude, :codex]
+      assert Enum.map(LoginRecipes.enabled(), & &1.provider) == [:claude, :codex, :grok]
       assert :agy in LoginRecipes.unsupported()
     end
 
@@ -43,7 +43,7 @@ defmodule Arbiter.Accounts.LoginRecipesTest do
       assert %{command: "codex", args: ["login", "--device-auth"], config_dir_env: "CODEX_HOME"} =
                LoginRecipes.codex()
 
-      assert %{args: ["login", "--device-auth"], config_dir_env: "GROK_HOME", enabled?: false} =
+      assert %{args: ["login", "--device-code"], config_dir_env: "GROK_HOME", enabled?: true} =
                LoginRecipes.grok()
     end
   end
@@ -116,7 +116,7 @@ defmodule Arbiter.Accounts.LoginRecipesTest do
     end
   end
 
-  describe "grok patterns (disabled recipe)" do
+  describe "grok patterns" do
     test "extracts device URL and code" do
       screen = """
       To sign in, open this URL in your browser:

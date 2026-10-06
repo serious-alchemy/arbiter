@@ -1750,6 +1750,52 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
+    test "grok auth: silent-ok when disabled, reports state when enabled" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "not enabled"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{"enabled" => true, "workspaces" => ["w1"], "state" => "logged_in"}, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "logged in (w1)"
+    end
+
+    test "grok auth: a missing login fails with the fix and never blocks readiness" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "not_logged_in",
+                "fix" => "Run `grok login --device-code` on the Arbiter host."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ "grok login --device-code"
+      result = Enum.find(Checks.run(), &(&1.name == "grok auth"))
+      refute result.blocks_readiness
+    end
+
     test "a server that predates the check is reported as unknown, not as a failure" do
       stub_routes(base_routes())
 

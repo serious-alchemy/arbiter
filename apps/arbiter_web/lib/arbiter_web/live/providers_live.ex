@@ -56,7 +56,8 @@ defmodule ArbiterWeb.ProvidersLive do
   @providers [
     {"Claude", "claude"},
     {"Codex", "codex"},
-    {"Antigravity", "antigravity"}
+    {"Antigravity", "antigravity"},
+    {"Grok", "grok"}
   ]
 
   @kinds [
