@@ -43,7 +43,7 @@ defmodule ArbiterWeb.LayoutsTest do
 
       entries =
         rail
-        |> LazyHTML.query("a[href]")
+        |> LazyHTML.query("a[href]:not(#about-link)")
         |> Enum.map(fn a ->
           {a |> LazyHTML.text() |> String.trim(), a |> LazyHTML.attribute("href") |> hd()}
         end)
@@ -108,10 +108,11 @@ defmodule ArbiterWeb.LayoutsTest do
       refute html =~ ~s(data-role="nav-badge")
     end
 
-    test "About is no longer part of the nav" do
-      html = render_app()
+    test "About is not a nav entry, but the rail footer links to it" do
+      rail = render_app() |> LazyHTML.from_fragment() |> LazyHTML.query("#nav-rail")
 
-      refute html =~ ~s(href="/about")
+      assert LazyHTML.attribute(LazyHTML.query(rail, "#about-link"), "href") == ["/about"]
+      assert Enum.count(LazyHTML.query(rail, "#about-link")) == 1
     end
 
     test "renders the fixed 46px chrome bar" do
