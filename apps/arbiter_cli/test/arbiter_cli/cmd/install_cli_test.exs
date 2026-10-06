@@ -116,8 +116,15 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
 
       on_exit(fn ->
         case prior_home_content do
-          {:ok, content} -> File.write!(Start.recorded_home_path(), content)
-          _ -> File.rm(Start.recorded_home_path())
+          {:ok, content} ->
+            try do
+              File.write!(Start.recorded_home_path(), content)
+            rescue
+              _ -> :ok
+            end
+
+          _ ->
+            File.rm(Start.recorded_home_path())
         end
       end)
 

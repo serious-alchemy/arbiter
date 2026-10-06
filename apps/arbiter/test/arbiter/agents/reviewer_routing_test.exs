@@ -689,4 +689,36 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       end
     end
   end
+
+  describe "project/3 (bd-biycyw, R6)" do
+    test "projects the reviewer for an implementer family without writing a pin" do
+      ws = workspace!(["claude", "gemini"])
+      task = task!(ws, "anthropic")
+
+      assert {:ok, sel} = ReviewerRouting.project(ws, :anthropic, opts([], task: task))
+      assert sel.family == :google
+      assert sel.provider == :gemini
+
+      # The task is not pinned by a projection.
+      refute Ash.get!(Issue, task.id).reviewer_family
+
+      # Projecting for a Google implementer picks Anthropic.
+      assert {:ok, sel2} = ReviewerRouting.project(ws, :google, opts([], task: task))
+      assert sel2.family == :anthropic
+      assert sel2.provider == :claude
+      refute Ash.get!(Issue, task.id).reviewer_family
+    end
+
+    test "works with task: nil" do
+      ws = workspace!(["claude", "gemini"])
+
+      assert {:ok, sel} = ReviewerRouting.project(ws, :anthropic, opts())
+      assert sel.family == :google
+    end
+
+    test "returns :off when cross-family review is not enabled" do
+      ws = %Workspace{id: "ws-off", config: %{}}
+      assert ReviewerRouting.project(ws, :anthropic, opts()) == :off
+    end
+  end
 end

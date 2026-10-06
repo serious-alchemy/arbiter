@@ -186,6 +186,12 @@ defmodule ArbiterCli.ConfigSchema do
       scoring.time_weight map "P0".."P4" -> non-negative number: the weight of the
                           expected-time-to-merge term for a ticket's own priority
                           (default 0 for every priority).
+      scoring.competence  bool (default: false) — under scored, use the hand
+                          competence matrix to estimate expected draw and time
+                          to close for each candidate model and task difficulty.
+      scoring.reviewer_coupling bool (default: false) — under competence, project
+                          the cross-family reviewer and price review runs on the
+                          projected reviewer's quota pool.
       capability_gates    bool (default: false) — drop a candidate that lacks a required
                           capability (reason capability_missing) before quota is
                           weighed, in both routers and on the unrouted dispatch

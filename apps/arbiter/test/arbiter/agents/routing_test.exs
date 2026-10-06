@@ -327,6 +327,25 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.bump_tier("premium", 0) == "premium"
     end
 
+    test "reviewer_tier/2 bumps the difficulty's tier by the default offset of 1" do
+      assert ByDifficulty.reviewer_tier(%{}, 1) == "standard"
+      assert ByDifficulty.reviewer_tier(nil, 2) == "premium"
+      assert ByDifficulty.reviewer_tier(%{}, nil) == "premium"
+    end
+
+    test "reviewer_tier/2 honours tier_offset and an explicit model_tier" do
+      assert ByDifficulty.reviewer_tier(
+               %{"review_agent" => %{"config" => %{"tier_offset" => 0}}},
+               1
+             ) ==
+               "economy"
+
+      explicit = %{"review_agent" => %{"config" => %{"model_tier" => "economy"}}}
+      assert ByDifficulty.reviewer_tier(explicit, 4) == "economy"
+      # An explicit tier never reads the difficulty.
+      assert ByDifficulty.reviewer_tier(explicit, fn -> flunk("difficulty read") end) == "economy"
+    end
+
     test "bump_tier/2 passes an unrecognized tier through unchanged" do
       assert ByDifficulty.bump_tier("weird", 1) == "weird"
     end

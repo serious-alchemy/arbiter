@@ -211,6 +211,52 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
     end
   end
 
+  # bd-3xultf: how many tiers above the task's own tier the reviewer is routed
+  # by default. Overridable per-workspace via `review_agent.config.tier_offset`;
+  # 0 restores a fixed (same-tier) reviewer — the rollback knob if a moving
+  # judge invalidates the before/after convergence comparison (#1011).
+  @default_reviewer_tier_offset 1
+
+  @doc """
+  The reviewer's `model_tier` for a task of `difficulty` (bd-3xultf): an explicit
+  `review_agent.config.model_tier` (or the `agent.config.model_tier` fallback)
+  always wins; otherwise the author's nominal tier for the difficulty, bumped by
+  `review_agent.config.tier_offset` (default 1, capped at "premium").
+
+  The one derivation shared by the ReviewGate (which spawns the reviewer) and the
+  competence projection (which prices it before dispatch), so they cannot drift.
+
+  `difficulty` may be a zero-arity function, read only when no explicit tier is
+  configured (the ReviewGate's lookup is a database read).
+  """
+  @spec reviewer_tier(map() | nil, integer() | nil | (-> integer() | nil)) :: String.t()
+  def reviewer_tier(config, difficulty) do
+    block =
+      get_in(config || %{}, ["review_agent", "config"]) ||
+        get_in(config || %{}, ["agent", "config"]) || %{}
+
+    case Map.get(block, "model_tier") do
+      tier when is_binary(tier) and tier != "" ->
+        tier
+
+      _ ->
+        difficulty
+        |> resolve_difficulty()
+        |> tier_for_difficulty()
+        |> bump_tier(reviewer_tier_offset(block))
+    end
+  end
+
+  defp resolve_difficulty(fun) when is_function(fun, 0), do: fun.()
+  defp resolve_difficulty(difficulty), do: difficulty
+
+  defp reviewer_tier_offset(block) do
+    case Map.get(block, "tier_offset") do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_reviewer_tier_offset
+    end
+  end
+
   # The merged rule = default for that tier, overridden by any
   # workspace-config rule for the same tier. Default keys survive when
   # the workspace rule omits them.
