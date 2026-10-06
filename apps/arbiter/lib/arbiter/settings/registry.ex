@@ -119,6 +119,10 @@ defmodule Arbiter.Settings.Registry do
 
   @keys Enum.map(@schema, & &1.key)
 
+  # Built at compile time from the fixed schema above, so no input ever mints an
+  # atom (some keys are dotted: `:"nodes.public_url"`).
+  @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
+
   @doc "Every settable key, in display order."
   @spec keys() :: [key()]
   def keys, do: @keys
@@ -341,6 +345,9 @@ defmodule Arbiter.Settings.Registry do
 
   @doc "`%{key_atom => override}` — what `installation_config_get` returns as `settings`."
   @spec overrides() :: %{atom() => term()}
-  # `String.to_atom/1`: `@keys` is the compile-time schema above, never input.
-  def overrides, do: Map.new(@keys, &{String.to_atom(&1), override(&1)})
+  def overrides, do: Map.new(@keys, &{key_atom(&1), override(&1)})
+
+  @doc "The atom a key is reported under in `overrides/0`; dotted keys are quoted atoms."
+  @spec key_atom(key()) :: atom()
+  def key_atom(key) when key in @keys, do: Map.fetch!(@key_atoms, key)
 end

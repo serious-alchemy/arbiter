@@ -109,14 +109,10 @@ defmodule Arbiter.Nodes do
         ok
 
       {:error, reason} = error ->
-        record(:join_failed, nil, nil, %{"reason" => Atom.to_string(reason_tag(reason))}, hint)
+        record(:join_failed, nil, nil, %{"reason" => Atom.to_string(reason)}, hint)
         error
     end
   end
-
-  defp reason_tag(:invalid_token), do: :invalid_token
-  defp reason_tag(:name_taken), do: :name_taken
-  defp reason_tag(_), do: :error
 
   defp do_redeem(secret, attrs, now, hint) do
     with true <- Credentials.join_token?(secret) || {:error, :invalid_token},
