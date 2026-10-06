@@ -117,13 +117,20 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
         ticket("merging-1", :merging),
         ticket("awaiting-ci-2", :active, %{review_gate_state: %{"ci_wait" => ci_marker}}),
         ticket("verifying-1", :verifying),
-        ticket("closed-1", :closed)
+        ticket("closed-1", :closed),
+        # bd-abg443: held by the quota gate, so no slot either, and Blocked.
+        ticket("held-1", :active)
       ]
 
-      expected_slot_holders = SlotGate.slot_holders(tickets)
+      expected_slot_holders = SlotGate.slot_holders(tickets, held_ids: ["held-1"])
       assert expected_slot_holders == ["active-1", "active-2"]
 
-      board = Arbiter.Board.Snapshot.derive(%{issues: tickets})
+      board =
+        Arbiter.Board.Snapshot.derive(%{
+          issues: tickets,
+          held: %{"held-1" => %{reason: "claude:default 5h ≥ paced line"}}
+        })
+
       in_progress_ids = Enum.map(board.in_progress, & &1.id)
       merging_ids = Enum.map(board.merging, & &1.id)
 
@@ -131,6 +138,8 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
       assert "awaiting-ci-1" in merging_ids
       assert "awaiting-ci-2" in merging_ids
       refute "awaiting-ci-1" in in_progress_ids
+      refute "held-1" in in_progress_ids
+      assert [%{id: "held-1", hold: %{reason: "held — quota" <> _}}] = board.blocked
       refute "awaiting-ci-2" in in_progress_ids
     end
   end

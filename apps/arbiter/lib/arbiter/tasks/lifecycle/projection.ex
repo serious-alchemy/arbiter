@@ -49,7 +49,9 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   """
   @spec states_for_column(View.column()) :: [Lifecycle.state()]
   def states_for_column(:backlog), do: [:backlog]
-  def states_for_column(column) when column in [:blocked, :ready], do: [:queued]
+  def states_for_column(:ready), do: [:queued]
+  # bd-abg443: an `:active` ticket held by the quota gate reads Blocked.
+  def states_for_column(:blocked), do: [:queued, :active]
   def states_for_column(:in_progress), do: [:active, :backlog, :queued]
   def states_for_column(:merging), do: [:merging, :active]
   def states_for_column(:verifying), do: [:verifying]
@@ -114,10 +116,18 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
       column: str(view.column),
       step: str(view.step),
       blocked_by: view.blocked_by,
+      hold: hold_payload(Map.get(view, :hold)),
       attention: attention_payload(view.attention),
       ci_wait: ci_wait_payload(Map.get(view, :ci_wait))
     }
   end
+
+  @doc "A quota hold (`View.hold/0`) as JSON — `reason` and an ISO-8601 `resumes_at`; nil stays nil."
+  @spec hold_payload(map() | nil) :: map() | nil
+  def hold_payload(nil), do: nil
+
+  def hold_payload(%{reason: reason} = hold),
+    do: %{reason: reason, resumes_at: iso(Map.get(hold, :resumes_at))}
 
   @doc """
   A ticket's ReviewGate CI wait (bd-cut6uv) as JSON — `sha`, `since` and the
