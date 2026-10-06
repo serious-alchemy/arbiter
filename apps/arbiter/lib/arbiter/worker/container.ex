@@ -126,7 +126,13 @@ defmodule Arbiter.Worker.Container do
           optional(:inherit_env) => [String.t()],
           optional(:network) => network(),
           optional(:pod) => String.t() | nil,
-          optional(:interactive) => boolean()
+          optional(:interactive) => boolean(),
+          optional(:memory) => String.t() | nil,
+          optional(:memory_swap) => String.t() | nil,
+          optional(:cpus) => String.t() | nil,
+          optional(:labels) => [{String.t(), String.t()}],
+          optional(:keep) => boolean(),
+          optional(:mount_map) => %{optional(String.t()) => String.t()}
         }
 
   # -- naming ----------------------------------------------------------------
@@ -140,6 +146,14 @@ defmodule Arbiter.Worker.Container do
   @doc """
   The full `podman run` argv for `spec`, ending in `["--", image | command]`.
   Pure: validation and every existence check live in `wrap/2`.
+
+  Opt-in spec keys (RW8a, none changes the argv when absent): `:memory`,
+  `:memory_swap` and `:cpus` (`--memory`, `--memory-swap`, `--cpus` values),
+  `:labels` (`[{key, value}]`, extra `--label`s), `keep: true` (omit `--rm`,
+  so `.State.OOMKilled` is readable after exit; the caller then owns removal)
+  and `:mount_map` (`%{host_path => container_path}`: the container side of a
+  `-v` and the `-w` workdir, for a host path that lives elsewhere inside the
+  container). The hardening flags are emitted whatever these are.
   """
   @spec argv(spec(), [String.t()]) :: [String.t()]
   def argv(%{podman: podman, image: image, name: name, worktree: worktree} = spec, command)
@@ -149,16 +163,20 @@ defmodule Arbiter.Worker.Container do
     home = Map.get(spec, :home)
 
     Enum.concat([
-      [podman, "run", "--name", name, "--init", "--rm", "--pull=never"],
+      [podman, "run", "--name", name, "--init"],
+      if(Map.get(spec, :keep, false), do: [], else: ["--rm"]),
+      ["--pull=never"],
       placement(spec),
       ["--read-only", "--cap-drop=all"],
       ["--security-opt", "no-new-privileges"],
       if(label_disabled?, do: ["--security-opt", "label=disable"], else: []),
       Enum.flat_map(["/tmp", "/dev/shm"] ++ Map.get(spec, :tmpfs, []), &tmpfs_args/1),
       mounts(spec, label_disabled?),
-      env_args(spec, home),
+      env_args(spec, home && mapped(spec, home)),
+      limit_args(spec),
+      Enum.flat_map(Map.get(spec, :labels, []), fn {k, v} -> ["--label", "#{k}=#{v}"] end),
       if(Map.get(spec, :interactive, false), do: ["-i"], else: []),
-      ["-w", worktree, "--", image],
+      ["-w", mapped(spec, worktree), "--", image],
       command
     ])
   end
@@ -171,6 +189,16 @@ defmodule Arbiter.Worker.Container do
 
   defp network(spec),
     do: if(Map.get(spec, :bridges, []) == [], do: Map.get(spec, :network, :none), else: :none)
+
+  defp limit_args(spec) do
+    for {key, flag} <- [memory: "--memory", memory_swap: "--memory-swap", cpus: "--cpus"],
+        value = Map.get(spec, key),
+        value != nil,
+        arg <- [flag, to_string(value)],
+        do: arg
+  end
+
+  defp mapped(spec, path), do: Map.get(Map.get(spec, :mount_map, %{}), path, path)
 
   defp tmpfs_args("/dev/shm"), do: ["--tmpfs", "/dev/shm:rw,nosuid,nodev,noexec,size=64m"]
   defp tmpfs_args("/tmp"), do: ["--tmpfs", "/tmp:rw,nosuid,nodev"]
@@ -191,7 +219,9 @@ defmodule Arbiter.Worker.Container do
         Enum.map(Map.get(spec, :writable_paths, []), &{&1, :rw}) ++
         Enum.map(Map.get(spec, :bridges, []), &{&1, :ro}) ++
         Enum.map(Map.get(spec, :readonly_paths, []), &{&1, :ro}),
-      fn {path, mode} -> ["-v", "#{path}:#{path}:#{mount_opts(mode, label_disabled?)}"] end
+      fn {path, mode} ->
+        ["-v", "#{path}:#{mapped(spec, path)}:#{mount_opts(mode, label_disabled?)}"]
+      end
     ) ++
       Enum.flat_map(Map.get(spec, :cli_mounts, []), fn {host, dest} ->
         ["-v", "#{host}:#{dest}:ro"]
