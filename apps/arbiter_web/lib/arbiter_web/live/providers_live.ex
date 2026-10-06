@@ -249,6 +249,7 @@ defmodule ArbiterWeb.ProvidersLive do
 
   def handle_event("attach", %{"account_id" => id, "attach" => params}, socket) do
     with %{account: account} <- find_row(socket, id) || {:error, :not_found},
+         :ok <- not_grok(account),
          {:ok, opts} <- share_opts(Map.get(params, "share")),
          {:ok, _link} <-
            Accounts.attach_workspace(
@@ -493,6 +494,10 @@ defmodule ArbiterWeb.ProvidersLive do
 
   defp account_form(params \\ %{"provider" => "claude"}), do: to_form(params, as: :account)
   defp credential_form(params), do: to_form(params, as: :credential)
+  # grok routes only through `routing.grok.enabled`, as the workspace pane does.
+  defp not_grok(%{provider: :grok}), do: {:error, :grok_routed_by_opt_in}
+  defp not_grok(_), do: :ok
+
   defp attach_form(params \\ %{}), do: to_form(params, as: :attach)
 
   defp account_attrs(params) do
@@ -544,6 +549,11 @@ defmodule ArbiterWeb.ProvidersLive do
     do: "That account is a #{provider} account."
 
   defp error_message(:not_found), do: "Not found — pick a workspace."
+
+  defp error_message(:grok_routed_by_opt_in),
+    do:
+      "Grok is routed by the \"Route D1 tickets to Grok\" toggle in workspace settings, not attached."
+
   defp error_message(:not_attached), do: "That workspace is no longer attached to this account."
   defp error_message(:ambiguous), do: "That account reference is ambiguous."
   defp error_message(:already_deleted), do: "This account has already been deleted."
@@ -702,6 +712,10 @@ defmodule ArbiterWeb.ProvidersLive do
             </ArbiterWeb.CoreComponents.Core.button>
           </:actions>
         </ArbiterWeb.CoreComponents.Domain.index_header>
+
+        <p id="providers-routing-help" class="m-0 text-[12px] text-[var(--arb-text-muted)]">
+          Attaching an account to a workspace is metering and concurrency only. To route work to a provider, add it in the workspace's settings (Providers section); Grok is switched on there too, with its routing toggle.
+        </p>
 
         <div
           id="providers-panel"
@@ -1350,8 +1364,15 @@ defmodule ArbiterWeb.ProvidersLive do
                     <ArbiterWeb.CoreComponents.Core.icon name="hero-x-mark" size={11} />
                   </button>
                 </span>
+                <p
+                  :if={row.account.provider == :grok}
+                  id={"account-#{row.account.id}-grok-routing-note"}
+                  class="m-0 ml-auto max-w-md text-[12px] text-[var(--arb-text-muted)]"
+                >
+                  Grok has no workspace attach: it routes only through "Route D1 tickets to Grok" in each workspace's settings (Providers section).
+                </p>
                 <ArbiterWeb.CoreComponents.Core.button
-                  :if={@attach_for != row.account.id}
+                  :if={@attach_for != row.account.id and row.account.provider != :grok}
                   id={"account-#{row.account.id}-attach-button"}
                   phx-click="open_attach"
                   phx-value-id={row.account.id}
@@ -1371,6 +1392,12 @@ defmodule ArbiterWeb.ProvidersLive do
                   class="basis-full flex flex-wrap items-end gap-2 pt-2"
                 >
                   <input type="hidden" name="account_id" value={row.account.id} />
+                  <p
+                    id={"attach-form-#{row.account.id}-help"}
+                    class="m-0 basis-full text-[12px] text-[var(--arb-text-muted)]"
+                  >
+                    Metering and concurrency only; to route work here, add it in the workspace settings.
+                  </p>
                   <.input
                     field={@attach_form[:workspace_id]}
                     type="select"
