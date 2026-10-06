@@ -43,7 +43,9 @@ defmodule Arbiter.NodesTest do
       {_token, %{join_token: row}} = mint!(ttl_seconds: 3600)
       assert_in_delta DateTime.diff(row.expires_at, DateTime.utc_now()), 3600, 5
 
-      assert {:error, :invalid_ttl} = Nodes.mint_join_token([ttl_seconds: 24 * 3600 + 1], @operator)
+      assert {:error, :invalid_ttl} =
+               Nodes.mint_join_token([ttl_seconds: 24 * 3600 + 1], @operator)
+
       assert {:error, :invalid_ttl} = Nodes.mint_join_token([ttl_seconds: 0], @operator)
     end
 
@@ -99,7 +101,10 @@ defmodule Arbiter.NodesTest do
       later = DateTime.add(row.expires_at, 1, :second)
 
       assert {:error, :invalid_token} = Nodes.redeem_join_token(token, %{name: "a"}, now: later)
-      assert {:error, :invalid_token} = Nodes.redeem_join_token("arbj_" <> String.duplicate("a", 52), %{name: "a"})
+
+      assert {:error, :invalid_token} =
+               Nodes.redeem_join_token("arbj_" <> String.duplicate("a", 52), %{name: "a"})
+
       assert Ash.read!(Node) == []
     end
 
@@ -119,8 +124,12 @@ defmodule Arbiter.NodesTest do
 
     test "writes enrolled (actor node) and join_failed events" do
       {token, _} = mint!()
-      {:ok, %{node: node}} = Nodes.redeem_join_token(token, %{name: "a"}, remote_addr_hint: "100.64.0.9")
-      {:error, :invalid_token} = Nodes.redeem_join_token(token, %{name: "b"}, remote_addr_hint: "100.64.0.10")
+
+      {:ok, %{node: node}} =
+        Nodes.redeem_join_token(token, %{name: "a"}, remote_addr_hint: "100.64.0.9")
+
+      {:error, :invalid_token} =
+        Nodes.redeem_join_token(token, %{name: "b"}, remote_addr_hint: "100.64.0.10")
 
       assert [enrolled] = events(:enrolled)
       assert enrolled.node_id == node.id
@@ -172,8 +181,13 @@ defmodule Arbiter.NodesTest do
       assert id == node.id
 
       {:ok, _id, secret} = Credentials.parse_node_credential(credential)
-      assert {:error, :invalid_credential} = Nodes.authenticate("arbn_#{node.id}.#{String.reverse(secret)}")
-      assert {:error, :invalid_credential} = Nodes.authenticate("arbn_#{Ash.UUIDv7.generate()}.#{secret}")
+
+      assert {:error, :invalid_credential} =
+               Nodes.authenticate("arbn_#{node.id}.#{String.reverse(secret)}")
+
+      assert {:error, :invalid_credential} =
+               Nodes.authenticate("arbn_#{Ash.UUIDv7.generate()}.#{secret}")
+
       assert {:error, :invalid_credential} = Nodes.authenticate("arbn_not-a-uuid.#{secret}")
       assert {:error, :invalid_credential} = Nodes.authenticate("garbage")
       assert {:error, :invalid_credential} = Nodes.authenticate(nil)

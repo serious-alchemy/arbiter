@@ -228,8 +228,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
         {:ok, %{key: nil, value: settings, settings: settings}}
 
       key when key in @install_settings_keys ->
-        {:ok,
-         %{key: key, value: Map.get(settings, String.to_atom(key)), settings: settings}}
+        {:ok, %{key: key, value: Map.get(settings, String.to_atom(key)), settings: settings}}
 
       key ->
         {:error, {:not_found, "unknown installation setting: #{key}"}}

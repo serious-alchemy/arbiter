@@ -13,7 +13,8 @@ defmodule Arbiter.Nodes.RateLimitTest do
 
   describe ":enroll" do
     test "allows 10 attempts a minute globally, then 429s with a Retry-After", %{server: s} do
-      for _ <- 1..10, do: assert(:ok = RateLimit.check(:enroll, "100.64.0.1", server: s, now_ms: @t0))
+      for _ <- 1..10,
+          do: assert(:ok = RateLimit.check(:enroll, "100.64.0.1", server: s, now_ms: @t0))
 
       assert {:error, {:rate_limited, retry}} =
                RateLimit.check(:enroll, "100.64.0.2", server: s, now_ms: @t0)
@@ -26,14 +27,19 @@ defmodule Arbiter.Nodes.RateLimitTest do
       assert {:error, {:rate_limited, _}} = RateLimit.check(:enroll, "a", server: s, now_ms: @t0)
 
       assert :ok = RateLimit.check(:enroll, "a", server: s, now_ms: @t0 + 7_000)
-      assert {:error, {:rate_limited, _}} = RateLimit.check(:enroll, "a", server: s, now_ms: @t0 + 7_000)
+
+      assert {:error, {:rate_limited, _}} =
+               RateLimit.check(:enroll, "a", server: s, now_ms: @t0 + 7_000)
+
       assert :ok = RateLimit.check(:enroll, "a", server: s, now_ms: @t0 + 70_000)
     end
 
     test "5 failures in 10 minutes block that source only", %{server: s} do
       for _ <- 1..5, do: RateLimit.record_failure(:enroll, "bad", server: s, now_ms: @t0)
 
-      assert {:error, {:rate_limited, retry}} = RateLimit.check(:enroll, "bad", server: s, now_ms: @t0)
+      assert {:error, {:rate_limited, retry}} =
+               RateLimit.check(:enroll, "bad", server: s, now_ms: @t0)
+
       assert retry > 0
       assert :ok = RateLimit.check(:enroll, "good", server: s, now_ms: @t0)
     end
@@ -54,19 +60,25 @@ defmodule Arbiter.Nodes.RateLimitTest do
 
   describe ":mint" do
     test "is 20 an hour per actor", %{server: s} do
-      for _ <- 1..20, do: assert(:ok = RateLimit.check(:mint, "operator:cli", server: s, now_ms: @t0))
+      for _ <- 1..20,
+          do: assert(:ok = RateLimit.check(:mint, "operator:cli", server: s, now_ms: @t0))
 
-      assert {:error, {:rate_limited, _}} = RateLimit.check(:mint, "operator:cli", server: s, now_ms: @t0)
+      assert {:error, {:rate_limited, _}} =
+               RateLimit.check(:mint, "operator:cli", server: s, now_ms: @t0)
+
       assert :ok = RateLimit.check(:mint, "operator:other", server: s, now_ms: @t0)
     end
   end
 
   describe ":socket_connect" do
     test "30 failures a minute globally close the door, checks cost nothing", %{server: s} do
-      for _ <- 1..100, do: assert(:ok = RateLimit.check(:socket_connect, "x", server: s, now_ms: @t0))
+      for _ <- 1..100,
+          do: assert(:ok = RateLimit.check(:socket_connect, "x", server: s, now_ms: @t0))
+
       for _ <- 1..30, do: RateLimit.record_failure(:socket_connect, "x", server: s, now_ms: @t0)
 
-      assert {:error, {:rate_limited, _}} = RateLimit.check(:socket_connect, "y", server: s, now_ms: @t0)
+      assert {:error, {:rate_limited, _}} =
+               RateLimit.check(:socket_connect, "y", server: s, now_ms: @t0)
     end
   end
 

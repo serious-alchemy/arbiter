@@ -120,7 +120,8 @@ defmodule Arbiter.Nodes do
 
   defp do_redeem(secret, attrs, now, hint) do
     with true <- Credentials.join_token?(secret) || {:error, :invalid_token},
-         %JoinToken{} = token <- find_join_token(Credentials.hash(secret)) || {:error, :invalid_token},
+         %JoinToken{} = token <-
+           find_join_token(Credentials.hash(secret)) || {:error, :invalid_token},
          node_id = Ash.UUIDv7.generate(),
          name = bound_name(token, attrs, node_id),
          :ok <- ensure_name_free(name),
@@ -162,7 +163,9 @@ defmodule Arbiter.Nodes do
   # but a racer took it before our insert: hand the token back, but only if it
   # is still the claim we made.
   defp unclaim(%JoinToken{id: id}, node_id) do
-    query = from(t in "join_tokens", where: t.id == type(^id, :string) and t.used_by_node == ^node_id)
+    query =
+      from(t in "join_tokens", where: t.id == type(^id, :string) and t.used_by_node == ^node_id)
+
     Repo.update_all(query, set: [used_at: nil, used_by_node: nil])
     :ok
   end
@@ -183,7 +186,14 @@ defmodule Arbiter.Nodes do
 
     case Ash.create(Node, fields, action: :enroll) do
       {:ok, node} ->
-        record(:enrolled, node.id, Actor.label(Actor.node(node.name)), %{"join_token_id" => token.id}, hint)
+        record(
+          :enrolled,
+          node.id,
+          Actor.label(Actor.node(node.name)),
+          %{"join_token_id" => token.id},
+          hint
+        )
+
         {:ok, %{node: node, credential: cred.credential}}
 
       {:error, _} ->

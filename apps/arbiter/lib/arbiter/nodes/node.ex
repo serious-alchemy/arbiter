@@ -31,10 +31,6 @@ defmodule Arbiter.Nodes.Node do
     repo Arbiter.Repo
   end
 
-  identities do
-    identity :unique_name, [:name]
-  end
-
   actions do
     defaults [:read, :destroy]
 
@@ -128,5 +124,9 @@ defmodule Arbiter.Nodes.Node do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  identities do
+    identity :unique_name, [:name]
   end
 end

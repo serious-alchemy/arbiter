@@ -25,7 +25,10 @@ defmodule ArbiterWeb.NodeTierGuardTest do
 
   setup do
     {:ok, %{token: token}} = Nodes.mint_join_token([], @operator)
-    {:ok, %{node: node, credential: credential}} = Nodes.redeem_join_token(token, %{name: "guard-box"})
+
+    {:ok, %{node: node, credential: credential}} =
+      Nodes.redeem_join_token(token, %{name: "guard-box"})
+
     {:ok, %{token: join_token}} = Nodes.mint_join_token([], @operator)
     {:ok, node: node, credential: credential, join_token: join_token}
   end
@@ -95,7 +98,9 @@ defmodule ArbiterWeb.NodeTierGuardTest do
       end
     end
 
-    test "is refused (401) by /events as a bearer header and as ?token=", %{credential: credential} do
+    test "is refused (401) by /events as a bearer header and as ?token=", %{
+      credential: credential
+    } do
       assert present(credential, :get, "/events").status == 401
 
       conn =

@@ -93,5 +93,6 @@ defmodule Arbiter.Nodes.Credentials do
   def matches?(_secret, _stored_hash), do: false
 
   defp random_secret,
-    do: @secret_bytes |> :crypto.strong_rand_bytes() |> Base.encode32(case: :lower, padding: false)
+    do:
+      @secret_bytes |> :crypto.strong_rand_bytes() |> Base.encode32(case: :lower, padding: false)
 end

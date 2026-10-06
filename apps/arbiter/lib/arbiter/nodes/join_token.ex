@@ -19,10 +19,6 @@ defmodule Arbiter.Nodes.JoinToken do
     repo Arbiter.Repo
   end
 
-  identities do
-    identity :unique_token_hash, [:token_hash]
-  end
-
   actions do
     defaults [:read]
 
@@ -63,5 +59,9 @@ defmodule Arbiter.Nodes.JoinToken do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  identities do
+    identity :unique_token_hash, [:token_hash]
   end
 end

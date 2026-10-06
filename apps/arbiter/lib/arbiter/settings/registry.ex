@@ -154,13 +154,19 @@ defmodule Arbiter.Settings.Registry do
 
   defp do_cast("http_url", url) when is_binary(url) do
     case Settings.normalize_public_url(url) do
-      {:ok, normalized} -> {:ok, normalized}
-      :error -> {:error, "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+      {:ok, normalized} ->
+        {:ok, normalized}
+
+      :error ->
+        {:error,
+         "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
     end
   end
 
   defp do_cast("http_url", _),
-    do: {:error, "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+    do:
+      {:error,
+       "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
 
   defp do_cast("join_token_ttl", n) when is_integer(n) and n > 0 do
     max = Settings.max_join_token_ttl_minutes()
@@ -170,7 +176,8 @@ defmodule Arbiter.Settings.Registry do
       else: {:error, "value must be at most #{max} minutes (24 hours) or null"}
   end
 
-  defp do_cast("join_token_ttl", _), do: {:error, "value must be a positive integer of minutes or null"}
+  defp do_cast("join_token_ttl", _),
+    do: {:error, "value must be a positive integer of minutes or null"}
 
   defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
     valid = allowed(type)
@@ -242,8 +249,12 @@ defmodule Arbiter.Settings.Registry do
     do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
 
   defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
-  defp write("nodes.allow_public_endpoint", v), do: wrap(Settings.set_nodes_allow_public_endpoint(v))
-  defp write("nodes.join_token_ttl_minutes", v), do: wrap(Settings.set_nodes_join_token_ttl_minutes(v))
+
+  defp write("nodes.allow_public_endpoint", v),
+    do: wrap(Settings.set_nodes_allow_public_endpoint(v))
+
+  defp write("nodes.join_token_ttl_minutes", v),
+    do: wrap(Settings.set_nodes_join_token_ttl_minutes(v))
 
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}

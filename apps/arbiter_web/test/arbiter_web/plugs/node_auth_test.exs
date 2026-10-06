@@ -16,7 +16,10 @@ defmodule ArbiterWeb.Plugs.NodeAuthTest do
   setup do
     Actor.put(nil)
     {:ok, token} = mint_join_token()
-    {:ok, %{node: node, credential: credential}} = Nodes.redeem_join_token(token, %{name: "plug-box"})
+
+    {:ok, %{node: node, credential: credential}} =
+      Nodes.redeem_join_token(token, %{name: "plug-box"})
+
     {:ok, node: node, credential: credential}
   end
 
@@ -82,7 +85,10 @@ defmodule ArbiterWeb.Plugs.NodeAuthTest do
 
   test "a wrong secret and an unknown id are 401", ctx do
     assert call(bearer("arbn_#{ctx.node.id}.#{String.duplicate("a", 52)}")).status == 401
-    assert call(bearer("arbn_#{Ash.UUIDv7.generate()}.#{String.duplicate("a", 52)}")).status == 401
+
+    assert call(bearer("arbn_#{Ash.UUIDv7.generate()}.#{String.duplicate("a", 52)}")).status ==
+             401
+
     assert call(bearer("arbn_")).status == 401
     assert call([{"authorization", "Basic abc"}]).status == 401
   end
@@ -96,7 +102,8 @@ defmodule ArbiterWeb.Plugs.NodeAuthTest do
     refute Map.has_key?(conn.assigns, :current_node)
   end
 
-  test "a rotated credential: the new one works and so does the old one during the overlap", ctx do
+  test "a rotated credential: the new one works and so does the old one during the overlap",
+       ctx do
     {:ok, %{credential: new}} = Nodes.rotate_credential(ctx.node, @operator)
 
     refute call(bearer(new)).halted

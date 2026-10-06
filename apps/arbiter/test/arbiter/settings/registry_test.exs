@@ -134,8 +134,17 @@ defmodule Arbiter.Settings.RegistryTest do
     end
 
     test "nodes.public_url refuses anything that is not a bare http(s) URL" do
-      for bad <- ["ftp://box", "box.ts.net", "https://", "https://u:p@box", "https://box/?x=1",
-                  "https://box#frag", "javascript:alert(1)", 5, ""] do
+      for bad <- [
+            "ftp://box",
+            "box.ts.net",
+            "https://",
+            "https://u:p@box",
+            "https://box/?x=1",
+            "https://box#frag",
+            "javascript:alert(1)",
+            5,
+            ""
+          ] do
         assert {:error, {:invalid, _}} = Registry.put("nodes.public_url", bad), inspect(bad)
       end
 
