@@ -59,7 +59,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_provider_accounts(),
       check_account_policy_binding(),
       check_merge_routing()
-    ]
+    ] ++ check_nodes()
   end
 
   @doc """
@@ -1830,6 +1830,217 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
     end
+  end
+
+  # ---- nodes (RW7, docs/design/remote-workers.md §4.3, §14) ------------------
+  #
+  # Fed by the operator-only `GET /api/nodes`. Every result is informational
+  # (never fatal, never blocks deploy readiness): a sleeping laptop or a
+  # missing tailnet is the operator's to act on, not a reason to roll back a
+  # deploy. A server that predates the endpoint, or a token without operator
+  # proof (403), skips the whole section.
+
+  @doc """
+  The nodes section: `nodes.public_url reachable` (an anonymous `GET
+  <public_url>/nodes/ping`), whether the endpoint looks private (§4.3), one line
+  per node that is not revoked, the local worker cap and the cap total against
+  `conductor.max_concurrent`.
+  """
+  @spec check_nodes() :: [Result.t()]
+  def check_nodes do
+    case Client.get("/api/nodes") do
+      {:ok, %{"nodes" => nodes} = resp} when is_list(nodes) ->
+        nodes_results(resp, Enum.reject(nodes, &(&1["state"] == "revoked")))
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        [server_error_result("nodes", err)]
+
+      _other ->
+        [nodes_result("nodes", :ok, "could not read the node list — skipping")]
+    end
+  end
+
+  defp nodes_results(resp, nodes) do
+    url = resp["public_url"]
+
+    if nodes == [] and is_nil(url) and "local_cap_zero" not in (resp["warnings"] || []) do
+      [nodes_result("nodes", :ok, "none enrolled")]
+    else
+      [
+        public_url_result(url, nodes),
+        exposure_result(url, resp)
+      ] ++
+        Enum.map(nodes, &node_result/1) ++
+        [local_cap_result(resp)] ++
+        capacity_result(resp, nodes)
+    end
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp public_url_result(nil, []), do: nil
+
+  defp public_url_result(nil, _nodes) do
+    nodes_result(
+      "nodes.public_url reachable",
+      :fail,
+      "nodes are enrolled but nodes.public_url is not set",
+      "arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
+    )
+  end
+
+  defp public_url_result(url, _nodes) do
+    case Client.probe_url(url <> "/nodes/ping") do
+      {:ok, _} ->
+        nodes_result("nodes.public_url reachable", :ok, url)
+
+      {:error, reason} ->
+        nodes_result(
+          "nodes.public_url reachable",
+          :fail,
+          "#{url}/nodes/ping did not answer: #{probe_reason(reason)}",
+          "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:4848` " <>
+            "on the primary, and check that this machine is on the same tailnet."
+        )
+    end
+  end
+
+  defp probe_reason({:status, status}), do: "HTTP #{status}"
+  defp probe_reason(reason), do: inspect(reason)
+
+  defp exposure_result(nil, _resp), do: nil
+
+  defp exposure_result(url, %{"exposure" => "public"} = resp) do
+    allowed? = resp["allow_public_endpoint"] == true
+
+    nodes_result(
+      "nodes.public_url is a private endpoint",
+      :fail,
+      "#{url} looks like a public internet address (not *.ts.net, not a private or loopback range)" <>
+        if(allowed?,
+          do: "; tolerated because nodes.allow_public_endpoint is on, a standing warning",
+          else: "; enrolment would be reachable from the internet"
+        ),
+      "Prefer a tailnet name. Public exposure puts the login page, /api/version and the " <>
+        "/live socket on the internet; it is refused unless nodes.allow_public_endpoint is true."
+    )
+  end
+
+  defp exposure_result(url, _resp),
+    do: nodes_result("nodes.public_url is a private endpoint", :ok, url)
+
+  defp node_result(n) do
+    state = n["state"] || n["status"]
+    health = n["health"]
+
+    detail =
+      [
+        to_string(state),
+        "seen #{age(n["last_heartbeat_at"] || n["last_seen_at"])}",
+        "v#{n["agent_version"] || "?"} (primary v#{n["server_version"] || "?"})",
+        "#{n["live"] || 0}/#{n["max"] || "?"} workers"
+      ]
+      |> Kernel.++(if health in [nil, "ready"], do: [], else: ["health #{health}"])
+      |> Enum.join(", ")
+
+    ok? = state in ["online", "draining"] and health in [nil, "ready"]
+
+    nodes_result(
+      "node #{n["name"]}",
+      if(ok?, do: :ok, else: :fail),
+      detail,
+      unless(ok?, do: node_hint(state, health))
+    )
+  end
+
+  defp node_hint(state, _health) when state in ["offline", "suspect"],
+    do: "The agent is not heartbeating. Check `systemctl --user status arbiter-node` on the node."
+
+  defp node_hint(_state, "outdated"), do: "Run `arb node upgrade <name>`."
+  defp node_hint(_state, "ahead"), do: "Run `arb node upgrade <name>` to move it back."
+
+  defp node_hint(_state, "incompatible"),
+    do: "The agent speaks a protocol this primary does not; upgrade it."
+
+  defp node_hint(_state, _health), do: "See `arb node show <name>`."
+
+  defp local_cap_result(%{"local" => %{"max" => 0}}) do
+    nodes_result(
+      "local worker cap",
+      :fail,
+      "the local cap is 0: work that can only run on this machine (reviewers, fix and " <>
+        "conflict passes, agy/codex runs, research) will wait",
+      "Raise it with `arb node set local --max-workers N`."
+    )
+  end
+
+  defp local_cap_result(%{"local" => %{"max" => max}}),
+    do: nodes_result("local worker cap", :ok, to_string(max))
+
+  defp local_cap_result(_), do: nodes_result("local worker cap", :ok, "not reported")
+
+  defp capacity_result(_resp, []), do: []
+
+  defp capacity_result(%{"total" => total, "ceiling" => ceiling} = resp, _nodes) do
+    cond do
+      "ceiling_below_total" in (resp["warnings"] || []) ->
+        [
+          nodes_result(
+            "node capacity vs conductor.max_concurrent",
+            :fail,
+            "the caps add up to #{total} but conductor.max_concurrent is #{ceiling}: " <>
+              "the extra capacity will sit idle",
+            "Raise conductor.max_concurrent (it is the operator-owned spend valve), or lower a cap."
+          )
+        ]
+
+      "ceiling_far_above_total" in (resp["warnings"] || []) ->
+        [
+          nodes_result(
+            "node capacity vs conductor.max_concurrent",
+            :fail,
+            "conductor.max_concurrent is #{ceiling} but the caps add up to only #{total}: " <>
+              "the board will plan more than any machine can start",
+            "Lower conductor.max_concurrent, or raise a cap."
+          )
+        ]
+
+      true ->
+        [
+          nodes_result(
+            "node capacity vs conductor.max_concurrent",
+            :ok,
+            "#{total} of #{ceiling}"
+          )
+        ]
+    end
+  end
+
+  defp capacity_result(_resp, _nodes), do: []
+
+  defp age(nil), do: "never"
+
+  defp age(iso) do
+    with {:ok, at, _} <- DateTime.from_iso8601(iso) do
+      case max(DateTime.diff(DateTime.utc_now(), at), 0) do
+        s when s < 60 -> "#{s}s ago"
+        s when s < 3600 -> "#{div(s, 60)}m ago"
+        s when s < 86_400 -> "#{div(s, 3600)}h ago"
+        s -> "#{div(s, 86_400)}d ago"
+      end
+    else
+      _ -> "at an unknown time"
+    end
+  end
+
+  defp nodes_result(name, status, detail, hint \\ nil) do
+    %Result{
+      name: name,
+      status: status,
+      detail: detail,
+      hint: hint,
+      fatal: false,
+      blocks_readiness: false
+    }
   end
 
   # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;

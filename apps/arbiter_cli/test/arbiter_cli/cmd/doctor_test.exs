@@ -167,7 +167,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
   defp predating(routes) do
     routes ++
-      for path <- @server_paths,
+      for path <- ["/api/nodes" | @server_paths],
           not List.keymember?(routes, {"get", path}, 0),
           do: {{"get", path}, {%{"error" => "not found"}, 404}}
   end
@@ -186,7 +186,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 30
+    assert length(checks) == 31
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -2483,6 +2483,252 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       assert find_podman().status == :ok
+    end
+  end
+
+  # RW7: the nodes section (`docs/design/remote-workers.md` §4.3, §14), fed by
+  # the operator-only `GET /api/nodes`.
+  describe "nodes section" do
+    @url "https://primary.example.ts.net"
+
+    defp local_row(attrs \\ %{}),
+      do:
+        Map.merge(
+          %{"name" => "local", "kind" => "local", "state" => "online", "max" => 3, "live" => 0},
+          attrs
+        )
+
+    defp node_row(attrs) do
+      Map.merge(
+        %{
+          "name" => "box-1",
+          "kind" => "machine",
+          "status" => "active",
+          "state" => "online",
+          "health" => "ready",
+          "agent_version" => "1.2.3",
+          "server_version" => "1.2.3",
+          "live" => 1,
+          "max" => 4,
+          "last_heartbeat_at" => DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -5)),
+          "last_seen_at" => nil
+        },
+        attrs
+      )
+    end
+
+    defp nodes_resp(attrs \\ %{}) do
+      Map.merge(
+        %{
+          "nodes" => [],
+          "local" => local_row(),
+          "total" => 3,
+          "ceiling" => 3,
+          "warnings" => [],
+          "public_url" => nil,
+          "exposure" => "unset",
+          "allow_public_endpoint" => false
+        },
+        attrs
+      )
+    end
+
+    defp stub_nodes(resp, ping \\ {"pong", 200}, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/nodes"}, {resp, status}},
+        {{"get", "/nodes/ping"}, ping}
+      ])
+    end
+
+    defp nodes_results, do: Checks.check_nodes()
+    defp named(results, name), do: Enum.find(results, &(&1.name == name))
+
+    test "with no nodes and no public_url there is one quiet line" do
+      stub_nodes(nodes_resp())
+
+      assert [%{name: "nodes", status: :ok, detail: detail}] = nodes_results()
+      assert detail =~ "none enrolled"
+    end
+
+    test "nodes.public_url reachable: an anonymous GET /nodes/ping that answers" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "nodes.public_url reachable")
+      assert detail =~ @url
+    end
+
+    test "an unreachable public_url fails, non-fatal, with a hint" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}), {%{}, 502})
+
+      assert %{status: :fail, fatal: false, blocks_readiness: false} =
+               result = named(nodes_results(), "nodes.public_url reachable")
+
+      assert result.detail =~ "502"
+      assert result.hint =~ "tailscale serve"
+    end
+
+    test "a transport failure to public_url fails the same way" do
+      stub_routes([
+        {{"get", "/api/nodes"},
+         {nodes_resp(%{"public_url" => @url, "exposure" => "private"}), 200}},
+        {{"get", "/nodes/ping"}, fn conn -> Req.Test.transport_error(conn, :econnrefused) end}
+      ])
+
+      assert %{status: :fail} = named(nodes_results(), "nodes.public_url reachable")
+    end
+
+    test "nodes enrolled but no public_url fails" do
+      stub_nodes(nodes_resp(%{"nodes" => [node_row(%{})]}))
+
+      assert %{status: :fail, detail: detail} =
+               named(nodes_results(), "nodes.public_url reachable")
+
+      assert detail =~ "not set"
+    end
+
+    test "a private endpoint is quiet; a public one warns" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
+      assert %{status: :ok} = named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      stub_nodes(
+        nodes_resp(%{"public_url" => "https://arbiter.example.com", "exposure" => "public"})
+      )
+
+      assert %{status: :fail, detail: detail, fatal: false} =
+               named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      assert detail =~ "arbiter.example.com"
+      assert detail =~ "internet"
+    end
+
+    test "a public endpoint that was allowed is still a standing warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "https://arbiter.example.com",
+          "exposure" => "public",
+          "allow_public_endpoint" => true
+        })
+      )
+
+      assert %{status: :fail, detail: detail} =
+               named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      assert detail =~ "allow_public_endpoint"
+    end
+
+    test "each live node is a line with its age, version and capacity" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{})]
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "node box-1")
+      assert detail =~ "online"
+      assert detail =~ "5s ago" or detail =~ "6s ago"
+      assert detail =~ "1.2.3"
+      assert detail =~ "1/4"
+    end
+
+    test "offline, suspect and unready nodes fail; revoked ones are not listed" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [
+            node_row(%{"name" => "asleep", "state" => "offline", "agent_version" => nil}),
+            node_row(%{"name" => "shaky", "state" => "suspect"}),
+            node_row(%{"name" => "stale", "health" => "outdated", "agent_version" => "1.0.0"}),
+            node_row(%{"name" => "gone", "state" => "revoked", "status" => "revoked"})
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :fail} = named(results, "node asleep")
+      assert %{status: :fail, detail: shaky} = named(results, "node shaky")
+      assert shaky =~ "suspect"
+      assert %{status: :fail, detail: stale} = named(results, "node stale")
+      assert stale =~ "outdated" and stale =~ "1.0.0"
+      assert named(results, "node gone") == nil
+    end
+
+    test "a local cap of 0 warns that local-only work will wait" do
+      stub_nodes(
+        nodes_resp(%{"local" => local_row(%{"max" => 0}), "warnings" => ["local_cap_zero"]})
+      )
+
+      assert %{status: :fail, detail: detail, hint: hint} =
+               named(nodes_results(), "local worker cap")
+
+      assert detail =~ "0"
+      assert detail =~ "wait"
+      assert hint =~ "arb node set local"
+    end
+
+    test "conductor.max_concurrent below the sum of the caps warns" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{})],
+          "total" => 7,
+          "ceiling" => 4,
+          "warnings" => ["ceiling_below_total"]
+        })
+      )
+
+      assert %{status: :fail, detail: detail} =
+               named(nodes_results(), "node capacity vs conductor.max_concurrent")
+
+      assert detail =~ "7" and detail =~ "4"
+    end
+
+    test "capacity within the ceiling is green" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{})],
+          "total" => 3,
+          "ceiling" => 4
+        })
+      )
+
+      assert %{status: :ok} = named(nodes_results(), "node capacity vs conductor.max_concurrent")
+    end
+
+    test "a server without /api/nodes, or an operator-less token (403), is skipped" do
+      for status <- [404, 403] do
+        stub_nodes(%{"error" => "nope"}, {"pong", 200}, status)
+        assert [%{name: "nodes", status: :ok, detail: detail}] = nodes_results()
+        assert detail =~ "skipping"
+      end
+    end
+
+    test "a 5xx from /api/nodes is a failure, not a skip" do
+      stub_nodes(%{"error" => "boom"}, {"pong", 200}, 500)
+      assert [%{name: "nodes", status: :fail}] = nodes_results()
+    end
+
+    test "nothing in the section blocks deploy readiness or exits non-zero" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "https://arbiter.example.com",
+          "exposure" => "public",
+          "nodes" => [node_row(%{"state" => "offline"})],
+          "local" => local_row(%{"max" => 0}),
+          "warnings" => ["local_cap_zero"]
+        }),
+        {%{}, 502}
+      )
+
+      for r <- nodes_results() do
+        refute r.fatal
+        refute r.blocks_readiness
+      end
     end
   end
 end
