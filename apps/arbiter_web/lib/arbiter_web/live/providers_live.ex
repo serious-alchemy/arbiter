@@ -126,6 +126,11 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
+  # Every live_session LiveView also receives the coordinator-inbox
+  # `{:new_message, _}` / `{:message_read, _}` broadcasts (LiveHooks `:cont`s
+  # them on); this page has no use for them.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   @impl true
   def handle_async(:providers, {:ok, data}, socket) do
     socket
