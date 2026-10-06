@@ -51,6 +51,9 @@ defmodule Arbiter.Application do
       Arbiter.Vault,
       {DNSCluster, query: Application.get_env(:arbiter, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Arbiter.PubSub},
+      # Token-bucket limiter for the node auth tier's enrol / mint / socket-connect
+      # paths (RW3, docs/design/remote-workers.md §5.4). No deps, state in memory.
+      Arbiter.Nodes.RateLimit,
       # Shared, priority-aware GitHub request budget (bd-3p5vqc). Keyed on pool
       # identity (the account owning a credential), it reserves headroom so
       # background patrol traffic can never starve foreground work — a deploy,
