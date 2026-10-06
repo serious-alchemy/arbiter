@@ -113,11 +113,7 @@ defmodule ArbiterWeb.MixProject do
       {:finch, "~> 0.19"},
       {:bandit, "~> 1.5"},
       # finch pins mint "~> 1.8"; force the patched line to clear known CVEs.
-      {:mint, "~> 1.9", override: true},
-      # bd-6tx1xv (RW2 spike): the WebSocket client the remote-workers agent
-      # would use (docs/design/remote-workers.md U2). Test-only: the spike
-      # prototypes under test/support/spike and test/spike are not product code.
-      {:mint_web_socket, "~> 1.0", only: :test, runtime: false}
+      {:mint, "~> 1.9", override: true}
     ]
   end
 

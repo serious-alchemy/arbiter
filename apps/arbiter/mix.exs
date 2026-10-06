@@ -107,6 +107,11 @@ defmodule Arbiter.MixProject do
       # HTTP client (used by Tracker.Jira, Tracker.GitHub adapters in later tasks)
       {:req, "~> 0.7.3"},
 
+      # The node agent's WebSocket client (RW5, docs/design/remote-workers.md
+      # U2): Arbiter.NodeAgent.WsClient speaks Phoenix's V2 serializer over it.
+      # Only depends on mint, which finch already brings in.
+      {:mint_web_socket, "~> 1.0"},
+
       # GenStateMachine — workflow driver FSM (gte-015 WorkflowMachine)
       {:gen_state_machine, "~> 3.0"}
     ]

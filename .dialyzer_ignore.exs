@@ -151,5 +151,18 @@
   # site was therefore rewritten in source rather than suppressed
   # (pr_patrol.ex `meta: nil` in the clause head), moving the nil check into
   # a clause the analysed types say is unreachable, i.e. group 1 again.
-  {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match}
+  {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match},
+
+  # ── 6. Mint.WebSocket.new/4 success path (`pattern_match`, `unused_fun`) ───
+  #
+  # Dialyzer infers `Mint.WebSocket.new/4` can only return `{:error, ...}`
+  # (its `do_new/4` success clauses hang off `Extension.accept_extensions/2`
+  # and a private-key lookup it cannot see through), so the `{:ok, conn, ws}`
+  # arm in `NodeAgent.WSClient.handle_response/2` "can never match" and the
+  # helpers reachable only from it (`replay_queued/1`, `notify/2`) read as
+  # unused. The success arm is the whole point of the client and is covered
+  # end to end by ws_client_test.exs and connection_test.exs against a Bandit
+  # endpoint, so the warnings are a library-spec artefact, not dead code.
+  {"lib/arbiter/node_agent/ws_client.ex", :pattern_match},
+  {"lib/arbiter/node_agent/ws_client.ex", :unused_fun}
 ]

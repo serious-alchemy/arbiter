@@ -138,6 +138,14 @@ config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 # per-test with a unique tmp dir.
 config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
+# The node agent (RW5) keeps its status file and credential under its node
+# home. A test that starts `Arbiter.NodeAgent.Supervisor` with no explicit paths
+# must land in tmp, never in the operator's real `~/.arbiter-node`; tests that
+# assert on the files pass their own.
+config :arbiter, Arbiter.NodeAgent,
+  node_home: Path.join(System.tmp_dir!(), "arbiter-node-agent-test"),
+  credential_file: Path.join(System.tmp_dir!(), "arbiter-node-agent-test/credential")
+
 # `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both resolve their
 # root via `Arbiter.Config.Paths.worktree_root/0`, whose ultimate fallback is
 # a `$HOME`-relative default that isn't writable/isolated for the test suite.

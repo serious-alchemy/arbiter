@@ -1,0 +1,26 @@
+# The node agent's user unit (docs/design/remote-workers.md §5.5, §6). The join
+# script installs it as ~/.config/systemd/user/arbiter-node.service and writes
+# ~/.config/arbiter-node/agent.env (ARB_NODE_URL=https://<primary>…); the
+# credential lives in ~/.config/arbiter-node/credential (0600), not here.
+#
+# ARB_DATA_HOME keeps the release's cookie under ~/.arbiter-node instead of the
+# primary's ~/.arbiter, and RELEASE_NODE gives the VM a name of its own, so a node
+# on the primary's machine (a test rig) cannot collide with it.
+[Unit]
+Description=Arbiter node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/arbiter-node/agent.env
+Environment=ARB_ROLE=agent
+Environment=ARB_DATA_HOME=%h/.arbiter-node
+Environment=RELEASE_NODE=arbiter_node@127.0.0.1
+ExecStartPre=%h/.arbiter-node/bin/arbiter-node pre-start
+ExecStart=%h/.arbiter-node/current/bin/arbiter start
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
