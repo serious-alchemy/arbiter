@@ -5,32 +5,29 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
   setup do
     # Start an autopilot instance for testing
-    {:ok, pid} =
-      Autopilot.start_link(
-        name: nil,
-        paused: false,
-        interval_ms: :never,
-        snapshot: fn opts ->
-          %{
-            ready: [],
-            running: [],
-            waiting: [],
-            closed_today: [],
-            promote: nil,
-            slots_total: 4,
-            slots_free: 4,
-            quota: :ok,
-            paused: opts[:paused],
-            now: DateTime.utc_now()
-          }
-        end
+    pid =
+      start_supervised!(
+        {Autopilot,
+         name: nil,
+         paused: false,
+         interval_ms: :never,
+         snapshot: fn opts ->
+           %{
+             ready: [],
+             running: [],
+             waiting: [],
+             closed_today: [],
+             promote: nil,
+             slots_total: 4,
+             slots_free: 4,
+             quota: :ok,
+             paused: opts[:paused],
+             now: DateTime.utc_now()
+           }
+         end}
       )
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        GenServer.stop(pid)
-      end
-
       # Reset the global Autopilot singleton to paused state to prevent test pollution
       Autopilot.pause(Autopilot)
     end)
