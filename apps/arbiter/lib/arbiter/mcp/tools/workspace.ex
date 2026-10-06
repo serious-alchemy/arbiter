@@ -25,7 +25,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # ---- workspace_show -----------------------------------------------------
 
   @doc """
-  A workspace: config and the resolved worker security posture.
+  A workspace: config and the resolved worker security posture, plus an `update`
+  block (`enabled`, `current`, `latest`, `release_url`, `update_available`).
   Resolved from the optional `workspace` arg (name or id), else the scope's bound
   workspace, else the installation default. A workspace-bound scope (worker) can
   only ever inspect its own workspace.
@@ -34,10 +35,27 @@ defmodule Arbiter.MCP.Tools.Workspace do
   def workspace_show(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
       case Ash.get(Workspace, ws_id) do
-        {:ok, %Workspace{} = ws} -> {:ok, Tools.serialize_workspace(ws)}
-        _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
+        {:ok, %Workspace{} = ws} ->
+          {:ok, ws |> Tools.serialize_workspace() |> Map.put(:update, update_block())}
+
+        _ ->
+          {:error, {:not_found, "workspace #{ws_id} not found"}}
       end
     end
+  end
+
+  # The release update check (`Arbiter.Release.UpdateCheck`), so a headless
+  # coordinator sees "an update is available" without the dashboard.
+  defp update_block do
+    u = Arbiter.Release.UpdateCheck.state()
+
+    %{
+      enabled: u.enabled,
+      current: Arbiter.Version.app_version(),
+      latest: u.latest,
+      release_url: u.release_url,
+      update_available: u.update_available?
+    }
   end
 
   # ---- workspace_config_get ----------------------------------------------

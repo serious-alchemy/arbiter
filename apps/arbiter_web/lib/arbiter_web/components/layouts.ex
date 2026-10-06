@@ -96,6 +96,10 @@ defmodule ArbiterWeb.Layouts do
         ArbiterWeb.Nav.groups(assigns.open_epic_count)
       )
 
+    # One GenServer call to `UpdateCheck`, which answers from memory (the HTTP
+    # fetch runs in its own task) and reports "disabled" when it isn't running.
+    assigns = assign(assigns, :update, Arbiter.Release.UpdateCheck.state())
+
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
@@ -218,7 +222,18 @@ defmodule ArbiterWeb.Layouts do
       class="nav-rail fixed left-0 top-[var(--nav-height)] bottom-[var(--session-dock-strip-height)] z-20"
     >
       <.sidebar_nav groups={@groups} current_path={@current_path} expanded={true}>
-        <:footer><.theme_toggle /></:footer>
+        <:footer>
+          <.link
+            id="about-link"
+            navigate={~p"/about"}
+            title="About: version and update status"
+            class="flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-label)] no-underline transition-colors duration-150 hover:text-[var(--text-title)]"
+          >
+            <.icon name="hero-information-circle" size={14} /> About
+            <span class="ml-auto">v{Arbiter.Version.app_version()}</span>
+          </.link>
+          <.theme_toggle />
+        </:footer>
       </.sidebar_nav>
     </div>
 
@@ -230,6 +245,7 @@ defmodule ArbiterWeb.Layouts do
           page while talking to a session is the whole reason the Side preset
           exists. --%>
     <main class="pl-[var(--nav-rail-page-inset)] pr-[var(--session-dock-page-inset)]">
+      <.update_notice update={@update} />
       {render_slot(@inner_block)}
     </main>
 
@@ -467,6 +483,42 @@ defmodule ArbiterWeb.Layouts do
   # the right-hand cluster (live badge, inbox, theme toggle) sits beside the
   # chip in the bar, so a popover under the bar can't cover them — and is
   # capped at the viewport width minus the bar's padding.
+
+  @doc """
+  The "update available" notice from `Arbiter.Release.UpdateCheck.state/0`:
+  the release link plus the deploy command. Renders nothing unless a newer
+  release was found.
+  """
+  attr :update, :map, required: true
+
+  def update_notice(assigns) do
+    ~H"""
+    <div
+      :if={@update.update_available?}
+      id="update-available"
+      role="status"
+      class="alert alert-info mx-4 mt-4 text-sm"
+    >
+      <.icon name="hero-arrow-up-circle" class="size-5 shrink-0" />
+      <div>
+        <p class="font-semibold">Update available: {@update.latest}</p>
+        <p>
+          <a
+            :if={@update.release_url}
+            id="update-release-link"
+            href={@update.release_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="link link-hover"
+          >
+            Release notes
+          </a>
+          · deploy with <code id="update-deploy-command">arb server deploy</code>
+        </p>
+      </div>
+    </div>
+    """
+  end
 
   attr :quotas, :list, required: true
   attr :on_exhaustion, :any, default: nil

@@ -809,6 +809,12 @@ defmodule Arbiter.MCP.ToolsTest do
       assert is_map(data.config)
       assert is_binary(data.security["mode"])
     end
+
+    test "carries the release update block", ctx do
+      assert {:ok, %{update: update}} = Tools.workspace_show(ctx.worker, %{})
+      assert %{enabled: _, update_available: false, latest: nil, current: current} = update
+      assert current == Arbiter.Version.app_version()
+    end
   end
 
   describe "serialize_workspace/1 egress posture (bd-5yydxh)" do
