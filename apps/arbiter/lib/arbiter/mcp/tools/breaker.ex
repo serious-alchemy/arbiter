@@ -129,9 +129,7 @@ defmodule Arbiter.MCP.Tools.Breaker do
   defp maybe_put(kw, _key, false), do: kw
   defp maybe_put(kw, key, value), do: Keyword.put(kw, key, value)
 
-  defp truthy(true), do: true
-  defp truthy("true"), do: true
-  defp truthy(_), do: false
+  defp truthy(value), do: Arbiter.Params.boolean(value) == {:ok, true}
 
   defp serialize(entry) do
     %{

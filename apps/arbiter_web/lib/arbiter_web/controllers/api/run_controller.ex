@@ -24,6 +24,7 @@ defmodule ArbiterWeb.Api.RunController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
   require Ash.Query
@@ -31,6 +32,7 @@ defmodule ArbiterWeb.Api.RunController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @default_limit 20
+  @max_limit 200
 
   # `{state, outcome}` for each pre-5/13 `status` value — the same rule as
   # `RunState.from_legacy_status/1` and the migration that backfilled the
@@ -133,17 +135,7 @@ defmodule ArbiterWeb.Api.RunController do
 
   # ---- param coercion ----
 
-  defp parse_limit(nil), do: {:ok, @default_limit}
-  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
-
-  defp parse_limit(raw) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {n, ""} when n > 0 -> {:ok, n}
-      _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
-    end
-  end
-
-  defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+  defp parse_limit(raw), do: raw |> Params.limit(@default_limit, @max_limit) |> Params.to_rest()
 
   # Matched against the allowed atoms' names, so an unknown value never
   # reaches `String.to_existing_atom/1`.

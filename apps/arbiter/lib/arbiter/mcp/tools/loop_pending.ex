@@ -33,7 +33,7 @@ defmodule Arbiter.MCP.Tools.LoopPending do
     with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
          {:ok, states} <- loop_states(args),
          {:ok, kind} <- Tools.optional_enum(args, "kind", @loop_kinds),
-         {:ok, limit} <- Tools.optional_integer(args, "limit") do
+         {:ok, limit} <- Tools.optional_bounded_limit(args, "limit", 500) do
       rows =
         [state: states || Arbiter.Loop.live_states()]
         |> Tools.maybe_put_kw(:kind, kind)

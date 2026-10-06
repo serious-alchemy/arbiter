@@ -34,6 +34,7 @@ defmodule ArbiterWeb.Api.IssueController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
@@ -156,11 +157,17 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def create(conn, params) do
-    force? = params["force"] == true
+    with {:ok, force?} <- params |> Params.fetch_bool("force", false) |> Params.to_rest() do
+      create_issue(conn, params, force?)
+    end
+  end
+
+  defp create_issue(conn, params, force?) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
     attrs =
       params
+      |> Params.strip_attribution()
       |> Map.drop(["id", "force", "assignee"])
       |> coerce_atoms(@atom_fields)
 
@@ -284,6 +291,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
     attrs =
       params
+      |> Params.strip_attribution()
       |> Map.drop(["id", "workspace_id", "assignee"])
       |> coerce_atoms(@atom_fields)
 
@@ -297,16 +305,15 @@ defmodule ArbiterWeb.Api.IssueController do
     reason = params["reason"]
 
     # bd-2wilou: propagate the close upstream by default (matches the `:close`
-    # action's own default). Only an explicit `close_upstream: false/"false"/"0"`
-    # suppresses it.
-    close_upstream = params["close_upstream"] not in [false, "false", "0"]
-
-    args =
-      %{}
-      |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
-      |> Map.put(:close_upstream, close_upstream)
-
-    with {:ok, issue} <- Ash.get(Issue, id),
+    # action's own default). Only an explicit false (`false`/`"false"`/`"0"`)
+    # suppresses it; junk is a 400.
+    with {:ok, close_upstream} <-
+           params |> Params.fetch_bool("close_upstream", true) |> Params.to_rest(),
+         {:ok, issue} <- Ash.get(Issue, id),
+         args =
+           %{}
+           |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
+           |> Map.put(:close_upstream, close_upstream),
          {:ok, closed} <- Ash.update(issue, args, action: :close) do
       render(conn, :show, issue: closed)
     end
@@ -454,7 +461,8 @@ defmodule ArbiterWeb.Api.IssueController do
   def resolve(conn, %{"id" => id} = params) do
     attrs =
       params
-      |> Map.take(~w(decision reasoning gate actor round fix_round_attempt))
+      |> Map.take(~w(decision reasoning gate round fix_round_attempt))
+      |> Map.put("actor", Params.actor_label(conn.assigns[:mcp_scope]) || "coordinator")
       |> Map.put("task_id", id)
 
     case Arbiter.ReviewGate.Resolutions.record(attrs) do

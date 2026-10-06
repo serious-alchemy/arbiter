@@ -711,7 +711,7 @@ defmodule Arbiter.MCP.Tools.Task do
       opts =
         []
         |> Tools.maybe_put_kw(:notes, Tools.fetch_string(args, "notes"))
-        |> Tools.maybe_put_kw(:created_by, Tools.fetch_string(args, "created_by"))
+        |> Tools.maybe_put_kw(:created_by, Arbiter.Params.actor_label(scope))
 
       case Dependencies.add(from, to, type, opts) do
         {:ok, dep} -> {:ok, Tools.serialize_dependency(dep)}

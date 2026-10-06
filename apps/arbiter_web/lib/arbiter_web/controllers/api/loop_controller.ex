@@ -35,7 +35,11 @@ defmodule ArbiterWeb.Api.LoopController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Loop
+  alias Arbiter.Params
   alias Arbiter.Loop.Analysis
+
+  # Documented `limit` cap for the loop list/analysis routes.
+  @max_limit 500
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -416,18 +420,9 @@ defmodule ArbiterWeb.Api.LoopController do
   defp parse_discover(_other),
     do: {:error, {:invalid_request, "discover must be true or false"}}
 
-  defp parse_limit(nil), do: {:ok, nil}
-  defp parse_limit(""), do: {:ok, nil}
-  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
-
-  defp parse_limit(raw) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {n, ""} when n > 0 -> {:ok, n}
-      _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
-    end
-  end
-
-  defp parse_limit(_other), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+  # Absent means "no cap requested"; a supplied value is clamped to `@max_limit`.
+  defp parse_limit(raw) when raw in [nil, ""], do: {:ok, nil}
+  defp parse_limit(raw), do: raw |> Params.limit(@max_limit, @max_limit) |> Params.to_rest()
 
   defp unit_seconds("d"), do: 24 * 3600
   defp unit_seconds("h"), do: 3600

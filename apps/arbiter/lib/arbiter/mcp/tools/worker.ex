@@ -80,7 +80,8 @@ defmodule Arbiter.MCP.Tools.Worker do
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, force} <- Tools.fetch_bool(args, "force", false) do
+         {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -128,6 +129,7 @@ defmodule Arbiter.MCP.Tools.Worker do
          {:ok, task} <- Tools.fetch_task(scope, args, task_id),
          {:ok, task} <- maybe_set_tracker_context(task, args),
          {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
          {:ok, mode} <- guard_review_automation(scope, args, force),
          {:ok, _} <- persist_review_automation(task, mode) do
       opts =
@@ -830,6 +832,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   # config is used to pick the first healthy provider.
   defp worker_dispatch_opts(%Scope{tier: tier} = scope, args) do
     with {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
          {:ok, over_cap} <- Tools.fetch_bool(args, "over_cap", false) do
       scope
       |> dispatch_opts(args)

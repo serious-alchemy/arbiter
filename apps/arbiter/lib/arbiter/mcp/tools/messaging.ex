@@ -370,14 +370,14 @@ defmodule Arbiter.MCP.Tools.Messaging do
   The most recent notifications (broadcast events: completions, milestones,
   system events) for the scope's workspace. Available to both tiers and always
   scoped to the bound workspace. Read-only — notifications are never consumed.
-  Optional `limit` (default 20). Backs onto `Messages.recent_notifications/2`.
+  Optional `limit` (default 20, max 500). Backs onto `Messages.recent_notifications/2`.
   """
   @spec notify_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def notify_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
-         {:ok, limit} <- Tools.optional_integer(args, "limit") do
+         {:ok, limit} <- Tools.parse_bounded_limit(args, "limit", 20, 500) do
       notifications =
-        (limit || 20)
+        limit
         |> Message.recent_notifications(workspace_id: ws_id)
         |> Enum.map(&serialize_message/1)
 

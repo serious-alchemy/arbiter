@@ -49,6 +49,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
@@ -61,7 +62,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   def dispatch(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       case params do
         %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
           with {:ok, opts} <- dispatch_opts(params) do
@@ -117,7 +119,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def review(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       case params do
         # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
         # the reviewer at an arbitrary PR by URL/number through the MR adapter.
@@ -194,7 +197,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       resume_session(conn, task_id, params)
     end
   end
@@ -702,10 +706,22 @@ defmodule ArbiterWeb.Api.WorkerController do
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
-  defp truthy(nil), do: nil
-  defp truthy(true), do: true
-  defp truthy("true"), do: true
-  defp truthy(false), do: false
-  defp truthy("false"), do: false
-  defp truthy(_), do: nil
+  @flag_keys ~w(force force_quota over_cap no_agent with_claude with_gemini)
+
+  # A junk flag (`force_quota: "yes"`) is a 400, not a silent "unset".
+  defp validate_flags(params) do
+    Enum.reduce_while(@flag_keys, :ok, fn key, :ok ->
+      case params |> Params.fetch_optional_bool(key) |> Params.to_rest() do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp truthy(value) do
+    case Params.boolean(value) do
+      {:ok, bool} -> bool
+      :error -> nil
+    end
+  end
 end

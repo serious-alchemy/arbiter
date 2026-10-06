@@ -85,11 +85,10 @@ defmodule ArbiterWeb.Api.SchedulerController do
        {:busy, "the scheduler is not responding; retry shortly", %{reason: inspect(reason)}}}
   end
 
-  # bd-cl6zjn: `arb scheduler` says `"surface": "cli"`; any other caller is the
-  # bare API. The actor is the token's scope (`coordinator`, ...).
-  defp actor(conn, params) do
-    surface = if params["surface"] == "cli", do: "cli", else: "api"
-    {Arbiter.PaperTrail.actor_label(conn.assigns[:mcp_scope]) || "unknown", surface}
+  # The actor is derived from the token's scope (`coordinator`, ...) and the
+  # surface is the route's own; a caller-supplied `surface` is ignored.
+  defp actor(conn, _params) do
+    {Arbiter.PaperTrail.actor_label(conn.assigns[:mcp_scope]) || "unknown", "api"}
   end
 
   defp status_json, do: Drain.status() |> Drain.to_json()

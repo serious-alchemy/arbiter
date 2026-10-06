@@ -12,6 +12,7 @@ defmodule ArbiterWeb.Api.ProviderPauseController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Providers.Pause
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -19,17 +20,22 @@ defmodule ArbiterWeb.Api.ProviderPauseController do
   def index(conn, _params), do: json(conn, %{paused: Pause.to_json()})
 
   def pause(conn, %{"ref" => ref} = params) when is_binary(ref) and ref != "" do
-    case Pause.pause(ref, reason: params["reason"], by: "api") do
-      {:ok, _entry} ->
-        stopped = if params["stop_running"] == true, do: Pause.stop_running(ref), else: []
-        json(conn, %{paused: Pause.to_json(), stopped: stopped})
-
-      {:error, reason} ->
-        {:error, failure(reason, ref)}
+    with {:ok, stop_running?} <-
+           params |> Params.fetch_bool("stop_running", false) |> Params.to_rest(),
+         {:ok, _entry} <- pause_ref(ref, params) do
+      stopped = if stop_running?, do: Pause.stop_running(ref), else: []
+      json(conn, %{paused: Pause.to_json(), stopped: stopped})
     end
   end
 
   def pause(_conn, _params), do: {:error, {:invalid_request, "`ref` is required"}}
+
+  defp pause_ref(ref, params) do
+    case Pause.pause(ref, reason: params["reason"], by: "api") do
+      {:ok, _} = ok -> ok
+      {:error, reason} -> {:error, failure(reason, ref)}
+    end
+  end
 
   def resume(conn, %{"ref" => ref}) when is_binary(ref) and ref != "" do
     case Pause.resume(ref, by: "api") do
