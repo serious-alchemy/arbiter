@@ -410,14 +410,14 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert body["pending"]["payload"]["lesson"] == "this repo's tests need FLAG=1 set"
     end
 
-    test "400s when `repo` is missing", %{conn: conn} do
+    test "422s when `repo` is missing", %{conn: conn} do
       conn = post(conn, ~p"/api/loop/propose/repo_doc_patch", %{lesson: "some lesson"})
-      assert json_response(conn, 400)
+      assert json_response(conn, 422)
     end
 
-    test "400s when `lesson` is missing", %{conn: conn} do
+    test "422s when `lesson` is missing", %{conn: conn} do
       conn = post(conn, ~p"/api/loop/propose/repo_doc_patch", %{repo: "myrepo"})
-      assert json_response(conn, 400)
+      assert json_response(conn, 422)
     end
   end
 
@@ -443,7 +443,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert status["message"] =~ "no canary is running"
     end
 
-    test "POST /api/loop/propose/routing 400s on a bad difficulty", %{conn: conn} do
+    test "POST /api/loop/propose/routing 422s on a bad difficulty", %{conn: conn} do
       ws = workspace!()
 
       conn =
@@ -453,7 +453,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
           model_tier: "standard"
         })
 
-      assert json_response(conn, 400)
+      assert json_response(conn, 422)
     end
   end
 
@@ -558,7 +558,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert hyp.state == :hypothesis
 
       conn = post(conn, ~p"/api/loop/pending/#{hyp.id}/apply", %{})
-      body = json_response(conn, 400)
+      body = json_response(conn, 409)
 
       assert inspect(body) =~ "1 incident"
       {:ok, unchanged} = Loop.get_pending(hyp.id)

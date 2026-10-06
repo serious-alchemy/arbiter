@@ -125,7 +125,7 @@ defmodule ArbiterWeb.Api.LoopController do
           )
 
         {:error, reason} ->
-          {:error, {:invalid_request, "loop analysis failed: #{inspect(reason)}"}}
+          {:error, {:server_error, "loop analysis failed", %{reason: inspect(reason)}}}
       end
     end
   end
@@ -194,10 +194,17 @@ defmodule ArbiterWeb.Api.LoopController do
 
   defp apply_error(:not_found), do: :not_found
 
-  defp apply_error({code, message}) when is_atom(code) and is_binary(message),
-    do: {:invalid_request, message, %{code: to_string(code)}}
+  # The proposal's own state refuses (already decided, nothing to apply) → 409;
+  # the domain refused the write's arguments → 422. `code` stays in `details`.
+  defp apply_error({code, message})
+       when code in [:not_applicable, :unmapped] and is_binary(message),
+       do: {:conflict, message, %{code: to_string(code)}}
 
-  defp apply_error(other), do: {:invalid_request, "loop proposal failed: #{inspect(other)}"}
+  defp apply_error({code, message}) when is_atom(code) and is_binary(message),
+    do: {:invalid, message, %{code: to_string(code)}}
+
+  defp apply_error(other),
+    do: {:server_error, "loop proposal failed", %{reason: inspect(other)}}
 
   defp render_pending(row, detail \\ :summary)
 
