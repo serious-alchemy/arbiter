@@ -3047,6 +3047,7 @@ defmodule Arbiter.Worker do
       )
       when is_boolean(waiting?) do
     hold_account(state, not waiting?)
+    if waiting?, do: announce_slot_released(state)
     {:noreply, state}
   end
 
@@ -6790,6 +6791,15 @@ defmodule Arbiter.Worker do
     hold_account(state, true)
 
     %State{state | meta: Map.drop(meta, [:review_gate_ref, :review_gate_stalled_since])}
+  end
+
+  # bd-dtdeff: releasing the account hold changes only the registry's `released`
+  # flag — the phase stays `in_review` — so nothing else tells the Autopilot a
+  # provider slot just opened. Say so, so it re-plans now instead of at the tick.
+  defp announce_slot_released(%State{} = state) do
+    Arbiter.Events.broadcast(effective_workspace_id(state), "worker_slot_released", %{
+      task_id: state.task_id
+    })
   end
 
   # Count this worker on its provider account (`hold?: true`, the normal state)

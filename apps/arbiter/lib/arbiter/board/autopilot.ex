@@ -228,7 +228,7 @@ defmodule Arbiter.Board.Autopilot do
   @topic "board"
   @tasks_topic "tasks"
   @events_topic "events"
-  @worker_slot_events ~w(worker_done worker_failed)
+  @worker_slot_events ~w(worker_done worker_failed worker_slot_released)
   @default_interval_ms 60_000
   @default_debounce_ms 300
 
@@ -647,9 +647,11 @@ defmodule Arbiter.Board.Autopilot do
 
   # bd-dtdeff: a slot can free with no worker finishing or failing — a ticket
   # leaving In progress for Merging/Verifying (`task_state`), or a worker
-  # releasing its account slot while it waits on CI or a review round
-  # (`worker_phase`, which also covers bd-92mx1m's park-for-a-human release a
-  # deferred resume waits on). Both are debounced like every other trigger, and
+  # moving to a phase that holds no slot (`worker_phase`, which covers
+  # bd-92mx1m's park-for-a-human release a deferred resume waits on). The
+  # CI-wait release changes no phase; it has its own `worker_slot_released`
+  # event. `task_state` duplicates the `:task_lifecycle` message above (defence
+  # in depth). All are debounced like every other trigger, and
   # a pass that finds nothing to promote does not reschedule itself.
   def handle_info({:event, %{topic: "worker_phase"} = event}, state) do
     if slot_releasing_phase?(event), do: {:noreply, request_plan(state)}, else: {:noreply, state}
@@ -698,7 +700,7 @@ defmodule Arbiter.Board.Autopilot do
 
   # A phase that holds no slot: the worker is waiting (on review, CI or a
   # human) or finished. Mid-work phases fire constantly and free nothing.
-  @slot_releasing_phases ~w(waiting_on_you done in_review awaiting_ci ci_wait)
+  @slot_releasing_phases ~w(waiting_on_you done in_review held_for_quota)
 
   defp slot_releasing_phase?(%{phase: phase}) when phase in @slot_releasing_phases, do: true
   defp slot_releasing_phase?(%{state: state}) when state in ["waiting", "finished"], do: true

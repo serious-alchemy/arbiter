@@ -740,6 +740,14 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:dispatched, "bd-1"}, 500
     end
 
+    test "a worker releasing its account slot runs a pass" do
+      pid = start(paused: false)
+
+      send(pid, {:event, %{topic: "worker_slot_released", task_id: "bd-9"}})
+
+      assert_receive {:dispatched, "bd-1"}, 500
+    end
+
     test "a ticket leaving In progress for Merging runs a pass" do
       pid = start(paused: false)
 
