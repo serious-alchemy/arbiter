@@ -88,13 +88,13 @@ defmodule ArbiterCli.Cmd.Prime do
       labelled text sections.
   """
 
-  alias ArbiterCli.{Client, Output, RunLabel, SchedulerState}
+  alias ArbiterCli.{ArgParser, Client, Output, RunLabel, SchedulerState}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb prime", switches: [])
       sections = gather()
 
       case mode do

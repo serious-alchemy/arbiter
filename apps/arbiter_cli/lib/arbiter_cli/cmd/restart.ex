@@ -42,7 +42,7 @@ defmodule ArbiterCli.Cmd.Restart do
       within the timeout, or a prerequisite (project root) was missing.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output, RunLabel}
+  alias ArbiterCli.{ArgParser, Client, Cmd.Doctor, Cmd.Start, Output, RunLabel}
 
   @switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -63,7 +63,9 @@ defmodule ArbiterCli.Cmd.Restart do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb server restart", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
       timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
       force = opts[:force] || false

@@ -160,4 +160,14 @@ defmodule ArbiterCli.Cmd.ImageTest do
     assert code == 2
     assert err =~ "unknown image subcommand"
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "an unknown --flag value is an error, not a repo named \"value\"" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Cmd.Image.run(["build", "--bogus", "value"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --bogus for arb image"
+    end
+  end
 end

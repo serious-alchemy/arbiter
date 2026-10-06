@@ -91,7 +91,7 @@ defmodule ArbiterCli.Cmd.Usage do
   was, and counting it would read as "D-ratings run low".
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @default_by "day"
   @default_event_limit 50
@@ -128,8 +128,9 @@ defmodule ArbiterCli.Cmd.Usage do
   # ---- summarize ---------------------------------------------------------
 
   defp summarize(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb usage show",
         switches: [
           by: :string,
           since: :string,
@@ -159,8 +160,9 @@ defmodule ArbiterCli.Cmd.Usage do
   # ---- events ------------------------------------------------------------
 
   defp events(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb usage events",
         switches: [
           task: :string,
           workspace: :string,
@@ -196,20 +198,34 @@ defmodule ArbiterCli.Cmd.Usage do
   # detected the same way `--calibration` is: parsed out of the raw argv
   # before deciding which subcommand to run.
   defp session_flag(argv) do
-    {opts, _rest, _bad} = OptionParser.parse(argv, switches: [session: :string])
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv, passthrough: true, command: "arb usage", switches: [session: :string])
+
     Keyword.get(opts, :session)
   end
 
   defp session_detail(session_id, argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
-        switches: [session: :string, workspace: :string, since: :string, limit: :integer]
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb usage events",
+        switches: [
+          session: :string,
+          workspace: :string,
+          account: :string,
+          step: :string,
+          source: :string,
+          since: :string,
+          limit: :integer
+        ]
       )
 
     params =
       []
       |> maybe_put(:session_id, session_id)
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:account, Keyword.get(opts, :account))
+      |> maybe_put(:step, Keyword.get(opts, :step))
+      |> maybe_put(:source, Keyword.get(opts, :source))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
 
@@ -224,8 +240,9 @@ defmodule ArbiterCli.Cmd.Usage do
   defp calibration?(argv), do: "--calibration" in argv
 
   defp calibration(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb usage",
         switches: [calibration: :boolean, workspace: :string, window_days: :integer],
         aliases: [w: :workspace]
       )

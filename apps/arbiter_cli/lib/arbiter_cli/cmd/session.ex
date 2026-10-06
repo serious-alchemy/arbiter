@@ -26,8 +26,7 @@ defmodule ArbiterCli.Cmd.Session do
   """
 
   alias Arbiter.Worker.ReleaseEnv
-  alias ArbiterCli.Cmd.Start
-  alias ArbiterCli.Output
+  alias ArbiterCli.{ArgParser, Cmd.Start, Output}
 
   @unit_prefix "arb-session-"
   @socket_prefix "session-"
@@ -37,9 +36,16 @@ defmodule ArbiterCli.Cmd.Session do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      case Output.drop_json(argv) do
-        ["list" | args] -> list(args, Output.mode(argv))
-        ["attach" | args] -> attach(args)
+      {opts, rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb session",
+          switches: [read_only: :boolean],
+          aliases: [r: :read_only]
+        )
+
+      case rest do
+        ["list" | args] -> list(args, mode)
+        ["attach" | args] -> attach(args, opts[:read_only] == true)
         _ -> unknown()
       end
     end
@@ -125,10 +131,8 @@ defmodule ArbiterCli.Cmd.Session do
   # Every branch below terminates via `Output.die/2` or `Output.halt/1`
   # (both `no_return()`) — spelled out so dialyzer does not report it as an
   # accidental "no local return".
-  @spec attach([String.t()]) :: no_return()
-  defp attach(args) do
-    {read_only?, rest} = extract_flag(args, ["--read-only", "-r"])
-
+  @spec attach([String.t()], boolean()) :: no_return()
+  defp attach(rest, read_only?) do
     case rest do
       [id | _] ->
         socket = require_socket_path(id)
@@ -170,14 +174,6 @@ defmodule ArbiterCli.Cmd.Session do
           "arb session attach needs a session id",
           "Run `arb session list` to see live sessions."
         )
-    end
-  end
-
-  defp extract_flag(args, flags) do
-    if Enum.any?(flags, &(&1 in args)) do
-      {true, Enum.reject(args, &(&1 in flags))}
-    else
-      {false, args}
     end
   end
 

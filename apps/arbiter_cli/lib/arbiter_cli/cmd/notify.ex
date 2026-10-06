@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Notify do
     --json      emit JSON instead of human-readable text
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @default_limit 20
 
@@ -19,10 +19,9 @@ defmodule ArbiterCli.Cmd.Notify do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
+      {opts, _rest, mode} =
+        ArgParser.parse(argv, command: "arb message notify", strict: [limit: :integer])
 
-      {opts, _rest, _invalid} = OptionParser.parse(rest, strict: [limit: :integer])
       limit = opts[:limit] || @default_limit
 
       case Client.get("/api/messages", kind: "notification", limit: limit) do

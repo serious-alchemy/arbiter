@@ -164,7 +164,7 @@ defmodule ArbiterCli.Cmd.Create do
     description: :string,
     acceptance: :string,
     priority: :integer,
-    difficulty: :integer,
+    difficulty: :string,
     type: :string,
     deps: :string,
     labels: :string,
@@ -195,7 +195,10 @@ defmodule ArbiterCli.Cmd.Create do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, mode} = ArgParser.parse_strict!(argv, "arb create", strict: @all_switches)
+      {opts, rest, mode} =
+        ArgParser.parse(argv, command: "arb ticket create", strict: @all_switches)
+
+      opts = ArgParser.coerce_difficulty(opts)
 
       title =
         case rest do
@@ -271,8 +274,6 @@ defmodule ArbiterCli.Cmd.Create do
     constraint = ProviderConstraintFlags.payload(opts)
     workspace_id = Workspace.id_or_halt()
     force? = opts[:force] == true
-
-    validate_difficulty!(opts[:difficulty])
 
     payload =
       %{"title" => title, "workspace_id" => workspace_id}
@@ -360,13 +361,6 @@ defmodule ArbiterCli.Cmd.Create do
 
   defp maybe_put_flag(map, _key, false), do: map
   defp maybe_put_flag(map, key, true), do: Map.put(map, key, true)
-
-  defp validate_difficulty!(nil), do: :ok
-  defp validate_difficulty!(n) when is_integer(n) and n in 0..5, do: :ok
-
-  defp validate_difficulty!(other) do
-    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..5 / D0..D5)")
-  end
 
   defp attach_deps(new_id, raw) do
     raw

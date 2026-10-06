@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   def run(argv) do
     ArgParser.unless_help(argv, @moduledoc, fn ->
-      {_opts, _rest, mode} = ArgParser.parse(argv, switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb server doctor", switches: [])
       results = checks()
 
       case mode do

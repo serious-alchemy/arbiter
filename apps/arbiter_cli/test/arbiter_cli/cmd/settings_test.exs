@@ -148,4 +148,21 @@ defmodule ArbiterCli.Cmd.SettingsTest do
     {out, _err, 0} = capture(fn -> Settings.run(["--help"]) end)
     for sub <- ~w(get set unset schema), do: assert(out =~ "arb settings #{sub}")
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "`set <k> <v> --force` is rejected instead of storing \"v --force\"" do
+      {_out, err, code} =
+        capture(fn -> Settings.run(["set", "nodes.public_url", "https://x", "--force"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --force for arb settings"
+    end
+
+    test "`get --foo` is rejected rather than querying a key named --foo" do
+      {_out, err, code} = capture(fn -> Settings.run(["get", "--foo"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --foo for arb settings"
+    end
+  end
 end

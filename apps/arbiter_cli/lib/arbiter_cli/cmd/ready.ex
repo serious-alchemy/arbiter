@@ -13,7 +13,7 @@ defmodule ArbiterCli.Cmd.Ready do
   lifts its children); this command is a thin shell over it.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [json: :boolean, all: :boolean]
 
@@ -21,7 +21,9 @@ defmodule ArbiterCli.Cmd.Ready do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket ready", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       params = ready_params(opts)

@@ -137,4 +137,20 @@ defmodule ArbiterCli.Cmd.McpTest do
       end
     end
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "mint rejects an unknown flag" do
+      {_out, err, code} = capture(fn -> Mcp.run(["token", "mint", "--tir", "coordinator"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --tir for arb mcp token mint"
+    end
+
+    test "verify rejects an unknown flag rather than skipping dash-words" do
+      {_out, err, code} = capture(fn -> Mcp.run(["token", "verify", "--bogus", "tok"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --bogus for arb mcp token verify"
+    end
+  end
 end

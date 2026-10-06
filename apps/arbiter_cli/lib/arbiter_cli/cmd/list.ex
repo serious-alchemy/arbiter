@@ -27,7 +27,7 @@ defmodule ArbiterCli.Cmd.List do
   tasks — the CLI degrades cleanly rather than failing.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [
     state: :string,
@@ -44,7 +44,9 @@ defmodule ArbiterCli.Cmd.List do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket list", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       warn_deprecated_flags(opts, mode)

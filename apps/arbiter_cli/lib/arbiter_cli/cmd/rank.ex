@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Rank do
   count of tickets in that band (`priority_band_size`).
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean, top: :boolean, bottom: :boolean, before: :string, after: :string]
 
@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.Rank do
   end
 
   defp do_run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    {opts, rest, _mode} = ArgParser.parse(argv, command: "arb ticket rank", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     id = parse_id(rest)
     body = rank_body(opts)
