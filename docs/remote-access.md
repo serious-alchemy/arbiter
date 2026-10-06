@@ -2,8 +2,8 @@
 
 The Arbiter dashboard and browser-based session terminal are **loopback-only** by design — they bind to `127.0.0.1:4848` and do not accept off-network connections. To use the dashboard and terminal from another device (e.g., accessing an Arbiter instance on an AWS dev box from a laptop), forward the port over SSH.
 
-
 > Looking to run workers on other machines rather than reach the dashboard remotely? See the proposed [remote workers design](design/remote-workers.md).
+
 SSH provides both authentication (implicit) and encryption, and the forwarded connection appears to Arbiter as loopback traffic, so all existing security properties hold.
 
 ## Quick start: one-off SSH tunnel
