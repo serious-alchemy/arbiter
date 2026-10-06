@@ -34,6 +34,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
+    {Arbiter.Worker.Watchdog, :park_ci_cancelled, 1,
+     "#360: cancelled CI checks still cancelled after the re-run cap park the watcher and page " <>
+       "the coordinator once as CI infrastructure — nothing is refused, no fix round is dispatched"},
     {Arbiter.Worker.Watchdog, :spawn_conflict_resolver, 1,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
