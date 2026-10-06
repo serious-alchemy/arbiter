@@ -91,4 +91,36 @@ defmodule Arbiter.Test.SessionEnv do
 
     session
   end
+
+  @doc """
+  Give the launch form something to offer (bd-8qoxst): it lists a session
+  provider only when a live provider account exists for it, and — once a
+  workspace is picked — only when that workspace is joined to the account.
+  Creates `claude:default` and `antigravity:default` and joins each of
+  `workspaces` to both. Idempotent; call it from a `setup` that owns the
+  sandbox.
+  """
+  @spec launch_accounts!([struct()]) :: :ok
+  def launch_accounts!(workspaces \\ []) do
+    accounts =
+      for provider <- [:claude, :antigravity] do
+        account =
+          Arbiter.Accounts.get_account("#{provider}:default")
+          |> case do
+            {:ok, account} ->
+              account
+
+            _ ->
+              Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: provider, slug: "default"})
+          end
+
+        {provider, account}
+      end
+
+    for workspace <- workspaces, {provider, account} <- accounts do
+      {:ok, _} = Arbiter.Accounts.attach_workspace(workspace.id, provider, account.id)
+    end
+
+    :ok
+  end
 end

@@ -320,8 +320,18 @@ defmodule Arbiter.Worker.ClaudeSession do
     with {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            ContainerSpawn.prepare(
-             Keyword.take(opts, [:arb_token, :workspace, :repo, :image, :podman, :egress]) ++
+             Keyword.take(opts, [
+               :arb_token,
+               :workspace,
+               :repo,
+               :image,
+               :podman,
+               :egress,
+               :codex_path,
+               :codex_source_home
+             ]) ++
                [
+                 provider: provider,
                  policy: policy,
                  worktree_path: port_args.cd,
                  argv: port_args.argv,

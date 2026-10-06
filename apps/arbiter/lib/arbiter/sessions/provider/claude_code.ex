@@ -51,6 +51,18 @@ defmodule Arbiter.Sessions.Provider.ClaudeCode do
   def config_dir?, do: true
 
   @impl Provider
+  def label, do: "Claude Code"
+
+  @impl Provider
+  def account_provider, do: :claude
+
+  @impl Provider
+  def executable, do: "claude"
+
+  @impl Provider
+  def agent_adapter, do: Arbiter.Agents.Claude
+
+  @impl Provider
   def env(%Session{} = session) do
     ([{"ARB_SESSION_ID", session.id}] ++
        pair("CLAUDE_CONFIG_DIR", session.config_dir) ++

@@ -21,13 +21,18 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.Accounts
+  alias Arbiter.Agents.Claude
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Sessions
   alias Arbiter.Test.NoopRunner
+  alias Arbiter.Worker.StopReason
   alias Arbiter.Usage.Event
   alias ArbiterWeb.SessionIndexLive, as: ArbiterWebSessionIndex
 
   setup do
     Arbiter.Test.SessionEnv.sandbox("session-index-usage")
+    Arbiter.Test.SessionEnv.launch_accounts!()
     put_env(:sessions_runner, NoopRunner)
     :ok
   end
@@ -498,6 +503,8 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web2", prefix: "aw2"})
 
+      :ok = Arbiter.Test.SessionEnv.launch_accounts!([workspace])
+
       {:ok, view, _html} = live_sessions!(conn)
 
       view
@@ -512,6 +519,8 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
          %{conn: conn} do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web3", prefix: "aw3"})
+
+      :ok = Arbiter.Test.SessionEnv.launch_accounts!([workspace])
 
       {:ok, view, _html} = live_sessions!(conn)
 
@@ -821,17 +830,18 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "a crafted submit cannot put agy in mode A or pick an unknown provider",
          %{conn: conn} do
-      assert ArbiterWebSessionIndex.launch_defaults(%{
-               "provider" => "agy",
-               "auth_mode" => "oauth_token",
-               "remote_control" => "true"
-             })[:auth_mode] == :seeded_credentials
+      assert {:ok, opts} =
+               ArbiterWebSessionIndex.launch_defaults(%{
+                 "provider" => "agy",
+                 "auth_mode" => "oauth_token",
+                 "remote_control" => "true"
+               })
 
-      assert ArbiterWebSessionIndex.launch_defaults(%{"provider" => "agy"})[:remote_control] ==
-               false
+      assert opts[:auth_mode] == :seeded_credentials
+      assert opts[:remote_control] == false
 
-      assert ArbiterWebSessionIndex.launch_defaults(%{"provider" => "not_a_provider"})[:provider] ==
-               :claude_code
+      assert {:error, {:provider_unavailable, "not_a_provider"}} =
+               ArbiterWebSessionIndex.launch_defaults(%{"provider" => "not_a_provider"})
 
       {:ok, _view, _html} = live_sessions!(conn)
     end
@@ -845,6 +855,139 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
                view,
                ~s(#launch-session-provider option[value="claude_code"][selected])
              )
+    end
+  end
+
+  describe "which providers the launch form offers (bd-8qoxst)" do
+    # A provider whose accounts are all soft-deleted is not offered.
+    defp delete_account!(ref), do: {:ok, _} = Accounts.delete_account(ref)
+
+    defp expire_claude! do
+      reason = %StopReason{
+        category: :auth_expired,
+        summary: "API Error: 401",
+        remediation: "Re-authenticate",
+        exit_status: 1,
+        signal: nil
+      }
+
+      CredentialWatchdog.mark_expired(Claude, reason, CredentialWatchdog, :periodic_probe)
+      on_exit(fn -> CredentialWatchdog.clear(Claude) end)
+    end
+
+    test "a provider with no live account is not listed", %{conn: conn} do
+      delete_account!("antigravity:default")
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(view, ~s(#launch-session-provider option[value="claude_code"]))
+      refute has_element?(view, ~s(#launch-session-provider option[value="agy"]))
+    end
+
+    test "a provider whose CLI is not on the host is not listed", %{conn: conn} do
+      previous = Application.fetch_env!(:arbiter, :sessions_find_executable)
+
+      Application.put_env(:arbiter, :sessions_find_executable, fn
+        "agy" -> nil
+        name -> name
+      end)
+
+      on_exit(fn -> Application.put_env(:arbiter, :sessions_find_executable, previous) end)
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      refute has_element?(view, ~s(#launch-session-provider option[value="agy"]))
+    end
+
+    test "an unhealthy provider is listed disabled, with the reason", %{conn: conn} do
+      expire_claude!()
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-provider option[value="claude_code"][disabled])
+             )
+
+      assert has_element?(view, "#launch-session-provider-claude_code-unavailable", "expired")
+      refute has_element?(view, ~s(#launch-session-provider option[value="agy"][disabled]))
+    end
+
+    test "with the default unavailable, the first healthy provider is pre-selected",
+         %{conn: conn} do
+      expire_claude!()
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(view, ~s(#launch-session-provider option[value="agy"][selected]))
+      refute has_element?(view, "#launch-session[disabled]")
+
+      view |> form("#launch-session-form") |> render_submit()
+      assert [%{provider: :agy}] = Sessions.list()
+    end
+
+    test "with nothing launchable, Launch is disabled and points at /providers",
+         %{conn: conn} do
+      delete_account!("claude:default")
+      delete_account!("antigravity:default")
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(view, "#launch-session[disabled]")
+      assert has_element?(view, ~s(#launch-session-providers-link[href="/providers"]))
+
+      render_submit(view, "launch", %{"provider" => "claude_code"})
+      assert Sessions.list() == []
+    end
+
+    test "picking a workspace re-derives the list from that workspace's joined accounts",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-claude-only", prefix: "acl"})
+
+      {:ok, claude} = Accounts.get_account("claude:default")
+      {:ok, _} = Accounts.attach_workspace(workspace.id, :claude, claude.id)
+
+      {:ok, view, _html} = live_sessions!(conn)
+      assert has_element?(view, ~s(#launch-session-provider option[value="agy"]))
+
+      view |> form("#launch-session-form", %{"workspace_id" => workspace.id}) |> render_change()
+
+      assert has_element?(view, ~s(#launch-session-provider option[value="claude_code"]))
+      refute has_element?(view, ~s(#launch-session-provider option[value="agy"]))
+    end
+
+    test "a hidden provider is rejected server-side", %{conn: conn} do
+      delete_account!("antigravity:default")
+
+      {:ok, view, _html} = live_sessions!(conn)
+      render_submit(view, "launch", %{"provider" => "agy"})
+
+      assert Sessions.list() == []
+      assert render(view) =~ "not available"
+    end
+
+    test "a disabled provider is rejected server-side, not swapped for another",
+         %{conn: conn} do
+      expire_claude!()
+
+      {:ok, view, _html} = live_sessions!(conn)
+      render_submit(view, "launch", %{"provider" => "claude_code"})
+
+      assert Sessions.list() == []
+    end
+
+    test "launch_defaults/1 refuses an unavailable or unknown provider" do
+      delete_account!("antigravity:default")
+
+      assert {:ok, opts} = ArbiterWebSessionIndex.launch_defaults(%{"provider" => "claude_code"})
+      assert opts[:provider] == :claude_code
+
+      assert {:error, {:provider_unavailable, "agy"}} =
+               ArbiterWebSessionIndex.launch_defaults(%{"provider" => "agy"})
+
+      assert {:error, {:provider_unavailable, "not_a_provider"}} =
+               ArbiterWebSessionIndex.launch_defaults(%{"provider" => "not_a_provider"})
     end
   end
 

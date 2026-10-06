@@ -131,6 +131,9 @@ defmodule Arbiter.Trackers.Sync do
     unless already_transitioned?(issue, opts) do
       case transition_event(issue, :pr_opened) do
         :ok -> record_pr_transitioned(issue, opts)
+        # Declined because the item is already past the target: a decision, not
+        # a failure, so don't retry (and re-notify) on every later run.
+        {:skipped, :upstream_past_target} -> record_pr_transitioned(issue, opts)
         _ -> :ok
       end
     end
@@ -216,9 +219,10 @@ defmodule Arbiter.Trackers.Sync do
   success or a benign skip, `{:error, reason}` only after escalating a loud
   failure (so callers that care can react; most ignore it).
 
-  `{:skipped, :upstream_past_target}` means the adapter declined a `:closed`
+  `{:skipped, :upstream_past_target}` means the adapter declined a forward
   transition because the upstream item is already at, or demonstrably beyond,
-  the closed-mapped status (bd-4i7kky) — nothing was written, nothing failed,
+  the status mapped from `event` (bd-4i7kky, generalised by bd-30ukqo) —
+  nothing was written, nothing failed,
   and there is nothing to verify or retry.
 
   Used by `lifecycle/3` and by `Arbiter.Tasks.Issue.Changes.SyncTracker` for
@@ -348,7 +352,7 @@ defmodule Arbiter.Trackers.Sync do
             "ref=#{issue.tracker_ref} upstream — #{describe(reason)}"
         )
 
-        record_close_skipped(issue, reason)
+        record_transition_skipped(issue, :closed, reason)
         :ok
 
       {:error, reason} ->
@@ -361,12 +365,13 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
-  # A declined close is not a failure, but it is a decision the operator may need
-  # to second-guess (a ticket in an unmapped in-progress status is declined too —
-  # bd-4i7kky), so leave a record on the ticket rather than only in the log.
-  defp record_close_skipped(issue, reason) do
-    CoordinatorNotifier.tracker_close_skipped(
+  # A declined transition is not a failure, but it is a decision the operator may
+  # need to second-guess (a ticket in an unmapped in-progress status is declined
+  # too — bd-4i7kky), so leave a record on the ticket rather than only in the log.
+  defp record_transition_skipped(issue, event, reason) do
+    CoordinatorNotifier.tracker_transition_skipped(
       %{
+        event: event,
         task_id: issue.id,
         workspace_id: issue.workspace_id,
         tracker_type: issue.tracker_type,
@@ -438,7 +443,7 @@ defmodule Arbiter.Trackers.Sync do
             "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — #{describe(reason)}"
         )
 
-        record_close_skipped(issue, reason)
+        record_transition_skipped(issue, event, reason)
         {:skipped, :upstream_past_target}
 
       {:error, %{kind: kind} = reason} when kind in [:validation_failed, :no_transition_path] ->

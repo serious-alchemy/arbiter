@@ -1152,4 +1152,125 @@ defmodule Arbiter.Agents.CodexTest do
       end
     end
   end
+
+  # bd-50d5j6 (P8): `sandbox.backend: podman` runs codex in a container.
+  describe "podman backend" do
+    alias Arbiter.Agents.Codex.ConfigDir
+
+    @container_codex "/opt/arbiter/cli/codex"
+
+    setup do
+      keys = [:worker_codex_home_root, :worker_codex_source_home, :worker_isolate_config]
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+
+      base =
+        Path.join(System.tmp_dir!(), "arb-codex-podman-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(Path.join(base, "operator"))
+      File.write!(Path.join(base, "operator/auth.json"), ~s({"tokens":{"refresh_token":"r"}}))
+      Application.put_env(:arbiter, :worker_codex_home_root, Path.join(base, "homes"))
+      Application.put_env(:arbiter, :worker_codex_source_home, Path.join(base, "operator"))
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+
+      on_exit(fn ->
+        Enum.each(prev, fn {k, v} -> restore_env(k, v) end)
+        File.rm_rf!(base)
+      end)
+
+      %{base: base}
+    end
+
+    defp podman_policy(mode \\ :bypass) do
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      %{policy | permissions: %{policy.permissions | mode: mode}}
+    end
+
+    test "is refused unless the caller will hand the spawn to the container wrap" do
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Codex.default_argv("p", security: podman_policy())
+    end
+
+    test "with sandbox_wrap the argv names the container's codex and needs none on the host" do
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", "/nonexistent-dir-for-test")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      prior = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior || [], :inject_config, true))
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, Arbiter.MCP, prior),
+          else: Application.delete_env(:arbiter, Arbiter.MCP)
+      end)
+
+      assert {:ok, ["sh", "-c", _, "sh", @container_codex, "exec" | _] = argv} =
+               Codex.default_argv("the prompt",
+                 security: podman_policy(),
+                 sandbox_wrap: true,
+                 arb_token: "tok"
+               )
+
+      # The per-run home the container seeds is the only config: not the stopgap flag.
+      refute "--ignore-user-config" in argv
+      # MCP is `-c` overrides, with the bearer in the environment (bd-avq0wb).
+      overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
+      name = Arbiter.MCP.server_name()
+      assert "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}" in overrides
+      assert "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"" in overrides
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
+    end
+
+    test "the sandbox flags still follow the policy mode" do
+      for {mode, flag} <- [
+            bypass: "--dangerously-bypass-approvals-and-sandbox",
+            auto: ~s(sandbox_mode="workspace-write")
+          ] do
+        assert {:ok, argv} =
+                 Codex.default_argv("p", security: podman_policy(mode), sandbox_wrap: true)
+
+        assert flag in argv
+      end
+    end
+
+    test "spawn_env does not seed the host's per-worktree home or link the real auth.json",
+         %{base: base} do
+      env =
+        Codex.spawn_env(
+          security: podman_policy(),
+          sandbox_wrap: true,
+          worktree_path: Path.join(base, "wt"),
+          arb_token: "tok"
+        )
+
+      refute Enum.any?(env, &(elem(&1, 0) == "CODEX_HOME"))
+      assert {"ARBITER_MCP_TOKEN", "tok"} in env
+      refute File.exists?(ConfigDir.home_root())
+    end
+
+    test "write_confinement is the container, in bypass and auto; strict stays refused" do
+      assert Codex.write_confinement(podman_policy(:bypass)) == :os_jail
+      assert Codex.write_confinement(podman_policy(:auto)) == :os_jail
+      assert Codex.write_confinement(podman_policy(:strict)) == :none
+      assert Codex.write_jail_warning(podman_policy(:bypass)) == nil
+    end
+
+    test "egress_confinement follows the container's network capability" do
+      Application.put_env(:arbiter, :worker_container_network_available, true)
+      Application.put_env(:arbiter, :worker_container_available, true)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worker_container_network_available)
+        Application.delete_env(:arbiter, :worker_container_available)
+      end)
+
+      assert Codex.egress_confinement(podman_policy()) == :os_jail
+      assert Codex.egress_confinement(SecurityPolicy.base()) == :none
+
+      Application.put_env(:arbiter, :worker_container_network_available, false)
+      assert Codex.egress_confinement(podman_policy()) == :none
+    end
+  end
 end

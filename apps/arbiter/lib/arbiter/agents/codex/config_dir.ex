@@ -79,6 +79,7 @@ defmodule Arbiter.Agents.Codex.ConfigDir do
   change.
   """
 
+  alias Arbiter.Agents.Codex.AuthSync
   alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.Codex.Security
   alias Arbiter.Agents.SecurityPolicy
@@ -181,6 +182,43 @@ defmodule Arbiter.Agents.Codex.ConfigDir do
       _ ->
         []
     end
+  end
+
+  @doc """
+  Seed a **per-run** `CODEX_HOME` at `dir` for a containerised worker (the podman
+  sandbox backend, bd-50d5j6): the same generated `config.toml`, `AGENTS.md` and
+  execpolicy rules as `ensure/1`, but `auth.json` is a *copy* of the operator's
+  login (`AuthSync.seed/2`), not a link. The real file is never bind-mounted
+  into a container, so a link could not resolve there, and a copy that the CLI
+  rotates must be carried back by `AuthSync.sync/2`.
+
+  Not gated on the `worker_isolate_config` switch (a container always gets its
+  own home) and independent of the per-worktree host home. Options: `:security`
+  (the policy the rules are generated from) and `:source_home` (default
+  `source_home/0`).
+
+  `{:ok, %{dir: dir, auth: {source_auth, run_auth} | nil}}`; `auth` is `nil` when
+  the source has no login (a keyless backend).
+  """
+  @spec seed_run_home(Path.t(), keyword()) ::
+          {:ok, %{dir: Path.t(), auth: {Path.t(), Path.t()} | nil}} | {:error, term()}
+  def seed_run_home(dir, opts \\ []) when is_binary(dir) do
+    source = Keyword.get_lazy(opts, :source_home, &source_home/0)
+    src_auth = Path.join(source, "auth.json")
+    run_auth = Path.join(dir, "auth.json")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- write_config(dir, source),
+         :ok <- write_generated(dir, "AGENTS.md", worker_memory()),
+         :ok <- write_rules(dir, opts) do
+      case AuthSync.seed(src_auth, run_auth) do
+        :ok -> {:ok, %{dir: dir, auth: {src_auth, run_auth}}}
+        :no_source -> {:ok, %{dir: dir, auth: nil}}
+        {:error, reason} -> {:error, {:auth_copy_failed, reason}}
+      end
+    end
+  rescue
+    e -> {:error, {:seed_raised, e}}
   end
 
   @doc "The operator home the backend config and login are taken from."

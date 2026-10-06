@@ -256,6 +256,9 @@ defmodule ArbiterWeb.SessionDockLive do
      # banner, and it must survive `dismiss_error` and vice versa.
      |> assign(:launch_open?, false)
      |> assign(:launch_provider, "claude_code")
+     # bd-8qoxst: read when the panel opens (`toggle_launch`), not at mount —
+     # this view is chrome on every page and health changes under it.
+     |> assign(:launch_providers, nil)
      |> assign(:launch_auth_mode, "seeded_credentials")
      |> assign(:launch_name, nil)
      |> assign(:launch_workspace_id, nil)
@@ -356,7 +359,13 @@ defmodule ArbiterWeb.SessionDockLive do
     open? = not socket.assigns.launch_open?
 
     socket =
-      if open?, do: assign(socket, :workspaces, SessionIndexLive.workspaces()), else: socket
+      if open? do
+        socket
+        |> assign(:workspaces, SessionIndexLive.workspaces())
+        |> SessionIndexLive.refresh_launch_providers()
+      else
+        socket
+      end
 
     {:noreply,
      socket
@@ -383,22 +392,23 @@ defmodule ArbiterWeb.SessionDockLive do
   # `SessionIndexLive`'s own launch failure), but that is a history entry,
   # never something live sitting half-built in the roster.
   def handle_event("launch", params, socket) do
-    case Sessions.launch(SessionIndexLive.launch_defaults(params)) do
-      {:ok, session} ->
-        socket = load_sessions(socket)
-        open_ids = open_window_ids(socket.assigns.open_ids, session.id)
+    # `launch_defaults/1` also refuses a hidden or disabled provider (bd-8qoxst).
+    with {:ok, opts} <- SessionIndexLive.launch_defaults(params),
+         {:ok, session} <- Sessions.launch(opts) do
+      socket = load_sessions(socket)
+      open_ids = open_window_ids(socket.assigns.open_ids, session.id)
 
-        {:noreply,
-         socket
-         |> assign(:open_ids, open_ids)
-         |> prune_sizes(open_ids)
-         |> expand_window(session.id)
-         |> assign(:launch_open?, false)
-         |> assign(:launch_error, nil)
-         |> assign(:roster_open?, false)
-         |> SessionIndexLive.reset_launch_params()
-         |> persist()}
-
+      {:noreply,
+       socket
+       |> assign(:open_ids, open_ids)
+       |> prune_sizes(open_ids)
+       |> expand_window(session.id)
+       |> assign(:launch_open?, false)
+       |> assign(:launch_error, nil)
+       |> assign(:roster_open?, false)
+       |> SessionIndexLive.reset_launch_params()
+       |> persist()}
+    else
       {:error, reason} ->
         Logger.error("SessionDockLive: launch failed: #{inspect(reason)}")
 
@@ -1095,6 +1105,7 @@ defmodule ArbiterWeb.SessionDockLive do
         running_count={@running_count}
         launch_open?={@launch_open?}
         launch_provider={@launch_provider}
+        launch_providers={@launch_providers}
         launch_auth_mode={@launch_auth_mode}
         launch_name={@launch_name}
         launch_workspace_id={@launch_workspace_id}
@@ -1419,6 +1430,7 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :running_count, :integer, required: true
   attr :launch_open?, :boolean, required: true
   attr :launch_provider, :string, default: "claude_code"
+  attr :launch_providers, :list, default: nil
   attr :launch_auth_mode, :string, required: true
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
@@ -1455,6 +1467,7 @@ defmodule ArbiterWeb.SessionDockLive do
         <SessionIndexLive.launch_form
           prefix="session-dock-launch"
           launch_provider={@launch_provider}
+          launch_providers={@launch_providers}
           launch_auth_mode={@launch_auth_mode}
           launch_name={@launch_name}
           launch_workspace_id={@launch_workspace_id}

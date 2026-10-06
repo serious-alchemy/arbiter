@@ -416,7 +416,7 @@ defmodule Arbiter.Trackers.LinearTest do
     end
   end
 
-  describe "transition/2 :closed never moves an issue backwards (bd-4i7kky)" do
+  describe "transition/2 never moves an issue backwards (bd-4i7kky, bd-30ukqo)" do
     # Team workflow: Todo(unstarted,0) < In Progress(started,1) <
     # Ready to Ship(started,2) < QA(started,3) < Done(completed,4).
     @linear_states [
@@ -493,7 +493,7 @@ defmodule Arbiter.Trackers.LinearTest do
     test "an issue already in the closed-mapped state is not rewritten" do
       stub_linear("s-ship")
 
-      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :closed)
+      assert :ok = Linear.transition("ENG-1", :closed)
       refute_received {:wrote, _}
     end
 
@@ -516,13 +516,52 @@ defmodule Arbiter.Trackers.LinearTest do
       assert_received {:wrote, %{"stateId" => "s-done"}}
     end
 
-    test "only :closed is guarded — other events keep their behaviour" do
+    test "every forward event is guarded, not only :closed (bd-30ukqo)" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"in_progress" => "In Progress", "merged" => "Ready to Ship"}
+      })
+
+      stub_linear("s-qa")
+
+      assert {:error, %Error{kind: :upstream_past_target}} =
+               Linear.transition("ENG-1", :in_progress)
+
+      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :merged)
+      refute_received {:wrote, _}
+    end
+
+    test ":open (requeue/reopen) deliberately moves a started or done issue back" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"open" => "Todo"}
+      })
+
+      stub_linear("s-done")
+
+      assert :ok = Linear.transition("ENG-1", :open)
+      assert_received {:wrote, %{"stateId" => "s-todo"}}
+    end
+
+    test "an issue already exactly on the target is a silent no-op" do
       Config.put_active(%{
         "credentials_ref" => "test-token",
         "status_map" => %{"in_progress" => "In Progress"}
       })
 
-      stub_linear("s-qa")
+      stub_linear("s-prog")
+
+      assert :ok = Linear.transition("ENG-1", :in_progress)
+      refute_received {:wrote, _}
+    end
+
+    test "a non-close event still moves an issue that is genuinely earlier" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"in_progress" => "In Progress"}
+      })
+
+      stub_linear("s-todo")
 
       assert :ok = Linear.transition("ENG-1", :in_progress)
       assert_received {:wrote, %{"stateId" => "s-prog"}}

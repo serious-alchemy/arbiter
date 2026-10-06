@@ -597,32 +597,45 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
-  Record on the ticket that a tracker **close was skipped** because the upstream
-  item is already at, or not known to precede, the closed-mapped status
-  (bd-4i7kky). A `:notification` carrying the ticket's `task_ref`, so it shows in
+  Record on the ticket that a tracker **forward transition was skipped** because
+  the upstream item is already at, or not known to precede, the status mapped
+  from the lifecycle event (bd-4i7kky for `:closed`, every event since
+  bd-30ukqo). A `:notification` carrying the ticket's `task_ref`, so it shows in
   the ticket's MESSAGES panel and the activity feed without paging the
-  coordinator: nothing failed, but a forward close that was declined by mistake
-  (an unmapped in-progress status, say) must be findable from the ticket rather
-  than only in the logs. Best-effort, returns `:ok`.
+  coordinator: nothing failed, but a forward transition that was declined by
+  mistake (an unmapped in-progress status, say) must be findable from the ticket
+  rather than only in the logs. `snapshot[:event]` names the event (default
+  `:closed`). Best-effort, returns `:ok`.
   """
-  @spec tracker_close_skipped(map(), term()) :: :ok
-  def tracker_close_skipped(%{workspace_id: ws_id, task_id: task_id} = snapshot, reason)
+  @spec tracker_transition_skipped(map(), term()) :: :ok
+  def tracker_transition_skipped(%{workspace_id: ws_id, task_id: task_id} = snapshot, reason)
       when is_binary(ws_id) do
     tracker = Map.get(snapshot, :tracker_type)
     ref = Map.get(snapshot, :tracker_ref)
+    event = Map.get(snapshot, :event) || :closed
+
+    {label, summary} =
+      if event == :closed do
+        {"close",
+         "Closed #{title_for(task_id)} locally but did not close its upstream item: " <>
+           "it is already at, or not known to precede, the closed-mapped status."}
+      else
+        {"#{event} transition",
+         "Did not move the upstream item of #{title_for(task_id)} for #{event}: " <>
+           "it is already at, or not known to precede, the #{event}-mapped status."}
+      end
 
     Message.notify(%{
       workspace_id: ws_id,
       from_ref: task_id,
       task_ref: task_id,
-      subject: "#{task_id} tracker close skipped",
+      subject: "#{task_id} tracker #{label} skipped",
       body:
         [
-          "Closed #{title_for(task_id)} locally but did not close its upstream item: " <>
-            "it is already at, or not known to precede, the closed-mapped status.",
+          summary,
           tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
           "Detail: #{describe_reason(reason)}",
-          "Close it upstream by hand if it should be closed."
+          "Move it upstream by hand if it should be moved."
         ]
         |> Enum.reject(&is_nil/1)
         |> Enum.join("\n")
@@ -631,13 +644,16 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("CoordinatorNotifier.tracker_close_skipped swallowed: #{Exception.message(e)}")
+      Logger.debug(
+        "CoordinatorNotifier.tracker_transition_skipped swallowed: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, _ -> :ok
   end
 
-  def tracker_close_skipped(_snapshot, _reason), do: :ok
+  def tracker_transition_skipped(_snapshot, _reason), do: :ok
 
   @doc """
   Escalate a failed **review-coverage write** to the coordinator (bd-203cl5 /

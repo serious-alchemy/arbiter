@@ -183,7 +183,9 @@ defmodule Arbiter.Trackers.JiraTest do
           conn.method == "GET" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+            |> Req.Test.json(%{
+              "fields" => %{"status" => %{"name" => cur, "statusCategory" => %{"key" => "new"}}}
+            })
 
           conn.method == "POST" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -252,7 +254,9 @@ defmodule Arbiter.Trackers.JiraTest do
           conn.method == "GET" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+            |> Req.Test.json(%{
+              "fields" => %{"status" => %{"name" => cur, "statusCategory" => %{"key" => "new"}}}
+            })
 
           conn.method == "POST" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -323,7 +327,9 @@ defmodule Arbiter.Trackers.JiraTest do
           conn.method == "GET" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+            |> Req.Test.json(%{
+              "fields" => %{"status" => %{"name" => cur, "statusCategory" => %{"key" => "new"}}}
+            })
 
           conn.method == "POST" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -387,7 +393,9 @@ defmodule Arbiter.Trackers.JiraTest do
           conn.method == "GET" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+            |> Req.Test.json(%{
+              "fields" => %{"status" => %{"name" => cur, "statusCategory" => %{"key" => "new"}}}
+            })
 
           conn.method == "POST" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -434,7 +442,11 @@ defmodule Arbiter.Trackers.JiraTest do
         else
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "Backlog"}}})
+          |> Req.Test.json(%{
+            "fields" => %{
+              "status" => %{"name" => "Backlog", "statusCategory" => %{"key" => "new"}}
+            }
+          })
         end
       end)
 
