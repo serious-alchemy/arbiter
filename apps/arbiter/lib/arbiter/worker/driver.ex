@@ -53,7 +53,9 @@ defmodule Arbiter.Worker.Driver do
   `:max_ticks` bounds the loop. Defaults differ by mode:
     - workflow mode: 50 ticks × 100ms = 5 seconds (plenty for no-op steps).
     - claude-driven mode: 1800 ticks × 1000ms = 30 minutes (room for real
-      Claude work; tune via the `:max_ticks` and `:interval_ms` opts).
+      Claude work; tune via the `:max_ticks` and `:interval_ms` opts). Past the
+      budget the Driver still waits on a live run (bd-6dxqkg) — it only gives
+      up on a worker that is gone or failed.
   """
 
   use GenServer
@@ -131,7 +133,8 @@ defmodule Arbiter.Worker.Driver do
       # force-removed on the way out rather than run through the
       # dirty/ahead-of-base guards `maybe_cleanup_worktree/1` applies.
       review_checkout_path: Keyword.get(opts, :review_checkout_path),
-      ticks: 0
+      ticks: 0,
+      overrun_logged: false
     }
 
     Process.monitor(state.worker_pid)
@@ -146,6 +149,29 @@ defmodule Arbiter.Worker.Driver do
 
   defp default_max_ticks_for(true), do: @claude_default_max_ticks
   defp default_max_ticks_for(false), do: @workflow_default_max_ticks
+
+  # bd-21bmdh: an auth death reclaims its debris and returns the task to Ready
+  # (behind the provider's AuthHold). Every other failure keeps the task
+  # :active. Shared by the in-budget and past-budget (#372) paths.
+  defp handle_failed_worker(state, worker_state) do
+    case AuthDeath.handle(
+           state.task_id,
+           state.worker_pid,
+           worker_state,
+           blocking_workers(state)
+         ) do
+      :not_auth ->
+        Logger.warning(
+          "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :active"
+        )
+
+      {:auth, _outcome} ->
+        :ok
+    end
+
+    maybe_cleanup_worktree(state)
+    {:stop, :normal, state}
+  end
 
   defp schedule_first(%{claude_driven: true}), do: Process.send_after(self(), :check_worker, 0)
   defp schedule_first(%{claude_driven: false}), do: Process.send_after(self(), :tick, 0)
@@ -189,6 +215,25 @@ defmodule Arbiter.Worker.Driver do
         Process.send_after(self(), :check_worker, state.interval_ms)
         {:noreply, state}
 
+      # bd-6dxqkg (#372): a run still in flight when the budget lapses (a long
+      # research spike outlives 30 minutes) must not be abandoned. Stopping here
+      # left nobody to close the ticket when the run later finished `arb done`,
+      # so it sat `:active` holding its scheduler slot. Keep polling — the
+      # worker has its own bounds, and its exit or failure still ends this loop.
+      %{state: run_state} when run_state in [:starting, :working, :waiting] ->
+        unless state.overrun_logged do
+          Logger.warning(
+            "Worker.Driver (claude_driven) past max_ticks=#{m} for task=#{state.task_id} " <>
+              "with the run still live; continuing to wait for it"
+          )
+        end
+
+        Process.send_after(self(), :check_worker, state.interval_ms)
+        {:noreply, %{state | overrun_logged: true}}
+
+      %{state: :finished} = worker_state ->
+        handle_failed_worker(state, worker_state)
+
       _ ->
         Logger.warning(
           "Worker.Driver (claude_driven) hit max_ticks=#{m} for task=#{state.task_id}; stopping"
@@ -214,26 +259,7 @@ defmodule Arbiter.Worker.Driver do
         {:stop, :normal, state}
 
       %{state: :finished} = worker_state ->
-        # bd-21bmdh: an auth death reclaims its debris and returns the task to
-        # Ready (behind the provider's AuthHold). Every other failure keeps the
-        # task :active exactly as before.
-        case AuthDeath.handle(
-               state.task_id,
-               state.worker_pid,
-               worker_state,
-               blocking_workers(state)
-             ) do
-          :not_auth ->
-            Logger.warning(
-              "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :active"
-            )
-
-          {:auth, _outcome} ->
-            :ok
-        end
-
-        maybe_cleanup_worktree(state)
-        {:stop, :normal, state}
+        handle_failed_worker(state, worker_state)
 
       %{state: :waiting, waiting_on: :review_gate} ->
         # A distinct reviewer worker (ReviewGate) is evaluating the diff; it

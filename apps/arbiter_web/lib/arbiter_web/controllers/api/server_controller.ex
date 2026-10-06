@@ -41,6 +41,10 @@ defmodule ArbiterWeb.Api.ServerController do
       and whose Claude dispatch is now held. `arb server doctor` lists them.
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
+    * `GET /api/server/grok_auth` — grok's login state (bd-dpv4vt,
+      `Arbiter.Grok.AuthReport`): `enabled: false` unless a workspace routes to
+      or pins grok, else `state` (`logged_in` / `expired` / `reauth_required` /
+      `not_logged_in`) and the fix. `arb server doctor` reports it.
     * `GET /api/server/provider_accounts` — how this boot classified the
       install's provider accounts (bd-cvvb02, P13 bd-9gqj8e,
       `Arbiter.Accounts.Enablement.status/0`): the decision, and — re-read
@@ -161,6 +165,9 @@ defmodule ArbiterWeb.Api.ServerController do
         end)
     })
   end
+
+  # bd-dpv4vt: grok's login state, reported only when a workspace uses grok.
+  def grok_auth(conn, _params), do: json(conn, Arbiter.Grok.AuthReport.report())
 
   # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
   def worker_tmp(conn, _params), do: json(conn, Arbiter.Worker.RunTmp.diagnosis())

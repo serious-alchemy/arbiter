@@ -410,7 +410,95 @@ defmodule Arbiter.Worker.DriverTest do
       assert reloaded.state == :active
     end
 
-    test "max_ticks backstop stops the driver if the worker never completes", %{ws: ws} do
+    # bd-6dxqkg (#372): the tick budget (30 min by default) ran out while the
+    # agent was still working; the Driver gave up and stopped, so when the run
+    # later finished nobody closed the ticket and it held its slot forever.
+    for type <- [:research, :task] do
+      test "outlives the tick budget while a #{type} worker is live, then closes the task",
+           %{ws: ws} do
+        {:ok, task} =
+          Ash.create(Issue, %{
+            title: "cd-overrun",
+            workspace_id: ws.id,
+            issue_type: unquote(type),
+            notes: "findings write-up"
+          })
+
+        {:ok, worker_pid} =
+          Worker.start(
+            task_id: task.id,
+            repo: "r",
+            workspace_id: ws.id,
+            meta: %{issue_type: unquote(type)}
+          )
+
+        {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+        {:ok, machine_pid} = Machine.start(machine_id)
+        put_state!(task, :active)
+        :ok = Worker.advance(worker_pid, :running)
+
+        {:ok, driver_pid} =
+          Driver.start(
+            task_id: task.id,
+            worker_pid: worker_pid,
+            machine_id: machine_id,
+            machine_pid: machine_pid,
+            interval_ms: 5,
+            max_ticks: 3,
+            claude_driven: true
+          )
+
+        ref = Process.monitor(driver_pid)
+        refute_receive {:DOWN, ^ref, :process, _pid, _}, 100
+
+        :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+        # The real completion path: the session reader's `arb done` message.
+        send(worker_pid, {:__claude_session_done__, "arb done"})
+        assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+        assert Ash.get!(Issue, task.id).state == :closed
+
+        # The coordinator's /events stream hears about it too.
+        task_id = task.id
+        assert_receive {:event, %{topic: "worker_done", task_id: ^task_id}}, 1_000
+      end
+    end
+
+    test "past the tick budget, an auth-death failure returns the task to Ready", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "cd-auth", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      put_state!(task, :active)
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          max_ticks: 3,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      refute_receive {:DOWN, ^ref, :process, _pid, _}, 100
+
+      :ok =
+        Worker.fail(worker_pid, %Arbiter.Worker.StopReason{
+          category: :auth_expired,
+          summary: "401"
+        })
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+      assert Ash.get!(Issue, task.id).state == :queued
+    end
+
+    test "past the tick budget, a worker that fails stops the driver and leaves the task :active",
+         %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "cd-stuck", workspace_id: ws.id})
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
@@ -430,11 +518,12 @@ defmodule Arbiter.Worker.DriverTest do
         )
 
       ref = Process.monitor(driver_pid)
+      refute_receive {:DOWN, ^ref, :process, _pid, _}, 100
+
+      :ok = Worker.fail(worker_pid, :claude_crashed)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      # Task stays :active; we didn't close because worker didn't complete.
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.state == :active
+      assert Ash.get!(Issue, task.id).state == :active
     end
 
     # bd-d1jp4r: ticks must not consume budget while the worker is parked on

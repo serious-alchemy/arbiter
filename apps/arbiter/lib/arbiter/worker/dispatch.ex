@@ -68,10 +68,12 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Floors
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
+  alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Drain
@@ -1304,36 +1306,55 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp maybe_route(task, workspace, opts) do
-    if ProviderRouting.enabled?(workspace) do
-      role = Keyword.get(opts, :routing_role, :main)
-      override = caller_override(opts)
+    cond do
+      grok_routed?(task, workspace, opts) ->
+        # bd-dpv4vt: the operator's opt-in (`routing.grok`) is the routed
+        # override; quota/scored provider routing must not swap it back out.
+        opts
+        |> Keyword.put(:agent_type, :grok)
+        |> Keyword.put(:routed_agent_type, :grok)
 
-      routing_opts = [
-        override: override,
-        security: routing_security(workspace, opts),
-        routing_choice: Keyword.get(opts, :routing_choice),
-        repo: Keyword.get(opts, :repo)
-      ]
+      ProviderRouting.enabled?(workspace) ->
+        route_by_provider(task, workspace, opts)
 
-      case ProviderRouting.select(workspace, task, role, routing_opts) do
-        {:ok, selection} ->
-          opts
-          |> Keyword.put(:agent_type, selection.agent_type)
-          |> put_opt_if_present(
-            :provider_fallback,
-            ProviderRouting.truncate_fallback(selection.decision["fallback"])
-          )
-          |> put_routing_decision(selection.decision)
+      true ->
+        constrain_unrouted(task, workspace, opts)
+    end
+  end
 
-        {:legacy, decision} ->
-          # No routed candidates: the pool pick still applies, filtered by the
-          # ticket's constraint (bd-13pqcp), so dispatch and board agree.
-          opts
-          |> Keyword.put(:routing_decision, decision)
-          |> then(&constrain_unrouted(task, workspace, &1))
-      end
-    else
-      constrain_unrouted(task, workspace, opts)
+  defp grok_routed?(task, workspace, opts) do
+    Keyword.get(opts, :routing_role, :main) == :main and is_nil(caller_override(opts)) and
+      GrokRouting.route?(workspace, ByDifficulty.effective_difficulty(task.difficulty)) and
+      match?(%{type: :grok}, Keyword.get(opts, :routing_choice))
+  end
+
+  defp route_by_provider(task, workspace, opts) do
+    role = Keyword.get(opts, :routing_role, :main)
+    override = caller_override(opts)
+
+    routing_opts = [
+      override: override,
+      security: routing_security(workspace, opts),
+      routing_choice: Keyword.get(opts, :routing_choice),
+      repo: Keyword.get(opts, :repo)
+    ]
+
+    case ProviderRouting.select(workspace, task, role, routing_opts) do
+      {:ok, selection} ->
+        opts
+        |> Keyword.put(:agent_type, selection.agent_type)
+        |> put_opt_if_present(
+          :provider_fallback,
+          ProviderRouting.truncate_fallback(selection.decision["fallback"])
+        )
+        |> put_routing_decision(selection.decision)
+
+      {:legacy, decision} ->
+        # No routed candidates: the pool pick still applies, filtered by the
+        # ticket's constraint (bd-13pqcp), so dispatch and board agree.
+        opts
+        |> Keyword.put(:routing_decision, decision)
+        |> then(&constrain_unrouted(task, workspace, &1))
     end
   end
 

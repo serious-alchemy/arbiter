@@ -1292,7 +1292,11 @@ defmodule Arbiter.Board.Snapshot do
         mr_ref: Map.get(issue, :pr_ref),
         merger_url: Map.get(issue, :merger_url),
         merger_status: PullRequest.merger_status(issue),
-        watchdog_alive: ticket_watchdog_alive(issue.id, watchdog_live),
+        watchdog_alive:
+          if(Lifecycle.state_of(issue) == :merging,
+            do: ticket_watchdog_alive(issue.id, watchdog_live),
+            else: nil
+          ),
         merge_pulled: PullRequest.pulled?(issue),
         collapsed_note: collapsed_note(nil, group),
         since: Map.get(issue, :updated_at) || created_at(issue),

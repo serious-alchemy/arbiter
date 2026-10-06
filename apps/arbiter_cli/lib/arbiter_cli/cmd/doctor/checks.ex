@@ -55,6 +55,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_worker_tmp(),
       check_worker_memory(),
       check_claude_worker_credentials(),
+      check_grok_auth(),
       check_provider_accounts(),
       check_account_policy_binding(),
       check_merge_routing()
@@ -496,6 +497,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
         security_defaults_result(offenders)
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("workspace safe-default categories", err)
+
       _ ->
         %Result{
           name: "workspace safe-default categories",
@@ -623,6 +627,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
         agy_write_jail_result(host, offenders)
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy write jail", err)
+
       _ ->
         %Result{
           name: "agy write jail",
@@ -668,6 +675,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy ssh transport", err)
+
       _ ->
         %Result{
           name: "agy ssh transport",
@@ -712,6 +722,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy jail escape vectors", err)
+
       _ ->
         %Result{
           name: "agy jail escape vectors",
@@ -752,6 +765,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy jail hidden reads", err)
+
       _ ->
         %Result{
           name: "agy jail hidden reads",
@@ -789,6 +805,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy jail network", err)
+
       _ ->
         %Result{
           name: "agy jail network",
@@ -823,6 +842,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy jail keyring proxy", err)
 
       _ ->
         %Result{
@@ -864,6 +886,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("egress jail", err)
 
       _ ->
         %Result{
@@ -916,6 +941,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("guardrail profiles", err)
 
       _ ->
         %Result{
@@ -1057,6 +1085,28 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     }
   end
 
+  # A 5xx (or other non-404 HTTP error) from a server-backed check is a real
+  # failure, not "server unreachable or predates this check": only a 404
+  # (older server) or a transport error means skip.
+  defp server_error_result(name, %Client.Error{status: status} = err) do
+    %Result{
+      name: name,
+      status: :fail,
+      detail: "server returned HTTP #{status}: #{error_detail(err)}",
+      hint: "Check the server log for the failing /api/server request.",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp error_detail(%Client.Error{message: message, body: body}) do
+    case body do
+      %{"detail" => d} when is_binary(d) -> "#{message} (#{d})"
+      %{"error" => e} when is_binary(e) -> "#{message} (#{e})"
+      _ -> to_string(message)
+    end
+  end
+
   # bd-5ad4ch: the per-run worker TMPDIR root must be disk-backed and small.
   defp check_worker_tmp do
     case Client.get("/api/server/worker_tmp") do
@@ -1093,6 +1143,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
+        server_error_result("worker temp dir", err)
+
       _ ->
         %Result{
           name: "worker temp dir",
@@ -1117,6 +1170,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         worker_memory_ok(
           "not running as a systemd service (no OOMPolicy to set); " <> cap_summary(body)
         )
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
+        server_error_result("worker memory cap", err)
 
       _ ->
         worker_memory_ok("server unreachable or predates this check — skipping")
@@ -1243,6 +1299,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("tmux", err)
+
       _ ->
         %Result{
           name: "tmux",
@@ -1299,6 +1358,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("podman sandbox readiness", err)
 
       _ ->
         %Result{
@@ -1357,9 +1419,65 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("claude worker credentials", err)
+
       _ ->
         %Result{
           name: "claude worker credentials",
+          status: :ok,
+          detail: "could not check — server unreachable, or it predates this check",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-dpv4vt: grok is off unless a workspace routes to or pins it; then report
+  # its login. A missing or refused login holds grok dispatch only, so it is
+  # operator-actionable (non-zero exit) but never blocks deploy readiness.
+  defp check_grok_auth do
+    case Client.get("/api/server/grok_auth") do
+      {:ok, %{"enabled" => true, "state" => state} = body} when state in ~w(logged_in expired) ->
+        %Result{
+          name: "grok auth",
+          status: :ok,
+          detail:
+            "#{state |> String.replace("_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})" <>
+              if(state == "expired",
+                do: " — the broker refreshes it on the next dispatch",
+                else: ""
+              ),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"enabled" => true, "state" => state} = body} ->
+        %Result{
+          name: "grok auth",
+          status: :fail,
+          detail:
+            "#{String.replace(state, "_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})",
+          hint: Map.get(body, "fix"),
+          fatal: true,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"enabled" => false}} ->
+        %Result{
+          name: "grok auth",
+          status: :ok,
+          detail: "grok is not enabled for any workspace",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("grok auth", err)
+
+      _ ->
+        %Result{
+          name: "grok auth",
           status: :ok,
           detail: "could not check — server unreachable, or it predates this check",
           fatal: false,
@@ -1396,6 +1514,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("merge routing", err)
 
       _ ->
         %Result{
@@ -1441,6 +1562,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     case Client.get("/api/server/provider_accounts") do
       {:ok, %{"decision" => decision} = status} ->
         provider_accounts_result(decision, status)
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("provider accounts", err)
 
       _ ->
         %Result{
@@ -1542,6 +1666,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           |> Enum.flat_map(&policy_override_offenders/1)
 
         account_policy_binding_result(offenders)
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("account/workspace quota policy", err)
 
       _ ->
         %Result{
@@ -1708,10 +1835,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
   # there is no login", so a server reachable off-loopback exposes
   # unauthenticated LiveView pages to anyone who can reach the port. This is
-  # purely informational — never fatal, never blocks readiness — and any
-  # ambiguous response (server predates this endpoint, transient error, etc.)
-  # is treated as green rather than risking a spurious [fail] on installs
-  # that are already fine.
+  # purely informational — never fatal, never blocks readiness. An ambiguous
+  # response (server predates this endpoint, unreachable) is treated as green
+  # rather than risking a spurious [fail] on installs that are already fine,
+  # but a 5xx is a [fail] like every other server-backed check.
   defp check_bind_address do
     case Client.get("/api/server/bind_address") do
       {:ok, %{"loopback" => true, "ip" => ip}} ->
@@ -1740,6 +1867,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("bind address is loopback", err)
 
       _other ->
         %Result{

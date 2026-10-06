@@ -81,7 +81,8 @@ defmodule Arbiter.Accounts.ProviderSettings do
   @agent_types %{
     claude: "claude",
     codex: "codex",
-    antigravity: "gemini"
+    antigravity: "gemini",
+    grok: "grok"
   }
 
   @doc "The roles a workspace configures accounts for."
@@ -132,10 +133,17 @@ defmodule Arbiter.Accounts.ProviderSettings do
   @spec add(Workspace.t(), role(), String.t()) :: {:ok, Workspace.t()} | {:error, term()}
   def add(%Workspace{} = ws, role, account_ref) when role in @roles do
     with {:ok, account} <- Accounts.get_account(account_ref),
-         :ok <- usable(account) do
+         :ok <- usable(account),
+         :ok <- not_grok(account) do
       transact(ws, role, fn links -> attach(ws, role, account, links) end)
     end
   end
+
+  # bd-dpv4vt: grok is free-tier, D1-only. Attaching its account would put
+  # `grok` in `agent.type`, where provider routing sends any difficulty to it;
+  # the per-workspace opt-in is `routing.grok.enabled` (`GrokRouting`).
+  defp not_grok(%ProviderAccount{provider: :grok}), do: {:error, :grok_routed_by_opt_in}
+  defp not_grok(_), do: :ok
 
   @doc """
   Drop `account_id` from `role`. The link itself stays — it is still the

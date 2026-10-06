@@ -252,6 +252,20 @@ defmodule Arbiter.WorkerTest do
         refute_receive {:worker_done, ^task_id}, 500
         assert Worker.state(pid).outcome == :succeeded
       end
+
+      # bd-6dxqkg (#372): the MergeQueue message stays skipped, but the
+      # `/events` worker_done event must still fire for a no-PR ticket.
+      test "a `:#{type}`-type worker's arb-done still emits the worker_done event" do
+        ws_id = "ws-task-evt-#{System.unique_integer([:positive])}"
+        :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws_id))
+
+        {pid, task_id} = start_worker(workspace_id: ws_id, meta: %{issue_type: unquote(type)})
+
+        :ok = Worker.advance(pid, :run_claude)
+        send(pid, {:__claude_session_done__, "arb done"})
+
+        assert_receive {:event, %{topic: "worker_done", task_id: ^task_id}}, 500
+      end
     end
 
     test "advance/2 after complete/2 is rejected" do

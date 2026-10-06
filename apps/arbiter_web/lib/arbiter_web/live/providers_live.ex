@@ -56,7 +56,8 @@ defmodule ArbiterWeb.ProvidersLive do
   @providers [
     {"Claude", "claude"},
     {"Codex", "codex"},
-    {"Antigravity", "antigravity"}
+    {"Antigravity", "antigravity"},
+    {"Grok", "grok"}
   ]
 
   @kinds [
@@ -124,6 +125,11 @@ defmodule ArbiterWeb.ProvidersLive do
          if(login_terminal?(snapshot.status), do: fetch_providers(socket), else: socket)}
     end
   end
+
+  # Every live_session LiveView also receives the coordinator-inbox
+  # `{:new_message, _}` / `{:message_read, _}` broadcasts (LiveHooks `:cont`s
+  # them on); this page has no use for them.
+  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def handle_async(:providers, {:ok, data}, socket) do

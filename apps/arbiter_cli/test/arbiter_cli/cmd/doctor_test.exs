@@ -146,19 +146,47 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert out =~ "seeds.exs"
   end
 
+  # An older server answers 404 for every /api/server endpoint it predates;
+  # a route left unstubbed is a 500 and doctor now reports that as a failure.
+  @server_paths [
+    "/api/server/agy_write_jail",
+    "/api/server/bind_address",
+    "/api/server/claude_credentials",
+    "/api/server/dashboard_auth",
+    "/api/server/egress_jail",
+    "/api/server/grok_auth",
+    "/api/server/guardrails",
+    "/api/server/merge_routing",
+    "/api/server/migrations",
+    "/api/server/podman_sandbox",
+    "/api/server/provider_accounts",
+    "/api/server/tmux",
+    "/api/server/worker_memory",
+    "/api/server/worker_tmp"
+  ]
+
+  defp predating(routes) do
+    routes ++
+      for path <- @server_paths,
+          not List.keymember?(routes, {"get", path}, 0),
+          do: {{"get", path}, {%{"error" => "not found"}, 404}}
+  end
+
   test "--json emits structured payload" do
-    stub_routes([
-      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
-      {{"get", "/api/repos"}, {@repos_resp, 200}},
-      {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
-    ])
+    stub_routes(
+      predating([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+    )
 
     {out, _err, exit_code} = capture(fn -> Doctor.run(["--json"]) end)
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 29
+    assert length(checks) == 30
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1750,8 +1778,54 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
+    test "grok auth: silent-ok when disabled, reports state when enabled" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "not enabled"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{"enabled" => true, "workspaces" => ["w1"], "state" => "logged_in"}, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "logged in (w1)"
+    end
+
+    test "grok auth: a missing login fails with the fix and never blocks readiness" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "not_logged_in",
+                "fix" => "Run `grok login --device-code` on the Arbiter host."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ "grok login --device-code"
+      result = Enum.find(Checks.run(), &(&1.name == "grok auth"))
+      refute result.blocks_readiness
+    end
+
     test "a server that predates the check is reported as unknown, not as a failure" do
-      stub_routes(base_routes())
+      stub_routes(predating(base_routes()))
 
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] claude worker credentials"
@@ -1768,6 +1842,83 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
         {{"get", "/api/server/worker_tmp"}, {body, 200}}
       ]
+    end
+
+    test "a 500 from the endpoint fails with the status and detail" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"},
+           {%{"error" => %{"message" => "expand_default crashed"}}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :fail
+      assert result.detail =~ "expand_default crashed"
+    end
+
+    test "a 404 means the server predates the check" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"}, {%{"error" => "not found"}, 404}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :ok
+      assert result.detail =~ "predates this check"
+    end
+
+    test "another server-backed check (tmux) fails on a 500 instead of skipping" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/tmux"},
+          0,
+          {{"get", "/api/server/tmux"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      assert result.status == :fail
+      assert result.detail =~ "HTTP 500"
+    end
+
+    test "every server-backed endpoint fails on a 500 instead of skipping" do
+      for path <- @server_paths -- ["/api/server/migrations"] do
+        stub_routes(
+          List.keystore(
+            worker_tmp_routes(%{}),
+            {"get", path},
+            0,
+            {{"get", path}, {%{"error" => "boom"}, 500}}
+          )
+        )
+
+        assert Enum.any?(Checks.run(), &(&1.status == :fail and &1.detail =~ "HTTP 500")),
+               "#{path} hid a 500"
+      end
+    end
+
+    test "bind_address 500 fails" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/bind_address"},
+          0,
+          {{"get", "/api/server/bind_address"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "bind address is loopback"))
+      assert result.status == :fail
+      assert result.detail =~ "HTTP 500"
     end
 
     test "warns when the temp root is on tmpfs" do
@@ -1907,9 +2058,28 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert result.detail =~ "not running as a systemd service"
     end
 
+    test "still queries the memory cap when worker_tmp returns a 500" do
+      stub_routes(
+        List.keystore(
+          worker_memory_routes(memory_body(%{})),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      results = Checks.run()
+      assert Enum.find(results, &(&1.name == "worker temp dir")).status == :fail
+      memory = Enum.find(results, &(&1.name == "worker memory cap"))
+      refute memory.detail =~ "skipping"
+      assert memory.detail =~ "OOMPolicy"
+    end
+
     test "an unreachable or older server is skipped, not failed" do
       stub_routes(
-        List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
+        predating(
+          List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
+        )
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
@@ -1962,7 +2132,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
 
     test "skips quietly when the server predates the endpoint" do
-      stub_routes(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0))
+      stub_routes(predating(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0)))
 
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
@@ -2052,7 +2222,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
 
     test "an old server without the endpoint is not a failure" do
-      stub_routes(Enum.drop(routing_routes(%{}), -1))
+      stub_routes(predating(Enum.drop(routing_routes(%{}), -1)))
 
       result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
       assert result.status == :ok
@@ -2143,7 +2313,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
 
     test "a server that predates the check is reported as unknown, not as a failure" do
-      stub_routes(accounts_routes(%{}) |> List.delete_at(-1))
+      stub_routes(predating(accounts_routes(%{}) |> List.delete_at(-1)))
 
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] provider accounts"
@@ -2306,8 +2476,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "a server that predates the check is skipped" do
       stub_routes(
-        podman_routes(%{})
-        |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+        predating(
+          podman_routes(%{})
+          |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+        )
       )
 
       assert find_podman().status == :ok

@@ -621,10 +621,46 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_scoring(Map.get(routing, "scoring"))
     |> validate_capability_gates(routing)
     |> validate_floors(Map.get(routing, "floors"))
+    |> validate_grok_routing(Map.get(routing, "grok"))
   end
 
   defp validate_routing(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "routing must be a map")
+  end
+
+  # bd-dpv4vt: `routing.grok` is `%{"enabled" => bool, "difficulties" => [0..5]}`.
+  defp validate_grok_routing(changeset, nil), do: changeset
+
+  defp validate_grok_routing(changeset, %{} = grok) do
+    enabled = Map.get(grok, "enabled")
+    diffs = Map.get(grok, "difficulties")
+
+    cond do
+      not is_nil(enabled) and not is_boolean(enabled) ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "routing.grok.enabled must be true or false; got: #{inspect(enabled)}"
+        )
+
+      not is_nil(diffs) and
+          not (is_list(diffs) and diffs != [] and Enum.all?(diffs, &(&1 in 0..5))) ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "routing.grok.difficulties must be a non-empty list of integers 0..5; " <>
+              "got: #{inspect(diffs)}"
+        )
+
+      true ->
+        changeset
+    end
+  end
+
+  defp validate_grok_routing(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.grok must be a map; got: #{inspect(other)}"
+    )
   end
 
   # bd-40pzpj: `most_quota` routes the implementer to the attached account
