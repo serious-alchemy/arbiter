@@ -27,8 +27,8 @@ peer's kernel credentials and refuses any process Arbiter spawned
 * `arb mcp token mint`'s dual route (REST vs socket by environment) keeps its
   documented behaviour; the REST route already caps the minted token at the
   caller's authority (`McpController.mint_token/2`).
-* The login-start page for the dashboard's own UI stays loopback-only; it is a
-  browser flow, not an API tier.
+* The dashboard UI's own login-start path (the browser flow in D-A-18) is not
+  touched by this change; only the REST mint route gained the proof requirement.
 
 ## Tests
 
