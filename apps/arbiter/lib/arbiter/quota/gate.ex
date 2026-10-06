@@ -413,6 +413,30 @@ defmodule Arbiter.Quota.Gate do
     end
   end
 
+  @doc """
+  `validate_quota_config/1` for a partial *update* (bd-8vkqd3): a `nil` value
+  names a key to clear, so a settable key is valid as `nil` and the result
+  keeps it as `nil` for the caller to drop. Everything else validates exactly
+  as in `validate_quota_config/1`; an unknown key is still rejected, nil or not.
+  """
+  @spec validate_quota_config_patch(map()) ::
+          {:ok, map()} | {:error, {:invalid_quota_config, String.t()}}
+  def validate_quota_config_patch(updates) when is_map(updates) do
+    {clears, sets} = Map.split_with(updates, fn {_key, value} -> is_nil(value) end)
+
+    with {:ok, validated} <- validate_quota_config(sets),
+         [] <- Map.keys(clears) -- @quota_config_settable_keys do
+      {:ok, Enum.reduce(Map.keys(clears), validated, &Map.put(&2, &1, nil))}
+    else
+      {:error, _} = error ->
+        error
+
+      unknown ->
+        {:error,
+         {:invalid_quota_config, "unknown quota_config key(s): #{Enum.join(unknown, ", ")}"}}
+    end
+  end
+
   defp validate_quota_config_values(updates) do
     Enum.reduce_while(updates, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
       case validate_quota_config_field(key, value) do

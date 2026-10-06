@@ -19,7 +19,9 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--max-concurrent N]
                                      No credential is required at creation
                                      time (§2.4 — operator-asserted identity).
-      arb account set    <ref> [--max-concurrent N|none]
+      arb account set    <ref> [--label TEXT] [--plan TEXT]
+                                     [--enable | --disable]
+                                     [--max-concurrent N|none]
                                      [--threshold-mode flat|paced]
                                      [--weekly-threshold F] [--paced-floor F]
                                      [--weekly-paced-floor F]
@@ -38,6 +40,10 @@ defmodule ArbiterCli.Cmd.Account do
                                      `min(account, workspace)`. Only the given
                                      fields change; a sibling key already set
                                      (e.g. `throttle_threshold`) is untouched.
+                                     `--label` / `--plan` / `--enable` /
+                                     `--disable` (bd-8vkqd3): the display name,
+                                     the plan, and whether the account is
+                                     parked. An empty `--label ""` clears it.
                                      At least one flag is required.
       arb account attach <workspace-id> <provider> <ref> [--share N]
                                      Points a workspace at an account for a
@@ -133,7 +139,9 @@ defmodule ArbiterCli.Cmd.Account do
     json: :boolean,
     include_merged: :boolean,
     detach: :boolean,
-    hard: :boolean
+    hard: :boolean,
+    enable: :boolean,
+    disable: :boolean
   ]
 
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
@@ -287,13 +295,15 @@ defmodule ArbiterCli.Cmd.Account do
 
     payload =
       %{}
+      |> maybe_put_attrs(opts)
       |> maybe_put_ceiling(opts)
       |> maybe_put_quota_config(opts)
 
     if payload == %{} do
       Output.die(
-        "account set requires at least one of --max-concurrent, --threshold-mode, " <>
-          "--weekly-threshold, --paced-floor, --weekly-paced-floor"
+        "account set requires at least one of --label, --plan, --enable, --disable, " <>
+          "--max-concurrent, --threshold-mode, --weekly-threshold, --paced-floor, " <>
+          "--weekly-paced-floor"
       )
     end
 
@@ -301,6 +311,15 @@ defmodule ArbiterCli.Cmd.Account do
       {:ok, account} -> emit_set(account, mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  defp maybe_put_attrs(payload, opts) do
+    if opts[:enable] && opts[:disable], do: Output.die("--enable and --disable are exclusive")
+
+    payload
+    |> maybe_put("label", opts[:label])
+    |> maybe_put("plan", opts[:plan])
+    |> maybe_put("enabled", if(opts[:enable], do: true, else: if(opts[:disable], do: false)))
   end
 
   defp maybe_put_ceiling(payload, opts) do
@@ -356,7 +375,8 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts(
       "#{account["provider"]}:#{account["slug"]} max_concurrent=" <>
         "#{account["max_concurrent"] || "(none)"}" <>
-        " threshold_mode=#{quota_config["threshold_mode"] || "flat"}"
+        " threshold_mode=#{quota_config["threshold_mode"] || "flat"}" <>
+        " enabled=#{account["enabled"]}"
     )
   end
 
