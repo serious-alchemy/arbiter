@@ -348,11 +348,17 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
   defp grok_auth_text(:logged_in), do: "logged in"
   defp grok_auth_text(:expired), do: "token expired — refreshed on the next dispatch"
 
+  defp grok_auth_text(:refresh_unverified),
+    do: "token expired and not yet refreshed — run the doctor, or log in again"
+
+  defp grok_auth_text(:refresh_failed),
+    do: "token expired and the last refresh failed — check the network, or log in again"
+
   defp grok_auth_text(:reauth_required),
-    do: "re-login required: run `grok login --device-code` on the Arbiter host"
+    do: "re-login required: log in to the grok account from the dashboard"
 
   defp grok_auth_text(:not_logged_in),
-    do: "not logged in: run `grok login --device-code` on the Arbiter host"
+    do: "not logged in: log in to the grok account from the dashboard"
 
   defp write(socket, fun) do
     case fun.(socket.assigns.workspace) do

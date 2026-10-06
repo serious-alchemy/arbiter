@@ -18,7 +18,10 @@ defmodule Arbiter.Agents.Grok do
   spawn, and grok's own Landlock/bwrap sandbox would nest inside it. The prompt
   goes inline, or, when it would overflow one argv element, in a `--prompt-file`
   under the worker's bound HOME (the jail's `--tmpfs /tmp` hides `/tmp` files).
-  The whole thing runs under `sh -c 'exec "$@" < /dev/null'` so stdin is closed.
+  The whole thing runs under `sh -c '... exec "$@" < /dev/null'` so stdin is
+  closed. That script first runs `grok login` when the broker's
+  `GROK_AUTH_PROVIDER_COMMAND` is set and the worker's `GROK_HOME` has no
+  `auth.json`: headless `-p` never calls the provider cold (bd-8rvkqd).
 
   ## Security policy (bd-761q6h)
 
@@ -158,9 +161,30 @@ defmodule Arbiter.Agents.Grok do
          {:ok, prompt_args} <- prompt_args(prompt, opts),
          command = [grok | prompt_args] ++ flags(opts) ++ security_flags(policy, opts),
          {:ok, command} <- maybe_jail(command, opts, policy) do
-      {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
+      {:ok, ["sh", "-c", launch_script(grok), "sh" | command]}
     end
   end
+
+  # grok's headless `-p` never runs `GROK_AUTH_PROVIDER_COMMAND` on a cold
+  # `GROK_HOME`: it answers "Not signed in" without asking (grok 1.0.25,
+  # bd-8rvkqd). The command is only consulted to *refresh* a credential grok
+  # already holds, and `grok login` is what hydrates one (an `auth.json` with
+  # `auth_mode: external` and no refresh token). So when the broker's provider
+  # command is wired in and this home has no `auth.json` yet, run `grok login`
+  # first: it asks the broker for a token through the provider command, which
+  # is the first (logged) token request of the run. A failed login prints its
+  # output and the spawn goes on to die "Not signed in", which is an auth death
+  # like any other. Runs in the spawn's own env, before the jail wraps grok.
+  defp launch_script(grok) do
+    """
+    if [ -n "$GROK_AUTH_PROVIDER_COMMAND" ] && [ -n "$GROK_HOME" ] && [ ! -s "$GROK_HOME/auth.json" ]; then
+      #{quote_sh(grok)} login < /dev/null > "$GROK_HOME/arbiter-login.log" 2>&1 || cat "$GROK_HOME/arbiter-login.log" >&2
+    fi
+    exec "$@" < /dev/null
+    """
+  end
+
+  defp quote_sh(path), do: "'" <> String.replace(path, "'", "'\\''") <> "'"
 
   @impl true
   def spawn_env(opts \\ []) do

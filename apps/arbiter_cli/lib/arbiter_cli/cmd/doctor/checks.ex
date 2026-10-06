@@ -1436,6 +1436,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # bd-dpv4vt: grok is off unless a workspace routes to or pins it; then report
   # its login. A missing or refused login holds grok dispatch only, so it is
   # operator-actionable (non-zero exit) but never blocks deploy readiness.
+  # bd-8rvkqd: the report names the file the broker reads and its expiry, and an
+  # expired token is only ok while a refresh is known to work.
   defp check_grok_auth do
     case Client.get("/api/server/grok_auth") do
       {:ok, %{"enabled" => true, "state" => state} = body} when state in ~w(logged_in expired) ->
@@ -1444,8 +1446,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :ok,
           detail:
             "#{state |> String.replace("_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})" <>
+              grok_credential_detail(body) <>
               if(state == "expired",
-                do: " — the broker refreshes it on the next dispatch",
+                do:
+                  " — the broker's last refresh worked, so it refreshes this on the next dispatch",
                 else: ""
               ),
           fatal: false,
@@ -1457,7 +1461,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "grok auth",
           status: :fail,
           detail:
-            "#{String.replace(state, "_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})",
+            "#{String.replace(state, "_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})" <>
+              grok_credential_detail(body),
           hint: Map.get(body, "fix"),
           fatal: true,
           blocks_readiness: false
@@ -1483,6 +1488,19 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           fatal: false,
           blocks_readiness: false
         }
+    end
+  end
+
+  defp grok_credential_detail(body) do
+    case {Map.get(body, "path"), Map.get(body, "expires_at")} do
+      {path, expires} when is_binary(path) and is_binary(expires) ->
+        " — #{path}, access token expires #{expires}"
+
+      {path, _} when is_binary(path) ->
+        " — #{path}"
+
+      _ ->
+        ""
     end
   end
 

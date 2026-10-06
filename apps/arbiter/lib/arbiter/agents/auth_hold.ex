@@ -16,6 +16,18 @@ defmodule Arbiter.Agents.AuthHold do
   hold opens (`:threshold`, default 2). Without the hold, reopening would
   feed the wave: every death would put its task straight back in the queue.
 
+  ## grok opens on the first death (bd-8rvkqd)
+
+  grok is the exception: its login is one server-side credential
+  (`Arbiter.Grok.CredentialBroker`) that every grok worker shares, so a worker
+  that dies "Not signed in" at spawn is not a blip to retry, it says the
+  credential the broker serves is missing or refused. Counting to N would send
+  N-1 more D1 tickets into the same wall (the 2026-10-06 incident: the ticket
+  was reopened, routable to grok again, and nothing held it). So
+  `immediate_adapters/0` providers open the hold on the **first** auth death,
+  and `Arbiter.Agents.GrokRouting` stops routing to grok while it is open, so
+  the reopened ticket goes to the next eligible provider.
+
   "Consecutive" is per provider: a worker that *completes* on the provider
   (`record_success/2`) resets the streak, because it just proved the
   credential works.
@@ -105,6 +117,10 @@ defmodule Arbiter.Agents.AuthHold do
 
   @default_threshold 2
   @default_max_task_reopens 3
+
+  # Providers whose credential is one shared server-side login: a single auth
+  # death is conclusive, so the hold opens at once (see the moduledoc).
+  @immediate_adapters [Arbiter.Agents.Grok]
 
   @typedoc "Per-provider hold state."
   @type entry :: %{
@@ -242,6 +258,16 @@ defmodule Arbiter.Agents.AuthHold do
   @spec threshold(keyword()) :: pos_integer()
   def threshold(opts \\ []), do: config(:threshold, opts, @default_threshold)
 
+  @doc "Providers whose first auth death opens the hold (bd-8rvkqd)."
+  @spec immediate_adapters() :: [module()]
+  def immediate_adapters, do: @immediate_adapters
+
+  @doc "The deaths that open `adapter`'s hold: 1 for `immediate_adapters/0`, else `threshold/1`."
+  @spec threshold_for(module(), keyword()) :: pos_integer()
+  def threshold_for(adapter, opts \\ []) do
+    if adapter in @immediate_adapters, do: 1, else: threshold(opts)
+  end
+
   @doc """
   Auth deaths after which `Arbiter.Worker.AuthDeath` stops returning a task
   to Ready (app env › #{@default_max_task_reopens}).
@@ -264,7 +290,7 @@ defmodule Arbiter.Agents.AuthHold do
   @impl true
   def handle_call({:record_death, adapter, reason}, _from, state) do
     entry = entry(state, adapter)
-    threshold = threshold(state.opts)
+    threshold = threshold_for(adapter, state.opts)
 
     cond do
       entry.open? ->
@@ -422,7 +448,7 @@ defmodule Arbiter.Agents.AuthHold do
     Map.merge(entry, %{
       adapter: adapter,
       provider: provider_key(adapter),
-      threshold: threshold(state.opts)
+      threshold: threshold_for(adapter, state.opts)
     })
   end
 

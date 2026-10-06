@@ -1824,6 +1824,53 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
+    test "grok auth: an expired token the broker cannot refresh fails, naming the path and expiry" do
+      path = "/home/op/.arbiter/accounts/grok-default/auth.json"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "refresh_unverified",
+                "path" => path,
+                "expires_at" => "2026-10-02T12:00:00Z",
+                "fix" => "Log in again from the dashboard, which writes #{path}."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ path
+      assert out =~ "2026-10-02T12:00:00Z"
+      refute out =~ "the broker's last refresh worked"
+    end
+
+    test "grok auth: the refreshes-on-next-dispatch hint only appears when a refresh worked" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "expired",
+                "path" => "/a/auth.json",
+                "expires_at" => "2026-10-06T10:00:00Z"
+              }, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "/a/auth.json"
+      assert out =~ "the broker's last refresh worked"
+    end
+
     test "a server that predates the check is reported as unknown, not as a failure" do
       stub_routes(predating(base_routes()))
 

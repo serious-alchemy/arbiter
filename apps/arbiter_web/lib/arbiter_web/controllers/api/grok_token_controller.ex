@@ -7,14 +7,15 @@ defmodule ArbiterWeb.Api.GrokTokenController do
 
   `arb grok-token` (run by grok itself through the wrapper
   `Arbiter.Grok.AuthProvider` installs) calls this with the worker's own bearer
-  token. The answer comes from `Arbiter.Grok.CredentialBroker`, the single
+  token. Each request is logged by the broker with the task (and, for a jailed
+  worker, the run) that asked. The answer comes from `Arbiter.Grok.CredentialBroker`, the single
   refresher: the rotating refresh token stays on the server, and the worker only
   ever holds an access token that expires in hours. `force` is grok's
   `GROK_AUTH_EXPIRED=1`.
 
   Failures are `503`, `Cache-Control: no-store`, and carry the remedy and no
   token: `grok_reauth_required` / `grok_not_logged_in` (the operator has to run
-  `grok login`; an auth hold is already open) or `grok_unavailable` (the issuer
+  a grok login; an auth hold is already open) or `grok_unavailable` (the issuer
   is unreachable; retry).
   """
 
@@ -22,10 +23,17 @@ defmodule ArbiterWeb.Api.GrokTokenController do
 
   alias Arbiter.Grok.CredentialBroker
 
+  @relogin "Log in to grok again from the dashboard (the grok provider account's login); " <>
+             "with no grok account, run `grok login --device-code` on the Arbiter host."
+
   def create(conn, params) do
     conn = put_resp_header(conn, "cache-control", "no-store")
 
-    case CredentialBroker.fetch_token(force: params["force"] == true) do
+    case CredentialBroker.fetch_token(
+           force: params["force"] == true,
+           task_id: requester_task(conn),
+           run_id: requester_run(conn)
+         ) do
       {:ok, %{access_token: token, expires_in: expires_in}} ->
         json(conn, %{access_token: token, expires_in: expires_in})
 
@@ -34,11 +42,19 @@ defmodule ArbiterWeb.Api.GrokTokenController do
     end
   end
 
+  # Who asked, for the broker's per-request log line (bd-8rvkqd). A worker
+  # token is bound to its task; a jailed worker's bridge also names its run.
+  defp requester_task(%{assigns: %{mcp_scope: %{task_id: task_id}}}), do: task_id
+  defp requester_task(_conn), do: nil
+
+  defp requester_run(%{assigns: %{worker_bridge: {run_id, _resolution}}}), do: run_id
+  defp requester_run(_conn), do: nil
+
   defp failure(conn, :reauth_required) do
     fail(
       conn,
       "grok_reauth_required",
-      "The grok login was refused by x.ai. Run `grok login --device-code` on the Arbiter host."
+      "The grok login was refused by x.ai. #{@relogin}"
     )
   end
 
@@ -46,7 +62,7 @@ defmodule ArbiterWeb.Api.GrokTokenController do
     fail(
       conn,
       "grok_not_logged_in",
-      "There is no usable grok login. Run `grok login --device-code` on the Arbiter host."
+      "There is no usable grok login. #{@relogin}"
     )
   end
 
