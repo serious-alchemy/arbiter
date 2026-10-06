@@ -73,6 +73,12 @@ defmodule Arbiter.Nodes.Node do
       end
     end
 
+    # The operator's edit surface (`arb node set`): what the node is called and
+    # how much it may run. Never credentials or status.
+    update :set do
+      accept [:name, :labels, :max_workers]
+    end
+
     update :touch do
       accept [:last_seen_at]
     end

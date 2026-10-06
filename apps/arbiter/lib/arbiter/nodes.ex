@@ -345,6 +345,63 @@ defmodule Arbiter.Nodes do
     end
   end
 
+  @settable [:name, :labels, :max_workers]
+
+  @doc """
+  Edit a node's `name`, `labels` and `max_workers` (anything else in `changes`
+  is ignored: credentials and status have their own verbs). A revoked node is
+  `{:error, :revoked}`, a name another node holds `{:error, :name_taken}`.
+  Writes an `updated` event naming the fields that actually changed.
+  """
+  @spec update_node(Node.t(), map(), Actor.t() | String.t() | nil) ::
+          {:ok, Node.t()} | {:error, :revoked | :name_taken | :not_found | term()}
+  def update_node(%Node{id: id}, changes, actor) do
+    case get_node(id) do
+      nil ->
+        {:error, :not_found}
+
+      %Node{status: :revoked} ->
+        {:error, :revoked}
+
+      %Node{} = node ->
+        wanted =
+          Map.new(@settable, &{&1, settable(changes, &1)}) |> Map.reject(&(elem(&1, 1) == :skip))
+
+        delta = Map.reject(wanted, fn {k, v} -> Map.get(node, k) == v end)
+
+        if delta == %{} do
+          {:ok, node}
+        else
+          apply_set(node, delta, actor)
+        end
+    end
+  end
+
+  defp settable(changes, key) do
+    cond do
+      Map.has_key?(changes, key) -> Map.fetch!(changes, key)
+      Map.has_key?(changes, Atom.to_string(key)) -> Map.fetch!(changes, Atom.to_string(key))
+      true -> :skip
+    end
+  end
+
+  defp apply_set(node, delta, actor) do
+    case Ash.update(node, delta, action: :set) do
+      {:ok, updated} ->
+        detail = %{"changes" => Map.new(delta, fn {k, v} -> {Atom.to_string(k), v} end)}
+        record(:updated, node.id, Actor.resolve_label(actor), detail)
+        {:ok, updated}
+
+      {:error, error} ->
+        if name_conflict?(error), do: {:error, :name_taken}, else: {:error, error}
+    end
+  end
+
+  defp name_conflict?(%{errors: errors}) when is_list(errors),
+    do: Enum.any?(errors, &(Map.get(&1, :field) == :name))
+
+  defp name_conflict?(_), do: false
+
   # ---- reads -------------------------------------------------------------
 
   @doc "A node by id, or `nil`."
@@ -352,6 +409,17 @@ defmodule Arbiter.Nodes do
   def get_node(id) when is_binary(id) do
     Node |> Ash.Query.filter(id == ^id) |> Ash.read_one!()
   end
+
+  @doc "A node by id or by (unique) name, or `nil`."
+  @spec find_node(String.t()) :: Node.t() | nil
+  def find_node(ref) when is_binary(ref) do
+    case Ecto.UUID.cast(ref) do
+      {:ok, _} -> get_node(ref) || get_node_by_name(ref)
+      :error -> get_node_by_name(ref)
+    end
+  end
+
+  defp get_node_by_name(name), do: Node |> Ash.Query.filter(name == ^name) |> Ash.read_one!()
 
   @doc "Every node, by name."
   @spec list_nodes() :: [Node.t()]
