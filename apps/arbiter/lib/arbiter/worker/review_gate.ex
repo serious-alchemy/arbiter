@@ -1593,6 +1593,30 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
+  # (the wait already backs off between re-runs); a re-run that cannot be made is
+  # the same escalation as one that keeps being cancelled.
+  defp ci_act(state, wait, :rerun_infra, _result) do
+    case ci_rerun(state) do
+      :ok ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} was cancelled, not failed; " <>
+            "re-running it (#{wait.infra_reruns})"
+        )
+
+        {:wait, ci_schedule(state, wait)}
+
+      {:error, why} ->
+        ci_infra(
+          state,
+          "CI infrastructure: checks on #{wait.sha} were cancelled, not failed, and could " <>
+            "not be re-run (#{why})."
+        )
+    end
+  end
+
+  defp ci_act(state, _wait, {:infra, reason}, _result), do: ci_infra(state, reason)
+
   defp ci_act(state, wait, :fix, _result) do
     stored = if wait.rerun, do: wait.rerun.checks, else: []
 
@@ -1629,6 +1653,25 @@ defmodule Arbiter.Worker.ReviewGate do
     else
       enter_revise(state, findings, :ci)
     end
+  end
+
+  # Still cancelled after the re-runs: one distinct coordinator escalation, and no
+  # implementer round. The reviewer goes ahead and runs the tests itself, as for
+  # any CI that cannot vouch for a head.
+  defp ci_infra(state, reason) do
+    Logger.warning(
+      "ReviewGate: #{reason} (task=#{state.task_id}, round #{state.round}); escalating, no fix round"
+    )
+
+    safe(fn ->
+      CoordinatorNotifier.merge_blocked(
+        %{workspace_id: state.workspace_id, task_id: state.task_id},
+        state.ci_ctx.pr_ref,
+        :ci_cancelled
+      )
+    end)
+
+    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
   end
 
   defp ci_fall_back(state, reason) do

@@ -90,8 +90,17 @@ defmodule Arbiter.Mergers.Github do
   @max_review_pages 50
 
   # Check-run conclusions that count as a CI failure (shared by the pipeline
-  # classifier and the `:ci_failed` log fetch).
-  @failing_conclusions ["failure", "timed_out", "action_required", "cancelled"]
+  # classifier and the `:ci_failed` log fetch). `timed_out` stays a code failure:
+  # a hung test is as likely this diff's as the runner's.
+  @failing_conclusions ["failure", "timed_out", "action_required"]
+
+  # Conclusions that say the check never gave a verdict — the runner was
+  # cancelled out from under it (a superseded duplicate run, a GitHub Actions
+  # incident), not the code. They re-run; they never dispatch a fix round (#360).
+  @infra_conclusions ["cancelled", "stale"]
+
+  # A run `rerun_ci/2` can act on: a settled failure or an infrastructure outcome.
+  @rerunnable_conclusions @failing_conclusions ++ @infra_conclusions
 
   # How much of each failing check's output to keep in the fix-pass briefing.
   @log_tail_limit 4_000
@@ -186,7 +195,7 @@ defmodule Arbiter.Mergers.Github do
 
   # `CheckRun.conclusion` values (GraphQL enum, upper snake case) that count as
   # a settled failure — the GraphQL-side counterpart to `@failing_conclusions`.
-  @failing_check_run_conclusions ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"]
+  @failing_check_run_conclusions ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED"]
 
   # `StatusContext.state` values that count as a settled failure. Legacy
   # commit statuses have no separate "still running" status field — PENDING
@@ -724,18 +733,23 @@ defmodule Arbiter.Mergers.Github do
          )
          |> handle_json() do
       {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
-        runs
-        |> Enum.filter(&(failed_run?(&1) and matches_workflow?(&1, workflow)))
+        matching = Enum.filter(runs, &matches_workflow?(&1, workflow))
+
+        matching
+        |> Enum.filter(&failed_run?/1)
         |> List.first()
         |> case do
           nil ->
+            in_flight =
+              if Enum.any?(matching, &in_flight_run?/1), do: " (a run is still running)", else: ""
+
             {:error,
              %Error{
                kind: :not_found,
                status: nil,
                message:
                  "cannot re-run CI: no failed workflow run on head SHA #{sha}" <>
-                   if(workflow, do: " matching #{inspect(workflow)}", else: ""),
+                   if(workflow, do: " matching #{inspect(workflow)}", else: "") <> in_flight,
                raw: nil
              }}
 
@@ -758,8 +772,12 @@ defmodule Arbiter.Mergers.Github do
   end
 
   defp failed_run?(run) do
-    Map.get(run, "status") == "completed" and Map.get(run, "conclusion") in @failing_conclusions
+    Map.get(run, "status") == "completed" and
+      Map.get(run, "conclusion") in @rerunnable_conclusions
   end
+
+  defp in_flight_run?(run),
+    do: Map.get(run, "status") in ["queued", "in_progress", "waiting", "requested", "pending"]
 
   defp matches_workflow?(_run, nil), do: true
 
@@ -842,7 +860,7 @@ defmodule Arbiter.Mergers.Github do
        body
        |> rollup_contexts()
        |> Enum.reject(&is_nil/1)
-       |> Enum.filter(&required_settled_failure?/1)
+       |> required_failures()
        |> Enum.map(&summarize_required_check/1)}
     end
   end
@@ -1365,6 +1383,7 @@ defmodule Arbiter.Mergers.Github do
   #   :conflict                  — mergeable=false / mergeable_state "dirty"
   #   :behind_base               — "behind" (no conflict, just stale vs base)
   #   :ci_failed                 — a required check failed (pipeline :failed)
+  #   :ci_cancelled              — checks were cancelled, none failed (pipeline :canceled)
   #   :needs_approval            — "blocked" by required review, or a dismissed
   #                                approval (a review the fleet can still wait on)
   #   :needs_nonauthor_approval  — "blocked" on a required review of a
@@ -1390,6 +1409,7 @@ defmodule Arbiter.Mergers.Github do
       state == "dirty" or Map.get(pr, "mergeable") == false -> {:conflict, nil}
       state == "behind" -> {:behind_base, nil}
       pipeline == :failed -> {:ci_failed, nil}
+      pipeline == :canceled -> {:ci_cancelled, nil}
       changes_requested -> {:needs_approval, nil}
       state == "blocked" -> blocked_reason(cfg, target, pr, pipeline, approved)
       state in ["clean", "has_hooks", "unstable", "unknown", nil] -> {nil, nil}
@@ -1778,19 +1798,57 @@ defmodule Arbiter.Mergers.Github do
     conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
     statuses = Enum.map(runs, &Map.get(&1, "status"))
 
+    in_flight? =
+      Enum.any?(statuses, &(&1 in ["in_progress", "queued", "waiting", "requested", "pending"]))
+
     cond do
-      Enum.any?(conclusions, &(&1 in @failing_conclusions)) ->
+      real_failure?(runs) ->
         :failed
+
+      # Cancelled with nothing real failing: an infrastructure outcome. A re-run
+      # of it still in flight is `:running`, not cancelled (#360).
+      Enum.any?(conclusions, &(&1 in @infra_conclusions)) ->
+        if in_flight?, do: :running, else: :canceled
 
       Enum.all?(statuses, &(&1 == "completed")) and
           Enum.all?(conclusions, &(&1 in ["success", "skipped", "neutral"])) ->
         :success
 
-      Enum.any?(statuses, &(&1 in ["in_progress", "queued", "waiting", "requested", "pending"])) ->
+      in_flight? ->
         :running
 
       true ->
         :neutral
+    end
+  end
+
+  # A genuine code failure: a failing conclusion that is not an aggregate job
+  # merely reporting a cancelled shard.
+  defp real_failure?(runs) do
+    Enum.any?(runs, fn run ->
+      Map.get(run, "conclusion") in @failing_conclusions and
+        not cancelled_aggregate?(run, runs)
+    end)
+  end
+
+  # The aggregate job (`mix test`, which `needs:` every `mix test (app 1/3)`
+  # shard) fails when a shard is cancelled, though nothing failed. Look through
+  # it: a failing check whose "<name> (…" matrix siblings include a cancelled
+  # one and no failed one is that cancellation echoed, not a second failure.
+  defp cancelled_aggregate?(run, runs) do
+    name = Map.get(run, "name")
+
+    if is_binary(name) and Map.get(run, "conclusion") == "failure" do
+      siblings =
+        Enum.filter(runs, fn other ->
+          other_name = Map.get(other, "name")
+          is_binary(other_name) and String.starts_with?(other_name, name <> " (")
+        end)
+
+      Enum.any?(siblings, &(Map.get(&1, "conclusion") in @infra_conclusions)) and
+        not Enum.any?(siblings, &(Map.get(&1, "conclusion") in @failing_conclusions))
+    else
+      false
     end
   end
 
@@ -2249,9 +2307,33 @@ defmodule Arbiter.Mergers.Github do
         []
     end
     |> Enum.reject(&is_nil/1)
-    |> Enum.filter(&required_settled_failure?/1)
+    |> required_failures()
     |> Enum.map(&summarize_required_check/1)
   end
+
+  # Required+settled failures, minus an aggregate CheckRun that failed only
+  # because a matrix shard was cancelled (#360). Same look-through as
+  # `cancelled_aggregate?/2`, with the GraphQL upper-case enums normalised to
+  # the REST lower-case values, so PRPatrol files no fix follow-up for it.
+  defp required_failures(contexts) do
+    runs = for %{"__typename" => "CheckRun"} = ctx <- contexts, do: rest_run(ctx)
+
+    contexts
+    |> Enum.filter(&required_settled_failure?/1)
+    |> Enum.reject(fn ctx ->
+      Map.get(ctx, "__typename") == "CheckRun" and cancelled_aggregate?(rest_run(ctx), runs)
+    end)
+  end
+
+  defp rest_run(ctx) do
+    %{
+      "name" => Map.get(ctx, "name"),
+      "conclusion" => ctx |> Map.get("conclusion") |> downcase_enum()
+    }
+  end
+
+  defp downcase_enum(v) when is_binary(v), do: String.downcase(v)
+  defp downcase_enum(v), do: v
 
   # A required rollup context (CheckRun or legacy StatusContext) that has
   # settled on a failing outcome. A required check still IN_PROGRESS/PENDING

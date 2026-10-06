@@ -34,10 +34,16 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
+    {Arbiter.Worker.Watchdog, :park_ci_cancelled, 1,
+     "#360: cancelled CI checks still cancelled after the re-run cap park the watcher and page " <>
+       "the coordinator once as CI infrastructure — nothing is refused, no fix round is dispatched"},
     {Arbiter.Worker.Watchdog, :spawn_conflict_resolver, 1,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
     # --- review_gate.ex ---
+    {Arbiter.Worker.ReviewGate, :ci_infra, 2,
+     "#360: cancelled CI checks re-run, then page the coordinator once as CI infrastructure " <>
+       "and fall back to a reviewer-run suite — nothing is refused, no fix round is dispatched"},
     {Arbiter.Worker.ReviewGate, :rearm_ci_wait, 2,
      "bd-2gc809: a boot lookup miss (no marker, no worktree); the reconciler clears the " <>
        "marker and the ordinary resume takes the ticket — nothing is refused or escalated"},
