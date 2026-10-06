@@ -1,12 +1,16 @@
 defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
-  `arb create <title> [--description ...] [--priority N] [--difficulty N]
+  `arb create <title> [--description ...] [--acceptance ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
                        [--tracker-ref REF] [--no-tracker]
                        [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--ticket-only]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
+
+  `--acceptance TEXT` sets the acceptance criteria at create time, so a
+  bug/feature can be promoted to Ready straight away. Unknown flags are
+  rejected with a non-zero exit rather than silently dropped.
 
   ## --difficulty N (0..5 / D0..D5)
 
@@ -154,10 +158,11 @@ defmodule ArbiterCli.Cmd.Create do
   passes it doesn't break.
   """
 
-  alias ArbiterCli.{Client, Output, ProviderConstraintFlags, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, ProviderConstraintFlags, Workspace}
 
   @switches [
     description: :string,
+    acceptance: :string,
     priority: :integer,
     difficulty: :integer,
     type: :string,
@@ -190,8 +195,7 @@ defmodule ArbiterCli.Cmd.Create do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @all_switches)
-      mode = if opts[:json], do: :json, else: :text
+      {opts, rest, mode} = ArgParser.parse_strict!(argv, "arb create", strict: @all_switches)
 
       title =
         case rest do
@@ -273,6 +277,7 @@ defmodule ArbiterCli.Cmd.Create do
     payload =
       %{"title" => title, "workspace_id" => workspace_id}
       |> maybe_put("description", opts[:description])
+      |> maybe_put("acceptance", opts[:acceptance])
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])
