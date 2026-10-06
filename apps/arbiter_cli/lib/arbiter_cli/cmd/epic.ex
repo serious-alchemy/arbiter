@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Epic do
   Operator and coordinator tokens only; a worker token gets a 403.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @usage "epic floor requires: <id> P1|P2|P3|none"
 
@@ -23,9 +23,9 @@ defmodule ArbiterCli.Cmd.Epic do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb epic", switches: [])
 
-      case Output.drop_json(argv) do
+      case rest do
         ["floor" | rest] -> floor(rest, mode)
         [] -> Output.die("epic requires a subcommand: `floor`")
         [unknown | _] -> Output.die("unknown epic subcommand: #{unknown}")

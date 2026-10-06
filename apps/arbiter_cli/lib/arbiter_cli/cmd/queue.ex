@@ -65,50 +65,65 @@ defmodule ArbiterCli.Cmd.Queue do
   on.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
-  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      rest = Output.drop_json(argv)
-      mode = Output.mode(argv)
+      dispatch(argv)
+    end
+  end
 
-      case rest do
-        [cmd, task_id | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
-          retry_auto_resolve(task_id, mode)
+  # `mark-ci-external`'s trailing words are a free-text note — one of the
+  # deliberate opt-outs from strict flag parsing (bd-cqw11s): a word that
+  # starts with a dash is part of the note, not a flag. Only `--json` is
+  # peeled off. Every other verb parses strictly.
+  defp dispatch([cmd | tail]) when cmd in ["mark-ci-external", "mark_ci_external"] do
+    mode = Output.mode(tail)
 
-        [cmd | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
-          Output.die("queue retry-auto-resolve requires: <task-id>")
+    case Output.drop_json(tail) do
+      [task_id | note_parts] when note_parts != [] ->
+        mark_ci_external(task_id, Enum.join(note_parts, " "), mode)
 
-        [cmd, task_id | _] when cmd in ["restart-watchdog", "restart_watchdog"] ->
-          restart_watchdog(task_id, mode)
+      _ ->
+        Output.die("queue mark-ci-external requires: <task-id> <note>")
+    end
+  end
 
-        [cmd | _] when cmd in ["restart-watchdog", "restart_watchdog"] ->
-          Output.die("queue restart-watchdog requires: <task-id>")
+  defp dispatch([cmd | tail]) when cmd in ["rerun-ci", "rerun_ci"] do
+    {opts, rest, mode} =
+      ArgParser.parse(tail,
+        command: "arb queue rerun-ci",
+        switches: [mode: :string, workflow: :string, input: [:string, :keep]]
+      )
 
-        [cmd, task_id | rest_args] when cmd in ["rerun-ci", "rerun_ci"] ->
-          rerun_ci(task_id, rest_args, mode)
+    case rest do
+      [task_id | extra] -> rerun_ci(task_id, extra, opts, mode)
+      [] -> Output.die("queue rerun-ci requires: <task-id>")
+    end
+  end
 
-        [cmd | _] when cmd in ["rerun-ci", "rerun_ci"] ->
-          Output.die("queue rerun-ci requires: <task-id>")
+  defp dispatch(argv) do
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb queue", switches: [])
 
-        [cmd, task_id | note_parts]
-        when cmd in ["mark-ci-external", "mark_ci_external"] and note_parts != [] ->
-          mark_ci_external(task_id, Enum.join(note_parts, " "), mode)
+    case rest do
+      [cmd, task_id | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
+        retry_auto_resolve(task_id, mode)
 
-        [cmd | _] when cmd in ["mark-ci-external", "mark_ci_external"] ->
-          Output.die("queue mark-ci-external requires: <task-id> <note>")
+      [cmd | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
+        Output.die("queue retry-auto-resolve requires: <task-id>")
 
-        _ ->
-          IO.puts(:stderr, "arb: unknown queue subcommand")
-          IO.puts(:stderr, "Run `arb queue --help` for usage.")
-          Output.halt(2)
-      end
+      [cmd, task_id | _] when cmd in ["restart-watchdog", "restart_watchdog"] ->
+        restart_watchdog(task_id, mode)
+
+      [cmd | _] when cmd in ["restart-watchdog", "restart_watchdog"] ->
+        Output.die("queue restart-watchdog requires: <task-id>")
+
+      _ ->
+        IO.puts(:stderr, "arb: unknown queue subcommand")
+        IO.puts(:stderr, "Run `arb queue --help` for usage.")
+        Output.halt(2)
     end
   end
 
@@ -196,11 +211,11 @@ defmodule ArbiterCli.Cmd.Queue do
 
   @rerun_modes ~w(auto failed_jobs all_jobs workflow)
 
-  defp rerun_ci(task_id, args, mode) do
-    {opts, bad} = parse_rerun_args(args, %{}, [])
-    bad != [] && Output.die("queue rerun-ci: unrecognised argument(s): #{Enum.join(bad, " ")}")
+  defp rerun_ci(task_id, extra, opts, mode) do
+    extra != [] &&
+      Output.die("queue rerun-ci: unrecognised argument(s): #{Enum.join(extra, " ")}")
 
-    case Client.post("/api/queue/#{task_id}/rerun_ci", opts) do
+    case Client.post("/api/queue/#{task_id}/rerun_ci", rerun_body(opts)) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -248,34 +263,40 @@ defmodule ArbiterCli.Cmd.Queue do
 
   defp rerun_summary(task_id, _body), do: "Re-ran CI for #{task_id}."
 
-  defp parse_rerun_args([], opts, bad), do: {opts, Enum.reverse(bad)}
-
-  defp parse_rerun_args(["--mode", value | rest], opts, bad) do
-    if value in @rerun_modes do
-      parse_rerun_args(rest, Map.put(opts, "mode", value), bad)
-    else
-      Output.die(
-        "queue rerun-ci: unknown --mode #{inspect(value)} — expected one of: " <>
-          Enum.join(@rerun_modes, ", ")
-      )
-    end
+  defp rerun_body(opts) do
+    %{}
+    |> put_mode(opts[:mode])
+    |> maybe_put("workflow", opts[:workflow])
+    |> put_inputs(Keyword.get_values(opts, :input))
   end
 
-  defp parse_rerun_args(["--workflow", value | rest], opts, bad),
-    do: parse_rerun_args(rest, Map.put(opts, "workflow", value), bad)
+  defp put_mode(body, nil), do: body
 
-  defp parse_rerun_args(["--input", kv | rest], opts, bad) do
-    case String.split(kv, "=", parts: 2) do
-      [k, v] ->
-        inputs = Map.put(Map.get(opts, "inputs", %{}), k, v)
-        parse_rerun_args(rest, Map.put(opts, "inputs", inputs), bad)
+  defp put_mode(body, value) when value in @rerun_modes, do: Map.put(body, "mode", value)
 
-      _ ->
-        Output.die("queue rerun-ci: --input expects key=value, got: #{inspect(kv)}")
-    end
+  defp put_mode(_body, value) do
+    Output.die(
+      "queue rerun-ci: unknown --mode #{inspect(value)} — expected one of: " <>
+        Enum.join(@rerun_modes, ", ")
+    )
   end
 
-  defp parse_rerun_args([arg | rest], opts, bad), do: parse_rerun_args(rest, opts, [arg | bad])
+  defp maybe_put(body, _key, nil), do: body
+  defp maybe_put(body, key, value), do: Map.put(body, key, value)
+
+  defp put_inputs(body, []), do: body
+
+  defp put_inputs(body, kvs) do
+    inputs =
+      Map.new(kvs, fn kv ->
+        case String.split(kv, "=", parts: 2) do
+          [k, v] -> {k, v}
+          _ -> Output.die("queue rerun-ci: --input expects key=value, got: #{inspect(kv)}")
+        end
+      end)
+
+    Map.put(body, "inputs", inputs)
+  end
 
   defp mark_ci_external(task_id, note, mode) do
     case Client.post("/api/queue/#{task_id}/mark_ci_external", %{"note" => note}) do

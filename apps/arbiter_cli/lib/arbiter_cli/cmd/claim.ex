@@ -33,11 +33,11 @@ defmodule ArbiterCli.Cmd.Claim do
     --json         Emit JSON instead of human-readable text.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [
     force: :boolean,
-    difficulty: :integer,
+    difficulty: :string,
     repo: :string,
     json: :boolean
   ]
@@ -46,7 +46,10 @@ defmodule ArbiterCli.Cmd.Claim do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket claim", switches: @switches)
+
+      opts = ArgParser.coerce_difficulty(opts)
       mode = if opts[:json], do: :json, else: :text
 
       ref =
@@ -65,8 +68,6 @@ defmodule ArbiterCli.Cmd.Claim do
 
       workspace_id = Workspace.id_or_halt()
 
-      validate_difficulty!(opts[:difficulty])
-
       body =
         %{"ref" => ref}
         |> maybe_put("force", opts[:force])
@@ -83,13 +84,6 @@ defmodule ArbiterCli.Cmd.Claim do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, false), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp validate_difficulty!(nil), do: :ok
-  defp validate_difficulty!(n) when is_integer(n) and n in 0..5, do: :ok
-
-  defp validate_difficulty!(other) do
-    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..5 / D0..D5)")
-  end
 
   defp emit(payload, _repo, :json), do: IO.puts(Jason.encode!(payload))
 

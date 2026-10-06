@@ -35,7 +35,7 @@ defmodule ArbiterCli.Cmd.Settings do
   `arb scheduler pause|resume|status|wait` (`/api/scheduler/*`).
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @path "/api/installation/config"
 
@@ -43,8 +43,7 @@ defmodule ArbiterCli.Cmd.Settings do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      rest = Output.drop_json(argv)
-      mode = Output.mode(argv)
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb settings", switches: [])
 
       case rest do
         ["get" | args] -> get(args, mode)

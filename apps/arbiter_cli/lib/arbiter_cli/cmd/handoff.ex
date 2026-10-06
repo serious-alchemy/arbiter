@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Handoff do
   must have attention now, not already owned by the side it is going to.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean, note: :string]
 
@@ -25,9 +25,12 @@ defmodule ArbiterCli.Cmd.Handoff do
   end
 
   defp do_run(to, argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
     verb = if to == :operator, do: "handoff", else: "handback"
+
+    {opts, rest, _mode} =
+      ArgParser.parse(argv, command: "arb ticket #{verb}", switches: @switches)
+
+    mode = if opts[:json], do: :json, else: :text
     id = parse_id(rest, verb)
     note = opts[:note]
 

@@ -84,7 +84,7 @@ defmodule ArbiterCli.Cmd.Init do
   to a generic install-path hint.
   """
 
-  alias ArbiterCli.{Client, Cmd.Start, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Cmd.Start, Output, Workspace}
 
   require EEx
 
@@ -162,7 +162,7 @@ defmodule ArbiterCli.Cmd.Init do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb init", switches: @switches)
       mode = if opts[:json], do: :json, else: :text
       force = opts[:force] || false
       dev_mode = opts[:dev] || false

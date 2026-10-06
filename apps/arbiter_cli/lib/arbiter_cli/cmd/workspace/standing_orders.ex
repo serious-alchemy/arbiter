@@ -15,7 +15,12 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv, opts) do
-    {parsed, rest, mode} = ArgParser.parse(argv, switches: Keyword.fetch!(opts, :switches))
+    {parsed, rest, mode} =
+      ArgParser.parse(argv,
+        command: "arb workspace standing-order",
+        switches: Keyword.fetch!(opts, :switches)
+      )
+
     workspace_opt = parsed[:workspace]
     # --repo is canonical; --rig is a deprecated alias kept for existing
     # scripts/muscle-memory (bd-1aw9dl). --repo wins if both are given.

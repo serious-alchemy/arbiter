@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.Config do
       IO.puts("")
       IO.puts(ArbiterCli.ConfigSchema.render())
     else
-      {opts, rest, mode} = ArgParser.parse(argv, switches: @switches)
+      {opts, rest, mode} = ArgParser.parse(argv, command: "arb config", switches: @switches)
       workspace_opt = opts[:workspace]
       force = opts[:force] || false
 

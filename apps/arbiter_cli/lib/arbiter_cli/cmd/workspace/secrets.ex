@@ -14,7 +14,12 @@ defmodule ArbiterCli.Cmd.Workspace.Secrets do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv, opts) do
-    {parsed, rest, mode} = ArgParser.parse(argv, switches: Keyword.fetch!(opts, :switches))
+    {parsed, rest, mode} =
+      ArgParser.parse(argv,
+        command: "arb workspace secret",
+        switches: Keyword.fetch!(opts, :switches)
+      )
+
     workspace_opt = parsed[:workspace]
 
     case rest do

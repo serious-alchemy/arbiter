@@ -8,13 +8,13 @@ defmodule ArbiterCli.Cmd.Version do
   server is unreachable.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb version", switches: [])
       cli_info = cli_version()
       server_result = fetch_server_version()
 

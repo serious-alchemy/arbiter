@@ -118,7 +118,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   defp list(argv) do
-    mode = Output.mode(argv)
+    {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb workspace list", switches: [])
 
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} -> emit_list(list, mode)
@@ -128,8 +128,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   defp show(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb workspace show", switches: [])
 
     id =
       case rest do
@@ -151,7 +150,8 @@ defmodule ArbiterCli.Cmd.Workspace do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create(argv) do
-    {opts, rest, mode} = ArgParser.parse(argv, switches: @switches)
+    {opts, rest, mode} =
+      ArgParser.parse(argv, command: "arb workspace create", switches: @switches)
 
     name =
       case rest do

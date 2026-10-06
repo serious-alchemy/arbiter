@@ -18,12 +18,13 @@ defmodule ArbiterCli.Cmd.GrokToken do
   `grok login` on the Arbiter host, or x.ai was unreachable.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
+      _ = ArgParser.parse(argv, command: "arb grok-token", switches: [])
       force? = System.get_env("GROK_AUTH_EXPIRED") == "1"
 
       case Client.post("/api/grok/token", %{force: force?}) do

@@ -56,17 +56,15 @@ defmodule ArbiterCli.Cmd.Quota do
   Reads from `GET /api/quota`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
-
-      {opts, _rest, _bad} =
-        OptionParser.parse(rest,
+      {opts, _rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb quota",
           switches: [workspace: :string, account: :string],
           aliases: [w: :workspace, a: :account]
         )

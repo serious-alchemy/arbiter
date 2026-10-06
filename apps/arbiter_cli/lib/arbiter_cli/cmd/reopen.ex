@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Reopen do
   so this dedicated verb is the supported path out of `:closed`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean]
 
@@ -16,7 +16,9 @@ defmodule ArbiterCli.Cmd.Reopen do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket reopen", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       id =

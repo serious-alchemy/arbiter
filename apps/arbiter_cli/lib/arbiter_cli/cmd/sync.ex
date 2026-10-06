@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Sync do
   No-ops cleanly when the workspace's tracker isn't GitHub.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [dry: :boolean, json: :boolean]
 
@@ -23,7 +23,9 @@ defmodule ArbiterCli.Cmd.Sync do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket sync", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
       dry? = opts[:dry] || false
 

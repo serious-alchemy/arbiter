@@ -125,7 +125,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   @edit_switches [
     priority: :integer,
-    difficulty: :integer,
+    difficulty: :string,
     append_notes: :string,
     notes: :string,
     acceptance: :string,
@@ -298,7 +298,11 @@ defmodule ArbiterCli.Cmd.Update do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_edit_issue(argv) do
     refuse_status_flag!(argv)
-    {opts, rest, mode} = ArgParser.parse(argv, switches: @all_edit_switches)
+
+    {opts, rest, mode} =
+      ArgParser.parse(argv, command: "arb ticket update", switches: @all_edit_switches)
+
+    opts = ArgParser.coerce_difficulty(opts)
 
     id =
       case rest do
@@ -315,7 +319,6 @@ defmodule ArbiterCli.Cmd.Update do
         end
       end
 
-    validate_difficulty!(opts[:difficulty])
     warn_deprecated_assignee(opts[:assignee], mode)
 
     payload =
@@ -364,13 +367,6 @@ defmodule ArbiterCli.Cmd.Update do
   defp put_if(map, _key, nil), do: map
   defp put_if(map, _key, ""), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
-
-  defp validate_difficulty!(nil), do: :ok
-  defp validate_difficulty!(n) when is_integer(n) and n in 0..5, do: :ok
-
-  defp validate_difficulty!(other) do
-    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..5 / D0..D5)")
-  end
 
   defp maybe_append_notes(payload, nil, _existing), do: payload
 
