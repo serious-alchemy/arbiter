@@ -304,4 +304,60 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
              ) == 1
     end
   end
+
+  describe "grok routing (bd-co08p2)" do
+    test "the toggle sets and clears routing.grok.enabled, keeping other config", %{conn: conn} do
+      ws = workspace!(%{"routing" => %{"provider_selection" => "most_quota"}})
+      view = open(conn, ws)
+
+      assert has_element?(view, "#grok-routing-form")
+      assert has_element?(view, "#grok-auth-state")
+      refute has_element?(view, ~s(#grok-routing-form input[type=checkbox][checked]))
+      refute has_element?(view, "#grok-difficulties")
+
+      view |> form("#grok-routing-form", %{"enabled" => "true"}) |> render_change()
+
+      config = Ash.get!(Workspace, ws.id).config
+      assert get_in(config, ["routing", "grok", "enabled"]) == true
+      assert get_in(config, ["routing", "provider_selection"]) == "most_quota"
+      assert has_element?(view, "#grok-difficulties")
+
+      view |> form("#grok-routing-form", %{"enabled" => "false"}) |> render_change()
+
+      config = Ash.get!(Workspace, ws.id).config
+      assert get_in(config, ["routing", "grok", "enabled"]) in [nil, false]
+      assert get_in(config, ["routing", "provider_selection"]) == "most_quota"
+    end
+
+    test "the difficulties list is written and a blank list clears it", %{conn: conn} do
+      ws = workspace!(%{"routing" => %{"grok" => %{"enabled" => true}}})
+      view = open(conn, ws)
+
+      view
+      |> form("#grok-routing-form", %{"enabled" => "true", "difficulties" => "1, 2"})
+      |> render_change()
+
+      config = Ash.get!(Workspace, ws.id).config
+      assert get_in(config, ["routing", "grok", "difficulties"]) == [1, 2]
+
+      view
+      |> form("#grok-routing-form", %{"enabled" => "true", "difficulties" => "9"})
+      |> render_change()
+
+      assert has_element?(view, "#provider-settings-error")
+
+      view
+      |> form("#grok-routing-form", %{"enabled" => "true", "difficulties" => ""})
+      |> render_change()
+
+      config = Ash.get!(Workspace, ws.id).config
+      assert get_in(config, ["routing", "grok", "difficulties"]) == nil
+      assert get_in(config, ["routing", "grok", "enabled"]) == true
+    end
+
+    test "the pane points to the Providers page", %{conn: conn} do
+      view = open(conn, workspace!())
+      assert has_element?(view, ~s(#provider-settings-help a[href="/providers"]))
+    end
+  end
 end

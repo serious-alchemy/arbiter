@@ -14,14 +14,39 @@ defmodule Arbiter.Application do
 
   @impl true
   def start(_type, _args) do
+    with {:ok, role} <- Arbiter.NodeAgent.role(),
+         {:ok, children} <- boot_children(role) do
+      Supervisor.start_link(children, strategy: :one_for_one, name: Arbiter.Supervisor)
+    end
+  end
+
+  # Extensions load before a single primary consumer starts (a bad extension
+  # aborts the boot here); an agent has no seams to register, so it skips them.
+  defp boot_children(:agent), do: supervisor_children(:agent, &primary_children/0)
+
+  defp boot_children(:primary) do
     # Register core's and any installed extension's seam implementations before
     # a single consumer starts; a bad extension aborts the boot here.
     :ok = Arbiter.Extensions.load!()
-
-    children = children(auto_start?: MergeQueueSupervisor.auto_start?())
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Arbiter.Supervisor)
+    supervisor_children(:primary, &primary_children/0)
   end
+
+  @doc """
+  The top-level children for `role` (`docs/design/remote-workers.md` §3).
+
+  A positive, fail-closed match: `:agent` returns only
+  `Arbiter.NodeAgent.Supervisor` and **never calls** `primary_fun`, so a child
+  added to the primary list later does not run on a node; `:primary` returns
+  `primary_fun.()`; any other role is an error and nothing starts.
+  """
+  @spec supervisor_children(term(), (-> [Supervisor.child_spec() | {module(), term()} | module()])) ::
+          {:ok, [Supervisor.child_spec() | {module(), term()} | module()]}
+          | {:error, {:unknown_role, term()}}
+  def supervisor_children(:agent, _primary_fun), do: {:ok, [Arbiter.NodeAgent.Supervisor]}
+  def supervisor_children(:primary, primary_fun), do: {:ok, primary_fun.()}
+  def supervisor_children(other, _primary_fun), do: {:error, {:unknown_role, other}}
+
+  defp primary_children, do: children(auto_start?: MergeQueueSupervisor.auto_start?())
 
   @doc """
   Build the application's full child spec list.
@@ -64,6 +89,10 @@ defmodule Arbiter.Application do
     ] ++
       migration_gate(auto_start?) ++
       [
+        # One session per connected remote node, plus the registry that finds it
+        # (RW6, docs/design/remote-workers.md §3, §10.1). Sessions read the Repo,
+        # so this follows the migration gate.
+        Arbiter.Nodes.Supervisor,
         # The shared circuit breaker (bd-5jr49o). Started early and with no deps
         # so every auto-filing / auto-escalating / auto-redispatching path can
         # gate through it; callers fail open if it is somehow absent.

@@ -437,6 +437,60 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "grok's ledger estimate in a workspace's quota list (bd-co08p2)" do
+    alias Arbiter.Usage.Event
+
+    defp grok_workspace!(grok) do
+      Ash.create!(Workspace, %{
+        name: "grokq-#{System.unique_integer([:positive])}",
+        prefix: "gq",
+        config: %{"routing" => %{"grok" => grok}}
+      })
+    end
+
+    test "is absent while grok routing is off" do
+      for grok <- [%{}, %{"enabled" => false}] do
+        ws = grok_workspace!(grok)
+        refute "grok" in Enum.map(Quota.list_serialized_for_workspace(ws.id), & &1.provider)
+      end
+    end
+
+    test "is listed, as an estimate, once routing.grok.enabled is on" do
+      prev = Application.get_env(:arbiter, :grok_quota)
+      Application.put_env(:arbiter, :grok_quota, cap_tokens: 400_000)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, :grok_quota, prev),
+          else: Application.delete_env(:arbiter, :grok_quota)
+      end)
+
+      Ash.create!(Event, %{
+        task_id: "bd-grok-q",
+        source: :task,
+        step: :work,
+        provider: "grok",
+        tokens_in: 100_000,
+        tokens_out: 0,
+        occurred_at: DateTime.add(DateTime.utc_now(), -3600, :second)
+      })
+
+      ws = grok_workspace!(%{"enabled" => true})
+
+      assert %{} =
+               grok =
+               ws.id
+               |> Quota.list_serialized_for_workspace()
+               |> Enum.find(&(&1.provider == "grok"))
+
+      assert grok.primary_label == "24h"
+      assert grok.secondary_label == nil
+      assert grok.utilization_5h == 0.25
+      assert grok.estimate == %{window: "24h", used_tokens: 100_000, cap_tokens: 400_000}
+      assert grok.message == nil
+    end
+  end
+
   describe "list_latest/1 multi-provider merge (bd-ajh7bd)" do
     alias Arbiter.Quota.CodexQuota
     alias Arbiter.Quota.GoogleQuota

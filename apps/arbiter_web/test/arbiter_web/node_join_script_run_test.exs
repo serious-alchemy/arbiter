@@ -429,7 +429,7 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
 
       env = File.read!(Path.join(cfg, "agent.env"))
       assert env =~ ~s(ARB_ROLE="agent")
-      assert env =~ ~s(ARB_PRIMARY_URL="#{ctx.url}")
+      assert env =~ ~s(ARB_NODE_URL="#{ctx.url}")
       assert env =~ ~s(ARB_NODE_CREDENTIAL_FILE="#{cfg}/credential")
 
       unit = File.read!(Path.join(ctx.home, ".config/systemd/user/arbiter-node.service"))

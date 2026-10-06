@@ -114,6 +114,20 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Default lifetime of a minted join token, in minutes (max 1440); null = 15. " <>
           "Operator-only."
+    },
+    %{
+      key: "nodes.fence_after_s",
+      type: "positive_integer",
+      description:
+        "Seconds without a heartbeat ack after which a node agent stops its containers " <>
+          "(30-90); null = 60. Must stay below nodes.lost_after_s. Operator-only."
+    },
+    %{
+      key: "nodes.lost_after_s",
+      type: "positive_integer",
+      description:
+        "Seconds of silence after which the primary declares a node lost and interrupts " <>
+          "its runs; must exceed nodes.fence_after_s; null = fence + 30. Operator-only."
     }
   ]
 
@@ -260,6 +274,9 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.join_token_ttl_minutes", v),
     do: wrap(Settings.set_nodes_join_token_ttl_minutes(v))
 
+  defp write("nodes.fence_after_s", v), do: wrap(Settings.set_nodes_fence_after_s(v))
+  defp write("nodes.lost_after_s", v), do: wrap(Settings.set_nodes_lost_after_s(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -287,6 +304,8 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.public_url"), do: Settings.nodes_public_url()
   def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
   def override("nodes.join_token_ttl_minutes"), do: Settings.nodes_join_token_ttl_override()
+  def override("nodes.fence_after_s"), do: Settings.nodes_fence_after_s()
+  def override("nodes.lost_after_s"), do: Settings.nodes_lost_after_s_override()
 
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
@@ -315,6 +334,11 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.public_url"), do: nil
   def default("nodes.allow_public_endpoint"), do: false
   def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
+  def default("nodes.fence_after_s"), do: Arbiter.Nodes.Liveness.default_fence_after_s()
+
+  # Follows the fence in force, so the value shown is `fence + 30` once the
+  # fence is overridden.
+  def default("nodes.lost_after_s"), do: Arbiter.Nodes.Liveness.current().lost_after_s
 
   def default(key) when key in ["quota_providers_shown", "quota_providers_hidden"], do: nil
 

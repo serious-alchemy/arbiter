@@ -9,7 +9,8 @@ defmodule Arbiter.Settings.RegistryTest do
            quota_providers_shown quota_providers_hidden output_offload_enabled
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
            scheduling_finish_first scheduling_finish_first_max_wait_hours
-           nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes)
+           nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
+           nodes.fence_after_s nodes.lost_after_s)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
