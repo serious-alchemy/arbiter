@@ -873,6 +873,32 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_cancelled end)
       assert length(reruns("!can1")) == 2
       assert StubFixPassDispatcher.call_count() == 0
+      # The cap-reached escalation fired (the re-run branches must not pre-latch it).
+      assert :sys.get_state(wpid).ci_cancelled_escalated_head == "h1"
+    end
+
+    test "re-run → in flight → cancelled again keeps the cap and escalates exactly once" do
+      StubMerger.queue_get("!can3", [
+        cancelled("h1"),
+        pending("h1"),
+        cancelled("h1"),
+        pending("h1"),
+        cancelled("h1"),
+        pending("h1"),
+        cancelled("h1")
+      ])
+
+      {wpid, _task_id} = flake_watchdog("!can3")
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_cancelled end)
+      escalated_at = :sys.get_state(wpid).last_block_escalated_poll
+      assert escalated_at > 0
+      wait_until(fn -> StubMerger.get_count("!can3") >= 12 end)
+
+      state = :sys.get_state(wpid)
+      assert state.last_block_escalated_poll == escalated_at
+      assert length(reruns("!can3")) == 2
+      assert StubFixPassDispatcher.call_count() == 0
     end
 
     test "a real failure alongside the same harness still dispatches a fix pass" do

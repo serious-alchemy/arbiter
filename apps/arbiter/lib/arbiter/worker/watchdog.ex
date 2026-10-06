@@ -1395,6 +1395,9 @@ defmodule Arbiter.Worker.Watchdog do
       # Kept apart from `auto_resolve_attempts`, which a running re-run resets
       # (the block reads nil while it is in flight) and which would never cap.
       cancel_rerun: nil,
+      # Head whose cap-reached `:ci_cancelled` escalation already fired: the latch is
+      # its own field because `last_block_reason` is reset by every non-blocked poll.
+      ci_cancelled_escalated_head: nil,
       # The head parked as a suspected flake, and the head
       # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
       # equals a head, including a nil one.
@@ -2968,7 +2971,31 @@ defmodule Arbiter.Worker.Watchdog do
   # Indefinite park-and-watch, like an exhausted `:ci_failed`: the coordinator has
   # been paged, so the ordinary poll ceiling must not fail the worker out.
   defp park_ci_cancelled(state) do
-    state = debounce_escalate_block(state, :ci_cancelled)
+    head = (state.cancel_rerun && state.cancel_rerun.head) || :unknown
+
+    state =
+      if state.ci_cancelled_escalated_head != head do
+        Logger.warning(
+          "Worker.Watchdog: merge blocked (:ci_cancelled) for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; escalating to coordinator"
+        )
+
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            :ci_cancelled
+          )
+        end)
+
+        %{
+          state
+          | ci_cancelled_escalated_head: head,
+            last_block_escalated_poll: state.poll_count
+        }
+      else
+        state
+      end
 
     reschedule(%{
       state
