@@ -37,7 +37,10 @@ defmodule Arbiter.NodeAgent.Upgrade do
 
   @type spec :: %{required(String.t()) => String.t()}
 
-  @doc "Download, verify and unpack `spec` (`%{\"version\" => v, \"sha256\" => hex}`)."
+  @doc """
+  Download, verify and unpack `spec`: the `upgrade` map of a `hello_ok`, with
+  string keys `version` and `sha256` (hex).
+  """
   @spec prepare(Config.t(), spec()) :: {:ok, Path.t()} | {:error, term()}
   def prepare(%Config{} = config, %{"version" => version, "sha256" => sha}) do
     with :ok <- check_version(version),

@@ -31,9 +31,8 @@ defmodule Arbiter.NodeAgent.Status do
     tmp = path <> ".tmp"
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(tmp, Jason.encode!(status, pretty: true) <> "\n"),
-         :ok <- File.rename(tmp, path) do
-      :ok
+         :ok <- File.write(tmp, Jason.encode!(status, pretty: true) <> "\n") do
+      File.rename(tmp, path)
     end
   end
 
