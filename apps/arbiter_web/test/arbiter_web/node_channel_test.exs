@@ -137,7 +137,10 @@ defmodule ArbiterWeb.NodeChannelTest do
 
     test "repeated failures trip the socket-connect limiter, which then refuses even a good credential",
          %{credential: credential} do
-      for _ <- 1..30, do: assert(:error = connect(NodeSocket, %{"token" => "x"}, connect_info: connect_info()))
+      for _ <- 1..30,
+          do:
+            assert(:error = connect(NodeSocket, %{"token" => "x"}, connect_info: connect_info()))
+
       assert :error = connect_node(credential)
     end
   end
@@ -161,7 +164,11 @@ defmodule ArbiterWeb.NodeChannelTest do
       gone = Ash.UUID.generate()
 
       {_socket, ok} =
-        join_and_hello(node, credential, hello(%{"runs" => [%{"id" => live.id}, %{"id" => gone}]}))
+        join_and_hello(
+          node,
+          credential,
+          hello(%{"runs" => [%{"id" => live.id}, %{"id" => gone}]})
+        )
 
       assert ok["boot_epoch"] == Nodes.boot_epoch()
       assert ok["runs"] == %{live.id => "known", gone => "unknown"}

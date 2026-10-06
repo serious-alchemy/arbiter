@@ -69,7 +69,9 @@ defmodule ArbiterWeb.NodeChannel do
     end
   end
 
-  def handle_in("hb", _payload, socket), do: {:reply, {:error, %{reason: "hello_required"}}, socket}
+  def handle_in("hb", _payload, socket),
+    do: {:reply, {:error, %{reason: "hello_required"}}, socket}
+
   def handle_in(_event, _payload, socket), do: {:noreply, socket}
 
   defp attach(node, params, socket) do
