@@ -212,6 +212,62 @@ defmodule Arbiter.Worker.PrivateCloneGitSwapTest do
     end
   end
 
+  describe "a .git replaced by a file or symlink that leads to the worker's own gitdir" do
+    # `mv .git evil; echo "gitdir: ./evil" > .git`: git follows the file to a
+    # config the worker wrote (reproduced with a plain `git status`).
+    defp indirect_git!(ctx, kind) do
+      dot_git = Path.join(ctx.path, ".git")
+      evil = Path.join(ctx.path, "evil")
+      File.cp_r!(dot_git, evil)
+      File.rename!(dot_git, dot_git <> "2")
+
+      File.write!(
+        Path.join(evil, "config"),
+        File.read!(Path.join(evil, "config")) <> payload_config(ctx)
+      )
+
+      case kind do
+        :gitdir_file -> File.write!(dot_git, "gitdir: ./evil\n")
+        :absolute_gitdir_file -> File.write!(dot_git, "gitdir: #{evil}\n")
+        :symlink -> File.ln_s!(evil, dot_git)
+      end
+    end
+
+    for kind <- [:gitdir_file, :absolute_gitdir_file, :symlink] do
+      test "#{kind}: cmd/3 refuses, settle/1 reports and restores, nothing fires", ctx do
+        original = File.lstat!(Path.join(ctx.path, ".git")).inode
+        indirect_git!(ctx, unquote(kind))
+
+        assert {:error, {:tampered, _}} = PrivateClone.guard(ctx.path)
+
+        for args <- [["status", "--porcelain"], ["diff", "main..HEAD"], ["rev-parse", "HEAD"]] do
+          assert {out, 128} = PrivateClone.cmd(ctx.path, args, stderr_to_stdout: true)
+          assert out =~ "refusing to run git"
+        end
+
+        assert {:error, _} = Worktree.current_branch(ctx.path)
+        assert fired(ctx) == []
+
+        capture_log(fn -> send(self(), {:settled, PrivateClone.settle(ctx.path)}) end)
+
+        assert_received {:settled, {:error, {:tampered, _}}}
+        assert File.lstat!(Path.join(ctx.path, ".git")).inode == original
+        assert :ok = PrivateClone.verify(ctx.path)
+        assert fired(ctx) == []
+      end
+    end
+
+    test "a .git file naming another repo's linked worktree is still a linked worktree", ctx do
+      linked = Path.join(Path.dirname(ctx.path), "linked-#{System.unique_integer([:positive])}")
+      git!(ctx.checkout, ["worktree", "add", "-q", "-b", "linked-wt", linked])
+      on_exit(fn -> File.rm_rf!(linked) end)
+
+      assert :ok = PrivateClone.guard(linked)
+      assert :ok = PrivateClone.settle(linked)
+      assert {_, 0} = PrivateClone.cmd(linked, ["status", "--porcelain"])
+    end
+  end
+
   describe "host-side git run through PrivateClone.cmd/3" do
     test "refuses a swapped tree for the commands that read the config", ctx do
       swap_git!(ctx)

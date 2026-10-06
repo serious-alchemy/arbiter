@@ -753,18 +753,30 @@ defmodule Arbiter.Worker.PrivateClone do
 
   @doc """
   `verify/1` for a git about to run in `path`, when `path` is a checkout leaf
-  of the worktree root with a real `.git` directory (a private clone, or
-  something posing as one: a `.git` that names no main repo is refused there
-  too). `:ok` for everything else (a linked worktree's `.git` is a file; a
-  repo outside the root is not a worker's).
+  of the worktree root (a private clone, or something posing as one). A `.git`
+  directory must verify (one that names no main repo is refused too); a
+  `.git` file is a linked worktree's and is accepted only when its `gitdir:`
+  names a `<repo>/.git/worktrees/<name>` outside the checkout (`linked_gitdir/1`),
+  so a worker's `mv .git evil; echo 'gitdir: ./evil' > .git` is refused; a
+  `.git` symlink is refused outright. `:ok` for a path that is not a checkout
+  leaf (a repo outside the root is not a worker's) or has no `.git` at all.
   """
   @spec guard(term()) :: :ok | {:error, {:tampered, String.t()}}
   def guard(path) when is_binary(path) do
     with true <- checkout_leaf?(path),
-         {:ok, %File.Stat{type: :directory}} <- File.lstat(Path.join(path, ".git")) do
-      case verify(path) do
-        {:error, :not_a_private_clone} -> tampered(".git names no main repo")
-        other -> other
+         {:ok, %File.Stat{type: type}} <- File.lstat(Path.join(path, ".git")) do
+      case type do
+        :directory ->
+          case verify(path) do
+            {:error, :not_a_private_clone} -> tampered(".git names no main repo")
+            other -> other
+          end
+
+        :regular ->
+          linked_gitdir(path)
+
+        other ->
+          tampered(".git is a #{other}, not a directory or a worktree file")
       end
     else
       _ -> :ok
@@ -797,22 +809,40 @@ defmodule Arbiter.Worker.PrivateClone do
   @doc """
   The completion-time check on the checkout at `path`, once nothing of the
   worker's runs any more: `:ok` for a path that is not a checkout leaf of the
-  worktree root or whose `.git` is a file (a linked worktree), otherwise
-  `reclaim/1`. `{:error, {:tampered, why}}` means the worker swapped the clone's
-  `.git` (it has been put right, but the run is not to be trusted: the caller
-  fails closed rather than routing the tree on to review or merge).
+  worktree root or whose `.git` is a linked worktree's file (`guard/1`'s
+  rule: a `gitdir:` file that points anywhere else is not one), otherwise
+  `reclaim/1`. `{:error, {:tampered, why}}` means the worker swapped the
+  clone's `.git` (it has been put right, but the run is not to be trusted: the
+  caller fails closed rather than routing the tree on to review or merge).
   """
   @spec settle(term()) :: :ok | {:error, {:tampered, String.t()}}
   def settle(path) when is_binary(path) do
-    with true <- checkout_leaf?(path),
-         false <- match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(path, ".git"))) do
-      reclaim(path)
-    else
-      _ -> :ok
-    end
+    if checkout_leaf?(path) and not linked_worktree?(path), do: reclaim(path), else: :ok
   end
 
   def settle(_), do: :ok
+
+  defp linked_worktree?(path),
+    do:
+      match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(path, ".git"))) and
+        linked_gitdir(path) == :ok
+
+  # A `.git` file the host may follow: `gitdir: <repo>/.git/worktrees/<name>`
+  # with the target outside the checkout, so the config git reads is the main
+  # repo's, not one the worker could have written.
+  defp linked_gitdir(path) do
+    checkout = Path.expand(path)
+
+    with {:ok, "gitdir:" <> rest} <- File.read(Path.join(path, ".git")),
+         target = rest |> String.trim() |> Path.expand(checkout),
+         false <- target == checkout or String.starts_with?(target, checkout <> "/"),
+         "worktrees" <- target |> Path.dirname() |> Path.basename(),
+         ".git" <- target |> Path.dirname() |> Path.dirname() |> Path.basename() do
+      :ok
+    else
+      _ -> tampered(".git is a file that does not name a linked worktree of another repo")
+    end
+  end
 
   # A direct child of the worktree root: where a private clone lives.
   defp checkout_leaf?(path),

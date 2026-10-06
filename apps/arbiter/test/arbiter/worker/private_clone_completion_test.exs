@@ -68,6 +68,26 @@ defmodule Arbiter.Worker.PrivateCloneCompletionTest do
     )
   end
 
+  # The `.git`-as-a-file variant: `mv .git evil; echo "gitdir: ./evil" > .git`
+  # (or a symlink to it). Git follows either, to a config the worker wrote.
+  defp swap_git_indirect!(ctx, kind) do
+    dot_git = Path.join(ctx.path, ".git")
+    evil = Path.join(ctx.path, "evil")
+    File.cp_r!(dot_git, evil)
+    File.rename!(dot_git, dot_git <> "2")
+
+    File.write!(
+      Path.join(evil, "config"),
+      File.read!(Path.join(evil, "config")) <>
+        "[core]\n\tfsmonitor = touch #{Path.join(ctx.marker_dir, "fsmonitor")}; echo\n"
+    )
+
+    case kind do
+      :gitdir_file -> File.write!(dot_git, "gitdir: ./evil\n")
+      :symlink -> File.ln_s!(evil, dot_git)
+    end
+  end
+
   defp start_worker!(ctx) do
     {:ok, pid} =
       Worker.start(
@@ -133,6 +153,28 @@ defmodule Arbiter.Worker.PrivateCloneCompletionTest do
     assert Message.coordinator_ref()
            |> Message.inbox(workspace_id: ctx.ws.id)
            |> Enum.any?(&(&1.kind == :escalation and &1.directive_ref == ctx.task.id))
+  end
+
+  for kind <- [:gitdir_file, :symlink] do
+    test "arb done from a .git replaced by a #{kind} fails :tampered_clone before any git runs",
+         ctx do
+      original = File.lstat!(Path.join(ctx.path, ".git")).inode
+      swap_git_indirect!(ctx, unquote(kind))
+      pid = start_worker!(ctx)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(pid, {:__claude_session_done__, "arb done"})
+        send(self(), {:snap, wait_finished(pid)})
+      end)
+
+      assert_received {:snap, snap}
+      assert snap.outcome == :failed
+      refute snap.waiting_on == :review_gate
+      assert snap.meta.stop_reason.category == :tampered_clone
+
+      assert fired(ctx) == []
+      assert File.lstat!(Path.join(ctx.path, ".git")).inode == original
+    end
   end
 
   test "arb done from an untouched clone is not refused as tampered", ctx do
