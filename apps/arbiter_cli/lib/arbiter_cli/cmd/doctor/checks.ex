@@ -1931,24 +1931,27 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp node_result(n) do
     state = n["state"] || n["status"]
     health = n["health"]
-
-    detail =
-      [
-        to_string(state),
-        "seen #{age(n["last_heartbeat_at"] || n["last_seen_at"])}",
-        "v#{n["agent_version"] || "?"} (primary v#{n["server_version"] || "?"})",
-        "#{n["live"] || 0}/#{n["max"] || "?"} workers"
-      ]
-      |> Kernel.++(if health in [nil, "ready"], do: [], else: ["health #{health}"])
-      |> Enum.join(", ")
-
     ok? = state in ["online", "draining"] and health in [nil, "ready"]
 
     nodes_result(
       "node #{n["name"]}",
       if(ok?, do: :ok, else: :fail),
-      detail,
+      node_detail(n, state, health),
       unless(ok?, do: node_hint(state, health))
+    )
+  end
+
+  defp node_detail(n, state, health) do
+    health_part = if health in [nil, "ready"], do: [], else: ["health #{health}"]
+
+    Enum.join(
+      [
+        to_string(state),
+        "seen #{age(n["last_heartbeat_at"] || n["last_seen_at"])}",
+        "v#{n["agent_version"] || "?"} (primary v#{n["server_version"] || "?"})",
+        "#{n["live"] || 0}/#{n["max"] || "?"} workers"
+      ] ++ health_part,
+      ", "
     )
   end
 
@@ -2020,17 +2023,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp age(nil), do: "never"
 
   defp age(iso) do
-    with {:ok, at, _} <- DateTime.from_iso8601(iso) do
-      case max(DateTime.diff(DateTime.utc_now(), at), 0) do
-        s when s < 60 -> "#{s}s ago"
-        s when s < 3600 -> "#{div(s, 60)}m ago"
-        s when s < 86_400 -> "#{div(s, 3600)}h ago"
-        s -> "#{div(s, 86_400)}d ago"
-      end
-    else
+    case DateTime.from_iso8601(iso) do
+      {:ok, at, _} -> age_text(max(DateTime.diff(DateTime.utc_now(), at), 0))
       _ -> "at an unknown time"
     end
   end
+
+  defp age_text(s) when s < 60, do: "#{s}s ago"
+  defp age_text(s) when s < 3600, do: "#{div(s, 60)}m ago"
+  defp age_text(s) when s < 86_400, do: "#{div(s, 3600)}h ago"
+  defp age_text(s), do: "#{div(s, 86_400)}d ago"
 
   defp nodes_result(name, status, detail, hint \\ nil) do
     %Result{

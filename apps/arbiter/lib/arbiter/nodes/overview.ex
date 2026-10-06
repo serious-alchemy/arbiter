@@ -210,10 +210,9 @@ defmodule Arbiter.Nodes.Overview do
   defp host_exposure(host) do
     host = host |> String.trim_leading("[") |> String.trim_trailing("]") |> String.downcase()
 
-    cond do
-      host == "localhost" or String.ends_with?(host, ".ts.net") -> :private
-      true -> ip_exposure(host)
-    end
+    if host == "localhost" or String.ends_with?(host, ".ts.net"),
+      do: :private,
+      else: ip_exposure(host)
   end
 
   defp ip_exposure(host) do
