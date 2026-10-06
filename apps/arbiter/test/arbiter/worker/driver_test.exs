@@ -417,9 +417,21 @@ defmodule Arbiter.Worker.DriverTest do
       test "outlives the tick budget while a #{type} worker is live, then closes the task",
            %{ws: ws} do
         {:ok, task} =
-          Ash.create(Issue, %{title: "cd-overrun", workspace_id: ws.id, issue_type: unquote(type)})
+          Ash.create(Issue, %{
+            title: "cd-overrun",
+            workspace_id: ws.id,
+            issue_type: unquote(type),
+            notes: "findings write-up"
+          })
 
-        {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+        {:ok, worker_pid} =
+          Worker.start(
+            task_id: task.id,
+            repo: "r",
+            workspace_id: ws.id,
+            meta: %{issue_type: unquote(type)}
+          )
+
         {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
         {:ok, machine_pid} = Machine.start(machine_id)
         put_state!(task, :active)
