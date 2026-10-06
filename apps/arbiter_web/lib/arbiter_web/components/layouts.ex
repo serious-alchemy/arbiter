@@ -223,16 +223,23 @@ defmodule ArbiterWeb.Layouts do
     >
       <.sidebar_nav groups={@groups} current_path={@current_path} expanded={true}>
         <:footer>
-          <.link
-            id="about-link"
-            navigate={~p"/about"}
-            title="About: version and update status"
-            class="flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-label)] no-underline transition-colors duration-150 hover:text-[var(--text-title)]"
-          >
-            <.icon name="hero-information-circle" size={14} /> About
-            <span class="ml-auto">v{Arbiter.Version.app_version()}</span>
-          </.link>
-          <.theme_toggle />
+          <div class="flex min-w-0 flex-col gap-1">
+            <.link
+              id="about-link"
+              navigate={~p"/about"}
+              title="About: version and update status"
+              class="flex items-center whitespace-nowrap rounded-[var(--radius-field)] py-1.5 text-xs text-[var(--text-label)] no-underline transition-colors duration-150 hover:text-[var(--text-title)]"
+            >
+              <%!-- A 40px icon cell puts the icon on the collapsed rail's centre line, and
+                    the label's margin starts it past the 56px clip, as a nav item's does. --%>
+              <span class="flex w-10 flex-none justify-center">
+                <.icon name="hero-information-circle" size={14} />
+              </span>
+              <span class="ml-3">About</span>
+              <span class="ml-3">v{Arbiter.Version.app_version()}</span>
+            </.link>
+            <.theme_toggle />
+          </div>
         </:footer>
       </.sidebar_nav>
     </div>
@@ -509,7 +516,7 @@ defmodule ArbiterWeb.Layouts do
             href={@update.release_url}
             target="_blank"
             rel="noopener noreferrer"
-            class="link link-hover"
+            class="link link-hover font-medium text-info-content underline"
           >
             Release notes
           </a>
