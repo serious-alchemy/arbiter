@@ -20,6 +20,12 @@ defmodule ArbiterWeb.ApiPolicy do
     * `:anonymous` — reachable with no token. Read-only, no secrets, no
       workspace data. Reserved for what `arb server doctor` and monitoring
       need before any token exists.
+    * `:operator` — a `:coordinator`-tier token carrying **operator proof**
+      (`Arbiter.MCP.Scope.operator?/1`: minted over the operator socket, the
+      human's own `arb`). Node administration over REST (join-token minting,
+      drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
+      coordinator *session* (an LLM) is refused, so it cannot enrol machines
+      that will receive provider tokens. No route uses it yet; RW4/RW7 add them.
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
     * `:dispatch` — `:coordinator` plus `can_dispatch` (the recursion
@@ -68,6 +74,7 @@ defmodule ArbiterWeb.ApiPolicy do
   @type policy ::
           :anonymous
           | :coordinator
+          | :operator
           | :dispatch
           | :any_token
           | :issue_read
@@ -283,6 +290,12 @@ defmodule ArbiterWeb.ApiPolicy do
     do: :ok
 
   def authorize(:coordinator, %Scope{tier: :coordinator}, _params), do: :ok
+
+  def authorize(:operator, %Scope{} = scope, _params) do
+    if Scope.operator?(scope),
+      do: :ok,
+      else: forbidden(scope, "lacks operator proof (node administration is operator-only)")
+  end
 
   def authorize(:grok_token, %Scope{tier: tier}, _params) when tier in [:coordinator, :worker],
     do: :ok
