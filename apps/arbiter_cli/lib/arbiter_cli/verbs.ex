@@ -154,7 +154,7 @@ defmodule ArbiterCli.Verbs do
          ["create", "p", "s"],
          ["attach", "w", "p", "a"],
          ["rotate", "a"],
-         ["merge", "a"]
+         ~w(merge a)
        ]
      ]},
     {"node", Module.concat(@cmd, Node),
