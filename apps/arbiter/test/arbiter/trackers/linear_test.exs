@@ -493,7 +493,7 @@ defmodule Arbiter.Trackers.LinearTest do
     test "an issue already in the closed-mapped state is not rewritten" do
       stub_linear("s-ship")
 
-      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :closed)
+      assert :ok = Linear.transition("ENG-1", :closed)
       refute_received {:wrote, _}
     end
 
