@@ -89,6 +89,10 @@ defmodule Arbiter.Application do
     ] ++
       migration_gate(auto_start?) ++
       [
+        # One session per connected remote node, plus the registry that finds it
+        # (RW6, docs/design/remote-workers.md §3, §10.1). Sessions read the Repo,
+        # so this follows the migration gate.
+        Arbiter.Nodes.Supervisor,
         # The shared circuit breaker (bd-5jr49o). Started early and with no deps
         # so every auto-filing / auto-escalating / auto-redispatching path can
         # gate through it; callers fail open if it is somehow absent.

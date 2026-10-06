@@ -79,6 +79,18 @@ defmodule Arbiter.Nodes.Node do
       accept [:name, :labels, :max_workers]
     end
 
+    # Drain: no new assignments, live runs untouched (§13). Revoked stays revoked,
+    # so these two never leave `:revoked`; the domain checks that first.
+    update :drain do
+      accept []
+      change set_attribute(:status, :draining)
+    end
+
+    update :undrain do
+      accept []
+      change set_attribute(:status, :active)
+    end
+
     update :touch do
       accept [:last_seen_at]
     end
