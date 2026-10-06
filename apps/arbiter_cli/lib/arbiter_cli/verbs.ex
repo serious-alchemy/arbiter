@@ -21,6 +21,12 @@ defmodule ArbiterCli.Verbs do
     * `:deprecated` — true for legacy flat verbs and the `issue` alias
     * `:host_local?` — true when the verb never talks to the server over HTTP
     * `:flags` — `{switch, type}` pairs the verb itself declares at this level
+    * `:probes` — argv prefixes (subcommand plus dummy positionals) that each
+      reach a flag parser; `strictness_test.exs` appends an unknown flag to
+      every one and asserts the verb exits 1 with
+      `unknown option --x for arb <verb>`. Every verb must declare them (`nil`
+      fails the test), so a new verb cannot ship with a lenient parse.
+      `[]` is only for a verb with no flag surface at all (`help`).
   """
 
   @type entry :: %{
@@ -31,7 +37,8 @@ defmodule ArbiterCli.Verbs do
           redirect_to: String.t() | nil,
           deprecated: boolean(),
           host_local?: boolean(),
-          flags: [{String.t(), :boolean | :string}]
+          flags: [{String.t(), :boolean | :string}],
+          probes: [[String.t()]] | nil
         }
 
   # Flags stripped centrally in `Main` before any subcommand parses argv.
@@ -44,42 +51,137 @@ defmodule ArbiterCli.Verbs do
 
   @cmd ArbiterCli.Cmd
 
+  @ticket_probes [
+    ["list"],
+    ["show", "bd-1"],
+    ["create", "T"],
+    ["update", "bd-1"],
+    ["close", "bd-1"],
+    ["reopen", "bd-1"],
+    ["promote", "bd-1"],
+    ["demote", "bd-1"],
+    ["rank", "bd-1"],
+    ["verify", "bd-1"],
+    ["resolve", "bd-1"],
+    ["handoff", "bd-1"],
+    ["handback", "bd-1"],
+    ["claim", "1"],
+    ["sync"],
+    ["ready"],
+    ["dispatch", "bd-1"]
+  ]
+
   @resources [
-    {"ticket", Module.concat(@cmd, Issue), []},
-    {"issue", Module.concat(@cmd, Issue), [deprecated: true]},
-    {"epic", Module.concat(@cmd, Epic), []},
-    {"worker", Module.concat(@cmd, Worker), []},
-    {"repo", Module.concat(@cmd, Repo), []},
-    {"dep", Module.concat(@cmd, Dep), []},
-    {"config", Module.concat(@cmd, Config), []},
-    {"server", Module.concat(@cmd, Server), []},
-    {"workspace", Module.concat(@cmd, Workspace), []},
-    {"message", Module.concat(@cmd, Message), []},
-    {"usage", Module.concat(@cmd, Usage), []},
-    {"loop", Module.concat(@cmd, Loop), []},
-    {"queue", Module.concat(@cmd, Queue), []},
-    {"scheduler", Module.concat(@cmd, Scheduler), []},
-    {"settings", Module.concat(@cmd, Settings), []},
-    {"quota", Module.concat(@cmd, Quota), []},
-    {"provider", Module.concat(@cmd, Provider), []},
-    {"breaker", Module.concat(@cmd, Breaker), []},
-    {"image", Module.concat(@cmd, Image), []},
-    {"install", Module.concat(@cmd, Install), [host_local?: true]},
-    {"mcp", Module.concat(@cmd, Mcp), []},
-    {"skill", Module.concat(@cmd, Skill), []},
-    {"session", Module.concat(@cmd, Session), [host_local?: true]},
-    {"account", Module.concat(@cmd, Account), []},
-    {"node", Module.concat(@cmd, Node), []},
-    {"dashboard", Module.concat(@cmd, Dashboard), []},
-    {"prime", Module.concat(@cmd, Prime), []},
-    {"where", Module.concat(@cmd, Where), [host_local?: true]},
-    {"init", Module.concat(@cmd, Init), [host_local?: true]},
-    {"version", Module.concat(@cmd, Version), [host_local?: true]},
-    {"self-update", Module.concat(@cmd, SelfUpdate), [host_local?: true]},
-    {"upgrade", Module.concat(@cmd, SelfUpdate), [host_local?: true]},
-    {"preflip-gate", Module.concat(@cmd, PreflipGate), []},
-    {"grok-token", Module.concat(@cmd, GrokToken), []},
-    {"help", ArbiterCli.Main, [host_local?: true]}
+    {"ticket", Module.concat(@cmd, Issue), [probes: @ticket_probes]},
+    {"issue", Module.concat(@cmd, Issue), [deprecated: true, probes: @ticket_probes]},
+    {"epic", Module.concat(@cmd, Epic), [probes: [["floor", "bd-1", "P1"]]]},
+    {"worker", Module.concat(@cmd, Worker),
+     [
+       probes: [
+         ["list"],
+         ["show", "bd-1"],
+         ["runs", "bd-1"],
+         ["log", "bd-1"],
+         ["stop", "bd-1"],
+         ["resume", "bd-1"],
+         ["review", "bd-1"]
+       ]
+     ]},
+    {"repo", Module.concat(@cmd, Repo), [probes: [["list"], ["show", "r"]]]},
+    {"dep", Module.concat(@cmd, Dep),
+     [probes: [["add", "a", "depends_on", "b"], ["rm", "a", "b"], ["list"]]]},
+    {"config", Module.concat(@cmd, Config),
+     [probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["overview"]]]},
+    {"server", Module.concat(@cmd, Server),
+     [probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"]]]},
+    {"workspace", Module.concat(@cmd, Workspace),
+     [
+       probes: [
+         ["list"],
+         ["show", "w"],
+         ["create", "w"],
+         ["standing-order", "ls"],
+         ["secret", "ls"]
+       ]
+     ]},
+    {"message", Module.concat(@cmd, Message),
+     [probes: [["send", "r", "body"], ["inbox"], ["notify"]]]},
+    {"usage", Module.concat(@cmd, Usage), [probes: [[], ["events"]]]},
+    {"loop", Module.concat(@cmd, Loop),
+     [
+       probes: [
+         ["analyze"],
+         ["pending"],
+         ["diff", "1"],
+         ["apply", "1"],
+         ["apply", "all"],
+         ["reject", "1"],
+         ["propose", "routing"],
+         ["propose", "repo-doc-patch"],
+         ["canary", "status"]
+       ]
+     ]},
+    {"queue", Module.concat(@cmd, Queue),
+     [
+       probes: [
+         ["retry-auto-resolve", "bd-1"],
+         ["restart-watchdog", "bd-1"],
+         ["rerun-ci", "bd-1"]
+       ]
+     ]},
+    {"scheduler", Module.concat(@cmd, Scheduler),
+     [probes: [["pause"], ["resume"], ["status"], ["wait"]]]},
+    {"settings", Module.concat(@cmd, Settings),
+     [probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["schema"]]]},
+    {"quota", Module.concat(@cmd, Quota), [probes: [[]]]},
+    {"provider", Module.concat(@cmd, Provider),
+     [probes: [["pause", "p"], ["resume", "p"], ["list"]]]},
+    {"breaker", Module.concat(@cmd, Breaker), [probes: [["list"], ["reset", "sig"]]]},
+    {"image", Module.concat(@cmd, Image),
+     [probes: [["list"], ["build", "r"], ["refresh"], ["prune"]]]},
+    {"install", Module.concat(@cmd, Install),
+     [host_local?: true, probes: [["cli"], ["service"]]]},
+    {"mcp", Module.concat(@cmd, Mcp), [probes: [["token", "mint"], ["token", "verify", "tok"]]]},
+    {"skill", Module.concat(@cmd, Skill),
+     [probes: [["list"], ["show", "s"], ["create", "s"], ["update", "s"], ["delete", "s"]]]},
+    {"session", Module.concat(@cmd, Session),
+     [host_local?: true, probes: [["list"], ["attach", "s"]]]},
+    {"account", Module.concat(@cmd, Account),
+     [
+       probes: [
+         ["list"],
+         ["show", "a"],
+         ["create", "p", "s"],
+         ["attach", "w", "p", "a"],
+         ["rotate", "a"],
+         ["merge", "a"]
+       ]
+     ]},
+    {"node", Module.concat(@cmd, Node),
+     [
+       probes: [
+         ["add"],
+         ["list"],
+         ["show", "n"],
+         ["set", "n"],
+         ["events", "n"],
+         ["drain", "n"],
+         ["undrain", "n"],
+         ["revoke", "n"],
+         ["upgrade", "n"],
+         ["remove", "n"]
+       ]
+     ]},
+    {"dashboard", Module.concat(@cmd, Dashboard), [probes: [["login"]]]},
+    {"prime", Module.concat(@cmd, Prime), [probes: [[]]]},
+    {"where", Module.concat(@cmd, Where), [host_local?: true, probes: [[]]]},
+    {"init", Module.concat(@cmd, Init), [host_local?: true, probes: [[]]]},
+    {"version", Module.concat(@cmd, Version), [host_local?: true, probes: [[]]]},
+    {"self-update", Module.concat(@cmd, SelfUpdate), [host_local?: true, probes: [[]]]},
+    {"upgrade", Module.concat(@cmd, SelfUpdate), [host_local?: true, probes: [[]]]},
+    {"preflip-gate", Module.concat(@cmd, PreflipGate), [probes: [[]]]},
+    {"grok-token", Module.concat(@cmd, GrokToken), [probes: [[]]]},
+    {"help", ArbiterCli.Main, [host_local?: true, probes: []]}
   ]
 
   # `arb dispatch <id>` == `arb ticket dispatch <id>`; same for `verify`.
@@ -125,8 +227,14 @@ defmodule ArbiterCli.Verbs do
   @spec orphans() :: [entry()]
   def orphans do
     [
-      entry("review", :orphan, Module.concat(@cmd, Review), deprecated: true),
-      entry("update", :orphan, Module.concat(@cmd, Update), deprecated: true)
+      entry("review", :orphan, Module.concat(@cmd, Review),
+        deprecated: true,
+        probes: [["bd-1"]]
+      ),
+      entry("update", :orphan, Module.concat(@cmd, Update),
+        deprecated: true,
+        probes: [[], ["bd-1"]]
+      )
     ]
   end
 
@@ -159,7 +267,7 @@ defmodule ArbiterCli.Verbs do
 
   defp shortcuts do
     for {name, sub} <- @shortcuts do
-      entry(name, :shortcut, Module.concat(@cmd, Issue), prefix: [sub])
+      entry(name, :shortcut, Module.concat(@cmd, Issue), prefix: [sub], probes: [[]])
     end
   end
 
@@ -167,7 +275,12 @@ defmodule ArbiterCli.Verbs do
     for {name, resource, prefix} <- @legacy do
       {:ok, %{handler: handler}} = fetch_resource(resource)
 
-      entry(name, :legacy, handler, prefix: prefix, redirect_to: resource, deprecated: true)
+      entry(name, :legacy, handler,
+        prefix: prefix,
+        redirect_to: resource,
+        deprecated: true,
+        probes: [[]]
+      )
     end
   end
 
@@ -187,7 +300,8 @@ defmodule ArbiterCli.Verbs do
       redirect_to: Keyword.get(opts, :redirect_to),
       deprecated: Keyword.get(opts, :deprecated, false),
       host_local?: Keyword.get(opts, :host_local?, false),
-      flags: Keyword.get(opts, :flags, [])
+      flags: Keyword.get(opts, :flags, []),
+      probes: Keyword.get(opts, :probes)
     }
   end
 end

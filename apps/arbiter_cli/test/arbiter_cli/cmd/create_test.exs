@@ -624,4 +624,42 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert_receive {:create_body, %{"verify_after_deploy" => true}}
     assert {:ok, %{"verify_after_deploy" => true}} = Jason.decode(out)
   end
+
+  for spelling <- ["3", "D3", "d3"] do
+    test "--difficulty #{spelling} forwards difficulty 3" do
+      parent = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/issues"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:posted, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{"id" => "bd-005", "title" => "Hard", "difficulty" => 3})
+         end}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn -> Create.run(["Hard", "--difficulty", unquote(spelling)]) end)
+
+      assert exit_code == 0
+      assert_received {:posted, %{"difficulty" => 3}}
+    end
+  end
+
+  test "--priority with a non-integer value errors rather than creating the ticket" do
+    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--priority", "abc"]) end)
+    assert exit_code == 1
+    assert err =~ "invalid value \"abc\" for --priority"
+  end
+
+  test "--difficulty with a non-numeric value errors" do
+    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--difficulty", "hard"]) end)
+    assert exit_code == 1
+    assert err =~ "invalid --difficulty"
+  end
 end
