@@ -26,6 +26,12 @@ defmodule Arbiter.Boot.ConfigMigrator do
   transient boot never races the canonical instance's writes. It is placed
   *after* `Arbiter.Boot.Migrator` in the tree so the schema is already at head.
 
+  It now runs before the patrol and finalizer supervisors exist (bd-2hwm9e), so
+  the `:patch_config` after-actions (`ReconcilePatrols`,
+  `ReconcileMergedPRFinalizer`) can log "reconcile raised/exited" warnings on a
+  boot where a legacy key is actually rewritten. They are harmless: the later
+  boot tasks start the patrols from the migrated config.
+
   Every migration here must be idempotent — it runs on every boot, not once.
   """
 
