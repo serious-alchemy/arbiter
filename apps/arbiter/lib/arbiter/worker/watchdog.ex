@@ -2851,7 +2851,10 @@ defmodule Arbiter.Worker.Watchdog do
                 merge_stall_notified: false,
                 merge_fail_count: 0,
                 last_merge_stall_poll: 0,
-                park_reason: nil
+                park_reason: nil,
+                # Drop the backoff anchor: it is a pre-reset `poll_count`, so a
+                # re-cancel of this head would otherwise sit "backing off" (#360).
+                cancel_rerun: unanchor_cancel_rerun(state.cancel_rerun)
             }
           else
             state
@@ -2935,6 +2938,9 @@ defmodule Arbiter.Worker.Watchdog do
         auto_resolve(reason, result, state)
     end
   end
+
+  defp unanchor_cancel_rerun(%{} = rerun), do: %{rerun | poll: nil}
+  defp unanchor_cancel_rerun(other), do: other
 
   defp cancel_rerun_for(%{cancel_rerun: %{head: head} = rerun}, head), do: rerun
   defp cancel_rerun_for(_state, head), do: %{head: head, count: 0, poll: nil}

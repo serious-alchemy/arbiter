@@ -2570,6 +2570,42 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:ok, []} = Github.list_required_check_failures(@ref)
     end
+
+    defp aggregate_with_shards(shard_conclusions) do
+      aggregate = %{
+        "__typename" => "CheckRun",
+        "name" => "mix test",
+        "status" => "COMPLETED",
+        "conclusion" => "FAILURE",
+        "isRequired" => true
+      }
+
+      shards =
+        for {c, i} <- Enum.with_index(shard_conclusions, 1) do
+          %{
+            "__typename" => "CheckRun",
+            "name" => "mix test (arbiter #{i}/3)",
+            "status" => "COMPLETED",
+            "conclusion" => c,
+            "isRequired" => false
+          }
+        end
+
+      [aggregate | shards]
+    end
+
+    test "an aggregate that failed only because a shard was cancelled is not a failure (#360)" do
+      stub_required_checks(aggregate_with_shards(["SUCCESS", "CANCELLED", "SUCCESS"]))
+
+      assert {:ok, []} = Github.list_required_check_failures(@ref)
+    end
+
+    test "an aggregate alongside a FAILURE shard is still listed (#360)" do
+      stub_required_checks(aggregate_with_shards(["SUCCESS", "CANCELLED", "FAILURE"]))
+
+      assert {:ok, [check]} = Github.list_required_check_failures(@ref)
+      assert check.name == "mix test"
+    end
   end
 
   describe "close/1" do

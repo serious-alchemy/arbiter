@@ -860,7 +860,7 @@ defmodule Arbiter.Mergers.Github do
        body
        |> rollup_contexts()
        |> Enum.reject(&is_nil/1)
-       |> Enum.filter(&required_settled_failure?/1)
+       |> required_failures()
        |> Enum.map(&summarize_required_check/1)}
     end
   end
@@ -2307,9 +2307,33 @@ defmodule Arbiter.Mergers.Github do
         []
     end
     |> Enum.reject(&is_nil/1)
-    |> Enum.filter(&required_settled_failure?/1)
+    |> required_failures()
     |> Enum.map(&summarize_required_check/1)
   end
+
+  # Required+settled failures, minus an aggregate CheckRun that failed only
+  # because a matrix shard was cancelled (#360). Same look-through as
+  # `cancelled_aggregate?/2`, with the GraphQL upper-case enums normalised to
+  # the REST lower-case values, so PRPatrol files no fix follow-up for it.
+  defp required_failures(contexts) do
+    runs = for %{"__typename" => "CheckRun"} = ctx <- contexts, do: rest_run(ctx)
+
+    contexts
+    |> Enum.filter(&required_settled_failure?/1)
+    |> Enum.reject(fn ctx ->
+      Map.get(ctx, "__typename") == "CheckRun" and cancelled_aggregate?(rest_run(ctx), runs)
+    end)
+  end
+
+  defp rest_run(ctx) do
+    %{
+      "name" => Map.get(ctx, "name"),
+      "conclusion" => ctx |> Map.get("conclusion") |> downcase_enum()
+    }
+  end
+
+  defp downcase_enum(v) when is_binary(v), do: String.downcase(v)
+  defp downcase_enum(v), do: v
 
   # A required rollup context (CheckRun or legacy StatusContext) that has
   # settled on a failing outcome. A required check still IN_PROGRESS/PENDING
