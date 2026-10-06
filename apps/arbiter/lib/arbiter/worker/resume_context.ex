@@ -169,7 +169,7 @@ defmodule Arbiter.Worker.ResumeContext do
   defp fenced(content), do: "```\n#{String.trim_trailing(content)}\n```"
 
   defp run_git(args, cd) do
-    case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+    case Arbiter.Worker.PrivateClone.cmd(cd, args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, String.trim_trailing(output)}
       {output, _nonzero} -> {:error, String.trim(output)}
     end
