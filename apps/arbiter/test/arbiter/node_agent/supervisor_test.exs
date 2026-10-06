@@ -45,11 +45,15 @@ defmodule Arbiter.NodeAgent.SupervisorTest do
 
     children = AgentSupervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
 
+    # `Image.Builder` is the primary app tree's here, so the agent doesn't start
+    # a second one; a bare agent boot does.
     assert Enum.sort(children) ==
              Enum.sort([
                Arbiter.NodeAgent.TaskSupervisor,
                Arbiter.NodeAgent.Status,
                Arbiter.NodeAgent.Upgrader,
+               Arbiter.NodeAgent.RunRegistry,
+               Arbiter.NodeAgent.RunSupervisor,
                Arbiter.NodeAgent.Connection
              ])
   end

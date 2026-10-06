@@ -34,6 +34,7 @@ defmodule Arbiter.NodeAgent.Config do
     :halt_fun,
     :live_runs_fun,
     :readiness_fun,
+    run_opts: [],
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
     readiness_ttl_ms: 600_000,
@@ -75,7 +76,7 @@ defmodule Arbiter.NodeAgent.Config do
          |> merged_opts()
          |> Keyword.take(
            ~w(hb_interval_ms fence_after_ms readiness_ttl_ms connect_timeout_ms hello_timeout_ms
-            idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun)a
+            idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun run_opts)a
          )
          |> Keyword.merge(
            primary_url: url,

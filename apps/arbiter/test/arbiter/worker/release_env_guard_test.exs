@@ -69,7 +69,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-3qkbch: `arb session attach`'s full-terminal handoff to tmux. Not a
     # BEAM/agent child, but every Port.open/2 site is scrubbed regardless of
     # what it spawns (rule 2's own text).
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => 1
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => 1,
+    # bd-1o2zh6 (RW9): the node agent's single `podman run` spawn, scrubbed via
+    # `ReleaseEnv.port_env/1`.
+    "apps/arbiter/lib/arbiter/node_agent/run.ex" => 1
   }
 
   # Every file under `apps/*/lib` that contains a subprocess spawn primitive,
@@ -164,7 +167,11 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed,
     # bd-3qkbch: opens a Port for tmux only (§4.7's CLI fallback) — scrubbed
     # for the same blanket rule-2 reason, not because tmux is a BEAM/agent.
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => :scrubbed
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => :scrubbed,
+    # bd-1o2zh6 (RW9): the node agent's run supervisor opens the one
+    # `podman run` Port; every other `node_agent/**` file spawns nothing (this
+    # inventory fails if one starts to).
+    "apps/arbiter/lib/arbiter/node_agent/run.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects
@@ -401,5 +408,14 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
 
            #{Enum.join(hand_rolled, "\n")}
            """
+  end
+
+  # bd-1o2zh6 (RW9): the node agent spawns `podman` on a remote host, so its
+  # tree must stay inside the scan rather than rely on a happy wildcard.
+  test "the scan covers apps/arbiter/lib/arbiter/node_agent/**" do
+    scanned = for {rel, _lines} <- source_files(), do: rel
+
+    assert "apps/arbiter/lib/arbiter/node_agent/run.ex" in scanned
+    assert Enum.any?(scanned, &String.starts_with?(&1, "apps/arbiter/lib/arbiter/node_agent/"))
   end
 end
