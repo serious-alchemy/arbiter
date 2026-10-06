@@ -209,9 +209,10 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       assert has_element?(view, ~s(#card-#{merging.id}), "in merge queue")
     end
 
-    # bd-cut6uv: a ticket whose ReviewGate waits on CI is In progress but holds
-    # no slot, and its card says what it is waiting on.
-    test "an In progress card waiting on CI names the head and holds no slot",
+    # bd-dc468g: a ticket whose ReviewGate waits on CI appears in Merging
+    # (holding no slot), keeping its "waiting on CI" badge, while In progress
+    # contains only slot-holding tickets.
+    test "a ticket waiting on CI appears in Merging with waiting on CI badge and In progress holds slot",
          %{conn: conn, ws: ws} do
       waiting = active_issue(ws, "waiting on ci")
       other = active_issue(ws, "working")
@@ -232,6 +233,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
 
       view = live_board(conn)
 
+      assert in_column?(view, "merging", waiting.id)
       assert has_element?(view, ~s(#card-#{waiting.id} [data-step="awaiting_ci"]))
 
       assert has_element?(
@@ -240,7 +242,9 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
                "waiting on CI #{String.slice(sha, 0, 12)}"
              )
 
+      assert in_column?(view, "in_progress", other.id)
       assert has_element?(view, ~s(#card-#{other.id} [data-step="implementing"]))
+      refute in_column?(view, "in_progress", waiting.id)
     end
 
     test "a Closed card shows its close reason", %{conn: conn, ws: ws} do

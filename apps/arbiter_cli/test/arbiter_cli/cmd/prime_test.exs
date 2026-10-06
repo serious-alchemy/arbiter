@@ -217,6 +217,36 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute Map.has_key?(ws, "review_parked")
     end
 
+    test "awaiting_ci tickets appear under Merging in text and json mode" do
+      tickets = [
+        ticket("bd-wait-ci", "merging", %{
+          "step" => "awaiting_ci",
+          "title" => "Awaiting CI on review"
+        }),
+        ticket("bd-active", "in_progress", %{
+          "step" => "implementing",
+          "title" => "Implementing thing"
+        })
+      ]
+
+      stub_with_tickets(tickets)
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      sec = Map.new(sections(out))
+      merging_text = Map.get(sec, "== Merging", []) |> Enum.join("\n")
+      in_prog_text = Map.get(sec, "== In progress", []) |> Enum.join("\n")
+
+      assert merging_text =~ "bd-wait-ci"
+      assert merging_text =~ "step=awaiting_ci"
+      assert in_prog_text =~ "bd-active"
+      refute in_prog_text =~ "bd-wait-ci"
+
+      {json_out, _err, 0} = capture(fn -> Prime.run(["--json"]) end)
+      assert {:ok, %{"workspaces" => [ws]}} = Jason.decode(json_out)
+      assert Enum.map(ws["merging"], & &1["id"]) == ["bd-wait-ci"]
+      assert Enum.map(ws["in_progress"], & &1["id"]) == ["bd-active"]
+    end
+
     test "an unreadable lifecycle read is marked, not omitted" do
       stub_routes([
         {{"get", "/api/workspaces"},

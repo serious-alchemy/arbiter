@@ -110,7 +110,7 @@ Verifying, Closed**.
 |---|---|
 | `backlog` | Backlog |
 | `queued` | **Blocked** or **Ready**, computed from the ticket's dependency edges |
-| `active` | In progress |
+| `active` | In progress (Merging while its ReviewGate waits on CI, bd-dc468g) |
 | `merging` | Merging |
 | `verifying` | Verifying |
 | `closed` | Closed |
@@ -142,8 +142,10 @@ attention too (bd-8if9zt).
 
 ## 5. Slots
 
-- **In progress is exactly the set of tickets holding a slot.** No slot is
-  held from anywhere else, and none invisibly.
+- **Every slot-holding ticket is In progress.** No slot is held from
+  anywhere else, and none invisibly. In progress may also hold slot-free
+  tickets (quota-held, see the slot table below); a ticket whose ReviewGate
+  is waiting on CI holds no slot and is in Merging.
 - **Merging and Verifying release the slot.** This replaces the 2026-09-21
   rule "another slot doesn't open until the issue occupying it is merged".
 - **A CI failure or a conflict moves the ticket back to In progress**
@@ -336,17 +338,17 @@ the ticket.
 
 ### Step
 
-- In progress: `implementing | in_review | awaiting_ci | addressing_review |
+- In progress: `implementing | in_review | addressing_review |
   fixing_ci | resolving_conflict`, from `Arbiter.Worker.Phase` over the runs — a
-  live subordinate round wins, and `implementing` is the default. `awaiting_ci`
-  (bd-cut6uv) is `in_review` while the ReviewGate holds its reviewer back until
-  CI is green on the head: the ticket carries a `ci_wait` marker
-  (`Arbiter.Worker.ReviewCi.waiting/2`), the card reads `waiting on CI <sha>`,
-  and the ticket holds no slot (below).
-- Merging: `behind_base` for a PR behind its base; `merge_blocked` for a
-  conflict, red CI, a draft, or an approved PR the forge still refuses;
-  `waiting_ci` while CI runs (or a deferred merge on record is `ci_pending`);
-  otherwise `in_merge_queue`.
+  live subordinate round wins, and `implementing` is the default.
+- Merging: `awaiting_ci` (bd-cut6uv, bd-dc468g) is `in_review` while the
+  ReviewGate holds its reviewer back until CI is green on the head: the ticket
+  carries a `ci_wait` marker (`Arbiter.Worker.ReviewCi.waiting/2`), the card
+  reads `waiting on CI <sha>`, it appears in Merging, and the ticket holds no
+  slot (below); `behind_base` for a
+  PR behind its base; `merge_blocked` for a conflict, red CI, a draft, or an
+  approved PR the forge still refuses; `waiting_ci` while CI runs (or a
+  deferred merge on record is `ci_pending`); otherwise `in_merge_queue`.
 
 ### The interim board
 
@@ -369,7 +371,10 @@ sharing its id; a ticket gets exactly one card.
 
 ## Child 3 (bd-asxw4e): the scheduler on ticket state
 
-### A slot is a ticket In progress
+### Slots and the In progress column
+
+(In progress is a superset of the slot holders: a quota-held `:active` ticket
+releases its slot but stays In progress until the follow-up decides its column.)
 
 `SlotGate.slots_used/1` counts the tickets whose stored state is `:active`
 (`holds_slot?/1`; epics never count). The worker rows are not an input:
@@ -380,7 +385,8 @@ sharing its id; a ticket gets exactly one card.
 | parked on a human (`:waiting_on_you`) | **released** | held — `:active`, with attention |
 | open PR (`waiting_ci_merge`) | held | released — `:merging` |
 | `:unknown` liveness probe | held | whatever the state says |
-| ReviewGate waiting on CI before dispatching a reviewer (bd-cut6uv) | held | released — still `:active`, but `holds_slot?/1` skips a ticket with a live `ci_wait` marker |
+| ReviewGate waiting on CI before dispatching a reviewer (bd-cut6uv, bd-dc468g) | held | released — `:merging` on board; `holds_slot?/1` skips a ticket with a live `ci_wait` marker |
+| held for quota (`DispatchQueue`) | held | released (`held_for_quota?`), still In progress on the board; column TBD, follow-up (bd-dc468g) |
 | merged, waiting on verification | released | released — `:verifying` |
 
 This replaces the operator's 2026-09-21 rule "another slot doesn't open until
@@ -545,7 +551,7 @@ starts, unless another run holds the ticket by then. A pass whose agent fails
 to start is failed rather than left `:idle` holding the ticket's key.
 
 The slot hand-off (`meta[:slot_handoff]`) and `Worker.Phase`'s
-`:handing_off` are gone: a ticket In progress is the slot.
+`:handing_off` are gone: a slot-holding ticket is In progress.
 
 ### The ReviewGate reports to the ticket
 
@@ -862,7 +868,8 @@ anyway, so `promote` is unchanged. Every card carries the view's `step` and
 | Verifying | awaiting verification |
 | Closed | `close_reason`: completed / won't do / duplicate |
 
-In progress holds every `:active` ticket, whatever its run is doing: a parked
+In progress holds every `:active` ticket, whatever its run is doing (except
+one whose ReviewGate is waiting on CI, which is in Merging): a parked
 or crashed run keeps its card there, wearing the coordinator's attention.
 
 ### The Needs-attention swimlane

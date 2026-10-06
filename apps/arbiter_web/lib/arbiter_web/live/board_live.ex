@@ -867,8 +867,9 @@ defmodule ArbiterWeb.BoardLive do
   defp detail("blocked", card), do: EdgeGate.describe({:waiting_on, card.blocked_by})
   defp detail("ready", card), do: ready_reason(card.reason)
 
-  defp detail("in_progress", %{step: :awaiting_ci, ci_wait: %{sha: _} = wait}),
-    do: Arbiter.Worker.ReviewCi.wait_label(wait)
+  defp detail(column, %{step: :awaiting_ci, ci_wait: %{sha: _} = wait})
+       when column in ["in_progress", "merging"],
+       do: Arbiter.Worker.ReviewCi.wait_label(wait)
 
   defp detail(column, card) when column in ["in_progress", "merging"], do: step_label(card.step)
   defp detail("verifying", _card), do: "awaiting verification — restart & observe"
@@ -889,7 +890,7 @@ defmodule ArbiterWeb.BoardLive do
   # The activity line: what an In-progress card's run is doing (linked to its
   # worker when a run is live), the PR a Merging card is on.
   defp activity("in_progress", card), do: Map.get(card, :activity)
-  defp activity("merging", card), do: Map.get(card, :mr_ref)
+  defp activity("merging", card), do: Map.get(card, :mr_ref) || Map.get(card, :activity)
   defp activity(_column, _card), do: nil
 
   #
@@ -901,6 +902,7 @@ defmodule ArbiterWeb.BoardLive do
   defp activity_href("in_progress", %{status: status} = card) when not is_nil(status),
     do: ~p"/workers/#{card.id}"
 
+  defp activity_href("merging", %{step: :awaiting_ci} = card), do: ~p"/workers/#{card.id}"
   defp activity_href("merging", %{merge_pulled: true} = card), do: ~p"/workers/#{card.id}"
   defp activity_href("merging", %{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
   defp activity_href("merging", _card), do: ~p"/merge_queue"
