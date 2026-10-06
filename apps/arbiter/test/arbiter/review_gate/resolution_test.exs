@@ -148,7 +148,7 @@ defmodule Arbiter.ReviewGate.ResolutionTest do
       assert [%Resolution{decision: :amend}] = Resolutions.list(task.id)
     end
 
-    test "an explicit actor is recorded as given", %{task: task, coordinator: coord} do
+    test "a caller-supplied actor is ignored; attribution comes from the caller", %{task: task, coordinator: coord} do
       assert {:ok, %{resolution: res}} =
                Tools.review_gate_resolve(coord, %{
                  "task_id" => task.id,
@@ -157,7 +157,7 @@ defmodule Arbiter.ReviewGate.ResolutionTest do
                  "actor" => "operator:ryan"
                })
 
-      assert res.actor == "operator:ryan"
+      assert res.actor == "coordinator"
     end
 
     test "requires task_id, decision and reasoning", %{task: task, coordinator: coord} do
