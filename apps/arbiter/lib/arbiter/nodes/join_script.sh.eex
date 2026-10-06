@@ -33,6 +33,7 @@ FAILURES=0
 REMEDIES=""
 TMP_DIR=""
 JOIN_TOKEN=""
+ENV_TOKEN=""
 NODE_ROOT=""
 CONFIG_DIR=""
 UNIT_DIR=""
@@ -330,8 +331,8 @@ read_token() {
       *) die "ARB_JOIN_TOKEN_FILE must be mode 0600 (it is $mode)" ;;
     esac
     IFS= read -r tok <"$ARB_JOIN_TOKEN_FILE" || true
-  elif [ -n "${ARB_JOIN_TOKEN:-}" ]; then
-    tok="$ARB_JOIN_TOKEN"
+  elif [ -n "$ENV_TOKEN" ]; then
+    tok="$ENV_TOKEN"
   else
     # stdin is the curl pipe, so the terminal is read directly.
     if ! { : </dev/tty; } 2>/dev/null; then
@@ -341,7 +342,7 @@ read_token() {
     IFS= read -rs tok </dev/tty || true
     printf '\n' >/dev/tty
   fi
-  unset ARB_JOIN_TOKEN
+  ENV_TOKEN=""
   tok="${tok//[[:space:]]/}"
   if [[ ! "$tok" =~ ^arbj_[a-z2-7]{52}$ ]]; then
     die "that is not a join token (it should look like arbj_ followed by 52 characters)"
@@ -518,6 +519,10 @@ start_agent() {
 }
 
 main() {
+  # Take the token out of the environment first thing, so no child process
+  # (podman, curl, systemctl...) is ever started with it.
+  ENV_TOKEN="${ARB_JOIN_TOKEN:-}"
+  unset ARB_JOIN_TOKEN
   if [ "$(id -u)" -eq 0 ]; then
     die "refusing to run as root: rootless podman needs an unprivileged user. Run this as the user that will own the node."
   fi
