@@ -683,6 +683,9 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp default_estimate_fun(ws, task, opts) do
     if competence?(ws) do
+      # One matrix read per evaluation, not one per candidate (the board
+      # snapshot calls `availability/3` per issue).
+      opts = Keyword.put_new_lazy(opts, :rows, &Competence.rows/0)
       fn entry -> Competence.estimate(ws, entry, task, opts) end
     else
       nil
@@ -729,7 +732,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       index: index,
       model: model,
       family: family,
-      pool: pool
+      pool: pool,
+      tier: ctx.tier
     }
   end
 

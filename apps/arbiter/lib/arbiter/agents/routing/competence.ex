@@ -678,7 +678,7 @@ defmodule Arbiter.Agents.Routing.Competence do
   @spec estimate(Workspace.t() | nil, map(), Issue.t() | nil, keyword()) :: map()
   def estimate(ws, entry, task, opts \\ []) do
     choice = build_choice(entry, task, opts)
-    all_rows = rows()
+    all_rows = Keyword.get_lazy(opts, :rows, &rows/0)
 
     case lookup(all_rows, choice) do
       nil ->

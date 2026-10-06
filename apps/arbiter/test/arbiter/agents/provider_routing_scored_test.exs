@@ -428,6 +428,43 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       assert %{"rung" => 3} = codex_cand["cell"]
     end
 
+    test "an operator rung-2 (family, tier, difficulty) row is hit through select/4" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      codex = account!(:codex, "codex")
+      allow!(ws, codex, 0)
+
+      pairs = [{codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      # Baseline: the routed tier is what the rung-2 row has to match.
+      assert {:ok, %{decision: base}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      tier = base["model_tier"]
+      assert is_binary(tier)
+
+      assert {:ok, _} =
+               Arbiter.Settings.set_competence_matrix([
+                 %{
+                   "match" => %{"family" => "openai", "tier" => tier, "difficulty" => 2},
+                   "n" => 40,
+                   "rung" => 2,
+                   "author_runs" => 3.0,
+                   "review_runs" => 1.5,
+                   "time_to_close_median_hours" => 2.0
+                 }
+               ])
+
+      on_exit(fn -> Arbiter.Settings.set_competence_matrix(nil) end)
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      [cand] = d["candidates"]
+      assert %{"rung" => 2, "n" => 40} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 3.0, "review" => 1.5}
+    end
+
     test "a real agy account lands on the measured flash-medium D2 cell" do
       cfg =
         config("scored", %{"mode" => "enforce", "competence" => true})
