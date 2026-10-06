@@ -369,7 +369,9 @@ defmodule Arbiter.Worker.ClaudeSession do
                :image,
                :podman,
                :egress,
-               :services
+               :services,
+               :claude_path,
+               :arb_path
              ]) ++
                [
                  provider: provider,
