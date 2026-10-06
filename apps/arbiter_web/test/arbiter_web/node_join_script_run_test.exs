@@ -534,6 +534,20 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
       refute File.exists?(Path.join(ctx.home, ".arbiter-node/releases/#{ctx.release.tag}"))
     end
 
+    test "unpacks a flat tarball (a hand-rolled --local build) as well as a rooted one", ctx do
+      File.rm_rf!(Path.join(ctx.release.home, "current"))
+      File.rm_rf!(Path.join(ctx.release.home, "releases"))
+      install_release!(ctx.release.home, "local-1", layout: :flat)
+
+      {out, 0} = run_script(ctx, [{"ARB_JOIN_TOKEN_FILE", token_file(ctx, mint())}])
+
+      assert out =~ "Done."
+      assert File.exists?(Path.join(ctx.home, ".arbiter-node/releases/local-1/bin/arbiter"))
+      assert File.exists?(Path.join(ctx.home, ".arbiter-node/releases/local-1/.agent-sha256"))
+      refute File.exists?(Path.join(ctx.home, ".arbiter-node/releases/.stage.1"))
+      assert Path.wildcard(Path.join(ctx.home, ".arbiter-node/releases/.stage.*")) == []
+    end
+
     test "leaves no temporary directory behind", ctx do
       {_, 0} = run_script(ctx, [{"ARB_JOIN_TOKEN_FILE", token_file(ctx, mint())}])
       assert Path.wildcard(Path.join(ctx.run, "arbiter-join.*")) == []

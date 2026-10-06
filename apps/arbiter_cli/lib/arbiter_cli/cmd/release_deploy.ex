@@ -212,6 +212,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       log("Checksum verified (sha256 #{String.slice(expected_sha, 0, 12)}…).")
 
       ReleaseFiles.unpack!(tarball, target_dir)
+      ReleaseFiles.retain_tarball!(target_dir, tarball, expected_sha)
     end
 
     deploy(tag, populate, mode, force, timeout_ms, opts)
@@ -239,7 +240,14 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         ReleaseFiles.install_dir!(path, target_dir)
       else
         log("Installing local release tarball #{path}…")
-        ReleaseFiles.unpack!(File.read!(path), target_dir)
+        bytes = File.read!(path)
+        ReleaseFiles.unpack!(bytes, target_dir)
+
+        ReleaseFiles.retain_tarball!(
+          target_dir,
+          bytes,
+          :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+        )
       end
 
       unless File.exists?(Path.join(target_dir, "bin/arbiter")) do

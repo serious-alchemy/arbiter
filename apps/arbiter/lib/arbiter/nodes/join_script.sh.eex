@@ -438,18 +438,25 @@ download_agent() {
 }
 
 install_agent() {
-  local rel="$NODE_ROOT/releases/$AGENT_VERSION" stage="$NODE_ROOT/releases/.stage.$$"
+  local rel="$NODE_ROOT/releases/$AGENT_VERSION" stage="$NODE_ROOT/releases/.stage.$$" root
   mkdir -p "$NODE_ROOT/releases" "$NODE_ROOT/bin"
   if [ -x "$rel/bin/arbiter" ] && [ -f "$rel/.agent-sha256" ] && [ "$(cat "$rel/.agent-sha256")" = "$AGENT_SHA" ]; then
     ok "agent $AGENT_VERSION is already unpacked"
   else
     rm -rf -- "$stage"
     mkdir -p "$stage"
-    tar -xzf "$TMP_DIR/agent.tar.gz" -C "$stage" --strip-components=1
-    [ -x "$stage/bin/arbiter" ] || die "the agent archive has no bin/arbiter"
-    printf '%s\n' "$AGENT_SHA" >"$stage/.agent-sha256"
+    tar -xzf "$TMP_DIR/agent.tar.gz" -C "$stage"
+    # A published release has one top-level arbiter/ directory; a hand-rolled
+    # --local tarball may be flat.
+    root="$stage"
+    if [ -x "$stage/arbiter/bin/arbiter" ]; then
+      root="$stage/arbiter"
+    fi
+    [ -x "$root/bin/arbiter" ] || die "the agent archive has no bin/arbiter"
+    printf '%s\n' "$AGENT_SHA" >"$root/.agent-sha256"
     rm -rf -- "$rel"
-    mv "$stage" "$rel"
+    mv "$root" "$rel"
+    rm -rf -- "$stage"
   fi
   # Atomic swap: build the new link beside the old one, then rename over it.
   ln -s "releases/$AGENT_VERSION" "$NODE_ROOT/current.new.$$"

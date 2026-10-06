@@ -9,8 +9,8 @@ defmodule ArbiterWeb.NodeFixtures do
   `bin/arbiter` script), the retained `<tag>.tar.gz` + `.sha256`, and the
   `current` symlink. Returns `%{home:, tag:, tarball:, sha256:}`.
   """
-  @spec install_release!(String.t(), String.t()) :: map()
-  def install_release!(home, tag \\ "v9.9.9") do
+  @spec install_release!(String.t(), String.t(), keyword()) :: map()
+  def install_release!(home, tag \\ "v9.9.9", opts \\ []) do
     releases = Path.join(home, "releases")
     tree = Path.join(releases, tag)
     File.mkdir_p!(Path.join(tree, "bin"))
@@ -23,12 +23,14 @@ defmodule ArbiterWeb.NodeFixtures do
     File.cp!(Path.join(tree, "bin/arbiter"), Path.join(staging, "arbiter/bin/arbiter"))
     File.chmod!(Path.join(staging, "arbiter/bin/arbiter"), 0o755)
 
-    :ok =
-      :erl_tar.create(
-        String.to_charlist(tarball),
-        [{~c"arbiter", String.to_charlist(Path.join(staging, "arbiter"))}],
-        [:compressed]
-      )
+    # `layout: :flat` is a hand-rolled `--local` tarball with no top-level dir.
+    entries =
+      case Keyword.get(opts, :layout, :rooted) do
+        :rooted -> [{~c"arbiter", String.to_charlist(Path.join(staging, "arbiter"))}]
+        :flat -> [{~c"bin", String.to_charlist(Path.join(staging, "arbiter/bin"))}]
+      end
+
+    :ok = :erl_tar.create(String.to_charlist(tarball), entries, [:compressed])
 
     File.rm_rf!(staging)
 
