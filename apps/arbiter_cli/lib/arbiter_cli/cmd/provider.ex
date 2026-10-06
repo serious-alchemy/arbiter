@@ -30,7 +30,8 @@ defmodule ArbiterCli.Cmd.Provider do
         ["resume" | rest] ->
           resume(rest, Output.mode(argv))
 
-        ["list" | _] ->
+        ["list" | rest] ->
+          _ = ArgParser.parse(rest, command: "arb provider list", switches: [])
           list(Output.mode(argv))
 
         _ ->

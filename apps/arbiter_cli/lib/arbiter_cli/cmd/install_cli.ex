@@ -18,7 +18,7 @@ defmodule ArbiterCli.Cmd.InstallCli do
     * `1` — build or install failed, or project root could not be located.
   """
 
-  alias ArbiterCli.{Cmd.Start, Output}
+  alias ArbiterCli.{ArgParser, Cmd.Start, Output}
 
   @switches [json: :boolean]
 
@@ -26,7 +26,9 @@ defmodule ArbiterCli.Cmd.InstallCli do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb install cli", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       root =

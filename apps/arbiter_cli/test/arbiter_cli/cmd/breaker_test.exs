@@ -284,4 +284,21 @@ defmodule ArbiterCli.Cmd.BreakerTest do
     assert code == 2
     assert err =~ "unknown breaker subcommand"
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "an unknown --flag value is an error, not a signature of \"value\"" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Cmd.Breaker.run(["reset", "--bogus", "value"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --bogus for arb breaker"
+    end
+
+    test "list rejects an unknown flag" do
+      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Breaker.run(["list", "--opne"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --opne for arb breaker"
+    end
+  end
 end

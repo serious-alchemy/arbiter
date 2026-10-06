@@ -174,31 +174,6 @@ defmodule ArbiterCli.Main do
       ARB_WORKSPACE  Workspace name or id (unset: "default", else the sole workspace); overridden by -w / --workspace
   """
 
-  # Pre-`arb <resource> <verb>` flat commands, mapped to their new canonical
-  # form. Each still runs (we dispatch to the new handler) but prints a
-  # one-line note pointing at the new grammar.
-  @legacy %{
-    "list" => {"ticket", ["list"]},
-    "show" => {"ticket", ["show"]},
-    "create" => {"ticket", ["create"]},
-    "close" => {"ticket", ["close"]},
-    "reopen" => {"ticket", ["reopen"]},
-    "claim" => {"ticket", ["claim"]},
-    "sync" => {"ticket", ["sync"]},
-    "ready" => {"ticket", ["ready"]},
-    "resume" => {"worker", ["resume"]},
-    "review" => {"worker", ["review"]},
-    "start" => {"server", ["start"]},
-    "restart" => {"server", ["restart"]},
-    "migrate" => {"server", ["migrate"]},
-    "doctor" => {"server", ["doctor"]},
-    "inbox" => {"message", ["inbox"]},
-    "notify" => {"message", ["notify"]},
-    "msg" => {"message", ["send"]},
-    "install-cli" => {"install", ["cli"]},
-    "install-service" => {"install", ["service"]}
-  }
-
   def main(argv) do
     # Start :req's transitive applications. The escript bundles them but does
     # not auto-start. Without this, Req.get crashes with :finch not started.
@@ -283,11 +258,11 @@ defmodule ArbiterCli.Main do
   end
 
   defp legacy_redirect(cmd, args) do
-    case Map.fetch(@legacy, cmd) do
-      {:ok, {resource, prefix}} ->
-        {:ok, resource, prefix ++ args, "#{resource} #{Enum.join(prefix, " ")}"}
+    case ArbiterCli.Verbs.fetch(cmd) do
+      {:ok, %{kind: :legacy} = entry} ->
+        {:ok, entry.redirect_to, entry.prefix ++ args, ArbiterCli.Verbs.new_form(entry)}
 
-      :error ->
+      _ ->
         :none
     end
   end
@@ -297,52 +272,23 @@ defmodule ArbiterCli.Main do
   defp deploy_invocation?([]), do: true
   defp deploy_invocation?([first | _]), do: String.starts_with?(first, "-")
 
-  defp dispatch_known("ticket", args), do: ArbiterCli.Cmd.Issue.run(args)
-
   # bd-4jojpw: `issue` was renamed `ticket`. The old resource name keeps working
   # for one release, with a single note on stderr so `--json` stdout stays clean.
   defp dispatch_known("issue", args) do
     IO.puts(:stderr, "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).")
-    ArbiterCli.Cmd.Issue.run(args)
+    run_entry("issue", args)
   end
 
-  defp dispatch_known("epic", args), do: ArbiterCli.Cmd.Epic.run(args)
-  defp dispatch_known("worker", args), do: ArbiterCli.Cmd.Worker.run(args)
-  defp dispatch_known("repo", args), do: ArbiterCli.Cmd.Repo.run(args)
-  defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)
-  defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
-  defp dispatch_known("settings", args), do: ArbiterCli.Cmd.Settings.run(args)
-  defp dispatch_known("server", args), do: ArbiterCli.Cmd.Server.run(args)
-  defp dispatch_known("workspace", args), do: ArbiterCli.Cmd.Workspace.run(args)
-  defp dispatch_known("message", args), do: ArbiterCli.Cmd.Message.run(args)
-  defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
-  defp dispatch_known("loop", args), do: ArbiterCli.Cmd.Loop.run(args)
-  defp dispatch_known("queue", args), do: ArbiterCli.Cmd.Queue.run(args)
-  defp dispatch_known("scheduler", args), do: ArbiterCli.Cmd.Scheduler.run(args)
-  defp dispatch_known("provider", args), do: ArbiterCli.Cmd.Provider.run(args)
-  defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
-  defp dispatch_known("preflip-gate", args), do: ArbiterCli.Cmd.PreflipGate.run(args)
-  defp dispatch_known("breaker", args), do: ArbiterCli.Cmd.Breaker.run(args)
-  defp dispatch_known("grok-token", args), do: ArbiterCli.Cmd.GrokToken.run(args)
-  defp dispatch_known("image", args), do: ArbiterCli.Cmd.Image.run(args)
-  defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
-  defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
-  defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
-  defp dispatch_known("node", args), do: ArbiterCli.Cmd.Node.run(args)
-  defp dispatch_known("account", args), do: ArbiterCli.Cmd.Account.run(args)
-  defp dispatch_known("session", args), do: ArbiterCli.Cmd.Session.run(args)
-  # Top-level shortcut: `arb dispatch <id>` == `arb ticket dispatch <id>`.
-  defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
-  # Top-level shortcut: `arb verify <id>` == `arb ticket verify <id>`.
-  defp dispatch_known("verify", args), do: ArbiterCli.Cmd.Issue.run(["verify" | args])
-  defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
-  defp dispatch_known("dashboard", args), do: ArbiterCli.Cmd.Dashboard.run(args)
-  defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
-  defp dispatch_known("init", args), do: ArbiterCli.Cmd.Init.run(args)
-  defp dispatch_known("version", args), do: ArbiterCli.Cmd.Version.run(args)
-  defp dispatch_known("self-update", args), do: ArbiterCli.Cmd.SelfUpdate.run(args)
-  defp dispatch_known("upgrade", args), do: ArbiterCli.Cmd.SelfUpdate.run(args)
-  defp dispatch_known("help", _args), do: usage_and_exit(0)
+  defp dispatch_known(name, args), do: run_entry(name, args)
+
+  defp run_entry(name, args) do
+    {:ok, entry} = ArbiterCli.Verbs.fetch(name)
+
+    case entry.handler do
+      __MODULE__ -> usage_and_exit(0)
+      handler -> handler.run(ArbiterCli.Verbs.handler_args(entry, args))
+    end
+  end
 
   # Terminates the VM via `Output.halt/1` on every clause — spelled out so
   # dialyzer does not report it as an accidental "no local return".

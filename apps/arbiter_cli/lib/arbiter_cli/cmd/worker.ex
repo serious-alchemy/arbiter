@@ -43,7 +43,7 @@ defmodule ArbiterCli.Cmd.Worker do
   the repo and model.
   """
 
-  alias ArbiterCli.{Client, Output, RunLabel}
+  alias ArbiterCli.{ArgParser, Client, Output, RunLabel}
 
   @switches [
     json: :boolean,
@@ -61,8 +61,7 @@ defmodule ArbiterCli.Cmd.Worker do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
+      {flags, rest, mode} = ArgParser.parse(argv, command: "arb worker", switches: @switches)
 
       case rest do
         ["list" | _] ->
@@ -95,14 +94,14 @@ defmodule ArbiterCli.Cmd.Worker do
         ["stop" | _] ->
           Output.die("worker stop requires: <task-id>")
 
-        ["resume", task_id | opts] ->
-          resume(task_id, opts, mode)
+        ["resume", task_id | positional] ->
+          resume(task_id, positional, flags, mode)
 
         ["resume" | _] ->
           Output.die("worker resume requires: <task-id>")
 
-        ["review", task_id | opts] ->
-          review(task_id, opts, mode)
+        ["review", task_id | _] ->
+          review(task_id, flags, mode)
 
         ["review" | _] ->
           Output.die("worker review requires: <task-id>")
@@ -160,11 +159,9 @@ defmodule ArbiterCli.Cmd.Worker do
   # the task's most recent run when omitted); `--model` is an optional per-run
   # override. POSTs to the same endpoint regardless of whether the user typed
   # `arb worker resume` or the top-level `arb resume` alias.
-  defp resume(task_id, opts, mode) do
-    {flags, rest, _invalid} = OptionParser.parse(opts, switches: @switches)
-
+  defp resume(task_id, positional, flags, mode) do
     repo =
-      case rest do
+      case positional do
         [] -> nil
         [repo] -> repo
         _ -> Output.die("worker resume takes at most: <task-id> [<repo>]")
@@ -183,9 +180,7 @@ defmodule ArbiterCli.Cmd.Worker do
     end
   end
 
-  defp review(task_id, opts, mode) do
-    {flags, _rest, _invalid} = OptionParser.parse(opts, switches: @switches)
-
+  defp review(task_id, flags, mode) do
     body =
       %{"task_id" => task_id}
       |> maybe_put("repo", flags[:repo])

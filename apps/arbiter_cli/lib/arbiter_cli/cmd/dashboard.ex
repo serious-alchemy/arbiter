@@ -11,22 +11,27 @@ defmodule ArbiterCli.Cmd.Dashboard do
   the local operator.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   def run(argv) do
-    cond do
-      Output.help?(argv) -> IO.puts(@moduledoc)
-      match?(["login" | _], argv) -> login(argv)
-      true -> Output.die("usage: arb dashboard login [--json]")
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb dashboard", switches: [])
+
+      case rest do
+        ["login" | _] -> login(mode)
+        _ -> Output.die("usage: arb dashboard login [--json]")
+      end
     end
   end
 
-  defp login(argv) do
+  defp login(mode) do
     case Client.post("/api/dashboard/login_tokens", %{}) do
       {:ok, %{"path" => path} = body} ->
         url = Client.base_url() <> path
 
-        case Output.mode(argv) do
+        case mode do
           :json -> IO.puts(Jason.encode!(Map.put(body, "url", url)))
           :text -> IO.puts(url)
         end

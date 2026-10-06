@@ -41,7 +41,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
       mismatch, write failure).
   """
 
-  alias ArbiterCli.Output
+  alias ArbiterCli.{ArgParser, Output}
 
   @default_github_api "https://api.github.com"
   @switches [version: :string, json: :boolean, force: :boolean]
@@ -57,14 +57,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
   end
 
   defp do_self_update(argv) do
-    {opts, _rest, invalid} = OptionParser.parse(argv, strict: @switches)
-
-    if invalid != [] do
-      [{flag, _} | _] = invalid
-      Output.die("unknown option #{flag} for `arb self-update`")
-    end
-
-    mode = if opts[:json], do: :json, else: :text
+    {opts, _rest, mode} = ArgParser.parse(argv, command: "arb self-update", strict: @switches)
     force = opts[:force] || false
 
     repo = release_repo()

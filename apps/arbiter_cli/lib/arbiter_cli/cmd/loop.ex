@@ -108,7 +108,7 @@ defmodule ArbiterCli.Cmd.Loop do
   never re-opens on its own.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -147,7 +147,8 @@ defmodule ArbiterCli.Cmd.Loop do
         ["pending" | tail] ->
           pending(tail, mode)
 
-        ["diff", id | _] ->
+        ["diff", id | tail] ->
+          _ = ArgParser.parse(tail, command: "arb loop diff", switches: [])
           diff(id)
 
         ["diff" | _] ->
@@ -156,7 +157,8 @@ defmodule ArbiterCli.Cmd.Loop do
         ["apply", "all" | tail] ->
           apply_all(tail, mode)
 
-        ["apply", id | _] ->
+        ["apply", id | tail] ->
+          _ = ArgParser.parse(tail, command: "arb loop apply", switches: [])
           apply_one(id, mode)
 
         ["apply" | _] ->
@@ -182,8 +184,9 @@ defmodule ArbiterCli.Cmd.Loop do
   @discover_timeout_ms 360_000
 
   defp analyze(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop analyze",
         switches: [
           since: :string,
           until: :string,
@@ -238,8 +241,9 @@ defmodule ArbiterCli.Cmd.Loop do
   end
 
   defp propose_repo_doc_patch(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop propose",
         switches: [repo: :string, lesson: :string, category: :string, workspace: :string],
         aliases: [r: :repo, l: :lesson, w: :workspace]
       )
@@ -259,16 +263,19 @@ defmodule ArbiterCli.Cmd.Loop do
   end
 
   defp propose_routing(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop propose",
         switches: [
           workspace: :string,
-          difficulty: :integer,
+          difficulty: :string,
           model_tier: :string,
           thinking: :string
         ],
         aliases: [w: :workspace]
       )
+
+    opts = ArgParser.coerce_difficulty(opts)
 
     body =
       %{}
@@ -285,8 +292,12 @@ defmodule ArbiterCli.Cmd.Loop do
   end
 
   defp canary_status(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv, switches: [workspace: :string], aliases: [w: :workspace])
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop canary",
+        switches: [workspace: :string],
+        aliases: [w: :workspace]
+      )
 
     params = maybe_put([], :workspace_id, Keyword.get(opts, :workspace))
 
@@ -368,8 +379,9 @@ defmodule ArbiterCli.Cmd.Loop do
   # ---- the proposal queue -------------------------------------------------
 
   defp pending(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop pending",
         switches: [state: :string, kind: :string, workspace: :string, limit: :integer],
         aliases: [l: :limit, w: :workspace]
       )
@@ -479,8 +491,9 @@ defmodule ArbiterCli.Cmd.Loop do
   # `apply all` is a convenience over the same per-row endpoint — never a
   # server-side bulk write, so one bad row cannot take the batch with it.
   defp apply_all(argv, mode) do
-    {opts, _rest, _bad} =
-      OptionParser.parse(argv,
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv,
+        command: "arb loop apply",
         switches: [state: :string, workspace: :string, limit: :integer],
         aliases: [l: :limit, w: :workspace]
       )
@@ -519,7 +532,9 @@ defmodule ArbiterCli.Cmd.Loop do
   end
 
   defp reject(id, argv, mode) do
-    {opts, _rest, _bad} = OptionParser.parse(argv, switches: [reason: :string])
+    {opts, _rest, _mode} =
+      ArgParser.parse(argv, command: "arb loop reject", switches: [reason: :string])
+
     body = maybe_put_map(%{}, "reason", Keyword.get(opts, :reason))
 
     case Client.post("/api/loop/pending/#{id}/reject", body) do

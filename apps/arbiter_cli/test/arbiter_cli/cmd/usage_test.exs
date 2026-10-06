@@ -548,4 +548,43 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert code == 0
     end
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "an unknown flag is rejected" do
+      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Usage.run(["--sinse", "7d"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --sinse for arb usage"
+    end
+
+    test "--session honours --account/--step/--source instead of dropping them" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-1"
+           assert conn.query_params["account"] == "acct"
+           assert conn.query_params["step"] == "work"
+           assert conn.query_params["source"] == "worker"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Usage.run([
+            "--session",
+            "sess-1",
+            "--account",
+            "acct",
+            "--step",
+            "work",
+            "--source",
+            "worker"
+          ])
+        end)
+
+      assert code == 0
+    end
+  end
 end

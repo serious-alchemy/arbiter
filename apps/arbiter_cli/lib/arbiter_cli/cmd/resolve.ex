@@ -29,7 +29,7 @@ defmodule ArbiterCli.Cmd.Resolve do
   Wraps `POST /api/issues/:id/resolve`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @decisions [
     accept_as_is: "accept_as_is",
@@ -53,7 +53,9 @@ defmodule ArbiterCli.Cmd.Resolve do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket resolve", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       id =

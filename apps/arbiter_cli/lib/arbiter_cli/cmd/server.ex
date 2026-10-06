@@ -73,7 +73,7 @@ defmodule ArbiterCli.Cmd.Server do
   next boot, after the old server is stopped.
   """
 
-  alias ArbiterCli.{Cmd, Cmd.Doctor, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.{ArgParser, Cmd, Cmd.Doctor, Cmd.Restart, Cmd.Start, Output}
 
   @migrate_switches [json: :boolean, timeout: :integer, force: :boolean]
   @default_migrate_timeout_s 60
@@ -153,7 +153,9 @@ defmodule ArbiterCli.Cmd.Server do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @migrate_switches)
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb server migrate", switches: @migrate_switches)
+
       mode = Output.mode(argv)
       timeout_ms = max(1, opts[:timeout] || @default_migrate_timeout_s) * 1000
       force = opts[:force] || false

@@ -196,4 +196,44 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert code != 0
     assert err =~ "difficulty"
   end
+
+  for spelling <- ["3", "D3", "d3"] do
+    test "--difficulty #{spelling} forwards difficulty 3" do
+      parent = self()
+
+      stub_routes([
+        @workspace_lookup,
+        {{"post", "/api/workspaces/ws-1/claim"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:posted, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{
+             "status" => "created",
+             "task" => %{"id" => "bd-abc", "title" => "T", "state" => "backlog"}
+           })
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Claim.run(["43", "--difficulty", unquote(spelling)]) end)
+
+      assert code == 0
+      assert_received {:posted, %{"difficulty" => 3}}
+    end
+  end
+
+  test "--difficulty with a non-numeric value errors rather than being dropped" do
+    {_out, err, code} = capture(fn -> Claim.run(["43", "--difficulty", "hard"]) end)
+    assert code == 1
+    assert err =~ "invalid --difficulty"
+  end
+
+  test "an unknown flag exits 1 naming the flag and does not swallow the ref" do
+    {_out, err, code} = capture(fn -> Claim.run(["--acceptance", "43"]) end)
+    assert code == 1
+    assert err =~ "unknown option --acceptance for arb ticket claim"
+  end
 end

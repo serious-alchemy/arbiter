@@ -37,21 +37,24 @@ defmodule ArbiterCli.Cmd.Dep do
   cycle named.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      mode = Output.mode(argv)
-      rest = Output.drop_json(argv)
+      {opts, rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb dep",
+          switches: [type: :string, workspace: :string, json: :boolean]
+        )
 
       case rest do
         ["add", from, type, to | _] -> add(from, type, to, mode)
         ["add" | _] -> Output.die("dep add requires: <from> <type> <to>")
-        ["rm" | rest] -> rm(rest, mode)
-        ["remove" | rest] -> rm(rest, mode)
-        ["list" | rest] -> list(rest, mode)
+        ["rm" | positional] -> rm(positional, opts, mode)
+        ["remove" | positional] -> rm(positional, opts, mode)
+        ["list" | positional] -> list(positional, opts, mode)
         [] -> Output.die("dep requires a subcommand: `add`, `rm` or `list`")
         [unknown | _] -> Output.die("unknown dep subcommand: #{unknown}")
       end
@@ -67,10 +70,7 @@ defmodule ArbiterCli.Cmd.Dep do
     end
   end
 
-  defp rm(args, mode) do
-    {opts, positional, _invalid} =
-      OptionParser.parse(args, switches: [type: :string, json: :boolean])
-
+  defp rm(positional, opts, mode) do
     case positional do
       [from, to] ->
         params = if opts[:type], do: [type: opts[:type]], else: []
@@ -92,10 +92,7 @@ defmodule ArbiterCli.Cmd.Dep do
     end
   end
 
-  defp list(args, mode) do
-    {opts, positional, _invalid} =
-      OptionParser.parse(args, switches: [type: :string, workspace: :string, json: :boolean])
-
+  defp list(positional, opts, mode) do
     if opts[:workspace], do: System.put_env("ARB_WORKSPACE", opts[:workspace])
 
     case positional do

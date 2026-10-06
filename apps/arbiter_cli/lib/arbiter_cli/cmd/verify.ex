@@ -20,7 +20,7 @@ defmodule ArbiterCli.Cmd.Verify do
   Wraps `POST /api/issues/:id/verify`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [observed: :string, failed: :string, json: :boolean]
 
@@ -28,7 +28,9 @@ defmodule ArbiterCli.Cmd.Verify do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket verify", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       id =

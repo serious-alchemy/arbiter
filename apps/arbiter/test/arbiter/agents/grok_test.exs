@@ -62,7 +62,8 @@ defmodule Arbiter.Agents.GrokTest do
 
   # `sh -c 'exec "$@" < /dev/null' sh <jail...> -- <grok ...>`
   defp split(argv) do
-    assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+    assert ["sh", "-c", script, "sh" | rest] = argv
+    assert script =~ ~s(exec "$@" < /dev/null)
     {jail, ["--" | command]} = Enum.split_while(rest, &(&1 != "--"))
     {jail, command}
   end
@@ -175,7 +176,8 @@ defmodule Arbiter.Agents.GrokTest do
     } do
       Application.put_env(:arbiter, :worker_jail_available, false)
       assert {:ok, argv} = Grok.default_argv("p", worktree: wt, security: policy(:auto))
-      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", ^grok, "-p", "p" | _] = argv
+      assert ["sh", "-c", script, "sh", ^grok, "-p", "p" | _] = argv
+      assert script =~ ~s(exec "$@" < /dev/null)
     end
 
     test "no grok on PATH is an error", %{worktree: wt, bin: bin} do
@@ -498,6 +500,67 @@ defmodule Arbiter.Agents.GrokTest do
       assert StopReason.classify(143, lines, "grok").category == :killed
       assert StopReason.classify(130, lines, "grok").category == :killed
       assert StopReason.classify(0, lines, "grok").category == :exited_without_done
+    end
+  end
+
+  describe "the launch script hydrates grok's login (bd-8rvkqd)" do
+    # grok 1.0.25's headless `-p` never runs GROK_AUTH_PROVIDER_COMMAND on a cold
+    # GROK_HOME (it answers "Not signed in"); `grok login` is what hydrates one.
+    # A stub `grok` records its argv; the script is run for real under `sh`.
+    setup %{bin: bin, base: base} do
+      log = Path.join(base, "grok.log")
+
+      File.write!(Path.join(bin, "grok"), """
+      #!/bin/sh
+      echo "$@" >> #{log}
+      if [ "$1" = login ]; then echo '{}' > "$GROK_HOME/auth.json"; fi
+      """)
+
+      home = Path.join(base, "home/.grok")
+      File.mkdir_p!(home)
+      {:ok, log: log, home: home}
+    end
+
+    defp run_launch(wt, env) do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      {:ok, ["sh", "-c", script, "sh" | command]} =
+        Grok.default_argv("p", worktree: wt, security: policy(:auto))
+
+      System.cmd("/bin/sh", ["-c", script, "sh" | command], env: env, stderr_to_stdout: true)
+    end
+
+    test "with the broker's provider command and a cold GROK_HOME: login first, then grok",
+         %{worktree: wt, log: log, home: home} do
+      env = [{"GROK_HOME", home}, {"GROK_AUTH_PROVIDER_COMMAND", "/x/arbiter-grok-token"}]
+      assert {_out, 0} = run_launch(wt, env)
+
+      assert [login, run] = log |> File.read!() |> String.split("\n", trim: true)
+      assert login == "login"
+      assert run =~ "-p p"
+      assert File.exists?(Path.join(home, "auth.json"))
+    end
+
+    test "an already hydrated GROK_HOME is not logged in again", %{
+      worktree: wt,
+      log: log,
+      home: home
+    } do
+      File.write!(Path.join(home, "auth.json"), "{}")
+      env = [{"GROK_HOME", home}, {"GROK_AUTH_PROVIDER_COMMAND", "/x/arbiter-grok-token"}]
+      assert {_out, 0} = run_launch(wt, env)
+      assert [run] = log |> File.read!() |> String.split("\n", trim: true)
+      assert run =~ "-p p"
+    end
+
+    test "without the provider command (an XAI_API_KEY spawn) there is no login", %{
+      worktree: wt,
+      log: log,
+      home: home
+    } do
+      assert {_out, 0} = run_launch(wt, [{"GROK_HOME", home}, {"XAI_API_KEY", "k"}])
+      assert [run] = log |> File.read!() |> String.split("\n", trim: true)
+      assert run =~ "-p p"
     end
   end
 end

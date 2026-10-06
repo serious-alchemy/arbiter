@@ -1,8 +1,8 @@
 defmodule Arbiter.Grok.CredentialStore do
   @moduledoc """
-  The canonical grok OIDC credential: one `auth.json` (the operator's
-  `~/.grok/auth.json` by default) that only `Arbiter.Grok.CredentialBroker`
-  ever refreshes (bd-9p4lx9).
+  The canonical grok OIDC credential: one `auth.json` (the grok provider
+  account's, see `resolve/1`) that only `Arbiter.Grok.CredentialBroker` ever
+  refreshes (bd-9p4lx9).
 
   grok's `auth.json` is a map of `"<issuer>::<client id>"` to one entry, which
   carries the access token (`key`), its `expires_at`, and a **rotating**
@@ -21,6 +21,8 @@ defmodule Arbiter.Grok.CredentialStore do
   `fingerprint/1` is the only thing derived from a secret that may be logged
   or compared: a 12-hex-digit SHA-256 prefix.
   """
+
+  require Logger
 
   @type creds :: %{
           entry_key: String.t(),
@@ -42,6 +44,91 @@ defmodule Arbiter.Grok.CredentialStore do
   @doc "The default canonical path (`~/.grok/auth.json`, expanded)."
   @spec default_path() :: String.t()
   def default_path, do: Path.expand(@default_path)
+
+  @type path_source :: :explicit | :account | :fallback
+
+  @doc """
+  The canonical `auth.json` path, and where it came from (bd-8rvkqd).
+
+  There is exactly **one** canonical credential, and the dashboard login relay
+  (`Arbiter.Accounts.LoginRunner`, `GROK_HOME=<accounts_root>/grok-<slug>`)
+  writes it, so that is the file the broker refreshes and the doctor reports:
+
+    1. `:explicit` - `:auth_path` in `opts`, else
+       `config :arbiter, :grok_broker, auth_path:` (an operator pin, and what
+       tests use).
+    2. `:account` - `<accounts_root>/grok-<slug>/auth.json` of the grok provider
+       account. With several accounts the one slugged `"default"` wins, else
+       the first whose file exists, else the first by slug.
+    3. `:fallback` - `~/.grok/auth.json`, only when no grok account exists.
+
+  Nothing is copied between locations: the refresh token rotates on every
+  refresh, so two copies would race. Resolution is cheap, so the broker repeats
+  it per request and picks up an account created by a first login without a
+  restart.
+
+  Other options: `:accounts` (a list of `ProviderAccount`s, or a 0-arity fun
+  returning one; default `Arbiter.Accounts.list_accounts(provider: :grok)`),
+  `:accounts_root`.
+  """
+  @spec resolve(keyword()) :: {String.t(), path_source()}
+  def resolve(opts \\ []) do
+    case explicit_path(opts) do
+      path when is_binary(path) ->
+        {Path.expand(path), :explicit}
+
+      nil ->
+        case account_path(opts) do
+          nil -> {default_path(), :fallback}
+          path -> {path, :account}
+        end
+    end
+  end
+
+  @doc "`resolve/1` without the source."
+  @spec resolve_path(keyword()) :: String.t()
+  def resolve_path(opts \\ []), do: opts |> resolve() |> elem(0)
+
+  defp explicit_path(opts) do
+    path =
+      Keyword.get_lazy(opts, :auth_path, fn ->
+        :arbiter |> Application.get_env(:grok_broker, []) |> Keyword.get(:auth_path)
+      end)
+
+    if is_binary(path) and path != "", do: path
+  end
+
+  defp account_path(opts) do
+    accounts =
+      case Keyword.get(opts, :accounts) do
+        list when is_list(list) -> list
+        fun when is_function(fun, 0) -> fun.()
+        nil -> grok_accounts()
+      end
+
+    root = Keyword.get_lazy(opts, :accounts_root, &Arbiter.Config.Paths.accounts_root/0)
+
+    paths =
+      accounts
+      |> Enum.sort_by(&(&1.slug != "default"))
+      |> Enum.map(&Path.expand(Path.join([root, "#{&1.provider}-#{&1.slug}", "auth.json"])))
+
+    Enum.find(paths, &File.regular?/1) || List.first(paths)
+  end
+
+  defp grok_accounts do
+    Arbiter.Accounts.list_accounts(provider: :grok)
+  rescue
+    error ->
+      Logger.warning(
+        "grok credential path: could not list grok provider accounts " <>
+          "(#{Exception.message(error)}); using #{@default_path}"
+      )
+
+      []
+  catch
+    :exit, _ -> []
+  end
 
   @doc """
   Read the OIDC entry from `path`. `{:error, :not_logged_in}` for a missing,

@@ -545,4 +545,13 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       refute contents =~ "current/bin/arbiter start"
     end
   end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "a typo'd --uninstal is rejected instead of running a full install" do
+      {_out, err, code} = capture(fn -> InstallService.run(["--uninstal"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --uninstal for arb install service"
+    end
+  end
 end

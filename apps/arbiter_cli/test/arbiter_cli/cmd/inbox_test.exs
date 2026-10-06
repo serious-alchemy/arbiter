@@ -312,7 +312,8 @@ defmodule ArbiterCli.Cmd.InboxTest do
     test "requires a task id" do
       {_out, err, code} = capture(fn -> Inbox.run(["clear", "--task"]) end)
       assert code != 0
-      assert err =~ "requires a task id"
+      assert err =~ "--task"
+      assert err =~ "requires a value"
     end
   end
 

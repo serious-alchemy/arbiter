@@ -20,7 +20,7 @@ defmodule ArbiterCli.Cmd.Message do
   picks it up next time it runs `arb message inbox <task-id>`.
   """
 
-  alias ArbiterCli.{Client, Cmd, Output, Workspace}
+  alias ArbiterCli.{ArgParser, Client, Cmd, Output, Workspace}
 
   @allowed_kinds ~w(notification completion failure escalation info)
   @default_kind "info"
@@ -42,11 +42,9 @@ defmodule ArbiterCli.Cmd.Message do
   # ---- send (was `arb msg`) ----------------------------------------------
 
   defp send(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
-
-    {opts, positional, _invalid} =
-      OptionParser.parse(rest,
+    {opts, positional, mode} =
+      ArgParser.parse(argv,
+        command: "arb message send",
         strict: [subject: :string, task: :string, directive: :string, kind: :string]
       )
 
@@ -102,6 +100,9 @@ defmodule ArbiterCli.Cmd.Message do
 
   # ---- direction shorthand (was `arb message <task> <text>`) -------------
 
+  # The one deliberate opt-out from strict flag parsing (bd-cqw11s): everything
+  # after the task id is free text for the worker, so a word that starts with a
+  # dash is body, not a flag. Only `--json` is peeled off.
   defp direction(task_id, words) do
     mode = Output.mode(words)
     text = words |> Output.drop_json() |> Enum.join(" ")

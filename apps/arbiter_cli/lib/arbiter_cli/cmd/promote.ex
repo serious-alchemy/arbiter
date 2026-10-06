@@ -13,7 +13,7 @@ defmodule ArbiterCli.Cmd.Promote do
   `acceptance_waived` and shown in `task show`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean, waive: :string]
 
@@ -26,7 +26,9 @@ defmodule ArbiterCli.Cmd.Promote do
   end
 
   defp do_run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    {opts, rest, _mode} =
+      ArgParser.parse(argv, command: "arb ticket promote", switches: @switches)
+
     mode = if opts[:json], do: :json, else: :text
     id = parse_id(rest)
     body = waive_body(opts[:waive])

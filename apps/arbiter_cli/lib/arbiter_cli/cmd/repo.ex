@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Repo do
   Both read from `GET /api/repos`.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output}
 
   @switches [json: :boolean]
 
@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.Repo do
   end
 
   defp list(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    {opts, _rest, _mode} = ArgParser.parse(argv, command: "arb repo", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
 
     case Client.get("/api/repos") do
@@ -59,8 +59,7 @@ defmodule ArbiterCli.Cmd.Repo do
   end
 
   defp show(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb repo show", switches: [])
 
     name =
       case rest do
