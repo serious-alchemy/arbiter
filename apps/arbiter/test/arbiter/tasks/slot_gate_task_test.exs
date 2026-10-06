@@ -102,4 +102,36 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
       assert SlotGate.slots_free(4, tickets) == 1
     end
   end
+
+  # bd-dc468g: In progress column matches exactly the slot-holding set
+  describe "board In progress column matches slot holders" do
+    test "In progress column cards match SlotGate.slot_holders for a mixed fixture" do
+      ci_marker =
+        Arbiter.Worker.ReviewCi.marker("a1b2c3d4e5f6", 1, %{interval_ms: 60_000, max_polls: 30})
+
+      tickets = [
+        ticket("active-1", :active),
+        ticket("awaiting-ci-1", :active, %{review_gate_state: %{"ci_wait" => ci_marker}}),
+        ticket("queued-1", :queued),
+        ticket("active-2", :active),
+        ticket("merging-1", :merging),
+        ticket("awaiting-ci-2", :active, %{review_gate_state: %{"ci_wait" => ci_marker}}),
+        ticket("verifying-1", :verifying),
+        ticket("closed-1", :closed)
+      ]
+
+      expected_slot_holders = SlotGate.slot_holders(tickets)
+      assert expected_slot_holders == ["active-1", "active-2"]
+
+      board = Arbiter.Board.Snapshot.derive(%{issues: tickets})
+      in_progress_ids = Enum.map(board.in_progress, & &1.id)
+      merging_ids = Enum.map(board.merging, & &1.id)
+
+      assert in_progress_ids == expected_slot_holders
+      assert "awaiting-ci-1" in merging_ids
+      assert "awaiting-ci-2" in merging_ids
+      refute "awaiting-ci-1" in in_progress_ids
+      refute "awaiting-ci-2" in in_progress_ids
+    end
+  end
 end

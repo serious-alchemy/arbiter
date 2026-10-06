@@ -662,9 +662,10 @@ defmodule Arbiter.Board.SnapshotTest do
       assert elsewhere(board, "bd-a") == []
     end
 
-    # bd-2gc809: a restart re-arms a CI wait with no run row at all; the card
-    # names the wait and the ticket has no attention (it is not a crash).
-    test "an in_progress issue waiting on CI with no worker reads waiting-on-CI, not stopped" do
+    # bd-dc468g: a ticket waiting on CI holds no scheduler slot and appears in
+    # the Merging column, keeping its "waiting on CI" badge / activity, while
+    # In progress is kept to slot-holding tickets.
+    test "an active issue waiting on CI appears in Merging with waiting-on-CI activity, not In progress" do
       marker =
         Arbiter.Worker.ReviewCi.marker("a1b2c3d4e5f6a7b8", 1, %{
           interval_ms: 60_000,
@@ -683,8 +684,10 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert [%{id: "bd-a", live: false, activity: activity, step: :awaiting_ci} = card] =
-               board.in_progress
+      assert board.in_progress == []
+
+      assert [%{id: "bd-a", agent_live: false, activity: activity, step: :awaiting_ci} = card] =
+               board.merging
 
       assert activity == "waiting on CI a1b2c3d4e5f6"
       assert card.attention == nil

@@ -28,7 +28,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   |---|---|
   | `:backlog` | `:backlog` |
   | `:queued` | `:blocked` when `:blocked_by` is non-empty, else `:ready` |
-  | `:active` | `:in_progress` |
+  | `:active` | `:in_progress` (or `:merging` when waiting on ReviewGate CI, bd-dc468g) |
   | `:merging` | `:merging` |
   | `:verifying` | `:verifying` |
   | `:closed` | `:closed` |
@@ -38,25 +38,28 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   The column comes from the stored state, never from a run: a `:queued`
   ticket with a leftover `:completed` or `:failed` author row is still Ready
-  or Blocked. The one exception is a *live* author run on a `:backlog` or
-  `:queued` ticket. Dispatch moves the ticket to `:active` before its run
-  starts, so that pair means the write lags a run that is already working
-  (a run started around the dispatch path, or a write that failed), and the
-  ticket reads as `:in_progress`. A row with no stored state at all (a bare
-  `%{id: ...}` for a run whose ticket was not read) is claimed by any non-completed author row.
+  or Blocked. The exceptions are:
+    * a *live* author run on a `:backlog` or `:queued` ticket (reads as `:in_progress`);
+    * an `:active` ticket whose ReviewGate is waiting on CI (`:awaiting_ci`, bd-dc468g)
+      which appears in `:merging` because it holds no scheduler slot.
+
+  A row with no stored state at all (a bare `%{id: ...}` for a run whose ticket
+  was not read) is claimed by any non-completed author row.
 
   ## Step
 
   Computed for `:in_progress` and `:merging` only, `nil` elsewhere.
 
-    * in progress: `:implementing | :in_review | :awaiting_ci |
+    * in progress: `:implementing | :in_review |
       :addressing_review | :fixing_ci | :resolving_conflict`, from the runs
       through `Arbiter.Worker.Phase` — a live subordinate round names the step,
       otherwise the author's own phase does, and a ticket with nothing more
-      specific on record is `:implementing`. `:awaiting_ci` (bd-cut6uv) is
+      specific on record is `:implementing`.
+    * awaiting ReviewGate CI: `:awaiting_ci` (bd-cut6uv, bd-dc468g) is
       `:in_review` while the ReviewGate holds its reviewer back until CI is green
       on the head (the ticket's `ci_wait` marker, `Arbiter.Worker.ReviewCi.waiting/2`):
-      no agent is live and the ticket holds no slot (`Arbiter.Tasks.SlotGate`).
+      no agent is live, the ticket holds no slot (`Arbiter.Tasks.SlotGate`), and it
+      appears in the `:merging` column so In progress matches the slot-holding set.
     * merging: `:waiting_ci | :in_merge_queue | :behind_base |
       :merge_blocked`, from the merger status. A conflict, red CI or a draft
       blocks whatever the approval state; an approval-type block counts only
@@ -134,14 +137,17 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     runs = runs_for(ticket, ctx)
     state = effective_state(ticket, runs)
     blocked_by = ctx |> Map.get(:blocked_by) |> List.wrap() |> Enum.uniq() |> Enum.sort()
-    column = column(state, blocked_by)
-    ci_wait = if column == :in_progress, do: ReviewCi.waiting(ticket, ctx_now(ctx))
-    cut_off = if column == :in_progress, do: ReviewPass.current(ticket, ctx_now(ctx))
+    initial_column = column(state, blocked_by)
+    ci_wait = if initial_column == :in_progress, do: ReviewCi.waiting(ticket, ctx_now(ctx))
+    cut_off = if initial_column == :in_progress, do: ReviewPass.current(ticket, ctx_now(ctx))
+    initial_step = step(initial_column, ticket, runs, ctx)
+    step = awaiting_ci(initial_step, ci_wait, runs)
+    column = if step == :awaiting_ci, do: :merging, else: initial_column
 
     %{
       state: state,
       column: column,
-      step: step(column, ticket, runs, ctx) |> awaiting_ci(ci_wait, runs),
+      step: step,
       blocked_by: blocked_by,
       attention:
         Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait, cut_off)),
