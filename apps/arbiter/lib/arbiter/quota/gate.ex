@@ -575,6 +575,28 @@ defmodule Arbiter.Quota.Gate do
     3. `nil` — Codex `"session"` (a session reset, not a fixed-length window)
        and Antigravity's collapsed `"used"` (no time window) by default.
 
+  ## Provider-reported lengths (bd-38h291)
+
+  A length the provider itself reports ranks between the account override and
+  the built-in table. Only Codex does, and it already flows through this
+  function: `wham/usage` reports `limit_window_seconds`, stored as
+  `session_window_minutes` / `weekly_window_minutes` and carried into the
+  snapshot as a `"<n>m"` label (step 2), with `CodexPlanWindows` as the
+  fallback for rows that report none. An account override keyed by that label
+  still wins.
+
+  No other provider is known to report a length. This is from the checked-in
+  code and fixtures only — no live sample payload was captured, so treat each
+  as "unconfirmed", not "proven absent":
+
+    * Anthropic `/api/oauth/usage` and rate-limit headers — windows are named
+      (`five_hour` / `seven_day`), no duration field in the parsers.
+    * Antigravity / Cloud Code — buckets carry a `window` label
+      (`"5h"` / `"weekly"`), no duration field.
+    * Gemini CLI — no window-length field parsed.
+
+  Re-check when a sanitized real payload from one of them shows a duration.
+
   There is deliberately no workspace step: window length is a property of the
   account's plan, not of who is spending it.
 
