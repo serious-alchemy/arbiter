@@ -10,7 +10,8 @@ defmodule ArbiterWeb.Plugs.CheckRepoStatusExceptMachineRoutes do
   workers instead of just showing a dashboard visitor a friendly error
   (bd-44gk10).
 
-  Requests under `/proxy`, `/api`, `/events`, or `/mcp` pass straight
+  Requests under `/proxy`, `/api`, `/events`, `/mcp`, or the node tier
+  (`/nodes`, `/node`) pass straight
   through; everything else (browser/LiveView routes) still gets the check.
   """
 
@@ -18,7 +19,7 @@ defmodule ArbiterWeb.Plugs.CheckRepoStatusExceptMachineRoutes do
 
   alias Plug.Conn
 
-  @machine_facing_prefixes ["proxy", "api", "events", "mcp"]
+  @machine_facing_prefixes ["proxy", "api", "events", "mcp", "nodes", "node"]
 
   @impl true
   def init(opts), do: Phoenix.Ecto.CheckRepoStatus.init(opts)

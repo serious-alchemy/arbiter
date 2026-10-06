@@ -20,10 +20,20 @@ defmodule ArbiterWeb.NodeTierGuardTest do
 
   # The node-namespace routes that are deliberately reachable without a node
   # credential (the join script, enrolment with a join token in the body, the
-  # reachability ping). RW4 adds them here; today the namespace has no routes.
-  @anonymous_node_routes []
+  # reachability ping). `NodeJoinTest` covers what each of them does.
+  @anonymous_node_routes ["get /nodes/join", "get /nodes/ping", "post /nodes/enroll"]
 
-  setup do
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: home} do
+    # Enrolment answers 503 until the primary has a public URL and an agent
+    # build to hand out, which would hide the 401 these tests are after.
+    {:ok, _} = Arbiter.Settings.set_nodes_public_url("https://primary.example.ts.net")
+    on_exit(fn -> Arbiter.Settings.set_nodes_public_url(nil) end)
+    ArbiterWeb.NodeFixtures.use_data_home!(home)
+    ArbiterWeb.NodeFixtures.install_release!(home)
+    Arbiter.Nodes.RateLimit.reset()
+
     {:ok, %{token: token}} = Nodes.mint_join_token([], @operator)
 
     {:ok, %{node: node, credential: credential}} =
@@ -166,10 +176,34 @@ defmodule ArbiterWeb.NodeTierGuardTest do
           Phoenix.ConnTest.build_conn()
           |> Map.put(:remote_ip, {127, 0, 0, 1})
           |> put_req_header("accept", "application/json")
-          |> Phoenix.ConnTest.dispatch(@endpoint, route.verb, concrete(route.path), "")
+          |> Phoenix.ConnTest.dispatch(@endpoint, route.verb, concrete(route.path), nil)
 
         assert conn.status == 401, "#{route.verb} #{route.path} answered #{conn.status}"
       end
+    end
+
+    test "the anonymous routes are exactly the join script, the ping and enrolment" do
+      anon =
+        for r <- routes(),
+            String.starts_with?(r.path, "/nodes") or String.starts_with?(r.path, "/node/"),
+            "#{r.verb} #{r.path}" in @anonymous_node_routes,
+            do: "#{r.verb} #{r.path}"
+
+      assert Enum.sort(anon) == Enum.sort(@anonymous_node_routes)
+    end
+
+    test "a node credential cannot enroll: it is not a join token", ctx do
+      conn =
+        present(ctx.credential, :post, "/nodes/enroll", Jason.encode!(%{token: ctx.credential}))
+
+      assert conn.status == 401
+      assert length(Nodes.list_nodes()) == 1
+    end
+
+    test "a Scope token in the enroll body is not a join token either" do
+      token = Scope.mint_coordinator(nil, operator: true)
+      conn = present("", :post, "/nodes/enroll", Jason.encode!(%{token: token}))
+      assert conn.status == 401
     end
 
     test "a jailed worker's bridge cannot reach it: /nodes is not on the bridge allowlist" do

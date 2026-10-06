@@ -73,6 +73,23 @@ defmodule ArbiterWeb.Router do
     plug(ArbiterWeb.Plugs.NodeAuth)
   end
 
+  # Node routes reachable without a node credential: the join script, the
+  # reachability ping and enrolment (a join token in the body). Rate limited and
+  # audited in `ArbiterWeb.NodeController`.
+  scope "/nodes", ArbiterWeb do
+    get("/join", NodeController, :join)
+    get("/ping", NodeController, :ping)
+    post("/enroll", NodeController, :enroll)
+  end
+
+  # Node routes behind `ArbiterWeb.Plugs.NodeAuth`.
+  scope "/nodes", ArbiterWeb do
+    pipe_through(:node)
+
+    get("/agent/:file", NodeController, :agent)
+    get("/files/:sha", NodeController, :file)
+  end
+
   scope "/", ArbiterWeb do
     pipe_through(:browser)
 
@@ -231,6 +248,14 @@ defmodule ArbiterWeb.Router do
     get("/providers/paused", ProviderPauseController, :index)
     post("/providers/pause", ProviderPauseController, :pause)
     post("/providers/resume", ProviderPauseController, :resume)
+
+    # Node administration (RW4, `docs/design/remote-workers.md` §5.3, §5.6).
+    # Minting and editing are `:operator`; reads are `:coordinator`.
+    post("/nodes/join-tokens", NodeController, :create_join_token)
+    get("/nodes", NodeController, :index)
+    get("/nodes/:ref", NodeController, :show)
+    get("/nodes/:ref/events", NodeController, :events)
+    patch("/nodes/:ref", NodeController, :update)
 
     # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
     # backs `arb account list|show|create|attach|rotate|merge|delete`.

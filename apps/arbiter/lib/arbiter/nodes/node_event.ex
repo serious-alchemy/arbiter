@@ -29,6 +29,7 @@ defmodule Arbiter.Nodes.NodeEvent do
     :connected,
     :disconnected,
     :rotated,
+    :updated,
     :drained,
     :revoked,
     :removed,

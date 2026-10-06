@@ -155,6 +155,18 @@ Backpressure: Phoenix channels have none, so streams use a credit window (256 Ki
 
 `arb node add [--name N] [--label k=v …] [--max-workers N] [--ttl 15m]` (operator-proof) prints the one-liner and the token (token to stdout only on a TTY, otherwise `--token-file`); `arb node list|show|drain|undrain|revoke|remove|set <name>`; `arb node events <name>`. On the node: `arbiter-node status|logs|leave`. `arb` has no `node` command today; `Cmd.Server` dispatch and `Main`'s alias table are where it lands.
 
+**As built (RW4, bd-6kquah).** The server side of §5.2, §5.5 and §6 is in: `ArbiterWeb.NodeController` (`GET /nodes/join`, `GET /nodes/ping`, `POST /nodes/enroll`, `GET /nodes/agent/<version>.tar.gz`, `GET /nodes/files/<sha256>`), `Arbiter.Nodes.JoinScript` (+ `join_script.sh.eex`), `Arbiter.Nodes.Agent` (artifact), `/api/nodes*` and `arb node add|list|show|set|events`. Where it differs from, or fills in, the text above:
+
+* **Enroll response format.** JSON by default; `Accept: text/plain` returns `KEY=value` lines (`node_id`, `name`, `credential`, `ws_url`, `agent_version`, `tarball_sha256`) because the script has no JSON parser (`jq`/`python` are not prerequisites). The script reads them without `eval` and validates each against a character set. `fence_after` is not sent yet (RW6 owns it).
+* **The token is read from the request body only** (`conn.body_params`); a `?token=` query string is ignored, so it never reaches an access log. The agent artifact is checked **before** the token is redeemed: a primary with nothing to serve answers `503` and the token is not spent. A name clash is `409` and does not spend it either (`Nodes.redeem_join_token/3` hands it back).
+* **`ARB_JOIN_TOKEN` is removed from the environment first thing in `main`**, so no child process (podman, curl, systemctl) is ever started with it.
+* **`ARB_JOIN_CHECK_ONLY=1` does not change the machine**: it reports linger as "the real run enables it" instead of running `loginctl enable-linger`. A real run does enable it (the one fix), before the token is read.
+* **`/nodes/files/<sha256>`** is content-addressed access to the same artifact (credential-gated); only the served agent tarball is addressable today. Later bundle kinds (checkout sync) add to it.
+* **Artifact source.** `arb server deploy` retains `<data-home>/releases/<tag>.tar.gz` + `.sha256` (GitHub and `--local <tarball>`); pruning removes them with their release and sweeps orphans. A `--local <dir>` deploy has none, so `Nodes.Agent` packs the allowlist on first request into `<data-home>/nodes/agent-cache/<tag>.tar.gz` (outside `releases/`). The reported sha256 is always computed from the bytes served, never from the sidecar.
+* **`arbiter-node leave`** stops and disables the unit and tells the operator to `arb node revoke`; asking the primary to remove the node needs an endpoint that RW7 adds. The unit starts `bin/arbiter start` with `ARB_ROLE=agent`, which a release without the role gate (RW5) treats as a primary: until RW5 lands the unit will not stay up, and the script ends with a warning rather than an error.
+* **`ARB_JOIN_FS_ROOT`** prefixes the `/etc` and `/sys` reads, a test seam. Tests run the real script against the real endpoint with stubs for the host-inspecting tools only.
+* **`arb node add`** refuses to print the token to anything but a terminal (`--token-file` writes it mode 0600, never overwriting); that decision is made before a token is minted.
+
 ## 6. Agent packaging, versioning and upgrade
 
 **Artifact.** The agent is the release tarball the primary is running. The primary serves it: `GET /nodes/agent/<version>.tar.gz` (node credential; the enroll response carries the expected sha256).

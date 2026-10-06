@@ -25,7 +25,7 @@ defmodule ArbiterWeb.ApiPolicy do
       human's own `arb`). Node administration over REST (join-token minting,
       drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
       coordinator *session* (an LLM) is refused, so it cannot enrol machines
-      that will receive provider tokens. No route uses it yet; RW4/RW7 add them.
+      that will receive provider tokens. Used by `/api/nodes/join-tokens` and `PATCH /api/nodes/:ref`.
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
     * `:dispatch` — `:coordinator` plus `can_dispatch` (the recursion
@@ -146,6 +146,13 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- providers / accounts (credential-bearing) -------------------------
     {:get, "/api/providers/paused"} => :coordinator,
+
+    # ---- nodes (RW4): minting/editing are operator-proof only ------------------
+    {:post, "/api/nodes/join-tokens"} => :operator,
+    {:get, "/api/nodes"} => :coordinator,
+    {:get, "/api/nodes/:ref"} => :coordinator,
+    {:get, "/api/nodes/:ref/events"} => :coordinator,
+    {:patch, "/api/nodes/:ref"} => :operator,
     {:post, "/api/providers/pause"} => :coordinator,
     {:post, "/api/providers/resume"} => :coordinator,
     {:get, "/api/accounts"} => :coordinator,

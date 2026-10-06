@@ -112,6 +112,12 @@ defmodule ArbiterCli.Main do
 
       arb scheduler pause|resume|status
       arb scheduler wait  [--timeout SECS] [--interval SECS]
+      arb node add     [--name N] [--label k=v ...] [--max-workers N] [--ttl 15m] [--token-file PATH]
+                       mint a join token: prints the one-liner for the new node and,
+                       separately, the token (terminal or --token-file only)
+      arb node list|show <name|id>|events <name|id>
+      arb node set <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+
       arb provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
       arb provider resume <provider|account-ref>
       arb provider list
@@ -322,6 +328,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
+  defp dispatch_known("node", args), do: ArbiterCli.Cmd.Node.run(args)
   defp dispatch_known("account", args), do: ArbiterCli.Cmd.Account.run(args)
   defp dispatch_known("session", args), do: ArbiterCli.Cmd.Session.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb ticket dispatch <id>`.

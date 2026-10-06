@@ -94,6 +94,72 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFilesTest do
     end
   end
 
+  describe "retain_tarball!/3 and pruning (RW4)" do
+    defp releases_dir do
+      dir = Path.join(System.tmp_dir!(), "relfiles-prune-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      dir
+    end
+
+    defp fake_release(dir, tag, mtime) do
+      File.mkdir_p!(Path.join(dir, tag))
+      File.write!(Path.join(dir, tag <> ".tar.gz"), "bytes #{tag}")
+      File.write!(Path.join(dir, tag <> ".tar.gz.sha256"), "abc  x\n")
+      File.touch!(Path.join(dir, tag), mtime)
+    end
+
+    test "writes <target>.tar.gz and a sha256 sidecar atomically" do
+      dir = releases_dir()
+      target = Path.join(dir, "v1.0.0")
+
+      assert :ok = ReleaseFiles.retain_tarball!(target, "the bytes", "deadbeef")
+
+      assert File.read!(target <> ".tar.gz") == "the bytes"
+      assert File.read!(target <> ".tar.gz.sha256") =~ ~r/\Adeadbeef  /
+      assert Path.wildcard(Path.join(dir, "*.tmp*")) == []
+    end
+
+    test "pruning a release removes its retained tarball and checksum with it" do
+      dir = releases_dir()
+      tags = for n <- 1..7, do: "v1.0.#{n}"
+
+      for {tag, n} <- Enum.with_index(tags, 1),
+          do: fake_release(dir, tag, {{2026, 1, n}, {0, 0, 0}})
+
+      current = Path.join(dir, "v1.0.7")
+      pruned = ReleaseFiles.prune_old_releases(dir, current, Path.join(dir, "v1.0.6"))
+
+      assert pruned != []
+
+      for tag <- pruned do
+        refute File.exists?(Path.join(dir, tag))
+        refute File.exists?(Path.join(dir, tag <> ".tar.gz"))
+        refute File.exists?(Path.join(dir, tag <> ".tar.gz.sha256"))
+      end
+
+      for tag <- tags -- pruned do
+        assert File.exists?(Path.join(dir, tag <> ".tar.gz"))
+        assert File.exists?(Path.join(dir, tag <> ".tar.gz.sha256"))
+      end
+
+      assert File.exists?(Path.join(dir, "v1.0.7.tar.gz"))
+    end
+
+    test "an orphan tarball (its release dir is gone) is swept, the current one never" do
+      dir = releases_dir()
+      fake_release(dir, "v2.0.0", {{2026, 3, 1}, {0, 0, 0}})
+      File.write!(Path.join(dir, "v0.0.1.tar.gz"), "orphan")
+      File.write!(Path.join(dir, "v0.0.1.tar.gz.sha256"), "abc  x\n")
+
+      ReleaseFiles.prune_old_releases(dir, Path.join(dir, "v2.0.0"), nil)
+
+      refute File.exists?(Path.join(dir, "v0.0.1.tar.gz"))
+      refute File.exists?(Path.join(dir, "v0.0.1.tar.gz.sha256"))
+      assert File.exists?(Path.join(dir, "v2.0.0.tar.gz"))
+    end
+  end
+
   describe "crossed_migrations/2" do
     test "names the migrations present in the new release but not the prior one" do
       prior = release_dir("v1.0.0", ["20260101000000_create_things"])

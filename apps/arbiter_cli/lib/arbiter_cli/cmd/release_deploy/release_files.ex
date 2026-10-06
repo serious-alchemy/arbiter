@@ -61,6 +61,30 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles do
     end
   end
 
+  # Keep the pristine published bytes next to the unpacked tree
+  # (`<releases>/<tag>.tar.gz` + `.sha256`), so the primary can serve exactly
+  # what was published to joining nodes (`Arbiter.Nodes.Agent`, RW4). The
+  # sibling files are not release directories (`list_release_dirs/1` skips
+  # them) and `prune_old_releases/3` removes them with their release.
+  @spec retain_tarball!(String.t(), binary(), String.t()) :: :ok
+  def retain_tarball!(target_dir, tarball, sha256_hex) do
+    path = target_dir <> ".tar.gz"
+    write_atomically!(path, tarball)
+
+    write_atomically!(
+      path <> ".sha256",
+      "#{sha256_hex}  #{Path.basename(path)}\n"
+    )
+  end
+
+  defp write_atomically!(path, content) do
+    tmp = path <> ".#{System.unique_integer([:positive])}.tmp"
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(tmp, content)
+    File.rename!(tmp, path)
+    :ok
+  end
+
   # Move the contents of the tarball's top-level dir up into `target_dir`. If
   # the archive has the expected single `arbiter/` root we strip it; otherwise
   # we keep whatever layout it shipped (defensive — still produces a usable
@@ -257,8 +281,42 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles do
       _ = File.rm_rf(Path.join(releases_dir, tag))
     end)
 
+    prune_retained_tarballs(releases_dir, keep)
+
     if pruned != [], do: Start.log_text("Pruned old release(s): #{Enum.join(pruned, ", ")}")
     pruned
+  end
+
+  # Retained tarballs (`<tag>.tar.gz`, `<tag>.tar.gz.sha256`) follow their
+  # release: any whose tag is not kept goes, including an orphan left by a
+  # deploy that failed after retaining but before swapping.
+  defp prune_retained_tarballs(releases_dir, keep) do
+    case File.ls(releases_dir) do
+      {:ok, entries} ->
+        for entry <- entries,
+            tag = retained_tag(entry),
+            tag != nil,
+            not MapSet.member?(keep, tag),
+            do: File.rm(Path.join(releases_dir, entry))
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp retained_tag(entry) do
+    cond do
+      String.ends_with?(entry, ".tar.gz.sha256") ->
+        String.replace_suffix(entry, ".tar.gz.sha256", "")
+
+      String.ends_with?(entry, ".tar.gz") ->
+        String.replace_suffix(entry, ".tar.gz", "")
+
+      true ->
+        nil
+    end
   end
 
   defp list_release_dirs(releases_dir) do

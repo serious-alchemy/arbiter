@@ -73,6 +73,12 @@ defmodule Arbiter.Nodes.Node do
       end
     end
 
+    # The operator's edit surface (`arb node set`): what the node is called and
+    # how much it may run. Never credentials or status.
+    update :set do
+      accept [:name, :labels, :max_workers]
+    end
+
     update :touch do
       accept [:last_seen_at]
     end
@@ -84,7 +90,7 @@ defmodule Arbiter.Nodes.Node do
     attribute :name, :string do
       allow_nil? false
       public? true
-      constraints min_length: 1, max_length: 128
+      constraints min_length: 1, max_length: 128, match: ~r/\A[A-Za-z0-9._=:\/@-]+\z/
     end
 
     attribute :status, :atom do

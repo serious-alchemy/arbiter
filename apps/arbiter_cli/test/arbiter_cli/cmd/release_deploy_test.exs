@@ -279,6 +279,22 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
     end
 
+    test "retains the pristine tarball and its checksum beside the unpacked tree (RW4)",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = sha256_hex(tarball)
+      stub_release(@vsn, tarball, "#{sha}  arbiter-#{@vsn}-linux.tar.gz\n")
+      stub_cmds()
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      retained = Path.join([home, "releases", @vsn <> ".tar.gz"])
+      assert File.read!(retained) == tarball
+      assert File.read!(retained <> ".sha256") |> String.split() |> hd() == sha
+      # a tarball is not a release directory: it must not be mistaken for one
+      assert {:ok, _} = File.stat(Path.join([home, "releases", @vsn]))
+    end
+
     test "deploys cleanly (no rollback) when the only workspace isn't named \"default\"" do
       # Regression for bd-8ix2tw: Workspace.resolve/0 used to require a
       # workspace literally named "default", so an install whose sole
@@ -375,6 +391,35 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
       # Shares the install machinery with the GitHub flow — no separate swap.
       assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+    end
+
+    test "retains a local tarball too, so a node can fetch exactly what was deployed (RW4)",
+         %{home: home} do
+      bytes = flat_release_tarball()
+      path = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}.tar.gz")
+      File.write!(path, bytes)
+      on_exit(fn -> File.rm(path) end)
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run(["--local", path]) end)
+
+      {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      retained = link_target <> ".tar.gz"
+      assert File.read!(retained) == bytes
+      assert File.read!(retained <> ".sha256") |> String.split() |> hd() == sha256_hex(bytes)
+    end
+
+    test "a local directory retains no tarball (the primary packs an allowlist on demand)",
+         %{home: home} do
+      dir = local_release_dir()
+      on_exit(fn -> File.rm_rf(dir) end)
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run(["--local", dir]) end)
+
+      assert Path.wildcard(Path.join([home, "releases", "*.tar.gz*"])) == []
     end
 
     test "installs a local release directory (no tarball)", %{home: home} do

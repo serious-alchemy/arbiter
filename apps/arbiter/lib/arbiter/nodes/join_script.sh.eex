@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+# Arbiter node join script (protocol <%= @proto %>), rendered by the primary at
+# /nodes/join. It installs the Arbiter node agent for the CURRENT user under
+# ~/.arbiter-node/ and a user systemd unit. It never uses sudo and refuses to
+# run as root.
+#
+#   curl ... /nodes/join | bash      the join token is read from /dev/tty
+#
+# Unattended installs:  ARB_JOIN_TOKEN_FILE=/path (mode 0600)  or  ARB_JOIN_TOKEN
+# Check only:           ARB_JOIN_CHECK_ONLY=1  runs every prerequisite check and
+#                       exits; no token is read and none is spent.
+# Optional:             ARB_NODE_NAME, ARB_NODE_LABELS=k=v,k=v, ARB_NODE_MAX_WORKERS
+#
+# Nothing in this file is executed until the final line: a truncated download
+# runs nothing.
+
+set -euo pipefail
+umask 077
+
+ARB_PRIMARY_URL=<%= Arbiter.Nodes.JoinScript.sh_quote(@public_url) %>
+ARB_EXPECT_ARCH=<%= Arbiter.Nodes.JoinScript.sh_quote(@arch) %>
+ARB_MIN_PODMAN_MAJOR=<%= Arbiter.Nodes.JoinScript.sh_quote(@min_podman_major) %>
+ARB_MIN_GLIBC=<%= Arbiter.Nodes.JoinScript.sh_quote(@min_glibc) %>
+ARB_MIN_DISK_GB=<%= Arbiter.Nodes.JoinScript.sh_quote(@min_disk_gb) %>
+ARB_MIN_SUBID=65536
+ARB_JOIN_PROTO=<%= Arbiter.Nodes.JoinScript.sh_quote(@proto) %>
+
+# Test seam only: a prefix for the /etc and /sys reads.
+FS_ROOT="${ARB_JOIN_FS_ROOT:-}"
+
+ARB_SCHEME=""
+FAILURES=0
+REMEDIES=""
+TMP_DIR=""
+JOIN_TOKEN=""
+ENV_TOKEN=""
+NODE_ROOT=""
+CONFIG_DIR=""
+UNIT_DIR=""
+NODE_ID=""
+NODE_NAME=""
+CREDENTIAL=""
+AGENT_VERSION=""
+AGENT_SHA=""
+
+say() { printf '%s\n' "$*"; }
+die() {
+  printf 'arbiter-join: %s\n' "$*" >&2
+  exit 1
+}
+ok() { printf '  [ ok ] %s\n' "$1"; }
+
+# bad LABEL [REMEDY]: record a failed check. The remedy is text for the
+# operator to run themselves; this script never runs it.
+bad() {
+  printf '  [FAIL] %s\n' "$1"
+  FAILURES=$((FAILURES + 1))
+  if [ -n "${2:-}" ]; then
+    REMEDIES="${REMEDIES}    ${2}"$'\n'
+  fi
+  return 0
+}
+
+cleanup() {
+  if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf -- "$TMP_DIR"
+  fi
+}
+
+# version_ge A B: is version A >= version B (sort -V).
+version_ge() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
+}
+
+word_in() {
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+curl_safe() {
+  if [ "$ARB_SCHEME" = https ]; then
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error \
+      --connect-timeout 10 --max-time 900 "$@"
+  else
+    curl --proto '=http' --proto-redir '=http' --silent --show-error \
+      --connect-timeout 10 --max-time 900 "$@"
+  fi
+}
+
+# ---- prerequisite checks (all run before a token is read or spent) ---------
+
+check_scheme() {
+  case "$ARB_PRIMARY_URL" in
+    https://*) ARB_SCHEME=https ;;
+    http://127.0.0.1 | http://127.0.0.1:* | http://localhost | http://localhost:* | 'http://[::1]'*)
+      ARB_SCHEME=http
+      ;;
+    *) die "the primary URL must be https (or a loopback http tunnel): $ARB_PRIMARY_URL" ;;
+  esac
+}
+
+check_os() {
+  local arch
+  if [ "$(uname -s)" = Linux ]; then
+    ok "Linux"
+  else
+    bad "not Linux ($(uname -s))" "Remote nodes are Linux hosts."
+  fi
+  arch="$(uname -m)"
+  if [ "$arch" = "$ARB_EXPECT_ARCH" ]; then
+    ok "architecture $arch"
+  else
+    bad "architecture $arch (this primary ships $ARB_EXPECT_ARCH builds)" "Join from an $ARB_EXPECT_ARCH Linux host."
+  fi
+}
+
+check_glibc() {
+  local out ver
+  out="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+  ver="${out##* }"
+  if [ -z "$ver" ]; then
+    bad "cannot read the glibc version (musl?)" "Use a glibc distribution, version $ARB_MIN_GLIBC or newer."
+  elif version_ge "$ver" "$ARB_MIN_GLIBC"; then
+    ok "glibc $ver"
+  else
+    bad "glibc $ver is older than $ARB_MIN_GLIBC" "Use a distribution with glibc $ARB_MIN_GLIBC or newer."
+  fi
+}
+
+check_commands() {
+  local c
+  for c in curl tar sha256sum git systemctl loginctl podman; do
+    if command -v "$c" >/dev/null 2>&1; then
+      ok "$c"
+    else
+      bad "$c is not installed" "sudo dnf install $c   (Debian/Ubuntu: sudo apt install $c)"
+    fi
+  done
+}
+
+check_podman() {
+  local out ver major rootless
+  if ! command -v podman >/dev/null 2>&1; then
+    return 0
+  fi
+  out="$(podman --version 2>/dev/null || true)"
+  ver="${out##* }"
+  major="${ver%%.*}"
+  case "$major" in
+    '' | *[!0-9]*)
+      bad "cannot read the podman version ($out)" "Install podman $ARB_MIN_PODMAN_MAJOR or newer."
+      return 0
+      ;;
+  esac
+  if [ "$major" -ge "$ARB_MIN_PODMAN_MAJOR" ]; then
+    ok "podman $ver"
+  else
+    bad "podman $ver is older than $ARB_MIN_PODMAN_MAJOR" "Upgrade podman to $ARB_MIN_PODMAN_MAJOR or newer."
+  fi
+  rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+  if [ "$rootless" = true ]; then
+    ok "podman runs rootless"
+  else
+    bad "podman does not report rootless mode" "Run as an ordinary user and check that podman info works (podman info)."
+  fi
+}
+
+# subid_total FILE: the sum of the ranges FILE grants to this user.
+subid_total() {
+  local file="$FS_ROOT$1" total=0 owner count me uid
+  me="$(id -un)"
+  uid="$(id -u)"
+  if [ -r "$file" ]; then
+    while IFS=: read -r owner _ count; do
+      case "$count" in
+        '' | *[!0-9]*) continue ;;
+      esac
+      if [ "$owner" = "$me" ] || [ "$owner" = "$uid" ]; then
+        total=$((total + count))
+      fi
+    done <"$file"
+  fi
+  printf '%s\n' "$total"
+}
+
+check_subids() {
+  local f total
+  for f in /etc/subuid /etc/subgid; do
+    total="$(subid_total "$f")"
+    if [ "$total" -ge "$ARB_MIN_SUBID" ]; then
+      ok "$f grants $total ids"
+    else
+      bad "$f grants $total ids to $(id -un) (need $ARB_MIN_SUBID)" "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)"
+    fi
+  done
+}
+
+check_cgroups() {
+  local fstype uid base f missing=0 img
+  fstype="$(stat -fc %T "$FS_ROOT/sys/fs/cgroup" 2>/dev/null || true)"
+  if [ "$fstype" = cgroup2fs ]; then
+    ok "cgroup v2"
+  else
+    bad "cgroup v2 is not mounted (found: ${fstype:-none})" "Boot with systemd.unified_cgroup_hierarchy=1 (cgroup v2 is required)."
+    return 0
+  fi
+  # The memory controller must be delegated to this user's manager: a login
+  # session scope is not the delegation point, so read user@UID.service.
+  uid="$(id -u)"
+  base="$FS_ROOT/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service"
+  for f in cgroup.controllers cgroup.subtree_control; do
+    if [ -r "$base/$f" ] && word_in memory "$(cat "$base/$f")"; then
+      :
+    else
+      missing=1
+    fi
+  done
+  if [ "$missing" -eq 1 ]; then
+    bad "the memory cgroup controller is not delegated to your user" "sudo mkdir -p /etc/systemd/system/user@.service.d && printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf && sudo systemctl daemon-reload   (then log out and in again)"
+    return 0
+  fi
+  ok "memory controller delegated"
+  # The functional probe is the authority, but needs an image already on the
+  # node; the agent re-runs it on start.
+  if command -v podman >/dev/null 2>&1; then
+    img="$(podman images -q 2>/dev/null | head -n 1 || true)"
+    if [ -n "$img" ]; then
+      if timeout 90 podman run --rm --memory=64m --memory-swap=64m "$img" true >/dev/null 2>&1; then
+        ok "podman honours a memory limit"
+      else
+        bad "podman could not start a container with --memory=64m" "Check podman info and the cgroup delegation above; the memory controller must reach your user."
+      fi
+    fi
+  fi
+}
+
+check_linger() {
+  local linger me
+  if ! command -v loginctl >/dev/null 2>&1; then
+    return 0
+  fi
+  me="$(id -un)"
+  linger="$(loginctl show-user "$me" -p Linger --value 2>/dev/null || true)"
+  if [ "$linger" = yes ]; then
+    ok "linger enabled for $me"
+  elif [ "${ARB_JOIN_CHECK_ONLY:-0}" = 1 ]; then
+    ok "linger is off for $me (the real run enables it for you)"
+  elif loginctl --no-ask-password enable-linger "$me" >/dev/null 2>&1; then
+    ok "enabled linger for $me"
+  else
+    bad "linger is off for $me and could not be enabled" "sudo loginctl enable-linger $me"
+  fi
+}
+
+check_user_systemd() {
+  if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR:-}" ]; then
+    bad "XDG_RUNTIME_DIR is not set (no login session)" "Log in with ssh or a console, not su, or: export XDG_RUNTIME_DIR=/run/user/$(id -u)"
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    ok "user systemd is reachable"
+  else
+    bad "systemctl --user cannot reach your user manager" "Make sure user@$(id -u).service is running (log in via ssh or a console)."
+  fi
+}
+
+check_disk() {
+  local line avail_kb
+  line="$(df -Pk "${HOME:?}" 2>/dev/null | tail -n 1 || true)"
+  # shellcheck disable=SC2034  # only the fourth column is wanted
+  read -r _ _ _ avail_kb _ <<<"$line" || true
+  case "$avail_kb" in
+    '' | *[!0-9]*)
+      bad "cannot read free disk space under $HOME" "Check df -Pk $HOME"
+      return 0
+      ;;
+  esac
+  if [ "$avail_kb" -ge $((ARB_MIN_DISK_GB * 1024 * 1024)) ]; then
+    ok "free disk space under $HOME ($((avail_kb / 1024 / 1024)) GB)"
+  else
+    bad "less than $ARB_MIN_DISK_GB GB free under $HOME" "Free up disk space under $HOME."
+  fi
+}
+
+check_primary() {
+  local pong
+  pong="$(curl_safe --fail "$ARB_PRIMARY_URL/nodes/ping" 2>/dev/null || true)"
+  if [ "$pong" = pong ]; then
+    ok "the primary answers at $ARB_PRIMARY_URL"
+  else
+    bad "no answer from $ARB_PRIMARY_URL/nodes/ping" "Check the VPN/tailnet: curl $ARB_PRIMARY_URL/nodes/ping should print pong."
+  fi
+}
+
+run_checks() {
+  say "Checking prerequisites (nothing is installed and no token is used yet)..."
+  check_os
+  check_glibc
+  check_commands
+  check_podman
+  check_subids
+  check_cgroups
+  check_linger
+  check_user_systemd
+  check_disk
+  check_primary
+  if [ "$FAILURES" -gt 0 ]; then
+    say ""
+    say "This machine is not ready ($FAILURES problem(s)). Nothing was changed and no token was used."
+    say "Fix these yourself (this script never escalates privileges), then run it again:"
+    printf '%s' "$REMEDIES"
+    return 1
+  fi
+  say "All prerequisite checks passed."
+}
+
+# ---- the join token --------------------------------------------------------
+
+read_token() {
+  local tok="" mode
+  if [ -n "${ARB_JOIN_TOKEN_FILE:-}" ]; then
+    [ -f "$ARB_JOIN_TOKEN_FILE" ] || die "ARB_JOIN_TOKEN_FILE is not a file"
+    mode="$(stat -c %a -- "$ARB_JOIN_TOKEN_FILE")"
+    case "$mode" in
+      400 | 600) ;;
+      *) die "ARB_JOIN_TOKEN_FILE must be mode 0600 (it is $mode)" ;;
+    esac
+    IFS= read -r tok <"$ARB_JOIN_TOKEN_FILE" || true
+  elif [ -n "$ENV_TOKEN" ]; then
+    tok="$ENV_TOKEN"
+  else
+    # stdin is the curl pipe, so the terminal is read directly.
+    if ! { : </dev/tty; } 2>/dev/null; then
+      die "no terminal to read the join token from; set ARB_JOIN_TOKEN_FILE=/path (mode 0600)"
+    fi
+    printf 'Join token (input is hidden): ' >/dev/tty
+    IFS= read -rs tok </dev/tty || true
+    printf '\n' >/dev/tty
+  fi
+  ENV_TOKEN=""
+  tok="${tok//[[:space:]]/}"
+  if [[ ! "$tok" =~ ^arbj_[a-z2-7]{52}$ ]]; then
+    die "that is not a join token (it should look like arbj_ followed by 52 characters)"
+  fi
+  JOIN_TOKEN="$tok"
+}
+
+# json_field NAME VALUE: a JSON string pair for a value restricted to a safe
+# character set (anything else is refused rather than escaped).
+safe_value() {
+  case "$1" in
+    *[!A-Za-z0-9._=:/@-]*) die "$2 contains characters outside A-Za-z0-9._=:/@-" ;;
+  esac
+}
+
+enroll() {
+  local body labels="" item name="${ARB_NODE_NAME:-}" workers="${ARB_NODE_MAX_WORKERS:-}"
+  local code out="$TMP_DIR/enroll.out" k v
+  if [ -n "$name" ]; then
+    safe_value "$name" ARB_NODE_NAME
+  fi
+  if [ -n "${ARB_NODE_LABELS:-}" ]; then
+    local IFS=,
+    for item in $ARB_NODE_LABELS; do
+      safe_value "$item" ARB_NODE_LABELS
+      labels="${labels}${labels:+,}\"$item\""
+    done
+  fi
+  case "$workers" in
+    '' | *[!0-9]*)
+      if [ -n "$workers" ]; then die "ARB_NODE_MAX_WORKERS must be a number"; fi
+      ;;
+  esac
+  body="{\"token\":\"$JOIN_TOKEN\",\"proto\":$ARB_JOIN_PROTO"
+  if [ -n "$name" ]; then body="$body,\"name\":\"$name\""; fi
+  if [ -n "$labels" ]; then body="$body,\"labels\":[$labels]"; fi
+  if [ -n "$workers" ]; then body="$body,\"max_workers\":$workers"; fi
+  body="$body}"
+  # The token travels on curl's stdin only: not on argv, not in the environment.
+  code="$(printf '%s' "$body" | curl_safe -X POST --data-binary @- \
+    -H 'Content-Type: application/json' -H 'Accept: text/plain' \
+    -o "$out" -w '%{http_code}' "$ARB_PRIMARY_URL/nodes/enroll" || true)"
+  body=""
+  JOIN_TOKEN=""
+  case "$code" in
+    200) ;;
+    401) die "the primary refused the join token (unknown, expired or already used); create a new one" ;;
+    409) die "a node with that name already exists; pick another ARB_NODE_NAME, or remove the old node on the primary" ;;
+    422) die "the primary refused the node name (allowed: A-Za-z0-9._=:/@-, up to 128 characters); the token was not used" ;;
+    429) die "the primary is rate limiting enrolment; wait a minute and retry with a fresh token" ;;
+    503) die "the primary cannot serve an agent build yet (the token was not used)" ;;
+    *) die "enrolment failed (HTTP ${code:-none})" ;;
+  esac
+  while IFS='=' read -r k v; do
+    case "$k" in
+      node_id) NODE_ID="$v" ;;
+      name) NODE_NAME="$v" ;;
+      credential) CREDENTIAL="$v" ;;
+      agent_version) AGENT_VERSION="$v" ;;
+      tarball_sha256) AGENT_SHA="$v" ;;
+      *) ;;
+    esac
+  done <"$out"
+  rm -f -- "$out"
+  [[ "$NODE_ID" =~ ^[0-9a-f-]{36}$ ]] || die "the primary sent a malformed node id"
+  [[ "$NODE_NAME" =~ ^[A-Za-z0-9._=:/@-]+$ ]] || die "the primary sent a malformed node name"
+  [[ "$CREDENTIAL" =~ ^arbn_[0-9a-f-]{36}\.[a-z2-7]{52}$ ]] || die "the primary sent a malformed credential"
+  [[ "$AGENT_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "the primary sent a malformed agent version"
+  [[ "$AGENT_SHA" =~ ^[0-9a-f]{64}$ ]] || die "the primary sent a malformed checksum"
+}
+
+# ---- install ----------------------------------------------------------------
+
+store_credential() {
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  printf '%s\n' "$CREDENTIAL" >"$CONFIG_DIR/credential.new"
+  chmod 600 "$CONFIG_DIR/credential.new"
+  mv -f "$CONFIG_DIR/credential.new" "$CONFIG_DIR/credential"
+}
+
+download_agent() {
+  local out="$TMP_DIR/agent.tar.gz" got
+  say "Downloading agent $AGENT_VERSION..."
+  # The credential goes in a curl config on stdin, so it is never on argv.
+  printf 'header = "Authorization: Bearer %s"\n' "$CREDENTIAL" |
+    curl_safe -K - --fail -o "$out" "$ARB_PRIMARY_URL/nodes/agent/$AGENT_VERSION.tar.gz"
+  got="$(sha256sum "$out")"
+  got="${got%% *}"
+  if [ "$got" != "$AGENT_SHA" ]; then
+    die "the agent download does not match its checksum (got $got, expected $AGENT_SHA); nothing was installed"
+  fi
+  ok "checksum verified"
+}
+
+install_agent() {
+  local rel="$NODE_ROOT/releases/$AGENT_VERSION" stage="$NODE_ROOT/releases/.stage.$$" root
+  mkdir -p "$NODE_ROOT/releases" "$NODE_ROOT/bin"
+  if [ -x "$rel/bin/arbiter" ] && [ -f "$rel/.agent-sha256" ] && [ "$(cat "$rel/.agent-sha256")" = "$AGENT_SHA" ]; then
+    ok "agent $AGENT_VERSION is already unpacked"
+  else
+    rm -rf -- "$stage"
+    mkdir -p "$stage"
+    tar -xzf "$TMP_DIR/agent.tar.gz" -C "$stage"
+    # A published release has one top-level arbiter/ directory; a hand-rolled
+    # --local tarball may be flat.
+    root="$stage"
+    if [ -x "$stage/arbiter/bin/arbiter" ]; then
+      root="$stage/arbiter"
+    fi
+    [ -x "$root/bin/arbiter" ] || die "the agent archive has no bin/arbiter"
+    printf '%s\n' "$AGENT_SHA" >"$root/.agent-sha256"
+    rm -rf -- "$rel"
+    mv "$root" "$rel"
+    rm -rf -- "$stage"
+  fi
+  # Atomic swap: build the new link beside the old one, then rename over it.
+  ln -s "releases/$AGENT_VERSION" "$NODE_ROOT/current.new.$$"
+  mv -T "$NODE_ROOT/current.new.$$" "$NODE_ROOT/current"
+}
+
+write_config() {
+  mkdir -p "$CONFIG_DIR" "$UNIT_DIR"
+  cat >"$CONFIG_DIR/agent.env" <<ENVFILE
+ARB_ROLE="agent"
+ARB_DATA_HOME="$NODE_ROOT"
+ARB_PRIMARY_URL="$ARB_PRIMARY_URL"
+ARB_NODE_ID="$NODE_ID"
+ARB_NODE_NAME="$NODE_NAME"
+ARB_NODE_CREDENTIAL_FILE="$CONFIG_DIR/credential"
+ENVFILE
+  chmod 600 "$CONFIG_DIR/agent.env"
+  cat >"$UNIT_DIR/arbiter-node.service" <<'UNIT'
+[Unit]
+Description=Arbiter node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/arbiter-node/agent.env
+Environment=ARB_ROLE=agent
+ExecStart=%h/.arbiter-node/current/bin/arbiter start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+  cat >"$NODE_ROOT/bin/arbiter-node" <<'WRAPPER'
+#!/usr/bin/env bash
+# arbiter-node status | logs | leave
+set -euo pipefail
+case "${1:-status}" in
+  status) systemctl --user status arbiter-node.service --no-pager ;;
+  logs) journalctl --user -u arbiter-node.service -n 200 --no-pager "${@:2}" ;;
+  leave)
+    systemctl --user disable --now arbiter-node.service
+    echo "Stopped. Ask the operator to run: arb node revoke <this node's name>"
+    ;;
+  *)
+    echo "usage: arbiter-node status|logs|leave" >&2
+    exit 2
+    ;;
+esac
+WRAPPER
+  chmod 755 "$NODE_ROOT/bin/arbiter-node"
+}
+
+start_agent() {
+  systemctl --user daemon-reload
+  systemctl --user enable arbiter-node.service >/dev/null 2>&1
+  systemctl --user restart arbiter-node.service
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if systemctl --user is-active --quiet arbiter-node.service; then
+      ok "arbiter-node.service is running"
+      return 0
+    fi
+    sleep 1
+  done
+  say "  [warn] arbiter-node.service is not active yet: run $NODE_ROOT/bin/arbiter-node logs"
+}
+
+main() {
+  # Take the token out of the environment first thing, so no child process
+  # (podman, curl, systemctl...) is ever started with it.
+  ENV_TOKEN="${ARB_JOIN_TOKEN:-}"
+  unset ARB_JOIN_TOKEN
+  if [ "$(id -u)" -eq 0 ]; then
+    die "refusing to run as root: rootless podman needs an unprivileged user. Run this as the user that will own the node."
+  fi
+  check_scheme
+  NODE_ROOT="${HOME:?}/.arbiter-node"
+  CONFIG_DIR="$HOME/.config/arbiter-node"
+  UNIT_DIR="$HOME/.config/systemd/user"
+
+  say "Arbiter node join: $ARB_PRIMARY_URL"
+  say "Plan: check this machine, exchange a join token for a node credential,"
+  say "      install the agent under $NODE_ROOT and a user systemd unit."
+  run_checks || exit 1
+  if [ "${ARB_JOIN_CHECK_ONLY:-0}" = 1 ]; then
+    say "ARB_JOIN_CHECK_ONLY=1: stopping here. No token was read or used."
+    exit 0
+  fi
+
+  TMP_DIR="$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/arbiter-join.XXXXXX")"
+  trap cleanup EXIT
+  read_token
+  enroll
+  ok "enrolled as $NODE_NAME ($NODE_ID)"
+  store_credential
+  download_agent
+  install_agent
+  write_config
+  start_agent
+  say "Done. Manage the node with: $NODE_ROOT/bin/arbiter-node status|logs|leave"
+}
+
+main "$@"
