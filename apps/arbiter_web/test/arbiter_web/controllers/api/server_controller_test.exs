@@ -149,6 +149,14 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
   # bd-80ecol: `arb server doctor` lists every Claude workspace that has no
   # credential of its own — the ones that used to fall into copying the
   # operator's `.credentials.json` (mode B), and whose dispatch is now held.
+  describe "GET /api/server/grok_auth" do
+    test "grok is off by default: nothing enabled, no auth state", %{conn: conn} do
+      resp = conn |> get("/api/server/grok_auth") |> json_response(200)
+      assert resp["enabled"] == false
+      refute Map.has_key?(resp, "state")
+    end
+  end
+
   describe "GET /api/server/claude_credentials" do
     setup do
       prev_env =

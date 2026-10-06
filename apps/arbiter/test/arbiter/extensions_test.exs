@@ -217,7 +217,7 @@ defmodule Arbiter.ExtensionsTest do
 
     test "existing dispatcher registries are unchanged with no extension installed" do
       # Order matters too: it is what the UI dropdowns and error messages show.
-      assert Agents.valid_agent_types() == ~w(claude gemini codex)
+      assert Agents.valid_agent_types() == ~w(claude gemini codex grok)
       assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github gitlab)
       assert Workspace.valid_merger_strategies() == ~w(direct gitlab github)
 
@@ -227,10 +227,11 @@ defmodule Arbiter.ExtensionsTest do
       assert Agents.adapters() == %{
                claude: Arbiter.Agents.Claude,
                gemini: Arbiter.Agents.Gemini,
-               codex: Arbiter.Agents.Codex
+               codex: Arbiter.Agents.Codex,
+               grok: Arbiter.Agents.Grok
              }
 
-      assert Enum.sort(Agents.valid_agent_types()) == ~w(claude codex gemini)
+      assert Enum.sort(Agents.valid_agent_types()) == ~w(claude codex gemini grok)
 
       assert Enum.sort(Routing.valid_policies()) ==
                ~w(by_budget by_difficulty by_priority round_robin static)

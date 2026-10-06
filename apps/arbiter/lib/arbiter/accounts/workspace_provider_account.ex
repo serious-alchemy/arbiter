@@ -71,7 +71,7 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
     attribute :provider, :atom do
       allow_nil? false
       public? true
-      constraints one_of: [:claude, :codex, :antigravity]
+      constraints one_of: [:claude, :codex, :antigravity, :grok]
     end
 
     attribute :share, :integer do

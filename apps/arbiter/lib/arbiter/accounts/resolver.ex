@@ -53,7 +53,8 @@ defmodule Arbiter.Accounts.Resolver do
   @providers %{
     "claude" => :claude,
     "codex" => :codex,
-    "antigravity" => :antigravity
+    "antigravity" => :antigravity,
+    "grok" => :grok
   }
 
   @default_slug "default"

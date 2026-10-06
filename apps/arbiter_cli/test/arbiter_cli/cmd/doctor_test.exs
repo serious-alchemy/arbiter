@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 29
+    assert length(checks) == 30
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1747,6 +1747,52 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       result = Enum.find(Checks.run(), &(&1.name == "claude worker credentials"))
       assert result.status == :fail
+      refute result.blocks_readiness
+    end
+
+    test "grok auth: silent-ok when disabled, reports state when enabled" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "not enabled"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{"enabled" => true, "workspaces" => ["w1"], "state" => "logged_in"}, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "logged in (w1)"
+    end
+
+    test "grok auth: a missing login fails with the fix and never blocks readiness" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "not_logged_in",
+                "fix" => "Run `grok login --device-code` on the Arbiter host."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ "grok login --device-code"
+      result = Enum.find(Checks.run(), &(&1.name == "grok auth"))
       refute result.blocks_readiness
     end
 

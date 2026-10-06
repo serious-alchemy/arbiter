@@ -165,6 +165,38 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
     first
   end
 
+  # ---- bd-dpv4vt: the grok opt-in survives provider routing ----------------------
+
+  describe "routing.grok.enabled on a most_quota workspace" do
+    test "a D1 ticket is routed to grok, not to the quota pick" do
+      %{ws: ws} = claude_and_codex!(%{"grok" => %{"enabled" => true}})
+      task = task!(ws, %{difficulty: 1})
+
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
+      assert Worker.state(result.worker_pid).meta[:provider] == "grok"
+      assert latest_run(task.id).provider == "grok"
+    end
+
+    test "a D3 ticket still takes the quota pick" do
+      %{ws: ws} = claude_and_codex!(%{"grok" => %{"enabled" => true}})
+      task = task!(ws, %{difficulty: 3})
+
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
+      assert Worker.state(result.worker_pid).meta[:provider] == "codex"
+    end
+
+    test "off by default: a D1 ticket takes the quota pick" do
+      %{ws: ws} = claude_and_codex!()
+      task = task!(ws, %{difficulty: 1})
+
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
+      assert Worker.state(result.worker_pid).meta[:provider] == "codex"
+    end
+  end
+
   # ---- AC5 / AC7: a new dispatch -----------------------------------------------
 
   describe "a new dispatch with most_quota on" do

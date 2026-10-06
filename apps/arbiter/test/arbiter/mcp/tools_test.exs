@@ -3025,7 +3025,8 @@ defmodule Arbiter.MCP.ToolsTest do
     test "malformed string for credential_watchdog_adapters fails validation", ctx do
       # A stringified object where a list was expected should still fail
       assert {:error,
-              {:invalid, "value must be a list of agent types (claude, gemini, codex) or null"}} =
+              {:invalid,
+               "value must be a list of agent types (claude, gemini, codex, grok) or null"}} =
                Tools.installation_config_set(ctx.coordinator, %{
                  "key" => "credential_watchdog_adapters",
                  "value" => "{\"invalid\": \"object\"}"

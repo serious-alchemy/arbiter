@@ -143,6 +143,11 @@ defmodule Arbiter.Agents.Grok do
     end
   end
 
+  # grok has no per-workspace config map of its own (model and effort ride in
+  # the dispatch opts), so there is nothing to seed.
+  @impl true
+  def prepare(_workspace, _opts \\ []), do: :ok
+
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     policy = security_policy(opts)

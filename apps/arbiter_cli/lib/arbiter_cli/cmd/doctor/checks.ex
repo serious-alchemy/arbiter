@@ -55,6 +55,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_worker_tmp(),
       check_worker_memory(),
       check_claude_worker_credentials(),
+      check_grok_auth(),
       check_provider_accounts(),
       check_account_policy_binding(),
       check_merge_routing()
@@ -1360,6 +1361,56 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "claude worker credentials",
+          status: :ok,
+          detail: "could not check — server unreachable, or it predates this check",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-dpv4vt: grok is off unless a workspace routes to or pins it; then report
+  # its login. A missing or refused login holds grok dispatch only, so it is
+  # operator-actionable (non-zero exit) but never blocks deploy readiness.
+  defp check_grok_auth do
+    case Client.get("/api/server/grok_auth") do
+      {:ok, %{"enabled" => true, "state" => state} = body} when state in ~w(logged_in expired) ->
+        %Result{
+          name: "grok auth",
+          status: :ok,
+          detail:
+            "#{state |> String.replace("_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})" <>
+              if(state == "expired",
+                do: " — the broker refreshes it on the next dispatch",
+                else: ""
+              ),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"enabled" => true, "state" => state} = body} ->
+        %Result{
+          name: "grok auth",
+          status: :fail,
+          detail:
+            "#{String.replace(state, "_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})",
+          hint: Map.get(body, "fix"),
+          fatal: true,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"enabled" => false}} ->
+        %Result{
+          name: "grok auth",
+          status: :ok,
+          detail: "grok is not enabled for any workspace",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "grok auth",
           status: :ok,
           detail: "could not check — server unreachable, or it predates this check",
           fatal: false,
