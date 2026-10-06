@@ -305,6 +305,145 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
     end
   end
 
+  describe "scoring (bd-8vkqd3)" do
+    defp config_of(ws), do: Ash.get!(Workspace, ws.id).config
+
+    defp scoring_mode(view) do
+      view
+      |> render()
+      |> LazyHTML.from_document()
+      |> LazyHTML.query("#scoring-form input[type=radio][checked]")
+      |> LazyHTML.attribute("value")
+      |> List.first()
+    end
+
+    test "defaults to off and hides the competence switch", %{conn: conn} do
+      view = open(conn, workspace!())
+
+      assert has_element?(view, "#scoring-form")
+      assert scoring_mode(view) == "off"
+      refute has_element?(view, "#scoring-competence")
+    end
+
+    test "shadow then enforce persist routing.scoring.mode and select the scored strategy",
+         %{conn: conn} do
+      ws = workspace!(%{"routing" => %{"provider_selection" => "most_quota"}})
+      view = open(conn, ws)
+
+      view |> form("#scoring-form", %{"scoring_mode" => "shadow"}) |> render_change()
+      config = config_of(ws)
+      assert get_in(config, ["routing", "provider_selection"]) == "scored"
+      assert get_in(config, ["routing", "scoring", "mode"]) == "shadow"
+      assert scoring_mode(view) == "shadow"
+      assert has_element?(view, "#scoring-competence")
+
+      view |> form("#scoring-form", %{"scoring_mode" => "enforce"}) |> render_change()
+      assert get_in(config_of(ws), ["routing", "scoring", "mode"]) == "enforce"
+      assert scoring_mode(view) == "enforce"
+    end
+
+    test "competence is written as true and unset (not false) when cleared", %{conn: conn} do
+      ws =
+        workspace!(%{
+          "routing" => %{
+            "provider_selection" => "scored",
+            "scoring" => %{"mode" => "shadow", "time_weight" => %{"P0" => 2}}
+          }
+        })
+
+      view = open(conn, ws)
+
+      view
+      |> form("#scoring-form", %{"scoring_mode" => "shadow", "competence" => "true"})
+      |> render_change()
+
+      assert get_in(config_of(ws), ["routing", "scoring", "competence"]) == true
+
+      view
+      |> form("#scoring-form", %{"scoring_mode" => "shadow", "competence" => "false"})
+      |> render_change()
+
+      scoring = get_in(config_of(ws), ["routing", "scoring"])
+      refute Map.has_key?(scoring, "competence")
+      # Sibling scoring keys are left alone.
+      assert scoring["time_weight"] == %{"P0" => 2}
+    end
+
+    test "off unsets the mode and drops back to most_quota, not failover", %{conn: conn} do
+      ws =
+        workspace!(%{
+          "routing" => %{
+            "provider_selection" => "scored",
+            "scoring" => %{"mode" => "enforce"}
+          }
+        })
+
+      view = open(conn, ws)
+      assert scoring_mode(view) == "enforce"
+
+      view |> form("#scoring-form", %{"scoring_mode" => "off"}) |> render_change()
+
+      config = config_of(ws)
+      assert get_in(config, ["routing", "provider_selection"]) == "most_quota"
+      refute Map.has_key?(get_in(config, ["routing", "scoring"]) || %{}, "mode")
+      assert scoring_mode(view) == "off"
+    end
+
+    test "a rejected write shows the error and leaves the config alone", %{conn: conn} do
+      ws = workspace!()
+      view = open(conn, ws)
+
+      view |> element("#scoring-form") |> render_change(%{"scoring_mode" => "turbo"})
+
+      assert get_in(config_of(ws), ["routing", "scoring"]) == nil
+      assert has_element?(view, "#provider-settings-error")
+    end
+  end
+
+  describe "workspace pace exemption (bd-8vkqd3)" do
+    defp exempt_value(view) do
+      view
+      |> render()
+      |> LazyHTML.from_document()
+      |> LazyHTML.query("#pace-exempt-form select option[selected]")
+      |> LazyHTML.attribute("value")
+      |> List.first()
+    end
+
+    test "narrowing is written as an integer, 'none', or unset when blank", %{conn: conn} do
+      ws = workspace!(%{"quota" => %{"throttle_threshold" => 0.8}})
+      view = open(conn, ws)
+
+      assert has_element?(view, "#pace-exempt-form")
+      assert exempt_value(view) in [nil, ""]
+
+      view |> form("#pace-exempt-form", %{"pace_exempt_priority" => "1"}) |> render_change()
+      assert get_in(config_of(ws), ["quota", "pace_exempt_priority"]) == 1
+      assert exempt_value(view) == "1"
+
+      view |> form("#pace-exempt-form", %{"pace_exempt_priority" => "none"}) |> render_change()
+      assert get_in(config_of(ws), ["quota", "pace_exempt_priority"]) == "none"
+
+      view |> form("#pace-exempt-form", %{"pace_exempt_priority" => ""}) |> render_change()
+      quota = get_in(config_of(ws), ["quota"])
+      refute Map.has_key?(quota, "pace_exempt_priority")
+      assert quota["throttle_threshold"] == 0.8
+    end
+
+    test "shows what each attached account actually ends up with", %{conn: conn} do
+      ws = workspace!(%{"quota" => %{"pace_exempt_priority" => 1}})
+      granting = account!(:claude, "wps-grants", %{quota_config: %{"pace_exempt_priority" => 3}})
+      silent = account!(:codex, "wps-silent")
+      link!(ws, granting)
+      link!(ws, silent)
+
+      view = open(conn, ws)
+
+      assert view |> element("#pace-exempt-effective-#{granting.id}") |> render() =~ "P0 to P1"
+      assert view |> element("#pace-exempt-effective-#{silent.id}") |> render() =~ "off"
+    end
+  end
+
   describe "grok routing (bd-co08p2)" do
     test "the toggle sets and clears routing.grok.enabled, keeping other config", %{conn: conn} do
       ws = workspace!(%{"routing" => %{"provider_selection" => "most_quota"}})

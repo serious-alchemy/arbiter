@@ -4,7 +4,7 @@ defmodule Arbiter.Accounts.Overview do
   provider account, carrying everything the page shows about it.
 
     * `workspaces` — the `WorkspaceProviderAccount` links, with the
-      workspace's name and `share`.
+      workspace's name, `share` and its own `quota` settings.
     * `credentials` — the account's **active** credentials, as metadata only
       (kind, env var, a 12-character fingerprint prefix, created_at). The
       encrypted column is never selected, so no row can carry the secret.
@@ -129,6 +129,7 @@ defmodule Arbiter.Accounts.Overview do
         account_id: link.provider_account_id,
         workspace_id: link.workspace_id,
         workspace_name: link.workspace && link.workspace.name,
+        workspace_quota: workspace_quota(link.workspace),
         provider: link.provider,
         share: link.share
       }
@@ -136,6 +137,12 @@ defmodule Arbiter.Accounts.Overview do
     |> Enum.sort_by(& &1.workspace_name)
     |> Enum.group_by(& &1.account_id)
   end
+
+  # The workspace's own `config["quota"]` — the other side of the gate's
+  # `min(account, workspace)` — so the account edit form can show the
+  # effective ceiling (bd-8vkqd3). `%{}` when the workspace sets nothing.
+  defp workspace_quota(%{config: %{"quota" => %{} = quota}}), do: quota
+  defp workspace_quota(_workspace), do: %{}
 
   defp credentials_by_account([]), do: %{}
 

@@ -190,6 +190,94 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
     end
   end
 
+  describe "PATCH /api/accounts/:ref (bd-8vkqd3 — label, plan, enabled)" do
+    test "sets label, plan and enabled alone", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-set", max_concurrent: 2})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-set", %{
+            label: "Work Max",
+            plan: "max_20x",
+            enabled: false
+          }),
+          200
+        )
+
+      assert body["label"] == "Work Max"
+      assert body["plan"] == "max_20x"
+      assert body["enabled"] == false
+      assert body["max_concurrent"] == 2
+    end
+
+    test "combines with max_concurrent and quota_config in one request", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-combo"})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-combo", %{
+            label: "Combo",
+            max_concurrent: 5,
+            quota_config: %{threshold_mode: "paced"}
+          }),
+          200
+        )
+
+      assert body["label"] == "Combo"
+      assert body["max_concurrent"] == 5
+      assert body["quota_config"]["threshold_mode"] == "paced"
+    end
+
+    test "a blank label clears it; enabled accepts the string form", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-clear", label: "Old", enabled: false})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-clear", %{label: "", enabled: "true"}),
+          200
+        )
+
+      assert body["label"] == nil
+      assert body["enabled"] == true
+    end
+
+    test "400s on a non-boolean enabled without writing anything else", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-bad", max_concurrent: 1})
+
+      response =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-bad", %{enabled: "maybe", max_concurrent: 9}),
+          400
+        )
+
+      assert response["error"]["message"] =~ "enabled"
+      assert json_response(get(conn, ~p"/api/accounts/meta-bad"), 200)["max_concurrent"] == 1
+    end
+
+    test "400s when slug or provider is sent — identity is not an edit", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-identity"})
+      # Not a named updatable key: only the three above count as "an update".
+      assert json_response(patch(conn, ~p"/api/accounts/meta-identity", %{slug: "x"}), 400)
+    end
+
+    test "a null quota_config value clears that key and leaves siblings", %{conn: conn} do
+      create_account!(%{
+        provider: :claude,
+        slug: "meta-unset",
+        quota_config: %{"weekly_threshold" => 0.8, "paced_floor" => 0.3}
+      })
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-unset", %{quota_config: %{weekly_threshold: nil}}),
+          200
+        )
+
+      refute Map.has_key?(body["quota_config"], "weekly_threshold")
+      assert body["quota_config"]["paced_floor"] == 0.3
+    end
+  end
+
   describe "GET /api/accounts" do
     test "lists accounts", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "list-a"})

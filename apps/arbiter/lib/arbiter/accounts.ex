@@ -193,11 +193,76 @@ defmodule Arbiter.Accounts do
   """
   @spec set_quota_config(String.t(), map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
   def set_quota_config(account_ref, updates) when is_map(updates) do
-    with {:ok, validated} <- Arbiter.Quota.Gate.validate_quota_config(updates),
+    with {:ok, validated} <- Arbiter.Quota.Gate.validate_quota_config_patch(updates),
          {:ok, account} <- get_account(account_ref) do
-      Ash.update(account, %{quota_config: Map.merge(account.quota_config || %{}, validated)})
+      {clears, sets} = Map.split_with(validated, fn {_key, value} -> is_nil(value) end)
+      merged = (account.quota_config || %{}) |> Map.merge(sets) |> Map.drop(Map.keys(clears))
+      Ash.update(account, %{quota_config: merged})
     end
   end
+
+  @update_account_keys ~w(label plan enabled)
+
+  @doc """
+  Edit an account's `label`, `plan` and `enabled` — `arb account set --label
+  ... --plan ... --enable/--disable` / `PATCH /api/accounts/:ref` and the
+  Providers page's Edit form (bd-8vkqd3). The three attributes had no setter
+  above the Ash layer, only `create_account/1`.
+
+  Only the given keys (string or atom) are written. A blank `label` / `plan`
+  clears it; `enabled` is a boolean or its `"true"` / `"false"` string form.
+  `provider` and `slug` are the account's identity (§3.1) and, like any other
+  key, are rejected as `{:error, {:invalid_account, message}}` rather than
+  ignored. The concurrency cap and `quota_config` have their own setters
+  (`set_max_concurrent/2`, `set_quota_config/2`).
+  """
+  @spec update_account(String.t(), map()) ::
+          {:ok, ProviderAccount.t()} | {:error, term()}
+  def update_account(account_ref, attrs) when is_map(attrs) do
+    with {:ok, changes} <- validate_account_attrs(attrs),
+         {:ok, account} <- get_account(account_ref) do
+      Ash.update(account, changes)
+    end
+  end
+
+  @doc """
+  The check `update_account/2` runs before writing, exposed so a caller that
+  also writes the cap or `quota_config` (the `PATCH` controller, the Providers
+  form) can validate the whole edit up front and never half-apply it. Returns
+  the attribute changes keyed by atom.
+  """
+  @spec validate_account_attrs(map()) :: {:ok, map()} | {:error, {:invalid_account, String.t()}}
+  def validate_account_attrs(attrs) when is_map(attrs) do
+    attrs = Map.new(attrs, fn {key, value} -> {to_string(key), value} end)
+
+    case Map.keys(attrs) -- @update_account_keys do
+      [] -> attrs |> Enum.reduce_while({:ok, %{}}, &cast_account_attr/2)
+      unknown -> invalid_account("cannot set #{Enum.join(unknown, ", ")}")
+    end
+  end
+
+  defp cast_account_attr({"enabled", value}, {:ok, acc}) do
+    case cast_boolean(value) do
+      {:ok, bool} -> {:cont, {:ok, Map.put(acc, :enabled, bool)}}
+      :error -> {:halt, invalid_account("enabled must be true or false")}
+    end
+  end
+
+  defp cast_account_attr({key, value}, {:ok, acc}) when value in [nil] or is_binary(value) do
+    text = if is_binary(value), do: String.trim(value)
+
+    {:cont,
+     {:ok, Map.put(acc, String.to_existing_atom(key), if(text == "", do: nil, else: text))}}
+  end
+
+  defp cast_account_attr({key, _value}, _acc), do: {:halt, invalid_account("#{key} must be text")}
+
+  defp cast_boolean(value) when is_boolean(value), do: {:ok, value}
+  defp cast_boolean("true"), do: {:ok, true}
+  defp cast_boolean("false"), do: {:ok, false}
+  defp cast_boolean(_), do: :error
+
+  defp invalid_account(message), do: {:error, {:invalid_account, message}}
 
   @doc """
   Attach a workspace to an account for a provider — `arb account attach

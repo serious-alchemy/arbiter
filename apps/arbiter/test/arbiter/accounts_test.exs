@@ -271,6 +271,115 @@ defmodule Arbiter.AccountsTest do
     end
   end
 
+  describe "set_quota_config/2 — a nil value clears the key (bd-8vkqd3)" do
+    test "drops only the named key, leaving siblings alone" do
+      create_account!(%{
+        provider: :claude,
+        slug: "policy-clear",
+        quota_config: %{
+          "weekly_threshold" => 0.8,
+          "paced_floor" => 0.3,
+          "throttle_threshold" => 0.7
+        }
+      })
+
+      assert {:ok, account} =
+               Accounts.set_quota_config("policy-clear", %{
+                 "weekly_threshold" => nil,
+                 "threshold_mode" => "paced"
+               })
+
+      refute Map.has_key?(account.quota_config, "weekly_threshold")
+      assert account.quota_config["paced_floor"] == 0.3
+      assert account.quota_config["throttle_threshold"] == 0.7
+      assert account.quota_config["threshold_mode"] == "paced"
+    end
+
+    test "clearing a key that is not set is a no-op, not an error" do
+      create_account!(%{provider: :claude, slug: "policy-clear-unset"})
+
+      assert {:ok, account} =
+               Accounts.set_quota_config("policy-clear-unset", %{"paced_floor" => nil})
+
+      assert account.quota_config == %{}
+    end
+
+    test "an unknown key is still rejected even when nil" do
+      create_account!(%{provider: :claude, slug: "policy-clear-bad"})
+
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.set_quota_config("policy-clear-bad", %{"nope" => nil})
+    end
+  end
+
+  describe "update_account/2 (bd-8vkqd3)" do
+    test "sets label, plan and enabled; the identity and cap are untouched" do
+      create_account!(%{provider: :claude, slug: "upd-all", max_concurrent: 3})
+
+      assert {:ok, account} =
+               Accounts.update_account("upd-all", %{
+                 "label" => "Work Max",
+                 "plan" => "max_20x",
+                 "enabled" => false
+               })
+
+      assert account.label == "Work Max"
+      assert account.plan == "max_20x"
+      assert account.enabled == false
+      assert account.slug == "upd-all"
+      assert account.max_concurrent == 3
+    end
+
+    test "only the given keys change" do
+      create_account!(%{provider: :claude, slug: "upd-part", label: "Keep", plan: "pro"})
+
+      assert {:ok, account} = Accounts.update_account("upd-part", %{"plan" => "team"})
+      assert account.label == "Keep"
+      assert account.plan == "team"
+      assert account.enabled == true
+    end
+
+    test "a blank label or plan clears it" do
+      create_account!(%{provider: :claude, slug: "upd-blank", label: "L", plan: "pro"})
+
+      assert {:ok, account} = Accounts.update_account("upd-blank", %{label: "  ", plan: nil})
+      assert account.label == nil
+      assert account.plan == nil
+    end
+
+    test "accepts atom keys and the string forms of enabled" do
+      create_account!(%{provider: :claude, slug: "upd-forms"})
+
+      assert {:ok, %{enabled: false}} = Accounts.update_account("upd-forms", %{enabled: "false"})
+
+      assert {:ok, %{enabled: true}} =
+               Accounts.update_account("upd-forms", %{"enabled" => "true"})
+    end
+
+    test "rejects a non-boolean enabled and an unknown key without writing" do
+      create_account!(%{provider: :claude, slug: "upd-bad", label: "Before"})
+
+      assert {:error, {:invalid_account, msg}} =
+               Accounts.update_account("upd-bad", %{"enabled" => "maybe", "label" => "After"})
+
+      assert msg =~ "enabled"
+
+      assert {:error, {:invalid_account, msg}} =
+               Accounts.update_account("upd-bad", %{"slug" => "renamed"})
+
+      assert msg =~ "slug"
+      assert {:ok, %{label: "Before", slug: "upd-bad"}} = Accounts.get_account("upd-bad")
+    end
+
+    test "resolves the same refs every other verb does" do
+      account = create_account!(%{provider: :claude, slug: "upd-refs"})
+
+      assert {:ok, _} = Accounts.update_account(account.id, %{"label" => "a"})
+      assert {:ok, _} = Accounts.update_account("claude:upd-refs", %{"label" => "b"})
+      assert {:error, :not_found} = Accounts.update_account("no-such-account", %{"label" => "c"})
+    end
+  end
+
   describe "share is a cap, not a reservation (§4.3)" do
     test "shares may sum to more than the account ceiling" do
       account = create_account!(%{provider: :claude, slug: "oversubscribed", max_concurrent: 4})
