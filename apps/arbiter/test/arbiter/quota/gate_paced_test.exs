@@ -266,6 +266,22 @@ defmodule Arbiter.Quota.GatePacedTest do
       assert Gate.window_seconds("5h", account(%{"window_seconds" => %{"5h" => -5}})) == 18_000
       assert Gate.window_seconds("5h", account(%{"window_seconds" => "garbage"})) == 18_000
     end
+
+    test "precedence: override > provider-reported length > built-in table > nil" do
+      # A Codex window reporting 420 minutes is stored as minutes and labelled "420m".
+      reported = Snapshot.codex_window_label(420, "session")
+      assert reported == "420m"
+      override = account(%{"window_seconds" => %{"420m" => 3600, "5h" => 36_000}})
+
+      # 1. the account override wins over the provider-reported length
+      assert Gate.window_seconds(reported, override) == 3600
+      # 2. the provider-reported length, with no override
+      assert Gate.window_seconds(reported, nil) == 25_200
+      # 3. a standard reported length is labelled "5h" and resolves via the built-in table
+      assert Gate.window_seconds(Snapshot.codex_window_label(300, "session"), nil) == 18_000
+      # 4. nothing reported, no override, no table entry -> nil (flat fallback)
+      assert Gate.window_seconds(Snapshot.codex_window_label(nil, "session"), nil) == nil
+    end
   end
 
   describe "window-length resolution in the gate" do
