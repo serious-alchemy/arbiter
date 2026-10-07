@@ -150,4 +150,42 @@ defmodule Arbiter.Board.SnapshotProviderConstraintTest do
     assert reason =~ "codex:#{codex.slug} at capacity"
     assert %{state: :next} = ready["t-2"]
   end
+
+  describe "an unconstrained ticket whose workspace allows only full/paused providers (bd-814vuy)" do
+    test "is held at capacity and the next workspace's ticket goes — no dispatch attempted" do
+      claude_ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
+      other_ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
+      claude = account!(:claude, %{max_concurrent: 1})
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: claude_ws.id,
+        provider: :claude,
+        provider_account_id: claude.id
+      })
+
+      live_worker!(claude_ws, :claude)
+
+      head = issue("t-1", claude_ws, %{priority: 1})
+      lower = issue("t-2", other_ws)
+
+      ready = load_ready(other_ws, [head, lower])
+
+      assert %{state: :blocked, reason: reason} = ready["t-1"]
+      assert reason =~ "held — provider constraint"
+      assert reason =~ "at capacity"
+      assert %{state: :next} = ready["t-2"]
+    end
+
+    test "is held when every allowed provider is paused, and the next ticket goes" do
+      ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
+      other_ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
+      {:ok, _} = Arbiter.Providers.Pause.pause("claude", reason: "test pause", by: "test")
+
+      ready = load_ready(other_ws, [issue("t-1", ws, %{priority: 1}), issue("t-2", other_ws)])
+
+      assert %{state: :blocked, reason: reason} = ready["t-1"]
+      assert reason =~ "paused"
+      assert %{state: :next} = ready["t-2"]
+    end
+  end
 end

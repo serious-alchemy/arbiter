@@ -448,6 +448,65 @@ defmodule Arbiter.Board.AutopilotTest do
     end
   end
 
+  describe "a refused head card does not end the pass (bd-814vuy)" do
+    # A scheduler stand-in: names the first card that is not held by
+    # `:dispatch_holds`, and shows the held ones with their reason.
+    defp two_card_snapshot(opts) do
+      holds = Keyword.get(opts, :dispatch_holds, %{})
+
+      ready =
+        for id <- ["bd-1", "bd-2"] do
+          case holds do
+            %{^id => {:hold, detail}} ->
+              %{id: id, state: :blocked, reason: "held — provider constraint (#{detail})"}
+
+            _ ->
+              %{id: id, state: :queued, reason: "queued"}
+          end
+        end
+
+      promote = Enum.find_value(ready, fn e -> if e.state != :blocked, do: e.id end)
+      %{board("bd-1") | ready: ready, promote: promote}
+    end
+
+    for {label, error, phrase} <- [
+          {"account at capacity",
+           {:account_at_capacity, %{account: "claude:default", cap: 2, holders: ["a", "b"]}},
+           "claude:default at capacity"},
+          {"quota held", {:quota_held, "bd-1"}, "quota held"},
+          {"paused provider", {:provider_paused, :claude, "held — claude paused: x"},
+           "claude paused"}
+        ] do
+      test "#{label}: the next card is dispatched, quietly" do
+        test = self()
+        error = unquote(Macro.escape(error))
+
+        pid =
+          start(
+            paused: false,
+            snapshot: &two_card_snapshot/1,
+            dispatch: fn
+              "bd-1" -> {:error, error}
+              id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}}
+            end
+          )
+
+        log =
+          ExUnit.CaptureLog.capture_log([level: :warning], fn ->
+            assert {:error, ^error} = Autopilot.tick(pid)
+            assert {:ok, "bd-2"} = Autopilot.tick(pid)
+          end)
+
+        assert_receive {:dispatched, "bd-2"}
+        refute log =~ "failed"
+
+        board = Autopilot.board(pid)
+        assert %{state: :blocked, reason: reason} = Enum.find(board.ready, &(&1.id == "bd-1"))
+        assert reason =~ unquote(phrase)
+      end
+    end
+  end
+
   describe "a quota-exhausted pre-flight failure is held, not retried every tick (bd-8lnnnt)" do
     alias Arbiter.Worker.StopReason
 

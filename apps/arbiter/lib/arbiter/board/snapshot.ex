@@ -260,7 +260,8 @@ defmodule Arbiter.Board.Snapshot do
         slot_note: Map.get(input, :slot_note),
         quota: quota,
         card_quota: Map.get(input, :card_quota, %{}),
-        card_constraint: Map.get(input, :card_constraint, %{}),
+        card_constraint:
+          Map.merge(Map.get(input, :card_constraint, %{}), Map.get(input, :dispatch_holds, %{})),
         paused: paused?
       })
 
@@ -430,6 +431,7 @@ defmodule Arbiter.Board.Snapshot do
         Keyword.get_lazy(opts, :card_constraint, fn ->
           ticket_constraint_holds(workspace, issues, opts)
         end),
+      dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -873,22 +875,51 @@ defmodule Arbiter.Board.Snapshot do
   # has capacity (`ProviderConstraint.pick/3`, the one read dispatch also
   # asks), so Autopilot plans past it instead of dispatching into a refusal.
   # Only constrained tickets are evaluated; everything else yields no entry.
-  defp ticket_constraint_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
-    issues
-    |> Enum.filter(
-      &(Lifecycle.state_of(&1) == :queued and not epic?(&1) and ProviderConstraint.from(&1))
-    )
-    |> Map.new(fn issue ->
-      case ProviderConstraint.pick(workspace, issue, opts) do
-        {:ok, _provider} -> {issue.id, :ok}
-        {:hold, detail} -> {issue.id, {:hold, detail}}
-      end
-    end)
+  #
+  # bd-814vuy: the same read now covers an *unconstrained* ticket, against the
+  # workspace the ticket itself belongs to. A workspace whose `agent.type` pool
+  # is entirely full or paused cannot take any of its tickets, so the head of
+  # the queue behind a full account no longer ends the pass: Autopilot plans
+  # past it to a card another provider can take. Only a hold is recorded for an
+  # unconstrained ticket (one verdict per workspace), so a healthy board is
+  # unchanged.
+  defp ticket_constraint_holds(%Arbiter.Tasks.Workspace{} = default, issues, opts) do
+    queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+    {constrained, plain} = Enum.split_with(queued, &ProviderConstraint.from/1)
+
+    constrained_holds =
+      Map.new(constrained, fn issue ->
+        case ProviderConstraint.pick(default, issue, opts) do
+          {:ok, _provider} -> {issue.id, :ok}
+          {:hold, detail} -> {issue.id, {:hold, detail}}
+        end
+      end)
+
+    plain
+    |> Enum.group_by(&Map.get(&1, :workspace_id))
+    |> Enum.flat_map(fn {ws_id, tickets} -> pool_holds(default, ws_id, tickets, opts) end)
+    |> Map.new()
+    |> Map.merge(constrained_holds)
   rescue
     _ -> %{}
   end
 
   defp ticket_constraint_holds(_, _, _), do: %{}
+
+  defp pool_holds(default, ws_id, [sample | _] = tickets, opts) do
+    workspace = if ws_id in [nil, default.id], do: default, else: safe_workspace(ws_id)
+
+    case workspace && ProviderConstraint.pick(workspace, sample, opts) do
+      {:hold, detail} ->
+        detail = String.trim_leading(detail, ": ")
+        Enum.map(tickets, &{&1.id, {:hold, detail}})
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
