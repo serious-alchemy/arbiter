@@ -2,80 +2,90 @@ defmodule ArbiterWeb.Api.MessageController do
   @moduledoc """
   REST endpoints for `Arbiter.Messages.Message` — the inter-agent queue.
 
-  Routes:
+  Routes (a thin adapter over `Arbiter.Messages.Mailbox`, as the MCP mailbox
+  tools and `arb inbox` / `arb message` / `arb notify` are):
 
     * `GET  /api/messages`           — :index (filters: workspace (id or name;
                                        `workspace_id` alias), kind, to_ref, from_ref,
                                        unread=true [pending: read_at & cleared_at
                                        both nil], outstanding=true [read, not
-                                       cleared], limit [default 50])
+                                       cleared], limit, mark_read=true [stamp the
+                                       returned unread messages read; default
+                                       false — a plain GET is a pure read]).
+                                       Unread/outstanding are oldest-first and
+                                       uncapped unless `limit` is given; the
+                                       history view is newest-first, 50 by default.
+                                       `limit` never exceeds 500. A worker token
+                                       may read its own mailbox (`to_ref=<its
+                                       task>`) and the notification feed
+                                       (`kind=notification`, its own workspace).
     * `GET  /api/messages/:id`       — :show (one message in full; a worker
                                        token may read only its own task's mail)
-    * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
-                                       subject, body, task_ref (or the
-                                       deprecated directive_ref alias),
-                                       workspace_id)
+    * `POST /api/messages`           — :create (body: kind, to_ref, subject,
+                                       body, task_ref (or the deprecated
+                                       directive_ref alias), workspace_id). The
+                                       recipient must be the coordinator or an
+                                       existing task and the message is filed in
+                                       the RECIPIENT's workspace; a `workspace_id`
+                                       that disagrees is a 422.
     * `POST /api/messages/:id/read`  — :read (stamp read_at = now)
     * `DELETE /api/messages`         — :clear (soft-clear by stamping cleared_at;
                                        rows are retained, not destroyed). Three
                                        forms: `ids=<comma-separated>` clears
                                        exactly those messages, resolved
                                        regardless of workspace; `task_id=<ref>`
-                                       (+ `workspace`, required when
-                                       several workspaces exist) clears every
+                                       (+ optional `workspace`; omitted = every
+                                       workspace the token may see) clears every
                                        coordinator message concerning that
                                        task; `to_ref=<ref>` (+ optional `all`)
                                        is the bulk mailbox clear — `all=true`
                                        clears read+unread, absent/false clears
-                                       the outstanding (read) tail only.
-
-  Newest first. `arb inbox` / `arb notify` / `arb msg` / `arb message` drive
-  these.
+                                       the outstanding (read) tail only. Every
+                                       form answers with the same keys
+                                       (`cleared`, `cleared_count`, `not_found`,
+                                       `deleted_read`, `deleted_unread`,
+                                       `remaining_unread`, `workspace_id`).
 
   ## Reader identity (bd-8akewg)
 
-  The coordinator mailbox is shared, but read/cleared state is per reader. These
-  endpoints act as the **sessionless coordinator** reader by default — the
-  identity the CLI, the dashboard drawer and any plain minted token share — so
-  every existing caller behaves exactly as it did. Pass `session=<session_id>`
-  on :index, :read or any :clear form (bulk, `ids`, `task_id`) to act as that
-  browser session's reader instead;
-  its reads and clears then leave the shared row, and therefore every other
-  reader, untouched.
+  The coordinator mailbox is shared, but read/cleared state is per reader. The
+  reader is derived from the token exactly as the MCP tools derive it
+  (`Mailbox.reader/2`): a session token acts as its own session; any other token
+  is the **sessionless coordinator** reader — the identity the CLI, the
+  dashboard drawer and a plain minted token share — unless it names a
+  `session=<session_id>` on :index, :read or any :clear form. A session's reads
+  and clears leave the shared row, and therefore every other reader, untouched.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Messages.Mailbox
   alias Arbiter.Messages.Message
   alias Arbiter.Params
   alias ArbiterWeb.Api.WorkspaceParam
-  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  @default_limit 50
-  @max_limit 500
-
   def index(conn, params) do
-    reader = reader_ref(params)
-
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
          {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, kind} <- parse_kind(params["kind"]),
          {:ok, unread?} <- params |> Params.fetch_bool("unread", false) |> Params.to_rest(),
          {:ok, outstanding?} <-
-           params |> Params.fetch_bool("outstanding", false) |> Params.to_rest() do
+           params |> Params.fetch_bool("outstanding", false) |> Params.to_rest(),
+         {:ok, mark_read?} <- params |> Params.fetch_bool("mark_read", false) |> Params.to_rest(),
+         {:ok, state} <- parse_state(unread?, outstanding?) do
       messages =
-        Message
-        |> filter_workspace(ws_id)
-        |> filter_eq(:kind, kind)
-        |> filter_eq(:to_ref, params["to_ref"])
-        |> filter_eq(:from_ref, params["from_ref"])
-        |> maybe_unread(unread?, reader)
-        |> maybe_outstanding(outstanding?, reader)
-        |> Ash.Query.sort(inserted_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
+        Mailbox.list(
+          workspace_id: ws_id,
+          kind: kind,
+          to_ref: params["to_ref"],
+          from_ref: params["from_ref"],
+          state: state,
+          reader: reader_ref(conn, params),
+          limit: limit,
+          mark_read: mark_read?
+        )
 
       render(conn, :index, messages: messages, workspace_id: ws_id)
     end
@@ -88,125 +98,30 @@ defmodule ArbiterWeb.Api.MessageController do
   end
 
   def create(conn, params) do
-    with {:ok, ws_id} <- create_workspace(conn, params) do
-      attrs =
-        params
-        |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref))
-        |> Map.put("workspace_id", ws_id)
-        |> pin_sender(conn.assigns[:mcp_scope])
-        |> coerce_kind()
-        |> Message.hand_written()
-        |> mark_unverified_origin()
+    attrs = %{
+      to_ref: params["to_ref"],
+      body: params["body"],
+      kind: params["kind"],
+      subject: params["subject"],
+      task_ref: params["task_ref"],
+      directive_ref: params["directive_ref"],
+      from_ref: params["from_ref"],
+      workspace: Arbiter.Tasks.Workspaces.arg(params)
+    }
 
-      case Ash.create(Message, attrs) do
-        {:ok, message} ->
-          conn
-          |> put_status(:created)
-          |> render(:show, message: message)
+    case Mailbox.send_message(conn.assigns[:mcp_scope], attrs) do
+      {:ok, message} ->
+        conn
+        |> put_status(:created)
+        |> render(:show, message: message)
 
-        {:error, _} = err ->
-          err
-      end
+      {:error, _} = err ->
+        err
     end
-  end
-
-  # An escalation raised by an `arb` in a sandbox or another install names a
-  # workspace this installation has no row for. It is delivered and marked
-  # (`mark_unverified_origin/1`), never dropped, so an unknown workspace is kept
-  # as written for an UNBOUND caller; a token bound to a workspace stays
-  # confined and gets the resolver's answer. A worker token never names one: it
-  # sends into its own workspace whatever the body claims (`pin_worker_sender/2`).
-  defp create_workspace(
-         %Plug.Conn{assigns: %{mcp_scope: %Arbiter.MCP.Scope{tier: :worker} = scope}},
-         _params
-       ),
-       do: {:ok, scope.workspace_id}
-
-  defp create_workspace(conn, params) do
-    case WorkspaceParam.resolve(conn, params, :write) do
-      {:error, {:not_found, _}} = error ->
-        scope = conn.assigns[:mcp_scope]
-        raw = Arbiter.Tasks.Workspaces.arg(params)
-
-        if is_binary(raw) and (is_nil(scope) or is_nil(scope.workspace_id)),
-          do: {:ok, raw},
-          else: error
-
-      other ->
-        other
-    end
-  end
-
-  # bd-asawcq: a worker token sends as its own task, into its own workspace,
-  # whatever the body claims — the REST twin of the `message_send` MCP tool's
-  # envelope. A worker cannot direct (`arb message <task> <text>` sends
-  # `kind: direction` from "coordinator"), so a direction becomes a flag.
-  defp pin_worker_sender(attrs, scope) do
-    attrs
-    |> Map.put("from_ref", scope.task_id)
-    |> Map.put("workspace_id", scope.workspace_id)
-    |> Map.update("kind", "flag", fn
-      kind when kind in [nil, "direction"] -> "flag"
-      kind -> kind
-    end)
-  end
-
-  # A coordinator likewise sends as itself: `from_ref` is derived from the
-  # token, never asserted by the caller. The literal "coordinator" (not the
-  # operator-flavoured `Params.actor_label/1`) is deliberate: it is the mailbox
-  # address coordinator-bound mail and directive matching key on.
-  defp pin_sender(attrs, %Arbiter.MCP.Scope{tier: :worker} = scope),
-    do: pin_worker_sender(attrs, scope)
-
-  defp pin_sender(attrs, %Arbiter.MCP.Scope{tier: :coordinator}),
-    do: Map.put(attrs, "from_ref", "coordinator")
-
-  defp pin_sender(attrs, _scope), do: attrs
-
-  # bd-2nbu7a / #15: `arb` defaults to http://127.0.0.1:4848, so an agent CLI in
-  # a throwaway sandbox on this host (test fixture, nested install) posts to the
-  # live coordinator. Its escalation names a task this installation has no row
-  # for. Mark such an escalation — never drop it: an operator can still read it,
-  # and a real incident phrased the same way is never filtered, only a
-  # task_ref this installation cannot resolve is flagged.
-  defp mark_unverified_origin(attrs) do
-    task_ref = attr(attrs, :task_ref)
-
-    if agent_escalation?(attrs) and is_binary(task_ref) and task_ref != "" and
-         not task_known?(task_ref) do
-      note =
-        "[origin not verified: #{task_ref} is not a task in this installation — " <>
-          "likely a sandbox, test fixture or another install posting to this host]"
-
-      attrs
-      |> put_attr(:subject, "[UNVERIFIED ORIGIN: #{task_ref}] #{attr(attrs, :subject)}")
-      |> put_attr(:body, "#{note}\n\n#{attr(attrs, :body)}")
-    else
-      attrs
-    end
-  end
-
-  defp agent_escalation?(attrs),
-    do: attr(attrs, :kind) in [:escalation, "escalation"]
-
-  defp task_known?(id) do
-    match?({:ok, %Arbiter.Tasks.Issue{}}, Ash.get(Arbiter.Tasks.Issue, id))
-  rescue
-    _ -> false
-  end
-
-  # `hand_written/1` returns string- or atom-keyed attrs depending on `kind`.
-  defp attr(attrs, key), do: Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
-
-  defp put_attr(attrs, key, value) do
-    if Map.has_key?(attrs, Atom.to_string(key)),
-      do: Map.put(attrs, Atom.to_string(key), value),
-      else: Map.put(attrs, key, value)
   end
 
   def read(conn, %{"id" => id} = params) do
-    with {:ok, message} <- Ash.get(Message, id),
-         {:ok, updated} <- Message.mark_read(message, reader: reader_ref(params)) do
+    with {:ok, updated} <- Mailbox.mark_read(id, reader: reader_ref(conn, params)) do
       render(conn, :show, message: updated)
     end
   end
@@ -223,32 +138,18 @@ defmodule ArbiterWeb.Api.MessageController do
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
 
-    {:ok, cleared, not_found} = Message.clear_ids(ids, reader: reader_ref(params))
-
-    json(conn, %{
-      data: %{
-        cleared: Enum.map(cleared, & &1.id),
-        not_found: not_found
-      }
-    })
+    {:ok, result} = Mailbox.clear({:ids, ids}, reader: reader_ref(conn, params))
+    json(conn, %{data: result})
   end
 
-  # Soft-clear every coordinator message concerning `task_id`. A write: it
-  # clears inside the named `workspace`, else the bound / sole workspace, and
-  # refuses (422, listing the candidates) when several exist — the same rule as
-  # MCP `coordinator_inbox_clear`.
+  # Soft-clear every coordinator message concerning `task_id` — in the named
+  # `workspace`, else (a task id being unambiguous) every workspace the token
+  # may see. The same rule as MCP `coordinator_inbox_clear`.
   def clear(conn, %{"task_id" => task_id} = params) when is_binary(task_id) and task_id != "" do
-    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
-      {:ok, cleared} =
-        Message.clear_by_task(task_id, reader: reader_ref(params), workspace_id: ws_id)
-
-      json(conn, %{
-        data: %{
-          cleared: Enum.map(cleared, & &1.id),
-          cleared_count: length(cleared),
-          workspace_id: ws_id
-        }
-      })
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, result} <-
+           Mailbox.clear({:task, task_id}, reader: reader_ref(conn, params), workspace_id: ws_id) do
+      json(conn, %{data: result})
     end
   end
 
@@ -258,69 +159,43 @@ defmodule ArbiterWeb.Api.MessageController do
   # retained (soft), never destroyed; the durable escalation record survives.
   # `to_ref` is required so a stray call can't sweep the table.
   def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
-    opts = [reader: reader_ref(params)]
-
-    with {:ok, all?} <- params |> Params.fetch_bool("all", false) |> Params.to_rest() do
-      {:ok, deleted_read, deleted_unread, remaining_unread} =
-        if all? do
-          Message.clear_all(to_ref, opts)
-        else
-          Message.clear_read(to_ref, opts)
-        end
-
-      json(conn, %{
-        data: %{
-          deleted_read: deleted_read,
-          deleted_unread: deleted_unread,
-          remaining_unread: remaining_unread
-        }
-      })
+    with {:ok, all?} <- params |> Params.fetch_bool("all", false) |> Params.to_rest(),
+         {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, result} <-
+           Mailbox.clear({:mailbox, to_ref, all?},
+             reader: reader_ref(conn, params),
+             workspace_id: ws_id
+           ) do
+      json(conn, %{data: result})
     end
   end
 
-  def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
+  def clear(_conn, _params),
+    do: {:error, {:invalid_request, "clear requires ids, task_id or to_ref"}}
 
-  # ---- query helpers ----
+  # ---- helpers ----
 
-  defp filter_workspace(query, nil), do: query
-  defp filter_workspace(query, ws_id), do: Ash.Query.filter(query, workspace_id == ^ws_id)
+  # The reader these endpoints act as: the token's own session when it has one,
+  # else `session=<session_id>`, else the shared sessionless coordinator reader
+  # (whose state is mirrored onto the row — which is why callers that never
+  # pass `session` see no change at all).
+  defp reader_ref(conn, params), do: Mailbox.reader(conn.assigns[:mcp_scope], params["session"])
 
-  defp filter_eq(query, _field, value) when value in [nil, ""], do: query
-  defp filter_eq(query, :kind, value), do: Ash.Query.filter(query, kind == ^value)
-  # `to_ref`/`from_ref` dual-read the coordinator mailbox during the
-  # admiral→coordinator compat window: either literal matches both stored
-  # variants (`Message.ref_variants/1`); every other ref matches only itself.
-  defp filter_eq(query, :to_ref, value),
-    do: Ash.Query.filter(query, to_ref in ^Message.ref_variants(value))
+  defp parse_state(true, true),
+    do: {:error, {:invalid_request, "unread and outstanding are mutually exclusive"}}
 
-  defp filter_eq(query, :from_ref, value),
-    do: Ash.Query.filter(query, from_ref in ^Message.ref_variants(value))
-
-  # `unread` = pending: never seen and not cleared. cleared_at must also be nil
-  # so a message soft-cleared while still unread does not resurface as pending.
-  defp maybe_unread(query, true, reader),
-    do: Message.for_reader(query, reader, :unread)
-
-  defp maybe_unread(query, false, _reader), do: query
-
-  # `outstanding` = the triage queue: seen (read_at set) but not yet cleared.
-  defp maybe_outstanding(query, true, reader),
-    do: Message.for_reader(query, reader, :outstanding)
-
-  defp maybe_outstanding(query, false, _reader), do: query
-
-  # The reader these endpoints act as. `session=<session_id>` opts into that
-  # browser session's own view; everything else is the shared sessionless
-  # coordinator reader, whose state is mirrored onto the row — which is why
-  # callers that never pass `session` see no change at all.
-  defp reader_ref(%{"session" => session}) when is_binary(session) and session != "",
-    do: Message.session_reader(session)
-
-  defp reader_ref(_params), do: Message.coordinator_reader()
+  defp parse_state(true, false), do: {:ok, :unread}
+  defp parse_state(false, true), do: {:ok, :outstanding}
+  defp parse_state(false, false), do: {:ok, :any}
 
   # ---- param coercion ----
 
-  defp parse_limit(raw), do: raw |> Params.limit(@default_limit, @max_limit) |> Params.to_rest()
+  # No `limit` is `nil`: the unread/outstanding queues are uncapped and the
+  # history view applies `Mailbox.default_limit/0` itself.
+  defp parse_limit(raw) when raw in [nil, ""], do: {:ok, nil}
+
+  defp parse_limit(raw),
+    do: raw |> Params.limit(Mailbox.default_limit(), Mailbox.max_limit()) |> Params.to_rest()
 
   defp parse_kind(nil), do: {:ok, nil}
   defp parse_kind(""), do: {:ok, nil}
@@ -330,13 +205,4 @@ defmodule ArbiterWeb.Api.MessageController do
   rescue
     ArgumentError -> {:error, {:invalid_request, "invalid kind: #{inspect(raw)}"}}
   end
-
-  defp coerce_kind(%{"kind" => kind} = attrs) when is_binary(kind) do
-    Map.put(attrs, "kind", String.to_existing_atom(kind))
-  rescue
-    # Leave the bad string in place; Ash returns a clean validation error.
-    ArgumentError -> attrs
-  end
-
-  defp coerce_kind(attrs), do: attrs
 end

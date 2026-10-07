@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.Api.MessageControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.MCP.Scope
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
 
@@ -17,11 +19,13 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
   describe "POST /api/messages" do
     test "creates a mailbox message", %{conn: conn} do
+      task = Ash.create!(Issue, %{title: "recipient", workspace_id: ws_id(), acceptance: "- x"})
+
       conn =
         post(conn, ~p"/api/messages", %{
           kind: "mailbox",
           from_ref: "coordinator",
-          to_ref: "bd-xyz",
+          to_ref: task.id,
           subject: "heads up",
           body: "check the API contract",
           workspace_id: ws_id()
@@ -29,7 +33,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       body = json_response(conn, 201)
       assert body["kind"] == "mailbox"
-      assert body["to_ref"] == "bd-xyz"
+      assert body["to_ref"] == task.id
       assert body["body"] == "check the API contract"
       assert body["read_at"] == nil
     end
@@ -556,8 +560,10 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
     end
 
-    # Operator ruling on bd-26s98f: a clear is a write, so it never guesses.
-    test "with several workspaces and none named it is refused, clearing nothing", %{conn: conn} do
+    # P-26 (D-M-3): a task id is unambiguous, so naming no workspace clears the
+    # thread everywhere — the same as MCP `coordinator_inbox_clear`.
+    test "with several workspaces and none named it clears the thread in all of them",
+         %{conn: conn} do
       task = "bd-ctrl-cleartask-ambiguous"
 
       {:ok, msg} =
@@ -572,11 +578,9 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       conn = delete(conn, ~p"/api/messages", %{task_id: task})
 
-      assert %{"error" => %{"type" => "validation_error", "message" => message}} =
-               json_response(conn, 422)
-
-      assert message =~ "multiple workspaces; pass workspace (name or id)"
-      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, msg.id)
+      assert %{"data" => %{"cleared" => [id], "cleared_count" => 1}} = json_response(conn, 200)
+      assert id == msg.id
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
     end
 
     test "scopes to a workspace when given", %{conn: conn} do
@@ -597,6 +601,170 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       assert %{"data" => %{"cleared" => [], "cleared_count" => 0}} = json_response(conn, 200)
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, elsewhere.id)
+    end
+  end
+
+  describe "P-26 mailbox parity" do
+    setup do
+      other =
+        Ash.create!(Workspace, %{name: "ws-p26-recipient-#{System.unique_integer([:positive])}"})
+
+      task = Ash.create!(Issue, %{title: "T", workspace_id: other.id, acceptance: "- x"})
+      {:ok, other: other, task: task}
+    end
+
+    test "a send is filed under the RECIPIENT task's workspace and the task's own mailbox sees it",
+         %{conn: conn, task: task, other: other} do
+      # No workspace named: the CLI default workspace must not be stamped on it.
+      body =
+        conn
+        |> post(~p"/api/messages", %{to_ref: task.id, body: "go", kind: "info"})
+        |> json_response(201)
+
+      assert body["workspace_id"] == other.id
+
+      worker =
+        put_req_header(
+          conn,
+          "authorization",
+          "Bearer " <> Scope.mint_worker(%{id: task.id, workspace_id: other.id})
+        )
+
+      assert %{"data" => [%{"id" => id}]} =
+               worker
+               |> get(~p"/api/messages", %{to_ref: task.id, unread: "true", mark_read: "true"})
+               |> json_response(200)
+
+      assert id == body["id"]
+
+      assert %{"data" => []} =
+               worker
+               |> get(~p"/api/messages", %{to_ref: task.id, unread: "true"})
+               |> json_response(200)
+    end
+
+    test "a workspace that is not the recipient's is refused", %{conn: conn, task: task} do
+      assert %{"error" => %{"type" => "validation_error"}} =
+               conn
+               |> post(~p"/api/messages", %{to_ref: task.id, body: "go", workspace_id: ws_id()})
+               |> json_response(422)
+    end
+
+    test "a recipient that is not a task (a typo'd verb) is a 404, not a filed message",
+         %{conn: conn} do
+      assert conn
+             |> post(~p"/api/messages", %{to_ref: "sned", body: "bd-1 hi", kind: "direction"})
+             |> json_response(404)
+
+      assert [] = Message |> Ash.read!() |> Enum.filter(&(&1.to_ref == "sned"))
+    end
+
+    test "GET honours workspace_id", %{conn: conn, task: task, other: other} do
+      Message.send_mail(%{
+        kind: :info,
+        workspace_id: ws_id(),
+        to_ref: "coordinator",
+        body: "mine"
+      })
+
+      Message.send_mail(%{
+        kind: :info,
+        workspace_id: other.id,
+        to_ref: "coordinator",
+        body: "theirs"
+      })
+
+      _ = task
+
+      assert %{"data" => [%{"body" => "theirs"}]} =
+               conn
+               |> get(~p"/api/messages", %{to_ref: "coordinator", workspace_id: other.id})
+               |> json_response(200)
+    end
+
+    test "a plain GET never marks read; the queue is oldest-first and uncapped", %{conn: conn} do
+      for i <- 1..3 do
+        Message.send_mail(%{
+          kind: :info,
+          workspace_id: ws_id(),
+          to_ref: "coordinator",
+          body: "q#{i}"
+        })
+      end
+
+      params = %{to_ref: "coordinator", unread: "true", workspace_id: ws_id()}
+      assert %{"data" => list} = conn |> get(~p"/api/messages", params) |> json_response(200)
+      assert Enum.map(list, & &1["body"]) == ["q1", "q2", "q3"]
+      assert %{"data" => [_, _, _]} = conn |> get(~p"/api/messages", params) |> json_response(200)
+    end
+
+    test "unread and outstanding together is a 400", %{conn: conn} do
+      assert conn
+             |> get(~p"/api/messages", %{unread: "true", outstanding: "true"})
+             |> json_response(400)
+    end
+
+    test "a worker token can read the notification feed, confined to its workspace",
+         %{conn: conn, task: task, other: other} do
+      Message.notify(%{kind: :notification, workspace_id: other.id, from_ref: "w", body: "in"})
+      Message.notify(%{kind: :notification, workspace_id: ws_id(), from_ref: "w", body: "out"})
+
+      worker =
+        put_req_header(
+          conn,
+          "authorization",
+          "Bearer " <> Scope.mint_worker(%{id: task.id, workspace_id: other.id})
+        )
+
+      assert %{"data" => [%{"body" => "in"}]} =
+               worker |> get(~p"/api/messages", %{kind: "notification"}) |> json_response(200)
+
+      # Anything else on the coordinator side stays refused.
+      assert worker |> get(~p"/api/messages", %{to_ref: "coordinator"}) |> json_response(403)
+    end
+
+    test "reader identity comes from the token's session, not only the session param",
+         %{conn: conn} do
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :info,
+          workspace_id: ws_id(),
+          to_ref: "coordinator",
+          body: "shared"
+        })
+
+      session = Ash.create!(Arbiter.Sessions.Session, %{cwd: "/tmp/p26", workspace_id: ws_id()})
+
+      session_conn =
+        put_req_header(
+          conn,
+          "authorization",
+          "Bearer " <> Arbiter.Sessions.Provisioning.mint_token(session)
+        )
+
+      # The session token clears its own view only…
+      assert %{"data" => %{"cleared" => [_]}} =
+               session_conn |> delete(~p"/api/messages", %{ids: m.id}) |> json_response(200)
+
+      # …so the row and the sessionless coordinator still owe the message.
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      assert %{"data" => [_]} =
+               conn
+               |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true"})
+               |> json_response(200)
+    end
+
+    test "every clear form answers with the same keys", %{conn: conn} do
+      {:ok, m} =
+        Message.send_mail(%{kind: :info, workspace_id: ws_id(), to_ref: "coordinator", body: "x"})
+
+      keys = ~w(cleared cleared_count not_found deleted_read deleted_unread remaining_unread)
+
+      for params <- [%{ids: m.id}, %{task_id: "bd-none"}, %{to_ref: "coordinator"}] do
+        assert %{"data" => data} = conn |> delete(~p"/api/messages", params) |> json_response(200)
+        assert Enum.all?(keys, &Map.has_key?(data, &1)), inspect({params, data})
+      end
     end
   end
 end
