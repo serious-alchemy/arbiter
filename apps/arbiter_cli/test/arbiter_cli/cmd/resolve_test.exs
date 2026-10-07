@@ -48,7 +48,7 @@ defmodule ArbiterCli.Cmd.ResolveTest do
     assert out =~ "bd-001"
   end
 
-  test "each decision flag maps to its decision, with gate / round / actor passed through" do
+  test "each decision flag maps to its decision, with gate / round passed through" do
     for {flag, decision} <- [
           {"--accept-as-is", "accept_as_is"},
           {"--send-back", "send_back"},
@@ -65,9 +65,7 @@ defmodule ArbiterCli.Cmd.ResolveTest do
             "--gate",
             "notes_gate",
             "--round",
-            "2",
-            "--actor",
-            "operator"
+            "2"
           ])
         end)
 
@@ -78,8 +76,7 @@ defmodule ArbiterCli.Cmd.ResolveTest do
                "decision" => decision,
                "reasoning" => "why",
                "gate" => "notes_gate",
-               "round" => 2,
-               "actor" => "operator"
+               "round" => 2
              }
     end
   end

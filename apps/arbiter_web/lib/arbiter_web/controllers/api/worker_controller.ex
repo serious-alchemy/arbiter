@@ -49,6 +49,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
@@ -62,7 +63,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   def dispatch(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       case params do
         %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
           with {:ok, opts} <- dispatch_opts(params) do
@@ -118,7 +120,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def review(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       case params do
         # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
         # the reviewer at an arbitrary PR by URL/number through the MR adapter.
@@ -178,9 +181,9 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
-  defp maybe_put_report_only(opts, true), do: Keyword.put(opts, :report_only, true)
-  defp maybe_put_report_only(opts, "true"), do: Keyword.put(opts, :report_only, true)
-  defp maybe_put_report_only(opts, _), do: opts
+  defp maybe_put_report_only(opts, raw) do
+    if truthy(raw) == true, do: Keyword.put(opts, :report_only, true), else: opts
+  end
 
   @doc """
   Resume a stopped worker at the SESSION level (bd-1z7624, #472). Re-spawns the
@@ -201,7 +204,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
-    with :ok <- ensure_dispatch_allowed(conn) do
+    with :ok <- ensure_dispatch_allowed(conn),
+         :ok <- validate_flags(params) do
       resume_session(conn, task_id, params)
     end
   end
@@ -524,16 +528,20 @@ defmodule ArbiterWeb.Api.WorkerController do
   # `:index`'s `task_id` filter (exact match only), this also matches
   # anything prefixed `<task_id>#`. `transcript_exists` distinguishes a
   # missing durable log from an empty one without a separate `:log` call.
-  def run_log_list(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+  def run_log_list(conn, %{"task_id" => task_id} = params)
+      when is_binary(task_id) and task_id != "" do
     prefix = task_id <> "#"
 
-    runs =
-      Run
-      |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
-      |> Ash.Query.sort(started_at: :desc)
-      |> Ash.read!()
+    with {:ok, limit} <- params["limit"] |> Params.limit(200, 1000) |> Params.to_rest() do
+      runs =
+        Run
+        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
 
-    json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+      json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+    end
   end
 
   def run_log_list(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
@@ -708,10 +716,22 @@ defmodule ArbiterWeb.Api.WorkerController do
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
-  defp truthy(nil), do: nil
-  defp truthy(true), do: true
-  defp truthy("true"), do: true
-  defp truthy(false), do: false
-  defp truthy("false"), do: false
-  defp truthy(_), do: nil
+  @flag_keys ~w(force force_quota over_cap no_agent with_claude with_gemini)
+
+  # A junk flag (`force_quota: "yes"`) is a 400, not a silent "unset".
+  defp validate_flags(params) do
+    Enum.reduce_while(@flag_keys, :ok, fn key, :ok ->
+      case params |> Params.fetch_optional_bool(key) |> Params.to_rest() do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp truthy(value) do
+    case Params.boolean(value) do
+      {:ok, bool} -> bool
+      :error -> nil
+    end
+  end
 end

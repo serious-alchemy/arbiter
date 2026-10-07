@@ -29,6 +29,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Reviews.Record
   alias Arbiter.Reviews.Transcript
   alias ArbiterWeb.Api.WorkspaceParam
@@ -97,10 +98,14 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     end
   end
 
-  defp maybe_prompt(_id, "false"), do: nil
-  defp maybe_prompt(_id, false), do: nil
+  defp maybe_prompt(id, raw) do
+    case Params.boolean(raw) do
+      {:ok, false} -> nil
+      _ -> fetch_prompt(id)
+    end
+  end
 
-  defp maybe_prompt(id, _) do
+  defp fetch_prompt(id) do
     case Transcript.prompt(id) do
       {:ok, prompt} -> prompt
       {:error, _} -> nil
@@ -177,18 +182,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
       {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
   end
 
-  defp parse_limit(nil), do: {:ok, @default_limit}
-  defp parse_limit(""), do: {:ok, @default_limit}
-
-  defp parse_limit(raw) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {n, ""} when n > 0 -> {:ok, min(n, @max_limit)}
-      _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
-    end
-  end
-
-  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, min(n, @max_limit)}
-  defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+  defp parse_limit(raw), do: raw |> Params.limit(@default_limit, @max_limit) |> Params.to_rest()
 
   defp parse_tail(nil), do: {:ok, nil}
   defp parse_tail(""), do: {:ok, nil}

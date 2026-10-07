@@ -57,7 +57,7 @@ defmodule ArbiterWeb.Api.DependencyController do
     with {:ok, from} <- require_param(params, "from_issue_id"),
          {:ok, to} <- require_param(params, "to_issue_id"),
          {:ok, type} <- require_param(params, "type"),
-         {:ok, dep} <- Dependencies.add(from, to, type, edge_opts(params)) do
+         {:ok, dep} <- Dependencies.add(from, to, type, edge_opts(conn, params)) do
       conn
       |> put_status(:created)
       |> render(:show, dependency: dep)
@@ -149,10 +149,10 @@ defmodule ArbiterWeb.Api.DependencyController do
     end
   end
 
-  defp edge_opts(params) do
+  defp edge_opts(conn, params) do
     []
     |> put_opt(:notes, params["notes"])
-    |> put_opt(:created_by, params["created_by"])
+    |> put_opt(:created_by, Arbiter.Params.actor_label(conn.assigns[:mcp_scope]))
   end
 
   defp put_opt(opts, _key, nil), do: opts

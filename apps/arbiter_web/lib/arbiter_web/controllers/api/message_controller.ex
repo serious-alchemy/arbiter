@@ -47,27 +47,32 @@ defmodule ArbiterWeb.Api.MessageController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Messages.Message
+  alias Arbiter.Params
   alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @default_limit 50
+  @max_limit 500
 
   def index(conn, params) do
     reader = reader_ref(params)
 
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
          {:ok, limit} <- parse_limit(params["limit"]),
-         {:ok, kind} <- parse_kind(params["kind"]) do
+         {:ok, kind} <- parse_kind(params["kind"]),
+         {:ok, unread?} <- params |> Params.fetch_bool("unread", false) |> Params.to_rest(),
+         {:ok, outstanding?} <-
+           params |> Params.fetch_bool("outstanding", false) |> Params.to_rest() do
       messages =
         Message
         |> filter_workspace(ws_id)
         |> filter_eq(:kind, kind)
         |> filter_eq(:to_ref, params["to_ref"])
         |> filter_eq(:from_ref, params["from_ref"])
-        |> maybe_unread(params["unread"], reader)
-        |> maybe_outstanding(params["outstanding"], reader)
+        |> maybe_unread(unread?, reader)
+        |> maybe_outstanding(outstanding?, reader)
         |> Ash.Query.sort(inserted_at: :desc)
         |> Ash.Query.limit(limit)
         |> Ash.read!()
@@ -88,7 +93,7 @@ defmodule ArbiterWeb.Api.MessageController do
         params
         |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref))
         |> Map.put("workspace_id", ws_id)
-        |> pin_worker_sender(conn.assigns[:mcp_scope])
+        |> pin_sender(conn.assigns[:mcp_scope])
         |> coerce_kind()
         |> Message.hand_written()
         |> mark_unverified_origin()
@@ -136,7 +141,7 @@ defmodule ArbiterWeb.Api.MessageController do
   # whatever the body claims — the REST twin of the `message_send` MCP tool's
   # envelope. A worker cannot direct (`arb message <task> <text>` sends
   # `kind: direction` from "coordinator"), so a direction becomes a flag.
-  defp pin_worker_sender(attrs, %Arbiter.MCP.Scope{tier: :worker} = scope) do
+  defp pin_worker_sender(attrs, scope) do
     attrs
     |> Map.put("from_ref", scope.task_id)
     |> Map.put("workspace_id", scope.workspace_id)
@@ -146,7 +151,17 @@ defmodule ArbiterWeb.Api.MessageController do
     end)
   end
 
-  defp pin_worker_sender(attrs, _scope), do: attrs
+  # A coordinator likewise sends as itself: `from_ref` is derived from the
+  # token, never asserted by the caller. The literal "coordinator" (not the
+  # operator-flavoured `Params.actor_label/1`) is deliberate: it is the mailbox
+  # address coordinator-bound mail and directive matching key on.
+  defp pin_sender(attrs, %Arbiter.MCP.Scope{tier: :worker} = scope),
+    do: pin_worker_sender(attrs, scope)
+
+  defp pin_sender(attrs, %Arbiter.MCP.Scope{tier: :coordinator}),
+    do: Map.put(attrs, "from_ref", "coordinator")
+
+  defp pin_sender(attrs, _scope), do: attrs
 
   # bd-2nbu7a / #15: `arb` defaults to http://127.0.0.1:4848, so an agent CLI in
   # a throwaway sandbox on this host (test fixture, nested install) posts to the
@@ -245,20 +260,22 @@ defmodule ArbiterWeb.Api.MessageController do
   def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
     opts = [reader: reader_ref(params)]
 
-    {:ok, deleted_read, deleted_unread, remaining_unread} =
-      if params["all"] in ["true", true] do
-        Message.clear_all(to_ref, opts)
-      else
-        Message.clear_read(to_ref, opts)
-      end
+    with {:ok, all?} <- params |> Params.fetch_bool("all", false) |> Params.to_rest() do
+      {:ok, deleted_read, deleted_unread, remaining_unread} =
+        if all? do
+          Message.clear_all(to_ref, opts)
+        else
+          Message.clear_read(to_ref, opts)
+        end
 
-    json(conn, %{
-      data: %{
-        deleted_read: deleted_read,
-        deleted_unread: deleted_unread,
-        remaining_unread: remaining_unread
-      }
-    })
+      json(conn, %{
+        data: %{
+          deleted_read: deleted_read,
+          deleted_unread: deleted_unread,
+          remaining_unread: remaining_unread
+        }
+      })
+    end
   end
 
   def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
@@ -281,16 +298,16 @@ defmodule ArbiterWeb.Api.MessageController do
 
   # `unread` = pending: never seen and not cleared. cleared_at must also be nil
   # so a message soft-cleared while still unread does not resurface as pending.
-  defp maybe_unread(query, flag, reader) when flag in ["true", true],
+  defp maybe_unread(query, true, reader),
     do: Message.for_reader(query, reader, :unread)
 
-  defp maybe_unread(query, _flag, _reader), do: query
+  defp maybe_unread(query, false, _reader), do: query
 
   # `outstanding` = the triage queue: seen (read_at set) but not yet cleared.
-  defp maybe_outstanding(query, flag, reader) when flag in ["true", true],
+  defp maybe_outstanding(query, true, reader),
     do: Message.for_reader(query, reader, :outstanding)
 
-  defp maybe_outstanding(query, _flag, _reader), do: query
+  defp maybe_outstanding(query, false, _reader), do: query
 
   # The reader these endpoints act as. `session=<session_id>` opts into that
   # browser session's own view; everything else is the shared sessionless
@@ -303,17 +320,7 @@ defmodule ArbiterWeb.Api.MessageController do
 
   # ---- param coercion ----
 
-  defp parse_limit(nil), do: {:ok, @default_limit}
-  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
-
-  defp parse_limit(raw) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {n, ""} when n > 0 -> {:ok, n}
-      _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
-    end
-  end
-
-  defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+  defp parse_limit(raw), do: raw |> Params.limit(@default_limit, @max_limit) |> Params.to_rest()
 
   defp parse_kind(nil), do: {:ok, nil}
   defp parse_kind(""), do: {:ok, nil}

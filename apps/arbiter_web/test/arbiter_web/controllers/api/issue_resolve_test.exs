@@ -21,8 +21,7 @@ defmodule ArbiterWeb.Api.IssueResolveTest do
     conn =
       post(conn, ~p"/api/issues/#{task.id}/resolve", %{
         decision: "amend",
-        reasoning: "heuristic need not be airtight",
-        actor: "operator"
+        reasoning: "heuristic need not be airtight"
       })
 
     body = json_response(conn, 201)
@@ -30,7 +29,7 @@ defmodule ArbiterWeb.Api.IssueResolveTest do
     assert body["decision"] == "amend"
     assert body["gate"] == "review_gate"
     assert body["reasoning"] == "heuristic need not be airtight"
-    assert body["actor"] == "operator"
+    assert body["actor"] == "coordinator"
     assert is_binary(body["inserted_at"])
 
     assert [%{decision: :amend}] = Resolutions.list(task.id)
