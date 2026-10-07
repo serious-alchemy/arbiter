@@ -13,6 +13,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Reviews.Guard
+  alias Arbiter.Reviews.Params, as: ReviewParams
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Dispatch.Params
@@ -148,21 +149,9 @@ defmodule Arbiter.MCP.Tools.Worker do
     with :ok <- Tools.ensure_can_dispatch(scope),
          :ok <- Params.ensure_depth(scope),
          {:ok, ws_ref} <- Tools.authorized_workspace(scope, args),
-         {:ok, follow_up} <- Tools.fetch_optional_bool(args, "follow_up"),
-         {:ok, force} <- Tools.fetch_optional_bool(args, "force") do
-      opts =
-        [
-          pr: pr,
-          repo: Tools.fetch_string(args, "repo"),
-          workspace: ws_ref,
-          automation: Tools.fetch_string(args, "automation"),
-          tracker_context_ref: Tools.fetch_string(args, "tracker_context_ref"),
-          tracker_context_type: Tools.fetch_string(args, "tracker_context_type"),
-          dispatched_by: "mcp"
-        ]
-        |> Tools.maybe_put_kw(:follow_up, follow_up)
-        |> Tools.maybe_put_kw(:force, force)
-        |> Tools.maybe_put_kw(:scope, Tools.fetch_string(args, "scope"))
+         {:ok, opts} <-
+           ReviewParams.dispatch_opts(args, workspace: ws_ref, dispatched_by: "mcp") do
+      opts = Keyword.put(opts, :pr, pr)
 
       case Arbiter.Reviews.ExternalReview.dispatch(opts) do
         {:ok, ack} ->

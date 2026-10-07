@@ -242,6 +242,9 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/usage/calibration"} => :coordinator,
     {:get, "/api/external_reviews"} => :coordinator,
     {:get, "/api/external_reviews/:id/transcript"} => :coordinator,
+    {:get, "/api/external_reviews/:id"} => :coordinator,
+    # Posts to the PR under the fleet's identity: dispatch tier, like the review itself.
+    {:post, "/api/external_reviews/:id/greenlight"} => :dispatch,
     {:get, "/api/review_gate_rounds"} => :coordinator,
     {:get, "/api/quota"} => :coordinator,
     {:get, "/api/coverage_shadow/preflip_gate"} => :coordinator,

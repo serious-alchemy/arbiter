@@ -8,66 +8,34 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
       oldest first, wrapped under the "data" key. One row per reviewer or
       implementer pass, so a round-1 rejection and a round-2 approval are
       two distinct rows rather than a single terminal outcome.
-      Required query param: `task_id`.
+      Required query param: `task_id`. Optional: `limit` (the most recent N
+      rounds, max 200).
+
+      Beside `data` the body carries the rest of
+      `Arbiter.ReviewGate.RoundsReport` — `count`, `total_count`, `outcome`,
+      `resolution`, `resolutions` and `conflict_review` — so this is the same
+      report `review_gate_rounds_list` returns over MCP (P-12, D-W-21).
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Params
-  alias Arbiter.ReviewGate.Round
-  require Ash.Query
+  alias Arbiter.ReviewGate.RoundsReport
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   def index(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
-    with {:ok, limit} <- params["limit"] |> Params.limit(200, 200) |> Params.to_rest() do
-      rounds =
-        Round
-        |> Ash.Query.filter(task_id == ^task_id)
-        # bd-6d3h8m: `round` restarts at 1 on every automatic fix round's fresh
-        # gate; sort on `fix_round_attempt` first so the two passes don't
-        # interleave.
-        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      json(conn, %{data: Enum.map(rounds, &render_round/1)})
+    with {:ok, limit} <-
+           params["limit"]
+           |> Params.limit(RoundsReport.max_limit(), RoundsReport.max_limit())
+           |> Params.to_rest() do
+      {rounds, report} = task_id |> RoundsReport.build(limit) |> Map.pop!(:rounds)
+      json(conn, Map.put(report, :data, rounds))
     end
   end
 
   def index(_conn, _params) do
     {:error, {:invalid_request, "task_id is required"}}
   end
-
-  defp render_round(%Round{} = r) do
-    %{
-      id: r.id,
-      task_id: r.task_id,
-      run_id: r.run_id,
-      round: r.round,
-      fix_round_attempt: r.fix_round_attempt,
-      role: r.role,
-      verdict: r.verdict,
-      findings: r.findings,
-      finding_count: r.finding_count,
-      reviewer_model: r.reviewer_model,
-      # bd-3hb4ih: which provider ran the pass. The only way to see a reviewer
-      # print-timeout rotation (one `:timed_out` row per provider that hit its
-      # CLI's own wall, then the verdict row naming the one that answered)
-      # without re-reading transcripts.
-      reviewer_provider: r.reviewer_provider,
-      # bd-a1ke2c: the cross-family audit trail (nil when it is off).
-      reviewer_family: r.reviewer_family,
-      implementer_family: r.implementer_family,
-      same_family_fallback: r.same_family_fallback,
-      same_family_fallback_reason: r.same_family_fallback_reason,
-      cost_usd: r.cost_usd,
-      converged: r.converged,
-      inserted_at: iso(r.inserted_at)
-    }
-  end
-
-  defp iso(nil), do: nil
-  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 end

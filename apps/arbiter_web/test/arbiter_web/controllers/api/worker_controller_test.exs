@@ -703,6 +703,21 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert body["data"]["strategy"] == "github"
     end
 
+    # P-12 (D-W-6): the refusal text tells a caller to "pass force: true"; the
+    # route now judges force / follow_up with the same normaliser MCP uses.
+    test "external PR review rejects a junk force / follow_up flag", %{conn: conn, ws: ws} do
+      for flag <- ["force", "follow_up"] do
+        conn =
+          post(conn, ~p"/api/workers/review", %{
+            "pr" => "octo/widget#1",
+            "workspace" => ws.name,
+            flag => "yes"
+          })
+
+        assert json_response(conn, 400)["error"]["message"] =~ flag
+      end
+    end
+
     test "external PR review on a direct-strategy workspace is rejected", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/workers/review", %{"pr" => "octo/widget#1", "workspace" => ws.name})

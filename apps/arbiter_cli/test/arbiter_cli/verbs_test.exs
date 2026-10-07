@@ -49,7 +49,6 @@ defmodule ArbiterCli.VerbsTest do
   end
 
   test "orphans/0 are exactly the handlers no verb reaches" do
-    assert Enum.sort(Enum.map(Verbs.orphans(), & &1.handler)) ==
-             [ArbiterCli.Cmd.Review, ArbiterCli.Cmd.Update]
+    assert Enum.sort(Enum.map(Verbs.orphans(), & &1.handler)) == [ArbiterCli.Cmd.Update]
   end
 end

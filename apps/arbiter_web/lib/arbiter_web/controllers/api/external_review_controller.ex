@@ -8,12 +8,26 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
       Returns: `{"data": [...]}` (consistent with other /api collection endpoints).
       Note: the MCP `external_review_list` tool uses "external_reviews" instead (deliberate
       asymmetry — each transport follows its own convention per bd-bs5b12 Option 3).
+      The records themselves are `Arbiter.Reviews.Serializer.record/2`, the same as MCP's,
+      so `mode`, `greenlight_status` and the `proposed_*` counts are here too (P-12).
       Optional query params:
         * `workspace` — restrict to one workspace (id or name; `workspace_id` is
           its alias). Omitted = all workspaces; the body echoes `workspace_id`.
         * `status`       — filter by `running` | `completed` | `failed`.
         * `since`        — ISO8601 lower bound on `started_at`.
-        * `limit`        — max rows (default 50, max 500).
+        * `limit`        — max rows (default 20, max 200 — `Arbiter.Reviews.Listing`).
+
+    * `GET /api/external_reviews/:id` — one record with its full `proposed_comments`
+      and its durable-corpus state: a report-only review's findings, readable before
+      they are greenlit. Wrapped under "data".
+
+    * `POST /api/external_reviews/:id/greenlight` — post the approved subset of a
+      report-only review's `proposed_comments` to the PR, and nothing else (bd-36qzgx).
+      `:dispatch` tier, like the review that produced the record, and refused at the
+      dispatch-recursion limit. Optional body: `select` (`"all"` — the default —, a list
+      of zero-based indices, or `[]` to approve nothing), `post_verdict`, `repo`.
+      Returns `{"data": {mr_ref, posted, selected, proposed, skipped, verdict_posted,
+      verdict, link}}`.
 
     * `GET /api/external_reviews/:id/transcript` — the durable corpus of one review
       (bd-7efini): the composed prompt, the raw stream-json transcript its reviewer
@@ -30,37 +44,64 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Params
-  alias Arbiter.Reviews.Record
+  alias Arbiter.Reviews.ExternalReview
+  alias Arbiter.Reviews.Listing
+  alias Arbiter.Reviews.Params, as: ReviewParams
+  alias Arbiter.Reviews.Serializer
   alias Arbiter.Reviews.Transcript
+  alias Arbiter.Worker.Dispatch.Params, as: DispatchParams
   alias ArbiterWeb.Api.WorkspaceParam
-  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  @default_limit 50
-  @max_limit 500
-
   def index(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
-         {:ok, since} <- parse_since(params["since"]),
-         {:ok, status} <- parse_status(params["status"]),
-         {:ok, limit} <- parse_limit(params["limit"]) do
+         {:ok, since} <- params["since"] |> Listing.parse_since() |> Params.to_rest(),
+         {:ok, status} <- params["status"] |> Listing.parse_status() |> Params.to_rest(),
+         {:ok, limit} <- params["limit"] |> Listing.parse_limit() |> Params.to_rest() do
       records =
-        Record
-        |> filter_workspace(ws_id)
-        |> filter_status(status)
-        |> filter_since(since)
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
+        Listing.list(workspace_id: ws_id, status: status, since: since, limit: limit)
 
-      json(conn, %{data: Enum.map(records, &render_record/1), workspace_id: ws_id})
+      json(conn, %{data: Enum.map(records, &Serializer.record/1), workspace_id: ws_id})
     end
   end
 
+  def show(conn, %{"id" => id}) do
+    with {:ok, record} <- Listing.fetch(id) do
+      json(conn, %{data: Serializer.record(record, proposed_comments: true, transcript: true)})
+    end
+  end
+
+  # The depth/`can_dispatch` checks repeat `ApiPolicy`'s `:dispatch` rule on
+  # purpose (defense in depth), exactly as `WorkerController` does for review:
+  # greenlight posts to a forge under the fleet's identity, and a depth-limited
+  # session must not be able to curl its way past what MCP refuses.
+  def greenlight(conn, %{"id" => id} = params) do
+    scope = conn.assigns[:mcp_scope]
+
+    with :ok <- ensure_can_dispatch(scope),
+         :ok <- DispatchParams.ensure_depth(scope),
+         {:ok, opts} <- id |> ReviewParams.greenlight_opts(params) |> Params.to_rest() do
+      case ExternalReview.greenlight(opts) do
+        {:ok, result} -> json(conn, %{data: result})
+        {:error, reason} -> greenlight_error(reason)
+      end
+    end
+  end
+
+  defp ensure_can_dispatch(%Arbiter.MCP.Scope{tier: :coordinator, can_dispatch: true}), do: :ok
+
+  defp ensure_can_dispatch(_),
+    do: {:error, {:unauthorized, "this token may not dispatch (can_dispatch is not set)"}}
+
+  defp greenlight_error({:not_found, _}), do: {:error, :not_found}
+
+  defp greenlight_error(reason),
+    do: {:error, {:invalid_request, ExternalReview.describe_error(reason)}}
+
   def transcript(conn, %{"id" => id} = params) do
     with {:ok, tail} <- parse_tail(params["tail"]),
-         {:ok, record} <- fetch_record(id) do
+         {:ok, record} <- Listing.fetch(id) do
       # One read + one decode pass for every projection — a tool-heavy review
       # runs to thousands of JSONL lines and this endpoint wants all of them.
       corpus = Transcript.corpus(record.id, preview: Transcript.default_preview())
@@ -91,13 +132,6 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     end
   end
 
-  defp fetch_record(id) do
-    case Ash.get(Record, id) do
-      {:ok, %Record{} = record} -> {:ok, record}
-      _ -> {:error, :not_found}
-    end
-  end
-
   defp maybe_prompt(id, raw) do
     case Params.boolean(raw) do
       {:ok, false} -> nil
@@ -112,77 +146,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     end
   end
 
-  # ---- rendering -----------------------------------------------------------
-
-  defp render_record(%Record{} = r) do
-    %{
-      id: r.id,
-      pr_ref: r.pr_ref,
-      pr: r.pr,
-      workspace_id: r.workspace_id,
-      strategy: r.strategy,
-      link: r.link,
-      status: r.status,
-      verdict: r.verdict,
-      finding_count: r.finding_count,
-      findings_summary: r.findings_summary,
-      model: r.model,
-      cost_usd: r.cost_usd,
-      tokens_in: r.tokens_in,
-      tokens_out: r.tokens_out,
-      dispatched_by: r.dispatched_by,
-      engagement_id: r.engagement_id,
-      failure_stage: r.failure_stage,
-      failure_reason: r.failure_reason,
-      started_at: iso(r.started_at),
-      completed_at: iso(r.completed_at),
-      inserted_at: iso(r.inserted_at)
-    }
-  end
-
-  defp iso(nil), do: nil
-  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-
-  # ---- query helpers -------------------------------------------------------
-
-  defp filter_workspace(query, nil), do: query
-  defp filter_workspace(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
-
-  defp filter_status(query, nil), do: query
-  defp filter_status(query, status), do: Ash.Query.filter(query, status == ^status)
-
-  defp filter_since(query, nil), do: query
-  defp filter_since(query, %DateTime{} = dt), do: Ash.Query.filter(query, started_at >= ^dt)
-
   # ---- param coercion ------------------------------------------------------
-
-  defp parse_since(nil), do: {:ok, nil}
-  defp parse_since(""), do: {:ok, nil}
-
-  defp parse_since(raw) when is_binary(raw) do
-    case DateTime.from_iso8601(raw) do
-      {:ok, dt, _} -> {:ok, dt}
-      _ -> {:error, {:invalid_request, "since must be ISO8601 (e.g. 2026-06-01T00:00:00Z)"}}
-    end
-  end
-
-  defp parse_status(nil), do: {:ok, nil}
-  defp parse_status(""), do: {:ok, nil}
-
-  defp parse_status(raw) when is_binary(raw) do
-    valid = Record.statuses() |> Enum.map(&Atom.to_string/1)
-
-    if raw in valid do
-      {:ok, String.to_existing_atom(raw)}
-    else
-      {:error, {:invalid_request, "status must be one of: #{Enum.join(valid, ", ")}"}}
-    end
-  rescue
-    ArgumentError ->
-      {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
-  end
-
-  defp parse_limit(raw), do: raw |> Params.limit(@default_limit, @max_limit) |> Params.to_rest()
 
   defp parse_tail(nil), do: {:ok, nil}
   defp parse_tail(""), do: {:ok, nil}

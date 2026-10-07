@@ -196,6 +196,255 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
     end
   end
 
+  describe "GET /api/external_reviews field parity with MCP (D-W-20)" do
+    test "list carries mode, greenlight_status and the proposed_* counts", %{conn: conn} do
+      insert_record!(%{
+        mode: :report_only,
+        greenlight_status: :pending,
+        proposed_comments: [
+          %{"file" => "a.ex", "line" => 1, "body" => "x", "in_diff" => true},
+          %{"file" => "b.ex", "line" => 2, "body" => "y", "in_diff" => false}
+        ]
+      })
+
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
+      [rec] = json_response(conn, 200)["data"]
+
+      assert rec["mode"] == "report_only"
+      assert rec["greenlight_status"] == "pending"
+      assert rec["proposed_count"] == 2
+      assert rec["in_diff_count"] == 1
+      assert rec["out_of_diff_count"] == 1
+      refute Map.has_key?(rec, "proposed_comments")
+    end
+
+    test "REST and MCP list records are the same shape", %{conn: conn} do
+      insert_record!(%{mode: :report_only, greenlight_status: :pending})
+
+      [rest] =
+        conn
+        |> get(~p"/api/external_reviews", %{workspace_id: ws_id()})
+        |> json_response(200)
+        |> Map.fetch!("data")
+
+      {:ok, %{external_reviews: [mcp]}} =
+        Arbiter.MCP.Tools.external_review_list(
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws_id(), can_dispatch: true},
+          %{}
+        )
+
+      assert Enum.sort(Map.keys(rest)) ==
+               mcp |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
+    end
+
+    test "the limit cap is the MCP cap", %{conn: conn} do
+      for _ <- 1..3, do: insert_record!(%{})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id(), limit: "1"})
+      assert length(json_response(conn, 200)["data"]) == 1
+    end
+  end
+
+  describe "GET /api/external_reviews/:id" do
+    test "returns the record with its proposed_comments and corpus state", %{conn: conn} do
+      rec =
+        insert_record!(%{
+          mode: :report_only,
+          greenlight_status: :pending,
+          proposed_comments: [%{"file" => "a.ex", "line" => 1, "body" => "**ERROR**: boom"}]
+        })
+
+      body = conn |> get(~p"/api/external_reviews/#{rec.id}") |> json_response(200)
+      data = body["data"]
+
+      assert data["id"] == rec.id
+      assert data["mode"] == "report_only"
+      assert [%{"file" => "a.ex"}] = data["proposed_comments"]
+      assert data["transcript_exists"] == false
+      assert Map.has_key?(data, "tools_used")
+    end
+
+    test "404s for an unknown record", %{conn: conn} do
+      assert conn |> get(~p"/api/external_reviews/no-such-record") |> json_response(404)
+    end
+  end
+
+  describe "POST /api/external_reviews/:id/greenlight" do
+    @env_var "ER_REST_GREENLIGHT_TOKEN"
+
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-er-greenlight-#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "octo",
+                "repo" => "widget",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      events = :ets.new(:er_rest_gl, [:public, :duplicate_bag])
+      stub_github(events)
+
+      rec =
+        insert_record!(%{
+          workspace_id: ws.id,
+          pr_ref: "octo/widget#42",
+          pr: "octo/widget#42",
+          mode: :report_only,
+          greenlight_status: :pending,
+          verdict: :request_changes,
+          proposed_comments: [
+            %{
+              "file" => "a.ex",
+              "line" => 1,
+              "severity" => "error",
+              "message" => "one",
+              "body" => "**ERROR**: one"
+            },
+            %{
+              "file" => "b.ex",
+              "line" => 2,
+              "severity" => "warning",
+              "message" => "two",
+              "body" => "**WARNING**: two"
+            }
+          ]
+        })
+
+      {:ok, rec: rec, events: events}
+    end
+
+    defp stub_github(events) do
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+        cond do
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/a.ex b/a.ex\n--- a/a.ex\n+++ b/a.ex\n@@ -0,0 +1 @@\n+one\n" <>
+                "diff --git a/b.ex b/b.ex\n--- a/b.ex\n+++ b/b.ex\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+            Req.Test.json(conn, %{
+              "number" => 42,
+              "state" => "open",
+              "head" => %{"sha" => "sha-1"},
+              "user" => %{"login" => "coworker"},
+              "html_url" => "https://github.com/octo/widget/pull/42"
+            })
+
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:comment, Jason.decode!(body)})
+            Req.Test.json(conn, %{"id" => :rand.uniform(100_000)})
+
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:review, Jason.decode!(body)})
+            Req.Test.json(conn, %{"id" => 99})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(404)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+    end
+
+    test "posts only the selected comments and flips greenlight_status", %{
+      conn: conn,
+      rec: rec,
+      events: events
+    } do
+      body =
+        conn
+        |> post(~p"/api/external_reviews/#{rec.id}/greenlight", %{"select" => [0]})
+        |> json_response(200)
+
+      assert body["data"]["posted"] == 1
+      assert body["data"]["selected"] == 1
+      assert [{:comment, c}] = :ets.lookup(events, :comment)
+      assert c["path"] == "a.ex"
+      assert Ash.get!(Record, rec.id).greenlight_status == :posted
+    end
+
+    test "select: \"all\" posts everything; select: [] approves nothing", %{
+      conn: conn,
+      rec: rec,
+      events: events
+    } do
+      body =
+        conn
+        |> post(~p"/api/external_reviews/#{rec.id}/greenlight", %{"select" => []})
+        |> json_response(200)
+
+      assert body["data"]["posted"] == 0
+      assert :ets.lookup(events, :comment) == []
+      assert Ash.get!(Record, rec.id).greenlight_status == :none
+    end
+
+    test "a malformed select is a 400 and posts nothing", %{conn: conn, rec: rec, events: events} do
+      conn = post(conn, ~p"/api/external_reviews/#{rec.id}/greenlight", %{"select" => "some"})
+      assert json_response(conn, 400)["error"]["message"] =~ "select"
+      assert :ets.lookup(events, :comment) == []
+    end
+
+    test "an unknown record is a 404", %{conn: conn} do
+      conn = post(conn, ~p"/api/external_reviews/no-such-record/greenlight", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "is dispatch-tier: a token without can_dispatch is refused", %{
+      conn: conn,
+      rec: rec,
+      events: events
+    } do
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: false)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/external_reviews/#{rec.id}/greenlight", %{})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "can_dispatch"
+      assert :ets.lookup(events, :comment) == []
+    end
+
+    test "a token at the dispatch-recursion limit is refused", %{
+      conn: conn,
+      rec: rec,
+      events: events
+    } do
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, depth: Arbiter.MCP.max_depth())
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/external_reviews/#{rec.id}/greenlight", %{})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "depth limit"
+      assert :ets.lookup(events, :comment) == []
+    end
+
+    test "the route is :dispatch tier in the ApiPolicy table" do
+      assert ArbiterWeb.ApiPolicy.policies()[{:post, "/api/external_reviews/:id/greenlight"}] ==
+               :dispatch
+    end
+  end
+
   describe "GET /api/external_reviews/:id/transcript (bd-7efini)" do
     setup do
       prev = Application.get_env(:arbiter, :output_log_root)

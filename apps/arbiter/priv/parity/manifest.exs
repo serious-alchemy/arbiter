@@ -30,7 +30,6 @@
 %{
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
-    "P-12" => "External-PR review surface: revive `arb review`, REST show/greenlight, field parity",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
     "P-16" => "Account field registry: edit parity across PATCH, `arb account`, UI and MCP",
     "P-17" => "MCP/CLI read gaps for accounts, usage, pauses, alerts",
@@ -401,13 +400,10 @@
       id: "workers/review_an_external_non_arbiter_pr",
       title: "Review an external (non-arbiter) PR",
       mcp: ["worker_review"],
-      cli: nil,
+      cli: ["arb review"],
       rest: ["POST /api/workers/review"],
-      status: {:gap, "P-12"},
-      divergences: ["D-W-6"],
-      absent: %{
-        cli: {:gap, "P-12", "REST `POST /api/workers/review` (pr shape) exists but no CLI verb reaches it: `arb review --pr` is dead code (`Cmd.Review` is an orphan)."}
-      }
+      status: :full,
+      note: "`arb review --pr` -> POST /api/workers/review; MCP and REST normalise through `Arbiter.Reviews.Params.dispatch_opts/2` (force, follow_up, scope, report_only, tracker_context_*)."
     },
     %{
       id: "workers/stop_a_worker",
@@ -507,61 +503,44 @@
       id: "workers/list_external_pr_review_records",
       title: "List external-PR review records",
       mcp: ["external_review_list"],
-      cli: nil,
+      cli: ["arb review list"],
       rest: ["GET /api/external_reviews"],
-      status: {:gap, "P-12"},
-      divergences: ["D-W-20"],
-      absent: %{
-        cli: {:gap, "P-12", "No `arb review list` (orphan `Cmd.Review` is not wired into the registry)."}
-      }
+      status: :full,
+      note: "One read (`Arbiter.Reviews.Listing`) and one record serializer (`Arbiter.Reviews.Serializer`) behind all three; envelope key differs by transport (`data` vs `external_reviews`) by design."
     },
     %{
       id: "workers/show_one_external_review_record_incl",
       title: "Show one external review record (incl. proposed_comments)",
       mcp: ["external_review_show"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-12"},
-      absent: %{
-        cli: {:gap, "P-12", "No `arb review show <id>`."},
-        rest: {:gap, "P-12", "No `GET /api/external_reviews/:id`: report-only findings must be readable before greenlight."}
-      }
+      cli: ["arb review show"],
+      rest: ["GET /api/external_reviews/:id"],
+      status: :full
     },
     %{
       id: "workers/read_an_external_review_s_prompt",
       title: "Read an external review's prompt/transcript/tool uses",
       mcp: ["external_review_transcript"],
-      cli: nil,
+      cli: ["arb review transcript"],
       rest: ["GET /api/external_reviews/:id/transcript"],
-      status: {:gap, "P-12"},
-      divergences: ["D-W-22"],
-      absent: %{
-        cli: {:gap, "P-12", "No `arb review transcript <id>` (orphan `Cmd.Review` is not wired into the registry)."}
-      }
+      status: :full
     },
     %{
       id: "workers/list_reviewgate_rounds_for_a_task",
       title: "List ReviewGate rounds for a task",
       mcp: ["review_gate_rounds_list"],
-      cli: nil,
+      cli: ["arb review rounds"],
       rest: ["GET /api/review_gate_rounds"],
-      status: {:gap, "P-12"},
-      divergences: ["D-W-21"],
-      absent: %{
-        cli: {:gap, "P-12", "No `arb review rounds <task>` (sibling of `arb review resolve`, which exists)."}
-      }
+      status: :full,
+      note: "One report (`Arbiter.ReviewGate.RoundsReport`); REST returns the rounds under `data` with the report's other keys beside it."
     },
     %{
       id: "workers/greenlight_a_report_only_external_review",
       title: "Greenlight a report-only external review (post approved comments)",
       mcp: ["review_greenlight"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-12"},
-      absent: %{
-        cli: {:gap, "P-12", "No `arb review greenlight <id> [--select ..]`."},
-        rest: {:gap, "P-12", "No `POST /api/external_reviews/:id/greenlight` (policy :dispatch like review)."}
-      }
+      cli: ["arb review greenlight"],
+      rest: ["POST /api/external_reviews/:id/greenlight"],
+      status: :full,
+      note: "Dispatch tier on every surface (`can_dispatch` + the recursion-depth guard); options via `Arbiter.Reviews.Params.greenlight_opts/2`."
     },
     %{
       id: "workers/re_arm_one_auto_resolve_attempt_on",
@@ -656,18 +635,6 @@
       absent: %{
         mcp: {:intentional, "Deprecated flat CLI alias for `arb worker resume`; MCP/REST have the canonical operation."},
         rest: {:intentional, "Deprecated flat CLI alias for `arb worker resume`; MCP/REST have the canonical operation."}
-      }
-    },
-    %{
-      id: "workers/legacy_alias_2",
-      title: "(legacy alias) arb review <task-id>",
-      mcp: nil,
-      cli: ["arb review", "arb worker review"],
-      rest: nil,
-      status: :excluded,
-      absent: %{
-        mcp: {:intentional, "Deprecated flat CLI alias for `arb worker review`; MCP/REST have the canonical operation."},
-        rest: {:intentional, "Deprecated flat CLI alias for `arb worker review`; MCP/REST have the canonical operation."}
       }
     },
     # ---- accounts ----

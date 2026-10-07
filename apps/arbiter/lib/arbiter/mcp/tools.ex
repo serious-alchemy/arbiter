@@ -56,7 +56,10 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.ReviewGate.Resolutions
-  alias Arbiter.Reviews.ConflictReview
+  alias Arbiter.ReviewGate.RoundsReport
+  alias Arbiter.Reviews.Listing
+  alias Arbiter.Reviews.Params, as: ReviewParams
+  alias Arbiter.Reviews.Serializer
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -133,28 +136,20 @@ defmodule Arbiter.MCP.Tools do
   endpoint `GET /api/external_reviews` uses the :data key instead — this deliberate
   asymmetry is intentional (Option 3 in bd-bs5b12): each transport follows its own
   convention for consistency within that transport. Optional `limit` (default 20,
-  max 200), `status` filter, and `workspace` (resolved the same way as
+  max 200), `status` and `since` (ISO 8601) filters, and `workspace` (resolved the same way as
   `worker_list`/`ticket_ready` — explicit arg, else the bound workspace, else
   ALL workspaces; the response echoes `workspace_id`).
   """
   @spec external_review_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_list(%Scope{} = scope, args) do
-    require Ash.Query
-    alias Arbiter.Reviews.Record, as: ExternalReviewRecord
-
     with {:ok, ws_id} <- authorized_workspace(scope, args),
-         {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200),
-         {:ok, status} <- optional_enum(args, "status", ExternalReviewRecord.statuses()) do
+         {:ok, limit} <- Listing.parse_limit(Map.get(args, "limit")),
+         {:ok, status} <- Listing.parse_status(Map.get(args, "status")),
+         {:ok, since} <- Listing.parse_since(Map.get(args, "since")) do
       records =
-        ExternalReviewRecord
-        |> filter_workspace(ws_id)
-        |> then(fn q ->
-          if status, do: Ash.Query.filter(q, status == ^status), else: q
-        end)
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-        |> Enum.map(&serialize_external_review/1)
+        [workspace_id: ws_id, status: status, since: since, limit: limit]
+        |> Listing.list()
+        |> Enum.map(&Serializer.record/1)
 
       {:ok, %{external_reviews: records, count: length(records), workspace_id: ws_id}}
     end
@@ -180,14 +175,12 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec external_review_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_show(%Scope{} = _scope, args) do
-    alias Arbiter.Reviews.Record, as: ExternalReviewRecord
-
     with {:ok, record_id} <- require_string(args, "record_id") do
-      case Ash.get(ExternalReviewRecord, record_id) do
-        {:ok, %ExternalReviewRecord{} = record} ->
-          {:ok, serialize_external_review(record, proposed_comments: true, transcript: true)}
+      case Listing.fetch(record_id) do
+        {:ok, record} ->
+          {:ok, Serializer.record(record, proposed_comments: true, transcript: true)}
 
-        _ ->
+        {:error, :not_found} ->
           {:error, {:not_found, "no external review record found for #{record_id}"}}
       end
     end
@@ -306,44 +299,9 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec review_gate_rounds_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def review_gate_rounds_list(%Scope{} = _scope, args) do
-    require Ash.Query
-    alias Arbiter.ReviewGate.Round
-
     with {:ok, task_id} <- require_string(args, "task_id"),
-         {:ok, limit} <- optional_bounded_limit(args, "limit", 200) do
-      all_rounds =
-        Round
-        |> Ash.Query.filter(task_id == ^task_id)
-        # bd-6d3h8m: sort on `fix_round_attempt` first — `round` restarts at 1
-        # on every automatic fix round's fresh gate, so sorting on `round`
-        # alone interleaves a fix round's rounds 1..N with the original pass's.
-        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
-        |> Ash.read!()
-
-      rounds =
-        all_rounds
-        |> take_last(limit)
-        |> Enum.map(&serialize_review_gate_round/1)
-
-      resolutions = Resolutions.list(task_id)
-      serialized_resolutions = Enum.map(resolutions, &Resolutions.serialize/1)
-
-      {:ok,
-       %{
-         rounds: rounds,
-         count: length(rounds),
-         total_count: length(all_rounds),
-         # bd-954ym8: how much of this ticket's re-review the conflict-resolution
-         # path saved — auto-covered clean rebases, scoped reviews of resolved
-         # conflicts, and fallbacks to a full review — beside the fleet totals.
-         conflict_review: %{
-           task: ConflictReview.report(task_id),
-           fleet: ConflictReview.report()
-         },
-         outcome: Resolutions.outcome(all_rounds, resolutions),
-         resolution: List.last(serialized_resolutions),
-         resolutions: serialized_resolutions
-       }}
+         {:ok, limit} <- optional_bounded_limit(args, "limit", RoundsReport.max_limit()) do
+      {:ok, RoundsReport.build(task_id, limit)}
     end
   rescue
     e -> {:error, {:internal, "review_gate_rounds_list failed: #{Exception.message(e)}"}}
@@ -374,9 +332,6 @@ defmodule Arbiter.MCP.Tools do
     e -> {:error, {:internal, "review_gate_resolve failed: #{Exception.message(e)}"}}
   end
 
-  defp take_last(list, nil), do: list
-  defp take_last(list, n), do: Enum.take(list, -n)
-
   defp optional_positive_integer(args, key) do
     with {:ok, n} <- optional_integer(args, key) do
       cond do
@@ -385,32 +340,6 @@ defmodule Arbiter.MCP.Tools do
         true -> {:error, {:invalid, "`#{key}` must be a positive integer"}}
       end
     end
-  end
-
-  defp serialize_review_gate_round(%Arbiter.ReviewGate.Round{} = r) do
-    %{
-      id: r.id,
-      task_id: r.task_id,
-      run_id: r.run_id,
-      round: r.round,
-      fix_round_attempt: r.fix_round_attempt,
-      role: r.role,
-      verdict: r.verdict,
-      findings: r.findings,
-      finding_count: r.finding_count,
-      reviewer_model: r.reviewer_model,
-      reviewer_tier: r.reviewer_tier,
-      reviewer_provider: r.reviewer_provider,
-      # bd-a1ke2c: under `review_agent.cross_family`, who reviewed whom, and a
-      # same-family fallback with its reason — never silent.
-      reviewer_family: r.reviewer_family,
-      implementer_family: r.implementer_family,
-      same_family_fallback: r.same_family_fallback,
-      same_family_fallback_reason: r.same_family_fallback_reason,
-      cost_usd: r.cost_usd,
-      converged: r.converged,
-      inserted_at: iso(r.inserted_at)
-    }
   end
 
   # ---- review_greenlight --------------------------------------------------
@@ -423,13 +352,9 @@ defmodule Arbiter.MCP.Tools do
   @spec review_greenlight(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def review_greenlight(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
+         :ok <- Arbiter.Worker.Dispatch.Params.ensure_depth(scope),
          {:ok, record_id} <- require_string(args, "record_id"),
-         {:ok, select} <- parse_select(args) do
-      opts =
-        [record_id: record_id, repo: fetch_string(args, "repo")]
-        |> maybe_put_kw(:select, select)
-        |> maybe_put_kw(:post_verdict, fetch_optional_bool!(args, "post_verdict"))
-
+         {:ok, opts} <- ReviewParams.greenlight_opts(record_id, args) do
       case Arbiter.Reviews.ExternalReview.greenlight(opts) do
         {:ok, result} ->
           {:ok, result}
@@ -440,93 +365,10 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # `select` may be omitted (→ nil, meaning all), the string "all", or a JSON
-  # array of zero-based indices. Anything else is rejected.
-  defp parse_select(args) do
-    case Map.get(args, "select") do
-      nil ->
-        {:ok, nil}
-
-      "all" ->
-        {:ok, :all}
-
-      list when is_list(list) ->
-        if Enum.all?(list, &(is_integer(&1) and &1 >= 0)) do
-          {:ok, list}
-        else
-          {:error, {:invalid, "select must be \"all\" or a list of non-negative integers"}}
-        end
-
-      _ ->
-        {:error, {:invalid, "select must be \"all\" or a list of non-negative integers"}}
-    end
-  end
-
   defp fetch_optional_bool!(args, key) do
     case Arbiter.Params.fetch_optional_bool(args, key) do
       {:ok, b} -> b
       {:error, _} -> nil
-    end
-  end
-
-  defp serialize_external_review(%Arbiter.Reviews.Record{} = r, opts \\ []) do
-    proposed = r.proposed_comments || []
-
-    base = %{
-      id: r.id,
-      pr_ref: r.pr_ref,
-      pr: r.pr,
-      workspace_id: r.workspace_id,
-      strategy: r.strategy,
-      link: r.link,
-      status: r.status,
-      mode: r.mode,
-      greenlight_status: r.greenlight_status,
-      proposed_count: length(proposed),
-      # bd-887swr: in/out-of-diff breakdown of the proposed comments, so a
-      # coordinator can see how many are postable without fetching the full
-      # `proposed_comments` list (external_review_show) or diffing the PR by
-      # hand. Comments persisted before the "in_diff" label existed count
-      # toward neither.
-      in_diff_count: Enum.count(proposed, &(&1["in_diff"] == true)),
-      out_of_diff_count: Enum.count(proposed, &(&1["in_diff"] == false)),
-      verdict: r.verdict,
-      finding_count: r.finding_count,
-      findings_summary: r.findings_summary,
-      model: r.model,
-      cost_usd: r.cost_usd,
-      tokens_in: r.tokens_in,
-      tokens_out: r.tokens_out,
-      dispatched_by: r.dispatched_by,
-      engagement_id: r.engagement_id,
-      failure_stage: r.failure_stage,
-      failure_reason: r.failure_reason,
-      started_at: iso_dt(r.started_at),
-      completed_at: iso_dt(r.completed_at)
-    }
-
-    base =
-      if Keyword.get(opts, :proposed_comments, false) do
-        Map.put(base, :proposed_comments, proposed)
-      else
-        base
-      end
-
-    # bd-7efini: capture state of the review's durable corpus. Show-only —
-    # each call stats/reads files, which a 200-record list must not do.
-    if Keyword.get(opts, :transcript, false) do
-      summary = Arbiter.Reviews.Transcript.summary(r.id)
-
-      Map.merge(base, %{
-        transcript_exists: summary.exists,
-        transcript_path: summary.path,
-        transcript_line_count: summary.line_count,
-        prompt_exists: summary.prompt_exists,
-        tool_use_count: summary.tool_use_count,
-        tools_used: summary.tools_used
-      })
-    else
-      base
     end
   end
 
@@ -546,9 +388,6 @@ defmodule Arbiter.MCP.Tools do
       _ -> parse_bounded_limit(args, key, max, max)
     end
   end
-
-  defp iso_dt(nil), do: nil
-  defp iso_dt(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
   # ---- task_list ----------------------------------------------------------
 
