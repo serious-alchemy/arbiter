@@ -72,7 +72,9 @@ defmodule ArbiterWeb.NodeBridgeTest do
 
   # A TCP server on loopback that echoes everything back.
   defp echo_server do
-    {:ok, lsock} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+    {:ok, lsock} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
     {:ok, port} = :inet.port(lsock)
     pid = spawn_link(fn -> accept(lsock, &echo/1) end)
     on_exit(fn -> :gen_tcp.close(lsock) end)
@@ -82,7 +84,15 @@ defmodule ArbiterWeb.NodeBridgeTest do
 
   # One that accepts and never reads: a consumer that has stopped.
   defp stuck_server do
-    {:ok, lsock} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}, recbuf: 4096])
+    {:ok, lsock} =
+      :gen_tcp.listen(0, [
+        :binary,
+        active: false,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1},
+        recbuf: 4096
+      ])
+
     {:ok, port} = :inet.port(lsock)
     spawn_link(fn -> accept(lsock, fn _sock -> Process.sleep(:infinity) end) end)
     on_exit(fn -> :gen_tcp.close(lsock) end)
@@ -117,17 +127,22 @@ defmodule ArbiterWeb.NodeBridgeTest do
   # the run on the node with a spec that declares those sockets.
   defp place_run(ctx, run, targets) do
     bridges = for {name, port} <- targets, do: {name, {"127.0.0.1", port}}
-    {:ok, proxy} = Egress.start_run(run, dir: ctx.dir, bridges: bridges, owner: self(), audit: false)
+
+    {:ok, proxy} =
+      Egress.start_run(run, dir: ctx.dir, bridges: bridges, owner: self(), audit: false)
 
     declared =
       [%{"name" => "proxy", "path" => proxy}] ++
-        for {name, _} <- targets, do: %{"name" => name, "path" => Egress.bridge_path(run, name, ctx.dir)}
+        for {name, _} <- targets,
+            do: %{"name" => name, "path" => Egress.bridge_path(run, name, ctx.dir)}
 
     owner = self()
 
     task =
       Task.async(fn ->
-        Session.assign(ctx.session, run, %{"bridges" => declared}, owner, prepare_timeout_ms: 5_000)
+        Session.assign(ctx.session, run, %{"bridges" => declared}, owner,
+          prepare_timeout_ms: 5_000
+        )
       end)
 
     assert_push "assign", %{"run" => ^run}
