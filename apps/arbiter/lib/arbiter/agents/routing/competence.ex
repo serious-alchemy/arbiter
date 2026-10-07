@@ -373,17 +373,16 @@ defmodule Arbiter.Agents.Routing.Competence do
   def rows, do: (Settings.competence_matrix() || []) ++ @default_rows
 
   @doc """
-  The rows a *candidate* matrix would rank with (bd-dde4l7): the stored
-  candidate ahead of the code defaults, exactly as `rows/0` does for the live
-  override — or `nil` when no candidate is stored. Never reads the live
-  override, so the two cannot be mixed up.
+  The live and candidate row sets from one installation read (bd-dde4l7):
+  `live` is `rows/0`; `candidate` is the stored candidate ahead of the code
+  defaults, exactly as the live override is, or `nil` when none is stored.
+  The two are built from separate settings fields and never share a row, so a
+  candidate cannot leak into dispatch.
   """
-  @spec candidate_rows() :: [row()] | nil
-  def candidate_rows do
-    case Settings.competence_matrix_candidate() do
-      nil -> nil
-      rows -> rows ++ @default_rows
-    end
+  @spec matrices() :: %{live: [row()], candidate: [row()] | nil}
+  def matrices do
+    %{live: live, candidate: candidate} = Settings.competence_matrices()
+    %{live: (live || []) ++ @default_rows, candidate: candidate && candidate ++ @default_rows}
   end
 
   @doc """

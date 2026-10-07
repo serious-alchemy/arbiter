@@ -667,52 +667,49 @@ defmodule Arbiter.Agents.ProviderRouting do
     if scored?(ws) do
       config = Score.config(ws)
 
-      estimate_fun =
-        case Keyword.fetch(opts, :estimate_fun) do
-          {:ok, fun} -> fun
-          :error -> default_estimate_fun(ws, task, opts)
-        end
+      {estimate_fun, candidate_estimate_fun} = estimate_funs(ws, task, opts)
 
       %{
         mode: config.mode,
         weight: Score.weight(config, task),
         estimate_fun: estimate_fun,
-        candidate_estimate_fun: candidate_estimate_fun(ws, task, opts)
+        candidate_estimate_fun: candidate_estimate_fun
       }
     end
   end
 
-  defp default_estimate_fun(ws, task, opts) do
-    if competence?(ws) do
-      # One matrix read per evaluation, not one per candidate (the board
-      # snapshot calls `availability/3` per issue).
-      opts = Keyword.put_new_lazy(opts, :rows, &Competence.rows/0)
-      fn entry -> Competence.estimate(ws, entry, task, opts) end
-    else
-      nil
-    end
-  end
-
-  # bd-dde4l7: the candidate matrix's estimator, or `nil` (no candidate: no
-  # second ranking, no record key). It ranks with the candidate's rows and
+  # The live and candidate estimators (`:estimate_fun` / `:candidate_estimate_fun`
+  # are the test seams). One matrix read per evaluation, not one per candidate
+  # (the board snapshot calls `availability/3` per issue) and not one per
+  # matrix: `Competence.matrices/0` reads the live and candidate together.
+  #
+  # bd-dde4l7: the candidate estimator is `nil` (no second ranking, no record
+  # key) unless a candidate is stored. It ranks with the candidate's rows and
   # NOTHING of the live override — `:rows` is replaced, not defaulted — and its
   # result only ever lands in the record, never in the dispatch order.
-  # `:candidate_estimate_fun` is the test seam, as `:estimate_fun` is.
-  defp candidate_estimate_fun(ws, task, opts) do
-    case Keyword.fetch(opts, :candidate_estimate_fun) do
-      {:ok, fun} ->
-        fun
+  defp estimate_funs(ws, task, opts) do
+    matrices = if competence?(ws), do: Competence.matrices()
 
-      :error ->
-        with true <- competence?(ws),
-             [_ | _] = rows <- Competence.candidate_rows() do
-          opts = Keyword.put(opts, :rows, rows)
-          fn entry -> Competence.estimate(ws, entry, task, opts) end
-        else
-          _ -> nil
-        end
-    end
+    live =
+      case Keyword.fetch(opts, :estimate_fun) do
+        {:ok, fun} -> fun
+        :error -> matrices && estimator(ws, task, Keyword.put_new(opts, :rows, matrices.live))
+      end
+
+    candidate =
+      case Keyword.fetch(opts, :candidate_estimate_fun) do
+        {:ok, fun} ->
+          fun
+
+        :error ->
+          matrices && matrices.candidate &&
+            estimator(ws, task, Keyword.put(opts, :rows, matrices.candidate))
+      end
+
+    {live, candidate}
   end
+
+  defp estimator(ws, task, opts), do: fn entry -> Competence.estimate(ws, entry, task, opts) end
 
   defp competence?(%Workspace{config: config}) do
     get_in(config || %{}, ["routing", "scoring", "competence"]) == true

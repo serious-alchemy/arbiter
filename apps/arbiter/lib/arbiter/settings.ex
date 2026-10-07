@@ -280,6 +280,24 @@ defmodule Arbiter.Settings do
   def competence_matrix, do: read_setting(:competence_matrix)
 
   @doc """
+  The live override and the candidate (bd-dde4l7) from ONE read of the
+  installation row — the routing hot path wants both per evaluation and each
+  read costs milliseconds. Each side is `nil` when unset; never raises.
+  """
+  @spec competence_matrices() :: %{live: [map()] | nil, candidate: [map()] | nil}
+  def competence_matrices do
+    case singleton() do
+      %Installation{} = row ->
+        %{live: row.competence_matrix, candidate: row.competence_matrix_candidate}
+
+      nil ->
+        %{live: nil, candidate: nil}
+    end
+  rescue
+    _ -> %{live: nil, candidate: nil}
+  end
+
+  @doc """
   Set the competence-matrix override. Rows are validated and normalised by
   `Arbiter.Agents.Routing.Competence.normalize_rows/1`; an invalid row refuses
   the whole write. `nil` clears the override. Operator-owned.
