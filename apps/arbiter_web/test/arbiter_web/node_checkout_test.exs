@@ -259,6 +259,9 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       Application.put_env(:arbiter, :node_checkout_max_bytes, 1_000)
       on_exit(fn -> Application.delete_env(:arbiter, :node_checkout_max_bytes) end)
 
+      waiter = Task.async(fn -> Session.collect(c.pid, @run, :checkout, 10_000) end)
+      assert_receive {:node_session, {:push, "collect", _}}
+
       conn =
         request(:put, "/nodes/runs/#{@run}/checkout", [
           {"content-type", "application/x-git-bundle"},
@@ -266,6 +269,8 @@ defmodule ArbiterWeb.NodeCheckoutTest do
         ])
 
       assert conn.status == 413
+      # a waiting collector hears about it instead of timing out
+      assert {:error, {:too_large, 5000}} = Task.await(waiter)
 
       # and the cap holds for a body larger than it declared
       conn =

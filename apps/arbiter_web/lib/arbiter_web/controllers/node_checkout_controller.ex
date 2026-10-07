@@ -104,9 +104,14 @@ defmodule ArbiterWeb.NodeCheckoutController do
 
     case declared_length(conn) do
       :missing -> error(conn, 411, "Content-Length is required")
-      length when length > cap -> error(conn, 413, "Bundle exceeds the #{cap} byte cap")
+      length when length > cap -> too_large(conn, pid, run, kind, cap, length)
       _length -> locked_ingest(conn, pid, run, ctx, cap, kind)
     end
+  end
+
+  defp too_large(conn, pid, run, kind, cap, length) do
+    if kind == :checkout, do: Session.checkout_done(pid, run, {:error, {:too_large, length}})
+    error(conn, 413, "Bundle exceeds the #{cap} byte cap")
   end
 
   # One ingest per run at a time: they change the same home clone.

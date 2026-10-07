@@ -434,13 +434,15 @@ defmodule Arbiter.Nodes.Checkout do
          branch: branch
        }) do
     checkpoint = checkpoint_ref(run)
+    # Read before the fetch below overwrites it: it is what the work tree holds now.
+    previous = Git.rev_parse(home_git, checkpoint)
 
     with {:ok, _} <-
            Git.run(["fetch", "-q", "--no-tags", q, "+#{snapshot_ref(run)}:#{checkpoint}"],
              git_dir: home_git,
              work_tree: home
            ),
-         {:ok, status_hash} <- apply_state(home, home_git, branch, tip, snap) do
+         {:ok, status_hash} <- apply_state(home, home_git, branch, {tip, snap}, previous) do
       {:ok,
        %{
          head: tip,
@@ -454,13 +456,20 @@ defmodule Arbiter.Nodes.Checkout do
 
   # Force the branch to `tip` and make the work tree and index `snap`, then the
   # index `tip`, so everything past the tip reads as uncommitted.
-  defp apply_state(home, home_git, branch, tip, snap) do
+  #
+  # `previous` is the snapshot the work tree last held. The index was reset to
+  # that snapshot's tip, so its uncommitted additions are untracked on disk and
+  # `read-tree -u --reset` would leave them behind once the agent deleted them.
+  # Loading the previous snapshot into the index first makes git track, and so
+  # remove, whatever `snap` no longer has.
+  defp apply_state(home, home_git, branch, {tip, snap}, previous) do
     opts = [git_dir: home_git, work_tree: home]
     branch_ref = "refs/heads/" <> branch
 
     with {:ok, head} <- Git.run(["symbolic-ref", "-q", "HEAD"], opts),
          true <- head == branch_ref or {:error, {:home_not_on_branch, head}},
          {:ok, _} <- Git.run(["update-ref", branch_ref, tip], opts),
+         :ok <- track_previous(previous, opts),
          {:ok, _} <- Git.run(["read-tree", "-u", "--reset", snap], opts),
          {:ok, _} <- Git.run(["reset", "-q", "--mixed", tip], opts),
          {:ok, status} <- Git.run(["status", "--porcelain"], opts) do
@@ -469,6 +478,12 @@ defmodule Arbiter.Nodes.Checkout do
       {:error, {:git, _, out}} -> {:error, {:handoff_failed, out}}
       {:error, _} = error -> error
     end
+  end
+
+  defp track_previous(nil, _opts), do: :ok
+
+  defp track_previous(previous, opts) do
+    with {:ok, _} <- Git.run(["read-tree", previous], opts), do: :ok
   end
 
   # ---- restore -----------------------------------------------------------------------
@@ -485,7 +500,7 @@ defmodule Arbiter.Nodes.Checkout do
            Git.rev_parse(home_git, checkpoint_ref(run)) || {:error, :no_checkpoint},
          tip when is_binary(tip) <-
            Git.rev_parse(home_git, snap <> "^") || {:error, :no_checkpoint},
-         {:ok, status_hash} <- apply_state(home, home_git, branch, tip, snap) do
+         {:ok, status_hash} <- apply_state(home, home_git, branch, {tip, snap}, snap) do
       {:ok, %{head: tip, snapshot: snap, status_hash: status_hash}}
     end
   end

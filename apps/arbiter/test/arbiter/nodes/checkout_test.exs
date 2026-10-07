@@ -412,6 +412,37 @@ defmodule Arbiter.Nodes.CheckoutTest do
       assert modes(fresh.shadow) == expected
       assert git!(fresh.shadow, ["status", "--porcelain"]) =~ "untracked.sh"
     end
+
+    test "a later checkpoint drops files the earlier one added but never committed", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up1} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up1.path, c.ctx)
+      assert File.exists?(Path.join(c.home, "untracked.sh"))
+
+      # the agent abandons its scratch file and the uncommitted edit, then checkpoints again
+      File.rm!(Path.join(shadow, "untracked.sh"))
+      git!(shadow, ["checkout", "--", "lib/new.txt"])
+      expected = modes(shadow)
+      {:ok, up2} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up2.path, c.ctx)
+
+      refute File.exists?(Path.join(c.home, "untracked.sh"))
+      assert modes(c.home) == expected
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+    end
+
+    test "restoring over the state the checkpoint already left is idempotent", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      expected = modes(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, ingested} = Checkout.ingest(up.path, c.ctx)
+
+      assert {:ok, restored} = Checkout.restore(c.home, @run, @branch)
+      assert restored.status_hash == ingested.status_hash
+      assert modes(c.home) == expected
+    end
   end
 
   # -- helpers -----------------------------------------------------------------
