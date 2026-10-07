@@ -37,11 +37,14 @@ defmodule Arbiter.Parity.Manifest do
   @spec path() :: Path.t()
   def path, do: Application.app_dir(:arbiter, @path)
 
-  @doc "Read the manifest term (it is a plain literal, evaluated once per call)."
+  @doc """
+  Read the manifest term. The file is a plain literal (maps, lists, tuples,
+  strings, atoms); it is parsed and converted without being evaluated, so
+  anything that is not a literal raises.
+  """
   @spec load!() :: t()
   def load! do
-    {manifest, _binding} = Code.eval_file(path())
-    manifest
+    path() |> File.read!() |> Code.string_to_quoted!(file: path()) |> literal!()
   end
 
   @doc "Every MCP tool name the manifest mentions (canonical names and aliases)."
@@ -142,6 +145,15 @@ defmodule Arbiter.Parity.Manifest do
   def problems(_), do: ["manifest must be %{children: map, operations: list}"]
 
   # ---- internals -----------------------------------------------------------
+
+  defp literal!({:%{}, _, pairs}), do: Map.new(pairs, fn {k, v} -> {literal!(k), literal!(v)} end)
+  defp literal!({:{}, _, elems}), do: elems |> Enum.map(&literal!/1) |> List.to_tuple()
+  defp literal!({a, b}), do: {literal!(a), literal!(b)}
+  defp literal!(list) when is_list(list), do: Enum.map(list, &literal!/1)
+  defp literal!(lit) when is_binary(lit) or is_atom(lit) or is_number(lit), do: lit
+
+  defp literal!(other),
+    do: raise(ArgumentError, "#{@path} must be a plain literal, found #{Macro.to_string(other)}")
 
   defp cells(%{operations: ops}, surface) do
     ops |> Enum.flat_map(&(Map.get(&1, surface) || [])) |> Enum.uniq()
