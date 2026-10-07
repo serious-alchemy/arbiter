@@ -37,8 +37,12 @@ defmodule Arbiter.NodeAgent.Bridge do
   @max_socket_path 100
 
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts),
-    do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  def start_link(opts) do
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
 
   @doc """
   Listen for `bridges` (`[%{name:, path:}]` from the run spec) of `run`: returns
