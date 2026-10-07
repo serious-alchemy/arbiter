@@ -204,10 +204,11 @@ defmodule ArbiterCli.Cmd.NodeTest do
   describe "list" do
     test "shows the local row first, then name, state, caps, labels and last seen" do
       stub_get("/api/nodes", %{
-        "nodes" => [@live_node],
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
         "local" => @local,
         "total" => 5,
-        "ceiling" => 8,
+        "effective" => 5,
+        "ceiling" => nil,
         "warnings" => []
       })
 
@@ -219,8 +220,40 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert second =~ "box-1" and second =~ "online" and second =~ "1/2"
       assert out =~ "zone=a"
       assert out =~ "never"
-      assert out =~ "local 3 + nodes 2 = 5"
-      assert out =~ "conductor.max_concurrent = 8"
+      assert out =~ "capacity 5 = local 3 + box-1 2"
+      assert out =~ "conductor.max_concurrent: not set"
+      refute out =~ "idle"
+    end
+
+    test "names a ceiling that cuts the sum, and the idle-capacity warning with it" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
+        "local" => @local,
+        "total" => 5,
+        "effective" => 4,
+        "ceiling" => 4,
+        "warnings" => ["ceiling_below_total"]
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "conductor.max_concurrent = 4"
+      assert out =~ "plans 4"
+      assert out =~ "arb settings unset conductor_system_max_concurrent"
+      assert out =~ "will sit idle"
+    end
+
+    test "lists a node that adds nothing as not counted" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.merge(@live_node, %{"contributes" => 0, "state" => "draining"})],
+        "local" => @local,
+        "total" => 3,
+        "effective" => 3,
+        "ceiling" => nil,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "capacity 3 = local 3 (not counted: box-1 draining)"
     end
 
     test "prints the warnings" do

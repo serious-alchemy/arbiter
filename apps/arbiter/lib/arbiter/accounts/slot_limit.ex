@@ -61,7 +61,7 @@ defmodule Arbiter.Accounts.SlotLimit do
   @doc "The binding limit for `workspace` (a `Workspace` struct) given its `own` live count."
   @spec binding(Arbiter.Tasks.Workspace.t(), non_neg_integer() | nil) :: t() | nil
   def binding(%Arbiter.Tasks.Workspace{} = ws, own) do
-    system_max = Arbiter.Board.Snapshot.system_max_concurrent()
+    system_max = Arbiter.Board.Snapshot.install_capacity()
     provider = Arbiter.Quota.default_provider(ws)
     account = Resolver.account(ws.id, provider)
 
