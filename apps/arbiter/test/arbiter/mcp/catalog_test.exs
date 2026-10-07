@@ -38,7 +38,7 @@ defmodule Arbiter.MCP.CatalogTest do
                                 quota_get ticket_create worker_list ticket_list usage_summarize notify_list
                                 tracker_claim tracker_sync tracker_list_issues tracker_create_ticket worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
-                                external_review_list skill_create skill_update skill_list skill_get
+                                external_review_list skill_create skill_update skill_delete skill_list skill_get
                                 transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject loop_propose_routing loop_canary_status breaker_list breaker_reset

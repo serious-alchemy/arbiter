@@ -215,6 +215,30 @@ defmodule Arbiter.Skills do
     end
   end
 
+  @doc """
+  Scope-aware fetch used by every surface's `show` / `update` / `delete`
+  (parity audit P-22). `workspace_id` is the caller's resolved scope: a UUID ref
+  is fetched directly then must be visible in that scope; a name ref resolves
+  with shadowing precedence (`resolve_skill/2`). A global skill is visible in
+  any scope, a scoped skill only in its own workspace, and a `nil` scope (a
+  workspace-agnostic caller) resolves a name to the global but sees any id.
+  """
+  @spec fetch_skill_in_scope(String.t(), String.t() | nil) ::
+          {:ok, Skill.t()} | {:error, :not_found}
+  def fetch_skill_in_scope(ref, workspace_id) when is_binary(ref) do
+    if uuid?(ref) do
+      with {:ok, skill} <- get_skill(ref) do
+        if visible_in_scope?(skill, workspace_id), do: {:ok, skill}, else: {:error, :not_found}
+      end
+    else
+      resolve_skill(ref, workspace_id)
+    end
+  end
+
+  defp visible_in_scope?(_skill, nil), do: true
+  defp visible_in_scope?(%Skill{workspace_id: nil}, _ws_id), do: true
+  defp visible_in_scope?(%Skill{workspace_id: ws}, ws_id), do: ws == ws_id
+
   @doc "Fetch the **global** skill (workspace_id nil) with this `name`."
   @spec get_skill_by_name(String.t()) :: {:ok, Skill.t()} | {:error, :not_found}
   def get_skill_by_name(name) when is_binary(name), do: fetch_scoped(name, nil)
