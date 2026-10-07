@@ -149,10 +149,10 @@ defmodule ArbiterCli.Cmd.Update do
       Phoenix not coming back green after the restart.
   """
 
-  alias ArbiterCli.ArgParser
+  alias ArbiterCli.{AcceptanceFlags, ArgParser}
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
-  alias ArbiterCli.{AcceptanceFlags, ProviderConstraintFlags}
+  alias ArbiterCli.ProviderConstraintFlags
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.
