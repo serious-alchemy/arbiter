@@ -1,13 +1,10 @@
-defmodule ArbiterCli.ConfigSchemaTest do
+defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
   use ExUnit.Case, async: true
 
-  alias ArbiterCli.ConfigSchema
+  alias Arbiter.Tasks.Workspace.ConfigSchema
 
-  # ArbiterCli has no runtime dependency on the arbiter core app (see
-  # config_schema.ex moduledoc), so ConfigSchema's enum lists are literal
-  # copies. This test is the drift guard: it pulls in `arbiter` as a
-  # test-only dep and asserts every list here is byte-for-byte equal to the
-  # server-side source of truth.
+  # ConfigSchema's enum lists are literal copies; these tests are the drift
+  # guard asserting each equals the server-side source of truth.
 
   test "tracker types match Arbiter.Tasks.Workspace.valid_tracker_types/0" do
     assert ConfigSchema.tracker_types() == Arbiter.Tasks.Workspace.valid_tracker_types()
@@ -95,18 +92,11 @@ defmodule ArbiterCli.ConfigSchemaTest do
            "standing_orders is never injected into a worker prompt"
   end
 
-  # `arb workspace --help` prints this moduledoc immediately followed by
-  # ConfigSchema.render() (see ArbiterCli.Cmd.Workspace.print_help/0) — if this
-  # doc site regresses back to the false claim, the two would contradict each
-  # other on the same screen.
-  test "ArbiterCli.Cmd.Workspace moduledoc does not claim standing_orders reaches a worker briefing" do
-    {:docs_v1, _, :elixir, _, %{"en" => moduledoc}, _, _} =
-      Code.fetch_docs(ArbiterCli.Cmd.Workspace)
+  test "describe/0 carries the rendered text and the enum lists" do
+    %{text: text, enums: enums} = ConfigSchema.describe()
 
-    refute moduledoc =~ ~r/worker's `arb prime`/,
-           "arb prime is a coordinator command, not a per-worker briefing"
-
-    refute moduledoc =~ ~r/every worker/i,
-           "standing_orders is never injected into a worker prompt"
+    assert text == ConfigSchema.render()
+    assert enums.tracker_types == ConfigSchema.tracker_types()
+    assert enums.quota_modes == ConfigSchema.quota_modes()
   end
 end

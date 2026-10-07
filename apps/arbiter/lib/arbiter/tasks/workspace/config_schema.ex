@@ -1,16 +1,13 @@
-defmodule ArbiterCli.ConfigSchema do
+defmodule Arbiter.Tasks.Workspace.ConfigSchema do
   @moduledoc """
   A comprehensive, human-readable reference for every key `workspace.config`
-  accepts — printed by `arb config schema` and appended to `arb config --help`
-  / `arb workspace --help`.
+  accepts. Served by `GET /api/workspaces/config_schema` and the MCP
+  `workspace_config_schema` tool, and printed by `arb config schema`.
 
-  `arbiter_cli` is a standalone escript with no runtime dependency on the
-  `arbiter` core app (it talks to the server over HTTP), so the enum lists
-  below are literal copies rather than live calls into
-  `Arbiter.Tasks.Workspace.Changes.ValidateConfig` and its sibling modules.
-  `ArbiterCli.ConfigSchemaTest` (a test-only `{:arbiter, in_umbrella: true,
-  only: :test}` dependency) asserts every list here is byte-for-byte equal to
-  the corresponding `valid_*/0` function on the server, so a change to the
+  Lives next to `Arbiter.Tasks.Workspace.Changes.ValidateConfig` (the enforcer
+  this text documents) in core so every surface reads one copy; the enum lists
+  below are literal, and `Arbiter.Tasks.Workspace.ConfigSchemaTest` asserts each
+  is byte-for-byte equal to the matching `valid_*/0` function so a change to the
   validator without a matching update here fails CI instead of silently
   drifting.
   """
@@ -43,6 +40,28 @@ defmodule ArbiterCli.ConfigSchema do
   def review_automation_modes, do: @review_automation_modes
   @doc false
   def quota_modes, do: @quota_modes
+
+  @doc """
+  The reference as a machine-readable map: the rendered `text` plus the enum
+  lists it interpolates, keyed by the config field they constrain.
+  """
+  @spec describe() :: map()
+  def describe do
+    %{
+      text: render(),
+      enums: %{
+        tracker_types: @tracker_types,
+        merger_strategies: @merger_strategies,
+        agent_types: @agent_types,
+        routing_policies: @routing_policies,
+        security_modes: @security_modes,
+        sandbox_filesystems: @sandbox_filesystems,
+        safe_default_categories: @safe_default_categories,
+        review_automation_modes: @review_automation_modes,
+        quota_modes: @quota_modes
+      }
+    }
+  end
 
   @doc "Renders the full workspace config reference as plain text."
   @spec render() :: String.t()

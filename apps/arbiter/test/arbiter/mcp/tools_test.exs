@@ -2578,6 +2578,150 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "workspace_config_set/2 multi-key (P-21)" do
+    test "applies patch + unset_paths in one write and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}, "x" => 1},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{
+                   "merge" => %{"auto_merge" => true},
+                   "routing" => %{"policy" => "static"}
+                 },
+                 "unset_paths" => ["x"]
+               })
+
+      assert get_in(data.config, ["merge", "auto_merge"]) == true
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+      assert get_in(data.config, ["routing", "policy"]) == "static"
+      refute Map.has_key?(data.config, "x")
+    end
+
+    test "a patch can write a key containing a dot", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{"repo_paths" => %{"my.repo" => %{"path" => "/tmp/my.repo"}}}
+               })
+
+      assert get_in(data.config, ["repo_paths", "my.repo", "path"]) == "/tmp/my.repo"
+    end
+
+    test "the safety rails apply to a patch too", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{"secret_token" => "sk-nope"}
+               })
+
+      assert msg =~ "secret"
+    end
+
+    test "key and patch together, or neither, are refused", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "a",
+                 "value" => 1,
+                 "patch" => %{"b" => 2}
+               })
+
+      assert {:error, {:invalid, _}} = Tools.workspace_config_set(ctx.coordinator, %{})
+    end
+
+    test "an unset_paths-only call works", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"x" => 1, "y" => 2}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{"unset_paths" => ["x"]})
+
+      refute Map.has_key?(data.config, "x")
+      assert data.config["y"] == 2
+    end
+  end
+
+  describe "workspace_config_schema/2 (P-21)" do
+    test "returns the reference text and enum lists to both tiers", ctx do
+      for scope <- [ctx.coordinator, ctx.worker] do
+        assert {:ok, %{text: text, enums: enums}} = Tools.workspace_config_schema(scope, %{})
+        assert text =~ "WORKSPACE CONFIG REFERENCE"
+        assert enums.tracker_types == Arbiter.Tasks.Workspace.valid_tracker_types()
+      end
+    end
+  end
+
+  describe "workspace standing orders (P-21)" do
+    test "add then remove, global and repo-scoped", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{patch: %{"repo_paths" => %{"r1" => %{"path" => "/tmp/r1"}}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_add(ctx.coordinator, %{"text" => "check inbox"})
+
+      assert data.standing_orders == ["check inbox"]
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_add(ctx.coordinator, %{
+                 "text" => "repo rule",
+                 "repo" => "r1"
+               })
+
+      assert data.standing_orders == ["repo rule"]
+      assert data.repo == "r1"
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{
+                 "target" => "1",
+                 "repo" => "r1"
+               })
+
+      assert data.standing_orders == []
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{"target" => "check inbox"})
+
+      assert data.standing_orders == []
+
+      assert {:error, {:not_found, _}} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{"target" => "ghost"})
+    end
+
+    test "add requires text", ctx do
+      assert {:error, {:invalid, _}} = Tools.workspace_standing_order_add(ctx.coordinator, %{})
+    end
+  end
+
+  describe "workspace_show worker_env names (P-21)" do
+    test "lists names and flags but never a value", ctx do
+      {:ok, ws} =
+        Ash.update(
+          ctx.ws,
+          %{
+            worker_env: %{"API_TOKEN" => %{"value" => "tok_supersecret_value", "secret" => true}}
+          },
+          action: :update
+        )
+
+      assert ws.id == ctx.ws.id
+      assert {:ok, data} = Tools.workspace_show(ctx.coordinator, %{})
+      assert data.worker_env == [%{name: "API_TOKEN", secret: true}]
+      assert is_list(data.secret_keys)
+      refute inspect(data) =~ "tok_supersecret_value"
+    end
+  end
+
   describe "workspace_config_set/2" do
     test "sets a scalar leaf and preserves siblings", ctx do
       {:ok, _} =

@@ -545,6 +545,11 @@ Existing `env:` refs keep working unchanged, so you can migrate one workspace at
 a time. Secret **values** are never returned by the API or CLI — only the key
 names are listed.
 
+Env vars injected into every worker's subprocess are managed the same way
+(`arb workspace env ls|set|rm`; `--secret` encrypts and redacts the value, and
+the value comes from `-` (stdin) or `--file` so it stays off `ps`). `ls` shows
+names and secret flags only; revealing a value is browser-only.
+
 ## Initialize your coordinator session
 
 A **coordinator** is a dedicated Claude Code session that directs work across
