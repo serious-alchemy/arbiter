@@ -149,6 +149,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "scheduler_status" => @deny_reason_scheduler,
     "provider_pause" => @deny_reason_scheduler,
     "provider_resume" => @deny_reason_scheduler,
+    "account_set" => @deny_reason_scheduler,
     "alert_list" => @deny_reason_ops,
     "breaker_list" => @deny_reason_scheduler,
     "breaker_reset" => @deny_reason_scheduler,

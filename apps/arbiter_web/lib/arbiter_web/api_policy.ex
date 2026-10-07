@@ -177,6 +177,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/accounts/:ref"} => :coordinator,
     {:patch, "/api/accounts/:ref"} => :coordinator,
     {:post, "/api/accounts/:ref/attach"} => :coordinator,
+    {:delete, "/api/accounts/:ref/attach/:workspace_id"} => :coordinator,
     {:post, "/api/accounts/:ref/rotate"} => :coordinator,
     {:post, "/api/accounts/:ref/merge"} => :coordinator,
     {:delete, "/api/accounts/:ref"} => :coordinator,

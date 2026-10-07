@@ -26,7 +26,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
                        loop_propose_routing loop_canary_status breaker_list breaker_reset
-                       alert_list
+                       alert_list account_set
                        memory_pending_list memory_pending_diff memory_pending_apply
                        memory_pending_reject memory_quarantine_list memory_quarantine_restore
                        memory_distill)

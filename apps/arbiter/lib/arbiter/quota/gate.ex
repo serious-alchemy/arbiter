@@ -380,115 +380,30 @@ defmodule Arbiter.Quota.Gate do
   @spec threshold_modes() :: [String.t()]
   def threshold_modes, do: @threshold_modes
 
-  @quota_config_settable_keys ~w(threshold_mode weekly_threshold paced_floor weekly_paced_floor pace_exempt_priority pace_exempt_threshold weekly_pace_exempt_threshold)
-
   @doc """
-  Validate a partial `quota_config` update (bd-c7ll4t) — the fields `arb
-  account set --threshold-mode ...` / `PATCH /api/accounts/:ref` may write.
-  `threshold_mode` must be one of `threshold_modes/0`; `weekly_threshold`,
-  `paced_floor`, `weekly_paced_floor`, `pace_exempt_threshold` and
-  `weekly_pace_exempt_threshold` must be a number (or its string form) in
-  `(0, 1]`, the same fraction shape every other `quota_config` reader in this
-  module expects; `pace_exempt_priority` an integer `0..4` (or its string
-  form). An unknown key is rejected outright rather than
-  silently accepted and then never read by anything here — the failure mode
-  that let `bd-5ps98m` set an account's `quota_config` only via `bin/arbiter
-  eval`.
+  Validate a `quota_config` update (bd-c7ll4t). The validator itself lives in
+  the account field registry, `Arbiter.Accounts.Fields` (bd-1kr3qf), so the
+  REST create/PATCH, `arb account`, the Providers form and MCP `account_set`
+  all share one; this stays as the gate-side entry point.
 
   Returns the validated map with numbers coerced to floats, ready to
   `Map.merge/2` into an account's existing `quota_config` (a partial update
-  must not clobber sibling keys like `throttle_threshold` it does not
-  mention).
+  must not clobber sibling keys it does not mention).
   """
   @spec validate_quota_config(map()) ::
           {:ok, map()} | {:error, {:invalid_quota_config, String.t()}}
-  def validate_quota_config(updates) when is_map(updates) do
-    case Map.keys(updates) -- @quota_config_settable_keys do
-      [] ->
-        validate_quota_config_values(updates)
-
-      unknown ->
-        {:error,
-         {:invalid_quota_config, "unknown quota_config key(s): #{Enum.join(unknown, ", ")}"}}
-    end
-  end
+  def validate_quota_config(updates) when is_map(updates),
+    do: Arbiter.Accounts.Fields.validate_quota_config(updates, :set)
 
   @doc """
   `validate_quota_config/1` for a partial *update* (bd-8vkqd3): a `nil` value
-  names a key to clear, so a settable key is valid as `nil` and the result
-  keeps it as `nil` for the caller to drop. Everything else validates exactly
-  as in `validate_quota_config/1`; an unknown key is still rejected, nil or not.
+  names a key to clear, so a known key is valid as `nil` and the result keeps
+  it as `nil` for the caller to drop. An unknown key is still rejected.
   """
   @spec validate_quota_config_patch(map()) ::
           {:ok, map()} | {:error, {:invalid_quota_config, String.t()}}
-  def validate_quota_config_patch(updates) when is_map(updates) do
-    {clears, sets} = Map.split_with(updates, fn {_key, value} -> is_nil(value) end)
-
-    with {:ok, validated} <- validate_quota_config(sets),
-         [] <- Map.keys(clears) -- @quota_config_settable_keys do
-      {:ok, Enum.reduce(Map.keys(clears), validated, &Map.put(&2, &1, nil))}
-    else
-      {:error, _} = error ->
-        error
-
-      unknown ->
-        {:error,
-         {:invalid_quota_config, "unknown quota_config key(s): #{Enum.join(unknown, ", ")}"}}
-    end
-  end
-
-  defp validate_quota_config_values(updates) do
-    Enum.reduce_while(updates, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-      case validate_quota_config_field(key, value) do
-        {:ok, validated} -> {:cont, {:ok, Map.put(acc, key, validated)}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-  end
-
-  defp validate_quota_config_field("threshold_mode", mode) when mode in @threshold_modes,
-    do: {:ok, mode}
-
-  defp validate_quota_config_field("threshold_mode", mode) do
-    {:error,
-     {:invalid_quota_config,
-      "threshold_mode must be one of #{Enum.join(@threshold_modes, ", ")} (got #{inspect(mode)})"}}
-  end
-
-  defp validate_quota_config_field("pace_exempt_priority", value) do
-    case parse_priority(value) do
-      nil ->
-        {:error,
-         {:invalid_quota_config,
-          "pace_exempt_priority must be an integer in 0..4 (got #{inspect(value)})"}}
-
-      priority ->
-        {:ok, priority}
-    end
-  end
-
-  defp validate_quota_config_field(key, value)
-       when key in ~w(weekly_threshold paced_floor weekly_paced_floor pace_exempt_threshold weekly_pace_exempt_threshold) do
-    case strict_fraction(value) do
-      {:ok, f} ->
-        {:ok, f}
-
-      :error ->
-        {:error,
-         {:invalid_quota_config, "#{key} must be a number in 0..1 (got #{inspect(value)})"}}
-    end
-  end
-
-  defp strict_fraction(n) when is_number(n) and n > 0 and n <= 1, do: {:ok, n * 1.0}
-
-  defp strict_fraction(s) when is_binary(s) do
-    case Float.parse(s) do
-      {f, ""} when f > 0 and f <= 1 -> {:ok, f}
-      _ -> :error
-    end
-  end
-
-  defp strict_fraction(_), do: :error
+  def validate_quota_config_patch(updates) when is_map(updates),
+    do: Arbiter.Accounts.Fields.validate_quota_config(updates, :patch)
 
   @doc """
   Which side of `min(account, workspace)` is currently binding `key`

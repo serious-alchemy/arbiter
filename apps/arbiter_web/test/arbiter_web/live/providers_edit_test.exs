@@ -2,7 +2,7 @@ defmodule ArbiterWeb.ProvidersEditTest do
   @moduledoc """
   The per-account Edit form on `/providers` (bd-8vkqd3): label, plan, enabled,
   the concurrency cap and every settable `quota_config` key, written through
-  `Accounts.update_account/2`, `set_max_concurrent/2` and `set_quota_config/2`.
+  `Accounts.edit_account/2` (one write, bd-1kr3qf).
   """
   use ArbiterWeb.ConnCase, async: false
 
@@ -92,6 +92,22 @@ defmodule ArbiterWeb.ProvidersEditTest do
     end
   end
 
+  describe "the registry (bd-1kr3qf, AC 1)" do
+    test "the form has an input for every editable quota key", %{conn: conn} do
+      account = account!(:claude, "ed-registry")
+      {:ok, view, _html} = live_providers(conn)
+      open_edit(view, account)
+
+      for key <- Arbiter.Accounts.Fields.quota_keys() do
+        assert has_element?(
+                 view,
+                 "#{edit_form(account)} [name='edit[#{key}]']"
+               ),
+               "no form control for quota key #{key}"
+      end
+    end
+  end
+
   describe "saving" do
     test "writes every field and survives a reload", %{conn: conn} do
       account = account!(:claude, "ed-save", %{max_concurrent: 2})
@@ -154,6 +170,81 @@ defmodule ArbiterWeb.ProvidersEditTest do
                view,
                "#{edit_form(account)} select[name='edit[pace_exempt_priority]'] option[value='1'][selected]"
              )
+    end
+
+    # bd-1kr3qf (D-A-15): the keys that were editable on no surface.
+    test "reaches throttle_threshold, weekly_warning_policy and window_seconds", %{conn: conn} do
+      account = account!(:claude, "ed-new-keys")
+      {:ok, view, _html} = live_providers(conn)
+      open_edit(view, account)
+
+      for key <- ~w(throttle_threshold window_seconds) do
+        assert has_element?(view, "#{edit_form(account)} input[name='edit[#{key}]']")
+      end
+
+      assert has_element?(
+               view,
+               "#{edit_form(account)} select[name='edit[weekly_warning_policy]']"
+             )
+
+      view
+      |> form(edit_form(account),
+        edit: %{
+          throttle_threshold: "0.6",
+          weekly_warning_policy: "hold",
+          window_seconds: "5h=3600, 7d=86400"
+        }
+      )
+      |> render_submit()
+
+      render_async(view, @async_timeout)
+
+      assert {:ok, saved} = Accounts.get_account(account.id)
+
+      assert %{
+               "throttle_threshold" => 0.6,
+               "weekly_warning_policy" => "hold",
+               "window_seconds" => %{"5h" => 3600, "7d" => 86_400}
+             } = saved.quota_config
+
+      {:ok, view, _html} = live_providers(conn)
+      open_edit(view, account)
+
+      assert has_element?(
+               view,
+               "#{edit_form(account)} input[name='edit[window_seconds]'][value='5h=3600, 7d=86400']"
+             )
+
+      assert has_element?(
+               view,
+               "#{edit_form(account)} select[name='edit[weekly_warning_policy]'] option[value='hold'][selected]"
+             )
+
+      view
+      |> form(edit_form(account),
+        edit: %{throttle_threshold: "", weekly_warning_policy: "", window_seconds: ""}
+      )
+      |> render_submit()
+
+      render_async(view, @async_timeout)
+      assert {:ok, %{quota_config: cleared}} = Accounts.get_account(account.id)
+      assert cleared == %{}
+    end
+
+    test "a malformed window table names the field and writes nothing", %{conn: conn} do
+      account = account!(:claude, "ed-bad-windows", %{label: "Before"})
+      {:ok, view, _html} = live_providers(conn)
+      open_edit(view, account)
+
+      for bad <- ["5h", "5h=0", "5h=abc"] do
+        view
+        |> form(edit_form(account), edit: %{label: "After", window_seconds: bad})
+        |> render_submit()
+
+        assert view |> element("#edit-form-#{account.id}-error") |> render() =~ "window_seconds"
+      end
+
+      assert {:ok, %{label: "Before", quota_config: %{}}} = Accounts.get_account(account.id)
     end
 
     test "a blank cap and blank policy fields clear them, leaving other keys alone", %{conn: conn} do

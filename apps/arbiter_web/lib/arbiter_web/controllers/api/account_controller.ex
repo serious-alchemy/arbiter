@@ -10,13 +10,20 @@ defmodule ArbiterWeb.Api.AccountController do
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
     * `PATCH  /api/accounts/:ref`       — :update (`label`, `plan`, `enabled`;
-      `max_concurrent`, nullable; `quota_config`, a partial merge —
-      `threshold_mode`, `weekly_threshold`, `paced_floor`, `weekly_paced_floor`,
-      the pace-exempt keys; a `null` value clears that key)
-    * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
+      `max_concurrent`, nullable; `quota_config`, a partial merge of every key in
+      `Arbiter.Accounts.Fields.quota_keys/0`; a `null` value clears that key).
+      One write: a failure leaves the account untouched.
+    * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`;
+      not for a `grok` account)
+    * `DELETE /api/accounts/:ref/attach/:workspace_id` — :detach (one workspace's link only)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
     * `POST   /api/accounts/:ref/merge`   — :merge  (`into` — the surviving account ref)
     * `DELETE /api/accounts/:ref`         — :delete (optional `?detach=true`, `?hard=true`)
+
+  The settable fields, their types and validation live in the one registry,
+  `Arbiter.Accounts.Fields` (bd-1kr3qf); `create` and `update` take their
+  whitelist from it and share its validator, so a bad `quota_config` is a 422
+  `validation_error` on both.
 
   `:ref` resolution is `Arbiter.Accounts.get_account/1` — a bare slug that
   matches more than one provider's account is rejected as ambiguous.
@@ -25,6 +32,7 @@ defmodule ArbiterWeb.Api.AccountController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Accounts
+  alias Arbiter.Accounts.Fields
   alias Arbiter.Params
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -62,18 +70,7 @@ defmodule ArbiterWeb.Api.AccountController do
   end
 
   def create(conn, params) do
-    attrs =
-      Map.take(params, [
-        "provider",
-        "slug",
-        "label",
-        "plan",
-        "provider_account_ref",
-        "provider_org_ref",
-        "max_concurrent",
-        "quota_config",
-        "enabled"
-      ])
+    attrs = Map.take(params, Fields.names(:create))
 
     with {:ok, account} <- attrs |> Accounts.create_account() |> friendly() do
       conn
@@ -83,121 +80,31 @@ defmodule ArbiterWeb.Api.AccountController do
   end
 
   @doc """
-  The account concurrency ceiling (P8, `docs/provider-account-design.md`
-  §4.2) and/or the account's gate policy (bd-c7ll4t). `max_concurrent` is
-  nullable and an explicit `null` clears it: the ceiling is opt-in (§4.4), so
-  "no ceiling" has to be reachable, and giving the key an absent value is a
-  malformed request rather than a clear. `quota_config` is a **partial**
-  merge — `threshold_mode`, `weekly_threshold`, `paced_floor`,
-  `weekly_paced_floor`, `pace_exempt_priority`, `pace_exempt_threshold`,
-  `weekly_pace_exempt_threshold` — validated against `Arbiter.Quota.Gate
-  .threshold_modes/0` and 0..1 floats; keys not mentioned (e.g.
-  `throttle_threshold`) are left untouched. At least one of the two must be
-  given.
+  Edit an account — `label`, `plan`, `enabled`, `max_concurrent` (nullable; an
+  explicit `null` clears the ceiling, which is opt-in per §4.4) and/or a
+  **partial** `quota_config` merge (bd-c7ll4t): any key in
+  `Arbiter.Accounts.Fields.quota_keys/0`, with a `null` value clearing that
+  key; keys not mentioned are left untouched. At least one field must be given.
 
-  Before `quota_config` landed here, an existing account's gate policy could
-  only be edited with `bin/arbiter eval` (bd-5ps98m) — `PATCH` accepted only
-  `max_concurrent`, and `quota_config` was settable solely at `create`.
-
-  `label`, `plan` and `enabled` (bd-8vkqd3) go through
-  `Arbiter.Accounts.update_account/2`; a blank `label`/`plan` clears it. A
-  `null` `quota_config` value clears that key rather than being rejected.
-
-  `provider`/`slug` are still never accepted here — they are the account's
-  identity (§3.1) and changing either is a new account, not an edit.
+  The whole request is validated by `Arbiter.Accounts.Fields` and written by
+  `Arbiter.Accounts.edit_account/2` as a single update (bd-1kr3qf, D-A-20), so
+  a bad value anywhere rejects the request and a failure writes nothing.
+  `provider` / `slug` are the account's identity (§3.1) and are rejected by
+  name: changing either is a new account, not an edit.
   """
   def update(conn, %{"ref" => ref} = params) do
-    with {:ok, attrs} <- fetch_account_attrs(params),
-         {:ok, max_concurrent} <- fetch_max_concurrent(params),
-         {:ok, quota_config} <- fetch_quota_config(params),
-         :ok <- require_an_update(attrs, max_concurrent, quota_config),
-         {:ok, account} <- apply_updates(ref, attrs, max_concurrent, quota_config) do
-      render(conn, :show, account: account)
-    end
-  end
-
-  # `label` / `plan` / `enabled` (bd-8vkqd3), validated up front like the
-  # other two halves. A `slug` / `provider` here is not silently ignored: it
-  # is the account's identity, so it is rejected by name.
-  defp fetch_account_attrs(params) do
-    attrs = Map.take(params, ~w(label plan enabled slug provider))
+    attrs = Map.take(params, Fields.names(:update) ++ Fields.identity_names())
 
     if attrs == %{} do
-      {:ok, :absent}
+      {:error,
+       {:invalid_request,
+        "missing required parameter: one of #{Enum.join(Fields.names(:update), ", ")}"}}
     else
-      with {:ok, _changes} <- attrs |> Accounts.validate_account_attrs() |> friendly(),
-           do: {:ok, {:set, attrs}}
+      with {:ok, account} <- ref |> Accounts.edit_account(attrs) |> friendly() do
+        render(conn, :show, account: account)
+      end
     end
   end
-
-  defp fetch_max_concurrent(params) do
-    case Map.fetch(params, "max_concurrent") do
-      :error -> {:ok, :absent}
-      {:ok, value} -> with {:ok, v} <- cast_max_concurrent(value), do: {:ok, {:set, v}}
-    end
-  end
-
-  defp cast_max_concurrent(nil), do: {:ok, nil}
-  defp cast_max_concurrent(""), do: {:ok, nil}
-  defp cast_max_concurrent(n) when is_integer(n) and n >= 0, do: {:ok, n}
-
-  defp cast_max_concurrent(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, ""} when n >= 0 -> {:ok, n}
-      _ -> invalid_max_concurrent()
-    end
-  end
-
-  defp cast_max_concurrent(_), do: invalid_max_concurrent()
-
-  defp invalid_max_concurrent,
-    do: {:error, {:invalid_request, "max_concurrent must be a non-negative integer or null"}}
-
-  # Validated here, before `apply_updates/3` writes anything (bd-c7ll4t) — a
-  # `PATCH` with a bad `quota_config` alongside a good `max_concurrent` must
-  # not persist the `max_concurrent` half and then 422 on the other; the two
-  # updates read as one request.
-  defp fetch_quota_config(params) do
-    case Map.fetch(params, "quota_config") do
-      :error ->
-        {:ok, :absent}
-
-      {:ok, %{} = updates} ->
-        case Arbiter.Quota.Gate.validate_quota_config_patch(updates) |> friendly() do
-          {:ok, validated} -> {:ok, {:set, validated}}
-          {:error, _} = err -> err
-        end
-
-      {:ok, _} ->
-        {:error, {:invalid_request, "quota_config must be an object"}}
-    end
-  end
-
-  defp require_an_update(:absent, :absent, :absent) do
-    {:error,
-     {:invalid_request,
-      "missing required parameter: one of label, plan, enabled, max_concurrent or quota_config"}}
-  end
-
-  defp require_an_update(_attrs, _max_concurrent, _quota_config), do: :ok
-
-  defp apply_updates(ref, attrs, max_concurrent, quota_config) do
-    with {:ok, account} <- ref |> apply_attrs(attrs) |> friendly(),
-         {:ok, account} <- account.id |> apply_max_concurrent(max_concurrent) |> friendly() do
-      account |> apply_quota_config(quota_config) |> friendly()
-    end
-  end
-
-  defp apply_attrs(ref, :absent), do: Accounts.get_account(ref)
-  defp apply_attrs(ref, {:set, attrs}), do: Accounts.update_account(ref, attrs)
-
-  defp apply_max_concurrent(ref, :absent), do: Accounts.get_account(ref)
-  defp apply_max_concurrent(ref, {:set, value}), do: Accounts.set_max_concurrent(ref, value)
-
-  defp apply_quota_config(account, :absent), do: {:ok, account}
-
-  defp apply_quota_config(%{id: id}, {:set, updates}),
-    do: Accounts.set_quota_config(id, updates)
 
   def attach(conn, %{"ref" => ref} = params) do
     with {:ok, workspace_id} <- require_param(params, "workspace_id"),
@@ -218,6 +125,17 @@ defmodule ArbiterWeb.Api.AccountController do
     case Map.get(params, "share") do
       nil -> []
       share -> [share: share]
+    end
+  end
+
+  @doc """
+  Detach one workspace from an account (the inverse of `attach/2`): removes only
+  that `(workspace, provider)` link, and only while it still points at this
+  account.
+  """
+  def detach(conn, %{"ref" => ref, "workspace_id" => workspace_id}) do
+    with {:ok, link} <- workspace_id |> Accounts.detach_workspace(ref) |> friendly() do
+      render(conn, :attach, link: link)
     end
   end
 
@@ -344,11 +262,22 @@ defmodule ArbiterWeb.Api.AccountController do
   defp friendly({:error, {:missing, key}}),
     do: {:error, {:invalid_request, "missing required field: #{key}"}}
 
+  # A well-formed request whose values are unacceptable: 422 `validation_error`,
+  # the same on create and PATCH.
   defp friendly({:error, {:invalid_quota_config, message}}),
-    do: {:error, {:invalid_request, message}}
+    do: {:error, {:invalid, message}}
 
   defp friendly({:error, {:invalid_account, message}}),
-    do: {:error, {:invalid_request, message}}
+    do: {:error, {:invalid, message}}
+
+  defp friendly({:error, :grok_routed_by_opt_in}),
+    do:
+      {:error,
+       {:invalid_request,
+        "Grok is routed by the workspace's \"Route D1 tickets to Grok\" setting, not attached to an account"}}
+
+  defp friendly({:error, :not_attached}),
+    do: {:error, {:invalid_request, "that workspace is not attached to this account"}}
 
   defp friendly(other), do: other
 
