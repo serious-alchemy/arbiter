@@ -224,9 +224,9 @@ defmodule ArbiterWeb.ApiTierTest do
 
     # bd-7ezcqb: a worker that defers review-thread work must file the
     # follow-up and cite its key, via `arb create <title> --parent <own id>`
-    # (a create carrying `parent_id`, then the `parent_of` edge). That stays
-    # possible — but only as a Backlog child of its own task, in its own
-    # workspace.
+    # (a create carrying `parent_id`; since P-14 the server attaches the
+    # `parent_of` edge in the same call). That stays possible — but only as a
+    # Backlog child of its own task, in its own workspace.
     test "files a follow-up as a child of its own task", ctx do
       conn =
         ctx.worker_token
@@ -241,6 +241,13 @@ defmodule ArbiterWeb.ApiTierTest do
       child = json_response(conn, 201)
       assert child["state"] == "backlog"
 
+      # The create already attached the edge — no second POST is needed, and
+      # adopting an already-parented ticket is still refused.
+      assert {:ok, [%{edge: %{type: :parent_of, from_issue_id: from}}]} =
+               Arbiter.Tasks.Dependencies.list(issue_id: child["id"])
+
+      assert from == ctx.task.id
+
       conn =
         ctx.worker_token
         |> as()
@@ -250,7 +257,7 @@ defmodule ArbiterWeb.ApiTierTest do
           type: "parent_of"
         })
 
-      assert json_response(conn, 201)
+      assert json_response(conn, 403)
     end
 
     test "cannot file a ticket that is not its own child, or into another workspace", ctx do
