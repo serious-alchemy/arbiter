@@ -79,8 +79,10 @@ defmodule ArbiterCli.Cmd.Repo do
     Enum.find(repos, fn repo -> repo["name"] == name end)
   end
 
-  defp emit_show(nil, name, :json),
-    do: IO.puts(Jason.encode!(%{"error" => "no repo named #{name}"}))
+  defp emit_show(nil, name, :json) do
+    IO.puts(Jason.encode!(%{"error" => "no repo named #{name}"}))
+    Output.halt(1)
+  end
 
   defp emit_show(nil, name, :text) do
     Output.die("no repo named #{inspect(name)} (try `arb repo list`)")

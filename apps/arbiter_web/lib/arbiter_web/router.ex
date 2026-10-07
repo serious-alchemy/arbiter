@@ -246,6 +246,7 @@ defmodule ArbiterWeb.Router do
 
     # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)
+    get("/repos/:name", RepoController, :show)
 
     # Skills (system-wide, user-authored worker skill registry)
     get("/skills", SkillController, :index)

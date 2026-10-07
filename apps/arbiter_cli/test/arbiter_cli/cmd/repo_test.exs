@@ -91,6 +91,46 @@ defmodule ArbiterCli.Cmd.RepoTest do
     assert err =~ "no repo named"
   end
 
+  test "show --json errors with non-zero exit code when the repo is unknown" do
+    stub_get("/api/repos", @rigs)
+    {out, _err, code} = capture(fn -> Repo.run(["show", "ghost", "--json"]) end)
+    assert code != 0
+    assert out =~ "no repo named"
+  end
+
+  test "list returns both entries for same-name repo across workspaces in text and json" do
+    two_workspaces_same_name = %{
+      "data" => [
+        %{
+          "name" => "shared-repo",
+          "source" => "ws-one",
+          "path" => "/dev/ws-one/shared-repo",
+          "workers" => 0,
+          "worktrees" => 0
+        },
+        %{
+          "name" => "shared-repo",
+          "source" => "ws-two",
+          "path" => "/dev/ws-two/shared-repo",
+          "workers" => 0,
+          "worktrees" => 0
+        }
+      ]
+    }
+
+    stub_get("/api/repos", two_workspaces_same_name)
+    {out_text, _err, code_text} = capture(fn -> Repo.run(["list"]) end)
+    assert code_text == 0
+    assert out_text =~ "ws-one"
+    assert out_text =~ "ws-two"
+
+    stub_get("/api/repos", two_workspaces_same_name)
+    {out_json, _err, code_json} = capture(fn -> Repo.run(["list", "--json"]) end)
+    assert code_json == 0
+    assert {:ok, %{"data" => entries}} = Jason.decode(String.trim(out_json))
+    assert length(entries) == 2
+  end
+
   test "show requires a name" do
     {_out, err, code} = capture(fn -> Repo.run(["show"]) end)
     assert code == 1

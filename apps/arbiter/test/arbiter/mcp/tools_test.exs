@@ -6607,6 +6607,27 @@ defmodule Arbiter.MCP.ToolsTest do
       assert is_integer(repo.workers)
       assert is_integer(repo.worktrees)
     end
+
+    test "two-workspace same-name fixture returns both entries", ctx do
+      {:ok, _ws2} =
+        Ash.create(Workspace, %{
+          name: "second-ws",
+          prefix: "sws",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-2"}}
+        })
+
+      ws_config = ctx.ws.config || %{}
+
+      {:ok, _updated_ws} =
+        Ash.update(ctx.ws, %{
+          config: Map.merge(ws_config, %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-1"}})
+        })
+
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      twins = Enum.filter(data.repos, &(&1.name == "twin-repo"))
+      assert length(twins) == 2
+      assert Enum.map(twins, & &1.source) |> Enum.sort() == Enum.sort([ctx.ws.name, "second-ws"])
+    end
   end
 
   describe "repo_show/2" do

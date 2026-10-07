@@ -5,6 +5,8 @@ defmodule ArbiterWeb.Api.RepoJSON do
     %{data: Enum.map(repos, &data/1)}
   end
 
+  def show(%{repo: repo}), do: data(repo)
+
   def data(repo) do
     %{
       name: repo.name,
