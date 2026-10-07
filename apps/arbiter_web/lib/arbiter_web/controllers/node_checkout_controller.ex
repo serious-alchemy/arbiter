@@ -40,6 +40,10 @@ defmodule ArbiterWeb.NodeCheckoutController do
     end
   end
 
+  # Every scratch path is `<data_home>/node-checkout/<kind>-<run>-<n>`: `run` matched
+  # `@run_re` (letters, digits, `-`, `_`) in `authorize/2` and `<n>` is a unique
+  # integer, so the request chooses no directory component.
+  # sobelow_skip ["Traversal.FileModule"]
   defp seed_run(conn, run, ctx, have) do
     File.mkdir_p!(scratch())
     dest = Path.join(scratch(), "seed-#{run}-#{System.unique_integer([:positive])}.bundle")
@@ -56,8 +60,8 @@ defmodule ArbiterWeb.NodeCheckoutController do
     send_seed(conn, result, dest)
   end
 
-  # sobelow_skip ["Traversal.SendFile"]
   # `path` is the scratch file this request created; the request named no path.
+  # sobelow_skip ["Traversal.SendFile", "Traversal.FileModule"]
   defp send_seed(conn, {:ok, %{path: path, thin?: thin?}}, dest) do
     conn
     |> put_resp_content_type("application/x-git-bundle")
@@ -68,6 +72,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
     File.rm(dest)
   end
 
+  # sobelow_skip ["Traversal.FileModule"]
   defp send_seed(conn, {:error, reason}, dest) do
     File.rm(dest)
     reject(conn, reason)
@@ -114,6 +119,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
     end
   end
 
+  # sobelow_skip ["Traversal.FileModule"]
   defp ingest(conn, pid, run, ctx, cap, kind) do
     File.mkdir_p!(scratch())
     upload = Path.join(scratch(), "up-#{run}-#{System.unique_integer([:positive])}.bundle")
@@ -177,6 +183,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
   end
 
   # Stream to `path`, refusing past `cap` however much the request declared.
+  # sobelow_skip ["Traversal.FileModule"]
   defp receive_body(conn, path, cap) do
     file = File.open!(path, [:write, :binary])
 
