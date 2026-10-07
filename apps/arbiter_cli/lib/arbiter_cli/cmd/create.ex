@@ -309,6 +309,7 @@ defmodule ArbiterCli.Cmd.Create do
   # the ticket already created: `error.details.task_id` names it. A script
   # reading `--json` still needs that id, so print it before dying — the id is
   # in the message text too, for `text` mode.
+  @spec die_create(Client.Error.t(), :json | :text) :: no_return()
   defp die_create(%Client.Error{body: %{"details" => %{"task_id" => id}} = body} = err, :json)
        when is_binary(id) do
     IO.puts(
