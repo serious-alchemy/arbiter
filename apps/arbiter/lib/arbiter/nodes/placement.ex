@@ -51,12 +51,14 @@ defmodule Arbiter.Nodes.Placement do
   `Arbiter.Accounts.Admission` — so a burst of placements can take no more than
   the headroom.
 
-  ## Until RW9
+  ## Remote execution
 
-  Nothing can run a task on a node yet (`Executor.Node` is RW9), so
-  `remote_execution_available?/0` is `false` and `place/2` finds no candidate:
-  `prefer_remote` runs locally and `remote_only` is refused. Everything else
-  here is built and tested with the `remote_available?: true` seam.
+  `Executor.Node` exists (RW9), so `remote_execution_available?/0` is `true` by
+  default and `worker.placement` (default `local_only`) is the only switch an
+  operator flips. RW8 shipped it `false` ("until RW9") and nothing flipped it
+  afterwards, so a real dispatch could never reach a node; the end-to-end suite
+  (`:node_agent`, bd-afcoop) is what found that. `config :arbiter, remote_execution:
+  false` is the kill switch.
   """
 
   alias Arbiter.Nodes.Overview
@@ -168,11 +170,11 @@ defmodule Arbiter.Nodes.Placement do
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
   @doc """
-  True once something can run a task on a node. `false` until RW9 lands
-  `Executor.Node`: placement then never returns a node.
+  True when placement may return a node (`Executor.Node` exists since RW9, so the
+  default is `true`; `config :arbiter, remote_execution: false` turns it off).
   """
   @spec remote_execution_available?() :: boolean()
-  def remote_execution_available?, do: Application.get_env(:arbiter, :remote_execution, false)
+  def remote_execution_available?, do: Application.get_env(:arbiter, :remote_execution, true)
 
   @doc """
   Place `request`. Options: `:nodes` (rows, or a 0-arity function returning them;

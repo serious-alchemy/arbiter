@@ -484,7 +484,7 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
 
   describe "placement" do
     test "an eligible run is placed on the joined node and its slot is reserved", ctx do
-      assert {:ok, {:node, row}} = Placement.place(request(ctx), remote_available?: true)
+      assert {:ok, {:node, row}} = Placement.place(request(ctx))
       assert row.id == ctx.node.id
       assert [%{task_id: task_id}] = Placement.reservations()
       assert task_id == ctx.task.id
@@ -496,10 +496,10 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert {:ok, _} = Nodes.drain(ctx.node, @operator)
 
       assert {:error, {:no_node_capacity, _}} =
-               Placement.place(request(ctx), remote_available?: true)
+               Placement.place(request(ctx))
 
       assert {:ok, _} = Nodes.undrain(ctx.node, @operator)
-      assert {:ok, {:node, _}} = Placement.place(request(ctx), remote_available?: true)
+      assert {:ok, {:node, _}} = Placement.place(request(ctx))
       Placement.release(ctx.task.id)
 
       assert {:ok, _} = Nodes.revoke(ctx.node, @operator)
@@ -518,7 +518,7 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert {:error, _} = Nodes.authenticate(ctx.join.credential)
 
       assert {:error, {:no_node_capacity, _}} =
-               Placement.place(request(ctx), remote_available?: true)
+               Placement.place(request(ctx))
     end
   end
 
