@@ -131,6 +131,8 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
 
   # Every failure inside the install path throws, so `arb self-update` can turn
   # it into a halt and `install_from_release/3` into an `{:error, _}`.
+  @spec fail(String.t()) :: no_return()
+  @spec fail(String.t(), String.t() | nil) :: no_return()
   defp fail(msg, hint \\ nil), do: throw({:self_update_failed, msg, hint})
 
   # ---- release resolution --------------------------------------------------

@@ -561,8 +561,11 @@ defmodule ArbiterCli.Output do
   # rescue/catch without killing the BEAM. Production path calls System.halt/1.
   # Terminates the VM via `Output.halt/1` on every clause — spelled out so
   # dialyzer does not report it as an accidental "no local return".
+  @spec do_halt(non_neg_integer()) :: no_return()
+  defp do_halt(code), do: do_halt(code, nil)
+
   @spec do_halt(non_neg_integer(), String.t() | nil) :: no_return()
-  defp do_halt(code, message \\ nil) do
+  defp do_halt(code, message) do
     run_halt_hook(code, message)
 
     case Process.get(:bd2_halt_strategy, :system_halt) do

@@ -668,8 +668,9 @@ defmodule ArbiterWeb.Layouts do
   defp update_confirm_text(update) do
     "Update Arbiter to #{update.latest}?\n\n" <>
       migrations_sentence(update[:migrations_pending]) <>
-      "\n\nA database backup is taken first. The server restarts and in-flight workers are " <>
-      "interrupted; if the new release does not come back healthy it is rolled back."
+      "\n\nA database backup is taken first, then the server restarts; if the new release " <>
+      "does not come back healthy it is rolled back. The update will not start while workers " <>
+      "are actively working (a restart would kill their in-flight work) — it stops and says so here."
   end
 
   defp migrations_sentence([]), do: "This update has no pending migrations."
