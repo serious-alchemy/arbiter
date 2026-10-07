@@ -51,9 +51,9 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
     end
   end
 
+  def update(_conn, _params), do: {:error, {:invalid, "key is required"}}
+
   # The operator-only keys (`Registry.operator_only_keys/0`) need operator proof:
   # the token's authority decides, exactly as for the MCP set tool.
   defp authority(conn), do: Authority.from_scope(conn.assigns[:mcp_scope])
-
-  def update(_conn, _params), do: {:error, {:invalid, "key is required"}}
 end

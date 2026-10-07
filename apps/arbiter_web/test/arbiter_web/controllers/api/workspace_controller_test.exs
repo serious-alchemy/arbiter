@@ -335,7 +335,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
   end
 
   describe "PATCH /api/workspaces/:id" do
-    test "activates the GitHub tracker via config", %{conn: conn} do
+    test "activates the GitHub tracker via the config route", %{conn: conn} do
       {:ok, ws} = Ash.create(Workspace, %{name: "to-activate", prefix: "act"})
 
       github_config = %{
@@ -349,12 +349,44 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
         }
       }
 
-      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{config: github_config})
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{patch: github_config})
 
       body = json_response(conn, 200)
       assert body["id"] == ws.id
       assert body["config"]["tracker"]["type"] == "github"
       assert body["config"]["tracker"]["config"]["owner"] == "ryanrborn"
+    end
+
+    # P-20 / D-C-6: PATCH/PUT used to replace the whole `config` map, silently
+    # wiping every sibling key including system-written ones like loop.canary.
+    for verb <- ["PATCH", "PUT"] do
+      test "#{verb} with a `config` map is refused and wipes nothing", %{conn: conn} do
+        canary = %{"state" => "armed", "since" => "2026-10-06T00:00:00Z"}
+
+        {:ok, ws} =
+          Ash.create(Workspace, %{
+            name: "no-wipe-#{unquote(verb)}",
+            prefix: "nw#{String.downcase(unquote(verb))}",
+            config: %{"loop" => %{"canary" => canary}, "merge" => %{"strategy" => "github"}}
+          })
+
+        conn =
+          dispatch(
+            conn,
+            @endpoint,
+            unquote(verb),
+            ~p"/api/workspaces/#{ws.id}",
+            %{"name" => "renamed", "config" => %{"merge" => %{"auto_merge" => true}}}
+          )
+
+        assert %{"error" => %{"type" => "validation_error", "message" => msg}} = json_response(conn, 422)
+        assert msg =~ "/config"
+
+        reloaded = Ash.get!(Workspace, ws.id)
+        assert reloaded.name == "no-wipe-#{unquote(verb)}"
+        assert reloaded.config["loop"]["canary"] == canary
+        assert reloaded.config["merge"] == %{"strategy" => "github"}
+      end
     end
 
     test "updates scalar fields", %{conn: conn} do
@@ -371,8 +403,8 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       {:ok, ws} = Ash.create(Workspace, %{name: "bad-cfg", prefix: "bad"})
 
       conn =
-        patch(conn, ~p"/api/workspaces/#{ws.id}", %{
-          config: %{"tracker" => %{"type" => "bitbucket"}}
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          patch: %{"tracker" => %{"type" => "bitbucket"}}
         })
 
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
@@ -497,11 +529,12 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
     test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
       conn =
         patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
-          "unset_paths" => ["tracker.config.owner"]
+          "unset_paths" => ["merge.config.repo"]
         })
 
       body = json_response(conn, 200)
-      refute Map.has_key?(body["config"]["tracker"]["config"], "owner")
+      refute Map.has_key?(body["config"]["merge"]["config"], "repo")
+      assert body["config"]["merge"]["config"]["owner"] == "acme"
       assert body["config"]["tracker"]["type"] == "github"
     end
 
@@ -518,6 +551,41 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
         })
 
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "refuses a secret*/credentials* top-level key (P-20, D-C-4)", %{conn: conn, ws: ws} do
+      for key <- ~w(secrets credentials secret) do
+        conn =
+          patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{"patch" => %{key => %{"x" => "t"}}})
+
+        assert %{"error" => %{"type" => "validation_error"}} = resp = json_response(conn, 422)
+        assert inspect(resp) =~ "arb workspace secret"
+      end
+
+      refute Map.has_key?(Ash.get!(Workspace, ws.id).config, "secrets")
+    end
+
+    test "the dedicated secrets field still works on PATCH /workspaces/:id", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{secrets: %{"gh" => "ghp_x"}})
+      assert %{"secret_keys" => ["gh"]} = json_response(conn, 200)
+    end
+
+    test "safety rails: emptying repo_paths is refused unless force (D-C-16)", %{
+      conn: conn,
+      ws: ws
+    } do
+      body = %{"unset_paths" => ["repo_paths.arbiter"]}
+      conn1 = patch(conn, ~p"/api/workspaces/#{ws.id}/config", body)
+      assert %{"error" => %{"type" => "validation_error"}} = resp = json_response(conn1, 422)
+      assert inspect(resp) =~ "repo_paths is empty"
+
+      conn2 = patch(conn, ~p"/api/workspaces/#{ws.id}/config", Map.put(body, "force", true))
+      assert json_response(conn2, 200)["config"]["repo_paths"] == %{}
+    end
+
+    test "unset of an absent key is a 200 no-op", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{"unset_paths" => ["nope.x"]})
+      assert json_response(conn, 200)["config"]["merge"]["strategy"] == "github"
     end
 
     test "returns 404 for a missing workspace", %{conn: conn} do

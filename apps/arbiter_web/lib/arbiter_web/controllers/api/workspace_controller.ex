@@ -67,13 +67,29 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     # `secrets`, when present, is merge-patched into the existing encrypted
     # secrets (a key with a null value removes it); omitting it leaves them
     # untouched. Write-only — never serialised back. See WorkspaceJSON.
-    attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
+    #
+    # `config` is not accepted here (P-20, D-C-6): the `:update` action
+    # *replaces* the whole map, which wipes every sibling key — including
+    # system-written ones such as `loop.canary` — for a client that meant a
+    # partial edit. Config is written through `PATCH …/config` (deep-merge).
+    attrs = Map.take(params, ["name", "description", "prefix", "secrets"])
 
-    with {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
+    with :ok <- reject_config(params),
+         {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
          {:ok, updated} <- Ash.update(ws, attrs, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)
     end
   end
+
+  defp reject_config(%{"config" => _}) do
+    {:error,
+     {:invalid,
+      "`config` cannot be replaced through PATCH/PUT /api/workspaces/:id (it would wipe sibling " <>
+        "keys such as loop.canary); use PATCH /api/workspaces/:id/config with " <>
+        "{\"patch\": ..., \"unset_paths\": [...]}"}}
+  end
+
+  defp reject_config(_params), do: :ok
 
   @doc """
   Field-level config update. Body shape:
@@ -86,12 +102,18 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   Both keys are optional. The existing `config` is read, `unset_paths` are
   removed, then `patch` is deep-merged in (siblings preserved). The result
   is validated; on failure the existing config is untouched.
+
+  `unset_paths` are dotted keys with `\\.` for a literal dot (a repo name);
+  unsetting an absent key is a no-op 200. The server refuses top-level
+  `secret*`/`credentials*` keys in `patch` (use `secrets`) and a write that
+  newly empties `repo_paths` or sets `tracker.type` with no `tracker.config`;
+  `"force": true` overrides the last two.
   """
   def patch_config(conn, %{"id" => id} = params) do
     patch = Map.get(params, "patch") || %{}
     unset_paths = Map.get(params, "unset_paths") || []
 
-    args = %{patch: patch, unset_paths: unset_paths}
+    args = %{patch: patch, unset_paths: unset_paths, force: Map.get(params, "force") == true}
 
     with {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
          {:ok, updated} <-
