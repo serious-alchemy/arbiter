@@ -116,14 +116,10 @@ defmodule ArbiterCli.Cmd.Settings do
     end
   end
 
-  # JSON when it parses (5, [..], [], null), otherwise the raw string — the
-  # server then rejects it with the allowed values.
-  defp parse(raw) do
-    case Jason.decode(String.trim(raw)) do
-      {:ok, v} -> v
-      _ -> raw
-    end
-  end
+  # The same value rule as `arb config set` (`Config.Value.parse_value/1`):
+  # JSON when it parses (5, [..], [], null, "quoted"), otherwise the raw string
+  # — the server then rejects it with the allowed values.
+  defp parse(raw), do: ArbiterCli.Cmd.Config.Value.parse_value(raw)
 
   defp print_item(i) do
     source = if i["overridden"], do: "override", else: "default"
