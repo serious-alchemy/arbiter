@@ -28,8 +28,11 @@ defmodule Arbiter.Tasks.Issue do
   one already in `backlog`, is a no-op success. The **strict** `:promote` /
   `:demote` are the board's (`BoardLive`): a card the operator drags
   from a column it is no longer in means the board is stale, and the error is
-  what tells the LiveView to reload. Both doors refuse the same states (a live
-  worker, `verifying`, `closed`) and apply the same transition.
+  what tells the LiveView to reload. The two doors apply the same transition and
+  the same guards (the acceptance-criteria gate on promote; `GuardDemote`'s
+  live-worker / `verifying` / `closed` refusal on demote); they differ only in
+  what a ticket already past the transition's source state gets — a no-op
+  success or an error.
 
   `:update` accepts none of `state`, `close_reason` or `rank`. bd-36ytcl
   removed the legacy `status` and `refined` columns the transitions used to
