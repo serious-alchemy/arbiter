@@ -329,17 +329,14 @@ defmodule Arbiter.MCP.Tools.Worker do
   running in other workspaces. A ReviewGate reviewer's run is its ticket's,
   so it is listed under the ticket's workspace.
 
-  bd-45tkhq: a workspace-agnostic coordinator that names no `workspace` gets
-  one resolved for it (`Tools.resolve_workspace_id/2` — the scope's bound
-  workspace, else the installation default). That guess can be wrong for
-  where a given worker is actually running, and an empty `workers: []` on
-  its own reads as "nothing is running" rather than "scoped to a workspace
-  with nothing running". The response always echoes the `workspace_id` it
-  scoped to so that ambiguity is never silent.
+  A workspace-agnostic coordinator that names no `workspace` lists ALL
+  workspaces (`Arbiter.Tasks.Workspaces`, `:read` mode) — it is never silently
+  narrowed to a guessed one (bd-45tkhq). The response always echoes the
+  `workspace_id` it scoped to (`nil` for all) so the scope is never silent.
   """
   @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
       runs = Current.list(workspace_id: ws_id)
 
       # bd-8vnuy3: the task's settled + in-flight spend — the issue page's
@@ -712,10 +709,11 @@ defmodule Arbiter.MCP.Tools.Worker do
   @spec transcript_capture_stats(Scope.t(), map()) ::
           {:ok, map()} | {:error, {atom(), String.t()}}
   def transcript_capture_stats(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
       runs =
         Arbiter.Workers.Run
-        |> Ash.Query.filter(workspace_id == ^ws_id and started_at >= ^@corpus_start_date)
+        |> Ash.Query.filter(started_at >= ^@corpus_start_date)
+        |> then(fn q -> if ws_id, do: Ash.Query.filter(q, workspace_id == ^ws_id), else: q end)
         |> Ash.read!()
 
       {agent_sessions, workflow_only} =
@@ -751,6 +749,7 @@ defmodule Arbiter.MCP.Tools.Worker do
 
       {:ok,
        %{
+         workspace_id: ws_id,
          corpus_start_date: Date.to_iso8601(DateTime.to_date(@corpus_start_date)),
          total_runs: length(runs),
          claude_sessions: length(agent_sessions),

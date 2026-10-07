@@ -89,21 +89,24 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   (`Arbiter.Tasks.EffectivePriority.order/1`, the §4 key of `Arbiter.Board.Scheduler.order/1`:
   effective priority, …, own priority, rank, age — plain priority, rank, age while no epic has a floor).
   """
-  @spec open(String.t(), keyword()) :: [{Issue.t(), View.t()}]
-  def open(workspace_id, opts \\ []) when is_binary(workspace_id) do
+  @spec open(String.t() | nil, keyword()) :: [{Issue.t(), View.t()}]
+  def open(workspace_id, opts \\ []) when is_binary(workspace_id) or is_nil(workspace_id) do
     excluded = Issue.non_dispatchable_types()
 
     issues =
       Issue
-      |> Ash.Query.filter(
-        workspace_id == ^workspace_id and state != :closed and issue_type not in ^excluded
-      )
+      |> open_in_workspace(workspace_id)
+      |> Ash.Query.filter(state != :closed and issue_type not in ^excluded)
       |> Ash.read!()
       |> EffectivePriority.order()
 
     views = views(issues, opts)
     Enum.map(issues, &{&1, Map.fetch!(views, &1.id)})
   end
+
+  # `nil` is every workspace (the omitted-workspace read rule).
+  defp open_in_workspace(query, nil), do: query
+  defp open_in_workspace(query, ws_id), do: Ash.Query.filter(query, workspace_id == ^ws_id)
 
   @doc """
   A view as JSON: `state`, `column`, `step`, `blocked_by`, `attention`

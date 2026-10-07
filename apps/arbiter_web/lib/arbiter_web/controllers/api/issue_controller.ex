@@ -44,23 +44,27 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Estimate
   alias Arbiter.Workers.Current
+  alias ArbiterWeb.Api.WorkspaceParam
   alias ArbiterWeb.InstallationSettings
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @atom_fields ~w(issue_type tracker_type)a
-  @filter_fields ~w(state priority difficulty issue_type workspace_id)a
+  @filter_fields ~w(state priority difficulty issue_type)a
 
   def index(conn, params) do
-    with {:ok, filters} <- build_filters(params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, filters} <- build_filters(params) do
+      filters = if ws_id, do: [{:workspace_id, ws_id} | filters], else: filters
       query = Ash.Query.do_filter(Ash.Query.new(Issue), filters)
 
       case Ash.read(query) do
         {:ok, issues} ->
-          render(conn, :index, issues: issues)
+          render(conn, :index, issues: issues, workspace_id: ws_id)
 
         {:error, _} = err ->
           err
@@ -69,26 +73,34 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def ready(conn, params) do
-    opts =
-      case params["workspace_id"] do
-        ws when is_binary(ws) and ws != "" -> [workspace_id: ws]
-        _ -> []
-      end
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      opts = if ws_id, do: [workspace_id: ws_id], else: []
 
-    # ES4: `Issue.ready/1` is the set; the §4 key (`EffectivePriority.order/1`,
-    # an epic's floor included) is the order `arb ready` prints it in.
-    issues = opts |> Issue.ready() |> EffectivePriority.order()
-    render(conn, :index, issues: issues)
+      # ES4: `Issue.ready/1` is the set; the §4 key (`EffectivePriority.order/1`,
+      # an epic's floor included) is the order `arb ready` prints it in.
+      issues = opts |> Issue.ready() |> EffectivePriority.order()
+      render(conn, :index, issues: issues, workspace_id: ws_id)
+    end
   end
 
   # bd-6fkgvo: every open ticket in a workspace with its lifecycle projection
   # (state, column, step, blocked_by, attention), epics excluded as on the
   # board, in dispatch order — what `arb prime` groups into its sections.
-  def lifecycle(conn, %{"workspace_id" => ws_id}) when is_binary(ws_id) and ws_id != "" do
-    render(conn, :lifecycle, tickets: Projection.open(ws_id), holds: ready_holds(ws_id))
+  def lifecycle(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      render(conn, :lifecycle,
+        tickets: Projection.open(ws_id),
+        holds: ready_holds(ws_id),
+        workspace_id: ws_id
+      )
+    end
   end
 
-  def lifecycle(_conn, _params), do: {:error, {:invalid, "workspace_id is required"}}
+  # `nil` (every workspace) merges each workspace's holds; ticket ids are
+  # globally unique, so the maps never collide.
+  defp ready_holds(nil) do
+    Workspace |> Ash.read!() |> Enum.reduce(%{}, &Map.merge(&2, ready_holds(&1.id)))
+  end
 
   # bd-dtdeff: why the scheduler is not dispatching each Ready card, from the
   # board's own plan (the reason its card shows), so a card Autopilot is
@@ -156,12 +168,19 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def create(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
+      do_create(conn, params, ws_id)
+    end
+  end
+
+  defp do_create(conn, params, ws_id) do
     force? = params["force"] == true
     assignee_warnings = AssigneeCompat.warnings(params)
 
     attrs =
       params
-      |> Map.drop(["id", "force", "assignee"])
+      |> Map.drop(["id", "force", "assignee", "workspace"])
+      |> Map.put("workspace_id", ws_id)
       |> coerce_atoms(@atom_fields)
 
     case dedup_check(attrs, force?) do

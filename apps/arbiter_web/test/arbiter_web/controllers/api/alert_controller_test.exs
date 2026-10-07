@@ -39,14 +39,27 @@ defmodule ArbiterWeb.Api.AlertControllerTest do
     assert is_binary(first["raised_at"])
   end
 
-  test "filters by workspace and kind", %{conn: conn} do
-    a = raise_one(:credential_expired, "k1", "ws-a")
-    b = raise_one(:overage_alert, "ws-b", "ws-b")
+  test "filters by workspace (id or name) and kind, echoing the scope", %{conn: conn} do
+    ws_a = Ash.create!(Arbiter.Tasks.Workspace, %{name: "alert-ws-a"})
+    ws_b = Ash.create!(Arbiter.Tasks.Workspace, %{name: "alert-ws-b"})
+    a = raise_one(:credential_expired, "k1", ws_a.id)
+    b = raise_one(:overage_alert, "ws-b", ws_b.id)
 
-    assert %{"alerts" => [%{"id" => id_b}]} =
-             conn |> get("/api/alerts", %{"workspace" => "ws-b"}) |> json_response(200)
+    for ref <- [ws_b.name, ws_b.id] do
+      assert %{"alerts" => [%{"id" => id_b}], "workspace_id" => ws_id} =
+               conn |> get("/api/alerts", %{"workspace" => ref}) |> json_response(200)
 
-    assert id_b == b.id
+      assert id_b == b.id
+      assert ws_id == ws_b.id
+    end
+
+    assert %{"alerts" => [%{"id" => alias_id}]} =
+             conn |> get("/api/alerts", %{"workspace_id" => ws_b.id}) |> json_response(200)
+
+    assert alias_id == b.id
+
+    assert %{"error" => %{"type" => "not_found"}} =
+             conn |> get("/api/alerts", %{"workspace" => "nope"}) |> json_response(404)
 
     assert %{"alerts" => [%{"id" => id_a}]} =
              conn |> get("/api/alerts", %{"kind" => "credential_expired"}) |> json_response(200)

@@ -1,19 +1,24 @@
 defmodule ArbiterWeb.Api.RunControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workers.Run
 
-  @ws "ws-api-run"
-
+  # `workspace` is resolved server-side (id or name; unknown is a 404), so the
+  # fixtures hang off real workspaces.
   setup %{conn: conn} do
+    ws = Ash.create!(Workspace, %{name: "ws-api-run-#{System.unique_integer([:positive])}"})
+    Process.put(:run_ws, ws.id)
     {:ok, conn: put_req_header(conn, "accept", "application/json")}
   end
+
+  defp ws_id, do: Process.get(:run_ws)
 
   defp insert_run!(attrs) do
     base = %{
       task_id: "bd-#{System.unique_integer([:positive])}",
       repo: "arbiter",
-      workspace_id: @ws,
+      workspace_id: ws_id(),
       state: :working,
       started_at: DateTime.utc_now()
     }
@@ -37,7 +42,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       _ = insert_run!(%{task_id: "bd-h3", started_at: newer, state: :finished, outcome: :failed})
       _ = insert_run!(%{task_id: "bd-h4", started_at: newer, workspace_id: "other"})
 
-      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, outcome: "succeeded"})
+      conn = get(conn, ~p"/api/workers/history", %{workspace_id: ws_id(), outcome: "succeeded"})
       data = json_response(conn, 200)["data"]
       ids = Enum.map(data, & &1["task_id"])
       assert ids == ["bd-h2", "bd-h1"]
@@ -81,7 +86,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
       data =
         conn
-        |> get(~p"/api/workers/history", %{workspace_id: @ws, kind: "review"})
+        |> get(~p"/api/workers/history", %{workspace_id: ws_id(), kind: "review"})
         |> json_response(200)
         |> Map.fetch!("data")
 
@@ -89,7 +94,11 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
       data =
         conn
-        |> get(~p"/api/workers/history", %{workspace_id: @ws, kind: "review", state: "waiting"})
+        |> get(~p"/api/workers/history", %{
+          workspace_id: ws_id(),
+          kind: "review",
+          state: "waiting"
+        })
         |> json_response(200)
         |> Map.fetch!("data")
 
@@ -104,7 +113,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
       ids_for = fn status ->
         conn
-        |> get(~p"/api/workers/history", %{workspace_id: @ws, status: status})
+        |> get(~p"/api/workers/history", %{workspace_id: ws_id(), status: status})
         |> json_response(200)
         |> Map.fetch!("data")
         |> Enum.map(& &1["task_id"])
@@ -128,7 +137,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
         })
       end
 
-      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, limit: "2"})
+      conn = get(conn, ~p"/api/workers/history", %{workspace_id: ws_id(), limit: "2"})
       assert length(json_response(conn, 200)["data"]) == 2
     end
 
@@ -157,7 +166,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
       conn =
         get(conn, ~p"/api/workers/history", %{
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           before: "2026-05-27T11:00:00Z"
         })
 

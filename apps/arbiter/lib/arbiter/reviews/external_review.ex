@@ -69,7 +69,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.{Checkout, Coverage, PrState, Record}
-  alias Arbiter.Tasks.{Issue, IssueRepo, RepoConfig, Workspace}
+  alias Arbiter.Tasks.{Issue, IssueRepo, RepoConfig, Workspace, Workspaces}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
@@ -1855,51 +1855,16 @@ defmodule Arbiter.Reviews.ExternalReview do
   # "default"); a string → a workspace id, then a workspace name. Mirrors the
   # resolution `Arbiter.MCP.Tools` uses for workspace-agnostic coordinator tools.
 
-  defp resolve_workspace(nil), do: default_workspace()
-
-  defp resolve_workspace(ref) when is_binary(ref) and ref != "" do
-    with :error <- workspace_by_id(ref),
-         :error <- workspace_by_name(ref) do
-      {:error, {:workspace, "workspace #{inspect(ref)} not found"}}
-    end
-  end
-
-  defp resolve_workspace(_), do: default_workspace()
-
-  defp default_workspace do
-    case Ash.read!(Workspace) do
-      [%Workspace{} = ws] ->
-        {:ok, ws}
-
-      [] ->
-        {:error, {:workspace, "no workspaces exist on this installation"}}
-
-      many ->
-        case Enum.find(many, &(&1.name == "default")) do
-          %Workspace{} = ws -> {:ok, ws}
-          nil -> {:error, {:workspace, "multiple workspaces; pass a workspace name or id"}}
-        end
+  # The one omitted-workspace rule (`Arbiter.Tasks.Workspaces`, `:write`): a
+  # named workspace (id or name), else the sole workspace, else a refusal that
+  # lists the candidates — never the one that happens to be named `default`.
+  defp resolve_workspace(ref) do
+    case Workspaces.resolve_workspace(nil, ref, mode: :write) do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      {:error, {_kind, msg}} -> {:error, {:workspace, msg}}
     end
   rescue
     e -> {:error, {:workspace, "could not load workspaces: #{Exception.message(e)}"}}
-  end
-
-  defp workspace_by_id(ref) do
-    case Ash.get(Workspace, ref) do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp workspace_by_name(ref) do
-    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
   end
 
   # ---- repo path resolution ------------------------------------------------

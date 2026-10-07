@@ -5,17 +5,21 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event
 
-  @ws "ws-api-usage"
-
+  # `workspace` is resolved server-side (id or name; unknown is a 404), so the
+  # ledger fixtures hang off a real workspace.
   setup %{conn: conn} do
+    ws = Ash.create!(Workspace, %{name: "ws-api-usage-#{System.unique_integer([:positive])}"})
+    Process.put(:usage_ws, ws.id)
     {:ok, conn: put_req_header(conn, "accept", "application/json")}
   end
+
+  defp ws_id, do: Process.get(:usage_ws)
 
   defp insert_event!(attrs) do
     base = %{
       task_id: "bd-#{System.unique_integer([:positive])}",
       repo: "arbiter",
-      workspace_id: @ws,
+      workspace_id: ws_id(),
       step: :work,
       occurred_at: DateTime.utc_now()
     }
@@ -52,7 +56,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-r1", cost_usd: 2.0, tokens_in: 200})
       _ = insert_event!(%{task_id: "bd-r2", cost_usd: 0.5})
 
-      conn = get(conn, ~p"/api/usage", %{by: "task", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "task", workspace_id: ws_id()})
       body = json_response(conn, 200)
       assert body["by"] == "task"
 
@@ -67,7 +71,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{cost_usd: 1.0, occurred_at: ~U[2026-06-01 10:00:00.000000Z]})
       _ = insert_event!(%{cost_usd: 0.5, occurred_at: ~U[2026-06-02 10:00:00.000000Z]})
 
-      conn = get(conn, ~p"/api/usage", %{by: "day", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "day", workspace_id: ws_id()})
       groups = Enum.map(json_response(conn, 200)["data"], & &1["group"])
       assert groups == ["2026-06-01", "2026-06-02"]
     end
@@ -76,7 +80,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{step: :work, cost_usd: 1.0})
       _ = insert_event!(%{step: :review, cost_usd: 0.5, task_id: "bd-r#review"})
 
-      conn = get(conn, ~p"/api/usage", %{by: "step", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "step", workspace_id: ws_id()})
       by_step = Map.new(json_response(conn, 200)["data"], &{&1["group"], &1})
       assert by_step["work"]["rows"] == 1
       assert by_step["review"]["rows"] == 1
@@ -85,13 +89,13 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
     test "by=campaign is accepted as a deprecated alias for by=epic", %{conn: conn} do
       _ = insert_event!(%{cost_usd: 1.0})
 
-      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: ws_id()})
       body = json_response(conn, 200)["data"]
       assert Enum.any?(body, &(&1["group"] == "(no_epic)"))
     end
 
     test "the response echoes the normalized by dimension for a deprecated alias", %{conn: conn} do
-      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: ws_id()})
       assert json_response(conn, 200)["by"] == "epic"
     end
 
@@ -116,7 +120,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
 
       _ = insert_event!(%{task_id: "bd-no-session", cost_usd: 5.0})
 
-      conn = get(conn, ~p"/api/usage", %{by: "session", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "session", workspace_id: ws_id()})
       body = json_response(conn, 200)["data"]
 
       assert [row] = body
@@ -142,7 +146,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
           thinking_tokens: 60
         })
 
-      conn = get(conn, ~p"/api/usage", %{by: "model", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "model", workspace_id: ws_id()})
       data = Map.new(json_response(conn, 200)["data"], &{&1["group"], &1})
 
       row = data["gemini-3.8-flash-low"]
@@ -175,7 +179,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
 
       _ = insert_event!(%{task_id: "bd-e2", cost_usd: 0.2, occurred_at: now})
 
-      conn = get(conn, ~p"/api/usage/events", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{workspace_id: ws_id()})
       data = json_response(conn, 200)["data"]
       ids = Enum.map(data, & &1["task_id"])
       assert hd(ids) == "bd-e2"
@@ -185,7 +189,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-only", cost_usd: 0.3})
       _ = insert_event!(%{task_id: "bd-other", cost_usd: 0.4})
 
-      conn = get(conn, ~p"/api/usage/events", %{task_id: "bd-only", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{task_id: "bd-only", workspace_id: ws_id()})
       data = json_response(conn, 200)["data"]
       assert Enum.all?(data, &(&1["task_id"] == "bd-only"))
     end
@@ -196,7 +200,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-trib#review#r2", step: :review, cost_usd: 0.3})
       _ = insert_event!(%{task_id: "bd-unrelated", cost_usd: 0.9})
 
-      conn = get(conn, ~p"/api/usage/events", %{task_id: "bd-trib", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{task_id: "bd-trib", workspace_id: ws_id()})
       data = json_response(conn, 200)["data"]
       returned_ids = Enum.map(data, & &1["task_id"]) |> Enum.sort()
       assert returned_ids == ["bd-trib", "bd-trib#review", "bd-trib#review#r2"]
@@ -207,7 +211,11 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-trib2#review", step: :review, cost_usd: 0.2})
 
       conn =
-        get(conn, ~p"/api/usage/events", %{task_id: "bd-trib2", step: "review", workspace_id: @ws})
+        get(conn, ~p"/api/usage/events", %{
+          task_id: "bd-trib2",
+          step: "review",
+          workspace_id: ws_id()
+        })
 
       data = json_response(conn, 200)["data"]
       assert length(data) == 1
@@ -232,7 +240,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
           cost_usd: 0.4
         })
 
-      conn = get(conn, ~p"/api/usage/events", %{session_id: "sess-only", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{session_id: "sess-only", workspace_id: ws_id()})
       data = json_response(conn, 200)["data"]
       assert Enum.all?(data, &(&1["session_id"] == "sess-only"))
       assert data != []
@@ -248,7 +256,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
 
       _ = insert_event!(%{task_id: nil, source: :preflight, cost_usd: 0.1})
 
-      conn = get(conn, ~p"/api/usage", %{by: "source", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "source", workspace_id: ws_id()})
       body = json_response(conn, 200)
       assert body["by"] == "source"
 
@@ -263,7 +271,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-src2", source: :task, cost_usd: 1.0})
       _ = insert_event!(%{task_id: nil, source: :probe, cost_usd: 0.25})
 
-      conn = get(conn, ~p"/api/usage", %{by: "task", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage", %{by: "task", workspace_id: ws_id()})
       groups = json_response(conn, 200)["data"] |> Enum.map(& &1["group"])
 
       assert "bd-src2" in groups
@@ -277,7 +285,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       _ = insert_event!(%{task_id: "bd-src3", source: :task, cost_usd: 1.0})
       _ = insert_event!(%{task_id: nil, source: :probe, cost_usd: 0.25})
 
-      conn = get(conn, ~p"/api/usage/events", %{source: "probe", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{source: "probe", workspace_id: ws_id()})
       data = json_response(conn, 200)["data"]
 
       assert [event] = data
@@ -286,7 +294,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
     end
 
     test "an unknown source is a 400, not a crash", %{conn: conn} do
-      conn = get(conn, ~p"/api/usage/events", %{source: "not_a_source", workspace_id: @ws})
+      conn = get(conn, ~p"/api/usage/events", %{source: "not_a_source", workspace_id: ws_id()})
       assert json_response(conn, 400)
     end
   end
@@ -440,7 +448,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       body = conn |> get(~p"/api/usage/calibration") |> json_response(200)
 
       assert Enum.sort(Map.keys(body)) ==
-               ~w(flagged re_dispatched_flagged tiers window_days)
+               ~w(flagged re_dispatched_flagged tiers window_days workspace_id)
 
       assert Enum.sort(Map.keys(hd(body["tiers"]))) ==
                ~w(difficulty median n n_scored over_rate over_rated p25 p75 p90

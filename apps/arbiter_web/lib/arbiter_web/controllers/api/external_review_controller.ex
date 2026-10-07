@@ -9,7 +9,8 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
       Note: the MCP `external_review_list` tool uses "external_reviews" instead (deliberate
       asymmetry — each transport follows its own convention per bd-bs5b12 Option 3).
       Optional query params:
-        * `workspace_id` — restrict to one workspace.
+        * `workspace` — restrict to one workspace (id or name; `workspace_id` is
+          its alias). Omitted = all workspaces; the body echoes `workspace_id`.
         * `status`       — filter by `running` | `completed` | `failed`.
         * `since`        — ISO8601 lower bound on `started_at`.
         * `limit`        — max rows (default 50, max 500).
@@ -30,6 +31,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
 
   alias Arbiter.Reviews.Record
   alias Arbiter.Reviews.Transcript
+  alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -38,19 +40,20 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
   @max_limit 500
 
   def index(conn, params) do
-    with {:ok, since} <- parse_since(params["since"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, since} <- parse_since(params["since"]),
          {:ok, status} <- parse_status(params["status"]),
          {:ok, limit} <- parse_limit(params["limit"]) do
       records =
         Record
-        |> filter_workspace(params["workspace_id"])
+        |> filter_workspace(ws_id)
         |> filter_status(status)
         |> filter_since(since)
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.Query.limit(limit)
         |> Ash.read!()
 
-      json(conn, %{data: Enum.map(records, &render_record/1)})
+      json(conn, %{data: Enum.map(records, &render_record/1), workspace_id: ws_id})
     end
   end
 
@@ -137,7 +140,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
 
   # ---- query helpers -------------------------------------------------------
 
-  defp filter_workspace(query, ws) when ws in [nil, ""], do: query
+  defp filter_workspace(query, nil), do: query
   defp filter_workspace(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
 
   defp filter_status(query, nil), do: query

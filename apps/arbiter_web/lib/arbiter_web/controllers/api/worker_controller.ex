@@ -56,6 +56,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Worker.PromptLog
   alias Arbiter.Workers.Current
   alias Arbiter.Workers.Run
+  alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -148,11 +149,17 @@ defmodule ArbiterWeb.Api.WorkerController do
   # immediately, then runs the CodeReview adapter workflow in the background and
   # acks with the resolved mr_ref + link. `repo`/`workspace` are optional.
   defp review_external(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      do_review_external(conn, params, ws_id)
+    end
+  end
+
+  defp do_review_external(conn, params, ws_id) do
     opts =
       [
         pr: params["pr"],
         repo: params["repo"],
-        workspace: params["workspace"],
+        workspace: ws_id,
         # report_only (propose) / automation flow through to ExternalReview, which
         # resolves whether the review posts to the PR or only reports (bd-36qzgx).
         automation: params["automation"],
@@ -373,9 +380,11 @@ defmodule ArbiterWeb.Api.WorkerController do
   defp refusal_text(_reason, _task_id, _verb), do: nil
 
   def index(conn, params) do
-    runs = Current.list(workspace_id: blank_to_nil(params["workspace_id"]))
-    # bd-8vnuy3: settled + in-flight spend, per task — the issue page's figure.
-    render(conn, :index, runs: runs, costs: worker_costs(runs))
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      runs = Current.list(workspace_id: ws_id)
+      # bd-8vnuy3: settled + in-flight spend, per task — the issue page's figure.
+      render(conn, :index, runs: runs, costs: worker_costs(runs), workspace_id: ws_id)
+    end
   end
 
   def show(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
@@ -389,9 +398,6 @@ defmodule ArbiterWeb.Api.WorkerController do
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
-
-  defp blank_to_nil(v) when is_binary(v) and v != "", do: v
-  defp blank_to_nil(_), do: nil
 
   # Best-effort, like the ledger read it replaced: a failed cost read costs the
   # listing its cost fields, not the listing.

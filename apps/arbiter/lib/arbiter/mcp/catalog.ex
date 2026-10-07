@@ -126,15 +126,19 @@ defmodule Arbiter.MCP.Catalog do
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
-  # a workspace here targets it explicitly. Omitting it resolves the workspace
-  # from the referenced entity (e.g. a task's own workspace) or the installation
-  # default. A workspace-bound scope (a worker) may only ever name its own.
+  # a workspace here targets it explicitly. Omitting it follows the one rule in
+  # `Arbiter.Tasks.Workspaces`: a bound token uses its own workspace; reads then
+  # cover ALL workspaces; writes use the sole workspace or fail. A workspace-bound
+  # scope (a worker) may only ever name its own.
   @workspace_field %{
     "type" => "string",
     "description" =>
       "Workspace name or id to operate in (optional). Coordinator tokens are " <>
-        "workspace-agnostic; omit to resolve from the referenced task or the " <>
-        "installation default. A worker may only ever name its own workspace."
+        "workspace-agnostic. Omitted: a list/read tool covers ALL workspaces (the " <>
+        "response echoes `workspace_id`); a tool that writes uses the only workspace " <>
+        "when there is exactly one and otherwise fails listing the candidates — it " <>
+        "never falls back to a workspace merely named `default`. A worker may only " <>
+        "ever name its own workspace."
   }
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
@@ -274,8 +278,8 @@ defmodule Arbiter.MCP.Catalog do
           "(a list of message ids) and/or `task_id`; at least one is required. `ids` resolve " <>
           "directly by id, regardless of workspace. `task_id` clears every coordinator message " <>
           "concerning that ticket; pass `workspace` to scope it explicitly, else it resolves the " <>
-          "usual way (bound workspace, then the installation default) and errors rather than " <>
-          "guessing when that's ambiguous. Rows are retained (soft-clear), never destroyed. " <>
+          "usual way for a write (bound workspace, then the sole workspace) and errors rather than " <>
+          "guessing when several exist. Rows are retained (soft-clear), never destroyed. " <>
           "Clears only YOUR view of the shared mailbox: a session token clears its own copy, " <>
           "leaving every other session and the sessionless coordinator still owing the message. " <>
           "Returns what was cleared and what id wasn't found.",
@@ -1235,10 +1239,10 @@ defmodule Arbiter.MCP.Catalog do
           "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
           "subordinate row (role is not null) — the merge queue owns those passes. The " <>
           "response always includes `workspace_id`: the workspace this call actually scoped " <>
-          "to (the `workspace` arg if given, else the caller's bound workspace, else the " <>
-          "installation default). An empty `workers: []` means no live workers in THAT " <>
-          "workspace, not that nothing is running anywhere — check `workspace_id` before " <>
-          "reading a zero count as \"everything died\".",
+          "to (the `workspace` arg if given, else the caller's bound workspace, else null " <>
+          "= ALL workspaces). An empty `workers: []` means no live workers in THAT " <>
+          "scope — check `workspace_id` before reading a zero count as \"everything " <>
+          "died\".",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },
@@ -2459,7 +2463,8 @@ defmodule Arbiter.MCP.Catalog do
           "thinking" => %{"type" => "string", "description" => "Optional thinking level."},
           "workspace" => %{
             "type" => "string",
-            "description" => "Workspace (id or name); defaults to the installation default."
+            "description" =>
+              "Workspace (id or name); the sole workspace when omitted, else required."
           }
         },
         "required" => ["difficulty", "model_tier"],
@@ -2480,7 +2485,8 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "workspace" => %{
             "type" => "string",
-            "description" => "Workspace (id or name); defaults to the installation default."
+            "description" =>
+              "Workspace (id or name); the sole workspace when omitted, else required."
           }
         },
         "additionalProperties" => false

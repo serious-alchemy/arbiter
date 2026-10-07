@@ -33,13 +33,12 @@ defmodule ArbiterWeb.Api.TrackerController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Tasks.AssigneeCompat
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
 
   action_fallback ArbiterWeb.Api.FallbackController
 
   def issues(conn, %{"workspace_id" => workspace_id}) do
-    with {:ok, workspace} <- get_workspace(workspace_id) do
+    with {:ok, workspace} <- get_workspace(conn, workspace_id) do
       case Trackers.list_open(workspace) do
         {:ok, summaries} ->
           json(conn, %{data: Enum.map(summaries, &serialize/1), supported: true})
@@ -54,7 +53,7 @@ defmodule ArbiterWeb.Api.TrackerController do
   end
 
   def create_ticket(conn, %{"workspace_id" => workspace_id} = params) do
-    with {:ok, workspace} <- get_workspace(workspace_id),
+    with {:ok, workspace} <- get_workspace(conn, workspace_id),
          :ok <- require_tracker(workspace) do
       attrs = build_ticket_attrs(params)
       tracker_type = Trackers.workspace_type(workspace)
@@ -128,10 +127,5 @@ defmodule ArbiterWeb.Api.TrackerController do
     }
   end
 
-  defp get_workspace(id) do
-    case Ash.get(Workspace, id) do
-      {:ok, ws} -> {:ok, ws}
-      {:error, _} = err -> err
-    end
-  end
+  defp get_workspace(conn, id), do: ArbiterWeb.Api.WorkspaceParam.resolve_ref(conn, id)
 end

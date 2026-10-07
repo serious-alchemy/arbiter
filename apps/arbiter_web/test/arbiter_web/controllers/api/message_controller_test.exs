@@ -1,13 +1,19 @@
 defmodule ArbiterWeb.Api.MessageControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
 
-  @ws "ws-api-msg"
-
+  # `workspace` is resolved server-side (id or name; unknown is a 404), so the
+  # fixtures hang off real workspaces.
   setup %{conn: conn} do
+    ws = Ash.create!(Workspace, %{name: "ws-api-msg-#{System.unique_integer([:positive])}"})
+    Ash.create!(Workspace, %{name: "ws-api-msg-other-#{System.unique_integer([:positive])}"})
+    Process.put(:msg_ws, ws.id)
     {:ok, conn: put_req_header(conn, "accept", "application/json")}
   end
+
+  defp ws_id, do: Process.get(:msg_ws)
 
   describe "POST /api/messages" do
     test "creates a mailbox message", %{conn: conn} do
@@ -18,7 +24,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
           to_ref: "bd-xyz",
           subject: "heads up",
           body: "check the API contract",
-          workspace_id: @ws
+          workspace_id: ws_id()
         })
 
       body = json_response(conn, 201)
@@ -34,7 +40,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     end
 
     test "returns 422 on invalid kind", %{conn: conn} do
-      conn = post(conn, ~p"/api/messages", %{kind: "bogus", body: "x", workspace_id: @ws})
+      conn = post(conn, ~p"/api/messages", %{kind: "bogus", body: "x", workspace_id: ws_id()})
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
 
@@ -46,7 +52,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
           to_ref: "coordinator",
           directive_ref: "bd-soren",
           body: "GitLab adapter complete",
-          workspace_id: @ws
+          workspace_id: ws_id()
         })
 
       body = json_response(conn, 201)
@@ -72,7 +78,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
         task_ref: task_ref,
         subject: "CI fix-pass on #{task_ref} needs human review",
         body: @wording,
-        workspace_id: @ws
+        workspace_id: ws_id()
       })
     end
 
@@ -106,7 +112,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
           to_ref: "coordinator",
           subject: "operator note",
           body: "hi",
-          workspace_id: @ws
+          workspace_id: ws_id()
         })
 
       refute json_response(conn, 201)["subject"] =~ "UNVERIFIED"
@@ -115,9 +121,9 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
   describe "GET /api/messages" do
     test "lists messages, filtering by kind and to_ref", %{conn: conn} do
-      {:ok, _} = Message.notify(%{workspace_id: @ws, body: "a notification"})
-      {:ok, _} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-1", body: "for bd-1"})
-      {:ok, _} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-2", body: "for bd-2"})
+      {:ok, _} = Message.notify(%{workspace_id: ws_id(), body: "a notification"})
+      {:ok, _} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-1", body: "for bd-1"})
+      {:ok, _} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-2", body: "for bd-2"})
 
       conn = get(conn, ~p"/api/messages", %{kind: "notification"})
       data = json_response(conn, 200)["data"]
@@ -129,8 +135,8 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     end
 
     test "unread=true returns only unacknowledged messages", %{conn: conn} do
-      {:ok, m} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-u", body: "unread one"})
-      {:ok, read} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-u", body: "read one"})
+      {:ok, m} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-u", body: "unread one"})
+      {:ok, read} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-u", body: "read one"})
       {:ok, _} = Message.mark_read(read)
 
       conn = get(conn, ~p"/api/messages", %{to_ref: "bd-u", unread: "true"})
@@ -141,10 +147,11 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
     test "unread=true excludes a message that was soft-cleared while still unread",
          %{conn: conn} do
-      {:ok, pending} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-c", body: "pending"})
+      {:ok, pending} =
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-c", body: "pending"})
 
       {:ok, cleared_unread} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "bd-c", body: "cleared-unread"})
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-c", body: "cleared-unread"})
 
       # Soft-clear only the second one *while it is still unread* (read_at nil,
       # cleared_at set) — the state clear_all can produce for never-seen mail.
@@ -159,9 +166,13 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
     test "outstanding=true returns read-but-uncleared messages and exposes cleared_at",
          %{conn: conn} do
-      {:ok, _pending} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "pending"})
-      {:ok, out} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "outstanding"})
-      {:ok, done} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "cleared"})
+      {:ok, _pending} =
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-o", body: "pending"})
+
+      {:ok, out} =
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-o", body: "outstanding"})
+
+      {:ok, done} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-o", body: "cleared"})
       {:ok, _} = Message.mark_read(out)
       {:ok, _} = Message.mark_read(done)
       {:ok, _} = Message.mark_cleared(done)
@@ -181,7 +192,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
   describe "POST /api/messages/:id/read" do
     test "stamps read_at", %{conn: conn} do
-      {:ok, m} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-r", body: "mark me"})
+      {:ok, m} = Message.send_mail(%{workspace_id: ws_id(), to_ref: "bd-r", body: "mark me"})
 
       conn = post(conn, ~p"/api/messages/#{m.id}/read", %{})
       body = json_response(conn, 200)
@@ -199,7 +210,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
          %{conn: conn} do
       {:ok, unread} =
         Message.send_mail(%{
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "coordinator",
           kind: :info,
           body: "keep me"
@@ -207,7 +218,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       {:ok, read} =
         Message.send_mail(%{
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "coordinator",
           kind: :info,
           body: "clear me"
@@ -217,7 +228,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       {:ok, other} =
         Message.send_mail(%{
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "bd-other",
           kind: :info,
           body: "not coordinator's"
@@ -242,14 +253,19 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
          %{conn: conn} do
       {:ok, unread} =
         Message.send_mail(%{
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "coordinator",
           kind: :info,
           body: "unread"
         })
 
       {:ok, read} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "read"})
+        Message.send_mail(%{
+          workspace_id: ws_id(),
+          to_ref: "coordinator",
+          kind: :info,
+          body: "read"
+        })
 
       {:ok, _} = Message.mark_read(read)
 
@@ -275,7 +291,8 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
   describe "per-reader read state" do
     setup do
-      ws = "ws-api-reader-#{System.unique_integer([:positive])}"
+      ws =
+        Ash.create!(Workspace, %{name: "ws-api-reader-#{System.unique_integer([:positive])}"}).id
 
       {:ok, m} =
         Message.send_mail(%{
@@ -360,7 +377,9 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
           body: "task escalation"
         })
 
-      conn = delete(conn, ~p"/api/messages", %{task_id: task, session: session})
+      conn =
+        delete(conn, ~p"/api/messages", %{task_id: task, session: session, workspace_id: ws})
+
       assert %{"cleared_count" => 1} = json_response(conn, 200)["data"]
 
       {:ok, reloaded} = Ash.get(Message, m.id)
@@ -461,7 +480,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
   describe "DELETE /api/messages?ids=... (per-message soft clear)" do
     test "soft-clears exactly the given ids, resolved regardless of workspace", %{conn: conn} do
       {:ok, m1} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "1"})
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "coordinator", kind: :info, body: "1"})
 
       {:ok, m2} =
         Message.send_mail(%{
@@ -472,7 +491,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
         })
 
       {:ok, untouched} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "3"})
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "coordinator", kind: :info, body: "3"})
 
       conn = delete(conn, ~p"/api/messages", %{ids: "#{m1.id},#{m2.id}"})
 
@@ -489,7 +508,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
     test "reports unknown ids as not_found", %{conn: conn} do
       {:ok, m} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "1"})
+        Message.send_mail(%{workspace_id: ws_id(), to_ref: "coordinator", kind: :info, body: "1"})
 
       bogus = Ecto.UUID.generate()
 
@@ -510,7 +529,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
         Message.send_mail(%{
           kind: :escalation,
           escalation_kind: :agent_raised,
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "coordinator",
           task_ref: task,
           body: "needs a decision"
@@ -520,13 +539,13 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
         Message.send_mail(%{
           kind: :escalation,
           escalation_kind: :agent_raised,
-          workspace_id: @ws,
+          workspace_id: ws_id(),
           to_ref: "coordinator",
           task_ref: "bd-ctrl-other",
           body: "not this task"
         })
 
-      conn = delete(conn, ~p"/api/messages", %{task_id: task})
+      conn = delete(conn, ~p"/api/messages", %{task_id: task, workspace_id: ws_id()})
 
       assert %{"data" => %{"cleared" => [cleared_id], "cleared_count" => 1}} =
                json_response(conn, 200)
@@ -537,20 +556,44 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
     end
 
+    # Operator ruling on bd-26s98f: a clear is a write, so it never guesses.
+    test "with several workspaces and none named it is refused, clearing nothing", %{conn: conn} do
+      task = "bd-ctrl-cleartask-ambiguous"
+
+      {:ok, msg} =
+        Message.send_mail(%{
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          workspace_id: ws_id(),
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "needs a decision"
+        })
+
+      conn = delete(conn, ~p"/api/messages", %{task_id: task})
+
+      assert %{"error" => %{"type" => "validation_error", "message" => message}} =
+               json_response(conn, 422)
+
+      assert message =~ "multiple workspaces; pass workspace (name or id)"
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, msg.id)
+    end
+
     test "scopes to a workspace when given", %{conn: conn} do
       task = "bd-ctrl-cleartask-ws"
+      elsewhere_ws = Ash.create!(Workspace, %{name: "ws-elsewhere-2"})
 
       {:ok, elsewhere} =
         Message.send_mail(%{
           kind: :escalation,
           escalation_kind: :agent_raised,
-          workspace_id: "ws-elsewhere-2",
+          workspace_id: elsewhere_ws.id,
           to_ref: "coordinator",
           task_ref: task,
           body: "elsewhere"
         })
 
-      conn = delete(conn, ~p"/api/messages", %{task_id: task, workspace_id: @ws})
+      conn = delete(conn, ~p"/api/messages", %{task_id: task, workspace_id: ws_id()})
 
       assert %{"data" => %{"cleared" => [], "cleared_count" => 0}} = json_response(conn, 200)
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, elsewhere.id)
