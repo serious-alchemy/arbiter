@@ -17,7 +17,9 @@ mode="${1:-APPROVE}"
 common="$(git rev-parse --path-format=absolute --git-common-dir)"
 n=0
 [ -f "$common/review_ci_passes" ] && n="$(cat "$common/review_ci_passes")"
-echo $((n + 1)) > "$common/review_ci_passes"
+passes_tmp="$common/review_ci_passes.tmp.$$"
+echo $((n + 1)) > "$passes_tmp"
+mv -f "$passes_tmp" "$common/review_ci_passes"
 git rev-parse HEAD > "$common/review_ci_reviewed_head"
 
 echo "reviewing the diff (pass $((n + 1)))"
