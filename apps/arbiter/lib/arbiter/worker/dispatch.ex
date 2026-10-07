@@ -492,6 +492,22 @@ defmodule Arbiter.Worker.Dispatch do
     Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume_session(task_id, opts) end)
   end
 
+  @doc """
+  The manual-resume entry point every surface calls (`arb worker resume`,
+  `POST /api/workers/:task_id/resume`, MCP `worker_resume`). `opts` carries the
+  `:resume_mode` `Arbiter.Worker.Dispatch.Params` normalised: `:session`
+  (default) continues the prior session via `resume_session/2`; `:briefing` is
+  the explicit opt-in for `resume/2`'s fresh agent briefed from git state.
+  """
+  @spec resume_task(String.t(), dispatch_opts()) ::
+          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+  def resume_task(task_id, opts \\ []) when is_binary(task_id) do
+    case Keyword.pop(opts, :resume_mode, :session) do
+      {:briefing, rest} -> resume(task_id, rest)
+      {:session, rest} -> resume_session(task_id, rest)
+    end
+  end
+
   defp do_resume_session(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_dispatchable(task, resume: true),

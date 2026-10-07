@@ -15,6 +15,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   alias Arbiter.Reviews.Guard
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.Dispatch.Params
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Current
 
@@ -39,18 +40,20 @@ defmodule Arbiter.MCP.Tools.Worker do
   so a chain of dispatches is tracked. When `provider` is omitted, the workspace's
   `agent.type` config is consulted and the first healthy provider is selected via
   `ProviderPool` — identical to the REST dispatch default. Pass an explicit
-  `provider` (`"claude"` | `"gemini"`, or the deprecated `with_claude: true` alias)
-  to override. Set `no_agent: true` to move the task to `:active` without
-  spawning a worker (hand-off / manual-attach path).
+  `provider` (any of `Arbiter.Agents.valid_agent_types/0`, or the deprecated
+  `with_claude` / `with_gemini` aliases) to override. Set `no_agent: true` to move
+  the task to `:active` without spawning a worker (hand-off / manual-attach path);
+  it cannot be combined with a provider. An unknown provider or argument is an
+  error, never a silent fall-through to the workspace default
+  (`Arbiter.Worker.Dispatch.Params`).
   Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
   """
   @spec worker_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_dispatch(%Scope{} = scope, args) do
     with :ok <- Tools.ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
+         {:ok, opts} <- normalize(:dispatch, scope, args),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, opts} <- worker_dispatch_opts(scope, args) do
+         {:ok, _task} <- Tools.fetch_task(scope, args, task_id) do
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> dispatch_error(reason, task_id)
@@ -61,11 +64,15 @@ defmodule Arbiter.MCP.Tools.Worker do
   # ---- worker_resume -----------------------------------------------------
 
   @doc """
-  Re-attach a fresh worker to a task's **preserved** worktree
-  (`arb resume`). Coordinator only, and — like `worker_dispatch` — gated by the
+  Resume a stopped worker (`arb worker resume`): continue the task's PRIOR
+  session (`claude --resume <session_id>`) in its **preserved** worktree — the same
+  operation as `POST /api/workers/:task_id/resume`, `Dispatch.resume_session/2`.
+  `mode: "briefing"` is the explicit opt-in for the other variant, a fresh agent
+  briefed from the worktree's git state (`Dispatch.resume/2`). Coordinator only,
+  and — like `worker_dispatch` — gated by the
   dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
   the same recursion concerns apply. The child worker's scope is minted one
-  level deeper. Backs onto `Arbiter.Worker.Dispatch.resume/2`.
+  level deeper. Backs onto `Arbiter.Worker.Dispatch.resume_task/2`.
 
   bd-92mx1m: a task that released its slot (parked for a human, stopped,
   completed) re-acquires one like a new admission. At a full cap the resume is
@@ -76,19 +83,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   @spec worker_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_resume(%Scope{} = scope, args) do
     with :ok <- Tools.ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
+         {:ok, opts} <- normalize(:resume, scope, args),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, force} <- Tools.fetch_bool(args, "force", false),
-         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false) do
-      opts =
-        scope
-        |> dispatch_opts(args)
-        |> Keyword.put(:resume_origin, :human)
-        |> Keyword.put(:force_slot, force)
-        |> Keyword.put(:slot_override_actor, actor_string(scope.tier))
-
-      case Dispatch.resume(task_id, opts) do
+         {:ok, _task} <- Tools.fetch_task(scope, args, task_id) do
+      case Dispatch.resume_task(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> dispatch_error(reason, task_id)
       end
@@ -123,21 +121,14 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   defp worker_review_task(%Scope{} = scope, args) do
     with :ok <- Tools.ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
+         {:ok, opts} <- normalize(:review, scope, args),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, task} <- Tools.fetch_task(scope, args, task_id),
          {:ok, force} <- Tools.fetch_bool(args, "force", false),
-         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
          # The guard reads the TASK's workspace config (never the caller's
          # bound workspace, nil for a normal coordinator token) and refuses
          # before anything is written or spawned — see `Arbiter.Reviews.Guard`.
          {:ok, _task} <- Guard.prepare(task, args, force) do
-      opts =
-        scope
-        |> dispatch_opts(args)
-        |> Keyword.put(:review, true)
-        |> review_claude_flag(args)
-
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> dispatch_error(reason, task_id)
@@ -155,7 +146,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   # mirror the task-review path and are carried onto that engagement.
   defp worker_review_external(%Scope{} = scope, args, pr) do
     with :ok <- Tools.ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
+         :ok <- Params.ensure_depth(scope),
          {:ok, ws_ref} <- Tools.authorized_workspace(scope, args),
          {:ok, follow_up} <- Tools.fetch_optional_bool(args, "follow_up"),
          {:ok, force} <- Tools.fetch_optional_bool(args, "force") do
@@ -662,149 +653,15 @@ defmodule Arbiter.MCP.Tools.Worker do
     Float.round((total - missing) / total * 100, 1)
   end
 
-  # ---- Phase 2 dispatch guardrail + opts (docs/mcp-server-design.md §4.3) ----
+  # ---- dispatch opts ------------------------------------------------------
 
-  defp ensure_dispatch_depth(%Scope{depth: depth}) do
-    max = Arbiter.MCP.max_depth()
-
-    if depth < max,
-      do: :ok,
-      else: {:error, {:unauthorized, "dispatch depth limit (#{max}) reached"}}
-  end
-
-  # The opts common to every worker-dispatch tool (dispatch / resume / review):
-  # the optional `repo` / `model` overrides plus the child scope depth, minted
-  # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
-  defp dispatch_opts(%Scope{tier: tier, depth: depth}, args) do
-    {:ok, force_quota} = Tools.fetch_bool(args, "force_quota", false)
-    quota_bypass_reason = Tools.fetch_string(args, "force_quota_reason")
-
-    [depth: depth + 1]
-    |> Tools.maybe_put_kw(:repo, Tools.fetch_string(args, "repo"))
-    |> Tools.maybe_put_kw(:model, Tools.fetch_string(args, "model"))
-    |> then(fn opts ->
-      if force_quota,
-        do:
-          opts
-          |> Keyword.put(:skip_quota_gate, true)
-          |> Keyword.put(:quota_bypass_actor, actor_string(tier))
-          |> then(fn opts2 ->
-            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
-            # wired Credo up. Thresholds stay at the tool's own default so new
-            # code is held to it; see the note in .credo.exs.
-            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-            if quota_bypass_reason,
-              do: Keyword.put(opts2, :quota_bypass_reason, quota_bypass_reason),
-              else: opts2
-          end),
-        else: opts
-    end)
-  end
-
-  defp actor_string(:coordinator), do: "coordinator"
-
-  # :worker-tier scopes never have can_dispatch: true (mcp/scope.ex), so this branch is unreachable in practice.
-  defp actor_string(:worker), do: "worker"
-
-  # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the
-  # REST `POST /api/workers/dispatch` contract: an explicit `provider` (or deprecated
-  # `with_claude`) forces that agent via `agent_type`; `no_agent: true` parks the
-  # task `:active` (hand-off path); otherwise the workspace's `agent.type`
-  # config is used to pick the first healthy provider.
-  defp worker_dispatch_opts(%Scope{tier: tier} = scope, args) do
-    with {:ok, force} <- Tools.fetch_bool(args, "force", false),
-         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
-         {:ok, over_cap} <- Tools.fetch_bool(args, "over_cap", false),
-         {:ok, no_agent} <- Tools.fetch_bool(args, "no_agent", false),
-         {:ok, with_claude} <- Tools.fetch_bool(args, "with_claude", false) do
-      scope
-      |> dispatch_opts(args)
-      # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
-      |> Keyword.put(:force, force)
-      # bd-8suxac: go over a full provider account's cap (recorded).
-      |> Keyword.put(:force_slot, over_cap)
-      |> Keyword.put(:slot_override_actor, actor_string(tier))
-      |> Keyword.put(:dispatched_by, "mcp")
-      |> with_provider(args, no_agent, with_claude)
-    end
-  end
-
-  defp with_provider(base, args, no_agent, with_claude) do
-    case dispatch_provider(args, no_agent, with_claude) do
-      {:error, {:unknown_provider, value}} ->
-        # bd-dcvo3n: an explicit but unrecognized `provider` must fail LOUDLY.
-        # Falling through to the workspace default here is what silently spawned
-        # Claude when `provider: "codex"` hit a server too old to know the value
-        # — a substitution the caller had no signal for. Reject it instead.
-        {:error,
-         {:invalid,
-          "unknown provider #{inspect(value)}; valid providers: " <>
-            Enum.join(Arbiter.Agents.valid_agent_types(), ", ")}}
-
-      :park ->
-        {:ok, Keyword.put(base, :start_driver, false)}
-
-      nil ->
-        # No provider specified — resolve from workspace `agent.type` config.
-        {:ok, Keyword.put(base, :start_claude, true)}
-
-      type when is_atom(type) ->
-        {:ok, base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)}
-    end
-  end
-
-  # Resolve the worker provider from `worker_dispatch` args. Returns `:park` for
-  # an explicit `no_agent` opt-in, a provider atom when specified via `provider`
-  # or the deprecated `with_claude`, `{:error, {:unknown_provider, value}}` when
-  # `provider` is present but unrecognized, or `nil` to signal "use the workspace
-  # default" (only when no provider was named at all).
-  defp dispatch_provider(args, no_agent, with_claude) do
-    cond do
-      no_agent ->
-        :park
-
-      provider_given?(args) ->
-        provider_atom(Map.get(args, "provider"))
-
-      with_claude ->
-        :claude
-
-      true ->
-        nil
-    end
-  end
-
-  # A `provider` arg is "given" only when it's a non-blank string. An absent key
-  # or an empty/whitespace value means "use the workspace default" (→ `nil`),
-  # never an error.
-  defp provider_given?(args) do
-    case Map.get(args, "provider") do
-      p when is_binary(p) -> String.trim(p) != ""
-      _ -> false
-    end
-  end
-
-  # Map an explicit provider string to its atom. An unrecognized (but non-blank)
-  # value is a hard error, not a silent fallback to the workspace default.
-  defp provider_atom(provider) do
-    trimmed = String.trim(provider)
-
-    if trimmed in Arbiter.Agents.valid_agent_types() do
-      String.to_existing_atom(trimmed)
-    else
-      {:error, {:unknown_provider, provider}}
-    end
-  end
-
-  # `worker_review` is claude-driven by default (a reviewer with no agent has
-  # nothing to do), mirroring `POST /api/workers/review`. `with_claude: false`
-  # dispatches the review without spawning an agent (the test affordance).
-  defp review_claude_flag(opts, args) do
-    case Map.get(args, "with_claude") do
-      v when v in [false, "false"] -> Keyword.put(opts, :start_claude, false)
-      _ -> Keyword.put(opts, :start_claude, true)
-    end
-  end
+  # Every dispatch-shaped tool (dispatch / resume / review) normalises its
+  # arguments through `Arbiter.Worker.Dispatch.Params`, the same function the
+  # REST controller calls: the same provider list, the same unknown-argument
+  # refusal, the same recursion-depth guard (child scope minted at depth + 1)
+  # and the same quota-bypass attribution.
+  defp normalize(verb, %Scope{} = scope, args),
+    do: Params.normalize(args, verb: verb, scope: scope, surface: :mcp)
 
   # One kind per refusal (`Dispatch.refusal_kind/1`, shared with the REST
   # controller), so a client can tell busy / conflict / invalid / not_found apart.

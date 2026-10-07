@@ -963,7 +963,9 @@ defmodule Arbiter.MCP.Catalog do
           "token and is depth-limited (the dispatch-recursion guardrail). Omitting `provider` " <>
           "resolves the worker from the workspace's `agent.type` config (first healthy provider via " <>
           "ProviderPool). Pass `provider` to override; set `no_agent: true` to move the ticket " <>
-          "to In progress without spawning a worker (hand-off / manual-attach workflows).",
+          "to In progress without spawning a worker (hand-off / manual-attach workflows) — it " <>
+          "cannot be combined with `provider`. An unknown provider or argument is refused, " <>
+          "never silently replaced by the workspace default.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -978,7 +980,7 @@ defmodule Arbiter.MCP.Catalog do
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
             "type" => "string",
-            "enum" => ["claude", "gemini", "codex"],
+            "enum" => ["claude", "gemini", "codex", "grok"],
             "description" =>
               "Override the workspace's default provider. Omit to use the workspace `agent.type` config."
           },
@@ -991,6 +993,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "DEPRECATED alias for `provider: \"claude\"`. `true` → start a Claude worker."
+          },
+          "with_gemini" => %{
+            "type" => "boolean",
+            "description" =>
+              "DEPRECATED alias for `provider: \"gemini\"`. `true` → start a Gemini worker."
           },
           "force" => %{
             "type" => "boolean",
@@ -1027,13 +1034,23 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_resume",
       tiers: @coordinator,
       description:
-        "Re-attach a fresh worker to a ticket's preserved worktree (`arb resume`), continuing " <>
-          "the stopped run rather than restarting. Requires a `can_dispatch` coordinator token and is " <>
-          "depth-limited (the dispatch-recursion guardrail).",
+        "Resume a stopped worker (`arb worker resume`): re-spawn the agent continuing the ticket's " <>
+          "PRIOR session (`--resume <session_id>`) in its preserved worktree — the same operation as " <>
+          "`POST /api/workers/:task_id/resume`. Refused with `no_session` / `no_outpost` when there is " <>
+          "nothing to continue. Pass `mode: \"briefing\"` for a fresh agent briefed from the worktree's " <>
+          "git state instead. Requires a `can_dispatch` coordinator token and is depth-limited (the " <>
+          "dispatch-recursion guardrail).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{"type" => "string", "description" => "Ticket to resume (required)."},
+          "mode" => %{
+            "type" => "string",
+            "enum" => ["session", "briefing"],
+            "description" =>
+              "`session` (default): continue the prior session. `briefing`: a fresh agent " <>
+                "briefed from the worktree's git state (the previous MCP behaviour)."
+          },
           "repo" => %{
             "type" => "string",
             "description" => "Repo to run in (optional; inherited from the ticket's last run)."
@@ -1179,6 +1196,18 @@ defmodule Arbiter.MCP.Catalog do
                 "\"off\" guard (`pr` and `task_id`: dispatch even when the resolved mode is " <>
                 ~s["off"/"never"/"disabled"). Default false — normally such a dispatch is ] <>
                 "refused so we don't double-post an approval or ignore a hard opt-out."
+          },
+          "force_quota" => %{
+            "type" => "boolean",
+            "description" =>
+              "(ticket review) ADVANCED: bypass the quota gate for this review. Recorded with the " <>
+                "caller as actor. Defaults to false (quota-gated)."
+          },
+          "force_quota_reason" => %{
+            "type" => "string",
+            "description" =>
+              "(ticket review) ADVANCED: optional rationale for bypassing the quota gate. Only used " <>
+                "when `force_quota: true`."
           }
         },
         "required" => [],

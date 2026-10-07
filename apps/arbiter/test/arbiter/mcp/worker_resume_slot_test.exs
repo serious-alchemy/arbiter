@@ -10,6 +10,7 @@ defmodule Arbiter.MCP.WorkerResumeSlotTest do
   alias Arbiter.MCP.Tools
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Test.ResumeSlotFixture
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
 
   setup do
@@ -24,7 +25,21 @@ defmodule Arbiter.MCP.WorkerResumeSlotTest do
       })
 
     coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
-    Map.merge(%{ws: ws, coordinator: coordinator}, ResumeSlotFixture.setup_incident(ws))
+    incident = ResumeSlotFixture.setup_incident(ws)
+
+    # `worker_resume` continues the prior session (bd-a9hqfb), so it needs one.
+    {:ok, _} =
+      Ash.create(UsageEvent, %{
+        task_id: incident.a.id,
+        workspace_id: ws.id,
+        repo: ResumeSlotFixture.repo(),
+        step: :work,
+        provider: "claude",
+        session_id: "sess-#{System.unique_integer([:positive])}",
+        occurred_at: DateTime.utc_now()
+      })
+
+    Map.merge(%{ws: ws, coordinator: coordinator}, incident)
   end
 
   test "refuses at a full cap, naming the cap and the holder", ctx do
