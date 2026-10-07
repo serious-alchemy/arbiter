@@ -192,6 +192,29 @@ defmodule Arbiter.Release.SelfDeployTest do
     end
   end
 
+  describe "resolve_tag/2" do
+    test "defaults to the latest release when an update is available" do
+      assert SelfDeploy.resolve_tag(nil, %{update_available?: true, latest: "v1.2.3"}) ==
+               {:ok, "v1.2.3"}
+
+      assert SelfDeploy.resolve_tag("", %{update_available?: true, latest: "v1.2.3"}) ==
+               {:ok, "v1.2.3"}
+    end
+
+    test "has nothing to deploy when up to date and no version was asked for" do
+      assert SelfDeploy.resolve_tag(nil, %{update_available?: false, latest: "v1.2.3"}) ==
+               {:error, :no_update}
+    end
+
+    test "an explicit version is used as given, if it is a release tag" do
+      assert SelfDeploy.resolve_tag("v1.0.0", %{update_available?: false, latest: "v1.2.3"}) ==
+               {:ok, "v1.0.0"}
+
+      assert SelfDeploy.resolve_tag("main", %{update_available?: true, latest: "v1.2.3"}) ==
+               {:error, :invalid_tag}
+    end
+  end
+
   describe "DeployStatus" do
     test "read/0 is nil with no record, and the record once the CLI wrote one", %{home: home} do
       assert DeployStatus.read() == nil

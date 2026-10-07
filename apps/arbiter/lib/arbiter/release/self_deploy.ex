@@ -62,6 +62,26 @@ defmodule Arbiter.Release.SelfDeploy do
 
   def start(_), do: {:error, :invalid_tag}
 
+  @doc """
+  Which tag a request means: `requested` when given (it still has to be a release
+  tag — `start/1` re-checks), else the latest release when `update` (the
+  `Arbiter.Release.UpdateCheck.state/0` map) says one is available.
+  """
+  @spec resolve_tag(String.t() | nil, map()) ::
+          {:ok, String.t()} | {:error, :invalid_tag | :no_update}
+  def resolve_tag(requested, update) when requested in [nil, ""] do
+    case update do
+      %{update_available?: true, latest: tag} when is_binary(tag) -> {:ok, tag}
+      _ -> {:error, :no_update}
+    end
+  end
+
+  def resolve_tag(requested, _update) when is_binary(requested) do
+    if Regex.match?(@tag_re, requested), do: {:ok, requested}, else: {:error, :invalid_tag}
+  end
+
+  def resolve_tag(_requested, _update), do: {:error, :invalid_tag}
+
   @doc "The deploy-unit name for `tag`."
   @spec unit_name(String.t()) :: String.t()
   def unit_name(tag), do: @unit_prefix <> tag
