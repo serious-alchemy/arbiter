@@ -46,7 +46,7 @@ defmodule ArbiterCli.Main do
       arb worker log      <task-id>
       arb worker stop     <task-id>
       arb worker resume   <task-id> [<repo>] [--model <name>]
-      arb worker review   <task-id> [--repo <repo>] [--model <name>]
+      arb worker review   <task-id> [--repo <repo>] [--model <name>] [--force] [--automation <mode>]
       arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
 
       arb repo list

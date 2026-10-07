@@ -3231,7 +3231,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert full.tracker_context_type == "jira"
     end
 
-    test "worker_review persists :flag mode when no workspace review_automation config (bd-577w96)",
+    # bd-dtfe9x (D-W-2): with no review_automation config anywhere, the resolved
+    # :flag is the conservative fallback, not a decision — it must not be written
+    # onto the engagement (ReviewPatrol already reads an unset mode as :flag).
+    test "worker_review does not persist :flag when no review_automation config exists",
          ctx do
       {:ok, task} = Ash.create(Issue, %{title: "review mode default", workspace_id: ctx.ws.id})
 
@@ -3242,7 +3245,48 @@ defmodule Arbiter.MCP.ToolsTest do
         })
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.review_automation == :flag
+      assert reloaded.review_automation == nil
+    end
+
+    # bd-dtfe9x (D-W-2) regression: a normal coordinator token is
+    # workspace-agnostic (workspace_id: nil). The guard used to read the
+    # CALLER's workspace, found no config, and let an `off` workspace through.
+    test "worker_review refuses an off workspace for a workspace-agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-off-ws",
+          prefix: "raag",
+          config: %{"review_automation" => %{"default" => "off"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic off review", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      assert msg =~ "review_automation.default"
+      assert msg =~ "force"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "worker_review persists the TASK workspace's resolved mode for an agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-auto-ws",
+          prefix: "raaa",
+          config: %{"review_automation" => %{"default" => "report_only"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic report_only", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      _ = Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
     end
 
     test "worker_review: explicit automation override wins over policy (bd-577w96)", ctx do

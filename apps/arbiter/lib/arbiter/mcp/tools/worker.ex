@@ -12,10 +12,9 @@ defmodule Arbiter.MCP.Tools.Worker do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
-  alias Arbiter.Trackers
+  alias Arbiter.Reviews.Guard
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Current
 
@@ -126,10 +125,11 @@ defmodule Arbiter.MCP.Tools.Worker do
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, task} <- maybe_set_tracker_context(task, args),
          {:ok, force} <- Tools.fetch_bool(args, "force", false),
-         {:ok, mode} <- guard_review_automation(scope, args, force),
-         {:ok, _} <- persist_review_automation(task, mode) do
+         # The guard reads the TASK's workspace config (never the caller's
+         # bound workspace, nil for a normal coordinator token) and refuses
+         # before anything is written or spawned — see `Arbiter.Reviews.Guard`.
+         {:ok, _task} <- Guard.prepare(task, args, force) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -140,124 +140,6 @@ defmodule Arbiter.MCP.Tools.Worker do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> dispatch_error(reason, task_id)
       end
-    end
-  end
-
-  # Resolve the review_automation mode (+ its source, logged for visibility —
-  # bd-7opdaf) and refuse the dispatch outright when it resolves to `:off`,
-  # UNLESS `force: true` is passed — mirrors the external (`pr:`) path's
-  # `guard_automation_off/2` in `Arbiter.Reviews.ExternalReview`. No task is
-  # touched and no worker is spawned when this refuses.
-  #
-  # Resolution order (most-specific wins):
-  #   1. An explicit `automation` arg passed to `worker_review` — hard override.
-  #   2. The workspace's `review_automation.repo_overrides[repo]` — per-repo hard gate.
-  #   3. The workspace's `review_automation.auto_authors` list, then `default`.
-  #   4. No config → :flag (conservative: never auto-post unless explicitly trusted).
-  defp guard_review_automation(scope, args, force) do
-    pr_author = Tools.fetch_string(args, "pr_author")
-    repo_name = Tools.fetch_string(args, "repo")
-    ws_config = load_workspace_config(scope.workspace_id)
-    explicit = Tools.fetch_string(args, "automation")
-
-    {mode, source} =
-      ReviewAutomation.resolve_with_source(ws_config, pr_author, repo_name, explicit)
-
-    Logger.info(
-      "worker_review(task_id): resolved review_automation=#{mode} (source: #{source})" <>
-        if(repo_name, do: " [#{repo_name}]", else: "")
-    )
-
-    cond do
-      mode != :off -> {:ok, mode}
-      force -> {:ok, mode}
-      true -> {:error, {:invalid, automation_off_message(repo_name, source)}}
-    end
-  end
-
-  defp automation_off_message(repo_name, :repo_override) when is_binary(repo_name) do
-    "review_automation is \"off\" for #{repo_name} " <>
-      "(review_automation.repo_overrides[#{inspect(repo_name)}]); refusing to dispatch a " <>
-      "reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(repo_name, :explicit) do
-    "review_automation was explicitly set to \"off\" for #{repo_name || "this task"} " <>
-      "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(repo_name, :default) when is_binary(repo_name) do
-    "review_automation is \"off\" by default for #{repo_name} (review_automation.default); " <>
-      "refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(_repo_name, :default) do
-    "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
-      "refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  # Persist the (already-guarded) review_automation mode on the engagement
-  # task, so the ReviewPatrol poller can read it from the task without
-  # re-loading workspace config on each cycle.
-  defp persist_review_automation(task, mode) do
-    case Ash.update(task, %{review_automation: mode}) do
-      {:ok, updated} -> {:ok, updated}
-      {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
-    end
-  end
-
-  defp load_workspace_config(nil), do: nil
-
-  defp load_workspace_config(ws_id) do
-    case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
-      {:ok, %{config: config}} -> config
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  # If `tracker_context_ref` is provided in args, persist it (and optionally
-  # `tracker_context_type`) on the task before dispatch so the review prompt
-  # can fetch the ticket's acceptance criteria. When `tracker_context_type` is
-  # omitted, the workspace's default tracker type is used as the fallback —
-  # the most common case (reviewee and reviewer share the same tracker).
-  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp maybe_set_tracker_context(task, args) do
-    case Tools.fetch_string(args, "tracker_context_ref") do
-      ref when is_binary(ref) and ref != "" ->
-        context_type =
-          case Tools.fetch_string(args, "tracker_context_type") do
-            t when is_binary(t) and t != "" ->
-              try do
-                String.to_existing_atom(t)
-              rescue
-                ArgumentError -> nil
-              end
-
-            _ ->
-              case Tools.fetch_workspace(task.workspace_id) do
-                {:ok, ws} -> Trackers.workspace_type(ws)
-                _ -> nil
-              end
-          end
-
-        attrs =
-          %{"tracker_context_ref" => ref}
-          |> then(fn m ->
-            if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m
-          end)
-
-        case Ash.update(task, attrs, action: :update) do
-          {:ok, updated} -> {:ok, updated}
-          {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
-        end
-
-      _ ->
-        {:ok, task}
     end
   end
 

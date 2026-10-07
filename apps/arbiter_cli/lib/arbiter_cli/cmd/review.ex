@@ -45,6 +45,17 @@ defmodule ArbiterCli.Cmd.Review do
                        defaults to the installation's sole/`default` workspace.
     --model <name>     (task review only) one-shot model override
                        (`haiku|sonnet|opus`).
+    --force            Dispatch even when review_automation resolves to "off" for the
+                       task's workspace/repo (a recorded override).
+    --force-quota      (task review only) bypass the quota gate for this dispatch.
+    --automation <m>   Override the resolved review_automation mode for this review
+                       (auto | report_only | flag | off).
+    --pr-author <login>  (task review only) PR author, matched against
+                       review_automation.auto_authors.
+    --tracker-context-ref <ref>   Ticket the review should read acceptance criteria
+                       from (a coworker's ticket this task does not claim).
+    --tracker-context-type <type> Tracker type of --tracker-context-ref (default: the
+                       workspace's tracker).
     --transcript <id>  Read one external review's persisted corpus instead of
                        dispatching anything.
     --tail <n>         (`--transcript` only) only the last N transcript lines.
@@ -67,7 +78,13 @@ defmodule ArbiterCli.Cmd.Review do
     workspace: :string,
     transcript: :string,
     tail: :integer,
-    prompt: :boolean
+    prompt: :boolean,
+    force: :boolean,
+    force_quota: :boolean,
+    automation: :string,
+    pr_author: :string,
+    tracker_context_ref: :string,
+    tracker_context_type: :string
   ]
 
   def run(argv) do
@@ -93,6 +110,10 @@ defmodule ArbiterCli.Cmd.Review do
       %{"pr" => opts[:pr]}
       |> maybe_put("repo", opts[:repo])
       |> maybe_put("workspace", opts[:workspace])
+      |> maybe_put("force", if(opts[:force], do: true))
+      |> maybe_put("automation", opts[:automation])
+      |> maybe_put("tracker_context_ref", opts[:tracker_context_ref])
+      |> maybe_put("tracker_context_type", opts[:tracker_context_type])
 
     case Client.post("/api/workers/review", body) do
       {:ok, payload} -> emit_external(payload, mode)
@@ -119,6 +140,12 @@ defmodule ArbiterCli.Cmd.Review do
       %{"task_id" => task_id}
       |> maybe_put("repo", opts[:repo])
       |> maybe_put("model", opts[:model])
+      |> maybe_put("force", if(opts[:force], do: true))
+      |> maybe_put("force_quota", if(opts[:force_quota], do: true))
+      |> maybe_put("automation", opts[:automation])
+      |> maybe_put("pr_author", opts[:pr_author])
+      |> maybe_put("tracker_context_ref", opts[:tracker_context_ref])
+      |> maybe_put("tracker_context_type", opts[:tracker_context_type])
 
     case Client.post("/api/workers/review", body) do
       {:ok, payload} -> emit(payload, mode)
