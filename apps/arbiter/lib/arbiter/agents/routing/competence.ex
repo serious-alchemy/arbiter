@@ -373,6 +373,20 @@ defmodule Arbiter.Agents.Routing.Competence do
   def rows, do: (Settings.competence_matrix() || []) ++ @default_rows
 
   @doc """
+  The rows a *candidate* matrix would rank with (bd-dde4l7): the stored
+  candidate ahead of the code defaults, exactly as `rows/0` does for the live
+  override — or `nil` when no candidate is stored. Never reads the live
+  override, so the two cannot be mixed up.
+  """
+  @spec candidate_rows() :: [row()] | nil
+  def candidate_rows do
+    case Settings.competence_matrix_candidate() do
+      nil -> nil
+      rows -> rows ++ @default_rows
+    end
+  end
+
+  @doc """
   Validate and normalise operator-supplied competence rows.
   """
   @spec normalize_rows(term()) :: {:ok, [row()]} | {:error, String.t()}

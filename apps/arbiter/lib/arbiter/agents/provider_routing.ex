@@ -676,7 +676,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       %{
         mode: config.mode,
         weight: Score.weight(config, task),
-        estimate_fun: estimate_fun
+        estimate_fun: estimate_fun,
+        candidate_estimate_fun: candidate_estimate_fun(ws, task, opts)
       }
     end
   end
@@ -689,6 +690,27 @@ defmodule Arbiter.Agents.ProviderRouting do
       fn entry -> Competence.estimate(ws, entry, task, opts) end
     else
       nil
+    end
+  end
+
+  # bd-dde4l7: the candidate matrix's estimator, or `nil` (no candidate: no
+  # second ranking, no record key). It ranks with the candidate's rows and
+  # NOTHING of the live override — `:rows` is replaced, not defaulted — and its
+  # result only ever lands in the record, never in the dispatch order.
+  # `:candidate_estimate_fun` is the test seam, as `:estimate_fun` is.
+  defp candidate_estimate_fun(ws, task, opts) do
+    case Keyword.fetch(opts, :candidate_estimate_fun) do
+      {:ok, fun} ->
+        fun
+
+      :error ->
+        with true <- competence?(ws),
+             [_ | _] = rows <- Competence.candidate_rows() do
+          opts = Keyword.put(opts, :rows, rows)
+          fn entry -> Competence.estimate(ws, entry, task, opts) end
+        else
+          _ -> nil
+        end
     end
   end
 
@@ -938,35 +960,75 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   # The survivors, best first, plus the scoring fields for the record.
   #
-  # Off (`most_quota`): by headroom. `scored` in `enforce`: by the scorer's J.
-  # `scored` in `shadow`: still by headroom — dispatch is unchanged — with the
-  # scorer's ranking recorded beside it (design §9.2 item 3).
+  # Off (`most_quota`): by headroom. `scored` in `enforce`: by the scorer's J,
+  # with the headroom ranking recorded beside it (`"policy" => "headroom"`,
+  # bd-dde4l7). `scored` in `shadow`: still by headroom — dispatch is
+  # unchanged — with the scorer's ranking recorded beside it (design §9.2 item
+  # 3; `"policy" => "scorer"`). Either way a stored candidate competence matrix
+  # is ranked too and recorded as `shadow_candidate`; it never orders anything.
   defp order(entries, %{scoring: nil}), do: {rank(entries), %{}}
 
-  defp order(entries, %{scoring: scoring}) do
-    estimated = Enum.map(entries, &estimate(&1, scoring))
+  defp order(entries, %{scoring: scoring, task: task}) do
+    estimated = Enum.map(entries, &estimate(&1, scoring.estimate_fun))
     scored = Score.rank(estimated, weight: scoring.weight)
     base = %{"scoring_mode" => to_string(scoring.mode), "time_weight" => scoring.weight}
+    base = put_candidate_ranking(base, entries, scoring, task)
+    scores = Map.new(scored, &{&1.index, &1.score})
+    headroom_order = estimated |> rank() |> Enum.map(&annotate(&1, scores))
 
     case scoring.mode do
       :enforce ->
-        {scored, base}
+        {scored,
+         Map.put(base, "shadow", %{
+           "policy" => "headroom",
+           "ranking" => Enum.map(headroom_order, &ranking_row/1)
+         })}
 
       :shadow ->
-        scores = Map.new(scored, &{&1.index, &1.score})
-        headroom_order = estimated |> rank() |> Enum.map(&annotate(&1, scores))
-
         {headroom_order,
-         Map.put(base, "shadow", %{"ranking" => Enum.map(scored, &ranking_row/1)})}
+         Map.put(base, "shadow", %{
+           "policy" => "scorer",
+           "ranking" => Enum.map(scored, &ranking_row/1)
+         })}
+    end
+  end
+
+  defp put_candidate_ranking(base, _entries, %{candidate_estimate_fun: nil}, _task), do: base
+
+  defp put_candidate_ranking(base, entries, scoring, task) do
+    ranking =
+      entries
+      |> Enum.map(&estimate(&1, scoring.candidate_estimate_fun))
+      |> Score.rank(weight: scoring.weight)
+      |> Enum.map(&ranking_row/1)
+
+    Map.put(base, "shadow_candidate", %{
+      "ranking" => ranking,
+      "difficulty" => task_difficulty(task),
+      "issue_type" => task_issue_type(task)
+    })
+  end
+
+  # The cell coordinates `Competence` keys on, recorded so the report can
+  # group candidate disagreements without re-reading the task.
+  defp task_difficulty(nil), do: 2
+
+  defp task_difficulty(task),
+    do: Map.get(task, :difficulty_at_dispatch) || Map.get(task, :difficulty) || 2
+
+  defp task_issue_type(task) do
+    case task && Map.get(task, :issue_type) do
+      nil -> nil
+      type -> to_string(type)
     end
   end
 
   defp annotate(entry, scores), do: Map.put(entry, :score, Map.fetch!(scores, entry.index))
 
   # R6's competence matrix plugs in here: `(entry -> %{draw:, time_h:} | nil)`.
-  defp estimate(entry, %{estimate_fun: nil}), do: entry
+  defp estimate(entry, nil), do: entry
 
-  defp estimate(entry, %{estimate_fun: fun}) do
+  defp estimate(entry, fun) do
     case fun.(entry) do
       %{} = estimate ->
         Map.merge(entry, Map.take(estimate, [:draw, :time_h, :sides, :reviewer_windows, :cell]))
@@ -1079,15 +1141,25 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   # ---- shadow ------------------------------------------------------------------
 
-  # Once the real pick is known, say what the scorer would have picked in its
-  # place and whether they agree. Only a fresh choice (`selected`, `fallback`)
-  # is comparable: a pin, an override or no candidate never consulted the rank.
+  # Once the real pick is known, say what the shadowed policy would have picked
+  # in its place and whether they agree. Only a fresh choice (`selected`,
+  # `fallback`) is comparable: a pin, an override or no candidate never
+  # consulted the rank.
+  #
+  # `shadow` is the other policy than the one that dispatched (`policy` says
+  # which: `scorer` in `shadow` mode, `headroom` in `enforce`); `shadow_candidate`
+  # is the candidate matrix's scorer ranking, compared with the LIVE scorer's
+  # pick — the dispatched one in `enforce`, `shadow`'s own pick in `shadow`.
   defp finish_shadow({:ok, %{decision: decision} = selection}),
     do: {:ok, %{selection | decision: shadow_outcome(decision)}}
 
   defp finish_shadow({:legacy, decision}), do: {:legacy, shadow_outcome(decision)}
 
-  defp shadow_outcome(%{"shadow" => %{"ranking" => ranking} = shadow} = decision) do
+  defp shadow_outcome(decision) do
+    decision |> baseline_outcome() |> candidate_outcome()
+  end
+
+  defp baseline_outcome(%{"shadow" => %{"ranking" => ranking} = shadow} = decision) do
     comparable = decision["outcome"] in ["selected", "fallback"]
     pick = if comparable, do: shadow_pick(ranking, decision["excluded_family"])
     actual = if comparable, do: Enum.find(ranking, &same_pick?(&1, decision))
@@ -1105,14 +1177,67 @@ defmodule Arbiter.Agents.ProviderRouting do
             "comparable" => true,
             "pick" => pick,
             "agrees" => false,
-            "reason" => disagreement_reason(pick, actual)
+            "reason" => baseline_reason(shadow["policy"], pick, actual)
           }
       end
 
     Map.put(decision, "shadow", Map.merge(shadow, fields))
   end
 
-  defp shadow_outcome(decision), do: decision
+  defp baseline_outcome(decision), do: decision
+
+  # `disagreement_reason/2` explains why the SCORER's pick differs from the
+  # other one; in `enforce` the scorer's pick is the dispatched one.
+  defp baseline_reason("headroom", headroom_pick, scorer_pick),
+    do: disagreement_reason(scorer_pick, headroom_pick)
+
+  defp baseline_reason(_scorer, scorer_pick, headroom_pick),
+    do: disagreement_reason(scorer_pick, headroom_pick)
+
+  defp candidate_outcome(%{"shadow_candidate" => %{"ranking" => ranking} = candidate} = decision) do
+    pick = candidate_pick(decision, ranking)
+    live = live_pick(decision)
+
+    fields =
+      cond do
+        is_nil(pick) or is_nil(live) ->
+          %{"comparable" => false, "pick" => nil, "live_pick" => nil, "agrees" => nil}
+
+        same_row?(pick, live) ->
+          %{"comparable" => true, "pick" => pick, "live_pick" => live, "agrees" => true}
+
+        true ->
+          %{"comparable" => true, "pick" => pick, "live_pick" => live, "agrees" => false}
+      end
+
+    Map.put(decision, "shadow_candidate", Map.merge(candidate, fields))
+  end
+
+  defp candidate_outcome(decision), do: decision
+
+  defp candidate_pick(decision, ranking) do
+    if decision["outcome"] in ["selected", "fallback"],
+      do: shadow_pick(ranking, decision["excluded_family"])
+  end
+
+  # What the live scorer picked: in `enforce` the dispatched pick itself; in
+  # `shadow` (headroom dispatched) the scorer's own comparable pick.
+  defp live_pick(%{"outcome" => outcome} = decision) when outcome in ["selected", "fallback"] do
+    case decision do
+      %{"scoring_mode" => "enforce"} ->
+        Map.take(decision, ["account_id", "account_slug", "model"])
+
+      %{"shadow" => %{"comparable" => true, "pick" => %{} = pick}} ->
+        pick
+
+      _ ->
+        nil
+    end
+  end
+
+  defp live_pick(_decision), do: nil
+
+  defp same_row?(a, b), do: a["account_id"] == b["account_id"] and a["model"] == b["model"]
 
   # The fallback path's own rule: leave the reviewer's family out unless that
   # would leave nothing.

@@ -223,7 +223,9 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       assert d["scoring_mode"] == "shadow"
       assert d["outcome"] == "selected"
       assert %{"ranking" => [first, _], "agrees" => true, "comparable" => true} = d["shadow"]
+      assert d["shadow"]["policy"] == "scorer"
       assert first["account_id"] == codex.id
+      refute Map.has_key?(d, "shadow_candidate")
       assert Enum.all?(d["candidates"], &(is_number(&1["price"]) and is_number(&1["score"])))
     end
 
@@ -294,8 +296,70 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
 
       assert picked.id == claude.id
       assert d["scoring_mode"] == "enforce"
-      refute Map.has_key?(d, "shadow")
       assert hd(d["candidates"])["account_id"] == claude.id
+    end
+
+    test "dispatches by the scorer AND records the headroom ranking as the shadow (bd-dde4l7)",
+         ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+      # codex has far more headroom but is expected to need ten times the draw.
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      estimate = fn
+        %{account: %{id: id}} when id == codex.id -> %{draw: 10.0}
+        _ -> %{draw: 1.0}
+      end
+
+      assert {:ok, %{account: picked, decision: d}} =
+               ProviderRouting.select(ws, task!(ws), :main, opts(pairs, estimate_fun: estimate))
+
+      # Dispatch: the scorer's order.
+      assert picked.id == claude.id
+      assert d["scoring_mode"] == "enforce"
+
+      # Shadow: the headroom order, labelled, and compared with what dispatched.
+      assert %{
+               "policy" => "headroom",
+               "ranking" => [first, second],
+               "comparable" => true,
+               "agrees" => false,
+               "pick" => pick,
+               "reason" => reason
+             } = d["shadow"]
+
+      assert first["account_id"] == codex.id
+      assert second["account_id"] == claude.id
+      assert pick["account_id"] == codex.id
+      assert reason =~ "price"
+    end
+
+    test "when the scorer and headroom agree the shadow says so", ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      assert {:ok, %{account: picked, decision: d}} =
+               ProviderRouting.select(ws, task!(ws), :main, opts(pairs))
+
+      assert picked.id == codex.id
+      assert %{"policy" => "headroom", "agrees" => true, "comparable" => true} = d["shadow"]
+    end
+
+    test "a pinned dispatch's shadow is not comparable", ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+
+      task =
+        ws
+        |> task!()
+        |> Ash.Changeset.for_update(:pin_implementer, %{
+          implementer_account_id: claude.id,
+          implementer_family: "claude"
+        })
+        |> Ash.update!()
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :resume, opts(pairs))
+      assert %{"policy" => "headroom", "comparable" => false, "agrees" => nil} = d["shadow"]
     end
 
     test "the time term, weighted by the ticket's own priority, can reorder" do
@@ -660,6 +724,182 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
         assert picked.id == only.id
         assert d["outcome"] == "selected"
       end
+    end
+  end
+
+  describe "candidate competence matrix (bd-dde4l7)" do
+    setup do
+      two_accounts!(config("scored", %{"mode" => "enforce"}))
+    end
+
+    # codex has the headroom; the live estimate makes it cheap, the candidate
+    # makes it ten times dearer — so the two matrices pick different accounts.
+    defp live_estimate(codex),
+      do: fn
+        %{account: %{id: id}} when id == codex.id -> %{draw: 1.0}
+        _ -> %{draw: 2.0}
+      end
+
+    defp candidate_estimate(codex),
+      do: fn
+        %{account: %{id: id}} when id == codex.id -> %{draw: 10.0}
+        _ -> %{draw: 2.0}
+      end
+
+    test "with a candidate each scored dispatch also records its ranking; the live order is unaffected",
+         ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 3, issue_type: :bug})
+
+      base_opts = opts(pairs, estimate_fun: live_estimate(codex))
+
+      assert {:ok, %{account: without, decision: d0}} =
+               ProviderRouting.select(ws, task, :main, base_opts)
+
+      refute Map.has_key?(d0, "shadow_candidate")
+
+      with_candidate =
+        Keyword.put(base_opts, :candidate_estimate_fun, candidate_estimate(codex))
+
+      assert {:ok, %{account: picked, decision: d}} =
+               ProviderRouting.select(ws, task, :main, with_candidate)
+
+      # The live dispatch is exactly what it was without a candidate.
+      assert picked.id == without.id
+      assert picked.id == codex.id
+
+      assert Enum.map(d["candidates"], & &1["account_id"]) ==
+               Enum.map(d0["candidates"], & &1["account_id"])
+
+      assert Enum.map(d["candidates"], & &1["score"]) ==
+               Enum.map(d0["candidates"], & &1["score"])
+
+      assert %{
+               "ranking" => [first, _],
+               "comparable" => true,
+               "agrees" => false,
+               "pick" => pick,
+               "live_pick" => live_pick,
+               "difficulty" => 3,
+               "issue_type" => "bug"
+             } = d["shadow_candidate"]
+
+      assert first["account_id"] == claude.id
+      assert pick["account_id"] == claude.id
+      assert live_pick["account_id"] == codex.id
+      # The baseline shadow is still the headroom ranking.
+      assert d["shadow"]["policy"] == "headroom"
+    end
+
+    test "a candidate that ranks the same as live agrees", ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      assert {:ok, %{decision: d}} =
+               ProviderRouting.select(
+                 ws,
+                 task!(ws),
+                 :main,
+                 opts(pairs,
+                   estimate_fun: live_estimate(codex),
+                   candidate_estimate_fun: live_estimate(codex)
+                 )
+               )
+
+      assert %{"comparable" => true, "agrees" => true} = d["shadow_candidate"]
+    end
+
+    test "in shadow mode the candidate is compared with the live scorer's pick, not headroom's" do
+      %{ws: ws, claude: claude, codex: codex} =
+        two_accounts!(config("scored", %{"mode" => "shadow"}))
+
+      # Headroom dispatches codex; the live scorer also prefers codex; the candidate claude.
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      assert {:ok, %{account: picked, decision: d}} =
+               ProviderRouting.select(
+                 ws,
+                 task!(ws),
+                 :main,
+                 opts(pairs,
+                   estimate_fun: live_estimate(codex),
+                   candidate_estimate_fun: candidate_estimate(codex)
+                 )
+               )
+
+      assert picked.id == codex.id
+      assert d["shadow"]["policy"] == "scorer"
+
+      assert %{"agrees" => false, "pick" => pick, "live_pick" => live} = d["shadow_candidate"]
+      assert pick["account_id"] == claude.id
+      assert live["account_id"] == codex.id
+    end
+
+    test "a pinned dispatch's candidate record is not comparable", ctx do
+      %{ws: ws, claude: claude, codex: codex} = ctx
+
+      task =
+        ws
+        |> task!()
+        |> Ash.Changeset.for_update(:pin_implementer, %{
+          implementer_account_id: claude.id,
+          implementer_family: "claude"
+        })
+        |> Ash.update!()
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+
+      assert {:ok, %{decision: d}} =
+               ProviderRouting.select(
+                 ws,
+                 task,
+                 :resume,
+                 opts(pairs,
+                   estimate_fun: live_estimate(codex),
+                   candidate_estimate_fun: candidate_estimate(codex)
+                 )
+               )
+
+      assert %{"comparable" => false, "agrees" => nil} = d["shadow_candidate"]
+    end
+
+    test "the stored candidate is read by competence scoring and never the live matrix's rows" do
+      cfg = config("scored", %{"mode" => "enforce", "competence" => true})
+      %{ws: ws, claude: claude, codex: codex} = two_accounts!(cfg)
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(5.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      # No candidate stored: no record.
+      assert {:ok, %{decision: none}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      refute Map.has_key?(none, "shadow_candidate")
+
+      # A candidate claiming codex needs 40 author runs at every rung-1 cell.
+      live_before = Arbiter.Settings.competence_matrix()
+
+      {:ok, _} =
+        Arbiter.Settings.set_competence_matrix_candidate([
+          %{
+            "match" => %{"provider" => "codex", "difficulty" => 2},
+            "n" => 99,
+            "rung" => 1,
+            "author_runs" => 40.0,
+            "review_runs" => 1.0,
+            "time_to_close_median_hours" => 1.0
+          }
+        ])
+
+      on_exit(fn -> Arbiter.Settings.set_competence_matrix_candidate(nil) end)
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      assert %{"ranking" => ranking} = d["shadow_candidate"]
+      assert length(ranking) == 2
+      assert Arbiter.Settings.competence_matrix() == live_before
+
+      # The live decision's cells come from the live matrix (defaults), never the candidate's n: 99.
+      refute Enum.any?(d["candidates"], &match?(%{"cell" => %{"n" => 99}}, &1))
     end
   end
 end
