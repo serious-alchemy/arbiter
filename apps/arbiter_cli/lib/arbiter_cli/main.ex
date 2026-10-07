@@ -65,6 +65,14 @@ defmodule ArbiterCli.Main do
       arb queue restart-watchdog   <task-id>
       arb queue rerun-ci           <task-id> [--mode <mode>] [--workflow <w>] [--input k=v]
       arb queue mark-ci-external   <task-id> <note...>
+      arb review          <task-id> | --pr <url|number> [--report-only] [--force] [--follow-up|--no-follow-up]
+                          [--scope diff|repo] [--automation <mode>] [--repo <repo>]
+                          [--tracker-context-ref <ref> [--tracker-context-type <t>]]
+      arb review list     [--status running|completed|failed] [--since <ts>] [--limit <n>]
+      arb review show     <record-id>              proposed comments, numbered
+      arb review transcript <record-id> [--tail <n>] [--no-prompt]
+      arb review rounds   <task-id> [--limit <n>]  ReviewGate rounds + outcome
+      arb review greenlight <record-id> [--select all|none|0,2] [--no-post-verdict]
       arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
 
       arb repo list
@@ -240,14 +248,6 @@ defmodule ArbiterCli.Main do
     ws_val = ws_val || extra_name
 
     dispatch_resolved(cmd, args, flag, ws_val)
-  end
-
-  # bd-4qjl0q: `arb review resolve` is the spelling the gate-escalation mail
-  # names. `review` alone is a legacy redirect to `worker review`, which would
-  # read `resolve` as a task id — so route it before that, with no note.
-  defp dispatch_resolved("review", ["resolve" | rest], _flag, ws_val) do
-    ArbiterCli.Workspace.put_selected(ws_val)
-    ArbiterCli.Cmd.Resolve.run(rest)
   end
 
   defp dispatch_resolved(cmd, args, flag, ws_val) do

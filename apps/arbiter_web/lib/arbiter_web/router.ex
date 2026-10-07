@@ -360,6 +360,8 @@ defmodule ArbiterWeb.Router do
     get("/external_reviews", ExternalReviewController, :index)
     # Durable per-review corpus: prompt + raw transcript + tool uses (bd-7efini)
     get("/external_reviews/:id/transcript", ExternalReviewController, :transcript)
+    get("/external_reviews/:id", ExternalReviewController, :show)
+    post("/external_reviews/:id/greenlight", ExternalReviewController, :greenlight)
 
     # Internal ReviewGate structured round outcomes (bd-aqyjuc)
     get("/review_gate_rounds", ReviewGateRoundController, :index)

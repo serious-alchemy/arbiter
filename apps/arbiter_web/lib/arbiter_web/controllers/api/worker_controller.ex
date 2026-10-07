@@ -57,6 +57,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Params
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Reviews.Guard
+  alias Arbiter.Reviews.Params, as: ReviewParams
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Dispatch.Params, as: DispatchParams
@@ -175,47 +176,30 @@ defmodule ArbiterWeb.Api.WorkerController do
   # acks with the resolved mr_ref + link. `repo`/`workspace` are optional.
   defp review_external(conn, params) do
     with :ok <- DispatchParams.ensure_depth(conn.assigns[:mcp_scope]),
-         :ok <- validate_bool(params, "force"),
          {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
       do_review_external(conn, params, ws_id)
     end
   end
 
   defp do_review_external(conn, params, ws_id) do
-    opts =
-      [
-        pr: params["pr"],
-        repo: params["repo"],
-        workspace: ws_id,
-        # report_only (propose) / automation flow through to ExternalReview, which
-        # resolves whether the review posts to the PR or only reports (bd-36qzgx).
-        automation: params["automation"],
-        tracker_context_ref: blank_to_nil(params["tracker_context_ref"]),
-        tracker_context_type: blank_to_nil(params["tracker_context_type"]),
-        dispatched_by: "http_api"
-      ]
-      |> maybe_put_report_only(params["report_only"])
-      |> maybe_put_force(params["force"])
+    # One normaliser behind MCP and REST (P-12, D-W-6): `force`, `follow_up`,
+    # `scope`, `report_only` and `tracker_context_*` reach ExternalReview from
+    # here exactly as they do from `worker_review pr:`. `report_only` (propose)
+    # / `automation` resolve whether the review posts to the PR or only reports
+    # (bd-36qzgx).
+    with {:ok, opts} <-
+           params
+           |> ReviewParams.dispatch_opts(workspace: ws_id, dispatched_by: "http_api")
+           |> Params.to_rest() do
+      case ExternalReview.dispatch(opts) do
+        {:ok, ack} ->
+          conn
+          |> put_status(:created)
+          |> json(%{data: ack})
 
-    case ExternalReview.dispatch(opts) do
-      {:ok, ack} ->
-        conn
-        |> put_status(:created)
-        |> json(%{data: ack})
-
-      {:error, reason} ->
-        {:error, {:invalid_request, ExternalReview.describe_error(reason), %{pr: params["pr"]}}}
-    end
-  end
-
-  defp maybe_put_report_only(opts, raw) do
-    if truthy(raw) == true, do: Keyword.put(opts, :report_only, true), else: opts
-  end
-
-  defp maybe_put_force(opts, force) do
-    case truthy(force) do
-      nil -> opts
-      value -> Keyword.put(opts, :force, value)
+        {:error, reason} ->
+          {:error, {:invalid_request, ExternalReview.describe_error(reason), %{pr: params["pr"]}}}
+      end
     end
   end
 
@@ -611,26 +595,6 @@ defmodule ArbiterWeb.Api.WorkerController do
       {:ok, opts} -> {:ok, opts}
       {:error, {:invalid, message}} -> {:error, {:invalid_request, message, %{}}}
       {:error, {:unauthorized, _message}} = err -> err
-    end
-  end
-
-  defp blank_to_nil(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
-    end
-  end
-
-  defp blank_to_nil(_), do: nil
-
-  # A junk flag (`force: "yes"`) is a 400, not a silent "unset".
-  defp validate_bool(params, key) do
-    params
-    |> Params.fetch_optional_bool(key)
-    |> Params.to_rest()
-    |> case do
-      {:ok, _} -> :ok
-      {:error, _} = err -> err
     end
   end
 
