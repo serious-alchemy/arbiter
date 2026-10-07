@@ -4,14 +4,15 @@ defmodule ArbiterCli.Cmd.Skill do
 
   A skill is a reusable markdown instruction module arbiter materializes into a
   worker's worktree at `.claude/skills/<name>/SKILL.md`. The registry is
-  system-wide — one definition is shared across the whole arbiter system
-  (NOT workspace-scoped).
+  system-wide by default; `create --workspace WS` scopes a skill to one
+  workspace, where it shadows a same-named global. `-w WS` (or ARB_WORKSPACE) on
+  list/show/update/delete resolves names within that workspace; ids always work.
 
-      arb skill list                                registered skills (name + size + metadata)
-      arb skill show   <id|name>                    one skill's full body + metadata
+      arb skill list                                registered skills (name + metadata; no body)
+      arb skill show   <id|name> [-w WS]            one skill's full body + metadata
       arb skill create <name> [--body ... | --body-file PATH | -]
                                      [--metadata JSON] [--activation-mode situational|always_on]
-                                     [--code-only]
+                                     [--code-only | --code-only=false]
       arb skill update <id|name> [--name NEW] [--body ... | --body-file PATH | -]
                                      [--metadata JSON] [--activation-mode situational|always_on]
                                      [--code-only]
@@ -36,7 +37,7 @@ defmodule ArbiterCli.Cmd.Skill do
   All verbs go through the REST API at `/api/skills`.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [
     body: :string,
@@ -57,7 +58,9 @@ defmodule ArbiterCli.Cmd.Skill do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb skill", switches: @switches)
+      {opts, rest, _mode} =
+        ArgParser.parse(argv, command: "arb skill", switches: @switches)
+
       mode = if opts[:json], do: :json, else: :text
 
       case rest do
@@ -94,7 +97,7 @@ defmodule ArbiterCli.Cmd.Skill do
   # ---- list --------------------------------------------------------------
 
   defp list(mode) do
-    case Client.get("/api/skills") do
+    case Client.get("/api/skills", scope_params()) do
       {:ok, %{"data" => skills}} -> emit_list(skills, mode)
       {:ok, _} -> emit_list([], mode)
       {:error, err} -> Output.die(err)
@@ -107,11 +110,10 @@ defmodule ArbiterCli.Cmd.Skill do
 
   defp emit_list(skills, :text) do
     Enum.each(skills, fn s ->
-      bytes = byte_size(s["body"] || "")
       desc = get_in(s, ["metadata", "description"])
       suffix = if desc in [nil, ""], do: "", else: "  — #{desc}"
       usage_tag = format_usage(s)
-      IO.puts("#{s["name"]}  (#{bytes} bytes)#{activation_tag(s)}#{usage_tag}#{suffix}")
+      IO.puts("#{s["name"]}#{activation_tag(s)}#{usage_tag}#{suffix}")
     end)
   end
 
@@ -148,7 +150,7 @@ defmodule ArbiterCli.Cmd.Skill do
   defp show(args, mode) do
     ref = one_ref!(args, "show")
 
-    case Client.get("/api/skills/" <> URI.encode(ref)) do
+    case Client.get("/api/skills/" <> URI.encode(ref), scope_params()) do
       {:ok, skill} -> emit_show(skill, mode)
       {:error, err} -> Output.die(err)
     end
@@ -185,6 +187,7 @@ defmodule ArbiterCli.Cmd.Skill do
       |> maybe_put("metadata", metadata)
       |> maybe_put("activation_mode", validate_activation!(opts[:activation_mode]))
       |> maybe_put("code_only", opts[:code_only])
+      |> maybe_put("workspace", if(Workspace.flag_given?(), do: Workspace.selected_id()))
 
     case Client.post("/api/skills", payload) do
       {:ok, skill} -> emit_written(skill, "created", mode)
@@ -212,7 +215,7 @@ defmodule ArbiterCli.Cmd.Skill do
       )
     end
 
-    case Client.patch("/api/skills/" <> URI.encode(ref), payload) do
+    case Client.patch("/api/skills/" <> URI.encode(ref) <> query(scope_params()), payload) do
       {:ok, skill} -> emit_written(skill, "updated", mode)
       {:error, err} -> Output.die(err)
     end
@@ -227,7 +230,7 @@ defmodule ArbiterCli.Cmd.Skill do
       confirm!(ref)
     end
 
-    case Client.delete("/api/skills/" <> URI.encode(ref)) do
+    case Client.delete("/api/skills/" <> URI.encode(ref), scope_params()) do
       {:ok, skill} -> emit_deleted(skill, mode)
       {:error, err} -> Output.die(err)
     end
@@ -334,6 +337,18 @@ defmodule ArbiterCli.Cmd.Skill do
       [] -> Output.die("skill #{verb} requires a skill name or id")
     end
   end
+
+  # The workspace a read / by-name lookup is scoped to: `-w` / `--workspace`,
+  # else `ARB_WORKSPACE`; no param (all scopes, global by name) when neither.
+  defp scope_params do
+    case Workspace.selected_id() do
+      nil -> []
+      ws_id -> [workspace: ws_id]
+    end
+  end
+
+  defp query([]), do: ""
+  defp query(params), do: "?" <> URI.encode_query(params)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

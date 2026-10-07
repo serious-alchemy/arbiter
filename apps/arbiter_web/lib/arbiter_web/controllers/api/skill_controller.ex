@@ -7,7 +7,8 @@ defmodule ArbiterWeb.Api.SkillController do
 
     * `GET    /api/skills`     — :index
     * `POST   /api/skills`     — :create
-    * `GET    /api/skills/:id` — :show  (`:id` is a UUID or the skill name)
+    * `GET    /api/skills/:id` — :show  (`:id` is a UUID or the skill name;
+      a name resolves within the `workspace` param / bound token, scoped over global)
     * `PATCH  /api/skills/:id` — :update (also `PUT`)
     * `DELETE /api/skills/:id` — :delete
 
@@ -45,9 +46,18 @@ defmodule ArbiterWeb.Api.SkillController do
     end
   end
 
-  def show(conn, %{"id" => id}) do
-    with {:ok, skill} <- Skills.get_skill(id) do
+  def show(conn, %{"id" => id} = params) do
+    with {:ok, skill} <- fetch_in_scope(conn, id, params) do
       render(conn, :show, skill: skill)
+    end
+  end
+
+  # By-name lookup honours the caller's workspace (`workspace` / `workspace_id`,
+  # or the token's bound workspace), as MCP `skill_get` does: a scoped skill
+  # shadows the global one, and a bound token never sees another workspace's.
+  defp fetch_in_scope(conn, ref, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      Skills.fetch_skill_in_scope(ref, ws_id)
     end
   end
 
@@ -81,16 +91,16 @@ defmodule ArbiterWeb.Api.SkillController do
   def update(conn, %{"id" => id} = params) do
     attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
 
-    with {:ok, skill} <- Skills.get_skill(id),
+    with {:ok, skill} <- fetch_in_scope(conn, id, params),
          {:ok, updated} <- Skills.update_skill(skill, attrs, actor: actor_label()) do
       render(conn, :show, skill: updated, warning: Skills.bundled_collision(updated.name))
     end
   end
 
-  def delete(conn, %{"id" => id}) do
-    with {:ok, skill} <- Skills.get_skill(id),
+  def delete(conn, %{"id" => id} = params) do
+    with {:ok, skill} <- fetch_in_scope(conn, id, params),
          :ok <- Skills.delete_skill(skill) do
-      render(conn, :show, skill: skill)
+      json(conn, Arbiter.Skills.Serializer.deleted(skill))
     end
   end
 end
