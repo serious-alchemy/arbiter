@@ -49,6 +49,10 @@ defmodule Arbiter.Nodes.UpdateTest do
       node = enroll!()
       {:ok, node} = Nodes.update_node(node, %{max_workers: 2}, @operator)
       assert {:error, _} = Nodes.update_node(node, %{max_workers: 0}, @operator)
+
+      assert {:error, :invalid_max_workers} =
+               Nodes.update_node(node, %{max_workers: -3}, @operator)
+
       assert {:ok, %{max_workers: nil}} = Nodes.update_node(node, %{max_workers: nil}, @operator)
     end
 

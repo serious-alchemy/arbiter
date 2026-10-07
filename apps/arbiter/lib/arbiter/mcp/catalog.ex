@@ -2864,6 +2864,12 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" => "Close every breaker matching `workspace` / `kind`."
           },
+          "confirm_all" => %{
+            "type" => "boolean",
+            "description" =>
+              "Required with `all: true` when neither `workspace` nor `kind` is given " <>
+                "(an installation-wide reset)."
+          },
           "workspace" => %{"type" => "string", "description" => "Workspace id or name."},
           "kind" => %{"type" => "string", "description" => "Restrict `all` to one kind."},
           "provider" => %{

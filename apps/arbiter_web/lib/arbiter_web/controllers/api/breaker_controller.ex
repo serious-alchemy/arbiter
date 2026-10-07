@@ -83,8 +83,16 @@ defmodule ArbiterWeb.Api.BreakerController do
               |> maybe_put(:workspace_id, ws_id)
               |> maybe_put(:kind, kind)
 
-            {:ok, count} = CircuitBreaker.reset_all(filters)
-            json(conn, %{reset: count, workspace_id: ws_id})
+            with {:ok, confirm?} <-
+                   params |> Params.fetch_bool("confirm_all", false) |> Params.to_rest() do
+              case CircuitBreaker.reset_scope(filters, confirm?) do
+                {:ok, count} ->
+                  json(conn, %{reset: count, workspace_id: ws_id})
+
+                {:error, :unscoped} ->
+                  {:error, {:invalid_request, CircuitBreaker.unscoped_message()}}
+              end
+            end
           end
         else
           {:error,
@@ -93,13 +101,19 @@ defmodule ArbiterWeb.Api.BreakerController do
         end
 
       signature ->
-        case CircuitBreaker.reset(signature) do
-          :ok ->
-            json(conn, %{reset: 1, signature: signature})
-
-          {:error, :not_found} ->
-            {:error, {:invalid_request, "no breaker with signature #{signature}"}}
+        with {:ok, _kind} <- resolve_kind(params["kind"]) do
+          reset_signature(conn, signature)
         end
+    end
+  end
+
+  defp reset_signature(conn, signature) do
+    case CircuitBreaker.reset(signature) do
+      :ok ->
+        json(conn, %{reset: 1, signature: signature})
+
+      {:error, :not_found} ->
+        {:error, :not_found}
     end
   end
 

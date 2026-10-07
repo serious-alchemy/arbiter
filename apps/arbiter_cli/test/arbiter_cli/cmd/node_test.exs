@@ -355,6 +355,16 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert Jason.decode!(raw) == %{"workspace_ids" => []}
     end
 
+    test "--json prints the raw response instead of the text summary" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--max-workers", "3", "--json"]) end)
+
+      assert %{"node" => _} = Jason.decode!(String.trim(out))
+      refute out =~ "Updated"
+    end
+
     test "with nothing to change it says so and sends nothing" do
       {_out, err, code} = capture(fn -> Node.run(["set", "box-1"]) end)
       assert code != 0

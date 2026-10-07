@@ -67,6 +67,10 @@ defmodule Arbiter.Nodes do
   def valid_name?(name),
     do: is_binary(name) and name != @local_name and Regex.match?(@name_pattern, name)
 
+  # A node cap is `nil` (uncapped) or a positive integer; 0 is "drain the node".
+  defp max_workers_ok?(nil), do: true
+  defp max_workers_ok?(n), do: is_integer(n) and n >= 1
+
   defp name_ok?(nil), do: true
   defp name_ok?(name), do: valid_name?(name)
 
@@ -438,7 +442,8 @@ defmodule Arbiter.Nodes do
   """
   @spec update_node(Node.t(), map(), Actor.t() | String.t() | nil) ::
           {:ok, Node.t()}
-          | {:error, :revoked | :name_taken | :invalid_name | :not_found | term()}
+          | {:error,
+             :revoked | :name_taken | :invalid_name | :invalid_max_workers | :not_found | term()}
   def update_node(%Node{id: id}, changes, actor) do
     case get_node(id) do
       nil ->
@@ -455,6 +460,7 @@ defmodule Arbiter.Nodes do
 
         cond do
           not name_ok?(Map.get(delta, :name)) -> {:error, :invalid_name}
+          not max_workers_ok?(Map.get(delta, :max_workers)) -> {:error, :invalid_max_workers}
           delta == %{} -> {:ok, node}
           true -> apply_set(node, delta, actor)
         end

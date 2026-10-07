@@ -186,6 +186,32 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert out =~ "Closed 4 circuit breaker(s)."
     end
 
+    test "--all together with a signature is refused client-side" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Cmd.Breaker.run(["reset", "sig-1", "--all"]) end)
+
+      assert code != 0
+      assert err =~ "not both"
+    end
+
+    test "--confirm-all is forwarded with --all" do
+      test_pid = self()
+
+      stub_routes([
+        {{"post", "/api/breakers/reset"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:body, Jason.decode!(body)})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"reset" => 0})
+         end}
+      ])
+
+      {_out, _err, 0} =
+        capture(fn -> ArbiterCli.Cmd.Breaker.run(["reset", "--all", "--confirm-all"]) end)
+
+      assert_receive {:body, %{"all" => true, "confirm_all" => true}}
+    end
+
     test "--auth-hold <provider> clears that provider's auth hold (bd-21bmdh)" do
       test_pid = self()
 

@@ -6,8 +6,11 @@ defmodule ArbiterCli.Cmd.Breaker do
                                         — show live breaker state plus the
                                           registry of every gated call site
       arb breaker reset <signature>     — close one tripped breaker
-      arb breaker reset --all [--workspace W] [--kind K]
-                                        — close every breaker in a scope
+      arb breaker reset --all [--workspace W] [--kind K] [--confirm-all]
+                                        — close every breaker in a scope;
+                                          with neither --workspace nor --kind
+                                          it is installation-wide and needs
+                                          --confirm-all
       arb breaker reset --auth-hold <provider>
                                         — clear a provider's auth hold
                                           (claude / codex / gemini)
@@ -44,6 +47,7 @@ defmodule ArbiterCli.Cmd.Breaker do
             kind: :string,
             open: :boolean,
             all: :boolean,
+            confirm_all: :boolean,
             auth_hold: :string
           ]
         )
@@ -86,10 +90,14 @@ defmodule ArbiterCli.Cmd.Breaker do
           Workspace.reject_flag!("breaker reset --auth-hold")
           %{provider: provider}
 
+        opts[:all] && args != [] ->
+          Output.die("arb breaker reset: pass a signature or --all, not both")
+
         opts[:all] ->
           %{all: true}
           |> put_workspace(opts)
           |> put_opt(opts, :kind)
+          |> put_opt(opts, :confirm_all)
 
         signature = List.first(args) ->
           Workspace.reject_flag!("breaker reset <signature>")

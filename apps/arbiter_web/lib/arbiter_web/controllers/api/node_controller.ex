@@ -105,10 +105,20 @@ defmodule ArbiterWeb.Api.NodeController do
          {:ok, updated} <- Nodes.update_node(node, changes, nil) do
       json(conn, %{node: node_view(updated)})
     else
-      {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
-      {:error, :name_taken} -> {:error, {:conflict, "a node with that name already exists"}}
-      {:error, :revoked} -> {:error, {:conflict, "the node is revoked and cannot be edited"}}
-      {:error, other} -> {:error, other}
+      {:error, :invalid_name} ->
+        {:error, {:invalid, @name_message}}
+
+      {:error, :invalid_max_workers} ->
+        {:error, {:invalid, "max_workers must be 1 or more, or null"}}
+
+      {:error, :name_taken} ->
+        {:error, {:conflict, "a node with that name already exists"}}
+
+      {:error, :revoked} ->
+        {:error, {:conflict, "the node is revoked and cannot be edited"}}
+
+      {:error, other} ->
+        {:error, other}
     end
   end
 

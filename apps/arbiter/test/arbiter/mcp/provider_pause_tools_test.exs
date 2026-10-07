@@ -16,13 +16,26 @@ defmodule Arbiter.MCP.ProviderPauseToolsTest do
   end
 
   test "pause then resume" do
-    assert {:ok, %{paused: [%{"target" => "antigravity", "reason" => "escape", "by" => "mcp"}]}} =
+    assert {:ok,
+            %{
+              paused: [
+                %{"target" => "antigravity", "reason" => "escape", "by" => "coordinator via mcp"}
+              ]
+            }} =
              Tools.provider_pause(@coordinator, %{"ref" => "antigravity", "reason" => "escape"})
 
     assert Arbiter.Providers.Pause.provider_paused?(:antigravity)
 
     assert {:ok, %{paused: []}} = Tools.provider_resume(@coordinator, %{"ref" => "antigravity"})
     refute Arbiter.Providers.Pause.provider_paused?(:antigravity)
+  end
+
+  test "an ambiguous or unknown ref maps to a typed error, not an atom dump" do
+    assert {:error, {:not_found, msg}} = Tools.provider_pause(@coordinator, %{"ref" => "nope"})
+    refute msg =~ ":not_found"
+
+    assert {:error, {:invalid, msg}} = Tools.provider_resume(@coordinator, %{"ref" => "claude"})
+    assert msg =~ "not paused"
   end
 
   test "ref is required and unknown refs error" do

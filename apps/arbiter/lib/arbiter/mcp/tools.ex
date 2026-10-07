@@ -1109,10 +1109,10 @@ defmodule Arbiter.MCP.Tools do
     {:ok, scheduler_status_data()}
   rescue
     e ->
-      {:error, {:invalid, "status check failed: #{inspect(e)}"}}
+      {:error, {:internal, "status check failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
-      {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
+      {:error, {:busy, "status check failed: process error #{inspect(reason)}"}}
   end
 
   defp mcp_actor(scope), do: {Arbiter.PaperTrail.actor_label(scope), "mcp"}
@@ -1131,34 +1131,43 @@ defmodule Arbiter.MCP.Tools do
   running unless `stop_running` is true. Persisted. Coordinator only.
   """
   @spec provider_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def provider_pause(%Scope{} = _scope, args) do
+  def provider_pause(%Scope{} = scope, args) do
+    alias Arbiter.Providers.Pause
+
     with {:ok, ref} <- require_string(args, "ref"),
          {:ok, stop_running?} <- fetch_bool(args, "stop_running", false),
-         {:ok, entry} <-
-           Arbiter.Providers.Pause.pause(ref, reason: fetch_string(args, "reason"), by: "mcp") do
-      stopped =
-        if stop_running?, do: Arbiter.Providers.Pause.stop_running(ref), else: []
-
-      Logger.info("[provider_pause] #{entry.target} paused")
-      {:ok, %{paused: Arbiter.Providers.Pause.to_json(), stopped: stopped}}
-    else
-      {:error, {_, _} = err} -> {:error, err}
-      {:error, reason} -> {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
+         {:ok, stopped} <-
+           ref
+           |> Pause.pause_and_stop(
+             reason: fetch_string(args, "reason"),
+             by: pause_by(scope),
+             stop_running: stop_running?
+           )
+           |> pause_failure(ref) do
+      Logger.info("[provider_pause] #{ref} paused")
+      {:ok, %{paused: Pause.to_json(), stopped: stopped}}
     end
   end
 
   @doc "Resume a paused provider or account. Coordinator only."
   @spec provider_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def provider_resume(%Scope{} = _scope, args) do
+  def provider_resume(%Scope{} = scope, args) do
+    alias Arbiter.Providers.Pause
+
     with {:ok, ref} <- require_string(args, "ref"),
-         {:ok, entry} <- Arbiter.Providers.Pause.resume(ref, by: "mcp") do
+         {:ok, entry} <- ref |> Pause.resume(by: pause_by(scope)) |> pause_failure(ref) do
       Logger.info("[provider_resume] #{entry.target} resumed")
-      {:ok, %{paused: Arbiter.Providers.Pause.to_json()}}
-    else
-      {:error, {_, _} = err} -> {:error, err}
-      {:error, reason} -> {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+      {:ok, %{paused: Pause.to_json()}}
     end
   end
+
+  defp pause_by(scope),
+    do: Arbiter.Providers.Pause.attribution(Arbiter.PaperTrail.actor_label(scope), "mcp")
+
+  defp pause_failure({:error, reason}, ref),
+    do: {:error, Arbiter.Providers.Pause.error_message(reason, ref)}
+
+  defp pause_failure(ok, _ref), do: ok
 
   # ---- shared resolution / fetch -----------------------------------------
 
