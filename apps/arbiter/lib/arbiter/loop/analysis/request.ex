@@ -50,7 +50,8 @@ defmodule Arbiter.Loop.Analysis.Request do
   defp parse_window(raw) when is_binary(raw) do
     case Regex.run(~r/^(\d+)([dhm])$/, raw) do
       [_, n, unit] ->
-        {:ok, DateTime.add(DateTime.utc_now(), -String.to_integer(n) * unit_seconds(unit), :second)}
+        {:ok,
+         DateTime.add(DateTime.utc_now(), -String.to_integer(n) * unit_seconds(unit), :second)}
 
       nil ->
         parse_iso(raw)
@@ -74,7 +75,9 @@ defmodule Arbiter.Loop.Analysis.Request do
   # A string on the GET query / REST alias, a real integer in a JSON body or an
   # MCP argument; anything else is refused rather than crashing.
   defp parse_limit(raw, default) when raw in [nil, ""] and is_nil(default), do: {:ok, nil}
-  defp parse_limit(raw, default), do: raw |> Params.limit(default || @max_limit, @max_limit) |> unwrap()
+
+  defp parse_limit(raw, default),
+    do: raw |> Params.limit(default || @max_limit, @max_limit) |> unwrap()
 
   defp unwrap({:error, {:invalid, msg}}), do: {:error, msg}
   defp unwrap(ok), do: ok
