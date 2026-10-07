@@ -189,4 +189,21 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert %DateTime{} = data.changed_at
     end
   end
+
+  describe "internal failures are not :invalid (P-19)" do
+    setup do
+      :ok = :meck.new(Arbiter.Board.Drain, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Board.Drain) end)
+    end
+
+    test "a raise in scheduler_status is :internal", %{coordinator: coordinator} do
+      :meck.expect(Arbiter.Board.Drain, :status, fn -> raise "boom" end)
+      assert {:error, {:internal, _}} = Tools.scheduler_status(coordinator, %{})
+    end
+
+    test "an exit in scheduler_status is :busy", %{coordinator: coordinator} do
+      :meck.expect(Arbiter.Board.Drain, :status, fn -> exit(:timeout) end)
+      assert {:error, {:busy, _}} = Tools.scheduler_status(coordinator, %{})
+    end
+  end
 end

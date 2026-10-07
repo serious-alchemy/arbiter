@@ -359,8 +359,8 @@ defmodule ArbiterCli.Cmd.Node do
 
   # ---- set -------------------------------------------------------------------
 
-  defp set(argv, _mode) do
-    {opts, rest, mode} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
+  defp set(argv, mode) do
+    {opts, rest, _} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
     if ref == "local" and (opts[:name] || labels(opts) != [] || pins(opts) != []),

@@ -7,7 +7,7 @@ defmodule ArbiterWeb.Api.ProviderPauseControllerTest do
   test "pause, list and resume round-trip", %{conn: conn} do
     conn1 = post(conn, "/api/providers/pause", %{"ref" => "codex", "reason" => "jail escape"})
 
-    assert %{"paused" => [%{"target" => "codex", "reason" => "jail escape", "by" => "api"}]} =
+    assert %{"paused" => [%{"target" => "codex", "reason" => "jail escape"}]} =
              json_response(conn1, 200)
 
     assert Pause.provider_paused?(:codex)
@@ -24,6 +24,34 @@ defmodule ArbiterWeb.Api.ProviderPauseControllerTest do
   test "an unknown ref is 404 and resuming something not paused is 4xx", %{conn: conn} do
     assert json_response(post(conn, "/api/providers/pause", %{"ref" => "nope"}), 404)
     assert json_response(post(conn, "/api/providers/resume", %{"ref" => "claude"}), 400)
+  end
+
+  test "an ambiguous ref explains provider:slug", %{conn: conn} do
+    for provider <- [:claude, :codex] do
+      {:ok, _} = Ash.create(Arbiter.Accounts.ProviderAccount, %{provider: provider, slug: "dup"})
+    end
+
+    body = json_response(post(conn, "/api/providers/pause", %{"ref" => "dup"}), 400)
+    assert inspect(body) =~ "provider:slug"
+  end
+
+  test "a non-string reason is rejected", %{conn: conn} do
+    assert json_response(
+             post(conn, "/api/providers/pause", %{"ref" => "codex", "reason" => 5}),
+             400
+           )
+
+    refute Pause.provider_paused?(:codex)
+  end
+
+  test "attribution comes from the token scope, not a literal", %{conn: conn} do
+    assert %{"paused" => [%{"by" => by}]} =
+             json_response(
+               post(conn, "/api/providers/pause", %{"ref" => "codex", "by" => "spoof"}),
+               200
+             )
+
+    assert by == "coordinator via api"
   end
 
   test "a missing ref is rejected", %{conn: conn} do

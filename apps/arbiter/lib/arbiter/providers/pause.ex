@@ -123,6 +123,43 @@ defmodule Arbiter.Providers.Pause do
     end
   end
 
+  @doc """
+  Pause `ref` and, when `stop_running?`, stop the live workers on it. The one
+  sequence behind REST and MCP. Returns `{:ok, stopped_task_ids}`.
+  """
+  @spec pause_and_stop(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def pause_and_stop(ref, opts \\ []) do
+    {stop?, opts} = Keyword.pop(opts, :stop_running, false)
+
+    with {:ok, _entry} <- pause(ref, opts) do
+      {:ok, if(stop?, do: stop_running(ref), else: [])}
+    end
+  end
+
+  @doc """
+  The `by` string for a pause/resume: the token's actor label and the surface
+  (`"coordinator via mcp"`), or just the surface when the caller has no scope.
+  Never caller-asserted.
+  """
+  @spec attribution(String.t() | nil, String.t()) :: String.t()
+  def attribution(nil, surface), do: surface
+  def attribution(label, surface), do: "#{label} via #{surface}"
+
+  @doc """
+  The one error table for pause/resume failures: `{kind, message}` with
+  `kind` in `:not_found | :invalid | :internal`.
+  """
+  @spec error_message(term(), String.t()) :: {:not_found | :invalid | :internal, String.t()}
+  def error_message(:not_found, ref), do: {:not_found, "no provider or account matches `#{ref}`"}
+
+  def error_message(:ambiguous, ref),
+    do: {:invalid, "`#{ref}` matches several accounts — use provider:slug"}
+
+  def error_message(:not_paused, ref), do: {:invalid, "`#{ref}` is not paused"}
+
+  def error_message(other, ref),
+    do: {:internal, "pause/resume of `#{ref}` failed: #{inspect(other)}"}
+
   @doc "Resume `ref`; `{:error, :not_paused}` when it was not paused."
   @spec resume(String.t(), keyword()) :: {:ok, entry()} | {:error, term()}
   def resume(ref, opts \\ []) do
