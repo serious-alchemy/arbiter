@@ -340,7 +340,7 @@ defmodule ArbiterCli.Cmd.Skill do
 
   # The workspace a read / by-name lookup is scoped to: `-w` / `--workspace`,
   # else `ARB_WORKSPACE`; no param (all scopes, global by name) when neither.
-  defp scope_params() do
+  defp scope_params do
     case Workspace.selected_id() do
       nil -> []
       ws_id -> [workspace: ws_id]
