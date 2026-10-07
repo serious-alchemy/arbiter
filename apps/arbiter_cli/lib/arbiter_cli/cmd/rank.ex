@@ -1,13 +1,17 @@
 defmodule ArbiterCli.Cmd.Rank do
   @moduledoc """
-  `arb ticket rank <id> --top | --bottom | --before <id> | --after <id>` —
+  `arb ticket rank <id> --top | --bottom | --before <id> | --after <id>
+  [--pin | --unpin]` and `arb ticket rank <id> --pin | --unpin` —
   reorder a ticket inside its workspace's rank order (bd-djapyj): the space
   `board/scheduler.ex` and Autopilot dispatch read (priority, then rank,
   then age).
 
   Wraps `PATCH /api/issues/:id/rank`, which runs the `:set_rank` action.
   Exactly one of `--top`, `--bottom`, `--before <id>`, `--after <id>` is
-  required. `--before`/`--after` must name a ticket in the same workspace.
+  required unless `--pin`/`--unpin` is given alone. `--before`/`--after` must name a ticket in the same workspace.
+  `--pin` / `--unpin` set or clear `rank_pinned` (P-15): alone they change the
+  pin without moving the ticket; with a move, `--pin` pins with the move and
+  `--unpin` moves then unpins. Without either, a move leaves the pin as it was.
   Never changes priority — ranking before/after a ticket in a different
   priority band only orders within rank, it does not move the ticket into
   that band.
@@ -19,7 +23,15 @@ defmodule ArbiterCli.Cmd.Rank do
 
   alias ArbiterCli.{ArgParser, Client, Output}
 
-  @switches [json: :boolean, top: :boolean, bottom: :boolean, before: :string, after: :string]
+  @switches [
+    json: :boolean,
+    top: :boolean,
+    bottom: :boolean,
+    before: :string,
+    after: :string,
+    pin: :boolean,
+    unpin: :boolean
+  ]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -49,6 +61,8 @@ defmodule ArbiterCli.Cmd.Rank do
     end
   end
 
+  @usage "give exactly one of: --top, --bottom, --before <id>, --after <id> (optionally with --pin or --unpin), or --pin / --unpin alone"
+
   defp rank_body(opts) do
     forms =
       [
@@ -59,10 +73,18 @@ defmodule ArbiterCli.Cmd.Rank do
       ]
       |> Enum.reject(&(&1 == nil || &1 == false))
 
+    pinned =
+      case {opts[:pin], opts[:unpin]} do
+        {true, true} -> Output.die("--pin and --unpin are mutually exclusive")
+        {true, _} -> %{"pinned" => true}
+        {_, true} -> %{"pinned" => false}
+        _ -> %{}
+      end
+
     case forms do
-      [form] -> form
-      [] -> Output.die("give exactly one of: --top, --bottom, --before <id>, --after <id>")
-      _ -> Output.die("give exactly one of: --top, --bottom, --before <id>, --after <id>")
+      [form] -> Map.merge(form, pinned)
+      [] when pinned != %{} -> pinned
+      _ -> Output.die(@usage)
     end
   end
 

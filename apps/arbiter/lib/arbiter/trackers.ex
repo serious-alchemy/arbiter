@@ -257,6 +257,44 @@ defmodule Arbiter.Trackers do
   end
 
   @doc """
+  Create an unclaimed upstream ticket with NO local task (`arb ticket create
+  --ticket-only`, REST `POST /tracker/tickets`, MCP `tracker_create_ticket`;
+  P-15). `attrs` takes `:title`, `:description`, `:priority`, `:issue_type`;
+  blank values are dropped. Refuses a workspace with no tracker and an adapter
+  without outbound create as `{:error, {:invalid_request, message}}`.
+  """
+  @spec create_ticket_only(Arbiter.Tasks.Workspace.t(), map()) ::
+          {:ok, %{ref: Tracker.ref(), url: String.t() | nil, tracker_type: String.t()}}
+          | {:error, term()}
+  def create_ticket_only(%Arbiter.Tasks.Workspace{} = workspace, attrs) when is_map(attrs) do
+    type = workspace_tracker_type(workspace)
+    attrs = Map.reject(attrs, fn {_k, v} -> v in [nil, ""] end)
+
+    if type == :none do
+      {:error,
+       {:invalid_request,
+        "workspace has no tracker configured; use arb create (without --ticket-only) for a local task"}}
+    else
+      case create_for_workspace(workspace, attrs) do
+        {:ok, ref} ->
+          {:ok,
+           %{
+             ref: ref,
+             url: link_for_workspace(workspace, ref),
+             tracker_type: Atom.to_string(type)
+           }}
+
+        {:error, :not_supported} ->
+          {:error,
+           {:invalid_request, "tracker #{type} does not support outbound ticket creation"}}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  @doc """
   Returns a human-clickable URL for a tracker ref in the context of the given workspace.
 
   Resolves the adapter from `workspace.config["tracker"]["type"]`, seeds the

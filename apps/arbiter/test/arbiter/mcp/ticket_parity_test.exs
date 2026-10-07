@@ -192,6 +192,64 @@ defmodule Arbiter.MCP.TicketParityTest do
     end
   end
 
+  describe "tracker_list_issues / tracker_create_ticket (tracker = none)" do
+    test "list reports supported: false with no rows", ctx do
+      data = call!(ctx.coordinator, "tracker_list_issues", %{})
+      assert data == %{data: [], supported: false}
+    end
+
+    test "create refuses a workspace with no tracker", ctx do
+      assert {:tool_error, message, "invalid_request"} =
+               Catalog.call(ctx.coordinator, "tracker_create_ticket", %{"title" => "x"})
+
+      assert message =~ "no tracker configured"
+    end
+
+    test "both resolve the workspace by the P-04 rule: a foreign workspace is refused", ctx do
+      {:ok, other} =
+        Ash.create(Workspace, %{
+          name: "par-o-#{System.unique_integer([:positive])}",
+          prefix: "pao"
+        })
+
+      worker_scope = %Scope{tier: :coordinator, workspace_id: ctx.ws.id, can_dispatch: false}
+
+      claim =
+        Catalog.call(worker_scope, "tracker_claim", %{"ref" => "1", "workspace" => other.id})
+
+      list = Catalog.call(worker_scope, "tracker_list_issues", %{"workspace" => other.id})
+
+      create =
+        Catalog.call(worker_scope, "tracker_create_ticket", %{
+          "title" => "x",
+          "workspace" => other.id
+        })
+
+      assert elem(list, 0) == elem(claim, 0)
+      assert elem(create, 0) == elem(claim, 0)
+    end
+  end
+
+  describe "ticket_rank pinned (P-15)" do
+    test "pinned: false alone unpins; with a move it pins or unpins", ctx do
+      t = ticket(ctx.ws)
+
+      pinned =
+        call!(ctx.coordinator, "ticket_rank", %{"id" => t.id, "top" => true, "pinned" => true})
+
+      assert pinned.rank_pinned == true
+
+      unpinned = call!(ctx.coordinator, "ticket_rank", %{"id" => t.id, "pinned" => false})
+      assert unpinned.rank_pinned == false
+      assert unpinned.rank == pinned.rank
+    end
+
+    test "no move form and no pinned is refused", ctx do
+      t = ticket(ctx.ws)
+      assert {:tool_error, _, _} = Catalog.call(ctx.coordinator, "ticket_rank", %{"id" => t.id})
+    end
+  end
+
   describe "tracker_claim / tracker_sync (github)" do
     setup do
       System.put_env(@gh_env_var, "parity-token")
@@ -249,6 +307,49 @@ defmodule Arbiter.MCP.TicketParityTest do
       assert data.actions == data.data
       assert data.applied == false
       assert data.count == 1
+    end
+
+    test "tracker_list_issues lists open issues in the REST shape", ctx do
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [issue_payload(@gh_viewer)])
+        end
+      end)
+
+      data = call!(ctx.gh, "tracker_list_issues", %{})
+
+      assert data.supported == true
+      assert [%{ref: "43", title: "Wire up the thing", status: "open", url: url}] = data.data
+      assert url =~ "issues/43"
+    end
+
+    test "tracker_create_ticket creates upstream and returns ref/url/tracker_type", ctx do
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues"} ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(Map.put(issue_payload(@gh_viewer), "number", 77))
+        end
+      end)
+
+      data = call!(ctx.gh, "tracker_create_ticket", %{"title" => "Fresh"})
+
+      assert %{ref: "77", tracker_type: "github", url: url} = data
+      assert url =~ "77"
+      assert Ash.read!(Issue) |> Enum.filter(&(&1.tracker_ref == "77")) == []
+    end
+
+    test "tracker_create_ticket requires a title", ctx do
+      assert {:tool_error, message, _} = Catalog.call(ctx.gh, "tracker_create_ticket", %{})
+      assert message =~ "title"
     end
 
     test "tracker_claim: difficulty is range-checked before the tracker is called", ctx do

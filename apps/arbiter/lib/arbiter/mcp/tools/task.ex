@@ -594,6 +594,8 @@ defmodule Arbiter.MCP.Tools.Task do
   priority band only orders within rank, it does not move the task into
   that band.
   """
+  @rank_usage "give exactly one of: top, bottom, before_id, after_id (optionally with pinned), or pinned alone"
+
   @spec task_rank(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_rank(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
@@ -612,7 +614,8 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp rank_args(args) do
     with {:ok, top?} <- Params.fetch_bool(args, "top", false),
-         {:ok, bottom?} <- Params.fetch_bool(args, "bottom", false) do
+         {:ok, bottom?} <- Params.fetch_bool(args, "bottom", false),
+         {:ok, pinned} <- fetch_pinned(args) do
       forms =
         [
           top? && %{position: :top},
@@ -622,11 +625,19 @@ defmodule Arbiter.MCP.Tools.Task do
         ]
         |> Enum.reject(&(&1 == false))
 
-      case forms do
-        [form] -> {:ok, form}
-        _ -> {:error, {:invalid, "give exactly one of: top, bottom, before_id, after_id"}}
+      case {forms, pinned} do
+        {[form], nil} -> {:ok, form}
+        {[form], pinned} -> {:ok, Map.put(form, :pinned, pinned)}
+        {[], pinned} when is_boolean(pinned) -> {:ok, %{pinned: pinned}}
+        _ -> {:error, {:invalid, @rank_usage}}
       end
     end
+  end
+
+  defp fetch_pinned(args) do
+    if Map.has_key?(args, "pinned"),
+      do: Params.fetch_bool(args, "pinned", false),
+      else: {:ok, nil}
   end
 
   # ---- epic_floor -------------------------------------------------------------

@@ -58,6 +58,8 @@ defmodule Arbiter.MCP.Catalog do
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `ticket_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
+  | `tracker_list_issues` | coordinator | `Arbiter.Trackers.list_open/1` |
+  | `tracker_create_ticket` | coordinator | `Arbiter.Trackers.create_ticket_only/2` |
   | `tracker_sync` | coordinator | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
   | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
   | `workspace_config_get` | worker, coordinator | `Ash.get(Workspace, id)` → read `config` / dotted key |
@@ -144,7 +146,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
@@ -775,7 +777,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Reorder a ticket inside its workspace's rank order via the `:set_rank` action — the space " <>
           "`board/scheduler.ex` and Autopilot dispatch read (priority, then rank, then age). " <>
-          "Coordinator only. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required. " <>
+          "Coordinator only. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required, unless `pinned` is given alone. " <>
           "`before_id`/`after_id` must name a ticket in the same workspace, or the call is rejected. " <>
           "Never changes `priority` — ranking before/after a ticket in a different priority band " <>
           "only orders within rank, it does not move the ticket into that band.",
@@ -795,6 +797,13 @@ defmodule Arbiter.MCP.Catalog do
           "after_id" => %{
             "type" => "string",
             "description" => "Move immediately behind this ticket (same workspace)."
+          },
+          "pinned" => %{
+            "type" => "boolean",
+            "description" =>
+              "Set or clear `rank_pinned` (a board drag pins; a plain move leaves the pin as it was). " <>
+                "Alone: pin/unpin without moving. With a move: `true` pins with the move, " <>
+                "`false` moves then unpins."
           }
         },
         "required" => ["id"],
@@ -1860,6 +1869,41 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.tracker_claim/2
+    },
+    %{
+      name: "tracker_list_issues",
+      tiers: @coordinator,
+      description:
+        "List the open tracker issues assigned to the workspace user (`arb ticket list --tracker`, " <>
+          "`GET /api/workspaces/:id/tracker/issues`) — the `ref`s `tracker_claim` takes. Returns " <>
+          "`{data: [{ref, title, url, status, assignees}], supported}`; `supported: false` (no rows) " <>
+          "means the tracker has no backlog listing, not an error.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.tracker_list_issues/2
+    },
+    %{
+      name: "tracker_create_ticket",
+      tiers: @coordinator,
+      description:
+        "Create an UNCLAIMED ticket in the workspace's external tracker with no local ticket " <>
+          "(`arb ticket create --ticket-only`, `POST /api/workspaces/:id/tracker/tickets`), so any " <>
+          "fleet contributor can pick it up with `tracker_claim`. Needs a configured tracker whose " <>
+          "adapter supports outbound create. Returns `{ref, url, tracker_type}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "title" => %{"type" => "string", "description" => "Ticket title (required)."},
+          "description" => %{"type" => "string", "description" => "Ticket body (optional)."},
+          "priority" => %{"type" => "integer", "description" => "0 (P0) .. 4 (P4) (optional)."},
+          "issue_type" => %{
+            "type" => "string",
+            "description" => "Issue type, e.g. bug | feature | task (optional)."
+          }
+        },
+        "required" => ["title"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.tracker_create_ticket/2
     },
     %{
       name: "tracker_sync",

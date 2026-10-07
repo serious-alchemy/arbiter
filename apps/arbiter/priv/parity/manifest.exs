@@ -32,7 +32,6 @@
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-12" => "External-PR review surface: revive `arb review`, REST show/greenlight, field parity",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-15" => "Missing ticket operations: tracker discovery, tracker-only create, upstream close, rank pin",
     "P-16" => "Account field registry: edit parity across PATCH, `arb account`, UI and MCP",
     "P-17" => "MCP/CLI read gaps for accounts, usage, pauses, alerts",
     "P-21" => "Workspace operations parity: update, schema, multi-key patch, worker_env, standing orders",
@@ -93,24 +92,18 @@
     %{
       id: "tickets/create_tracker_only_unclaimed_ticket_no",
       title: "Create tracker-only (unclaimed) ticket, no local task",
-      mcp: nil,
+      mcp: ["tracker_create_ticket"],
       cli: ["arb ticket create"],
       rest: ["POST /api/workspaces/:workspace_id/tracker/tickets"],
-      status: {:gap, "P-15"},
-      absent: %{
-        mcp: {:gap, "P-15", "No MCP create of an unclaimed tracker-only ticket (REST and `arb ticket create --ticket-only` have it)."}
-      }
+      status: :full
     },
     %{
       id: "tickets/list_open_tracker_issues_unclaimed",
       title: "List open tracker issues (unclaimed)",
-      mcp: nil,
+      mcp: ["tracker_list_issues"],
       cli: ["arb ticket list"],
       rest: ["GET /api/workspaces/:workspace_id/tracker/issues"],
-      status: {:gap, "P-15"},
-      absent: %{
-        mcp: {:gap, "P-15", "No MCP discovery of open tracker issues; `tracker_claim` needs a ref the coordinator has no way to find."}
-      }
+      status: :full
     },
     %{
       id: "tickets/update_ticket_fields",
@@ -179,15 +172,11 @@
     %{
       id: "tickets/pin_unpin_a_card_s_rank",
       title: "Pin/unpin a card's rank (rank_pinned)",
-      mcp: nil,
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-15"},
-      absent: %{
-        mcp: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."},
-        cli: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."},
-        rest: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."}
-      }
+      mcp: ["ticket_rank", "task_rank"],
+      cli: ["arb ticket rank"],
+      rest: ["PATCH /api/issues/:id/rank"],
+      status: :full,
+      note: "`pinned` alone pins/unpins without moving; with a move form it pins with the move (true) or moves then unpins (false)."
     },
     %{
       id: "tickets/set_clear_epic_priority_floor",
@@ -236,13 +225,9 @@
       id: "tickets/push_close_upstream_for_an_already",
       title: "Push close upstream for an already-closed ticket",
       mcp: ["ticket_sync_upstream_close", "task_sync_upstream_close"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-15"},
-      absent: %{
-        cli: {:gap, "P-15", "`arb sync` reports drift whose remedy is exactly sync-upstream-close, but only MCP `ticket_sync_upstream_close` can run it."},
-        rest: {:gap, "P-15", "`arb sync` reports drift whose remedy is exactly sync-upstream-close, but only MCP `ticket_sync_upstream_close` can run it."}
-      }
+      cli: ["arb ticket sync-upstream-close"],
+      rest: ["POST /api/issues/:id/sync_upstream_close"],
+      status: :full
     },
     %{
       id: "tickets/add_dependency_edge",

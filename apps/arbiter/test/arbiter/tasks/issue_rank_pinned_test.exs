@@ -139,4 +139,39 @@ defmodule Arbiter.Tasks.IssueRankPinnedTest do
 
     assert started.rank_pinned
   end
+
+  describe "Rank.move/2 with pinned (P-15)" do
+    test "pinned: false alone unpins without moving", %{ws: ws} do
+      pinned = pinned!(ready(ws))
+
+      {:ok, unpinned} = Rank.move(pinned, %{pinned: false})
+
+      refute unpinned.rank_pinned
+      assert unpinned.rank == pinned.rank
+    end
+
+    test "pinned: true alone pins without moving", %{ws: ws} do
+      issue = ready(ws)
+
+      {:ok, pinned} = Rank.move(issue, %{pinned: true})
+
+      assert pinned.rank_pinned
+      assert pinned.rank == issue.rank
+    end
+
+    test "a move with pinned: false moves and unpins", %{ws: ws} do
+      a = ready(ws)
+      pinned = pinned!(ready(ws))
+
+      {:ok, moved} = Rank.move(pinned, %{after_id: a.id, pinned: false})
+
+      refute moved.rank_pinned
+      assert moved.rank > a.rank
+    end
+
+    test "a move with pinned: true pins with the move", %{ws: ws} do
+      {:ok, moved} = Rank.move(ready(ws), %{position: :top, pinned: true})
+      assert moved.rank_pinned
+    end
+  end
 end

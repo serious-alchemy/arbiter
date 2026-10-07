@@ -68,6 +68,7 @@ defmodule ArbiterCli.Verbs do
     ["handback", "bd-1"],
     ["claim", "1"],
     ["sync"],
+    ["sync-upstream-close", "bd-1"],
     ["ready"],
     ["dispatch", "bd-1"]
   ]
