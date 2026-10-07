@@ -2683,17 +2683,37 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         nodes_resp(%{
           "public_url" => @url,
           "exposure" => "private",
-          "nodes" => [node_row(%{})],
+          "nodes" => [node_row(%{"contributes" => 4})],
           "total" => 7,
+          "effective" => 4,
           "ceiling" => 4,
           "warnings" => ["ceiling_below_total"]
         })
       )
 
-      assert %{status: :warn, detail: detail} =
+      assert %{status: :warn, detail: detail, hint: hint} =
                named(nodes_results(), "node capacity vs conductor.max_concurrent")
 
-      assert detail =~ "7" and detail =~ "4"
+      assert detail =~ "capacity 7 = local 3 + box-1 4"
+      assert detail =~ "ceiling conductor.max_concurrent = 4"
+      assert hint =~ "unset conductor_system_max_concurrent"
+    end
+
+    test "with no ceiling set the capacity is green and shows the breakdown" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{"contributes" => 4})],
+          "total" => 7,
+          "effective" => 7,
+          "ceiling" => nil
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "node capacity")
+      assert detail =~ "capacity 7 = local 3 + box-1 4"
+      assert detail =~ "no ceiling"
     end
 
     test "capacity within the ceiling is green" do
@@ -2703,11 +2723,15 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           "exposure" => "private",
           "nodes" => [node_row(%{})],
           "total" => 3,
+          "effective" => 3,
           "ceiling" => 4
         })
       )
 
-      assert %{status: :ok} = named(nodes_results(), "node capacity vs conductor.max_concurrent")
+      assert %{status: :ok, detail: detail} =
+               named(nodes_results(), "node capacity vs conductor.max_concurrent")
+
+      assert detail =~ "under the ceiling 4"
     end
 
     test "a server without /api/nodes, or an operator-less token (403), is a warn, not skipped" do

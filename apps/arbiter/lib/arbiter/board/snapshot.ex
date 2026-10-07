@@ -494,13 +494,37 @@ defmodule Arbiter.Board.Snapshot do
     used = SlotGate.slots_used(issues)
 
     if used >= slots_total do
-      workspace
-      |> Arbiter.Accounts.SlotLimit.binding(used)
-      |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues))
+      placement_note(workspace) ||
+        workspace
+        |> Arbiter.Accounts.SlotLimit.binding(used)
+        |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues))
     end
   end
 
   defp slot_note(_workspace, _issues, _slots_total), do: nil
+
+  # RW14: the workspace's work has nowhere to go. Phrased like the dispatch-time
+  # RW8 hold (`held — local capacity 0 …`), so the board and the dispatcher say
+  # the same thing.
+  defp placement_note(workspace) do
+    mode = Arbiter.Nodes.Placement.mode(workspace)
+
+    case {mode, Arbiter.Nodes.Capacity.placement(mode)} do
+      {:local_only, %{cap: 0}} ->
+        "held — local capacity 0 (worker.placement is local_only and this machine's cap is 0)"
+
+      {mode, %{cap: 0}} ->
+        "held — no node capacity (worker.placement is #{mode}; no node is available)"
+
+      {mode, %{free: 0}} ->
+        "held — no free slot on #{if mode == :remote_only, do: "any node", else: "this machine or any node"} (worker.placement is #{mode})"
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
 
   # What `load/1` reads for `slots_total`, for the default workspace.
   defp slots_total(issues, opts) do
@@ -582,8 +606,42 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   @doc """
+  `conductor.max_concurrent` as an **optional hard ceiling** (RW14): the runtime
+  `Arbiter.Settings` override, else the `:conductor_system_max_concurrent` app
+  env, else `nil` — unset, meaning "use the sum of the available machines' caps"
+  (`Arbiter.Nodes.Capacity`). `system_max_concurrent/0` is the same number with
+  the hardcoded default filled in, which is the primary's default local cap.
+  """
+  @spec concurrency_ceiling() :: pos_integer() | nil
+  def concurrency_ceiling do
+    Arbiter.Settings.conductor_system_max_concurrent() ||
+      Application.get_env(:arbiter, :conductor_system_max_concurrent)
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  The install-wide effective concurrency: the sum of the available machines'
+  caps, under the ceiling if one is set (`Arbiter.Nodes.Capacity.effective/1`).
+  What the board plans to when it is not scoped to a workspace.
+  """
+  @spec install_capacity(keyword()) :: non_neg_integer()
+  def install_capacity(opts \\ []) do
+    Arbiter.Nodes.Capacity.effective(capacity_opts(opts))
+  rescue
+    _ -> system_max_concurrent()
+  end
+
+  defp capacity_opts(opts), do: Keyword.take(opts, [:nodes, :remote_available?])
+
+  @doc """
   The effective maximum concurrent workers for a workspace: the minimum of the
-  workspace-level cap (if set), the system-wide cap, and — since P8
+  workspace-level cap (if set), the install's capacity (RW14: the sum of the
+  caps of every available machine, under the optional `conductor.max_concurrent`
+  ceiling — `Arbiter.Nodes.Capacity`), the placement term for the workspace's
+  `worker.placement` (the slots its work can actually be served in: a
+  `local_only` workspace gets the primary's cap, so a local cap of 0 plans none;
+  a `remote_only` one gets only the free node slots) and — since P8
   (`docs/provider-account-design.md` §4.2) — the headroom left on the provider
   account this workspace is metered under.
 
@@ -612,7 +670,8 @@ defmodule Arbiter.Board.Snapshot do
   back to the pre-routing provider, and so does this.
 
   Options: `:routing` (an `availability/3` result, or `nil` for "not routed", to
-  reuse one already read) and `:routing_opts` (forwarded to `availability/3`).
+  reuse one already read), `:routing_opts` (forwarded to `availability/3`) and
+  `:nodes` / `:remote_available?` (`Arbiter.Nodes.Capacity.breakdown/1`'s seams).
   """
   @spec effective_max_concurrent(
           String.t() | Arbiter.Tasks.Workspace.t() | nil,
@@ -621,19 +680,22 @@ defmodule Arbiter.Board.Snapshot do
         ) :: non_neg_integer()
   def effective_max_concurrent(workspace_or_id, already_counted \\ nil, opts \\ [])
 
-  def effective_max_concurrent(nil, _already_counted, _opts) do
-    system_max_concurrent()
+  def effective_max_concurrent(nil, _already_counted, opts) do
+    install_capacity(opts)
   end
 
   def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
     workspace_id = ws.id
-    system_max = system_max_concurrent()
+    capacity_opts = capacity_opts(opts)
+    install = install_capacity(opts)
+    placement = Arbiter.Nodes.Capacity.placement(Arbiter.Nodes.Placement.mode(ws), capacity_opts)
 
     base =
       case workspace_config_max(ws) do
-        n when is_integer(n) and n > 0 -> min(n, system_max)
-        _ -> system_max
+        n when is_integer(n) and n > 0 -> min(n, install)
+        _ -> install
       end
+      |> min(placement.cap)
 
     {headroom, live_count} =
       case routed_availability(ws, opts) do
@@ -647,7 +709,11 @@ defmodule Arbiter.Board.Snapshot do
            fn -> Concurrency.workspace_live_count(workspace_id, provider) end}
       end
 
-    Concurrency.clamp(base, headroom, already_counted || live_count.())
+    counted = already_counted || live_count.()
+
+    base
+    |> Concurrency.clamp(headroom, counted)
+    |> Concurrency.clamp(placement.free, counted)
   rescue
     _ -> system_max_concurrent()
   end
@@ -659,7 +725,7 @@ defmodule Arbiter.Board.Snapshot do
         effective_max_concurrent(ws, already_counted, opts)
 
       nil ->
-        system_max_concurrent()
+        install_capacity(opts)
     end
   rescue
     _ -> system_max_concurrent()

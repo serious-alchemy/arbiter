@@ -26,8 +26,9 @@ defmodule ArbiterWeb.Api.NodeJSON do
   @doc """
   A node as the operator sees it: the stored fields plus the live ones from
   `Arbiter.Nodes.Overview` (`state`, `health`, versions, `live`, and the cap
-  breakdown `suggested` / `override` / `ceiling` / `max`, and `cap_source`, which
-  says whether the ceiling is what bound it). `max_workers` stays
+  breakdown `suggested` / `override` / `ceiling` / `max`, `cap_source`, which
+  says whether the ceiling is what bound it, and `contributes`, what it adds to
+  the install's capacity: its `max` while it is available, else 0). `max_workers` stays
   the operator's override, as before.
   """
   def node(%Node{} = node, %{} = row) do
@@ -52,7 +53,8 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :suggested,
       :override,
       :ceiling,
-      :cap_source
+      :cap_source,
+      :contributes
     ])
     |> Map.put(:max_workers, row.override)
   end
