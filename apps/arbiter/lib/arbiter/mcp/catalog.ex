@@ -2081,7 +2081,8 @@ defmodule Arbiter.MCP.Catalog do
           "text" => %{"type" => "string", "description" => "The standing order. Required."},
           "repo" => %{
             "type" => "string",
-            "description" => "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
+            "description" =>
+              "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
           }
         },
         "required" => ["text"],
@@ -2104,7 +2105,8 @@ defmodule Arbiter.MCP.Catalog do
           },
           "repo" => %{
             "type" => "string",
-            "description" => "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
+            "description" =>
+              "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
           }
         },
         "required" => ["target"],

@@ -292,7 +292,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
          repo = Tools.fetch_string(args, "repo"),
          {:ok, ws} <-
            ws_id
-           |> Operations.remove_standing_order(target, repo: repo, context: guardrail_context(scope))
+           |> Operations.remove_standing_order(target,
+             repo: repo,
+             context: guardrail_context(scope)
+           )
            |> operation_result() do
       {:ok, Operations.view(ws, repo)}
     end

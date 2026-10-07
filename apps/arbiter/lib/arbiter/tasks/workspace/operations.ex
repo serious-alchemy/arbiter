@@ -157,8 +157,7 @@ defmodule Arbiter.Tasks.Workspace.Operations do
 
         orders = if is_list(entry["standing_orders"]), do: entry["standing_orders"], else: []
 
-        {:ok, orders,
-         &%{"repo_paths" => %{key => Map.put(entry, "standing_orders", &1)}}}
+        {:ok, orders, &%{"repo_paths" => %{key => Map.put(entry, "standing_orders", &1)}}}
     end
   end
 
@@ -171,8 +170,7 @@ defmodule Arbiter.Tasks.Workspace.Operations do
         {:ok, n - 1}
 
       {:ok, n} ->
-        {:error,
-         {:invalid, "standing order index #{n} out of range (1..#{length(orders)})"}}
+        {:error, {:invalid, "standing order index #{n} out of range (1..#{length(orders)})"}}
 
       :text ->
         case Enum.find_index(orders, &(StandingOrders.canonical_text(&1) == target)) do
@@ -199,7 +197,13 @@ defmodule Arbiter.Tasks.Workspace.Operations do
   defp repo_label(repo), do: " for repo #{repo}"
 
   defp write(ws, put, new_orders, opts),
-    do: ash_update(ws, %{patch: put.(new_orders), unset_paths: [], force: false}, :patch_config, opts)
+    do:
+      ash_update(
+        ws,
+        %{patch: put.(new_orders), unset_paths: [], force: false},
+        :patch_config,
+        opts
+      )
 
   # ---- locking --------------------------------------------------------------
 

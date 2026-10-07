@@ -2583,7 +2583,10 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, data} =
                Tools.workspace_config_set(ctx.coordinator, %{
-                 "patch" => %{"merge" => %{"auto_merge" => true}, "routing" => %{"policy" => "static"}},
+                 "patch" => %{
+                   "merge" => %{"auto_merge" => true},
+                   "routing" => %{"policy" => "static"}
+                 },
                  "unset_paths" => ["x"]
                })
 
@@ -2624,7 +2627,9 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "an unset_paths-only call works", ctx do
       {:ok, _} =
-        Ash.update(ctx.ws, %{patch: %{"x" => 1, "y" => 2}, unset_paths: []}, action: :patch_config)
+        Ash.update(ctx.ws, %{patch: %{"x" => 1, "y" => 2}, unset_paths: []},
+          action: :patch_config
+        )
 
       assert {:ok, data} =
                Tools.workspace_config_set(ctx.coordinator, %{"unset_paths" => ["x"]})
@@ -2694,7 +2699,9 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, ws} =
         Ash.update(
           ctx.ws,
-          %{worker_env: %{"API_TOKEN" => %{"value" => "tok_supersecret_value", "secret" => true}}},
+          %{
+            worker_env: %{"API_TOKEN" => %{"value" => "tok_supersecret_value", "secret" => true}}
+          },
           action: :update
         )
 

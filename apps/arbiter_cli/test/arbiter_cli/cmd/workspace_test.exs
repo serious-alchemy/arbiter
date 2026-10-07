@@ -460,9 +460,14 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
 
     test "ls lists names and secret flags" do
-      stub_env_ws([%{"name" => "API_TOKEN", "secret" => true}, %{"name" => "LOG", "secret" => false}])
+      stub_env_ws([
+        %{"name" => "API_TOKEN", "secret" => true},
+        %{"name" => "LOG", "secret" => false}
+      ])
 
-      {out, _err, code} = capture(fn -> Workspace.run(["env", "ls", "--workspace", "default"]) end)
+      {out, _err, code} =
+        capture(fn -> Workspace.run(["env", "ls", "--workspace", "default"]) end)
+
       assert code == 0
       assert out =~ "API_TOKEN"
       assert out =~ "secret"
@@ -495,7 +500,13 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
           input: @env_value <> "\n"
         )
 
-      assert_received {:patched, %{"worker_env" => %{"API_TOKEN" => %{"value" => @env_value, "secret" => true}}}}
+      assert_received {:patched,
+                       %{
+                         "worker_env" => %{
+                           "API_TOKEN" => %{"value" => @env_value, "secret" => true}
+                         }
+                       }}
+
       assert out =~ "API_TOKEN"
       refute out =~ @env_value
       refute err =~ @env_value
@@ -535,7 +546,9 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       stub_env_patch(self(), [%{"name" => "OLD", "secret" => true}])
 
       {_out, _err, 0} =
-        capture(fn -> Workspace.run(["env", "set", "OLD", "--secret", "--workspace", "default"]) end)
+        capture(fn ->
+          Workspace.run(["env", "set", "OLD", "--secret", "--workspace", "default"])
+        end)
 
       assert_received {:patched, %{"worker_env" => %{"OLD" => patch}}}
       assert patch == %{"secret" => true}
@@ -676,7 +689,12 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
         "/standing_orders/remove",
         %{"target" => "9"},
         422,
-        %{"error" => %{"type" => "invalid", "message" => "standing order index 9 out of range (1..1)"}}
+        %{
+          "error" => %{
+            "type" => "invalid",
+            "message" => "standing order index 9 out of range (1..1)"
+          }
+        }
       )
 
       {_out, err, code} =
@@ -688,7 +706,9 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
 
     test "add rejects empty text before calling the server" do
       {_out, err, code} =
-        capture(fn -> Workspace.run(["standing-order", "add", "  ", "--workspace", "default"]) end)
+        capture(fn ->
+          Workspace.run(["standing-order", "add", "  ", "--workspace", "default"])
+        end)
 
       assert code == 1
       assert err =~ "text must not be empty"
@@ -714,7 +734,6 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert code == 0
       assert out =~ "(no standing orders)"
     end
-
   end
 
   describe "standing-order --repo (canonical) and --rig (deprecated alias)" do

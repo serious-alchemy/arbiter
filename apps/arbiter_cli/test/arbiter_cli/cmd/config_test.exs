@@ -494,7 +494,10 @@ defmodule ArbiterCli.Cmd.ConfigTest do
     end
 
     test "--json emits the whole payload" do
-      stub_get("/api/workspaces/config_schema", %{"text" => "T", "enums" => %{"quota_modes" => []}})
+      stub_get("/api/workspaces/config_schema", %{
+        "text" => "T",
+        "enums" => %{"quota_modes" => []}
+      })
 
       {out, _err, 0} = capture(fn -> Config.run(["schema", "--json"]) end)
       assert %{"text" => "T", "enums" => _} = Jason.decode!(String.trim(out))

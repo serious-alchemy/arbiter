@@ -42,11 +42,17 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
              ]
 
       {:ok, stored} = Ash.get(Workspace, ws.id)
-      assert Workspace.worker_env_map(stored) == %{"API_TOKEN" => @secret_value, "LOG_LEVEL" => @plain_value}
+
+      assert Workspace.worker_env_map(stored) == %{
+               "API_TOKEN" => @secret_value,
+               "LOG_LEVEL" => @plain_value
+             }
 
       body =
         conn
-        |> patch(~p"/api/workspaces/#{ws.id}", %{worker_env: %{"LOG_LEVEL" => %{"secret" => true}}})
+        |> patch(~p"/api/workspaces/#{ws.id}", %{
+          worker_env: %{"LOG_LEVEL" => %{"secret" => true}}
+        })
         |> json_response(200)
 
       assert %{"name" => "LOG_LEVEL", "secret" => true} in body["worker_env"]
@@ -62,7 +68,9 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
     test "an invalid name is a 422", %{conn: conn} do
       ws = workspace()
 
-      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{worker_env: %{"9bad" => %{"value" => "x"}}})
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}", %{worker_env: %{"9bad" => %{"value" => "x"}}})
+
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
 
@@ -96,10 +104,14 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
         conn |> get(~p"/api/workspaces/#{ws.id}") |> response(200),
         conn |> get(~p"/api/workspaces") |> response(200),
         conn
-        |> patch(~p"/api/workspaces/#{ws.id}", %{worker_env: %{"MORE" => %{"value" => @secret_value}}})
+        |> patch(~p"/api/workspaces/#{ws.id}", %{
+          worker_env: %{"MORE" => %{"value" => @secret_value}}
+        })
         |> response(200),
         conn
-        |> patch(~p"/api/workspaces/#{ws.id}/config", %{patch: %{"merge" => %{"auto_merge" => true}}})
+        |> patch(~p"/api/workspaces/#{ws.id}/config", %{
+          patch: %{"merge" => %{"auto_merge" => true}}
+        })
         |> response(200),
         conn
         |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: "an order"})
@@ -131,7 +143,11 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
 
       scope = %Scope{tier: :coordinator, workspace_id: ws.id}
 
-      for tool <- [&Tools.workspace_show/2, &Tools.workspace_config_get/2, &Tools.workspace_config_overview/2] do
+      for tool <- [
+            &Tools.workspace_show/2,
+            &Tools.workspace_config_get/2,
+            &Tools.workspace_config_overview/2
+          ] do
         assert {:ok, data} = tool.(scope, %{})
         refute inspect(data) =~ @secret_value
         refute Jason.encode!(data) =~ @secret_value
@@ -156,10 +172,18 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
     test "add, remove by index and text, repo-scoped", %{conn: conn} do
       ws = workspace(%{config: %{"repo_paths" => %{"r1" => "/tmp/r1"}}})
 
-      body = conn |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: "one"}) |> json_response(200)
+      body =
+        conn
+        |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: "one"})
+        |> json_response(200)
+
       assert body["standing_orders"] == ["one"]
 
-      body = conn |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: "two"}) |> json_response(200)
+      body =
+        conn
+        |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: "two"})
+        |> json_response(200)
+
       assert body["standing_orders"] == ["one", "two"]
 
       body =
@@ -191,7 +215,9 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
     test "errors: blank text 422, unknown target 404, unregistered repo 404", %{conn: conn} do
       ws = workspace()
 
-      assert conn |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: " "}) |> json_response(422)
+      assert conn
+             |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: " "})
+             |> json_response(422)
 
       assert conn
              |> post(~p"/api/workspaces/#{ws.id}/standing_orders/remove", %{target: "nope"})
@@ -210,7 +236,9 @@ defmodule ArbiterWeb.Api.WorkspaceOperationsTest do
         texts
         |> Enum.map(fn text ->
           Task.async(fn ->
-            conn |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: text}) |> Map.fetch!(:status)
+            conn
+            |> post(~p"/api/workspaces/#{ws.id}/standing_orders", %{text: text})
+            |> Map.fetch!(:status)
           end)
         end)
         |> Task.await_many(15_000)

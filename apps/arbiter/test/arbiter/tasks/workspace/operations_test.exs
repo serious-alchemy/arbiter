@@ -48,7 +48,9 @@ defmodule Arbiter.Tasks.Workspace.OperationsTest do
       ws = workspace()
 
       assert {:ok, ws} =
-               Operations.patch_worker_env(ws, %{"TOKEN" => %{"value" => "s3cr3t", "secret" => true}})
+               Operations.patch_worker_env(ws, %{
+                 "TOKEN" => %{"value" => "s3cr3t", "secret" => true}
+               })
 
       assert Workspace.worker_env_keys(ws) == [%{name: "TOKEN", secret?: true}]
       assert Workspace.worker_env_map(ws) == %{"TOKEN" => "s3cr3t"}
@@ -80,7 +82,9 @@ defmodule Arbiter.Tasks.Workspace.OperationsTest do
 
       assert Enum.all?(results, &match?({:ok, _}, &1))
       {:ok, fresh} = Ash.get(Workspace, ws.id)
-      assert Enum.map(Workspace.worker_env_keys(fresh), & &1.name) == for(n <- 1..6, do: "VAR_#{n}")
+
+      assert Enum.map(Workspace.worker_env_keys(fresh), & &1.name) ==
+               for(n <- 1..6, do: "VAR_#{n}")
     end
   end
 
@@ -107,7 +111,9 @@ defmodule Arbiter.Tasks.Workspace.OperationsTest do
 
       results =
         expected
-        |> Enum.map(fn text -> Task.async(fn -> Operations.add_standing_order(ws.id, text) end) end)
+        |> Enum.map(fn text ->
+          Task.async(fn -> Operations.add_standing_order(ws.id, text) end)
+        end)
         |> Task.await_many(15_000)
 
       assert Enum.all?(results, &match?({:ok, _}, &1))
@@ -185,7 +191,11 @@ defmodule Arbiter.Tasks.Workspace.OperationsTest do
     test "a string repo_paths entry is promoted to a map" do
       ws = workspace(%{"repo_paths" => %{"r" => "/tmp/r"}})
       assert {:ok, updated} = Operations.add_standing_order(ws, "x", repo: "r")
-      assert updated.config["repo_paths"]["r"] == %{"path" => "/tmp/r", "standing_orders" => ["x"]}
+
+      assert updated.config["repo_paths"]["r"] == %{
+               "path" => "/tmp/r",
+               "standing_orders" => ["x"]
+             }
     end
 
     test "an unknown workspace id is not_found" do
