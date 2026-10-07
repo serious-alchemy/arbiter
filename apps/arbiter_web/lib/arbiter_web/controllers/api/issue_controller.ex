@@ -43,7 +43,6 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Board.Snapshot
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Create
@@ -54,12 +53,11 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.IssueFields
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias Arbiter.Tasks.ReadyHolds
   alias Arbiter.Tasks.Verification
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Estimate
   alias Arbiter.Workers.Current
   alias ArbiterWeb.Api.WorkspaceParam
-  alias ArbiterWeb.InstallationSettings
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -75,7 +73,16 @@ defmodule ArbiterWeb.Api.IssueController do
 
       case Ash.read(query) do
         {:ok, issues} ->
-          render(conn, :index, issues: issues, workspace_id: ws_id)
+          # P-13 (D-T-17): every row carries its lifecycle projection (`column`,
+          # `step`, `blocked_by`, ...), as the MCP `ticket_list` rows do.
+          views = Projection.views(issues)
+
+          render(conn, :index,
+            issues: issues,
+            views: views,
+            holds: holds_for(views, ws_id),
+            workspace_id: ws_id
+          )
 
         {:error, _} = err ->
           err
@@ -85,12 +92,19 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def ready(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
-      opts = if ws_id, do: [workspace_id: ws_id], else: []
+      # P-13 (D-T-16): `Projection.ready/2` is the one Ready definition — the
+      # same rows MCP `ticket_ready` returns, in dispatch order (the §4 key,
+      # an epic's floor included) — and each carries its projection and, when
+      # the scheduler is holding it, its `hold_reason`.
+      rows = Projection.ready(ws_id)
+      views = Map.new(rows, fn {issue, view} -> {issue.id, view} end)
 
-      # ES4: `Issue.ready/1` is the set; the §4 key (`EffectivePriority.order/1`,
-      # an epic's floor included) is the order `arb ready` prints it in.
-      issues = opts |> Issue.ready() |> EffectivePriority.order()
-      render(conn, :index, issues: issues, workspace_id: ws_id)
+      render(conn, :index,
+        issues: Enum.map(rows, &elem(&1, 0)),
+        views: views,
+        holds: if(rows == [], do: %{}, else: ReadyHolds.for_workspace(ws_id)),
+        workspace_id: ws_id
+      )
     end
   end
 
@@ -99,35 +113,21 @@ defmodule ArbiterWeb.Api.IssueController do
   # board, in dispatch order — what `arb prime` groups into its sections.
   def lifecycle(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      tickets = Projection.open(ws_id)
+
       render(conn, :lifecycle,
-        tickets: Projection.open(ws_id),
-        holds: ready_holds(ws_id),
+        tickets: tickets,
+        holds: ReadyHolds.for_workspace(ws_id),
         workspace_id: ws_id
       )
     end
   end
 
-  # `nil` (every workspace) merges each workspace's holds; ticket ids are
-  # globally unique, so the maps never collide.
-  defp ready_holds(nil) do
-    Workspace |> Ash.read!() |> Enum.reduce(%{}, &Map.merge(&2, ready_holds(&1.id)))
-  end
-
-  # bd-dtdeff: why the scheduler is not dispatching each Ready card, from the
-  # board's own plan (the reason its card shows), so a card Autopilot is
-  # skipping reads the same on `arb prime`. Only cards the board holds appear;
-  # a failed board read yields none rather than failing the listing.
-  defp ready_holds(ws_id) do
-    paused? =
-      not InstallationSettings.scheduler_running?() or InstallationSettings.scheduler_paused?()
-
-    [workspace_id: ws_id, paused: paused?, exclude_engagements?: true]
-    |> Snapshot.load()
-    |> Map.get(:ready, [])
-    |> Enum.filter(&(&1.state == :blocked))
-    |> Map.new(&{&1.id, &1.reason})
-  rescue
-    _ -> %{}
+  # The board's read is only worth paying for when a Ready card is in the page.
+  defp holds_for(views, ws_id) do
+    if Enum.any?(views, fn {_id, view} -> view.column == :ready end),
+      do: ReadyHolds.for_workspace(ws_id),
+      else: %{}
   end
 
   def show(conn, %{"id" => id}) do
@@ -407,7 +407,7 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, rank_args} <- rank_args(params),
          {:ok, issue} <- Ash.get(Issue, id),
          {:ok, ranked} <- Arbiter.Tasks.Rank.move(issue, rank_args) do
-      render(conn, :show, issue: ranked)
+      render(conn, :rank, issue: ranked, band: Arbiter.Tasks.Rank.band_fields(ranked))
     end
   end
 
@@ -548,8 +548,14 @@ defmodule ArbiterWeb.Api.IssueController do
 
     with {:ok, _issue} <- Ash.get(Issue, id) do
       case Arbiter.Tasks.Attention.hand_off(id, to, note) do
-        {:ok, _attention} -> render(conn, :show, issue: Ash.get!(Issue, id))
-        {:error, reason} -> attention_error(reason)
+        {:ok, _attention} ->
+          # P-13 (D-T-13): the ticket with its projection (`attention` included),
+          # the shape the MCP `ticket_handoff` / `ticket_handback` return too.
+          issue = Ash.get!(Issue, id)
+          render(conn, :handoff, issue: issue, view: Projection.view(issue))
+
+        {:error, reason} ->
+          attention_error(reason)
       end
     end
   end

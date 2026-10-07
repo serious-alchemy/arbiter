@@ -7,10 +7,14 @@ defmodule ArbiterWeb.Api.WorkerController do
   Routes:
 
     * `POST /api/workers/dispatch`           — :dispatch (body: `task_id`, optional `repo`, `provider`).
-      `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
-      `with_gemini` booleans). With a provider a worker subprocess works the task
-      and the Driver closes it on `arb done`; with `no_agent` the task parks in
-      `:active` (no Driver).
+      `provider` is any of `Arbiter.Agents.valid_agent_types/0` (deprecated
+      aliases: `with_claude` / `with_gemini` booleans). With a provider a worker
+      subprocess works the task and the Driver closes it on `arb done`; with
+      `no_agent` the task parks in `:active` (no Driver) — and `no_agent` plus a
+      provider is a 400, never half-honoured. Every dispatch/resume/review
+      parameter goes through `Arbiter.Worker.Dispatch.Params`, shared with the MCP
+      tools: an unknown argument is a 400, the recursion-depth limit applies, and
+      a `force_quota` bypass is attributed to the token's actor.
     * `POST /api/workers/review`          — :review.
       Two shapes: (a) `task_id` (+ optional `repo`) dispatches a review-only
       worker against the PR/MR linked to a task — no worktree, no per-task
@@ -31,7 +35,8 @@ defmodule ArbiterWeb.Api.WorkerController do
       Session-level resume: re-spawns the worker continuing the task's PRIOR
       Claude session (`claude --print --resume <session_id>`) in the SAME
       preserved worktree. Refuses (pointing at `arb dispatch`) when no prior
-      session/worktree exists — never silently starts fresh.
+      session/worktree exists — never silently starts fresh. `mode: "briefing"`
+      opts into a fresh agent briefed from the worktree's git state instead.
     * `POST /api/workers/:task_id/stop`   — :stop (terminate worker cleanly)
     * `GET  /api/workers/:task_id/log`    — :log (full, uncapped durable
       transcript of the task's most recent run; the audit source of record).
@@ -54,6 +59,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Reviews.Guard
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.Dispatch.Params, as: DispatchParams
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptLog
   alias Arbiter.Workers.Current
@@ -64,11 +70,10 @@ defmodule ArbiterWeb.Api.WorkerController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   def dispatch(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn),
-         :ok <- validate_flags(params) do
+    with :ok <- ensure_dispatch_allowed(conn) do
       case params do
         %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
-          with {:ok, opts} <- dispatch_opts(params) do
+          with {:ok, opts} <- normalize(conn, :dispatch, params) do
             dispatch_task(conn, task_id, opts)
           end
 
@@ -121,8 +126,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def review(conn, params) do
-    with :ok <- ensure_dispatch_allowed(conn),
-         :ok <- validate_flags(params) do
+    with :ok <- ensure_dispatch_allowed(conn) do
       case params do
         # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
         # the reviewer at an arbitrary PR by URL/number through the MR adapter.
@@ -144,8 +148,9 @@ defmodule ArbiterWeb.Api.WorkerController do
   # written or spawned on a refusal. An unknown task skips the guard and falls
   # through to `Dispatch`, which answers 404 as it always has.
   defp review_task(conn, task_id, params) do
-    with {:ok, _task} <- guard_task_review(task_id, params) do
-      case Dispatch.dispatch(task_id, review_opts(params)) do
+    with {:ok, opts} <- normalize(conn, :review, params),
+         {:ok, _task} <- guard_task_review(task_id, params) do
+      case Dispatch.dispatch(task_id, opts) do
         {:ok, result} ->
           conn
           |> put_status(:created)
@@ -169,7 +174,9 @@ defmodule ArbiterWeb.Api.WorkerController do
   # immediately, then runs the CodeReview adapter workflow in the background and
   # acks with the resolved mr_ref + link. `repo`/`workspace` are optional.
   defp review_external(conn, params) do
-    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+    with :ok <- DispatchParams.ensure_depth(conn.assigns[:mcp_scope]),
+         :ok <- validate_bool(params, "force"),
+         {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
       do_review_external(conn, params, ws_id)
     end
   end
@@ -232,17 +239,17 @@ defmodule ArbiterWeb.Api.WorkerController do
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
     with :ok <- ensure_dispatch_allowed(conn),
-         :ok <- validate_flags(params) do
-      resume_session(conn, task_id, params)
+         {:ok, opts} <- normalize(conn, :resume, params) do
+      resume_task(conn, task_id, opts)
     end
   end
 
   def resume(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  defp resume_session(conn, task_id, params) do
-    opts = resume_opts(params)
-
-    case Dispatch.resume_session(task_id, opts) do
+  # `opts[:resume_mode]` is `:session` unless the caller asked for `mode:
+  # "briefing"`, so the default is the same `--resume <session>` MCP runs.
+  defp resume_task(conn, task_id, opts) do
+    case Dispatch.resume_task(task_id, opts) do
       {:ok, result} ->
         conn
         |> put_status(:created)
@@ -591,172 +598,19 @@ defmodule ArbiterWeb.Api.WorkerController do
     }
   end
 
-  # Map request params onto `Dispatch.dispatch/2` opts.
-  #
-  # Worker resolution:
-  #   * `no_agent`    → dry dispatch: park the task in `:active` for a hand
-  #     to attach. The Driver is suppressed (`start_driver: false`) so the
-  #     no-op Work workflow doesn't race to a bogus `:closed`.
-  #   * `provider`    → force the named provider (`"claude"` | `"gemini"`),
-  #     regardless of workspace's `agent.type`. `agent_type: <atom>` overrides
-  #     routing.
-  #   * `with_claude` / `with_gemini` → DEPRECATED aliases for
-  #     `provider: "claude"` / `provider: "gemini"`. Still honored so existing
-  #     scripts and the MCP `with_claude` alias don't break.
-  #   * none          → use the workspace's `agent.type` config (the default).
-  #     Resolves via `Agents.for_workspace`, picking the provider the workspace
-  #     is configured for.
-  #   * `force_quota` → ADVANCED: bypass the quota gate for judged-important work.
-  #     Omitting this flag preserves the default quota-gated behavior.
-  #
-  # Returns `{:ok, opts}`, or `{:error, {:invalid_request, msg, meta}}` when an
-  # explicit but unrecognized `provider` is supplied (bd-dcvo3n) — that must fail
-  # loudly rather than silently degrade to the workspace default.
-  defp dispatch_opts(params) do
-    base =
-      [repo: params["repo"]]
-      |> add_model_override(params["model"])
-      |> maybe_add_skip_quota_gate(params["force_quota"])
-      # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
-      |> Keyword.put(:force, truthy(params["force"]) == true)
-      # bd-8suxac: go over a full provider account's cap (recorded).
-      |> Keyword.put(:force_slot, truthy(params["over_cap"]) == true)
-      |> Keyword.put(:slot_override_actor, "api")
-      |> Keyword.put(:dispatched_by, "http_api")
-
-    with {:ok, worker_opts} <- worker_dispatch_opts(params) do
-      opts =
-        (base ++ worker_opts)
-        |> Enum.reject(fn {_, v} -> is_nil(v) end)
-
-      {:ok, opts}
-    end
-  end
-
-  defp worker_dispatch_opts(params) do
-    cond do
-      truthy(params["no_agent"]) == true ->
-        {:ok, [start_driver: false]}
-
-      provider_given?(params["provider"]) ->
-        case normalize_provider(params["provider"]) do
-          {:error, _} = err -> err
-          provider -> {:ok, [start_claude: true, agent_type: provider]}
-        end
-
-      truthy(params["with_claude"]) == true ->
-        {:ok, [start_claude: true, agent_type: :claude]}
-
-      truthy(params["with_gemini"]) == true ->
-        {:ok, [start_claude: true, agent_type: :gemini]}
-
-      true ->
-        {:ok, [start_claude: true]}
-    end
-  end
-
-  # A `provider` field is "given" only when it's a non-blank string. Absent or
-  # blank means "use the workspace default", never an error.
-  defp provider_given?(p) when is_binary(p), do: String.trim(p) != ""
-  defp provider_given?(_), do: false
-
-  # Normalize an explicit `provider` field to the `:agent_type` atom Dispatch
-  # expects. An unrecognized (but non-blank) value is a hard error, not a silent
-  # fallback to the workspace default (bd-dcvo3n).
-  defp normalize_provider(provider) do
-    trimmed = provider |> to_string() |> String.trim()
-
-    if trimmed in Arbiter.Agents.valid_agent_types() do
-      String.to_existing_atom(trimmed)
-    else
-      {:error,
-       {:invalid_request,
-        "unknown provider #{inspect(provider)}; valid providers: " <>
-          Enum.join(Arbiter.Agents.valid_agent_types(), ", "), %{provider: provider}}}
-    end
-  end
-
-  # Map request params onto `Dispatch.resume_session/2` opts. Repo is optional —
-  # resume falls back to the task's most recent run's repo when omitted.
-  # `--model` is an optional per-dispatch override, same as dispatch.
-  # `--force-quota` is an ADVANCED option to bypass the quota gate for
-  # judged-important work, same as dispatch.
-  #
-  # bd-92mx1m: a human resume (`resume_origin: :human` — refused, never
-  # deferred, at a full cap). `--force` goes over the cap; `ResumeSlot` records
-  # the override with this endpoint as its actor.
-  defp resume_opts(params) do
-    [repo: params["repo"]]
-    |> add_model_override(params["model"])
-    |> maybe_add_skip_quota_gate(params["force_quota"])
-    |> Enum.reject(fn {_, v} -> is_nil(v) end)
-    |> Keyword.put(:resume_origin, :human)
-    |> Keyword.put(:force_slot, truthy(params["force"]) == true)
-    |> Keyword.put(:slot_override_actor, "api")
-  end
-
-  # `--model` from the CLI is forwarded into `Dispatch.dispatch/2` so the worker
-  # session runs on the named model regardless of workspace/routing config.
-  # Only honored when start_claude is true (no agent ⇒ no model to pick).
-  defp add_model_override(opts, model) when is_binary(model) and model != "" do
-    Keyword.put(opts, :model, model)
-  end
-
-  defp add_model_override(opts, _), do: opts
-
-  # `--force-quota` from the CLI bypasses the quota gate for judged-important work.
-  # Maps to `:skip_quota_gate` in Dispatch opts. Only set when explicitly truthy.
-  defp maybe_add_skip_quota_gate(opts, force_quota) do
-    case truthy(force_quota) do
-      true -> Keyword.put(opts, :skip_quota_gate, true)
-      _ -> opts
-    end
-  end
-
-  # Review-only dispatch. `review: true` cascades into Dispatch: it pulls the
-  # CodeReview workflow, suppresses worktree provisioning, swaps the prompt,
-  # and stamps `review_only` into the worker's meta so completion doesn't
-  # fan out to the merge queue.
-  #
-  # `with_claude` defaults to true — a reviewer with no agent has nothing to
-  # do. Tests pass `with_claude: false` to dispatch a review without spawning
-  # a Claude subprocess.
-  defp review_opts(params) do
-    base = [repo: params["repo"], review: true]
-
-    start_claude =
-      case truthy(params["with_claude"]) do
-        false -> false
-        _ -> true
-      end
-
-    base
-    |> Keyword.put(:start_claude, start_claude)
-    |> then(fn opts ->
-      # Suppress the Driver only when no Claude subprocess is involved
-      # (test-mode dispatch with with_claude: false). For real reviews
-      # (start_claude: true), the Driver runs in claude_driven mode and
-      # is the sole component that closes the task on :completed.
-      if start_claude, do: opts, else: Keyword.put(opts, :start_driver, false)
-    end)
-    |> add_model_override(params["model"])
-    |> maybe_add_quota_bypass(params)
-    |> Enum.reject(fn {_, v} -> is_nil(v) end)
-  end
-
-  # `force_quota` on a review bypasses the quota gate, recorded with this
-  # endpoint as the actor (and the optional `force_quota_reason`), like the
-  # `worker_review` MCP tool's `dispatch_opts`.
-  defp maybe_add_quota_bypass(opts, params) do
-    case truthy(params["force_quota"]) do
-      true ->
-        opts
-        |> Keyword.put(:skip_quota_gate, true)
-        |> Keyword.put(:quota_bypass_actor, "api")
-        |> Keyword.put(:quota_bypass_reason, blank_to_nil(params["force_quota_reason"]))
-
-      _ ->
-        opts
+  # The one dispatch/resume/review param normaliser, shared with the MCP tools
+  # (`Arbiter.Worker.Dispatch.Params`): unknown arguments, a junk boolean, an
+  # unknown provider, `no_agent` combined with a provider, the recursion-depth
+  # limit — all refused here, before anything is written or spawned.
+  defp normalize(conn, verb, params) do
+    case DispatchParams.normalize(params,
+           verb: verb,
+           scope: conn.assigns[:mcp_scope],
+           surface: :rest
+         ) do
+      {:ok, opts} -> {:ok, opts}
+      {:error, {:invalid, message}} -> {:error, {:invalid_request, message, %{}}}
+      {:error, {:unauthorized, _message}} = err -> err
     end
   end
 
@@ -769,16 +623,15 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   defp blank_to_nil(_), do: nil
 
-  @flag_keys ~w(force force_quota over_cap no_agent with_claude with_gemini)
-
-  # A junk flag (`force_quota: "yes"`) is a 400, not a silent "unset".
-  defp validate_flags(params) do
-    Enum.reduce_while(@flag_keys, :ok, fn key, :ok ->
-      case params |> Params.fetch_optional_bool(key) |> Params.to_rest() do
-        {:ok, _} -> {:cont, :ok}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+  # A junk flag (`force: "yes"`) is a 400, not a silent "unset".
+  defp validate_bool(params, key) do
+    params
+    |> Params.fetch_optional_bool(key)
+    |> Params.to_rest()
+    |> case do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
   end
 
   defp truthy(value) do

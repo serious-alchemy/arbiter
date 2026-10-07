@@ -17,6 +17,7 @@ defmodule Arbiter.NodeAgent.Protocol do
   """
 
   alias Arbiter.NodeAgent.Config
+  alias Arbiter.NodeAgent.Retained
 
   @doc "The topic a node joins: `node:<node_id>`."
   @spec topic(Config.t()) :: String.t()
@@ -34,11 +35,19 @@ defmodule Arbiter.NodeAgent.Protocol do
       "proto" => Config.proto(),
       "kind" => "machine",
       "arch" => to_string(:erlang.system_info(:system_architecture)),
-      # Only what this agent actually implements; later children add `bundle`,
-      # `bridge_streams`, … as they land.
-      "caps" => %{"backend" => "podman", "image" => "build", "upgrade" => "tarball"},
+      # Only what this agent actually implements; later children add `bundle`, …
+      # as they land.
+      "caps" => %{
+        "backend" => "podman",
+        "image" => "build",
+        "upgrade" => "tarball",
+        "bridge_streams" => "mux"
+      },
       "capacity" => capacity(),
-      "inventory" => %{"runs" => live_runs(config)},
+      "inventory" => %{
+        "runs" => live_runs(config),
+        "retained" => Enum.map(Retained.list(config), &Retained.report/1)
+      },
       "readiness" => readiness
     }
   end

@@ -56,9 +56,12 @@ defmodule Arbiter.NodeAgent.Runs do
     ArgumentError -> []
   end
 
-  @doc "The channel is up: every run rewinds to its last ack and resends."
-  @spec attach_all() :: :ok
-  def attach_all, do: each(&Run.attach/1)
+  @doc """
+  The channel is up: every run rewinds to its last ack and resends. Runs in `skip`
+  (the ones the primary does not know, being quiesced) are left alone.
+  """
+  @spec attach_all([String.t()]) :: :ok
+  def attach_all(skip \\ []), do: each(&Run.attach/1, skip)
 
   @doc "The channel went away."
   @spec detach_all() :: :ok
@@ -68,8 +71,8 @@ defmodule Arbiter.NodeAgent.Runs do
   @spec fence_all() :: :ok
   def fence_all, do: each(&Run.cancel(&1, "fenced"))
 
-  defp each(fun) do
-    Enum.each(run_ids(), fun)
+  defp each(fun, skip \\ []) do
+    Enum.each(run_ids() -- skip, fun)
     :ok
   end
 end

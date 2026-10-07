@@ -65,15 +65,24 @@ defmodule Arbiter.Loop.CompetenceGenerator do
 
   @doc """
   Generate proposed rows and persist them into installation settings.
+
+  `:target` picks the slot: `:live` (default) overwrites the live matrix;
+  `:candidate` (bd-dde4l7) writes the candidate beside it and leaves the live
+  matrix — and so every dispatch — untouched. Other options are `generate/1`'s.
   """
   @spec seed_installation!(keyword()) :: {:ok, [row()]} | {:error, term()}
   def seed_installation!(opts \\ []) do
+    {target, opts} = Keyword.pop(opts, :target, :live)
     rows = generate(opts)
 
-    with {:ok, _} <- Settings.set_competence_matrix(rows) do
+    with {:ok, _} <- persist(target, rows) do
       {:ok, rows}
     end
   end
+
+  defp persist(:live, rows), do: Settings.set_competence_matrix(rows)
+  defp persist(:candidate, rows), do: Settings.set_competence_matrix_candidate(rows)
+  defp persist(other, _rows), do: {:error, {:unknown_target, other}}
 
   @doc """
   Format proposed rows as a Markdown table matching design doc §3.6.

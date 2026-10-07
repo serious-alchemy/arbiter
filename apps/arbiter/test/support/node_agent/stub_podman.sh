@@ -23,6 +23,26 @@ case "$sub" in
       esac
       prev="$a"
     done
+    # RW11: stand in for the agent working in its shadow clone: write into the host
+    # directory mounted at /work/tree.
+    if [ -e "$D/edit" ]; then
+      prev=""
+      for a in "$@"; do
+        if [ "$prev" = "-v" ]; then
+          case "$a" in
+            *:/work/tree|*:/work/tree:*)
+              h="${a%%:*}"
+              echo "edited by the run" > "$h/edited.txt"
+              echo '{}' > "$h/.mcp.json" ;;
+            *:/work/config|*:/work/config:*)
+              h="${a%%:*}"
+              mkdir -p "$h/projects/-work-tree"
+              echo '{"type":"summary"}' > "$h/projects/-work-tree/s1.jsonl" ;;
+          esac
+        fi
+        prev="$a"
+      done
+    fi
     mode=$(cat "$D/mode" 2>/dev/null || echo lines)
     echo $$ > "$D/run.pid"
     case "$mode" in
@@ -41,6 +61,9 @@ case "$sub" in
     esac ;;
   inspect) cat "$D/oom" 2>/dev/null || echo false ;;
   rm) : > "$D/removed"; exit 0 ;;
+  # RW12: the reaper lists containers (`ps -a ... --format json`) and pods (`pod ps ...`).
+  ps) cat "$D/ps.json" 2>/dev/null || echo '[]'; exit 0 ;;
+  pod) cat "$D/pods.json" 2>/dev/null || echo '[]'; exit 0 ;;
   kill) exit 0 ;;
   image) exit 0 ;;
   *) exit 0 ;;

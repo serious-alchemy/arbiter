@@ -170,10 +170,19 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp gather_workspaces do
-    case Client.get("/api/workspaces") do
-      {:ok, %{"data" => list}} -> {:ok, list}
-      {:ok, _} -> {:ok, []}
-      {:error, %Client.Error{} = err} -> {:error, err.message}
+    ws_target = System.get_env("ARB_WORKSPACE")
+
+    if is_binary(ws_target) and ws_target != "" do
+      case ArbiterCli.Workspace.resolve(ws_target) do
+        {:ok, ws} -> {:ok, [ws]}
+        {:error, msg} -> {:error, msg}
+      end
+    else
+      case Client.get("/api/workspaces") do
+        {:ok, %{"data" => list}} -> {:ok, list}
+        {:ok, _} -> {:ok, []}
+        {:error, %Client.Error{} = err} -> {:error, err.message}
+      end
     end
   end
 

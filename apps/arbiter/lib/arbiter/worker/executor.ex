@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.Executor do
   | `signal/2` | `TERM` or `KILL` to the container's init |
   | `stop/1` | idempotent stop-and-remove by name, done by the agent |
   | `outcome/1` | `%{oom?, exit_code, cancelled?, node_lost?}` once the run ended |
-  | `collect/2` | request a checkpoint upload (RW11) |
+  | `collect/2` | take a checkpoint now (RW11): the agent uploads, the primary ingests, the result comes back |
   | `recover/2` | the restart path (RW12) |
   | `reap/2` | node-side reaping against the primary's live set (RW12) |
 
@@ -41,7 +41,7 @@ defmodule Arbiter.Worker.Executor do
   @callback signal(handle(), :term | :kill) :: :ok | {:error, term()}
   @callback stop(run_ref()) :: :ok
   @callback outcome(run_ref()) :: {:ok, map()} | :pending | {:error, term()}
-  @callback collect(run_ref(), :checkout | :transcripts) :: :ok | {:error, term()}
+  @callback collect(run_ref(), :checkout | :transcripts) :: :ok | {:ok, term()} | {:error, term()}
   @callback recover(node_ref(), run_ref()) :: {:ok, term()} | {:error, term()}
   @callback reap(node_ref(), live_set :: [String.t()]) :: :ok | {:error, term()}
 

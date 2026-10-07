@@ -123,7 +123,7 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
 
       conn = delete(conn, ~p"/api/dependencies/#{a.id}/#{b.id}")
-      assert response(conn, 204)
+      assert %{"removed" => 2} = json_response(conn, 200)
 
       # Both edges gone
       assert [] =
@@ -139,7 +139,7 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
 
       conn = delete(conn, ~p"/api/dependencies/#{a.id}/#{b.id}?type=blocks")
-      assert response(conn, 204)
+      assert %{"removed" => 1} = json_response(conn, 200)
 
       remaining =
         Dependency
@@ -150,9 +150,14 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       assert id == kept.id
     end
 
-    test "returns 404 when no matching edges", %{conn: conn, a: a, b: b} do
+    # P-13 (D-T-20): the same answer the MCP `dep_remove` gives.
+    test "removing an absent edge is a 200 with removed: 0", %{conn: conn, a: a, b: b} do
       conn = delete(conn, ~p"/api/dependencies/#{a.id}/#{b.id}")
-      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+
+      assert %{"removed" => 0, "from_issue_id" => from, "to_issue_id" => to} =
+               json_response(conn, 200)
+
+      assert {from, to} == {a.id, b.id}
     end
   end
 

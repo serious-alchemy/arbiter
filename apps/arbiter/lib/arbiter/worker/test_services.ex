@@ -275,8 +275,10 @@ defmodule Arbiter.Worker.TestServices do
   The label carries this server's OS pid so a later boot can tell an orphan
   from a live pod (`reap_orphans/1`).
   """
-  @spec pod_create_argv(String.t(), String.t()) :: [String.t()]
-  def pod_create_argv(podman, pod) do
+  @spec pod_create_argv(String.t(), String.t(), keyword()) :: [String.t()]
+  def pod_create_argv(podman, pod, opts \\ []) do
+    labels = Keyword.get(opts, :labels, [])
+
     [
       podman,
       "pod",
@@ -289,7 +291,7 @@ defmodule Arbiter.Worker.TestServices do
       "keep-id",
       "--label",
       "#{@label}=#{System.pid()}"
-    ]
+    ] ++ Enum.flat_map(labels, fn {key, value} -> ["--label", "#{key}=#{value}"] end)
   end
 
   @doc "`podman run -d` for `service` as a member of `pod`."
@@ -354,7 +356,12 @@ defmodule Arbiter.Worker.TestServices do
 
     with :ok <- check_pod(pod),
          :ok <- ensure_images(opts, podman, services),
-         :ok <- step(opts, :pod_create, pod_create_argv(podman, pod)) do
+         :ok <-
+           step(
+             opts,
+             :pod_create,
+             pod_create_argv(podman, pod, labels: Keyword.get(opts, :labels, []))
+           ) do
       case run_services(opts, podman, pod, name, services) do
         :ok ->
           {:ok, %{pod: pod, services: Enum.map(services, & &1.name), env: worker_env(services)}}
@@ -501,16 +508,36 @@ defmodule Arbiter.Worker.TestServices do
   label whose recorded OS pid is no longer alive (never one of a live server,
   so a second Arbiter on the host keeps its own). Returns the names removed.
   Options: `:runner`, `:podman`, `:alive?` (`(os_pid -> boolean)`, for tests).
+
+  A pod on a **node** (RW12, §10.6) is not judged by its OS pid: that is the node
+  agent's own, always alive, and says nothing about the run. `:live_pods` (the
+  names of the pods of runs the primary says are live, plus the agent's own)
+  replaces the test: a pod is an orphan iff its name is not in the list (or, given
+  a function of the pod's `podman pod ps` map, iff it answers `false`).
+  `:labels` (`[{key, value}]`, `arbiter.install` / `arbiter.node`) narrows the
+  listing to one install on one node, so an install never sweeps another's pods.
   """
   @spec reap_orphans(keyword()) :: [String.t()]
   def reap_orphans(opts \\ []) do
-    alive? = Keyword.get(opts, :alive?, &os_alive?/1)
-    args = ["pod", "ps", "--filter", "label=#{@label}", "--format", "json"]
+    live? =
+      case Keyword.fetch(opts, :live_pods) do
+        {:ok, live} when is_list(live) -> fn pod -> pod["Name"] in live end
+        {:ok, fun} when is_function(fun, 1) -> fun
+        :error -> fn pod -> pod_server_alive?(pod, Keyword.get(opts, :alive?, &os_alive?/1)) end
+      end
+
+    filters =
+      Enum.flat_map(
+        [@label | Enum.map(Keyword.get(opts, :labels, []), fn {k, v} -> "#{k}=#{v}" end)],
+        &["--filter", "label=#{&1}"]
+      )
+
+    args = ["pod", "ps"] ++ filters ++ ["--format", "json"]
 
     with {out, 0} <- Container.cmd(opts, podman(opts), args, timeout: @stop_timeout_ms),
          {:ok, pods} when is_list(pods) <- Jason.decode(out) do
       pods
-      |> Enum.filter(&orphan?(&1, alive?))
+      |> Enum.filter(&orphan?(&1, live?))
       |> Enum.map(& &1["Name"])
       |> Enum.filter(&(stop(&1, opts) == :ok))
     else
@@ -518,11 +545,14 @@ defmodule Arbiter.Worker.TestServices do
     end
   end
 
-  defp orphan?(%{"Name" => name, "Labels" => %{@label => pid}}, alive?) when is_binary(name) do
-    String.starts_with?(name, "arb-") and not alive?.(pid)
+  defp orphan?(%{"Name" => name, "Labels" => %{@label => _pid}} = pod, live?)
+       when is_binary(name) do
+    String.starts_with?(name, "arb-") and not live?.(pod)
   end
 
   defp orphan?(_, _), do: false
+
+  defp pod_server_alive?(%{"Labels" => %{@label => pid}}, alive?), do: alive?.(pid)
 
   defp os_alive?(pid), do: pid == System.pid() or File.exists?("/proc/#{pid}")
 end

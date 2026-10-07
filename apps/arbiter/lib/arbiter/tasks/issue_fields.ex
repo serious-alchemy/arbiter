@@ -44,7 +44,7 @@ defmodule Arbiter.Tasks.IssueFields do
   @create @shared ++
             ~w(workspace_id source_pr skip_upstream_create parent_id tracker_child_policy)
 
-  @update @shared ++ ~w(pr_ref pr_body)
+  @update @shared ++ ~w(pr_ref pr_body append_notes)
 
   @always_denied ~w(change_origin)
 

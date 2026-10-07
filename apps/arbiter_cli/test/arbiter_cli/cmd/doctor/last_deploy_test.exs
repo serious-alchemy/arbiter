@@ -19,8 +19,8 @@ defmodule ArbiterCli.Cmd.Doctor.LastDeployTest do
     :ok
   end
 
-  test "no deploy recorded is ok" do
-    assert %{name: "last deploy", status: :ok, detail: detail} = Checks.check_last_deploy()
+  test "no deploy recorded is n/a" do
+    assert %{name: "last deploy", status: :na, detail: detail} = Checks.check_last_deploy()
     assert detail =~ "no `arb server deploy` recorded"
   end
 
@@ -28,7 +28,7 @@ defmodule ArbiterCli.Cmd.Doctor.LastDeployTest do
     Status.start("v2.0.0", %{})
     Status.finish("succeeded", %{backup_path: "/h/snapshots/arbiter-pre-v2.0.0-x.sqlite3"})
 
-    assert %{status: :ok, detail: detail, fatal: false, blocks_readiness: false} =
+    assert %{status: :ok, detail: detail, blocks_readiness: false} =
              Checks.check_last_deploy()
 
     assert detail =~ "v2.0.0"
@@ -37,7 +37,7 @@ defmodule ArbiterCli.Cmd.Doctor.LastDeployTest do
     assert detail =~ ~r/\d{4}-\d{2}-\d{2}T/
   end
 
-  test "a rolled-back deploy is flagged but never blocks readiness or fails doctor" do
+  test "a rolled-back deploy is a warning: it never blocks readiness or fails doctor" do
     Status.start("v2.0.0", %{})
 
     Status.finish("rolled_back", %{
@@ -46,7 +46,7 @@ defmodule ArbiterCli.Cmd.Doctor.LastDeployTest do
       backup_path: "/h/b.sqlite3"
     })
 
-    assert %{status: :fail, detail: detail, hint: hint, fatal: false, blocks_readiness: false} =
+    assert %{status: :warn, detail: detail, hint: hint, blocks_readiness: false} =
              Checks.check_last_deploy()
 
     assert detail =~ "rolled back to v1.9.0"
@@ -64,7 +64,7 @@ defmodule ArbiterCli.Cmd.Doctor.LastDeployTest do
       Jason.encode!(%{"state" => "running", "tag" => "v2.0.0", "pid" => "999999999"})
     )
 
-    assert %{status: :fail, detail: dead} = Checks.check_last_deploy()
+    assert %{status: :warn, detail: dead} = Checks.check_last_deploy()
     assert dead =~ "interrupted"
   end
 

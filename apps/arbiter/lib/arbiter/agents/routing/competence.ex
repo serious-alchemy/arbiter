@@ -373,6 +373,19 @@ defmodule Arbiter.Agents.Routing.Competence do
   def rows, do: (Settings.competence_matrix() || []) ++ @default_rows
 
   @doc """
+  The live and candidate row sets from one installation read (bd-dde4l7):
+  `live` is `rows/0`; `candidate` is the stored candidate ahead of the code
+  defaults, exactly as the live override is, or `nil` when none is stored.
+  The two are built from separate settings fields and never share a row, so a
+  candidate cannot leak into dispatch.
+  """
+  @spec matrices() :: %{live: [row()], candidate: [row()] | nil}
+  def matrices do
+    %{live: live, candidate: candidate} = Settings.competence_matrices()
+    %{live: (live || []) ++ @default_rows, candidate: candidate && candidate ++ @default_rows}
+  end
+
+  @doc """
   Validate and normalise operator-supplied competence rows.
   """
   @spec normalize_rows(term()) :: {:ok, [row()]} | {:error, String.t()}

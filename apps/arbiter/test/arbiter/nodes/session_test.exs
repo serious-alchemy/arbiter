@@ -95,25 +95,41 @@ defmodule Arbiter.Nodes.SessionTest do
       assert byte_size(Base.url_decode64!(Nodes.boot_epoch(), padding: false)) == 16
     end
 
-    test "per-run verdicts: known to the primary, or unknown", %{node: node, clock: c} do
+    test "per-run verdicts: known only to a session that holds the run, else unknown (§10.4)",
+         %{node: node, clock: c} do
+      # A live worker_runs row is NOT enough: after a primary restart the row is still
+      # live, but its Worker is gone, and the agent must quiesce the run, not reattach it.
       live = run!(:working)
       done = run!(:finished)
+      {:ok, %{pid: pid}} = attach(node, c)
+      held = Ash.UUID.generate()
+      place!(pid, held)
 
       runs = [
         %{"id" => live.id, "state" => "running"},
         %{"id" => done.id, "state" => "running"},
-        %{"id" => Ash.UUID.generate(), "state" => "running"},
+        %{"id" => held, "state" => "running"},
         %{"id" => "not-a-uuid", "state" => "running"}
       ]
 
       assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), hello(%{"runs" => runs}))
 
       assert ok["runs"] == %{
-               live.id => "known",
+               live.id => "unknown",
                done.id => "unknown",
-               Enum.at(runs, 2)["id"] => "unknown",
+               held => "known",
                "not-a-uuid" => "unknown"
              }
+    end
+
+    test "a restarted primary (a fresh session) knows none of the agent's runs", %{
+      node: node,
+      clock: c
+    } do
+      live = run!(:working)
+      runs = [%{"id" => live.id, "state" => "running"}]
+      assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), hello(%{"runs" => runs}))
+      assert ok["runs"] == %{live.id => "unknown"}
     end
 
     test "records a connected event", %{node: node, clock: c} do
@@ -148,12 +164,14 @@ defmodule Arbiter.Nodes.SessionTest do
       node: node,
       clock: c
     } do
-      live = run!(:working)
-      params = hello(%{"agent_version" => "0.0.1", "runs" => [%{"id" => live.id}]})
+      {:ok, %{pid: pid}} = attach(node, c)
+      live = Ash.UUID.generate()
+      place!(pid, live)
+      params = hello(%{"agent_version" => "0.0.1", "runs" => [%{"id" => live}]})
       assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), params)
       assert ok["health"] == "outdated"
       assert ok["max_workers"] == 0
-      assert ok["runs"][live.id] == "known"
+      assert ok["runs"][live] == "known"
       refute Registry.assignable?(node.id)
       assert %{health: :outdated, connected?: true} = Session.snapshot(node.id)
     end
@@ -422,6 +440,256 @@ defmodule Arbiter.Nodes.SessionTest do
       {:ok, _} = Nodes.revoke(node, "operator:test")
       assert {:error, :revoked} = attach(node, c)
     end
+  end
+
+  describe "checkout context (RW11)" do
+    setup %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      ctx = %{home: "/h", branch: "arbiter/b", base: "main", seeded_paths: []}
+
+      owner = self()
+
+      task =
+        Task.async(fn ->
+          Session.assign(pid, "run1", %{"run" => "run1"}, owner, checkout: ctx)
+        end)
+
+      assert_receive {:node_session, {:push, "assign", %{"run" => "run1"}}}
+      Session.node_event(pid, "run.ready", %{"run" => "run1"})
+      assert {:ok, _handle} = Task.await(task)
+      %{pid: pid, ctx: ctx}
+    end
+
+    test "a run's checkout context is served only for a run placed with one", %{
+      pid: pid,
+      ctx: ctx
+    } do
+      assert {:ok, ^ctx} = Session.checkout_context(pid, "run1")
+      assert :error = Session.checkout_context(pid, "other")
+    end
+
+    test "collect pushes `collect` to the node and returns the ingest result", %{pid: pid} do
+      waiter = Task.async(fn -> Session.collect(pid, "run1", :checkout, 5_000) end)
+      assert_receive {:node_session, {:push, "collect", %{"run" => "run1", "kind" => "checkout"}}}
+      Session.checkout_done(pid, "run1", {:ok, %{head: "abc"}})
+      assert {:ok, %{head: "abc"}} = Task.await(waiter)
+    end
+
+    test "a collect for a run that is gone is an error, and releasing the run answers waiters", %{
+      pid: pid
+    } do
+      assert {:error, :unknown_run} = Session.collect(pid, "nope", :checkout, 1_000)
+
+      waiter = Task.async(fn -> Session.collect(pid, "run1", :checkout, 5_000) end)
+      assert_receive {:node_session, {:push, "collect", _}}
+      Session.release_run(pid, "run1")
+      assert {:error, :run_gone} = Task.await(waiter)
+      assert :error = Session.checkout_context(pid, "run1")
+    end
+
+    test "a rejected ingest is recorded as a checkout_rejected event", %{pid: pid, node: node} do
+      Session.checkout_done(pid, "run1", {:error, {:veto, :submodule, "vendor/dep"}})
+      _ = Session.snapshot(pid)
+      assert :checkout_rejected in kinds(node)
+    end
+  end
+
+  describe "restart recovery (RW12)" do
+    @ctx %{home: "/h", branch: "arbiter/b", base: "main", seeded_paths: [], config_dir: "/c"}
+
+    defp retained_report(run),
+      do: %{"run" => run, "task" => "bd-1", "checkout" => %{"bytes" => 1}, "transcripts" => nil}
+
+    test "a hello lists what the agent retained, and the snapshot shows it", %{
+      node: node,
+      clock: c
+    } do
+      params = hello(%{"inventory" => %{"runs" => [], "retained" => [retained_report("r1")]}})
+      assert {:ok, %{pid: pid}} = attach(node, c, self(), params)
+      assert %{retained: %{"r1" => %{"run" => "r1"}}} = Session.snapshot(pid)
+    end
+
+    test "a retained push is stored and recorded as an event", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "retained", retained_report("r1"))
+      assert %{retained: %{"r1" => _}} = Session.snapshot(pid)
+      assert :retained in kinds(node)
+    end
+
+    test "recover asks a retained run's node for it and returns what the uploads say", %{
+      node: node,
+      clock: c
+    } do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "retained", retained_report("r1"))
+
+      waiter = Task.async(fn -> Session.recover(pid, "r1", @ctx, 5_000) end)
+      assert_receive {:node_session, {:push, "recover", %{"run" => "r1"}}}
+
+      # the upload endpoints are authorized for the recovery, and only for it
+      assert {:ok, @ctx} = Session.checkout_context(pid, "r1")
+      assert :error = Session.checkout_context(pid, "other")
+
+      Session.checkout_done(pid, "r1", {:ok, %{head: "abc"}})
+
+      Session.node_event(pid, "recovered", %{
+        "run" => "r1",
+        "transcripts" => "none",
+        "checkout" => "ok"
+      })
+
+      assert {:ok, %{checkout: %{head: "abc"}, agent: %{"checkout" => "ok"}}} = Task.await(waiter)
+      assert :error = Session.checkout_context(pid, "r1")
+      assert :recovered in kinds(node)
+    end
+
+    test "a failed upload is an error, and the recovery context is withdrawn", %{
+      node: node,
+      clock: c
+    } do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "retained", retained_report("r1"))
+      waiter = Task.async(fn -> Session.recover(pid, "r1", @ctx, 5_000) end)
+      assert_receive {:node_session, {:push, "recover", _}}
+      Session.checkout_done(pid, "r1", {:error, {:veto, :submodule, "x"}})
+
+      Session.node_event(pid, "recovered", %{
+        "run" => "r1",
+        "transcripts" => "none",
+        "checkout" => "failed: {:rejected, 422, %{}}"
+      })
+
+      assert {:error, {:recovery_failed, _}} = Task.await(waiter)
+      assert :error = Session.checkout_context(pid, "r1")
+    end
+
+    test "a run the node neither holds nor retained is not on the node", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      assert {:error, :not_on_node} = Session.recover(pid, "ghost", @ctx, 1_000)
+    end
+
+    test "a run the agent is still quiescing is asked for once it reports retained", %{
+      node: node,
+      clock: c
+    } do
+      params = hello(%{"runs" => [%{"id" => "r1", "state" => "running"}]})
+      {:ok, %{pid: pid}} = attach(node, c, self(), params)
+
+      waiter = Task.async(fn -> Session.recover(pid, "r1", @ctx, 5_000) end)
+      _ = Session.snapshot(pid)
+      refute_received {:node_session, {:push, "recover", _}}
+
+      Session.node_event(pid, "retained", retained_report("r1"))
+      assert_receive {:node_session, {:push, "recover", %{"run" => "r1"}}}
+
+      Session.node_event(pid, "recovered", %{
+        "run" => "r1",
+        "transcripts" => "none",
+        "checkout" => "none"
+      })
+
+      assert {:ok, _} = Task.await(waiter)
+    end
+
+    test "recover_abort withdraws a recovery that ran out of budget", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "retained", retained_report("r1"))
+      waiter = Task.async(fn -> Session.recover(pid, "r1", @ctx, 100) end)
+      assert {:error, :timeout} = Task.await(waiter)
+      assert :error = Session.checkout_context(pid, "r1")
+    end
+
+    test "a recovered run can be dropped on the node", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "retained", retained_report("r1"))
+      assert :ok = Session.drop_retained(pid, "r1")
+      assert_receive {:node_session, {:push, "retained.drop", %{"run" => "r1"}}}
+      assert %{retained: retained} = Session.snapshot(pid)
+      refute Map.has_key?(retained, "r1")
+    end
+  end
+
+  describe "reaping (RW12)" do
+    setup do
+      previous = Application.fetch_env(:arbiter, :node_reaper)
+      Application.put_env(:arbiter, :node_reaper, enabled: true, primary?: fn -> true end)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:arbiter, :node_reaper, v)
+          :error -> Application.delete_env(:arbiter, :node_reaper)
+        end
+      end)
+    end
+
+    test "every hello is answered with a reap carrying the install and the live set", %{
+      node: node,
+      clock: c
+    } do
+      live = run!(:working)
+      _done = run!(:finished)
+      {:ok, _} = attach(node, c)
+
+      assert_receive {:node_session, {:push, "reap", %{"install" => install, "live_set" => set}}}
+      assert install == Arbiter.Nodes.InstallId.get()
+      assert live.id in set
+      assert length(set) == 1
+    end
+
+    test "the live set also holds runs the session itself placed", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      assert_receive {:node_session, {:push, "reap", _}}
+      placed = Ash.UUID.generate()
+      place!(pid, placed)
+      Session.reap_now(pid)
+      assert_receive {:node_session, {:push, "reap", %{"live_set" => set}}}
+      assert placed in set
+    end
+
+    test "a second instance (not the primary) never reaps", %{node: node, clock: c} do
+      Application.put_env(:arbiter, :node_reaper, enabled: true, primary?: fn -> false end)
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.reap_now(pid)
+      _ = Session.snapshot(pid)
+      refute_received {:node_session, {:push, "reap", _}}
+    end
+
+    test "reap/2 sends an explicit live set, install-scoped; disabled when not the primary", %{
+      node: node,
+      clock: c
+    } do
+      {:ok, %{pid: pid}} = attach(node, c)
+      assert_receive {:node_session, {:push, "reap", _}}
+
+      assert :ok = Session.reap(pid, ["a", "b", "a"])
+      assert_receive {:node_session, {:push, "reap", %{"install" => i, "live_set" => ["a", "b"]}}}
+      assert i == Arbiter.Nodes.InstallId.get()
+
+      Application.put_env(:arbiter, :node_reaper, enabled: true, primary?: fn -> false end)
+      assert {:error, :disabled} = Session.reap(pid, ["a"])
+    end
+
+    test "a reaped report is recorded", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      Session.node_event(pid, "reaped", %{"containers" => ["arb-x"], "pods" => [], "dirs" => []})
+      _ = Session.snapshot(pid)
+      assert :reaped in kinds(node)
+    end
+  end
+
+  # Place `run` on the session as a Worker would, and mark it running.
+  defp place!(pid, run, opts \\ []) do
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        Session.assign(pid, run, %{"run" => run}, owner, opts)
+      end)
+
+    assert_receive {:node_session, {:push, "assign", %{"run" => ^run}}}
+    Session.node_event(pid, "run.ready", %{"run" => run})
+    assert {:ok, handle} = Task.await(task)
+    handle
   end
 
   defp run!(state) do

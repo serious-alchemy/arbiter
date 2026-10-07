@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.List do
   @moduledoc """
-  `arb list [--state ...] [--type ...] [--priority N] [--labels ...]
+  `arb list [--state ...] [--type ...] [--priority N] [--difficulty N] [--labels ...]
             [--tracker] [--workspace-id ID] [--json]`
 
   Filters are passed through to `GET /api/issues` as query params
@@ -8,6 +8,9 @@ defmodule ArbiterCli.Cmd.List do
   merging | verifying | closed). `--labels`
   is accepted for interface parity with `bd`, but the current Issue resource
   has no labels field — the flag is ignored with a stderr warning.
+
+  Each row carries its lifecycle projection (`column`, `step`, `blocked_by`) —
+  see them with `--json`.
 
   `--assignee` is deprecated (bd-1ozks5): it filtered the local `assignee`
   column, which no longer exists (Arbiter is a local single-user app). The
@@ -33,6 +36,7 @@ defmodule ArbiterCli.Cmd.List do
     state: :string,
     type: :string,
     priority: :integer,
+    difficulty: :integer,
     labels: :string,
     workspace_id: :string,
     assignee: :string,
@@ -51,12 +55,15 @@ defmodule ArbiterCli.Cmd.List do
 
       warn_deprecated_flags(opts, mode)
 
+      ws_id = Workspace.selected_id(opts[:workspace_id])
+
       params =
         []
         |> put_if(:state, opts[:state])
         |> put_if(:issue_type, opts[:type])
         |> put_if(:priority, opts[:priority])
-        |> put_if(:workspace_id, opts[:workspace_id])
+        |> put_if(:difficulty, opts[:difficulty])
+        |> put_if(:workspace_id, ws_id)
 
       case fetch_tasks(params) do
         {:ok, tasks} ->

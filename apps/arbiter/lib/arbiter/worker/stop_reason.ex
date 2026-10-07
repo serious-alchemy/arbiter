@@ -205,6 +205,7 @@ defmodule Arbiter.Worker.StopReason do
           | :tampered_clone
           | :spawn_failed
           | :model_unavailable
+          | :node_lost
 
   @type t :: %__MODULE__{
           category: category(),
@@ -903,6 +904,30 @@ defmodule Arbiter.Worker.StopReason do
     }
   end
 
+  @doc """
+  Build a `:node_lost` reason (RW12, `docs/design/remote-workers.md` §10.3): the node
+  a run was placed on stopped answering for `lost_after` seconds (or never came back
+  after a primary restart), so the run is **interrupted, not failed**, and no
+  resume attempt is consumed. Not a signal and not an agent failure: nothing in the
+  output tail says anything about why, so it is never classified from one.
+  """
+  @spec node_lost(String.t()) :: t()
+  def node_lost(node_name) when is_binary(node_name) do
+    %__MODULE__{
+      category: :node_lost,
+      summary:
+        "node lost: #{node_name} stopped answering while this run was placed on it; " <>
+          "the run was interrupted (not failed) and any work since its last checkpoint " <>
+          "on the node is only recoverable if the node returns",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If the " <>
+          "node comes back, what it retained is salvageable; see `arb node show #{node_name}`.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
   defp format_bytes(bytes) do
     gib = bytes / 1_073_741_824
     "#{:erlang.float_to_binary(gib, decimals: 1)} GiB"
@@ -942,6 +967,7 @@ defmodule Arbiter.Worker.StopReason do
         :tampered_clone -> "the worker replaced its clone's .git (refused, not trusted)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
         :model_unavailable -> "model unavailable for this account"
+        :node_lost -> "node lost (run interrupted)"
       end
 
     case reason.exit_status do

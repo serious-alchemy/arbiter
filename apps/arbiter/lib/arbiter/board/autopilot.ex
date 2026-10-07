@@ -273,7 +273,13 @@ defmodule Arbiter.Board.Autopilot do
   # workspace, or the primary's own cap (`Arbiter.Nodes.LocalCapacity`) held a
   # local run. Held, never failed: it lifts when a slot frees or the operator
   # raises the cap, and is held as briefly as a full account.
-  @self_clearing_dispatch_errors [:account_at_capacity, :provider_constraint, :no_node_capacity]
+  @self_clearing_dispatch_errors [
+    :account_at_capacity,
+    :provider_constraint,
+    :no_node_capacity,
+    :quota_held,
+    :provider_paused
+  ]
   @account_cap_retry_ms 15_000
 
   # How many consecutive same-shape failures a non-deterministic error (a
@@ -549,7 +555,9 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   def handle_call({:board, opts}, _from, state) do
-    {_status, snapshot} = read_board(state, opts)
+    {_status, snapshot} =
+      read_board(state, Keyword.put_new(opts, :dispatch_holds, dispatch_holds(state)))
+
     {:reply, snapshot, state}
   end
 
@@ -752,10 +760,20 @@ defmodule Arbiter.Board.Autopilot do
        when result in [:ok, :resumed],
        do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
-  defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),
+  # bd-814vuy: a placement refusal holds that card only — go straight on to the
+  # next candidate rather than idling the slot until some other event wakes us.
+  defp after_dispatch(state, {:error, reason}) do
+    if error_shape(reason) in @self_clearing_dispatch_errors,
+      do: trigger_immediate_pass(%{state | replan_after_dispatch: false}),
+      else: after_dispatch_replan(state)
+  end
+
+  defp after_dispatch(state, _outcome), do: after_dispatch_replan(state)
+
+  defp after_dispatch_replan(%{replan_after_dispatch: true} = state),
     do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
-  defp after_dispatch(state, _outcome), do: state
+  defp after_dispatch_replan(state), do: state
 
   defp trigger_immediate_pass(state) do
     state = cancel_plan_timer(state)
@@ -800,7 +818,7 @@ defmodule Arbiter.Board.Autopilot do
   defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
 
   defp plan(state) do
-    {read_status, snapshot} = read_board(state, [])
+    {read_status, snapshot} = read_board(state, dispatch_holds: dispatch_holds(state))
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     cond do
@@ -988,7 +1006,13 @@ defmodule Arbiter.Board.Autopilot do
   # needs to hear about it*: `record_failure/3` tracks the failure and, past
   # its threshold, escalates.
   defp finish_dispatch(state, id, {:error, reason} = error) do
-    Logger.warning("board autopilot: dispatch of #{id} failed: #{inspect(reason)}")
+    # bd-814vuy: a placement refusal is a hold on this card, not a failure.
+    if error_shape(reason) in @self_clearing_dispatch_errors do
+      Logger.info("board autopilot: dispatch of #{id} held: #{inspect(reason)}")
+    else
+      Logger.warning("board autopilot: dispatch of #{id} failed: #{inspect(reason)}")
+    end
+
     {error, record_failure(state, id, reason)}
   end
 
@@ -996,6 +1020,31 @@ defmodule Arbiter.Board.Autopilot do
     Logger.warning("board autopilot: dispatch of #{id} returned #{inspect(other)}")
     {{:error, other}, record_failure(state, id, other)}
   end
+
+  # bd-814vuy: a card whose last dispatch was refused for a placement reason
+  # (account cap, provider constraint, quota hold, paused provider …) and is
+  # still inside its retry window is a hold on *that card*. Handing the holds
+  # to the board keeps the scheduler from naming it head again, so the pass
+  # goes on to the next card another provider can take.
+  defp dispatch_holds(%{failures: failures, now: now}) do
+    at = now.()
+
+    for {id, %{retry_not_before: %DateTime{} = until} = entry} <- failures,
+        DateTime.compare(at, until) == :lt,
+        into: %{} do
+      {id, {:hold, Map.get(entry, :detail) || "dispatch refused (#{entry.shape})"}}
+    end
+  end
+
+  defp failure_detail({:account_at_capacity, %{account: account, cap: cap}}),
+    do: "#{account} at capacity (cap #{cap})"
+
+  defp failure_detail({:account_at_capacity, _}), do: "account at capacity"
+  defp failure_detail({:quota_held, _}), do: "quota held"
+  defp failure_detail({:provider_paused, provider, _}), do: "#{provider} paused"
+  defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
+  defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
+  defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
   defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
 
@@ -1010,12 +1059,13 @@ defmodule Arbiter.Board.Autopilot do
       if previous && previous.shape == shape do
         %{previous | count: previous.count + 1}
       else
-        %{count: 1, shape: shape, escalated?: false, retry_not_before: nil}
+        %{count: 1, shape: shape, escalated?: false, retry_not_before: nil, detail: nil}
       end
 
     entry = %{
       entry
-      | retry_not_before: preflight_retry_not_before(reason, entry.count, state.now.())
+      | retry_not_before: preflight_retry_not_before(reason, entry.count, state.now.()),
+        detail: failure_detail(reason)
     }
 
     entry =
@@ -1051,6 +1101,12 @@ defmodule Arbiter.Board.Autopilot do
   # bd-8suxac: a full account is held briefly — a slot frees when any run on
   # it ends, which no reset time predicts.
   defp preflight_retry_not_before({:account_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:quota_held, _task_id}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:provider_paused, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:no_node_capacity, _info}, _count, now),

@@ -91,12 +91,11 @@ defmodule ArbiterCli.Cmd.DashboardTest do
       assert result.detail =~ "mode token"
     end
 
-    test "fails, fatally, when the dashboard is served anonymously" do
+    test "fails when the dashboard is served anonymously" do
       stub_routes([{{"get", "/"}, fn conn -> Plug.Conn.send_resp(conn, 200, "<html>") end}])
 
       result = Checks.check_dashboard_auth()
       assert result.status == :fail
-      assert result.fatal
     end
 
     test "with loopback trust on, the direct probe is not a failure but a forwarded one must redirect" do
@@ -130,12 +129,13 @@ defmodule ArbiterCli.Cmd.DashboardTest do
 
       result = Checks.check_dashboard_auth()
       assert result.status == :fail
-      assert result.fatal
     end
 
-    test "an unknown answer is left alone" do
+    test "an unknown answer is a warn, never an all-clear" do
       stub_routes([])
-      assert Checks.check_dashboard_auth().status == :ok
+      result = Checks.check_dashboard_auth()
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
     end
   end
 end

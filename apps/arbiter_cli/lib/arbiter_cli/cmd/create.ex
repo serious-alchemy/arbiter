@@ -1,16 +1,36 @@
 defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
-  `arb create <title> [--description ...] [--acceptance ...] [--priority N] [--difficulty N]
-                       [--type T] [--deps id1,id2] [--labels a,b]
-                       [--tracker-ref REF] [--no-tracker]
-                       [--target-branch NAME] [--repo owner/name]
-                       [--parent <parent-id>] [--ticket-only]`
+  `arb create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
+                       [--notes ...] [--qa-notes ...] [--deployment-notes ...]
+                       [--priority N] [--difficulty N] [--type T]
+                       [--deps id1,id2] [--labels a,b]
+                       [--tracker-ref REF] [--tracker-type T]
+                       [--tracker-context-type T] [--tracker-context-ref REF]
+                       [--no-tracker] [--target-branch NAME] [--repo owner/name]
+                       [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
+                       [--require-provider P | --exclude-provider P]
+                       [--force] [--ticket-only] [--json]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
   `--acceptance TEXT` sets the acceptance criteria at create time, so a
-  bug/feature can be promoted to Ready straight away. Unknown flags are
-  rejected with a non-zero exit rather than silently dropped.
+  bug/feature can be promoted to Ready straight away. `--acceptance-file PATH`
+  reads the (usually multi-line) criteria from a file instead (`-` for stdin);
+  pass one or the other. Unknown flags are rejected with a non-zero exit rather
+  than silently dropped.
+
+  `--notes` / `--qa-notes` / `--deployment-notes` seed those fields at create
+  time (P-08). `--tracker-type T` sets which tracker the ticket is linked to
+  (`github`, `jira`, `none`, …); `--tracker-context-type` / `--tracker-context-ref`
+  set the read-only parent-ticket context a child carries (#1973). Every flag
+  maps onto a field MCP `ticket_create` / `POST /api/issues` accept.
+
+  Intentionally **not** exposed (internal engagement state or server-derived):
+  `source_pr` and the ReviewPatrol / PRPatrol seed fields (`review_only`,
+  `last_reviewed_sha`, `last_seen_comment_id`, `review_automation`,
+  `posted_findings`, `last_verdict`, `last_verdict_sha`), `skills`, and
+  `tracker_child_policy` (a workspace config). `workspace_id` comes from
+  `-w` / `ARB_WORKSPACE`, not a flag.
 
   ## --difficulty N (0..5 / D0..D5)
 
@@ -107,8 +127,9 @@ defmodule ArbiterCli.Cmd.Create do
       `--local-only` (opposite intent).
       Honored: `--title`, `--description`, `--priority`, `--type`.
       Not honored (warning emitted): `--difficulty`, `--deps`, `--parent`,
-      `--tracker-ref`, `--target-branch`, `--repo`, `--labels`, `--assignee`
-      (deprecated — bd-1ozks5).
+      `--tracker-ref`, `--tracker-type`, `--tracker-context-*`, `--acceptance[-file]`,
+      `--notes`, `--qa-notes`, `--deployment-notes`, `--target-branch`, `--repo`,
+      `--labels`, `--assignee` (deprecated — bd-1ozks5).
 
   `--deps id1,id2` creates a `blocks` dependency for each listed issue (each
   becomes `<dep_id> blocks <new_id>`), in the same call as the create.
@@ -148,11 +169,20 @@ defmodule ArbiterCli.Cmd.Create do
   passes it doesn't break.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output, ProviderConstraintFlags, Workspace}
+  alias ArbiterCli.{
+    AcceptanceFlags,
+    ArgParser,
+    Client,
+    Output,
+    ProviderConstraintFlags,
+    Workspace
+  }
 
   @switches [
     description: :string,
-    acceptance: :string,
+    notes: :string,
+    qa_notes: :string,
+    deployment_notes: :string,
     priority: :integer,
     difficulty: :string,
     type: :string,
@@ -160,6 +190,9 @@ defmodule ArbiterCli.Cmd.Create do
     labels: :string,
     assignee: :string,
     tracker_ref: :string,
+    tracker_type: :string,
+    tracker_context_type: :string,
+    tracker_context_ref: :string,
     target_branch: :string,
     repo: :string,
     no_tracker: :boolean,
@@ -175,7 +208,8 @@ defmodule ArbiterCli.Cmd.Create do
   ]
 
   # bd-13pqcp: `--require-provider` / `--exclude-provider` (repeatable).
-  @all_switches @switches ++ ProviderConstraintFlags.switches()
+  @all_switches @switches ++
+                  AcceptanceFlags.switches() ++ ProviderConstraintFlags.switches()
 
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -228,6 +262,14 @@ defmodule ArbiterCli.Cmd.Create do
         {"--deps", opts[:deps]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
+        {"--tracker-type", opts[:tracker_type]},
+        {"--tracker-context-type", opts[:tracker_context_type]},
+        {"--tracker-context-ref", opts[:tracker_context_ref]},
+        {"--acceptance", opts[:acceptance]},
+        {"--acceptance-file", opts[:acceptance_file]},
+        {"--notes", opts[:notes]},
+        {"--qa-notes", opts[:qa_notes]},
+        {"--deployment-notes", opts[:deployment_notes]},
         {"--target-branch", opts[:target_branch]},
         {"--repo", opts[:repo]},
         {"--labels", opts[:labels]}
@@ -262,17 +304,24 @@ defmodule ArbiterCli.Cmd.Create do
   defp run_task_create(opts, _rest, title, skip_upstream?, mode) do
     # Refuse contradictory provider flags before any request.
     constraint = ProviderConstraintFlags.payload(opts)
+    acceptance = AcceptanceFlags.resolve!(opts)
     workspace_id = Workspace.id_or_halt()
     force? = opts[:force] == true
 
     payload =
       %{"title" => title, "workspace_id" => workspace_id}
       |> maybe_put("description", opts[:description])
-      |> maybe_put("acceptance", opts[:acceptance])
+      |> maybe_put("acceptance", acceptance)
+      |> maybe_put("notes", opts[:notes])
+      |> maybe_put("qa_notes", opts[:qa_notes])
+      |> maybe_put("deployment_notes", opts[:deployment_notes])
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
+      |> maybe_put("tracker_type", opts[:tracker_type])
+      |> maybe_put("tracker_context_type", opts[:tracker_context_type])
+      |> maybe_put("tracker_context_ref", opts[:tracker_context_ref])
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put("repo", opts[:repo])
       # P-14: the server creates the `parent_of` edge (and defaults a child of a

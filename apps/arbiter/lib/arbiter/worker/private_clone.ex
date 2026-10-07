@@ -140,7 +140,7 @@ defmodule Arbiter.Worker.PrivateClone do
   different branch (the same "different branch" error as `Worktree.create/3`,
   which `Dispatch` already knows how to recover from for a detached tree).
   """
-  @spec create(path(), String.t() | nil, String.t(), [String.t()] | nil) ::
+  @spec create(path(), String.t() | nil, String.t(), [String.t()] | nil | false) ::
           {:ok, path()} | {:error, term()}
   def create(repo_path, branch, base_branch, seed_paths \\ nil)
 
@@ -162,7 +162,7 @@ defmodule Arbiter.Worker.PrivateClone do
   repo's current `origin/<base_branch>` is copied in as well (no fetch, as
   `Worktree.attach/2` does none).
   """
-  @spec attach(path(), String.t() | nil, String.t() | nil, [String.t()] | nil) ::
+  @spec attach(path(), String.t() | nil, String.t() | nil, [String.t()] | nil | false) ::
           {:ok, path()} | {:error, term()}
   def attach(repo_path, branch, base_branch \\ nil, seed_paths \\ nil)
 
@@ -279,8 +279,7 @@ defmodule Arbiter.Worker.PrivateClone do
 
       case build(plan) do
         :ok ->
-          :ok = Worktree.seed_compiled_deps(repo, path, plan.seed_paths)
-          :ok = Worktree.ensure_deps_fetched(path)
+          :ok = Worktree.seed_worktree(repo, path, plan.seed_paths)
           _ = AgentConfig.add_to_git_exclude(path, [".arbiter/"])
           Logger.info("PrivateClone: created #{path} (#{branch} of #{repo})")
           {:ok, path}

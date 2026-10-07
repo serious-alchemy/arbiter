@@ -1023,6 +1023,22 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.task_update_progress(ctx.worker, %{})
     end
 
+    test "an empty string clears a progress field (D-T-18/29)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => "check it"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => ""})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.qa_notes == nil
+    end
+
+    test "append_notes appends without replacing (D-T-19)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"notes" => "first"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"append_notes" => "second"})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.notes == "first\n\nsecond"
+    end
+
     test "a worker may not progress another task", ctx do
       {:ok, other} = Ash.create(Issue, %{title: "not yours", workspace_id: ctx.ws.id})
 
@@ -2332,7 +2348,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "tracker_claim/2 + tracker_sync/2 (tracker = none)" do
     test "claim refuses when the workspace tracker does not support it", ctx do
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:invalid_request, msg}} =
                Tools.tracker_claim(ctx.coordinator, %{"ref" => "42"})
 
       assert msg =~ "tracker"
@@ -2421,10 +2437,10 @@ defmodule Arbiter.MCP.ToolsTest do
                  "repo" => "emricare/tonic"
                })
 
-      assert data.claim_status == "created"
-      assert data.difficulty == 4
-      assert data.issue_type == "bug"
-      assert data.repo == "emricare/tonic"
+      assert data.status == "created"
+      assert data.task.difficulty == 4
+      assert data.task.issue_type == "bug"
+      assert data.task.repo == "emricare/tonic"
     end
   end
 
@@ -5287,6 +5303,91 @@ defmodule Arbiter.MCP.ToolsTest do
       refute msg =~ "repo"
 
       on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
+  # bd-a9hqfb: one normaliser (`Arbiter.Worker.Dispatch.Params`) behind
+  # worker_dispatch — provider list, unknown arguments, exclusive selectors.
+  describe "worker_dispatch/2 params (D-W-5, D-W-9, D-W-10)" do
+    # An unconfigured workspace has no repo, so a dispatch that gets past
+    # normalisation fails on the repo — proof the arguments were accepted.
+    test "provider: \"grok\" is accepted", ctx do
+      {:ok, task} = ready_issue(ctx, "grok dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "grok"
+               })
+
+      assert msg =~ "repo"
+      refute msg =~ "unknown provider"
+    end
+
+    test "with_gemini is read, not silently dropped", ctx do
+      {:ok, task} = ready_issue(ctx, "gemini alias")
+
+      # Read: it conflicts with an explicit, different provider.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "claude",
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "conflicting provider"
+
+      # And alone it is accepted (falls through to the repo error).
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "repo"
+    end
+
+    test "an unknown argument is refused and nothing is dispatched", ctx do
+      {:ok, task} = ready_issue(ctx, "typo")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agnet" => true,
+                 "no_agent" => true
+               })
+
+      assert msg =~ "no_agnet"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "no_agent with a provider is refused, not half-honoured", ctx do
+      {:ok, task} = ready_issue(ctx, "park or spawn")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "provider" => "claude"
+               })
+
+      assert msg =~ "no_agent"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "a junk force_quota is a typed error, not a crash", ctx do
+      {:ok, task} = ready_issue(ctx, "junk bool")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => 1.5
+               })
+
+      assert msg =~ "force_quota"
     end
   end
 

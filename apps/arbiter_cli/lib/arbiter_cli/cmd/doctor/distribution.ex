@@ -113,10 +113,10 @@ defmodule ArbiterCli.Cmd.Doctor.Distribution do
     end
   end
 
-  # Fatal so `arb doctor` exits non-zero — this is a remote-code-execution
-  # path into the server — but it says nothing about whether a freshly
+  # A fail (so `arb doctor` exits non-zero — this is a remote-code-execution
+  # path into the server), but it says nothing about whether a freshly
   # deployed release is healthy, so it never gates deploy readiness.
-  defp flags(result), do: %{result | fatal: true, blocks_readiness: false}
+  defp flags(result), do: %{result | blocks_readiness: false}
 
   defp ok_detail(listeners, binds, cookies) do
     bound = for {label, _port, [_ | _] = addrs} <- binds, do: "#{label} #{endpoints(addrs)}"

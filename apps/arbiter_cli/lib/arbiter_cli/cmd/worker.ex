@@ -7,8 +7,10 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
-      arb worker resume <task-id> [<repo>] [--model <name>] [--force-quota] [--force] — resume the prior session
+      arb worker resume <task-id> [<repo> | --repo <repo>] [--model <name>] [--force] [--force-quota
+                      [--force-quota-reason <why>]] [--mode session|briefing] — resume the prior session
       arb worker review <task-id> [--repo <repo>] [--model <name>] [--force] [--force-quota]
+                      [--force-quota-reason <why>]
                       [--automation <mode>] [--pr-author <login>]
                       [--tracker-context-ref <ref>] [--tracker-context-type <type>] — spawn a review worker
 
@@ -27,6 +29,11 @@ defmodule ArbiterCli.Cmd.Worker do
   must re-acquire one to resume (bd-92mx1m). When the concurrency cap is full
   the server refuses, naming the cap and the tasks holding it; `--force` goes
   over the cap anyway, and the override is recorded.
+
+  `--mode briefing` is the explicit opt-in for the other kind of resume: a FRESH
+  agent briefed from the preserved worktree's git state, with no prior session
+  continued. The default (`--mode session`) is what the MCP `worker_resume` tool
+  does too — the two are one operation (`Arbiter.Worker.Dispatch.resume_task/2`).
 
   `list` and `show` read the same thing (bd-1uu19b): a ticket's current run,
   in one run vocabulary — its kind (`implement`, `review`, `fix_pass`,
@@ -54,6 +61,8 @@ defmodule ArbiterCli.Cmd.Worker do
     repo: :string,
     model: :string,
     force_quota: :boolean,
+    force_quota_reason: :string,
+    mode: :string,
     force: :boolean,
     automation: :string,
     pr_author: :string,
@@ -126,7 +135,13 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp list(mode) do
-    case Client.get("/api/workers") do
+    params =
+      case ArbiterCli.Workspace.selected_id() do
+        nil -> []
+        ws_id -> [workspace_id: ws_id]
+      end
+
+    case Client.get("/api/workers", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode)
       {:ok, _} -> emit_list([], mode)
       {:error, err} -> Output.die(err)
@@ -141,7 +156,13 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp runs(task_id, mode) do
-    case Client.get("/api/workers/history?task_id=#{URI.encode_www_form(task_id)}") do
+    params =
+      case ArbiterCli.Workspace.selected_id() do
+        nil -> [task_id: task_id]
+        ws_id -> [task_id: task_id, workspace_id: ws_id]
+      end
+
+    case Client.get("/api/workers/history", params) do
       {:ok, %{"data" => list}} -> emit_runs(task_id, list, mode)
       {:ok, _} -> emit_runs(task_id, [], mode)
       {:error, err} -> Output.die(err)
@@ -180,7 +201,9 @@ defmodule ArbiterCli.Cmd.Worker do
       |> maybe_put("repo", repo || flags[:repo])
       |> maybe_put("model", flags[:model])
       |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force_quota_reason", flags[:force_quota_reason])
       |> maybe_put("force", if(flags[:force], do: true))
+      |> maybe_put("mode", flags[:mode])
 
     case Client.post("/api/workers/#{task_id}/resume", body) do
       {:ok, payload} -> emit_resume(payload, mode)
@@ -194,6 +217,7 @@ defmodule ArbiterCli.Cmd.Worker do
       |> maybe_put("repo", flags[:repo])
       |> maybe_put("model", flags[:model])
       |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force_quota_reason", flags[:force_quota_reason])
       |> maybe_put("force", if(flags[:force], do: true))
       |> maybe_put("automation", flags[:automation])
       |> maybe_put("pr_author", flags[:pr_author])

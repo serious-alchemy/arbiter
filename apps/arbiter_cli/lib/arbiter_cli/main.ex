@@ -9,29 +9,40 @@ defmodule ArbiterCli.Main do
       arb ticket list     [--state ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
       arb ticket show     <id>
       arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
+                                  [--acceptance a | --acceptance-file PATH]
+                                  [--notes t] [--qa-notes t] [--deployment-notes t]
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
-                                  [--auto-close]
+                                  [--auto-close] [--tracker-ref R] [--tracker-type T]
+                                  [--tracker-context-type T] [--tracker-context-ref R]
                                   [--require-provider p | --exclude-provider p]
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
-                                  [--description d] [--append-notes text]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
+                                  [--description d] [--notes t | --append-notes t]
+                                  [--acceptance a | --acceptance-file PATH]
                                   [--qa-notes text] [--deployment-notes text]
-                                  [--pr-body text]
+                                  [--pr-body text] [--pr-ref R] [--target-branch B]
+                                  [--tracker-ref R] [--tracker-type T]
+                                  [--tracker-context-type T] [--tracker-context-ref R]
+                                  [--auto-close | --no-auto-close]
                                   [--require-provider p | --exclude-provider p |
                                    --clear-provider-constraint]
-      arb ticket close    <id> [--reason ...]
+                                  ("" clears a field; `arb ticket update --help` lists all)
+      arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
                                   for a ticket in state verifying
       arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<reasoning>"
                                   [--gate review_gate|notes_gate|commit_gate] [--round N]
-                                  [--actor <who>]
+                                  [--fix-round-attempt N]
                                   record your answer to a gate escalation — what the
                                   coordinator decided and why (bd-4qjl0q)
       arb ticket claim    <ref> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket ready
-      arb ticket dispatch <id> [<repo>] [--with-claude] [--model <name>] [--force]
+      arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
+                          [--model <name>] [--force] [--over-cap]
+                          [--force-quota [--force-quota-reason <why>]]
+                                  (== arb dispatch; --with-claude/--with-gemini are deprecated aliases)
 
                                   `arb issue …` is a deprecated alias for `arb ticket …`:
                                   it still runs, and prints a one-line note on stderr.
@@ -43,10 +54,17 @@ defmodule ArbiterCli.Main do
 
       arb worker list
       arb worker show     <task-id>
+      arb worker runs     <task-id>
       arb worker log      <task-id>
       arb worker stop     <task-id>
-      arb worker resume   <task-id> [<repo>] [--model <name>]
+      arb worker resume   <task-id> [<repo> | --repo <repo>] [--model <name>] [--force]
+                          [--force-quota [--force-quota-reason <why>]] [--mode session|briefing]
       arb worker review   <task-id> [--repo <repo>] [--model <name>] [--force] [--automation <mode>]
+                          [--force-quota [--force-quota-reason <why>]]
+      arb queue retry-auto-resolve <task-id>
+      arb queue restart-watchdog   <task-id>
+      arb queue rerun-ci           <task-id> [--mode <mode>] [--workflow <w>] [--input k=v]
+      arb queue mark-ci-external   <task-id> <note...>
       arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
 
       arb repo list
@@ -181,59 +199,78 @@ defmodule ArbiterCli.Main do
 
     # Strip -w / --workspace from the full argv before splitting into cmd/rest,
     # so the flag works at any position (including before the subcommand).
-    {workspace, argv} = ArbiterCli.Workspace.take_flag(argv)
-    if workspace, do: System.put_env("ARB_WORKSPACE", workspace)
+    {flag, workspace, argv} = ArbiterCli.Workspace.extract_flag(argv)
 
     case argv do
-      [] -> usage_and_exit(0)
-      ["help" | rest] -> help(rest)
-      ["-h"] -> usage_and_exit(0)
-      ["--help"] -> usage_and_exit(0)
-      ["-v"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
-      ["--version"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
-      [cmd | rest] -> dispatch(cmd, rest)
+      [] ->
+        reject_flag!(flag, "arb")
+        usage_and_exit(0)
+
+      ["help" | rest] ->
+        reject_flag!(flag, "arb help")
+        help(rest)
+
+      [h] when h in ["-h", "--help"] ->
+        reject_flag!(flag, "arb help")
+        usage_and_exit(0)
+
+      [v] when v in ["-v", "--version"] ->
+        reject_flag!(flag, "arb version")
+        IO.puts("arb #{ArbiterCli.Version.app_version()}")
+
+      [cmd | rest] ->
+        dispatch(cmd, rest, flag, workspace)
     end
   end
 
-  defp dispatch(cmd, args) do
+  # `-w` means nothing to help/version/the bare usage screen: refuse it rather
+  # than run the command and ignore it.
+  defp reject_flag!(nil, _verb), do: :ok
+
+  defp reject_flag!(flag, verb),
+    do: ArbiterCli.Output.die("unknown option #{flag_label(flag)} for #{verb}")
+
+  defp dispatch(cmd, args, flag, ws_val) do
     # A `--workspace <name|id>` / `-w` flag anywhere in the invocation overrides
     # the active workspace, exactly as `ARB_WORKSPACE` does. Strip it centrally —
     # before any subcommand's own `OptionParser` runs — and seed the env so every
     # subcommand honors it uniformly, without each declaring the switch.
-    args =
-      case ArbiterCli.Workspace.take_flag(args) do
-        {nil, rest} ->
-          rest
+    {extra_flag, extra_name, args} = ArbiterCli.Workspace.extract_flag(args)
+    flag = flag || extra_flag
+    ws_val = ws_val || extra_name
 
-        {name, rest} ->
-          System.put_env("ARB_WORKSPACE", name)
-          rest
-      end
-
-    dispatch_resolved(cmd, args)
+    dispatch_resolved(cmd, args, flag, ws_val)
   end
 
   # bd-4qjl0q: `arb review resolve` is the spelling the gate-escalation mail
   # names. `review` alone is a legacy redirect to `worker review`, which would
   # read `resolve` as a task id — so route it before that, with no note.
-  defp dispatch_resolved("review", ["resolve" | rest]), do: ArbiterCli.Cmd.Resolve.run(rest)
+  defp dispatch_resolved("review", ["resolve" | rest], _flag, ws_val) do
+    ArbiterCli.Workspace.put_selected(ws_val)
+    ArbiterCli.Cmd.Resolve.run(rest)
+  end
 
-  defp dispatch_resolved(cmd, args) do
+  defp dispatch_resolved(cmd, args, flag, ws_val) do
     case ArbiterCli.AliasResolver.resolve(cmd) do
       {:ok, canonical} ->
-        dispatch_known(canonical, args)
+        dispatch_known(canonical, args, flag, ws_val)
 
       {:unknown, suggestions} ->
-        dispatch_legacy_or_unknown(cmd, args, suggestions)
+        dispatch_legacy_or_unknown(cmd, args, suggestions, flag, ws_val)
     end
   end
 
   # An old flat command? Run its new form and point the user at it.
-  defp dispatch_legacy_or_unknown(cmd, args, suggestions) do
+  defp dispatch_legacy_or_unknown(cmd, args, suggestions, flag, ws_val) do
     case legacy_redirect(cmd, args) do
       {:ok, canonical, new_args, new_form} ->
+        case ArbiterCli.Verbs.fetch(cmd) do
+          {:ok, entry} -> check_workspace_guard!(entry, flag, ws_val)
+          _ -> :ok
+        end
+
         IO.puts(:stderr, "arb: note: `arb #{cmd}` is now `arb #{new_form}` — running it for you.")
-        dispatch_known(canonical, new_args)
+        dispatch_known(canonical, new_args, flag, ws_val)
 
       :none ->
         IO.puts(:stderr, "arb: unknown command: #{cmd}")
@@ -274,16 +311,45 @@ defmodule ArbiterCli.Main do
 
   # bd-4jojpw: `issue` was renamed `ticket`. The old resource name keeps working
   # for one release, with a single note on stderr so `--json` stdout stays clean.
-  defp dispatch_known("issue", args) do
+  defp dispatch_known("issue", args, flag, ws_val) do
+    {:ok, entry} = ArbiterCli.Verbs.fetch("issue")
+    check_workspace_guard!(entry, flag, ws_val)
+    ArbiterCli.Workspace.put_selected(ws_val)
     IO.puts(:stderr, "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).")
-    run_entry("issue", args)
+    run_entry(entry, args)
   end
 
-  defp dispatch_known(name, args), do: run_entry(name, args)
-
-  defp run_entry(name, args) do
+  defp dispatch_known(name, args, flag, ws_val) do
     {:ok, entry} = ArbiterCli.Verbs.fetch(name)
+    check_workspace_guard!(entry, flag, ws_val)
+    ArbiterCli.Workspace.put_selected(ws_val)
+    run_entry(entry, args)
+  end
 
+  defp check_workspace_guard!(entry, flag, ws_val) do
+    cond do
+      flag != nil and entry.workspace == :none ->
+        ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb #{entry.name}")
+
+      flag != nil and is_nil(ws_val) ->
+        ArbiterCli.Output.die("option #{flag_label(flag)} for arb #{entry.name} requires a value")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp flag_label(flag) when is_binary(flag) do
+    cond do
+      String.starts_with?(flag, "--workspace=") -> "--workspace"
+      String.starts_with?(flag, "-w=") -> "-w"
+      true -> flag
+    end
+  end
+
+  defp flag_label(_), do: "--workspace"
+
+  defp run_entry(entry, args) do
     case entry.handler do
       __MODULE__ -> usage_and_exit(0)
       handler -> handler.run(ArbiterCli.Verbs.handler_args(entry, args))

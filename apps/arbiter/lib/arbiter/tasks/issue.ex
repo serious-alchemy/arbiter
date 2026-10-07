@@ -19,6 +19,21 @@ defmodule Arbiter.Tasks.Issue do
   `:return_to_backlog` apply `promote` / `demote`, and `:requeue` puts a
   stopped run's ticket back in the queue.
 
+  Failure semantics of the two doors (P-13, D-T-27 — decided: document, do not
+  unify). The **idempotent** `:promote_to_ready` / `:return_to_backlog` are the
+  door for the API surfaces — REST (`POST /api/issues/:id/promote`, `/demote`),
+  the MCP `ticket_promote` / `ticket_demote` tools and the CLI — where a retried
+  or racing call (a script, an Autopilot tick that already promoted it) must
+  not fail: promoting a ticket that is already `queued` or beyond, or demoting
+  one already in `backlog`, is a no-op success. The **strict** `:promote` /
+  `:demote` are the board's (`BoardLive`): a card the operator drags
+  from a column it is no longer in means the board is stale, and the error is
+  what tells the LiveView to reload. The two doors apply the same transition and
+  the same guards (the acceptance-criteria gate on promote; `GuardDemote`'s
+  live-worker / `verifying` / `closed` refusal on demote); they differ only in
+  what a ticket already past the transition's source state gets — a no-op
+  success or an error.
+
   `:update` accepts none of `state`, `close_reason` or `rank`. bd-36ytcl
   removed the legacy `status` and `refined` columns the transitions used to
   dual-write, and the ReviewGate park columns (the park is the ticket's
@@ -284,6 +299,10 @@ defmodule Arbiter.Tasks.Issue do
       # itself; a caller that omits it is recorded exactly as before.
       argument :change_origin, :string
 
+      # P-08 (D-T-19): server-side atomic append to `notes`, so `--append-notes`
+      # is not a client read-modify-write. Mutually exclusive with `notes`.
+      argument :append_notes, :string
+
       # `source_pr` is deliberately NOT in `accept` above: it's the PR-dedup
       # linkage PRPatrol/ExternalReview set at :create time (and :reopen clears
       # it), and no legitimate caller of :update ever needs to touch it. A
@@ -299,6 +318,7 @@ defmodule Arbiter.Tasks.Issue do
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
       change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
+      change {Arbiter.Tasks.Issue.Changes.AppendNotes, []}
 
       # A floor only means something on an epic: retyping one away clears it.
       change {Arbiter.Tasks.Issue.Changes.ClearFloorOnRetype, []}
@@ -2257,7 +2277,8 @@ defmodule Arbiter.Tasks.Issue do
   @doc """
   Returns the "ready" tickets: exactly those whose `Arbiter.Tasks.Lifecycle.view/2`
   column is `:ready` (bd-6zapbl) — `:queued`, with every gating blocker
-  satisfied (`:verifying` or `:closed`, per `Lifecycle.blocker_satisfied?/1`).
+  satisfied (`:verifying` or `:closed`, per `Lifecycle.blocker_satisfied?/1`) —
+  in dispatch order (`Arbiter.Tasks.EffectivePriority.order/1`).
 
   So a `:backlog` ticket is never ready, whatever its edges: it has not been
   refined into the queue. And a blocker that has merged and is waiting on its
@@ -2269,10 +2290,11 @@ defmodule Arbiter.Tasks.Issue do
   Ready/Blocked split reads. Epics (`non_dispatchable_types/0`) are excluded
   up front: an epic is a rollup of children, never a unit of work.
 
-  This is the read behind the `ticket_ready` MCP tool, `GET /api/issues/ready`,
-  `arb ready` and `arb prime`'s "Ready issues". It passes no runs to the
-  projection: a `:queued` ticket whose run registered before dispatch's
-  `start` transition landed still reads as ready here, for that window.
+  This is a thin read over `Arbiter.Tasks.Lifecycle.Projection.ready/2` — the one
+  Ready implementation behind the `ticket_ready` MCP tool,
+  `GET /api/issues/ready`, `arb ready` and `arb prime`'s "Ready issues" (P-13).
+  Like the board it consults the live runs, so a `:queued` ticket whose run
+  registered before dispatch's `start` transition landed is not ready.
 
   ## Options
 
@@ -2280,35 +2302,16 @@ defmodule Arbiter.Tasks.Issue do
       workspace. Gating dependencies are still consulted across
       workspaces (a task in workspace A can be blocked by a task in
       workspace B). Default: no filter (all workspaces).
+    * `:workers` — the live worker rows, instead of reading them.
 
   At our scale (~thousands of issues) reading every issue and edge is fine.
   """
   def ready(opts \\ []) do
-    workspace_id = Keyword.get(opts, :workspace_id)
-    issues = Ash.read!(__MODULE__)
+    {workspace_id, opts} = Keyword.pop(opts, :workspace_id)
 
-    candidates =
-      Enum.filter(issues, fn i ->
-        i.state == :queued and i.issue_type not in @non_dispatchable_types and
-          (is_nil(workspace_id) or i.workspace_id == workspace_id)
-      end)
-
-    if candidates == [] do
-      []
-    else
-      gating = Arbiter.Tasks.DependencyGraph.gating_types()
-
-      blockers =
-        Arbiter.Tasks.Dependency
-        |> Ash.Query.filter(type in ^gating)
-        |> Ash.read!()
-        |> Arbiter.Tasks.EdgeGate.blockers(issues)
-
-      Enum.filter(candidates, fn i ->
-        Arbiter.Tasks.Lifecycle.view(i, %{blocked_by: Map.get(blockers, i.id, [])}).column ==
-          :ready
-      end)
-    end
+    workspace_id
+    |> Projection.ready(opts)
+    |> Enum.map(&elem(&1, 0))
   end
 
   # ---- parent-with-progress rollup ---------------------------------------

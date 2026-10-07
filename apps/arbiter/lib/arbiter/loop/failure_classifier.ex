@@ -148,6 +148,8 @@ defmodule Arbiter.Loop.FailureClassifier do
     # conclusive on its own: the transcript is whatever the run was doing when
     # the kernel ended it.
     memory_cap_exceeded: {:operational, :memory_cap_exceeded},
+    # RW12: the node a run was placed on was lost. Infrastructure, never the agent.
+    node_lost: {:operational, :node_lost},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
     # bd-b6noq9: the run's workspace was deleted while it was alive. Always

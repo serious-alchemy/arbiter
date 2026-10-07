@@ -76,11 +76,13 @@ defmodule ArbiterCli.Cmd.Dep do
         params = if opts[:type], do: [type: opts[:type]], else: []
 
         case Client.delete("/api/dependencies/" <> from <> "/" <> to, params) do
-          {:ok, _} ->
-            if mode == :json do
-              IO.puts(Jason.encode!(%{ok: true}))
-            else
-              IO.puts("removed dependency edge: #{from} -> #{to}")
+          {:ok, body} ->
+            removed = removed_count(body)
+
+            cond do
+              mode == :json -> IO.puts(Jason.encode!(%{ok: true, removed: removed}))
+              removed == 0 -> IO.puts("no dependency edge: #{from} -> #{to} (nothing removed)")
+              true -> IO.puts("removed #{removed} dependency edge(s): #{from} -> #{to}")
             end
 
           {:error, err} ->
@@ -91,6 +93,11 @@ defmodule ArbiterCli.Cmd.Dep do
         Output.die("dep rm requires: <from> <to> [--type T]")
     end
   end
+
+  # The server answers `{removed: n}`; an older server answered 204 with no body
+  # (an edge it did remove).
+  defp removed_count(%{"removed" => n}) when is_integer(n), do: n
+  defp removed_count(_), do: 1
 
   defp list(positional, opts, mode) do
     if opts[:workspace], do: System.put_env("ARB_WORKSPACE", opts[:workspace])

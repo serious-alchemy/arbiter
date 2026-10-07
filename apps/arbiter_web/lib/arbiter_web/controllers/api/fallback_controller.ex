@@ -34,8 +34,8 @@ defmodule ArbiterWeb.Api.FallbackController do
 
   alias Arbiter.Errors
 
-  @domain_kinds ~w(not_found invalid invalid_request conflict busy forbidden unauthorized
-                   unauthenticated internal server_error)a
+  @domain_kinds ~w(not_found invalid invalid_request conflict already_claimed not_assigned busy
+                   forbidden unauthorized unauthenticated internal server_error)a
 
   def call(conn, {:error, %Ash.Error.Invalid{} = err}) do
     if contains_not_found?(err) do

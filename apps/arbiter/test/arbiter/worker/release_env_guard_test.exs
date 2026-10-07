@@ -125,6 +125,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # build, pin, sync back and reap a git-layout-B private clone. Deps seeding
     # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.
     "apps/arbiter/lib/arbiter/worker/private_clone.ex" => :pure_tool,
+    # RW11: the one place checkout sync spawns `git` (seed bundles, the quarantine
+    # ingest, the node's snapshot): git only, hooks and user config disabled.
+    "apps/arbiter/lib/arbiter/nodes/checkout/git.ex" => :pure_tool,
     # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.

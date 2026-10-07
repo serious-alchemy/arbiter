@@ -128,6 +128,68 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert_receive {:body, %{"force" => true}}
     end
 
+    # bd-a9hqfb: the quota-bypass rationale and the opt-in briefing mode reach
+    # the server, which attributes and applies them (Dispatch.Params).
+    test "--force-quota-reason and --mode forward in the request body" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} =
+        capture(fn ->
+          run_resume([
+            "bd-9",
+            "--force-quota",
+            "--force-quota-reason",
+            "unblock release",
+            "--mode",
+            "briefing"
+          ])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["force_quota"] == true
+      assert body["force_quota_reason"] == "unblock release"
+      assert body["mode"] == "briefing"
+    end
+
+    test "without --mode no mode is sent, so the server default (session) applies" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-9"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      refute Map.has_key?(body, "mode")
+    end
+
     test "a full-cap refusal surfaces the server's message" do
       stub_post(
         "/api/workers/bd-a/resume",

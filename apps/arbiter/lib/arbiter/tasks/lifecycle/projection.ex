@@ -104,6 +104,21 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
     Enum.map(issues, &{&1, Map.fetch!(views, &1.id)})
   end
 
+  @doc """
+  The Ready tickets of workspace `workspace_id` (`nil`: every workspace), each
+  with its view, in dispatch order — the `:ready` rows of `open/2`, and the one
+  definition of "Ready" every surface reads (`Issue.ready/1`, MCP `ticket_ready`,
+  `GET /api/issues/ready`, `arb ready`; P-13, D-T-16).
+
+  The live runs are consulted (`opts[:workers]` overrides the read), so a
+  `:queued` ticket whose run registered before dispatch's `start` transition
+  landed reads `:in_progress` and is not Ready here — on any surface.
+  """
+  @spec ready(String.t() | nil, keyword()) :: [{Issue.t(), View.t()}]
+  def ready(workspace_id, opts \\ []) when is_binary(workspace_id) or is_nil(workspace_id) do
+    for {_issue, %{column: :ready}} = row <- open(workspace_id, opts), do: row
+  end
+
   # `nil` is every workspace (the omitted-workspace read rule).
   defp open_in_workspace(query, nil), do: query
   defp open_in_workspace(query, ws_id), do: Ash.Query.filter(query, workspace_id == ^ws_id)

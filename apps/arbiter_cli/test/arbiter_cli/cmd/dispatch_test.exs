@@ -220,7 +220,25 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert body["provider"] == "claude"
     end
 
-    test "--provider takes precedence over the deprecated --with-gemini alias" do
+    # D-W-5: the CLI used to drop `--no-agent` when a provider flag was also
+    # given, and spawned a paid worker. Every selector is sent as typed; the
+    # server (Arbiter.Worker.Dispatch.Params) refuses the combination, so
+    # nothing is spawned or parked.
+    test "--provider claude --no-agent sends BOTH, so the server can refuse the combination" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "claude", "--no-agent"])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "claude"
+      assert body["no_agent"] == true
+    end
+
+    test "--provider with a deprecated alias sends both rather than letting one win" do
       stub_dispatch_capture()
 
       {_out, _err, code} =
@@ -231,7 +249,28 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert code == 0
       assert_receive {:body, body}
       assert body["provider"] == "claude"
-      refute Map.has_key?(body, "with_gemini")
+      assert body["with_gemini"] == true
+    end
+
+    test "a server refusal of the combination is reported and exits non-zero" do
+      stub_post(
+        "/api/workers/dispatch",
+        %{
+          "error" => %{
+            "type" => "invalid_request",
+            "message" => "`no_agent` parks the ticket without a worker and cannot be combined"
+          }
+        },
+        400
+      )
+
+      {_out, err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "claude", "--no-agent"])
+        end)
+
+      assert code != 0
+      assert err =~ "no_agent"
     end
 
     # bd-dcvo3n: codex is a supported provider (PR #796) but the CLI's local
@@ -248,12 +287,57 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert body["provider"] == "codex"
     end
 
-    test "an unknown --provider value dies with a usage hint" do
+    # D-W-10: the CLI had its own hand-mirrored provider list (claude/gemini/codex)
+    # and rejected grok. The server owns the list now, so there is nothing to drift.
+    test "--provider grok is sent to the server" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "grok"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "grok"
+    end
+
+    test "an unknown --provider is sent as-is; the server's refusal (with the valid list) is shown" do
+      stub_post(
+        "/api/workers/dispatch",
+        %{
+          "error" => %{
+            "type" => "invalid_request",
+            "message" =>
+              ~s(unknown provider "llama"; valid providers: claude, gemini, codex, grok)
+          }
+        },
+        400
+      )
+
       {_out, err, code} =
         capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "llama"]) end)
 
       assert code != 0
-      assert err =~ "--provider must be one of"
+      assert err =~ "unknown provider"
+      assert err =~ "grok"
+    end
+
+    test "--force-quota-reason is sent alongside --force-quota" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Dispatch.run([
+            "gte-017",
+            "--force-quota",
+            "--force-quota-reason",
+            "critical path"
+          ])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["force_quota"] == true
+      assert body["force_quota_reason"] == "critical path"
     end
   end
 end

@@ -66,19 +66,12 @@ defmodule ArbiterWeb.Api.DependencyController do
     end
   end
 
+  # P-13 (D-T-20): removing an edge that is not there is a no-op, not an error —
+  # `{removed: 0}` with a 200, the same answer the MCP `dep_remove` gives.
   def delete(conn, %{"from" => from, "to" => to} = params) do
     case Dependencies.remove(from, to, params["type"]) do
-      # A removal that matched nothing keeps its historical 404: the CLI and any
-      # other HTTP client have always read it as "there was no such edge", and
-      # the facade's `{:ok, 0}` is about the *domain* call being a no-op, not
-      # about what a REST client should be told.
-      {:ok, 0} ->
-        {:error, :not_found}
-
-      {:ok, _removed} ->
-        conn
-        |> put_status(:no_content)
-        |> send_resp(:no_content, "")
+      {:ok, removed} ->
+        json(conn, %{from_issue_id: from, to_issue_id: to, removed: removed})
 
       {:error, reason} ->
         {:error, translate(reason)}

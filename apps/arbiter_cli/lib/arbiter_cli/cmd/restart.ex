@@ -580,7 +580,7 @@ defmodule ArbiterCli.Cmd.Restart do
         was_running: was_running,
         actions: action_payload(actions),
         base_url: Client.base_url(),
-        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+        checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
         ok: Doctor.green?()
       })
     )
@@ -603,7 +603,7 @@ defmodule ArbiterCli.Cmd.Restart do
         was_running: nil,
         actions: action_payload(actions),
         base_url: Client.base_url(),
-        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+        checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
         ok: false,
         timed_out_after_s: div(timeout_ms, 1000)
       })
