@@ -1114,8 +1114,9 @@ defmodule Arbiter.MCP.Tools do
   @spec repo_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def repo_show(%Scope{} = scope, args) do
     with {:ok, name} <- require_string(args, "name"),
-         {:ok, target_ws} <- authorized_workspace(scope, args),
-         opts = if(target_ws, do: [workspace_id: target_ws], else: []) do
+         {:ok, target_ws} <- authorized_workspace(scope, args) do
+      opts = if(target_ws, do: [workspace_id: target_ws], else: [])
+
       case Arbiter.Repos.get(name, opts) do
         {:ok, repo} -> {:ok, serialize_repo(repo)}
         {:error, {:invalid_request, msg, _details}} -> {:error, {:invalid_request, msg}}
