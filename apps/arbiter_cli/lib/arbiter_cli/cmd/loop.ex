@@ -198,8 +198,7 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [s: :since, l: :limit, w: :workspace]
       )
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     params =
       []
@@ -251,8 +250,7 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [r: :repo, l: :lesson, w: :workspace]
       )
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     body =
       %{}
@@ -283,8 +281,7 @@ defmodule ArbiterCli.Cmd.Loop do
 
     opts = ArgParser.coerce_difficulty(opts)
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     body =
       %{}
@@ -308,8 +305,7 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [w: :workspace]
       )
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     params = maybe_put([], :workspace_id, ws_id)
 
@@ -398,8 +394,7 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [l: :limit, w: :workspace]
       )
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     params =
       []
@@ -513,8 +508,7 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [l: :limit, w: :workspace]
       )
 
-    ws_target = Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE")
-    ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
 
     params =
       [state: Keyword.get(opts, :state, "proposed")]

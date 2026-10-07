@@ -411,10 +411,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
   # `-w` / ARB_WORKSPACE accept an id or a name; the API wants the id.
   defp resolve_workspace(opts) do
-    case Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE") do
-      target when is_binary(target) and target != "" -> ArbiterCli.Workspace.id_or_halt(target)
-      _ -> nil
-    end
+    ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
   end
 
   defp maybe_put(opts, _key, nil), do: opts

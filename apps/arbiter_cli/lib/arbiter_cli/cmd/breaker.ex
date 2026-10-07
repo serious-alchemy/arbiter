@@ -64,17 +64,9 @@ defmodule ArbiterCli.Cmd.Breaker do
   end
 
   defp list(opts, mode) do
-    ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
-
     params =
       []
-      |> then(fn p ->
-        if ws_target do
-          [{:workspace, ArbiterCli.Workspace.id_or_halt(ws_target)} | p]
-        else
-          p
-        end
-      end)
+      |> put_workspace(opts)
       |> put_flag(opts, :kind)
       |> then(fn p -> if opts[:open], do: [{:open_only, "true"} | p], else: p end)
 
@@ -94,17 +86,8 @@ defmodule ArbiterCli.Cmd.Breaker do
           %{provider: provider}
 
         opts[:all] ->
-          ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
-          base = %{all: true}
-
-          base =
-            if ws_target do
-              Map.put(base, :workspace, ArbiterCli.Workspace.id_or_halt(ws_target))
-            else
-              base
-            end
-
-          base
+          %{all: true}
+          |> put_workspace(opts)
           |> put_opt(opts, :kind)
 
         signature = List.first(args) ->
@@ -228,6 +211,15 @@ defmodule ArbiterCli.Cmd.Breaker do
     case opts[key] do
       nil -> params
       value -> [{key, value} | params]
+    end
+  end
+
+  # `--workspace` / `-w` / ARB_WORKSPACE, resolved to the workspace id.
+  defp put_workspace(params, opts) do
+    case ArbiterCli.Workspace.selected_id(opts[:workspace]) do
+      nil -> params
+      id when is_list(params) -> [{:workspace, id} | params]
+      id -> Map.put(params, :workspace, id)
     end
   end
 

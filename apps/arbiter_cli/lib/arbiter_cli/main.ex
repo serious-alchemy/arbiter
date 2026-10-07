@@ -185,51 +185,32 @@ defmodule ArbiterCli.Main do
 
     case argv do
       [] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb")
-        else
-          usage_and_exit(0)
-        end
+        reject_flag!(flag, "arb")
+        usage_and_exit(0)
 
       ["help" | rest] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb help")
-        else
-          help(rest)
-        end
+        reject_flag!(flag, "arb help")
+        help(rest)
 
-      ["-h"] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb help")
-        else
-          usage_and_exit(0)
-        end
+      [h] when h in ["-h", "--help"] ->
+        reject_flag!(flag, "arb help")
+        usage_and_exit(0)
 
-      ["--help"] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb help")
-        else
-          usage_and_exit(0)
-        end
-
-      ["-v"] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb version")
-        else
-          IO.puts("arb #{ArbiterCli.Version.app_version()}")
-        end
-
-      ["--version"] ->
-        if flag do
-          ArbiterCli.Output.die("unknown option #{flag_label(flag)} for arb version")
-        else
-          IO.puts("arb #{ArbiterCli.Version.app_version()}")
-        end
+      [v] when v in ["-v", "--version"] ->
+        reject_flag!(flag, "arb version")
+        IO.puts("arb #{ArbiterCli.Version.app_version()}")
 
       [cmd | rest] ->
         dispatch(cmd, rest, flag, workspace)
     end
   end
+
+  # `-w` means nothing to help/version/the bare usage screen: refuse it rather
+  # than run the command and ignore it.
+  defp reject_flag!(nil, _verb), do: :ok
+
+  defp reject_flag!(flag, verb),
+    do: ArbiterCli.Output.die("unknown option #{flag_label(flag)} for #{verb}")
 
   defp dispatch(cmd, args, flag, ws_val) do
     # A `--workspace <name|id>` / `-w` flag anywhere in the invocation overrides

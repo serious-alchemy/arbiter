@@ -66,12 +66,10 @@ defmodule ArbiterCli.Cmd.Image do
         repo -> repo
       end
 
-    ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
-
     body =
-      case ws_target do
+      case ArbiterCli.Workspace.selected_id(opts[:workspace]) do
         nil -> %{repo: repo}
-        ws -> %{repo: repo, workspace: ArbiterCli.Workspace.id_or_halt(ws)}
+        ws_id -> %{repo: repo, workspace: ws_id}
       end
 
     case Client.post("/api/images/build", body, receive_timeout: @build_timeout_ms) do

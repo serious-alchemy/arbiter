@@ -118,6 +118,19 @@ defmodule ArbiterCli.Workspace do
     end
   end
 
+  @doc """
+  The id of the workspace selected by `explicit` (a `-w` value, id or name) or
+  else `ARB_WORKSPACE`; `nil` when neither is set. A selector that matches no
+  workspace halts rather than widening the request.
+  """
+  @spec selected_id(String.t() | nil) :: String.t() | nil
+  def selected_id(explicit \\ nil) do
+    case explicit || System.get_env("ARB_WORKSPACE") do
+      target when is_binary(target) and target != "" -> id_or_halt(target)
+      _ -> nil
+    end
+  end
+
   @doc "Convenience: resolve and return just the id, or halt with a friendly error."
   @spec id_or_halt(String.t() | nil) :: String.t()
   def id_or_halt(target \\ nil) do

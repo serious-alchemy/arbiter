@@ -75,17 +75,17 @@ defmodule ArbiterCli.Cmd.Mcp do
       mode = if opts[:json], do: :json, else: :text
       ttl = opts[:ttl] || @default_ttl
 
-      ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
-      ws_id = if ws_target, do: ArbiterCli.Workspace.id_or_halt(ws_target)
-
-      params =
-        %{"ttl" => ttl}
-        |> then(fn p -> if ws_id, do: Map.put(p, "workspace_id", ws_id), else: p end)
-
-      case mint_token(params) do
+      case mint_token(mint_params(ttl, opts[:workspace])) do
         {:ok, resp} -> emit_mint(resp, mode)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  defp mint_params(ttl, workspace) do
+    case ArbiterCli.Workspace.selected_id(workspace) do
+      nil -> %{"ttl" => ttl}
+      ws_id -> %{"ttl" => ttl, "workspace_id" => ws_id}
     end
   end
 

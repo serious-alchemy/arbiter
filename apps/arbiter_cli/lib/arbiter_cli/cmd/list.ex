@@ -51,8 +51,7 @@ defmodule ArbiterCli.Cmd.List do
 
       warn_deprecated_flags(opts, mode)
 
-      ws_target = opts[:workspace_id] || System.get_env("ARB_WORKSPACE")
-      ws_id = if ws_target, do: Workspace.id_or_halt(ws_target)
+      ws_id = Workspace.selected_id(opts[:workspace_id])
 
       params =
         []
