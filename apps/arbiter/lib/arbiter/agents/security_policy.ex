@@ -886,6 +886,41 @@ defmodule Arbiter.Agents.SecurityPolicy do
   def for_review_spawn(%__MODULE__{sandbox: sandbox} = policy),
     do: %{policy | sandbox: Map.put(sandbox, :backend, review_backend(policy))}
 
+  @doc """
+  `for_review_spawn/1` for a ReviewGate reviewer (bd-7ays3v). A reviewer whose
+  repo is on `sandbox.backend: podman` runs in the container as well, which
+  needs two things `for_review_spawn/1` cannot assume:
+
+    * `private_clone: true` — the reviewer stands in a private clone
+      (`Arbiter.Reviews.Checkout`'s `layout: :private_clone`), the only layout a
+      container is handed;
+    * `provider:` is Claude, the one provider the review path has a container
+      wrap point for.
+
+  Without both, this is exactly `for_review_spawn/1`: the reviewer runs under
+  `sandbox.review_backend` as before. A `review_backend` of `:podman` is kept
+  whatever the provider, so the spawn is refused where it cannot run, never
+  downgraded. A repo that is not on podman is untouched.
+  """
+  @spec for_review_spawn(t(), keyword()) :: t()
+  def for_review_spawn(%__MODULE__{sandbox: sandbox} = policy, opts) when is_list(opts) do
+    if sandbox_backend(policy) == :podman and Keyword.get(opts, :private_clone, false) and
+         claude?(Keyword.get(opts, :provider)),
+       do: %{policy | sandbox: Map.put(sandbox, :backend, :podman)},
+       else: for_review_spawn(policy)
+  end
+
+  defp claude?(provider), do: provider in [:claude, "claude"]
+
+  @doc """
+  Whether a review spawn under `policy` may run in a container: either backend
+  is `:podman`. What decides the checkout layout a reviewer is given
+  (`Arbiter.Worker.GitLayout.for_review_policy/1`).
+  """
+  @spec review_container?(t()) :: boolean()
+  def review_container?(%__MODULE__{} = policy),
+    do: :podman in [sandbox_backend(policy), review_backend(policy)]
+
   @doc "The resolved `sandbox.egress` of `policy` (`:open` when unset)."
   @spec egress(t()) :: egress()
   def egress(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :egress, :open)
