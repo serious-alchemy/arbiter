@@ -23,6 +23,7 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Tasks.Claim
   alias ArbiterWeb.Api.IssueJSON
 
@@ -202,10 +203,7 @@ defmodule ArbiterWeb.Api.ClaimController do
     end
   end
 
-  defp truthy?(true), do: true
-  defp truthy?("true"), do: true
-  defp truthy?("1"), do: true
-  defp truthy?(_), do: false
+  defp truthy?(v), do: Params.boolean(v) == {:ok, true}
 
   defp status_code_for(:created), do: :created
   defp status_code_for(:existing), do: :ok

@@ -13,22 +13,27 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.ReviewGate.Round
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  def index(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    rounds =
-      Round
-      |> Ash.Query.filter(task_id == ^task_id)
-      # bd-6d3h8m: `round` restarts at 1 on every automatic fix round's fresh
-      # gate; sort on `fix_round_attempt` first so the two passes don't
-      # interleave.
-      |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
-      |> Ash.read!()
+  def index(conn, %{"task_id" => task_id} = params)
+      when is_binary(task_id) and task_id != "" do
+    with {:ok, limit} <- params["limit"] |> Params.limit(200, 200) |> Params.to_rest() do
+      rounds =
+        Round
+        |> Ash.Query.filter(task_id == ^task_id)
+        # bd-6d3h8m: `round` restarts at 1 on every automatic fix round's fresh
+        # gate; sort on `fix_round_attempt` first so the two passes don't
+        # interleave.
+        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
 
-    json(conn, %{data: Enum.map(rounds, &render_round/1)})
+      json(conn, %{data: Enum.map(rounds, &render_round/1)})
+    end
   end
 
   def index(_conn, _params) do

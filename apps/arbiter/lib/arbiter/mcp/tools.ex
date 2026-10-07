@@ -309,7 +309,7 @@ defmodule Arbiter.MCP.Tools do
     alias Arbiter.ReviewGate.Round
 
     with {:ok, task_id} <- require_string(args, "task_id"),
-         {:ok, limit} <- optional_positive_integer(args, "limit") do
+         {:ok, limit} <- optional_bounded_limit(args, "limit", 200) do
       all_rounds =
         Round
         |> Ash.Query.filter(task_id == ^task_id)
@@ -354,17 +354,18 @@ defmodule Arbiter.MCP.Tools do
   Record the coordinator's answer to a gate escalation (bd-4qjl0q): `decision`
   (`accept_as_is` / `amend` / `send_back` / `reject`), `reasoning`, and
   optionally `gate` (`review_gate` default, `notes_gate`, `commit_gate`),
-  `actor` (default `"coordinator"`), `round` / `fix_round_attempt`. Coordinator
+  `round` / `fix_round_attempt`. Coordinator
   only. A record, not an action — see `Arbiter.ReviewGate.Resolution`.
   """
   @spec review_gate_resolve(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def review_gate_resolve(%Scope{} = _scope, args) do
+  def review_gate_resolve(%Scope{} = scope, args) do
     with {:ok, _task_id} <- require_string(args, "task_id"),
          {:ok, _decision} <- require_string(args, "decision"),
          {:ok, _reasoning} <- require_string(args, "reasoning"),
          {:ok, resolution} <-
            args
-           |> Map.take(~w(task_id decision reasoning gate actor round fix_round_attempt))
+           |> Map.take(~w(task_id decision reasoning gate round fix_round_attempt))
+           |> Map.put("actor", Arbiter.Params.actor_label(scope) || "coordinator")
            |> Resolutions.record() do
       {:ok, %{resolution: Resolutions.serialize(resolution)}}
     end
@@ -461,9 +462,9 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp fetch_optional_bool!(args, key) do
-    case Map.get(args, key) do
-      b when is_boolean(b) -> b
-      _ -> nil
+    case Arbiter.Params.fetch_optional_bool(args, key) do
+      {:ok, b} -> b
+      {:error, _} -> nil
     end
   end
 
@@ -530,10 +531,18 @@ defmodule Arbiter.MCP.Tools do
 
   # internal — shared by Arbiter.MCP.Tools.Worker (also used by external_review_list)
   def parse_bounded_limit(args, key, default, max) do
+    case Arbiter.Params.limit(Map.get(args, key), default, max) do
+      {:ok, n} -> {:ok, n}
+      {:error, _} -> {:error, {:invalid, "#{key} must be a positive integer (max #{max})"}}
+    end
+  end
+
+  # internal — an optional `limit` with no default (nil = no cap requested),
+  # clamped to `max` when given.
+  def optional_bounded_limit(args, key, max) do
     case Map.get(args, key) do
-      nil -> {:ok, default}
-      n when is_integer(n) and n > 0 -> {:ok, min(n, max)}
-      _ -> {:error, {:invalid, "#{key} must be a positive integer (max #{max})"}}
+      nil -> {:ok, nil}
+      _ -> parse_bounded_limit(args, key, max, max)
     end
   end
 
@@ -638,7 +647,7 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, ws_id} <- authorized_workspace(scope, args),
          {:ok, by} <- require_enum(args, "by", Usage.acceptable_groupings()),
          {:ok, since} <- optional_datetime(args, "since"),
-         {:ok, limit} <- optional_integer(args, "limit") do
+         {:ok, limit} <- optional_bounded_limit(args, "limit", 1000) do
       opts =
         [by: by, workspace_id: ws_id]
         |> maybe_put_kw(:since, since)
@@ -1301,10 +1310,11 @@ defmodule Arbiter.MCP.Tools do
   @spec provider_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def provider_pause(%Scope{} = _scope, args) do
     with {:ok, ref} <- require_string(args, "ref"),
+         {:ok, stop_running?} <- fetch_bool(args, "stop_running", false),
          {:ok, entry} <-
            Arbiter.Providers.Pause.pause(ref, reason: fetch_string(args, "reason"), by: "mcp") do
       stopped =
-        if args["stop_running"] == true, do: Arbiter.Providers.Pause.stop_running(ref), else: []
+        if stop_running?, do: Arbiter.Providers.Pause.stop_running(ref), else: []
 
       Logger.info("[provider_pause] #{entry.target} paused")
       {:ok, %{paused: Arbiter.Providers.Pause.to_json(), stopped: stopped}}
@@ -1590,17 +1600,11 @@ defmodule Arbiter.MCP.Tools do
       nil ->
         {:ok, nil}
 
-      v when is_integer(v) ->
-        {:ok, v}
-
-      v when is_binary(v) ->
-        case Integer.parse(v) do
-          {n, ""} -> {:ok, n}
-          _ -> {:error, {:invalid, "`#{key}` must be an integer"}}
+      v ->
+        case Arbiter.Params.integer(v) do
+          {:ok, n} -> {:ok, n}
+          :error -> {:error, {:invalid, "`#{key}` must be an integer"}}
         end
-
-      _ ->
-        {:error, {:invalid, "`#{key}` must be an integer"}}
     end
   end
 
@@ -1617,28 +1621,12 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # internal — shared
-  def fetch_bool(args, key, default) do
-    case Map.get(args, key) do
-      nil -> {:ok, default}
-      v when is_boolean(v) -> {:ok, v}
-      "true" -> {:ok, true}
-      "false" -> {:ok, false}
-      _ -> {:error, {:invalid, "`#{key}` must be a boolean"}}
-    end
-  end
+  # internal — shared; coercion lives in Arbiter.Params
+  defdelegate fetch_bool(args, key, default), to: Arbiter.Params
 
   # Tri-state bool: `{:ok, nil}` when the key is absent (so the callee can apply
   # its own default), `{:ok, true|false}` when present, error on a bad value.
-  def fetch_optional_bool(args, key) do
-    case Map.get(args, key) do
-      nil -> {:ok, nil}
-      v when is_boolean(v) -> {:ok, v}
-      "true" -> {:ok, true}
-      "false" -> {:ok, false}
-      _ -> {:error, {:invalid, "`#{key}` must be a boolean"}}
-    end
-  end
+  defdelegate fetch_optional_bool(args, key), to: Arbiter.Params
 
   # internal — shared
   def require_some(attrs, msg) do

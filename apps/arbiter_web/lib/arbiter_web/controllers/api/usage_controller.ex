@@ -44,6 +44,7 @@ defmodule ArbiterWeb.Api.UsageController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Params
   alias Arbiter.Usage
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
@@ -53,6 +54,7 @@ defmodule ArbiterWeb.Api.UsageController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @default_event_limit 50
+  @max_limit 1000
 
   def summarize(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
@@ -306,17 +308,8 @@ defmodule ArbiterWeb.Api.UsageController do
     ArgumentError -> {:error, {:invalid_request, "invalid source: #{inspect(raw)}"}}
   end
 
-  defp parse_limit(nil), do: {:ok, @default_event_limit}
-
-  defp parse_limit(raw) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {n, ""} when n > 0 -> {:ok, n}
-      _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
-    end
-  end
-
-  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
-  defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+  defp parse_limit(raw),
+    do: raw |> Params.limit(@default_event_limit, @max_limit) |> Params.to_rest()
 
   defp parse_window_days(nil), do: {:ok, nil}
   defp parse_window_days(""), do: {:ok, nil}

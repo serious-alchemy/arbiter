@@ -861,7 +861,10 @@ defmodule Arbiter.MCP.Catalog do
           "to_issue_id" => %{"type" => "string", "description" => "The dependency target."},
           "type" => %{"type" => "string", "description" => "Edge type (required)."},
           "notes" => %{"type" => "string"},
-          "created_by" => %{"type" => "string"}
+          "created_by" => %{
+            "type" => "string",
+            "description" => "Ignored: the creator is derived from the token."
+          }
         },
         "required" => ["from_issue_id", "to_issue_id", "type"],
         "additionalProperties" => false
@@ -1603,7 +1606,7 @@ defmodule Arbiter.MCP.Catalog do
           },
           "actor" => %{
             "type" => "string",
-            "description" => "Who decided. Default \"coordinator\"."
+            "description" => "Ignored: the decider is derived from the token."
           },
           "round" => %{
             "type" => "integer",

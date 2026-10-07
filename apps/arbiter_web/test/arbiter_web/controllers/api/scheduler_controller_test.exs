@@ -55,14 +55,14 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
   end
 
   describe "surface attribution (bd-cl6zjn)" do
-    test "the CLI's pause is recorded as cli, and audited", %{conn: conn} do
+    test "a caller-supplied surface is ignored (P-07); the route's own is recorded", %{conn: conn} do
       :ok = Autopilot.resume()
 
       conn = post(conn, "/api/scheduler/pause", %{"surface" => "cli"})
 
-      assert %{"changed_by" => "coordinator via cli"} = json_response(conn, 200)
+      assert %{"changed_by" => "coordinator via api"} = json_response(conn, 200)
 
-      assert [%{paused: true, actor: "coordinator", surface: "cli"} | _] =
+      assert [%{paused: true, actor: "coordinator", surface: "api"} | _] =
                Arbiter.Settings.scheduler_changes()
     end
 
