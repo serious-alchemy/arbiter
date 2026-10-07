@@ -78,7 +78,6 @@ defmodule Arbiter.Params do
     end
   end
 
-  @spec integer(term()) :: {:ok, integer()} | :error
   @doc "Optional string arg: absent/nil is `{:ok, nil}`; any non-string is an `:invalid` error."
   @spec fetch_string(map(), String.t()) ::
           {:ok, String.t() | nil} | {:error, {:invalid, String.t()}}
@@ -90,6 +89,7 @@ defmodule Arbiter.Params do
     end
   end
 
+  @spec integer(term()) :: {:ok, integer()} | :error
   def integer(n) when is_integer(n), do: {:ok, n}
 
   def integer(raw) when is_binary(raw) do

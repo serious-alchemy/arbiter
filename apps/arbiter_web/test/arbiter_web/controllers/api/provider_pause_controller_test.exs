@@ -26,8 +26,16 @@ defmodule ArbiterWeb.Api.ProviderPauseControllerTest do
     assert json_response(post(conn, "/api/providers/resume", %{"ref" => "claude"}), 400)
   end
 
-  test "an ambiguous ref explains provider:slug and a non-string reason is rejected",
-       %{conn: conn} do
+  test "an ambiguous ref explains provider:slug", %{conn: conn} do
+    for provider <- [:claude, :codex] do
+      {:ok, _} = Ash.create(Arbiter.Accounts.ProviderAccount, %{provider: provider, slug: "dup"})
+    end
+
+    body = json_response(post(conn, "/api/providers/pause", %{"ref" => "dup"}), 400)
+    assert inspect(body) =~ "provider:slug"
+  end
+
+  test "a non-string reason is rejected", %{conn: conn} do
     assert json_response(
              post(conn, "/api/providers/pause", %{"ref" => "codex", "reason" => 5}),
              400
@@ -43,7 +51,7 @@ defmodule ArbiterWeb.Api.ProviderPauseControllerTest do
                200
              )
 
-    refute by in ["api", "spoof"]
+    assert by == "coordinator via api"
   end
 
   test "a missing ref is rejected", %{conn: conn} do

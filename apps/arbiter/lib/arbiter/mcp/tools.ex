@@ -1168,10 +1168,11 @@ defmodule Arbiter.MCP.Tools do
 
     with {:ok, ref} <- require_string(args, "ref"),
          {:ok, stop_running?} <- fetch_bool(args, "stop_running", false),
+         {:ok, reason} <- Arbiter.Params.fetch_string(args, "reason"),
          {:ok, stopped} <-
            ref
            |> Pause.pause_and_stop(
-             reason: fetch_string(args, "reason"),
+             reason: reason,
              by: pause_by(scope),
              stop_running: stop_running?
            )

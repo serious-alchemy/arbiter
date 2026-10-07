@@ -38,6 +38,23 @@ defmodule Arbiter.MCP.ProviderPauseToolsTest do
     assert msg =~ "not paused"
   end
 
+  test "a non-string reason is rejected like REST" do
+    assert {:error, {:invalid, msg}} =
+             Tools.provider_pause(@coordinator, %{"ref" => "codex", "reason" => 5})
+
+    assert msg =~ "reason"
+    refute Arbiter.Providers.Pause.provider_paused?(:codex)
+  end
+
+  test "an ambiguous bare slug is an :invalid error naming provider:slug" do
+    for provider <- [:claude, :codex] do
+      {:ok, _} = Ash.create(Arbiter.Accounts.ProviderAccount, %{provider: provider, slug: "dup"})
+    end
+
+    assert {:error, {:invalid, msg}} = Tools.provider_pause(@coordinator, %{"ref" => "dup"})
+    assert msg =~ "provider:slug"
+  end
+
   test "ref is required and unknown refs error" do
     assert {:error, {:invalid, _}} = Tools.provider_pause(@coordinator, %{})
     assert {:error, _} = Tools.provider_pause(@coordinator, %{"ref" => "nope"})
