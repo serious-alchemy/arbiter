@@ -31,7 +31,6 @@
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-17" => "MCP/CLI read gaps for accounts, usage, pauses, alerts",
     "P-21" => "Workspace operations parity: update, schema, multi-key patch, worker_env, standing orders",
     "P-23" => "Loop parity",
     "P-25" => "Memory operator surface (REST + CLI)",
@@ -649,13 +648,10 @@
     %{
       id: "accounts/read_quota_by_account",
       title: "Read quota (by account)",
-      mcp: nil,
+      mcp: ["quota_get"],
       cli: ["arb quota"],
       rest: ["GET /api/quota"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "`quota_get` has no `account` arg (REST `?account=` and `arb quota --account` do)."}
-      }
+      status: :full
     },
     %{
       id: "accounts/usage_rollup",
@@ -669,35 +665,26 @@
     %{
       id: "accounts/usage_raw_events_incl",
       title: "Usage raw events (incl. --session)",
-      mcp: nil,
+      mcp: ["usage_events_list"],
       cli: ["arb usage events", "arb usage"],
       rest: ["GET /api/usage/events"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "No MCP drill-down of raw usage events (needs a shared context function first)."}
-      }
+      status: :full
     },
     %{
       id: "accounts/usage_calibration_report",
       title: "Usage calibration report",
-      mcp: nil,
+      mcp: ["usage_calibration"],
       cli: ["arb usage"],
       rest: ["GET /api/usage/calibration"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "No MCP usage calibration report (low priority)."}
-      }
+      status: :full
     },
     %{
       id: "accounts/list_paused_providers_accounts",
       title: "List paused providers/accounts",
-      mcp: nil,
+      mcp: ["provider_list"],
       cli: ["arb provider list"],
       rest: ["GET /api/providers/paused"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "No MCP `provider_list` of paused providers/accounts."}
-      }
+      status: :full
     },
     %{
       id: "accounts/pause_provider_account",
@@ -721,12 +708,9 @@
       id: "accounts/list_active_system_alerts",
       title: "List active system alerts",
       mcp: ["alert_list"],
-      cli: nil,
+      cli: ["arb alert list"],
       rest: ["GET /api/alerts"],
-      status: {:gap, "P-17"},
-      absent: %{
-        cli: {:gap, "P-17", "No `arb alert list` (alerts are readable over REST and MCP only)."}
-      }
+      status: :full
     },
     %{
       id: "accounts/list_circuit_breakers_auth_holds",
@@ -767,24 +751,19 @@
     %{
       id: "accounts/list_accounts",
       title: "List accounts",
-      mcp: nil,
+      mcp: ["account_list"],
       cli: ["arb account list"],
       rest: ["GET /api/accounts"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "No MCP `account_list`; it is read-only and carries credential kind + fingerprint prefix, never a secret."}
-      }
+      status: :partial,
+      divergences: ["D-A-19"]
     },
     %{
       id: "accounts/show_account",
       title: "Show account",
-      mcp: nil,
+      mcp: ["account_show"],
       cli: ["arb account show"],
       rest: ["GET /api/accounts/:ref"],
-      status: {:gap, "P-17"},
-      absent: %{
-        mcp: {:gap, "P-17", "No MCP `account_show`; read-only, as `account_list`."}
-      }
+      status: :full
     },
     %{
       id: "accounts/create_account",

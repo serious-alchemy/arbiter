@@ -80,6 +80,22 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
     end
   end
 
+  # The stub writes `token` after its `spawn.*` line, so a spawn having landed
+  # does not mean the token has: wait for it, non-empty.
+  defp token(dir, attempts \\ 100) do
+    case File.read(Path.join(dir, "token")) do
+      {:ok, token} when token != "" ->
+        token
+
+      _ when attempts == 0 ->
+        flunk("the stub never recorded its ARB_TOKEN")
+
+      _ ->
+        Process.sleep(50)
+        token(dir, attempts - 1)
+    end
+  end
+
   defp resume_pair(argv) do
     argv |> Enum.chunk_every(2, 1, :discard) |> Enum.find(&match?(["--resume", _], &1))
   end
@@ -136,7 +152,7 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
     assert json_response(conn, 201)
     _ = spawns(ctx.bin, 1)
-    child = File.read!(Path.join(ctx.bin, "token"))
+    child = token(ctx.bin)
     assert {:ok, %Scope{tier: :worker, depth: 2}} = Scope.from_token(child)
   end
 

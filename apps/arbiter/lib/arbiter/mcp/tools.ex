@@ -102,6 +102,34 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
+    case fetch_string(args, "account") do
+      nil -> quota_for_workspace(scope, args)
+      ref -> quota_for_account(scope, ref)
+    end
+  end
+
+  # `account` goes straight to that account's quota, the way REST `?account=`
+  # does (`Arbiter.Quota.Snapshot.for_account/1`, the REST `data` map). An account
+  # is installation-wide, so only a coordinator may name one.
+  defp quota_for_account(%Scope{tier: :coordinator}, ref) do
+    case Arbiter.Accounts.get_account(ref) do
+      {:ok, account} ->
+        {:ok, Arbiter.Quota.Snapshot.for_account(account)}
+
+      {:error, :not_found} ->
+        {:error, {:not_found, "account #{inspect(ref)} not found"}}
+
+      {:error, :ambiguous} ->
+        {:error, {:invalid, "account #{inspect(ref)} is ambiguous; use \"provider:slug\""}}
+    end
+  end
+
+  defp quota_for_account(%Scope{}, _ref),
+    do:
+      {:error,
+       {:unauthorized, "quota_get `account` is coordinator-only; omit it to read your workspace"}}
+
+  defp quota_for_workspace(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Workspaces.resolve_default(scope, fetch_string(args, "workspace")) do
       # One builder shared with `GET /api/quota` (P-18, D-A-5).
       {:ok, Arbiter.Quota.Snapshot.for_workspace(ws_id, fetch_string(args, "workspace"))}
@@ -489,14 +517,18 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, ws_id} <- authorized_workspace(scope, args),
          {:ok, by} <- require_enum(args, "by", Usage.acceptable_groupings()),
          {:ok, since} <- optional_datetime(args, "since"),
-         {:ok, limit} <- optional_bounded_limit(args, "limit", 1000) do
+         {:ok, limit} <- optional_bounded_limit(args, "limit", 1000),
+         {:ok, account_id} <- Usage.Params.account_id(fetch_string(args, "account")) do
       opts =
         [by: by, workspace_id: ws_id]
         |> maybe_put_kw(:since, since)
         |> maybe_put_kw(:limit, limit)
+        |> maybe_put_kw(:provider_account_id, account_id)
 
       zero_token_opts =
-        [workspace_id: ws_id] |> maybe_put_kw(:since, since)
+        [workspace_id: ws_id]
+        |> maybe_put_kw(:since, since)
+        |> maybe_put_kw(:provider_account_id, account_id)
 
       with {:ok, rollups} <- Usage.summarize(opts),
            {:ok, flagged} <- Usage.zero_token_providers(zero_token_opts) do
@@ -1751,6 +1783,13 @@ defmodule Arbiter.MCP.Tools do
   defdelegate notify_list(scope, args), to: Arbiter.MCP.Tools.Messaging
 
   defdelegate alert_list(scope, args), to: Arbiter.MCP.Tools.Alerts
+
+  defdelegate account_list(scope, args), to: Arbiter.MCP.Tools.Accounts
+  defdelegate account_show(scope, args), to: Arbiter.MCP.Tools.Accounts
+  defdelegate provider_list(scope, args), to: Arbiter.MCP.Tools.Accounts
+
+  defdelegate usage_events_list(scope, args), to: Arbiter.MCP.Tools.Usage
+  defdelegate usage_calibration(scope, args), to: Arbiter.MCP.Tools.Usage
 
   defdelegate account_set(scope, args), to: Arbiter.MCP.Tools.Account
 

@@ -12,6 +12,8 @@ defmodule Arbiter.Usage.Serializer do
   surfaces now carry.
   """
 
+  alias Arbiter.Usage.Event
+
   @doc "Wire shape for one rollup row."
   @spec rollup(map()) :: map()
   def rollup(%{group: g} = r) do
@@ -66,4 +68,78 @@ defmodule Arbiter.Usage.Serializer do
     do: " (a further #{n} row(s) recorded no usage at all — NULL, not zero.)"
 
   defp unknown_suffix(_report), do: ""
+
+  @doc "One raw ledger row."
+  @spec event(Event.t()) :: map()
+  def event(%Event{} = ev) do
+    %{
+      id: ev.id,
+      task_id: ev.task_id,
+      source: Atom.to_string(ev.source || :task),
+      workspace_id: ev.workspace_id,
+      repo: ev.repo,
+      step: Atom.to_string(ev.step),
+      model: ev.model,
+      provider: ev.provider,
+      tokens_in: ev.tokens_in,
+      tokens_out: ev.tokens_out,
+      thinking_tokens: ev.thinking_tokens,
+      cache_creation_tokens: ev.cache_creation_tokens,
+      cache_read_tokens: ev.cache_read_tokens,
+      cost_usd: ev.cost_usd,
+      duration_ms: ev.duration_ms,
+      exit_status: ev.exit_status,
+      occurred_at: iso(ev.occurred_at),
+      session_id: ev.session_id,
+      worker_run_id: ev.worker_run_id
+    }
+  end
+
+  @doc """
+  The `Arbiter.Usage.calibration/1` report, with the workspace it was run for
+  echoed as `workspace_id`.
+  """
+  @spec calibration(map(), String.t() | nil) :: map()
+  def calibration(report, workspace_id) do
+    %{
+      workspace_id: workspace_id,
+      window_days: report.window_days,
+      re_dispatched_flagged: report.re_dispatched_flagged,
+      tiers: Enum.map(report.tiers, &tier/1),
+      flagged: Enum.map(report.flagged, &flag/1)
+    }
+  end
+
+  defp tier(tier) do
+    %{
+      difficulty: tier.difficulty,
+      n: tier.n,
+      n_scored: tier.n_scored,
+      re_dispatched: tier.re_dispatched,
+      p25: round_money(tier.p25),
+      median: round_money(tier.median),
+      p75: round_money(tier.p75),
+      p90: round_money(tier.p90),
+      under_rated: tier.under_rated,
+      over_rated: tier.over_rated,
+      under_rate: tier.under_rate,
+      over_rate: tier.over_rate
+    }
+  end
+
+  defp flag(flag) do
+    %{
+      task_id: flag.task_id,
+      title: flag.title,
+      difficulty: flag.difficulty,
+      issue_type: group(flag.issue_type),
+      actual_cost_usd: round_money(flag.actual_cost_usd),
+      direction: Atom.to_string(flag.direction),
+      suggested_difficulty: flag.suggested_difficulty,
+      re_dispatched: flag.re_dispatched
+    }
+  end
+
+  defp iso(nil), do: nil
+  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 end
