@@ -4,7 +4,8 @@ defmodule ArbiterWeb.Api.MessageController do
 
   Routes:
 
-    * `GET  /api/messages`           — :index (filters: kind, to_ref, from_ref,
+    * `GET  /api/messages`           — :index (filters: workspace (id or name;
+                                       `workspace_id` alias), kind, to_ref, from_ref,
                                        unread=true [pending: read_at & cleared_at
                                        both nil], outstanding=true [read, not
                                        cleared], limit [default 50])
@@ -20,7 +21,8 @@ defmodule ArbiterWeb.Api.MessageController do
                                        forms: `ids=<comma-separated>` clears
                                        exactly those messages, resolved
                                        regardless of workspace; `task_id=<ref>`
-                                       (+ optional `workspace_id`) clears every
+                                       (+ `workspace`, required when
+                                       several workspaces exist) clears every
                                        coordinator message concerning that
                                        task; `to_ref=<ref>` (+ optional `all`)
                                        is the bulk mailbox clear — `all=true`
@@ -45,6 +47,7 @@ defmodule ArbiterWeb.Api.MessageController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Messages.Message
+  alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -54,10 +57,12 @@ defmodule ArbiterWeb.Api.MessageController do
   def index(conn, params) do
     reader = reader_ref(params)
 
-    with {:ok, limit} <- parse_limit(params["limit"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, kind} <- parse_kind(params["kind"]) do
       messages =
         Message
+        |> filter_workspace(ws_id)
         |> filter_eq(:kind, kind)
         |> filter_eq(:to_ref, params["to_ref"])
         |> filter_eq(:from_ref, params["from_ref"])
@@ -67,7 +72,7 @@ defmodule ArbiterWeb.Api.MessageController do
         |> Ash.Query.limit(limit)
         |> Ash.read!()
 
-      render(conn, :index, messages: messages)
+      render(conn, :index, messages: messages, workspace_id: ws_id)
     end
   end
 
@@ -78,22 +83,52 @@ defmodule ArbiterWeb.Api.MessageController do
   end
 
   def create(conn, params) do
-    attrs =
-      params
-      |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id))
-      |> pin_worker_sender(conn.assigns[:mcp_scope])
-      |> coerce_kind()
-      |> Message.hand_written()
-      |> mark_unverified_origin()
+    with {:ok, ws_id} <- create_workspace(conn, params) do
+      attrs =
+        params
+        |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref))
+        |> Map.put("workspace_id", ws_id)
+        |> pin_worker_sender(conn.assigns[:mcp_scope])
+        |> coerce_kind()
+        |> Message.hand_written()
+        |> mark_unverified_origin()
 
-    case Ash.create(Message, attrs) do
-      {:ok, message} ->
-        conn
-        |> put_status(:created)
-        |> render(:show, message: message)
+      case Ash.create(Message, attrs) do
+        {:ok, message} ->
+          conn
+          |> put_status(:created)
+          |> render(:show, message: message)
 
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  # An escalation raised by an `arb` in a sandbox or another install names a
+  # workspace this installation has no row for. It is delivered and marked
+  # (`mark_unverified_origin/1`), never dropped, so an unknown workspace is kept
+  # as written for an UNBOUND caller; a token bound to a workspace stays
+  # confined and gets the resolver's answer. A worker token never names one: it
+  # sends into its own workspace whatever the body claims (`pin_worker_sender/2`).
+  defp create_workspace(
+         %Plug.Conn{assigns: %{mcp_scope: %Arbiter.MCP.Scope{tier: :worker} = scope}},
+         _params
+       ),
+       do: {:ok, scope.workspace_id}
+
+  defp create_workspace(conn, params) do
+    case WorkspaceParam.resolve(conn, params, :write) do
+      {:error, {:not_found, _}} = error ->
+        scope = conn.assigns[:mcp_scope]
+        raw = Arbiter.Tasks.Workspaces.arg(params)
+
+        if is_binary(raw) and (is_nil(scope) or is_nil(scope.workspace_id)),
+          do: {:ok, raw},
+          else: error
+
+      other ->
+        other
     end
   end
 
@@ -183,23 +218,23 @@ defmodule ArbiterWeb.Api.MessageController do
     })
   end
 
-  # Soft-clear every coordinator message concerning `task_id`. Pass
-  # `workspace_id` to scope to one workspace.
+  # Soft-clear every coordinator message concerning `task_id`. A write: it
+  # clears inside the named `workspace`, else the bound / sole workspace, and
+  # refuses (422, listing the candidates) when several exist — the same rule as
+  # MCP `coordinator_inbox_clear`.
   def clear(conn, %{"task_id" => task_id} = params) when is_binary(task_id) and task_id != "" do
-    opts =
-      case params["workspace_id"] do
-        ws when is_binary(ws) and ws != "" -> [workspace_id: ws]
-        _ -> []
-      end
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
+      {:ok, cleared} =
+        Message.clear_by_task(task_id, reader: reader_ref(params), workspace_id: ws_id)
 
-    {:ok, cleared} = Message.clear_by_task(task_id, [reader: reader_ref(params)] ++ opts)
-
-    json(conn, %{
-      data: %{
-        cleared: Enum.map(cleared, & &1.id),
-        cleared_count: length(cleared)
-      }
-    })
+      json(conn, %{
+        data: %{
+          cleared: Enum.map(cleared, & &1.id),
+          cleared_count: length(cleared),
+          workspace_id: ws_id
+        }
+      })
+    end
   end
 
   # Soft-clear a mailbox: stamp `cleared_at` on the outstanding (read, uncleared)
@@ -229,6 +264,9 @@ defmodule ArbiterWeb.Api.MessageController do
   def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
 
   # ---- query helpers ----
+
+  defp filter_workspace(query, nil), do: query
+  defp filter_workspace(query, ws_id), do: Ash.Query.filter(query, workspace_id == ^ws_id)
 
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
   defp filter_eq(query, :kind, value), do: Ash.Query.filter(query, kind == ^value)

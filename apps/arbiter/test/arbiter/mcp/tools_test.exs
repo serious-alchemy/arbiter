@@ -6206,24 +6206,35 @@ defmodule Arbiter.MCP.ToolsTest do
       assert reloaded.workspace_id == ctx.ws.id
     end
 
-    test "a coordinator falls back to the workspace named \"default\" when several exist" do
+    # Operator ruling on bd-26s98f (parity P-04): a write never lands in the
+    # workspace that merely happens to be called `default`.
+    test "a write with no `workspace` fails when several exist, even with one named \"default\"" do
       {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
       {:ok, _other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
       agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
-      assert {:ok, data} = Tools.task_create(agnostic, %{"title" => "to default"})
-      {:ok, reloaded} = Ash.get(Issue, data.id)
-      assert reloaded.workspace_id == default.id
+      assert {:error, {:invalid, msg}} = Tools.task_create(agnostic, %{"title" => "to default"})
+      assert msg =~ "multiple workspaces; pass workspace (name or id)"
+      assert msg =~ "another-ws"
+
+      assert [] = Issue |> Ash.read!() |> Enum.filter(&(&1.title == "to default"))
+
+      # Naming it — by name or by id — still works.
+      assert {:ok, by_name} =
+               Tools.task_create(agnostic, %{"title" => "explicit", "workspace" => "default"})
+
+      assert {:ok, by_id} =
+               Tools.task_create(agnostic, %{"title" => "explicit 2", "workspace" => default.id})
+
+      assert Ash.get!(Issue, by_name.id).workspace_id == default.id
+      assert Ash.get!(Issue, by_id.id).workspace_id == default.id
     end
 
-    # bd-45tkhq: an unscoped `worker_list` from a workspace-agnostic
-    # coordinator silently resolves to a guessed default workspace the same
-    # way `ticket_create` does above. When a worker is genuinely live in a
-    # *different* workspace, that guess returns `count: 0` — indistinguishable
-    # from "nothing is running" — unless the response says which workspace it
-    # scoped to.
-    test "an agnostic coordinator's unscoped worker_list names the workspace it scoped to" do
-      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+    # bd-45tkhq: an unscoped `worker_list` used to silently resolve to a guessed
+    # workspace and return `count: 0` for a worker live elsewhere. Reads now
+    # cover ALL workspaces and echo the scope they used.
+    test "an agnostic coordinator's unscoped worker_list covers every workspace and echoes it" do
+      {:ok, _default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
       {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
       {:ok, task} = Ash.create(Issue, %{title: "live elsewhere", workspace_id: other.id})
 
@@ -6232,8 +6243,33 @@ defmodule Arbiter.MCP.ToolsTest do
 
       agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
-      assert {:ok, %{workers: [], workspace_id: ws_id}} = Tools.worker_list(agnostic, %{})
-      assert ws_id == default.id
+      assert {:ok, %{workers: workers, workspace_id: nil}} = Tools.worker_list(agnostic, %{})
+      assert Enum.any?(workers, &(&1.task_id == task.id and &1.workspace_id == other.id))
+
+      assert {:ok, %{workers: [], workspace_id: ws_id}} =
+               Tools.worker_list(agnostic, %{"workspace" => "default"})
+
+      assert ws_id != other.id
+    end
+
+    test "an unscoped ticket_list reads every workspace and echoes `workspace_id: nil`" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      {:ok, a} = Ash.create(Issue, %{title: "in default", workspace_id: default.id})
+      {:ok, b} = Ash.create(Issue, %{title: "in other", workspace_id: other.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{tasks: tasks, workspace_id: nil}} = Tools.task_list(agnostic, %{})
+      ids = Enum.map(tasks, & &1.id)
+      assert a.id in ids and b.id in ids
+      assert Enum.find(tasks, &(&1.id == b.id)).workspace_id == other.id
+
+      assert {:ok, %{tasks: only, workspace_id: ws_id}} =
+               Tools.task_list(agnostic, %{"workspace" => "another-ws"})
+
+      assert ws_id == other.id
+      assert b.id in Enum.map(only, & &1.id)
+      refute a.id in Enum.map(only, & &1.id)
     end
   end
 
@@ -6243,6 +6279,30 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:unauthorized, _}} =
                Tools.task_create(ctx.coordinator, %{"title" => "x", "workspace" => other_ws.id})
+    end
+
+    test "over the MCP transport a bound coordinator naming another workspace is -32003", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bound-rpc-ws", prefix: "brw"})
+
+      for {tool, args} <- [
+            {"ticket_list", %{}},
+            {"ticket_ready", %{}},
+            {"worker_list", %{}},
+            {"usage_summarize", %{"by" => "day"}},
+            {"notify_list", %{}},
+            {"coordinator_inbox", %{}},
+            {"alert_list", %{}},
+            {"breaker_list", %{}},
+            {"ticket_create", %{"title" => "x"}}
+          ] do
+        for ref <- [other_ws.id, other_ws.name] do
+          assert {:rpc_error, -32003, message} =
+                   Catalog.call(ctx.coordinator, tool, Map.put(args, "workspace", ref)),
+                 "#{tool} naming #{ref}"
+
+          assert message =~ "bound to a single workspace"
+        end
+      end
     end
 
     test "a worker naming a different workspace is unauthorized", ctx do

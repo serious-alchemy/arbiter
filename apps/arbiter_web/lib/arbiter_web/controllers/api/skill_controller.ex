@@ -22,6 +22,7 @@ defmodule ArbiterWeb.Api.SkillController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Skills
+  alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -33,13 +34,15 @@ defmodule ArbiterWeb.Api.SkillController do
   defp actor_label, do: Arbiter.Actor.resolve_label(nil) || @actor
 
   def index(conn, params) do
-    skills =
-      case Map.get(params, "workspace_id") do
-        nil -> Skills.list_skills()
-        ws_id -> Skills.list_skills(workspace_id: ws_id)
-      end
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      skills =
+        case ws_id do
+          nil -> Skills.list_skills()
+          ws_id -> Skills.list_skills(workspace_id: ws_id)
+        end
 
-    render(conn, :index, skills: skills)
+      render(conn, :index, skills: skills)
+    end
   end
 
   def show(conn, %{"id" => id}) do
@@ -49,16 +52,25 @@ defmodule ArbiterWeb.Api.SkillController do
   end
 
   def create(conn, params) do
-    attrs =
-      Map.take(params, [
-        "name",
-        "body",
-        "metadata",
-        "activation_mode",
-        "code_only",
-        "workspace_id"
-      ])
+    # A skill is global unless a workspace is named (id or name) — even a
+    # workspace-bound token must ask for scoping, as in MCP `skill_create`.
+    with {:ok, ws_id} <- named_workspace(conn, params) do
+      attrs =
+        params
+        |> Map.take(["name", "body", "metadata", "activation_mode", "code_only"])
+        |> then(fn attrs -> if ws_id, do: Map.put(attrs, "workspace_id", ws_id), else: attrs end)
 
+      create_skill(conn, attrs)
+    end
+  end
+
+  defp named_workspace(conn, params) do
+    if Arbiter.Tasks.Workspaces.arg(params),
+      do: WorkspaceParam.resolve(conn, params, :read),
+      else: {:ok, nil}
+  end
+
+  defp create_skill(conn, attrs) do
     with {:ok, skill} <- Skills.create_skill(attrs, actor: actor_label()) do
       conn
       |> put_status(:created)

@@ -6,32 +6,36 @@ defmodule ArbiterWeb.Api.AlertController do
 
   Routes:
 
-    * `GET /api/alerts` — the active alerts, oldest first (`?workspace=`,
-      `?kind=`)
+    * `GET /api/alerts` — the active alerts, oldest first (`?workspace=` — id or name,
+      `workspace_id` accepted as an alias — `?kind=`)
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Alerts
+  alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @doc "The active system alerts."
   def index(conn, params) do
-    case Alerts.parse_kind(params["kind"]) do
-      {:ok, kind} ->
-        alerts = Alerts.active(workspace_id: blank_to_nil(params["workspace"]), kind: kind)
-        json(conn, %{alerts: Enum.map(alerts, &Alerts.serialize/1), count: length(alerts)})
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      case Alerts.parse_kind(params["kind"]) do
+        {:ok, kind} ->
+          alerts = Alerts.active(workspace_id: ws_id, kind: kind)
 
-      :error ->
-        {:error,
-         {:invalid_request,
-          "unknown alert kind #{inspect(params["kind"])} — one of " <>
-            Enum.map_join(Arbiter.Alerts.SystemAlert.kinds(), ", ", &Atom.to_string/1)}}
+          json(conn, %{
+            alerts: Enum.map(alerts, &Alerts.serialize/1),
+            count: length(alerts),
+            workspace_id: ws_id
+          })
+
+        :error ->
+          {:error,
+           {:invalid_request,
+            "unknown alert kind #{inspect(params["kind"])} — one of " <>
+              Enum.map_join(Arbiter.Alerts.SystemAlert.kinds(), ", ", &Atom.to_string/1)}}
+      end
     end
   end
-
-  defp blank_to_nil(value) when value in [nil, ""], do: nil
-  defp blank_to_nil(value) when is_binary(value), do: value
-  defp blank_to_nil(_), do: nil
 end

@@ -62,8 +62,8 @@ defmodule ArbiterWeb.Api.QuotaController do
 
   alias Arbiter.Quota
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspaces
   alias Arbiter.Workflows.DispatchQueue
-  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -72,7 +72,10 @@ defmodule ArbiterWeb.Api.QuotaController do
   end
 
   def show(conn, params) do
-    case resolve_workspace_id(Map.get(params, "workspace")) do
+    # The quota view is shaped around ONE workspace, so an omitted `workspace`
+    # means the installation default (`Workspaces.resolve_default/2`) — the
+    # response echoes the resolved `workspace_id`. A bound token stays confined.
+    case Workspaces.resolve_default(conn.assigns[:mcp_scope], Workspaces.arg(params)) do
       {:ok, ws_id} ->
         accounts = Quota.account_ids(ws_id)
         codex = Quota.Codex.serialize_latest(accounts["codex"])
@@ -99,7 +102,7 @@ defmodule ArbiterWeb.Api.QuotaController do
         render(conn, :show,
           workspace_id: ws_id,
           workspace: workspace_view(ws_id),
-          requested_workspace: Map.get(params, "workspace"),
+          requested_workspace: Workspaces.arg(params),
           claude:
             Quota.serialize(accounts["claude"], "claude",
               workspace_id: ws_id,
@@ -126,8 +129,8 @@ defmodule ArbiterWeb.Api.QuotaController do
           paused_providers: Arbiter.Providers.Pause.to_json()
         )
 
-      {:error, message} when is_binary(message) ->
-        {:error, {:not_found, message}}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -206,41 +209,5 @@ defmodule ArbiterWeb.Api.QuotaController do
     end
   rescue
     _ -> nil
-  end
-
-  # Explicit `?workspace=` (id, then name) wins; else the installation default.
-  defp resolve_workspace_id(nil), do: default_workspace_id()
-  defp resolve_workspace_id(""), do: default_workspace_id()
-
-  defp resolve_workspace_id(ref) do
-    with :error <- by_id(ref), :error <- by_name(ref) do
-      {:error, "workspace #{inspect(ref)} not found"}
-    end
-  end
-
-  defp by_id(ref) do
-    case Ash.get(Workspace, ref) do
-      {:ok, %Workspace{id: id}} -> {:ok, id}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp by_name(ref) do
-    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
-      {:ok, %Workspace{id: id}} -> {:ok, id}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp default_workspace_id do
-    case Quota.default_workspace_id() do
-      {:ok, id} -> {:ok, id}
-      {:error, :no_workspaces} -> {:error, "no workspaces exist on this installation"}
-      {:error, _} -> {:error, "no default workspace; pass ?workspace=<id>"}
-    end
   end
 end

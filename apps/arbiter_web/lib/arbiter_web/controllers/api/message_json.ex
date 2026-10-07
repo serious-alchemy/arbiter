@@ -11,8 +11,8 @@ defmodule ArbiterWeb.Api.MessageJSON do
   def show(%{message: message}), do: data(message)
 
   @doc "Renders a list of messages wrapped under :data."
-  def index(%{messages: messages}) do
-    %{data: Enum.map(messages, &data/1)}
+  def index(%{messages: messages} = assigns) do
+    %{data: Enum.map(messages, &data/1)} |> ArbiterWeb.Api.WorkspaceParam.echo(assigns)
   end
 
   def data(%Message{} = m) do

@@ -195,7 +195,12 @@ defmodule ArbiterWeb.Api.WorkerCurrentRunTest do
 
       on_exit(fn -> if Process.alive?(pid), do: Worker.stop(pid) end)
 
-      assert list_entry(conn, ticket.id, workspace_id: Ecto.UUID.generate()) == []
+      other =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "run-other-#{System.unique_integer([:positive])}"
+        })
+
+      assert list_entry(conn, ticket.id, workspace_id: other.id) == []
     end
   end
 end
