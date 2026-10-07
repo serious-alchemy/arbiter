@@ -1112,9 +1112,11 @@ defmodule Arbiter.MCP.Tools do
   Coordinator only. Returns not-found if the repo name does not exist.
   """
   @spec repo_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def repo_show(%Scope{}, args) do
+  def repo_show(%Scope{} = scope, args) do
     with {:ok, name} <- require_string(args, "name"),
-         {:ok, repo} <- Arbiter.Repos.get(name) do
+         {:ok, target_ws} <- authorized_workspace(scope, args),
+         opts = if(target_ws, do: [workspace_id: target_ws], else: []),
+         {:ok, repo} <- Arbiter.Repos.get(name, opts) do
       {:ok, serialize_repo(repo)}
     end
   rescue
@@ -1126,6 +1128,7 @@ defmodule Arbiter.MCP.Tools do
       name: repo.name,
       path: repo.path,
       source: repo.source,
+      workspace_id: repo.workspace_id,
       workers: repo.workers,
       worktrees: repo.worktrees
     }

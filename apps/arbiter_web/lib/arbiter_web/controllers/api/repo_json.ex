@@ -12,6 +12,7 @@ defmodule ArbiterWeb.Api.RepoJSON do
       name: repo.name,
       path: repo.path,
       source: repo.source,
+      workspace_id: repo.workspace_id,
       workers: repo.workers,
       worktrees: repo.worktrees
     }

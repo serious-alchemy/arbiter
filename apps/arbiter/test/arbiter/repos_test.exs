@@ -136,5 +136,49 @@ defmodule Arbiter.ReposTest do
       assert repo2.path == "/tmp/ws2-path"
       assert repo2.source == "ws-two"
     end
+
+    test "returns ambiguous error when same-named repo exists in multiple workspaces without scope" do
+      {:ok, _ws1} =
+        Ash.create(Workspace, %{
+          name: "ws-one",
+          prefix: "w1",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-1"}}
+        })
+
+      {:ok, _ws2} =
+        Ash.create(Workspace, %{
+          name: "ws-two",
+          prefix: "w2",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-2"}}
+        })
+
+      assert {:error, {:invalid_request, msg, details}} = Repos.get("twin-repo")
+      assert msg =~ "ambiguous"
+      assert msg =~ "twin-repo"
+      assert is_list(details.workspaces)
+      assert length(details.workspaces) == 2
+    end
+  end
+
+  describe "get_all/2" do
+    test "two-workspace same-name fixture returns both entries" do
+      {:ok, ws1} =
+        Ash.create(Workspace, %{
+          name: "ws-one",
+          prefix: "w1",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-1"}}
+        })
+
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "ws-two",
+          prefix: "w2",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-2"}}
+        })
+
+      entries = Repos.get_all("twin-repo")
+      assert length(entries) == 2
+      assert Enum.map(entries, & &1.workspace_id) |> Enum.sort() == Enum.sort([ws1.id, ws2.id])
+    end
   end
 end

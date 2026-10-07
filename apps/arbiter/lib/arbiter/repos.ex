@@ -10,6 +10,11 @@ defmodule Arbiter.Repos do
 
   Repo listing is workspace-aware and does not collapse same-named repos
   across workspaces (parity audit P-24, D-C-31).
+
+  Note on worker counts: active worker processes in Arbiter register with
+  their repo name. When the same repo name is configured in multiple workspaces,
+  active workers running against that repo name are counted globally for that repo
+  name across workspaces.
   """
 
   require Ash.Query
@@ -87,16 +92,41 @@ defmodule Arbiter.Repos do
   end
 
   @doc """
-  Find a single repo by name, returning `{:ok, repo}` or `{:error, {:not_found, msg}}`.
+  Find all repos matching `name`. Accepts the same options as `list/1`.
+  """
+  @spec get_all(String.t(), keyword()) :: [repo()]
+  def get_all(name, opts \\ []) when is_binary(name) do
+    list(opts)
+    |> Enum.filter(fn repo -> repo.name == name end)
+  end
+
+  @doc """
+  Find a single repo by name.
+
+  Returns `{:ok, repo}`, `{:error, {:not_found, msg}}`, or
+  `{:error, {:invalid_request, msg, details}}` if multiple workspaces define
+  a repo with the same name and no workspace qualifier was passed.
   Accepts the same options as `list/1`.
   """
-  @spec get(String.t(), keyword()) :: {:ok, repo()} | {:error, {:not_found, String.t()}}
+  @spec get(String.t(), keyword()) ::
+          {:ok, repo()}
+          | {:error, {:not_found, String.t()}}
+          | {:error, {:invalid_request, String.t(), map()}}
   def get(name, opts \\ []) when is_binary(name) do
-    repos = list(opts)
+    case get_all(name, opts) do
+      [] ->
+        {:error, {:not_found, "repo #{inspect(name)} not found"}}
 
-    case Enum.find(repos, fn repo -> repo.name == name end) do
-      nil -> {:error, {:not_found, "repo #{inspect(name)} not found"}}
-      repo -> {:ok, repo}
+      [repo] ->
+        {:ok, repo}
+
+      matches ->
+        sources = Enum.map_join(matches, ", ", & &1.source)
+
+        {:error,
+         {:invalid_request,
+          "repo #{inspect(name)} is ambiguous; found in workspaces: #{sources}. Specify workspace to disambiguate",
+          %{workspaces: Enum.map(matches, &%{source: &1.source, workspace_id: &1.workspace_id})}}}
     end
   end
 

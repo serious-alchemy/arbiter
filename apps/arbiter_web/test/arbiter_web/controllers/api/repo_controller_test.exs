@@ -17,13 +17,14 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
         assert Map.has_key?(repo, "name")
         assert Map.has_key?(repo, "path")
         assert Map.has_key?(repo, "source")
+        assert Map.has_key?(repo, "workspace_id")
         assert Map.has_key?(repo, "workers")
         assert Map.has_key?(repo, "worktrees")
       end
     end
 
     test "surfaces a workspace's configured repo_paths", %{conn: conn} do
-      {:ok, _ws} =
+      {:ok, ws} =
         Ash.create(Workspace, %{
           name: "repo-ws",
           prefix: "rpw",
@@ -37,19 +38,20 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert alpha
       assert alpha["path"] == "/tmp/does-not-exist-alpha"
       assert alpha["source"] == "repo-ws"
+      assert alpha["workspace_id"] == ws.id
       assert is_integer(alpha["workers"])
       assert is_integer(alpha["worktrees"])
     end
 
     test "two-workspace same-name fixture returns both entries", %{conn: conn} do
-      {:ok, _ws1} =
+      {:ok, ws1} =
         Ash.create(Workspace, %{
           name: "repo-ws-1",
           prefix: "rw1",
           config: %{"repo_paths" => %{"shared" => "/tmp/shared-1"}}
         })
 
-      {:ok, _ws2} =
+      {:ok, ws2} =
         Ash.create(Workspace, %{
           name: "repo-ws-2",
           prefix: "rw2",
@@ -63,6 +65,7 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert length(shared) == 2
       assert Enum.map(shared, & &1["source"]) |> Enum.sort() == ["repo-ws-1", "repo-ws-2"]
       assert Enum.map(shared, & &1["path"]) |> Enum.sort() == ["/tmp/shared-1", "/tmp/shared-2"]
+      assert Enum.map(shared, & &1["workspace_id"]) |> Enum.sort() == Enum.sort([ws1.id, ws2.id])
     end
 
     test "responds with JSON, not an HTML 404", %{conn: conn} do
@@ -74,7 +77,7 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
 
   describe "GET /api/repos/:name" do
     test "returns repo details when repo exists", %{conn: conn} do
-      {:ok, _ws} =
+      {:ok, ws} =
         Ash.create(Workspace, %{
           name: "repo-ws",
           prefix: "rpw",
@@ -86,6 +89,7 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert repo["name"] == "alpha"
       assert repo["path"] == "/tmp/does-not-exist-alpha"
       assert repo["source"] == "repo-ws"
+      assert repo["workspace_id"] == ws.id
       assert is_integer(repo["workers"])
       assert is_integer(repo["worktrees"])
     end
@@ -109,11 +113,34 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert repo1 = json_response(conn1, 200)
       assert repo1["path"] == "/tmp/alpha-1"
       assert repo1["source"] == "repo-ws-1"
+      assert repo1["workspace_id"] == ws1.id
 
       conn2 = get(conn, ~p"/api/repos/alpha?workspace=#{ws2.name}")
       assert repo2 = json_response(conn2, 200)
       assert repo2["path"] == "/tmp/alpha-2"
       assert repo2["source"] == "repo-ws-2"
+      assert repo2["workspace_id"] == ws2.id
+    end
+
+    test "returns 400 when repo is ambiguous without workspace qualification", %{conn: conn} do
+      {:ok, _ws1} =
+        Ash.create(Workspace, %{
+          name: "repo-ws-1",
+          prefix: "rw1",
+          config: %{"repo_paths" => %{"twin" => "/tmp/twin-1"}}
+        })
+
+      {:ok, _ws2} =
+        Ash.create(Workspace, %{
+          name: "repo-ws-2",
+          prefix: "rw2",
+          config: %{"repo_paths" => %{"twin" => "/tmp/twin-2"}}
+        })
+
+      conn = get(conn, ~p"/api/repos/twin")
+      assert %{"error" => error} = json_response(conn, 400)
+      assert error["type"] == "invalid_request"
+      assert error["message"] =~ "ambiguous"
     end
 
     test "returns 404 when repo does not exist", %{conn: conn} do

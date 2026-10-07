@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.Repo do
       arb repo list             registered repos with source + path
       arb repo show <name>      one repo's detail (active workers, worktrees)
 
-  Both read from `GET /api/repos`.
+  `list` reads from `GET /api/repos`; `show` reads from `GET /api/repos/:name`.
   """
 
   alias ArbiterCli.{ArgParser, Client, Output}
@@ -68,15 +68,11 @@ defmodule ArbiterCli.Cmd.Repo do
         _ -> Output.die("repo show takes exactly one argument: the repo name")
       end
 
-    case Client.get("/api/repos") do
-      {:ok, %{"data" => repos}} -> emit_show(find_repo(repos, name), name, mode)
-      {:ok, _} -> emit_show(nil, name, mode)
+    case Client.get("/api/repos/#{URI.encode(name)}") do
+      {:ok, repo} when is_map(repo) -> emit_show(repo, name, mode)
+      {:error, %Client.Error{status: 404}} -> emit_show(nil, name, mode)
       {:error, err} -> Output.die(err)
     end
-  end
-
-  defp find_repo(repos, name) when is_list(repos) do
-    Enum.find(repos, fn repo -> repo["name"] == name end)
   end
 
   defp emit_show(nil, name, :json) do

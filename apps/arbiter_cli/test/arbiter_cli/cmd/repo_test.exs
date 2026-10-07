@@ -69,7 +69,7 @@ defmodule ArbiterCli.Cmd.RepoTest do
   end
 
   test "show finds a repo by name" do
-    stub_get("/api/repos", @rigs)
+    stub_get("/api/repos/arbiter", hd(@rigs["data"]))
     {out, _err, code} = capture(fn -> Repo.run(["show", "arbiter", "--json"]) end)
     assert code == 0
     assert out =~ "arbiter"
@@ -77,7 +77,7 @@ defmodule ArbiterCli.Cmd.RepoTest do
   end
 
   test "show renders detail in text mode" do
-    stub_get("/api/repos", @rigs)
+    stub_get("/api/repos/arbiter", hd(@rigs["data"]))
     {out, _err, code} = capture(fn -> Repo.run(["show", "arbiter"]) end)
     assert code == 0
     assert out =~ "arbiter"
@@ -85,14 +85,24 @@ defmodule ArbiterCli.Cmd.RepoTest do
   end
 
   test "show errors when the repo is unknown" do
-    stub_get("/api/repos", @rigs)
+    stub_get(
+      "/api/repos/ghost",
+      %{"error" => %{"type" => "not_found", "message" => "repo \"ghost\" not found"}},
+      404
+    )
+
     {_out, err, code} = capture(fn -> Repo.run(["show", "ghost"]) end)
     assert code == 1
     assert err =~ "no repo named"
   end
 
   test "show --json errors with non-zero exit code when the repo is unknown" do
-    stub_get("/api/repos", @rigs)
+    stub_get(
+      "/api/repos/ghost",
+      %{"error" => %{"type" => "not_found", "message" => "repo \"ghost\" not found"}},
+      404
+    )
+
     {out, _err, code} = capture(fn -> Repo.run(["show", "ghost", "--json"]) end)
     assert code != 0
     assert out =~ "no repo named"
