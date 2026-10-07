@@ -68,6 +68,7 @@ defmodule ArbiterCli.Verbs do
     ["handback", "bd-1"],
     ["claim", "1"],
     ["sync"],
+    ["sync-upstream-close", "bd-1"],
     ["ready"],
     ["dispatch", "bd-1"]
   ]
@@ -88,6 +89,18 @@ defmodule ArbiterCli.Verbs do
          ["stop", "bd-1"],
          ["resume", "bd-1"],
          ["review", "bd-1"]
+       ]
+     ]},
+    {"review", Module.concat(@cmd, Review),
+     [
+       workspace: :resolve,
+       probes: [
+         ["bd-1"],
+         ["list"],
+         ["show", "r1"],
+         ["transcript", "r1"],
+         ["rounds", "bd-1"],
+         ["greenlight", "r1"]
        ]
      ]},
     {"repo", Module.concat(@cmd, Repo), [workspace: :none, probes: [["list"], ["show", "r"]]]},
@@ -224,7 +237,6 @@ defmodule ArbiterCli.Verbs do
     {"sync", "ticket", ["sync"]},
     {"ready", "ticket", ["ready"]},
     {"resume", "worker", ["resume"]},
-    {"review", "worker", ["review"]},
     {"start", "server", ["start"]},
     {"restart", "server", ["restart"]},
     {"migrate", "server", ["migrate"]},
@@ -246,18 +258,13 @@ defmodule ArbiterCli.Verbs do
 
   @doc """
   Handler modules that exist but no verb dispatches to any more
-  (`Cmd.Review` — superseded by `worker review`; `Cmd.Update` — now a library
+  (`Cmd.Update` — now a library
   behind `ticket update` / `server deploy`; `Main` still redirects the dual-mode
   flat `update` by hand).
   """
   @spec orphans() :: [entry()]
   def orphans do
     [
-      entry("review", :orphan, Module.concat(@cmd, Review),
-        workspace: :resolve,
-        deprecated: true,
-        probes: [["bd-1"]]
-      ),
       entry("update", :orphan, Module.concat(@cmd, Update),
         workspace: :resolve,
         deprecated: true,

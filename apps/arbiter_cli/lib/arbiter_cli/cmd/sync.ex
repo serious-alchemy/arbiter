@@ -12,12 +12,17 @@ defmodule ArbiterCli.Cmd.Sync do
     --dry    Print the plan without applying it.
     --json   Emit JSON instead of human-readable text.
 
+    * closed task whose close never reached the tracker → reported as `drift`
+      (report-only); each names its remedy, `arb ticket sync-upstream-close <id>`.
+
   No-ops cleanly when the workspace's tracker isn't GitHub.
   """
 
   alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @switches [dry: :boolean, json: :boolean]
+
+  @drift_remedy "arb ticket sync-upstream-close"
 
   def run(argv) do
     if Output.help?(argv) do
@@ -75,6 +80,11 @@ defmodule ArbiterCli.Cmd.Sync do
     IO.puts("  - close #{id}: #{reason}")
   end
 
+  defp print_action(%{"action" => "drift", "task_id" => id, "reason" => reason}) do
+    IO.puts("  ! drift #{id}: #{reason}")
+    IO.puts("      fix: #{@drift_remedy} #{id}")
+  end
+
   defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
 
   # GitHub issue refs are bare numbers and read naturally with a `#` prefix
@@ -90,6 +100,11 @@ defmodule ArbiterCli.Cmd.Sync do
 
   defp print_result(%{"outcome" => "closed", "task" => task}) do
     IO.puts("  - closed #{task["id"]}")
+  end
+
+  defp print_result(%{"outcome" => "drifted", "task" => task}) do
+    IO.puts("  ! drift #{task["id"]}: closed locally but still open upstream")
+    IO.puts("      fix: #{@drift_remedy} #{task["id"]}")
   end
 
   defp print_result(%{"outcome" => "error", "action" => action, "reason" => reason}) do

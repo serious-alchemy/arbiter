@@ -20,7 +20,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        worker_dispatch
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
                        worker_log ticket_list
-                       tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
+                       tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_list usage_summarize coordinator_inbox
                        coordinator_inbox_clear
                        workspace_config_set workspace_config_unset
                        external_review_list external_review_show review_greenlight
@@ -35,7 +35,7 @@ defmodule Arbiter.MCP.CatalogTest do
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
   @workspace_resolving_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show
                                 quota_get ticket_create worker_list ticket_list usage_summarize notify_list
-                                tracker_claim tracker_sync worker_review workspace_config_get
+                                tracker_claim tracker_sync tracker_list_issues tracker_create_ticket worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 external_review_list skill_create skill_update skill_list skill_get
                                 transcript_capture_stats dep_list

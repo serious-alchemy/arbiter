@@ -27,7 +27,8 @@ defmodule ArbiterCli.Cmd.Issue do
       arb ticket reopen   <id>
       arb ticket promote  <id> [--waive REASON]
       arb ticket demote   <id>
-      arb ticket rank     <id> --top | --bottom | --before <id> | --after <id>
+      arb ticket rank     <id> --top | --bottom | --before <id> | --after <id> [--pin | --unpin]
+      arb ticket rank     <id> --pin | --unpin
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
       arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"
                           [--gate g] [--round N] [--fix-round-attempt N]
@@ -36,6 +37,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb ticket handback <id> [--note "<what changed>"]
       arb ticket claim    <issue#> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
+      arb ticket sync-upstream-close <id>
       arb ticket ready
       arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
                           [--model <name>] [--force] [--over-cap]
@@ -82,6 +84,7 @@ defmodule ArbiterCli.Cmd.Issue do
       ["handback" | rest] -> Cmd.Handoff.run(:coordinator, rest)
       ["claim" | rest] -> Cmd.Claim.run(rest)
       ["sync" | rest] -> Cmd.Sync.run(rest)
+      ["sync-upstream-close" | rest] -> Cmd.SyncUpstreamClose.run(rest)
       ["ready" | rest] -> Cmd.Ready.run(rest)
       ["dispatch" | rest] -> Cmd.Dispatch.run(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
@@ -91,7 +94,7 @@ defmodule ArbiterCli.Cmd.Issue do
     end
   end
 
-  @subcommands ~w(list show create update close reopen promote demote rank verify resolve handoff handback claim sync ready dispatch)
+  @subcommands ~w(list show create update close reopen promote demote rank verify resolve handoff handback claim sync sync-upstream-close ready dispatch)
 
   @doc "Every verb `arb ticket` (and its deprecated alias `arb issue`) accepts."
   @spec subcommands() :: [String.t()]

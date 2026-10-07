@@ -21,11 +21,20 @@ defmodule Arbiter.Tasks.Rank do
 
   require Ash.Query
 
+  @doc """
+  Move and/or pin a ticket. `args` is a move form (`position:`, `before_id:`,
+  `after_id:`), optionally with `pinned: boolean`, or `%{pinned: boolean}`
+  alone (P-15). A move leaves `rank_pinned` as it was unless `pinned` says
+  otherwise: `pinned: true` pins with the move (a board drag), `pinned: false`
+  moves and then unpins; `pinned` alone changes the pin without moving.
+  """
   @spec move(Arbiter.Tasks.Issue.t(), map()) ::
           {:ok, Arbiter.Tasks.Issue.t()} | {:error, term()}
   def move(issue, args) do
+    {pinned, form} = Map.pop(args, :pinned)
+
     Repo.transaction(fn ->
-      case Ash.update(issue, args, action: :set_rank) do
+      case do_move(issue, form, pinned) do
         {:ok, ranked} -> ranked
         {:error, error} -> Repo.rollback(error)
       end
@@ -33,6 +42,20 @@ defmodule Arbiter.Tasks.Rank do
   rescue
     error -> {:error, error}
   end
+
+  defp do_move(issue, form, pinned) when map_size(form) == 0 and is_boolean(pinned),
+    do: Ash.update(issue, %{pinned: pinned}, action: :set_rank_pinned)
+
+  defp do_move(issue, form, true),
+    do: Ash.update(issue, Map.put(form, :pin, true), action: :set_rank)
+
+  defp do_move(issue, form, false) do
+    with {:ok, moved} <- Ash.update(issue, form, action: :set_rank) do
+      Ash.update(moved, %{pinned: false}, action: :set_rank_pinned)
+    end
+  end
+
+  defp do_move(issue, form, nil), do: Ash.update(issue, form, action: :set_rank)
 
   @doc """
   Where `issue` sits among the open tickets of its workspace and priority band —

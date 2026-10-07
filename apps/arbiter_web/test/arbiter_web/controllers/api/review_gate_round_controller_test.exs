@@ -134,4 +134,72 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
                ]
     end
   end
+
+  describe "GET /api/review_gate_rounds report parity with MCP (D-W-21)" do
+    test "carries total_count, outcome and resolutions beside data", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "ws-rounds-report-#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, task} =
+        Ash.create(Arbiter.Tasks.Issue, %{title: "rounds report", workspace_id: ws.id})
+
+      task_id = task.id
+
+      for n <- 1..3 do
+        insert_round!(%{task_id: task_id, round: n, verdict: :request_changes, converged: false})
+      end
+
+      {:ok, _} =
+        Arbiter.ReviewGate.Resolutions.record(%{
+          "task_id" => task_id,
+          "decision" => "amend",
+          "reasoning" => "fixed by hand",
+          "actor" => "coordinator"
+        })
+
+      body = conn |> get(~p"/api/review_gate_rounds", %{task_id: task_id}) |> json_response(200)
+
+      assert length(body["data"]) == 3
+      assert body["count"] == 3
+      assert body["total_count"] == 3
+      assert body["outcome"] == "resolved"
+      assert [%{"decision" => "amend"}] = body["resolutions"]
+      assert body["resolution"]["decision"] == "amend"
+      assert Map.has_key?(body["conflict_review"], "task")
+      assert Map.has_key?(hd(body["data"]), "reviewer_tier")
+    end
+
+    test "limit keeps the most recent N rounds; total_count still counts them all", %{conn: conn} do
+      task_id = "bd-rest-limit-#{System.unique_integer([:positive])}"
+      for n <- 1..3, do: insert_round!(%{task_id: task_id, round: n})
+
+      body =
+        conn
+        |> get(~p"/api/review_gate_rounds", %{task_id: task_id, limit: "2"})
+        |> json_response(200)
+
+      assert Enum.map(body["data"], & &1["round"]) == [2, 3]
+      assert body["count"] == 2
+      assert body["total_count"] == 3
+    end
+
+    test "REST and MCP return the same report", %{conn: conn} do
+      task_id = "bd-rest-same-#{System.unique_integer([:positive])}"
+      insert_round!(%{task_id: task_id, round: 1, verdict: :approve, converged: true})
+
+      rest = conn |> get(~p"/api/review_gate_rounds", %{task_id: task_id}) |> json_response(200)
+
+      {:ok, mcp} =
+        Arbiter.MCP.Tools.review_gate_rounds_list(
+          %Arbiter.MCP.Scope{tier: :coordinator, can_dispatch: true},
+          %{"task_id" => task_id}
+        )
+
+      mcp = mcp |> Jason.encode!() |> Jason.decode!()
+      assert Map.delete(rest, "data") == Map.delete(mcp, "rounds")
+      assert rest["data"] == mcp["rounds"]
+    end
+  end
 end

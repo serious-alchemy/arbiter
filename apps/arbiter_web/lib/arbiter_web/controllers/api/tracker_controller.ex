@@ -54,29 +54,10 @@ defmodule ArbiterWeb.Api.TrackerController do
 
   def create_ticket(conn, %{"workspace_id" => workspace_id} = params) do
     with {:ok, workspace} <- get_workspace(conn, workspace_id),
-         :ok <- require_tracker(workspace) do
-      attrs = build_ticket_attrs(params)
-      tracker_type = Trackers.workspace_type(workspace)
-
-      case Trackers.create_for_workspace(workspace, attrs) do
-        {:ok, ref} ->
-          url = Trackers.link_for_workspace(workspace, ref)
-
-          body =
-            %{ref: ref, url: url, tracker_type: Atom.to_string(tracker_type)}
-            |> maybe_put_warnings(AssigneeCompat.warnings(params))
-
-          conn
-          |> put_status(:created)
-          |> json(body)
-
-        {:error, :not_supported} ->
-          {:error,
-           {:invalid_request, "tracker #{tracker_type} does not support outbound ticket creation"}}
-
-        {:error, _} = err ->
-          err
-      end
+         {:ok, body} <- Trackers.create_ticket_only(workspace, build_ticket_attrs(params)) do
+      conn
+      |> put_status(:created)
+      |> json(maybe_put_warnings(body, AssigneeCompat.warnings(params)))
     end
   end
 
@@ -96,18 +77,6 @@ defmodule ArbiterWeb.Api.TrackerController do
 
   defp maybe_put_warnings(map, []), do: map
   defp maybe_put_warnings(map, warnings), do: Map.put(map, :warnings, warnings)
-
-  defp require_tracker(workspace) do
-    case Trackers.workspace_type(workspace) do
-      :none ->
-        {:error,
-         {:invalid_request,
-          "workspace has no tracker configured; use arb create (without --ticket-only) for a local task"}}
-
-      _ ->
-        :ok
-    end
-  end
 
   # ---- serialization -----------------------------------------------------
 

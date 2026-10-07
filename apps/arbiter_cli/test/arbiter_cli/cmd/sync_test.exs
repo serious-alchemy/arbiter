@@ -69,4 +69,25 @@ defmodule ArbiterCli.Cmd.SyncTest do
     assert code == 0
     assert {:ok, _} = Jason.decode(String.trim(out))
   end
+
+  test "a drift entry names the sync-upstream-close verb (plan and applied)" do
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"},
+       {%{"data" => [%{"action" => "drift", "task_id" => "bd-d", "reason" => "still open"}]}, 200}},
+      {{"post", "/api/workspaces/ws-1/sync"},
+       {%{
+          "data" => [%{"action" => "drift", "task_id" => "bd-d", "reason" => "still open"}],
+          "results" => [%{"outcome" => "drifted", "task" => %{"id" => "bd-d"}}],
+          "applied" => true
+        }, 200}}
+    ])
+
+    {out, _err, 0} = capture(fn -> Sync.run(["--dry"]) end)
+    assert out =~ "drift bd-d"
+    assert out =~ "arb ticket sync-upstream-close bd-d"
+
+    {out, _err, 0} = capture(fn -> Sync.run([]) end)
+    assert out =~ "arb ticket sync-upstream-close bd-d"
+  end
 end

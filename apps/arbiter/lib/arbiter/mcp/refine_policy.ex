@@ -177,6 +177,8 @@ defmodule Arbiter.MCP.RefinePolicy do
     # tracker
     "tracker_claim" => @deny_reason_tracker,
     "tracker_sync" => @deny_reason_tracker,
+    "tracker_list_issues" => @deny_reason_tracker,
+    "tracker_create_ticket" => @deny_reason_tracker,
 
     # out of scope for a single-workspace, single-issue token
     "workspace_list" => @deny_reason_scope,
