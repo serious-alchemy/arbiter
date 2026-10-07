@@ -84,12 +84,12 @@ defmodule ArbiterCli.Cmd.Doctor do
   def reachable?, do: Checks.phoenix().status == :ok
 
   @doc """
-  True when every readiness-blocking health check passes. `fatal` alone can't
-  gate this: it also drives `arb doctor`'s exit code, and some checks (like
+  True when no readiness-blocking health check fails. A `fail` alone can't gate
+  this: it also drives `arb doctor`'s exit code, and some checks (like
   workspace resolution) are operator-actionable failures worth a non-zero
   exit without saying anything about whether the deployed server is healthy.
   `blocks_readiness` is the narrower signal `arb server deploy`'s
-  auto-rollback wait actually needs.
+  auto-rollback wait actually needs. A `warn` never blocks.
   """
   @spec green?() :: boolean()
   def green?, do: green?(checks())
@@ -106,9 +106,11 @@ defmodule ArbiterCli.Cmd.Doctor do
   end
 
   @doc """
-  Print the human-readable health report to stdout and return whether no check
-  failed (a `[warn]` is not a failure). Lets `arb start` show the same status block `arb doctor`
-  does without duplicating the formatting.
+  Print the full, grouped health report (every check, as `arb server doctor
+  --all`) to stdout and return whether no check failed (a `[warn]` is not a
+  failure). Lets `arb start`, `arb restart`, `arb update` and `arb server
+  deploy` show the same status block `arb doctor` does without duplicating the
+  formatting.
   """
   @spec report() :: boolean()
   def report, do: report(checks())
@@ -119,7 +121,7 @@ defmodule ArbiterCli.Cmd.Doctor do
   """
   @spec report([Checks.Result.t()]) :: boolean()
   def report(results) do
-    Formatter.emit_text(results)
+    Formatter.emit_text(results, all: true)
     Formatter.overall(results) != :fail
   end
 end

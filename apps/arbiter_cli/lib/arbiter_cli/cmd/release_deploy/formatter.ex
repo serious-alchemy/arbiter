@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
         actions: action_payload(actions),
         pruned: pruned,
         base_url: Client.base_url(),
-        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+        checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
         ok: Doctor.green?()
       }
       |> Map.merge(extras_payload(extras))
@@ -70,7 +70,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       version: tag,
       deployed: false,
       base_url: Client.base_url(),
-      checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+      checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
       ok: false,
       timed_out_after_s: div(timeout_ms, 1000),
       pre_existing_blocking_failures: pre_deploy_fails
@@ -114,7 +114,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       deployed: false,
       server_version_after_restart: server_vsn,
       base_url: Client.base_url(),
-      checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+      checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
       ok: false
     }
     |> Map.merge(rollback_payload(outcome, extras))
@@ -165,7 +165,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
         was_running: false,
         actions: action_payload(actions),
         base_url: Client.base_url(),
-        checks: Enum.map(results, &Map.from_struct/1),
+        checks: Enum.map(results, &Doctor.Formatter.json_check/1),
         ok: ok,
         timed_out_after_s: div(timeout_ms, 1000),
         pre_existing_blocking_failures: pre_deploy_fails

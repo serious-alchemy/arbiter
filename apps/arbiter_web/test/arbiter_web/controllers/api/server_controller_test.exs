@@ -157,6 +157,24 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  # bd-7pnat1: what `arb server doctor` reads to report a check as n/a.
+  describe "GET /api/server/doctor_scope" do
+    test "answers which providers and sandbox backends this install uses", %{conn: conn} do
+      resp = conn |> get("/api/server/doctor_scope") |> json_response(200)
+
+      assert Map.keys(resp["providers"]) |> Enum.sort() == ~w(claude codex gemini grok)
+
+      for {_type, entry} <- resp["providers"] do
+        assert is_boolean(entry["in_use"])
+        assert is_boolean(entry["paused"])
+        assert is_list(entry["workspaces"])
+      end
+
+      assert is_boolean(resp["podman_in_use"])
+      assert is_boolean(resp["egress_enforced"])
+    end
+  end
+
   describe "GET /api/server/claude_credentials" do
     setup do
       prev_env =

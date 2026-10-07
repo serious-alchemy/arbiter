@@ -56,7 +56,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       actions: action_payload(actions),
       cli_rebuilt: cli_built,
       base_url: Client.base_url(),
-      checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+      checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
       ok: Doctor.green?()
     }
     |> Map.merge(migrations_payload(migrations_applied))
@@ -120,7 +120,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       actions: action_payload(actions),
       cli_rebuilt: cli_built,
       base_url: Client.base_url(),
-      checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+      checks: Enum.map(Doctor.checks(), &Doctor.Formatter.json_check/1),
       ok: false,
       timed_out_after_s: div(timeout_ms, 1000)
     }
