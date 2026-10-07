@@ -18,6 +18,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Status do
   same process (a halt hook firing after the real outcome) is ignored.
   """
 
+  alias ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles
+
   @file_name "deploy-status.json"
   # A "running" record this old with no live process is an interrupted deploy.
   @stale_after_s 15 * 60
@@ -29,7 +31,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Status do
   def path do
     case Process.get(:bd2_deploy_status_path) do
       path when is_binary(path) -> path
-      _ -> Path.join(ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles.data_home(), @file_name)
+      _ -> Path.join(ReleaseFiles.data_home(), @file_name)
     end
   end
 

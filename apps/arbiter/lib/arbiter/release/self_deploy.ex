@@ -102,16 +102,14 @@ defmodule Arbiter.Release.SelfDeploy do
   end
 
   defp ensure_not_running do
-    cond do
-      DeployStatus.running?(DeployStatus.read()) ->
-        {:error, :already_running}
-
-      true ->
-        case active_units() do
-          {:ok, []} -> :ok
-          {:ok, _units} -> {:error, :already_running}
-          :error -> {:error, :systemd_unavailable}
-        end
+    if DeployStatus.running?(DeployStatus.read()) do
+      {:error, :already_running}
+    else
+      case active_units() do
+        {:ok, []} -> :ok
+        {:ok, _units} -> {:error, :already_running}
+        :error -> {:error, :systemd_unavailable}
+      end
     end
   end
 
