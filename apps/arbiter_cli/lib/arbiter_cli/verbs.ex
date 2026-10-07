@@ -163,6 +163,7 @@ defmodule ArbiterCli.Verbs do
     {"quota", Module.concat(@cmd, Quota), [workspace: :resolve, probes: [[]]]},
     {"provider", Module.concat(@cmd, Provider),
      [workspace: :none, probes: [["pause", "p"], ["resume", "p"], ["list"]]]},
+    {"alert", Module.concat(@cmd, Alert), [workspace: :resolve, probes: [["list"]]]},
     {"breaker", Module.concat(@cmd, Breaker),
      [workspace: :resolve, probes: [["list"], ["reset", "sig"]]]},
     {"image", Module.concat(@cmd, Image),

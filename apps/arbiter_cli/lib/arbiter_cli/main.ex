@@ -154,6 +154,7 @@ defmodule ArbiterCli.Main do
                                   §6.3's coverage-shadow rollout gate: may
                                   `merge.coverage_enabled` be flipped?
 
+      arb alert list      [--workspace <id|name>] [--kind <k>] [--json]
       arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
       arb breaker reset   <signature> | --all [--kind <k>] [--json]
 

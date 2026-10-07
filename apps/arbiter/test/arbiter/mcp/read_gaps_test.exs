@@ -30,7 +30,9 @@ defmodule Arbiter.MCP.ReadGapsTest do
                  tokens_in tokens_out worker_run_id workspace_id)a
 
   defp account!(provider, slug, attrs \\ %{}) do
-    {:ok, account} = Ash.create(ProviderAccount, Map.merge(%{provider: provider, slug: slug}, attrs))
+    {:ok, account} =
+      Ash.create(ProviderAccount, Map.merge(%{provider: provider, slug: slug}, attrs))
+
     account
   end
 

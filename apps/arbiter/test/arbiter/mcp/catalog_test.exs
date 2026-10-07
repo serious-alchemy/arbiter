@@ -26,7 +26,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
                        loop_propose_routing loop_canary_status breaker_list breaker_reset
-                       alert_list
+                       alert_list account_list account_show provider_list usage_events_list
+                       usage_calibration
                        memory_pending_list memory_pending_diff memory_pending_apply
                        memory_pending_reject memory_quarantine_list memory_quarantine_restore
                        memory_distill)
@@ -41,7 +42,7 @@ defmodule Arbiter.MCP.CatalogTest do
                                 transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject loop_propose_routing loop_canary_status breaker_list breaker_reset
-                                alert_list repo_show)
+                                alert_list repo_show usage_events_list usage_calibration)
 
   describe "tool descriptions" do
     # bd-apj0gq: the description listed five of the six types, but
