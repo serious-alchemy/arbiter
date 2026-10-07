@@ -955,6 +955,7 @@ defmodule Arbiter.Worker.Worktree do
   # list: they differ per repo, so `seed_compiled_deps/3` records the ones it
   # copied in the worktree's own git dir and `seeded_entry?/3` consults that.
   @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/ .arbiter .arbiter/ .run-server.sh)
+  @excluded_checkout_roots @ignored_artifact_paths |> Enum.map(&String.trim_trailing(&1, "/")) |> Enum.uniq()
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
@@ -1099,6 +1100,20 @@ defmodule Arbiter.Worker.Worktree do
     else
       _ -> {:ok, false}
     end
+  end
+
+  @doc """
+  Whether `path` (repo-relative) is one Arbiter never lets into a checkout it
+  takes back from a node (RW11, `docs/design/remote-workers.md` §9 step 4): a
+  build-artifact root (`@ignored_artifact_paths`: `deps`, `_build`, `.hex`,
+  `.run-server.sh`, ...) or per-spawn injected config (`.mcp.json`, `.gemini/`,
+  `.codex/`, `.arbiter/`). Matched on the first path segment, so `deps/x/y.ex`
+  and `.mcp.json` match and `lib/deps.ex` does not.
+  """
+  @spec excluded_checkout_path?(String.t()) :: boolean()
+  def excluded_checkout_path?(path) when is_binary(path) do
+    [root | _] = String.split(path, "/", parts: 2)
+    root in @excluded_checkout_roots or injected_config_path?(path)
   end
 
   defp injected_config_path?(file) do
