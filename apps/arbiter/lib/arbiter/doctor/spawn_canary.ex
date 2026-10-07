@@ -73,6 +73,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
     {"grok", :grok, "grok"}
   ]
 
+  @prompt "arbiter doctor spawn canary"
   @default_timeout_ms 30_000
   @probe_args ["--version"]
   # A `--version` answer is a line or two. Anything past this is a runaway (or
@@ -257,6 +258,8 @@ defmodule Arbiter.Doctor.SpawnCanary do
         :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
         track_agent_home(adapter_type, worktree)
 
+        token = mint_token(workspace, canary_id)
+
         agent_opts =
           [
             security: policy,
@@ -264,12 +267,12 @@ defmodule Arbiter.Doctor.SpawnCanary do
             worktree_path: worktree,
             task_id: canary_id,
             sandbox_wrap: true
-          ] ++ mcp_opts(adapter_type, worktree)
+          ] ++ mcp_opts(adapter_type, worktree, token) ++ arb_token_opts(token)
 
-        with {:ok, argv} <- adapter.default_argv("arbiter doctor spawn canary", agent_opts),
-             argv = argv ++ Keyword.get(opts, :probe_args, @probe_args),
+        with {:ok, argv} <- adapter.default_argv(@prompt, agent_opts),
+             argv = probe_argv(argv, Keyword.get(opts, :probe_args, @probe_args)),
              {:ok, exec} <- resolve_executable(argv) do
-          env = port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir)
+          env = port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir, token)
           probe(%{exec: exec, argv: argv, cd: worktree, env: env}, canary_id, opts)
         else
           {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
@@ -279,6 +282,33 @@ defmodule Arbiter.Doctor.SpawnCanary do
       end
     end
   end
+
+  # The adapter's argv with the probe flag at the end, which is the agent CLI's
+  # own argument list. A `-- <prompt>` tail (codex puts the prompt after `--`)
+  # is dropped: past `--` the flag would be read as the prompt.
+  defp probe_argv(argv, probe_args) do
+    case Enum.split(argv, -2) do
+      {head, ["--", @prompt]} -> head ++ probe_args
+      _ -> argv ++ probe_args
+    end
+  end
+
+  # A worker token bound to the canary's made-up task id, the way a dispatch
+  # mints one for its task (`ARB_TOKEN`, which the agent's own `arb` and grok's
+  # token broker authenticate with). It is signed, not stored: no row exists,
+  # and it can read nothing.
+  defp mint_token(%Workspace{id: ws_id}, canary_id) do
+    Arbiter.MCP.Scope.mint_worker(%{id: canary_id, workspace_id: ws_id})
+  rescue
+    e ->
+      Logger.warning("SpawnCanary: minting the canary token failed: #{Exception.message(e)}")
+      nil
+  end
+
+  defp mint_token(nil, _canary_id), do: nil
+
+  defp arb_token_opts(nil), do: []
+  defp arb_token_opts(token), do: [arb_token: token]
 
   # `ClaudeSession.start/1` resolves the head of argv before opening the port.
   defp resolve_executable([exec | _]) do
@@ -301,7 +331,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
   # explicit `:env` (a dispatch always does): workspace vars and provider-account
   # credentials, the adapter's own env, the per-run TMPDIR, the self-recursion
   # guard, all through `SpawnEnv`.
-  defp port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir) do
+  defp port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir, token) do
     {worker_env, _secrets} =
       case workspace do
         %Workspace{} = ws -> WorkerEnv.resolve_workspace(ws, canary_id, provider: type)
@@ -313,19 +343,24 @@ defmodule Arbiter.Doctor.SpawnCanary do
 
     SpawnEnv.port_env(
       worker_env ++
-        adapter_env ++ RunTmp.env_pairs(tmp_dir) ++ [{"ARB_WORKER_BEAD_ID", canary_id}],
+        adapter_env ++
+        RunTmp.env_pairs(tmp_dir) ++
+        arb_token_env(token) ++ [{"ARB_WORKER_BEAD_ID", canary_id}],
       type
     )
   end
 
+  defp arb_token_env(nil), do: []
+  defp arb_token_env(token), do: [{"ARB_TOKEN", token}]
+
   # Claude is handed an MCP config file by `--mcp-config`; write one the same
-  # way a dispatch does so the flag and its path are exercised. The token in it
-  # is a placeholder: `--version` never connects.
-  defp mcp_opts(:claude, worktree) do
+  # way a dispatch does so the flag and its path are exercised. `--version`
+  # never connects, so the token in it is never used.
+  defp mcp_opts(:claude, worktree, token) do
     if MCP.inject_config?() do
       write_opts = [
         mcp_url: MCP.server_url(),
-        scope_token: "doctor-spawn-canary",
+        scope_token: token || "doctor-spawn-canary",
         server_name: MCP.server_name()
       ]
 
@@ -338,7 +373,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
     end
   end
 
-  defp mcp_opts(_adapter_type, _worktree), do: []
+  defp mcp_opts(_adapter_type, _worktree, _token), do: []
 
   defp probe(port_args, canary_id, opts) do
     timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
@@ -361,7 +396,11 @@ defmodule Arbiter.Doctor.SpawnCanary do
         close(port)
 
         {:failed,
-         %{spawned: true, error: "the agent did not answer `--version` within #{timeout} ms"}}
+         %{
+           spawned: true,
+           error:
+             "the agent did not finish `--version` within #{timeout} ms (launch wrapper included)"
+         }}
 
       :overflow ->
         kill_tree(os_pid)

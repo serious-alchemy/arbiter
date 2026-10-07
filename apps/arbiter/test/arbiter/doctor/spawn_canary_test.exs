@@ -111,6 +111,20 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
                4
     end
 
+    test "the probe flag is not placed behind codex's `-- <prompt>` separator" do
+      # real codex rejects `--version` as a second positional after `--`
+      provision!(%{
+        "codex" =>
+          ~s(for a in "$@"; do [ "$a" = "--" ] && { echo "error: unexpected argument '--version' found" >&2; exit 2; }; done\necho "codex-cli 9.9.9"\n)
+      })
+
+      workspace!(["codex"])
+
+      report = run_canary!()
+
+      assert %{status: "ok", detail: "codex-cli 9.9.9"} = provider(report, "codex")
+    end
+
     test "a provider no workspace uses, or that is paused, is n/a and never spawned" do
       sandbox = provision!()
       workspace!(["claude", "gemini"])
@@ -215,7 +229,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       refute report.ok
 
       assert %{status: "fail", spawned: true, error: error} = provider(report, "claude")
-      assert error =~ "did not answer"
+      assert error =~ "did not finish"
     end
   end
 
