@@ -386,25 +386,27 @@ defmodule ArbiterCli.Cmd.Review do
     IO.puts("  Verdict:    #{dash(r["verdict"])}  (#{r["finding_count"] || 0} finding(s))")
     IO.puts("  Model:      #{dash(r["model"])}")
 
-    case r["link"] do
-      link when is_binary(link) and link != "" -> IO.puts("  Link:       #{link}")
-      _ -> :ok
-    end
-
-    case r["failure_reason"] do
-      reason when is_binary(reason) and reason != "" ->
-        IO.puts("  Failed:     #{r["failure_stage"]}: #{reason}")
-
-      _ ->
-        :ok
-    end
-
-    IO.puts(
-      "  Transcript: #{if r["transcript_exists"], do: "#{r["transcript_line_count"]} lines", else: "none captured"}"
-    )
+    puts_if_present("  Link:       ", r["link"])
+    puts_if_present("  Failed:     ", failure_text(r))
+    IO.puts("  Transcript: #{transcript_text(r)}")
 
     emit_proposed(r["proposed_comments"] || [])
   end
+
+  defp failure_text(%{"failure_reason" => reason} = r) when is_binary(reason) and reason != "",
+    do: "#{r["failure_stage"]}: #{reason}"
+
+  defp failure_text(_), do: nil
+
+  defp transcript_text(%{"transcript_exists" => true} = r),
+    do: "#{r["transcript_line_count"]} lines"
+
+  defp transcript_text(_), do: "none captured"
+
+  defp puts_if_present(label, text) when is_binary(text) and text != "",
+    do: IO.puts(label <> text)
+
+  defp puts_if_present(_label, _text), do: :ok
 
   defp emit_proposed([]), do: :ok
 
@@ -441,24 +443,22 @@ defmodule ArbiterCli.Cmd.Review do
   defp emit_rounds(payload, :text) do
     rounds = payload["data"] || []
 
-    IO.puts(
-      "#{payload["count"] || length(rounds)} of #{payload["total_count"] || length(rounds)} round(s) — outcome: #{dash(payload["outcome"])}"
-    )
+    count = payload["count"] || length(rounds)
+    total = payload["total_count"] || length(rounds)
+    IO.puts("#{count} of #{total} round(s) — outcome: #{dash(payload["outcome"])}")
 
-    for r <- rounds do
-      IO.puts(
-        "  fix#{r["fix_round_attempt"] || 0} r#{r["round"]} #{r["role"]} " <>
-          "#{dash(r["verdict"])} #{r["finding_count"] || 0} finding(s) " <>
-          "#{dash(r["reviewer_provider"])}/#{dash(r["reviewer_model"])}"
-      )
-    end
-
-    for res <- payload["resolutions"] || [] do
-      IO.puts(
-        "  resolved: #{res["decision"]} (#{res["gate"]}) — #{first_line(res["reasoning"] || "")}"
-      )
-    end
+    Enum.each(rounds, &IO.puts(round_line(&1)))
+    Enum.each(payload["resolutions"] || [], &IO.puts(resolution_line(&1)))
   end
+
+  defp round_line(r) do
+    "  fix#{r["fix_round_attempt"] || 0} r#{r["round"]} #{r["role"]} " <>
+      "#{dash(r["verdict"])} #{r["finding_count"] || 0} finding(s) " <>
+      "#{dash(r["reviewer_provider"])}/#{dash(r["reviewer_model"])}"
+  end
+
+  defp resolution_line(res),
+    do: "  resolved: #{res["decision"]} (#{res["gate"]}) — #{first_line(res["reasoning"] || "")}"
 
   # ---- greenlight ------------------------------------------------------------
 
