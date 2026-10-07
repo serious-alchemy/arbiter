@@ -146,6 +146,65 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
     end
   end
 
+  describe "operator-only keys (P-20, D-C-3)" do
+    # One case per key class: the nodes.* enrolment keys (a URL, a boolean and
+    # integers) and the two epic-floor scheduling switches.
+    @operator_only_cases [
+      {"nodes.public_url", "https://arb.tailnet.ts.net"},
+      {"nodes.allow_public_endpoint", true},
+      {"nodes.join_token_ttl_minutes", 30},
+      {"nodes.fence_after_s", 45},
+      {"nodes.lost_after_s", 120},
+      {"scheduling_epic_floors_enabled", false},
+      {"scheduling_max_lifted_in_flight", 2}
+    ]
+
+    setup do
+      on_exit(fn ->
+        for {key, _} <- @operator_only_cases, do: Arbiter.Settings.Registry.put(key, nil)
+        Settings.set_scheduling_finish_first(nil)
+      end)
+
+      :ok
+    end
+
+    test "a coordinator-tier token without operator proof is refused, nothing written",
+         %{conn: conn} do
+      for {key, value} <- @operator_only_cases do
+        resp = conn |> patch("/api/installation/config", %{"key" => key, "value" => value})
+
+        assert %{"error" => %{"type" => "unauthorized", "message" => msg}} =
+                 json_response(resp, 403)
+
+        assert msg =~ key
+        assert Arbiter.Settings.Registry.override(key) == nil
+      end
+    end
+
+    test "a coordinator without proof still writes the ordinary keys", %{conn: conn} do
+      body = %{"key" => "scheduling_finish_first", "value" => true}
+
+      assert %{"data" => %{"override" => true}} =
+               conn |> patch("/api/installation/config", body) |> json_response(200)
+    end
+
+    test "a coordinator token with operator proof may write them", %{conn: conn} do
+      conn =
+        put_req_header(
+          conn,
+          "authorization",
+          "Bearer " <> Scope.mint_coordinator(nil, operator: true)
+        )
+
+      for {key, value} <- @operator_only_cases do
+        assert %{"data" => %{"override" => ^value}} =
+                 conn
+                 |> patch("/api/installation/config", %{"key" => key, "value" => value})
+                 |> json_response(200)
+      end
+    end
+  end
+
   describe "authorisation" do
     test "no token is 401, a worker token is 403 on read and write" do
       anon = Phoenix.ConnTest.build_conn() |> Map.put(:remote_ip, {127, 0, 0, 1})

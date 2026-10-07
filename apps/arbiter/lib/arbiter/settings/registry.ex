@@ -133,6 +133,16 @@ defmodule Arbiter.Settings.Registry do
 
   @keys Enum.map(@schema, & &1.key)
 
+  # `docs/design/epic-aware-scheduling.md` §6.6: the operator alone decides how
+  # much of the fleet an epic floor may take. The `nodes.*` keys (RW3,
+  # `docs/design/remote-workers.md` §15) decide where machines that receive
+  # provider tokens may enrol from and for how long a join token lives, so a
+  # coordinator *session* must not set them either. Enforced in `put/3`, so
+  # MCP, REST and `arb settings` all refuse them for a non-operator token.
+  @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+                    nodes.public_url nodes.allow_public_endpoint
+                    nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s)
+
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
@@ -141,9 +151,22 @@ defmodule Arbiter.Settings.Registry do
   @spec keys() :: [key()]
   def keys, do: @keys
 
-  @doc "Key, type, description and (for enum-typed keys) allowed values."
+  @doc "The keys only an operator-authority caller may write (`put/3`)."
+  @spec operator_only_keys() :: [key()]
+  def operator_only_keys, do: @operator_only
+
+  @doc """
+  Key, type, description, `operator_only` and (for enum-typed keys) allowed
+  values.
+  """
   @spec schema() :: [map()]
-  def schema, do: Enum.map(@schema, &Map.put(&1, :allowed, allowed(&1.type)))
+  def schema do
+    Enum.map(@schema, fn entry ->
+      entry
+      |> Map.put(:allowed, allowed(entry.type))
+      |> Map.put(:operator_only, entry.key in @operator_only)
+    end)
+  end
 
   defp allowed("agent_type_list"), do: Arbiter.Agents.valid_agent_types()
   defp allowed("quota_provider_list"), do: Arbiter.Quota.Visibility.provider_codes()
@@ -223,13 +246,29 @@ defmodule Arbiter.Settings.Registry do
   defp unwrap(raw), do: raw
 
   @doc """
-  Validate then persist. Returns the stored override (`nil` once cleared).
-  An invalid value is rejected before anything is written.
+  Authorize, validate, then persist. Returns the stored override (`nil` once
+  cleared). A refused or invalid value is rejected before anything is written.
+
+  `opts[:authority]` is the caller's `Arbiter.Guardrails.Authority` (default
+  `:operator`: in-process callers such as the dashboard are trusted, and every
+  untrusted entry point — REST, MCP — passes its token's authority). The
+  `operator_only_keys/0` are refused for any other authority with
+  `{:unauthorized, message}`, ahead of validation.
   """
-  @spec put(key(), term()) :: {:ok, term()} | {:error, error()}
-  def put(key, raw) do
-    with {:ok, value} <- cast_for_put(key, raw), do: write(key, value)
+  @spec put(key(), term(), keyword()) ::
+          {:ok, term()} | {:error, error() | {:unauthorized, String.t()}}
+  def put(key, raw, opts \\ []) do
+    authority = Keyword.get(opts, :authority, :operator)
+
+    with :ok <- authorize(key, authority),
+         {:ok, value} <- cast_for_put(key, raw),
+         do: write(key, value)
   end
+
+  defp authorize(key, authority) when key in @operator_only and authority != :operator,
+    do: {:error, {:unauthorized, "#{key} is operator-only — it needs an operator-proof token"}}
+
+  defp authorize(_key, _authority), do: :ok
 
   defp cast_for_put(key, raw) do
     case cast(key, raw) do
