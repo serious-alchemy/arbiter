@@ -6665,7 +6665,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert is_integer(repo.worktrees)
     end
 
-    test "two-workspace same-name fixture rejects unqualified lookup and accepts workspace qualifier", ctx do
+    test "two-workspace same-name fixture rejects unqualified lookup and accepts workspace qualifier",
+         ctx do
       {:ok, ws2} =
         Ash.create(Workspace, %{
           name: "second-ws",
