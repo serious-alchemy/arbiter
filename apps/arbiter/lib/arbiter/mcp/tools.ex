@@ -109,12 +109,12 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # `account` goes straight to that account's quota, the way REST `?account=`
-  # does (`Arbiter.Quota.account_snapshot/1`, the REST `data` map). An account
+  # does (`Arbiter.Quota.Snapshot.for_account/1`, the REST `data` map). An account
   # is installation-wide, so only a coordinator may name one.
   defp quota_for_account(%Scope{tier: :coordinator}, ref) do
     case Arbiter.Accounts.get_account(ref) do
       {:ok, account} ->
-        {:ok, Arbiter.Quota.account_snapshot(account)}
+        {:ok, Arbiter.Quota.Snapshot.for_account(account)}
 
       {:error, :not_found} ->
         {:error, {:not_found, "account #{inspect(ref)} not found"}}
@@ -131,27 +131,8 @@ defmodule Arbiter.MCP.Tools do
 
   defp quota_for_workspace(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Workspaces.resolve_default(scope, fetch_string(args, "workspace")) do
-      # P5: quota rows are keyed by provider account; the workspace is the
-      # lookup shorthand that resolves to one account per provider (§6).
-      accounts = Arbiter.Quota.account_ids(ws_id)
-      codex = Arbiter.Quota.Codex.serialize_latest(accounts["codex"])
-
-      {:ok,
-       %{
-         claude: Arbiter.Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
-         codex: codex,
-         codex_message: Arbiter.Quota.codex_absence_message(codex),
-         # bd-1fpjgx: read directly off `CredentialWatchdog`'s held state —
-         # the same free 401-streak / agy-exit signal `CloudProbe` feeds it
-         # for Claude (bd-1pmf9h) is now wired for these two adapters too, so
-         # this reports live regardless of whether a quota row has landed yet.
-         codex_credentials_expired:
-           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-         antigravity:
-           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
-         gemini_credentials_expired:
-           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
-       }}
+      # One builder shared with `GET /api/quota` (P-18, D-A-5).
+      {:ok, Arbiter.Quota.Snapshot.for_workspace(ws_id, fetch_string(args, "workspace"))}
     end
   end
 
@@ -554,41 +535,16 @@ defmodule Arbiter.MCP.Tools do
         {:ok,
          %{
            by: Atom.to_string(Usage.normalize_by(by)),
-           rollups: rollups,
+           rollups: Enum.map(rollups, &Arbiter.Usage.Serializer.rollup/1),
            count: length(rollups),
            workspace_id: ws_id,
-           warnings: Enum.map(flagged, &zero_token_warning/1)
+           warnings: Arbiter.Usage.Serializer.warnings(flagged)
          }}
       else
         {:error, reason} -> {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}
       end
     end
   end
-
-  # bd-96mn8i round 2, finding 3: a literal-zero row (the parser matched a
-  # terminal event and read no tokens out of it) is worded as the parser-bug
-  # signature it is. A provider with no literal zeros — every row is
-  # `tokens_in`/`tokens_out: nil` — never reached a terminal event at all
-  # (e.g. every probe in the window failed auth); wording that as "a stream
-  # parser silently dropping usage" would be its own false alarm once
-  # bd-96mn8i's fix is in place and correct.
-  defp zero_token_warning(%{provider: provider, rows: rows, zero_rows: zero_rows} = report)
-       when zero_rows > 0 do
-    "⚠ #{provider}: #{zero_rows} of #{rows} usage_events row(s) in this window carry literal zero " <>
-      "tokens — likely a stream parser silently dropping usage rather than a genuinely free provider." <>
-      unknown_suffix(report)
-  end
-
-  defp zero_token_warning(%{provider: provider, rows: rows}) do
-    "⚠ #{provider}: all #{rows} usage_events row(s) in this window recorded no usage at all " <>
-      "(NULL tokens, not zero) — check for failed probes or an unrecognized result shape; " <>
-      "these rows are excluded from cost/token aggregates, not counted as free."
-  end
-
-  defp unknown_suffix(%{unknown_rows: n}) when n > 0,
-    do: " (a further #{n} row(s) recorded no usage at all — NULL, not zero.)"
-
-  defp unknown_suffix(_report), do: ""
 
   # ---- tracker_claim ------------------------------------------------------
 

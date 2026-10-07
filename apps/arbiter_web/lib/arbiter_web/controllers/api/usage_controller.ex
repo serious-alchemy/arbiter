@@ -65,14 +65,17 @@ defmodule ArbiterWeb.Api.UsageController do
         |> add_opt(:provider_account_id, account_id)
         |> add_opt(:limit, limit)
 
-      case Usage.summarize(opts) do
-        {:ok, rollups} ->
-          json(conn, %{
-            by: Atom.to_string(Usage.normalize_by(by)),
-            workspace_id: ws_id,
-            data: Enum.map(rollups, &Serializer.rollup/1)
-          })
+      zero_token_opts = Keyword.take(opts, [:since, :workspace_id, :provider_account_id])
 
+      with {:ok, rollups} <- Usage.summarize(opts),
+           {:ok, flagged} <- Usage.zero_token_providers(zero_token_opts) do
+        json(conn, %{
+          by: Atom.to_string(Usage.normalize_by(by)),
+          workspace_id: ws_id,
+          data: Enum.map(rollups, &Serializer.rollup/1),
+          warnings: Serializer.warnings(flagged)
+        })
+      else
         {:error, reason} ->
           {:error, {:invalid_request, "could not summarize usage: #{inspect(reason)}"}}
       end

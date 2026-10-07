@@ -155,6 +155,14 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert row["thinking_tokens"] == 60
     end
 
+    test "carries the zero-token warnings array like MCP (P-18, D-A-7)", %{conn: conn} do
+      _ = insert_event!(%{provider: "gemini", tokens_in: 0, tokens_out: 0})
+
+      conn = get(conn, ~p"/api/usage", %{by: "model", workspace_id: ws_id()})
+      assert [warning] = json_response(conn, 200)["warnings"]
+      assert warning =~ "gemini"
+    end
+
     test "missing by returns 400", %{conn: conn} do
       conn = get(conn, ~p"/api/usage", %{})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)

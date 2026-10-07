@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
       arb usage [--by day|task|epic|workspace|provider_account|repo|model|step|provider|source|session]
                 (`--by account` also accepted, an alias for `--by provider_account`)
-                [--since YYYY-MM-DD | <iso8601>]
+                [--since YYYY-MM-DD | <iso8601> | Nd | Nh | Nm]
                 [--workspace <id>]
                 [--account <id|provider:slug|slug>]
                 [--limit N]
@@ -418,46 +418,42 @@ defmodule ArbiterCli.Cmd.Usage do
   defp maybe_put(opts, _key, ""), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
-  # Accept ISO8601 verbatim, or `Nd` / `Nh` shorthands ("7d", "24h") which we
-  # translate into an absolute timestamp. Keeps the common case ("last week")
-  # ergonomic without giving up arbitrary precision.
+  # Accept a full ISO8601 datetime verbatim, a bare `YYYY-MM-DD` (midnight
+  # UTC — the server wants a datetime), or `Nd` / `Nh` / `Nm` shorthands
+  # ("7d", "24h", "30m") translated into an absolute timestamp. A zero or
+  # unparseable window is refused loudly: dropping it would silently turn the
+  # query into an unbounded all-time one.
   defp normalize_since(nil), do: nil
   defp normalize_since(""), do: nil
 
-  defp normalize_since(<<n::binary-size(1), "d">>), do: shift_back_days(parse_int(n))
-  defp normalize_since(<<n::binary-size(2), "d">>), do: shift_back_days(parse_int(n))
-  defp normalize_since(<<n::binary-size(3), "d">>), do: shift_back_days(parse_int(n))
+  defp normalize_since(raw) do
+    cond do
+      match = Regex.run(~r/\A(\d+)([dhm])\z/, raw) ->
+        [_, n, unit] = match
+        shift_back(String.to_integer(n), unit, raw)
 
-  defp normalize_since(<<n::binary-size(1), "h">>), do: shift_back_hours(parse_int(n))
-  defp normalize_since(<<n::binary-size(2), "h">>), do: shift_back_hours(parse_int(n))
-  defp normalize_since(<<n::binary-size(3), "h">>), do: shift_back_hours(parse_int(n))
+      Regex.match?(~r/\A\d{4}-\d{2}-\d{2}\z/, raw) ->
+        case Date.from_iso8601(raw) do
+          {:ok, date} -> DateTime.to_iso8601(DateTime.new!(date, ~T[00:00:00], "Etc/UTC"))
+          _ -> Output.die("invalid --since #{inspect(raw)}: not a calendar date")
+        end
 
-  defp normalize_since(raw), do: raw
-
-  defp parse_int(s) do
-    case Integer.parse(s) do
-      {n, _} -> n
-      _ -> 0
+      true ->
+        raw
     end
   end
 
-  defp shift_back_days(n) when is_integer(n) and n > 0 do
+  defp shift_back(n, _unit, raw) when n <= 0,
+    do: Output.die("invalid --since #{inspect(raw)}: the window must be positive")
+
+  defp shift_back(n, unit, _raw) do
+    seconds = n * Map.fetch!(%{"d" => 86_400, "h" => 3_600, "m" => 60}, unit)
+
     DateTime.utc_now()
-    |> DateTime.add(-n * 86_400, :second)
+    |> DateTime.add(-seconds, :second)
     |> DateTime.truncate(:second)
     |> DateTime.to_iso8601()
   end
-
-  defp shift_back_days(_), do: nil
-
-  defp shift_back_hours(n) when is_integer(n) and n > 0 do
-    DateTime.utc_now()
-    |> DateTime.add(-n * 3_600, :second)
-    |> DateTime.truncate(:second)
-    |> DateTime.to_iso8601()
-  end
-
-  defp shift_back_hours(_), do: nil
 
   # nil means "no priced cost known" (e.g. agy/Antigravity, a subscription
   # with no per-call dollar figure) — never render that as "$0.0000", which
