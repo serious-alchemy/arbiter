@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Notify do
     --json      emit JSON instead of human-readable text
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @default_limit 20
 
@@ -24,11 +24,20 @@ defmodule ArbiterCli.Cmd.Notify do
 
       limit = opts[:limit] || @default_limit
 
-      case Client.get("/api/messages", kind: "notification", limit: limit) do
+      params = [kind: "notification", limit: limit] ++ workspace_params()
+
+      case Client.get("/api/messages", params) do
         {:ok, %{"data" => list}} -> emit(list, mode)
         {:ok, _} -> emit([], mode)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  defp workspace_params do
+    case Workspace.selected_id() do
+      nil -> []
+      id -> [workspace: id]
     end
   end
 

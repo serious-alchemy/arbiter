@@ -351,6 +351,37 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert err =~ "no workspace named"
     end
 
+    test "arb breaker reset <signature> -w X is refused, not dropped" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "some|sig", "-w", "acme"]) end)
+
+      assert code == 1
+      assert err =~ "--workspace does not apply to breaker reset <signature>"
+    end
+
+    test "arb breaker reset --auth-hold P -w X is refused, not dropped" do
+      {_out, err, code} =
+        capture(fn ->
+          ArbiterCli.Main.main(["breaker", "reset", "--auth-hold", "claude", "-w", "acme"])
+        end)
+
+      assert code == 1
+      assert err =~ "--workspace does not apply to breaker reset --auth-hold"
+    end
+
+    test "an inherited ARB_WORKSPACE does not block reset <signature>" do
+      System.put_env("ARB_WORKSPACE", "acme")
+
+      stub_routes([
+        {{"post", "/api/breakers/reset"}, {%{"reset" => 1, "signature" => "s"}, 200}}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "some|sig"]) end)
+
+      assert code == 0
+    end
+
     test "arb breaker list -w X sends the resolved workspace" do
       test_pid = self()
 

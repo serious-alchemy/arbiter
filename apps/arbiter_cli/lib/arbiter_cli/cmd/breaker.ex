@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.Breaker do
   live simply trips again, and in the meantime the flood resumes.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -83,6 +83,7 @@ defmodule ArbiterCli.Cmd.Breaker do
     body =
       cond do
         provider = opts[:auth_hold] ->
+          Workspace.reject_flag!("breaker reset --auth-hold")
           %{provider: provider}
 
         opts[:all] ->
@@ -91,6 +92,7 @@ defmodule ArbiterCli.Cmd.Breaker do
           |> put_opt(opts, :kind)
 
         signature = List.first(args) ->
+          Workspace.reject_flag!("breaker reset <signature>")
           %{signature: signature}
 
         true ->
@@ -216,7 +218,7 @@ defmodule ArbiterCli.Cmd.Breaker do
 
   # `--workspace` / `-w` / ARB_WORKSPACE, resolved to the workspace id.
   defp put_workspace(params, opts) do
-    case ArbiterCli.Workspace.selected_id(opts[:workspace]) do
+    case Workspace.selected_id(opts[:workspace]) do
       nil -> params
       id when is_list(params) -> [{:workspace, id} | params]
       id -> Map.put(params, :workspace, id)

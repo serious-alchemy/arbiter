@@ -228,7 +228,7 @@ defmodule ArbiterCli.Main do
   # names. `review` alone is a legacy redirect to `worker review`, which would
   # read `resolve` as a task id — so route it before that, with no note.
   defp dispatch_resolved("review", ["resolve" | rest], _flag, ws_val) do
-    if ws_val, do: System.put_env("ARB_WORKSPACE", ws_val)
+    ArbiterCli.Workspace.put_selected(ws_val)
     ArbiterCli.Cmd.Resolve.run(rest)
   end
 
@@ -296,7 +296,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("issue", args, flag, ws_val) do
     {:ok, entry} = ArbiterCli.Verbs.fetch("issue")
     check_workspace_guard!(entry, flag, ws_val)
-    if ws_val, do: System.put_env("ARB_WORKSPACE", ws_val)
+    ArbiterCli.Workspace.put_selected(ws_val)
     IO.puts(:stderr, "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).")
     run_entry(entry, args)
   end
@@ -304,7 +304,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known(name, args, flag, ws_val) do
     {:ok, entry} = ArbiterCli.Verbs.fetch(name)
     check_workspace_guard!(entry, flag, ws_val)
-    if ws_val, do: System.put_env("ARB_WORKSPACE", ws_val)
+    ArbiterCli.Workspace.put_selected(ws_val)
     run_entry(entry, args)
   end
 

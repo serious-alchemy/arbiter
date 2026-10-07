@@ -86,9 +86,9 @@ defmodule ArbiterCli.Cmd.Quota do
         [account: acct]
 
       _ ->
-        case Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE") do
-          ws when is_binary(ws) and ws != "" -> [workspace: ws]
-          _ -> []
+        case ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace)) do
+          nil -> []
+          id -> [workspace: id]
         end
     end
   end

@@ -131,6 +131,41 @@ defmodule ArbiterCli.Workspace do
     end
   end
 
+  @doc """
+  Seed the active workspace for this invocation. `name` is the `-w` value (or
+  `nil` when the flag was not given). The fact that the flag was given is kept
+  in the process dictionary, not the environment, so it neither leaks into child
+  processes nor outlives the invocation.
+  """
+  @spec put_selected(String.t() | nil) :: :ok
+  def put_selected(nil), do: Process.delete(:arb_workspace_flag) && :ok
+
+  def put_selected(name) when is_binary(name) do
+    System.put_env("ARB_WORKSPACE", name)
+    Process.put(:arb_workspace_flag, true)
+    :ok
+  end
+
+  @doc """
+  True when this invocation named a workspace with `-w` / `--workspace` (as
+  opposed to an `ARB_WORKSPACE` inherited from the shell).
+  """
+  @spec flag_given?() :: boolean()
+  def flag_given?, do: Process.get(:arb_workspace_flag, false)
+
+  @doc """
+  Refuse `-w` for a form that has no workspace dimension, instead of dropping it.
+  An inherited `ARB_WORKSPACE` is left alone — only an explicit flag is refused.
+  """
+  @spec reject_flag!(String.t()) :: :ok
+  def reject_flag!(what) do
+    if flag_given?() do
+      ArbiterCli.Output.die("--workspace does not apply to #{what}")
+    else
+      :ok
+    end
+  end
+
   @doc "Convenience: resolve and return just the id, or halt with a friendly error."
   @spec id_or_halt(String.t() | nil) :: String.t()
   def id_or_halt(target \\ nil) do

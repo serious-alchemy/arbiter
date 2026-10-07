@@ -97,7 +97,58 @@ defmodule ArbiterCli.WorkspaceFlagPlumbingTest do
     {_out, err, code} = run(["quota", "-w", "acme"])
     assert code == 0, err
     assert [{_, query, _} | _] = requests_to("/api/quota")
-    assert query["workspace"] in ["acme", "ws-acme"]
+    assert query["workspace"] == "ws-acme"
+  end
+
+  test "dep list -w" do
+    assert_query(["dep", "list", "-w", "acme"], "/api/dependencies", "workspace_id")
+  end
+
+  test "message inbox -w" do
+    assert_query(["message", "inbox", "-w", "acme"], "/api/messages", "workspace")
+  end
+
+  test "message notify -w" do
+    assert_query(["message", "notify", "-w", "acme"], "/api/messages", "workspace")
+  end
+
+  test "message inbox clear --task -w" do
+    test_pid = self()
+
+    Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+      conn = Plug.Conn.fetch_query_params(conn)
+      send(test_pid, {:request, conn.method, conn.request_path, conn.query_params, %{}})
+
+      body =
+        if conn.request_path == "/api/workspaces",
+          do: %{"data" => [@workspace]},
+          else: %{"data" => %{"cleared" => []}}
+
+      conn |> Plug.Conn.put_status(200) |> Req.Test.json(body)
+    end)
+
+    {_out, err, code} = run(["message", "inbox", "clear", "--task", "bd-1", "-w", "acme"])
+    assert code == 0, err
+
+    assert [{"DELETE", %{"workspace" => "ws-acme", "task_id" => "bd-1"}, _} | _] =
+             requests_to("/api/messages")
+  end
+
+  test "message inbox read -w is refused, not dropped" do
+    {_out, err, code} = run(["message", "inbox", "read", "bd-1", "-w", "acme"])
+    assert code == 1
+    assert err =~ "--workspace does not apply to inbox read"
+    assert requests_to("/api/messages") == []
+  end
+
+  test "ticket ready -w" do
+    assert_query(["ticket", "ready", "-w", "acme"], "/api/issues/ready", "workspace_id")
+  end
+
+  test "queue -w is rejected, not dropped" do
+    {_out, err, code} = run(["queue", "rerun-ci", "bd-1", "-w", "acme"])
+    assert code == 1
+    assert err =~ "unknown option -w for arb queue"
   end
 
   test "worker list -w" do
