@@ -98,7 +98,7 @@ defmodule Arbiter.NodeAgent.ConnectionTest do
     assert hello["agent_version"] == "1.0.0"
     assert hello["proto"] == 1
     assert hello["kind"] == "machine"
-    assert hello["inventory"] == %{"runs" => []}
+    assert hello["inventory"] == %{"runs" => [], "retained" => []}
     assert hello["caps"]["backend"] == "podman"
     assert is_binary(hello["arch"])
     assert hello["capacity"]["cpus"] >= 1
@@ -205,6 +205,101 @@ defmodule Arbiter.NodeAgent.ConnectionTest do
     wait_until(fn -> status(config)["fenced_at"] != nil end)
     # and it came back for another hello rather than sitting fenced
     assert_receive {:fake_node, :hello, _}, 5_000
+  end
+
+  # RW12 (§10.4): what the agent quiesced is on disk, so it outlives the agent and is listed
+  # in every hello until the primary has pulled it.
+  test "hello lists what the agent retained", ctx do
+    dir = Path.join([ctx.home, "runs", "kept", "retained"])
+    File.mkdir_p!(dir)
+
+    File.write!(
+      Path.join(dir, "manifest.json"),
+      Jason.encode!(%{
+        "run" => "kept",
+        "task" => "bd-1",
+        "checkout" => %{"bytes" => 9},
+        "transcripts" => nil,
+        "retained_at" => "2026-10-07T00:00:00Z",
+        "pulled" => false,
+        "branch" => "never-sent"
+      })
+    )
+
+    start_agent(ctx)
+    assert_receive {:fake_node, :hello, hello}, 5_000
+
+    assert [%{"run" => "kept", "task" => "bd-1", "checkout" => %{"bytes" => 9}} = report] =
+             hello["inventory"]["retained"]
+
+    # a report, not a manifest: nothing the primary would have to trust for a path
+    refute Map.has_key?(report, "branch")
+  end
+
+  # RW12 (§10.1): the agent self-fences at `fence_after`: it stops its containers, and the
+  # run directory (shadow clone, transcripts) stays on the node.
+  test "the self-fence stops a running container and keeps the run's directory", ctx do
+    alias Arbiter.NodeAgent.Runs
+
+    stub = Path.join(ctx.home, "stub")
+    podman = ArbiterWeb.StubPodman.install(stub)
+    ArbiterWeb.StubPodman.write_mode(stub, "hang")
+    rt = Path.join(ctx.home, "rt")
+    File.mkdir_p!(rt)
+    cli = Path.join(ctx.home, "claude")
+    File.write!(cli, "#!/bin/sh\n")
+    File.chmod!(cli, 0o755)
+
+    for spec <- Runs.child_specs(), do: start_supervised!(spec)
+    Application.put_env(:arbiter_web, :fake_node_ack?, false)
+
+    {_conn, config} =
+      start_agent(ctx,
+        fence_after_ms: 150,
+        live_runs_fun: &Runs.inventory/0,
+        run_opts: [
+          podman: podman,
+          runtime_dir: rt,
+          require_tmpfs: false,
+          image_fun: fn _image, _opts -> :ok end,
+          files_fun: fn _sha, _name -> {:ok, cli} end,
+          delegated_fun: fn -> ["memory", "pids", "cpu"] end
+        ]
+      )
+
+    Application.put_env(:arbiter_web, :fake_node_hello_ok, %{
+      "hb_interval" => 0.03,
+      "fence_after" => 0.15
+    })
+
+    spec = %{
+      "version" => 1,
+      "run" => "f1",
+      "name" => "arb-f1",
+      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "cwd" => "/work/tree",
+      "mounts" => [
+        %{"kind" => "worktree", "path" => "/work/tree"},
+        %{"kind" => "home", "path" => "/work/home"},
+        %{"kind" => "config_dir", "path" => "/work/config"},
+        %{"kind" => "tmp", "path" => "/work/tmp"}
+      ],
+      "env" => %{},
+      "secrets" => %{},
+      "limits" => %{"memory" => "1g"},
+      "command" => ["claude", "--print"]
+    }
+
+    opts = [config: config, sink: self(), node_id: config.node_id] ++ config.run_opts
+    assert {:ok, "f1"} = Runs.assign(spec, opts)
+    assert_receive {:run_push, "f1", "run.ready", _}, 5_000
+
+    wait_until(fn -> status(config)["fenced_at"] != nil end)
+
+    # the container was removed by name, the run reported cancelled "fenced"
+    assert_receive {:run_push, "f1", "exit", %{"cancelled" => true, "reason" => "fenced"}}, 5_000
+    assert File.read!(Path.join(stub, "calls")) =~ "rm --force --ignore --time 0 arb-f1"
+    assert File.dir?(Path.join([config.node_home, "runs", "f1", "worktree"]))
   end
 
   describe "version skew" do

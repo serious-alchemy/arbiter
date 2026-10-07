@@ -35,6 +35,16 @@ defmodule Arbiter.Nodes.Session do
   run ends for its owner too, flagged `node_lost?`; and an owner that dies has
   its runs cancelled.
 
+  ## Restart recovery and reaping (RW12)
+
+  A run is `known` to a node's `hello` iff this session holds it (§10.4); the rest the
+  agent quiesces and reports `retained` (stored here, also read from `hello`'s
+  `inventory.retained`). `recover/4` asks for a retained run's work and, while it
+  lasts, lets the upload endpoints accept it (`checkout_context/2`); see
+  `Arbiter.Nodes.Recovery`. The session also sends `reap{install, live_set}` on every
+  `hello` and periodically (`Arbiter.Nodes.Reaping`), and records `retained`,
+  `recovered` and `reaped` node events.
+
   ## Messages to the channel
 
   `{:node_session, :drain}` / `{:node_session, :undrain}` and
@@ -54,9 +64,10 @@ defmodule Arbiter.Nodes.Session do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Hello, Liveness, Node, RunStreams, Skew}
+  alias Arbiter.Nodes.{Hello, Liveness, Node, Reaping, RunStreams, Skew}
 
   @default_tick_ms 5_000
+  @default_reap_interval_ms 10 * 60_000
   @default_prepare_timeout_ms 25 * 60_000
 
   defstruct [
@@ -85,7 +96,12 @@ defmodule Arbiter.Nodes.Session do
     # RW11: `run => the primary's checkout context` (home clone, branch, base),
     # and the callers waiting on a checkout ingest, `run => [from]`.
     checkouts: %{},
-    collectors: %{}
+    collectors: %{},
+    # RW12: what the agent retained (`run => report`), the recoveries in flight
+    # (`run => %{ctx, waiters, phase, checkout}`) and the periodic reap.
+    retained: %{},
+    recoveries: %{},
+    reap_interval_ms: :infinity
   ]
 
   # ---- client API ----------------------------------------------------------
@@ -190,6 +206,50 @@ defmodule Arbiter.Nodes.Session do
   @spec checkout_done(pid(), String.t(), {:ok, term()} | {:error, term()}) :: :ok
   def checkout_done(pid, run, result), do: GenServer.cast(pid, {:checkout_done, run, result})
 
+  @doc """
+  Recover a run the node **retained** across a primary restart (RW12, §10.4): ask the
+  agent to upload its transcripts and checkout bundle, which the upload endpoints
+  accept for `run` against `ctx` (`%{home, branch, base, seeded_paths, config_dir}`,
+  the context `prepare/3`'s `:checkout` carries) while the recovery lasts. Waits for
+  the agent's `recovered` report.
+
+  Returns `{:ok, %{agent: parts, checkout: ingest_result | nil}}`;
+  `{:error, :not_on_node}` when the agent neither retains nor still holds the run;
+  `{:error, {:recovery_failed, details}}` when an upload was refused; and
+  `{:error, :timeout | :not_connected | :node_lost | :already_recovering}`. A run the
+  agent is still quiescing is asked for as soon as it reports `retained`.
+  """
+  @spec recover(pid(), String.t(), map(), timeout()) :: {:ok, map()} | {:error, term()}
+  def recover(pid, run, ctx, timeout \\ 60_000) do
+    GenServer.call(pid, {:recover, run, ctx}, timeout)
+  catch
+    :exit, {:timeout, _} ->
+      recover_abort(pid, run)
+      {:error, :timeout}
+
+    :exit, _ ->
+      {:error, :no_session}
+  end
+
+  @doc "Withdraw a recovery (its budget ran out): the upload endpoints stop accepting `run`."
+  @spec recover_abort(pid(), String.t()) :: :ok
+  def recover_abort(pid, run), do: GenServer.cast(pid, {:recover_abort, run})
+
+  @doc "Tell the agent it may delete what it retained of `run` (and forget it here)."
+  @spec drop_retained(pid(), String.t()) :: :ok
+  def drop_retained(pid, run), do: GenServer.call(pid, {:drop_retained, run})
+
+  @doc "Send the node a `reap` now (what the periodic timer does). `:ok` even when reaping is off."
+  @spec reap_now(pid()) :: :ok
+  def reap_now(pid), do: GenServer.call(pid, :reap_now)
+
+  @doc """
+  Send the node a `reap` against an explicit `live_set` (`Arbiter.Worker.Executor.reap/2`).
+  `{:error, :disabled}` when this instance may not reap (not the primary, or off).
+  """
+  @spec reap(pid(), [String.t()]) :: :ok | {:error, :disabled | :not_connected}
+  def reap(pid, live_set), do: GenServer.call(pid, {:reap, live_set})
+
   @doc "A run event from the node, via the channel: `run.ready`, `run.refused`, `stdout`, `exit`."
   @spec node_event(pid(), String.t(), term()) :: :ok
   def node_event(pid, event, payload), do: GenServer.cast(pid, {:node_event, event, payload})
@@ -241,25 +301,28 @@ defmodule Arbiter.Nodes.Session do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       thresholds: Liveness.current(),
       allow_skew?: Keyword.get(opts, :allow_skew, false),
-      last_hb: clock.()
+      last_hb: clock.(),
+      reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms)
     }
 
-    {:ok, schedule_tick(state)}
+    {:ok, state |> schedule_tick() |> schedule_reap()}
   end
 
   @impl true
   def handle_call({:attach, channel, params}, _from, state) do
     state = state |> take_over(channel) |> apply_hello(params)
 
-    # What the primary itself placed on this node is known by definition; the
-    # `worker_runs` check covers the rest.
+    # A run is "known" iff this session holds it: its Worker placed it in this BEAM
+    # (§10.4). A live `worker_runs` row is not enough: after a primary restart the row
+    # is still live but its Worker is gone, and the agent must quiesce the run rather
+    # than reattach it.
     verdicts =
       params
       |> hello_run_list()
       |> Hello.run_ids()
-      |> Hello.verdicts()
-      |> Map.new(fn {id, verdict} ->
-        {id, if(id in RunStreams.live(state.streams), do: "known", else: verdict)}
+      |> Map.new(fn id ->
+        {id,
+         if(match?({:ok, _}, RunStreams.fetch(state.streams, id)), do: "known", else: "unknown")}
       end)
 
     # Runs we hold that the agent no longer has are over; cancels it may have
@@ -278,7 +341,7 @@ defmodule Arbiter.Nodes.Session do
     broadcast({:node_connection, state.node_id, :up})
     broadcast({:node_state, state.node_id, :online})
 
-    {:reply, {:ok, %{pid: self(), hello_ok: hello_ok(state, verdicts)}}, state}
+    {:reply, {:ok, %{pid: self(), hello_ok: hello_ok(state, verdicts)}}, send_reap(state)}
   end
 
   def handle_call({:heartbeat, payload}, _from, state) do
@@ -326,7 +389,45 @@ defmodule Arbiter.Nodes.Session do
          {:ok, ctx} <- Map.fetch(state.checkouts, run) do
       {:reply, {:ok, ctx}, state}
     else
-      _ -> {:reply, :error, state}
+      _ -> {:reply, recovery_context(state, run), state}
+    end
+  end
+
+  def handle_call({:recover, _run, _ctx}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:recover, run, ctx}, from, state) do
+    cond do
+      Map.has_key?(state.recoveries, run) ->
+        {:reply, {:error, :already_recovering}, state}
+
+      Map.has_key?(state.retained, run) ->
+        {:noreply, start_recovery(state, run, ctx, from)}
+
+      # The agent still has it, so it is being quiesced: asked for once it says retained.
+      Map.has_key?(state.runs, run) ->
+        recovery = %{ctx: ctx, waiters: [from], phase: :waiting, checkout: nil}
+        {:noreply, %{state | recoveries: Map.put(state.recoveries, run, recovery)}}
+
+      true ->
+        {:reply, {:error, :not_on_node}, state}
+    end
+  end
+
+  def handle_call({:drop_retained, run}, _from, state) do
+    notify_channel(state, {:push, "retained.drop", %{"run" => run}})
+    {:reply, :ok, %{state | retained: Map.delete(state.retained, run)}}
+  end
+
+  def handle_call(:reap_now, _from, state), do: {:reply, :ok, send_reap(state)}
+
+  def handle_call({:reap, _live_set}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:reap, live_set}, _from, state) do
+    case Reaping.payload(live_set) do
+      nil -> {:reply, {:error, :disabled}, state}
+      payload -> {:reply, :ok, tap(state, &notify_channel(&1, {:push, "reap", payload}))}
     end
   end
 
@@ -384,7 +485,14 @@ defmodule Arbiter.Nodes.Session do
 
   def handle_cast({:release_run, run}, state), do: {:noreply, drop_run(state, run)}
 
+  def handle_cast({:recover_abort, run}, state) do
+    {recovery, recoveries} = Map.pop(state.recoveries, run)
+    if recovery, do: Enum.each(recovery.waiters, &GenServer.reply(&1, {:error, :timeout}))
+    {:noreply, %{state | recoveries: recoveries}}
+  end
+
   def handle_cast({:checkout_done, run, result}, state) do
+    state = note_recovered_checkout(state, run, result)
     {waiters, collectors} = Map.pop(state.collectors, run, [])
     Enum.each(waiters, &GenServer.reply(&1, result))
 
@@ -434,6 +542,8 @@ defmodule Arbiter.Nodes.Session do
     {:noreply, state}
   end
 
+  def handle_info(:reap, state), do: {:noreply, state |> send_reap() |> schedule_reap()}
+
   def handle_info({:prepare_timeout, run}, state) do
     case RunStreams.fetch(state.streams, run) do
       {:ok, %{state: :assigned, waiter: waiter}} when not is_nil(waiter) ->
@@ -454,6 +564,11 @@ defmodule Arbiter.Nodes.Session do
     # runs again, so each ends for its owner rather than leave a Worker waiting.
     {_streams, effects} = RunStreams.node_lost(state.streams)
     run_effects(%{state | channel: nil}, effects)
+
+    for {_run, recovery} <- state.recoveries,
+        from <- recovery.waiters,
+        do: GenServer.reply(from, {:error, :node_lost})
+
     :ok
   end
 
@@ -491,7 +606,106 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
+  # RW12: the agent quiesced a run the primary does not know and kept its work.
+  defp node_event_apply(state, "retained", %{"run" => run} = report) do
+    record(state, :retained, %{"run" => run, "report" => report})
+    state = %{state | retained: Map.put(state.retained, run, report)}
+
+    case Map.fetch(state.recoveries, run) do
+      {:ok, %{phase: :waiting, ctx: ctx, waiters: [from | _]}} ->
+        start_recovery(%{state | recoveries: Map.delete(state.recoveries, run)}, run, ctx, from)
+
+      _ ->
+        state
+    end
+  end
+
+  defp node_event_apply(state, "recovered", %{"run" => run} = parts),
+    do: finish_recovery(state, run, parts)
+
+  defp node_event_apply(state, "reaped", %{} = report) do
+    record(state, :reaped, Map.take(report, ~w(containers pods dirs)))
+    state
+  end
+
   defp node_event_apply(state, _event, _payload), do: state
+
+  # ---- recovery ----------------------------------------------------------------------
+
+  defp start_recovery(state, run, ctx, from) do
+    notify_channel(state, {:push, "recover", %{"run" => run}})
+    recovery = %{ctx: ctx, waiters: [from], phase: :pulling, checkout: nil}
+    %{state | recoveries: Map.put(state.recoveries, run, recovery)}
+  end
+
+  defp recovery_context(state, run) do
+    case Map.get(state.recoveries, run) do
+      %{phase: :pulling, ctx: ctx} -> {:ok, ctx}
+      _ -> :error
+    end
+  end
+
+  # The ingest's own verdict (the upload endpoint reports it here).
+  defp note_recovered_checkout(state, run, result) do
+    case Map.fetch(state.recoveries, run) do
+      {:ok, recovery} ->
+        %{state | recoveries: Map.put(state.recoveries, run, %{recovery | checkout: result})}
+
+      :error ->
+        state
+    end
+  end
+
+  defp finish_recovery(state, run, parts) do
+    case Map.pop(state.recoveries, run) do
+      {nil, _} ->
+        state
+
+      {%{waiters: waiters, checkout: checkout}, recoveries} ->
+        agent = Map.delete(parts, "run")
+        ok? = recovery_ok?(agent, checkout)
+
+        reply =
+          if ok?,
+            do: {:ok, %{agent: agent, checkout: ingested(checkout)}},
+            else: {:error, {:recovery_failed, %{agent: agent, checkout: checkout}}}
+
+        Enum.each(waiters, &GenServer.reply(&1, reply))
+
+        if ok? do
+          record(state, :recovered, %{"run" => run, "agent" => agent})
+          %{state | recoveries: recoveries, retained: Map.delete(state.retained, run)}
+        else
+          %{state | recoveries: recoveries}
+        end
+    end
+  end
+
+  defp recovery_ok?(agent, checkout) do
+    not Map.has_key?(agent, "error") and agent["transcripts"] in ["ok", "none"] and
+      agent["checkout"] in ["ok", "none"] and not match?({:error, _}, checkout)
+  end
+
+  defp ingested({:ok, result}), do: result
+  defp ingested(_none), do: nil
+
+  # ---- reaping -----------------------------------------------------------------------
+
+  defp send_reap(%{channel: nil} = state), do: state
+
+  defp send_reap(state) do
+    case Reaping.request(RunStreams.live(state.streams)) do
+      nil -> state
+      payload -> tap(state, &notify_channel(&1, {:push, "reap", payload}))
+    end
+  end
+
+  defp schedule_reap(%{reap_interval_ms: :infinity} = state), do: state
+
+  defp schedule_reap(%{reap_interval_ms: ms} = state) do
+    Process.send_after(self(), :reap, ms)
+    state
+  end
 
   defp apply_streams(state, {streams, effects}),
     do: run_effects(%{state | streams: streams}, effects)
@@ -533,6 +747,7 @@ defmodule Arbiter.Nodes.Session do
         caps: map(params["caps"]),
         capacity: map(params["capacity"]),
         runs: hello_runs(hello_run_list(params)),
+        retained: hello_retained(params),
         operator_max: node && node.max_workers,
         draining?: not is_nil(node) and node.status == :draining,
         thresholds: Liveness.current(),
@@ -551,6 +766,17 @@ defmodule Arbiter.Nodes.Session do
   end
 
   defp hello_runs(_), do: %{}
+
+  # `inventory.retained`: what the agent quiesced and still holds (RW12).
+  defp hello_retained(params) do
+    case get_in(params, ["inventory", "retained"]) do
+      list when is_list(list) ->
+        for %{"run" => run} = r <- list, is_binary(run), into: %{}, do: {run, r}
+
+      _ ->
+        %{}
+    end
+  end
 
   defp hello_ok(state, verdicts) do
     t = state.thresholds
@@ -716,6 +942,7 @@ defmodule Arbiter.Nodes.Session do
       capacity: state.capacity,
       max_workers: max_workers(state),
       runs: state.runs,
+      retained: state.retained,
       free_mem: state.free_mem,
       load: state.load,
       silence_ms: state.clock.() - state.last_hb

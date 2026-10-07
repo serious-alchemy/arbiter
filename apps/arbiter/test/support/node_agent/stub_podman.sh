@@ -61,6 +61,9 @@ case "$sub" in
     esac ;;
   inspect) cat "$D/oom" 2>/dev/null || echo false ;;
   rm) : > "$D/removed"; exit 0 ;;
+  # RW12: the reaper lists containers (`ps -a ... --format json`) and pods (`pod ps ...`).
+  ps) cat "$D/ps.json" 2>/dev/null || echo '[]'; exit 0 ;;
+  pod) cat "$D/pods.json" 2>/dev/null || echo '[]'; exit 0 ;;
   kill) exit 0 ;;
   image) exit 0 ;;
   *) exit 0 ;;

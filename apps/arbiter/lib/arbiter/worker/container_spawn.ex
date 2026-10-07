@@ -876,6 +876,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "run" => run_id,
          "task" => request.task_id && to_string(request.task_id),
          "name" => request.name,
+         "install" => Arbiter.Nodes.InstallId.get(),
          "image" => %{"tag" => request.image.tag, "plan" => plan_json(request.image.plan)},
          "cwd" => request.worktree,
          "mounts" =>
