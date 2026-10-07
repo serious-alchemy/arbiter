@@ -748,6 +748,73 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- tracker_list_issues ------------------------------------------------
+
+  @doc """
+  List the open tracker issues assigned to the workspace user (`arb ticket list
+  --tracker`, REST `GET /api/workspaces/:id/tracker/issues`) — the refs
+  `tracker_claim` needs (P-15). Coordinator only; the workspace resolves by the
+  same P-04 rule as `tracker_claim`. A tracker with no backlog notion replies
+  `supported: false` with no rows, as REST does.
+  """
+  @spec tracker_list_issues(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def tracker_list_issues(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, workspace} <- fetch_workspace(ws_id) do
+      case Trackers.list_open(workspace) do
+        {:ok, summaries} ->
+          {:ok, %{data: Enum.map(summaries, &tracker_issue_row/1), supported: true}}
+
+        {:error, :not_supported} ->
+          {:ok, %{data: [], supported: false}}
+
+        {:error, reason} ->
+          {:error, claim_error(reason)}
+      end
+    end
+  end
+
+  defp tracker_issue_row(%{
+         ref: ref,
+         title: title,
+         url: url,
+         status: status,
+         assignees: assignees
+       }),
+       do: %{
+         ref: ref,
+         title: title,
+         url: url,
+         status: Atom.to_string(status),
+         assignees: assignees
+       }
+
+  # ---- tracker_create_ticket ----------------------------------------------
+
+  @doc """
+  Create an unclaimed ticket in the workspace's external tracker with no local
+  task (`arb ticket create --ticket-only`, REST `POST
+  /api/workspaces/:id/tracker/tickets`; P-15). Coordinator only. Backs onto
+  `Arbiter.Trackers.create_ticket_only/2`.
+  """
+  @spec tracker_create_ticket(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def tracker_create_ticket(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, title} <- require_string(args, "title"),
+         {:ok, workspace} <- fetch_workspace(ws_id) do
+      attrs =
+        %{title: title, description: fetch_string(args, "description")}
+        |> Map.put(:priority, args["priority"])
+        |> Map.put(:issue_type, fetch_string(args, "issue_type"))
+
+      case Trackers.create_ticket_only(workspace, attrs) do
+        {:ok, created} -> {:ok, created}
+        {:error, {:invalid_request, _} = refusal} -> {:error, refusal}
+        {:error, reason} -> {:error, claim_error(reason)}
+      end
+    end
+  end
+
   # ---- tracker_sync -------------------------------------------------------
 
   @doc """

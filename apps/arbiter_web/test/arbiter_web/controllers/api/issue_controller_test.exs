@@ -1241,6 +1241,57 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "POST /api/issues/:id/sync_upstream_close" do
+    test "refuses a ticket that is not closed", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "open", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/sync_upstream_close")
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "a closed ticket with no tracker link succeeds without a state change", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues/#{closed.id}/sync_upstream_close")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "closed"
+    end
+
+    test "404s an unknown ticket", %{conn: conn} do
+      conn = post(conn, ~p"/api/issues/bd-nope/sync_upstream_close")
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "PATCH /api/issues/:id/rank pinned (P-15)" do
+    test "pinned: false alone unpins without moving", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, pinned} = Arbiter.Tasks.Rank.move(a, %{position: :top, pinned: true})
+      assert pinned.rank_pinned
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"pinned" => false})
+
+      body = json_response(conn, 200)
+      assert body["rank_pinned"] == false
+      assert body["rank"] == pinned.rank
+    end
+
+    test "a move with pinned: true pins", %{conn: conn, ws: ws} do
+      {:ok, _a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{b.id}/rank", %{"top" => true, "pinned" => true})
+
+      assert json_response(conn, 200)["rank_pinned"] == true
+    end
+  end
+
   describe "PATCH /api/issues/:id/rank" do
     test "top moves a ticket ahead of every other ticket in the workspace", %{conn: conn, ws: ws} do
       {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})

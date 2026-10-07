@@ -35,6 +35,7 @@ defmodule Arbiter.Tasks.IssueSerializer do
       state: str(issue.state),
       close_reason: str(issue.close_reason),
       rank: issue.rank,
+      rank_pinned: issue.rank_pinned,
       priority: issue.priority,
       # ES2: the epic priority floor (nil: none). Distinct from `priority`.
       floor_priority: issue.floor_priority,

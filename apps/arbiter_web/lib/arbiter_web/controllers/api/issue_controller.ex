@@ -398,11 +398,25 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   @doc """
+  Push a close to the linked tracker issue for a ticket already `:closed`
+  locally (P-15) — the remedy `arb sync` reports for `drift`. Backs onto the
+  `:sync_upstream_close` action; no local state change.
+  """
+  def sync_upstream_close(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, synced} <- Ash.update(issue, %{}, action: :sync_upstream_close) do
+      render(conn, :show, issue: synced)
+    end
+  end
+
+  @doc """
   Reorder a ticket inside its workspace's rank order (bd-djapyj). Body is one
   of `top: true`, `bottom: true`, `before_id: <id>`, `after_id: <id>` — the
   same four forms the CLI (`arb ticket rank`) and MCP (`ticket_rank`) accept,
   all backed by the `:set_rank` action. Never changes `priority`.
   """
+  @rank_usage "give exactly one of: top, bottom, before_id, after_id (optionally with pinned), or pinned alone"
+
   def rank(conn, %{"id" => id} = params) do
     with {:ok, rank_args} <- rank_args(params),
          {:ok, issue} <- Ash.get(Issue, id),
@@ -413,7 +427,8 @@ defmodule ArbiterWeb.Api.IssueController do
 
   defp rank_args(params) do
     with {:ok, top?} <- params |> Params.fetch_bool("top", false) |> Params.to_rest(),
-         {:ok, bottom?} <- params |> Params.fetch_bool("bottom", false) |> Params.to_rest() do
+         {:ok, bottom?} <- params |> Params.fetch_bool("bottom", false) |> Params.to_rest(),
+         {:ok, pinned} <- params |> fetch_pinned() |> Params.to_rest() do
       forms =
         [
           top? && %{position: :top},
@@ -423,11 +438,19 @@ defmodule ArbiterWeb.Api.IssueController do
         ]
         |> Enum.reject(&(&1 == false))
 
-      case forms do
-        [form] -> {:ok, form}
-        _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+      case {forms, pinned} do
+        {[form], nil} -> {:ok, form}
+        {[form], pinned} -> {:ok, Map.put(form, :pinned, pinned)}
+        {[], pinned} when is_boolean(pinned) -> {:ok, %{pinned: pinned}}
+        _ -> {:error, {:invalid_request, @rank_usage}}
       end
     end
+  end
+
+  defp fetch_pinned(params) do
+    if Map.has_key?(params, "pinned"),
+      do: Params.fetch_bool(params, "pinned", false),
+      else: {:ok, nil}
   end
 
   @doc """

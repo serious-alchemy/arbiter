@@ -137,4 +137,40 @@ defmodule ArbiterCli.Cmd.RankTest do
     assert exit_code == 1
     assert err =~ "different workspace"
   end
+
+  test "--unpin alone sends {pinned: false}" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001/rank"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"pinned" => false}
+
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--unpin"]) end)
+    assert exit_code == 0
+  end
+
+  test "--top with --pin sends both" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001/rank"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"top" => true, "pinned" => true}
+
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--top", "--pin"]) end)
+    assert exit_code == 0
+  end
+
+  test "--pin and --unpin together are refused" do
+    {_out, err, exit_code} = capture(fn -> Rank.run(["bd-001", "--pin", "--unpin"]) end)
+    assert exit_code != 0
+    assert err =~ "mutually exclusive"
+  end
 end
