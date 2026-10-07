@@ -6705,8 +6705,31 @@ defmodule Arbiter.MCP.ToolsTest do
       refute is_nil(repo)
       assert repo.path == "/tmp/test-repo"
       assert repo.source == ctx.ws.name
+      assert repo.workspace_id == ctx.ws.id
       assert is_integer(repo.workers)
       assert is_integer(repo.worktrees)
+    end
+
+    test "two-workspace same-name fixture returns both entries", ctx do
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "second-ws",
+          prefix: "sws",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-2"}}
+        })
+
+      ws_config = ctx.ws.config || %{}
+
+      {:ok, _updated_ws} =
+        Ash.update(ctx.ws, %{
+          config: Map.merge(ws_config, %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-1"}})
+        })
+
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      twins = Enum.filter(data.repos, &(&1.name == "twin-repo"))
+      assert length(twins) == 2
+      assert Enum.map(twins, & &1.source) |> Enum.sort() == Enum.sort([ctx.ws.name, "second-ws"])
+      assert Enum.map(twins, & &1.workspace_id) |> Enum.sort() == Enum.sort([ctx.ws.id, ws2.id])
     end
   end
 
@@ -6738,8 +6761,49 @@ defmodule Arbiter.MCP.ToolsTest do
       assert repo.name == "test-repo"
       assert repo.path == "/tmp/test-repo"
       assert repo.source == ctx.ws.name
+      assert repo.workspace_id == ctx.ws.id
       assert is_integer(repo.workers)
       assert is_integer(repo.worktrees)
+    end
+
+    test "two-workspace same-name fixture rejects unqualified lookup and accepts workspace qualifier",
+         ctx do
+      %Scope{} = coordinator = %{ctx.coordinator | workspace_id: nil}
+
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "second-ws",
+          prefix: "sws",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-2"}}
+        })
+
+      ws_config = ctx.ws.config || %{}
+
+      {:ok, _updated_ws} =
+        Ash.update(ctx.ws, %{
+          config: Map.merge(ws_config, %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-1"}})
+        })
+
+      # Unqualified lookup against multiple workspaces fails with ambiguity error
+      assert {:error, {:invalid_request, msg}} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo"})
+
+      assert msg =~ "ambiguous"
+
+      # Qualified lookup returns the specific workspace entry with its workspace_id
+      assert {:ok, repo1} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ctx.ws.id})
+
+      assert repo1.path == "/tmp/twin-repo-1"
+      assert repo1.source == ctx.ws.name
+      assert repo1.workspace_id == ctx.ws.id
+
+      assert {:ok, repo2} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ws2.name})
+
+      assert repo2.path == "/tmp/twin-repo-2"
+      assert repo2.source == "second-ws"
+      assert repo2.workspace_id == ws2.id
     end
   end
 
