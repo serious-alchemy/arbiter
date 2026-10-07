@@ -47,8 +47,10 @@ defmodule Arbiter.Worker.NodeLostTest do
   defp restore(key, :error), do: Application.delete_env(:arbiter, key)
 
   defp lose_node(pid, dir, outcome) do
-    {:ok, port} =
-      ClaudeSession.start(owner: pid, worktree_path: dir, command: ["sh", "-c", "sleep 30"])
+    # `sleep` itself, not `sh -c "sleep 30"`: a shell that forks rather than
+    # execs its last command (dash on Ubuntu CI) leaves `sleep` holding the
+    # port's pipe after the kill, so the exit is never reported.
+    {:ok, port} = ClaudeSession.start(owner: pid, worktree_path: dir, command: ["sleep", "30"])
 
     :sys.replace_state(pid, fn st ->
       update_in(st.claude_sessions[port], &Map.put(&1, :remote_outcome, outcome))
