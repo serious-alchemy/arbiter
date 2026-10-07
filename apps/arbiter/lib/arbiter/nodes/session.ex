@@ -177,6 +177,14 @@ defmodule Arbiter.Nodes.Session do
   @spec run_live?(pid(), String.t()) :: boolean()
   def run_live?(pid, run), do: GenServer.call(pid, {:run_live?, run})
 
+  @doc """
+  The primary's own socket for `name` of `run`, for a stream the node asks to
+  open (`Arbiter.Nodes.Bridge`): `{:error, :unknown_run | :run_ended |
+  :unknown_bridge}` unless the run is placed on this node and declared that name.
+  """
+  @spec bridge_target(pid(), String.t(), String.t()) :: {:ok, Path.t()} | {:error, atom()}
+  def bridge_target(pid, run, name), do: GenServer.call(pid, {:bridge_target, run, name})
+
   @doc "Forget an ended run."
   @spec release_run(pid(), String.t()) :: :ok
   def release_run(pid, run), do: GenServer.cast(pid, {:release_run, run})
@@ -267,11 +275,20 @@ defmodule Arbiter.Nodes.Session do
         ms = Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
         Process.send_after(self(), {:prepare_timeout, run}, ms)
 
-        state = %{state | streams: RunStreams.open(state.streams, run, handle, owner, from)}
+        bridges = bridge_map(spec)
+
+        state = %{
+          state
+          | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges)
+        }
+
         notify_channel(state, {:push, "assign", %{"run" => run, "spec" => spec}})
         {:noreply, state}
     end
   end
+
+  def handle_call({:bridge_target, run, name}, _from, state),
+    do: {:reply, RunStreams.bridge_target(state.streams, run, name), state}
 
   def handle_call({:run_outcome, run}, _from, state),
     do: {:reply, RunStreams.outcome(state.streams, run), state}
@@ -309,8 +326,7 @@ defmodule Arbiter.Nodes.Session do
     {:noreply, state}
   end
 
-  def handle_cast({:release_run, run}, state),
-    do: {:noreply, %{state | streams: RunStreams.drop(state.streams, run)}}
+  def handle_cast({:release_run, run}, state), do: {:noreply, drop_run(state, run)}
 
   def handle_cast({:upgrade, payload}, state) do
     notify_channel(state, {:upgrade, payload})
@@ -341,7 +357,7 @@ defmodule Arbiter.Nodes.Session do
     state =
       Enum.reduce(RunStreams.owned_by(state.streams, pid), state, fn run, acc ->
         {streams, effects} = RunStreams.cancel(acc.streams, run, "owner_down")
-        run_effects(%{acc | streams: RunStreams.drop(streams, run)}, effects)
+        run_effects(drop_run(%{acc | streams: streams}, run), effects)
       end)
 
     {:noreply, state}
@@ -352,7 +368,7 @@ defmodule Arbiter.Nodes.Session do
       {:ok, %{state: :assigned, waiter: waiter}} when not is_nil(waiter) ->
         GenServer.reply(waiter, {:error, :prepare_timeout})
         {streams, effects} = RunStreams.cancel(state.streams, run, "prepare_timeout")
-        {:noreply, run_effects(%{state | streams: RunStreams.drop(streams, run)}, effects)}
+        {:noreply, run_effects(drop_run(%{state | streams: streams}, run), effects)}
 
       _ ->
         {:noreply, state}
@@ -636,6 +652,20 @@ defmodule Arbiter.Nodes.Session do
   end
 
   # ---- plumbing ------------------------------------------------------------
+
+  # Forget a run; whatever streams it still has open on the channel end with it.
+  defp drop_run(state, run) do
+    notify_channel(state, {:run_over, run})
+    %{state | streams: RunStreams.drop(state.streams, run)}
+  end
+
+  # `%{name => path}` of the per-run sockets a spec declares.
+  defp bridge_map(%{"bridges" => bridges}) when is_list(bridges) do
+    for %{"name" => name, "path" => path} <- bridges, is_binary(name), is_binary(path), into: %{},
+        do: {name, path}
+  end
+
+  defp bridge_map(_spec), do: %{}
 
   defp notify_channel(%{channel: pid}, message) when is_pid(pid),
     do: send(pid, {:node_session, message})

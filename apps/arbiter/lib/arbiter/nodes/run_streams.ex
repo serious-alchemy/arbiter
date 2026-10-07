@@ -40,13 +40,19 @@ defmodule Arbiter.Nodes.RunStreams do
           | {:send, pid(), term()}
           | {:push, String.t(), map()}
 
-  @doc "Register run `run` placed with `handle`; `owner` receives its messages, `waiter` the answer to `assign`."
-  @spec open(t(), String.t(), term(), pid(), GenServer.from() | nil) :: t()
-  def open(%__MODULE__{} = table, run, handle, owner, waiter) do
+  @doc """
+  Register run `run` placed with `handle`; `owner` receives its messages, `waiter`
+  the answer to `assign`. `bridges` is `%{name => primary socket path}`, the
+  per-run sockets the node may open streams to (`bridge_target/3`).
+  """
+  @spec open(t(), String.t(), term(), pid(), GenServer.from() | nil, %{String.t() => Path.t()}) ::
+          t()
+  def open(%__MODULE__{} = table, run, handle, owner, waiter, bridges \\ %{}) do
     stream = %{
       handle: handle,
       owner: owner,
       waiter: waiter,
+      bridges: bridges,
       state: :assigned,
       next: 0,
       partial: "",
@@ -60,6 +66,20 @@ defmodule Arbiter.Nodes.RunStreams do
 
   @spec fetch(t(), String.t()) :: {:ok, map()} | :error
   def fetch(%__MODULE__{streams: streams}, run), do: Map.fetch(streams, run)
+
+  @doc """
+  The primary's own socket for bridge `name` of `run`: only for a run the node
+  holds that has not ended, and only for a name the run's spec declared.
+  """
+  @spec bridge_target(t(), String.t(), String.t()) :: {:ok, Path.t()} | {:error, atom()}
+  def bridge_target(%__MODULE__{streams: streams}, run, name) do
+    case streams do
+      %{^run => %{state: :done}} -> {:error, :run_ended}
+      %{^run => %{bridges: %{^name => path}}} -> {:ok, path}
+      %{^run => _} -> {:error, :unknown_bridge}
+      _ -> {:error, :unknown_run}
+    end
+  end
 
   @spec run_for_handle(t(), term()) :: String.t() | nil
   def run_for_handle(%__MODULE__{streams: streams}, handle) do
