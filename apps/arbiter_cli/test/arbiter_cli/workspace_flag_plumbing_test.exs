@@ -100,6 +100,10 @@ defmodule ArbiterCli.WorkspaceFlagPlumbingTest do
     assert query["workspace"] == "ws-acme"
   end
 
+  test "alert list -w" do
+    assert_query(["alert", "list", "-w", "acme"], "/api/alerts", "workspace")
+  end
+
   test "dep list -w" do
     assert_query(["dep", "list", "-w", "acme"], "/api/dependencies", "workspace_id")
   end
