@@ -31,6 +31,7 @@ defmodule Arbiter.Reviews.Checkout do
 
   require Logger
 
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Worktree
 
   @type reason ::
@@ -40,6 +41,7 @@ defmodule Arbiter.Reviews.Checkout do
           | {:fetch_failed, non_neg_integer(), String.t()}
           | {:rev_parse_failed, non_neg_integer(), String.t()}
           | {:worktree_failed, non_neg_integer(), String.t()}
+          | {:git_failed, String.t()}
 
   @default_prefix "ext-review"
 
@@ -107,6 +109,10 @@ defmodule Arbiter.Reviews.Checkout do
   the PR will be judged against. A branch `origin` has never seen falls back to
   the local ref — the Direct (local-merge) strategy's shape, where a task
   branch is never pushed at all and the local ref *is* the truth.
+
+  `layout: :private_clone` (with `base:` naming the target branch) provisions
+  a read-only `PrivateClone.create_review/3` instead of a linked worktree, for
+  a reviewer that runs in a container (bd-7ays3v).
 
   Best-effort with the same contract as `provision/3`: every failure (no
   `origin` and no local ref, `repo_path` not a git repo) returns
@@ -219,11 +225,21 @@ defmodule Arbiter.Reviews.Checkout do
   defp add_detached(repo_path, head_sha, opts) do
     path = worktree_path(head_sha, Keyword.get(opts, :prefix, @default_prefix))
 
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- worktree_add(repo_path, path, head_sha) do
-      {:ok, path}
+    with :ok <- File.mkdir_p(Path.dirname(path)) do
+      case Keyword.get(opts, :layout, :linked_worktree) do
+        :private_clone -> add_clone(repo_path, head_sha, path, opts)
+        _ -> with :ok <- worktree_add(repo_path, path, head_sha), do: {:ok, path}
+      end
     end
   end
+
+  # bd-7ays3v: the checkout of a reviewer that runs in a container, which is
+  # only ever handed a private clone (`PrivateClone.mounts/1`). Read-only and
+  # unable to push, so unlike the worktree it shares nothing with the main repo
+  # but the objects it borrows.
+  defp add_clone(repo_path, head_sha, path, opts),
+    do:
+      PrivateClone.create_review(repo_path, head_sha, path: path, base: Keyword.get(opts, :base))
 
   defp worktree_path(head_sha, prefix) do
     root = Arbiter.Config.Paths.worktree_root()

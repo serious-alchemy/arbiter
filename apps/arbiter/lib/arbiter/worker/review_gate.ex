@@ -238,9 +238,11 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -2109,7 +2111,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {:ok, state}
 
       {:ok, wt, branch} ->
-        case Checkout.provision_branch(wt, branch, prefix: @review_checkout_prefix) do
+        case Checkout.provision_branch(wt, branch, review_checkout_opts(state)) do
           {:ok, %{path: path, head_sha: sha}} ->
             # The reviewer may run tests here. Seed the implementer's fetched
             # and compiled deps (never the umbrella apps themselves — those
@@ -2157,6 +2159,28 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   def release_review_checkout(state), do: state
+
+  # bd-7ays3v: a reviewer that may run in a container (`sandbox.backend` or
+  # `sandbox.review_backend` is podman) is checked out as a read-only private
+  # clone, the only layout a container is handed. Everyone else keeps the
+  # detached linked worktree.
+  @doc false
+  @spec review_checkout_opts(map()) :: keyword()
+  def review_checkout_opts(state) do
+    ws = load_workspace(Map.get(state, :workspace_id))
+
+    case GitLayout.for_review_workspace(ws, Map.get(state, :repo)) do
+      :private_clone ->
+        [
+          prefix: @review_checkout_prefix,
+          layout: :private_clone,
+          base: Map.get(state, :target_branch)
+        ]
+
+      _ ->
+        [prefix: @review_checkout_prefix]
+    end
+  end
 
   defp review_checkout_source(%{worktree_path: wt, branch: branch})
        when is_binary(wt) and is_binary(branch) do
@@ -2209,10 +2233,17 @@ defmodule Arbiter.Worker.ReviewGate do
   Both roles spawn under `sandbox.review_backend`, not `sandbox.backend`
   (`SecurityPolicy.for_review_spawn/1`, bd-4rvf98): a podman repo still gets a
   jailed, un-parked review, and a `review_backend` that cannot run is refused.
+  The one exception (bd-7ays3v) is a Claude `:reviewer` whose `provider` is
+  given and whose checkout is a private clone: on a `sandbox.backend: podman`
+  repo it keeps podman and runs in the container.
   """
-  @spec session_security_policy(Workspace.t() | map() | nil, map(), :reviewer | :implementer) ::
-          SecurityPolicy.t()
-  def session_security_policy(ws, state, role) do
+  @spec session_security_policy(
+          Workspace.t() | map() | nil,
+          map(),
+          :reviewer | :implementer,
+          atom() | String.t() | nil
+        ) :: SecurityPolicy.t()
+  def session_security_policy(ws, state, role, provider \\ nil) do
     checkout =
       case {role, Map.get(state, :review_checkout)} do
         {:reviewer, %{path: _} = checkout} -> checkout
@@ -2222,8 +2253,15 @@ defmodule Arbiter.Worker.ReviewGate do
     policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
 
     case role do
+      # bd-7ays3v: a Claude reviewer on a podman repo, standing in its round's
+      # private clone, runs in the container (`SecurityPolicy.for_review_spawn/2`);
+      # every other reviewer runs under `sandbox.review_backend` as before.
       :reviewer ->
-        Dispatch.review_security_policy(policy, review_checkout: checkout, review: true)
+        Dispatch.review_security_policy(policy,
+          review_checkout: checkout,
+          review: true,
+          provider: provider
+        )
 
       # The revise pass writes in the implementer's tree, so it keeps the plain
       # posture, but not the implement backend: `sandbox.backend: podman` wraps
@@ -5867,19 +5905,21 @@ defmodule Arbiter.Worker.ReviewGate do
     # and Arbiter-owned `GEMINI.md` as a first-round worker, rather than
     # the operator's `~/.gemini`. Adapters that don't recognise it ignore
     # it.
+    policy = session_security_policy(ws, state, role, adapter.provider())
+
     agent_opts =
       (ws
        |> agent_opts_for_role(role_atom, state.task_id, adapter)
        |> apply_conflict_tier(state, role)
        |> apply_reviewer_selection(state, role)) ++
         [
-          security: session_security_policy(ws, state, role),
+          security: policy,
           workspace: ws,
           worktree_path: session_cwd(state, role),
           timeout_ms: state.timeout_ms,
           owner: pid,
           task_id: state.task_id
-        ] ++ arb_token_opts(state, role)
+        ] ++ arb_token_opts(state, role) ++ sandbox_wrap_opts(policy, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 
@@ -5920,12 +5960,26 @@ defmodule Arbiter.Worker.ReviewGate do
              env: env,
              provider: adapter.provider(),
              model: session_model
-           ]}
+           ] ++ sandbox_session_opts(policy, ws, role, state)}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  # bd-7ays3v: a reviewer that runs in the container hands its argv to
+  # `ClaudeSession` as a wrapped spawn (`sandbox_wrap: true`), and carries the
+  # policy there so it is wrapped. Only the reviewer: a fix round's implementer
+  # stays on `sandbox.review_backend`, and no other policy changes at all.
+  defp sandbox_wrap_opts(policy, :reviewer),
+    do: if(ContainerSpawn.podman?(policy), do: [sandbox_wrap: true], else: [])
+
+  defp sandbox_wrap_opts(_policy, _role), do: []
+
+  defp sandbox_session_opts(policy, ws, :reviewer, state),
+    do: ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo))
+
+  defp sandbox_session_opts(_policy, _ws, _role, _state), do: []
 
   # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
   # rotation has pinned to a specific provider uses THAT adapter, bypassing

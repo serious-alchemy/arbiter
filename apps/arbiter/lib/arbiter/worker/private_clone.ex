@@ -176,6 +176,68 @@ defmodule Arbiter.Worker.PrivateClone do
     end)
   end
 
+  @review_branch "arbiter/review"
+  # Where a read-only clone's `origin` pushes go: nowhere, and loudly.
+  @no_push_url "file:///dev/null/arbiter-review-clone-has-no-push"
+
+  @doc """
+  A **read-only** clone of one commit, for a reviewer (bd-7ays3v): `head_sha`
+  checked out at `:path` (required; a leaf of the worktree root, named by the
+  caller) on a clone-local branch of its own, never the PR's branch.
+
+  The same layout as `create/3`, so a container can be handed it
+  (`mounts/1`), with four differences that make it a view and not a workspace:
+
+    * it is marked `arbiter.readOnly`, and `sync_back/1` refuses it
+      (`{:error, :read_only_clone}`), as does `remove/1`'s own sync-back: nothing a
+      reviewer commits ever reaches the main repo's branches;
+    * `origin` is the forge for reads (a `git fetch` works as it does anywhere), but its
+      `pushurl` is a dead end, so the clone has no way to publish anything;
+    * it is cut from `head_sha`, which must already be in `repo_path` (the
+      caller fetched it); the head is pinned there against gc like any clone's
+      `base`;
+    * no deps are seeded (`seed_paths: false`): the caller seeds what it wants.
+
+  `:base` names the target branch, whose `origin/<base>` is copied in (as
+  `attach/4` does) so `git diff origin/<base>...HEAD` reads as it does in the
+  implementer's tree. Refuses a leaf that already exists.
+  """
+  @spec create_review(path(), String.t(), keyword()) :: {:ok, path()} | {:error, term()}
+  def create_review(repo_path, head_sha, opts)
+      when is_binary(repo_path) and is_binary(head_sha) and is_list(opts) do
+    path = Keyword.fetch!(opts, :path)
+    base = Keyword.get(opts, :base)
+    base_sha = base && rev(repo_path, "refs/remotes/origin/#{base}")
+    base_refs = if base_sha, do: [{"refs/remotes/origin/" <> base, base_sha}], else: []
+
+    cond do
+      File.exists?(path) ->
+        {:error, {:git_failed, "a review clone already exists at #{path}"}}
+
+      rev(repo_path, head_sha <> "^{commit}") == nil ->
+        {:error, {:git_failed, "invalid reference: #{head_sha} (not in #{repo_path})"}}
+
+      true ->
+        provision(%{
+          repo: repo_path,
+          path: path,
+          branch: @review_branch,
+          base: base_sha && base,
+          base_sha: base_sha,
+          start: head_sha,
+          checkout_from: head_sha,
+          remote_refs: base_refs,
+          seed_paths: false,
+          read_only: true
+        })
+    end
+  end
+
+  @doc "Whether `path` is a clone `create_review/3` made: one nothing syncs back from."
+  @spec read_only?(term()) :: boolean()
+  def read_only?(path) when is_binary(path), do: marker(path, "readOnly") == "true"
+  def read_only?(_), do: false
+
   defp open(branch, provision) do
     path = Worktree.worktree_path(branch)
 
@@ -302,13 +364,14 @@ defmodule Arbiter.Worker.PrivateClone do
            git(["init", "-q", "-b", plan.branch, "--object-format=" <> plan.format, path],
              cd: Path.dirname(path)
            ),
-         :ok <- set_markers(path, repo, plan.branch, plan.base),
+         :ok <- set_markers(path, repo, plan.branch, plan.base, Map.get(plan, :read_only, false)),
          :ok <- record_identity(repo, path, leaf),
          :ok <- record_ledger(path, repo),
          :ok <- File.write(Path.join(dot_git, "objects/info/alternates"), plan.objects <> "\n"),
          :ok <- File.write(Path.join(dot_git, "commondir"), @commondir_guard),
          :ok <- File.mkdir_p(Path.join(dot_git, "hooks")),
          :ok <- configure(repo, path, leaf),
+         :ok <- if(Map.get(plan, :read_only, false), do: no_push(path), else: :ok),
          :ok <- pin(repo, leaf, "base", plan.start),
          :ok <- if(plan.base_sha, do: pin(repo, leaf, "target", plan.base_sha), else: :ok),
          :ok <- update_refs(path, plan.remote_refs),
@@ -321,8 +384,13 @@ defmodule Arbiter.Worker.PrivateClone do
     end
   end
 
-  defp set_markers(path, repo, branch, base) do
-    [{"arbiter.mainRepo", Path.expand(repo)}, {"arbiter.branch", branch}, {"arbiter.base", base}]
+  defp set_markers(path, repo, branch, base, read_only?) do
+    [
+      {"arbiter.mainRepo", Path.expand(repo)},
+      {"arbiter.branch", branch},
+      {"arbiter.base", base},
+      {"arbiter.readOnly", if(read_only?, do: "true")}
+    ]
     |> Enum.reject(&is_nil(elem(&1, 1)))
     |> Enum.reduce_while(:ok, fn {key, value}, :ok ->
       case git(["config", key, value], cd: path) do
@@ -361,6 +429,19 @@ defmodule Arbiter.Worker.PrivateClone do
          {:ok, _} <-
            git(["config", "core.alternateRefsPrefixes", pin_prefix(leaf)], cd: path) do
       :ok
+    end
+  end
+
+  # A read-only clone reads from `origin` and publishes to nothing: with a
+  # `pushurl` set, git never uses `url` for a push. A clone with no `origin`
+  # (a main repo with none) has nothing to push to anyway.
+  defp no_push(path) do
+    case git(["remote", "get-url", "origin"], cd: path) do
+      {:ok, _} ->
+        with {:ok, _} <- git(["config", "remote.origin.pushurl", @no_push_url], cd: path), do: :ok
+
+      {:error, _} ->
+        :ok
     end
   end
 
@@ -485,7 +566,8 @@ defmodule Arbiter.Worker.PrivateClone do
   """
   @spec sync_back(path()) :: {:ok, String.t()} | {:error, term()}
   def sync_back(path) when is_binary(path) do
-    with {:ok, repo, branch} <- trusted_identity(path) do
+    with {:ok, repo, branch} <- trusted_identity(path),
+         :ok <- writable(path) do
       leaf = Path.basename(path)
 
       refspecs = [
@@ -503,6 +585,9 @@ defmodule Arbiter.Worker.PrivateClone do
       end
     end
   end
+
+  defp writable(path),
+    do: if(read_only?(path), do: {:error, :read_only_clone}, else: :ok)
 
   defp identity(path) do
     repo = main_repo(path)
@@ -643,7 +728,8 @@ defmodule Arbiter.Worker.PrivateClone do
   # A clone with no branch (a provision cut short, or a worker that deleted it)
   # has nothing to carry back.
   defp maybe_sync_back(path) do
-    with branch when is_binary(branch) <- branch(path),
+    with :ok <- writable(path),
+         branch when is_binary(branch) <- branch(path),
          sha when is_binary(sha) <- local_branch_sha(path, branch),
          {:error, reason} <- sync_back(path) do
       Logger.warning(
