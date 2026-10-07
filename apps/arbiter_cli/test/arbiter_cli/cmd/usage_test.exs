@@ -368,6 +368,7 @@ defmodule ArbiterCli.Cmd.UsageTest do
 
     test "passes --workspace through to the drill-down, like `events` does" do
       stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => [%{"id" => "ws-1", "name" => "acme"}]}, 200}},
         {{"get", "/api/usage/events"},
          fn conn ->
            conn = Plug.Conn.fetch_query_params(conn)
@@ -377,12 +378,12 @@ defmodule ArbiterCli.Cmd.UsageTest do
          end}
       ])
 
-      {out, _err, code} =
+      {out, err, code} =
         capture(fn ->
-          ArbiterCli.Cmd.Usage.run(["--session", "sess-abc123", "--workspace", "ws-1"])
+          ArbiterCli.Cmd.Usage.run(["--session", "sess-abc123", "--workspace", "acme"])
         end)
 
-      assert code == 0
+      assert code == 0, "exit #{code}: #{err}"
       assert out =~ "(no usage events)"
     end
   end

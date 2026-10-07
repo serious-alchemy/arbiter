@@ -383,19 +383,27 @@ defmodule ArbiterCli.Cmd.Account do
   # ---- attach ------------------------------------------------------------
 
   defp attach(args, opts, mode) do
-    case args do
-      [workspace_id, provider, ref | _] ->
-        payload =
-          %{"workspace_id" => workspace_id, "provider" => provider}
-          |> maybe_put("share", opts[:share])
+    ws_target = System.get_env("ARB_WORKSPACE")
 
-        case Client.post("/api/accounts/" <> URI.encode(ref) <> "/attach", payload) do
-          {:ok, link} -> emit_attach(link, mode)
-          {:error, err} -> Output.die(err)
-        end
+    {workspace_id, provider, ref} =
+      case args do
+        [workspace_id, provider, ref | _] ->
+          {workspace_id, provider, ref}
 
-      _ ->
-        Output.die("account attach requires <workspace-id> <provider> <ref>")
+        [provider, ref | _] when is_binary(ws_target) and ws_target != "" ->
+          {ArbiterCli.Workspace.id_or_halt(ws_target), provider, ref}
+
+        _ ->
+          Output.die("account attach requires <workspace-id> <provider> <ref>")
+      end
+
+    payload =
+      %{"workspace_id" => workspace_id, "provider" => provider}
+      |> maybe_put("share", opts[:share])
+
+    case Client.post("/api/accounts/" <> URI.encode(ref) <> "/attach", payload) do
+      {:ok, link} -> emit_attach(link, mode)
+      {:error, err} -> Output.die(err)
     end
   end
 

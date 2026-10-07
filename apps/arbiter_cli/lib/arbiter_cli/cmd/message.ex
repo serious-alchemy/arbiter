@@ -63,16 +63,19 @@ defmodule ArbiterCli.Cmd.Message do
   defp send_msg(recipient, body, opts, mode) do
     case validate_kind(opts[:kind]) do
       {:ok, kind} ->
+        task_ref = opts[:task] || opts[:directive]
+        workspace_id = resolve_message_workspace(recipient, task_ref)
+
         payload =
           %{
             kind: kind,
             from_ref: from_identity(),
             to_ref: recipient,
             body: body,
-            workspace_id: Workspace.id_or_halt()
+            workspace_id: workspace_id
           }
           |> put_optional(:subject, opts[:subject])
-          |> put_optional(:task_ref, opts[:task] || opts[:directive])
+          |> put_optional(:task_ref, task_ref)
 
         case Client.post("/api/messages", payload) do
           {:ok, message} -> emit_send(message, recipient, kind, mode)
@@ -106,7 +109,7 @@ defmodule ArbiterCli.Cmd.Message do
   defp direction(task_id, words) do
     mode = Output.mode(words)
     text = words |> Output.drop_json() |> Enum.join(" ")
-    workspace_id = Workspace.id_or_halt()
+    workspace_id = resolve_message_workspace(task_id, task_id)
 
     body = %{
       kind: "direction",
@@ -124,6 +127,31 @@ defmodule ArbiterCli.Cmd.Message do
 
   defp emit_direction(message, _task_id, :json), do: IO.puts(Jason.encode!(message))
   defp emit_direction(_message, task_id, :text), do: IO.puts("Direction sent to #{task_id}.")
+
+  # D-M-1: A message sent to a recipient task files under that recipient task's
+  # workspace, not the CLI's default workspace. Check if recipient (or task_ref)
+  # is a task on the server and use its workspace_id if so.
+  defp resolve_message_workspace(recipient, task_ref) do
+    target = recipient_task_candidate(recipient) || recipient_task_candidate(task_ref)
+
+    case target && Client.get("/api/issues/" <> URI.encode(target)) do
+      {:ok, %{"data" => %{"workspace_id" => ws_id}}} when is_binary(ws_id) and ws_id != "" ->
+        ws_id
+
+      {:ok, %{"workspace_id" => ws_id}} when is_binary(ws_id) and ws_id != "" ->
+        ws_id
+
+      _ ->
+        Workspace.id_or_halt()
+    end
+  end
+
+  defp recipient_task_candidate(nil), do: nil
+  defp recipient_task_candidate(""), do: nil
+  defp recipient_task_candidate("coordinator"), do: nil
+  defp recipient_task_candidate("cli"), do: nil
+  defp recipient_task_candidate("system"), do: nil
+  defp recipient_task_candidate(target), do: target
 
   defp usage_hint do
     "verbs: inbox, send, notify"

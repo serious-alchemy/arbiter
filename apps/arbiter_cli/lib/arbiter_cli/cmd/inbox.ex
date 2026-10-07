@@ -50,7 +50,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   with every form, including the targeted `clear <id>` and `clear --task`.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
 
   @coordinator "coordinator"
   @all_limit 20
@@ -111,6 +111,15 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp reader_params(nil), do: []
   defp reader_params(session) when is_binary(session), do: [session: session]
 
+  # `-w` / `ARB_WORKSPACE`, resolved to the workspace id, for the calls the
+  # server scopes by workspace.
+  defp workspace_params do
+    case Workspace.selected_id() do
+      nil -> []
+      id -> [workspace: id]
+    end
+  end
+
   # ---- coordinator views ----------------------------------------------------
 
   defp coordinator_inbox_view(unread_only, mode, session) do
@@ -119,7 +128,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         do: [to_ref: @coordinator, unread: "true"],
         else: [to_ref: @coordinator, limit: @all_limit]
 
-    params = params ++ reader_params(session)
+    params = params ++ reader_params(session) ++ workspace_params()
 
     case Client.get("/api/messages", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode, coordinator_label(unread_only, list))
@@ -139,6 +148,8 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- worker (task) path -------------------------------------------------
 
   defp task_inbox(task_id, mode) do
+    Workspace.reject_flag!("inbox <task-id> (a task id already names its workspace)")
+
     case Client.get("/api/messages", to_ref: task_id, unread: "true") do
       {:ok, %{"data" => list}} ->
         mail = Enum.filter(list, &(&1["kind"] in @mailbox_kinds))
@@ -189,6 +200,8 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- read one ------------------------------------------------------------
 
   defp read_one(token, mode, session) do
+    Workspace.reject_flag!("inbox read (a message id already names its workspace)")
+
     case resolve_id(token) do
       {:ok, id} ->
         case mark_read_as(id, session) do
@@ -245,6 +258,8 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- clear ---------------------------------------------------------------
 
   defp clear(clear_all, mode, session) do
+    Workspace.reject_flag!("inbox clear (the coordinator mailbox is not per-workspace)")
+
     params = [to_ref: @coordinator] ++ reader_params(session)
     params = if clear_all, do: params ++ [all: "true"], else: params
 
@@ -300,6 +315,8 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- clear specific ids ----------------------------------------------------
 
   defp clear_ids(tokens, mode, session) do
+    Workspace.reject_flag!("inbox clear <id> (a message id already names its workspace)")
+
     case resolve_ids(tokens) do
       {:ok, ids} ->
         case Client.delete("/api/messages", [ids: Enum.join(ids, ",")] ++ reader_params(session)) do
@@ -351,7 +368,9 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- clear by task ---------------------------------------------------------
 
   defp clear_task(task_id, mode, session) do
-    case Client.delete("/api/messages", [task_id: task_id] ++ reader_params(session)) do
+    params = [task_id: task_id] ++ reader_params(session) ++ workspace_params()
+
+    case Client.delete("/api/messages", params) do
       {:ok, %{"data" => data}} ->
         cleared = data["cleared"] || []
         emit_cleared_task(length(cleared), task_id, mode)
