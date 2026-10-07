@@ -9,19 +9,32 @@ defmodule Mix.Tasks.Arbiter.GenerateCompetenceMatrix do
 
   With `--seed`, commits the proposed rows to installation settings (`Arbiter.Settings.competence_matrix`).
 
+  With `--candidate` (implies `--seed`), the rows go to the candidate matrix instead
+  (`Arbiter.Settings.competence_matrix_candidate`): the scorer ranks with it in shadow
+  only, and the live matrix is untouched until promoted
+  (`Arbiter.Release.promote_candidate_matrix/0`).
+
   ## Usage
 
       mix arbiter.generate_competence_matrix
       mix arbiter.generate_competence_matrix --min-n 5
       mix arbiter.generate_competence_matrix --from 2026-08-24T00:00:00Z --until 2026-10-01T12:00:00Z
       mix arbiter.generate_competence_matrix --seed
+      mix arbiter.generate_competence_matrix --candidate
   """
 
   use Mix.Task
 
   alias Arbiter.Loop.CompetenceGenerator
 
-  @switches [from: :string, until: :string, min_n: :integer, seed: :boolean, workspace: :string]
+  @switches [
+    from: :string,
+    until: :string,
+    min_n: :integer,
+    seed: :boolean,
+    candidate: :boolean,
+    workspace: :string
+  ]
 
   @impl Mix.Task
   def run(argv) do
@@ -41,11 +54,12 @@ defmodule Mix.Tasks.Arbiter.GenerateCompetenceMatrix do
       |> maybe_put(:min_n, opts[:min_n])
       |> maybe_put(:workspace_id, opts[:workspace])
 
-    if opts[:seed] do
-      {:ok, rows} = CompetenceGenerator.seed_installation!(gen_opts)
+    if opts[:seed] || opts[:candidate] do
+      target = if opts[:candidate], do: :candidate, else: :live
+      {:ok, rows} = CompetenceGenerator.seed_installation!([target: target] ++ gen_opts)
 
       Mix.shell().info(
-        "Successfully seeded #{length(rows)} competence matrix rows to installation settings.\n"
+        "Successfully seeded #{length(rows)} #{target} competence matrix rows to installation settings.\n"
       )
 
       Mix.shell().info(CompetenceGenerator.format(rows))

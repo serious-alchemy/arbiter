@@ -1142,6 +1142,72 @@ installation settings (operator-owned)
    offline. With the layers off it must reproduce 100% of the recorded
    choices; with the layers on, it reports the differences.
 
+### 9.3 Shadow comparisons keep running in `enforce` (bd-dde4l7)
+
+Setting `enforce` does not end the comparison. The R6 matrix is a measurement
+of a moving fleet, so it has to keep being re-measured and the report has to
+keep saying whether the scorer is still earning its place.
+
+**Baseline shadow.** `routing_decision.shadow` is the *other* policy than the
+one that dispatched, and says which with `shadow.policy`:
+
+| `scoring_mode` | Dispatches by | `shadow.policy` | `shadow.ranking` |
+|---|---|---|---|
+| `shadow` | headroom (`most_quota`) | `scorer` | the scorer's order |
+| `enforce` | the scorer | `headroom` | the headroom order, already computed for the tie-break |
+
+Both fill the same fields (`comparable`, `pick`, `agrees`, `reason`) and use
+the same comparability rule: only a fresh choice (`selected`, `fallback`) is
+comparable. In `enforce` the dispatched pick *is* the scorer's, and `pick` is
+what headroom would have chosen. Records from before the label are read as
+`policy: scorer`.
+
+**Candidate matrix.** Installation settings hold up to three matrices, in
+separate columns:
+
+- `competence_matrix` — **live**. The only one dispatch reads.
+- `competence_matrix_candidate` — **candidate**. Nothing dispatches from it.
+- `competence_matrix_previous` — the live matrix the last promotion replaced,
+  kept for rollback.
+
+When a candidate exists (and `routing.scoring.competence` is on), each scored
+dispatch ranks a second time with the candidate's rows and records
+`routing_decision.shadow_candidate`: `ranking`, the cell coordinates
+(`difficulty`, `issue_type`) and, once the real pick is known, `comparable`,
+`pick` (the candidate scorer's), `live_pick` (the live scorer's: the dispatched
+pick in `enforce`, the scorer's own shadow pick in `shadow`) and `agrees`. The
+candidate path is built from the candidate rows alone, and its output is only
+written into the record; `order/2` never lets it near the returned order. The
+live and candidate rows come from one installation read per evaluation.
+
+**The report** (`Arbiter.Release.shadow_report/0`) splits by mode, each line
+labelled by live and shadowed policy, then adds a "candidate matrix vs live"
+section: decisions, comparable, agreement rate, and the `(difficulty,
+issue_type)` cells where the two pick differently, worst first.
+
+**The weekly reseed**, run by the coordinator:
+
+1. `Arbiter.Release.seed_competence_matrix(target: :candidate, from: …, until: …)`
+   — writes the candidate (the default window is the fixed R6 baseline, so pass
+   a rolling one). The live matrix is untouched.
+2. Let it collect decisions, then read
+   `bin/arbiter eval 'Arbiter.Release.shadow_report()'`: the live-vs-headroom
+   line says whether `enforce` is still worth it; the candidate section says
+   how much the new matrix would change and where.
+3. `Arbiter.Release.promote_candidate_matrix()` makes it live (the old live is
+   kept), or `Arbiter.Release.discard_candidate_matrix()` drops it.
+   `Arbiter.Release.rollback_competence_matrix()` swaps the previous matrix
+   back (and again, forward).
+
+`mix arbiter.generate_competence_matrix --candidate` is the Mix equivalent of
+step 1.
+
+**Cost.** The extra ranking is one more `Competence.estimate/4` per surviving
+candidate plus `Score.rank/2`, no extra I/O. On a two-account workspace with a
+60-row matrix, `estimate` for both entries is about 0.2 ms and `Score.rank`
+about 0.007 ms, against a whole `ProviderRouting.select/4` of 10–15 ms (almost
+all of it database reads) under the test sandbox.
+
 ## 10. Overrides survive every phase
 
 | Override | Today | Under this design |
@@ -1184,7 +1250,8 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   w(priority) × time_h`, ties to larger headroom then configured order) and
   `provider_selection: scored`. `routing.scoring.mode` is `shadow` (default:
   `most_quota` dispatches, `routing_decision.shadow` records the scorer's
-  ranking, pick, agreement and reason) or `enforce`. `routing.scoring.time_weight`
+  ranking, pick, agreement and reason) or `enforce` (the scorer dispatches and
+  `routing_decision.shadow` records the headroom ranking; see §9.3). `routing.scoring.time_weight`
   is read by the ticket's own priority. `draw` and `time_h` are `nil` until R6's
   matrix supplies them through `ProviderRouting`'s `:estimate_fun` seam, so today
   the price is `1/h` and the order is `most_quota`'s. Reviewer routing is

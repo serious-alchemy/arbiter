@@ -3,8 +3,9 @@ defmodule ArbiterCli.Cmd.Ready do
   `arb ready [--all] [--json]` — list issues ready to work on
   (`GET /api/issues/ready`).
 
-  By default filters to the active workspace (resolved via `ARB_WORKSPACE`
-  or the workspace named `default`). Pass `--all` to see ready issues
+  By default filters to the selected workspace (`-w` or `ARB_WORKSPACE`, id or
+  name; a selector that matches no workspace is an error, never a widening),
+  else the workspace named `default`. Pass `--all` to see ready issues
   across every workspace — useful for cross-workspace coordination but
   noisy when imported data dominates other workspaces.
 
@@ -36,14 +37,22 @@ defmodule ArbiterCli.Cmd.Ready do
     end
   end
 
+  # A named selector must resolve (`selected_id/0` dies otherwise); with none,
+  # fall back to the default workspace as before, and widen only when there is
+  # no default to fall back to.
   defp ready_params(opts) do
-    if opts[:all] == true do
-      []
-    else
-      case Workspace.resolve() do
-        {:ok, %{"id" => ws_id}} -> [workspace_id: ws_id]
-        {:error, _} -> []
-      end
+    cond do
+      opts[:all] == true ->
+        []
+
+      id = Workspace.selected_id() ->
+        [workspace_id: id]
+
+      true ->
+        case Workspace.resolve() do
+          {:ok, %{"id" => id}} -> [workspace_id: id]
+          {:error, _} -> []
+        end
     end
   end
 end

@@ -8,6 +8,12 @@ defmodule Mix.Tasks.Arbiter.RoutingShadowReport do
   dispatched, and every disagreement with its reason. Read it before setting
   `enforce` on a workspace.
 
+  After `enforce` it keeps comparing (bd-dde4l7): the scorer dispatches and the
+  recorded shadow is the headroom ranking, reported per mode and labelled by the
+  live and shadowed policy. A candidate competence matrix, when one is seeded,
+  gets its own live-vs-candidate section with the `(difficulty, issue_type)`
+  cells where the two differ.
+
   **Read-only.** It writes nothing.
 
   ## Usage

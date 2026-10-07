@@ -62,7 +62,8 @@ defmodule ArbiterCli.Cmd.Mcp do
       {opts, _rest, _mode} =
         ArgParser.parse(argv,
           command: "arb mcp token mint",
-          switches: [tier: :string, ttl: :integer, json: :boolean]
+          switches: [tier: :string, ttl: :integer, workspace: :string, json: :boolean],
+          aliases: [w: :workspace]
         )
 
       tier = opts[:tier] || "coordinator"
@@ -74,11 +75,17 @@ defmodule ArbiterCli.Cmd.Mcp do
       mode = if opts[:json], do: :json, else: :text
       ttl = opts[:ttl] || @default_ttl
 
-      # Coordinator tokens are workspace-agnostic — no workspace is bound at mint.
-      case mint_token(%{"ttl" => ttl}) do
+      case mint_token(mint_params(ttl, opts[:workspace])) do
         {:ok, resp} -> emit_mint(resp, mode)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  defp mint_params(ttl, workspace) do
+    case ArbiterCli.Workspace.selected_id(workspace) do
+      nil -> %{"ttl" => ttl}
+      ws_id -> %{"ttl" => ttl, "workspace_id" => ws_id}
     end
   end
 

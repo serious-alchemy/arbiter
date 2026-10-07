@@ -126,7 +126,13 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp list(mode) do
-    case Client.get("/api/workers") do
+    params =
+      case ArbiterCli.Workspace.selected_id() do
+        nil -> []
+        ws_id -> [workspace_id: ws_id]
+      end
+
+    case Client.get("/api/workers", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode)
       {:ok, _} -> emit_list([], mode)
       {:error, err} -> Output.die(err)
@@ -141,7 +147,13 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp runs(task_id, mode) do
-    case Client.get("/api/workers/history?task_id=#{URI.encode_www_form(task_id)}") do
+    params =
+      case ArbiterCli.Workspace.selected_id() do
+        nil -> [task_id: task_id]
+        ws_id -> [task_id: task_id, workspace_id: ws_id]
+      end
+
+    case Client.get("/api/workers/history", params) do
       {:ok, %{"data" => list}} -> emit_runs(task_id, list, mode)
       {:ok, _} -> emit_runs(task_id, [], mode)
       {:error, err} -> Output.die(err)

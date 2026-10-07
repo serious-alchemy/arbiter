@@ -75,6 +75,8 @@ defmodule Arbiter.Settings.Installation do
     :provider_pauses,
     :capability_matrix,
     :competence_matrix,
+    :competence_matrix_candidate,
+    :competence_matrix_previous,
     :quota_providers_shown,
     :quota_providers_hidden,
     :output_offload_enabled,
@@ -179,6 +181,20 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description ~s[Operator-owned competence matrix (bd-biycyw): rows consulted ahead of code defaults.]
+    end
+
+    attribute :competence_matrix_candidate, {:array, :map} do
+      public? true
+      allow_nil? true
+
+      description "Candidate competence matrix (bd-dde4l7): ranked beside the live one in shadow only (recorded as routing_decision shadow_candidate); never dispatches until promoted. nil = no candidate."
+    end
+
+    attribute :competence_matrix_previous, {:array, :map} do
+      public? true
+      allow_nil? true
+
+      description "The live competence matrix a promotion replaced (bd-dde4l7), kept for rollback. nil = nothing to roll back to."
     end
 
     attribute :quota_providers_shown, {:array, :string} do
