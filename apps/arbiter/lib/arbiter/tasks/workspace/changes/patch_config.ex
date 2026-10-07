@@ -21,6 +21,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.PatchConfig do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Tasks.Workspace.ConfigPath
   alias Ash.Changeset
 
   @impl true
@@ -67,8 +68,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.PatchConfig do
   end
 
   @doc """
-  Remove each dotted path from `config`. A dotted path traverses nested maps;
-  missing intermediate keys are a no-op (so unsetting an absent key is safe).
+  Remove each dotted path from `config` (`Arbiter.Tasks.Workspace.ConfigPath`:
+  a literal dot in a key is written `\\.`). A dotted path traverses nested maps;
+  missing intermediate keys are a no-op, so unsetting an absent key is an
+  idempotent success on every surface.
   Empty maps left behind after a leaf removal are kept (callers can decide
   whether to also prune empties).
   """
@@ -77,9 +80,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.PatchConfig do
     Enum.reduce(paths, config, fn path, acc -> drop_path(acc, split_path(path)) end)
   end
 
-  defp split_path(path) when is_binary(path) do
-    path |> String.split(".") |> Enum.reject(&(&1 == ""))
-  end
+  defp split_path(path) when is_binary(path), do: ConfigPath.split(path)
 
   defp drop_path(map, []), do: map
 

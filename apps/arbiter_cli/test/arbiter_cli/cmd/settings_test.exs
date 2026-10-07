@@ -38,6 +38,17 @@ defmodule ArbiterCli.Cmd.SettingsTest do
          send(test_pid, {:patched, Jason.decode!(raw)})
 
          case Jason.decode!(raw) do
+           %{"key" => "nodes.public_url"} ->
+             conn
+             |> Plug.Conn.put_status(403)
+             |> Req.Test.json(%{
+               "error" => %{
+                 "type" => "unauthorized",
+                 "message" =>
+                   "nodes.public_url is operator-only — it needs an operator-proof token"
+               }
+             })
+
            %{"value" => -1} ->
              conn
              |> Plug.Conn.put_status(422)
@@ -120,6 +131,23 @@ defmodule ArbiterCli.Cmd.SettingsTest do
 
     assert code != 0
     assert err =~ "positive integer"
+  end
+
+  test "an operator-only key refused by the server prints its message, exits non-zero (P-20)" do
+    stub_config(items())
+
+    {_out, err, code} =
+      capture(fn -> Settings.run(["set", "nodes.public_url", "https://x.ts.net"]) end)
+
+    assert code != 0
+    assert err =~ "operator-only"
+  end
+
+  test "set uses the shared value rule: a quoted string stays a string" do
+    stub_config(items())
+    capture(fn -> Settings.run(["set", "nodes.public_url", ~s("true")]) end)
+    # (refused by the stub, but the body shows how the value was typed)
+    assert_received {:patched, %{"key" => "nodes.public_url", "value" => "true"}}
   end
 
   test "set without a value and unknown subcommands die" do

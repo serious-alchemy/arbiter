@@ -29,29 +29,34 @@ defmodule ArbiterCli.Cmd.Config do
 
   ## Value parsing
 
-  `arb config set <key> <value>` parses the value in this order:
+  `arb config set <key> <value>` decodes the value as JSON (the rule `arb
+  settings set` uses too) and falls back to the raw string when it is not JSON:
 
-    * `true` / `false`                → boolean
-    * an integer literal              → integer
-    * starts with `{` or `[`          → JSON (object or array)
-    * the literal string `null`       → JSON null (use `unset` to actually remove)
-    * anything else                   → string
+    * `true` / `false` / `null`       → boolean / JSON null (use `unset` to remove)
+    * a number                        → integer / float
+    * `{...}` / `[...]`               → JSON object / array
+    * a *quoted* string `'"true"'`    → that string, so `true`, `5` etc. can be
+      stored as text: `arb config set feature.flag '"true"'`
+    * anything else                   → the string as typed
 
-  Quote shell-special values to keep them out of the parser's hands
-  (`arb config set tracker.config.host '"x.example.com"'`).
+  ## Key syntax
+
+  Keys are dotted. A literal dot in a segment (a repo name) is written `\\.`:
+  `arb config set 'repo_paths.my\\.repo' /srv/my.repo`.
 
   ## Guardrails
 
-  Before sending a `set` or `unset`, the CLI computes the local before/after
-  and refuses (without `--force`) any change that would drop required keys:
+  The safety rails are enforced by the **server** (so MCP and REST get them
+  too); the CLI only forwards `--force`:
 
-    * empty `repo_paths` (when `repo_paths` exists and would become `{}`)
-    * `tracker.type != "none"` with `tracker.config` missing or empty
-    * `merge.strategy == "github"` — no static check (owner + repo are per-repo derivable)
+    * top-level `secret*` / `credentials*` keys are refused — use
+      `arb workspace secret` (secrets are stored encrypted, never in config)
+    * a write that newly empties `repo_paths`, or sets `tracker.type != "none"`
+      with `tracker.config` missing/empty, is refused unless `--force`
+    * `unset` of an absent key is a no-op success
 
   Destructive changes (any unset, or any set that overwrites a non-empty
-  existing leaf) print a before/after diff. The server-side `ValidateConfig`
-  check still runs on top.
+  existing leaf) print a before/after diff and need `--force`.
 
   ## Workspace selection
 
@@ -107,7 +112,7 @@ defmodule ArbiterCli.Cmd.Config do
     value = if path, do: Value.get_in_path(config, Value.split(path)), else: config
 
     case {mode, value} do
-      {:json, v} -> Formatter.emit_get(:json, v)
+      {:json, v} -> Formatter.emit_get(:json, v, path)
       {:text, v} -> Formatter.emit_get(:text, v, path)
     end
   end
@@ -143,7 +148,7 @@ defmodule ArbiterCli.Cmd.Config do
 
     confirm_or_die!(existing, new_config, force, "set #{key}")
 
-    payload = %{"patch" => patch}
+    payload = with_force(%{"patch" => patch}, force)
 
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
       {:ok, updated} -> Formatter.emit_workspace_config(updated, mode)
@@ -167,21 +172,22 @@ defmodule ArbiterCli.Cmd.Config do
     ws = resolve_workspace!(workspace_opt)
     existing = ws["config"] || %{}
 
-    if Value.get_in_path(existing, path) == nil do
-      Output.die("config unset: key not found: #{key}")
-    end
-
+    # An absent key is not an error: the server treats it as an idempotent
+    # no-op, the same as MCP and REST.
     new_config = Value.drop_path(existing, path)
 
     confirm_or_die!(existing, new_config, force, "unset #{key}")
 
-    payload = %{"unset_paths" => [key]}
+    payload = with_force(%{"unset_paths" => [key]}, force)
 
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
       {:ok, updated} -> Formatter.emit_workspace_config(updated, mode)
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp with_force(payload, true), do: Map.put(payload, "force", true)
+  defp with_force(payload, _), do: payload
 
   # ----- workspace resolution --------------------------------------------
 
@@ -225,46 +231,18 @@ defmodule ArbiterCli.Cmd.Config do
   @doc false
   defdelegate deep_merge(left, right), to: Value
 
-  @doc """
-  Returns `:ok` if the new config is "safe", or `{:unsafe, [reasons]}` if it
-  drops a key the system relies on. Reasons mirror the task description.
-  """
-  defdelegate safety_check(new_config), to: Value
-
   # ----- guardrails + diff -----------------------------------------------
 
+  # The safety rails live on the server; this is only the overwrite prompt.
   defp confirm_or_die!(before, after_, force, label) do
-    case Value.safety_check(after_) do
-      :ok ->
-        if destructive?(before, after_) and not force do
-          IO.puts(:stderr, "arb config #{label}:")
-          IO.puts(:stderr, Formatter.diff(before, after_))
-          IO.puts(:stderr, "")
-          IO.puts(:stderr, "this overwrites an existing value. Re-run with --force to apply.")
-          Output.halt(1)
-        else
-          :ok
-        end
-
-      {:unsafe, reasons} ->
-        if force do
-          IO.puts(:stderr, "arb config #{label}: WARNING — proceeding under --force:")
-
-          Enum.each(reasons, fn r -> IO.puts(:stderr, "  - " <> r) end)
-
-          :ok
-        else
-          IO.puts(
-            :stderr,
-            "arb config #{label}: refusing — would leave config in a broken state:"
-          )
-
-          Enum.each(reasons, fn r -> IO.puts(:stderr, "  - " <> r) end)
-
-          IO.puts(:stderr, "")
-          IO.puts(:stderr, "Re-run with --force to override.")
-          Output.halt(1)
-        end
+    if destructive?(before, after_) and not force do
+      IO.puts(:stderr, "arb config #{label}:")
+      IO.puts(:stderr, Formatter.diff(before, after_))
+      IO.puts(:stderr, "")
+      IO.puts(:stderr, "this overwrites an existing value. Re-run with --force to apply.")
+      Output.halt(1)
+    else
+      :ok
     end
   end
 

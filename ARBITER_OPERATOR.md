@@ -85,7 +85,7 @@ state moves on.
 The six most-burned-by operating pitfalls. Check these first:
 
 - [ ] **Concurrency** — keep concurrent tickets FILE-DISJOINT. Tickets that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. The auto-conflict-resolver helps, but do not rely on it. Serialize those tickets.
-- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`repo_paths`, tracker, merge config, vernacular).
+- [ ] **Config** — use `arb config get/set/unset` only. **Never** send config through `PATCH`/`PUT /api/workspaces/:id` — the server now refuses a `config` there (it used to replace the whole map and silently clobber siblings such as `repo_paths`, tracker, merge config, `loop.canary`).
 - [ ] **Deploy** — before restarting the server, check for active workers (`arb prime` or `arb worker list`). **Restarting the server KILLS all in-flight workers and abandons their work.**
 - [ ] **Freshness** — keep repos current. Workers branch from the repo's base branch. A stale repo means stale, possibly regressed state for every new worker.
 - [ ] **Verify** — a worker can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
@@ -219,9 +219,21 @@ repo.
 
 Workspace config is a single JSON map stored in the database.
 
-**NEVER** send a partial config via the raw API PATCH — it replaces the whole
-map and **silently clobbers** siblings (`repo_paths`, tracker, merge config,
-vernacular).
+`PATCH`/`PUT /api/workspaces/:id` **refuses** a `config` field (it would replace
+the whole map and clobber siblings such as `repo_paths`, tracker, merge config,
+`loop.canary`). Config is written through `PATCH /api/workspaces/:id/config`
+(deep-merge) — which is what `arb config get/set/unset` and the MCP
+`workspace_config_*` tools use.
+
+The server also enforces, on every surface: no top-level `secret*` /
+`credentials*` key in config (secrets go through `arb workspace secret`); no
+write that newly empties `repo_paths` or sets `tracker.type` with an empty
+`tracker.config` unless forced (`--force`); an `unset` of an absent key is a
+no-op. A literal dot in a key (a repo name) is written `\.`
+(`arb config set 'repo_paths.my\.repo' /srv/x`). The operator-only install
+settings (`nodes.*`, `scheduling_epic_floors_enabled`,
+`scheduling_max_lifted_in_flight`) need an operator-proof token on REST, MCP and
+`arb settings` alike.
 
 **Use `arb config get/set/unset` (deep-merge) only.**
 

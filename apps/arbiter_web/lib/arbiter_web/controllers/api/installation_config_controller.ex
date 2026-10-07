@@ -14,7 +14,10 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
       `null`), `default` what applies with no override.
     * `PATCH /api/installation/config` — body `{"key": ..., "value": ...}`;
       `"value": null` clears the override. An invalid value is a 422 and
-      nothing is written.
+      nothing is written; an operator-only key (`nodes.*`,
+      `scheduling_epic_floors_enabled`, `scheduling_max_lifted_in_flight`) sent
+      with a coordinator token that lacks operator proof is a 403
+      `unauthorized` refusal (`Registry.put/3`).
 
   Both routes are coordinator-tier only (`ArbiterWeb.ApiPolicy`): the MCP set
   tool is coordinator-only, and `/api/server/*` and `/api/scheduler/*` read
@@ -23,6 +26,7 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.Settings.Registry
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -39,7 +43,7 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
   def update(conn, %{"key" => key} = params) when is_binary(key) do
     with true <-
            Map.has_key?(params, "value") || {:invalid, "value is required (use null to clear)"},
-         {:ok, _} <- Registry.put(key, Map.get(params, "value")) do
+         {:ok, _} <- Registry.put(key, Map.get(params, "value"), authority: authority(conn)) do
       json(conn, %{data: Registry.describe(key)})
     else
       {:invalid, message} -> {:error, {:invalid, message}}
@@ -48,4 +52,8 @@ defmodule ArbiterWeb.Api.InstallationConfigController do
   end
 
   def update(_conn, _params), do: {:error, {:invalid, "key is required"}}
+
+  # The operator-only keys (`Registry.operator_only_keys/0`) need operator proof:
+  # the token's authority decides, exactly as for the MCP set tool.
+  defp authority(conn), do: Authority.from_scope(conn.assigns[:mcp_scope])
 end

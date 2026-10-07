@@ -23,9 +23,24 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert Config.parse_value("{not json}") == "{not json}"
     end
 
+    test "parse_value/1 stores a quoted string as text — one rule, JSON-or-raw (D-C-18)" do
+      assert Config.parse_value(~s("true")) == "true"
+      assert Config.parse_value(~s("123")) == "123"
+      assert Config.parse_value(~s("hello world")) == "hello world"
+      assert Config.parse_value("1.5") == 1.5
+      # not JSON → raw
+      assert Config.parse_value("2026-10-06") == "2026-10-06"
+      assert Config.parse_value("x.example.com") == "x.example.com"
+    end
+
     test "split/1 drops empty segments" do
       assert Config.split("a.b.c") == ["a", "b", "c"]
       assert Config.split(".a..b") == ["a", "b"]
+    end
+
+    test "split/1 keeps an escaped dot inside a segment (D-C-17)" do
+      assert Config.split("repo_paths.my\\.repo") == ["repo_paths", "my.repo"]
+      assert Config.split("a\\\\.b") == ["a\\", "b"]
     end
 
     test "put_in_path/3 + get_in_path/2 build and read nested maps" do
@@ -47,36 +62,6 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert Config.drop_path(m, ["a", "b"]) == %{"a" => %{"c" => 2}}
       assert Config.drop_path(m, ["a", "nope"]) == m
       assert Config.drop_path(m, ["nope", "x"]) == m
-    end
-
-    test "safety_check/1 flags empty repo_paths" do
-      assert {:unsafe, [reason]} = Config.safety_check(%{"repo_paths" => %{}})
-      assert reason =~ "repo_paths is empty"
-    end
-
-    test "safety_check/1 flags tracker.type != none without tracker.config" do
-      assert {:unsafe, [reason]} = Config.safety_check(%{"tracker" => %{"type" => "github"}})
-      assert reason =~ "tracker.type is \"github\""
-    end
-
-    test "safety_check/1 accepts github merge with no owner or repo (both per-repo derivable)" do
-      assert :ok =
-               Config.safety_check(%{"merge" => %{"strategy" => "github"}})
-    end
-
-    test "safety_check/1 accepts a fully populated config" do
-      assert :ok =
-               Config.safety_check(%{
-                 "tracker" => %{"type" => "github", "config" => %{"owner" => "x"}},
-                 "merge" => %{
-                   "strategy" => "github",
-                   "config" => %{"owner" => "x"}
-                 }
-               })
-    end
-
-    test "safety_check/1 accepts a none-tracker without a config block" do
-      assert :ok = Config.safety_check(%{"tracker" => %{"type" => "none"}})
     end
   end
 
@@ -100,6 +85,14 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       {out, _err, code} = capture(fn -> Config.run(["get", "tracker.type", "--json"]) end)
       assert code == 0
       assert String.trim(out) == ~s("github")
+    end
+
+    test "a missing key is an error with --json too, not null/exit 0 (D-C-14)" do
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(%{}), 200}}])
+
+      {_out, err, code} = capture(fn -> Config.run(["get", "nope.here", "--json"]) end)
+      assert code == 1
+      assert err =~ "key not found"
     end
 
     test "errors on a missing key (text mode)" do
@@ -162,40 +155,117 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert code == 0
     end
 
-    test "refuses (without --force) when the resulting config drops a required key" do
-      # repo_paths starts with one entry; setting the only entry to a different
-      # key isn't a drop, so we test the bare-empty case by setting an
-      # unrelated key on a config that already has empty repo_paths is bogus.
-      # Cleanest test: existing has tracker.type=github + config; user clobbers
-      # tracker.config — actually, set creates/overwrites a leaf, not removes,
-      # so we instead trigger the *type-without-config* path by setting type
-      # before there's a config block.
+    test "the safety rails are the server's: its refusal is reported and no force is sent" do
       stub_routes([
-        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}}
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           refute Map.has_key?(Jason.decode!(body), "force")
+
+           conn
+           |> Plug.Conn.put_status(422)
+           |> Req.Test.json(%{
+             "error" => %{
+               "type" => "validation_error",
+               "message" => "tracker.type is \"github\" but tracker.config is missing/empty",
+               "details" => %{}
+             }
+           })
+         end}
       ])
 
       {_out, err, code} = capture(fn -> Config.run(["set", "tracker.type", "github"]) end)
       assert code == 1
-      assert err =~ "refusing"
       assert err =~ "tracker.config is missing"
     end
 
-    test "--force overrides a guardrail (and warns)" do
+    test "secret* keys are refused by the server, on the CLI too (P-20, D-C-4)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
         {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
-         {%{
-            "id" => @ws_id,
-            "name" => "default",
-            "config" => %{"tracker" => %{"type" => "github"}}
-          }, 200}}
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["patch"] == %{"secrets" => %{"x" => "tok"}}
+
+           conn
+           |> Plug.Conn.put_status(422)
+           |> Req.Test.json(%{
+             "error" => %{
+               "type" => "validation_error",
+               "message" =>
+                 "cannot set \"secrets\" in the workspace config — use `arb workspace secret`",
+               "details" => %{}
+             }
+           })
+         end}
       ])
 
-      {_out, err, code} =
+      {_out, err, code} = capture(fn -> Config.run(["set", "secrets.x", "tok"]) end)
+      assert code == 1
+      assert err =~ "arb workspace secret"
+    end
+
+    test "a quoted value is sent as the string, not the boolean" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["patch"] == %{"feature" => %{"flag" => "true"}}
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> Config.run(["set", "feature.flag", ~s("true")]) end)
+      assert code == 0
+    end
+
+    test "an escaped dot addresses a repo name containing a dot (D-C-17)" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["patch"] == %{"repo_paths" => %{"my.repo" => "/srv/x"}}
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Config.run(["set", "repo_paths.my\\.repo", "/srv/x"]) end)
+
+      assert code == 0
+    end
+
+    test "--force is forwarded to the server as force: true" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["force"] == true
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "id" => @ws_id,
+             "name" => "default",
+             "config" => %{"tracker" => %{"type" => "github"}}
+           })
+         end}
+      ])
+
+      {_out, _err, code} =
         capture(fn -> Config.run(["set", "tracker.type", "github", "--force"]) end)
 
       assert code == 0
-      assert err =~ "WARNING"
     end
 
     test "destructive overwrite of a non-empty leaf needs --force" do
@@ -245,21 +315,44 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert code == 0
     end
 
-    test "errors when the key doesn't exist" do
-      stub_routes([{{"get", "/api/workspaces"}, {default_ws(%{}), 200}}])
+    test "an absent key is an idempotent success, sent to the server (D-C-15)" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["unset_paths"] == ["no.such.key"]
 
-      {_out, err, code} = capture(fn -> Config.run(["unset", "no.such.key"]) end)
-      assert code == 1
-      assert err =~ "key not found"
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> Config.run(["unset", "no.such.key"]) end)
+      assert code == 0
     end
 
-    test "refuses an unset that empties repo_paths without --force" do
-      initial = %{"repo_paths" => %{"arbiter" => "/srv/arbiter"}}
-      stub_routes([{{"get", "/api/workspaces"}, {default_ws(initial), 200}}])
+    test "sends the raw (escaped) key so the server splits it" do
+      initial = %{"repo_paths" => %{"my.repo" => "/a", "b" => "/b"}}
 
-      {_out, err, code} = capture(fn -> Config.run(["unset", "repo_paths.arbiter"]) end)
-      assert code == 1
-      assert err =~ "repo_paths is empty"
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(initial), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["unset_paths"] == ["repo_paths.my\\.repo"]
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Config.run(["unset", "repo_paths.my\\.repo", "--force"]) end)
+
+      assert code == 0
     end
   end
 

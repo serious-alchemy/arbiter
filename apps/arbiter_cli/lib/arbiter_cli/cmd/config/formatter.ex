@@ -8,9 +8,12 @@ defmodule ArbiterCli.Cmd.Config.Formatter do
 
   # ----- get ---------------------------------------------------------------
 
-  def emit_get(:json, value) do
-    Output.emit_json(value)
-  end
+  # A missing key is an error in both modes (as MCP's `workspace_config_get`
+  # reports `not_found`), not `null` with exit 0.
+  def emit_get(:json, nil, path) when is_binary(path),
+    do: Output.die("config: key not found: #{path}")
+
+  def emit_get(:json, value, _path), do: Output.emit_json(value)
 
   def emit_get(:text, nil, path) do
     if path do
