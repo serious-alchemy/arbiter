@@ -207,14 +207,10 @@ defmodule ArbiterCli.Cmd.Queue do
           IO.puts(rerun_summary(task_id, body))
         end
 
+      # bd-dtfe9x: with no live watchdog the server re-runs through the task's
+      # workspace adapter itself, so a 404 now only ever means "no such task".
       {:error, %Client.Error{kind: :http, status: 404} = err} ->
-        Output.die_as(
-          err,
-          "no merge watchdog is currently running for task #{task_id}, so there is nothing " <>
-            "holding its PR to re-run CI for.\n" <>
-            "If the PR is still open, its watchdog died — start a replacement with:\n" <>
-            "  arb queue restart-watchdog #{task_id}"
-        )
+        Output.die_as(err, "no such task: #{task_id}")
 
       {:error, %Client.Error{kind: :http, status: 503} = err} ->
         Output.die_as(err, "task #{task_id}'s watchdog is busy polling — try again in a moment.")
@@ -232,6 +228,7 @@ defmodule ArbiterCli.Cmd.Queue do
 
     header =
       "Re-ran CI for #{task_id}: mode=#{used}" <>
+        if(body["via"], do: " via=#{body["via"]}", else: "") <>
         if(workflow, do: " workflow=#{workflow}", else: "") <>
         if(run, do: " run=#{run}", else: "")
 

@@ -255,4 +255,47 @@ defmodule ArbiterCli.OutputTest do
       assert Output.drop_json(["a", "b"]) == ["a", "b"]
     end
   end
+
+  describe "on_halt/1" do
+    setup do
+      Process.put(:bd2_halt_strategy, :raise)
+      :ok
+    end
+
+    test "runs once with the exit code before a non-zero halt" do
+      test_pid = self()
+      Output.on_halt(fn code, _msg -> send(test_pid, {:halted, code}) end)
+
+      assert_raise Output.Halt, fn -> Output.halt(3) end
+      assert_received {:halted, 3}
+
+      # One-shot: a second halt does not re-run it.
+      assert_raise Output.Halt, fn -> Output.halt(3) end
+      refute_received {:halted, _}
+    end
+
+    test "does not run for a zero exit" do
+      test_pid = self()
+      Output.on_halt(fn code, _msg -> send(test_pid, {:halted, code}) end)
+
+      assert_raise Output.Halt, fn -> Output.halt(0) end
+      refute_received {:halted, _}
+    end
+
+    test "die/1 hands the hook the error message" do
+      test_pid = self()
+      Output.on_halt(fn code, msg -> send(test_pid, {:halted, code, msg}) end)
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert_raise Output.Halt, fn -> Output.die("it broke", "try again") end
+      end)
+
+      assert_received {:halted, 1, "it broke"}
+    end
+
+    test "a crashing hook never blocks the halt" do
+      Output.on_halt(fn _, _ -> raise "boom" end)
+      assert_raise Output.Halt, fn -> Output.halt(1) end
+    end
+  end
 end

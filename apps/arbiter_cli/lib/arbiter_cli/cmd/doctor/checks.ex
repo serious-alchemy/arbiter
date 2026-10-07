@@ -34,6 +34,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_active_workspace(),
       check_repos(),
       check_versions(),
+      check_last_deploy(),
       check_migrations(),
       check_bind_address(),
       check_anonymous_api(),
@@ -180,6 +181,52 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
+  @doc """
+  The last `arb server deploy`, from its own status file (tag, time, outcome,
+  database backup path). Informational: a failed or rolled-back deploy shows as
+  `[fail]` with a hint but never blocks readiness or fails `arb doctor`.
+  """
+  @spec check_last_deploy() :: Result.t()
+  def check_last_deploy do
+    alias ArbiterCli.Cmd.ReleaseDeploy.Status
+
+    case Status.read() do
+      nil ->
+        %Result{
+          name: "last deploy",
+          status: :ok,
+          detail: "no `arb server deploy` recorded on this host",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      %{"state" => state} = last ->
+        good? = state == "succeeded" or (state == "running" and not Status.interrupted?(last))
+
+        %Result{
+          name: "last deploy",
+          status: if(good?, do: :ok, else: :fail),
+          detail: Status.describe(last),
+          hint:
+            if(good?,
+              do: nil,
+              else: "See #{Status.path()}; `arb server deploy` again once the cause is fixed."
+            ),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "last deploy",
+          status: :ok,
+          detail: "deploy status file is unreadable",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
   @doc false
   def check_versions(cli_vsn, cli_sha, server_vsn, server_sha) do
     version_result(cli_vsn, cli_sha, server_vsn, server_sha)
@@ -191,9 +238,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # runtime in a release build), so `cli_sha == server_sha` is NOT evidence of
   # a real match and must never be used as one.
   #
-  # `arb server deploy` doesn't refresh the local CLI binary, so a CLI that's
-  # a release behind the server is the normal post-deploy state — reported as
-  # a warning (`fatal: false`), never as a reason to auto-roll-back a deploy.
+  # `arb server deploy` installs the matching CLI after a green deploy, but a
+  # CLI that's a release behind the server is still possible (`--no-self-update`,
+  # a failed self-update, a deploy from another machine) — reported as a warning
+  # (`fatal: false`), never as a reason to auto-roll-back a deploy.
   defp version_result(cli_vsn, cli_sha, server_vsn, server_sha) do
     cond do
       cli_vsn == server_vsn ->
@@ -224,8 +272,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
               "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
             end
           else
-            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
-              "the #{server_vsn} release asset to match the server."
+            "Run `arb self-update --version v#{server_vsn}` to install the CLI matching the server."
           end
 
         %Result{

@@ -205,8 +205,9 @@ defmodule ArbiterCli.Cmd.SelfUpdateTest do
   # ---- configuration errors -----------------------------------------------
 
   describe "configuration errors" do
-    test "missing ARB_RELEASE_REPO aborts with a hint" do
+    test "no resolvable release repo aborts with a hint" do
       System.delete_env("ARB_RELEASE_REPO")
+      Process.put(:bd2_build_release_repo, false)
 
       {_out, err, code} = capture(fn -> SelfUpdate.run([]) end)
 

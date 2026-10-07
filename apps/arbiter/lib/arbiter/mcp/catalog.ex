@@ -26,7 +26,7 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `ticket_create` | coordinator | `Arbiter.Tasks.Create.run/2` (dedup, upstream drain, edges; P-14) |
+  | `ticket_create` | worker (child of own task only), coordinator | `Arbiter.Tasks.Create.run/2` (dedup, upstream drain, edges; P-14) |
   | `ticket_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
   | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
@@ -39,7 +39,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
-  | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
+  | `dep_add` | worker (`parent_of` from own task only), coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
   | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
@@ -80,7 +80,7 @@ defmodule Arbiter.MCP.Catalog do
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/2` (bd-8jixav) |
-  | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
+  | `ci_rerun` | worker, coordinator | `Arbiter.Worker.CIRerun.rerun/2` → `Watchdog.rerun_ci/2` / `Merger.rerun_ci/2` (bd-5mzzww) |
   | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
@@ -375,9 +375,12 @@ defmodule Arbiter.MCP.Catalog do
     # ---- Phase 2: coordinator-only mutating tools ----
     %{
       name: "ticket_create",
-      tiers: @coordinator,
+      tiers: @both,
       description:
-        "Create a ticket in the workspace. `title` is required; optional `description`, " <>
+        "Create a ticket in the workspace. A worker may file only a follow-up CHILD of its own " <>
+          "task (`parent_id` = its own task id, required), in its own workspace, with only " <>
+          "`title`, `description`, `acceptance`, `issue_type`, `priority`, `difficulty` " <>
+          "(the same rule as `POST /api/issues`). `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
           "`tracker_type`, …. The ticket is created in the session's workspace (the bound one, or the " <>
           "`workspace` you name). A ticket whose title matches an open one in that workspace is " <>
@@ -867,9 +870,11 @@ defmodule Arbiter.MCP.Catalog do
     },
     %{
       name: "dep_add",
-      tiers: @coordinator,
+      tiers: @both,
       description:
-        "Add a dependency edge between two tickets in the workspace. `type` is one of blocks, " <>
+        "Add a dependency edge between two tickets in the workspace. A worker may add only a " <>
+          "`parent_of` edge from its own task to an unparented ticket in its workspace (no " <>
+          "`notes`/`created_by`), the same rule as `POST /api/dependencies`. `type` is one of blocks, " <>
           "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
           "(from = parent, to = child) to attach a child to a parent ticket — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>

@@ -57,6 +57,11 @@ defmodule ArbiterCli.CliCase do
           {:ok, ["beam.smp", "-extra", "--no-halt", "mix", "phx.server"]}
         end)
 
+        # Never the host's real last-deploy record (`arb doctor`'s "last deploy"
+        # line reads it); tests of the record itself delete this and use
+        # ARB_DATA_HOME.
+        Process.put(:bd2_deploy_status_path, "/nonexistent/arb-test-deploy-status.json")
+
         # Never the host's real operator socket (bd-8381tk): on the operator's
         # machine that would mint a live coordinator token from a test run.
         # `ArbiterCli.FakeOperatorSocket.start!/1` repoints this.

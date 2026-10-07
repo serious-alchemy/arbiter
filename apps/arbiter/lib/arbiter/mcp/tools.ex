@@ -925,64 +925,31 @@ defmodule Arbiter.MCP.Tools do
   @spec ci_rerun(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def ci_rerun(%Scope{} = scope, args) do
     with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         # Workspace isolation for every path (watchdog and fallback alike).
+         {:ok, _issue} <- fetch_task(scope, args, task_id),
          {:ok, mode} <- parse_rerun_mode(args),
          {:ok, inputs} <- parse_rerun_inputs(args) do
       opts =
         %{mode: mode, inputs: inputs}
         |> maybe_put(:workflow, fetch_string(args, "workflow"))
 
-      case Arbiter.Worker.Watchdog.rerun_ci(task_id, opts) do
-        {:ok, result} ->
-          {:ok, Map.merge(%{task_id: task_id, via: "watchdog"}, result)}
-
-        {:error, :not_found} ->
-          rerun_via_workspace(scope, args, task_id, opts)
-
-        {:error, :unsupported} ->
-          {:error, {:conflict, unsupported_rerun_message(task_id)}}
-
-        {:error, :busy} ->
-          {:error,
-           {:busy,
-            "task #{task_id}'s watchdog is busy polling — try again in a moment rather " <>
-              "than repeating the call, since the original request may still land"}}
-
-        {:error, reason} ->
-          {:error, {:internal, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+      case Arbiter.Worker.CIRerun.rerun(task_id, opts) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> rerun_error(reason, task_id)
       end
     end
   end
 
-  # No live Watchdog: resolve the adapter straight off the task's workspace and
-  # re-run against the PR ref recorded on the task. This is the #1447 shape (a
-  # dead Watchdog on a genuinely-open PR) — the CI retry must not be a privilege
-  # of tasks that still happen to have a poller alive.
-  defp rerun_via_workspace(scope, args, task_id, opts) do
-    with {:ok, issue} <- fetch_task(scope, args, task_id),
-         {:ok, pr_ref} <- require_pr_ref(issue),
-         {:ok, workspace} <- fetch_workspace_for(issue) do
-      # bd-73zv62: the task's repo's merger, not the workspace-level one.
-      adapter = Arbiter.Mergers.for_repo(workspace, issue.repo)
+  defp rerun_error(reason, task_id) do
+    message = Arbiter.Worker.CIRerun.describe_error(reason, task_id)
 
-      if function_exported?(adapter, :rerun_ci, 2) do
-        Arbiter.Mergers.prepare_with_repo(workspace, issue.repo)
-
-        case adapter.rerun_ci(pr_ref, opts) do
-          {:ok, result} ->
-            {:ok, Map.merge(%{task_id: task_id, via: "workspace"}, result)}
-
-          {:error, reason} ->
-            {:error, {:internal, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
-        end
-      else
-        {:error, {:invalid, unsupported_rerun_message(task_id)}}
-      end
+    case reason do
+      :not_found -> {:error, {:not_found, message}}
+      :unsupported -> {:error, {:conflict, message}}
+      :busy -> {:error, {:busy, message}}
+      {:failed, _} -> {:error, {:internal, message}}
+      _no_pr_or_workspace -> {:error, {:invalid, message}}
     end
-  end
-
-  defp unsupported_rerun_message(task_id) do
-    "task #{task_id}'s merger adapter does not support re-running CI — only " <>
-      "hosted forges with a workflow API do (the `direct` strategy has no CI to re-run)"
   end
 
   @doc """
@@ -1118,20 +1085,6 @@ defmodule Arbiter.MCP.Tools do
 
       other ->
         {:error, {:invalid, "`inputs` must be an object of string values, got #{inspect(other)}"}}
-    end
-  end
-
-  defp require_pr_ref(%Issue{id: id, pr_ref: ref}) when ref in [nil, ""] do
-    {:error,
-     {:invalid, "task #{id} has no PR recorded (no `pr_ref`), so there is no CI run to re-run"}}
-  end
-
-  defp require_pr_ref(%Issue{pr_ref: ref}), do: {:ok, ref}
-
-  defp fetch_workspace_for(%Issue{id: id, workspace_id: ws_id}) do
-    case ws_id && Ash.get(Arbiter.Tasks.Workspace, ws_id) do
-      {:ok, ws} -> {:ok, ws}
-      _ -> {:error, {:invalid, "task #{id} has no readable workspace to resolve a merger from"}}
     end
   end
 

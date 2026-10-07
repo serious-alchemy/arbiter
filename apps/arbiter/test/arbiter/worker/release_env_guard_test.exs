@@ -87,6 +87,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     @release_env_source => :helper,
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
+    # bd-6umf7z: `systemd-run --user` launching `arb server deploy` in its own
+    # transient unit (and `systemctl` to see whether one is running), via
+    # `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/release/self_deploy.ex" => :scrubbed,
     # bd-6mo6be: worker-side `codex mcp list --json` check, via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/mcp/agent_config/codex.ex" => :scrubbed,
     # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.

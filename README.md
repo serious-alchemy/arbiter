@@ -180,9 +180,9 @@ them:
   `ExecStart` at `mix phx.server` rather than a release binary). This is how
   the "Install (development)" section above sets things up, and how this
   repo's own coordinator instance runs today — the releases strategy is
-  scoped but not yet built (see #754 for the history: `arb server deploy`
-  used to hard-require `ARB_RELEASE_REPO` and dead-end on a dev-mode install;
-  it now detects the missing env var and falls back automatically).
+  scoped but not yet built. A source checkout deploys with an explicit
+  `arb server deploy --git-pull`; a bare `arb server deploy` is always the
+  release path and never falls back to it.
 - **OTP release install** — a built release artifact unpacked under
   `~/.arbiter/releases/<tag>/`, installed via `arb install service`. No
   source checkout or Elixir/Mix toolchain on the box.
@@ -221,10 +221,9 @@ escript.build && cp arb ~/.local/bin/arb)` if `apps/arbiter_cli` changed →
 `arb server restart` → `arb server doctor`. The manual form is the safer
 choice when deps changed, since it never restarts against unfetched deps.
 
-A bare `arb server deploy` (no flags) does the same git-pull fallback
-automatically whenever `ARB_RELEASE_REPO` is unset, but prefer the explicit
-`--git-pull` form on a source checkout so the command's behavior doesn't
-depend silently on an environment variable you may not have set on purpose.
+`--git-pull` is the only way to reach this path. A bare `arb server deploy` is
+always the release path (below) and never falls back to a `git pull`, whatever
+the environment says.
 
 #### Production deploys: OTP-release installs
 
@@ -239,7 +238,9 @@ is symlinked atomically to the active release. Deploy a specific version (or
 arb server deploy --version v1.2.3
 ```
 
-This downloads the release tarball + checksum from GitHub Releases (`ARB_RELEASE_REPO`), verifies the SHA-256, unpacks it, atomically swaps `current`, restarts the service, and health-checks it — auto-rolling back to the last-known-good release if it doesn't come back green.
+This is the primary path, and the **"Update to vX.Y.Z"** button in the dashboard's update banner runs the same command. The full runbook is [docs/self-update.md](docs/self-update.md).
+
+It resolves the release repo (`ARB_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
 
 #### Migration ordering, and rollback across a migration
 
@@ -553,7 +554,7 @@ commands you'll reach for most.
 | `arb worker review <task-id>` | Dispatch a review-only worker against a ticket |
 | `arb message inbox` | Read (and mark read) the coordinator's escalation mailbox |
 | `arb server start` | Boot the stack (no-op if already up) |
-| `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases (auto-rollback on failure, refused across a migration) |
+| `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `arb` — see [docs/self-update.md](docs/self-update.md) |
 | `arb server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
 | `arb server doctor` | Health-check the server and database |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |

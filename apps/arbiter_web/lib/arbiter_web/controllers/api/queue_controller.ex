@@ -15,6 +15,7 @@ defmodule ArbiterWeb.Api.QueueController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Worker.CIRerun
   alias Arbiter.Worker.Watchdog
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -137,9 +138,14 @@ defmodule ArbiterWeb.Api.QueueController do
 
   Errors:
 
-    * 404 — no Watchdog is currently running for this task.
-    * 400 — unknown mode, or the merger for this task has no re-run primitive.
+    * 404 — no such task.
+    * 422 — unknown mode, or the task has no PR recorded.
+    * 409 — the merger for this task has no re-run primitive.
     * 503 — the Watchdog is busy polling.
+
+  With no live Watchdog the re-run goes through the task's workspace adapter
+  instead (`via: "workspace"`), exactly as the `ci_rerun` MCP tool does
+  (`Arbiter.Worker.CIRerun`). A worker token may call this for its own task.
   """
   def rerun_ci(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
@@ -149,22 +155,23 @@ defmodule ArbiterWeb.Api.QueueController do
         %{mode: mode, inputs: inputs}
         |> put_workflow(params)
 
-      case Watchdog.rerun_ci(task_id, opts) do
+      case CIRerun.rerun(task_id, opts) do
         {:ok, result} ->
-          json(conn, Map.merge(%{rerun: true, task_id: task_id}, result))
+          json(conn, Map.merge(%{rerun: true}, result))
 
         {:error, :not_found} ->
           {:error, :not_found}
 
         {:error, :unsupported} ->
-          {:error,
-           {:conflict,
-            "task #{task_id}'s merger has no CI re-run primitive — re-run it from the forge UI"}}
+          {:error, {:conflict, CIRerun.describe_error(:unsupported, task_id)}}
 
         {:error, :busy} ->
           {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
 
-        {:error, reason} ->
+        {:error, {kind, _} = reason} when kind in [:no_pr, :no_workspace] ->
+          {:error, {:invalid, CIRerun.describe_error(reason, task_id)}}
+
+        {:error, {:failed, reason}} ->
           {:error, {:server_error, "CI re-run failed for #{task_id}", %{reason: inspect(reason)}}}
       end
     end
