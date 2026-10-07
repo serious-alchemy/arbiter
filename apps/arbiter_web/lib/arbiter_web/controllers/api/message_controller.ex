@@ -57,14 +57,17 @@ defmodule ArbiterWeb.Api.MessageController do
     reader = reader_ref(params)
 
     with {:ok, limit} <- parse_limit(params["limit"]),
-         {:ok, kind} <- parse_kind(params["kind"]) do
+         {:ok, kind} <- parse_kind(params["kind"]),
+         {:ok, unread?} <- params |> Params.fetch_bool("unread", false) |> Params.to_rest(),
+         {:ok, outstanding?} <-
+           params |> Params.fetch_bool("outstanding", false) |> Params.to_rest() do
       messages =
         Message
         |> filter_eq(:kind, kind)
         |> filter_eq(:to_ref, params["to_ref"])
         |> filter_eq(:from_ref, params["from_ref"])
-        |> maybe_unread(params["unread"], reader)
-        |> maybe_outstanding(params["outstanding"], reader)
+        |> maybe_unread(unread?, reader)
+        |> maybe_outstanding(outstanding?, reader)
         |> Ash.Query.sort(inserted_at: :desc)
         |> Ash.Query.limit(limit)
         |> Ash.read!()
@@ -257,16 +260,16 @@ defmodule ArbiterWeb.Api.MessageController do
 
   # `unread` = pending: never seen and not cleared. cleared_at must also be nil
   # so a message soft-cleared while still unread does not resurface as pending.
-  defp maybe_unread(query, flag, reader) when flag in ["true", true],
+  defp maybe_unread(query, true, reader),
     do: Message.for_reader(query, reader, :unread)
 
-  defp maybe_unread(query, _flag, _reader), do: query
+  defp maybe_unread(query, false, _reader), do: query
 
   # `outstanding` = the triage queue: seen (read_at set) but not yet cleared.
-  defp maybe_outstanding(query, flag, reader) when flag in ["true", true],
+  defp maybe_outstanding(query, true, reader),
     do: Message.for_reader(query, reader, :outstanding)
 
-  defp maybe_outstanding(query, _flag, _reader), do: query
+  defp maybe_outstanding(query, false, _reader), do: query
 
   # The reader these endpoints act as. `session=<session_id>` opts into that
   # browser session's own view; everything else is the shared sessionless

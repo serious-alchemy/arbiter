@@ -29,7 +29,10 @@ defmodule ArbiterWeb.Api.ParamsAdoptionTest do
         for file <- files,
             src = File.read!(file),
             src =~ "defp truthy(true)" or
-              Regex.match?(~r/(params|args)\["\w+"\] (==|in) (true|\["true", true\])/, src) or
+              Regex.match?(
+                ~r/(params|args|attrs)\["\w+"\] (==|in) (true|\["true", true\])|Map\.get\((params|args), "\w+"\) == true/,
+                src
+              ) or
               (src =~ "defp parse_limit" and not (src =~ "Params.limit(")),
             do: Path.relative_to(file, @controllers)
 

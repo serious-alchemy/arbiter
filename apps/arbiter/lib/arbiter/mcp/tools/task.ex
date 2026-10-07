@@ -62,9 +62,8 @@ defmodule Arbiter.MCP.Tools.Task do
   @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
   @spec task_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_show(%Scope{} = scope, args) do
-    full = Map.get(args, "full") == true
-
-    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+    with {:ok, full} <- Params.fetch_bool(args, "full", false),
+         {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id) do
       loaded = load_progress(issue)
       result = if(full, do: Tools.serialize_task(loaded), else: serialize_task_slim(loaded))

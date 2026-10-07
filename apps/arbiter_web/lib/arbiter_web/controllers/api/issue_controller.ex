@@ -171,7 +171,14 @@ defmodule ArbiterWeb.Api.IssueController do
       |> Map.drop(["id", "force", "assignee"])
       |> coerce_atoms(@atom_fields)
 
-    case dedup_check(attrs, force?) do
+    with {:ok, skip_upstream?} <-
+           attrs |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
+      create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings)
+    end
+  end
+
+  defp create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings) do
+    case dedup_check(attrs, force?, skip_upstream?) do
       :ok ->
         case Ash.create(Issue, attrs) do
           {:ok, issue} ->
@@ -231,10 +238,10 @@ defmodule ArbiterWeb.Api.IssueController do
 
   # Delegates to `Arbiter.Tasks.Dedup` so the dashboard's create form applies
   # the same rule (bd-2cv4ws).
-  defp dedup_check(attrs, force?) do
+  defp dedup_check(attrs, force?, skip_upstream?) do
     Dedup.check(attrs["title"], attrs["workspace_id"],
       force: force?,
-      skip_upstream_create: attrs["skip_upstream_create"] == true,
+      skip_upstream_create: skip_upstream?,
       tracker_ref: attrs["tracker_ref"]
     )
   end
