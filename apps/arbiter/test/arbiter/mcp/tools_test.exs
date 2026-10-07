@@ -1033,6 +1033,140 @@ defmodule Arbiter.MCP.ToolsTest do
 
   # ---- Phase 2: coordinator-only mutating tools --------------------------
 
+  # bd-dtfe9x (D-T-21): the REST `:issue_create` / `:dependency_add` worker
+  # rules (`Arbiter.Tasks.WorkerFiling`) now hold on MCP too.
+  describe "ticket_create/dep_add as a worker (bd-dtfe9x)" do
+    test "files a child of its own task, in its own workspace", ctx do
+      assert {:ok, child} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "deferred review thread",
+                 "description" => "follow-up",
+                 "parent_id" => ctx.task.id,
+                 "priority" => 3
+               })
+
+      assert child.parent_id == ctx.task.id
+      assert Ash.get!(Issue, child.id).workspace_id == ctx.ws.id
+      assert Ash.get!(Issue, child.id).state == :backlog
+    end
+
+    test "naming its own workspace explicitly is fine", ctx do
+      assert {:ok, _} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "explicit ws",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => ctx.ws.name
+               })
+    end
+
+    test "must name a parent — and it must be its own task", ctx do
+      {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, %{"title" => "orphan"})
+      assert msg =~ "own task"
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_create(ctx.worker, %{"title" => "x", "parent_id" => sibling.id})
+    end
+
+    test "cannot file into another workspace", ctx do
+      {:ok, other} = Ash.create(Workspace, %{name: "mcp-tools-other", prefix: "mto"})
+
+      assert {:error, {kind, _}} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "elsewhere",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => other.name
+               })
+
+      assert kind in [:unauthorized, :not_found]
+    end
+
+    test "cannot set fields outside the worker's subset", ctx do
+      for extra <- [
+            %{"repo" => "r"},
+            %{"target_branch" => "x"},
+            %{"auto_close" => true},
+            %{"verify_after_deploy" => true},
+            %{"tracker_ref" => "7"},
+            %{"notes" => "n"}
+          ] do
+        args = Map.merge(%{"title" => "x", "parent_id" => ctx.task.id}, extra)
+        assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, args)
+        assert msg =~ (extra |> Map.keys() |> hd())
+      end
+    end
+
+    test "dep_add: a worker adopts an unparented ticket under its own task", ctx do
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => orphan.id,
+                 "type" => "parent_of"
+               })
+    end
+
+    test "dep_add: nothing but a parent_of edge from its own task", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      for {from, to, type} <- [
+            {ctx.task.id, a.id, "blocks"},
+            {a.id, b.id, "parent_of"}
+          ] do
+        assert {:error, {:unauthorized, msg}} =
+                 Tools.dep_add(ctx.worker, %{
+                   "from_issue_id" => from,
+                   "to_issue_id" => to,
+                   "type" => type
+                 })
+
+        assert msg =~ "parent_of"
+      end
+    end
+
+    test "dep_add: refuses a ticket that already has a parent, and caller-set created_by/notes",
+         ctx do
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+      {:ok, other_parent} = Ash.create(Issue, %{title: "p", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => other_parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert msg =~ "no parent"
+
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan2", workspace_id: ctx.ws.id})
+
+      for extra <- [%{"created_by" => "coordinator"}, %{"notes" => "n"}] do
+        assert {:error, {:unauthorized, _}} =
+                 Tools.dep_add(
+                   ctx.worker,
+                   Map.merge(
+                     %{
+                       "from_issue_id" => ctx.task.id,
+                       "to_issue_id" => orphan.id,
+                       "type" => "parent_of"
+                     },
+                     extra
+                   )
+                 )
+      end
+    end
+  end
+
   describe "task_create/2" do
     test "a coordinator creates a task forced into its own workspace", ctx do
       assert {:ok, data} =

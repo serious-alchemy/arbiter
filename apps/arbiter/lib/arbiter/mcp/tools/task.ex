@@ -17,6 +17,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
+  alias Arbiter.Tasks.WorkerFiling
   alias Arbiter.Usage.Estimate
 
   require Ash.Query
@@ -192,6 +193,7 @@ defmodule Arbiter.MCP.Tools.Task do
   @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_create(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         :ok <- authorize_worker_create(scope, args, ws_id),
          {:ok, title} <- Tools.require_string(args, "title"),
          {:ok, parent_id} <- create_parent(scope, args, ws_id),
          {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()),
@@ -217,6 +219,22 @@ defmodule Arbiter.MCP.Tools.Task do
       end
     end
   end
+
+  # bd-dtfe9x (D-T-21): a worker files exactly what `POST /api/issues` lets it
+  # (`ApiPolicy :issue_create`) — a child of its own task, in its own workspace,
+  # with only the descriptive fields. One rule set: `Arbiter.Tasks.WorkerFiling`.
+  # `workspace` is this tool's name for REST's `workspace_id`; it has been
+  # resolved (and confined to the worker's own workspace) by now.
+  defp authorize_worker_create(%Scope{tier: :worker} = scope, args, ws_id) do
+    params = args |> Map.delete("workspace") |> Map.put("workspace_id", ws_id)
+
+    case WorkerFiling.authorize_create(scope, params) do
+      :ok -> :ok
+      {:error, why} -> {:error, {:unauthorized, "a worker-tier token #{why}"}}
+    end
+  end
+
+  defp authorize_worker_create(_scope, _args, _ws_id), do: :ok
 
   # #1973: tell `Issue.create` who the parent is, so a child of a tracker-linked
   # parent defaults from the parent's linkage (per `tracker.child_policy`) rather
@@ -694,8 +712,9 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- dep_add ------------------------------------------------------------
 
   @doc """
-  Add a dependency edge between two tasks in the scope's workspace. Coordinator
-  only. Both endpoints must resolve inside the workspace (a cross-workspace id is
+  Add a dependency edge between two tasks in the scope's workspace. Coordinator,
+  or a worker adding a `parent_of` edge from its own task to an unparented
+  ticket (`Arbiter.Tasks.WorkerFiling`, the `POST /api/dependencies` rule). Both endpoints must resolve inside the workspace (a cross-workspace id is
   reported not-found, which is why the scope checks stay here and are not left
   to the facade's `:cross_workspace` error).
 
@@ -707,6 +726,7 @@ defmodule Arbiter.MCP.Tools.Task do
     with {:ok, from} <- Tools.require_string(args, "from_issue_id"),
          {:ok, to} <- Tools.require_string(args, "to_issue_id"),
          {:ok, type} <- Tools.require_enum(args, "type", Dependency.types()),
+         :ok <- authorize_worker_edge(scope, args),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
          {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to),
          :ok <- Tools.authorize_subtree_edge(scope, from, to, type) do
@@ -721,6 +741,18 @@ defmodule Arbiter.MCP.Tools.Task do
       end
     end
   end
+
+  # bd-dtfe9x (D-T-21): a worker adds what `POST /api/dependencies` lets it
+  # (`ApiPolicy :dependency_add`) — a `parent_of` edge from its own task to an
+  # unparented ticket in its workspace, and no caller-set `created_by`/`notes`.
+  defp authorize_worker_edge(%Scope{tier: :worker} = scope, args) do
+    case WorkerFiling.authorize_dependency(scope, args) do
+      :ok -> :ok
+      {:error, why} -> {:error, {:unauthorized, "a worker-tier token #{why}"}}
+    end
+  end
+
+  defp authorize_worker_edge(_scope, _args), do: :ok
 
   # ---- dep_remove ---------------------------------------------------------
 

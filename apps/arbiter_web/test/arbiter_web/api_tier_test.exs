@@ -329,6 +329,89 @@ defmodule ArbiterWeb.ApiTierTest do
     end
   end
 
+  # bd-dtfe9x (D-T-21): the worker's child-filing rules are ONE rule set
+  # (`Arbiter.Tasks.WorkerFiling`) behind REST and the MCP tools. Same input,
+  # same verdict — checked against both surfaces rather than assumed.
+  describe "worker child-filing parity: REST ApiPolicy vs MCP tools" do
+    alias Arbiter.MCP.Tools
+
+    defp worker_scope(ctx),
+      do: %Scope{tier: :worker, workspace_id: ctx.ws.id, task_id: ctx.task.id}
+
+    test "ticket_create == POST /api/issues for a worker, case by case", ctx do
+      scope = worker_scope(ctx)
+
+      cases = [
+        {"own child, descriptive fields",
+         %{"title" => "a", "description" => "d", "parent_id" => ctx.task.id, "priority" => 3}, true},
+        {"no parent", %{"title" => "a"}, false},
+        {"sibling as parent", %{"title" => "a", "parent_id" => ctx.sibling.id}, false},
+        {"extra repo", %{"title" => "a", "parent_id" => ctx.task.id, "repo" => "r"}, false},
+        {"extra auto_close", %{"title" => "a", "parent_id" => ctx.task.id, "auto_close" => true},
+         false},
+        {"extra notes", %{"title" => "a", "parent_id" => ctx.task.id, "notes" => "n"}, false}
+      ]
+
+      for {label, args, allowed?} <- cases do
+        # REST names the workspace `workspace_id`; MCP resolves it (own workspace).
+        rest = ApiPolicy.authorize(:issue_create, scope, Map.put(args, "workspace_id", ctx.ws.id))
+        mcp = Tools.task_create(scope, args)
+
+        assert match?(:ok, rest) == allowed?, "REST verdict for #{label}: #{inspect(rest)}"
+        assert match?({:ok, _}, mcp) == allowed?, "MCP verdict for #{label}: #{inspect(mcp)}"
+      end
+    end
+
+    test "a worker cannot file into another workspace on either surface", ctx do
+      scope = worker_scope(ctx)
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:issue_create, scope, %{
+                 "title" => "a",
+                 "parent_id" => ctx.task.id,
+                 "workspace_id" => ctx.other_ws.id
+               })
+
+      assert {:error, _} =
+               Tools.task_create(scope, %{
+                 "title" => "a",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => ctx.other_ws.name
+               })
+    end
+
+    test "dep_add == POST /api/dependencies for a worker, case by case", ctx do
+      scope = worker_scope(ctx)
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan", workspace_id: ctx.ws.id})
+
+      cases = [
+        {"parent_of from own task", %{"type" => "parent_of", "from_issue_id" => ctx.task.id},
+         true},
+        {"blocks", %{"type" => "blocks", "from_issue_id" => ctx.task.id}, false},
+        {"parent_of from a sibling", %{"type" => "parent_of", "from_issue_id" => ctx.sibling.id},
+         false},
+        {"created_by forged",
+         %{"type" => "parent_of", "from_issue_id" => ctx.task.id, "created_by" => "coordinator"},
+         false},
+        {"notes", %{"type" => "parent_of", "from_issue_id" => ctx.task.id, "notes" => "n"}, false}
+      ]
+
+      for {label, base, allowed?} <- cases do
+        args = Map.put(base, "to_issue_id", orphan.id)
+        rest = ApiPolicy.authorize(:dependency_add, scope, args)
+
+        # Roll back so each case sees the orphan unparented, as REST's check does.
+        {:error, {:rolled_back, mcp}} =
+          Arbiter.Repo.transaction(fn ->
+            Arbiter.Repo.rollback({:rolled_back, Tools.dep_add(scope, args)})
+          end)
+
+        assert match?(:ok, rest) == allowed?, "REST verdict for #{label}: #{inspect(rest)}"
+        assert match?({:ok, _}, mcp) == allowed?, "MCP verdict for #{label}: #{inspect(mcp)}"
+      end
+    end
+  end
+
   describe "a refine-tier token" do
     setup ctx do
       session = Ash.create!(Arbiter.Sessions.Session, %{cwd: "/tmp/api-tier-refine"})

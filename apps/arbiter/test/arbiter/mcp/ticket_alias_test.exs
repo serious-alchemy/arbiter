@@ -156,8 +156,8 @@ defmodule Arbiter.MCP.TicketAliasTest do
   end
 
   test "an alias is gated by its target's tiers", ctx do
-    assert {:rpc_error, -32_003, _} = Catalog.call(ctx.worker, "task_create", %{"title" => "x"})
-    assert {:rpc_error, -32_003, _} = Catalog.call(ctx.worker, "ticket_create", %{"title" => "x"})
+    assert {:rpc_error, -32_003, _} = Catalog.call(ctx.worker, "task_update", %{"id" => "x"})
+    assert {:rpc_error, -32_003, _} = Catalog.call(ctx.worker, "ticket_update", %{"id" => "x"})
   end
 
   describe "tools/list" do
@@ -178,8 +178,11 @@ defmodule Arbiter.MCP.TicketAliasTest do
 
       assert "task_show" in names
       assert "task_update_progress" in names
-      refute "task_create" in names
-      refute "ticket_create" in names
+      # bd-dtfe9x: a worker may file a child of its own task.
+      assert "task_create" in names
+      assert "ticket_create" in names
+      refute "task_update" in names
+      refute "ticket_update" in names
     end
   end
 end
