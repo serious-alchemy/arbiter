@@ -225,6 +225,8 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/worker_memory"} => :coordinator,
     {:get, "/api/server/dashboard_auth"} => :coordinator,
     {:get, "/api/server/doctor_scope"} => :coordinator,
+    {:get, "/api/server/spawn_canary"} => :coordinator,
+    {:post, "/api/server/spawn_canary"} => :coordinator,
     {:post, "/api/dashboard/login_tokens"} => :operator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------

@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Doctor do
   @moduledoc """
-  `arb server doctor [--all|-v] [--json]` — health checks.
+  `arb server doctor [--all|-v] [--spawn] [--json]` — health checks.
 
   Every check has a severity:
 
@@ -28,6 +28,20 @@ defmodule ArbiterCli.Cmd.Doctor do
   every check grouped as core, auth & providers, sandboxes and security
   posture; the agy jail's six sub-checks collapse to one line while they pass.
 
+  The `spawn` check is the one that proves a worker can actually spawn and
+  reach its agent (bd-8t4yui): the server runs a canary spawn per enabled,
+  unpaused provider through the real spawn pipeline (jail, per-run temp dir,
+  memory scope, env and credential handoff) with the agent CLI's `--version` —
+  no ticket, no run record, no scheduler slot, no model tokens — and reports,
+  per provider, whether it spawned and reached the agent, the exit code, the
+  duration and the first error line. A plain `arb server doctor` runs it
+  automatically the first time after the server boots (so the first doctor
+  after a deploy proves the new build spawns) and reuses that result until the
+  next boot, re-running it while it is failing so a fix shows up at once.
+  `--spawn` forces a fresh canary and prints its rows whatever their severity.
+  A failed spawn is a `fail`, so the doctor exits 1. The readiness polls of
+  `arb start`/`restart`/`server deploy` do not run it.
+
   Checks, by group:
 
     * core — Phoenix reachable, a workspace exists, the active workspace
@@ -38,7 +52,7 @@ defmodule ArbiterCli.Cmd.Doctor do
       accounts, tmux (the dashboard login relay), account/workspace quota policy.
     * sandboxes — the agy jail (write jail, escape vectors, hidden reads,
       network, keyring proxy, ssh transport), the egress jail, podman readiness,
-      the worker temp dir and the worker memory cap.
+      the worker temp dir, the worker memory cap and the spawn canary.
     * security posture — bind address, anonymous `/api` refused, dashboard
       login, Erlang distribution loopback-only with an owner-only cookie,
       workspace safe-default categories, guardrail profiles.
@@ -53,15 +67,21 @@ defmodule ArbiterCli.Cmd.Doctor do
       {opts, _rest, mode} =
         ArgParser.parse(argv,
           command: "arb server doctor",
-          switches: [all: :boolean, verbose: :boolean],
+          switches: [all: :boolean, verbose: :boolean, spawn: :boolean],
           aliases: [v: :verbose]
         )
 
-      results = checks()
+      results = checks(spawn: if(opts[:spawn] == true, do: :force, else: :auto))
 
       case mode do
-        :json -> Formatter.emit_json(results)
-        :text -> Formatter.emit_text(results, all: opts[:all] == true or opts[:verbose] == true)
+        :json ->
+          Formatter.emit_json(results)
+
+        :text ->
+          Formatter.emit_text(results,
+            all: opts[:all] == true or opts[:verbose] == true,
+            show_spawn: opts[:spawn] == true
+          )
       end
 
       if Formatter.overall(results) == :fail, do: Output.halt(1)
@@ -71,9 +91,12 @@ defmodule ArbiterCli.Cmd.Doctor do
   @doc """
   Run every health check and return the result structs, in display order.
   Shared by `arb doctor` and `arb start` so "green" has one definition.
+
+  Option `:spawn` is the canary spawn check's mode (`Checks.run/1`): `:auto`
+  (the default), `:force` or `:skip`.
   """
-  @spec checks() :: [Checks.Result.t()]
-  def checks, do: Checks.run()
+  @spec checks(keyword()) :: [Checks.Result.t()]
+  def checks(opts \\ []), do: Checks.run(opts)
 
   @doc """
   True when Phoenix's HTTP API is reachable — the first health check on its
@@ -92,7 +115,7 @@ defmodule ArbiterCli.Cmd.Doctor do
   auto-rollback wait actually needs. A `warn` never blocks.
   """
   @spec green?() :: boolean()
-  def green?, do: green?(checks())
+  def green?, do: green?(checks(spawn: :skip))
 
   @doc """
   Same as `green?/0`, but against a result list the caller already fetched —

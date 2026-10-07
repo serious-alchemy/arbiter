@@ -44,6 +44,44 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     "egress_enforced" => false
   }
 
+  # This boot's passing canary, as `GET /api/server/spawn_canary` answers it.
+  defp canary_ok do
+    %{
+      "ok" => true,
+      "ran_at" => "2026-10-07T12:00:00Z",
+      "providers" => [
+        %{
+          "provider" => "claude",
+          "label" => "claude",
+          "status" => "ok",
+          "spawned" => true,
+          "reached_agent" => true,
+          "exit_code" => 0,
+          "duration_ms" => 41,
+          "error" => nil,
+          "detail" => "2.1.292 (Claude Code)"
+        },
+        na("codex", "codex"),
+        na("gemini", "agy"),
+        na("grok", "grok")
+      ]
+    }
+  end
+
+  defp na(provider, label) do
+    %{
+      "provider" => provider,
+      "label" => label,
+      "status" => "n/a",
+      "spawned" => false,
+      "reached_agent" => false,
+      "exit_code" => nil,
+      "duration_ms" => nil,
+      "error" => nil,
+      "detail" => "#{label} is not configured for any workspace"
+    }
+  end
+
   # Every endpoint the doctor reads, answering "healthy". `overrides` replaces
   # entries by `{method, path}`.
   defp healthy_routes(overrides) do
@@ -81,7 +119,8 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {{"get", "/api/server/merge_routing"}, {%{"repos" => [], "problems" => []}, 200}},
       {{"get", "/api/nodes"}, {%{"nodes" => [], "public_url" => nil, "warnings" => []}, 200}},
       {{"get", "/api/providers/paused"}, {%{"paused" => []}, 200}},
-      {{"get", "/api/server/doctor_scope"}, {@scope_none, 200}}
+      {{"get", "/api/server/doctor_scope"}, {@scope_none, 200}},
+      {{"get", "/api/server/spawn_canary"}, {%{"report" => canary_ok()}, 200}}
     ]
 
     keys = Enum.map(overrides, &elem(&1, 0))
@@ -523,13 +562,19 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       merge_routing nodes
     )
 
+    # bd-8t4yui: one row per provider the server's canary reports.
+    @spawn_ids ~w(
+      spawn.spawn_canary_claude spawn.spawn_canary_codex spawn.spawn_canary_agy
+      spawn.spawn_canary_grok
+    )
+
     test "every pre-existing check is still reachable by id, and ids are unique" do
       stub_healthy()
       ids = Checks.run() |> Enum.map(& &1.id)
 
       assert Enum.sort(ids) == Enum.sort(Enum.uniq(ids))
       assert @expected_ids -- ids == []
-      assert ids -- @expected_ids == []
+      assert ids -- (@expected_ids ++ @spawn_ids) == []
     end
 
     test "--json lists every check, n/a included" do
@@ -538,7 +583,200 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {json, _err, 0} = capture(fn -> Doctor.run(["--json"]) end)
       {:ok, payload} = Jason.decode(String.trim(json))
 
-      assert payload["checks"] |> Enum.map(& &1["id"]) |> Enum.sort() == Enum.sort(@expected_ids)
+      assert payload["checks"] |> Enum.map(& &1["id"]) |> Enum.sort() ==
+               Enum.sort(@expected_ids ++ @spawn_ids)
+    end
+  end
+
+  # bd-8t4yui: the end-to-end canary spawn check.
+  describe "spawn canary" do
+    defp provider_row(provider, fields) do
+      Map.merge(
+        %{
+          "provider" => provider,
+          "label" => provider,
+          "status" => "ok",
+          "spawned" => true,
+          "reached_agent" => true,
+          "exit_code" => 0,
+          "duration_ms" => 12,
+          "error" => nil,
+          "detail" => nil
+        },
+        fields
+      )
+    end
+
+    defp report(providers) do
+      %{
+        "ok" => Enum.all?(providers, &(&1["status"] != "fail")),
+        "ran_at" => "2026-10-07T12:00:00Z",
+        "providers" => providers
+      }
+    end
+
+    defp failed_report do
+      report([
+        provider_row("claude", %{}),
+        provider_row("gemini", %{
+          "label" => "agy",
+          "status" => "fail",
+          "reached_agent" => false,
+          "exit_code" => 125,
+          "duration_ms" => 7,
+          "error" => "exit 125: bwrap: sun_path too long"
+        }),
+        provider_row("codex", %{
+          "status" => "fail",
+          "spawned" => false,
+          "reached_agent" => false,
+          "exit_code" => nil,
+          "error" => "FunctionClauseError: no function clause matching in Path.join/2"
+        })
+      ])
+    end
+
+    # `GET /api/server/spawn_canary` answers `cached`; `POST` answers `fresh`
+    # and tells the test process it was called.
+    defp stub_canary(cached, fresh) do
+      parent = self()
+
+      post_route =
+        case fresh do
+          {:status, status, body} ->
+            fn conn ->
+              send(parent, :canary_posted)
+              conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+            end
+
+          report ->
+            fn conn ->
+              send(parent, :canary_posted)
+              Req.Test.json(conn, %{"report" => report})
+            end
+        end
+
+      stub_healthy([
+        {{"get", "/api/server/spawn_canary"}, {%{"report" => cached}, 200}},
+        {{"post", "/api/server/spawn_canary"}, post_route}
+      ])
+    end
+
+    defp spawn_results(opts),
+      do: Checks.run(opts) |> Enum.filter(&String.starts_with?(&1.id, "spawn"))
+
+    test "--spawn runs a fresh canary even when this boot already has a passing one" do
+      stub_canary(canary_ok(), report([provider_row("claude", %{"detail" => "fresh 1.0"})]))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--spawn"]) end)
+
+      assert_received :canary_posted
+      assert exit_code == 0
+
+      assert out =~ "[ ok ] spawn canary (claude)"
+      assert out =~ "spawned, reached the agent (fresh 1.0), exit 0, 12 ms"
+    end
+
+    test "a failed spawn fails the doctor with the first error line, per provider" do
+      stub_canary(nil, failed_report())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--spawn"]) end)
+
+      assert exit_code == 1
+      assert out =~ "[fail] spawn canary (agy)"
+      assert out =~ "spawned but did not reach the agent: exit 125: bwrap: sun_path too long"
+      assert out =~ "[fail] spawn canary (codex)"
+      assert out =~ "could not spawn: FunctionClauseError"
+      assert out =~ ~r/1 ok .* 2 fail/
+    end
+
+    test "a failed spawn is reported by a plain doctor too, and --json carries it" do
+      stub_canary(failed_report(), failed_report())
+
+      {json, _err, exit_code} = capture(fn -> Doctor.run(["--json"]) end)
+      {:ok, payload} = Jason.decode(String.trim(json))
+
+      assert exit_code == 1
+      assert payload["ok"] == false
+
+      agy = Enum.find(payload["checks"], &(&1["id"] == "spawn.spawn_canary_agy"))
+      assert %{"severity" => "fail", "group" => "sandboxes"} = agy
+    end
+
+    test "paused or unconfigured providers are n/a, and not counted as failures" do
+      stub_canary(nil, report([provider_row("claude", %{}), na("gemini", "agy")]))
+
+      results = spawn_results(spawn: :force)
+
+      assert %{status: :ok} = by_id(results, "spawn.spawn_canary_claude")
+      assert %{status: :na, detail: detail} = by_id(results, "spawn.spawn_canary_agy")
+      assert detail =~ "not configured"
+    end
+
+    test "a podman provider the canary could not mount is n/a with the reason, never ok" do
+      skipped =
+        provider_row("claude", %{
+          "status" => "skipped",
+          "spawned" => false,
+          "reached_agent" => false,
+          "exit_code" => nil,
+          "duration_ms" => nil,
+          "detail" => "sandbox.backend is podman"
+        })
+
+      stub_canary(nil, report([skipped]))
+
+      assert [%{status: :na, detail: "sandbox.backend is podman"}] = spawn_results(spawn: :force)
+    end
+
+    test "a plain doctor reuses this boot's passing canary instead of spawning again" do
+      stub_canary(canary_ok(), canary_ok())
+
+      results = spawn_results(spawn: :auto)
+
+      refute_received :canary_posted
+      assert %{status: :ok} = by_id(results, "spawn.spawn_canary_claude")
+    end
+
+    test "the first plain doctor of a boot runs the canary and shows its result" do
+      stub_canary(nil, canary_ok())
+
+      results = spawn_results(spawn: :auto)
+
+      assert_received :canary_posted
+      assert %{status: :ok} = by_id(results, "spawn.spawn_canary_claude")
+    end
+
+    test "a plain doctor re-runs a canary that failed, so a fix shows up at once" do
+      stub_canary(failed_report(), canary_ok())
+
+      results = spawn_results(spawn: :auto)
+
+      assert_received :canary_posted
+      assert Enum.all?(results, &(&1.status in [:ok, :na]))
+    end
+
+    test "readiness polls (:skip) never spawn" do
+      stub_canary(nil, canary_ok())
+
+      assert [%{id: "spawn", status: :na}] = spawn_results(spawn: :skip)
+      refute_received :canary_posted
+      refute Doctor.green?() == nil
+      refute_received :canary_posted
+    end
+
+    test "a canary already running on the server is a warn, not an ok or a fail" do
+      stub_canary(nil, {:status, 409, %{"error" => "busy"}})
+
+      assert [%{status: :warn, detail: detail}] = spawn_results(spawn: :auto)
+      assert detail =~ "already running"
+    end
+
+    test "a server that predates the canary is could-not-check, never ok" do
+      stub_healthy([{{"get", "/api/server/spawn_canary"}, {%{"error" => "nf"}, 404}}])
+
+      assert [%{status: :warn, detail: detail}] = spawn_results(spawn: :auto)
+      assert detail =~ "could not check"
     end
   end
 end

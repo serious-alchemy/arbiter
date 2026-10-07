@@ -175,6 +175,111 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  # bd-8t4yui: the end-to-end canary spawn. Agent CLIs are stubs on PATH.
+  describe "POST /api/server/spawn_canary" do
+    alias Arbiter.Doctor.SpawnCanary
+    alias Arbiter.MCP.Scope
+
+    setup do
+      SpawnCanary.reset_cache()
+
+      dir =
+        Path.join(
+          Arbiter.Config.Paths.scratch_root(),
+          "canary-web-#{System.unique_integer([:positive])}"
+        )
+
+      bin = Path.join(dir, "bin")
+      File.mkdir_p!(bin)
+
+      for name <- ~w(claude agy gemini codex grok) do
+        path = Path.join(bin, name)
+        File.write!(path, "#!/bin/sh\necho \"#{name} 9.9.9\"\n")
+        File.chmod!(path, 0o755)
+      end
+
+      prev_path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> prev_path)
+
+      prev_root = Application.get_env(:arbiter, :worker_tmp_root)
+      Application.put_env(:arbiter, :worker_tmp_root, Path.join(dir, "tmp"))
+      File.mkdir_p!(Path.join(dir, "tmp"))
+
+      on_exit(fn ->
+        System.put_env("PATH", prev_path)
+
+        if prev_root,
+          do: Application.put_env(:arbiter, :worker_tmp_root, prev_root),
+          else: Application.delete_env(:arbiter, :worker_tmp_root)
+
+        SpawnCanary.reset_cache()
+        File.rm_rf(dir)
+      end)
+
+      Ash.create!(Arbiter.Tasks.Workspace, %{name: "canary-web", config: %{}})
+      :ok
+    end
+
+    defp as(token) do
+      Phoenix.ConnTest.build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+    end
+
+    test "runs the canary and returns the per-provider report, cached for the boot", %{conn: conn} do
+      assert %{"report" => nil} = conn |> get("/api/server/spawn_canary") |> json_response(200)
+
+      resp = conn |> post("/api/server/spawn_canary", %{}) |> json_response(200)
+
+      assert %{"ok" => true, "ran_at" => _, "providers" => providers} = resp["report"]
+
+      assert %{"status" => "ok", "spawned" => true, "reached_agent" => true, "exit_code" => 0} =
+               Enum.find(providers, &(&1["provider"] == "claude"))
+
+      assert %{"status" => "n/a", "spawned" => false} =
+               Enum.find(providers, &(&1["provider"] == "codex"))
+
+      assert %{"report" => cached} = conn |> get("/api/server/spawn_canary") |> json_response(200)
+      assert cached == resp["report"]
+    end
+
+    test "a concurrent canary is refused with 409", %{conn: conn} do
+      parent = self()
+
+      holder =
+        Task.async(fn ->
+          true = :global.set_lock({SpawnCanary, self()}, [node()], 0)
+          send(parent, :locked)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      assert_receive :locked, 5_000
+
+      resp = conn |> post("/api/server/spawn_canary", %{}) |> json_response(409)
+      assert resp["error"] == "busy"
+
+      send(holder.pid, :release)
+      Task.await(holder)
+    end
+
+    test "a worker token is refused (403), as are refine and anonymous callers" do
+      worker = as(Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"}))
+      assert post(worker, "/api/server/spawn_canary", %{}).status == 403
+      assert get(worker, "/api/server/spawn_canary").status == 403
+
+      refine = as(Scope.mint_refine("sess-1", "ws-1", "bd-1"))
+      assert post(refine, "/api/server/spawn_canary", %{}).status in [401, 403]
+
+      anonymous = build_conn() |> put_req_header("content-type", "application/json")
+      assert post(anonymous, "/api/server/spawn_canary", %{}).status == 401
+
+      assert SpawnCanary.cached() == nil
+    end
+  end
+
   describe "GET /api/server/claude_credentials" do
     setup do
       prev_env =

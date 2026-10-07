@@ -639,7 +639,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # bd-8ix2tw: a misleading "pre-existing condition" note on a deploy that
   # was never at risk of it.
   defp preflight_blocking_fails do
-    Doctor.checks()
+    Doctor.checks(spawn: :skip)
     |> Enum.filter(&(&1.status == :fail and &1.blocks_readiness))
     |> Enum.map(& &1.name)
   end
