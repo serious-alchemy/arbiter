@@ -273,7 +273,12 @@ defmodule Arbiter.Nodes.Bridge.Core do
             n -> Map.put(core.runs, run, n - 1)
           end
 
-        %{core | streams: Map.delete(core.streams, id), runs: runs, mux: Mux.drop_stream(core.mux, id)}
+        %{
+          core
+          | streams: Map.delete(core.streams, id),
+            runs: runs,
+            mux: Mux.drop_stream(core.mux, id)
+        }
 
       _ ->
         core
@@ -287,13 +292,17 @@ defmodule Arbiter.Nodes.Bridge.Core do
     end)
   end
 
-  defp apply_action(core, {:frame, _id, frame}), do: {core, [{:push, "bridge.data", {:binary, frame}}]}
+  defp apply_action(core, {:frame, _id, frame}),
+    do: {core, [{:push, "bridge.data", {:binary, frame}}]}
+
   defp apply_action(core, {:rearm, id}), do: {core, [{:stream, id, :rearm}]}
 
   defp apply_action(core, {:close, id}) do
     case core.streams do
       %{^id => s} ->
-        finish(put(core, id, %{s | tx_done?: true}), id, [{:push, "bridge.close", %{"stream" => id}}])
+        finish(put(core, id, %{s | tx_done?: true}), id, [
+          {:push, "bridge.close", %{"stream" => id}}
+        ])
 
       _ ->
         {core, []}
@@ -312,8 +321,11 @@ defmodule Arbiter.Nodes.Bridge.Core do
   # Closed in both directions: nothing more can be said on it.
   defp finish(core, id, effects) do
     case core.streams do
-      %{^id => %{tx_done?: true, rx_done?: true}} -> {remove(core, id), effects ++ [{:stream, id, :stop}]}
-      _ -> {core, effects}
+      %{^id => %{tx_done?: true, rx_done?: true}} ->
+        {remove(core, id), effects ++ [{:stream, id, :stop}]}
+
+      _ ->
+        {core, effects}
     end
   end
 end

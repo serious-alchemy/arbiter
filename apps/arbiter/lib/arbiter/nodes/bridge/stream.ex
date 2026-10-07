@@ -148,7 +148,9 @@ defmodule Arbiter.Nodes.Bridge.Stream do
     if state.eof_out?, do: {:stop, :normal, state}, else: {:noreply, state}
   end
 
-  def handle_info({:tcp_error, sock, reason}, %{sock: sock} = state), do: fail(state, {:read, reason})
+  def handle_info({:tcp_error, sock, reason}, %{sock: sock} = state),
+    do: fail(state, {:read, reason})
+
   def handle_info(_other, state), do: {:noreply, state}
 
   @impl true

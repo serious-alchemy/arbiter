@@ -6,7 +6,10 @@ defmodule Arbiter.Nodes.Bridge.MuxTest do
   defp frames(actions), do: for({:frame, id, bin} <- actions, do: {id, Frame.decode!(bin)})
 
   defp new(opts \\ []),
-    do: Mux.new(Keyword.merge([window: 64, frame: 16, node_cap: 1_000, max_stream_bytes: 10_000], opts))
+    do:
+      Mux.new(
+        Keyword.merge([window: 64, frame: 16, node_cap: 1_000, max_stream_bytes: 10_000], opts)
+      )
 
   defp open(mux, ids), do: Enum.reduce(ids, mux, &Mux.open_stream(&2, &1))
 
@@ -35,13 +38,19 @@ defmodule Arbiter.Nodes.Bridge.MuxTest do
 
     test "stops at the stream window and resumes when credit comes back" do
       {mux, actions} = new() |> open([1]) |> Mux.local_data(1, String.duplicate("a", 100))
-      assert actions |> frames() |> Enum.map(fn {_, f} -> byte_size(f.bytes) end) |> Enum.sum() == 64
+
+      assert actions |> frames() |> Enum.map(fn {_, f} -> byte_size(f.bytes) end) |> Enum.sum() ==
+               64
+
       refute {:rearm, 1} in actions
       assert Mux.buffered(mux) == 36
 
       # the peer wrote 32 of them to its socket
       {mux, actions} = Mux.credit(mux, 1, 32)
-      assert actions |> frames() |> Enum.map(fn {_, f} -> byte_size(f.bytes) end) |> Enum.sum() == 32
+
+      assert actions |> frames() |> Enum.map(fn {_, f} -> byte_size(f.bytes) end) |> Enum.sum() ==
+               32
+
       assert Mux.buffered(mux) == 4
       refute {:rearm, 1} in actions
     end
@@ -102,7 +111,12 @@ defmodule Arbiter.Nodes.Bridge.MuxTest do
 
       # stream 2 is not stalled by stream 1's 468 buffered bytes
       {mux, b} = Mux.local_data(mux, 2, String.duplicate("b", 30))
-      assert b |> frames() |> Enum.map(fn {id, f} -> {id, byte_size(f.bytes)} end) == [{2, 16}, {2, 14}]
+
+      assert b |> frames() |> Enum.map(fn {id, f} -> {id, byte_size(f.bytes)} end) == [
+               {2, 16},
+               {2, 14}
+             ]
+
       assert {:rearm, 2} in b
       refute {:rearm, 1} in b
       assert Mux.buffered(mux) == 468

@@ -99,8 +99,11 @@ defmodule Arbiter.Nodes.Bridge.Mux do
   @spec local_closed(t(), non_neg_integer()) :: {t(), [action()]}
   def local_closed(%__MODULE__{streams: streams} = mux, id) do
     case streams do
-      %{^id => %{done?: false} = s} -> mux |> put(id, %{s | closing?: true}) |> enqueue(id) |> pump()
-      _ -> {mux, []}
+      %{^id => %{done?: false} = s} ->
+        mux |> put(id, %{s | closing?: true}) |> enqueue(id) |> pump()
+
+      _ ->
+        {mux, []}
     end
   end
 

@@ -73,7 +73,9 @@ defmodule Arbiter.Nodes.Bridge.CoreTest do
     sim
     |> on(:a, &Core.open_local(&1, id, run, name))
     |> on(:b, &Core.open_remote(&1, id, run, name))
-    |> then(fn sim -> update_in(sim.armed, fn a -> %{a | a: MapSet.put(a.a, id), b: MapSet.put(a.b, id)} end) end)
+    |> then(fn sim ->
+      update_in(sim.armed, fn a -> %{a | a: MapSet.put(a.a, id), b: MapSet.put(a.b, id)} end)
+    end)
   end
 
   # the producer on `side` reads `bytes` from its local socket
@@ -182,12 +184,24 @@ defmodule Arbiter.Nodes.Bridge.CoreTest do
     setup do: %{sim: sim() |> open(1)}
 
     test "a frame past the stream window resets the stream", %{sim: sim} do
-      {b, effects} = Core.remote(sim.b, "bridge.data", {:binary, Frame.encode(0, 1, String.duplicate("x", 16))})
+      {b, effects} =
+        Core.remote(
+          sim.b,
+          "bridge.data",
+          {:binary, Frame.encode(0, 1, String.duplicate("x", 16))}
+        )
+
       refute Enum.any?(effects, &match?({:push, "bridge.reset", _}, &1))
 
-      {b, _} = Core.remote(b, "bridge.data", {:binary, Frame.encode(1, 1, String.duplicate("x", 16))})
-      {b, _} = Core.remote(b, "bridge.data", {:binary, Frame.encode(2, 1, String.duplicate("x", 16))})
-      {b, _} = Core.remote(b, "bridge.data", {:binary, Frame.encode(3, 1, String.duplicate("x", 16))})
+      {b, _} =
+        Core.remote(b, "bridge.data", {:binary, Frame.encode(1, 1, String.duplicate("x", 16))})
+
+      {b, _} =
+        Core.remote(b, "bridge.data", {:binary, Frame.encode(2, 1, String.duplicate("x", 16))})
+
+      {b, _} =
+        Core.remote(b, "bridge.data", {:binary, Frame.encode(3, 1, String.duplicate("x", 16))})
+
       # 64 unwritten: the fifth frame is one too many
       {b, effects} = Core.remote(b, "bridge.data", {:binary, Frame.encode(4, 1, "x")})
       assert {:push, "bridge.reset", %{"stream" => 1, "reason" => "window_exceeded"}} in effects
@@ -196,7 +210,13 @@ defmodule Arbiter.Nodes.Bridge.CoreTest do
     end
 
     test "an oversized frame resets the stream", %{sim: sim} do
-      {_b, effects} = Core.remote(sim.b, "bridge.data", {:binary, Frame.encode(0, 1, String.duplicate("x", 17))})
+      {_b, effects} =
+        Core.remote(
+          sim.b,
+          "bridge.data",
+          {:binary, Frame.encode(0, 1, String.duplicate("x", 17))}
+        )
+
       assert {:push, "bridge.reset", %{"stream" => 1, "reason" => "frame_too_large"}} in effects
     end
 
@@ -206,15 +226,26 @@ defmodule Arbiter.Nodes.Bridge.CoreTest do
     end
 
     test "something that is not a frame is a violation of the whole channel", %{sim: sim} do
-      assert {_, [{:violation, :bad_frame}]} = Core.remote(sim.b, "bridge.data", {:binary, "garbage"})
+      assert {_, [{:violation, :bad_frame}]} =
+               Core.remote(sim.b, "bridge.data", {:binary, "garbage"})
     end
 
     test "a stream past its lifetime byte cap is reset", %{sim: sim} do
       sim = %{sim | b: Core.new(Map.merge(@limits, %{max_stream_bytes: 20}))}
       sim = on(sim, :b, &Core.open_remote(&1, 1, "r1", "proxy"))
-      {b, e1} = Core.remote(sim.b, "bridge.data", {:binary, Frame.encode(0, 1, String.duplicate("x", 16))})
+
+      {b, e1} =
+        Core.remote(
+          sim.b,
+          "bridge.data",
+          {:binary, Frame.encode(0, 1, String.duplicate("x", 16))}
+        )
+
       refute Enum.any?(e1, &match?({:push, "bridge.reset", _}, &1))
-      {_b, e2} = Core.remote(b, "bridge.data", {:binary, Frame.encode(1, 1, String.duplicate("x", 16))})
+
+      {_b, e2} =
+        Core.remote(b, "bridge.data", {:binary, Frame.encode(1, 1, String.duplicate("x", 16))})
+
       assert {:push, "bridge.reset", %{"stream" => 1, "reason" => "stream_byte_cap"}} in e2
     end
 

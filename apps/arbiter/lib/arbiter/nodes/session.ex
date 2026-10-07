@@ -661,7 +661,10 @@ defmodule Arbiter.Nodes.Session do
 
   # `%{name => path}` of the per-run sockets a spec declares.
   defp bridge_map(%{"bridges" => bridges}) when is_list(bridges) do
-    for %{"name" => name, "path" => path} <- bridges, is_binary(name), is_binary(path), into: %{},
+    for %{"name" => name, "path" => path} <- bridges,
+        is_binary(name),
+        is_binary(path),
+        into: %{},
         do: {name, path}
   end
 
