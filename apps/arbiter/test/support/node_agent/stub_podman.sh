@@ -34,6 +34,10 @@ case "$sub" in
               h="${a%%:*}"
               echo "edited by the run" > "$h/edited.txt"
               echo '{}' > "$h/.mcp.json" ;;
+            *:/work/config|*:/work/config:*)
+              h="${a%%:*}"
+              mkdir -p "$h/projects/-work-tree"
+              echo '{"type":"summary"}' > "$h/projects/-work-tree/s1.jsonl" ;;
           esac
         fi
         prev="$a"

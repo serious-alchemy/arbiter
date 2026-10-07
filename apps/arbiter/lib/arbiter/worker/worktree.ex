@@ -89,6 +89,10 @@ defmodule Arbiter.Worker.Worktree do
   worktree would fail "already exists" and need `attach/2`. A clean linked
   worktree already at the leaf on this branch is replaced by a clone of it;
   anything else there is `{:error, {:layout_mismatch, path}}`.
+
+  `seed: false` (RW11) builds a **thin** clone: no compiled-deps seeding and no
+  `mix deps.get`. It is the home clone of a run placed on a node, which no
+  container ever mounts. `attach/3` takes it too.
   """
   @spec create(path(), String.t() | nil, String.t(), keyword()) ::
           {:ok, path()} | {:error, term()}
@@ -112,7 +116,22 @@ defmodule Arbiter.Worker.Worktree do
   # bd-2jerqw: the resolved `worker.repos.<repo>.seed_paths` (`SeedPaths.resolve/2`),
   # or nil for the built-in set. Every provisioning entry point takes it as the
   # `:seed_paths` option and hands it to `seed_compiled_deps/3`.
-  defp seed_paths(opts), do: Keyword.get(opts, :seed_paths)
+  #
+  # RW11: `seed: false` is a **thin** clone (`false` in place of the paths): the home
+  # clone of a run on a node is never mounted into a container, so it gets neither
+  # the compiled-deps copy nor a `mix deps.get`.
+  defp seed_paths(opts) do
+    if Keyword.get(opts, :seed) == false, do: false, else: Keyword.get(opts, :seed_paths)
+  end
+
+  @doc false
+  @spec seed_worktree(path(), path(), [String.t()] | nil | false) :: :ok
+  def seed_worktree(_source_repo, _worktree_path, false), do: :ok
+
+  def seed_worktree(source_repo, worktree_path, seed_paths) do
+    :ok = seed_compiled_deps(source_repo, worktree_path, seed_paths)
+    :ok = ensure_deps_fetched(worktree_path)
+  end
 
   # The leaf may hold the linked worktree an earlier run left before the
   # workspace switched to a container backend. Its branch and commits live in
@@ -168,8 +187,7 @@ defmodule Arbiter.Worker.Worktree do
                  ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
                  cd: repo_path
                ) do
-          :ok = seed_compiled_deps(repo_path, path, seed_paths)
-          :ok = ensure_deps_fetched(path)
+          :ok = seed_worktree(repo_path, path, seed_paths)
           {:ok, path}
         end
       end
@@ -326,8 +344,7 @@ defmodule Arbiter.Worker.Worktree do
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, _stdout} <-
            run_git(["checkout", "--detach", "--force", "origin/" <> base_branch], cd: path) do
-      :ok = seed_compiled_deps(repo_path, path, seed_paths)
-      :ok = ensure_deps_fetched(path)
+      :ok = seed_worktree(repo_path, path, seed_paths)
       {:ok, path}
     end
   end
@@ -339,8 +356,7 @@ defmodule Arbiter.Worker.Worktree do
          :ok <- fetch_origin_branch(repo_path, base_branch),
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, _stdout} <- add_detached_git(repo_path, path, base_branch) do
-      :ok = seed_compiled_deps(repo_path, path, seed_paths)
-      :ok = ensure_deps_fetched(path)
+      :ok = seed_worktree(repo_path, path, seed_paths)
       {:ok, path}
     end
   end
@@ -681,8 +697,7 @@ defmodule Arbiter.Worker.Worktree do
 
       case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
         {:ok, _stdout} ->
-          :ok = seed_compiled_deps(repo_path, path, seed_paths)
-          :ok = ensure_deps_fetched(path)
+          :ok = seed_worktree(repo_path, path, seed_paths)
           {:ok, path}
 
         {:error, _} = err ->
@@ -2121,8 +2136,13 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
-  # What `seed_compiled_deps/3` recorded as copied into `worktree_path`.
-  defp seeded_paths(worktree_path) do
+  @doc """
+  What `seed_compiled_deps/3` recorded as copied into `worktree_path`: the paths the
+  primary-side checkout filter (`Arbiter.Nodes.Checkout`, RW11) refuses to take back
+  from a node.
+  """
+  @spec seeded_paths(path()) :: [String.t()]
+  def seeded_paths(worktree_path) do
     with file when is_binary(file) <- seed_record_path(worktree_path),
          {:ok, body} <- File.read(file) do
       String.split(body, "\n", trim: true)

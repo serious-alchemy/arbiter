@@ -86,7 +86,14 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
     repo = Path.join(root, "primary-home")
     base = home!(repo)
 
-    %{node: node, stub: stub, repo: repo, base: base, node_home: home}
+    %{
+      node: node,
+      stub: stub,
+      repo: repo,
+      base: base,
+      node_home: home,
+      config_dir: Path.join(root, "primary-config")
+    }
   end
 
   defp put_env_restoring(app, key, value) do
@@ -148,7 +155,14 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
   end
 
   defp place(ctx, run) do
-    checkout = %{home: ctx.repo, branch: @branch, base: "main", seeded_paths: []}
+    checkout = %{
+      home: ctx.repo,
+      branch: @branch,
+      base: "main",
+      seeded_paths: [],
+      config_dir: ctx.config_dir
+    }
+
     Executor.prepare(ctx.node.id, spec(run), owner: self(), checkout: checkout)
   end
 
@@ -173,6 +187,9 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
     # the primary-side filter dropped the injected config the "container" left behind
     refute File.exists?(Path.join(ctx.repo, ".mcp.json"))
     assert git!(ctx.repo, ["rev-parse", "refs/arbiter/checkpoint/c1"]) != ""
+
+    # the session JSONL came back through the sanitising extractor, to the run's config dir
+    assert File.read!(Path.join(ctx.config_dir, "projects/-work-tree/s1.jsonl")) =~ "summary"
   end
 
   test "collect/2 takes a checkpoint of a live run and the home clone has it before the run ends", ctx do

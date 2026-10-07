@@ -47,7 +47,7 @@ defmodule Arbiter.NodeAgent.Run do
 
   use GenServer, restart: :temporary
 
-  alias Arbiter.NodeAgent.{Cgroups, Checkout, Files, RunSpec, Secrets, StdoutBuffer}
+  alias Arbiter.NodeAgent.{Cgroups, Checkout, Files, RunSpec, Secrets, StdoutBuffer, Transcripts}
   alias Arbiter.Nodes.StdoutFrame
   alias Arbiter.Worker.{Container, Image, TestServices}
   alias Arbiter.Worker.ReleaseEnv
@@ -404,13 +404,26 @@ defmodule Arbiter.NodeAgent.Run do
     %{state | cp_task: task}
   end
 
+  # The checkout bundle, then the session transcripts (best effort: they are
+  # provenance, the bundle is the work).
   defp upload(state) do
-    Checkout.upload(
-      run_config(state),
-      %{run: state.spec.run, branch: state.spec.checkout.branch},
-      shadow(state),
-      state.known || []
-    )
+    result =
+      Checkout.upload(
+        run_config(state),
+        %{run: state.spec.run, branch: state.spec.checkout.branch},
+        shadow(state),
+        state.known || []
+      )
+
+    config_dir = Path.join([run_config(state).node_home, "runs", state.spec.run, "config"])
+
+    with {:error, reason} <- Transcripts.upload(run_config(state), state.spec.run, config_dir) do
+      Logger.warning(
+        "node agent: run #{state.spec.run} transcript upload failed: #{inspect(reason, limit: 5, printable_limit: 300)}"
+      )
+    end
+
+    result
   end
 
   defp log_checkpoint(state, {:ok, _}), do: state

@@ -36,13 +36,15 @@ defmodule ArbiterWeb.NodeCheckoutTest do
     home = Path.join(tmp, "home")
     base = home!(home)
 
-    ctx = %{home: home, branch: @branch, base: "main", seeded_paths: []}
+    config_dir = Path.join(tmp, "config-dir")
+    ctx = %{home: home, branch: @branch, base: "main", seeded_paths: [], config_dir: config_dir}
     {:ok, %{pid: pid}} = attach!(node)
     place!(pid, @run, ctx)
     {:ok, %{pid: other_pid}} = attach!(other)
 
     %{
       node: node,
+      config_dir: config_dir,
       tmp: tmp,
       home: home,
       base: base,
@@ -284,6 +286,36 @@ defmodule ArbiterWeb.NodeCheckoutTest do
     test "garbage is a 422, not a crash", c do
       conn = upload("/nodes/runs/#{@run}/checkout", c.auth, "this is not a bundle")
       assert conn.status == 422
+    end
+  end
+
+  describe "PUT /nodes/runs/:run/transcripts" do
+    defp tar_of(c, entries) do
+      path = Path.join(c.tmp, "t.tar.gz")
+      {:ok, tar} = :erl_tar.open(String.to_charlist(path), [:write, :compressed])
+      for {name, body} <- entries, do: :ok = :erl_tar.add(tar, {String.to_charlist(name), body}, [])
+      :ok = :erl_tar.close(tar)
+      File.read!(path)
+    end
+
+    test "extracts the node's transcripts into the run's config dir, sanitised", c do
+      body = tar_of(c, [{"projects/-w/s.jsonl", "{}\n"}, {"settings.json", "{}"}])
+      conn = upload("/nodes/runs/#{@run}/transcripts", c.auth, body)
+      assert %{"files" => 1, "skipped" => ["settings.json"]} = json_response(conn, 200)
+      assert File.read!(Path.join(c.config_dir, "projects/-w/s.jsonl")) == "{}\n"
+      refute File.exists?(Path.join(c.config_dir, "settings.json"))
+    end
+
+    test "an unsafe archive is a 422 and writes nothing", c do
+      body = tar_of(c, [{"../escape.jsonl", "x"}])
+      assert upload("/nodes/runs/#{@run}/transcripts", c.auth, body).status == 422
+      refute File.exists?(Path.join(c.tmp, "escape.jsonl"))
+    end
+
+    test "needs a credential and a run assigned to the caller", c do
+      body = tar_of(c, [{"projects/p/s.jsonl", "x"}])
+      assert upload("/nodes/runs/#{@run}/transcripts", [], body).status == 401
+      assert upload("/nodes/runs/#{@run}/transcripts", c.other_auth, body).status == 404
     end
   end
 end

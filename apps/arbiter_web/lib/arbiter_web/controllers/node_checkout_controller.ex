@@ -10,6 +10,9 @@ defmodule ArbiterWeb.NodeCheckoutController do
       is streamed to a private scratch file and ingested through the quarantine
       (`Arbiter.Nodes.Checkout.ingest/2`); nothing a node sends reaches the home
       clone before that has passed.
+    * `PUT /nodes/runs/:run/transcripts` — a tar of the run's session JSONL, extracted
+      into the run's config dir by the sanitising extractor
+      (`Arbiter.Nodes.Transcripts`, §7.6).
 
   Both are authorized the same way: the run must be one **this node's session
   holds** (`Arbiter.Nodes.Session.checkout_context/2`), so a node can neither read
@@ -19,7 +22,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Nodes.{Agent, Checkout, Registry, Session}
+  alias Arbiter.Nodes.{Agent, Checkout, Registry, Session, Transcripts}
 
   require Logger
 
@@ -80,14 +83,17 @@ defmodule ArbiterWeb.NodeCheckoutController do
 
   # ---- checkout --------------------------------------------------------------------
 
-  def checkout(conn, %{"run" => run}) do
+  def checkout(conn, %{"run" => run}), do: upload(conn, run, :checkout)
+  def transcripts(conn, %{"run" => run}), do: upload(conn, run, :transcripts)
+
+  defp upload(conn, run, kind) do
     with {:ok, pid, ctx} <- authorize(conn, run) do
       cap = Checkout.max_bytes()
 
       case declared_length(conn) do
         :missing -> error(conn, 411, "Content-Length is required")
         length when length > cap -> error(conn, 413, "Bundle exceeds the #{cap} byte cap")
-        _length -> locked_ingest(conn, pid, run, ctx, cap)
+        _length -> locked_ingest(conn, pid, run, ctx, cap, kind)
       end
     else
       :error -> error(conn, 404, "Not found")
@@ -95,26 +101,26 @@ defmodule ArbiterWeb.NodeCheckoutController do
   end
 
   # One ingest per run at a time: they change the same home clone.
-  defp locked_ingest(conn, pid, run, ctx, cap) do
-    lock = {{__MODULE__, run}, self()}
+  defp locked_ingest(conn, pid, run, ctx, cap, kind) do
+    lock = {{__MODULE__, run, kind}, self()}
 
-    case :global.trans(lock, fn -> ingest(conn, pid, run, ctx, cap) end, [node()], 0) do
+    case :global.trans(lock, fn -> ingest(conn, pid, run, ctx, cap, kind) end, [node()], 0) do
       :aborted -> error(conn, 409, "A checkout for this run is already being ingested")
       conn -> conn
     end
   end
 
-  defp ingest(conn, pid, run, ctx, cap) do
+  defp ingest(conn, pid, run, ctx, cap, kind) do
     File.mkdir_p!(scratch())
     upload = Path.join(scratch(), "up-#{run}-#{System.unique_integer([:positive])}.bundle")
 
     try do
       case receive_body(conn, upload, cap) do
         {:ok, conn} ->
-          ingest_file(conn, pid, run, ctx, upload)
+          ingest_file(conn, pid, run, ctx, upload, kind)
 
         {:error, :too_large, conn} ->
-          Session.checkout_done(pid, run, {:error, {:too_large, cap}})
+          if kind == :checkout, do: Session.checkout_done(pid, run, {:error, {:too_large, cap}})
           error(conn, 413, "Bundle exceeds the #{cap} byte cap")
 
         {:error, reason, conn} ->
@@ -125,7 +131,17 @@ defmodule ArbiterWeb.NodeCheckoutController do
     end
   end
 
-  defp ingest_file(conn, pid, run, ctx, upload) do
+  defp ingest_file(conn, _pid, _run, %{config_dir: dir}, upload, :transcripts) when is_binary(dir) do
+    case Transcripts.extract(upload, dir) do
+      {:ok, result} -> json(conn, result)
+      {:error, reason} -> reject(conn, reason)
+    end
+  end
+
+  defp ingest_file(conn, _pid, _run, _ctx, _upload, :transcripts),
+    do: error(conn, 409, "This run has no config dir to extract transcripts into")
+
+  defp ingest_file(conn, pid, run, ctx, upload, :checkout) do
     ctx = ctx |> Map.take([:home, :branch, :base, :seeded_paths]) |> Map.merge(%{run: run, scratch: scratch()})
 
     case Checkout.ingest(upload, ctx) do
