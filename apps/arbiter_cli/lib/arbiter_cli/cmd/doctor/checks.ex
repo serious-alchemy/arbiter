@@ -65,14 +65,18 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"restart_safety", :core, nil, :always, plain(&check_restart_safety/0)},
       {"merge_routing", :core, nil, :always, plain(&check_merge_routing/0)},
       {"nodes", :core, nil, :always, plain(&check_nodes/0)},
-      {"claude_worker_credentials", :auth, nil, :always, plain(&check_claude_worker_credentials/0)},
+      {"claude_worker_credentials", :auth, nil, :always,
+       plain(&check_claude_worker_credentials/0)},
       {"grok_auth", :auth, nil, :always, plain(&check_grok_auth/0)},
       {"provider_accounts", :auth, nil, :always, plain(&check_provider_accounts/0)},
       {"tmux", :auth, nil, :always, plain(&check_tmux/0)},
       {"quota_policy", :auth, nil, :always, plain(&check_account_policy_binding/0)},
-      {"agy_write_jail", :sandboxes, "agy_jail", {:provider, "gemini"}, plain(&check_agy_write_jail/0)},
-      {"agy_jail_escape", :sandboxes, "agy_jail", {:provider, "gemini"}, plain(&check_agy_jail_escape/0)},
-      {"agy_jail_reads", :sandboxes, "agy_jail", {:provider, "gemini"}, plain(&check_agy_jail_reads/0)},
+      {"agy_write_jail", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_write_jail/0)},
+      {"agy_jail_escape", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_escape/0)},
+      {"agy_jail_reads", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_reads/0)},
       {"agy_jail_network", :sandboxes, "agy_jail", {:provider, "gemini"},
        plain(&check_agy_jail_network/0)},
       {"agy_jail_keyring", :sandboxes, "agy_jail", {:provider, "gemini"},
@@ -245,7 +249,12 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
       other ->
         %Result{} = result = unknown_result("version", other)
-        %{result | detail: result.detail <> " (CLI #{cli_vsn} @ #{cli_sha})", blocks_readiness: true}
+
+        %{
+          result
+          | detail: result.detail <> " (CLI #{cli_vsn} @ #{cli_sha})",
+            blocks_readiness: true
+        }
     end
   end
 
@@ -1535,7 +1544,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     {severity, detail, hint} =
       case {decision, status["server_env_token"]} do
         {"unresolved", _} ->
-          {:warn, "could not check: provider accounts are not resolved yet — the server is still booting",
+          {:warn,
+           "could not check: provider accounts are not resolved yet — the server is still booting",
            "Re-run `arb server doctor` once the server has finished booting."}
 
         {_, true} ->
@@ -1705,11 +1715,12 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         %Result{
           name: "migrations up to date",
           status: :warn,
-          detail: "could not check: the server could not verify its migration status" <>
-            case Map.get(body, "error") do
-              reason when is_binary(reason) -> " (#{reason})"
-              _ -> ""
-            end,
+          detail:
+            "could not check: the server could not verify its migration status" <>
+              case Map.get(body, "error") do
+                reason when is_binary(reason) -> " (#{reason})"
+                _ -> ""
+              end,
           hint: "The server could not verify migration status. Check server logs for errors.",
           blocks_readiness: false
         }
@@ -2206,7 +2217,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: name,
       status: :warn,
       detail: "could not check: " <> unknown_reason(other),
-      hint: "Re-run `arb server doctor`; if it persists, check the server log and `arb server version`.",
+      hint:
+        "Re-run `arb server doctor`; if it persists, check the server log and `arb server version`.",
       blocks_readiness: false
     }
   end

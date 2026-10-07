@@ -294,7 +294,8 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {"/api/scheduler/status", "restart_safety"}
     ]
 
-    for {path, id} <- @endpoint_checks, {status, label} <- [{404, "missing"}, {500, "erroring"}] do
+    for {path, id} <- @endpoint_checks,
+        {status, label} <- [{404, "missing"}, {500, "erroring"}] do
       test "#{label} #{path} is a warn naming the reason, never ok (#{id})" do
         stub_healthy([
           {{"get", "/api/server/doctor_scope"}, {scope_all(), 200}},

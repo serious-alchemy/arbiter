@@ -30,7 +30,9 @@ defmodule ArbiterCli.Cmd.Doctor.Formatter do
 
     shown = if all?, do: results, else: Enum.filter(results, &(&1.status in [:warn, :fail]))
 
-    for {group, title} <- @group_titles, rows = Enum.filter(shown, &(&1.group == group)), rows != [] do
+    for {group, title} <- @group_titles,
+        rows = Enum.filter(shown, &(&1.group == group)),
+        rows != [] do
       IO.puts("")
       IO.puts(title)
       rows |> collapse(all?) |> Enum.each(&print_row/1)
@@ -47,7 +49,12 @@ defmodule ArbiterCli.Cmd.Doctor.Formatter do
     if na > 0, do: base <> " · #{na} n/a", else: base
   end
 
-  @spec summary([struct()]) :: %{ok: non_neg_integer(), warn: non_neg_integer(), fail: non_neg_integer(), na: non_neg_integer()}
+  @spec summary([struct()]) :: %{
+          ok: non_neg_integer(),
+          warn: non_neg_integer(),
+          fail: non_neg_integer(),
+          na: non_neg_integer()
+        }
   def summary(results) do
     counts = Enum.frequencies_by(results, & &1.status)
     Map.new([:ok, :warn, :fail, :na], &{&1, Map.get(counts, &1, 0)})
@@ -102,7 +109,8 @@ defmodule ArbiterCli.Cmd.Doctor.Formatter do
     parts =
       [
         version && "server #{version}",
-        workspaces && workspaces != [] && "workspace#{plural(workspaces)}: #{Enum.join(workspaces, ", ")}",
+        workspaces && workspaces != [] &&
+          "workspace#{plural(workspaces)}: #{Enum.join(workspaces, ", ")}",
         bind && "bind #{bind}",
         Client.base_url()
       ]
