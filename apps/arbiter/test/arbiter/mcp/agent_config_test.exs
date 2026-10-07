@@ -56,6 +56,37 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert "workspace_show" in tools
     end
 
+    # bd-dtfe9x (D-M-21): the allowlist is the worker tier's catalog view minus a
+    # documented exclusion list — never a hand-kept copy that can drift.
+    test "worker_tools/0 is the catalog's worker tier minus the documented exclusions" do
+      worker = %Arbiter.MCP.Scope{tier: :worker, workspace_id: "w", task_id: "t"}
+
+      worker_tier =
+        worker
+        |> Arbiter.MCP.Catalog.visible()
+        |> Enum.map(& &1.name)
+        |> Enum.reject(&Map.has_key?(Arbiter.MCP.Catalog.legacy_aliases(), &1))
+
+      assert Enum.sort(Gemini.worker_tools()) ==
+               Enum.sort(worker_tier -- Gemini.excluded_worker_tools())
+
+      # The exclusions are real worker-tier tools — a stale entry fails here
+      # instead of silently excluding nothing.
+      assert Gemini.excluded_worker_tools() -- worker_tier == []
+      assert Gemini.worker_tools() -- worker_tier == []
+    end
+
+    test "the worker allowlist carries the CI pair and child filing" do
+      for tool <- ~w(ci_rerun ci_mark_external ticket_create dep_add ticket_show message_send) do
+        assert tool in Gemini.worker_tools()
+      end
+    end
+
+    test "a coordinator-only tool is never in the worker allowlist" do
+      refute "worker_dispatch" in Gemini.worker_tools()
+      refute "ticket_close" in Gemini.worker_tools()
+    end
+
     test "omits includeTools when include_tools: nil (coordinator scope)" do
       config = Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: nil)
       refute Map.has_key?(config["mcpServers"]["arbiter"], "includeTools")
