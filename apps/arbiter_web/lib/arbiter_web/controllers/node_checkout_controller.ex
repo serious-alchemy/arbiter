@@ -34,37 +34,38 @@ defmodule ArbiterWeb.NodeCheckoutController do
   # ---- seed ------------------------------------------------------------------------
 
   def seed(conn, %{"run" => run} = params) do
-    with {:ok, _pid, ctx} <- authorize(conn, run) do
-      File.mkdir_p!(scratch())
-      dest = Path.join(scratch(), "seed-#{run}-#{System.unique_integer([:positive])}.bundle")
-
-      result =
-        Checkout.seed_bundle(ctx.home,
-          run: run,
-          branch: ctx.branch,
-          base: ctx.base,
-          have: have(params),
-          dest: dest
-        )
-
-      send_seed(conn, result, dest)
-    else
+    case authorize(conn, run) do
+      {:ok, _pid, ctx} -> seed_run(conn, run, ctx, have(params))
       :error -> error(conn, 404, "Not found")
     end
   end
 
+  defp seed_run(conn, run, ctx, have) do
+    File.mkdir_p!(scratch())
+    dest = Path.join(scratch(), "seed-#{run}-#{System.unique_integer([:positive])}.bundle")
+
+    result =
+      Checkout.seed_bundle(ctx.home,
+        run: run,
+        branch: ctx.branch,
+        base: ctx.base,
+        have: have,
+        dest: dest
+      )
+
+    send_seed(conn, result, dest)
+  end
+
   # sobelow_skip ["Traversal.SendFile"]
+  # `path` is the scratch file this request created; the request named no path.
   defp send_seed(conn, {:ok, %{path: path, thin?: thin?}}, dest) do
-    # `path` is the scratch file this request created; the request named no path.
-    try do
-      conn
-      |> put_resp_content_type("application/x-git-bundle")
-      |> put_resp_header("cache-control", "no-store")
-      |> put_resp_header("x-bundle-thin", to_string(thin?))
-      |> send_file(200, path)
-    after
-      File.rm(dest)
-    end
+    conn
+    |> put_resp_content_type("application/x-git-bundle")
+    |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("x-bundle-thin", to_string(thin?))
+    |> send_file(200, path)
+  after
+    File.rm(dest)
   end
 
   defp send_seed(conn, {:error, reason}, dest) do
@@ -87,16 +88,19 @@ defmodule ArbiterWeb.NodeCheckoutController do
   def transcripts(conn, %{"run" => run}), do: upload(conn, run, :transcripts)
 
   defp upload(conn, run, kind) do
-    with {:ok, pid, ctx} <- authorize(conn, run) do
-      cap = Checkout.max_bytes()
-
-      case declared_length(conn) do
-        :missing -> error(conn, 411, "Content-Length is required")
-        length when length > cap -> error(conn, 413, "Bundle exceeds the #{cap} byte cap")
-        _length -> locked_ingest(conn, pid, run, ctx, cap, kind)
-      end
-    else
+    case authorize(conn, run) do
+      {:ok, pid, ctx} -> checked_upload(conn, pid, run, ctx, kind)
       :error -> error(conn, 404, "Not found")
+    end
+  end
+
+  defp checked_upload(conn, pid, run, ctx, kind) do
+    cap = Checkout.max_bytes()
+
+    case declared_length(conn) do
+      :missing -> error(conn, 411, "Content-Length is required")
+      length when length > cap -> error(conn, 413, "Bundle exceeds the #{cap} byte cap")
+      _length -> locked_ingest(conn, pid, run, ctx, cap, kind)
     end
   end
 

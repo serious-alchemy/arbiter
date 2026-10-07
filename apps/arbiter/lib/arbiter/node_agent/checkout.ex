@@ -390,9 +390,8 @@ defmodule Arbiter.NodeAgent.Checkout do
 
     try do
       with {:ok, %{path: path, bytes: bytes}} <-
-             package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest}),
-           {:ok, response} <- put(config, run, path, bytes) do
-        {:ok, response}
+             package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest}) do
+        put(config, run, path, bytes)
       end
     after
       File.rm(dest)

@@ -153,9 +153,11 @@ defmodule Arbiter.Nodes.Checkout do
 
   defp known_shas(git_dir, have) do
     have
-    |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[0-9a-f]{40,64}\z/, &1)))
-    |> Enum.filter(&Git.exists?(git_dir, &1 <> "^{commit}"))
     |> Enum.uniq()
+    |> Enum.filter(fn sha ->
+      is_binary(sha) and Regex.match?(~r/\A[0-9a-f]{40,64}\z/, sha) and
+        Git.exists?(git_dir, sha <> "^{commit}")
+    end)
   end
 
   # Thin when there is something to be thin against; a bundle git would call
