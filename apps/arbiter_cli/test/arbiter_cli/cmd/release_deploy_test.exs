@@ -1833,6 +1833,70 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
   end
 
+  # ---- no secrets in output or logs (bd-6umf7z) -----------------------------
+
+  describe "secrets" do
+    @token "ghp_supersecrettokenvalue123"
+
+    setup do
+      System.put_env("GITHUB_TOKEN", @token)
+      on_exit(fn -> System.delete_env("GITHUB_TOKEN") end)
+    end
+
+    defp everything_printed(fun) do
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          send(self(), {:result, capture(fun)})
+        end)
+
+      assert_received {:result, {out, err, code}}
+      {out <> err <> log, code}
+    end
+
+    test "a green deploy prints and logs no token", %{home: home} do
+      write_db_for_secrets(home)
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home)
+
+      {printed, 0} = everything_printed(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      refute printed =~ @token
+      refute File.read!(ArbiterCli.Cmd.ReleaseDeploy.Status.path()) =~ @token
+    end
+
+    test "a failed backup whose eval output echoes the token is redacted", %{home: home} do
+      write_db_for_secrets(home)
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      base = Process.get(:bd2_cmd_runner)
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        case args do
+          ["eval", "Arbiter.Release.Backup.eval_from_env()"] ->
+            {"crashed with GITHUB_TOKEN=#{@token}", 1}
+
+          _ ->
+            base.(cmd, args, opts)
+        end
+      end)
+
+      File.write!(Path.join(home, "arbiter.env"), "GITHUB_TOKEN=#{@token}\n")
+
+      {printed, 1} = everything_printed(fn -> ReleaseDeploy.run([]) end)
+
+      assert printed =~ "database backup failed"
+      refute printed =~ @token
+      refute File.read!(ArbiterCli.Cmd.ReleaseDeploy.Status.path()) =~ @token
+    end
+
+    defp write_db_for_secrets(home),
+      do: File.write!(Path.join(home, "arbiter.sqlite3"), "SQLite format 3\0")
+  end
+
   # ---- matching CLI after a green deploy (bd-6umf7z) -----------------------
 
   describe "CLI self-update after a green deploy" do

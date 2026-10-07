@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.ReleaseDeploy do
   @moduledoc """
-  `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]`
-  — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
+  `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+  [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
@@ -21,15 +21,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   This is the production deploy path: the box that runs Arbiter no longer needs
   a source checkout or a Mix/Elixir toolchain — only the prebuilt, self-contained
-  OTP release. The legacy `git pull` deploy remains available behind
-  `arb server deploy --git-pull` until the cutover is complete (see
-  `ArbiterCli.Cmd.Update`).
+  OTP release. The legacy `git pull` deploy runs only on an explicit
+  `arb server deploy --git-pull` (see `ArbiterCli.Cmd.Update`); this command never
+  falls back to it. The dashboard's "Update to vX.Y.Z" button launches this same
+  command in its own systemd unit (`Arbiter.Release.SelfDeploy`); see
+  `docs/self-update.md`.
 
   ## What it does
 
     1. **Resolve the target release.** Query the GitHub Releases API for
        `latest` (or the tag named by `--version`). The `owner/repo` comes from
-       `ARB_RELEASE_REPO`; a `GITHUB_TOKEN`, if set, authenticates the request
+       `ArbiterCli.ReleaseRepo` — `ARB_RELEASE_REPO`, else the running server's
+       own release metadata, else the repo this arb was built from — and the
+       output names which; a `GITHUB_TOKEN`, if set, authenticates the request
        (required for private repos, and lifts the anonymous rate limit).
     2. **Download the asset + checksum.** Fetch `arbiter-<tag>-linux.tar.gz`
        and its `arbiter-<tag>-linux.tar.gz.sha256` sidecar.
@@ -37,7 +41,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
        published checksum. A mismatch aborts before anything touches disk state.
     4. **Unpack** to `<data-home>/releases/<tag>/` (the OTP release tree, so
        `<data-home>/releases/<tag>/bin/arbiter` is the runnable binary).
-    5. **Atomically swap** the `<data-home>/current` symlink to the new release
+    5. **Back up the database** (`ArbiterCli.Cmd.ReleaseDeploy.Backup`): an
+       online, integrity-checked snapshot into `<data-home>/snapshots/`, taken
+       before the swap; a failure aborts the deploy with nothing changed.
+       **Atomically swap** the `<data-home>/current` symlink to the new release
        (symlink-then-rename, so readers never observe a missing/partial link).
     6. **Restart + health-check.** Bounce the service (via systemd when the
        `arbiter.service` user unit is present) and poll `arb doctor` until
@@ -46,12 +53,22 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     7. **Auto-rollback on failure.** If the stack does not come back green
        within the timeout, re-point `current` at the prior release and restart,
        leaving the server on the last-known-good version. The command then exits
-       non-zero so the operator knows the new version was rejected. **Unless
-       this deploy crossed a migration** — see "Cross-migration rollback".
+       non-zero so the operator knows the new version was rejected. **When this
+       deploy crossed a migration** the backup is restored first (stop → restore
+       → swap → restart) — see "Cross-migration rollback".
        **Unless the server was already down before this deploy began** — see
        "Cold deploy" below.
     8. **Prune.** Retain the current release plus the 3 most-recent prior
-       releases under `<data-home>/releases/`; delete anything older.
+       releases under `<data-home>/releases/`, and the newest
+       `ARB_DEPLOY_BACKUP_RETAIN` (default 5) database snapshots; delete older.
+    9. **Install the matching CLI.** After a green deploy, update the arb
+       escript to the same tag (`ArbiterCli.Cmd.SelfUpdate.install_from_release/3`)
+       so doctor's `version` check agrees; a failure there is reported, never
+       fatal. Skipped by `--no-self-update` and for `--local`.
+
+  Throughout, the deploy records itself in `<data-home>/deploy-status.json`
+  (`ArbiterCli.Cmd.ReleaseDeploy.Status`) — what `arb doctor`'s "last deploy"
+  line and the dashboard banner read after the server restarts.
 
   ## Cold deploy (bd-5zvux5)
 
@@ -107,8 +124,18 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     * `--allow-cross-migration-rollback` overrides that, rolling back anyway
       with a loud warning that the prior release is now on a newer schema.
 
+  **Backup restore (bd-6umf7z).** With a pre-deploy backup in hand, a release
+  that added migrations *and booted* (its green-wait timed out) no longer needs
+  that refusal: the rollback stops the service, replaces the database with the
+  backup (the database the failed release left behind is moved aside, never
+  deleted), re-points `current` and restarts — beating
+  `--allow-cross-migration-rollback`, which would leave old code on the migrated
+  schema. A failed swap (`/api/version` still on the old version) never
+  restores: the old release is still serving and its writes would be lost. With
+  no backup (no database file existed) the refusal above applies unchanged.
+
   A deploy that adds no migrations keeps the automatic rollback exactly as it
-  was.
+  was, and never touches the database.
 
   ## Layout
 
@@ -127,7 +154,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   ## Configuration
 
-    * `ARB_RELEASE_REPO` — `owner/repo` to pull releases from (required).
+    * `ARB_RELEASE_REPO` — `owner/repo` to pull releases from (optional; see
+      step 1).
+    * `DATABASE_PATH` / `ARB_DEPLOY_BACKUP_RETAIN` — the database to back up,
+      and how many snapshots to keep.
     * `GITHUB_TOKEN` — optional; authenticates the Releases API request.
     * `ARB_DATA_HOME` — deploy root (default `~/.arbiter`).
     * `ARB_GITHUB_API` — Releases API base (default `https://api.github.com`).
