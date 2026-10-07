@@ -81,7 +81,11 @@ defmodule Arbiter.Nodes.Session do
     caps: %{},
     capacity: %{},
     runs: %{},
-    streams: %RunStreams{}
+    streams: %RunStreams{},
+    # RW11: `run => the primary's checkout context` (home clone, branch, base),
+    # and the callers waiting on a checkout ingest, `run => [from]`.
+    checkouts: %{},
+    collectors: %{}
   ]
 
   # ---- client API ----------------------------------------------------------
@@ -156,6 +160,35 @@ defmodule Arbiter.Nodes.Session do
           {:ok, term()} | {:error, term()}
   def assign(pid, run, spec, owner, opts \\ []),
     do: GenServer.call(pid, {:assign, run, spec, owner, opts}, :infinity)
+
+  @doc """
+  The checkout context the primary placed `run` with (`assign/5`'s `:checkout`:
+  `%{home, branch, base, seeded_paths}`), or `:error` for a run the session does
+  not hold. `ArbiterWeb.NodeController` authorizes the seed and checkout
+  endpoints with it: the run must be assigned to *this* node's session.
+  """
+  @spec checkout_context(pid(), String.t()) :: {:ok, map()} | :error
+  def checkout_context(pid, run), do: GenServer.call(pid, {:checkout_context, run})
+
+  @doc """
+  Ask the node to upload a checkpoint of `run` now (`kind` is `:checkout`) and wait for
+  the primary's ingest of it: `{:ok, result}`, `{:error, reason}` from the ingest, or
+  `{:error, :unknown_run | :run_gone | :timeout | :not_connected}`.
+  """
+  @spec collect(pid(), String.t(), :checkout, timeout()) :: {:ok, term()} | {:error, term()}
+  def collect(pid, run, :checkout = kind, timeout \\ 120_000) do
+    GenServer.call(pid, {:collect, run, kind}, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  `ArbiterWeb.NodeController` reports the outcome of an ingest: answers whoever is in
+  `collect/4`, and records a rejection as a `checkout_rejected` node event.
+  """
+  @spec checkout_done(pid(), String.t(), {:ok, term()} | {:error, term()}) :: :ok
+  def checkout_done(pid, run, result), do: GenServer.cast(pid, {:checkout_done, run, result})
 
   @doc "A run event from the node, via the channel: `run.ready`, `run.refused`, `stdout`, `exit`."
   @spec node_event(pid(), String.t(), term()) :: :ok
@@ -279,11 +312,33 @@ defmodule Arbiter.Nodes.Session do
 
         state = %{
           state
-          | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges)
+          | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges),
+            checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout))
         }
 
         notify_channel(state, {:push, "assign", %{"run" => run, "spec" => spec}})
         {:noreply, state}
+    end
+  end
+
+  def handle_call({:checkout_context, run}, _from, state) do
+    with {:ok, _stream} <- RunStreams.fetch(state.streams, run),
+         {:ok, ctx} <- Map.fetch(state.checkouts, run) do
+      {:reply, {:ok, ctx}, state}
+    else
+      _ -> {:reply, :error, state}
+    end
+  end
+
+  def handle_call({:collect, _run, _kind}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:collect, run, kind}, from, state) do
+    if Map.has_key?(state.checkouts, run) and match?({:ok, _}, RunStreams.fetch(state.streams, run)) do
+      notify_channel(state, {:push, "collect", %{"run" => run, "kind" => Atom.to_string(kind)}})
+      {:noreply, %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
+    else
+      {:reply, {:error, :unknown_run}, state}
     end
   end
 
@@ -327,6 +382,21 @@ defmodule Arbiter.Nodes.Session do
   end
 
   def handle_cast({:release_run, run}, state), do: {:noreply, drop_run(state, run)}
+
+  def handle_cast({:checkout_done, run, result}, state) do
+    {waiters, collectors} = Map.pop(state.collectors, run, [])
+    Enum.each(waiters, &GenServer.reply(&1, result))
+
+    case result do
+      {:error, reason} ->
+        record(state, :checkout_rejected, %{"run" => run, "reason" => inspect(reason, limit: 10)})
+
+      {:ok, _} ->
+        :ok
+    end
+
+    {:noreply, %{state | collectors: collectors}}
+  end
 
   def handle_cast({:upgrade, payload}, state) do
     notify_channel(state, {:upgrade, payload})
@@ -656,8 +726,19 @@ defmodule Arbiter.Nodes.Session do
   # Forget a run; whatever streams it still has open on the channel end with it.
   defp drop_run(state, run) do
     notify_channel(state, {:run_over, run})
-    %{state | streams: RunStreams.drop(state.streams, run)}
+    {waiters, collectors} = Map.pop(state.collectors, run, [])
+    Enum.each(waiters, &GenServer.reply(&1, {:error, :run_gone}))
+
+    %{
+      state
+      | streams: RunStreams.drop(state.streams, run),
+        checkouts: Map.delete(state.checkouts, run),
+        collectors: collectors
+    }
   end
+
+  defp put_checkout(checkouts, run, %{} = ctx), do: Map.put(checkouts, run, ctx)
+  defp put_checkout(checkouts, _run, _none), do: checkouts
 
   # `%{name => path}` of the per-run sockets a spec declares.
   defp bridge_map(%{"bridges" => bridges}) when is_list(bridges) do
