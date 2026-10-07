@@ -760,10 +760,20 @@ defmodule Arbiter.Board.Autopilot do
        when result in [:ok, :resumed],
        do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
-  defp after_dispatch(%{replan_after_dispatch: true} = state, _outcome),
+  # bd-814vuy: a placement refusal holds that card only — go straight on to the
+  # next candidate rather than idling the slot until some other event wakes us.
+  defp after_dispatch(state, {:error, reason}) do
+    if error_shape(reason) in @self_clearing_dispatch_errors,
+      do: trigger_immediate_pass(%{state | replan_after_dispatch: false}),
+      else: after_dispatch_replan(state)
+  end
+
+  defp after_dispatch(state, _outcome), do: after_dispatch_replan(state)
+
+  defp after_dispatch_replan(%{replan_after_dispatch: true} = state),
     do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
 
-  defp after_dispatch(state, _outcome), do: state
+  defp after_dispatch_replan(state), do: state
 
   defp trigger_immediate_pass(state) do
     state = cancel_plan_timer(state)

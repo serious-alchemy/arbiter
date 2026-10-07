@@ -238,6 +238,25 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # A refused dispatch now schedules its own follow-up pass (bd-814vuy), so a
+    # hand-driven tick can land on that pass's in-flight dispatch (`:busy`) or
+    # on its fresh hold. Tick (moving the clock past the hold each time) until an
+    # attempt is observed.
+    defp tick_until_attempt(pid, clock, id, tries \\ 20) do
+      Autopilot.tick(pid)
+
+      receive do
+        {:dispatch_attempt, ^id} -> :ok
+      after
+        50 ->
+          Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+
+          if tries > 1,
+            do: tick_until_attempt(pid, clock, id, tries - 1),
+            else: flunk("no dispatch attempt for #{id}")
+      end
+    end
+
     # bd-8suxac: the board plans headroom on the workspace's default provider,
     # but `Admission` checks the account this ticket routes to. A refusal there
     # clears the moment a run on that account ends — never a `dispatch_stuck`
@@ -267,9 +286,8 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:dispatch_attempt, _}, 50
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -310,9 +328,8 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:dispatch_attempt, _}, 50
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -344,9 +361,8 @@ defmodule Arbiter.Board.AutopilotTest do
       assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -494,7 +510,6 @@ defmodule Arbiter.Board.AutopilotTest do
         log =
           ExUnit.CaptureLog.capture_log([level: :warning], fn ->
             assert {:error, ^error} = Autopilot.tick(pid)
-            assert {:ok, "bd-2"} = Autopilot.tick(pid)
           end)
 
         assert_receive {:dispatched, "bd-2"}
