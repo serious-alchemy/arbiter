@@ -22,6 +22,7 @@ defmodule ArbiterWeb.Api.BreakerController do
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Params
   alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -29,12 +30,13 @@ defmodule ArbiterWeb.Api.BreakerController do
   @doc "Live breaker state plus the call-site registry."
   def index(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
-         {:ok, kind} <- resolve_kind(params["kind"]) do
+         {:ok, kind} <- resolve_kind(params["kind"]),
+         {:ok, open_only?} <- params |> Params.fetch_bool("open_only", false) |> Params.to_rest() do
       filters =
         []
         |> maybe_put(:workspace_id, ws_id)
         |> maybe_put(:kind, kind)
-        |> maybe_put(:open_only, params["open_only"] in ["true", true])
+        |> maybe_put(:open_only, open_only?)
 
       breakers = CircuitBreaker.list(filters)
 
@@ -62,9 +64,15 @@ defmodule ArbiterWeb.Api.BreakerController do
   end
 
   def reset(conn, params) do
+    with {:ok, all?} <- params |> Params.fetch_bool("all", false) |> Params.to_rest() do
+      reset_scope(conn, params, all?)
+    end
+  end
+
+  defp reset_scope(conn, params, all?) do
     case blank_to_nil(params["signature"]) do
       nil ->
-        if params["all"] in ["true", true] do
+        if all? do
           # `kind` is resolved BEFORE the reset runs: a misspelled kind must
           # not degrade into "no filter" and re-arm every breaker in the
           # workspace when the operator asked for one.

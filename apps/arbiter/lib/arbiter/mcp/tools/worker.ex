@@ -80,7 +80,8 @@ defmodule Arbiter.MCP.Tools.Worker do
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, force} <- Tools.fetch_bool(args, "force", false) do
+         {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -128,6 +129,7 @@ defmodule Arbiter.MCP.Tools.Worker do
          {:ok, task} <- Tools.fetch_task(scope, args, task_id),
          {:ok, task} <- maybe_set_tracker_context(task, args),
          {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
          {:ok, mode} <- guard_review_automation(scope, args, force),
          {:ok, _} <- persist_review_automation(task, mode) do
       opts =
@@ -829,7 +831,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   # config is used to pick the first healthy provider.
   defp worker_dispatch_opts(%Scope{tier: tier} = scope, args) do
     with {:ok, force} <- Tools.fetch_bool(args, "force", false),
-         {:ok, over_cap} <- Tools.fetch_bool(args, "over_cap", false) do
+         {:ok, _} <- Tools.fetch_bool(args, "force_quota", false),
+         {:ok, over_cap} <- Tools.fetch_bool(args, "over_cap", false),
+         {:ok, no_agent} <- Tools.fetch_bool(args, "no_agent", false),
+         {:ok, with_claude} <- Tools.fetch_bool(args, "with_claude", false) do
       scope
       |> dispatch_opts(args)
       # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
@@ -838,12 +843,12 @@ defmodule Arbiter.MCP.Tools.Worker do
       |> Keyword.put(:force_slot, over_cap)
       |> Keyword.put(:slot_override_actor, actor_string(tier))
       |> Keyword.put(:dispatched_by, "mcp")
-      |> with_provider(args)
+      |> with_provider(args, no_agent, with_claude)
     end
   end
 
-  defp with_provider(base, args) do
-    case dispatch_provider(args) do
+  defp with_provider(base, args, no_agent, with_claude) do
+    case dispatch_provider(args, no_agent, with_claude) do
       {:error, {:unknown_provider, value}} ->
         # bd-dcvo3n: an explicit but unrecognized `provider` must fail LOUDLY.
         # Falling through to the workspace default here is what silently spawned
@@ -871,15 +876,15 @@ defmodule Arbiter.MCP.Tools.Worker do
   # or the deprecated `with_claude`, `{:error, {:unknown_provider, value}}` when
   # `provider` is present but unrecognized, or `nil` to signal "use the workspace
   # default" (only when no provider was named at all).
-  defp dispatch_provider(args) do
+  defp dispatch_provider(args, no_agent, with_claude) do
     cond do
-      Map.get(args, "no_agent") in [true, "true"] ->
+      no_agent ->
         :park
 
       provider_given?(args) ->
         provider_atom(Map.get(args, "provider"))
 
-      Map.get(args, "with_claude") in [true, "true"] ->
+      with_claude ->
         :claude
 
       true ->

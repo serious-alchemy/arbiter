@@ -34,6 +34,7 @@ defmodule ArbiterWeb.Api.IssueController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
@@ -168,22 +169,30 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def create(conn, params) do
-    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
-      do_create(conn, params, ws_id)
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write),
+         {:ok, force?} <- params |> Params.fetch_bool("force", false) |> Params.to_rest() do
+      create_issue(conn, params, force?, ws_id)
     end
   end
 
-  defp do_create(conn, params, ws_id) do
-    force? = params["force"] == true
+  defp create_issue(conn, params, force?, ws_id) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
     attrs =
       params
+      |> Params.strip_attribution()
       |> Map.drop(["id", "force", "assignee", "workspace"])
       |> Map.put("workspace_id", ws_id)
       |> coerce_atoms(@atom_fields)
 
-    case dedup_check(attrs, force?) do
+    with {:ok, skip_upstream?} <-
+           attrs |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
+      create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings)
+    end
+  end
+
+  defp create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings) do
+    case dedup_check(attrs, force?, skip_upstream?) do
       :ok ->
         case Ash.create(Issue, attrs) do
           {:ok, issue} ->
@@ -243,10 +252,10 @@ defmodule ArbiterWeb.Api.IssueController do
 
   # Delegates to `Arbiter.Tasks.Dedup` so the dashboard's create form applies
   # the same rule (bd-2cv4ws).
-  defp dedup_check(attrs, force?) do
+  defp dedup_check(attrs, force?, skip_upstream?) do
     Dedup.check(attrs["title"], attrs["workspace_id"],
       force: force?,
-      skip_upstream_create: attrs["skip_upstream_create"] == true,
+      skip_upstream_create: skip_upstream?,
       tracker_ref: attrs["tracker_ref"]
     )
   end
@@ -303,6 +312,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
     attrs =
       params
+      |> Params.strip_attribution()
       |> Map.drop(["id", "workspace_id", "assignee"])
       |> coerce_atoms(@atom_fields)
 
@@ -316,16 +326,15 @@ defmodule ArbiterWeb.Api.IssueController do
     reason = params["reason"]
 
     # bd-2wilou: propagate the close upstream by default (matches the `:close`
-    # action's own default). Only an explicit `close_upstream: false/"false"/"0"`
-    # suppresses it.
-    close_upstream = params["close_upstream"] not in [false, "false", "0"]
-
-    args =
-      %{}
-      |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
-      |> Map.put(:close_upstream, close_upstream)
-
-    with {:ok, issue} <- Ash.get(Issue, id),
+    # action's own default). Only an explicit false (`false`/`"false"`/`"0"`)
+    # suppresses it; junk is a 400.
+    with {:ok, close_upstream} <-
+           params |> Params.fetch_bool("close_upstream", true) |> Params.to_rest(),
+         {:ok, issue} <- Ash.get(Issue, id),
+         args =
+           %{}
+           |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
+           |> Map.put(:close_upstream, close_upstream),
          {:ok, closed} <- Ash.update(issue, args, action: :close) do
       render(conn, :show, issue: closed)
     end
@@ -373,18 +382,21 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   defp rank_args(params) do
-    forms =
-      [
-        params["top"] == true && %{position: :top},
-        params["bottom"] == true && %{position: :bottom},
-        is_binary(params["before_id"]) && %{before_id: params["before_id"]},
-        is_binary(params["after_id"]) && %{after_id: params["after_id"]}
-      ]
-      |> Enum.reject(&(&1 == false))
+    with {:ok, top?} <- params |> Params.fetch_bool("top", false) |> Params.to_rest(),
+         {:ok, bottom?} <- params |> Params.fetch_bool("bottom", false) |> Params.to_rest() do
+      forms =
+        [
+          top? && %{position: :top},
+          bottom? && %{position: :bottom},
+          is_binary(params["before_id"]) && %{before_id: params["before_id"]},
+          is_binary(params["after_id"]) && %{after_id: params["after_id"]}
+        ]
+        |> Enum.reject(&(&1 == false))
 
-    case forms do
-      [form] -> {:ok, form}
-      _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+      case forms do
+        [form] -> {:ok, form}
+        _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+      end
     end
   end
 
@@ -473,7 +485,8 @@ defmodule ArbiterWeb.Api.IssueController do
   def resolve(conn, %{"id" => id} = params) do
     attrs =
       params
-      |> Map.take(~w(decision reasoning gate actor round fix_round_attempt))
+      |> Map.take(~w(decision reasoning gate round fix_round_attempt))
+      |> Map.put("actor", Params.actor_label(conn.assigns[:mcp_scope]) || "coordinator")
       |> Map.put("task_id", id)
 
     case Arbiter.ReviewGate.Resolutions.record(attrs) do

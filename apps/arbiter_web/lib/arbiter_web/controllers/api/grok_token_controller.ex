@@ -24,6 +24,7 @@ defmodule ArbiterWeb.Api.GrokTokenController do
   alias Arbiter.Errors
   alias Arbiter.Grok.CredentialBroker
   alias Arbiter.MCP.Scope
+  alias Arbiter.Params
   alias Arbiter.Tasks.Issue
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -38,8 +39,14 @@ defmodule ArbiterWeb.Api.GrokTokenController do
   end
 
   defp fetch(conn, params) do
+    with {:ok, force?} <- params |> Params.fetch_bool("force", false) |> Params.to_rest() do
+      fetch_token(conn, force?)
+    end
+  end
+
+  defp fetch_token(conn, force?) do
     case CredentialBroker.fetch_token(
-           force: params["force"] == true,
+           force: force?,
            task_id: requester_task(conn),
            run_id: requester_run(conn)
          ) do
