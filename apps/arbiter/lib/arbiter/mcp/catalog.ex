@@ -144,7 +144,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for

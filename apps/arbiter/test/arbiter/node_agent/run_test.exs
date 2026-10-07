@@ -420,4 +420,47 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert_gone("g1")
     end
   end
+
+  describe "quiesce (RW12: the primary does not know the run)" do
+    test "a running run is stopped and retained locally, with no exit for the primary to ack",
+         %{opts: opts, stub: stub, home: home} do
+      StubPodman.write_mode(stub, "hang")
+      assert {:ok, "q1"} = Runs.assign(spec("q1"), opts)
+      wait_event("q1", "run.ready")
+
+      assert :ok = Run.quiesce("q1")
+
+      assert %{"run" => "q1", "task" => "bd-abc", "checkout" => nil} =
+               wait_event("q1", "retained")
+
+      assert_gone("q1")
+      refute_received {:run_push, "q1", "exit", _}
+
+      # the container was removed by name, and the manifest is on disk for hello
+      assert File.read!(Path.join(stub, "calls")) =~ "rm --force --ignore --time 0 arb-q1"
+      config = Keyword.fetch!(opts, :config)
+      assert [%{"run" => "q1", "pulled" => false}] = Arbiter.NodeAgent.Retained.list(config)
+      assert File.dir?(Path.join([home, "runs", "q1"]))
+    end
+
+    test "a run that already exited (exit unacked) is retained the same way", %{opts: opts} do
+      assert {:ok, "q2"} = Runs.assign(spec("q2"), opts)
+      wait_event("q2", "exit")
+
+      assert :ok = Run.quiesce("q2")
+      assert %{"run" => "q2"} = wait_event("q2", "retained")
+      assert_gone("q2")
+    end
+
+    test "quiescing a run twice or an unknown run is harmless", %{opts: opts, stub: stub} do
+      assert {:error, :not_found} = Run.quiesce("nope")
+      StubPodman.write_mode(stub, "hang")
+      assert {:ok, "q3"} = Runs.assign(spec("q3"), opts)
+      wait_event("q3", "run.ready")
+      assert :ok = Run.quiesce("q3")
+      _ = Run.quiesce("q3")
+      assert %{"run" => "q3"} = wait_event("q3", "retained")
+      assert_gone("q3")
+    end
+  end
 end

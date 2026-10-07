@@ -36,7 +36,10 @@ defmodule Arbiter.Nodes.NodeEvent do
     :upgraded,
     :fenced,
     :node_lost,
-    :checkout_rejected
+    :checkout_rejected,
+    :retained,
+    :recovered,
+    :reaped
   ]
 
   @doc "Every event kind."

@@ -38,8 +38,16 @@ defmodule Arbiter.NodeAgent.Connection do
     their streams; this process attaches it to the channel on `hello_ok`,
     detaches it on any loss, and hands it the `bridge.*` events. Its pushes go
     straight to the socket, not through here.
-  * Events the later children own (`reap`, `drain`, `rotate`) are logged and
-    ignored.
+  * **Restart recovery (RW12, §10.4–10.6).** A `hello_ok` whose per-run verdict is
+    `"unknown"` (the primary restarted, or lost the run) **quiesces** that run
+    (`Arbiter.NodeAgent.Run.quiesce/1`): container stopped, snapshot bundle and
+    transcripts taken locally into `Arbiter.NodeAgent.Retained`, a `retained`
+    push. Every `hello` lists what is retained (`inventory.retained`). The primary
+    asks for it with `recover{run}` (answered by `recovered{run, …}` once the
+    uploads are done) and says it may go with `retained.drop{run}`. A changed
+    `boot_epoch` is logged and recorded in the status file. `reap{install,
+    live_set}` runs `Arbiter.NodeAgent.Reaper`, install-scoped.
+  * Events the later children own (`drain`, `rotate`) are logged and ignored.
   """
   use GenServer
 
@@ -47,6 +55,8 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
+  alias Arbiter.NodeAgent.Reaper
+  alias Arbiter.NodeAgent.Retained
   alias Arbiter.NodeAgent.Run
   alias Arbiter.NodeAgent.Runs
   alias Arbiter.NodeAgent.Status
@@ -83,6 +93,8 @@ defmodule Arbiter.NodeAgent.Connection do
       hello_ref: nil,
       readiness_task: nil,
       readiness: nil,
+      reap_task: nil,
+      boot_epoch: nil,
       hb_timer: nil,
       hb_seq: 0,
       hb_refs: MapSet.new(),
@@ -167,6 +179,18 @@ defmodule Arbiter.NodeAgent.Connection do
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{readiness_task: ref} = state) do
     report = readiness_failure("readiness probe crashed: #{inspect(reason)}")
     {:noreply, send_hello(%{state | readiness_task: nil}, report)}
+  end
+
+  # -- reaper (RW12) --------------------------------------------------------------------
+
+  def handle_info({ref, result}, %{reap_task: ref} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, reaped(%{state | reap_task: nil}, result)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{reap_task: ref} = state) do
+    Logger.warning("node agent: reaper crashed: #{inspect(reason, limit: 5)}")
+    {:noreply, %{state | reap_task: nil}}
   end
 
   # -- timers -----------------------------------------------------------------------------
@@ -320,6 +344,51 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # RW12: the primary wants a retained run's work (the uploads go through the ordinary
+  # endpoints, off this process); `recovered` says they are done.
+  defp push(state, "recover", %{"run" => run}) when is_binary(run) do
+    config = state.config
+    me = self()
+
+    Task.Supervisor.start_child(state.task_supervisor, fn ->
+      result =
+        case Retained.pull(config, run) do
+          {:ok, parts} -> parts
+          {:error, reason} -> %{"error" => Atom.to_string(reason)}
+        end
+
+      send(me, {:run_push, run, "recovered", Map.put(result, "run", run)})
+    end)
+
+    state
+  end
+
+  defp push(state, "retained.drop", %{"run" => run}) when is_binary(run) do
+    Retained.drop(state.config, run)
+    state
+  end
+
+  defp push(%{reap_task: nil} = state, "reap", %{"install" => install, "live_set" => live})
+       when is_binary(install) and is_list(live) do
+    run_opts = state.config.run_opts || []
+
+    opts =
+      run_opts
+      |> Keyword.take([:podman, :runner, :runtime_dir, :reap_min_age_s])
+      |> rename_min_age()
+
+    config = state.config
+
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        Reaper.reap(config, %{install: install, live_set: Enum.filter(live, &is_binary/1)}, opts)
+      end)
+
+    %{state | reap_task: task.ref}
+  end
+
+  defp push(state, "reap", _payload), do: state
+
   defp push(state, "bridge." <> _ = event, payload) when state.phase == :ready do
     Bridge.from_primary(bridge(state), event, payload)
     state
@@ -410,24 +479,56 @@ defmodule Arbiter.NodeAgent.Connection do
     request_upgrade(state, payload["upgrade"])
     attach_runs(payload["runs"])
     Bridge.attach(bridge(state), state.client, Protocol.topic(config))
-    state
+    note_boot_epoch(state, payload["boot_epoch"])
+  end
+
+  # A new `boot_epoch` is a primary that restarted (§10.4): everything it does not
+  # list as known was just quiesced by `attach_runs/1`.
+  defp note_boot_epoch(%{boot_epoch: epoch} = state, epoch), do: state
+
+  defp note_boot_epoch(state, epoch) do
+    if state.boot_epoch,
+      do: Logger.warning("node agent: the primary restarted (boot_epoch changed)")
+
+    put_status(state, %{boot_epoch_changed_at: DateTime.utc_now() |> DateTime.to_iso8601()})
+    %{state | boot_epoch: epoch}
   end
 
   defp bridge(state), do: Keyword.get(state.config.run_opts, :bridge, Bridge)
 
+  defp rename_min_age(opts) do
+    case Keyword.pop(opts, :reap_min_age_s) do
+      {nil, opts} -> opts
+      {age, opts} -> Keyword.put(opts, :min_age_s, age)
+    end
+  end
+
+  defp reaped(state, %{containers: [], pods: [], dirs: []}), do: state
+
+  defp reaped(state, %{containers: containers, pods: pods, dirs: dirs}) do
+    send(
+      self(),
+      {:run_push, nil, "reaped", %{"containers" => containers, "pods" => pods, "dirs" => dirs}}
+    )
+
+    state
+  end
+
+  defp reaped(state, _error), do: state
+
   # Re-attach every run (each resends what the primary has not acknowledged).
   # A run the primary says it does not know is not one to keep alive: its owner
-  # is gone, so the container is stopped (the restart story proper, with
-  # retained checkpoints, is RW12's).
+  # is gone, so it is quiesced (§10.4): the container is stopped and the work is
+  # retained locally for the primary to recover.
   defp attach_runs(verdicts) do
     unknown = for {run, "unknown"} <- verdicts || %{}, do: run
 
     Enum.each(unknown, fn run ->
-      Logger.warning("node agent: primary does not know run #{run}; stopping it")
-      Run.cancel(run, "unknown_to_primary")
+      Logger.warning("node agent: primary does not know run #{run}; quiescing it")
+      Run.quiesce(run)
     end)
 
-    Runs.attach_all()
+    Runs.attach_all(unknown)
   end
 
   defp run_opts(state) do

@@ -168,10 +168,11 @@ defmodule ArbiterWeb.NodeChannelTest do
   end
 
   describe "hello" do
-    test "hello_ok carries the boot_epoch and the per-run verdicts", %{
-      node: node,
-      credential: credential
-    } do
+    test "hello_ok carries the boot_epoch and the per-run verdicts (no live Worker, so unknown: §10.4)",
+         %{
+           node: node,
+           credential: credential
+         } do
       live = run!(:working)
       gone = Ash.UUID.generate()
 
@@ -183,7 +184,8 @@ defmodule ArbiterWeb.NodeChannelTest do
         )
 
       assert ok["boot_epoch"] == Nodes.boot_epoch()
-      assert ok["runs"] == %{live.id => "known", gone => "unknown"}
+      # a live row alone is not "known": only a run this session holds is (RW12)
+      assert ok["runs"] == %{live.id => "unknown", gone => "unknown"}
       assert ok["fence_after"] == 60
       assert ok["lost_after"] == 90
       assert ok["hb_interval"] == 10

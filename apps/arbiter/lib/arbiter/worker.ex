@@ -3165,6 +3165,14 @@ defmodule Arbiter.Worker do
       other_session_live?(state, port) ->
         state
 
+      # RW12 (docs/design/remote-workers.md §10.3): the node the run was placed on
+      # is gone. That says nothing about the run or the agent: it is interrupted,
+      # not failed, and no resume attempt is consumed. Ahead of run_signalled_done?/1
+      # for the same reason as a node shutdown: whatever the agent printed last, its
+      # worktree on the node is not here to commit from.
+      node_lost?(session) ->
+        interrupt_node_lost(state, port, session)
+
       run_signalled_done?(state) ->
         on_claude_done(state)
 
@@ -3193,6 +3201,46 @@ defmodule Arbiter.Worker do
         maybe_resume_continuation(state, session)
     end
   end
+
+  defp node_lost?(session), do: match?(%{remote_outcome: %{node_lost?: true}}, session)
+
+  # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
+  # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
+  # `meta[:resume_attempts]` is not touched: the cap bounds *in-place* resumes of an
+  # agent that stopped on its own, and this one did not. The worker stays registered
+  # in its finished state (as a failed one does) until the automatic resume replaces
+  # it; the run row, not this process, is what the Driver's reap reads.
+  defp interrupt_node_lost(%State{} = state, handle, _session) do
+    name = node_name(handle)
+    reason = Arbiter.Worker.StopReason.node_lost(name)
+
+    Logger.warning(
+      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — node #{name} lost; " <>
+        "no resume attempt consumed"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, "node lost: #{name}")
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state =
+      %State{state | state: :finished, outcome: :interrupted, waiting_on: nil, meta: meta}
+
+    record_run_finished(new_state)
+    broadcast_lifecycle(:updated, new_state)
+    Arbiter.Nodes.LostResume.schedule(state.task_id)
+    new_state
+  end
+
+  defp node_name({:remote, {node_id, _run, _ref}}) do
+    case Arbiter.Nodes.get_node(node_id) do
+      %{name: name} -> name
+      _ -> node_id
+    end
+  end
+
+  defp node_name(_handle), do: "unknown"
 
   defp on_port_data(%State{} = state, port, fragment, eol?) do
     case Map.fetch(state.claude_sessions, port) do

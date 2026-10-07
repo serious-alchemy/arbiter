@@ -37,7 +37,6 @@
     "P-17" => "MCP/CLI read gaps for accounts, usage, pauses, alerts",
     "P-21" => "Workspace operations parity: update, schema, multi-key patch, worker_env, standing orders",
     "P-23" => "Loop parity",
-    "P-24" => "Shared repo listing",
     "P-25" => "Memory operator surface (REST + CLI)",
     "P-26" => "Mailbox: one context function, correct workspace and reader identity",
     "P-27" => "Coordinator attention queue on REST/CLI and read-only `server_status` on MCP"
@@ -1572,12 +1571,9 @@
       title: "Show repo",
       mcp: ["repo_show"],
       cli: ["arb repo show"],
-      rest: nil,
-      status: {:gap, "P-24"},
-      divergences: ["D-C-31"],
-      absent: %{
-        rest: {:gap, "P-24", "No `GET /api/repos/:name` (MCP `repo_show` and `arb repo show` exist; low priority)."}
-      }
+      rest: ["GET /api/repos/:name"],
+      status: :partial,
+      divergences: ["D-C-31"]
     },
     %{
       id: "workspace/workspace_resolution_for",

@@ -176,6 +176,13 @@ config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 config :arbiter, :run_tmp_sweeper, enabled: false
 config :arbiter, :test_services_reaper, enabled: false
 
+# RW12: nodes are told to reap only when a test asks (a reap query from a Session in
+# every node test would be noise, and the sandbox owns the connection).
+config :arbiter, :node_reaper, enabled: false
+
+# RW12: a Worker that loses its node asks for an automatic resume; tests that care say so.
+config :arbiter, :node_lost_resume, enabled: false
+
 # bd-6zuoo6: never wrap test spawns in a systemd scope — whether the host has a
 # user manager must not decide a test's outcome. The tests that exercise the cap
 # set `:worker_memory_max` themselves (fake binaries, or `:live_systemd`).

@@ -318,6 +318,60 @@ defmodule Arbiter.Worker.TestServicesTest do
       refute ["pod", "rm", "--force", "--ignore", "--time", "0", "arb-b-2-pod"] in calls()
     end
 
+    test "a live set replaces the OS-pid test: a pod is live iff its name is in it (RW12, §10.6)" do
+      # On a node the pod's recorded pid is the agent's own BEAM, which is always alive:
+      # it says nothing about the run. The primary's live set does.
+      list = [
+        %{"Name" => "arb-a-1-pod", "Labels" => %{"arbiter.test-services" => "111"}},
+        %{"Name" => "arb-b-2-pod", "Labels" => %{"arbiter.test-services" => "222"}}
+      ]
+
+      run =
+        runner(fn
+          ["pod", "ps" | _] -> pods_json(list)
+          _ -> {"", 0}
+        end)
+
+      assert ["arb-a-1-pod"] =
+               TestServices.reap_orphans(
+                 runner: run,
+                 live_pods: ["arb-b-2-pod"],
+                 alive?: fn _ -> flunk("os_alive? must not be consulted for a remote run") end
+               )
+    end
+
+    test "labels scope the listing to one install on one node" do
+      run =
+        runner(fn
+          ["pod", "ps" | _] -> pods_json([])
+          _ -> {"", 0}
+        end)
+
+      TestServices.reap_orphans(
+        runner: run,
+        live_pods: [],
+        labels: [{"arbiter.install", "inst1"}, {"arbiter.node", "n1"}]
+      )
+
+      [ps] = Enum.filter(calls(), &match?(["pod", "ps" | _], &1))
+      assert "label=arbiter.install=inst1" in ps
+      assert "label=arbiter.node=n1" in ps
+      assert "label=arbiter.test-services" in ps
+    end
+
+    test "pod_create_argv labels the pod with the install and node when asked" do
+      argv =
+        TestServices.pod_create_argv("podman", @pod,
+          labels: [{"arbiter.install", "inst1"}, {"arbiter.node", "n1"}]
+        )
+
+      assert "arbiter.install=inst1" in argv
+      assert "arbiter.node=n1" in argv
+
+      assert TestServices.pod_create_argv("podman", @pod) ==
+               TestServices.pod_create_argv("podman", @pod, [])
+    end
+
     test "podman missing or answering nonsense reaps nothing" do
       assert [] = TestServices.reap_orphans(runner: runner(fn _ -> {"no podman", 127} end))
       assert [] = TestServices.reap_orphans(runner: runner(fn _ -> {"not json", 0} end))

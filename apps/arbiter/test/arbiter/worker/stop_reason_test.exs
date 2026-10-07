@@ -1010,6 +1010,25 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "node_lost/1 (RW12)" do
+    test "is its own category, names the node, and is not a signal or an agent failure" do
+      reason = StopReason.node_lost("edge-1")
+
+      assert reason.category == :node_lost
+      assert reason.summary =~ "edge-1"
+      assert reason.remediation =~ "resum"
+      assert reason.exit_status == nil
+      assert reason.signal == nil
+      assert StopReason.label(reason) =~ "node lost"
+      assert StopReason.to_map(reason).category == :node_lost
+    end
+
+    test "is infrastructure, conclusive on its own, for the loop's failure classifier" do
+      assert {:operational, :node_lost} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:node_lost]
+    end
+  end
+
   describe "classify/3 — grok (bd-cwq8b0)" do
     @free_usage "subscription:free-usage-exhausted: You've used all the included free usage " <>
                   "for model grok-4.7 for now. Usage resets over a rolling 24-hour window " <>

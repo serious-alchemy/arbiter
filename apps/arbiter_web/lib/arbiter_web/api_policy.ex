@@ -143,6 +143,7 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- repos / skills ---------------------------------------------------
     {:get, "/api/repos"} => :coordinator,
+    {:get, "/api/repos/:name"} => :coordinator,
     {:get, "/api/skills"} => :coordinator,
     {:post, "/api/skills"} => :coordinator,
     {:get, "/api/skills/:id"} => :coordinator,
