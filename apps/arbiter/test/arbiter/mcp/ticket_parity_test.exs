@@ -266,6 +266,24 @@ defmodule Arbiter.MCP.TicketParityTest do
       assert message =~ "force=true"
     end
 
+    test "tracker_claim: a prior claim by another installation is a typed already_claimed", ctx do
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [%{"body" => "Claimed. Arbiter installation: other-host."}])
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(@gh_viewer))
+        end
+      end)
+
+      assert {:tool_error, _message, "already_claimed"} =
+               Catalog.call(ctx.gh, "tracker_claim", %{"ref" => "43"})
+    end
+
     test "tracker_claim returns the REST {status, task} shape", ctx do
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
         case {conn.method, conn.request_path} do

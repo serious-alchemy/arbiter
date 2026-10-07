@@ -19,6 +19,18 @@ defmodule Arbiter.Tasks.Issue do
   `:return_to_backlog` apply `promote` / `demote`, and `:requeue` puts a
   stopped run's ticket back in the queue.
 
+  Failure semantics of the two doors (P-13, D-T-27 — decided: document, do not
+  unify). The **idempotent** `:promote_to_ready` / `:return_to_backlog` are the
+  door for the API surfaces — REST (`POST /api/issues/:id/promote`, `/demote`),
+  the MCP `ticket_promote` / `ticket_demote` tools and the CLI — where a retried
+  or racing call (a script, an Autopilot tick that already promoted it) must
+  not fail: promoting a ticket that is already `queued` or beyond, or demoting
+  one already in `backlog`, is a no-op success. The **strict** `:promote` /
+  `:demote` are the board's (`BoardLive`): a card the operator drags
+  from a column it is no longer in means the board is stale, and the error is
+  what tells the LiveView to reload. Both doors refuse the same states (a live
+  worker, `verifying`, `closed`) and apply the same transition.
+
   `:update` accepts none of `state`, `close_reason` or `rank`. bd-36ytcl
   removed the legacy `status` and `refined` columns the transitions used to
   dual-write, and the ReviewGate park columns (the park is the ticket's
