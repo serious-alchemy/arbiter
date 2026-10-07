@@ -12,6 +12,13 @@ defmodule ArbiterCli.Version do
 
   @release_version System.get_env("RELEASE_VERSION")
 
+  # The GitHub `owner/repo` the release workflow built this from; the last
+  # fallback for `ArbiterCli.ReleaseRepo`. nil for a local source build.
+  @release_repo (case System.get_env("ARB_BUILD_RELEASE_REPO") do
+                   repo when is_binary(repo) and byte_size(repo) > 0 -> String.trim(repo)
+                   _ -> nil
+                 end)
+
   @git_version_result System.cmd("git", ["describe", "--tags", "--abbrev=0"],
                         stderr_to_stdout: true
                       )
@@ -73,6 +80,10 @@ defmodule ArbiterCli.Version do
       vsn -> vsn
     end
   end
+
+  @doc "The `owner/repo` this binary was built from by the release workflow, or nil."
+  @spec release_repo() :: String.t() | nil
+  def release_repo, do: @release_repo
 
   @doc "Short git SHA at build time, suffixed with `*` when the tree was dirty."
   def git_sha, do: if(@git_dirty, do: "#{@git_sha}*", else: @git_sha)

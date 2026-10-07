@@ -5,7 +5,8 @@ defmodule ArbiterCli.Cmd.Server do
       arb server start    [--timeout SECONDS] [--json]
       arb server restart  [--timeout SECONDS] [--json]
       arb server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-                          [--allow-cross-migration-rollback]
+                          [--allow-cross-migration-rollback] [--local PATH]
+                          [--no-self-update]
                           deploy from a GitHub Release: download + verify
                           arbiter-<v>-linux.tar.gz → atomically swap the
                           current symlink → restart → health-check, with
@@ -18,11 +19,16 @@ defmodule ArbiterCli.Cmd.Server do
                           lacks therefore refuses to auto-roll back (old code
                           on a new schema); pass
                           --allow-cross-migration-rollback to override.
-                          Requires `ARB_RELEASE_REPO`. When it isn't set (a
-                          dev-mode git-checkout install with no release
-                          artifact), this falls back to the git-pull path
-                          below automatically, rather than dead-ending on
-                          "ARB_RELEASE_REPO is not set".
+                          The release repo comes from `ARB_RELEASE_REPO`,
+                          else the running server's own release metadata,
+                          else the repo this arb was built from; the output
+                          names which. Before the swap the database gets an
+                          integrity-checked online backup
+                          (<data-home>/snapshots/), which a failed deploy of
+                          a release with migrations restores. After a green
+                          deploy the arb escript is updated to the same tag.
+                          This never falls back to git-pull: a source
+                          checkout is deployed only with --git-pull.
       arb server deploy --git-pull [--timeout SECONDS] [--json] [--force]
                           dev-runtime path: git pull --ff-only main → rebuild
                           CLI if changed → restart Phoenix.
@@ -33,8 +39,8 @@ defmodule ArbiterCli.Cmd.Server do
                           restart's Boot.Migrator applies pending migrations on
                           boot, before the endpoint opens. Only a server that is
                           already down gets a standalone `mix arbiter.migrate`.
-                          Also used automatically by a bare `arb server deploy`
-                          when `ARB_RELEASE_REPO` is unset.
+                          Only runs when asked for: a bare `arb server deploy`
+                          is always the release path.
       arb server migrate  [--timeout SECONDS] [--json] [--force]
                           apply pending database migrations.
                           When the server is running: restarts it so
@@ -97,40 +103,18 @@ defmodule ArbiterCli.Cmd.Server do
     end
   end
 
-  # `arb server deploy` — deploy from a GitHub Release (the new default). The
-  # legacy git-pull deploy is preserved behind `--git-pull` until the cutover
-  # to release-based deploys is complete.
-  #
-  # A dev-mode install (a git checkout with no `ARB_RELEASE_REPO` configured)
-  # has no release artifact to speak of, so routing it through
-  # `Cmd.ReleaseDeploy` just dead-ends on "ARB_RELEASE_REPO is not set". Detect
-  # that case and fall back to the git-pull path automatically, the same as if
-  # the operator had passed `--git-pull` themselves. Installs with
-  # `ARB_RELEASE_REPO` configured are unaffected — they keep hitting
-  # `Cmd.ReleaseDeploy` exactly as before.
+  # `arb server deploy` — deploy from a GitHub Release. This is the only default:
+  # the repo is resolved by `ArbiterCli.ReleaseRepo` (ARB_RELEASE_REPO, else the
+  # running server's own metadata, else the repo this arb was built from) and
+  # the deploy dies naming `--git-pull` when none of them answers. The legacy
+  # git-pull deploy of a source checkout runs only on an explicit `--git-pull`;
+  # it is never a silent fallback on a release install.
   defp deploy(argv) do
-    cond do
-      "--git-pull" in argv ->
-        Cmd.Update.deploy(argv -- ["--git-pull"])
-
-      release_repo_configured?() ->
-        Cmd.ReleaseDeploy.run(argv)
-
-      true ->
-        Start.log_text(
-          "ARB_RELEASE_REPO is not set — this looks like a dev-mode (git-checkout) " <>
-            "install. Falling back to the git-pull deploy path " <>
-            "(pull -> rebuild CLI escript if changed -> restart, which migrates on boot)."
-        )
-
-        Cmd.Update.deploy(argv)
-    end
-  end
-
-  defp release_repo_configured? do
-    case System.get_env("ARB_RELEASE_REPO") do
-      slug when is_binary(slug) and slug != "" -> true
-      _ -> false
+    if "--git-pull" in argv do
+      IO.puts(:stderr, "Deploy source: legacy git-pull of a source checkout (--git-pull).")
+      Cmd.Update.deploy(argv -- ["--git-pull"])
+    else
+      Cmd.ReleaseDeploy.run(argv)
     end
   end
 

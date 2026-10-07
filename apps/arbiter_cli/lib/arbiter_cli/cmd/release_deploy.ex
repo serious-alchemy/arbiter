@@ -195,7 +195,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   defp deploy_from_github(opts, mode, force, timeout_ms) do
     # Resolve the repo first so a misconfiguration fails fast, before we reach
     # for the (HTTP-backed) active-worker check.
-    repo = Github.release_repo()
+    {repo, repo_source} = Github.release_repo()
     Restart.guard_active_workers!(force)
 
     release = Github.fetch_release(repo, opts[:version])
