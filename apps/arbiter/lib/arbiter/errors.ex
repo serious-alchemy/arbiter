@@ -14,6 +14,10 @@ defmodule Arbiter.Errors do
       malformed (a missing or mistyped parameter).
     * `:conflict` — 409 `conflict` — the request is well formed and valid, the
       current state refuses it (closed ticket, live session, full account).
+    * `:already_claimed` — 409 `already_claimed` — another Arbiter installation
+      already claimed the tracker issue (`force` overrides).
+    * `:not_assigned` — 403 `not_assigned` — the tracker issue is not assigned to
+      the workspace user (`force` overrides).
     * `:bad_gateway` — 502 `bad_gateway` — an upstream system (the tracker)
       failed; our side may have succeeded (the ticket exists).
     * `:busy` — 503 `busy` — a transient condition; retry after a short wait.
@@ -32,6 +36,8 @@ defmodule Arbiter.Errors do
     unknown_provider: {"validation_error", 422},
     invalid_request: {"invalid_request", 400},
     conflict: {"conflict", 409},
+    already_claimed: {"already_claimed", 409},
+    not_assigned: {"not_assigned", 403},
     bad_gateway: {"bad_gateway", 502},
     busy: {"busy", 503},
     forbidden: {"forbidden", 403},

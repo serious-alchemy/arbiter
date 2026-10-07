@@ -19,8 +19,7 @@ defmodule ArbiterCli.Cmd.RankTest do
          assert Jason.decode!(body) == %{"top" => true}
 
          conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
-       end},
-      {{"get", "/api/issues"}, fn conn -> Req.Test.json(conn, %{"data" => [@issue]}) end}
+       end}
     ])
 
     {out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--top"]) end)
@@ -36,8 +35,7 @@ defmodule ArbiterCli.Cmd.RankTest do
          assert Jason.decode!(body) == %{"bottom" => true}
 
          conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
-       end},
-      {{"get", "/api/issues"}, fn conn -> Req.Test.json(conn, %{"data" => [@issue]}) end}
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--bottom"]) end)
@@ -52,8 +50,7 @@ defmodule ArbiterCli.Cmd.RankTest do
          assert Jason.decode!(body) == %{"before_id" => "bd-002"}
 
          conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
-       end},
-      {{"get", "/api/issues"}, fn conn -> Req.Test.json(conn, %{"data" => [@issue]}) end}
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--before", "bd-002"]) end)
@@ -68,24 +65,19 @@ defmodule ArbiterCli.Cmd.RankTest do
          assert Jason.decode!(body) == %{"after_id" => "bd-002"}
 
          conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue)
-       end},
-      {{"get", "/api/issues"}, fn conn -> Req.Test.json(conn, %{"data" => [@issue]}) end}
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--after", "bd-002"]) end)
     assert exit_code == 0
   end
 
-  test "--json emits raw JSON with priority_band fields" do
-    other = Map.put(@issue, "id", "bd-000")
-    # A closed ticket in the band is not part of the queue order.
-    closed = Map.merge(@issue, %{"id" => "bd-00c", "rank" => 0, "state" => "closed"})
+  test "--json passes through the server's priority_band fields" do
+    ranked = Map.merge(@issue, %{"priority_band_position" => 1, "priority_band_size" => 2})
 
     stub_routes([
       {{"patch", "/api/issues/bd-001/rank"},
-       fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue) end},
-      {{"get", "/api/issues"},
-       fn conn -> Req.Test.json(conn, %{"data" => [closed, other, @issue]}) end}
+       fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(ranked) end}
     ])
 
     {out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--top", "--json"]) end)
@@ -93,6 +85,18 @@ defmodule ArbiterCli.Cmd.RankTest do
     assert {:ok, body} = Jason.decode(out)
     assert body["priority_band_position"] == 1
     assert body["priority_band_size"] == 2
+  end
+
+  test "text mode prints the band position the server reported" do
+    ranked = Map.merge(@issue, %{"priority_band_position" => 1, "priority_band_size" => 2})
+
+    stub_routes([
+      {{"patch", "/api/issues/bd-001/rank"},
+       fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(ranked) end}
+    ])
+
+    {out, _err, 0} = capture(fn -> Rank.run(["bd-001", "--top"]) end)
+    assert out =~ "priority band 2: position 2 of 2"
   end
 
   test "requires a ticket id" do

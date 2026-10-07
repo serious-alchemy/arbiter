@@ -60,6 +60,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueSerializer
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Workspace
@@ -572,6 +573,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, column} <- optional_enum(args, "column", Projection.columns()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
          {:ok, priority} <- optional_integer(args, "priority"),
+         {:ok, difficulty} <- optional_integer(args, "difficulty"),
          {:ok, engagements} <- optional_enum(args, "engagements", @engagement_modes) do
       issues =
         Issue
@@ -581,18 +583,33 @@ defmodule Arbiter.MCP.Tools do
         |> maybe_filter_column_states(column)
         |> maybe_filter_issue_type(issue_type)
         |> maybe_filter_priority(priority)
+        |> maybe_filter_difficulty(difficulty)
         |> Ash.read!()
 
       views = Projection.views(issues)
 
-      tasks =
+      rows =
         for issue <- issues,
             view = Map.fetch!(views, issue.id),
             is_nil(column) or view.column == column,
-            do: serialize_task_summary(issue, view)
+            do: {issue, view}
 
-      {:ok, %{tasks: tasks, count: length(tasks), workspace_id: ws_id}}
+      {:ok, %{tasks: ready_rows(rows, ws_id), count: length(rows), workspace_id: ws_id}}
     end
+  end
+
+  # The summary rows, a Ready card the scheduler is holding carrying its
+  # `hold_reason` (P-13, D-T-16) — shared by `ticket_list` and `ticket_ready`.
+  # The board is only read when a Ready card is in the page.
+  @doc false
+  def ready_rows(rows, ws_id) do
+    holds =
+      if Enum.any?(rows, fn {_issue, view} -> view.column == :ready end),
+        do: Arbiter.Tasks.ReadyHolds.for_workspace(ws_id),
+        else: %{}
+
+    for {issue, view} <- rows,
+        do: IssueSerializer.row(IssueSerializer.summary(issue), view, Map.get(holds, issue.id))
   end
 
   # `nil` is "all workspaces" (`Workspaces.resolve/3`, `:read`).
@@ -623,6 +640,11 @@ defmodule Arbiter.MCP.Tools do
 
   defp maybe_filter_priority(query, priority),
     do: Ash.Query.filter(query, priority == ^priority)
+
+  defp maybe_filter_difficulty(query, nil), do: query
+
+  defp maybe_filter_difficulty(query, difficulty),
+    do: Ash.Query.filter(query, difficulty == ^difficulty)
 
   # ---- usage_summarize ----------------------------------------------------
 
@@ -717,30 +739,12 @@ defmodule Arbiter.MCP.Tools do
          {:ok, ref} <- require_string(args, "ref"),
          {:ok, force} <- fetch_bool(args, "force", false),
          {:ok, workspace} <- fetch_workspace(ws_id),
-         {:ok, overrides} <- collect_attrs(args, tracker_claim_override_spec()) do
-      opts =
-        [force: force]
-        |> put_string_key_opt(:difficulty, overrides)
-        |> put_string_key_opt(:repo, overrides)
-
-      case Claim.claim(workspace, ref, opts) do
-        {:ok, status, task} -> {:ok, Map.put(serialize_task(task), :claim_status, to_str(status))}
-        {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
+         # P-13 (D-T-24): the same 0..5 pre-check REST makes, before any tracker call.
+         {:ok, opts} <- Claim.claim_opts(args) do
+      case workspace |> Claim.claim(ref, Keyword.put(opts, :force, force)) |> Claim.typed() do
+        {:ok, status, task} -> {:ok, Claim.serialize_claim(status, task)}
+        {:error, reason} -> {:error, claim_error(reason)}
       end
-    end
-  end
-
-  defp tracker_claim_override_spec do
-    [
-      {"difficulty", :integer},
-      {"repo", :string}
-    ]
-  end
-
-  defp put_string_key_opt(opts, key, attrs) do
-    case Map.fetch(attrs, Atom.to_string(key)) do
-      {:ok, value} -> Keyword.put(opts, key, value)
-      :error -> opts
     end
   end
 
@@ -767,21 +771,17 @@ defmodule Arbiter.MCP.Tools do
          {:ok, dry} <- fetch_bool(args, "dry", false),
          {:ok, workspace} <- fetch_workspace(ws_id),
          {:ok, plan} <- claim_plan(workspace) do
-      actions = Enum.map(plan, &serialize_claim_action/1)
+      # The REST shape (`Claim.serialize_sync/2`: `data`, `applied`, `results`),
+      # plus the `actions` / `count` this tool has always carried.
+      payload =
+        if dry do
+          Claim.serialize_sync(plan, :dry)
+        else
+          {:ok, results} = Claim.apply_plan(workspace, plan)
+          Claim.serialize_sync(plan, results)
+        end
 
-      if dry do
-        {:ok, %{applied: false, actions: actions, count: length(actions)}}
-      else
-        {:ok, results} = Claim.apply_plan(workspace, plan)
-
-        {:ok,
-         %{
-           applied: true,
-           actions: actions,
-           results: Enum.map(results, &serialize_claim_result/1),
-           count: length(actions)
-         }}
-      end
+      {:ok, Map.merge(payload, %{actions: payload.data, count: length(plan)})}
     end
   end
 
@@ -1675,30 +1675,23 @@ defmodule Arbiter.MCP.Tools do
   # Wrap `Claim.plan/1` so an adapter/tracker error surfaces as a tool error
   # rather than crashing the handler.
   defp claim_plan(workspace) do
-    case Claim.plan(workspace) do
+    case workspace |> Claim.plan() |> Claim.typed() do
       {:ok, plan} -> {:ok, plan}
-      {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
+      {:error, reason} -> {:error, claim_error(reason)}
     end
   end
 
-  defp claim_error_message(:tracker_not_supported),
-    do: "workspace tracker does not support claim/sync (e.g. tracker is `none`)"
+  # A typed refusal (`Claim.refusal/1`: already_claimed, not_assigned,
+  # invalid_request) keeps its kind, so the MCP error `type` matches REST's; any
+  # other failure is the tracker's/Ash's own message.
+  defp claim_error({kind, message, _details}) when is_atom(kind) and is_binary(message),
+    do: {kind, message}
 
-  defp claim_error_message({:not_assigned, who}),
-    do:
-      "issue is not assigned to the workspace user (#{inspect(who)}); pass force=true to override"
-
-  defp claim_error_message({:already_claimed, _body}),
-    do:
-      "this issue has already been claimed by another Arbiter installation (force=true to override)"
-
-  defp claim_error_message({:invalid_ref, raw}), do: "invalid issue ref: #{inspect(raw)}"
-
-  defp claim_error_message(%{__struct__: _} = err) do
-    if is_exception(err), do: Exception.message(err), else: inspect(err)
+  defp claim_error(%{__struct__: _} = err) do
+    if is_exception(err), do: {:invalid, Exception.message(err)}, else: {:invalid, inspect(err)}
   end
 
-  defp claim_error_message(other), do: inspect(other)
+  defp claim_error(other), do: {:invalid, inspect(other)}
 
   # internal — shared
   def fetch_string(args, key) when is_map(args) do
@@ -1764,20 +1757,7 @@ defmodule Arbiter.MCP.Tools do
   def unwrap_stringified_json(v, _allowed_types), do: v
   # ---- serializers (JSON-friendly, mirroring the REST shapes) -------------
 
-  def serialize_task_summary(%Issue{} = i) do
-    %{
-      id: i.id,
-      title: i.title,
-      state: to_str(i.state),
-      close_reason: to_str(i.close_reason),
-      priority: i.priority,
-      difficulty: i.difficulty,
-      issue_type: to_str(i.issue_type),
-      workspace_id: i.workspace_id,
-      acceptance_waived: i.acceptance_waived,
-      rank: i.rank
-    }
-  end
+  def serialize_task_summary(%Issue{} = i), do: IssueSerializer.summary(i)
 
   @doc """
   A task summary with its lifecycle projection (`Lifecycle.Projection.payload/1`):
@@ -1789,60 +1769,19 @@ defmodule Arbiter.MCP.Tools do
 
   # internal — shared by Arbiter.MCP.Tools.Task (task_show's full view) and
   # tracker_claim below
-  def serialize_task(%Issue{} = i) do
-    %{
-      id: i.id,
-      title: i.title,
-      description: i.description,
-      acceptance: i.acceptance,
-      acceptance_waived: i.acceptance_waived,
-      notes: i.notes,
-      qa_notes: i.qa_notes,
-      deployment_notes: i.deployment_notes,
-      # bd-842qio: the stored lifecycle state, as on `GET /api/issues/:id`.
-      state: to_str(i.state),
-      close_reason: to_str(i.close_reason),
-      priority: i.priority,
-      floor_priority: i.floor_priority,
-      difficulty: i.difficulty,
-      issue_type: to_str(i.issue_type),
-      auto_close: i.auto_close,
-      verify_after_deploy: i.verify_after_deploy,
-      # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or nil.
-      provider_constraint: i.provider_constraint,
-      awaiting_verification_at: iso(i.awaiting_verification_at),
-      verification_outcome: to_str(i.verification_outcome),
-      verification_evidence: i.verification_evidence,
-      tracker_type: to_str(i.tracker_type),
-      tracker_ref: i.tracker_ref,
-      tracker_context_type: to_str(i.tracker_context_type),
-      tracker_context_ref: i.tracker_context_ref,
-      pr_ref: i.pr_ref,
-      # bd-741sid: the ticket owns its open PR, as on `GET /api/issues/:id`.
-      merger_url: i.merger_url,
-      merger_status: i.merger_status,
-      merger_checked_at: iso(i.merger_checked_at),
-      # bd-9zuvbh: a ReviewGate park (class C) is the attention cause, so the
-      # reason a finished task is sitting still is readable here and not only
-      # in `arb prime`.
-      attention_cause: to_str(i.attention_cause),
-      attention_detail: i.attention_detail,
-      attention_since: iso(i.attention_since),
-      # bd-8nlez1: who the attention was moved to (by a hand-off, a hand-back
-      # or an expired limit), and the note that came with it.
-      attention_owner: to_str(i.attention_owner),
-      attention_note: i.attention_note,
-      attention_owner_since: iso(i.attention_owner_since),
-      attention_resume_attempts: i.attention_resume_attempts,
-      pr_body: i.pr_body,
-      target_branch: i.target_branch,
-      repo: i.repo,
-      workspace_id: i.workspace_id,
-      closed_at: iso(i.closed_at),
-      created_at: iso(i.created_at),
-      updated_at: iso(i.updated_at)
-    }
-    |> put_progress(i)
+  def serialize_task(%Issue{} = i), do: i |> IssueSerializer.data() |> put_progress(i)
+
+  @doc """
+  What a `ticket_*` write tool returns: the full record REST returns
+  (`Arbiter.Tasks.IssueSerializer.data/1`), or — with `summary: true` — the
+  ten-field slim row (P-13, D-T-14).
+  """
+  @spec serialize_ticket(Issue.t(), map()) :: map()
+  def serialize_ticket(%Issue{} = i, args) do
+    case fetch_bool(args, "summary", false) do
+      {:ok, true} -> IssueSerializer.summary(i)
+      _ -> IssueSerializer.data(i)
+    end
   end
 
   # internal — shared: the child-progress rollup, appended by both
@@ -1912,29 +1851,6 @@ defmodule Arbiter.MCP.Tools do
       tracker_type: to_str(Trackers.workspace_type(ws))
     }
   end
-
-  # The planned reconcile actions / per-action results from the tracker bridge,
-  # mirroring `ArbiterWeb.Api.ClaimController`'s shapes.
-  defp serialize_claim_action({:create, ref, summary}),
-    do: %{action: "create", ref: ref, title: summary[:title], html_url: summary[:html_url]}
-
-  defp serialize_claim_action({:close, task_id, reason}),
-    do: %{action: "close", task_id: task_id, reason: reason}
-
-  defp serialize_claim_action({:drift, task_id, reason}),
-    do: %{action: "drift", task_id: task_id, reason: reason}
-
-  defp serialize_claim_result({:created, task}),
-    do: %{outcome: "created", task: serialize_task_summary(task)}
-
-  defp serialize_claim_result({:closed, task}),
-    do: %{outcome: "closed", task: serialize_task_summary(task)}
-
-  defp serialize_claim_result({:drifted, task}),
-    do: %{outcome: "drifted", task: serialize_task_summary(task)}
-
-  defp serialize_claim_result({:error, action, reason}),
-    do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}
 
   # internal — shared
   @doc """

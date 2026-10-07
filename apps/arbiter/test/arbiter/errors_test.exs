@@ -11,6 +11,8 @@ defmodule Arbiter.ErrorsTest do
     {:unknown_provider, "validation_error", 422},
     {:invalid_request, "invalid_request", 400},
     {:conflict, "conflict", 409},
+    {:already_claimed, "already_claimed", 409},
+    {:not_assigned, "not_assigned", 403},
     {:busy, "busy", 503},
     {:forbidden, "forbidden", 403},
     {:unauthorized, "unauthorized", 403},

@@ -2348,7 +2348,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "tracker_claim/2 + tracker_sync/2 (tracker = none)" do
     test "claim refuses when the workspace tracker does not support it", ctx do
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:invalid_request, msg}} =
                Tools.tracker_claim(ctx.coordinator, %{"ref" => "42"})
 
       assert msg =~ "tracker"
@@ -2437,10 +2437,10 @@ defmodule Arbiter.MCP.ToolsTest do
                  "repo" => "emricare/tonic"
                })
 
-      assert data.claim_status == "created"
-      assert data.difficulty == 4
-      assert data.issue_type == "bug"
-      assert data.repo == "emricare/tonic"
+      assert data.status == "created"
+      assert data.task.difficulty == 4
+      assert data.task.issue_type == "bug"
+      assert data.task.repo == "emricare/tonic"
     end
   end
 

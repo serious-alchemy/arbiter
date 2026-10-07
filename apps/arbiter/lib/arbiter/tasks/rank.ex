@@ -17,6 +17,9 @@ defmodule Arbiter.Tasks.Rank do
   """
 
   alias Arbiter.Repo
+  alias Arbiter.Tasks.Issue
+
+  require Ash.Query
 
   @spec move(Arbiter.Tasks.Issue.t(), map()) ::
           {:ok, Arbiter.Tasks.Issue.t()} | {:error, term()}
@@ -29,5 +32,31 @@ defmodule Arbiter.Tasks.Rank do
     end)
   rescue
     error -> {:error, error}
+  end
+
+  @doc """
+  Where `issue` sits among the open tickets of its workspace and priority band —
+  `%{priority_band_position: <zero-based>, priority_band_size: n}` — in the
+  queue order (rank, then age). REST (`PATCH /api/issues/:id/rank`) and the MCP
+  `ticket_rank` tool both report it, so a caller no longer has to list the band
+  to learn where a ticket landed (P-13, D-T-33).
+  """
+  @spec band_fields(Issue.t()) :: %{
+          priority_band_position: non_neg_integer(),
+          priority_band_size: pos_integer()
+        }
+  def band_fields(%Issue{} = issue) do
+    ordered =
+      Issue
+      |> Ash.Query.filter(
+        workspace_id == ^issue.workspace_id and priority == ^issue.priority and state != :closed
+      )
+      |> Ash.read!()
+      |> Enum.sort_by(&{&1.rank, DateTime.to_unix(&1.created_at, :microsecond)})
+
+    %{
+      priority_band_position: Enum.find_index(ordered, &(&1.id == issue.id)) || 0,
+      priority_band_size: max(length(ordered), 1)
+    }
   end
 end
