@@ -1,0 +1,343 @@
+defmodule Arbiter.Doctor.SpawnCanaryTest do
+  # bd-8t4yui: the doctor's end-to-end canary spawn. Every agent CLI is a stub
+  # (`Arbiter.TestSandbox` puts them first on PATH), so the real spawn pipeline
+  # runs — RunTmp, the adapters' own argv + env, SpawnEnv, the memory scope's
+  # wrapper, the Port — against fake agents.
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Doctor.SpawnCanary
+  alias Arbiter.Providers.Pause
+  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.TestSandbox
+  alias Arbiter.Usage.Event
+  alias Arbiter.Workers.Run
+
+  @all_providers ["claude", "gemini", "codex", "grok"]
+
+  setup do
+    SpawnCanary.reset_cache()
+    on_exit(&SpawnCanary.reset_cache/0)
+
+    prev_tmp_root = Application.get_env(:arbiter, :worker_tmp_root)
+    tmp_root = Path.join(Arbiter.Config.Paths.scratch_root(), "canary-#{unique()}")
+    File.mkdir_p!(tmp_root)
+    Application.put_env(:arbiter, :worker_tmp_root, tmp_root)
+
+    on_exit(fn ->
+      if prev_tmp_root,
+        do: Application.put_env(:arbiter, :worker_tmp_root, prev_tmp_root),
+        else: Application.delete_env(:arbiter, :worker_tmp_root)
+
+      File.rm_rf(tmp_root)
+    end)
+
+    %{tmp_root: tmp_root}
+  end
+
+  defp unique, do: System.unique_integer([:positive])
+
+  defp workspace!(types) do
+    Ash.create!(Workspace, %{
+      name: "canary-#{unique()}",
+      config: %{"agent" => %{"type" => types}}
+    })
+  end
+
+  # A stub CLI that logs its argv (`$0` is its name) and answers `--version`.
+  defp version_stub(log), do: ~s(echo "$0 $@" >> #{log}\necho "stub 9.9.9"\nexit 0\n)
+
+  defp provision!(stubs \\ %{}) do
+    sandbox = TestSandbox.provision!("canary")
+    # A stub is written for every binary; override per name with `stubs`.
+    defaults = Map.new(TestSandbox.agent_binaries(), &{&1, version_stub(sandbox.log)})
+    write_stubs!(sandbox, Map.merge(defaults, stubs))
+    sandbox
+  end
+
+  defp write_stubs!(sandbox, stubs) do
+    for {name, body} <- stubs do
+      path = Path.join(sandbox.bin, name)
+      File.write!(path, "#!/bin/sh\n" <> body)
+      File.chmod!(path, 0o755)
+    end
+  end
+
+  defp calls(sandbox), do: if(File.exists?(sandbox.log), do: File.read!(sandbox.log), else: "")
+
+  defp provider(report, name), do: Enum.find(report.providers, &(&1.provider == name))
+
+  defp counts do
+    %{
+      issues: Ash.count!(Issue),
+      runs: Ash.count!(Run),
+      events: Ash.count!(Event)
+    }
+  end
+
+  defp run_canary!(opts \\ []) do
+    assert {:ok, report} = SpawnCanary.run(opts)
+    report
+  end
+
+  describe "per provider" do
+    test "spawns each in-use provider, reaches the agent and reports exit and duration" do
+      sandbox = provision!()
+      workspace!(@all_providers)
+
+      report = run_canary!()
+
+      assert report.ok
+      assert {:ok, _, _} = DateTime.from_iso8601(report.ran_at)
+
+      for name <- @all_providers do
+        assert %{
+                 status: "ok",
+                 spawned: true,
+                 reached_agent: true,
+                 exit_code: 0,
+                 error: nil,
+                 detail: "stub 9.9.9"
+               } = r = provider(report, name)
+
+        assert is_integer(r.duration_ms) and r.duration_ms >= 0
+      end
+
+      # The probe is the CLI's own version flag, last on the argv: no prompt is
+      # ever answered, so no model tokens are spent.
+      invocations = calls(sandbox) |> String.split("\n", trim: true)
+
+      assert length(invocations) == 4
+      assert Enum.all?(invocations, &String.ends_with?(&1, " --version"))
+    end
+
+    test "a provider no workspace uses, or that is paused, is n/a and never spawned" do
+      sandbox = provision!()
+      workspace!(["claude", "gemini"])
+      {:ok, _} = Pause.pause("antigravity", by: "test", reason: "canary test")
+
+      report = run_canary!()
+
+      assert report.ok
+      assert %{status: "ok", spawned: true} = provider(report, "claude")
+      assert %{status: "n/a", spawned: false, detail: paused} = provider(report, "gemini")
+      assert paused =~ "paused"
+      assert %{status: "n/a", spawned: false, detail: unused} = provider(report, "codex")
+      assert unused =~ "not configured"
+      assert %{status: "n/a", spawned: false} = provider(report, "grok")
+
+      invocations = calls(sandbox) |> String.split("\n", trim: true)
+      assert [claude] = invocations
+      assert claude =~ "claude"
+      refute calls(sandbox) =~ "agy"
+    end
+  end
+
+  describe "spawn-path failures fail the report with the first error line" do
+    test "a FunctionClauseError in RunTmp.create (the 2026-10-04 v0.2.14 shape)" do
+      sandbox = provision!()
+      workspace!(["claude"])
+      # `Paths.worker_tmp_root/0` handing back a non-path is what crashed every
+      # spawn that day.
+      Application.put_env(:arbiter, :worker_tmp_root, :not_a_path)
+
+      report = run_canary!()
+
+      refute report.ok
+
+      assert %{status: "fail", spawned: false, reached_agent: false, error: error} =
+               provider(report, "claude")
+
+      assert error =~ "FunctionClauseError"
+      refute String.contains?(error, "\n")
+      assert calls(sandbox) == ""
+    end
+
+    test "a wrapper that exits 125 before the agent runs (the agy jail shape, bd-c9fqsk)" do
+      sandbox =
+        provision!(%{
+          "claude" =>
+            "echo \"bwrap: Can't bind socket path too long (sun_path)\" >&2\necho second >&2\nexit 125\n"
+        })
+
+      workspace!(["claude"])
+
+      report = run_canary!()
+
+      refute report.ok
+
+      assert %{
+               status: "fail",
+               spawned: true,
+               reached_agent: false,
+               exit_code: 125,
+               error: error
+             } = provider(report, "claude")
+
+      assert error == "exit 125: bwrap: Can't bind socket path too long (sun_path)"
+      assert calls(sandbox) == ""
+    end
+
+    test "a missing agent binary fails instead of crashing the report" do
+      sandbox = provision!()
+      workspace!(["claude", "codex"])
+      File.rm!(Path.join(sandbox.bin, "codex"))
+      # a real `codex` further down PATH must not answer for the missing stub
+      prev = System.get_env("PATH")
+      System.put_env("PATH", sandbox.bin)
+      on_exit(fn -> System.put_env("PATH", prev) end)
+
+      report = run_canary!()
+
+      refute report.ok
+      assert %{status: "fail", spawned: false, error: error} = provider(report, "codex")
+      assert error =~ "codex"
+      assert %{status: "ok"} = provider(report, "claude")
+    end
+
+    test "an agent that never answers is killed and reported, within the timeout" do
+      provision!(%{"claude" => "exec sleep 30\n"})
+      workspace!(["claude"])
+
+      report = run_canary!(timeout_ms: 300)
+
+      refute report.ok
+
+      assert %{status: "fail", spawned: true, error: error} = provider(report, "claude")
+      assert error =~ "did not answer"
+    end
+  end
+
+  describe "side effects" do
+    test "creates no ticket, run or usage row, and removes its temp dirs", %{tmp_root: tmp_root} do
+      provision!()
+      workspace!(@all_providers)
+      before = counts()
+
+      report = run_canary!()
+
+      assert report.ok
+      assert counts() == before
+      assert File.ls!(tmp_root) == []
+    end
+
+    test "cleans up after a failed spawn too", %{tmp_root: tmp_root} do
+      provision!(%{"claude" => "exit 3\n"})
+      workspace!(["claude"])
+      before = counts()
+
+      report = run_canary!()
+
+      refute report.ok
+      assert counts() == before
+      assert File.ls!(tmp_root) == []
+    end
+
+    test "runs the agent in its own memory scope and stops it afterwards" do
+      sandbox = provision!()
+      workspace!(["claude"])
+      fakes = install_fake_systemd!(sandbox)
+
+      report = run_canary!()
+
+      assert %{status: "ok"} = provider(report, "claude")
+
+      scope_runs =
+        fakes.run_log
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&(&1 =~ "arb-run-canary-claude-"))
+
+      assert [scope_run] = scope_runs
+      assert scope_run =~ "MemoryMax=512M"
+      [_, unit] = Regex.run(~r/--unit=(arb-run-canary-claude-[0-9a-f]+)/, scope_run)
+
+      assert fakes.ctl_log
+             |> File.read!()
+             |> String.split("\n", trim: true)
+             |> Enum.member?("--user stop #{unit}.scope")
+    end
+  end
+
+  describe "concurrency" do
+    test "a second canary while one is running is refused" do
+      sandbox = TestSandbox.provision!("canary-busy")
+      workspace!(["claude"])
+
+      up = Path.join(sandbox.root, "up.fifo")
+      down = Path.join(sandbox.root, "down.fifo")
+      {_, 0} = System.cmd("mkfifo", [up, down])
+
+      write_stubs!(sandbox, %{
+        "claude" => ~s(echo up > #{up}\ncat #{down} > /dev/null\necho "stub 9.9.9"\n)
+      })
+
+      first = Task.async(fn -> SpawnCanary.run() end)
+      # blocks until the first canary's agent is running
+      assert File.read!(up) == "up\n"
+
+      assert SpawnCanary.run() == {:error, :busy}
+
+      File.write!(down, "go")
+      assert {:ok, %{ok: true}} = Task.await(first, 10_000)
+
+      # the guard is released
+      assert {:ok, _} = SpawnCanary.run()
+    end
+  end
+
+  describe "cached/0" do
+    test "is nil until a canary has run this boot, then the last report" do
+      provision!()
+      workspace!(["claude"])
+
+      assert SpawnCanary.cached() == nil
+      report = run_canary!()
+      assert SpawnCanary.cached() == report
+    end
+  end
+
+  # A `systemd-run` that answers the two probes the way a healthy host does and
+  # otherwise runs the command that follows `env -u XDG_RUNTIME_DIR`, and a
+  # `systemctl` that only records what it was asked.
+  defp install_fake_systemd!(sandbox) do
+    run_log = Path.join(sandbox.root, "systemd-run.log")
+    ctl_log = Path.join(sandbox.root, "systemctl.log")
+
+    File.write!(Path.join(sandbox.bin, "systemd-run"), """
+    #!/bin/sh
+    echo "$@" >> #{run_log}
+    case "$*" in
+      *printf*) printf '$'; exit 0 ;;
+      *memory.max*) echo 536870912; exit 0 ;;
+    esac
+    while [ "$1" != "env" ]; do shift; done
+    exec "$@"
+    """)
+
+    File.write!(Path.join(sandbox.bin, "systemctl"), """
+    #!/bin/sh
+    echo "$@" >> #{ctl_log}
+    """)
+
+    for bin <- ["systemd-run", "systemctl"], do: File.chmod!(Path.join(sandbox.bin, bin), 0o755)
+
+    prev =
+      for k <- [:systemd_run, :systemctl, :worker_memory_max],
+          do: {k, Application.get_env(:arbiter, k)}
+
+    Application.put_env(:arbiter, :systemd_run, Path.join(sandbox.bin, "systemd-run"))
+    Application.put_env(:arbiter, :systemctl, Path.join(sandbox.bin, "systemctl"))
+    Application.put_env(:arbiter, :worker_memory_max, "512M")
+    Arbiter.Worker.MemoryScope.reset_probe()
+
+    on_exit(fn ->
+      for {k, v} <- prev do
+        if v, do: Application.put_env(:arbiter, k, v), else: Application.delete_env(:arbiter, k)
+      end
+
+      Arbiter.Worker.MemoryScope.reset_probe()
+    end)
+
+    %{run_log: run_log, ctl_log: ctl_log}
+  end
+end
