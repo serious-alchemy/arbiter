@@ -24,7 +24,9 @@ defmodule Arbiter.MCP.Tools.Task do
 
   require Ash.Query
 
-  @progress_fields ~w(notes qa_notes deployment_notes pr_body)
+  # P-08: `append_notes` appends to `notes` server-side (atomic, so it can't
+  # lose a concurrent write); `""` on any text field clears it (D-T-18/29).
+  @progress_fields ~w(notes append_notes qa_notes deployment_notes pr_body)
 
   # bd-9so315: the one non-text field a worker may set on its own task. It is a
   # self-declaration about its own diff ("this only runs inside the long-lived
@@ -39,7 +41,7 @@ defmodule Arbiter.MCP.Tools.Task do
   # through the transition tools), everything tracker- or assignment-shaped, and `pr_ref` /
   # `target_branch` / `pr_body` — a refine session shapes *what the work is*, not
   # who does it, where it lands, or whether it is done.
-  @refine_writable_fields ~w(title description acceptance notes qa_notes deployment_notes
+  @refine_writable_fields ~w(title description acceptance notes append_notes qa_notes deployment_notes
                              issue_type difficulty priority repo verify_after_deploy)
 
   # bd-13pqcp: `provider_constraint` (where a ticket may run) is deliberately in
@@ -890,7 +892,7 @@ defmodule Arbiter.MCP.Tools.Task do
   # Keep only the allowed progress fields; require at least one.
   defp progress_attrs(args) do
     text =
-      for field <- @progress_fields, (val = Tools.fetch_string(args, field)) != nil, into: %{} do
+      for field <- @progress_fields, is_binary(val = Map.get(args, field)), into: %{} do
         {String.to_existing_atom(field), val}
       end
 
@@ -938,6 +940,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"description", :string},
       {"acceptance", :string},
       {"notes", :string},
+      {"append_notes", :string},
       {"qa_notes", :string},
       {"deployment_notes", :string},
       {"priority", :integer},

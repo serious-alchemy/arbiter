@@ -43,10 +43,44 @@ defmodule ArbiterCli.Cmd.Update do
 
   With an **issue id**, `arb update` patches that issue's fields:
 
-      arb update <id> [--priority N] [--append-notes text]
-                      [--description d] [--acceptance a]
+      arb update <id> [--title t] [--description d] [--priority N] [--difficulty N]
+                      [--type T] [--auto-close | --no-auto-close]
+                      [--acceptance a | --acceptance-file PATH]
+                      [--notes text | --append-notes text]
                       [--qa-notes text] [--deployment-notes text]
-                      [--pr-body text] [--repo owner/name]
+                      [--pr-body text] [--pr-ref REF] [--repo owner/name]
+                      [--target-branch NAME]
+                      [--tracker-type T] [--tracker-ref REF]
+                      [--tracker-context-type T] [--tracker-context-ref REF]
+                      [--verify-after-deploy | --no-verify-after-deploy]
+                      [--require-provider P | --exclude-provider P |
+                       --clear-provider-constraint]
+                      [--resume-review] [--json]
+
+  Every flag maps one-to-one onto a field MCP `ticket_update` and
+  `PATCH /api/issues/:id` accept (P-08). **An empty string clears a field**:
+  `--tracker-ref ""`, `--description ""`, `--notes ""`. A bare `--description ""`
+  is a valid update on its own.
+
+  `--tracker-ref REF` links the ticket to an upstream tracker issue by hand —
+  the recovery step the server names when its upstream create fails
+  (`arb ticket update <id> --tracker-ref REF`). `--tracker-type` says which
+  tracker (`github`, `jira`, `none`, …); `--tracker-context-type` /
+  `--tracker-context-ref` set the read-only parent-ticket context a child
+  carries (#1973). `--target-branch` / `--pr-ref` set the PR's base branch and
+  an already-open PR's reference. `--type` is one of
+  `task | research | bug | feature | epic | chore | decision`.
+  `--auto-close` / `--no-auto-close` set whether the ticket closes itself once
+  all its `parent_of` children are closed.
+
+  Intentionally **not** exposed here (internal engagement state, written by
+  ReviewPatrol / PRPatrol / the transition actions, never by a person):
+  `review_only`, `last_reviewed_sha`, `last_seen_comment_id`, `review_automation`,
+  `last_reviewed_at`, `posted_findings`, `settled_threads`, `review_count`,
+  `review_cap_escalated`, `last_verdict`, `last_verdict_sha`,
+  `pr_opened_notified_ref`, `pr_opened_transitioned_ref`, `circuit_breaker_*`
+  (use `--resume-review`) and `skills`. `state`, `rank`, `close_reason` and
+  `source_pr` move only through their own verbs.
 
   `--assignee` is deprecated (bd-1ozks5): Arbiter is a local single-user app
   and no longer tracks an assignee locally, so the flag is accepted and
@@ -58,7 +92,8 @@ defmodule ArbiterCli.Cmd.Update do
   flag is refused with that pointer rather than silently dropped.
 
   `--acceptance` sets the acceptance criteria field, which guides the worker
-  in implementing and testing the change.
+  in implementing and testing the change. `--acceptance-file PATH` reads it from
+  a file (`-` for stdin) instead; pass one or the other.
 
   `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
   a worker produces for tracker-backed work (QA Testing Notes / Deployment
@@ -96,8 +131,10 @@ defmodule ArbiterCli.Cmd.Update do
   fields are patched first, then the breaker is resumed.
 
   `--append-notes` appends the given string to the existing `notes` field
-  (separated by two newlines). This requires fetching the issue first so we
-  don't lose existing notes.
+  (separated by a blank line). The append happens **on the server**, in one
+  statement against the row as it is when written (P-08, D-T-19), so it never
+  loses a worker's concurrent `ticket_update_progress` notes write. It cannot be
+  combined with `--notes`, which replaces the field.
 
   ## Why one verb
 
@@ -112,7 +149,7 @@ defmodule ArbiterCli.Cmd.Update do
       Phoenix not coming back green after the restart.
   """
 
-  alias ArbiterCli.ArgParser
+  alias ArbiterCli.{AcceptanceFlags, ArgParser}
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
   alias ArbiterCli.ProviderConstraintFlags
@@ -130,7 +167,6 @@ defmodule ArbiterCli.Cmd.Update do
     difficulty: :string,
     append_notes: :string,
     notes: :string,
-    acceptance: :string,
     qa_notes: :string,
     deployment_notes: :string,
     pr_body: :string,
@@ -140,11 +176,21 @@ defmodule ArbiterCli.Cmd.Update do
     repo: :string,
     resume_review: :boolean,
     verify_after_deploy: :boolean,
+    # P-08 (D-T-11): the fields MCP `ticket_update` / REST PATCH already accept.
+    tracker_ref: :string,
+    tracker_type: :string,
+    tracker_context_type: :string,
+    tracker_context_ref: :string,
+    target_branch: :string,
+    type: :string,
+    pr_ref: :string,
+    auto_close: :boolean,
     json: :boolean
   ]
 
   # bd-13pqcp: `--require-provider` / `--exclude-provider` / `--clear-provider-constraint`.
-  @all_edit_switches @edit_switches ++ ProviderConstraintFlags.switches()
+  @all_edit_switches @edit_switches ++
+                       AcceptanceFlags.switches() ++ ProviderConstraintFlags.switches()
 
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -313,13 +359,7 @@ defmodule ArbiterCli.Cmd.Update do
         _ -> Output.die("update takes exactly one positional argument: the ticket id")
       end
 
-    existing =
-      if opts[:append_notes] do
-        case Client.get("/api/issues/" <> id) do
-          {:ok, body} -> body
-          {:error, err} -> Output.die(err)
-        end
-      end
+    acceptance = AcceptanceFlags.resolve!(opts)
 
     warn_deprecated_assignee(opts[:assignee], mode)
 
@@ -328,14 +368,23 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("priority", opts[:priority])
       |> put_if("difficulty", opts[:difficulty])
       |> put_if("notes", opts[:notes])
-      |> put_if("acceptance", opts[:acceptance])
+      |> put_if("acceptance", acceptance)
       |> put_if("qa_notes", opts[:qa_notes])
       |> put_if("deployment_notes", opts[:deployment_notes])
       |> put_if("pr_body", opts[:pr_body])
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])
       |> put_if("repo", opts[:repo])
-      |> maybe_append_notes(opts[:append_notes], existing)
+      |> put_if("tracker_ref", opts[:tracker_ref])
+      |> put_if("tracker_type", opts[:tracker_type])
+      |> put_if("tracker_context_type", opts[:tracker_context_type])
+      |> put_if("tracker_context_ref", opts[:tracker_context_ref])
+      |> put_if("target_branch", opts[:target_branch])
+      |> put_if("issue_type", opts[:type])
+      |> put_if("pr_ref", opts[:pr_ref])
+      # P-08 (D-T-19): the server appends atomically — no GET, no client concat.
+      |> put_if("append_notes", opts[:append_notes])
+      |> put_bool_if("auto_close", opts[:auto_close])
       |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
       |> Map.merge(ProviderConstraintFlags.payload(opts))
 
@@ -383,21 +432,9 @@ defmodule ArbiterCli.Cmd.Update do
   defp put_bool_if(map, _key, nil), do: map
   defp put_bool_if(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
 
+  # P-08 (D-T-18): `""` is a value, not "absent" — the server clears the field.
   defp put_if(map, _key, nil), do: map
-  defp put_if(map, _key, ""), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
-
-  defp maybe_append_notes(payload, nil, _existing), do: payload
-
-  defp maybe_append_notes(payload, addition, existing) do
-    combined =
-      case existing["notes"] do
-        n when n in [nil, ""] -> addition
-        prev -> prev <> "\n\n" <> addition
-      end
-
-    Map.put(payload, "notes", combined)
-  end
 
   # bd-1ozks5: the local assignee field is gone — accept and ignore
   # `--assignee` for one release rather than breaking an existing script.

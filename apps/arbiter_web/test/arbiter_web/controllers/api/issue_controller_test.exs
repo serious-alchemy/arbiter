@@ -1320,6 +1320,43 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
   end
 
   # bd-9so315 — post-merge verification over REST (the `arb` CLI's transport).
+  describe "append_notes over REST (P-08, D-T-19)" do
+    test "PATCH appends to notes server-side", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id, notes: "first"})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{append_notes: "second"})
+      assert json_response(conn1, 200)["notes"] == "first\n\nsecond"
+    end
+
+    test "an append never clobbers a write that landed after the caller's read", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id})
+      stale = Ash.get!(Issue, issue.id)
+
+      # A worker's progress write lands between the caller's GET and its PATCH.
+      {:ok, _} = Ash.update(stale, %{notes: "from-worker"}, action: :update)
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{append_notes: "from-cli"})
+      assert json_response(conn1, 200)["notes"] == "from-worker\n\nfrom-cli"
+    end
+
+    test "append_notes together with notes is a 422", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{notes: "a", append_notes: "b"})
+      assert json_response(conn1, 422)
+    end
+
+    test "an empty string clears a text field", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id, tracker_ref: "X-1"})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{tracker_ref: ""})
+      assert json_response(conn1, 200)["tracker_ref"] == nil
+    end
+  end
+
   describe "verify_after_deploy over REST" do
     test "create + patch set the flag and it is rendered", %{conn: conn, ws: ws} do
       conn1 =

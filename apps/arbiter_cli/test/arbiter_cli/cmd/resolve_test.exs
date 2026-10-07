@@ -81,6 +81,21 @@ defmodule ArbiterCli.Cmd.ResolveTest do
     end
   end
 
+  test "--fix-round-attempt is sent as fix_round_attempt (D-T-26)" do
+    stub_resolve()
+
+    {_out, _err, 0} =
+      capture(fn ->
+        Resolve.run(["bd-001", "--reject", "why", "--fix-round-attempt", "2"])
+      end)
+
+    assert_received {:request, "POST", _, body}
+    assert body["fix_round_attempt"] == 2
+
+    {out, _err, 0} = capture(fn -> Resolve.run(["--help"]) end)
+    assert out =~ "--fix-round-attempt"
+  end
+
   test "--json prints the recorded resolution" do
     stub_resolve()
 

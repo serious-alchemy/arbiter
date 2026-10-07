@@ -161,7 +161,7 @@ defmodule ArbiterWeb.TaskNewLive do
      |> put_flash(
        :error,
        "Created #{task.id} locally, but the tracker mirror failed: " <>
-         "#{upstream_error_text(err)}. Re-link with `arb update #{task.id} --tracker-ref REF`."
+         "#{upstream_error_text(err)}. Re-link with `arb ticket update #{task.id} --tracker-ref REF`."
      )
      |> push_navigate(to: ~p"/tasks/#{task.id}")}
   end
