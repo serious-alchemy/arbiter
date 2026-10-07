@@ -41,7 +41,10 @@ defmodule ArbiterCli.ReleaseRepoTest do
 
   test "a server that does not report a repo falls back to the build-time repo" do
     Process.put(:bd2_build_release_repo, "build/repo")
-    stub_routes([{{"get", "/api/version"}, {%{"version" => "1.2.3", "release_repo" => nil}, 200}}])
+
+    stub_routes([
+      {{"get", "/api/version"}, {%{"version" => "1.2.3", "release_repo" => nil}, 200}}
+    ])
 
     assert ReleaseRepo.resolve() == {:ok, "build/repo", :build}
   end

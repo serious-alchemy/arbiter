@@ -255,7 +255,8 @@ defmodule ArbiterCli.Cmd.ServerTest do
 
     test "an unset ARB_RELEASE_REPO deploys from the repo the server reports, naming the source" do
       stub_routes([
-        {{"get", "/api/version"}, {%{"version" => "1.0.0", "release_repo" => "acme/arbiter"}, 200}},
+        {{"get", "/api/version"},
+         {%{"version" => "1.0.0", "release_repo" => "acme/arbiter"}, 200}},
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
