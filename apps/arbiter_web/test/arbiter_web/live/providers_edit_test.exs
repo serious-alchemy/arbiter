@@ -92,6 +92,22 @@ defmodule ArbiterWeb.ProvidersEditTest do
     end
   end
 
+  describe "the registry (bd-1kr3qf, AC 1)" do
+    test "the form has an input for every editable quota key", %{conn: conn} do
+      account = account!(:claude, "ed-registry")
+      {:ok, view, _html} = live_providers(conn)
+      open_edit(view, account)
+
+      for key <- Arbiter.Accounts.Fields.quota_keys() do
+        assert has_element?(
+                 view,
+                 "#{edit_form(account)} [name='edit[#{key}]']"
+               ),
+               "no form control for quota key #{key}"
+      end
+    end
+  end
+
   describe "saving" do
     test "writes every field and survives a reload", %{conn: conn} do
       account = account!(:claude, "ed-save", %{max_concurrent: 2})
