@@ -108,6 +108,13 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
     assert json_response(conn, 201)
     [rest] = spawns(ctx.bin, 1)
 
+    # The agent has done some work. Failing the worker below wakes its Driver,
+    # which asynchronously removes a *clean* worktree; the MCP resume would then
+    # race that removal and see :invalid_worktree. A worktree with uncommitted
+    # work is kept (like a real parked run's), so the race can't happen.
+    [worktree] = Path.wildcard(Path.join([Path.dirname(ctx.bin), "worktrees", "*"]))
+    File.write!(Path.join(worktree, "wip.txt"), "work in progress\n")
+
     :ok = Worker.fail(Worker.whereis(ctx.task.id), :token_exhausted)
 
     assert {:ok, %{worker: %{task_id: task_id}}} =
