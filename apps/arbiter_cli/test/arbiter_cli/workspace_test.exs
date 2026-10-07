@@ -33,6 +33,22 @@ defmodule ArbiterCli.WorkspaceTest do
       assert {nil, ["list", "--workspace-id", "ws-1"]} =
                Workspace.take_flag(["list", "--workspace-id", "ws-1"])
     end
+
+    test "extract_flag/1 returns the flag used, value, and remaining args" do
+      assert {"-w", "acme", ["list"]} = Workspace.extract_flag(["list", "-w", "acme"])
+
+      assert {"--workspace", "acme", ["list"]} =
+               Workspace.extract_flag(["list", "--workspace", "acme"])
+
+      assert {"-w=acme", "acme", ["list"]} = Workspace.extract_flag(["list", "-w=acme"])
+
+      assert {"--workspace=acme", "acme", ["list"]} =
+               Workspace.extract_flag(["list", "--workspace=acme"])
+
+      assert {nil, nil, ["list"]} = Workspace.extract_flag(["list"])
+      assert {"-w", nil, ["list"]} = Workspace.extract_flag(["list", "-w"])
+      assert {"--workspace", nil, ["list"]} = Workspace.extract_flag(["list", "--workspace"])
+    end
   end
 
   describe "resolve/0" do
@@ -80,6 +96,7 @@ defmodule ArbiterCli.WorkspaceTest do
       assert {:error, msg} = Workspace.resolve()
       refute msg =~ "ARB_WORKSPACE"
       assert msg =~ "no workspaces found"
+      assert msg =~ "arb workspace create"
     end
 
     test "errors when ambiguous: multiple workspaces, none named \"default\"" do
@@ -107,6 +124,24 @@ defmodule ArbiterCli.WorkspaceTest do
 
       assert {:error, msg} = Workspace.resolve()
       assert msg =~ "nonexistent"
+      assert msg =~ "arb workspace create"
+    end
+
+    test "resolve/1 accepts explicit target by id or name and ignores ARB_WORKSPACE" do
+      System.put_env("ARB_WORKSPACE", "other")
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-1", "name" => "first", "prefix" => "f1"},
+              %{"id" => "ws-2", "name" => "second", "prefix" => "s2"}
+            ]
+          }, 200}}
+      ])
+
+      assert {:ok, %{"name" => "second"}} = Workspace.resolve("second")
+      assert {:ok, %{"name" => "first"}} = Workspace.resolve("ws-1")
     end
   end
 

@@ -32,30 +32,45 @@ defmodule ArbiterCli.Workspace do
   `System.put_env("ARB_WORKSPACE", name)`.
   """
   @spec take_flag([String.t()]) :: {String.t() | nil, [String.t()]}
-  def take_flag(argv) when is_list(argv), do: take_flag(argv, nil, [])
+  def take_flag(argv) when is_list(argv) do
+    case extract_flag(argv) do
+      {_flag, value, rest} -> {value, rest}
+    end
+  end
 
-  defp take_flag([], name, kept), do: {name, Enum.reverse(kept)}
+  @doc """
+  Like `take_flag/1`, but also returns the exact flag switch that was supplied
+  (`"-w"`, `"--workspace"`, `"-w=..."`, `"--workspace=..."`, or `nil`).
+  """
+  @spec extract_flag([String.t()]) :: {String.t() | nil, String.t() | nil, [String.t()]}
+  def extract_flag(argv) when is_list(argv), do: do_extract_flag(argv, nil, nil, [])
 
-  defp take_flag([flag, value | rest], _name, kept) when flag in ["--workspace", "-w"],
-    do: take_flag(rest, value, kept)
+  defp do_extract_flag([], flag, name, kept), do: {flag, name, Enum.reverse(kept)}
 
-  defp take_flag([flag], name, kept) when flag in ["--workspace", "-w"],
-    # Dangling flag with no value — drop it; resolution falls back to the env.
-    do: take_flag([], name, kept)
+  defp do_extract_flag([flag, value | rest], _flag, _name, kept)
+       when flag in ["--workspace", "-w"],
+       do: do_extract_flag(rest, flag, value, kept)
 
-  defp take_flag(["--workspace=" <> value | rest], _name, kept),
-    do: take_flag(rest, value, kept)
+  defp do_extract_flag([flag], _flag, name, kept) when flag in ["--workspace", "-w"],
+    # Dangling flag with no value — drop it; keep flag for reporting.
+    do: do_extract_flag([], flag, name, kept)
 
-  defp take_flag(["-w=" <> value | rest], _name, kept),
-    do: take_flag(rest, value, kept)
+  defp do_extract_flag(["--workspace=" <> value = full | rest], _flag, _name, kept),
+    do: do_extract_flag(rest, full, value, kept)
 
-  defp take_flag([arg | rest], name, kept), do: take_flag(rest, name, [arg | kept])
+  defp do_extract_flag(["-w=" <> value = full | rest], _flag, _name, kept),
+    do: do_extract_flag(rest, full, value, kept)
 
-  @spec resolve() :: {:ok, map()} | {:error, String.t()}
-  def resolve do
+  defp do_extract_flag([arg | rest], flag, name, kept),
+    do: do_extract_flag(rest, flag, name, [arg | kept])
+
+  @spec resolve(String.t() | nil) :: {:ok, map()} | {:error, String.t()}
+  def resolve(target \\ nil) do
+    target = target || System.get_env("ARB_WORKSPACE")
+
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} ->
-        resolve_from_list(list, System.get_env("ARB_WORKSPACE"))
+        resolve_from_list(list, target)
 
       {:error, %Client.Error{} = err} ->
         {:error, "could not load workspaces: #{err.message}"}
@@ -70,7 +85,7 @@ defmodule ArbiterCli.Workspace do
       nil ->
         {:error,
          "no workspace named #{inspect(target)}. " <>
-           "Set ARB_WORKSPACE or create one with `arb` (workspace creation is not yet a arb command — use the API)."}
+           "Set ARB_WORKSPACE or create one with `arb workspace create`."}
 
       ws ->
         {:ok, ws}
@@ -82,9 +97,7 @@ defmodule ArbiterCli.Workspace do
   # no ambiguity to warn about. Only error when the choice is genuinely
   # ambiguous (multiple workspaces, none named "default").
   defp resolve_from_list([], nil) do
-    {:error,
-     "no workspaces found. Create one with `arb` (workspace creation is not yet a arb " <>
-       "command — use the API)."}
+    {:error, "no workspaces found. Create one with `arb workspace create`."}
   end
 
   defp resolve_from_list(list, nil) do
@@ -106,9 +119,9 @@ defmodule ArbiterCli.Workspace do
   end
 
   @doc "Convenience: resolve and return just the id, or halt with a friendly error."
-  @spec id_or_halt() :: String.t()
-  def id_or_halt do
-    case resolve() do
+  @spec id_or_halt(String.t() | nil) :: String.t()
+  def id_or_halt(target \\ nil) do
+    case resolve(target) do
       {:ok, ws} -> ws["id"]
       {:error, msg} -> ArbiterCli.Output.die(msg)
     end
