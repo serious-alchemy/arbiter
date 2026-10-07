@@ -22,8 +22,16 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Status do
   # A "running" record this old with no live process is an interrupted deploy.
   @stale_after_s 15 * 60
 
+  # `:bd2_deploy_status_path` is the test seam: `ArbiterCli.CliCase` points it at
+  # nothing so no test reads the host's real record; tests that exercise the file
+  # itself delete it and go through `ARB_DATA_HOME`.
   @spec path() :: String.t()
-  def path, do: Path.join(ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles.data_home(), @file_name)
+  def path do
+    case Process.get(:bd2_deploy_status_path) do
+      path when is_binary(path) -> path
+      _ -> Path.join(ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles.data_home(), @file_name)
+    end
+  end
 
   @doc "The last recorded deploy, or nil when there is none (or the file is unreadable)."
   @spec read() :: map() | nil

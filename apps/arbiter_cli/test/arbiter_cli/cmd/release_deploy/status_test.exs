@@ -8,6 +8,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.StatusTest do
     home = Path.join(System.tmp_dir!(), "arb-st-#{System.unique_integer([:positive])}")
     File.mkdir_p!(home)
     System.put_env("ARB_DATA_HOME", home)
+    Process.delete(:bd2_deploy_status_path)
     System.delete_env("GITHUB_TOKEN")
 
     on_exit(fn ->

@@ -21,6 +21,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     File.mkdir_p!(home)
 
     System.put_env("ARB_DATA_HOME", home)
+    Process.delete(:bd2_deploy_status_path)
     System.put_env("ARB_RELEASE_REPO", @repo)
     # A green deploy self-updates the CLI; never let a test write the real one.
     System.put_env("ARB_INSTALL_BIN", Path.join(home, "bin/arb"))
