@@ -478,7 +478,7 @@ defmodule ArbiterCli.Output do
   @spec die(String.t() | Client.Error.t()) :: no_return()
   def die(msg) when is_binary(msg) do
     IO.puts(:stderr, "arb: error: " <> msg)
-    do_halt(1)
+    do_halt(1, msg)
   end
 
   def die(%Client.Error{} = err) do
@@ -496,7 +496,7 @@ defmodule ArbiterCli.Output do
         :ok
     end
 
-    do_halt(exit_code_for(err))
+    do_halt(exit_code_for(err), err.message)
   end
 
   @doc """
@@ -508,15 +508,46 @@ defmodule ArbiterCli.Output do
   @spec die_as(Client.Error.t(), String.t()) :: no_return()
   def die_as(%Client.Error{} = err, msg) when is_binary(msg) do
     IO.puts(:stderr, "arb: error: " <> msg)
-    do_halt(exit_code_for(err))
+    do_halt(exit_code_for(err), msg)
   end
 
   @spec die(String.t(), String.t()) :: no_return()
   def die(msg, hint) do
     IO.puts(:stderr, "arb: error: " <> msg)
     IO.puts(:stderr, "       hint: " <> hint)
-    do_halt(1)
+    do_halt(1, msg)
   end
+
+  @doc """
+  Register a one-shot callback run with the exit code and the error message
+  (nil for a bare `halt/1`) just before this process halts (`die/1,2`, `halt/1`) — a way for a long, stateful command to record
+  that it stopped (`arb server deploy` writes its failure to the deploy status
+  file). It runs once, for non-zero codes only, and a crash in it never blocks
+  the halt.
+  """
+  @spec on_halt((non_neg_integer(), String.t() | nil -> any())) :: :ok
+  def on_halt(fun) when is_function(fun, 2) do
+    Process.put(:arb_on_halt, fun)
+    :ok
+  end
+
+  defp run_halt_hook(code, message) when code != 0 do
+    case Process.delete(:arb_on_halt) do
+      fun when is_function(fun, 2) ->
+        try do
+          fun.(code, message)
+        rescue
+          _ -> :ok
+        catch
+          _, _ -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp run_halt_hook(_code, _message), do: :ok
 
   @doc """
   Halt the VM with a status code. Tests override this via
@@ -531,7 +562,12 @@ defmodule ArbiterCli.Output do
   # Terminates the VM via `Output.halt/1` on every clause — spelled out so
   # dialyzer does not report it as an accidental "no local return".
   @spec do_halt(non_neg_integer()) :: no_return()
-  defp do_halt(code) do
+  defp do_halt(code), do: do_halt(code, nil)
+
+  @spec do_halt(non_neg_integer(), String.t() | nil) :: no_return()
+  defp do_halt(code, message) do
+    run_halt_hook(code, message)
+
     case Process.get(:bd2_halt_strategy, :system_halt) do
       :raise -> raise ArbiterCli.Output.Halt, code: code
       :system_halt -> System.halt(code)

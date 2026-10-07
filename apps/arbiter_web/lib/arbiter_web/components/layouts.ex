@@ -100,6 +100,11 @@ defmodule ArbiterWeb.Layouts do
     # fetch runs in its own task) and reports "disabled" when it isn't running.
     assigns = assign(assigns, :update, Arbiter.Release.UpdateCheck.state())
 
+    # The last `arb server deploy`'s own record (a tiny file the CLI keeps, so it
+    # survives the restart the deploy causes) — progress while it runs, the
+    # outcome once the server is back.
+    assigns = assign(assigns, :deploy, Arbiter.Release.DeployStatus.read())
+
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
@@ -252,7 +257,7 @@ defmodule ArbiterWeb.Layouts do
           page while talking to a session is the whole reason the Side preset
           exists. --%>
     <main class="pl-[var(--nav-rail-page-inset)] pr-[var(--session-dock-page-inset)]">
-      <.update_notice update={@update} />
+      <.update_notice update={@update} deploy={@deploy} />
       {render_slot(@inner_block)}
     </main>
 
@@ -493,12 +498,25 @@ defmodule ArbiterWeb.Layouts do
 
   @doc """
   The "update available" notice from `Arbiter.Release.UpdateCheck.state/0`:
-  the release link plus the deploy command. Renders nothing unless a newer
-  release was found.
+  the release link, the deploy command and — for the operator's own dashboard
+  session, which is the only thing that renders this layout — an
+  "Update to vX.Y.Z" button; plus the last deploy's progress or outcome
+  (`Arbiter.Release.DeployStatus`).
+
+  The button is a plain form POST to `/release/deploy` (a dashboard login, CSRF
+  protected) rather than a LiveView event, so it works on the dead `/about` page
+  and on every LiveView alike. Its `data-confirm` names the version and whether
+  migrations are pending before anything starts.
   """
   attr :update, :map, required: true
+  attr :deploy, :map, default: nil
 
   def update_notice(assigns) do
+    assigns =
+      assigns
+      |> assign(:deploy_state, deploy_state(assigns.deploy))
+      |> assign(:deploy_visible?, deploy_visible?(assigns.deploy))
+
     ~H"""
     <div
       :if={@update.update_available?}
@@ -507,7 +525,7 @@ defmodule ArbiterWeb.Layouts do
       class="alert alert-info mx-4 mt-4 text-sm"
     >
       <.icon name="hero-arrow-up-circle" class="size-5 shrink-0" />
-      <div>
+      <div class="min-w-0 flex-1">
         <p class="font-semibold">Update available: {@update.latest}</p>
         <p>
           <a
@@ -523,9 +541,149 @@ defmodule ArbiterWeb.Layouts do
           · deploy with <code id="update-deploy-command">arb server deploy</code>
         </p>
       </div>
+      <.form
+        :if={@deploy_state != "running"}
+        for={%{}}
+        as={:update}
+        id="update-deploy-form"
+        action={~p"/release/deploy"}
+        method="post"
+        class="shrink-0"
+      >
+        <button
+          type="submit"
+          id="update-deploy-button"
+          data-confirm={update_confirm_text(@update)}
+          class="inline-flex items-center gap-1.5 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] px-3 py-1.5 text-sm font-medium text-[var(--text-title)] cursor-pointer transition-colors duration-150 hover:bg-[var(--arb-raised-hover)]"
+        >
+          <.icon name="hero-arrow-down-tray" class="size-4" /> Update to {@update.latest}
+        </button>
+      </.form>
+    </div>
+    <div
+      :if={@deploy_visible?}
+      id="deploy-status"
+      role="status"
+      data-state={@deploy_state}
+      class={[
+        "alert mx-4 mt-4 text-sm",
+        deploy_alert_class(@deploy_state)
+      ]}
+    >
+      <.icon name={deploy_icon(@deploy_state)} class="size-5 shrink-0" />
+      <div class="min-w-0">
+        <p class="font-semibold">{deploy_headline(@deploy, @deploy_state)}</p>
+        <p class="break-words">{deploy_detail(@deploy, @deploy_state)}</p>
+      </div>
     </div>
     """
   end
+
+  # "running" is only believed while the deploy's process is alive: a record
+  # whose process died reads as an interrupted (failed) deploy.
+  defp deploy_state(nil), do: nil
+
+  defp deploy_state(%{"state" => "running"} = deploy) do
+    if Arbiter.Release.DeployStatus.interrupted?(deploy), do: "failed", else: "running"
+  end
+
+  defp deploy_state(%{"state" => state}) when is_binary(state), do: state
+  defp deploy_state(_), do: nil
+
+  # A successful deploy is news for a day; anything that needs the operator
+  # (failed, rolled back, refused) and anything in flight stays until the next
+  # deploy replaces the record.
+  @success_visible_s 24 * 3600
+
+  defp deploy_visible?(deploy) do
+    case deploy_state(deploy) do
+      nil -> false
+      "succeeded" -> within?(deploy["finished_at"], @success_visible_s)
+      _ -> true
+    end
+  end
+
+  defp within?(iso, seconds) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, at, _} -> DateTime.diff(DateTime.utc_now(), at) <= seconds
+      _ -> false
+    end
+  end
+
+  defp within?(_, _), do: false
+
+  defp deploy_alert_class("succeeded"), do: "alert-success"
+  defp deploy_alert_class("running"), do: "alert-info"
+  defp deploy_alert_class(_), do: "alert-warning"
+
+  defp deploy_icon("succeeded"), do: "hero-check-circle"
+  defp deploy_icon("running"), do: "hero-arrow-path"
+  defp deploy_icon(_), do: "hero-exclamation-triangle"
+
+  defp deploy_headline(deploy, "running"), do: "Updating to #{deploy["tag"]}…"
+  defp deploy_headline(deploy, "succeeded"), do: "Updated to #{deploy["tag"]}"
+
+  defp deploy_headline(deploy, "rolled_back"),
+    do: "Update to #{deploy["tag"]} failed and was rolled back to #{deploy["rolled_back_to"]}"
+
+  defp deploy_headline(deploy, "refused"),
+    do: "Update to #{deploy["tag"]} failed; rollback was declined"
+
+  defp deploy_headline(deploy, _), do: "Update to #{deploy["tag"]} failed"
+
+  defp deploy_detail(deploy, "running") do
+    "Phase: #{deploy["phase"] || "starting"}. The server restarts when the new release swaps in; " <>
+      "this page shows the outcome once it is back."
+  end
+
+  defp deploy_detail(deploy, "succeeded") do
+    "Finished #{deploy["finished_at"]}." <> backup_note(deploy)
+  end
+
+  defp deploy_detail(deploy, "rolled_back") do
+    restored =
+      if deploy["restored_database"] == true,
+        do: " The pre-update database was restored from the backup.",
+        else: " The database was not touched."
+
+    "The new release did not come back healthy." <> restored <> backup_note(deploy)
+  end
+
+  defp deploy_detail(deploy, "refused") do
+    "The release added migrations and could not be rolled back automatically; " <>
+      "see `arb server deploy` output." <> backup_note(deploy)
+  end
+
+  defp deploy_detail(deploy, state) do
+    base = deploy["message"] || "The deploy stopped before finishing (state: #{state})."
+    base <> backup_note(deploy)
+  end
+
+  defp backup_note(%{"backup_path" => path}) when is_binary(path), do: " Backup: #{path}"
+  defp backup_note(_), do: ""
+
+  # What the browser asks before it posts: the version, whether migrations are
+  # pending (the update check reads the release's migration manifest against this
+  # database), and that the server restarts.
+  defp update_confirm_text(update) do
+    "Update Arbiter to #{update.latest}?\n\n" <>
+      migrations_sentence(update[:migrations_pending]) <>
+      "\n\nA database backup is taken first, then the server restarts; if the new release " <>
+      "does not come back healthy it is rolled back. The update will not start while workers " <>
+      "are actively working (a restart would kill their in-flight work) — it stops and says so here."
+  end
+
+  defp migrations_sentence([]), do: "This update has no pending migrations."
+
+  defp migrations_sentence(names) when is_list(names) do
+    "This update has #{length(names)} pending migration(s): #{Enum.join(names, ", ")}. " <>
+      "If it fails after migrating, the database backup is restored."
+  end
+
+  defp migrations_sentence(_),
+    do:
+      "Whether it has pending migrations could not be determined " <>
+        "(the release publishes no migration list, or this database could not be read)."
 
   attr :quotas, :list, required: true
   attr :on_exhaustion, :any, default: nil

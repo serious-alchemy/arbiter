@@ -26,9 +26,10 @@ defmodule ArbiterWeb.ApiPolicy do
       drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
       coordinator *session* (an LLM) is refused, so it cannot enrol machines
       that will receive provider tokens. Used by every `/api/nodes` route: the list, minting, edits, drain, revoke, remove, upgrade;
-      and by `POST /api/dashboard/login_tokens` (P-28: a dashboard login is an operator
+      by `POST /api/dashboard/login_tokens` (P-28: a dashboard login is an operator
       grant, so an LLM coordinator session must not mint one;
-      `docs/design/tier-proof-boundaries.md`).
+      `docs/design/tier-proof-boundaries.md`);
+      and by `/api/release/deploy`, which restarts the server onto a new release.
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
     * `:dispatch` — `:coordinator` plus `can_dispatch` (the recursion
@@ -162,6 +163,10 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/nodes/:ref/revoke"} => :operator,
     {:post, "/api/nodes/:ref/upgrade"} => :operator,
     {:delete, "/api/nodes/:ref"} => :operator,
+
+    # ---- operator self-update (bd-6umf7z): launches `arb server deploy` -------
+    {:post, "/api/release/deploy"} => :operator,
+    {:get, "/api/release/deploy"} => :operator,
     {:post, "/api/providers/pause"} => :coordinator,
     {:post, "/api/providers/resume"} => :coordinator,
     {:get, "/api/accounts"} => :coordinator,

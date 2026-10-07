@@ -5,23 +5,25 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Github do
   downloading + verifying them.
   """
 
-  alias ArbiterCli.Output
+  alias ArbiterCli.{Output, ReleaseRepo}
 
   @default_github_api "https://api.github.com"
 
-  # `owner/repo` to pull releases from. Required — there's no safe default for
-  # "where does this server's code come from".
-  @spec release_repo() :: String.t()
+  # `owner/repo` to pull releases from, and where that came from. Resolved by
+  # `ArbiterCli.ReleaseRepo` (env, then the running server, then the build); the
+  # source is announced on stderr so a deploy never silently picks a repo.
+  @spec release_repo() :: {String.t(), ReleaseRepo.source()}
   def release_repo do
-    case System.get_env("ARB_RELEASE_REPO") do
-      slug when is_binary(slug) and slug != "" ->
-        slug
+    case ReleaseRepo.resolve() do
+      {:ok, repo, source} ->
+        IO.puts(:stderr, "Release source: #{repo} (#{ReleaseRepo.describe(source)}).")
+        {repo, source}
 
-      _ ->
+      :error ->
         Output.die(
-          "ARB_RELEASE_REPO is not set",
-          "Set it to the GitHub `owner/repo` that publishes Arbiter releases, " <>
-            "e.g. ARB_RELEASE_REPO=acme/arbiter."
+          "could not determine which GitHub repo publishes Arbiter releases",
+          "Set ARB_RELEASE_REPO=owner/repo, or deploy a release-built arb (it carries its own " <>
+            "repo), or pass --git-pull to deploy a source checkout the legacy way."
         )
     end
   end

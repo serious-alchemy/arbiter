@@ -187,4 +187,93 @@ defmodule Arbiter.Release.UpdateCheckTest do
       assert %{enabled: false, update_available?: false} = UpdateCheck.state(name)
     end
   end
+
+  describe "migrations_pending" do
+    defp start_check_with_manifest(name, manifest_body, applied) do
+      Req.Test.stub(name, fn conn ->
+        case conn.request_path do
+          "/repos/acme/arbiter/releases/latest" ->
+            Req.Test.json(conn, %{
+              "tag_name" => "v0.3.0",
+              "html_url" => "u",
+              "assets" => [
+                %{
+                  "name" => "arbiter-v0.3.0-migrations.txt",
+                  "browser_download_url" => "https://dl.test/m.txt"
+                }
+              ]
+            })
+
+          "/m.txt" ->
+            Plug.Conn.send_resp(conn, 200, manifest_body)
+        end
+      end)
+
+      pid =
+        start_supervised!(
+          {UpdateCheck,
+           name: name,
+           enabled: true,
+           repo: "acme/arbiter",
+           running_version: "0.2.0",
+           initial_delay_ms: :infinity,
+           applied_migrations: applied,
+           req_options: [plug: {Req.Test, name}]}
+        )
+
+      Req.Test.allow(name, self(), pid)
+      name
+    end
+
+    test "names the manifest entries this database has not applied" do
+      name = :"uc_mig_#{System.unique_integer([:positive])}"
+
+      manifest = "20260101000000_a\n20260202000000_b\n20260303000000_c\n"
+
+      start_check_with_manifest(name, manifest, fn -> [20_260_101_000_000, 20_260_202_000_000] end)
+
+      state = UpdateCheck.check_now(name)
+
+      assert state.update_available?
+      assert state.migrations_pending == ["20260303000000_c"]
+    end
+
+    test "an empty pending list means the update does not migrate" do
+      name = :"uc_mig_#{System.unique_integer([:positive])}"
+      start_check_with_manifest(name, "20260101000000_a\n", fn -> [20_260_101_000_000] end)
+
+      assert UpdateCheck.check_now(name).migrations_pending == []
+    end
+
+    test "is unknown (nil) when the release has no manifest" do
+      name = :"uc_mig_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(name, &Req.Test.json(&1, %{"tag_name" => "v0.3.0", "html_url" => "u"}))
+
+      pid =
+        start_supervised!(
+          {UpdateCheck,
+           name: name,
+           enabled: true,
+           repo: "acme/arbiter",
+           running_version: "0.2.0",
+           initial_delay_ms: :infinity,
+           applied_migrations: fn -> [] end,
+           req_options: [plug: {Req.Test, name}]}
+        )
+
+      Req.Test.allow(name, self(), pid)
+
+      state = UpdateCheck.check_now(name)
+      assert state.update_available?
+      assert state.migrations_pending == nil
+    end
+
+    test "is unknown when the database cannot be read" do
+      name = :"uc_mig_#{System.unique_integer([:positive])}"
+      start_check_with_manifest(name, "20260101000000_a\n", fn -> nil end)
+
+      assert UpdateCheck.check_now(name).migrations_pending == nil
+    end
+  end
 end

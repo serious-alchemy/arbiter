@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.ReleaseDeploy do
   @moduledoc """
-  `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]`
-  — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
+  `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+  [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
@@ -21,15 +21,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   This is the production deploy path: the box that runs Arbiter no longer needs
   a source checkout or a Mix/Elixir toolchain — only the prebuilt, self-contained
-  OTP release. The legacy `git pull` deploy remains available behind
-  `arb server deploy --git-pull` until the cutover is complete (see
-  `ArbiterCli.Cmd.Update`).
+  OTP release. The legacy `git pull` deploy runs only on an explicit
+  `arb server deploy --git-pull` (see `ArbiterCli.Cmd.Update`); this command never
+  falls back to it. The dashboard's "Update to vX.Y.Z" button launches this same
+  command in its own systemd unit (`Arbiter.Release.SelfDeploy`); see
+  `docs/self-update.md`.
 
   ## What it does
 
     1. **Resolve the target release.** Query the GitHub Releases API for
        `latest` (or the tag named by `--version`). The `owner/repo` comes from
-       `ARB_RELEASE_REPO`; a `GITHUB_TOKEN`, if set, authenticates the request
+       `ArbiterCli.ReleaseRepo` — `ARB_RELEASE_REPO`, else the running server's
+       own release metadata, else the repo this arb was built from — and the
+       output names which; a `GITHUB_TOKEN`, if set, authenticates the request
        (required for private repos, and lifts the anonymous rate limit).
     2. **Download the asset + checksum.** Fetch `arbiter-<tag>-linux.tar.gz`
        and its `arbiter-<tag>-linux.tar.gz.sha256` sidecar.
@@ -37,7 +41,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
        published checksum. A mismatch aborts before anything touches disk state.
     4. **Unpack** to `<data-home>/releases/<tag>/` (the OTP release tree, so
        `<data-home>/releases/<tag>/bin/arbiter` is the runnable binary).
-    5. **Atomically swap** the `<data-home>/current` symlink to the new release
+    5. **Back up the database** (`ArbiterCli.Cmd.ReleaseDeploy.Backup`): an
+       online, integrity-checked snapshot into `<data-home>/snapshots/`, taken
+       before the swap; a failure aborts the deploy with nothing changed.
+       **Atomically swap** the `<data-home>/current` symlink to the new release
        (symlink-then-rename, so readers never observe a missing/partial link).
     6. **Restart + health-check.** Bounce the service (via systemd when the
        `arbiter.service` user unit is present) and poll `arb doctor` until
@@ -46,12 +53,22 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     7. **Auto-rollback on failure.** If the stack does not come back green
        within the timeout, re-point `current` at the prior release and restart,
        leaving the server on the last-known-good version. The command then exits
-       non-zero so the operator knows the new version was rejected. **Unless
-       this deploy crossed a migration** — see "Cross-migration rollback".
+       non-zero so the operator knows the new version was rejected. **When this
+       deploy crossed a migration** the backup is restored first (stop → restore
+       → swap → restart) — see "Cross-migration rollback".
        **Unless the server was already down before this deploy began** — see
        "Cold deploy" below.
     8. **Prune.** Retain the current release plus the 3 most-recent prior
-       releases under `<data-home>/releases/`; delete anything older.
+       releases under `<data-home>/releases/`, and the newest
+       `ARB_DEPLOY_BACKUP_RETAIN` (default 5) database snapshots; delete older.
+    9. **Install the matching CLI.** After a green deploy, update the arb
+       escript to the same tag (`ArbiterCli.Cmd.SelfUpdate.install_from_release/3`)
+       so doctor's `version` check agrees; a failure there is reported, never
+       fatal. Skipped by `--no-self-update` and for `--local`.
+
+  Throughout, the deploy records itself in `<data-home>/deploy-status.json`
+  (`ArbiterCli.Cmd.ReleaseDeploy.Status`) — what `arb doctor`'s "last deploy"
+  line and the dashboard banner read after the server restarts.
 
   ## Cold deploy (bd-5zvux5)
 
@@ -107,8 +124,18 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     * `--allow-cross-migration-rollback` overrides that, rolling back anyway
       with a loud warning that the prior release is now on a newer schema.
 
+  **Backup restore (bd-6umf7z).** With a pre-deploy backup in hand, a release
+  that added migrations *and booted* (its green-wait timed out) no longer needs
+  that refusal: the rollback stops the service, replaces the database with the
+  backup (the database the failed release left behind is moved aside, never
+  deleted), re-points `current` and restarts — beating
+  `--allow-cross-migration-rollback`, which would leave old code on the migrated
+  schema. A failed swap (`/api/version` still on the old version) never
+  restores: the old release is still serving and its writes would be lost. With
+  no backup (no database file existed) the refusal above applies unchanged.
+
   A deploy that adds no migrations keeps the automatic rollback exactly as it
-  was.
+  was, and never touches the database.
 
   ## Layout
 
@@ -127,7 +154,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   ## Configuration
 
-    * `ARB_RELEASE_REPO` — `owner/repo` to pull releases from (required).
+    * `ARB_RELEASE_REPO` — `owner/repo` to pull releases from (optional; see
+      step 1).
+    * `DATABASE_PATH` / `ARB_DEPLOY_BACKUP_RETAIN` — the database to back up,
+      and how many snapshots to keep.
     * `GITHUB_TOKEN` — optional; authenticates the Releases API request.
     * `ARB_DATA_HOME` — deploy root (default `~/.arbiter`).
     * `ARB_GITHUB_API` — Releases API base (default `https://api.github.com`).
@@ -144,8 +174,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
-  alias ArbiterCli.Cmd.ReleaseDeploy.{Formatter, Github, ReleaseFiles}
-  alias ArbiterCli.Output
+  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, ReleaseFiles, Status}
+  alias ArbiterCli.{Cmd.SelfUpdate, Output, ReleaseRepo}
 
   @default_timeout_s 60
 
@@ -155,7 +185,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     json: :boolean,
     force: :boolean,
     local: :string,
-    allow_cross_migration_rollback: :boolean
+    allow_cross_migration_rollback: :boolean,
+    no_self_update: :boolean
   ]
 
   @doc "Entry point for `arb server deploy` (release-based path)."
@@ -184,18 +215,26 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       )
     end
 
+    run = %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts}
+
+    # Until `begin_status/2` takes over, a halt (repo resolution, the active-worker
+    # guard, the release lookup) must still leave a record: a deploy launched from
+    # the dashboard has no terminal, and the UI reads this file for the outcome.
+    early_tag = opts[:version] || if(opts[:local], do: "local", else: "latest")
+    Output.on_halt(fn _code, message -> Status.fail_early(early_tag, message) end)
+
     case opts[:local] do
-      nil -> deploy_from_github(opts, mode, force, timeout_ms)
-      path -> deploy_from_local(path, mode, force, timeout_ms, opts)
+      nil -> deploy_from_github(run)
+      path -> deploy_from_local(path, run)
     end
   end
 
   # ---- source: published GitHub release ------------------------------------
 
-  defp deploy_from_github(opts, mode, force, timeout_ms) do
+  defp deploy_from_github(%{opts: opts, force: force} = run) do
     # Resolve the repo first so a misconfiguration fails fast, before we reach
     # for the (HTTP-backed) active-worker check.
-    repo = Github.release_repo()
+    {repo, repo_source} = Github.release_repo()
     Restart.guard_active_workers!(force)
 
     release = Github.fetch_release(repo, opts[:version])
@@ -215,7 +254,14 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       ReleaseFiles.retain_tarball!(target_dir, tarball, expected_sha)
     end
 
-    deploy(tag, populate, mode, force, timeout_ms, opts)
+    extras = %{
+      release_repo: repo,
+      release_repo_source: to_string(repo_source),
+      release_repo_source_text: ReleaseRepo.describe(repo_source)
+    }
+
+    self_update = if opts[:no_self_update], do: nil, else: {repo, release}
+    deploy(tag, populate, Map.merge(run, %{extras: extras, self_update: self_update}))
   end
 
   # ---- source: locally-built release (bd-bbgw7k) ----------------------------
@@ -225,7 +271,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # collide on the same release directory (and the idempotency short-circuit
   # below is effectively a no-op for this source — every local deploy is
   # treated as a new release).
-  defp deploy_from_local(path, mode, force, timeout_ms, opts) do
+  defp deploy_from_local(path, %{force: force} = run) do
     Restart.guard_active_workers!(force)
 
     unless File.exists?(path) do
@@ -263,7 +309,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       end
     end
 
-    deploy(tag, populate, mode, force, timeout_ms, opts)
+    # A local build has no published release, so there is no matching `arb` to
+    # install afterwards.
+    deploy(tag, populate, Map.merge(run, %{extras: %{}, self_update: nil}))
   end
 
   # ---- shared install/swap/rollback path ------------------------------------
@@ -272,7 +320,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # machinery has exactly one implementation regardless of where the release
   # tree came from. `populate.(target_dir)` is the only source-specific step:
   # it must leave a fully-formed release under `target_dir` (or raise/die).
-  defp deploy(tag, populate, mode, force, timeout_ms, opts) do
+  defp deploy(
+         tag,
+         populate,
+         %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts} = run
+       ) do
     releases_dir = ReleaseFiles.releases_dir()
     target_dir = Path.join(releases_dir, tag)
     current_link = ReleaseFiles.current_link()
@@ -282,6 +334,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     if not force and ReleaseFiles.current_target_basename(current_link) == tag do
       Formatter.emit_already_current(mode, tag)
     else
+      begin_status(tag, run)
+
       # Snapshot doctor state before touching anything, so a readiness-blocking
       # check that's already red (pre-existing condition) is distinguishable from
       # one caused by the release being deployed. Without this, a timed-out
@@ -295,6 +349,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         log(preflight_warning(pre_deploy_fails, tag))
       end
 
+      Status.phase("downloading")
       populate.(target_dir)
 
       # Refresh the PATH in arbiter.env from the deploying shell before
@@ -317,6 +372,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         notice -> log(notice)
       end
 
+      # The database safety net, taken as late as possible so a restore loses as
+      # little as possible, and before the swap so a failure here changes nothing.
+      backup = take_backup(target_dir, tag)
+
+      Status.phase("swapping")
       ReleaseFiles.atomic_symlink_swap!(current_link, target_dir)
       log("Swapped #{current_link} -> #{target_dir}")
 
@@ -331,8 +391,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         prior_target: prior_target,
         current_link: current_link,
         rollback_plan: rollback_plan,
-        timeout_ms: timeout_ms
+        timeout_ms: timeout_ms,
+        backup: backup,
+        extras: Map.put(run.extras, :backup, backup),
+        self_update: run.self_update
       }
+
+      Status.phase("restarting")
 
       case Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms) do
         {:ok, actions, was_running} ->
@@ -344,57 +409,139 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     end
   end
 
-  # Split out of `deploy/6` purely to keep that function's cyclomatic
+  # Record this deploy in the status file, and make sure a halt anywhere below
+  # (a failed download, a checksum mismatch, a failed backup) leaves a `failed`
+  # record rather than a `running` one that never ends.
+  defp begin_status(tag, run) do
+    Status.start(tag, %{
+      "source" => if(run.opts[:local], do: "local", else: "github"),
+      "release_repo" => run.extras[:release_repo]
+    })
+
+    Output.on_halt(fn _code, message ->
+      Status.finish("failed", %{message: message || "the deploy stopped before finishing"})
+    end)
+  end
+
+  # `nil` when there is no database to protect (a fresh host). A failed backup or
+  # integrity check aborts the deploy before the swap.
+  defp take_backup(target_dir, tag) do
+    Status.phase("backup")
+
+    case Backup.take(target_dir, tag) do
+      :skipped ->
+        log("No database at #{Backup.db_path()} — skipping the pre-deploy backup.")
+        nil
+
+      {:ok, info} ->
+        log("Backed up #{info.db} to #{info.path} (integrity_check ok).")
+        info
+
+      {:error, message} ->
+        Output.die(
+          message,
+          "Aborted before the swap — nothing was changed and the running release is untouched. " <>
+            "Fix the database or the backup location (#{Backup.snapshots_dir()}) and re-run."
+        )
+    end
+  end
+
+  # Split out of `deploy/3` purely to keep that function's cyclomatic
   # complexity under the Credo threshold — this is the "restart succeeded,
   # now decide whether the new release is actually healthy" half of the
   # deploy, and reads as one contiguous step, so it stays adjacent rather
   # than being folded into `verify_deployed_version/1`.
   defp handle_restart_ok(ctx, actions, was_running) do
-    %{
-      mode: mode,
-      tag: tag,
-      releases_dir: releases_dir,
-      target_dir: target_dir,
-      prior_target: prior_target,
-      current_link: current_link,
-      rollback_plan: rollback_plan,
-      timeout_ms: timeout_ms
-    } = ctx
-
-    case verify_deployed_version(tag) do
+    case verify_deployed_version(ctx.tag) do
       :ok ->
-        pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
-
-        Formatter.emit_deployed(
-          mode,
-          tag,
-          ReleaseFiles.prior_basename(prior_target),
-          actions,
-          was_running,
-          pruned
-        )
+        finish_deployed(ctx, actions, was_running)
 
       {:mismatch, server_vsn} ->
-        outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
-        Formatter.emit_swap_failed(mode, tag, server_vsn, outcome)
+        outcome = auto_rollback(ctx, :version_mismatch)
+        finish_failed(ctx, outcome)
+        Formatter.emit_swap_failed(ctx.mode, ctx.tag, server_vsn, outcome, ctx.extras)
 
       :inconclusive ->
         # Doctor already confirmed Phoenix is reachable (a fatal check), so a
         # failure here is a transient /api/version hiccup, not evidence the
         # swap failed — don't roll back a healthy deploy on a flaky read of a
         # non-fatal endpoint.
-        pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
-
-        Formatter.emit_deployed(
-          mode,
-          tag,
-          ReleaseFiles.prior_basename(prior_target),
-          actions,
-          was_running,
-          pruned
-        )
+        finish_deployed(ctx, actions, was_running)
     end
   end
+
+  defp finish_deployed(ctx, actions, was_running) do
+    pruned = ReleaseFiles.prune_old_releases(ctx.releases_dir, ctx.target_dir, ctx.prior_target)
+    Backup.prune(Backup.snapshots_dir(), ctx.backup && ctx.backup.path)
+
+    cli_update = self_update_cli(ctx)
+    extras = Map.put(ctx.extras, :cli_update, cli_update)
+
+    Status.finish("succeeded", %{
+      backup_path: ctx.backup && ctx.backup.path,
+      previous_version: ReleaseFiles.prior_basename(ctx.prior_target)
+    })
+
+    Formatter.emit_deployed(
+      ctx.mode,
+      ctx.tag,
+      ReleaseFiles.prior_basename(ctx.prior_target),
+      actions,
+      was_running,
+      pruned,
+      extras
+    )
+  end
+
+  # Install the `arb` escript for the same tag, so the CLI and the server it
+  # just deployed agree (doctor's `version` check). The server is already
+  # healthy by now, so a failure here is reported, never fatal.
+  defp self_update_cli(%{self_update: nil}), do: nil
+
+  defp self_update_cli(%{self_update: {repo, release}, tag: tag}) do
+    Status.phase("updating cli")
+
+    case SelfUpdate.install_from_release(repo, release, tag) do
+      {:ok, %{updated: true} = info} ->
+        # This process now *is* (logically) the new CLI: doctor's version check
+        # in the report below must compare the installed version, not the one
+        # this escript was started as.
+        Process.put(:bd2_app_version, String.trim_leading(tag, "v"))
+        info
+
+      {:ok, info} ->
+        info
+
+      {:error, message} ->
+        %{updated: false, version: tag, error: message}
+    end
+  end
+
+  defp finish_failed(ctx, outcome) do
+    {state, extra} = failure_status(outcome, ctx)
+    Status.finish(state, extra)
+  end
+
+  defp failure_status({:rolled_back, prior_tag, _crossed}, ctx),
+    do: {"rolled_back", status_extra(ctx, %{rolled_back_to: prior_tag, restored_database: false})}
+
+  defp failure_status({:restored, prior_tag, _crossed, info}, ctx) do
+    {"rolled_back",
+     status_extra(ctx, %{
+       rolled_back_to: prior_tag,
+       restored_database: true,
+       failed_database_path: info.failed_database_path
+     })}
+  end
+
+  defp failure_status({:no_prior, _, _}, ctx),
+    do: {"failed", status_extra(ctx, %{message: "no prior release to roll back to"})}
+
+  defp failure_status(_refused, ctx),
+    do: {"refused", status_extra(ctx, %{message: "rollback refused: left on #{ctx.tag}"})}
+
+  defp status_extra(ctx, extra),
+    do: Map.merge(%{backup_path: ctx.backup && ctx.backup.path}, extra)
 
   # `Restart.perform/2` samples `Doctor.reachable?()` itself, right before it
   # stops/starts anything — the same reading `was_running` in
@@ -409,7 +556,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # about it now is reported as-is.
   defp handle_restart_timeout(ctx, actions, false, pre_deploy_fails) do
     if "phoenix reachable" in pre_deploy_fails do
-      Formatter.emit_cold_deploy(ctx.mode, ctx.tag, actions, ctx.timeout_ms, pre_deploy_fails)
+      Status.finish("succeeded", %{
+        backup_path: ctx.backup && ctx.backup.path,
+        message: "cold deploy: the server was down before the deploy; not rolled back"
+      })
+
+      Formatter.emit_cold_deploy(
+        ctx.mode,
+        ctx.tag,
+        actions,
+        ctx.timeout_ms,
+        pre_deploy_fails,
+        ctx.extras
+      )
     else
       # `was_running` came back false, but the pre-flight snapshot (taken
       # moments earlier, before anything was touched) still saw Phoenix
@@ -427,9 +586,17 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   @spec do_rollback(map(), [String.t()]) :: no_return()
   defp do_rollback(ctx, pre_deploy_fails) do
-    %{current_link: current_link, rollback_plan: rollback_plan, timeout_ms: timeout_ms} = ctx
-    outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
-    Formatter.emit_rollback(ctx.mode, ctx.tag, outcome, timeout_ms, pre_deploy_fails)
+    outcome = auto_rollback(ctx, :green_timeout)
+    finish_failed(ctx, outcome)
+
+    Formatter.emit_rollback(
+      ctx.mode,
+      ctx.tag,
+      outcome,
+      ctx.timeout_ms,
+      pre_deploy_fails,
+      ctx.extras
+    )
   end
 
   # ---- post-swap version verification --------------------------------------
@@ -595,21 +762,28 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   #     migrations at all, so the rollback cannot be *proven* safe. Fails closed
   #     the same way as `:refused`, because a detection glob that stopped
   #     matching reports "nothing crossed" for every deploy forever.
-  @spec auto_rollback(String.t(), rollback_plan(), non_neg_integer()) ::
-          {:rolled_back | :refused | :undetected, String.t(), [String.t()]}
-          | {:no_prior, nil, []}
-  defp auto_rollback(_current_link, %{prior_target: nil}, _timeout_ms), do: {:no_prior, nil, []}
+  @spec auto_rollback(map(), Formatter.failure_context()) :: Formatter.rollback_outcome()
+  defp auto_rollback(%{rollback_plan: %{prior_target: nil}}, _context), do: {:no_prior, nil, []}
 
-  defp auto_rollback(current_link, plan, timeout_ms) do
+  defp auto_rollback(ctx, context) do
+    %{rollback_plan: plan, current_link: current_link, timeout_ms: timeout_ms} = ctx
     %{prior_target: prior_target, crossed: crossed, allow_crossed: allow_crossed} = plan
     prior_tag = Path.basename(prior_target)
 
-    case {rollback_decision(plan), allow_crossed} do
-      {:safe, _} ->
+    case {rollback_decision(plan), allow_crossed, context, ctx.backup} do
+      # The new release added migrations and has booted (so they ran): put the
+      # pre-deploy database back, then the prior release. Wins over
+      # `--allow-cross-migration-rollback`, which would leave old code on the
+      # migrated schema. Only after a green-wait timeout — on a version mismatch
+      # the OLD release is still serving, and a restore would throw its writes away.
+      {:crossed, _, :green_timeout, %{} = backup} ->
+        restore_and_roll_back(ctx, prior_tag, crossed, backup)
+
+      {:safe, _, _, _} ->
         perform_rollback(current_link, prior_target, timeout_ms)
         {:rolled_back, prior_tag, []}
 
-      {:crossed, true} ->
+      {:crossed, true, _, _} ->
         log(
           "Health check failed and this deploy crossed #{length(crossed)} migration(s) — " <>
             "rolling back anyway because --allow-cross-migration-rollback was passed."
@@ -618,7 +792,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         perform_rollback(current_link, prior_target, timeout_ms)
         {:rolled_back, prior_tag, crossed}
 
-      {:crossed, false} ->
+      {:crossed, false, _, _} ->
         log(
           "Health check failed, but this deploy crossed #{length(crossed)} migration(s) — " <>
             "refusing to roll back to #{prior_tag} automatically."
@@ -626,7 +800,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
         {:refused, prior_tag, crossed}
 
-      {:undetected, true} ->
+      {:undetected, true, _, _} ->
         log(
           "Health check failed and the new release's migrations could not be read — " <>
             "rolling back anyway because --allow-cross-migration-rollback was passed."
@@ -635,7 +809,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         perform_rollback(current_link, prior_target, timeout_ms)
         {:rolled_back, prior_tag, []}
 
-      {:undetected, false} ->
+      {:undetected, false, _, _} ->
         log(
           "Health check failed, but the new release's migrations could not be read — " <>
             "refusing to roll back to #{prior_tag} automatically (cannot prove the " <>
@@ -643,6 +817,29 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         )
 
         {:undetected, prior_tag, []}
+    end
+  end
+
+  # Stop → restore → swap → restart. The stop comes first because SQLite has one
+  # writer: replacing the file under a running server corrupts it. If the stop
+  # fails nothing is touched.
+  defp restore_and_roll_back(ctx, prior_tag, crossed, backup) do
+    log(
+      "Health check failed and this deploy crossed #{length(crossed)} migration(s) — stopping " <>
+        "the server and restoring the pre-deploy database backup #{backup.path}…"
+    )
+
+    case Restart.stop(ReleaseFiles.restart_root(ctx.current_link)) do
+      :ok ->
+        {:ok, %{failed_db: failed_db}} = Backup.restore!(backup.path, backup.db, ctx.tag)
+        perform_rollback(ctx.current_link, ctx.rollback_plan.prior_target, ctx.timeout_ms)
+
+        {:restored, prior_tag, crossed,
+         %{backup_path: backup.path, failed_database_path: failed_db}}
+
+      {:error, reason} ->
+        log("Could not stop the server to restore the backup: #{reason}")
+        {:restore_failed, prior_tag, crossed, reason}
     end
   end
 
