@@ -133,10 +133,17 @@ defmodule Arbiter.Worker.Dispatch.Params do
 
   defp resume_mode(params) do
     case Map.get(params, "mode") do
-      nil -> {:ok, :session}
-      "session" -> {:ok, :session}
-      "briefing" -> {:ok, :briefing}
-      other -> {:error, {:invalid, "`mode` must be \"session\" or \"briefing\", got #{inspect(other)}"}}
+      nil ->
+        {:ok, :session}
+
+      "session" ->
+        {:ok, :session}
+
+      "briefing" ->
+        {:ok, :briefing}
+
+      other ->
+        {:error, {:invalid, "`mode` must be \"session\" or \"briefing\", got #{inspect(other)}"}}
     end
   end
 
@@ -217,7 +224,8 @@ defmodule Arbiter.Worker.Dispatch.Params do
   # ---- shared pieces ----------------------------------------------------------
 
   defp ensure_known_keys(params, verb, surface) do
-    allowed = @common ++ Map.fetch!(@verb_keys, verb) ++ if(surface == :mcp, do: ["workspace"], else: [])
+    allowed =
+      @common ++ Map.fetch!(@verb_keys, verb) ++ if(surface == :mcp, do: ["workspace"], else: [])
 
     case params |> Map.keys() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) do
       [] ->

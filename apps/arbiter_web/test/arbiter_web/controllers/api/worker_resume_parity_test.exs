@@ -107,7 +107,10 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
   test "`mode: briefing` is the explicit opt-in for the fresh-agent resume", ctx do
     assert {:ok, _} =
-             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.task.id, "mode" => "briefing"})
+             Tools.worker_resume(ctx.coordinator, %{
+               "task_id" => ctx.task.id,
+               "mode" => "briefing"
+             })
 
     [argv] = spawns(ctx.bin, 1)
     assert resume_pair(argv) == nil
@@ -116,7 +119,9 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
   # D-W-7: REST dispatch mints the child worker's scope at depth + 1 (the
   # worker's own `arb` token, handed to the spawned agent as ARB_TOKEN).
   test "a REST dispatch from a depth-1 token spawns a depth-2 worker", ctx do
-    {:ok, other} = Ash.create(Arbiter.Tasks.Issue, %{title: "depth", workspace_id: ctx.task.workspace_id})
+    {:ok, other} =
+      Ash.create(Arbiter.Tasks.Issue, %{title: "depth", workspace_id: ctx.task.workspace_id})
+
     token = Scope.mint_coordinator(nil, depth: 1)
 
     conn =
@@ -137,7 +142,10 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
   test "an argument resume does not take is refused, nothing is spawned", ctx do
     assert {:error, {:invalid, msg}} =
-             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.task.id, "provider" => "claude"})
+             Tools.worker_resume(ctx.coordinator, %{
+               "task_id" => ctx.task.id,
+               "provider" => "claude"
+             })
 
     assert msg =~ "provider"
     assert Path.wildcard(Path.join(ctx.bin, "spawn.*")) == []

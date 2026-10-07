@@ -31,7 +31,10 @@ defmodule ArbiterCli.Main do
       arb ticket claim    <ref> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket ready
-      arb ticket dispatch <id> [<repo>] [--with-claude] [--model <name>] [--force]
+      arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
+                          [--model <name>] [--force] [--over-cap]
+                          [--force-quota [--force-quota-reason <why>]]
+                                  (== arb dispatch; --with-claude/--with-gemini are deprecated aliases)
 
                                   `arb issue …` is a deprecated alias for `arb ticket …`:
                                   it still runs, and prints a one-line note on stderr.
@@ -43,10 +46,17 @@ defmodule ArbiterCli.Main do
 
       arb worker list
       arb worker show     <task-id>
+      arb worker runs     <task-id>
       arb worker log      <task-id>
       arb worker stop     <task-id>
-      arb worker resume   <task-id> [<repo>] [--model <name>]
+      arb worker resume   <task-id> [<repo> | --repo <repo>] [--model <name>] [--force]
+                          [--force-quota [--force-quota-reason <why>]] [--mode session|briefing]
       arb worker review   <task-id> [--repo <repo>] [--model <name>] [--force] [--automation <mode>]
+                          [--force-quota [--force-quota-reason <why>]]
+      arb queue retry-auto-resolve <task-id>
+      arb queue restart-watchdog   <task-id>
+      arb queue rerun-ci           <task-id> [--mode <mode>] [--workflow <w>] [--input k=v]
+      arb queue mark-ci-external   <task-id> <note...>
       arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
 
       arb repo list

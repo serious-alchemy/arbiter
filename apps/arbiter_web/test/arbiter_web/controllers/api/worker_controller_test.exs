@@ -488,6 +488,22 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
   end
 
+  describe "POST /api/workers/:task_id/resume params (bd-a9hqfb)" do
+    test "an argument resume does not take is a 400, not silently ignored", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume typo")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"provider" => "claude"})
+      assert json_response(conn, 400)["error"]["message"] =~ "provider"
+    end
+
+    test "an unknown mode is a 400", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume bad mode")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"mode" => "fresh"})
+      assert json_response(conn, 400)["error"]["message"] =~ "mode"
+    end
+  end
+
   describe "POST /api/workers/:task_id/resume" do
     test "returns 404 for an unknown task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/no-such-task/resume", %{})

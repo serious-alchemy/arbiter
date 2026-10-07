@@ -349,7 +349,9 @@ defmodule Arbiter.Worker.Dispatch do
   the prior worker's committed + uncommitted work, so it continues from where
   the stopped run left off instead of restarting from scratch.
 
-  This is the explicit `arb resume <task>` path. It carries no Claude/Gemini
+  Since bd-a9hqfb this is the explicit **opt-in** variant (`mode: "briefing"` on
+  every surface, via `resume_task/2`); the default manual resume is
+  `resume_session/2`. It also serves the automatic-resume and revise paths. It carries no Claude/Gemini
   session-resume id; the continuity comes from the preserved worktree state
   plus a `Arbiter.Worker.ResumeContext` briefing prepended to the standard
   work prompt (coordinator sign-off 2026-06-05, approach (b)). It is NOT

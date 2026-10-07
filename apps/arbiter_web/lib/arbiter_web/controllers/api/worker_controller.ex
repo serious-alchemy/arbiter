@@ -603,7 +603,11 @@ defmodule ArbiterWeb.Api.WorkerController do
   # unknown provider, `no_agent` combined with a provider, the recursion-depth
   # limit — all refused here, before anything is written or spawned.
   defp normalize(conn, verb, params) do
-    case DispatchParams.normalize(params, verb: verb, scope: conn.assigns[:mcp_scope], surface: :rest) do
+    case DispatchParams.normalize(params,
+           verb: verb,
+           scope: conn.assigns[:mcp_scope],
+           surface: :rest
+         ) do
       {:ok, opts} -> {:ok, opts}
       {:error, {:invalid, message}} -> {:error, {:invalid_request, message, %{}}}
       {:error, {:unauthorized, _message}} = err -> err
@@ -621,7 +625,10 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   # A junk flag (`force: "yes"`) is a 400, not a silent "unset".
   defp validate_bool(params, key) do
-    params |> Params.fetch_optional_bool(key) |> Params.to_rest() |> case do
+    params
+    |> Params.fetch_optional_bool(key)
+    |> Params.to_rest()
+    |> case do
       {:ok, _} -> :ok
       {:error, _} = err -> err
     end

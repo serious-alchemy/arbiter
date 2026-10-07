@@ -5299,7 +5299,10 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, task} = ready_issue(ctx, "grok dispatch")
 
       assert {:error, {:invalid, msg}} =
-               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "provider" => "grok"})
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "grok"
+               })
 
       assert msg =~ "repo"
       refute msg =~ "unknown provider"
