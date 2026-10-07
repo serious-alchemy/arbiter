@@ -33,6 +33,53 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert body["workspaces"] == []
     end
 
+    # bd-1kr3qf (D-A-14): create runs the same quota_config validator as PATCH.
+    test "422s on a bad quota_config and persists nothing", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/accounts", %{
+          provider: "claude",
+          slug: "rest-bad-qc",
+          quota_config: %{threshold_mode: "banana", weekly_threshold: 7}
+        })
+
+      assert %{"error" => %{"type" => "validation_error", "message" => message}} =
+               json_response(conn, 422)
+
+      assert message =~ "threshold_mode"
+      assert {:error, :not_found} = Accounts.get_account("rest-bad-qc")
+    end
+
+    test "422s on an unknown quota_config key", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/accounts", %{
+          provider: "claude",
+          slug: "rest-unknown-qc",
+          quota_config: %{nope: 1}
+        })
+
+      assert json_response(conn, 422)
+    end
+
+    test "creates with every editable quota key", %{conn: conn} do
+      qc = %{
+        "threshold_mode" => "paced",
+        "throttle_threshold" => 0.8,
+        "weekly_threshold" => 0.9,
+        "paced_floor" => 0.3,
+        "weekly_paced_floor" => 0.2,
+        "weekly_warning_policy" => "hold",
+        "window_seconds" => %{"5h" => 18_000},
+        "pace_exempt_priority" => 1,
+        "pace_exempt_threshold" => 0.95,
+        "weekly_pace_exempt_threshold" => 0.97
+      }
+
+      conn =
+        post(conn, ~p"/api/accounts", %{provider: "claude", slug: "rest-full", quota_config: qc})
+
+      assert json_response(conn, 201)["quota_config"] == qc
+    end
+
     test "422s on a duplicate provider+slug", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "dupe"})
       conn = post(conn, ~p"/api/accounts", %{provider: "claude", slug: "dupe"})
@@ -62,9 +109,9 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert json_response(patch(conn, ~p"/api/accounts/no-field", %{}), 400)
     end
 
-    test "400s on a negative ceiling", %{conn: conn} do
+    test "422s on a negative ceiling", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "negative"})
-      assert json_response(patch(conn, ~p"/api/accounts/negative", %{max_concurrent: -1}), 400)
+      assert json_response(patch(conn, ~p"/api/accounts/negative", %{max_concurrent: -1}), 422)
     end
 
     test "404s on an unknown ref", %{conn: conn} do
@@ -131,36 +178,36 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
              }
     end
 
-    test "400s on an invalid threshold_mode", %{conn: conn} do
+    test "422s on an invalid threshold_mode", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "bad-mode"})
 
       assert json_response(
                patch(conn, ~p"/api/accounts/bad-mode", %{
                  quota_config: %{threshold_mode: "aggressive"}
                }),
-               400
+               422
              )
     end
 
-    test "400s on an out-of-range float", %{conn: conn} do
+    test "422s on an out-of-range float", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "bad-float"})
 
       assert json_response(
                patch(conn, ~p"/api/accounts/bad-float", %{
                  quota_config: %{weekly_threshold: 1.5}
                }),
-               400
+               422
              )
     end
 
-    test "400s on an unknown quota_config key", %{conn: conn} do
+    test "422s on an unknown quota_config key", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "bad-key"})
 
       assert json_response(
                patch(conn, ~p"/api/accounts/bad-key", %{
                  quota_config: %{not_a_real_key: "x"}
                }),
-               400
+               422
              )
     end
 
@@ -182,11 +229,95 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
                  max_concurrent: 3,
                  quota_config: %{threshold_mode: "bogus"}
                }),
-               400
+               422
              )
 
       body = json_response(get(conn, ~p"/api/accounts/atomic-update"), 200)
       assert body["max_concurrent"] == 1
+    end
+  end
+
+  describe "PATCH /api/accounts/:ref (bd-1kr3qf — every quota key, one write)" do
+    test "sets and clears the keys that were unreachable before", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-all"})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-all", %{
+            quota_config: %{
+              throttle_threshold: 0.6,
+              weekly_warning_policy: "hold",
+              window_seconds: %{"5h" => "3600"},
+              pace_exempt_priority: "1"
+            }
+          }),
+          200
+        )
+
+      assert body["quota_config"] == %{
+               "throttle_threshold" => 0.6,
+               "weekly_warning_policy" => "hold",
+               "window_seconds" => %{"5h" => 3600},
+               "pace_exempt_priority" => 1
+             }
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/meta-all", %{
+            quota_config: %{
+              throttle_threshold: nil,
+              window_seconds: nil,
+              pace_exempt_priority: "none"
+            }
+          }),
+          200
+        )
+
+      assert body["quota_config"] == %{"weekly_warning_policy" => "hold"}
+    end
+
+    test "422s on a bad weekly_warning_policy or window table", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-bad-new"})
+
+      for qc <- [%{weekly_warning_policy: "maybe"}, %{window_seconds: %{"5h" => 0}}] do
+        assert json_response(
+                 patch(conn, ~p"/api/accounts/meta-bad-new", %{quota_config: qc}),
+                 422
+               )
+      end
+    end
+
+    test "422s when quota_config is not an object", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "meta-not-object"})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/meta-not-object", %{quota_config: "x"}),
+               422
+             )
+    end
+
+    test "a failing write leaves no partial update", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "meta-db-fail", label: "Before"})
+
+      Arbiter.Repo.query!("""
+      CREATE TRIGGER fail_patch BEFORE UPDATE ON provider_accounts
+      WHEN NEW.max_concurrent = 99
+      BEGIN SELECT RAISE(ABORT, 'boom'); END
+      """)
+
+      capture_log(fn ->
+        assert patch(conn, ~p"/api/accounts/meta-db-fail", %{
+                 label: "After",
+                 max_concurrent: 99,
+                 quota_config: %{threshold_mode: "paced"}
+               })
+               |> Map.fetch!(:status) >= 400
+      end)
+
+      assert {:ok, reloaded} = Accounts.get_account(account.id)
+      assert reloaded.label == "Before"
+      assert reloaded.max_concurrent == nil
+      assert reloaded.quota_config == %{}
     end
   end
 
@@ -241,23 +372,22 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert body["enabled"] == true
     end
 
-    test "400s on a non-boolean enabled without writing anything else", %{conn: conn} do
+    test "422s on a non-boolean enabled without writing anything else", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "meta-bad", max_concurrent: 1})
 
       response =
         json_response(
           patch(conn, ~p"/api/accounts/meta-bad", %{enabled: "maybe", max_concurrent: 9}),
-          400
+          422
         )
 
       assert response["error"]["message"] =~ "enabled"
       assert json_response(get(conn, ~p"/api/accounts/meta-bad"), 200)["max_concurrent"] == 1
     end
 
-    test "400s when slug or provider is sent — identity is not an edit", %{conn: conn} do
+    test "422s when slug or provider is sent — identity is not an edit", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "meta-identity"})
-      # Not a named updatable key: only the three above count as "an update".
-      assert json_response(patch(conn, ~p"/api/accounts/meta-identity", %{slug: "x"}), 400)
+      assert json_response(patch(conn, ~p"/api/accounts/meta-identity", %{slug: "x"}), 422)
     end
 
     test "a null quota_config value clears that key and leaves siblings", %{conn: conn} do
@@ -413,6 +543,22 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert body["share"] == 7
     end
 
+    test "400s on a grok account — it is routed by the workspace opt-in", %{conn: conn} do
+      create_account!(%{provider: :grok, slug: "attach-grok"})
+      ws = create_workspace!("attach-grok-ws")
+
+      conn =
+        post(conn, ~p"/api/accounts/attach-grok/attach", %{
+          "workspace_id" => ws.id,
+          "provider" => "grok"
+        })
+
+      assert %{"error" => %{"type" => "invalid_request", "message" => message}} =
+               json_response(conn, 400)
+
+      assert message =~ "Grok"
+    end
+
     test "400s (not a raise/500) on a non-uuid workspace_id", %{conn: conn} do
       _account = create_account!(%{provider: :claude, slug: "attach-bad-ws-id"})
 
@@ -423,6 +569,37 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
         })
 
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+
+  describe "DELETE /api/accounts/:ref/attach/:workspace_id" do
+    test "detaches one workspace and leaves the others", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "detach-me"})
+      ws = create_workspace!("detach-rest-ws")
+      other = create_workspace!("detach-rest-other")
+      {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
+      {:ok, _} = Accounts.attach_workspace(other.id, :claude, account.id)
+
+      body = json_response(delete(conn, ~p"/api/accounts/detach-me/attach/#{ws.id}"), 200)
+      assert body["workspace_id"] == ws.id
+
+      shown = json_response(get(conn, ~p"/api/accounts/detach-me"), 200)
+      assert Enum.map(shown["workspaces"], & &1["workspace_id"]) == [other.id]
+    end
+
+    test "400s when the workspace is not attached to that account", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "detach-none"})
+      ws = create_workspace!("detach-none-ws")
+
+      assert %{"error" => %{"type" => "invalid_request"}} =
+               json_response(delete(conn, ~p"/api/accounts/detach-none/attach/#{ws.id}"), 400)
+    end
+
+    test "404s on an unknown account or workspace", %{conn: conn} do
+      ws = create_workspace!("detach-404-ws")
+      assert json_response(delete(conn, ~p"/api/accounts/nope/attach/#{ws.id}"), 404)
+      create_account!(%{provider: :claude, slug: "detach-404"})
+      assert json_response(delete(conn, ~p"/api/accounts/detach-404/attach/nope"), 404)
     end
   end
 
