@@ -1023,6 +1023,22 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.task_update_progress(ctx.worker, %{})
     end
 
+    test "an empty string clears a progress field (D-T-18/29)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => "check it"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => ""})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.qa_notes == nil
+    end
+
+    test "append_notes appends without replacing (D-T-19)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"notes" => "first"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"append_notes" => "second"})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.notes == "first\n\nsecond"
+    end
+
     test "a worker may not progress another task", ctx do
       {:ok, other} = Ash.create(Issue, %{title: "not yours", workspace_id: ctx.ws.id})
 

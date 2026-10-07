@@ -299,6 +299,10 @@ defmodule Arbiter.Tasks.Issue do
       # itself; a caller that omits it is recorded exactly as before.
       argument :change_origin, :string
 
+      # P-08 (D-T-19): server-side atomic append to `notes`, so `--append-notes`
+      # is not a client read-modify-write. Mutually exclusive with `notes`.
+      argument :append_notes, :string
+
       # `source_pr` is deliberately NOT in `accept` above: it's the PR-dedup
       # linkage PRPatrol/ExternalReview set at :create time (and :reopen clears
       # it), and no legitimate caller of :update ever needs to touch it. A
@@ -314,6 +318,7 @@ defmodule Arbiter.Tasks.Issue do
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
       change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
+      change {Arbiter.Tasks.Issue.Changes.AppendNotes, []}
 
       # A floor only means something on an epic: retyping one away clears it.
       change {Arbiter.Tasks.Issue.Changes.ClearFloorOnRetype, []}

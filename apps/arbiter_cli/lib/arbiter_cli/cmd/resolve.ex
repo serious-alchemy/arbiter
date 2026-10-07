@@ -18,6 +18,10 @@ defmodule ArbiterCli.Cmd.Resolve do
 
       --gate <g>     review_gate (default) | notes_gate | commit_gate
       --round <n>    the ReviewGate round this answers (default: the latest)
+      --fix-round-attempt <n>
+                     which fix-round attempt that round belongs to — `round`
+                     restarts at 1 each attempt, so this disambiguates it
+                     (default: the latest attempt)
       --json         print the recorded resolution as JSON
 
   The decision, reasoning, actor (derived server-side from your token) and timestamp are persisted against the ticket
@@ -44,6 +48,7 @@ defmodule ArbiterCli.Cmd.Resolve do
     reject: :string,
     gate: :string,
     round: :integer,
+    fix_round_attempt: :integer,
     json: :boolean
   ]
 
@@ -69,6 +74,7 @@ defmodule ArbiterCli.Cmd.Resolve do
         %{"decision" => decision, "reasoning" => reasoning}
         |> put_opt("gate", opts[:gate])
         |> put_opt("round", opts[:round])
+        |> put_opt("fix_round_attempt", opts[:fix_round_attempt])
 
       case Client.post("/api/issues/" <> id <> "/resolve", body) do
         {:ok, resolution} -> emit(resolution, mode)

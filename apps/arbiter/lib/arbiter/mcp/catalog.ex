@@ -363,8 +363,22 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" => "Ticket id. Optional for a worker (defaults to its own ticket)."
           },
-          "notes" => %{"type" => "string", "description" => "Free-form progress / working notes."},
-          "qa_notes" => %{"type" => "string", "description" => "What QA should verify."},
+          "notes" => %{
+            "type" => "string",
+            "description" =>
+              "Free-form progress / working notes. REPLACES the field; `\"\"` clears it. " <>
+                "To add to what is there without losing a concurrent write, use `append_notes`."
+          },
+          "append_notes" => %{
+            "type" => "string",
+            "description" =>
+              "Append to `notes` (separated by a blank line), atomically on the server — " <>
+                "never a read-modify-write. Not combinable with `notes`."
+          },
+          "qa_notes" => %{
+            "type" => "string",
+            "description" => "What QA should verify. `\"\"` clears it."
+          },
           "deployment_notes" => %{
             "type" => "string",
             "description" => "Rollout / backout considerations."
@@ -554,7 +568,16 @@ defmodule Arbiter.MCP.Catalog do
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "acceptance" => %{"type" => "string"},
-          "notes" => %{"type" => "string"},
+          "notes" => %{
+            "type" => "string",
+            "description" => "REPLACES the field; `\"\"` clears it (as for every text field)."
+          },
+          "append_notes" => %{
+            "type" => "string",
+            "description" =>
+              "Append to `notes` (separated by a blank line), atomically on the server. " <>
+                "Not combinable with `notes`."
+          },
           "qa_notes" => %{"type" => "string"},
           "deployment_notes" => %{"type" => "string"},
           "priority" => %{"type" => "integer"},

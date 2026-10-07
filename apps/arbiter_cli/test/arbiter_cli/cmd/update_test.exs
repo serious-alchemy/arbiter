@@ -2,6 +2,7 @@ defmodule ArbiterCli.Cmd.UpdateTest do
   use ArbiterCli.CliCase, async: true
 
   alias ArbiterCli.Cmd.Update
+  alias ArbiterCli.Main
 
   test "updates priority via PATCH" do
     stub_patch(
@@ -26,21 +27,15 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     end
   end
 
-  test "append-notes fetches first, then patches with combined notes" do
+  test "--append-notes sends append_notes for the server to apply — no GET, no notes (D-T-19)" do
+    parent = self()
+
     stub_routes([
-      {{"get", "/api/issues/bd-001"},
-       {%{"id" => "bd-001", "title" => "X", "notes" => "prior"}, 200}},
       {{"patch", "/api/issues/bd-001"},
        fn conn ->
          {:ok, body, conn} = Plug.Conn.read_body(conn)
-         decoded = Jason.decode!(body)
-         # assert that combined notes ended up in the payload
-         assert decoded["notes"] =~ "prior"
-         assert decoded["notes"] =~ "addendum"
-
-         conn
-         |> Plug.Conn.put_status(200)
-         |> Req.Test.json(%{"id" => "bd-001", "notes" => decoded["notes"]})
+         send(parent, {:patched, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001", "notes" => "p"})
        end}
     ])
 
@@ -48,6 +43,8 @@ defmodule ArbiterCli.Cmd.UpdateTest do
       capture(fn -> Update.run(["bd-001", "--append-notes", "addendum"]) end)
 
     assert exit_code == 0
+    assert_received {:patched, body}
+    assert body == %{"append_notes" => "addendum"}
   end
 
   test "--qa-notes and --deployment-notes are sent as fields" do
@@ -325,5 +322,102 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     {_out, err, exit_code} = capture(fn -> Update.run(["bd-001", "--nope", "x"]) end)
     assert exit_code == 1
     assert err =~ "unknown option --nope for arb ticket update"
+  end
+
+  # ---- P-08: flag parity with MCP / REST ----------------------------------
+
+  defp patched_body(argv) do
+    parent = self()
+
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:patched, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001"})
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Update.run(["bd-001" | argv]) end)
+    assert exit_code == 0
+    assert_received {:patched, body}
+    body
+  end
+
+  describe "fields MCP/REST accept (D-T-11)" do
+    test "--tracker-ref (the recovery step three server messages name) reaches the PATCH" do
+      assert patched_body(["--tracker-ref", "PROJ-7"]) == %{"tracker_ref" => "PROJ-7"}
+    end
+
+    for {flag, key, value} <- [
+          {"--target-branch", "target_branch", "release/1"},
+          {"--type", "issue_type", "research"},
+          {"--pr-ref", "pr_ref", "123"},
+          {"--tracker-type", "tracker_type", "github"},
+          {"--tracker-context-type", "tracker_context_type", "jira"},
+          {"--tracker-context-ref", "tracker_context_ref", "PROJ-1"}
+        ] do
+      test "#{flag} is sent as #{key}" do
+        assert patched_body([unquote(flag), unquote(value)]) == %{unquote(key) => unquote(value)}
+      end
+    end
+
+    test "--auto-close / --no-auto-close set and clear the flag" do
+      assert patched_body(["--auto-close"]) == %{"auto_close" => true}
+      assert patched_body(["--no-auto-close"]) == %{"auto_close" => false}
+    end
+  end
+
+  describe "an empty string clears a field (D-T-18)" do
+    test "is sent through, and is a valid sole field flag" do
+      assert patched_body(["--description", ""]) == %{"description" => ""}
+      assert patched_body(["--tracker-ref", ""]) == %{"tracker_ref" => ""}
+
+      assert patched_body(["--notes", "", "--acceptance", ""]) == %{
+               "notes" => "",
+               "acceptance" => ""
+             }
+    end
+  end
+
+  test "`arb ticket update <id> --tracker-ref REF` — the recovery step the server prints — works end to end" do
+    parent = self()
+
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:patched, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001"})
+       end}
+    ])
+
+    {_out, err, code} =
+      capture(fn -> Main.main(["ticket", "update", "bd-001", "--tracker-ref", "42"]) end)
+
+    assert code == 0
+    refute err =~ "unknown option"
+    assert_received {:patched, %{"tracker_ref" => "42"}}
+  end
+
+  test "--acceptance-file reads the criteria from a file" do
+    path = Path.join(System.tmp_dir!(), "ac-#{System.unique_integer([:positive])}.md")
+    File.write!(path, "- it works\n")
+    on_exit(fn -> File.rm(path) end)
+
+    assert patched_body(["--acceptance-file", path]) == %{"acceptance" => "- it works\n"}
+  end
+
+  test "--help lists every flag the edit path accepts" do
+    {out, _err, 0} = capture(fn -> Update.run(["--help"]) end)
+
+    for flag <-
+          ~w(--priority --difficulty --notes --append-notes --acceptance --qa-notes
+             --deployment-notes --pr-body --description --title --repo --resume-review
+             --verify-after-deploy --tracker-ref --target-branch --auto-close --no-auto-close
+             --type --pr-ref --tracker-type --tracker-context-type --tracker-context-ref
+             --require-provider --exclude-provider --clear-provider-constraint) do
+      assert out =~ flag, "update --help does not list #{flag}"
+    end
   end
 end
