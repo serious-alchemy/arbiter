@@ -480,4 +480,34 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert Map.has_key?(decoded, "secret_keys")
     end
   end
+
+  describe "schema" do
+    test "prints the reference served by the server" do
+      stub_get("/api/workspaces/config_schema", %{
+        "text" => "WORKSPACE CONFIG REFERENCE\n  tracker (map)",
+        "enums" => %{"tracker_types" => ["none"]}
+      })
+
+      {out, _err, code} = capture(fn -> Config.run(["schema"]) end)
+      assert code == 0
+      assert out =~ "WORKSPACE CONFIG REFERENCE"
+    end
+
+    test "--json emits the whole payload" do
+      stub_get("/api/workspaces/config_schema", %{
+        "text" => "T",
+        "enums" => %{"quota_modes" => []}
+      })
+
+      {out, _err, 0} = capture(fn -> Config.run(["schema", "--json"]) end)
+      assert %{"text" => "T", "enums" => _} = Jason.decode!(String.trim(out))
+    end
+
+    test "a server error is surfaced" do
+      stub_get("/api/workspaces/config_schema", %{"error" => %{"message" => "boom"}}, 500)
+      {_out, err, code} = capture(fn -> Config.run(["schema"]) end)
+      assert code != 0
+      assert err =~ "boom"
+    end
+  end
 end

@@ -11,8 +11,9 @@ defmodule ArbiterCli.Cmd.Config do
   `schema` prints a comprehensive reference of every top-level config key
   (tracker, merge, agent/review_agent, security, routing, review/review_gate,
   review_automation, quota, conductor, standing_orders, repo_paths, pr_patrol,
-  review_patrol) with its sub-fields, valid enum values, and defaults — see
-  `ArbiterCli.ConfigSchema` for the full text (also appended below).
+  review_patrol) with its sub-fields, valid enum values, and defaults. It is
+  read from the running server (`GET /api/workspaces/config_schema`), the one
+  copy the validator, MCP's `workspace_config_schema` and this verb all share.
 
   `overview` prints a human-readable summary of the workspace's config grouped
   into sections (tracker, merge, agent, routing, review, standing orders)
@@ -78,8 +79,6 @@ defmodule ArbiterCli.Cmd.Config do
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
-      IO.puts("")
-      IO.puts(ArbiterCli.ConfigSchema.render())
     else
       {opts, rest, mode} = ArgParser.parse(argv, command: "arb config", switches: @switches)
       workspace_opt = opts[:workspace]
@@ -90,10 +89,28 @@ defmodule ArbiterCli.Cmd.Config do
         ["set" | rest] -> set(rest, workspace_opt, force, mode)
         ["unset" | rest] -> unset(rest, workspace_opt, force, mode)
         ["overview" | _] -> overview(workspace_opt, mode)
-        ["schema" | _] -> IO.puts(ArbiterCli.ConfigSchema.render())
+        ["schema" | _] -> schema(mode)
         [] -> Output.die("config requires a subcommand: get, set, unset, overview, or schema")
         [unknown | _] -> Output.die("unknown config subcommand: #{unknown}")
       end
+    end
+  end
+
+  # ----- schema -----------------------------------------------------------
+
+  defp schema(mode) do
+    case Client.get("/api/workspaces/config_schema") do
+      {:ok, %{"text" => text} = body} ->
+        case mode do
+          :json -> Output.emit_json(body)
+          :text -> IO.puts(text)
+        end
+
+      {:ok, _} ->
+        Output.die("unexpected response from the server")
+
+      {:error, err} ->
+        Output.die(err)
     end
   end
 

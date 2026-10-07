@@ -4,8 +4,9 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
   `arb prime`. They are never injected into any worker prompt; put
   worker-facing instructions in the repo's `CLAUDE.md` instead.
 
-  Add/remove rewrite the whole list rather than patching into it, because
-  `patch_config`'s deep merge has no way to delete a list element.
+  Add/remove are the server-side single-entry operations
+  (`Arbiter.Tasks.Workspace.Operations`) REST and MCP use, so two operators — or
+  an operator and a coordinator — editing at once never overwrite each other.
   """
   use ArbiterWeb, :live_component
 
@@ -32,33 +33,23 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
     if text == "" do
       {:noreply, assign(socket, :order_error, "Standing order text can't be empty.")}
     else
-      orders = standing_orders(socket.assigns.workspace) ++ [text]
-      write(socket, orders)
+      written(socket, add_standing_order(socket.assigns.workspace, text))
     end
   end
 
   def handle_event("rm_order", %{"index" => index}, socket) do
-    orders =
-      socket.assigns.workspace
-      |> standing_orders()
-      |> List.delete_at(String.to_integer(index))
-
-    write(socket, orders)
+    written(socket, remove_standing_order(socket.assigns.workspace, String.to_integer(index)))
   end
 
-  defp write(socket, orders) do
-    case patch_config(socket.assigns.workspace, %{"standing_orders" => orders}, []) do
-      {:ok, ws} ->
-        {:noreply,
-         socket
-         |> apply_workspace(ws)
-         |> assign(:order_error, nil)
-         |> assign(:orders, standing_orders(ws))}
-
-      {:error, msg} ->
-        {:noreply, assign(socket, :order_error, msg)}
-    end
+  defp written(socket, {:ok, ws}) do
+    {:noreply,
+     socket
+     |> apply_workspace(ws)
+     |> assign(:order_error, nil)
+     |> assign(:orders, standing_orders(ws))}
   end
+
+  defp written(socket, {:error, msg}), do: {:noreply, assign(socket, :order_error, msg)}
 
   defp standing_orders(ws) do
     case get_in(ws.config || %{}, ["standing_orders"]) do

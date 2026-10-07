@@ -81,80 +81,33 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
     end
   end
 
+  # `add` / `rm` are server-side single-entry operations
+  # (`POST /api/workspaces/:id/standing_orders[/remove]`): the server appends to
+  # / removes from the list it has just re-read under a lock, so two callers
+  # editing at once both keep their change. The CLI no longer reads the list and
+  # writes it back.
   defp add(workspace_opt, repo_opt, text, mode) do
     text = String.trim(text)
     if text == "", do: Output.die("workspace standing-order add: text must not be empty")
 
     ws = Resolver.resolve_workspace!(workspace_opt)
-    require_registered_repo!(ws, repo_opt, "add")
-    orders = current_standing_orders(ws, repo_opt)
-    patch_standing_orders(ws, repo_opt, orders ++ [text], mode)
+    body = maybe_repo(%{"text" => text}, repo_opt)
+    write(ws, "/standing_orders", body, repo_opt, mode)
   end
 
   defp rm(workspace_opt, repo_opt, target, mode) do
     ws = Resolver.resolve_workspace!(workspace_opt)
-    require_registered_repo!(ws, repo_opt, "rm")
-    orders = current_standing_orders(ws, repo_opt)
-
-    if orders == [] do
-      Output.die(
-        "workspace standing-order rm: this workspace has no standing orders#{repo_label(repo_opt)}"
-      )
-    end
-
-    new_orders =
-      case Integer.parse(target) do
-        {n, ""} when n >= 1 and n <= length(orders) ->
-          List.delete_at(orders, n - 1)
-
-        {n, ""} when is_integer(n) ->
-          Output.die(
-            "workspace standing-order rm: index #{n} out of range (1..#{length(orders)})"
-          )
-
-        _ ->
-          # Text match against the human-readable form of each order.
-          case Enum.find_index(orders, &(order_text(&1) == target)) do
-            nil ->
-              Output.die("workspace standing-order rm: no order matching #{inspect(target)}")
-
-            idx ->
-              List.delete_at(orders, idx)
-          end
-      end
-
-    patch_standing_orders(ws, repo_opt, new_orders, mode)
+    # A 1-based index or the exact text; the server tells them apart.
+    body = maybe_repo(%{"target" => target}, repo_opt)
+    write(ws, "/standing_orders/remove", body, repo_opt, mode)
   end
 
-  # Patches `config.standing_orders` wholesale (a list patch replaces the list,
-  # never appends) while leaving sibling config keys untouched. With `--repo`,
-  # patches just that repo's `standing_orders` sub-key under `repo_paths`,
-  # preserving its `path`/`target_branch` siblings.
-  defp patch_standing_orders(%{} = ws, nil, orders, mode) do
-    payload = %{"patch" => %{"standing_orders" => orders}}
-    do_patch_standing_orders(ws, nil, payload, mode)
-  end
+  defp maybe_repo(body, nil), do: body
+  defp maybe_repo(body, repo), do: Map.put(body, "repo", repo)
 
-  defp patch_standing_orders(%{} = ws, repo, orders, mode) do
-    {repo_paths_key, entry_key, entry} = Resolver.resolve_repo(ws, repo)
-
-    entry_map =
-      case entry do
-        %{} = m -> m
-        p when is_binary(p) -> %{"path" => p}
-        _ -> %{}
-      end
-
-    new_entry = Map.put(entry_map, "standing_orders", orders)
-    payload = %{"patch" => %{repo_paths_key => %{entry_key => new_entry}}}
-    do_patch_standing_orders(ws, repo, payload, mode)
-  end
-
-  defp do_patch_standing_orders(%{} = ws, repo, payload, mode) do
-    case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
-      {:ok, updated} ->
-        new_orders = current_standing_orders(updated, repo)
-
+  defp write(%{} = ws, suffix, body, repo, mode) do
+    case Client.post("/api/workspaces/" <> ws["id"] <> suffix, body) do
+      {:ok, %{"standing_orders" => new_orders}} ->
         case mode do
           :json ->
             Output.emit_json(orders_json(new_orders, repo))
@@ -166,6 +119,9 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
             |> Enum.with_index(1)
             |> Enum.each(fn {o, i} -> IO.puts("  #{i}. #{order_text(o)}") end)
         end
+
+      {:ok, _} ->
+        Output.die("unexpected response from the server")
 
       {:error, err} ->
         Output.die(err)
@@ -193,25 +149,6 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
     case Resolver.resolve_repo(ws, repo) do
       {_key, _entry_key, %{"standing_orders" => orders}} when is_list(orders) -> orders
       _ -> []
-    end
-  end
-
-  # Requires `repo` (when given) to already be registered under
-  # `repo_paths` — a standing order scoped to an unregistered repo
-  # is almost always a typo, and silently creating a path-less repo entry would
-  # hide it.
-  defp require_registered_repo!(_ws, nil, _verb), do: :ok
-
-  defp require_registered_repo!(ws, repo, verb) do
-    case Resolver.resolve_repo(ws, repo) do
-      {_key, _entry_key, nil} ->
-        Output.die(
-          "workspace standing-order #{verb}: no repo named #{inspect(repo)} registered",
-          "register its path first: arb config set repo_paths.#{repo}.path <path>"
-        )
-
-      _ ->
-        :ok
     end
   end
 

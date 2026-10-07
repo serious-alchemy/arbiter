@@ -40,11 +40,11 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       # lets `arb workspace secret ls` show what's set without exposing tokens.
       # The encrypted `secrets`/`encrypted_secrets` is deliberately never
       # serialised; reference a secret from config via `credentials_ref: "secret:<key>"`.
-      secret_keys: secret_key_names(ws),
+      secret_keys: Workspace.secret_key_names(ws),
       # User-defined worker env vars: names + per-key secret flags ONLY, never
       # the (encrypted) values. Secret-flagged values are additionally redacted
       # from worker output — see Arbiter.Worker.WorkerEnv / Arbiter.Redaction.
-      worker_env: worker_env_keys(ws),
+      worker_env: Workspace.worker_env_listing(ws),
       # The *resolved* worker security posture (install default + this
       # domain's overrides) — single source of truth for `arb prime` and the
       # dashboard, so neither re-derives it from raw config.
@@ -85,20 +85,6 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       created_at: iso(ws.created_at),
       updated_at: iso(ws.updated_at)
     }
-  end
-
-  # Sorted key names of the workspace's secrets (values are NEVER returned).
-  # Decrypts the stored column on demand via `Workspace.secrets_map/1`.
-  defp secret_key_names(%Workspace{} = ws) do
-    ws |> Workspace.secrets_map() |> Map.keys() |> Enum.sort()
-  end
-
-  # Worker env var names + secret flags (never values). Derived from the public
-  # `worker_env_meta`, so this never decrypts anything.
-  defp worker_env_keys(%Workspace{} = ws) do
-    ws
-    |> Workspace.worker_env_keys()
-    |> Enum.map(fn %{name: name, secret?: secret?} -> %{name: name, secret: secret?} end)
   end
 
   # `%{repo_name => %{"mode" => ..., "write_jail_warning" => ...}}` for every

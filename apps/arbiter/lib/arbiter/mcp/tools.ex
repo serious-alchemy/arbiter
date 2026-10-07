@@ -1650,6 +1650,10 @@ defmodule Arbiter.MCP.Tools do
       description: ws.description,
       prefix: ws.prefix,
       config: ws.config || %{},
+      # Names / flags ONLY (D-C-20): a coordinator or worker needs to know which
+      # env vars and secrets exist; a value never crosses a machine surface.
+      secret_keys: Workspace.secret_key_names(ws),
+      worker_env: Workspace.worker_env_listing(ws),
       security:
         ws
         |> SecurityPolicy.resolve()
@@ -1783,6 +1787,9 @@ defmodule Arbiter.MCP.Tools do
   defdelegate workspace_config_overview(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate workspace_config_set(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate workspace_config_unset(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_config_schema(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_standing_order_add(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_standing_order_remove(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate installation_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate installation_config_set(scope, args), to: Arbiter.MCP.Tools.Workspace
 

@@ -400,6 +400,24 @@ defmodule Arbiter.Tasks.Workspace do
     |> Enum.sort_by(& &1.name)
   end
 
+  @doc """
+  The machine-facing worker env listing every surface serialises — REST, MCP
+  `workspace_show`, `arb workspace env ls`: `[%{name: String.t(), secret:
+  boolean()}]`, sorted by name. Names and flags ONLY; a value never appears in
+  a machine response (reveal is browser-only).
+  """
+  @spec worker_env_listing(t()) :: [%{name: String.t(), secret: boolean()}]
+  def worker_env_listing(workspace) do
+    workspace
+    |> worker_env_keys()
+    |> Enum.map(fn %{name: name, secret?: secret?} -> %{name: name, secret: secret?} end)
+  end
+
+  @doc "Sorted names of the workspace's configured secrets (values are never returned)."
+  @spec secret_key_names(t()) :: [String.t()]
+  def secret_key_names(workspace),
+    do: workspace |> secrets_map() |> Map.keys() |> Enum.sort()
+
   defp meta_secret?(%{"secret" => true}), do: true
   defp meta_secret?(_), do: false
 

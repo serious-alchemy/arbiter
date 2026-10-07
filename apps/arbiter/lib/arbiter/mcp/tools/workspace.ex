@@ -3,8 +3,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
   `Arbiter.MCP.Tools` handlers for reading/writing workspace config and
   installation-wide settings: `workspace_show` / `workspace_config_get` /
   `workspace_config_overview` / `workspace_config_set` /
-  `workspace_config_unset` / `installation_config_get` /
-  `installation_config_set`. Split out of `Arbiter.MCP.Tools` (see its
+  `workspace_config_unset` / `workspace_config_schema` /
+  `workspace_standing_order_add` / `workspace_standing_order_remove` /
+  `installation_config_get` / `installation_config_set`. Split out of `Arbiter.MCP.Tools` (see its
   moduledoc) — called back into for the generic arg/serialization helpers it
   still owns.
   """
@@ -16,6 +17,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
   alias Arbiter.Tasks.AttentionLimits
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.ConfigPath
+  alias Arbiter.Tasks.Workspace.ConfigSchema
+  alias Arbiter.Tasks.Workspace.Operations
 
   @install_settings_keys Arbiter.Settings.Registry.keys()
 
@@ -146,33 +149,76 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # ---- workspace_config_set -----------------------------------------------
 
   @doc """
-  Set a single dotted.key to a value via the deep-merge config endpoint.
-  Coordinator only (enforced in `Arbiter.MCP.Catalog`). Sibling keys are
-  preserved — this uses `PATCH /api/workspaces/:id/config`, not the
-  whole-map replace path. A literal dot in a key segment (a repo name) is
-  written `\\.` (`Arbiter.Tasks.Workspace.ConfigPath`). The safety rails —
-  `secret*`/`credentials*` top-level keys refused, `repo_paths` emptied,
-  `tracker.type` with no `tracker.config` — are enforced by the `:patch_config`
-  action itself, so REST and `arb config` refuse the same writes; `force: true`
-  overrides the last two.
+  Set config via the deep-merge config endpoint. Coordinator only (enforced in
+  `Arbiter.MCP.Catalog`). Sibling keys are preserved — this uses the
+  `:patch_config` action, not the whole-map replace path.
+
+  Two input shapes, never both:
+
+    * `key` + `value` — one dotted key. A literal dot in a key segment (a repo
+      name) is written `\\.` (`Arbiter.Tasks.Workspace.ConfigPath`).
+    * `patch` and/or `unset_paths` — the same multi-key atomic write REST and
+      the dashboard do: `unset_paths` are removed, then `patch` (a nested map,
+      so a key containing a dot is just a map key) is deep-merged in, in one
+      validated write.
+
+  The safety rails — `secret*`/`credentials*` top-level keys refused,
+  `repo_paths` emptied, `tracker.type` with no `tracker.config` — are enforced
+  by the `:patch_config` action itself, so REST and `arb config` refuse the same
+  writes; `force: true` overrides the last two.
   Returns the workspace identity, the full updated config, and secret_keys.
   """
   @spec workspace_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def workspace_config_set(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
-         {:ok, key} <- Tools.require_string(args, "key"),
-         {:ok, value} <- require_config_value(args),
+         {:ok, {patch, unset_paths}} <- config_set_input(args),
          {:ok, force} <- Params.fetch_bool(args, "force", false),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
-      patch = ConfigPath.put(%{}, ConfigPath.split(key), value)
-
-      case Ash.update(ws, %{patch: patch, unset_paths: [], force: force},
+      case Ash.update(ws, %{patch: patch, unset_paths: unset_paths, force: force},
              action: :patch_config,
              context: guardrail_context(scope)
            ) do
         {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
+    end
+  end
+
+  defp config_set_input(args) do
+    keyed? = Map.has_key?(args, "key")
+    multi? = Map.has_key?(args, "patch") or Map.has_key?(args, "unset_paths")
+
+    cond do
+      keyed? and multi? ->
+        {:error, {:invalid, "pass either `key` + `value` or `patch` / `unset_paths`, not both"}}
+
+      keyed? ->
+        with {:ok, key} <- Tools.require_string(args, "key"),
+             {:ok, value} <- require_config_value(args) do
+          {:ok, {ConfigPath.put(%{}, ConfigPath.split(key), value), []}}
+        end
+
+      multi? ->
+        multi_input(args)
+
+      true ->
+        {:error, {:invalid, "`key` + `value`, or `patch` / `unset_paths`, is required"}}
+    end
+  end
+
+  defp multi_input(args) do
+    patch = args |> Map.get("patch") |> Tools.unwrap_stringified_json([:map])
+    unset = args |> Map.get("unset_paths") |> Tools.unwrap_stringified_json([:list])
+
+    cond do
+      not (is_nil(patch) or is_map(patch)) ->
+        {:error, {:invalid, "`patch` must be an object"}}
+
+      not (is_nil(unset) or (is_list(unset) and Enum.all?(unset, &is_binary/1))) ->
+        {:error, {:invalid, "`unset_paths` must be an array of dotted-key strings"}}
+
+      true ->
+        {:ok, {patch || %{}, unset || []}}
     end
   end
 
@@ -200,6 +246,72 @@ defmodule Arbiter.MCP.Tools.Workspace do
       end
     end
   end
+
+  # ---- workspace_config_schema --------------------------------------------
+
+  @doc """
+  The reference for every `workspace.config` key (valid values, defaults) — the
+  in-band schema a coordinator editing config through `workspace_config_set`
+  needs. The same text `arb config schema` prints and
+  `GET /api/workspaces/config_schema` returns: `%{text, enums}`.
+  """
+  @spec workspace_config_schema(Scope.t(), map()) :: {:ok, map()}
+  def workspace_config_schema(%Scope{} = _scope, _args), do: {:ok, ConfigSchema.describe()}
+
+  # ---- workspace_standing_order_add / _remove -----------------------------
+
+  @doc """
+  Append one standing order atomically on the server (`Operations.add_standing_order/3`),
+  so two concurrent callers both keep their entry — unlike rewriting the whole
+  list through `workspace_config_set`. `repo` targets a registered repo's list.
+  Coordinator only. Returns the resulting list.
+  """
+  @spec workspace_standing_order_add(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def workspace_standing_order_add(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, text} <- Tools.require_string(args, "text"),
+         repo = Tools.fetch_string(args, "repo"),
+         {:ok, ws} <-
+           ws_id
+           |> Operations.add_standing_order(text, repo: repo, context: guardrail_context(scope))
+           |> operation_result() do
+      {:ok, Operations.view(ws, repo)}
+    end
+  end
+
+  @doc """
+  Remove one standing order atomically, by 1-based index or exact text
+  (`target`). Coordinator only. Returns the resulting list.
+  """
+  @spec workspace_standing_order_remove(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def workspace_standing_order_remove(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, target} <- require_target(args),
+         repo = Tools.fetch_string(args, "repo"),
+         {:ok, ws} <-
+           ws_id
+           |> Operations.remove_standing_order(target,
+             repo: repo,
+             context: guardrail_context(scope)
+           )
+           |> operation_result() do
+      {:ok, Operations.view(ws, repo)}
+    end
+  end
+
+  defp require_target(args) do
+    case Map.get(args, "target") do
+      n when is_integer(n) -> {:ok, n}
+      t when is_binary(t) and t != "" -> {:ok, t}
+      _ -> {:error, {:invalid, "`target` (1-based index or exact text) is required"}}
+    end
+  end
+
+  defp operation_result({:ok, ws}), do: {:ok, ws}
+  defp operation_result({:error, {kind, _msg}} = err) when kind in [:invalid, :not_found], do: err
+  defp operation_result({:error, err}), do: {:error, {:invalid, Tools.ash_error_message(err)}}
 
   # ---- installation_config_get --------------------------------------------
 
@@ -296,9 +408,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
   # Sorted names of the workspace's configured secrets; values are never
   # returned. Mirrors ArbiterWeb.Api.WorkspaceJSON.secret_key_names/1.
-  defp workspace_secret_keys(%Workspace{} = ws) do
-    ws |> Workspace.secrets_map() |> Map.keys() |> Enum.sort()
-  end
+  defp workspace_secret_keys(%Workspace{} = ws), do: Workspace.secret_key_names(ws)
 
   # G11: the config write carries the caller's authority, so loosening
   # `guardrails.*` / `agent.security` is refused for anything but operator proof.

@@ -27,6 +27,7 @@ defmodule ArbiterWeb.WorkspaceDetail.Shared do
   """
 
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.Operations
 
   @doc """
   Reads a dotted config path, falling back to `default` for a missing value.
@@ -92,9 +93,29 @@ defmodule ArbiterWeb.WorkspaceDetail.Shared do
     end
   end
 
-  @doc "Worker env var set/remove (a `nil` value removes the key)."
+  @doc """
+  Worker env var set / flag toggle / remove (a `nil` value removes the key).
+  The same `Arbiter.Tasks.Workspace.Operations` write `PATCH /api/workspaces/:id`
+  runs, so the dashboard and REST cannot drift.
+  """
   def set_worker_env(ws, patch) do
-    case Ash.update(ws, %{worker_env: patch}, action: :update) do
+    case Operations.patch_worker_env(ws.id, patch) do
+      {:ok, updated} -> {:ok, updated}
+      {:error, err} -> {:error, error_message(err)}
+    end
+  end
+
+  @doc "Appends one standing order atomically (`Operations.add_standing_order/3`)."
+  def add_standing_order(ws, text) do
+    case Operations.add_standing_order(ws.id, text) do
+      {:ok, updated} -> {:ok, updated}
+      {:error, err} -> {:error, error_message(err)}
+    end
+  end
+
+  @doc "Removes the standing order at the 0-based list `index` atomically."
+  def remove_standing_order(ws, index) do
+    case Operations.remove_standing_order(ws.id, index + 1) do
       {:ok, updated} -> {:ok, updated}
       {:error, err} -> {:error, error_message(err)}
     end
@@ -103,6 +124,9 @@ defmodule ArbiterWeb.WorkspaceDetail.Shared do
   def error_message(%Ash.Error.Invalid{errors: errors}) do
     errors |> Enum.map_join("; ", &Exception.message/1)
   end
+
+  def error_message({kind, message}) when kind in [:invalid, :not_found] and is_binary(message),
+    do: message
 
   def error_message(err), do: Exception.message(err)
 
