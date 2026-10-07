@@ -69,19 +69,19 @@ defmodule ArbiterCli.Cmd.Repo do
       end
 
     case Client.get("/api/repos/#{URI.encode(name)}") do
-      {:ok, repo} when is_map(repo) -> emit_show(repo, mode)
-      {:error, %Client.Error{status: 404}} -> emit_not_found(name, mode)
-      {:error, err} -> Output.die(err)
+      {:ok, repo} when is_map(repo) ->
+        emit_show(repo, mode)
+
+      {:error, %Client.Error{status: 404}} when mode == :json ->
+        IO.puts(Jason.encode!(%{"error" => "no repo named #{name}"}))
+        Output.halt(1)
+
+      {:error, %Client.Error{status: 404}} ->
+        Output.die("no repo named #{inspect(name)} (try `arb repo list`)")
+
+      {:error, err} ->
+        Output.die(err)
     end
-  end
-
-  defp emit_not_found(name, :json) do
-    IO.puts(Jason.encode!(%{"error" => "no repo named #{name}"}))
-    Output.halt(1)
-  end
-
-  defp emit_not_found(name, :text) do
-    Output.die("no repo named #{inspect(name)} (try `arb repo list`)")
   end
 
   defp emit_show(repo, :json), do: IO.puts(Jason.encode!(repo))

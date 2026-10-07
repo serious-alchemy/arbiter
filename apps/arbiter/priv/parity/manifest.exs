@@ -1572,12 +1572,9 @@
       title: "Show repo",
       mcp: ["repo_show"],
       cli: ["arb repo show"],
-      rest: nil,
-      status: {:gap, "P-24"},
-      divergences: ["D-C-31"],
-      absent: %{
-        rest: {:gap, "P-24", "No `GET /api/repos/:name` (MCP `repo_show` and `arb repo show` exist; low priority)."}
-      }
+      rest: ["GET /api/repos/:name"],
+      status: :partial,
+      divergences: ["D-C-31"]
     },
     %{
       id: "workspace/workspace_resolution_for",
