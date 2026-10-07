@@ -36,6 +36,7 @@ defmodule ArbiterCli.Cmd.Settings do
   """
 
   alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.Cmd.Config.Value
 
   @path "/api/installation/config"
 
@@ -119,7 +120,7 @@ defmodule ArbiterCli.Cmd.Settings do
   # The same value rule as `arb config set` (`Config.Value.parse_value/1`):
   # JSON when it parses (5, [..], [], null, "quoted"), otherwise the raw string
   # — the server then rejects it with the allowed values.
-  defp parse(raw), do: ArbiterCli.Cmd.Config.Value.parse_value(raw)
+  defp parse(raw), do: Value.parse_value(raw)
 
   defp print_item(i) do
     source = if i["overridden"], do: "override", else: "default"

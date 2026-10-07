@@ -57,7 +57,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.RejectSecretConfigKeys do
   end
 
   defp offending(changeset) do
-    old = with %{config: %{} = c} <- changeset.data, do: c, else: (_ -> %{})
+    old =
+      case changeset.data do
+        %{config: %{} = c} -> c
+        _ -> %{}
+      end
 
     case Changeset.fetch_change(changeset, :config) do
       {:ok, %{} = new} ->
