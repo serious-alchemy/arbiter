@@ -335,7 +335,7 @@ defmodule ArbiterWeb.UpdateAvailableTest do
         "state" => "failed",
         "tag" => "v99.0.0",
         "phase" => "preflight",
-        "message" => "1 worker(s) are actively working: bd-xyz",
+        "message" => "1 worker(s) are actively working",
         "finished_at" => DateTime.utc_now() |> DateTime.to_iso8601()
       })
 

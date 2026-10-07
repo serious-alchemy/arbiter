@@ -1822,7 +1822,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert %{"state" => "failed", "tag" => @vsn, "message" => msg, "finished_at" => _} =
                Status.read()
 
-      assert msg =~ "bd-xyz"
+      assert msg =~ "actively working"
     end
 
     test "a release lookup failure is recorded as failed, with the reason" do
