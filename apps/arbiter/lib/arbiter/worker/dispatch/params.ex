@@ -45,7 +45,14 @@ defmodule Arbiter.Worker.Dispatch.Params do
   @type verb :: :dispatch | :resume | :review
 
   @common ~w(task_id repo model force_quota force_quota_reason)
-  @bool_keys ~w(force over_cap force_quota no_agent with_claude with_gemini)
+  @bool_keys [
+    {"force", :force},
+    {"over_cap", :over_cap},
+    {"force_quota", :force_quota},
+    {"no_agent", :no_agent},
+    {"with_claude", :with_claude},
+    {"with_gemini", :with_gemini}
+  ]
 
   @verb_keys %{
     dispatch: ~w(provider with_claude with_gemini no_agent force over_cap),
@@ -240,9 +247,9 @@ defmodule Arbiter.Worker.Dispatch.Params do
   end
 
   defp fetch_flags(params) do
-    Enum.reduce_while(@bool_keys, {:ok, %{}}, fn key, {:ok, acc} ->
+    Enum.reduce_while(@bool_keys, {:ok, %{}}, fn {key, name}, {:ok, acc} ->
       case Arbiter.Params.fetch_optional_bool(params, key) do
-        {:ok, value} -> {:cont, {:ok, Map.put(acc, String.to_atom(key), flag_value(key, value))}}
+        {:ok, value} -> {:cont, {:ok, Map.put(acc, name, flag_value(name, value))}}
         {:error, _} = err -> {:halt, err}
       end
     end)
@@ -250,7 +257,7 @@ defmodule Arbiter.Worker.Dispatch.Params do
 
   # `with_claude` keeps its tri-state (a review treats an explicit `false` as
   # "no agent"); every other flag is a plain boolean.
-  defp flag_value("with_claude", value), do: value
+  defp flag_value(:with_claude, value), do: value
   defp flag_value(_key, value), do: value == true
 
   defp fetch_string(params, key) do
