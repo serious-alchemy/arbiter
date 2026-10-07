@@ -1998,36 +1998,32 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp capacity_result(_resp, []), do: []
 
-  defp capacity_result(%{"total" => total, "ceiling" => ceiling} = resp, _nodes) do
+  defp capacity_result(%{"total" => _} = resp, _nodes) do
+    breakdown = ArbiterCli.Cmd.Node.capacity_line(resp)
+    ceiling = resp["ceiling"]
+
     cond do
       "ceiling_below_total" in (resp["warnings"] || []) ->
         [
           nodes_result(
             "node capacity vs conductor.max_concurrent",
             :warn,
-            "the caps add up to #{total} but conductor.max_concurrent is #{ceiling}: " <>
+            "#{breakdown}, but the ceiling conductor.max_concurrent = #{ceiling} cuts it: " <>
               "the extra capacity will sit idle",
-            "Raise conductor.max_concurrent (it is the operator-owned spend valve), or lower a cap."
+            "Raise the ceiling, or clear it so the sum applies: " <>
+              "`arb settings unset conductor_system_max_concurrent`."
           )
         ]
 
-      "ceiling_far_above_total" in (resp["warnings"] || []) ->
-        [
-          nodes_result(
-            "node capacity vs conductor.max_concurrent",
-            :warn,
-            "conductor.max_concurrent is #{ceiling} but the caps add up to only #{total}: " <>
-              "the board will plan more than any machine can start",
-            "Lower conductor.max_concurrent, or raise a cap."
-          )
-        ]
+      is_nil(ceiling) ->
+        [nodes_result("node capacity", :ok, "#{breakdown}; no ceiling set")]
 
       true ->
         [
           nodes_result(
             "node capacity vs conductor.max_concurrent",
             :ok,
-            "#{total} of #{ceiling}"
+            "#{breakdown}; under the ceiling #{ceiling}"
           )
         ]
     end
