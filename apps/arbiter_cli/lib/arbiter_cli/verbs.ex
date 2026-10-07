@@ -186,7 +186,9 @@ defmodule ArbiterCli.Verbs do
          ["list"],
          ["show", "a"],
          ["create", "p", "s"],
+         ["set", "a"],
          ["attach", "w", "p", "a"],
+         ["detach", "w", "a"],
          ["rotate", "a"],
          ~w(merge a)
        ]

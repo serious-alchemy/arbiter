@@ -221,6 +221,23 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
     git!(ctx.repo, ["commit", "-q", "-m", "submodule"])
     assert {:error, {:refused, _code, detail}} = place(ctx, "c3")
     assert detail =~ "submodule"
-    assert Runs.run_ids() == []
+    # The refused run's process unregisters asynchronously; wait (bounded) for it.
+    assert wait_until(fn -> "c3" not in Runs.run_ids() end)
+  end
+
+  defp wait_until(fun, attempts \\ 100) do
+    cond do
+      fun.() ->
+        true
+
+      attempts == 0 ->
+        false
+
+      true ->
+        receive do
+        after
+          50 -> wait_until(fun, attempts - 1)
+        end
+    end
   end
 end

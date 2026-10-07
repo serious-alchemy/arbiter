@@ -31,7 +31,6 @@
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-16" => "Account field registry: edit parity across PATCH, `arb account`, UI and MCP",
     "P-21" => "Workspace operations parity: update, schema, multi-key patch, worker_env, standing orders",
     "P-23" => "Loop parity",
     "P-25" => "Memory operator surface (REST + CLI)",
@@ -772,8 +771,7 @@
       mcp: nil,
       cli: ["arb account create"],
       rest: ["POST /api/accounts"],
-      status: :partial,
-      divergences: ["D-A-14"],
+      status: :full,
       absent: %{
         mcp: {:intentional, "Operator-asserted identity (design doc §2.4): creating an account is an operator/UI action, not a coordinator-agent one."}
       }
@@ -781,14 +779,11 @@
     %{
       id: "accounts/update_account_label_plan_enabled_max",
       title: "Update account (label/plan/enabled/max_concurrent/quota_config)",
-      mcp: nil,
+      mcp: ["account_set"],
       cli: ["arb account set"],
       rest: ["PATCH /api/accounts/:ref"],
-      status: {:gap, "P-16"},
-      divergences: ["D-A-15"],
-      absent: %{
-        mcp: {:gap, "P-16", "No MCP `account_set` for the non-secret fields (the same PATCH whitelist), though `provider_pause` is the same class of lever and is on MCP."}
-      }
+      status: :full,
+      note: "One `Accounts.Fields` registry: every quota key is reachable from REST, CLI, the Providers Edit form and MCP; the edit is a single write."
     },
     %{
       id: "accounts/attach_workspace_to_account",
@@ -796,8 +791,7 @@
       mcp: nil,
       cli: ["arb account attach"],
       rest: ["POST /api/accounts/:ref/attach"],
-      status: :partial,
-      divergences: ["D-A-16", "D-A-17"],
+      status: :full,
       absent: %{
         mcp: {:intentional, "Topology change; operator action."}
       }
@@ -806,13 +800,11 @@
       id: "accounts/detach_workspace_from_account",
       title: "Detach workspace from account",
       mcp: nil,
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-16"},
+      cli: ["arb account detach"],
+      rest: ["DELETE /api/accounts/:ref/attach/:workspace_id"],
+      status: :full,
       absent: %{
-        mcp: {:intentional, "Topology change; operator action (as attach)."},
-        cli: {:gap, "P-16", "No `arb account detach <ws> <ref>`."},
-        rest: {:gap, "P-16", "No `DELETE /api/accounts/:ref/attach/:workspace_id`; the context function is UI-only today."}
+        mcp: {:intentional, "Topology change; operator action (as attach)."}
       }
     },
     %{

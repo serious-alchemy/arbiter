@@ -75,9 +75,9 @@ defmodule Arbiter.Quota.GatePolicyTest do
 
     test "rejects an unknown key outright" do
       assert {:error, {:invalid_quota_config, message}} =
-               Gate.validate_quota_config(%{"throttle_threshold" => 0.5})
+               Gate.validate_quota_config(%{"not_a_gate_key" => 0.5})
 
-      assert message =~ "throttle_threshold"
+      assert message =~ "not_a_gate_key"
     end
 
     test "an empty map validates to an empty map" do

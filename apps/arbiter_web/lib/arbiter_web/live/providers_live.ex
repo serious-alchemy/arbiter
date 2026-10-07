@@ -306,7 +306,6 @@ defmodule ArbiterWeb.ProvidersLive do
 
   def handle_event("attach", %{"account_id" => id, "attach" => params}, socket) do
     with %{account: account} <- find_row(socket, id) || {:error, :not_found},
-         :ok <- not_grok(account),
          {:ok, opts} <- share_opts(Map.get(params, "share")),
          {:ok, _link} <-
            Accounts.attach_workspace(
@@ -552,9 +551,6 @@ defmodule ArbiterWeb.ProvidersLive do
   defp account_form(params \\ %{"provider" => "claude"}), do: to_form(params, as: :account)
   defp credential_form(params), do: to_form(params, as: :credential)
   defp edit_form(params), do: to_form(params, as: :edit)
-  # grok routes only through `routing.grok.enabled`, as the workspace pane does.
-  defp not_grok(%{provider: :grok}), do: {:error, :grok_routed_by_opt_in}
-  defp not_grok(_), do: :ok
 
   defp attach_form(params \\ %{}), do: to_form(params, as: :attach)
 

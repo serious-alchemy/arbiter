@@ -243,6 +243,181 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "--weekly-threshold"
   end
 
+  # ---- every editable quota key (bd-1kr3qf, D-A-15) ----------------------------
+
+  defp patch_body_route(expected) do
+    {{"patch", "/api/accounts/personal-max"},
+     fn conn ->
+       {:ok, body, conn} = Plug.Conn.read_body(conn)
+       assert Jason.decode!(body) == expected
+
+       conn
+       |> Plug.Conn.put_status(200)
+       |> Req.Test.json(%{
+         "id" => "acct-1",
+         "provider" => "claude",
+         "slug" => "personal-max",
+         "max_concurrent" => nil,
+         "quota_config" => %{},
+         "enabled" => true,
+         "merged_into_id" => nil
+       })
+     end}
+  end
+
+  test "account set reaches every quota key the registry names" do
+    stub_routes([
+      patch_body_route(%{
+        "quota_config" => %{
+          "threshold_mode" => "paced",
+          "throttle_threshold" => 0.7,
+          "weekly_threshold" => 0.9,
+          "paced_floor" => 0.3,
+          "weekly_paced_floor" => 0.2,
+          "weekly_warning_policy" => "hold",
+          "window_seconds" => %{"5h" => 18_000, "7d" => 604_800},
+          "pace_exempt_priority" => 1,
+          "pace_exempt_threshold" => 0.95,
+          "weekly_pace_exempt_threshold" => 0.97
+        }
+      })
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Account.run(~w(set personal-max --threshold-mode paced --throttle-threshold 0.7
+          --weekly-threshold 0.9 --paced-floor 0.3 --weekly-paced-floor 0.2
+          --weekly-warning-policy hold --window-seconds 5h=18000 --window-seconds 7d=604800
+          --pace-exempt-priority 1 --pace-exempt-threshold 0.95
+          --weekly-pace-exempt-threshold 0.97))
+      end)
+
+    assert exit_code == 0
+  end
+
+  test "--window-seconds also takes a comma list" do
+    stub_routes([
+      patch_body_route(%{"quota_config" => %{"window_seconds" => %{"5h" => 1, "7d" => 2}}})
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(~w(set personal-max --window-seconds 5h=1,7d=2)) end)
+
+    assert exit_code == 0
+  end
+
+  test "--pace-exempt-priority none clears the key" do
+    stub_routes([patch_body_route(%{"quota_config" => %{"pace_exempt_priority" => nil}})])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(~w(set personal-max --pace-exempt-priority none)) end)
+
+    assert exit_code == 0
+  end
+
+  test "--unset clears a quota key (underscore or dash spelling), repeatable" do
+    stub_routes([
+      patch_body_route(%{
+        "quota_config" => %{"weekly_threshold" => nil, "window_seconds" => nil}
+      })
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Account.run(~w(set personal-max --unset weekly_threshold --unset window-seconds))
+      end)
+
+    assert exit_code == 0
+  end
+
+  test "--unset rejects a key that is not a quota key" do
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(~w(set personal-max --unset label)) end)
+
+    assert exit_code != 0
+    assert err =~ "--unset"
+    assert err =~ "weekly_threshold"
+  end
+
+  test "--unset together with a value for the same key is refused" do
+    {_out, err, exit_code} =
+      capture(fn ->
+        Account.run(~w(set personal-max --weekly-threshold 0.9 --unset weekly_threshold))
+      end)
+
+    assert exit_code != 0
+    assert err =~ "weekly_threshold"
+  end
+
+  test "bad values for the new flags die client-side naming the flag" do
+    for {args, flag} <- [
+          {~w(--throttle-threshold 2), "--throttle-threshold"},
+          {~w(--pace-exempt-priority 9), "--pace-exempt-priority"},
+          {~w(--pace-exempt-threshold x), "--pace-exempt-threshold"},
+          {~w(--weekly-pace-exempt-threshold 0), "--weekly-pace-exempt-threshold"},
+          {~w(--weekly-warning-policy maybe), "--weekly-warning-policy"},
+          {~w(--window-seconds 5h), "--window-seconds"},
+          {~w(--window-seconds 5h=0), "--window-seconds"}
+        ] do
+      {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max" | args]) end)
+      assert exit_code != 0, "#{flag} should have failed"
+      assert err =~ flag
+    end
+  end
+
+  test "every registry quota key has an `arb account set` flag" do
+    keys = Arbiter.Accounts.Fields.quota_keys() |> Enum.sort()
+    assert Enum.sort(Account.quota_keys()) == keys
+  end
+
+  test "account create carries the same quota flags, --disable and the identity refs" do
+    stub_routes([
+      {{"post", "/api/accounts"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+         assert Jason.decode!(body) == %{
+                  "provider" => "claude",
+                  "slug" => "fresh",
+                  "enabled" => false,
+                  "provider_account_ref" => "uuid-a",
+                  "provider_org_ref" => "uuid-o",
+                  "quota_config" => %{
+                    "threshold_mode" => "paced",
+                    "window_seconds" => %{"5h" => 9}
+                  }
+                }
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "acct-9", "provider" => "claude", "slug" => "fresh"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Account.run(~w(create claude fresh --disable --provider-account-ref uuid-a
+          --provider-org-ref uuid-o --threshold-mode paced --window-seconds 5h=9))
+      end)
+
+    assert exit_code == 0
+    assert out =~ "created account claude:fresh"
+  end
+
+  test "account list --include-deleted forwards include_deleted=true" do
+    stub_routes([
+      {{"get", "/api/accounts"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         assert conn.query_params["include_deleted"] == "true"
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Account.run(["list", "--include-deleted"]) end)
+    assert exit_code == 0
+  end
+
   test "account set with no flags at all is an error" do
     {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max"]) end)
     assert exit_code != 0
@@ -363,19 +538,110 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert out =~ "created account codex:team-plan (acct-2)"
   end
 
-  test "account attach posts workspace/provider/share" do
-    stub_post("/api/accounts/personal-max/attach", %{
-      "workspace_id" => "ws-1",
-      "provider" => "claude",
-      "provider_account_id" => "acct-1",
-      "share" => 2
-    })
+  defp ws_list_route do
+    {{"get", "/api/workspaces"},
+     {%{
+        "data" => [
+          %{"id" => "ws-1", "name" => "alpha"},
+          %{"id" => "ws-2", "name" => "beta"}
+        ]
+      }, 200}}
+  end
+
+  test "account attach resolves a workspace id and posts workspace/provider/share" do
+    stub_routes([
+      ws_list_route(),
+      {{"post", "/api/accounts/personal-max/attach"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+         assert Jason.decode!(body) == %{
+                  "workspace_id" => "ws-1",
+                  "provider" => "claude",
+                  "share" => 2
+                }
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "workspace_id" => "ws-1",
+           "provider" => "claude",
+           "provider_account_id" => "acct-1",
+           "share" => 2
+         })
+       end}
+    ])
 
     {out, _err, exit_code} =
       capture(fn -> Account.run(["attach", "ws-1", "claude", "personal-max", "--share", "2"]) end)
 
     assert exit_code == 0
     assert out =~ "attached workspace ws-1 -> account acct-1 share=2"
+  end
+
+  # D-A-17: a workspace *name* resolves, like every other workspace-scoped verb.
+  test "account attach resolves a workspace name to its id" do
+    stub_routes([
+      ws_list_route(),
+      {{"post", "/api/accounts/personal-max/attach"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert %{"workspace_id" => "ws-2"} = Jason.decode!(body)
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"workspace_id" => "ws-2", "provider_account_id" => "acct-1"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["attach", "beta", "claude", "personal-max"]) end)
+
+    assert exit_code == 0
+    assert out =~ "attached workspace ws-2"
+  end
+
+  test "account attach with an unknown workspace dies before posting" do
+    stub_routes([ws_list_route()])
+
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(["attach", "nope", "claude", "personal-max"]) end)
+
+    assert exit_code != 0
+    assert err =~ "no workspace named"
+  end
+
+  test "account detach resolves the workspace and DELETEs the one link" do
+    stub_routes([
+      ws_list_route(),
+      {{"delete", "/api/accounts/personal-max/attach/ws-2"},
+       {%{"workspace_id" => "ws-2", "provider" => "claude", "provider_account_id" => "acct-1"},
+        200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["detach", "beta", "personal-max"]) end)
+    assert exit_code == 0
+    assert out =~ "detached workspace ws-2 from account acct-1"
+  end
+
+  test "account detach requires a workspace and a ref" do
+    {_out, err, exit_code} = capture(fn -> Account.run(["detach", "beta"]) end)
+    assert exit_code != 0
+    assert err =~ "account detach requires"
+  end
+
+  test "account detach surfaces the server's refusal" do
+    stub_routes([
+      ws_list_route(),
+      {{"delete", "/api/accounts/personal-max/attach/ws-1"},
+       {%{
+          "error" => %{"type" => "invalid_request", "message" => "that workspace is not attached"}
+        }, 400}}
+    ])
+
+    {_out, err, exit_code} = capture(fn -> Account.run(["detach", "alpha", "personal-max"]) end)
+    assert exit_code != 0
+    assert err =~ "not attached"
   end
 
   test "account rotate never prints the secret it just wrote" do

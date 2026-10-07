@@ -291,6 +291,7 @@ defmodule ArbiterWeb.Router do
     get("/accounts/:ref", AccountController, :show)
     patch("/accounts/:ref", AccountController, :update)
     post("/accounts/:ref/attach", AccountController, :attach)
+    delete("/accounts/:ref/attach/:workspace_id", AccountController, :detach)
     post("/accounts/:ref/rotate", AccountController, :rotate)
     post("/accounts/:ref/merge", AccountController, :merge)
     delete("/accounts/:ref", AccountController, :delete)

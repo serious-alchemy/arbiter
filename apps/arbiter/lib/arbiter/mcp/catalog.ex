@@ -94,6 +94,7 @@ defmodule Arbiter.MCP.Catalog do
   | `provider_list` | coordinator | `Arbiter.Providers.Pause.to_json/0` (active pauses, P-17) |
   | `account_list` | coordinator | `Arbiter.Accounts.list_accounts/1` via `Accounts.Serializer` (P-17) |
   | `account_show` | coordinator | `Arbiter.Accounts.get_account/1` via `Accounts.Serializer` (credential kind + fingerprint prefix only, P-17) |
+  | `account_set` | coordinator | `Arbiter.Accounts.edit_account/2` (non-secret fields only, bd-1kr3qf) |
   | `alert_list` | coordinator | `Arbiter.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
@@ -2890,6 +2891,24 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.account_show/2
+    },
+
+    # ---- provider accounts (bd-1kr3qf) --------------------------------------
+    %{
+      name: "account_set",
+      tiers: @coordinator,
+      description:
+        "Edit one provider account's non-secret settings in a single write: `label`, " <>
+          "`plan`, `enabled` (false parks it), `max_concurrent` (the account concurrency " <>
+          "ceiling; null clears it) and a `quota_config` patch — the gate settings " <>
+          "(thresholds, paced floors, weekly warning policy, window lengths, pace " <>
+          "exemption). A null `quota_config` value clears that key; keys not named are " <>
+          "left alone, and a bad value rejects the whole edit. `ref` is an account id, " <>
+          "`provider:slug` or a bare slug. Credentials, secrets, login, create, attach, " <>
+          "merge and delete are operator actions and are not available here. " <>
+          "Coordinator only.",
+      input_schema: Arbiter.MCP.Catalog.AccountSchema.account_set(),
+      handler: &Tools.account_set/2
     },
 
     # ---- system alerts (bd-7gt8rm) -------------------------------------------

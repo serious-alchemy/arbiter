@@ -3,11 +3,13 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   The per-account Edit form on `/providers` (bd-8vkqd3): `label`, `plan`,
   `enabled`, the concurrency cap and every settable `quota_config` key.
 
-  `parse/1` validates the whole submission before anything is written, so a
-  bad threshold can never leave the label saved and the policy not;
-  `save/2` then goes through the same writers `PATCH /api/accounts/:ref`
-  uses — `Accounts.update_account/2`, `Accounts.set_max_concurrent/2` and
-  `Accounts.set_quota_config/2` — and re-implements none of their validation.
+  The fields and their validation come from the account field registry,
+  `Arbiter.Accounts.Fields` (bd-1kr3qf), the same one `PATCH /api/accounts/:ref`
+  and `arb account set` use. `parse/1` validates the whole submission before
+  anything is written, so a bad threshold can never leave the label saved and
+  the policy not; `save/2` then hands the lot to `Accounts.edit_account/2`,
+  which writes it as one update — the form re-implements none of the
+  validation and cannot half-apply an edit.
 
   A blank policy field clears its key (the account then falls back to the
   built-in default); it is never written as an empty string.
@@ -19,14 +21,14 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   use Phoenix.Component
 
   alias Arbiter.Accounts
+  alias Arbiter.Accounts.Fields
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Forms
 
-  @quota_keys ~w(threshold_mode weekly_threshold paced_floor weekly_paced_floor
-                 pace_exempt_priority pace_exempt_threshold weekly_pace_exempt_threshold)
+  @quota_keys Fields.quota_keys()
 
   @field_names %{
     "max_concurrent" => "concurrency cap",
@@ -51,6 +53,14 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   end
 
   defp display(nil), do: ""
+
+  # `5h=18000, 7d=604800`: the table as the operator types it back.
+  defp display(%{} = windows) do
+    windows
+    |> Enum.sort()
+    |> Enum.map_join(", ", fn {label, seconds} -> "#{label}=#{seconds}" end)
+  end
+
   defp display(value), do: to_string(value)
 
   @doc """
@@ -62,18 +72,44 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     attrs = Map.take(params, ["label", "plan", "enabled"])
     quota = Map.new(@quota_keys, &{&1, blank_to_nil(Map.get(params, &1))})
 
+    {quota, window_errors} = parse_windows(quota)
+
     errors =
-      %{}
+      window_errors
       |> check_attrs(attrs)
       |> check_cap(Map.get(params, "max_concurrent"))
       |> check_quota(quota)
 
     case errors do
       errors when map_size(errors) == 0 ->
-        {:ok, %{attrs: attrs, max_concurrent: cap(params), quota: quota}}
+        {:ok,
+         %{attrs: attrs, max_concurrent: elem(cap(params["max_concurrent"]), 1), quota: quota}}
 
       errors ->
         {:error, errors}
+    end
+  end
+
+  # `window_seconds` is typed as `label=seconds` pairs; turn the text into the
+  # table `Fields` validates, or name the field when a pair does not parse.
+  defp parse_windows(%{"window_seconds" => nil} = quota), do: {quota, %{}}
+
+  defp parse_windows(%{"window_seconds" => text} = quota) do
+    pairs = text |> String.split([",", "\n"], trim: true) |> Enum.map(&String.trim/1)
+
+    parsed =
+      Enum.map(pairs, fn pair ->
+        case String.split(pair, "=", parts: 2) do
+          [label, seconds] -> {String.trim(label), String.trim(seconds)}
+          _ -> :error
+        end
+      end)
+
+    if :error in parsed do
+      {Map.put(quota, "window_seconds", nil),
+       %{"window_seconds" => "Window lengths are label=seconds pairs, e.g. 5h=18000, 7d=604800."}}
+    else
+      {Map.put(quota, "window_seconds", Map.new(parsed)), %{}}
     end
   end
 
@@ -94,7 +130,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   end
 
   defp check_cap(errors, raw) do
-    case parse_cap(raw) do
+    case cap(raw) do
       {:ok, _cap} ->
         errors
 
@@ -107,21 +143,10 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     end
   end
 
-  defp cap(params) do
-    {:ok, cap} = parse_cap(Map.get(params, "max_concurrent"))
-    cap
-  end
-
-  defp parse_cap(raw) do
-    case blank_to_nil(raw) do
-      nil ->
-        {:ok, nil}
-
-      text ->
-        case Integer.parse(text) do
-          {n, ""} when n >= 0 -> {:ok, n}
-          _ -> :error
-        end
+  defp cap(raw) do
+    case Fields.cast(%{"max_concurrent" => raw}, :update) do
+      {:ok, %{max_concurrent: cap}} -> {:ok, cap}
+      {:error, _} -> :error
     end
   end
 
@@ -133,7 +158,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
         acc
 
       {key, value}, acc ->
-        case Gate.validate_quota_config(%{key => value}) do
+        case Fields.validate_quota_config(%{key => value}) do
           {:ok, _} -> acc
           {:error, {:invalid_quota_config, message}} -> Map.put(acc, key, message)
         end
@@ -145,13 +170,12 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   """
   @spec save(String.t(), map()) :: {:ok, ProviderAccount.t()} | {:error, String.t()}
   def save(account_id, %{attrs: attrs, max_concurrent: cap, quota: quota}) do
-    result =
-      with {:ok, _} <- Accounts.update_account(account_id, attrs),
-           {:ok, _} <- Accounts.set_max_concurrent(account_id, cap) do
-        Accounts.set_quota_config(account_id, quota)
-      end
+    edit =
+      attrs
+      |> Map.put("max_concurrent", cap)
+      |> Map.put("quota_config", quota)
 
-    case result do
+    case Accounts.edit_account(account_id, edit) do
       {:ok, account} -> {:ok, account}
       {:error, error} -> {:error, describe(error)}
     end
@@ -217,6 +241,11 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     {"Default (flat)", ""},
     {"Flat — a fixed ceiling", "flat"},
     {"Paced — tracks the window", "paced"}
+  ]
+  @policy_options [
+    {"Default (ignore)", ""},
+    {"Ignore — a weekly warning does not hold", "ignore"},
+    {"Hold — a weekly warning holds dispatch", "hold"}
   ]
   @status_options [{"Enabled", "true"}, {"Parked — kept, but never routed to", "false"}]
   @priority_options [
@@ -312,6 +341,16 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
         <.field
           form={@form}
           id={@account.id}
+          key="throttle_threshold"
+          label="5-hour ceiling"
+          hint="throttle_threshold"
+          errors={@errors}
+          placeholder="0.90"
+          inputmode="decimal"
+        />
+        <.field
+          form={@form}
+          id={@account.id}
           key="weekly_threshold"
           label="7-day ceiling"
           hint="weekly_threshold"
@@ -353,6 +392,33 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
           <span class="text-[var(--arb-text-muted)]">
             — saved values; the lower of the two applies
           </span>
+        </p>
+      </fieldset>
+
+      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
+        <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+          Provider windows
+        </legend>
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="weekly_warning_policy"
+          label="Weekly warning"
+          hint="weekly_warning_policy"
+          options={policy_options()}
+          errors={@errors}
+        />
+        <.field
+          form={@form}
+          id={@account.id}
+          key="window_seconds"
+          label="Window lengths"
+          hint="window_seconds"
+          errors={@errors}
+          placeholder="5h=18000, 7d=604800"
+        />
+        <p class="m-0 sm:col-span-2 lg:col-span-4 max-w-3xl text-[12px] text-[var(--arb-text-muted)]">
+          "Hold" stops new dispatches while the provider shows a weekly warning; the default ignores it. Window lengths override how long a quota window is (label=seconds, comma-separated) for plans the built-in table does not know; blank uses the built-in lengths.
         </p>
       </fieldset>
 
@@ -436,6 +502,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   defp field_name(key), do: Map.get(@field_names, key, key)
   defp status_options, do: @status_options
   defp mode_options, do: @mode_options
+  defp policy_options, do: @policy_options
   defp priority_options, do: @priority_options
 
   attr :form, :any, required: true

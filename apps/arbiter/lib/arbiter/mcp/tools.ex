@@ -1835,6 +1835,8 @@ defmodule Arbiter.MCP.Tools do
   defdelegate usage_events_list(scope, args), to: Arbiter.MCP.Tools.Usage
   defdelegate usage_calibration(scope, args), to: Arbiter.MCP.Tools.Usage
 
+  defdelegate account_set(scope, args), to: Arbiter.MCP.Tools.Account
+
   defdelegate breaker_list(scope, args), to: Arbiter.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Arbiter.MCP.Tools.Breaker
 

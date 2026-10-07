@@ -6,25 +6,38 @@ defmodule ArbiterCli.Cmd.Account do
   survives credential rotation because none of them ever point at the
   credential itself.
 
-      arb account list                              [--provider claude|codex|antigravity]
-                                     [--include-merged]
-                                     By default merged-away accounts (from a
-                                     prior `arb account merge`) are hidden;
-                                     pass --include-merged to see them too.
+      arb account list                              [--provider claude|codex|antigravity|grok]
+                                     [--include-merged] [--include-deleted]
+                                     By default merged-away and deleted
+                                     accounts are hidden; pass --include-merged
+                                     / --include-deleted to see them too.
       arb account show   <ref>
                                      <ref> is a uuid, "provider:slug", or a
                                      bare slug (only unambiguous if no other
                                      provider shares it)
       arb account create <provider> <slug> [--label ...] [--plan ...]
-                                     [--max-concurrent N]
+                                     [--max-concurrent N] [--disable]
+                                     [--provider-account-ref ID]
+                                     [--provider-org-ref ID]
+                                     [<quota flags>, as for `set`]
                                      No credential is required at creation
                                      time (§2.4 — operator-asserted identity).
+                                     The quota flags are validated by the same
+                                     rules as `set`; a bad value creates
+                                     nothing.
       arb account set    <ref> [--label TEXT] [--plan TEXT]
                                      [--enable | --disable]
                                      [--max-concurrent N|none]
                                      [--threshold-mode flat|paced]
+                                     [--throttle-threshold F]
                                      [--weekly-threshold F] [--paced-floor F]
                                      [--weekly-paced-floor F]
+                                     [--weekly-warning-policy ignore|hold]
+                                     [--window-seconds LABEL=SECONDS[,...]]
+                                     [--pace-exempt-priority 0..4|none]
+                                     [--pace-exempt-threshold F]
+                                     [--weekly-pace-exempt-threshold F]
+                                     [--unset QUOTA_KEY]
                                      `--max-concurrent`: the account
                                      concurrency ceiling (P8, §4.2): at most N
                                      workers may run on this account across
@@ -32,28 +45,46 @@ defmodule ArbiterCli.Cmd.Account do
                                      clears it — the ceiling is opt-in (§4.4)
                                      and an account without one behaves
                                      exactly as it did before P8.
-                                     `--threshold-mode` / `--weekly-threshold`
-                                     / `--paced-floor` / `--weekly-paced-floor`
-                                     (bd-c7ll4t): a partial merge into the
-                                     account's `quota_config` — the gate
-                                     settings `Arbiter.Quota.Gate` resolves as
-                                     `min(account, workspace)`. Only the given
-                                     fields change; a sibling key already set
-                                     (e.g. `throttle_threshold`) is untouched.
+                                     The remaining flags (bd-c7ll4t, bd-1kr3qf)
+                                     are a partial merge into the account's
+                                     `quota_config` — the gate settings
+                                     `Arbiter.Quota.Gate` resolves as
+                                     `min(account, workspace)`. Every key the
+                                     gate reads from an account has a flag;
+                                     only the given keys change. F is a
+                                     fraction in (0, 1].
+                                     `--window-seconds` replaces the account's
+                                     whole window-length table (repeat the
+                                     flag or comma-separate: 5h=18000,7d=604800).
+                                     `--pace-exempt-priority none` and
+                                     `--unset KEY` (repeatable; KEY is a quota
+                                     key, e.g. weekly_threshold) clear a key so
+                                     the built-in default applies again.
                                      `--label` / `--plan` / `--enable` /
                                      `--disable` (bd-8vkqd3): the display name,
                                      the plan, and whether the account is
                                      parked. An empty `--label ""` clears it.
-                                     At least one flag is required.
-      arb account attach <workspace-id> <provider> <ref> [--share N]
-                                     Points a workspace at an account for a
-                                     provider — writes/updates the
-                                     workspace_provider_accounts row.
+                                     At least one flag is required. The whole
+                                     edit is one write: a bad value changes
+                                     nothing.
+      arb account attach <workspace> <provider> <ref> [--share N]
+                                     Points a workspace (name or id; with
+                                     `-w`/ARB_WORKSPACE the workspace may be
+                                     left out) at an account for a provider —
+                                     writes/updates the
+                                     workspace_provider_accounts row. A grok
+                                     account cannot be attached: grok is
+                                     routed by the workspace's own setting.
                                      `--share N` is this workspace's cap on
                                      its use of the account ceiling (§4.3) —
                                      a **cap, not a reservation**: shares may
                                      sum to more than the ceiling, and that is
                                      the useful configuration.
+      arb account detach <workspace> <ref>
+                                     Removes that workspace's link to the
+                                     account (name or id; `-w` may stand in
+                                     for the workspace). Other workspaces
+                                     stay attached.
       arb account rotate <ref> --kind oauth_token|api_key|cli_credentials_file
                                      --env-var VAR (--secret VALUE | --secret-file PATH | -)
                                      [--scopes a,b]
@@ -116,33 +147,56 @@ defmodule ArbiterCli.Cmd.Account do
   alias ArbiterCli.{ArgParser, Client, Output, SecretInput}
   alias ArbiterCli.Cmd.Account.Login
 
-  @switches [
-    provider: :string,
-    label: :string,
-    plan: :string,
-    # :string, not :integer, so `--max-concurrent none` can clear the
-    # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
-    max_concurrent: :string,
+  # One flag per `quota_config` key (`Arbiter.Accounts.Fields.quota_keys/0`; a
+  # test pins the two lists together). Values stay strings so the flag can say
+  # `none`; each is parsed and range-checked by `quota_value!/2`.
+  @quota_switches [
     threshold_mode: :string,
+    throttle_threshold: :string,
     weekly_threshold: :string,
     paced_floor: :string,
     weekly_paced_floor: :string,
-    share: :integer,
-    kind: :string,
-    env_var: :string,
-    secret: :string,
-    secret_file: :string,
-    # refused by `login`: a code must never ride in argv
-    code: :string,
-    scopes: :string,
-    into: :string,
-    json: :boolean,
-    include_merged: :boolean,
-    detach: :boolean,
-    hard: :boolean,
-    enable: :boolean,
-    disable: :boolean
+    weekly_warning_policy: :string,
+    window_seconds: [:string, :keep],
+    pace_exempt_priority: :string,
+    pace_exempt_threshold: :string,
+    weekly_pace_exempt_threshold: :string
   ]
+
+  @quota_keys Enum.map(@quota_switches, fn {key, _} -> Atom.to_string(key) end)
+
+  @doc "The `quota_config` keys `account create|set` has a flag for."
+  @spec quota_keys() :: [String.t()]
+  def quota_keys, do: @quota_keys
+
+  @switches @quota_switches ++
+              [
+                provider: :string,
+                label: :string,
+                plan: :string,
+                # :string, not :integer, so `--max-concurrent none` can clear the
+                # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
+                max_concurrent: :string,
+                provider_account_ref: :string,
+                provider_org_ref: :string,
+                unset: [:string, :keep],
+                share: :integer,
+                kind: :string,
+                env_var: :string,
+                secret: :string,
+                secret_file: :string,
+                # refused by `login`: a code must never ride in argv
+                code: :string,
+                scopes: :string,
+                into: :string,
+                json: :boolean,
+                include_merged: :boolean,
+                include_deleted: :boolean,
+                detach: :boolean,
+                hard: :boolean,
+                enable: :boolean,
+                disable: :boolean
+              ]
 
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
@@ -168,6 +222,9 @@ defmodule ArbiterCli.Cmd.Account do
         ["attach" | args] ->
           attach(args, opts, mode)
 
+        ["detach" | args] ->
+          detach(args, opts, mode)
+
         ["rotate" | args] ->
           rotate(args, opts, mode)
 
@@ -183,7 +240,7 @@ defmodule ArbiterCli.Cmd.Account do
         [] ->
           Output.die(
             "account requires a subcommand",
-            "verbs: list, show, create, set, attach, rotate, merge, delete, login"
+            "verbs: list, show, create, set, attach, detach, rotate, merge, delete, login"
           )
 
         [unknown | _] ->
@@ -199,6 +256,9 @@ defmodule ArbiterCli.Cmd.Account do
       []
       |> then(fn p -> if opts[:provider], do: [{:provider, opts[:provider]} | p], else: p end)
       |> then(fn p -> if opts[:include_merged], do: [{:include_merged, "true"} | p], else: p end)
+      |> then(fn p ->
+        if opts[:include_deleted], do: [{:include_deleted, "true"} | p], else: p
+      end)
 
     case Client.get("/api/accounts", params) do
       {:ok, %{"data" => accounts}} -> emit_list(accounts, mode)
@@ -278,6 +338,10 @@ defmodule ArbiterCli.Cmd.Account do
       |> maybe_put("label", opts[:label])
       |> maybe_put("plan", opts[:plan])
       |> maybe_put("max_concurrent", max_concurrent!(opts))
+      |> maybe_put("provider_account_ref", opts[:provider_account_ref])
+      |> maybe_put("provider_org_ref", opts[:provider_org_ref])
+      |> maybe_put("enabled", if(opts[:disable], do: false))
+      |> maybe_put_quota_config(opts, create: true)
 
     case Client.post("/api/accounts", payload) do
       {:ok, account} -> emit_written(account, "created", mode)
@@ -297,13 +361,13 @@ defmodule ArbiterCli.Cmd.Account do
       %{}
       |> maybe_put_attrs(opts)
       |> maybe_put_ceiling(opts)
-      |> maybe_put_quota_config(opts)
+      |> maybe_put_quota_config(opts, [])
 
     if payload == %{} do
       Output.die(
         "account set requires at least one of --label, --plan, --enable, --disable, " <>
-          "--max-concurrent, --threshold-mode, --weekly-threshold, --paced-floor, " <>
-          "--weekly-paced-floor"
+          "--max-concurrent, --unset, " <>
+          Enum.map_join(@quota_keys, ", ", &flag_name/1)
       )
     end
 
@@ -338,24 +402,102 @@ defmodule ArbiterCli.Cmd.Account do
     end
   end
 
-  defp maybe_put_quota_config(payload, opts) do
-    quota_config =
-      %{}
-      |> maybe_put("threshold_mode", opts[:threshold_mode])
-      |> maybe_put(
-        "weekly_threshold",
-        parse_fraction!(opts[:weekly_threshold], "--weekly-threshold")
-      )
-      |> maybe_put("paced_floor", parse_fraction!(opts[:paced_floor], "--paced-floor"))
-      |> maybe_put(
-        "weekly_paced_floor",
-        parse_fraction!(opts[:weekly_paced_floor], "--weekly-paced-floor")
-      )
+  # The `quota_config` object for `create` / `set`: one entry per flag given,
+  # plus a `nil` per `--unset` key (a clear). `create` has nothing to clear, so
+  # `--unset` is refused there.
+  defp maybe_put_quota_config(payload, opts, create_opts) do
+    unsets = unset_keys!(opts)
 
+    if create_opts[:create] && unsets != [] do
+      Output.die("--unset only applies to `arb account set`")
+    end
+
+    given =
+      Enum.reduce(@quota_keys, %{}, fn key, acc ->
+        case quota_value!(key, quota_flag_values(opts, key)) do
+          nil -> acc
+          :clear -> Map.put(acc, key, nil)
+          value -> Map.put(acc, key, value)
+        end
+      end)
+
+    case Enum.find(unsets, &Map.has_key?(given, &1)) do
+      nil -> :ok
+      key -> Output.die("#{flag_name(key)} and --unset #{key} contradict each other")
+    end
+
+    quota_config = Enum.reduce(unsets, given, &Map.put(&2, &1, nil))
     if quota_config == %{}, do: payload, else: Map.put(payload, "quota_config", quota_config)
   end
 
-  defp parse_fraction!(nil, _flag), do: nil
+  defp quota_flag_values(opts, "window_seconds"), do: Keyword.get_values(opts, :window_seconds)
+  defp quota_flag_values(opts, key), do: opts[String.to_existing_atom(key)]
+
+  defp flag_name(key), do: "--" <> String.replace(key, "_", "-")
+
+  defp unset_keys!(opts) do
+    opts
+    |> Keyword.get_values(:unset)
+    |> Enum.map(fn raw ->
+      key = raw |> String.trim() |> String.replace("-", "_")
+
+      if key in @quota_keys do
+        key
+      else
+        Output.die(
+          "--unset takes a quota key, got #{inspect(raw)}",
+          "quota keys: #{Enum.join(@quota_keys, ", ")}"
+        )
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  # `nil` when the flag was not given (`maybe_put` drops it).
+  defp quota_value!(_key, nil), do: nil
+  defp quota_value!(_key, []), do: nil
+  defp quota_value!("threshold_mode", value), do: value
+
+  defp quota_value!("weekly_warning_policy", value) do
+    if value in ~w(ignore hold) do
+      value
+    else
+      Output.die("--weekly-warning-policy must be ignore or hold (got #{inspect(value)})")
+    end
+  end
+
+  defp quota_value!("pace_exempt_priority", value) when value in ~w(none off), do: :clear
+
+  defp quota_value!("pace_exempt_priority", value) do
+    case Integer.parse(value) do
+      {n, ""} when n in 0..4 ->
+        n
+
+      _ ->
+        Output.die("--pace-exempt-priority must be 0..4 or `none` (got #{inspect(value)})")
+    end
+  end
+
+  defp quota_value!("window_seconds", values), do: parse_window_seconds!(values)
+  defp quota_value!(key, value), do: parse_fraction!(value, flag_name(key))
+
+  defp parse_window_seconds!(values) do
+    values
+    |> Enum.flat_map(&String.split(&1, ",", trim: true))
+    |> Map.new(fn pair ->
+      with [label, seconds] <- String.split(pair, "=", parts: 2),
+           label when label != "" <- String.trim(label),
+           {n, ""} when n > 0 <- Integer.parse(String.trim(seconds)) do
+        {label, n}
+      else
+        _ ->
+          Output.die(
+            "--window-seconds takes LABEL=SECONDS with positive whole seconds, e.g. 5h=18000 " <>
+              "(got #{inspect(pair)})"
+          )
+      end
+    end)
+  end
 
   defp parse_fraction!(value, flag) do
     case Float.parse(value) do
@@ -383,28 +525,63 @@ defmodule ArbiterCli.Cmd.Account do
   # ---- attach ------------------------------------------------------------
 
   defp attach(args, opts, mode) do
-    ws_target = System.get_env("ARB_WORKSPACE")
-
-    {workspace_id, provider, ref} =
+    {workspace, provider, ref} =
       case args do
-        [workspace_id, provider, ref | _] ->
-          {workspace_id, provider, ref}
+        [workspace, provider, ref | _] ->
+          {workspace, provider, ref}
 
-        [provider, ref | _] when is_binary(ws_target) and ws_target != "" ->
-          {ArbiterCli.Workspace.id_or_halt(ws_target), provider, ref}
+        [provider, ref | _] ->
+          {selected_workspace!("account attach requires <workspace> <provider> <ref>"), provider,
+           ref}
 
         _ ->
-          Output.die("account attach requires <workspace-id> <provider> <ref>")
+          Output.die("account attach requires <workspace> <provider> <ref>")
       end
 
     payload =
-      %{"workspace_id" => workspace_id, "provider" => provider}
+      %{"workspace_id" => ArbiterCli.Workspace.id_or_halt(workspace), "provider" => provider}
       |> maybe_put("share", opts[:share])
 
     case Client.post("/api/accounts/" <> URI.encode(ref) <> "/attach", payload) do
       {:ok, link} -> emit_attach(link, mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  # `-w` / ARB_WORKSPACE stands in for the leading positional (D-A-17).
+  defp selected_workspace!(usage) do
+    case System.get_env("ARB_WORKSPACE") do
+      ws when is_binary(ws) and ws != "" -> ws
+      _ -> Output.die(usage)
+    end
+  end
+
+  # ---- detach ------------------------------------------------------------
+
+  defp detach(args, _opts, mode) do
+    {workspace, ref} =
+      case args do
+        [workspace, ref | _] -> {workspace, ref}
+        [ref] -> {selected_workspace!("account detach requires <workspace> <ref>"), ref}
+        _ -> Output.die("account detach requires <workspace> <ref>")
+      end
+
+    workspace_id = ArbiterCli.Workspace.id_or_halt(workspace)
+
+    case Client.delete(
+           "/api/accounts/" <> URI.encode(ref) <> "/attach/" <> URI.encode(workspace_id)
+         ) do
+      {:ok, link} -> emit_detach(link, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_detach(link, :json), do: IO.puts(Jason.encode!(link))
+
+  defp emit_detach(link, :text) do
+    IO.puts(
+      "detached workspace #{link["workspace_id"]} from account #{link["provider_account_id"]}"
+    )
   end
 
   defp emit_attach(link, :json), do: IO.puts(Jason.encode!(link))

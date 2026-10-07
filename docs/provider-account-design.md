@@ -406,6 +406,27 @@ account_headroom(a, ws) =
   (`apps/arbiter/lib/arbiter/quota/gate.ex:116`) and `weekly_warning_policy/1`
   (`apps/arbiter/lib/arbiter/quota/gate.ex:139`).
 
+### 4.2.1 Editing an account: one field registry
+
+> **As shipped (bd-1kr3qf, parity P-16).** `Arbiter.Accounts.Fields` is the one
+> list of what an operator can set on an account — field, type, validation,
+> whether `null` clears it, and who may set it. `POST /api/accounts`,
+> `PATCH /api/accounts/:ref`, `arb account create|set`, the Providers Edit form
+> and the MCP `account_set` tool all read it, so a bad `quota_config` is the same
+> 422 on create and PATCH and no key is editable on one surface only.
+>
+> Every `quota_config` key the gate reads is editable: `threshold_mode`,
+> `throttle_threshold`, `weekly_threshold`, `paced_floor`, `weekly_paced_floor`,
+> `weekly_warning_policy`, `window_seconds` (written as a whole label => seconds
+> table), `pace_exempt_priority` (`none` = off, as on the workspace side),
+> `pace_exempt_threshold` and `weekly_pace_exempt_threshold`. `arb account set`
+> has a flag per key and `--unset KEY` to clear one. An edit is a single write
+> (`Accounts.edit_account/2`): a failure leaves the account untouched.
+> `DELETE /api/accounts/:ref/attach/:workspace_id` / `arb account detach` remove
+> one workspace's link, and attaching a `grok` account is refused on every surface
+> (grok is routed by the workspace's own setting). Credentials, rotation and login
+> are not in the registry and not on MCP.
+
 ### 4.3 "vstim may use at most 2 of my 4 slots"
 
 ```
