@@ -60,7 +60,7 @@ defmodule ArbiterWeb.Api.WorkerResumeSlotTest do
     assert [event] = ResumeSlotFixture.overrides(ctx.ws)
     assert event.payload["task_id"] == ctx.a.id
     assert event.payload["holders"] == [ctx.b.id]
-    assert event.payload["actor"] == "api"
+    assert event.payload["actor"] == "coordinator"
   end
 
   describe "refusals the endpoint used to answer with a generic 500 (bd-5fc29i)" do

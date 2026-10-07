@@ -52,8 +52,11 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   moves nothing on) — registered as `rs/repo`, plus a cap of 1. All restored
   on exit, and every worker left running is stopped before the sandbox goes.
   """
-  def setup_repo! do
-    sandbox = Arbiter.TestSandbox.provision!("resume-slot", stub: "exec sleep 30\n")
+  def setup_repo!(opts \\ []) do
+    sandbox =
+      Arbiter.TestSandbox.provision!("resume-slot",
+        stub: Keyword.get(opts, :stub, "exec sleep 30\n")
+      )
 
     put_env_restoring(:worktree_root, sandbox.worktree_root)
     put_env_restoring(:repo_paths, %{@repo => sandbox.repo})

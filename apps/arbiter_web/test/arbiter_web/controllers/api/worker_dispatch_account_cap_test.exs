@@ -104,6 +104,6 @@ defmodule ArbiterWeb.Api.WorkerDispatchAccountCapTest do
              |> Ash.read!()
 
     assert event.payload["task_id"] == ctx.task.id
-    assert event.payload["actor"] == "api"
+    assert event.payload["actor"] == "coordinator"
   end
 end

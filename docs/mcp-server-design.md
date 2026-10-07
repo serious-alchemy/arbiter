@@ -188,7 +188,7 @@ JSON. `R` = readable, `W` = writable.
 | `message_send` | worker, coordinator | W | `Messages.send_mail/1` — coordinator→direction, worker→flag-to-sibling |
 | `worker_list` | coordinator | R | `Ash.read(Workers.Run)` / live snapshot |
 | `worker_dispatch` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.dispatch/2` |
-| `worker_resume` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.resume/2` |
+| `worker_resume` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.resume_task/2` (continues the prior session via `resume_session/2`; `mode: "briefing"` opts into `resume/2`) |
 | `worker_review` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) |
 | `worker_stop` | coordinator | W | `Arbiter.Worker.stop/2` |
 | `tracker_claim` | coordinator | W | `Arbiter.Tasks.Claim.claim/3` |

@@ -5290,6 +5290,91 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-a9hqfb: one normaliser (`Arbiter.Worker.Dispatch.Params`) behind
+  # worker_dispatch — provider list, unknown arguments, exclusive selectors.
+  describe "worker_dispatch/2 params (D-W-5, D-W-9, D-W-10)" do
+    # An unconfigured workspace has no repo, so a dispatch that gets past
+    # normalisation fails on the repo — proof the arguments were accepted.
+    test "provider: \"grok\" is accepted", ctx do
+      {:ok, task} = ready_issue(ctx, "grok dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "grok"
+               })
+
+      assert msg =~ "repo"
+      refute msg =~ "unknown provider"
+    end
+
+    test "with_gemini is read, not silently dropped", ctx do
+      {:ok, task} = ready_issue(ctx, "gemini alias")
+
+      # Read: it conflicts with an explicit, different provider.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "claude",
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "conflicting provider"
+
+      # And alone it is accepted (falls through to the repo error).
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "repo"
+    end
+
+    test "an unknown argument is refused and nothing is dispatched", ctx do
+      {:ok, task} = ready_issue(ctx, "typo")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agnet" => true,
+                 "no_agent" => true
+               })
+
+      assert msg =~ "no_agnet"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "no_agent with a provider is refused, not half-honoured", ctx do
+      {:ok, task} = ready_issue(ctx, "park or spawn")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "provider" => "claude"
+               })
+
+      assert msg =~ "no_agent"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "a junk force_quota is a typed error, not a crash", ctx do
+      {:ok, task} = ready_issue(ctx, "junk bool")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => 1.5
+               })
+
+      assert msg =~ "force_quota"
+    end
+  end
+
   describe "worker_dispatch/2 provider: \"codex\" writes the Codex MCP config (bd-bi5t54)" do
     setup do
       tmp =

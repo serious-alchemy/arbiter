@@ -395,6 +395,115 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
   end
 
+  # bd-a9hqfb: one normaliser (`Arbiter.Worker.Dispatch.Params`) behind REST
+  # and MCP — what `arb dispatch` posts is judged by the same rules.
+  describe "POST /api/workers/dispatch params (D-W-5, D-W-7, D-W-8, D-W-10)" do
+    test "no_agent together with a provider is a 400 and spawns/parks nothing",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "park or spawn")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "provider" => "claude",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "no_agent"
+      assert Ash.get!(Issue, task.id).state == :queued
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "an unknown argument is a 400 naming it", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "typo")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agnet" => true})
+
+      assert json_response(conn, 400)["error"]["message"] =~ "no_agnet"
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "grok is a valid provider", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "grok")
+
+      conn = post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "provider" => "grok"})
+
+      # Past normalisation: the workspace has no repo, so that is the refusal.
+      refute inspect(json_response(conn, 422)) =~ "unknown provider"
+    end
+
+    test "a token at the dispatch-recursion limit is refused", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "too deep")
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, depth: Arbiter.MCP.max_depth())
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "depth limit"
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "a force_quota bypass over REST is attributed to the token's actor, with its reason",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "rest quota bypass")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force_quota" => true,
+          "force_quota_reason" => "critical path via REST"
+        })
+
+      assert json_response(conn, 201)
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      assert [event] =
+               Arbiter.Events.Record
+               |> Ash.Query.filter(workspace_id == ^ws.id and topic == "quota_gate_bypass")
+               |> Ash.read!()
+
+      assert event.payload["task_id"] == task.id
+      assert event.payload["actor"] == "coordinator"
+      assert event.payload["reason"] == "critical path via REST"
+    end
+
+    test "force_quota_reason without force_quota is a 400", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "reason only")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "no_agent" => true,
+          "force_quota_reason" => "because"
+        })
+
+      assert json_response(conn, 400)["error"]["message"] =~ "force_quota"
+    end
+  end
+
+  describe "POST /api/workers/:task_id/resume params (bd-a9hqfb)" do
+    test "an argument resume does not take is a 400, not silently ignored", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume typo")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"provider" => "claude"})
+      assert json_response(conn, 400)["error"]["message"] =~ "provider"
+    end
+
+    test "an unknown mode is a 400", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume bad mode")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"mode" => "fresh"})
+      assert json_response(conn, 400)["error"]["message"] =~ "mode"
+    end
+  end
+
   describe "POST /api/workers/:task_id/resume" do
     test "returns 404 for an unknown task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/no-such-task/resume", %{})

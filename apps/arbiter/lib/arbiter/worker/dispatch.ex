@@ -349,7 +349,9 @@ defmodule Arbiter.Worker.Dispatch do
   the prior worker's committed + uncommitted work, so it continues from where
   the stopped run left off instead of restarting from scratch.
 
-  This is the explicit `arb resume <task>` path. It carries no Claude/Gemini
+  Since bd-a9hqfb this is the explicit **opt-in** variant (`mode: "briefing"` on
+  every surface, via `resume_task/2`); the default manual resume is
+  `resume_session/2`. It also serves the automatic-resume and revise paths. It carries no Claude/Gemini
   session-resume id; the continuity comes from the preserved worktree state
   plus a `Arbiter.Worker.ResumeContext` briefing prepended to the standard
   work prompt (coordinator sign-off 2026-06-05, approach (b)). It is NOT
@@ -490,6 +492,22 @@ defmodule Arbiter.Worker.Dispatch do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
     Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume_session(task_id, opts) end)
+  end
+
+  @doc """
+  The manual-resume entry point every surface calls (`arb worker resume`,
+  `POST /api/workers/:task_id/resume`, MCP `worker_resume`). `opts` carries the
+  `:resume_mode` `Arbiter.Worker.Dispatch.Params` normalised: `:session`
+  (default) continues the prior session via `resume_session/2`; `:briefing` is
+  the explicit opt-in for `resume/2`'s fresh agent briefed from git state.
+  """
+  @spec resume_task(String.t(), dispatch_opts()) ::
+          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+  def resume_task(task_id, opts \\ []) when is_binary(task_id) do
+    case Keyword.pop(opts, :resume_mode, :session) do
+      {:briefing, rest} -> resume(task_id, rest)
+      {:session, rest} -> resume_session(task_id, rest)
+    end
   end
 
   defp do_resume_session(task_id, opts) do

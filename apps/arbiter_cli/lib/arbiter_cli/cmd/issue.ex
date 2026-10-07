@@ -28,7 +28,9 @@ defmodule ArbiterCli.Cmd.Issue do
       arb ticket claim    <issue#> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket ready
-      arb ticket dispatch <id> [<repo>] [--with-claude] [--model <name>]
+      arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
+                          [--model <name>] [--force] [--over-cap]
+                          [--force-quota [--force-quota-reason <why>]]
   """
 
   alias ArbiterCli.Cmd
