@@ -47,7 +47,7 @@ defmodule Arbiter.NodeAgent.Run do
 
   use GenServer, restart: :temporary
 
-  alias Arbiter.NodeAgent.{Cgroups, Files, RunSpec, Secrets, StdoutBuffer}
+  alias Arbiter.NodeAgent.{Cgroups, Checkout, Files, RunSpec, Secrets, StdoutBuffer}
   alias Arbiter.Nodes.StdoutFrame
   alias Arbiter.Worker.{Container, Image, TestServices}
   alias Arbiter.Worker.ReleaseEnv
@@ -68,6 +68,12 @@ defmodule Arbiter.NodeAgent.Run do
     :exit_timer,
     :pod,
     :secrets_file,
+    # RW11: the shas the primary has (the prerequisites of every bundle sent back),
+    # the checkpoint timer and in-flight upload, and how the last upload ended.
+    :known,
+    :cp_timer,
+    :cp_task,
+    :checkout_result,
     phase: :preparing,
     buffer: nil,
     sent: 0,
@@ -94,6 +100,10 @@ defmodule Arbiter.NodeAgent.Run do
   @doc "The primary has every stdout byte before `offset`."
   @spec ack(String.t(), non_neg_integer()) :: :ok | {:error, :not_found}
   def ack(run, offset), do: cast(run, {:ack, offset})
+
+  @doc "Take a checkpoint now (RW11): snapshot the shadow and upload it for the primary to ingest."
+  @spec collect(String.t()) :: :ok | {:error, :not_found}
+  def collect(run), do: cast(run, :collect)
 
   @doc "The primary has the `exit`: the run may go."
   @spec ack_exit(String.t()) :: :ok | {:error, :not_found}
@@ -161,6 +171,9 @@ defmodule Arbiter.NodeAgent.Run do
 
   def handle_cast({:signal, _}, state), do: {:noreply, state}
 
+  def handle_cast(:collect, %{phase: :running} = state), do: {:noreply, checkpoint(state)}
+  def handle_cast(:collect, state), do: {:noreply, state}
+
   def handle_cast({:ack, offset}, state) when is_integer(offset) do
     {:noreply, state |> Map.update!(:buffer, &StdoutBuffer.ack(&1, offset)) |> pump()}
   end
@@ -193,6 +206,19 @@ defmodule Arbiter.NodeAgent.Run do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %Task{ref: ref}} = state),
     do: refuse(%{state | task: nil}, :unschedulable, {:prepare_crashed, inspect(reason)})
+
+  def handle_info({ref, result}, %{cp_task: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | cp_task: nil} |> log_checkpoint(result)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{cp_task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | cp_task: nil} |> log_checkpoint({:error, {:crashed, reason}})}
+
+  def handle_info(:checkpoint, %{phase: :running} = state),
+    do: {:noreply, state |> checkpoint() |> schedule_checkpoint()}
+
+  def handle_info(:checkpoint, state), do: {:noreply, state}
 
   def handle_info({port, {:data, bytes}}, %{port: port} = state) do
     case StdoutBuffer.append(state.buffer, bytes) do
@@ -237,14 +263,19 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   defp prepared({:ok, prepared}, state) do
-    state = %{state | pod: prepared.pod, secrets_file: prepared.secrets_file}
+    state = %{
+      state
+      | pod: prepared.pod,
+        secrets_file: prepared.secrets_file,
+        known: prepared.known
+    }
 
     if state.cancelled do
       cancelled_before_start(state)
     else
       case open(state, prepared.argv) do
         {:ok, port} ->
-          state = %{state | port: port, phase: :running}
+          state = %{state | port: port, phase: :running} |> schedule_checkpoint()
 
           {:noreply,
            push(state, "run.ready", %{"run" => state.spec.run, "container" => state.spec.name})}
@@ -289,6 +320,7 @@ defmodule Arbiter.NodeAgent.Run do
     run_dir = Path.join([config.node_home, "runs", spec.run])
 
     with {:ok, dirs} <- make_dirs(spec, run_dir),
+         {:ok, known} <- seed_shadow(spec, config, dirs),
          :ok <- ensure_image(spec, opts),
          {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
@@ -308,7 +340,7 @@ defmodule Arbiter.NodeAgent.Run do
              pod: pod,
              service_env: service_env
            }) do
-      {:ok, %{argv: argv, pod: pod, secrets_file: secrets_file}}
+      {:ok, %{argv: argv, pod: pod, secrets_file: secrets_file, known: known}}
     else
       {:error, {_code, _detail}} = error ->
         # Anything partly made is removed: a refused run leaves no secret behind.
@@ -335,6 +367,84 @@ defmodule Arbiter.NodeAgent.Run do
         {:error, reason} -> {:halt, {:error, {:unschedulable, {:run_dir, reason}}}}
       end
     end)
+  end
+
+  # RW11: the worktree mount is a shadow clone built from the primary's seed bundle.
+  defp seed_shadow(%RunSpec{checkout: nil}, _config, _dirs), do: {:ok, nil}
+
+  defp seed_shadow(%RunSpec{checkout: co, run: run}, config, dirs) do
+    case Checkout.seed_from_primary(config, Map.put(co, :run, run), dirs["worktree"].host) do
+      {:ok, %{known: known}} -> {:ok, known}
+      {:error, reason} -> {:error, {:unschedulable, {:seed_failed, reason}}}
+    end
+  end
+
+  defp shadow(state), do: Path.join([run_config(state).node_home, "runs", state.spec.run, "worktree"])
+  defp run_config(state), do: Keyword.fetch!(state.opts, :config)
+
+  defp schedule_checkpoint(%{spec: %{checkout: nil}} = state), do: state
+
+  defp schedule_checkpoint(%{spec: %{checkout: %{interval_ms: ms}}} = state) do
+    if state.cp_timer, do: Process.cancel_timer(state.cp_timer)
+    %{state | cp_timer: Process.send_after(self(), :checkpoint, ms)}
+  end
+
+  # One upload at a time, off the run process: a checkpoint of a 256 MiB bundle
+  # must not hold up a cancel or an ack.
+  defp checkpoint(%{spec: %{checkout: nil}} = state), do: state
+  defp checkpoint(%{cp_task: %Task{}} = state), do: state
+
+  defp checkpoint(state) do
+    task =
+      Task.Supervisor.async_nolink(
+        Keyword.get(state.opts, :task_supervisor, Arbiter.NodeAgent.TaskSupervisor),
+        fn -> upload(state) end
+      )
+
+    %{state | cp_task: task}
+  end
+
+  defp upload(state) do
+    Checkout.upload(
+      run_config(state),
+      %{run: state.spec.run, branch: state.spec.checkout.branch},
+      shadow(state),
+      state.known || []
+    )
+  end
+
+  defp log_checkpoint(state, {:ok, _}), do: state
+
+  defp log_checkpoint(state, {:error, reason}) do
+    Logger.warning(
+      "node agent: run #{state.spec.run} checkpoint failed: #{inspect(reason, limit: 5, printable_limit: 300)}"
+    )
+
+    state
+  end
+
+  # The container is gone: the last snapshot, before the exit is reported, so the
+  # primary has the work by the time its owner hears the run ended.
+  defp final_checkout(%{spec: %{checkout: nil}} = state), do: state
+
+  defp final_checkout(state) do
+    if state.cp_task, do: Task.shutdown(state.cp_task, :brutal_kill)
+    if state.cp_timer, do: Process.cancel_timer(state.cp_timer)
+
+    result =
+      case upload(state) do
+        {:ok, _} ->
+          "ok"
+
+        {:error, reason} ->
+          Logger.warning(
+            "node agent: run #{state.spec.run} final checkout failed: #{inspect(reason, limit: 5, printable_limit: 300)}"
+          )
+
+          "failed: " <> inspect(reason, limit: 5, printable_limit: 200)
+      end
+
+    %{state | cp_task: nil, cp_timer: nil, checkout_result: result}
   end
 
   defp dir_name("config_dir"), do: "config"
@@ -592,6 +702,7 @@ defmodule Arbiter.NodeAgent.Run do
     oom? = oom?(state)
     stop_container(state)
     cleanup(state)
+    state = final_checkout(state)
 
     exit = exit_report(state, status, oom?)
     state = %{state | exit: exit, phase: :exited}
@@ -609,7 +720,11 @@ defmodule Arbiter.NodeAgent.Run do
       "cancelled" => not is_nil(state.cancelled),
       "reason" => state.cancelled
     }
+    |> put_checkout(state.checkout_result)
   end
+
+  defp put_checkout(report, nil), do: report
+  defp put_checkout(report, result), do: Map.put(report, "checkout", result)
 
   defp resend_exit(%{exit: %{} = exit} = state), do: push(state, "exit", exit)
   defp resend_exit(state), do: state

@@ -142,6 +142,37 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
     end
   end
 
+  describe "checkout (RW11)" do
+    test "a checkout block is validated and defaulted" do
+      assert {:ok, %RunSpec{checkout: nil}} = RunSpec.validate(spec())
+
+      assert {:ok, %RunSpec{checkout: co}} =
+               RunSpec.validate(spec(%{"checkout" => %{"branch" => "arbiter/bd-abc", "base" => "main"}}))
+
+      assert co == %{branch: "arbiter/bd-abc", base: "main", interval_ms: 300_000}
+
+      assert {:ok, %RunSpec{checkout: %{interval_ms: 10_000}}} =
+               RunSpec.validate(spec(%{"checkout" => %{"branch" => "b", "interval_s" => 10}}))
+    end
+
+    test "refuses a malformed checkout" do
+      for bad <- [
+            "x",
+            %{},
+            %{"branch" => "../x"},
+            %{"branch" => "-rf"},
+            %{"branch" => "a b"},
+            %{"branch" => "a..b"},
+            %{"branch" => "b", "base" => "x y"},
+            %{"branch" => "b", "interval_s" => 1},
+            %{"branch" => "b", "interval_s" => 100_000},
+            %{"branch" => "b", "extra" => 1}
+          ] do
+        assert {:error, {:refused, _}} = RunSpec.validate(spec(%{"checkout" => bad})), inspect(bad)
+      end
+    end
+  end
+
   describe "other refusals" do
     test "a spec with no worktree mount" do
       assert {:error, {:refused, {:missing_mount, "worktree"}}} =

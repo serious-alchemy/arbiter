@@ -5,7 +5,8 @@ defmodule ArbiterWeb.NodeTestEndpoint do
   real WebSocket transport close (`Endpoint.broadcast(socket_id, "disconnect")`)
   instead of inferring it from `Phoenix.ChannelTest`, which has no transport.
 
-  It shares `Arbiter.PubSub` with `ArbiterWeb.Endpoint`, so the broadcast the
+  It also serves `ArbiterWeb.Router`, so the agent's HTTP client (RW11) can reach the
+  node routes. It shares `Arbiter.PubSub` with `ArbiterWeb.Endpoint`, so the broadcast the
   channel makes on the real endpoint reaches this one's transports. It is
   configured from `configure/1`, never from `config/*.exs`.
   """
@@ -14,6 +15,10 @@ defmodule ArbiterWeb.NodeTestEndpoint do
   socket "/node/socket", ArbiterWeb.NodeSocket,
     websocket: [connect_info: [:peer_data, :x_headers], max_frame_size: 1_048_576],
     longpoll: false
+
+  # The node HTTP routes (`/nodes/*`: files, RW11's seed and checkout bundles) over the
+  # same real listener, for the end-to-end tests that need the agent's real client.
+  plug ArbiterWeb.Router
 
   @doc "Puts the endpoint's config (free loopback port). Then `start_supervised!(#{inspect(__MODULE__)})`."
   def configure do

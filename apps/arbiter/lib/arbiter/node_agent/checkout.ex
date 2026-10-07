@@ -31,6 +31,7 @@ defmodule Arbiter.NodeAgent.Checkout do
   `max_untracked_bytes` (default 50 MB) is vetoed before anything is hashed.
   """
 
+  alias Arbiter.NodeAgent.Config
   alias Arbiter.Nodes.Checkout, as: Primary
   alias Arbiter.Nodes.Checkout.Git
 
@@ -278,6 +279,124 @@ defmodule Arbiter.NodeAgent.Checkout do
     else
       {:error, {:git, _, out}} -> {:error, {:bundle_failed, out}}
       {:error, _} = error -> error
+    end
+  end
+
+  # ---- talking to the primary --------------------------------------------------------
+
+  @doc "The node's shared object store for primary repos."
+  @spec store(Config.t()) :: Path.t()
+  def store(%Config{node_home: home}), do: Path.join([home, "repos", "primary.git"])
+
+  @doc """
+  The whole seed: `GET /nodes/runs/<run>/seed.bundle?have=<store tips>` with the node
+  credential, then `seed/1`. `{:error, {:veto, kind}}` when the primary refuses the
+  repo (submodules, LFS); `{:error, {:http, status}}` otherwise.
+  """
+  @spec seed_from_primary(Config.t(), %{run: String.t(), branch: String.t(), base: String.t() | nil}, Path.t()) ::
+          {:ok, map()} | {:error, term()}
+  def seed_from_primary(%Config{} = config, %{run: run} = co, shadow) do
+    store = store(config)
+    bundle = Path.join([config.node_home, "runs", run, "seed.bundle"])
+    File.mkdir_p!(Path.dirname(bundle))
+
+    try do
+      with :ok <- init_store(store),
+           :ok <- download(config, run, have(store), bundle) do
+        seed(%{store: store, shadow: shadow, bundle: bundle, run: run, branch: co.branch, base: co.base})
+      end
+    after
+      File.rm(bundle)
+    end
+  end
+
+  # A 200 body is the bundle, streamed to `dest`; any other status is a small JSON
+  # error, kept in memory so a veto can be read out of it.
+  defp download(config, run, have, dest) do
+    io = File.open!(dest, [:write, :binary])
+
+    sink = fn {:data, data}, {req, resp} ->
+      if resp.status == 200 do
+        :ok = IO.binwrite(io, data)
+        {:cont, {req, resp}}
+      else
+        {:cont, {req, %{resp | body: (resp.body || "") <> data}}}
+      end
+    end
+
+    request =
+      Req.new(
+        [
+          url: Config.http_url(config, "/nodes/runs/#{run}/seed.bundle"),
+          params: [have: Enum.join(Enum.take(have, 64), ",")],
+          headers: [{"authorization", "Bearer " <> config.credential}],
+          decode_body: false,
+          into: sink,
+          retry: false,
+          receive_timeout: 600_000
+        ] ++ (config.req_options || [])
+      )
+
+    try do
+      case Req.get(request) do
+        {:ok, %Req.Response{status: 200}} -> :ok
+        {:ok, %Req.Response{status: status, body: body}} -> {:error, error_of(status, body)}
+        {:error, reason} -> {:error, {:download_failed, reason}}
+      end
+    after
+      File.close(io)
+    end
+  end
+
+  # A refusal's JSON body names the veto.
+  defp error_of(status, body) do
+    case Jason.decode(to_string(body)) do
+      {:ok, %{"error" => %{"veto" => kind}}} -> {:veto, kind}
+      _ -> {:http, status}
+    end
+  end
+
+  @doc """
+  Snapshot the shadow and `PUT /nodes/runs/<run>/checkout`. `known` is what the
+  primary told the node at seed. `{:ok, response}` is the primary's ingest
+  summary; a node-side or primary-side veto is `{:error, {:veto, ...}}`.
+  """
+  @spec upload(Config.t(), map(), Path.t(), [String.t()]) :: {:ok, map()} | {:error, term()}
+  def upload(%Config{} = config, %{run: run, branch: branch}, shadow, known) do
+    dest = Path.join([config.node_home, "runs", run, "checkout.bundle"])
+
+    try do
+      with {:ok, %{path: path, bytes: bytes}} <-
+             package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest}),
+           {:ok, response} <- put(config, run, path, bytes) do
+        {:ok, response}
+      end
+    after
+      File.rm(dest)
+    end
+  end
+
+  defp put(config, run, path, bytes) do
+    request =
+      Req.new(
+        [
+          url: Config.http_url(config, "/nodes/runs/#{run}/checkout"),
+          method: :put,
+          headers: [
+            {"authorization", "Bearer " <> config.credential},
+            {"content-type", "application/x-git-bundle"},
+            {"content-length", Integer.to_string(bytes)}
+          ],
+          body: File.stream!(path, 65_536),
+          retry: false,
+          receive_timeout: 600_000
+        ] ++ (config.req_options || [])
+      )
+
+    case Req.request(request) do
+      {:ok, %Req.Response{status: 200, body: body}} -> {:ok, body}
+      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:rejected, status, body}}
+      {:error, reason} -> {:error, {:upload_failed, reason}}
     end
   end
 end
