@@ -174,8 +174,9 @@ JSON. `R` = readable, `W` = writable.
 | `ticket_list` | coordinator | R | `Ash.read(Issue)` + filters |
 | `ticket_ready` | coordinator | R | `Issue.ready/1` |
 | `ticket_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes / pr_body / `verify_after_deploy` only |
-| `ticket_create` | coordinator | W | `Ash.create(Issue, …)` |
-| `ticket_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
+| `ticket_create` | coordinator | W | `Arbiter.Tasks.Create.run/2` — dedup (`force` overrides), upstream-failure drain, `parent_of` edge, AC warning (P-14) |
+| `ticket_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (priority/…; fields bounded by `Arbiter.Tasks.IssueFields`) |
+| `ticket_resume_review` | coordinator | W | `Ash.update(issue, …, action: :resume_review)` — clears a tripped ReviewPatrol breaker (P-14) |
 | `ticket_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
 | `ticket_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
 | `ticket_verify` | coordinator | W | `Arbiter.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
