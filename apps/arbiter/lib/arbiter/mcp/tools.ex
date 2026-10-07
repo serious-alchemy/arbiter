@@ -1779,9 +1779,10 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec serialize_ticket(Issue.t(), map()) :: map()
   def serialize_ticket(%Issue{} = i, args) do
-    if Map.get(args, "summary") == true,
-      do: IssueSerializer.summary(i),
-      else: IssueSerializer.data(i)
+    case fetch_bool(args, "summary", false) do
+      {:ok, true} -> IssueSerializer.summary(i)
+      _ -> IssueSerializer.data(i)
+    end
   end
 
   # internal — shared: the child-progress rollup, appended by both

@@ -77,6 +77,32 @@ defmodule Arbiter.MCP.TicketParityTest do
     end
   end
 
+  describe "hold_reason" do
+    test "a Ready card the scheduler is holding carries it on ticket_ready and ticket_list",
+         ctx do
+      t = ctx.ws |> ticket() |> put_state!(:queued)
+
+      # No scheduler runs under test, so every Ready card reads as held.
+      assert %{} = holds = Arbiter.Tasks.ReadyHolds.for_workspace(ctx.ws.id)
+      reason = Map.fetch!(holds, t.id)
+
+      {:ok, %{tasks: [ready]}} = Tools.task_ready(ctx.coordinator, %{})
+      {:ok, %{tasks: [listed]}} = Tools.task_list(ctx.coordinator, %{"column" => "ready"})
+
+      assert ready.id == t.id
+      assert ready.hold_reason == reason
+      assert listed.id == t.id
+      assert listed.hold_reason == reason
+    end
+
+    test "a card that is not Ready carries none", ctx do
+      _backlog = ticket(ctx.ws)
+
+      {:ok, %{tasks: [row]}} = Tools.task_list(ctx.coordinator, %{})
+      refute Map.has_key?(row, :hold_reason)
+    end
+  end
+
   describe "ticket_* write tools return the REST IssueJSON shape" do
     test "ticket_update returns the full record", ctx do
       t = ticket(ctx.ws)
