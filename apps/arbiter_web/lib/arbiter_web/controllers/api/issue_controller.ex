@@ -14,6 +14,9 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/reopen`  — :reopen
     * `POST   /api/issues/:id/promote` — :promote
     * `POST   /api/issues/:id/demote`  — :demote (return to backlog)
+    * `POST   /api/issues/:id/resume_review` — :resume_review (clear a tripped
+      ReviewPatrol circuit breaker; the typed replacement for PATCHing
+      `circuit_breaker_*`, P-14)
     * `PATCH  /api/issues/:id/rank`    — :rank (body: one of `top: true`,
       `bottom: true`, `before_id: <id>`, `after_id: <id>`) — reorders the
       ticket inside its workspace's rank order (bd-djapyj)
@@ -24,6 +27,13 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
+
+  P-14: `POST` / `PATCH` take only the fields in `Arbiter.Tasks.IssueFields`
+  (a coordinator's user-facing set). ReviewPatrol / circuit-breaker /
+  `pr_opened_*` / `skills` state and the `change_origin` audit label are
+  refused with 422; a key the action does not know at all is still Ash's
+  `NoSuchInput` 422. `POST` goes through `Arbiter.Tasks.Create`, which also
+  attaches the `parent_of` edge (`parent_id`) and `blocks` edges (`deps`).
 
   bd-1ozks5: the local `Issue.assignee` field was removed. `POST /api/issues`
   and `PATCH /api/issues/:id` still accept an `assignee` param — for one
@@ -36,12 +46,12 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Board.Snapshot
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
-  alias Arbiter.Tasks.Dedup
+  alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.History
   alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.Issue.Changes.CreateUpstream
+  alias Arbiter.Tasks.IssueFields
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
@@ -178,147 +188,167 @@ defmodule ArbiterWeb.Api.IssueController do
   defp create_issue(conn, params, force?, ws_id) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
-    attrs =
-      params
-      |> Params.strip_attribution()
-      |> Map.drop(["id", "force", "assignee", "workspace"])
-      |> Map.put("workspace_id", ws_id)
-      |> coerce_atoms(@atom_fields)
+    with :ok <- IssueFields.check(params, :create),
+         {:ok, deps} <- fetch_deps(params) do
+      attrs =
+        params
+        |> Params.strip_attribution()
+        |> Map.drop(["id", "force", "assignee", "workspace", "deps"])
+        |> Map.put("workspace_id", ws_id)
+        |> coerce_atoms(@atom_fields)
 
-    with {:ok, skip_upstream?} <-
-           attrs |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
-      create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings)
-    end
-  end
+      with {:ok, _skip_upstream?} <-
+             attrs |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
+        opts = [
+          force: force?,
+          deps: deps,
+          created_by: Params.actor_label(conn.assigns[:mcp_scope])
+        ]
 
-  defp create_deduped(conn, attrs, force?, skip_upstream?, assignee_warnings) do
-    case dedup_check(attrs, force?, skip_upstream?) do
-      :ok ->
-        case Ash.create(Issue, attrs) do
-          {:ok, issue} ->
-            case CreateUpstream.last_error() do
-              nil ->
-                conn
-                |> put_status(:created)
-                |> render(:show, issue: issue, warnings: assignee_warnings ++ ac_warnings(issue))
-
-              err ->
-                upstream_failure_response(conn, issue.id, err)
-            end
-
-          {:error, _} = err ->
-            err
-        end
-
-      {:local_dup, matches} ->
-        ids = Enum.map_join(matches, ", ", & &1.id)
-
-        conn
-        |> put_status(409)
-        |> json(%{
-          "error" => %{
-            "type" => "duplicate_task",
-            "message" =>
-              "an open task with this title already exists (#{ids}); use --force to proceed anyway",
-            "details" => %{
-              "matches" =>
-                Enum.map(matches, fn i ->
-                  %{"id" => i.id, "title" => i.title, "state" => to_string(i.state)}
-                end)
-            }
-          }
-        })
-
-      {:tracker_dup, matches} ->
-        urls = Enum.map_join(matches, ", ", &Map.get(&1, :url, ""))
-
-        conn
-        |> put_status(409)
-        |> json(%{
-          "error" => %{
-            "type" => "duplicate_tracker_issue",
-            "message" =>
-              "an open tracker issue with this title already exists (#{urls}); use --force to proceed anyway",
-            "details" => %{
-              "matches" =>
-                Enum.map(matches, fn m ->
-                  %{"ref" => m[:ref], "title" => m[:title], "url" => m[:url]}
-                end)
-            }
-          }
-        })
-    end
-  end
-
-  # Delegates to `Arbiter.Tasks.Dedup` so the dashboard's create form applies
-  # the same rule (bd-2cv4ws).
-  defp dedup_check(attrs, force?, skip_upstream?) do
-    Dedup.check(attrs["title"], attrs["workspace_id"],
-      force: force?,
-      skip_upstream_create: skip_upstream?,
-      tracker_ref: attrs["tracker_ref"]
-    )
-  end
-
-  # The task was created locally but the upstream create (or write-back of
-  # the returned ref) failed. We return 502 Bad Gateway so the CLI exits
-  # non-zero, but we include the task body in the response so the user can
-  # see what got persisted and re-link manually if needed.
-  defp upstream_failure_response(conn, task_id, err) do
-    issue_body =
-      case Ash.get(Issue, task_id) do
-        {:ok, issue} -> ArbiterWeb.Api.IssueJSON.data(issue)
-        _ -> %{id: task_id}
+        respond_to_create(conn, Create.run(attrs, opts), assignee_warnings)
       end
+    end
+  end
+
+  # `deps` — ids of tickets that block the new one. Optional; a list of strings.
+  defp fetch_deps(%{"deps" => deps}) when is_list(deps) do
+    if Enum.all?(deps, &is_binary/1),
+      do: {:ok, deps},
+      else: {:error, {:invalid_request, "deps must be a list of ticket ids"}}
+  end
+
+  defp fetch_deps(%{"deps" => nil}), do: {:ok, []}
+
+  defp fetch_deps(%{"deps" => _}),
+    do: {:error, {:invalid_request, "deps must be a list of ticket ids"}}
+
+  defp fetch_deps(_params), do: {:ok, []}
+
+  defp respond_to_create(conn, {:ok, issue, warnings}, assignee_warnings) do
+    conn
+    |> put_status(:created)
+    |> render(:show, issue: issue, warnings: assignee_warnings ++ warnings)
+  end
+
+  defp respond_to_create(conn, {:duplicate, dup}, _assignee_warnings),
+    do: duplicate_response(conn, dup)
+
+  defp respond_to_create(conn, {:partial, issue, failures}, _assignee_warnings),
+    do: partial_failure_response(conn, issue, failures)
+
+  defp respond_to_create(_conn, {:error, _} = err, _assignee_warnings), do: err
+
+  defp duplicate_response(conn, {:local_dup, matches}) do
+    ids = Enum.map_join(matches, ", ", & &1.id)
 
     conn
-    |> put_status(:bad_gateway)
+    |> put_status(409)
     |> json(%{
-      "issue" => issue_body,
       "error" => %{
-        "type" => to_string(err.kind),
-        "message" => err.message,
+        "type" => "duplicate_task",
+        "message" =>
+          "an open task with this title already exists (#{ids}); use --force to proceed anyway",
         "details" => %{
-          "task_id" => task_id,
-          "tracker_type" => err |> Map.get(:tracker_type) |> tracker_type_str(),
-          "tracker_ref" => Map.get(err, :tracker_ref)
+          "matches" =>
+            Enum.map(matches, fn i ->
+              %{"id" => i.id, "title" => i.title, "state" => to_string(i.state)}
+            end)
         }
       }
     })
   end
 
+  defp duplicate_response(conn, {:tracker_dup, matches}) do
+    urls = Enum.map_join(matches, ", ", &Map.get(&1, :url, ""))
+
+    conn
+    |> put_status(409)
+    |> json(%{
+      "error" => %{
+        "type" => "duplicate_tracker_issue",
+        "message" =>
+          "an open tracker issue with this title already exists (#{urls}); use --force to proceed anyway",
+        "details" => %{
+          "matches" =>
+            Enum.map(matches, fn m ->
+              %{"ref" => m[:ref], "title" => m[:title], "url" => m[:url]}
+            end)
+        }
+      }
+    })
+  end
+
+  # The task was created locally but the upstream create (or write-back of
+  # the returned ref) and/or an edge failed. An upstream failure is a 502 Bad
+  # Gateway so the CLI exits non-zero; an edge-only failure is a 422 (the ticket
+  # exists, the relationship the caller asked for does not). Either way the
+  # body carries the task, so the caller sees what got persisted and can
+  # re-link — and `--json` callers still get the id.
+  defp partial_failure_response(conn, %Issue{} = issue, failures) do
+    primary = Enum.find(failures, &(&1.kind == :upstream_create_failed)) || hd(failures)
+
+    status =
+      if primary.kind == :upstream_create_failed, do: :bad_gateway, else: :unprocessable_entity
+
+    conn
+    |> put_status(status)
+    |> json(%{
+      "issue" => ArbiterWeb.Api.IssueJSON.data(issue),
+      "error" => %{
+        "type" => to_string(primary.kind),
+        "message" => Create.failure_message(failures),
+        "details" => %{
+          "task_id" => issue.id,
+          "tracker_type" => primary |> Map.get(:tracker_type) |> tracker_type_str(),
+          "tracker_ref" => Map.get(primary, :tracker_ref),
+          "failures" => Enum.map(failures, &failure_json/1)
+        }
+      }
+    })
+  end
+
+  defp failure_json(failure) do
+    %{
+      "kind" => to_string(failure.kind),
+      "message" => failure.message,
+      "edge" => failure |> Map.get(:edge) |> edge_json()
+    }
+  end
+
+  defp edge_json(nil), do: nil
+
+  defp edge_json(%{from: from, to: to, type: type}),
+    do: %{"from_issue_id" => from, "to_issue_id" => to, "type" => to_string(type)}
+
   defp tracker_type_str(nil), do: nil
   defp tracker_type_str(t) when is_atom(t), do: to_string(t)
   defp tracker_type_str(t), do: t
 
-  # bd-7mbrlg: non-blocking heads-up at filing time — mirrors
-  # `Arbiter.MCP.Tools.Task.with_ac_warning/2`.
-  defp ac_warnings(%Issue{} = issue) do
-    if Issue.gated_type?(issue.issue_type) and blank?(issue.acceptance) do
-      [
-        "No acceptance criteria set. #{issue.issue_type} tasks need `acceptance` (or an " <>
-          "explicit `acceptance_waived` reason) before they can be promoted to Ready."
-      ]
-    else
-      []
-    end
-  end
-
-  defp blank?(nil), do: true
-  defp blank?(str), do: String.trim(str) == ""
-
   def update(conn, %{"id" => id} = params) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
-    attrs =
-      params
-      |> Params.strip_attribution()
-      |> Map.drop(["id", "workspace_id", "assignee"])
-      |> coerce_atoms(@atom_fields)
+    with :ok <- IssueFields.check(params, :update) do
+      attrs =
+        params
+        |> Params.strip_attribution()
+        |> Map.drop(["id", "workspace_id", "assignee"])
+        |> coerce_atoms(@atom_fields)
 
+      with {:ok, issue} <- Ash.get(Issue, id),
+           {:ok, updated} <- Ash.update(issue, attrs) do
+        render(conn, :show, issue: updated, warnings: assignee_warnings)
+      end
+    end
+  end
+
+  @doc """
+  Clear a tripped ReviewPatrol circuit breaker (P-14) — the typed replacement
+  for PATCHing `circuit_breaker_tripped` / `circuit_breaker_reason`. Idempotent.
+  """
+  def resume_review(conn, %{"id" => id}) do
     with {:ok, issue} <- Ash.get(Issue, id),
-         {:ok, updated} <- Ash.update(issue, attrs) do
-      render(conn, :show, issue: updated, warnings: assignee_warnings)
+         {:ok, resumed} <- Ash.update(issue, %{}, action: :resume_review) do
+      render(conn, :show, issue: resumed)
     end
   end
 
