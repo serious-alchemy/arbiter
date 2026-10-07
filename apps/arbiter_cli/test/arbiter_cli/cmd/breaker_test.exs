@@ -301,4 +301,109 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert err =~ "unknown option --opne for arb breaker"
     end
   end
+
+  describe "workspace plumbing (-w and --workspace)" do
+    setup do
+      prev = System.get_env("ARB_WORKSPACE")
+      System.delete_env("ARB_WORKSPACE")
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("ARB_WORKSPACE", prev),
+          else: System.delete_env("ARB_WORKSPACE")
+      end)
+
+      :ok
+    end
+
+    test "arb breaker reset --all -w X sends the resolved workspace" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]}, 200}},
+        {{"post", "/api/breakers/reset"},
+         fn conn ->
+           {:ok, raw, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:reset_body, Jason.decode!(raw)})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"reset" => 3})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "--all", "-w", "acme"]) end)
+
+      assert code == 0
+      assert out =~ "Closed 3 circuit breaker(s)."
+      assert_received {:reset_body, %{"all" => true, "workspace" => "ws-acme"}}
+    end
+
+    test "arb breaker reset --all -w bogus refuses to run unscoped and errors" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}}
+      ])
+
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "--all", "-w", "bogus"]) end)
+
+      assert code == 1
+      assert err =~ "no workspace named"
+    end
+
+    test "arb breaker reset <signature> -w X is refused, not dropped" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "some|sig", "-w", "acme"]) end)
+
+      assert code == 1
+      assert err =~ "--workspace does not apply to breaker reset <signature>"
+    end
+
+    test "arb breaker reset --auth-hold P -w X is refused, not dropped" do
+      {_out, err, code} =
+        capture(fn ->
+          ArbiterCli.Main.main(["breaker", "reset", "--auth-hold", "claude", "-w", "acme"])
+        end)
+
+      assert code == 1
+      assert err =~ "--workspace does not apply to breaker reset --auth-hold"
+    end
+
+    test "an inherited ARB_WORKSPACE does not block reset <signature>" do
+      System.put_env("ARB_WORKSPACE", "acme")
+
+      stub_routes([
+        {{"post", "/api/breakers/reset"}, {%{"reset" => 1, "signature" => "s"}, 200}}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "reset", "some|sig"]) end)
+
+      assert code == 0
+    end
+
+    test "arb breaker list -w X sends the resolved workspace" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]}, 200}},
+        {{"get", "/api/breakers"},
+         fn conn ->
+           send(test_pid, {:list_params, conn.query_params})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"breakers" => [], "open_count" => 0, "call_sites" => []})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Main.main(["breaker", "list", "-w", "acme"]) end)
+
+      assert code == 0
+      assert out =~ "No circuit breakers have fired"
+      assert_received {:list_params, %{"workspace" => "ws-acme"}}
+    end
+  end
 end

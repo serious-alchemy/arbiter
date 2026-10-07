@@ -38,6 +38,68 @@ defmodule ArbiterCli.StrictnessTest do
            "verbs without :probes (declare how to reach their flag parser): #{inspect(missing)}"
   end
 
+  test "every registry entry declares workspace: :resolve or :none" do
+    for entry <- entries() do
+      assert entry.workspace in [:resolve, :none],
+             "#{entry.name} must declare workspace: :resolve | :none, got: #{inspect(Map.get(entry, :workspace))}"
+    end
+  end
+
+  test "verbs with workspace: :none reject -w and --workspace with exit 1" do
+    none_entries =
+      for %{workspace: :none, kind: kind} = entry <- Verbs.all(),
+          kind in [:resource, :shortcut, :legacy],
+          do: entry
+
+    refute none_entries == []
+
+    for %{name: name, probes: probes} <- none_entries,
+        probe <-
+          (case probes do
+             [] -> [[]]
+             other -> other
+           end) do
+      for flag <- ["-w", "--workspace"] do
+        argv = [name | probe] ++ [flag, "dummy"]
+        label = "arb #{Enum.join(argv, " ")}"
+
+        {_out, err, code} =
+          capture(fn ->
+            try do
+              Main.main(argv)
+            rescue
+              e in ArbiterCli.Output.Halt ->
+                reraise e, __STACKTRACE__
+
+              e ->
+                flunk("#{label}: crashed instead of rejecting: #{Exception.message(e)}")
+            end
+          end)
+
+        assert code == 1, "#{label}: expected exit 1, got #{code}; stderr: #{err}"
+
+        assert err =~ "unknown option #{flag} for arb",
+               "#{label}: stderr did not name the unknown flag: #{err}"
+      end
+    end
+  end
+
+  test "a workspace-aware verb given a dangling -w or --workspace dies requiring a value" do
+    for flag <- ["-w", "--workspace"] do
+      {_out, err, code} = capture(fn -> Main.main(["ticket", "list", flag]) end)
+      assert code == 1
+      assert err =~ "option #{flag} for arb ticket requires a value"
+    end
+  end
+
+  test "arb server start -w and arb -w server start are rejected" do
+    for argv <- [["server", "start", "-w", "foo"], ["-w", "foo", "server", "start"]] do
+      {_out, err, code} = capture(fn -> Main.main(argv) end)
+      assert code == 1
+      assert err =~ "unknown option -w for arb server"
+    end
+  end
+
   test "an unknown flag is rejected with exit 1 by every verb, at every probe" do
     for %{name: name, kind: kind, handler: handler, prefix: prefix, probes: probes} <- entries(),
         probe <- probes || [] do

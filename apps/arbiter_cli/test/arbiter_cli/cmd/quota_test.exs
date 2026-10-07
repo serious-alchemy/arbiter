@@ -589,20 +589,25 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     end
 
     test "--workspace stays a lookup shorthand and says which workspace it went through" do
-      stub_get("/api/quota", %{
-        "data" => %{
-          "workspace_id" => "ws-2",
-          "workspace" => %{"id" => "ws-2", "name" => "emricare"},
-          "claude" => @snapshot,
-          "quotas" => [
-            %{
-              "provider" => "claude",
-              "account" => %{"slug" => "personal-max", "provider" => "claude"},
-              "workspaces" => [%{"id" => "ws-2", "name" => "emricare", "cost_usd" => 1.0}]
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-2", "name" => "emricare", "prefix" => "em"}]}, 200}},
+        {{"get", "/api/quota"},
+         {%{
+            "data" => %{
+              "workspace_id" => "ws-2",
+              "workspace" => %{"id" => "ws-2", "name" => "emricare"},
+              "claude" => @snapshot,
+              "quotas" => [
+                %{
+                  "provider" => "claude",
+                  "account" => %{"slug" => "personal-max", "provider" => "claude"},
+                  "workspaces" => [%{"id" => "ws-2", "name" => "emricare", "cost_usd" => 1.0}]
+                }
+              ]
             }
-          ]
-        }
-      })
+          }, 200}}
+      ])
 
       {out, _err, code} =
         capture(fn -> ArbiterCli.Cmd.Quota.run(["--workspace", "emricare"]) end)

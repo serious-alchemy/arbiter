@@ -1,5 +1,18 @@
 defmodule ArbiterCli.Cmd.LoopTest do
-  use ArbiterCli.CliCase, async: true
+  use ArbiterCli.CliCase, async: false
+
+  setup do
+    prev = System.get_env("ARB_WORKSPACE")
+    System.delete_env("ARB_WORKSPACE")
+
+    on_exit(fn ->
+      if prev,
+        do: System.put_env("ARB_WORKSPACE", prev),
+        else: System.delete_env("ARB_WORKSPACE")
+    end)
+
+    :ok
+  end
 
   alias ArbiterCli.Cmd.Loop
 
@@ -437,11 +450,12 @@ defmodule ArbiterCli.Cmd.LoopTest do
   end
 
   test "loop propose routing posts the tier spec and prints the proposal" do
-    stub_post(
-      "/api/loop/propose/routing",
-      %{"pending" => %{"id" => "p-9", "gist" => "route D3 to standard/high"}},
-      200
-    )
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-default", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/loop/propose/routing"},
+       {%{"pending" => %{"id" => "p-9", "gist" => "route D3 to standard/high"}}, 200}}
+    ])
 
     {out, _err, exit_code} =
       capture(fn ->
@@ -524,5 +538,194 @@ defmodule ArbiterCli.Cmd.LoopTest do
     {out, _err, exit_code} = capture(fn -> Loop.run(["--help"]) end)
     assert exit_code == 0
     assert out =~ "arb loop analyze"
+  end
+
+  describe "workspace plumbing (-w and --workspace)" do
+    test "arb loop propose routing -w X --difficulty 2 --model-tier T sends resolved workspace" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"post", "/api/loop/propose/routing"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:routing_body, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"pending" => %{"id" => "p-10", "gist" => "route D2 to standard"}})
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main(
+            ~w(loop propose routing -w custom --difficulty 2 --model-tier standard)
+          )
+        end)
+
+      assert exit_code == 0
+      assert out =~ "proposed p-10"
+      assert_received {:routing_body, body}
+      assert body["workspace_id"] == "ws-custom"
+      assert body["difficulty"] == 2
+      assert body["model_tier"] == "standard"
+    end
+
+    test "arb loop pending -w X sends resolved workspace_id query param" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"get", "/api/loop/pending"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           send(test_pid, {:pending_params, conn.query_params})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "pending" => [],
+             "evidence_bar" => %{"min_incidents" => 3, "min_distinct_tasks" => 2}
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main(~w(loop pending -w custom))
+        end)
+
+      assert exit_code == 0
+      assert out =~ "no queued loop proposals"
+      assert_received {:pending_params, %{"workspace_id" => "ws-custom"}}
+    end
+
+    test "arb loop apply all -w X sends resolved workspace_id query param" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"get", "/api/loop/pending"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           send(test_pid, {:apply_all_params, conn.query_params})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"pending" => []})
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main(~w(loop apply all -w custom))
+        end)
+
+      assert exit_code == 0
+      assert out =~ "nothing to apply"
+      assert_received {:apply_all_params, %{"workspace_id" => "ws-custom", "state" => "proposed"}}
+    end
+
+    test "arb loop analyze -w X sends resolved workspace_id query param" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"get", "/api/loop/analyze"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           send(test_pid, {:analyze_params, conn.query_params})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "markdown" => "# report",
+             "usage_event_id" => "ev-1",
+             "summary" => %{}
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main(~w(loop analyze -w custom))
+        end)
+
+      assert exit_code == 0
+      assert out =~ "report"
+      assert_received {:analyze_params, %{"workspace_id" => "ws-custom"}}
+    end
+
+    test "arb loop canary status -w X sends resolved workspace_id query param" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"get", "/api/loop/canary"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           send(test_pid, {:canary_params, conn.query_params})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"running" => false, "message" => "no canary is running"})
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main(~w(loop canary status -w custom))
+        end)
+
+      assert exit_code == 0
+      assert out =~ "no canary is running"
+      assert_received {:canary_params, %{"workspace_id" => "ws-custom"}}
+    end
+
+    test "arb loop propose repo-doc-patch -w X sends resolved workspace_id" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
+        {{"post", "/api/loop/propose/repo_doc_patch"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:repo_doc_body, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"pending" => %{"id" => "p-11", "gist" => "repo doc patch"}})
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn ->
+          ArbiterCli.Main.main([
+            "loop",
+            "propose",
+            "repo-doc-patch",
+            "-w",
+            "custom",
+            "--repo",
+            "myrepo",
+            "--lesson",
+            "test lesson"
+          ])
+        end)
+
+      assert exit_code == 0
+      assert out =~ "proposed p-11"
+      assert_received {:repo_doc_body, body}
+      assert body["workspace_id"] == "ws-custom"
+      assert body["repo"] == "myrepo"
+      assert body["lesson"] == "test lesson"
+    end
   end
 end

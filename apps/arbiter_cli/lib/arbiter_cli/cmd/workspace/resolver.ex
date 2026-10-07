@@ -5,7 +5,7 @@ defmodule ArbiterCli.Cmd.Workspace.Resolver do
   `standing-order` and `secret` verb groups of `arb workspace`.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Output, Workspace}
 
   @spec resolve_workspace!(map() | String.t() | nil) :: map()
   def resolve_workspace!(%{} = ws) when is_map_key(ws, "id"), do: ws
@@ -18,15 +18,9 @@ defmodule ArbiterCli.Cmd.Workspace.Resolver do
   end
 
   def resolve_workspace!(name) when is_binary(name) do
-    case Client.get("/api/workspaces") do
-      {:ok, %{"data" => list}} ->
-        case Enum.find(list, &(&1["name"] == name)) do
-          nil -> Output.die("no workspace named #{inspect(name)}")
-          ws -> ws
-        end
-
-      {:error, err} ->
-        Output.die(err)
+    case Workspace.resolve(name) do
+      {:ok, ws} -> ws
+      {:error, msg} -> Output.die(msg)
     end
   end
 

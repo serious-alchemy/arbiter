@@ -198,12 +198,14 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [s: :since, l: :limit, w: :workspace]
       )
 
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
     params =
       []
       |> maybe_put(:since, Keyword.get(opts, :since))
       |> maybe_put(:until, Keyword.get(opts, :until))
       |> maybe_put(:limit, Keyword.get(opts, :limit))
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
 
     # `--propose` is a different verb on a different route, not a flag on the
     # read-only GET — the analyze endpoint can never write. `--discover`
@@ -248,12 +250,14 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [r: :repo, l: :lesson, w: :workspace]
       )
 
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
     body =
       %{}
       |> maybe_put_map("repo", Keyword.get(opts, :repo))
       |> maybe_put_map("lesson", Keyword.get(opts, :lesson))
       |> maybe_put_map("category", Keyword.get(opts, :category))
-      |> maybe_put_map("workspace_id", Keyword.get(opts, :workspace))
+      |> maybe_put_map("workspace_id", ws_id)
 
     case Client.post("/api/loop/propose/repo_doc_patch", body) do
       {:ok, %{"pending" => row}} -> emit_decision(row, "proposed", mode)
@@ -277,9 +281,11 @@ defmodule ArbiterCli.Cmd.Loop do
 
     opts = ArgParser.coerce_difficulty(opts)
 
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
     body =
       %{}
-      |> maybe_put_map("workspace_id", Keyword.get(opts, :workspace))
+      |> maybe_put_map("workspace_id", ws_id)
       |> maybe_put_map("difficulty", Keyword.get(opts, :difficulty))
       |> maybe_put_map("model_tier", Keyword.get(opts, :model_tier))
       |> maybe_put_map("thinking", Keyword.get(opts, :thinking))
@@ -299,7 +305,9 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [w: :workspace]
       )
 
-    params = maybe_put([], :workspace_id, Keyword.get(opts, :workspace))
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
+    params = maybe_put([], :workspace_id, ws_id)
 
     case Client.get("/api/loop/canary", params) do
       {:ok, envelope} when mode == :json -> IO.puts(Jason.encode!(envelope))
@@ -386,11 +394,13 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [l: :limit, w: :workspace]
       )
 
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
     params =
       []
       |> maybe_put(:state, Keyword.get(opts, :state))
       |> maybe_put(:kind, Keyword.get(opts, :kind))
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
     case Client.get("/api/loop/pending", params) do
@@ -498,9 +508,11 @@ defmodule ArbiterCli.Cmd.Loop do
         aliases: [l: :limit, w: :workspace]
       )
 
+    ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+
     params =
       [state: Keyword.get(opts, :state, "proposed")]
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
     case Client.get("/api/loop/pending", params) do

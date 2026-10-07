@@ -38,7 +38,8 @@ defmodule ArbiterCli.Verbs do
           deprecated: boolean(),
           host_local?: boolean(),
           flags: [{String.t(), :boolean | :string}],
-          probes: [[String.t()]] | nil
+          probes: [[String.t()]] | nil,
+          workspace: :resolve | :none
         }
 
   # Flags stripped centrally in `Main` before any subcommand parses argv.
@@ -72,11 +73,13 @@ defmodule ArbiterCli.Verbs do
   ]
 
   @resources [
-    {"ticket", Module.concat(@cmd, Issue), [probes: @ticket_probes]},
-    {"issue", Module.concat(@cmd, Issue), [deprecated: true, probes: @ticket_probes]},
-    {"epic", Module.concat(@cmd, Epic), [probes: [["floor", "bd-1", "P1"]]]},
+    {"ticket", Module.concat(@cmd, Issue), [workspace: :resolve, probes: @ticket_probes]},
+    {"issue", Module.concat(@cmd, Issue),
+     [workspace: :resolve, deprecated: true, probes: @ticket_probes]},
+    {"epic", Module.concat(@cmd, Epic), [workspace: :none, probes: [["floor", "bd-1", "P1"]]]},
     {"worker", Module.concat(@cmd, Worker),
      [
+       workspace: :resolve,
        probes: [
          ["list"],
          ["show", "bd-1"],
@@ -87,15 +90,22 @@ defmodule ArbiterCli.Verbs do
          ["review", "bd-1"]
        ]
      ]},
-    {"repo", Module.concat(@cmd, Repo), [probes: [["list"], ["show", "r"]]]},
+    {"repo", Module.concat(@cmd, Repo), [workspace: :none, probes: [["list"], ["show", "r"]]]},
     {"dep", Module.concat(@cmd, Dep),
-     [probes: [["add", "a", "depends_on", "b"], ["rm", "a", "b"], ["list"]]]},
+     [
+       workspace: :resolve,
+       probes: [["add", "a", "depends_on", "b"], ["rm", "a", "b"], ["list"]]
+     ]},
     {"config", Module.concat(@cmd, Config),
-     [probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["overview"]]]},
+     [workspace: :resolve, probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["overview"]]]},
     {"server", Module.concat(@cmd, Server),
-     [probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"]]]},
+     [
+       workspace: :none,
+       probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"]]
+     ]},
     {"workspace", Module.concat(@cmd, Workspace),
      [
+       workspace: :resolve,
        probes: [
          ["list"],
          ["show", "w"],
@@ -105,10 +115,11 @@ defmodule ArbiterCli.Verbs do
        ]
      ]},
     {"message", Module.concat(@cmd, Message),
-     [probes: [["send", "r", "body"], ["inbox"], ["notify"]]]},
-    {"usage", Module.concat(@cmd, Usage), [probes: [[], ["events"]]]},
+     [workspace: :resolve, probes: [["send", "r", "body"], ["inbox"], ["notify"]]]},
+    {"usage", Module.concat(@cmd, Usage), [workspace: :resolve, probes: [[], ["events"]]]},
     {"loop", Module.concat(@cmd, Loop),
      [
+       workspace: :resolve,
        probes: [
          ["analyze"],
          ["pending"],
@@ -121,8 +132,11 @@ defmodule ArbiterCli.Verbs do
          ["canary", "status"]
        ]
      ]},
+    # Queue verbs address one task by id; the task already carries its workspace,
+    # so there is no workspace dimension for `-w` to select.
     {"queue", Module.concat(@cmd, Queue),
      [
+       workspace: :none,
        probes: [
          ["retry-auto-resolve", "bd-1"],
          ["restart-watchdog", "bd-1"],
@@ -130,24 +144,30 @@ defmodule ArbiterCli.Verbs do
        ]
      ]},
     {"scheduler", Module.concat(@cmd, Scheduler),
-     [probes: [["pause"], ["resume"], ["status"], ["wait"]]]},
+     [workspace: :none, probes: [["pause"], ["resume"], ["status"], ["wait"]]]},
     {"settings", Module.concat(@cmd, Settings),
-     [probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["schema"]]]},
-    {"quota", Module.concat(@cmd, Quota), [probes: [[]]]},
+     [workspace: :none, probes: [["get"], ["set", "k", "v"], ["unset", "k"], ["schema"]]]},
+    {"quota", Module.concat(@cmd, Quota), [workspace: :resolve, probes: [[]]]},
     {"provider", Module.concat(@cmd, Provider),
-     [probes: [["pause", "p"], ["resume", "p"], ["list"]]]},
-    {"breaker", Module.concat(@cmd, Breaker), [probes: [["list"], ["reset", "sig"]]]},
+     [workspace: :none, probes: [["pause", "p"], ["resume", "p"], ["list"]]]},
+    {"breaker", Module.concat(@cmd, Breaker),
+     [workspace: :resolve, probes: [["list"], ["reset", "sig"]]]},
     {"image", Module.concat(@cmd, Image),
-     [probes: [["list"], ["build", "r"], ["refresh"], ["prune"]]]},
+     [workspace: :resolve, probes: [["list"], ["build", "r"], ["refresh"], ["prune"]]]},
     {"install", Module.concat(@cmd, Install),
-     [host_local?: true, probes: [["cli"], ["service"]]]},
-    {"mcp", Module.concat(@cmd, Mcp), [probes: [["token", "mint"], ["token", "verify", "tok"]]]},
+     [workspace: :none, host_local?: true, probes: [["cli"], ["service"]]]},
+    {"mcp", Module.concat(@cmd, Mcp),
+     [workspace: :resolve, probes: [["token", "mint"], ["token", "verify", "tok"]]]},
     {"skill", Module.concat(@cmd, Skill),
-     [probes: [["list"], ["show", "s"], ["create", "s"], ["update", "s"], ["delete", "s"]]]},
+     [
+       workspace: :none,
+       probes: [["list"], ["show", "s"], ["create", "s"], ["update", "s"], ["delete", "s"]]
+     ]},
     {"session", Module.concat(@cmd, Session),
-     [host_local?: true, probes: [["list"], ["attach", "s"]]]},
+     [workspace: :none, host_local?: true, probes: [["list"], ["attach", "s"]]]},
     {"account", Module.concat(@cmd, Account),
      [
+       workspace: :resolve,
        probes: [
          ["list"],
          ["show", "a"],
@@ -159,6 +179,7 @@ defmodule ArbiterCli.Verbs do
      ]},
     {"node", Module.concat(@cmd, Node),
      [
+       workspace: :none,
        probes: [
          ["add"],
          ["list"],
@@ -172,16 +193,19 @@ defmodule ArbiterCli.Verbs do
          ["remove", "n"]
        ]
      ]},
-    {"dashboard", Module.concat(@cmd, Dashboard), [probes: [["login"]]]},
-    {"prime", Module.concat(@cmd, Prime), [probes: [[]]]},
-    {"where", Module.concat(@cmd, Where), [host_local?: true, probes: [[]]]},
-    {"init", Module.concat(@cmd, Init), [host_local?: true, probes: [[]]]},
-    {"version", Module.concat(@cmd, Version), [host_local?: true, probes: [[]]]},
-    {"self-update", Module.concat(@cmd, SelfUpdate), [host_local?: true, probes: [[]]]},
-    {"upgrade", Module.concat(@cmd, SelfUpdate), [host_local?: true, probes: [[]]]},
-    {"preflip-gate", Module.concat(@cmd, PreflipGate), [probes: [[]]]},
-    {"grok-token", Module.concat(@cmd, GrokToken), [probes: [[]]]},
-    {"help", ArbiterCli.Main, [host_local?: true, probes: []]}
+    {"dashboard", Module.concat(@cmd, Dashboard), [workspace: :none, probes: [["login"]]]},
+    {"prime", Module.concat(@cmd, Prime), [workspace: :resolve, probes: [[]]]},
+    {"where", Module.concat(@cmd, Where), [workspace: :resolve, host_local?: true, probes: [[]]]},
+    {"init", Module.concat(@cmd, Init), [workspace: :none, host_local?: true, probes: [[]]]},
+    {"version", Module.concat(@cmd, Version),
+     [workspace: :none, host_local?: true, probes: [[]]]},
+    {"self-update", Module.concat(@cmd, SelfUpdate),
+     [workspace: :none, host_local?: true, probes: [[]]]},
+    {"upgrade", Module.concat(@cmd, SelfUpdate),
+     [workspace: :none, host_local?: true, probes: [[]]]},
+    {"preflip-gate", Module.concat(@cmd, PreflipGate), [workspace: :none, probes: [[]]]},
+    {"grok-token", Module.concat(@cmd, GrokToken), [workspace: :none, probes: [[]]]},
+    {"help", ArbiterCli.Main, [workspace: :none, host_local?: true, probes: []]}
   ]
 
   # `arb dispatch <id>` == `arb ticket dispatch <id>`; same for `verify`.
@@ -228,10 +252,12 @@ defmodule ArbiterCli.Verbs do
   def orphans do
     [
       entry("review", :orphan, Module.concat(@cmd, Review),
+        workspace: :resolve,
         deprecated: true,
         probes: [["bd-1"]]
       ),
       entry("update", :orphan, Module.concat(@cmd, Update),
+        workspace: :resolve,
         deprecated: true,
         probes: [[], ["bd-1"]]
       )
@@ -267,15 +293,20 @@ defmodule ArbiterCli.Verbs do
 
   defp shortcuts do
     for {name, sub} <- @shortcuts do
-      entry(name, :shortcut, Module.concat(@cmd, Issue), prefix: [sub], probes: [[]])
+      entry(name, :shortcut, Module.concat(@cmd, Issue),
+        workspace: :resolve,
+        prefix: [sub],
+        probes: [[]]
+      )
     end
   end
 
   defp legacy do
     for {name, resource, prefix} <- @legacy do
-      {:ok, %{handler: handler}} = fetch_resource(resource)
+      {:ok, %{handler: handler, workspace: ws}} = fetch_resource(resource)
 
       entry(name, :legacy, handler,
+        workspace: ws,
         prefix: prefix,
         redirect_to: resource,
         deprecated: true,
@@ -301,7 +332,8 @@ defmodule ArbiterCli.Verbs do
       deprecated: Keyword.get(opts, :deprecated, false),
       host_local?: Keyword.get(opts, :host_local?, false),
       flags: Keyword.get(opts, :flags, []),
-      probes: Keyword.get(opts, :probes)
+      probes: Keyword.get(opts, :probes),
+      workspace: Keyword.fetch!(opts, :workspace)
     }
   end
 end
