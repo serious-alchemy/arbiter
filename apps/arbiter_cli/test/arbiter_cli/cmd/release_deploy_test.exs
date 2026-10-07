@@ -22,6 +22,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
     System.put_env("ARB_DATA_HOME", home)
     System.put_env("ARB_RELEASE_REPO", @repo)
+    # A green deploy self-updates the CLI; never let a test write the real one.
+    System.put_env("ARB_INSTALL_BIN", Path.join(home, "bin/arb"))
+    System.delete_env("DATABASE_PATH")
+    System.delete_env("ARB_DEPLOY_BACKUP_RETAIN")
     System.delete_env("ARB_HOST")
     System.delete_env("GITHUB_TOKEN")
     System.delete_env("ARB_WORKER_BEAD_ID")
@@ -30,6 +34,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     on_exit(fn ->
       System.delete_env("ARB_DATA_HOME")
       System.delete_env("ARB_RELEASE_REPO")
+      System.delete_env("ARB_INSTALL_BIN")
       File.rm_rf(home)
     end)
 
@@ -72,6 +77,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
   defp tarball_path(tag), do: "/dl/arbiter-#{tag}-linux.tar.gz"
   defp sha_path(tag), do: tarball_path(tag) <> ".sha256"
+  defp arb_path(tag), do: "/dl/#{tag}/arb"
+  defp arb_bytes(tag), do: "#!/usr/bin/env escript\n% fake arb #{tag}\n"
 
   # The GitHub release JSON for `tag`, with assets pointing at our stub paths.
   defp release_json(tag) do
@@ -84,6 +91,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
         %{
           "name" => name <> ".sha256",
           "browser_download_url" => "https://dl.test#{sha_path(tag)}"
+        },
+        %{"name" => "arb", "browser_download_url" => "https://dl.test#{arb_path(tag)}"},
+        %{
+          "name" => "arb.sha256",
+          "browser_download_url" => "https://dl.test#{arb_path(tag)}.sha256"
         }
       ]
     }
@@ -101,6 +113,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     workspaces = Keyword.get(opts, :workspaces, @green)
     latest? = Keyword.get(opts, :latest, true)
     version_resp = Keyword.get(opts, :version_resp)
+    arb_body = Keyword.get(opts, :arb_body, arb_bytes(tag))
+    arb_sha_text = Keyword.get(opts, :arb_sha_text, "#{sha256_hex(arb_bytes(tag))}  arb\n")
 
     api_path =
       if latest?,
@@ -115,6 +129,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
         {{"get", api_path}, {release_json(tag), 200}},
         {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
         {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
+        {{"get", arb_path(tag)}, fn conn -> raw_response(conn, 200, arb_body) end},
+        {{"get", arb_path(tag) <> ".sha256"},
+         fn conn -> raw_response(conn, 200, arb_sha_text) end},
         {{"get", "/api/workspaces"}, {workspaces, 200}},
         {{"get", "/api/repos"},
          {%{"data" => [%{"name" => "tonic", "source" => "acme", "path" => "/srv/tonic"}]}, 200}},
@@ -1325,8 +1342,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
   # ---- config errors -----------------------------------------------------
 
   describe "configuration errors" do
-    test "missing ARB_RELEASE_REPO aborts with a hint" do
+    test "no resolvable release repo aborts with a hint" do
       System.delete_env("ARB_RELEASE_REPO")
+      Process.put(:bd2_build_release_repo, false)
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 
@@ -1427,6 +1445,476 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert code == 1
       assert err =~ "worker"
       assert err =~ "bd-xyz"
+    end
+  end
+
+  # ---- pre-swap database backup + restore (bd-6umf7z) ----------------------
+
+  describe "pre-swap database backup" do
+    @magic "SQLite format 3\0"
+    @m_old "20260101000000_create_things"
+    @m_new "20260202000000_add_flag_to_things"
+
+    alias ArbiterCli.Cmd.ReleaseDeploy.Status
+
+    defp db_file(home), do: Path.join(home, "arbiter.sqlite3")
+    defp write_db(home, content), do: File.write!(db_file(home), @magic <> content)
+    defp read_db(home), do: File.read!(db_file(home))
+
+    # Stand in for `bin/arbiter eval Arbiter.Release.Backup.eval_from_env()`: a
+    # real one copies the live DB (VACUUM INTO) to ARB_BACKUP_DEST. The copy is
+    # made at the moment of the eval, so the swap/restart order is observable.
+    defp stub_backup(home, opts \\ []) do
+      base = Process.get(:bd2_cmd_runner)
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, run_opts ->
+        case args do
+          ["eval", "Arbiter.Release.Backup.eval_from_env()"] ->
+            env = Map.new(run_opts[:env])
+            send(test_pid, {:backup_eval, File.read_link(Path.join(home, "current")), cmd, env})
+
+            if Keyword.get(opts, :fail, false) do
+              {"integrity_check: row 3 missing from index", 1}
+            else
+              File.mkdir_p!(Path.dirname(env["ARB_BACKUP_DEST"]))
+              File.cp!(env["ARB_BACKUP_SRC"], env["ARB_BACKUP_DEST"])
+              {Jason.encode!(%{ok: true}), 0}
+            end
+
+          _ ->
+            send(test_pid, {:ran, cmd, args})
+            base.(cmd, args, run_opts)
+        end
+      end)
+    end
+
+    # restart #1 is the new release booting (it migrates the DB, then never goes
+    # green); restart #2 is the prior release coming back, green.
+    defp migrating_restarts(home) do
+      fn ->
+        n = (Process.get(:restarts) || 0) + 1
+        Process.put(:restarts, n)
+
+        case n do
+          1 -> write_db(home, "migrated-by-new-release")
+          _ -> stub_local_apis(workspaces: @green)
+        end
+      end
+    end
+
+    defp tagged_release(tag, migrations) do
+      tarball = release_tarball(tag, migrations)
+      {tarball, "#{sha256_hex(tarball)}  arbiter-#{tag}-linux.tar.gz\n"}
+    end
+
+    defp prior_release(home, migrations) do
+      prior = seed_release(home, "v0.0.2", migrations)
+      point_current(home, prior)
+      prior
+    end
+
+    test "snapshots the live DB before the swap and reports the path in text and JSON",
+         %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "live-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old])
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home)
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      path = payload["backup"]["path"]
+      assert Path.dirname(path) == Path.join(home, "snapshots")
+      assert Path.basename(path) =~ ~r/\Aarbiter-pre-#{@vsn}-\d{8}T\d{6}Z\.sqlite3\z/
+      assert File.read!(path) == @magic <> "live-data"
+      assert payload["backup"]["bytes"] == byte_size(@magic <> "live-data")
+
+      # Taken *before* the swap: `current` still pointed at the prior release.
+      assert_received {:backup_eval, {:ok, before_swap}, bin, env}
+      assert Path.basename(before_swap) == "v0.0.2"
+      assert bin == Path.join([home, "releases", @vsn, "bin/arbiter"])
+      assert env["ARB_BACKUP_SRC"] == db_file(home)
+
+      # …and then the swap happened.
+      assert {:ok, link} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link) == @vsn
+    end
+
+    test "text output names the backup", %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "live-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old])
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home)
+
+      {out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+      assert out =~ "Database backup:"
+      assert out =~ "snapshots/arbiter-pre-#{@vsn}-"
+    end
+
+    test "no database yet (a fresh host) skips the backup and says so", %{home: home} do
+      {tarball, sha} = tagged_release(@vsn, [@m_old])
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home)
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["backup"] == nil
+      refute_received {:backup_eval, _, _, _}
+    end
+
+    test "a failed backup or integrity check aborts before anything is swapped",
+         %{home: home} do
+      prior = prior_release(home, [@m_old])
+      write_db(home, "live-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home, fail: true)
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert err =~ "database backup failed"
+      assert err =~ "integrity_check"
+
+      # Nothing swapped, nothing restarted, the database untouched.
+      assert {:ok, link} = File.read_link(Path.join(home, "current"))
+      assert link == prior
+      refute_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      assert read_db(home) == @magic <> "live-data"
+
+      assert %{"state" => "failed", "tag" => @vsn, "message" => msg} = Status.read()
+      assert msg =~ "backup"
+    end
+
+    test "a failed health check of a release with migrations restores the backup and the " <>
+           "previous release comes back green",
+         %{home: home} do
+      prior = prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds(on_restart: migrating_restarts(home))
+      stub_backup(home)
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "did not come back green"
+      assert out =~ "Rolled back to v0.0.2"
+      assert out =~ "Restored the database"
+      refute out =~ "Refused to roll back"
+
+      # The migrated database is gone from the live path; the backup is in it.
+      assert read_db(home) == @magic <> "v0.0.2-data"
+
+      # …but nothing was deleted: the migrated one is kept aside, named in the output.
+      [failed] = Path.wildcard(Path.join(home, "snapshots/arbiter-failed-#{@vsn}-*.sqlite3"))
+      assert File.read!(failed) == @magic <> "migrated-by-new-release"
+      assert out =~ failed
+
+      # `current` is back on the prior release, which came back green.
+      assert {:ok, link} = File.read_link(Path.join(home, "current"))
+      assert link == prior
+      assert out =~ "[ ok ] phoenix reachable"
+      assert out =~ "[ ok ] active workspace resolves"
+
+      # Order: stop (database safe to touch) → restore → swap/restart.
+      cmds = drain_cmds()
+      assert Enum.member?(cmds, {"systemctl", ["--user", "stop", "arbiter.service"]})
+
+      restarts =
+        Enum.filter(cmds, &(&1 == {"systemctl", ["--user", "restart", "arbiter.service"]}))
+
+      assert length(restarts) == 2
+
+      assert %{
+               "state" => "rolled_back",
+               "rolled_back_to" => "v0.0.2",
+               "restored_database" => true
+             } =
+               Status.read()
+    end
+
+    test "--json reports the restore", %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds(on_restart: migrating_restarts(home))
+      stub_backup(home)
+
+      {out, _err, 1} = capture(fn -> ReleaseDeploy.run(["--timeout", "1", "--json"]) end)
+
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["rolled_back"] == true
+      assert payload["rollback_refused"] == false
+      assert payload["restored_database"] == true
+      assert payload["crossed_migrations"] == [@m_new]
+      assert payload["backup_path"] =~ "arbiter-pre-#{@vsn}-"
+      assert payload["failed_database_path"] =~ "arbiter-failed-#{@vsn}-"
+    end
+
+    test "a failed release that adds no migrations rolls back WITHOUT touching the database",
+         %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old])
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+
+      # The new release writes to the database while it is up (it is serving).
+      stub_cmds(on_restart: fn -> write_db(home, "written-while-new-release-ran") end)
+      stub_backup(home)
+
+      {out, _err, 1} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert out =~ "Rolled back to v0.0.2"
+      refute out =~ "Restored the database"
+      # Restoring would throw those writes away for no schema benefit.
+      assert read_db(home) == @magic <> "written-while-new-release-ran"
+      refute_received {:ran, "systemctl", ["--user", "stop", "arbiter.service"]}
+      assert %{"state" => "rolled_back", "restored_database" => false} = Status.read()
+    end
+
+    test "--allow-cross-migration-rollback still restores rather than rolling back onto the " <>
+           "migrated schema",
+         %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds(on_restart: migrating_restarts(home))
+      stub_backup(home)
+
+      {out, _err, 1} =
+        capture(fn ->
+          ReleaseDeploy.run(["--timeout", "1", "--allow-cross-migration-rollback"])
+        end)
+
+      assert out =~ "Restored the database"
+      refute out =~ "is now running against a newer schema"
+      assert read_db(home) == @magic <> "v0.0.2-data"
+    end
+
+    test "a swap that did not take (stale /api/version) never restores: the old release " <>
+           "kept serving and its writes would be lost",
+         %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+
+      stale = %{"version" => "0.0.2", "sha" => "x", "built_at" => "x", "booted_at" => "x"}
+      stub_release(@vsn, tarball, sha, version_resp: stale)
+      stub_cmds(on_restart: fn -> write_db(home, "old-release-still-writing") end)
+      stub_backup(home)
+
+      {out, _err, 1} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert out =~ "Refused to roll back"
+      assert read_db(home) == @magic <> "old-release-still-writing"
+      refute_received {:ran, "systemctl", ["--user", "stop", "arbiter.service"]}
+    end
+
+    test "a stop that fails leaves the database alone and refuses", %{home: home} do
+      prior_release(home, [@m_old])
+      write_db(home, "v0.0.2-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds(on_restart: migrating_restarts(home))
+
+      base = Process.get(:bd2_cmd_runner)
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        if {cmd, args} == {"systemctl", ["--user", "stop", "arbiter.service"]},
+          do: {"Failed to stop", 1},
+          else: base.(cmd, args, opts)
+      end)
+
+      stub_backup(home)
+
+      {out, _err, 1} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert out =~ "Refused to roll back"
+      assert out =~ "could not stop"
+      assert read_db(home) == @magic <> "migrated-by-new-release"
+    end
+
+    test "old snapshots are pruned to the configured count after a green deploy", %{home: home} do
+      System.put_env("ARB_DEPLOY_BACKUP_RETAIN", "2")
+      prior_release(home, [@m_old])
+      write_db(home, "live")
+      snapshots = Path.join(home, "snapshots")
+      File.mkdir_p!(snapshots)
+
+      for i <- 1..4,
+          do:
+            File.write!(
+              Path.join(snapshots, "arbiter-pre-v0.0.#{i}-2026010#{i}T000000Z.sqlite3"),
+              @magic
+            )
+
+      {tarball, sha} = tagged_release(@vsn, [@m_old])
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+      stub_backup(home)
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      names = snapshots |> File.ls!() |> Enum.sort()
+      assert length(names) == 2
+      assert Enum.any?(names, &String.contains?(&1, "arbiter-pre-#{@vsn}-"))
+    end
+  end
+
+  # ---- deploy status file (bd-6umf7z) --------------------------------------
+
+  describe "deploy status record" do
+    alias ArbiterCli.Cmd.ReleaseDeploy.Status
+
+    test "a green deploy records success, the tag and no secrets", %{home: home} do
+      System.put_env("GITHUB_TOKEN", "ghp_supersecrettokenvalue123")
+      on_exit(fn -> System.delete_env("GITHUB_TOKEN") end)
+
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert %{"state" => "succeeded", "tag" => @vsn, "finished_at" => _} = Status.read()
+      refute File.read!(Status.path()) =~ "ghp_supersecrettokenvalue123"
+      _ = home
+    end
+
+    test "an early failure (bad checksum) is recorded as failed, not left running" do
+      tarball = release_tarball(@vsn)
+      stub_release(@vsn, tarball, String.duplicate("0", 64) <> "  x\n")
+      stub_cmds()
+
+      {_out, _err, 1} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert %{"state" => "failed", "tag" => @vsn, "message" => msg} = Status.read()
+      assert msg =~ "checksum"
+    end
+
+    test "a refused rollback is recorded as refused", %{home: home} do
+      prior = seed_release(home, "v0.0.2", [@m_base])
+      point_current(home, prior)
+      tarball = release_tarball(@vsn, [@m_base, "20260202000000_x"])
+      stub_release(@vsn, tarball, "#{sha256_hex(tarball)}  x\n", workspaces: @empty)
+      stub_cmds()
+
+      {_out, _err, 1} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert %{"state" => "refused", "tag" => @vsn} = Status.read()
+    end
+
+    test "an already-current deploy leaves a prior record untouched", %{home: home} do
+      point_current(home, seed_release(home, @vsn))
+      Status.start("v0.0.1", %{})
+      Status.finish("succeeded", %{})
+      tarball = release_tarball(@vsn)
+      stub_release(@vsn, tarball, "#{sha256_hex(tarball)}  x\n")
+      stub_cmds()
+
+      {_out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert %{"tag" => "v0.0.1"} = Status.read()
+    end
+  end
+
+  # ---- matching CLI after a green deploy (bd-6umf7z) -----------------------
+
+  describe "CLI self-update after a green deploy" do
+    test "installs the escript for the same tag and reports it", %{home: home} do
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert %{"updated" => true, "version" => @vsn} = payload["cli_update"]
+      assert File.read!(Path.join(home, "bin/arb")) == arb_bytes(@vsn)
+    end
+
+    test "text output says the CLI was updated", %{home: home} do
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert out =~ "Updated arb to #{@vsn}"
+      assert File.exists?(Path.join(home, "bin/arb"))
+    end
+
+    test "--no-self-update leaves the CLI alone", %{home: home} do
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, 0} = capture(fn -> ReleaseDeploy.run(["--json", "--no-self-update"]) end)
+
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["cli_update"] == nil
+      refute File.exists?(Path.join(home, "bin/arb"))
+    end
+
+    test "a failing self-update does not fail the (already healthy) deploy", %{home: home} do
+      tarball = release_tarball(@vsn)
+
+      # The escript download no longer matches its published checksum.
+      stub_release(@vsn, tarball, "#{sha256_hex(tarball)}  x\n",
+        arb_body: "tampered",
+        arb_sha_text: "#{sha256_hex("the real one")}  arb\n"
+      )
+
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["deployed"] == true
+      assert payload["ok"] == true
+      assert payload["cli_update"]["updated"] == false
+      assert payload["cli_update"]["error"] =~ "checksum"
+      refute File.exists?(Path.join(home, "bin/arb"))
+    end
+
+    test "--local deploys do not touch the CLI (a local build has no matching release)",
+         %{home: home} do
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, _err, 0} =
+        capture(fn -> ReleaseDeploy.run(["--local", local_release_dir()]) end)
+
+      refute File.exists?(Path.join(home, "bin/arb"))
+    end
+
+    test "the output names the release repo and where it was resolved from" do
+      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, err, 0} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert err =~ "Release source: #{@repo} (from ARB_RELEASE_REPO)"
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["release_repo"] == @repo
+      assert payload["release_repo_source"] == "env"
     end
   end
 end

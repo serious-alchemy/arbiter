@@ -41,7 +41,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
       mismatch, write failure).
   """
 
-  alias ArbiterCli.{ArgParser, Output}
+  alias ArbiterCli.{ArgParser, Output, ReleaseRepo}
 
   @default_github_api "https://api.github.com"
   @switches [version: :string, json: :boolean, force: :boolean]
@@ -60,17 +60,60 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
     {opts, _rest, mode} = ArgParser.parse(argv, command: "arb self-update", strict: @switches)
     force = opts[:force] || false
 
-    repo = release_repo()
-    release = fetch_release(repo, opts[:version])
-    tag = release_tag(release)
+    try do
+      repo = release_repo()
+      release = fetch_release(repo, opts[:version])
+      tag = release_tag(release)
 
+      case install(release, repo, tag, force) do
+        {:already_current, _} -> emit_already_current(mode, tag)
+        {:updated, prior} -> emit_updated(mode, tag, prior)
+      end
+    catch
+      {:self_update_failed, msg, nil} -> Output.die(msg)
+      {:self_update_failed, msg, hint} -> Output.die(msg, hint)
+    end
+  end
+
+  @doc """
+  Install the `arb` escript from an already-fetched release (`repo`/`tag`) —
+  the half of `arb self-update` that `arb server deploy` runs after a green
+  deploy so the CLI matches the server it just put live.
+
+  Never halts the VM: a failure comes back as `{:error, message}` because the
+  caller's own work (a healthy server deploy) is already done. Quiet on stdout
+  so a `--json` deploy stays one object.
+  """
+  @spec install_from_release(String.t(), map(), String.t()) ::
+          {:ok, %{updated: boolean(), version: String.t(), previous_version: String.t() | nil}}
+          | {:error, String.t()}
+  def install_from_release(repo, release, tag) do
+    Process.put(:arb_self_update_quiet, true)
+
+    try do
+      case install(release, repo, tag, true) do
+        {:updated, prior} ->
+          {:ok,
+           %{updated: true, version: tag, previous_version: prior, install_path: install_path()}}
+
+        {:already_current, _} ->
+          {:ok, %{updated: false, version: tag, previous_version: nil}}
+      end
+    catch
+      {:self_update_failed, msg, _hint} -> {:error, msg}
+    after
+      Process.delete(:arb_self_update_quiet)
+    end
+  end
+
+  defp install(release, repo, tag, force) do
     # Strip the leading `v` from the tag before comparing with the app version
     # (the app version is stored without the prefix, e.g. "0.1.10").
     tag_version = String.trim_leading(tag, "v")
     current_version = ArbiterCli.Version.app_version()
 
     if not force and tag_version == current_version do
-      emit_already_current(mode, tag)
+      {:already_current, current_version}
     else
       {arb_url, sha_url} = cli_assets(release, tag)
 
@@ -81,25 +124,27 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
       verify_sha256!(arb_bytes, expected_sha)
       log("Checksum verified (sha256 #{String.slice(expected_sha, 0, 12)}…).")
 
-      install_path = install_path()
-      atomic_swap!(install_path, arb_bytes)
-
-      emit_updated(mode, tag, current_version)
+      atomic_swap!(install_path(), arb_bytes)
+      {:updated, current_version}
     end
   end
+
+  # Every failure inside the install path throws, so `arb self-update` can turn
+  # it into a halt and `install_from_release/3` into an `{:error, _}`.
+  defp fail(msg, hint \\ nil), do: throw({:self_update_failed, msg, hint})
 
   # ---- release resolution --------------------------------------------------
 
   defp release_repo do
-    case System.get_env("ARB_RELEASE_REPO") do
-      slug when is_binary(slug) and slug != "" ->
-        slug
+    case ReleaseRepo.resolve() do
+      {:ok, repo, source} ->
+        IO.puts(:stderr, "Release source: #{repo} (#{ReleaseRepo.describe(source)}).")
+        repo
 
-      _ ->
-        Output.die(
-          "ARB_RELEASE_REPO is not set",
-          "Set it to the GitHub `owner/repo` that publishes Arbiter releases, " <>
-            "e.g. ARB_RELEASE_REPO=acme/arbiter."
+      :error ->
+        fail(
+          "could not determine which GitHub repo publishes Arbiter releases",
+          "Set ARB_RELEASE_REPO=owner/repo, or use a release-built arb (it carries its own repo)."
         )
     end
   end
@@ -124,16 +169,16 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
         body
 
       {:ok, %Req.Response{status: 404}} ->
-        Output.die(
+        fail(
           "no #{what} release found in #{repo}",
           "Check `--version` matches a published tag, or publish a release first."
         )
 
       {:ok, %Req.Response{status: status}} ->
-        Output.die("GitHub Releases API returned HTTP #{status} for #{url}")
+        fail("GitHub Releases API returned HTTP #{status} for #{url}")
 
       {:error, reason} ->
-        Output.die(
+        fail(
           "could not reach the GitHub Releases API",
           "Requesting #{url} failed: #{inspect(reason)}"
         )
@@ -143,7 +188,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
   defp release_tag(%{"tag_name" => tag}) when is_binary(tag) and tag != "", do: tag
 
   defp release_tag(_),
-    do: Output.die("release metadata has no tag_name", "The Releases API response was malformed.")
+    do: fail("release metadata has no tag_name", "The Releases API response was malformed.")
 
   # Locate the `arb` escript asset and its `arb.sha256` sidecar.
   defp cli_assets(%{"assets" => assets}, tag) when is_list(assets) do
@@ -152,13 +197,13 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
 
     cond do
       is_nil(arb_url) ->
-        Output.die(
+        fail(
           "release #{tag} has no asset named `arb`",
           "The release workflow should publish it; re-run the build if it's missing."
         )
 
       is_nil(sha_url) ->
-        Output.die(
+        fail(
           "release #{tag} has no checksum asset named `arb.sha256`",
           "Refusing to update without a checksum to verify the download against."
         )
@@ -168,7 +213,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
     end
   end
 
-  defp cli_assets(_, tag), do: Output.die("release #{tag} has no assets")
+  defp cli_assets(_, tag), do: fail("release #{tag} has no assets")
 
   defp asset_url(assets, name) do
     Enum.find_value(assets, fn
@@ -196,10 +241,10 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
         body
 
       {:ok, %Req.Response{status: status}} ->
-        Output.die("download failed: HTTP #{status} for #{url}")
+        fail("download failed: HTTP #{status} for #{url}")
 
       {:error, reason} ->
-        Output.die("download failed for #{url}", inspect(reason))
+        fail("download failed for #{url}", inspect(reason))
     end
   end
 
@@ -211,7 +256,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
     |> List.first()
     |> case do
       hex when is_binary(hex) and hex != "" -> String.downcase(hex)
-      _ -> Output.die("could not parse the published sha256 checksum")
+      _ -> fail("could not parse the published sha256 checksum")
     end
   end
 
@@ -219,7 +264,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
     actual = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
     unless actual == expected do
-      Output.die(
+      fail(
         "sha256 checksum mismatch — refusing to update",
         "expected #{expected}\n             got #{actual}\n" <>
           "The download is corrupt or tampered with. Aborting before touching the binary."
@@ -234,7 +279,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
 
     case File.mkdir_p(install_dir) do
       :ok -> :ok
-      {:error, reason} -> Output.die("could not create #{install_dir}: #{inspect(reason)}")
+      {:error, reason} -> fail("could not create #{install_dir}: #{inspect(reason)}")
     end
 
     # Back up the existing binary so the user can roll back manually.
@@ -243,7 +288,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
 
       case File.copy(install_path, bak) do
         {:ok, _} -> log("Backed up existing binary to #{bak}")
-        {:error, reason} -> Output.die("could not back up #{install_path}: #{inspect(reason)}")
+        {:error, reason} -> fail("could not back up #{install_path}: #{inspect(reason)}")
       end
     end
 
@@ -258,7 +303,7 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
     else
       {:error, reason} ->
         _ = File.rm(tmp)
-        Output.die("failed to install arb to #{install_path}", inspect(reason))
+        fail("failed to install arb to #{install_path}", inspect(reason))
     end
   end
 
@@ -296,8 +341,10 @@ defmodule ArbiterCli.Cmd.SelfUpdate do
   defp test_opts, do: Process.get(:bd2_req_options, [])
 
   defp log(msg) do
-    unless Process.get(:bd2_req_options) do
-      IO.puts(msg)
+    cond do
+      Process.get(:bd2_req_options) -> :ok
+      Process.get(:arb_self_update_quiet) -> IO.puts(:stderr, msg)
+      true -> IO.puts(msg)
     end
   end
 

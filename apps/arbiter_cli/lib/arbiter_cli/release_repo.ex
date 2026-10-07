@@ -53,6 +53,10 @@ defmodule ArbiterCli.ReleaseRepo do
       _ ->
         :error
     end
+  rescue
+    # No server to ask is the ordinary case on a fresh host; fall through to the
+    # build-time repo rather than failing the deploy on a transport hiccup.
+    _ -> :error
   end
 
   defp from_build do
