@@ -59,6 +59,7 @@ defmodule Arbiter.Worker.Driver do
   """
 
   use GenServer
+  require Ash.Query
   require Logger
 
   alias Arbiter.Reviews.Checkout
@@ -583,13 +584,46 @@ defmodule Arbiter.Worker.Driver do
   defp maybe_cleanup_worktree(%{cleanup_worktree: false}), do: :ok
   defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
 
+  # RW12 (docs/design/remote-workers.md §10.3): a run cut off by a lost node is
+  # interrupted, not failed, and its home clone is what the resume re-enters (the
+  # node's own work is lost beyond the last checkpoint, but the checkpoint is here).
+  # The Worker is gone by the time this runs, so the run row says which it was.
+  defp maybe_cleanup_worktree(%{task_id: task_id} = state) when is_binary(task_id) do
+    if node_lost_run?(task_id) do
+      Logger.info(
+        "Worker.Driver: run for task=#{task_id} was interrupted by a lost node; " <>
+          "keeping its worktree for the resume"
+      )
+
+      :ok
+    else
+      cleanup_unless_merging(state)
+    end
+  end
+
+  defp maybe_cleanup_worktree(state), do: cleanup_unless_merging(state)
+
   # bd-741sid: a Merging ticket's worktree belongs to its merge path — a fix or
   # conflict pass works in it, and the ticket's close removes it.
-  defp maybe_cleanup_worktree(%{task_id: task_id} = state) when is_binary(task_id) do
+  defp cleanup_unless_merging(%{task_id: task_id} = state) when is_binary(task_id) do
     if merging?(task_id), do: :ok, else: do_maybe_cleanup_worktree(state)
   end
 
-  defp maybe_cleanup_worktree(state), do: do_maybe_cleanup_worktree(state)
+  defp cleanup_unless_merging(state), do: do_maybe_cleanup_worktree(state)
+
+  defp node_lost_run?(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%{outcome: :interrupted, stop_category: "node_lost"}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
 
   defp do_maybe_cleanup_worktree(%{worktree_path: path} = state) do
     # The task's :close after_action may already have removed the worktree

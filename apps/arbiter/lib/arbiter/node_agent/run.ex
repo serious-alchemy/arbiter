@@ -39,15 +39,33 @@ defmodule Arbiter.NodeAgent.Run do
   across the exit loses neither the status nor the tail of the output. Secrets
   are removed as soon as the container is gone.
 
+  ## Quiesce (RW12, §10.4)
+
+  `quiesce/1` is what a run gets when the primary does not know it (a restart took
+  its Worker): the container is stopped, then the snapshot bundle and the
+  transcript tarball are taken **locally** into `Arbiter.NodeAgent.Retained`, a
+  `retained` push reports them, and the process ends, with no `exit` for the
+  primary to ack. A run that had already exited is retained the same way.
+
   ## Messages to the sink
 
   `{:run_push, run_id, event, payload}` with `event` one of `"run.ready"`,
-  `"run.refused"`, `"stdout"` (`{:binary, frame}`) and `"exit"`.
+  `"run.refused"`, `"stdout"` (`{:binary, frame}`), `"exit"` and `"retained"`.
   """
 
   use GenServer, restart: :temporary
 
-  alias Arbiter.NodeAgent.{Cgroups, Checkout, Files, RunSpec, Secrets, StdoutBuffer, Transcripts}
+  alias Arbiter.NodeAgent.{
+    Cgroups,
+    Checkout,
+    Files,
+    Retained,
+    RunSpec,
+    Secrets,
+    StdoutBuffer,
+    Transcripts
+  }
+
   alias Arbiter.Nodes.StdoutFrame
   alias Arbiter.Worker.{Container, Image, TestServices}
   alias Arbiter.Worker.ReleaseEnv
@@ -75,6 +93,7 @@ defmodule Arbiter.NodeAgent.Run do
     :cp_task,
     :checkout_result,
     phase: :preparing,
+    quiesce?: false,
     buffer: nil,
     sent: 0,
     connected?: false,
@@ -104,6 +123,13 @@ defmodule Arbiter.NodeAgent.Run do
   @doc "Take a checkpoint now (RW11): snapshot the shadow and upload it for the primary to ingest."
   @spec collect(String.t()) :: :ok | {:error, :not_found}
   def collect(run), do: cast(run, :collect)
+
+  @doc """
+  The primary does not know this run (RW12): stop it and retain its work locally for
+  the primary to pull (`Arbiter.NodeAgent.Retained`).
+  """
+  @spec quiesce(String.t()) :: :ok | {:error, :not_found}
+  def quiesce(run), do: cast(run, :quiesce)
 
   @doc "The primary has the `exit`: the run may go."
   @spec ack_exit(String.t()) :: :ok | {:error, :not_found}
@@ -171,6 +197,25 @@ defmodule Arbiter.NodeAgent.Run do
 
   def handle_cast({:signal, _}, state), do: {:noreply, state}
 
+  def handle_cast(:quiesce, %{phase: :preparing} = state),
+    do: {:noreply, %{state | cancelled: state.cancelled || "quiesced"}}
+
+  # Quiesce is only ever asked for on a `hello_ok`, so the channel is up; the run was not
+  # `attach`ed (the primary does not know it), but its `retained` report has to get out.
+  def handle_cast(:quiesce, %{phase: :running} = state) do
+    stop_container(state)
+
+    {:noreply,
+     %{state | quiesce?: true, connected?: true, cancelled: state.cancelled || "quiesced"}}
+  end
+
+  def handle_cast(:quiesce, %{phase: :exited} = state) do
+    if state.exit_timer, do: Process.cancel_timer(state.exit_timer)
+    {:stop, :normal, retain(%{state | connected?: true})}
+  end
+
+  def handle_cast(:quiesce, state), do: {:noreply, state}
+
   def handle_cast(:collect, %{phase: :running} = state), do: {:noreply, checkpoint(state)}
   def handle_cast(:collect, state), do: {:noreply, state}
 
@@ -235,8 +280,12 @@ defmodule Arbiter.NodeAgent.Run do
     end
   end
 
-  def handle_info({port, {:exit_status, status}}, %{port: port} = state),
-    do: {:noreply, finish(%{state | port: nil}, status)}
+  def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
+    case finish(%{state | port: nil}, status) do
+      %{phase: :retained} = retained -> {:stop, :normal, retained}
+      state -> {:noreply, state}
+    end
+  end
 
   def handle_info(:retention_expired, state), do: {:stop, :normal, state}
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
@@ -604,6 +653,7 @@ defmodule Arbiter.NodeAgent.Run do
              Keyword.merge(runner_opts(opts),
                name: spec.name,
                services: services,
+               labels: labels(spec, opts),
                podman: podman_path(opts)
              )
            ) do
@@ -713,6 +763,14 @@ defmodule Arbiter.NodeAgent.Run do
 
   # ---- exit --------------------------------------------------------------------------
 
+  # RW12: the container is gone because the primary no longer knows the run. Its work
+  # is kept on this node, not uploaded: nothing on the primary would accept it.
+  defp finish(%{quiesce?: true} = state, _status) do
+    stop_container(state)
+    cleanup(state)
+    retain(state)
+  end
+
   defp finish(state, status) do
     oom? = oom?(state)
     stop_container(state)
@@ -722,6 +780,37 @@ defmodule Arbiter.NodeAgent.Run do
     exit = exit_report(state, status, oom?)
     state = %{state | exit: exit, phase: :exited}
     state = state |> push("exit", exit) |> arm_retention()
+    state
+  end
+
+  defp retain(state) do
+    if state.cp_task, do: Task.shutdown(state.cp_task, :brutal_kill)
+    if state.cp_timer, do: Process.cancel_timer(state.cp_timer)
+    cleanup(state)
+
+    checkout = state.spec.checkout
+
+    info = %{
+      run: state.spec.run,
+      task: state.spec.task,
+      name: state.spec.name,
+      install: state.spec.install,
+      branch: checkout && checkout.branch,
+      base: checkout && checkout.base,
+      shadow: shadow(state),
+      config_dir: Path.join([run_config(state).node_home, "runs", state.spec.run, "config"])
+    }
+
+    manifest = Retained.retain(run_config(state), info, state.known || [])
+
+    state =
+      push(
+        %{state | phase: :retained, cp_task: nil, cp_timer: nil},
+        "retained",
+        Retained.report(manifest)
+      )
+
+    Logger.info("node agent: run #{state.spec.run} quiesced and retained")
     state
   end
 

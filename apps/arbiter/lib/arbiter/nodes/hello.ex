@@ -1,46 +1,10 @@
 defmodule Arbiter.Nodes.Hello do
   @moduledoc """
   What the primary reads out of a node's `hello` and answers in `hello_ok`
-  (`docs/design/remote-workers.md` §4.2, §13): the per-run verdicts and the
-  effective worker ceiling. Pure of process state; the run check reads
-  `worker_runs`.
+  (`docs/design/remote-workers.md` §4.2, §13): the effective worker ceiling and the
+  run ids a hello lists. Pure. The per-run verdicts are the session's own
+  (`Arbiter.Nodes.Session`): a run is known iff the session holds it (§10.4).
   """
-
-  require Ash.Query
-
-  alias Arbiter.Workers.Run
-  alias Arbiter.Workers.RunState
-
-  @doc """
-  The primary's verdict on each run id the node reports in `hello`: `"known"`
-  (a `worker_runs` row in a live state — the primary still owns it) or
-  `"unknown"` (no such run, already finished, or not a run id at all — the
-  agent quiesces it, §10.4).
-
-  `worker_runs` has no `node_id` yet (RW8), so "known" is *a live run with this
-  id*, not *a live run assigned to this node*. The run-scoped authorization of
-  §5.3 tightens it when that column lands.
-  """
-  @spec verdicts([term()]) :: %{String.t() => String.t()}
-  def verdicts(run_ids) when is_list(run_ids) do
-    ids = run_ids |> Enum.filter(&is_binary/1) |> Enum.uniq()
-    uuids = Enum.filter(ids, &match?({:ok, _}, Ecto.UUID.cast(&1)))
-    live = live_run_ids(uuids)
-
-    Map.new(ids, fn id -> {id, if(id in live, do: "known", else: "unknown")} end)
-  end
-
-  defp live_run_ids([]), do: []
-
-  defp live_run_ids(uuids) do
-    live_states = Enum.filter(RunState.states(), &RunState.live?/1)
-
-    Run
-    |> Ash.Query.filter(id in ^uuids and state in ^live_states)
-    |> Ash.Query.select([:id])
-    |> Ash.read!()
-    |> Enum.map(& &1.id)
-  end
 
   @doc """
   The effective `max_workers` of a node (§13, with the RW8 operator amendment).

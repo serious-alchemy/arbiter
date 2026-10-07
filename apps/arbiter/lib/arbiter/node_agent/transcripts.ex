@@ -59,7 +59,7 @@ defmodule Arbiter.NodeAgent.Transcripts do
     try do
       with {:ok, %{files: n}} when n > 0 <- pack(config_dir, dest),
            {:ok, %File.Stat{size: bytes}} <- File.stat(dest) do
-        put(config, run, dest, bytes)
+        put_tar(config, run, dest, bytes)
       else
         {:ok, %{files: 0}} -> {:ok, %{"files" => 0}}
         {:error, _} = error -> error
@@ -69,7 +69,10 @@ defmodule Arbiter.NodeAgent.Transcripts do
     end
   end
 
-  defp put(config, run, path, bytes) do
+  @doc "`PUT` the file at `path` (`bytes` long) for `run`: `{:ok, body}` or `{:error, reason}`."
+  @spec put_tar(Config.t(), String.t(), Path.t(), non_neg_integer()) ::
+          {:ok, term()} | {:error, term()}
+  def put_tar(config, run, path, bytes) do
     request =
       Req.new(
         [

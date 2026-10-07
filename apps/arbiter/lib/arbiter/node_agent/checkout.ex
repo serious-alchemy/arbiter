@@ -391,14 +391,17 @@ defmodule Arbiter.NodeAgent.Checkout do
     try do
       with {:ok, %{path: path, bytes: bytes}} <-
              package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest}) do
-        put(config, run, path, bytes)
+        put_bundle(config, run, path, bytes)
       end
     after
       File.rm(dest)
     end
   end
 
-  defp put(config, run, path, bytes) do
+  @doc "`PUT` the file at `path` (`bytes` long) for `run`: `{:ok, body}` or `{:error, reason}`."
+  @spec put_bundle(Config.t(), String.t(), Path.t(), non_neg_integer()) ::
+          {:ok, term()} | {:error, term()}
+  def put_bundle(config, run, path, bytes) do
     request =
       Req.new(
         [
