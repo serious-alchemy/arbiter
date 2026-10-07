@@ -468,6 +468,73 @@ defmodule Arbiter.Quota do
   end
 
   @doc """
+  The REST `GET /api/quota` body (the map under `data`) from the assigns the
+  controller collects for a lookup. `ArbiterWeb.Api.QuotaJSON` renders through
+  it, and so does `account_snapshot/1`, so the `?account=` lookup has one shape
+  on REST and MCP.
+  """
+  @spec snapshot_view(map()) :: map()
+  def snapshot_view(%{workspace_id: ws_id, claude: claude, quotas: quotas} = assigns) do
+    %{
+      # Deprecated since P5 (`docs/provider-account-design.md` §6): the
+      # quota rows are keyed by provider account now, and each `quotas`
+      # entry carries its own `account`. Kept for one release as the alias
+      # for "the workspace this lookup came in through".
+      workspace_id: ws_id,
+      workspace: Map.get(assigns, :workspace),
+      requested_workspace: Map.get(assigns, :requested_workspace),
+      account: Map.get(assigns, :account),
+      workspaces: Map.get(assigns, :workspaces) || [],
+      account_policy: Map.get(assigns, :account_policy),
+      policy_binding: Map.get(assigns, :policy_binding),
+      effective_policy: Map.get(assigns, :effective_policy),
+      claude: claude,
+      quotas: quotas,
+      codex: Map.get(assigns, :codex),
+      codex_message: Map.get(assigns, :codex_message),
+      codex_credentials_expired: Map.get(assigns, :codex_credentials_expired, false),
+      antigravity: Map.get(assigns, :antigravity),
+      gemini_credentials_expired: Map.get(assigns, :gemini_credentials_expired, false),
+      held_dispatches: Map.get(assigns, :held_dispatches, [])
+    }
+  end
+
+  @doc """
+  One account's quota, straight to the account rather than through a workspace
+  (`GET /api/quota?account=`, `arb quota --account`, MCP `quota_get account`).
+  Only that account's own provider carries real data; the other providers' keys
+  stay `nil`. Returns the `snapshot_view/1` map.
+  """
+  @spec account_snapshot(ProviderAccount.t()) :: map()
+  def account_snapshot(%ProviderAccount{} = account) do
+    provider = Atom.to_string(account.provider)
+    spend = spend_cache(account.id)
+    fields = account_fields(account.id, provider, spend)
+    codex = if provider == "codex", do: Arbiter.Quota.Codex.serialize_latest(account.id)
+    policy = policy_fields(account, nil)
+
+    snapshot_view(%{
+      workspace_id: nil,
+      workspace: nil,
+      requested_workspace: nil,
+      claude: if(provider == "claude", do: serialize(account.id, "claude", spend_cache: spend)),
+      quotas: list_serialized(account.id, spend_cache: spend),
+      account: fields[:account],
+      workspaces: fields[:workspaces],
+      account_policy: policy[:account_policy],
+      policy_binding: policy[:policy_binding],
+      effective_policy: policy[:effective],
+      codex: codex,
+      codex_message: codex_absence_message(codex),
+      codex_credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
+      antigravity:
+        if(provider == "antigravity", do: CloudCode.serialize_latest(account.id, "antigravity")),
+      gemini_credentials_expired:
+        Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
+    })
+  end
+
+  @doc """
   The account's own quota policy, plus which side of `min(account,
   workspace)` binds each flat ceiling (bd-c7ll4t) — an account whose flat
   threshold bound tighter than a paced/looser workspace used to be invisible

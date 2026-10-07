@@ -149,6 +149,9 @@ defmodule Arbiter.MCP.RefinePolicy do
     "scheduler_status" => @deny_reason_scheduler,
     "provider_pause" => @deny_reason_scheduler,
     "provider_resume" => @deny_reason_scheduler,
+    "provider_list" => @deny_reason_scheduler,
+    "account_list" => @deny_reason_ops,
+    "account_show" => @deny_reason_ops,
     "account_set" => @deny_reason_scheduler,
     "alert_list" => @deny_reason_ops,
     "breaker_list" => @deny_reason_scheduler,
@@ -183,7 +186,9 @@ defmodule Arbiter.MCP.RefinePolicy do
     # out of scope for a single-workspace, single-issue token
     "workspace_list" => @deny_reason_scope,
     "quota_get" => @deny_reason_scope,
-    "usage_summarize" => @deny_reason_scope
+    "usage_summarize" => @deny_reason_scope,
+    "usage_events_list" => @deny_reason_scope,
+    "usage_calibration" => @deny_reason_scope
   }
 
   @allowed @allow_reads ++ @allow_writes
