@@ -45,6 +45,7 @@ defmodule Arbiter.Accounts do
     WorkspaceProviderAccount
   }
 
+  alias Arbiter.Accounts.Fields
   alias Arbiter.Quota.GrantFile
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
@@ -154,9 +155,17 @@ defmodule Arbiter.Accounts do
   @doc """
   Create a new `ProviderAccount` — `arb account create`. Operator-asserted
   identity (§2.4): no credential is required at creation time.
+
+  `attrs` goes through the account field registry (`Arbiter.Accounts.Fields`,
+  bd-1kr3qf): a field outside it is refused by name, and `quota_config` is
+  validated by the same validator `PATCH` uses, so a bad one never persists.
   """
   @spec create_account(map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
-  def create_account(attrs) when is_map(attrs), do: Ash.create(ProviderAccount, attrs)
+  def create_account(attrs) when is_map(attrs) do
+    with {:ok, changes} <- Fields.cast(attrs, :create) do
+      Ash.create(ProviderAccount, changes)
+    end
+  end
 
   @doc """
   Set (or clear, with `nil`) the account concurrency ceiling (P8,
@@ -193,13 +202,54 @@ defmodule Arbiter.Accounts do
   """
   @spec set_quota_config(String.t(), map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
   def set_quota_config(account_ref, updates) when is_map(updates) do
-    with {:ok, validated} <- Arbiter.Quota.Gate.validate_quota_config_patch(updates),
+    with {:ok, validated} <- Fields.validate_quota_config(updates, :patch),
          {:ok, account} <- get_account(account_ref) do
-      {clears, sets} = Map.split_with(validated, fn {_key, value} -> is_nil(value) end)
-      merged = (account.quota_config || %{}) |> Map.merge(sets) |> Map.drop(Map.keys(clears))
-      Ash.update(account, %{quota_config: merged})
+      Ash.update(account, %{quota_config: merge_quota_config(account, validated)})
     end
   end
+
+  # A validated patch onto the account's current `quota_config`: given keys
+  # are written, `nil` ones dropped, every sibling left exactly as it was.
+  defp merge_quota_config(account, validated) do
+    {clears, sets} = Map.split_with(validated, fn {_key, value} -> is_nil(value) end)
+    (account.quota_config || %{}) |> Map.merge(sets) |> Map.drop(Map.keys(clears))
+  end
+
+  @doc """
+  Edit an account in **one write** — `PATCH /api/accounts/:ref`, `arb account
+  set`, the Providers Edit form and MCP `account_set` (bd-1kr3qf, D-A-20).
+
+  `attrs` may carry any of `Fields.names(:update)`: `label`, `plan`, `enabled`,
+  `max_concurrent` and a `quota_config` patch (`nil` clears a key). The whole
+  edit is validated first, then applied as a single `UPDATE` of the row, so a
+  failure at any point leaves the account exactly as it was; the old
+  three-writes sequence could persist the label and then fail on the cap.
+  """
+  @spec edit_account(String.t(), map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
+  def edit_account(account_ref, attrs) when is_map(attrs) do
+    with {:ok, changes} <- Fields.cast(attrs, :update),
+         :ok <- require_changes(changes),
+         {:ok, account} <- get_account(account_ref) do
+      changes =
+        case changes do
+          %{quota_config: patch} ->
+            %{changes | quota_config: merge_quota_config(account, patch)}
+
+          _ ->
+            changes
+        end
+
+      Ash.update(account, changes)
+    end
+  end
+
+  defp require_changes(changes) when map_size(changes) == 0,
+    do:
+      invalid_account(
+        "nothing to update — give at least one of #{Enum.join(Fields.names(:update), ", ")}"
+      )
+
+  defp require_changes(_changes), do: :ok
 
   @update_account_keys ~w(label plan enabled)
 
@@ -236,31 +286,10 @@ defmodule Arbiter.Accounts do
     attrs = Map.new(attrs, fn {key, value} -> {to_string(key), value} end)
 
     case Map.keys(attrs) -- @update_account_keys do
-      [] -> attrs |> Enum.reduce_while({:ok, %{}}, &cast_account_attr/2)
-      unknown -> invalid_account("cannot set #{Enum.join(unknown, ", ")}")
+      [] -> Fields.cast(attrs, :update)
+      unknown -> invalid_account("cannot set #{Enum.join(Enum.sort(unknown), ", ")}")
     end
   end
-
-  defp cast_account_attr({"enabled", value}, {:ok, acc}) do
-    case cast_boolean(value) do
-      {:ok, bool} -> {:cont, {:ok, Map.put(acc, :enabled, bool)}}
-      :error -> {:halt, invalid_account("enabled must be true or false")}
-    end
-  end
-
-  defp cast_account_attr({key, value}, {:ok, acc}) when value in [nil] or is_binary(value) do
-    text = if is_binary(value), do: String.trim(value)
-
-    {:cont,
-     {:ok, Map.put(acc, String.to_existing_atom(key), if(text == "", do: nil, else: text))}}
-  end
-
-  defp cast_account_attr({key, _value}, _acc), do: {:halt, invalid_account("#{key} must be text")}
-
-  defp cast_boolean(value) when is_boolean(value), do: {:ok, value}
-  defp cast_boolean("true"), do: {:ok, true}
-  defp cast_boolean("false"), do: {:ok, false}
-  defp cast_boolean(_), do: :error
 
   defp invalid_account(message), do: {:error, {:invalid_account, message}}
 
@@ -281,6 +310,7 @@ defmodule Arbiter.Accounts do
          {:ok, _workspace} <- get_workspace(workspace_id),
          {:ok, account} <- get_account(account_ref),
          :ok <- ensure_not_merged_away(account),
+         :ok <- ensure_not_grok(account),
          :ok <- ensure_provider_match(account, provider) do
       case existing_link(workspace_id, provider) do
         nil ->
@@ -341,6 +371,12 @@ defmodule Arbiter.Accounts do
       :error -> {:error, {:invalid_provider, provider}}
     end
   end
+
+  # Grok is routed only by the per-workspace `routing.grok.enabled` opt-in, never
+  # by an attached account, so every surface refuses the attach (bd-1kr3qf,
+  # D-A-16) rather than the UI alone.
+  defp ensure_not_grok(%{provider: :grok}), do: {:error, :grok_routed_by_opt_in}
+  defp ensure_not_grok(_account), do: :ok
 
   defp ensure_provider_match(%{provider: p}, p), do: :ok
 

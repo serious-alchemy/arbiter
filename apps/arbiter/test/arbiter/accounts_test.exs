@@ -176,6 +176,142 @@ defmodule Arbiter.AccountsTest do
     end
   end
 
+  describe "create_account/1 — field registry (bd-1kr3qf)" do
+    test "validates quota_config with the PATCH validator" do
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.create_account(%{
+                 provider: :claude,
+                 slug: "bad-qc",
+                 quota_config: %{"threshold_mode" => "banana", "weekly_threshold" => 7}
+               })
+
+      assert {:error, :not_found} = Accounts.get_account("bad-qc")
+    end
+
+    test "accepts every registry quota key and the REST-only identity refs" do
+      assert {:ok, account} =
+               Accounts.create_account(%{
+                 "provider" => "codex",
+                 "slug" => "full-create",
+                 "enabled" => false,
+                 "max_concurrent" => "2",
+                 "provider_account_ref" => "ref-1",
+                 "provider_org_ref" => "org-1",
+                 "quota_config" => %{
+                   "throttle_threshold" => 0.7,
+                   "weekly_warning_policy" => "hold",
+                   "window_seconds" => %{"5h" => 18_000},
+                   "pace_exempt_priority" => "none"
+                 }
+               })
+
+      assert account.enabled == false
+      assert account.max_concurrent == 2
+      assert account.provider_org_ref == "org-1"
+
+      assert account.quota_config == %{
+               "throttle_threshold" => 0.7,
+               "weekly_warning_policy" => "hold",
+               "window_seconds" => %{"5h" => 18_000}
+             }
+    end
+
+    test "an unknown field is refused by name, not dropped" do
+      assert {:error, {:invalid_account, "cannot set merged_into_id"}} =
+               Accounts.create_account(%{
+                 provider: :claude,
+                 slug: "sneaky",
+                 merged_into_id: Ecto.UUID.generate()
+               })
+    end
+  end
+
+  describe "edit_account/2 (bd-1kr3qf)" do
+    test "writes label, plan, enabled, cap and quota_config together" do
+      create_account!(%{provider: :claude, slug: "edit-all", quota_config: %{"keep" => 1}})
+
+      assert {:ok, account} =
+               Accounts.edit_account("edit-all", %{
+                 "label" => "L",
+                 "plan" => "max_5x",
+                 "enabled" => false,
+                 "max_concurrent" => 4,
+                 "quota_config" => %{
+                   "threshold_mode" => "paced",
+                   "window_seconds" => %{"5h" => 1}
+                 }
+               })
+
+      assert %{label: "L", plan: "max_5x", enabled: false, max_concurrent: 4} = account
+
+      assert account.quota_config == %{
+               "keep" => 1,
+               "threshold_mode" => "paced",
+               "window_seconds" => %{"5h" => 1}
+             }
+    end
+
+    test "a quota_config nil clears that key and leaves siblings" do
+      create_account!(%{
+        provider: :claude,
+        slug: "edit-clear",
+        quota_config: %{"weekly_threshold" => 0.8, "paced_floor" => 0.3}
+      })
+
+      assert {:ok, %{quota_config: %{"paced_floor" => 0.3} = qc}} =
+               Accounts.edit_account("edit-clear", %{
+                 "quota_config" => %{"weekly_threshold" => nil}
+               })
+
+      refute Map.has_key?(qc, "weekly_threshold")
+    end
+
+    test "a bad field rejects the whole edit before any write" do
+      create_account!(%{provider: :claude, slug: "edit-bad", label: "Before"})
+
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.edit_account("edit-bad", %{
+                 "label" => "After",
+                 "quota_config" => %{"threshold_mode" => "bogus"}
+               })
+
+      assert {:ok, %{label: "Before"}} = Accounts.get_account("edit-bad")
+    end
+
+    test "an empty edit is an invalid_account error" do
+      create_account!(%{provider: :claude, slug: "edit-empty"})
+
+      assert {:error, {:invalid_account, "nothing to update" <> _}} =
+               Accounts.edit_account("edit-empty", %{})
+    end
+
+    test "a database failure leaves no partial write" do
+      account = create_account!(%{provider: :claude, slug: "edit-db-fail", label: "Before"})
+
+      Arbiter.Repo.query!("""
+      CREATE TRIGGER fail_edit BEFORE UPDATE ON provider_accounts
+      WHEN NEW.max_concurrent = 99
+      BEGIN SELECT RAISE(ABORT, 'boom'); END
+      """)
+
+      assert {:error, _} =
+               Accounts.edit_account(account.id, %{
+                 "label" => "After",
+                 "quota_config" => %{"threshold_mode" => "paced"},
+                 "max_concurrent" => 99
+               })
+
+      assert {:ok, reloaded} = Accounts.get_account(account.id)
+      assert reloaded.label == "Before"
+      assert reloaded.max_concurrent == nil
+      assert reloaded.quota_config == %{}
+    end
+
+    test "unknown account is not_found" do
+      assert {:error, :not_found} = Accounts.edit_account("nope", %{"label" => "x"})
+    end
+  end
+
   describe "parse_provider/1" do
     test "knows every live provider and not the removed gemini_cli (bd-ac53wz)" do
       for p <- ~w(claude codex antigravity),
@@ -454,6 +590,19 @@ defmodule Arbiter.AccountsTest do
                Accounts.attach_workspace(ws.id, :claude, from_account.id)
 
       assert survivor_id == into_account.id
+    end
+
+    test "refuses a grok account on every surface (bd-1kr3qf, D-A-16)" do
+      ws = create_workspace!("attach-ws-grok")
+      account = create_account!(%{provider: :grok, slug: "attach-grok"})
+
+      assert {:error, :grok_routed_by_opt_in} =
+               Accounts.attach_workspace(ws.id, :grok, account.id)
+
+      assert [] =
+               WorkspaceProviderAccount
+               |> Ash.Query.filter(workspace_id == ^ws.id)
+               |> Ash.read!()
     end
 
     test "rejects attaching to an account that has been soft-deleted" do
