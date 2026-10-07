@@ -339,6 +339,7 @@ defmodule ArbiterWeb.Router do
     get("/server/provider_accounts", ServerController, :provider_accounts)
     get("/server/merge_routing", ServerController, :merge_routing)
     get("/server/tmux", ServerController, :tmux)
+    get("/server/doctor_scope", ServerController, :doctor_scope)
     get("/server/worker_tmp", ServerController, :worker_tmp)
     get("/server/podman_sandbox", ServerController, :podman_sandbox)
     get("/server/worker_memory", ServerController, :worker_memory)

@@ -70,7 +70,7 @@ defmodule ArbiterCli.Cmd.Doctor.DistributionTest do
       )
 
     Task.await(serve)
-    assert %Result{status: :ok, fatal: true, blocks_readiness: false} = result
+    assert %Result{status: :ok, blocks_readiness: false} = result
     assert result.detail =~ "epmd 127.0.0.1:4369"
     assert result.detail =~ "arbiter 127.0.0.1:39783"
     assert result.detail =~ "#{cookie} 0600"
@@ -81,7 +81,7 @@ defmodule ArbiterCli.Cmd.Doctor.DistributionTest do
 
     result = check(proc_net: [tcp], epmd_port: nil, epmd_listen_port: 4369)
 
-    assert %Result{status: :fail, fatal: true} = result
+    assert %Result{status: :fail} = result
     assert result.detail =~ "epmd listens on 0.0.0.0:4369"
     assert result.hint =~ "ERL_EPMD_ADDRESS"
   end

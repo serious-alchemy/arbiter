@@ -223,6 +223,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/podman_sandbox"} => :coordinator,
     {:get, "/api/server/worker_memory"} => :coordinator,
     {:get, "/api/server/dashboard_auth"} => :coordinator,
+    {:get, "/api/server/doctor_scope"} => :coordinator,
     {:post, "/api/dashboard/login_tokens"} => :operator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------

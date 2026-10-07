@@ -6,6 +6,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
   @workspaces_resp %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
 
+  # The severity of the named check, from a fresh run against the current stubs
+  # (`--all` collapses a passing composite such as the agy jail into one line).
+  defp result_of(name) do
+    case Enum.find(Checks.run(), &(&1.name == name)) do
+      nil -> flunk("no check named #{inspect(name)}")
+      result -> result
+    end
+  end
+
+  defp status_of(name), do: result_of(name).status
+
   @repos_resp %{
     "data" => [
       %{"name" => "tonic", "source" => "default", "path" => "/srv/tonic"}
@@ -43,7 +54,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 0
     assert out =~ "[ ok ] phoenix reachable"
     assert out =~ "[ ok ] at least one workspace exists"
@@ -52,7 +63,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert out =~ "[ ok ] migrations up to date"
   end
 
-  test "pending migrations shows [fail] with count in detail" do
+  test "pending migrations is a [fail] with the count in detail, and exits 1" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -60,12 +71,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "warning", "pending_count" => 3}, 200}}
     ])
 
-    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
     assert out =~ "[fail] migrations up to date"
     assert out =~ "3 pending"
   end
 
-  test "unreachable DB or DB error shows [fail] with 'could not check'" do
+  test "unreachable DB or DB error is a [warn] with 'could not check'" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -74,9 +86,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
        {%{"status" => "unknown", "pending_count" => nil, "error" => "unreachable"}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 0
-    assert out =~ "[fail] migrations up to date"
+    assert out =~ "[warn] migrations up to date"
     assert out =~ "could not check"
     refute out =~ "[ ok ] migrations up to date"
   end
@@ -85,7 +97,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   # returns 404, landing exactly in the mid-deploy version-skew window this
   # check exists for — that must not be a hard [fail], consistent with how
   # check_versions/0 treats server errors.
-  test "server without the migrations endpoint (404) does not fail doctor" do
+  test "server without the migrations endpoint (404) is a [warn], never ok, and does not fail doctor" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -93,9 +105,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{}, 404}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 0
-    assert out =~ "[ ok ] migrations up to date"
+    assert out =~ "[warn] migrations up to date"
+    assert out =~ "could not check"
   end
 
   test "unexpected migrations response shape does not crash doctor" do
@@ -106,15 +119,16 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"unexpected" => "shape"}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 0
-    assert out =~ "[ ok ] migrations up to date"
+    assert out =~ "[warn] migrations up to date"
+    assert out =~ "could not check"
   end
 
   test "connection refused → all fail with actionable hint" do
     stub_transport_error(:get, "/api/workspaces", :econnrefused)
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 1
     assert out =~ "[fail] phoenix reachable"
     assert out =~ "mix phx.server"
@@ -124,7 +138,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     Process.put(:bd2_dev_build, false)
     stub_transport_error(:get, "/api/workspaces", :econnrefused)
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 1
     assert out =~ "[fail] phoenix reachable"
     refute out =~ "mix phx.server"
@@ -139,7 +153,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 1
     assert out =~ "[ ok ] phoenix reachable"
     assert out =~ "[fail] at least one workspace exists"
@@ -186,10 +200,11 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 32
+    assert length(checks) == length(Checks.ids())
+    assert Enum.all?(checks, &is_binary(&1["severity"]))
   end
 
-  test "version mismatch is non-fatal (exit 0 but shows [fail])" do
+  test "version mismatch is a [fail] and exits 1, but does not block readiness" do
     mismatched_version_resp = %{
       "version" => "9.9.9",
       "sha" => "mismatched_sha",
@@ -204,8 +219,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-    assert exit_code == 0
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
     assert out =~ "[ ok ] phoenix reachable"
     assert out =~ "[ ok ] at least one workspace exists"
     assert out =~ "[ ok ] active workspace resolves"
@@ -252,7 +267,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert exit_code == 0
     assert out =~ "[ ok ] version"
     assert out =~ "CLI and server match"
@@ -276,7 +291,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert Doctor.green?() == true
   end
 
-  test "release build (SHA unavailable) with mismatched version shows [fail] but is non-fatal" do
+  test "release build (SHA unavailable) with mismatched version shows [fail], exits 1, and does not block readiness" do
     # Regression for the false-green bug: both CLI and server report
     # sha: "unknown" in this scenario (neither has git at runtime), so a SHA
     # comparison alone would spuriously report a match. The version numbers
@@ -295,8 +310,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-    assert exit_code == 0
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
     assert out =~ "[fail] version"
     assert out =~ "server 0.0.1"
     assert out =~ "CLI #{ArbiterCli.Version.app_version()}"
@@ -335,7 +350,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert out =~ "[fail] version"
     assert out =~ "rebuild and reinstall the `arb` CLI"
     refute out =~ "restart the server"
@@ -372,7 +387,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert out =~ "[fail] version"
     refute out =~ "reinstall the CLI from"
     refute out =~ "rebuild and reinstall"
@@ -398,7 +413,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     # `arb doctor` still exits non-zero — this is an operator-actionable
     # misconfiguration, same as any other broken `Workspace.resolve/0` caller.
     assert exit_code == 1
@@ -428,8 +443,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-    assert exit_code == 0
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
     assert out =~ "[fail] version"
     refute out =~ "CLI and server match"
   end
@@ -454,13 +469,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
-    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-    assert exit_code == 0
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
     assert out =~ "[fail] version"
     assert out =~ "server 0.0.1"
     assert out =~ "CLI #{just_deployed_vsn}"
     refute out =~ "CLI and server match"
-    # Non-fatal: a version check on its own must not gate `arb server deploy`'s
+    # A version check on its own must not gate `arb server deploy`'s
     # auto-rollback — only Phoenix/workspace reachability does.
     assert Doctor.green?() == true
   end
@@ -480,7 +495,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] repos resolved"
       assert out =~ "1 repo(s)"
@@ -494,7 +509,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] repos resolved"
       assert out =~ "no repos registered"
@@ -509,7 +524,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] repos resolved"
       assert out =~ "rig_paths"
@@ -539,7 +554,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] repos resolved"
       assert out =~ "1 workspace still on the retired `rig_paths` key: acme"
@@ -555,7 +570,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert out =~ "arb server restart"
       assert out =~ "Arbiter.Release.migrate_config"
 
@@ -586,7 +601,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] repos resolved"
     end
@@ -612,8 +627,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] repos resolved"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[n/a ] repos resolved"
       assert out =~ "no workspaces"
     end
   end
@@ -687,7 +702,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
 
       assert exit_code == 1
       assert out =~ "[fail] anonymous /api access refused"
@@ -705,15 +720,16 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       result = Checks.check_anonymous_api()
       assert result.status == :fail
-      assert result.fatal
       refute result.blocks_readiness
       assert result.detail =~ "GET /api/issues → 200"
     end
 
-    test "an unreachable server is left to the reachability check" do
+    test "an unreachable server is a warn, never an all-clear (the reachability check owns the fail)" do
       stub_transport_error(:patch, @probe_write, :econnrefused)
 
-      assert Checks.check_anonymous_api().status == :ok
+      result = Checks.check_anonymous_api()
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
     end
   end
 
@@ -727,13 +743,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/bind_address"}, {%{"ip" => "127.0.0.1", "loopback" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] bind address is loopback"
       assert out =~ "127.0.0.1"
     end
 
-    test "non-loopback bind shows [fail] but is non-fatal and does not block deploy readiness" do
+    test "non-loopback bind is a [warn]: exit 0, and it does not block deploy readiness" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
         {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -742,9 +758,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/bind_address"}, {%{"ip" => "0.0.0.0", "loopback" => false}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] bind address is loopback"
+      assert out =~ "[warn] bind address is loopback"
       assert out =~ "0.0.0.0"
       assert out =~ "no login"
       assert out =~ "ARB_BIND_ADDRESS"
@@ -753,7 +769,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     # A server predating this check (or an unreachable one) returns something
     # this check can't interpret — must never spuriously fail doctor over it.
-    test "server without the bind_address endpoint (404) does not fail doctor" do
+    test "server without the bind_address endpoint (404) is a warn, not an all-clear" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
         {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -762,9 +778,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/bind_address"}, {%{}, 404}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] bind address is loopback"
+      assert out =~ "[warn] bind address is loopback"
+      assert out =~ "could not check"
     end
   end
 
@@ -780,7 +797,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       ])
     end
 
-    test "paused and draining is [fail], lists the work, but is non-fatal and never blocks readiness" do
+    test "paused and draining is a [warn], lists the work, and never blocks readiness" do
       stub_with_scheduler(
         {%{
            "state" => "draining",
@@ -792,10 +809,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          }, 200}
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
 
       assert exit_code == 0
-      assert out =~ "[fail] safe to restart"
+      assert out =~ "[warn] safe to restart"
       assert out =~ "conflict_resolver"
       assert out =~ "vs-3fpek0"
       assert out =~ "arb scheduler wait"
@@ -812,13 +829,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          }, 200}
       )
 
-      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
 
       assert out =~ "[ ok ] safe to restart"
       assert out =~ "paused, quiescent"
     end
 
-    test "a running scheduler is green, with how to reach a safe point" do
+    test "a running scheduler is a [warn] (not a safe restart point), with how to reach one" do
       stub_with_scheduler(
         {%{
            "state" => "running",
@@ -828,19 +845,21 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          }, 200}
       )
 
-      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
 
-      assert out =~ "[ ok ] safe to restart"
+      assert out =~ "[warn] safe to restart"
+      assert out =~ "not a safe restart point"
+      refute out =~ "[ ok ] safe to restart"
       assert out =~ "arb scheduler pause && arb scheduler wait"
     end
 
-    test "an unreadable scheduler status never fails doctor" do
+    test "an unreadable scheduler status is a warn, never an all-clear" do
       stub_with_scheduler({%{}, 404})
 
-      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
 
-      assert out =~ "[ ok ] safe to restart"
-      assert out =~ "could not determine"
+      assert out =~ "[warn] safe to restart"
+      assert out =~ "could not check"
     end
   end
 
@@ -858,7 +877,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] workspace safe-default categories"
     end
@@ -890,74 +909,16 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       # Non-fatal: named, but does not block readiness or fail the exit code.
       assert exit_code == 0
-      assert out =~ "[fail] workspace safe-default categories"
+      assert out =~ "[warn] workspace safe-default categories"
       assert out =~ "default: no_public_upload"
     end
   end
 
-  # bd-4420va: `permissions.safe_defaults` no longer has any effect once
-  # `safe_defaults_exclude` exists, so a workspace that opted a category out
-  # with the old key (e.g. `safe_defaults: []`) now silently resolves every
-  # category again. Flag any workspace whose config still carries the key.
-  describe "legacy safe_defaults key check" do
-    test "green when no workspace config carries the legacy key" do
-      stub_routes([
-        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
-        {{"get", "/api/repos"}, {@repos_resp, 200}},
-        {{"get", "/api/version"}, {matching_version_resp(), 200}},
-        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
-      ])
-
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-      assert exit_code == 0
-      assert out =~ "[ ok ] legacy safe_defaults key"
-    end
-
-    test "names a workspace whose config still sets the inert legacy key" do
-      workspaces_with_legacy_key = %{
-        "data" => [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "prefix" => "vs",
-            "config" => %{
-              "agent" => %{
-                "security" => %{
-                  "permissions" => %{
-                    "safe_defaults" => ["no_destructive_fs", "no_force_push"]
-                  }
-                }
-              }
-            },
-            "security_posture" => %{
-              "mode" => "bypass",
-              "allow" => [],
-              "deny" => [],
-              "safe_defaults" => [],
-              "safe_defaults_exclude" => [],
-              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true}
-            }
-          }
-        ]
-      }
-
-      stub_routes([
-        {{"get", "/api/workspaces"}, {workspaces_with_legacy_key, 200}},
-        {{"get", "/api/repos"}, {@repos_resp, 200}},
-        {{"get", "/api/version"}, {matching_version_resp(), 200}},
-        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
-      ])
-
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-      assert exit_code == 0
-      assert out =~ "[fail] legacy safe_defaults key"
-      assert out =~ "default"
-      assert out =~ "safe_defaults_exclude"
-    end
-  end
+  # The `legacy safe_defaults key` check was removed (bd-7pnat1): the migration
+  # it watched for finished. `doctor_severity_test.exs` pins the id inventory.
 
   # bd-3s82pf: outside :strict, a host that can't jail agy just runs it
   # unconfined instead of refusing, so `security_posture.write_jail_warning`
@@ -969,18 +930,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
         {{"get", "/api/repos"}, {@repos_resp, 200}},
         {{"get", "/api/version"}, {matching_version_resp(), 200}},
-        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-      assert exit_code == 0
-      assert out =~ "[ ok ] agy write jail"
+      assert status_of("agy write jail") == :ok
     end
 
     # bd-8xy1mf: outside :strict the gap is real but never fatal (agy just
-    # runs unconfined), so this is informational — [ ok ], not [fail] — even
-    # though the cause and fix are still named in the detail line.
-    test "names the workspace and the warning, but stays green, outside :strict" do
+    # runs unconfined), so it is a [warn] — not a [fail] — with the cause and
+    # fix named in the detail line.
+    test "names the workspace and the warning as a warn, exit 0, outside :strict" do
       workspaces_with_warning = %{
         "data" => [
           %{
@@ -1012,9 +972,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy write jail"
+      assert out =~ "[warn] agy write jail"
       assert out =~ "default: agy write jail unavailable"
       assert out =~ "dnf install bubblewrap"
     end
@@ -1051,7 +1011,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] agy write jail"
       assert out =~ "default: agy write jail unavailable"
@@ -1096,12 +1056,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           {{"get", "/api/workspaces"}, {workspaces, 200}},
           {{"get", "/api/repos"}, {@repos_resp, 200}},
           {{"get", "/api/version"}, {matching_version_resp(), 200}},
-          {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+          {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+          {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
         ])
 
-        {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+        {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
         assert exit_code == 0
-        assert out =~ "[ ok ] agy write jail"
+        assert status_of("agy write jail") == :ok
         refute out =~ "codex runs with"
         refute out =~ "skipped or refused"
         refute out =~ "[fail] agy write jail"
@@ -1121,13 +1082,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-      assert exit_code == 0
-      assert out =~ "[ ok ] agy write jail"
-      assert out =~ "host can jail agy — agy is :strict-eligible"
+      result = result_of("agy write jail")
+      assert result.status == :ok
+      assert result.detail =~ "host can jail agy — agy is :strict-eligible"
     end
 
-    test "reports the host cannot jail agy, informationally, when no workspace needs it" do
+    test "warns that the host cannot jail agy when no workspace is :strict" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
         {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -1143,11 +1103,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           }, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy write jail"
+      assert out =~ "[warn] agy write jail"
       assert out =~ "cannot jail agy: unprivileged user namespaces are disabled"
-      assert out =~ "informational only"
+      assert out =~ "runs unconfined rather than refusing"
+      assert out =~ "sysctl -w user.max_user_namespaces"
     end
 
     # bd-8xy1mf finding: a repo-level `agent.security.repos.<repo>` override
@@ -1191,7 +1152,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] agy write jail"
       assert out =~ "default (repo tonic): agy write jail unavailable"
@@ -1214,9 +1175,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          {%{"available" => true, "ssh" => %{"available" => true}}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy ssh transport"
+      assert status_of("agy ssh transport") == :ok
     end
 
     test "fails, with the cause and a hint, when the host's ssh probe fails" do
@@ -1237,16 +1198,16 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           }, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       # Not fatal and doesn't block readiness on its own.
       assert exit_code == 0
-      assert out =~ "[fail] agy ssh transport"
+      assert out =~ "[warn] agy ssh transport"
       assert out =~ "ssh still rejected the mirrored config"
       assert out =~ "hint:"
       assert out =~ "Check the ownership of Jail.ssh_shadow_config/0's output."
     end
 
-    test "ok (skipped) when the server predates the ssh key" do
+    test "warns (could not check) when the server predates the ssh key" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
         {{"get", "/api/repos"}, {@repos_resp, 200}},
@@ -1255,9 +1216,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy ssh transport"
+      assert status_of("agy ssh transport") == :warn
     end
   end
 
@@ -1274,10 +1235,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when no escape vector is reachable" do
       escape_routes(%{"available" => true, "escape" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy jail escape vectors"
-      assert out =~ "xdg-dbus-proxy not installed"
+      assert status_of("agy jail escape vectors") == :ok
+      assert result_of("agy jail escape vectors").detail =~ "xdg-dbus-proxy not installed"
     end
 
     test "FAILs with the vectors named when one is reachable" do
@@ -1290,16 +1251,16 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         }
       })
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[fail] agy jail escape vectors"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] agy jail escape vectors"
       assert out =~ "systemd-run --user"
       assert out =~ "mask /run/user/<uid>"
     end
 
-    test "ok (skipped) when the server predates the escape key" do
+    test "warns (could not check) when the server predates the escape key" do
       escape_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] agy jail escape vectors"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail escape vectors") == :warn
     end
   end
 
@@ -1316,9 +1277,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the jail cannot read the install DB or other workspaces" do
       reads_routes(%{"available" => true, "reads" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy jail hidden reads"
+      assert status_of("agy jail hidden reads") == :ok
     end
 
     test "FAILs with the paths named, without blocking readiness" do
@@ -1331,17 +1292,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         }
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] agy jail hidden reads"
+      assert out =~ "[warn] agy jail hidden reads"
       assert out =~ "/h/.arbiter/arbiter.sqlite3"
       assert out =~ "hide these"
     end
 
-    test "ok (skipped) when the server predates the reads key" do
+    test "warns (could not check) when the server predates the reads key" do
       reads_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] agy jail hidden reads"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail hidden reads") == :warn
     end
   end
 
@@ -1358,9 +1319,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the host can run the jail in a network namespace" do
       network_routes(%{"available" => true, "network" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy jail network"
+      assert status_of("agy jail network") == :ok
     end
 
     test "FAILs with the cause and fix when it cannot, without blocking readiness" do
@@ -1374,26 +1335,26 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         }
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] agy jail network"
+      assert out =~ "[warn] agy jail network"
       assert out =~ "no `socat` on PATH"
       assert out =~ "Install socat"
     end
 
-    test "ok (skipped) when the server predates the network key" do
+    test "warns (could not check) when the server predates the network key" do
       network_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] agy jail network"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail network") == :warn
     end
   end
 
   describe "agy jail keyring proxy (bd-c9fqsk)" do
     test "ok when the proxy comes up under a per-run TMPDIR" do
       network_routes(%{"available" => true, "keyring" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] agy jail keyring proxy"
+      assert status_of("agy jail keyring proxy") == :ok
     end
 
     test "FAILs with the cause, without blocking readiness" do
@@ -1402,9 +1363,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         "keyring" => %{"available" => false, "message" => "proxy down", "fix" => "shorten it"}
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] agy jail keyring proxy"
+      assert out =~ "[warn] agy jail keyring proxy"
       assert out =~ "proxy down"
     end
   end
@@ -1423,14 +1384,14 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok, naming 1 allow and 1 deny, when the proxy and jail work" do
       egress_routes(%{"available" => true, "allowed" => 1, "denied" => 1})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] egress jail"
       assert out =~ "1 allow"
       assert out =~ "1 deny"
     end
 
-    test "FAILs naming the missing package, without blocking readiness" do
+    test "a host that cannot enforce the allowlist warns, naming the missing package (scope unknown)" do
       egress_routes(%{
         "available" => false,
         "cause" => "socat_missing",
@@ -1438,19 +1399,19 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         "fix" => "Install socat (`dnf install socat` / `apt install socat`)."
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] egress jail"
+      assert out =~ "[warn] egress jail"
       assert out =~ "no `socat` on PATH"
       assert out =~ "dnf install socat"
     end
 
-    test "ok (skipped) when the server predates the endpoint" do
+    test "warns (could not check) when the server predates the endpoint" do
       egress_routes(%{"error" => "not found"}, 404)
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] egress jail"
-      assert out =~ "skipping"
+      assert out =~ "[warn] egress jail"
+      assert out =~ "could not check"
     end
   end
 
@@ -1467,7 +1428,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok and says guardrails are off when nothing is configured" do
       guardrail_routes(%{"active" => false, "rules" => 0, "workspaces" => [], "issues" => []})
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] guardrail profiles"
       assert out =~ "guardrails are off"
@@ -1489,7 +1450,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         ]
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] guardrail profiles"
       assert out =~ "default: claude/opus=privileged, antigravity=quarantine"
@@ -1509,18 +1470,18 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         ]
       })
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] guardrail profiles"
+      assert out =~ "[warn] guardrail profiles"
       assert out =~ "codex matches no subject rule"
     end
 
-    test "ok (skipped) when the server predates the endpoint" do
+    test "warns (could not check) when the server predates the endpoint" do
       guardrail_routes(%{"error" => "not found"}, 404)
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] guardrail profiles"
-      assert out =~ "skipping"
+      assert out =~ "[warn] guardrail profiles"
+      assert out =~ "could not check"
     end
   end
 
@@ -1533,7 +1494,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] account/workspace quota policy"
     end
@@ -1573,10 +1534,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          end}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       # Non-fatal: named, but does not block readiness or fail the exit code.
       assert exit_code == 0
-      assert out =~ "[fail] account/workspace quota policy"
+      assert out =~ "[warn] account/workspace quota policy"
       assert out =~ "default: account overrides its own throttle_threshold"
       assert out =~ "default: account overrides its own weekly_threshold"
     end
@@ -1613,7 +1574,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          end}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] account/workspace quota policy"
     end
@@ -1654,9 +1615,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          end}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] account/workspace quota policy"
+      assert out =~ "[warn] account/workspace quota policy"
       assert out =~ "default: account overrides its own throttle_threshold"
       refute out =~ "weekly_threshold"
     end
@@ -1697,7 +1658,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          end}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] account/workspace quota policy"
     end
@@ -1723,7 +1684,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           [{{"get", "/api/server/claude_credentials"}, {%{"checked" => 2, "missing" => []}, 200}}]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] claude worker credentials"
       assert out =~ "2 Claude workspace(s)"
@@ -1752,7 +1713,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] claude worker credentials"
       assert out =~ "no-token-ws (claude)"
@@ -1778,15 +1739,15 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
-    test "grok auth: silent-ok when disabled, reports state when enabled" do
+    test "grok auth: n/a when disabled, reports state when enabled" do
       stub_routes(
         base_routes() ++
           [{{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}}]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] grok auth"
+      assert out =~ "[n/a ] grok auth"
       assert out =~ "not enabled"
 
       stub_routes(
@@ -1797,7 +1758,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
       assert out =~ "[ ok ] grok auth"
       assert out =~ "logged in (w1)"
     end
@@ -1816,7 +1777,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] grok auth"
       assert out =~ "grok login --device-code"
@@ -1842,7 +1803,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] grok auth"
       assert out =~ path
@@ -1865,17 +1826,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           ]
       )
 
-      {out, _err, 0} = capture(fn -> Doctor.run([]) end)
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
       assert out =~ "[ ok ] grok auth"
       assert out =~ "/a/auth.json"
       assert out =~ "the broker's last refresh worked"
     end
 
-    test "a server that predates the check is reported as unknown, not as a failure" do
+    test "a server that predates the check is reported as unknown (warn), not as ok" do
       stub_routes(predating(base_routes()))
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] claude worker credentials"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] claude worker credentials"
       assert out =~ "could not check"
     end
   end
@@ -1891,7 +1852,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       ]
     end
 
-    test "a 500 from the endpoint fails with the status and detail" do
+    test "a 500 from the endpoint is a warn with the status and detail" do
       stub_routes(
         List.keystore(
           worker_tmp_routes(%{}),
@@ -1903,11 +1864,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
-      assert result.status == :fail
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
       assert result.detail =~ "expand_default crashed"
     end
 
-    test "a 404 means the server predates the check" do
+    test "a 404 means the server predates the check, and is a warn" do
       stub_routes(
         List.keystore(
           worker_tmp_routes(%{}),
@@ -1918,11 +1880,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
-      assert result.status == :ok
-      assert result.detail =~ "predates this check"
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+      assert result.detail =~ "predate"
     end
 
-    test "another server-backed check (tmux) fails on a 500 instead of skipping" do
+    test "another server-backed check (tmux) warns on a 500 instead of skipping" do
       stub_routes(
         List.keystore(
           worker_tmp_routes(%{}),
@@ -1933,11 +1896,11 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "tmux"))
-      assert result.status == :fail
+      assert result.status == :warn
       assert result.detail =~ "HTTP 500"
     end
 
-    test "every server-backed endpoint fails on a 500 instead of skipping" do
+    test "every server-backed endpoint warns on a 500 instead of skipping" do
       for path <- @server_paths -- ["/api/server/migrations"] do
         stub_routes(
           List.keystore(
@@ -1948,12 +1911,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
           )
         )
 
-        assert Enum.any?(Checks.run(), &(&1.status == :fail and &1.detail =~ "HTTP 500")),
+        assert Enum.any?(Checks.run(), &(&1.status == :warn and &1.detail =~ "HTTP 500")),
                "#{path} hid a 500"
       end
     end
 
-    test "bind_address 500 fails" do
+    test "bind_address 500 warns" do
       stub_routes(
         List.keystore(
           worker_tmp_routes(%{}),
@@ -1964,7 +1927,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "bind address is loopback"))
-      assert result.status == :fail
+      assert result.status == :warn
       assert result.detail =~ "HTTP 500"
     end
 
@@ -2116,13 +2079,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       results = Checks.run()
-      assert Enum.find(results, &(&1.name == "worker temp dir")).status == :fail
+      assert Enum.find(results, &(&1.name == "worker temp dir")).status == :warn
       memory = Enum.find(results, &(&1.name == "worker memory cap"))
       refute memory.detail =~ "skipping"
       assert memory.detail =~ "OOMPolicy"
     end
 
-    test "an unreachable or older server is skipped, not failed" do
+    test "an unreachable or older server is a warn, not an all-clear" do
       stub_routes(
         predating(
           List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
@@ -2130,8 +2093,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
-      assert result.status == :ok
-      assert result.detail =~ "skipping"
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
     end
   end
 
@@ -2153,7 +2116,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         tmux_routes(%{"available" => true, "path" => "/usr/bin/tmux", "version" => "tmux 3.4"})
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] tmux"
       assert out =~ "tmux 3.4"
@@ -2168,9 +2131,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         })
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[fail] tmux"
+      assert out =~ "[warn] tmux"
       assert out =~ "tmux is not installed"
       assert out =~ "sudo dnf install tmux"
 
@@ -2178,13 +2141,14 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
-    test "skips quietly when the server predates the endpoint" do
+    test "warns when the server predates the endpoint" do
       stub_routes(predating(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0)))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] tmux"
-      assert out =~ "predates this check"
+      assert out =~ "[warn] tmux"
+      assert out =~ "could not check"
+      assert out =~ "predate"
     end
   end
 
@@ -2219,7 +2183,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       stub_routes(routing_routes(%{"repos" => [@arbiter_ok, mesaana], "problems" => []}))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] merge routing"
       assert out =~ "default/arbiter: github"
@@ -2238,7 +2202,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       stub_routes(routing_routes(%{"repos" => [@arbiter_ok, flagged], "problems" => [flagged]}))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] merge routing"
       assert out =~ "default/mesaana"
@@ -2262,17 +2226,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       stub_routes(routing_routes(%{"repos" => [flagged], "problems" => [flagged]}))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "serious-alchemy/arbiter"
       assert out =~ "serious-alchemy/infra"
     end
 
-    test "an old server without the endpoint is not a failure" do
+    test "an old server without the endpoint is a warn, not a failure or an all-clear" do
       stub_routes(predating(Enum.drop(routing_routes(%{}), -1)))
 
       result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
-      assert result.status == :ok
+      assert result.status == :warn
       assert result.detail =~ "could not check"
     end
   end
@@ -2305,18 +2269,18 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     test "ok on a fresh or migrated install" do
       stub_routes(accounts_routes(%{"decision" => "migrated"}))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] provider accounts"
       assert out =~ "on (migrated)"
     end
 
-    test "ok on a migrated install with a leftover server-env token, telling the operator to remove it" do
+    test "warns on a migrated install with a leftover server-env token, telling the operator to remove it" do
       stub_routes(accounts_routes(%{"decision" => "migrated", "server_env_token" => true}))
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
-      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "[warn] provider accounts"
       assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
       assert out =~ "ignored"
     end
@@ -2330,7 +2294,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         })
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] provider accounts"
       assert out =~ "default, emricare"
@@ -2352,18 +2316,18 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         })
       )
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] provider accounts"
       assert out =~ "straggler"
       assert out =~ "MissingCredentialError"
     end
 
-    test "a server that predates the check is reported as unknown, not as a failure" do
+    test "a server that predates the check is reported as unknown (warn), not as ok" do
       stub_routes(predating(accounts_routes(%{}) |> List.delete_at(-1)))
 
-      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
-      assert out =~ "[ ok ] provider accounts"
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] provider accounts"
       assert out =~ "could not check"
     end
   end
@@ -2401,7 +2365,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       stub_routes(green_routes())
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 1
       assert out =~ "[fail] erlang distribution is loopback-only"
       assert out =~ "epmd listens on 0.0.0.0:4369"
@@ -2411,7 +2375,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     test "is part of every doctor run and green when nothing is exposed" do
       stub_routes(green_routes())
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] erlang distribution is loopback-only"
     end
@@ -2455,7 +2419,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
-    test "fails with each failed check's hint, without blocking readiness" do
+    test "warns with each failed check's hint (scope unknown), without blocking readiness" do
       stub_routes(
         podman_routes(%{
           "ready" => false,
@@ -2480,15 +2444,14 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = find_podman()
-      assert result.status == :fail
+      assert result.status == :warn
       assert result.detail =~ "subuid/subgid: ryan lacks a range"
       assert result.hint =~ "Run usermod."
       assert result.hint =~ "Use label=disable."
-      refute result.fatal
       refute result.blocks_readiness
     end
 
-    test "podman not installed is not a failure" do
+    test "podman not installed is a warn when the scope is unknown (it may not be used)" do
       stub_routes(
         podman_routes(%{
           "ready" => false,
@@ -2498,12 +2461,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       result = find_podman()
-      assert result.status == :ok
+      assert result.status == :warn
       assert result.detail =~ "not installed"
       assert result.hint =~ "Install podman"
     end
 
-    test "a timed-out probe request is a failure, not a skip" do
+    test "a timed-out probe request is a warn naming the timeout, not a skip" do
       routes =
         podman_routes(%{})
         |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
@@ -2515,13 +2478,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       ])
 
       result = find_podman()
-      assert result.status == :fail
+      assert result.status == :warn
       assert result.detail =~ "did not complete"
       assert result.hint =~ "podman run"
       refute result.blocks_readiness
     end
 
-    test "a server that predates the check is skipped" do
+    test "a server that predates the check is a warn" do
       stub_routes(
         predating(
           podman_routes(%{})
@@ -2529,7 +2492,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         )
       )
 
-      assert find_podman().status == :ok
+      assert find_podman().status == :warn
     end
   end
 
@@ -2590,11 +2553,11 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     defp nodes_results, do: Checks.check_nodes()
     defp named(results, name), do: Enum.find(results, &(&1.name == name))
 
-    test "with no nodes and no public_url there is one quiet line" do
+    test "with no nodes and no public_url the section is one n/a line" do
       stub_nodes(nodes_resp())
 
-      assert [%{name: "nodes", status: :ok, detail: detail}] = nodes_results()
-      assert detail =~ "none enrolled"
+      assert [%{name: "nodes", status: :na, detail: detail}] = nodes_results()
+      assert detail =~ "no remote nodes enrolled"
     end
 
     test "nodes.public_url reachable: an anonymous GET /nodes/ping that answers" do
@@ -2607,7 +2570,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     test "an unreachable public_url fails, non-fatal, with a hint" do
       stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}), {%{}, 502})
 
-      assert %{status: :fail, fatal: false, blocks_readiness: false} =
+      assert %{status: :warn, blocks_readiness: false} =
                result = named(nodes_results(), "nodes.public_url reachable")
 
       assert result.detail =~ "502"
@@ -2621,13 +2584,13 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/nodes/ping"}, fn conn -> Req.Test.transport_error(conn, :econnrefused) end}
       ])
 
-      assert %{status: :fail} = named(nodes_results(), "nodes.public_url reachable")
+      assert %{status: :warn} = named(nodes_results(), "nodes.public_url reachable")
     end
 
     test "nodes enrolled but no public_url fails" do
       stub_nodes(nodes_resp(%{"nodes" => [node_row(%{})]}))
 
-      assert %{status: :fail, detail: detail} =
+      assert %{status: :warn, detail: detail} =
                named(nodes_results(), "nodes.public_url reachable")
 
       assert detail =~ "not set"
@@ -2641,7 +2604,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         nodes_resp(%{"public_url" => "https://arbiter.example.com", "exposure" => "public"})
       )
 
-      assert %{status: :fail, detail: detail, fatal: false} =
+      assert %{status: :warn, detail: detail} =
                named(nodes_results(), "nodes.public_url is a private endpoint")
 
       assert detail =~ "arbiter.example.com"
@@ -2657,7 +2620,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         })
       )
 
-      assert %{status: :fail, detail: detail} =
+      assert %{status: :warn, detail: detail} =
                named(nodes_results(), "nodes.public_url is a private endpoint")
 
       assert detail =~ "allow_public_endpoint"
@@ -2694,10 +2657,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       results = nodes_results()
-      assert %{status: :fail} = named(results, "node asleep")
-      assert %{status: :fail, detail: shaky} = named(results, "node shaky")
+      assert %{status: :warn} = named(results, "node asleep")
+      assert %{status: :warn, detail: shaky} = named(results, "node shaky")
       assert shaky =~ "suspect"
-      assert %{status: :fail, detail: stale} = named(results, "node stale")
+      assert %{status: :warn, detail: stale} = named(results, "node stale")
       assert stale =~ "outdated" and stale =~ "1.0.0"
       assert named(results, "node gone") == nil
     end
@@ -2707,7 +2670,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         nodes_resp(%{"local" => local_row(%{"max" => 0}), "warnings" => ["local_cap_zero"]})
       )
 
-      assert %{status: :fail, detail: detail, hint: hint} =
+      assert %{status: :warn, detail: detail, hint: hint} =
                named(nodes_results(), "local worker cap")
 
       assert detail =~ "0"
@@ -2727,7 +2690,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         })
       )
 
-      assert %{status: :fail, detail: detail} =
+      assert %{status: :warn, detail: detail} =
                named(nodes_results(), "node capacity vs conductor.max_concurrent")
 
       assert detail =~ "7" and detail =~ "4"
@@ -2747,17 +2710,17 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert %{status: :ok} = named(nodes_results(), "node capacity vs conductor.max_concurrent")
     end
 
-    test "a server without /api/nodes, or an operator-less token (403), is skipped" do
+    test "a server without /api/nodes, or an operator-less token (403), is a warn, not skipped" do
       for status <- [404, 403] do
         stub_nodes(%{"error" => "nope"}, {"pong", 200}, status)
-        assert [%{name: "nodes", status: :ok, detail: detail}] = nodes_results()
-        assert detail =~ "skipping"
+        assert [%{name: "nodes", status: :warn, detail: detail}] = nodes_results()
+        assert detail =~ "could not check"
       end
     end
 
-    test "a 5xx from /api/nodes is a failure, not a skip" do
+    test "a 5xx from /api/nodes is a warn, not a skip" do
       stub_nodes(%{"error" => "boom"}, {"pong", 200}, 500)
-      assert [%{name: "nodes", status: :fail}] = nodes_results()
+      assert [%{name: "nodes", status: :warn}] = nodes_results()
     end
 
     test "nothing in the section blocks deploy readiness or exits non-zero" do
@@ -2773,7 +2736,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
 
       for r <- nodes_results() do
-        refute r.fatal
+        refute r.status == :fail
         refute r.blocks_readiness
       end
     end
