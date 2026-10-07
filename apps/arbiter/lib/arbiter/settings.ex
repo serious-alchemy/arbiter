@@ -294,6 +294,78 @@ defmodule Arbiter.Settings do
   end
 
   @doc """
+  The candidate competence matrix (bd-dde4l7; `nil` = none). The scorer ranks
+  with it beside the live matrix and only records the result
+  (`routing_decision["shadow_candidate"]`) — it never decides a dispatch until
+  `promote_competence_matrix_candidate/0` makes it live.
+  """
+  @spec competence_matrix_candidate() :: [map()] | nil
+  def competence_matrix_candidate, do: read_setting(:competence_matrix_candidate)
+
+  @doc """
+  The live competence matrix the last promotion replaced (`nil` = none; `[]`
+  = the live matrix was code-defaults only). Kept for
+  `rollback_competence_matrix/0`.
+  """
+  @spec competence_matrix_previous() :: [map()] | nil
+  def competence_matrix_previous, do: read_setting(:competence_matrix_previous)
+
+  @doc """
+  Set (or, with `nil`, discard) the candidate competence matrix. Rows are
+  validated like the live matrix's; the live matrix is not touched.
+  """
+  @spec set_competence_matrix_candidate([map()] | nil) :: {:ok, [map()] | nil} | {:error, term()}
+  def set_competence_matrix_candidate(nil), do: write_setting(:competence_matrix_candidate, nil)
+
+  def set_competence_matrix_candidate(rows) do
+    with {:ok, rows} <- Competence.normalize_rows(rows) do
+      write_setting(:competence_matrix_candidate, rows)
+    end
+  end
+
+  @doc """
+  Promote the candidate: it becomes the live matrix, the live matrix it
+  replaces is kept as the previous one (for rollback) and the candidate slot is
+  cleared — in one write, so a reader never sees the candidate live AND still
+  pending. `{:error, :no_candidate}` when there is nothing to promote.
+  """
+  @spec promote_competence_matrix_candidate() :: {:ok, [map()]} | {:error, term()}
+  def promote_competence_matrix_candidate do
+    with {:ok, row} <- get_or_create_singleton(),
+         [_ | _] = candidate <- row.competence_matrix_candidate || {:error, :no_candidate},
+         {:ok, updated} <-
+           write_settings(row, %{
+             competence_matrix: candidate,
+             competence_matrix_previous: row.competence_matrix || [],
+             competence_matrix_candidate: nil
+           }) do
+      {:ok, updated.competence_matrix}
+    else
+      [] -> {:error, :no_candidate}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Roll the live matrix back to the one the last promotion replaced. The
+  matrix being rolled back becomes the previous one, so a second call rolls
+  forward again. `{:error, :no_previous}` when there is nothing to roll back to.
+  """
+  @spec rollback_competence_matrix() :: {:ok, [map()]} | {:error, term()}
+  def rollback_competence_matrix do
+    with {:ok, row} <- get_or_create_singleton(),
+         previous when is_list(previous) <-
+           row.competence_matrix_previous || {:error, :no_previous},
+         {:ok, updated} <-
+           write_settings(row, %{
+             competence_matrix: previous,
+             competence_matrix_previous: row.competence_matrix || []
+           }) do
+      {:ok, updated.competence_matrix}
+    end
+  end
+
+  @doc """
   Quota provider codes forced onto the status bar's quota chip and `/usage`'s
   rate limits (bd-i2gwwn, `Arbiter.Quota.Visibility`), or `nil` when unset —
   auto-detect. Never raises.
@@ -603,6 +675,14 @@ defmodule Arbiter.Settings do
          {:ok, updated} <- Ash.update(row, %{field => value}, action: :update) do
       announce(field)
       {:ok, Map.fetch!(updated, field)}
+    end
+  end
+
+  # Several fields in ONE update — a promotion must never be observable half-done.
+  defp write_settings(row, changes) do
+    with {:ok, updated} <- Ash.update(row, changes, action: :update) do
+      Enum.each(Map.keys(changes), &announce/1)
+      {:ok, updated}
     end
   end
 
