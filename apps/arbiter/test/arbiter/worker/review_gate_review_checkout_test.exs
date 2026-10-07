@@ -860,6 +860,68 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       assert sha(repo, "refs/heads/" <> branch) == head
     end
 
+    # The production shape: on a podman repo the implementer's `worktree_path`
+    # is itself a private clone, not a linked worktree of the main repo.
+    test "a review clone cut from the implementer's private clone borrows the MAIN repo's objects",
+         %{repo: repo} do
+      branch = "feature/container-chain"
+      :ok = seed_feature_branch(repo, branch)
+      git!(["push", "-q", "-u", "origin", branch], repo)
+      git!(["fetch", "-q", "origin"], repo)
+
+      assert {:ok, impl} = Worker.PrivateClone.attach(repo, branch, "main", false)
+      refute impl == repo
+      assert Worker.PrivateClone.main_repo(impl) == repo
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: head}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, impl, branch))
+
+      assert Worker.PrivateClone.read_only?(path)
+      assert Worker.PrivateClone.main_repo(path) == repo
+      assert sha(path, "HEAD") == head
+
+      assert {:ok, mounts} = Worker.PrivateClone.mounts(path)
+      assert mounts[:objects] == Path.join(repo, ".git/objects")
+      refute String.starts_with?(mounts[:objects], impl)
+
+      alternates = File.read!(Path.join(path, ".git/objects/info/alternates"))
+      assert String.split(alternates, "\n", trim: true) == [mounts[:objects]]
+
+      # With only that one objects dir reachable (the implementer's clone gone),
+      # the whole history still reads, as it must inside the container.
+      Worker.PrivateClone.remove(impl)
+      assert {_, 0} = git(["log", "--oneline", "origin/main..HEAD"], path)
+      assert {_, 0} = git(["cat-file", "-e", "origin/main^{commit}"], path)
+      assert {_, 0} = git(["fsck", "--connectivity-only"], path)
+
+      # And ContainerSpawn's own builder accepts it: the review clone is
+      # mounted read-only, with the main repo's objects as the overlay.
+      argv =
+        Worker.Container.argv(
+          %{
+            podman: "podman",
+            image: "img",
+            name: "arb-rv",
+            worktree: path,
+            worktree_readonly: true,
+            git_dir: mounts[:git_dir],
+            objects: mounts[:objects],
+            readonly_paths: mounts[:readonly_paths]
+          },
+          ["true"]
+        )
+
+      assert Enum.any?(
+               argv,
+               &String.starts_with?(&1, mounts[:objects] <> ":" <> mounts[:objects])
+             )
+
+      assert Enum.any?(argv, &String.starts_with?(&1, path <> ":" <> path <> ":ro"))
+
+      ReviewGate.release_review_checkout(state)
+    end
+
     test "an explicit podman review_backend gets the private clone too",
          %{repo: repo, tmp: tmp} do
       branch = "feature/container-2"

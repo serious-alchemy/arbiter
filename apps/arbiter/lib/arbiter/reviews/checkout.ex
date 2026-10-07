@@ -133,6 +133,7 @@ defmodule Arbiter.Reviews.Checkout do
     # worktree exists, so the fetched tip stays reachable (a worktree's HEAD is
     # a gc root) for the whole window in which it could otherwise be pruned.
     tmp_ref = temp_fetch_ref()
+    repo_path = review_source(repo_path, opts)
 
     result =
       with {:ok, sha} <- branch_head_sha(repo_path, branch, tmp_ref),
@@ -240,6 +241,18 @@ defmodule Arbiter.Reviews.Checkout do
   defp add_clone(repo_path, head_sha, path, opts),
     do:
       PrivateClone.create_review(repo_path, head_sha, path: path, base: Keyword.get(opts, :base))
+
+  # bd-7ays3v: a container reviewer's clone borrows its objects from its source,
+  # and `PrivateClone.mounts/1` only mounts that one objects dir. When the
+  # caller hands us the implementer's own private clone, its objects chain on to
+  # the main repo's through an alternate the container never sees — so cut the
+  # review clone from the main repo itself, fetching the branch there.
+  defp review_source(repo_path, opts) do
+    case Keyword.get(opts, :layout, :linked_worktree) do
+      :private_clone -> PrivateClone.main_repo(repo_path) || repo_path
+      _ -> repo_path
+    end
+  end
 
   defp worktree_path(head_sha, prefix) do
     root = Arbiter.Config.Paths.worktree_root()
