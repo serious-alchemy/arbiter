@@ -56,7 +56,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
   describe "the shape of the permission set" do
     test "the read surface a refinement actually needs is allowed" do
       for tool <- ~w(ticket_show ticket_list ticket_ready workspace_show workspace_config_get
-                     workspace_config_overview repo_list repo_show
+                     workspace_config_overview workspace_config_schema repo_list repo_show
                      skill_list skill_get) do
         assert RefinePolicy.allow?(tool), "expected #{tool} to be allowed for a refine session"
       end
@@ -75,6 +75,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
                      worker_show worker_runs worker_log worker_prompt
                      scheduler_pause scheduler_resume scheduler_status
                      workspace_config_set workspace_config_unset
+                     workspace_standing_order_add workspace_standing_order_remove
                      installation_config_get installation_config_set
                      skill_create skill_update skill_delete
                      message_send review_greenlight) do

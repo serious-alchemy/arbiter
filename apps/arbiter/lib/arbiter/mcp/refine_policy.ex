@@ -58,6 +58,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     workspace_show
     workspace_config_get
     workspace_config_overview
+    workspace_config_schema
     repo_list
     repo_show
     skill_list
@@ -137,6 +138,8 @@ defmodule Arbiter.MCP.RefinePolicy do
     # config
     "workspace_config_set" => @deny_reason_config,
     "workspace_config_unset" => @deny_reason_config,
+    "workspace_standing_order_add" => @deny_reason_config,
+    "workspace_standing_order_remove" => @deny_reason_config,
     "installation_config_get" => @deny_reason_config,
     "installation_config_set" => @deny_reason_config,
     "skill_create" => @deny_reason_config,
