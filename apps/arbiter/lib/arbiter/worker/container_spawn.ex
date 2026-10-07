@@ -118,6 +118,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Agents.Codex.ConfigDir, as: CodexConfigDir
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers
+  alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
@@ -127,6 +128,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.TestServices
+  alias Arbiter.Worker.Worktree
 
   require Logger
 
@@ -667,6 +669,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, cli} <- remote_cli(provider, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(tmp_dir),
+         {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
 
@@ -677,6 +680,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          provider: provider,
          image: image,
          worktree: worktree,
+         checkout: checkout,
          home: home,
          config_dir: config_dir,
          config_files: config_files(Keyword.get(opts, :workspace)),
@@ -689,6 +693,37 @@ defmodule Arbiter.Worker.ContainerSpawn do
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
        }}
+    end
+  end
+
+  # RW11 (`docs/design/remote-workers.md` §9): a worktree that is a private clone
+  # (the home clone of a remote run) is synced to the node as a shadow clone and
+  # back as bundles. The placement veto runs here, so a repo with submodules or LFS
+  # is refused as a placement error rather than by the agent mid-seed. A worktree
+  # that is not a private clone has nothing to sync and is placed as before.
+  defp remote_checkout(opts, worktree, config_dir) do
+    case PrivateClone.branch(worktree) do
+      branch when is_binary(branch) ->
+        base =
+          Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+
+        case NodeCheckout.veto(worktree, branch) do
+          :ok ->
+            {:ok,
+             %{
+               home: worktree,
+               branch: branch,
+               base: base,
+               seeded_paths: Worktree.seeded_paths(worktree),
+               config_dir: config_dir
+             }}
+
+          {:error, reason} ->
+            {:error, {:checkout_vetoed, reason}}
+        end
+
+      _ ->
+        {:ok, nil}
     end
   end
 
@@ -864,9 +899,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "network" => "none",
          "services" => request.services,
          "command" => Jail.network_command(jail, argv)
-       }}
+       }
+       |> put_checkout(request.checkout)}
     end
   end
+
+  defp put_checkout(spec, nil), do: spec
+
+  defp put_checkout(spec, %{branch: branch, base: base}),
+    do: Map.put(spec, "checkout", %{"branch" => branch, "base" => base})
 
   defp prompt_mounts(paths) do
     Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->

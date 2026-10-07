@@ -29,6 +29,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
   | `network` | `"none"` (default) or `"pasta"` |
   | `services` | test-services definitions (`Arbiter.Worker.TestServices` specs), or `[]` |
   | `command` | the argv run inside the container |
+  | `checkout` | optional (RW11): `%{"branch", "base", "interval_s"}`. The agent seeds the `worktree` mount as a shadow clone from the primary (`GET /nodes/runs/<run>/seed.bundle`), uploads a snapshot bundle every `interval_s` (default 300, 10..3600) and at exit |
   | `extra_args` | must be absent or `[]`: there is no way to pass a flag |
 
   Mount kinds: `worktree`, `home`, `config_dir`, `tmp` (directories the agent
@@ -49,6 +50,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
     :cwd,
     :command,
     :network,
+    :checkout,
     mounts: [],
     bridges: [],
     env: %{},
@@ -60,7 +62,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
 
   @type t :: %__MODULE__{}
 
-  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets limits network services command extra_args)
+  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets limits network services command extra_args checkout)
   @mount_kinds ~w(worktree home config_dir tmp cli prompt)
   @dir_kinds ~w(worktree home config_dir tmp)
   @config_files ~w(settings.json CLAUDE.md)
@@ -105,6 +107,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
          {:ok, network} <- network(spec["network"]),
          {:ok, services} <- services(spec["services"] || []),
          {:ok, command} <- command(spec["command"]),
+         {:ok, checkout} <- checkout(spec["checkout"]),
          :ok <- needs_kinds(mounts, ["worktree"]) do
       {:ok,
        %__MODULE__{
@@ -121,7 +124,8 @@ defmodule Arbiter.NodeAgent.RunSpec do
          limits: limits,
          network: network,
          services: services,
-         command: command
+         command: command,
+         checkout: checkout
        }}
     end
   end
@@ -408,6 +412,50 @@ defmodule Arbiter.NodeAgent.RunSpec do
   defp limit_key("memory"), do: :memory
   defp limit_key("memory_swap"), do: :memory_swap
   defp limit_key("cpus"), do: :cpus
+
+  @ref_re ~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}\z/
+  @checkout_keys ~w(branch base interval_s)
+
+  # RW11. The branch and base become ref names the agent writes in its own repos
+  # and bundle refs, so they are held to a conservative subset of
+  # `git check-ref-format`.
+  defp checkout(nil), do: {:ok, nil}
+
+  defp checkout(%{} = map) do
+    with :ok <- known_checkout_keys(map),
+         {:ok, branch} <- ref(map["branch"], "checkout.branch", required: true),
+         {:ok, base} <- ref(map["base"], "checkout.base", required: false),
+         {:ok, seconds} <- interval(map["interval_s"]) do
+      {:ok, %{branch: branch, base: base, interval_ms: seconds * 1000}}
+    end
+  end
+
+  defp checkout(_other), do: refuse({:bad_value, "checkout"})
+
+  defp known_checkout_keys(map) do
+    case Enum.find(Map.keys(map), &(&1 not in @checkout_keys)) do
+      nil -> :ok
+      key -> refuse({:unknown_key, "checkout." <> to_string(key)})
+    end
+  end
+
+  defp ref(nil, key, required: true), do: refuse({:missing, key})
+  defp ref(nil, _key, required: false), do: {:ok, nil}
+
+  defp ref(value, key, _opts) when is_binary(value) do
+    bad? =
+      not Regex.match?(@ref_re, value) or String.contains?(value, ["..", "//", "@{"]) or
+        String.ends_with?(value, [".lock", "/", "."]) or
+        String.contains?(value, ["/.", "./"])
+
+    if bad?, do: refuse({:bad_value, key}), else: {:ok, value}
+  end
+
+  defp ref(_value, key, _opts), do: refuse({:bad_value, key})
+
+  defp interval(nil), do: {:ok, 300}
+  defp interval(s) when is_integer(s) and s in 10..3600, do: {:ok, s}
+  defp interval(_), do: refuse({:bad_value, "checkout.interval_s"})
 
   defp network(nil), do: {:ok, :none}
   defp network("none"), do: {:ok, :none}

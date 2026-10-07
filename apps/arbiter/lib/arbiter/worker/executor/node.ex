@@ -11,10 +11,15 @@ defmodule Arbiter.Worker.Executor.Node do
 
   ## What is and is not here yet
 
-  `prepare/3`, `open/1`, `signal/2`, `stop/1` and `outcome/1` are complete.
-  `collect/2` (checkpoint upload, RW11), `recover/2` and `reap/2` (restart
-  recovery and the node-side reaper, RW12) answer `{:error, :unsupported}`: the
-  agent has no side of those yet, and pretending would be worse than saying so.
+  `prepare/3`, `open/1`, `signal/2`, `stop/1`, `outcome/1` and `collect/2`
+  (`:checkout`, RW11) are complete. `recover/2` and `reap/2` (restart recovery
+  and the node-side reaper, RW12) answer `{:error, :unsupported}`: the agent has
+  no side of those yet, and pretending would be worse than saying so.
+
+  `prepare/3` takes `checkout: %{home, branch, base, seeded_paths}` (RW11): the
+  primary's context for the run, which authorizes the seed and checkout
+  endpoints (`Arbiter.Nodes.Checkout`). The spec's own `checkout` block tells the
+  agent to seed and upload.
 
   ## Stop is asynchronous
 
@@ -35,7 +40,13 @@ defmodule Arbiter.Worker.Executor.Node do
          {:ok, pid} <- session(node_id),
          owner = Keyword.get(opts, :owner, self()),
          {:ok, handle} <-
-           Session.assign(pid, run, run_spec, owner, Keyword.take(opts, [:prepare_timeout_ms])) do
+           Session.assign(
+             pid,
+             run,
+             run_spec,
+             owner,
+             Keyword.take(opts, [:prepare_timeout_ms, :checkout])
+           ) do
       {:ok, %{handle: handle, node_id: node_id, run: run, session: pid}}
     end
   end
@@ -70,7 +81,18 @@ defmodule Arbiter.Worker.Executor.Node do
     :exit, _ -> {:error, :no_session}
   end
 
+  @doc """
+  `collect(handle, :checkout)` takes a checkpoint now (RW11): the agent snapshots its
+  shadow and uploads it, the primary ingests it through the quarantine into the
+  home clone, and this returns `{:ok, %{head, snapshot, status_hash, filtered, ...}}`
+  or `{:error, reason}` (an ingest refusal, `:timeout`, `:run_gone`, ...).
+  `:transcripts` is not served by the node yet.
+  """
   @impl true
+  def collect({:remote, {node_id, run, _ref}}, :checkout) do
+    with {:ok, pid} <- session(node_id), do: Session.collect(pid, run, :checkout)
+  end
+
   def collect(_run_ref, _kind), do: {:error, :unsupported}
 
   @impl true

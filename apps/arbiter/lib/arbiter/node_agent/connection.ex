@@ -298,6 +298,12 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # RW11: the primary wants a checkpoint now.
+  defp push(state, "collect", %{"run" => run, "kind" => "checkout"}) do
+    Run.collect(run)
+    state
+  end
+
   defp push(state, "signal", %{"run" => run, "signal" => signal})
        when signal in ["TERM", "KILL"] do
     Run.signal(run, signal)
