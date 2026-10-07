@@ -10,6 +10,7 @@ defmodule ArbiterWeb.NodeChannel do
   | `hello`        | attaches this channel to the node's session; pushes `hello_ok` (`boot_epoch`, thresholds, effective `max_workers`, per-run verdicts, health, optional `upgrade`) |
   | `hb`           | pushes `hb_ack` `{seq, boot_epoch}`; a heartbeat before `hello` is replied `error: hello_required` |
   | `run.ready`, `run.refused`, `exit`, binary `stdout` | forwarded to the session's run table (`Arbiter.Nodes.RunStreams`) |
+  | `bridge.open`, `bridge.data` (binary), `bridge.credit`, `bridge.recv`, `bridge.close`, `bridge.reset` | forwarded to this connection's `Arbiter.Nodes.Bridge` (RW10), started on the first one; its pushes come back as `{:node_bridge, {:push, event, payload}}` |
 
   Pushed by the primary: the run protocol (`assign`, `cancel`, `signal`, `ack`,
   `exit_ack`; RW9), `drain` `{on: true | false}`, and `upgrade`
@@ -36,7 +37,7 @@ defmodule ArbiterWeb.NodeChannel do
   use Phoenix.Channel
 
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Registry, Session}
+  alias Arbiter.Nodes.{Bridge, Registry, Session}
 
   @impl true
   def join("node:" <> id, _params, %Phoenix.Socket{assigns: %{node_id: id}} = socket) do
@@ -91,7 +92,28 @@ defmodule ArbiterWeb.NodeChannel do
     {:noreply, socket}
   end
 
+  # The bridge mux (RW10). The streams belong to this connection, not to the
+  # session: a blip ends them. A bridge event before `hello` has no session to
+  # authorize against and is dropped.
+  @bridge_events ~w(bridge.open bridge.data bridge.credit bridge.recv bridge.close bridge.reset)
+
+  def handle_in(event, payload, %{assigns: %{session: session}} = socket)
+      when event in @bridge_events do
+    socket = ensure_bridge(socket, session)
+    Bridge.from_node(socket.assigns.bridge, event, payload)
+    {:noreply, socket}
+  end
+
   def handle_in(_event, _payload, socket), do: {:noreply, socket}
+
+  defp ensure_bridge(%{assigns: %{bridge: pid}} = socket, _session) when is_pid(pid), do: socket
+
+  defp ensure_bridge(socket, session) do
+    {:ok, pid} =
+      Bridge.start(channel: self(), session: session, node_id: socket.assigns.node_id)
+
+    assign(socket, bridge: pid, bridge_ref: Process.monitor(pid))
+  end
 
   defp attach(node, params, socket) do
     params =
@@ -134,6 +156,26 @@ defmodule ArbiterWeb.NodeChannel do
   def handle_info({:node_session, {:push, event, payload}}, socket) do
     push(socket, event, payload)
     {:noreply, socket}
+  end
+
+  # A bridge stream's bytes and credit, primary → node.
+  def handle_info({:node_bridge, {:push, event, payload}}, socket) do
+    push(socket, event, payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:node_session, {:run_over, run}}, %{assigns: %{bridge: bridge}} = socket)
+      when is_pid(bridge) do
+    Bridge.run_over(bridge, run)
+    {:noreply, socket}
+  end
+
+  def handle_info({:node_session, {:run_over, _run}}, socket), do: {:noreply, socket}
+
+  # The bridge ended (the node broke the protocol, or it crashed): its streams
+  # are gone, and the node cannot know. Closing the socket tells it.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{assigns: %{bridge_ref: ref}} = socket) do
+    {:stop, {:shutdown, :bridge_down}, close(socket, :bridge_down)}
   end
 
   def handle_info({:node_session, {:upgrade, payload}}, socket) do

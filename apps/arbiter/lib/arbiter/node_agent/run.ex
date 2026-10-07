@@ -441,8 +441,9 @@ defmodule Arbiter.NodeAgent.Run do
     end
   end
 
-  # The per-run bridge sockets are RW10's. Until a listener provider is wired a
-  # spec that names bridges cannot run here, and says so.
+  # The per-run bridge sockets (RW10): `:bridges_fun` is `Arbiter.NodeAgent.Bridge.listen/2`
+  # under the agent. Without a provider a spec that names bridges cannot run here,
+  # and says so.
   defp bridges(%{bridges: []}, _opts), do: {:ok, []}
 
   defp bridges(spec, opts) do
@@ -643,8 +644,20 @@ defmodule Arbiter.NodeAgent.Run do
         TestServices.stop(state.pod, runner_opts(state.opts) ++ [podman: podman_path(state.opts)])
 
     Secrets.remove(runtime_dir(state.opts), state.spec.run)
+    release_bridges(state)
     :ok
   end
+
+  defp release_bridges(%{spec: %{bridges: [_ | _], run: run}, opts: opts}) do
+    case Keyword.get(opts, :bridges_release_fun) do
+      fun when is_function(fun, 1) -> fun.(run)
+      _ -> :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp release_bridges(_state), do: :ok
 
   defp report(state) do
     %{

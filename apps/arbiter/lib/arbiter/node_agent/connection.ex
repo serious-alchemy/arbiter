@@ -34,12 +34,17 @@ defmodule Arbiter.NodeAgent.Connection do
     every run is re-attached (it resends what the primary has not acknowledged),
     runs the primary does not know are cancelled, and on any loss the runs are
     detached; a **fence** also stops every container (§10.1).
+  * **Bridges (RW10).** `Arbiter.NodeAgent.Bridge` owns the per-run listeners and
+    their streams; this process attaches it to the channel on `hello_ok`,
+    detaches it on any loss, and hands it the `bridge.*` events. Its pushes go
+    straight to the socket, not through here.
   * Events the later children own (`reap`, `drain`, `rotate`) are logged and
     ignored.
   """
   use GenServer
 
   alias Arbiter.NodeAgent.Backoff
+  alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
   alias Arbiter.NodeAgent.Run
@@ -309,6 +314,11 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  defp push(state, "bridge." <> _ = event, payload) when state.phase == :ready do
+    Bridge.from_primary(bridge(state), event, payload)
+    state
+  end
+
   defp push(state, event, _payload) do
     Logger.debug("node agent: ignoring #{inspect(event)} (not handled by this agent version)")
     state
@@ -393,8 +403,11 @@ defmodule Arbiter.NodeAgent.Connection do
 
     request_upgrade(state, payload["upgrade"])
     attach_runs(payload["runs"])
+    Bridge.attach(bridge(state), state.client, Protocol.topic(config))
     state
   end
+
+  defp bridge(state), do: Keyword.get(state.config.run_opts, :bridge, Bridge)
 
   # Re-attach every run (each resends what the primary has not acknowledged).
   # A run the primary says it does not know is not one to keep alive: its owner
@@ -473,6 +486,7 @@ defmodule Arbiter.NodeAgent.Connection do
 
   defp lost(state, reason) do
     Runs.detach_all()
+    Bridge.detach(bridge(state))
     if state.client, do: WsClient.close(state.client)
     if state.client_ref, do: Process.demonitor(state.client_ref, [:flush])
     cancel(state.hb_timer)
