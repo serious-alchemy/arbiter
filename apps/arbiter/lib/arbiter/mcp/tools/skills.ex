@@ -8,6 +8,7 @@ defmodule Arbiter.MCP.Tools.Skills do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Skills.Serializer
 
   require Logger
 
@@ -84,7 +85,7 @@ defmodule Arbiter.MCP.Tools.Skills do
   @spec skill_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def skill_update(%Scope{} = scope, args) do
     with {:ok, ref} <- Tools.require_string(args, "skill"),
-         {:ok, workspace_id} <- skill_write_scope(scope, args),
+         {:ok, workspace_id} <- skill_scope(scope, args),
          {:ok, skill} <- fetch_skill_in_scope(ref, workspace_id),
          {:ok, code_only} <- Tools.fetch_optional_bool(args, "code_only") do
       attrs =
@@ -113,13 +114,14 @@ defmodule Arbiter.MCP.Tools.Skills do
   Returns `{deleted: true, id, name}`.
   """
   @spec skill_delete(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_delete(%Scope{} = _scope, args) do
+  def skill_delete(%Scope{} = scope, args) do
     with {:ok, ref} <- Tools.require_string(args, "skill"),
-         {:ok, skill} <- fetch_skill(ref) do
+         {:ok, workspace_id} <- skill_scope(scope, args),
+         {:ok, skill} <- fetch_skill_in_scope(ref, workspace_id) do
       case Arbiter.Skills.delete_skill(skill) do
         :ok ->
           Logger.info("[skill_delete] skill #{skill.id} (#{skill.name}) deleted")
-          {:ok, %{deleted: true, id: skill.id, name: skill.name}}
+          {:ok, Serializer.deleted(skill)}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -127,44 +129,11 @@ defmodule Arbiter.MCP.Tools.Skills do
     end
   end
 
-  defp fetch_skill(ref) do
-    case Arbiter.Skills.get_skill(ref) do
+  defp fetch_skill_in_scope(ref, workspace_id) do
+    case Arbiter.Skills.fetch_skill_in_scope(ref, workspace_id) do
       {:ok, skill} -> {:ok, skill}
       {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
     end
-  end
-
-  # Scope-aware fetch for the read/write skill tools. A UUID ref is looked up
-  # directly, then checked against the caller's workspace scope; a name ref
-  # resolves with shadowing precedence within that scope
-  # (`Arbiter.Skills.resolve_skill/2`). `workspace_id` nil = global scope
-  # (a workspace-agnostic coordinator sees every skill).
-  defp fetch_skill_in_scope(ref, workspace_id) do
-    if uuid_ref?(ref) do
-      with {:ok, skill} <- fetch_skill(ref) do
-        if skill_visible?(skill, workspace_id),
-          do: {:ok, skill},
-          else: {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-      end
-    else
-      case Arbiter.Skills.resolve_skill(ref, workspace_id) do
-        {:ok, skill} -> {:ok, skill}
-        {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-      end
-    end
-  end
-
-  # A global skill is visible in any scope; a scoped skill only in its own
-  # workspace. A `nil` caller scope (workspace-agnostic coordinator) sees all.
-  defp skill_visible?(_skill, nil), do: true
-  defp skill_visible?(%Arbiter.Skills.Skill{workspace_id: nil}, _ws_id), do: true
-  defp skill_visible?(%Arbiter.Skills.Skill{workspace_id: ws}, ws_id), do: ws == ws_id
-
-  defp uuid_ref?(ref) do
-    Regex.match?(
-      ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-      ref
-    )
   end
 
   # ---- skill_list -----------------------------------------------------------
@@ -188,7 +157,7 @@ defmodule Arbiter.MCP.Tools.Skills do
           nil -> Arbiter.Skills.list_skills()
           ws_id -> Arbiter.Skills.list_skills(workspace_id: ws_id)
         end
-        |> Enum.map(&serialize_skill_summary/1)
+        |> Serializer.summaries()
 
       {:ok, %{skills: skills, count: length(skills)}}
     end
@@ -211,37 +180,7 @@ defmodule Arbiter.MCP.Tools.Skills do
     end
   end
 
-  defp serialize_skill_summary(%Arbiter.Skills.Skill{} = skill) do
-    %{
-      id: skill.id,
-      name: skill.name,
-      workspace_id: skill.workspace_id,
-      scope: skill_scope_label(skill),
-      metadata: skill.metadata || %{},
-      activation_mode: skill.activation_mode,
-      code_only: skill.code_only,
-      created_at: Tools.iso(skill.created_at),
-      updated_at: Tools.iso(skill.updated_at)
-    }
-  end
-
-  defp serialize_skill(%Arbiter.Skills.Skill{} = skill) do
-    %{
-      id: skill.id,
-      name: skill.name,
-      workspace_id: skill.workspace_id,
-      scope: skill_scope_label(skill),
-      body: skill.body,
-      metadata: skill.metadata || %{},
-      activation_mode: skill.activation_mode,
-      code_only: skill.code_only,
-      created_at: Tools.iso(skill.created_at),
-      updated_at: Tools.iso(skill.updated_at)
-    }
-  end
-
-  defp skill_scope_label(%Arbiter.Skills.Skill{workspace_id: nil}), do: "global"
-  defp skill_scope_label(%Arbiter.Skills.Skill{}), do: "workspace"
+  defp serialize_skill(%Arbiter.Skills.Skill{} = skill), do: Serializer.full(skill)
 
   # Attach a non-fatal bundled-skill collision warning to a serialized skill,
   # or leave it untouched when there is no collision.
