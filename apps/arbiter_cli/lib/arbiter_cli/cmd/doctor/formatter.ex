@@ -28,7 +28,13 @@ defmodule ArbiterCli.Cmd.Doctor.Formatter do
     IO.puts("")
     IO.puts(summary_line(results))
 
-    shown = if all?, do: results, else: Enum.filter(results, &(&1.status in [:warn, :fail]))
+    # `--spawn` asked for the canary: print its rows even when they pass.
+    spawn? = Keyword.get(opts, :show_spawn, false)
+
+    shown =
+      if all?,
+        do: results,
+        else: Enum.filter(results, &(&1.status in [:warn, :fail] or (spawn? and spawn_row?(&1))))
 
     for {group, title} <- @group_titles,
         rows = Enum.filter(shown, &(&1.group == group)),
@@ -40,6 +46,8 @@ defmodule ArbiterCli.Cmd.Doctor.Formatter do
 
     :ok
   end
+
+  defp spawn_row?(r), do: r.id == "spawn" or String.starts_with?(r.id || "", "spawn.")
 
   @doc "`27 ok · 1 warn · 0 fail`, plus `· 3 n/a` when any check does not apply."
   @spec summary_line([struct()]) :: String.t()

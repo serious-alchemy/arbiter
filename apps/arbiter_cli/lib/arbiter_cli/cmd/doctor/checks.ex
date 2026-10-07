@@ -53,7 +53,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # `ArbiterCli.Cmd.Doctor.Scope`); a check that does not apply is reported as
   # `:na` with the scope's reason and its endpoint is never called. A check
   # that returns a list (nodes) gets one id per result, derived from its name.
-  defp registry do
+  defp registry(opts \\ []) do
     [
       {"phoenix_reachable", :core, nil, :always, plain(&phoenix/0)},
       {"workspaces_exist", :core, nil, :always, plain(&check_workspaces_exist/0)},
@@ -87,6 +87,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"podman_sandbox", :sandboxes, nil, :podman, &check_podman_sandbox/1},
       {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
       {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},
+      {"spawn", :sandboxes, nil, :always, plain(fn -> check_spawn(opts[:spawn] || :auto) end)},
       {"bind_address", :security, nil, :always, plain(&check_bind_address/0)},
       {"anonymous_api", :security, nil, :always, plain(&check_anonymous_api/0)},
       {"dashboard_auth", :security, nil, :always, plain(&check_dashboard_auth/0)},
@@ -107,15 +108,19 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   `id`/`group`/`parent`, in group order: core, auth & providers, sandboxes,
   security posture.
 
+  Option `:spawn` sets the canary spawn check (`check_spawn/1`): `:auto` runs it
+  when this server boot has no passing canary yet, `:force` always runs a fresh
+  one, `:skip` leaves it out (the readiness polls).
+
   Applicability is read once (`Scope.fetch/0`); a check that does not apply to
   this install comes back as `:na` rather than being dropped, so `--all` and
   `--json` still list it.
   """
-  @spec run() :: [Result.t()]
-  def run do
+  @spec run(keyword()) :: [Result.t()]
+  def run(opts \\ []) do
     scope = Scope.fetch()
 
-    registry()
+    registry(opts)
     |> Enum.flat_map(fn {id, group, parent, applies_when, check} ->
       case Scope.applies?(scope, applies_when) do
         :yes ->
@@ -1106,6 +1111,117 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         unknown_result("worker temp dir", other)
     end
   end
+
+  # bd-8t4yui: the end-to-end canary spawn. The server spawns each enabled,
+  # unpaused provider's CLI (`--version`) through the real spawn pipeline and
+  # reports it; a spawn that crashes or exits early is the failure the static
+  # checks above cannot see (v0.2.14 on 2026-10-04: doctor all-ok, every spawn
+  # raising in RunTmp.create). `:auto` reuses this boot's passing report and
+  # runs the canary when there is none (or the last one failed, so a fix shows
+  # up at once); `:force` (`--spawn`) always runs one; `:skip` is for the
+  # readiness polls, which must not spawn agents in a loop.
+  @canary_timeout_ms 300_000
+
+  defp check_spawn(:skip) do
+    [
+      %Result{
+        name: "spawn canary",
+        status: :na,
+        detail: "not run in a readiness poll (`arb server doctor --spawn` runs it)"
+      }
+    ]
+  end
+
+  defp check_spawn(mode) do
+    case spawn_report(mode) do
+      {:ok, report} -> spawn_results(report)
+      {:error, :busy} -> [spawn_busy_result()]
+      {:error, other} -> [unknown_result("spawn canary", other)]
+    end
+  end
+
+  defp spawn_report(:force), do: run_spawn_canary()
+
+  defp spawn_report(:auto) do
+    case Client.get("/api/server/spawn_canary") do
+      {:ok, %{"report" => %{"ok" => true} = report}} -> {:ok, report}
+      {:ok, %{"report" => _none_or_failed}} -> run_spawn_canary()
+      other -> {:error, other}
+    end
+  end
+
+  defp run_spawn_canary do
+    case Client.post("/api/server/spawn_canary", %{}, receive_timeout: @canary_timeout_ms) do
+      {:ok, %{"report" => %{"providers" => providers} = report}} when is_list(providers) ->
+        {:ok, report}
+
+      {:error, %Client.Error{kind: :http, status: 409}} ->
+        {:error, :busy}
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp spawn_busy_result do
+    %Result{
+      name: "spawn canary",
+      status: :warn,
+      detail: "could not check: another spawn canary is already running on the server",
+      hint: "Re-run `arb server doctor --spawn` in a minute.",
+      blocks_readiness: false
+    }
+  end
+
+  defp spawn_results(%{"providers" => providers}), do: Enum.map(providers, &spawn_result/1)
+
+  defp spawn_result(%{"status" => "ok"} = p) do
+    %Result{
+      name: spawn_name(p),
+      status: :ok,
+      detail:
+        "spawned, reached the agent#{answer(p)}, exit #{p["exit_code"]}, #{p["duration_ms"]} ms",
+      blocks_readiness: false
+    }
+  end
+
+  defp spawn_result(%{"status" => "fail"} = p) do
+    %Result{
+      name: spawn_name(p),
+      status: :fail,
+      detail:
+        "#{spawn_stage(p)}: #{p["error"]}" <>
+          if(p["exit_code"], do: " (exit #{p["exit_code"]}, #{p["duration_ms"]} ms)", else: ""),
+      hint:
+        "A worker cannot spawn this provider. See the server log and `arb server doctor --all`; " <>
+          "re-run `arb server doctor --spawn` after fixing it.",
+      blocks_readiness: false
+    }
+  end
+
+  # `n/a` (not configured, paused) and `skipped` (podman: no worktree to
+  # mount): the provider was not spawned, and the detail says why.
+  defp spawn_result(%{"status" => status} = p) when status in ["n/a", "skipped"] do
+    %Result{name: spawn_name(p), status: :na, detail: p["detail"]}
+  end
+
+  defp spawn_result(p) do
+    %Result{
+      name: spawn_name(p),
+      status: :warn,
+      detail: "could not check: the server reported status #{inspect(p["status"])}",
+      hint: "Re-run `arb server doctor --spawn`; check that the CLI and server versions match.",
+      blocks_readiness: false
+    }
+  end
+
+  defp spawn_name(p), do: "spawn canary (#{p["label"] || p["provider"]})"
+
+  defp spawn_stage(%{"spawned" => true}), do: "spawned but did not reach the agent"
+  defp spawn_stage(_), do: "could not spawn"
+
+  defp answer(%{"detail" => detail}) when is_binary(detail) and detail != "", do: " (#{detail})"
+  defp answer(_), do: ""
 
   # bd-6zuoo6: workers live in the server's cgroup unless the per-worker memory
   # cap puts each in its own scope, and under the default `OOMPolicy=stop` the

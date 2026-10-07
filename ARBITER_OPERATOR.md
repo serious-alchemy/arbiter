@@ -249,6 +249,17 @@ Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
+### Prove the deploy spawns — don't watch the first dispatch
+
+After a deploy, `arb server doctor` runs a **canary spawn** per enabled provider
+(once per server boot; `arb server doctor --spawn` forces a fresh one): it goes
+through the real spawn path with the agent CLI's `--version`, costs no model
+tokens, and creates no ticket or run. A `[fail] spawn canary (…)` row with the
+first error line (a `RunTmp` crash, a jail exit 125, a missing CLI) means workers
+cannot spawn that provider on this build — roll back or fix forward before
+dispatching. A green canary replaces the manual "dispatch something and watch it
+start" step. It does not replace judging a real run's output.
+
 ### Never migrate a live server (SQLite has one writer)
 
 SQLite allows exactly one writer. **Never** run a standalone migrate against a

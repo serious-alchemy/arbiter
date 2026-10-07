@@ -338,6 +338,39 @@ default output is the header, the summary line and the warn/fail checks only;
 security posture. Which providers and sandbox backends an install uses comes
 from `GET /api/server/doctor_scope`; when that cannot be read, nothing is hidden.
 
+#### The spawn canary (`arb server doctor --spawn`)
+
+The static checks cannot prove the thing that matters after a deploy: that a
+worker can actually spawn and reach its agent (on 2026-10-04 a release deployed
+with the doctor all-ok while every spawn raised in `RunTmp.create`, and every agy
+reviewer exited 125 on the jail's `sun_path` limit). The `spawn` check asks the
+server (`POST /api/server/spawn_canary`) to run a **canary spawn** per enabled,
+unpaused provider through the real spawn pipeline: the per-run temp dir, the
+adapter's own argv (agy's jail wrapper, config isolation, Claude's MCP config), the
+workspace env and provider-account credential handoff, `SpawnEnv`, the memory
+scope and the same `Port` open. The only difference is that the CLI is asked for
+`--version`, so **no model tokens are spent**. It creates no ticket, run record,
+board card or `usage_events` row, occupies no scheduler slot and counts against no
+quota, and it removes its temp dirs, scope, agent process and isolated agent home.
+
+Each provider row says whether it spawned and reached the agent, with the exit
+code and duration; a failure prints the first line the spawn printed
+(`exit 125: bwrap: …`, or `FunctionClauseError: …`) and, being a `fail`, makes the
+doctor exit 1. A provider no workspace uses, or that is paused, is `n/a` and is not
+spawned; one whose workspace uses the podman backend is `n/a` too (a canary has no
+worktree to mount: see the podman readiness check).
+
+- `arb server doctor --spawn` runs a fresh canary and prints its rows.
+- A plain `arb server doctor` runs it **automatically the first time after the
+  server boots** (so the first doctor after a deploy proves the new build spawns),
+  keeps that result for the rest of the boot, and re-runs it while it is failing so
+  a fix shows up at once. `arb server deploy`'s final report does the same.
+- The readiness polls (`arb start`, `restart`, `server deploy`'s green-wait) do not
+  spawn agents; a spawn failure is a `fail` in the report but does not trigger the
+  deploy's auto-rollback.
+- One canary runs at a time: a concurrent call is a 409 (reported as a `warn`). The
+  endpoint is coordinator tier; a worker token is refused.
+
 ### Remote `arb` — access Arbiter over VPN
 
 By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback). To point `arb` at a remote Arbiter server:
@@ -576,7 +609,7 @@ commands you'll reach for most.
 | `arb server start` | Boot the stack (no-op if already up) |
 | `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `arb` — see [docs/self-update.md](docs/self-update.md) |
 | `arb server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
-| `arb server doctor [--all\|-v] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `arb server doctor`](#reading-arb-server-doctor) |
+| `arb server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `arb server doctor`](#reading-arb-server-doctor) |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
 

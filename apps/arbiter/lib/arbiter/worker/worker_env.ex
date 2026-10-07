@@ -83,36 +83,46 @@ defmodule Arbiter.Worker.WorkerEnv do
   @spec resolve(String.t() | nil, keyword()) :: {[{String.t(), String.t()}], [String.t()]}
   def resolve(task_id, opts \\ []) do
     case workspace_for(task_id) do
-      %Workspace{} = ws ->
-        workspace_pairs =
-          try do
-            ws |> Workspace.worker_env_map() |> Map.to_list()
-          rescue
-            error ->
-              Logger.warning(
-                "WorkerEnv: workspace #{ws.id} (#{ws.name}) has a worker env store that " <>
-                  "raised while decrypting for task #{task_id}: #{Exception.format(:error, error)}"
-              )
-
-              []
-          end
-
-        workspace_secrets =
-          if workspace_pairs == [] do
-            []
-          else
-            Workspace.worker_env_secret_values(ws)
-          end
-
-        {pairs, secret_values} =
-          apply_provider_accounts(ws, workspace_pairs, workspace_secrets, opts)
-
-        warn_if_degraded(task_id, ws, pairs)
-        {pairs, secret_values}
-
-      nil ->
-        {[], []}
+      %Workspace{} = ws -> resolve_workspace(ws, task_id, opts)
+      nil -> {[], []}
     end
+  end
+
+  @doc """
+  `resolve/2` for a workspace the caller already holds, with `label` (a task id,
+  or any name) standing in for the task in log lines. The doctor's spawn canary
+  (`Arbiter.Doctor.SpawnCanary`) has a workspace but no ticket, and hands its
+  probe the same workspace vars and provider-account credentials a real spawn
+  gets.
+  """
+  @spec resolve_workspace(Workspace.t(), String.t() | nil, keyword()) ::
+          {[{String.t(), String.t()}], [String.t()]}
+  def resolve_workspace(%Workspace{} = ws, label, opts \\ []) do
+    workspace_pairs =
+      try do
+        ws |> Workspace.worker_env_map() |> Map.to_list()
+      rescue
+        error ->
+          Logger.warning(
+            "WorkerEnv: workspace #{ws.id} (#{ws.name}) has a worker env store that " <>
+              "raised while decrypting for task #{label}: #{Exception.format(:error, error)}"
+          )
+
+          []
+      end
+
+    workspace_secrets =
+      if workspace_pairs == [] do
+        []
+      else
+        Workspace.worker_env_secret_values(ws)
+      end
+
+    {pairs, secret_values} =
+      apply_provider_accounts(ws, workspace_pairs, workspace_secrets, opts)
+
+    warn_if_degraded(label, ws, pairs)
+    {pairs, secret_values}
   end
 
   # Credential vars are swapped for the account's — the only source since the
