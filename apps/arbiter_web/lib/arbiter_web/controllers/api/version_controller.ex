@@ -40,6 +40,7 @@ defmodule ArbiterWeb.Api.VersionController do
       release_url: u.release_url,
       checked_at: u.checked_at && DateTime.to_iso8601(u.checked_at),
       update_available: u.update_available?,
+      migrations_pending: u.migrations_pending,
       error: u.error
     }
   end
