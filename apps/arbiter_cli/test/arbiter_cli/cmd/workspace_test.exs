@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
          {%{"id" => "ws-1", "secret_keys" => ["tracker_token"]}, 200}}
       ])
 
-      {out, _err, code} =
+      {out, err, code} =
         capture(fn ->
           Workspace.run(["secret", "set", "tracker_token", "sct_rw_x", "--workspace", "default"])
         end)
@@ -85,6 +85,82 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "tracker_token"
       # The token value is never printed back.
       refute out =~ "sct_rw_x"
+      # ...and the argv form warns, without echoing the value (P-28).
+      assert err =~ "warning: a secret on the command line"
+      refute err =~ "sct_rw_x"
+    end
+
+    defp stub_secret_patch(test_pid) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "secret_keys" => []}
+            ]
+          }, 200}},
+        {{"patch", "/api/workspaces/ws-1"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:patched, Jason.decode!(body)})
+           Req.Test.json(conn, %{"id" => "ws-1", "secret_keys" => ["tracker_token"]})
+         end}
+      ])
+    end
+
+    test "secret set reads the value from stdin with `-`, with no warning" do
+      stub_secret_patch(self())
+
+      {_out, err, 0} =
+        capture(
+          fn ->
+            Workspace.run(["secret", "set", "tracker_token", "-", "--workspace", "default"])
+          end,
+          input: "from-stdin\n"
+        )
+
+      assert_received {:patched, %{"secrets" => %{"tracker_token" => "from-stdin"}}}
+      refute err =~ "`set <key> -` (stdin)"
+    end
+
+    test "secret set reads the value from --file, with no warning" do
+      stub_secret_patch(self())
+      path = Path.join(System.tmp_dir!(), "ws-secret-#{System.unique_integer([:positive])}")
+      File.write!(path, "from-file\n")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, err, 0} =
+        capture(fn ->
+          Workspace.run([
+            "secret",
+            "set",
+            "tracker_token",
+            "--file",
+            path,
+            "--workspace",
+            "default"
+          ])
+        end)
+
+      assert_received {:patched, %{"secrets" => %{"tracker_token" => "from-file"}}}
+      refute err =~ "`set <key> -` (stdin)"
+    end
+
+    test "secret set with an unreadable --file dies" do
+      {_out, err, code} =
+        capture(fn ->
+          Workspace.run([
+            "secret",
+            "set",
+            "k",
+            "--file",
+            "/nonexistent/secret",
+            "--workspace",
+            "d"
+          ])
+        end)
+
+      assert code == 1
+      assert err =~ "cannot read --file"
     end
 
     test "secret set requires a value" do
@@ -94,7 +170,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
         end)
 
       assert code == 1
-      assert err =~ "requires <key> <value>"
+      assert err =~ "requires <key> and a value"
     end
 
     test "secret rm removes an existing key" do

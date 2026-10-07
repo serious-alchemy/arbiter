@@ -2,8 +2,8 @@ defmodule ArbiterWeb.DashboardAuth.LoginTokens do
   @moduledoc """
   One-time dashboard login tokens (bd-3gycsz).
 
-  `arb dashboard login` asks `POST /api/dashboard/login_tokens` (coordinator
-  token required) for one; the browser redeems it at `/login`. A token is 256
+  `arb dashboard login` asks `POST /api/dashboard/login_tokens` (**operator proof**
+  required, P-28) for one; the browser redeems it at `/login`. A token is 256
   random bits, lives `@ttl_seconds` and is deleted when redeemed. They are
   held in memory only (stored as SHA-256 digests), so a restart invalidates
   every outstanding one — they are minutes-long by design.

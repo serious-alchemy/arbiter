@@ -160,13 +160,14 @@ defmodule ArbiterCli.CliCase do
   @doc """
   Run `fun`, capturing stdout, stderr, and exit code. Returns
   `{stdout, stderr, exit_code}`. `exit_code` is 0 if `fun` returned normally,
-  otherwise it's the code passed to `Output.halt/die`.
+  otherwise it's the code passed to `Output.halt/die`. `input: "…"` feeds stdin.
   """
-  def capture(fun) do
+  def capture(fun, opts \\ []) do
     parent = self()
+    io_opts = if input = opts[:input], do: [input: input], else: []
 
     stdout =
-      ExUnit.CaptureIO.capture_io(fn ->
+      ExUnit.CaptureIO.capture_io(io_opts, fn ->
         stderr =
           ExUnit.CaptureIO.capture_io(:stderr, fn ->
             try do

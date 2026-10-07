@@ -25,7 +25,10 @@ defmodule ArbiterWeb.ApiPolicy do
       human's own `arb`). Node administration over REST (join-token minting,
       drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
       coordinator *session* (an LLM) is refused, so it cannot enrol machines
-      that will receive provider tokens. Used by every `/api/nodes` route: the list, minting, edits, drain, revoke, remove, upgrade.
+      that will receive provider tokens. Used by every `/api/nodes` route: the list, minting, edits, drain, revoke, remove, upgrade;
+      and by `POST /api/dashboard/login_tokens` (P-28: a dashboard login is an operator
+      grant, so an LLM coordinator session must not mint one;
+      `docs/design/tier-proof-boundaries.md`).
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
     * `:dispatch` — `:coordinator` plus `can_dispatch` (the recursion
@@ -213,7 +216,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/podman_sandbox"} => :coordinator,
     {:get, "/api/server/worker_memory"} => :coordinator,
     {:get, "/api/server/dashboard_auth"} => :coordinator,
-    {:post, "/api/dashboard/login_tokens"} => :coordinator,
+    {:post, "/api/dashboard/login_tokens"} => :operator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------
     # Coordinator for both: `set` is coordinator-only over MCP, and reads match
@@ -306,7 +309,11 @@ defmodule ArbiterWeb.ApiPolicy do
   def authorize(:operator, %Scope{} = scope, _params) do
     if Scope.operator?(scope),
       do: :ok,
-      else: forbidden(scope, "lacks operator proof (node administration is operator-only)")
+      else:
+        forbidden(
+          scope,
+          "lacks operator proof (this route is operator-only: node administration, dashboard login)"
+        )
   end
 
   def authorize(:grok_token, %Scope{tier: tier}, _params) when tier in [:coordinator, :worker],

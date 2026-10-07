@@ -1,28 +1,74 @@
 defmodule ArbiterCli.Cmd.DashboardTest do
-  use ArbiterCli.CliCase, async: true
+  # async: false — sets ARB_TOKEN in the process env.
+  use ArbiterCli.CliCase, async: false
 
   alias ArbiterCli.Cmd.Dashboard
   alias ArbiterCli.Cmd.Doctor.Checks
+  alias ArbiterCli.FakeOperatorSocket
 
   describe "arb dashboard login" do
+    @minted %{"token" => "PROOF-TOKEN", "tier" => "coordinator", "expires_in" => 300}
+    @login {%{"token" => "tok", "path" => "/login?token=tok", "expires_in" => 120}, 200}
+
+    setup do
+      saved = System.get_env("ARB_TOKEN")
+      System.put_env("ARB_TOKEN", "coordinator-session-token")
+
+      on_exit(fn ->
+        if saved, do: System.put_env("ARB_TOKEN", saved), else: System.delete_env("ARB_TOKEN")
+      end)
+
+      FakeOperatorSocket.start!(@minted)
+      :ok
+    end
+
     test "prints the one-time login URL" do
-      stub_routes([
-        {{"post", "/api/dashboard/login_tokens"},
-         {%{"token" => "tok", "path" => "/login?token=tok", "expires_in" => 120}, 200}}
-      ])
+      stub_routes([{{"post", "/api/dashboard/login_tokens"}, @login}])
 
       {out, _err, _code} = capture(fn -> Dashboard.run(["login"]) end)
       assert out =~ ~r{^http\S+/login\?token=tok$}m
     end
 
     test "--json carries the url" do
-      stub_routes([
-        {{"post", "/api/dashboard/login_tokens"},
-         {%{"token" => "tok", "path" => "/login?token=tok", "expires_in" => 120}, 200}}
-      ])
+      stub_routes([{{"post", "/api/dashboard/login_tokens"}, @login}])
 
       {out, _err, _code} = capture(fn -> Dashboard.run(["login", "--json"]) end)
       assert %{"token" => "tok", "url" => "http" <> _} = Jason.decode!(out)
+    end
+
+    test "mints operator proof over the socket and sends that, never ARB_TOKEN" do
+      test_pid = self()
+
+      stub_routes([
+        {{"post", "/api/dashboard/login_tokens"},
+         fn conn ->
+           send(test_pid, {:auth, Plug.Conn.get_req_header(conn, "authorization")})
+           Req.Test.json(conn, elem(@login, 0))
+         end}
+      ])
+
+      {_out, _err, 0} = capture(fn -> Dashboard.run(["login"]) end)
+
+      assert_received {:operator_request, %{"op" => "mint", "ttl" => 300}}
+      assert_received {:auth, ["Bearer PROOF-TOKEN"]}
+    end
+
+    test "an unreachable operator socket fails and never falls back to ARB_TOKEN" do
+      Process.put(:bd2_operator_socket, "/nonexistent-#{System.pid()}/op.sock")
+      test_pid = self()
+
+      stub_routes([
+        {{"post", "/api/dashboard/login_tokens"},
+         fn conn ->
+           send(test_pid, :hit_server)
+           Req.Test.json(conn, elem(@login, 0))
+         end}
+      ])
+
+      {_out, err, code} = capture(fn -> Dashboard.run(["login"]) end)
+      assert code != 0
+      assert err =~ "operator socket"
+      refute_received :hit_server
     end
   end
 

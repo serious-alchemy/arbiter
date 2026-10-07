@@ -2,10 +2,13 @@ defmodule ArbiterCli.Cmd.Workspace.Secrets do
   @moduledoc """
   `arb workspace secret ls|set|rm` — encrypted-at-rest workspace secrets.
   Values are write-only: reads only ever return key names.
+
+  `set <key>` takes the value from `--file PATH`, from stdin (`set <key> -`),
+  or — warning on stderr, since argv is visible host-wide — as `set <key> <value>`.
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, Output, SecretInput}
   alias ArbiterCli.Cmd.Workspace.Resolver
 
   @spec run([String.t()], keyword()) :: :ok | no_return()
@@ -17,20 +20,31 @@ defmodule ArbiterCli.Cmd.Workspace.Secrets do
     {parsed, rest, mode} =
       ArgParser.parse(argv,
         command: "arb workspace secret",
-        switches: Keyword.fetch!(opts, :switches)
+        switches: Keyword.fetch!(opts, :switches) ++ [file: :string]
       )
 
     workspace_opt = parsed[:workspace]
+    file = parsed[:file]
 
     case rest do
+      ["set", key] when is_binary(file) ->
+        set(workspace_opt, key, SecretInput.from_file!(file, "--file"), mode)
+
+      ["set", key, "-"] ->
+        set(workspace_opt, key, SecretInput.from_stdin!(), mode)
+
       ["set", key, value] ->
+        SecretInput.warn_argv("`set <key> --file <path>` or `set <key> -` (stdin)")
         set(workspace_opt, key, value, mode)
 
       ["set", key | vrest] when vrest != [] ->
+        SecretInput.warn_argv("`set <key> --file <path>` or `set <key> -` (stdin)")
         set(workspace_opt, key, Enum.join(vrest, " "), mode)
 
       ["set" | _] ->
-        Output.die("workspace secret set requires <key> <value>")
+        Output.die(
+          "workspace secret set requires <key> and a value (<value>, -, or --file <path>)"
+        )
 
       ["rm", key] ->
         rm(workspace_opt, key, mode)
@@ -53,6 +67,7 @@ defmodule ArbiterCli.Cmd.Workspace.Secrets do
   end
 
   defp set(workspace_opt, key, value, mode) do
+    if value == "", do: Output.die("workspace secret set: the secret value is empty")
     if String.trim(key) == "", do: Output.die("workspace secret set: key must not be empty")
     patch_secrets(workspace_opt, %{key => value}, mode)
   end
