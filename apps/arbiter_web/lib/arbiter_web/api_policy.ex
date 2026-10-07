@@ -54,6 +54,11 @@ defmodule ArbiterWeb.ApiPolicy do
     * `:dependency_add` — coordinator; or a worker adding the `parent_of`
       edge from its own task to a ticket in its workspace that has no parent
       yet — the second half of `arb create --parent`.
+    * `:own_task` — coordinator; or a worker acting on **its own task** (the
+      `:task_id` path param). The REST twin of the worker-tier `ci_rerun` /
+      `ci_mark_external` MCP tools: a worker files them from its own CI failure,
+      and `Arbiter.MCP.Tools.resolve_task_id/3` pins the MCP side to the same
+      rule (bd-dtfe9x).
     * `:mailbox` — coordinator; or a worker reading its own mailbox
       (`to_ref` must be its own task).
     * `:message_send` — coordinator; or a worker. `MessageController.create/2`
@@ -85,6 +90,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :issue_progress
           | :issue_create
           | :dependency_add
+          | :own_task
           | :mailbox
           | :message_send
           | :message_show
@@ -250,8 +256,8 @@ defmodule ArbiterWeb.ApiPolicy do
     # ---- queue / alerts / breakers / scheduler ----------------------------
     {:post, "/api/queue/:task_id/retry_auto_resolve"} => :coordinator,
     {:post, "/api/queue/:task_id/restart_watchdog"} => :coordinator,
-    {:post, "/api/queue/:task_id/rerun_ci"} => :coordinator,
-    {:post, "/api/queue/:task_id/mark_ci_external"} => :coordinator,
+    {:post, "/api/queue/:task_id/rerun_ci"} => :own_task,
+    {:post, "/api/queue/:task_id/mark_ci_external"} => :own_task,
     {:get, "/api/alerts"} => :coordinator,
     {:get, "/api/breakers"} => :coordinator,
     {:post, "/api/breakers/reset"} => :coordinator,
@@ -330,6 +336,7 @@ defmodule ArbiterWeb.ApiPolicy do
              :issue_progress,
              :issue_create,
              :dependency_add,
+             :own_task,
              :mailbox,
              :message_send,
              :message_show,
@@ -397,6 +404,12 @@ defmodule ArbiterWeb.ApiPolicy do
       true ->
         :ok
     end
+  end
+
+  def authorize(:own_task, %Scope{tier: :worker, task_id: task_id} = scope, params) do
+    if params["task_id"] == task_id,
+      do: :ok,
+      else: forbidden(scope, "may only act on its own task")
   end
 
   def authorize(:mailbox, %Scope{tier: :worker, task_id: task_id} = scope, params) do

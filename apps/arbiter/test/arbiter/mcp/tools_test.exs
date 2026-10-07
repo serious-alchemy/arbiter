@@ -6634,7 +6634,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, task} =
         Ash.update(ctx.task, %{pr_ref: "#7"}, action: :update)
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
 
       assert msg =~ "does not support"
@@ -6642,6 +6642,52 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "the coordinator must name a task", ctx do
       assert {:error, {:invalid, _}} = Tools.ci_rerun(ctx.coordinator, %{})
+    end
+
+    # bd-dtfe9x (D-W-17): the same own-task rule the REST route applies.
+    test "a worker re-runs CI on its own task through the live watchdog", ctx do
+      alias Arbiter.Test.StubMerger
+      StubMerger.reset()
+
+      {:ok, task} = Ash.create(Issue, %{title: "own ci", workspace_id: ctx.ws.id})
+      put_state!(task, :active)
+
+      {:ok, task} =
+        Issue.pr_opened(task.id, "!mcp-own-ci",
+          merger_url: "https://example.test/mr/mcp-own-ci",
+          merge_watch:
+            Arbiter.Tasks.PullRequest.lane(
+              adapter: StubMerger,
+              repo: "mcp/repo",
+              interval_ms: 600_000,
+              initial_delay_ms: 600_000
+            )
+        )
+
+      assert :ok = Arbiter.Worker.Watchdog.restart(task.id)
+
+      on_exit(fn ->
+        case Arbiter.Worker.Watchdog.whereis(task.id) do
+          nil -> :ok
+          wd -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, wd)
+        end
+      end)
+
+      worker = %{ctx.worker | task_id: task.id}
+      assert {:ok, %{task_id: id, via: "watchdog"}} = Tools.ci_rerun(worker, %{"mode" => "all_jobs"})
+      assert id == task.id
+      assert [{"!mcp-own-ci", %{mode: :all_jobs}} | _] = StubMerger.ci_reruns()
+    end
+
+    test "with no watchdog the fallback is shared with REST (CIRerun)", ctx do
+      {:ok, task} = Ash.update(ctx.task, %{pr_ref: "#8"}, action: :update)
+
+      # Same outcome the REST route gives for the same task: the workspace's
+      # merger is reached, and says it cannot re-run.
+      assert {:error, :unsupported} = Arbiter.Worker.CIRerun.rerun(task.id, %{})
+
+      assert {:error, {:conflict, _}} =
+               Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
     end
   end
 
