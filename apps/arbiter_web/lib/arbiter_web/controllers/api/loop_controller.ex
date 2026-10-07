@@ -59,7 +59,7 @@ defmodule ArbiterWeb.Api.LoopController do
   # `discover=true` makes a model call, neither of which a GET may do (D-C-30).
   # `GET` still answers identically, but is a deprecated alias — every response
   # carries `Deprecation` / `Link` / `Warning` so a caller sees it.
-  def analyze(%Plug.Conn{method: "GET"} = conn, params) do
+  def analyze_deprecated(conn, params) do
     conn
     |> put_resp_header("deprecation", "true")
     |> put_resp_header("link", ~s(</api/loop/analyze>; rel="successor-version"; method="POST"))

@@ -144,16 +144,14 @@ defmodule Arbiter.MCP.Tools.LoopPending do
         |> Keyword.put(:propose?, propose?)
         |> Tools.maybe_put_kw(:workspace_id, ws_id)
 
-      case Arbiter.Loop.Analysis.analyze(opts) do
-        {:ok, result} ->
-          {:ok,
-           result
-           |> Summary.envelope(&serialize_pending_summary/1)
-           |> Map.put(:workspace_id, ws_id)}
+      # `analyze/1` has no failure path today (dialyzer infers `{:ok, _}` only),
+      # so a future one should fail loudly here rather than be silently shaped.
+      {:ok, result} = Arbiter.Loop.Analysis.analyze(opts)
 
-        {:error, reason} ->
-          {:error, {:internal, "loop analysis failed: #{inspect(reason)}"}}
-      end
+      {:ok,
+       result
+       |> Summary.envelope(&serialize_pending_summary/1)
+       |> Map.put(:workspace_id, ws_id)}
     end
   end
 
