@@ -2,10 +2,10 @@ defmodule ArbiterWeb.TaskNewLive do
   @moduledoc """
   Standalone "Create a ticket" screen at `/tasks/new`.
 
-  Writes through the same `Issue` `:create` action the CLI/MCP use, so the
-  tracker-mirroring and id-generation hooks apply identically, and applies
-  the same `Arbiter.Tasks.Dedup` check the REST API does (with a "Create
-  anyway" override).
+  Creates through `Arbiter.Tasks.Create`, the one create path REST and MCP share
+  (P-14): the `Issue` `:create` action's tracker-mirroring and id-generation
+  hooks apply identically, and so does the `Arbiter.Tasks.Dedup` check (with a
+  "Create anyway" override).
 
   That sameness now includes where the issue lands: a new ticket's `state`
   is `:backlog`, so a task filed here starts in the board's Backlog column exactly
@@ -16,16 +16,15 @@ defmodule ArbiterWeb.TaskNewLive do
 
   The create itself runs in `start_async/3`: both the dedup check and
   `Issue.create`'s `CreateUpstream` hook talk to the upstream tracker over
-  the network, and a LiveView must not block its own process on that. The
-  `CreateUpstream` failure stash is per-process, so it is drained *inside*
-  the async function — the same drain `ArbiterWeb.Api.IssueController.create/2`
-  does — and surfaced as a warning rather than silently swallowed.
+  the network, and a LiveView must not block its own process on that.
+  `Tasks.Create` drains the per-process `CreateUpstream` failure stash inside
+  the async function, so a tracker-mirror failure is surfaced as a warning
+  rather than silently swallowed.
   """
 
   use ArbiterWeb, :live_view
 
   alias Arbiter.Tasks.Create
-  alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Dispatch
