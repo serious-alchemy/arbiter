@@ -251,10 +251,11 @@ every restart is also a migration run, and the ordering is always:
     stop the old server  →  new code boots  →  migrate  →  serve
 
 `arb server deploy` (release path) relies on this: it downloads, verifies,
-unpacks, swaps `current`, and restarts — it does **not** migrate itself.
+unpacks, takes a database backup, swaps `current`, and restarts — it does **not**
+migrate itself.
 `arb server migrate` against a live server redirects to a restart for the same
-reason. The dev-mode path (`arb server deploy --git-pull`, which a bare
-`arb server deploy` also falls back to when `ARB_RELEASE_REPO` is unset) follows
+reason. The dev-mode path (`arb server deploy --git-pull`, reached only when you pass
+`--git-pull` — a bare `arb server deploy` never falls back to it) follows
 the same rule: it pulls, rebuilds the CLI if it changed, and restarts, letting
 `Boot.Migrator` apply the pulled migrations on boot. It runs a standalone
 `mix arbiter.migrate` only when the server is already down — no live writer to
@@ -263,9 +264,20 @@ race. If you want to migrate by hand, stop the service first
 
 ### Rollback across a migration
 
+Before the swap, `arb server deploy` takes an integrity-checked **online
+database backup** (`~/.arbiter/snapshots/arbiter-pre-<tag>-<utc>.sqlite3`) and
+aborts if the check fails. When a release that added migrations boots but does
+not come back green, the rollback **stops the service, restores that backup
+(keeping the database the failed release left behind as
+`arbiter-failed-<tag>-<utc>.sqlite3`), then re-points `current` and restarts** —
+so the previous release returns on its own schema. See
+[docs/self-update.md](docs/self-update.md). The refusal below applies only when
+there is no backup to restore (no database file existed) or the swap did not
+take.
+
 `arb server deploy` auto-rolls back to the prior release when the new one
 doesn't come back green. **That rollback is refused when the deploy crossed a
-migration** — the new release has already applied migrations the prior release
+migration and no backup could be restored** — the new release has already applied migrations the prior release
 does not ship, and booting the prior release would run old code against a
 schema it has never seen. When that happens the deploy:
 
