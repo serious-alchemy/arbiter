@@ -553,7 +553,9 @@ defmodule ArbiterWeb.Api.IssueController do
           # the shape the MCP `ticket_handoff` / `ticket_handback` return too.
           issue = Ash.get!(Issue, id)
           render(conn, :handoff, issue: issue, view: Projection.view(issue))
-        {:error, reason} -> attention_error(reason)
+
+        {:error, reason} ->
+          attention_error(reason)
       end
     end
   end

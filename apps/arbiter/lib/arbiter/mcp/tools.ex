@@ -594,8 +594,7 @@ defmodule Arbiter.MCP.Tools do
             is_nil(column) or view.column == column,
             do: {issue, view}
 
-      {:ok,
-       %{tasks: ready_rows(rows, ws_id), count: length(rows), workspace_id: ws_id}}
+      {:ok, %{tasks: ready_rows(rows, ws_id), count: length(rows), workspace_id: ws_id}}
     end
   end
 

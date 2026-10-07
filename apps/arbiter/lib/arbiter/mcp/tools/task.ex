@@ -601,7 +601,9 @@ defmodule Arbiter.MCP.Tools.Task do
       case Rank.move(issue, rank_args) do
         {:ok, ranked} ->
           {:ok, ranked |> Tools.serialize_ticket(args) |> Map.merge(Rank.band_fields(ranked))}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
   end

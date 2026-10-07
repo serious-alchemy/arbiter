@@ -18,8 +18,12 @@ defmodule Arbiter.Tasks.ReadyParityTest do
     {:ok, ws} =
       Ash.create(Workspace, %{name: "rdyp-#{System.unique_integer([:positive])}", prefix: "rp"})
 
-    {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id, acceptance: "- ok", priority: 2})
-    {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id, acceptance: "- ok", priority: 1})
+    {:ok, a} =
+      Ash.create(Issue, %{title: "a", workspace_id: ws.id, acceptance: "- ok", priority: 2})
+
+    {:ok, b} =
+      Ash.create(Issue, %{title: "b", workspace_id: ws.id, acceptance: "- ok", priority: 1})
+
     a = promote!(a)
     b = promote!(b)
 

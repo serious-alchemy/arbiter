@@ -225,7 +225,9 @@ defmodule Arbiter.Tasks.Claim do
      %{viewer: login}}
   end
 
-  def refusal({:invalid_ref, raw}), do: {:invalid_request, "invalid issue ref: #{inspect(raw)}", %{}}
+  def refusal({:invalid_ref, raw}),
+    do: {:invalid_request, "invalid issue ref: #{inspect(raw)}", %{}}
+
   def refusal(_other), do: nil
 
   @doc """

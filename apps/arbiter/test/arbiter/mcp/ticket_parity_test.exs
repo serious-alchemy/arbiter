@@ -128,7 +128,9 @@ defmodule Arbiter.MCP.TicketParityTest do
     end
 
     test "ticket_create, ticket_promote and ticket_close return the full record", ctx do
-      created = call!(ctx.coordinator, "ticket_create", %{"title" => "made", "acceptance" => "- x"})
+      created =
+        call!(ctx.coordinator, "ticket_create", %{"title" => "made", "acceptance" => "- x"})
+
       assert Map.has_key?(created, :tracker_ref)
       assert Map.has_key?(created, :description)
 
@@ -136,7 +138,9 @@ defmodule Arbiter.MCP.TicketParityTest do
       assert promoted.state == "queued"
       assert Map.has_key?(promoted, :target_branch)
 
-      closed = call!(ctx.coordinator, "ticket_close", %{"id" => created.id, "reason" => "wontfix"})
+      closed =
+        call!(ctx.coordinator, "ticket_close", %{"id" => created.id, "reason" => "wontfix"})
+
       assert closed.state == "closed"
       assert Map.has_key?(closed, :pr_ref)
     end
@@ -230,8 +234,11 @@ defmodule Arbiter.MCP.TicketParityTest do
     test "tracker_sync shows a non-null url for a planned create", ctx do
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @gh_viewer})
-          {"GET", "/repos/ryanrborn/arbiter/issues"} -> Req.Test.json(conn, [issue_payload(@gh_viewer)])
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [issue_payload(@gh_viewer)])
         end
       end)
 
@@ -255,8 +262,11 @@ defmodule Arbiter.MCP.TicketParityTest do
     test "tracker_claim: an issue assigned to someone else is a typed not_assigned", ctx do
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @gh_viewer})
-          {"GET", "/repos/ryanrborn/arbiter/issues/43"} -> Req.Test.json(conn, issue_payload("someone-else"))
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload("someone-else"))
         end
       end)
 
