@@ -71,39 +71,38 @@ defmodule ArbiterWeb.Api.BreakerController do
 
   defp reset_scope(conn, params, all?) do
     case blank_to_nil(params["signature"]) do
+      nil when all? ->
+        reset_all(conn, params)
+
       nil ->
-        if all? do
-          # `kind` is resolved BEFORE the reset runs: a misspelled kind must
-          # not degrade into "no filter" and re-arm every breaker in the
-          # workspace when the operator asked for one.
-          with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
-               {:ok, kind} <- resolve_kind(params["kind"]) do
-            filters =
-              []
-              |> maybe_put(:workspace_id, ws_id)
-              |> maybe_put(:kind, kind)
-
-            with {:ok, confirm?} <-
-                   params |> Params.fetch_bool("confirm_all", false) |> Params.to_rest() do
-              case CircuitBreaker.reset_scope(filters, confirm?) do
-                {:ok, count} ->
-                  json(conn, %{reset: count, workspace_id: ws_id})
-
-                {:error, :unscoped} ->
-                  {:error, {:invalid_request, CircuitBreaker.unscoped_message()}}
-              end
-            end
-          end
-        else
-          {:error,
-           {:invalid_request,
-            "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}
-        end
+        {:error,
+         {:invalid_request,
+          "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}
 
       signature ->
         with {:ok, _kind} <- resolve_kind(params["kind"]) do
           reset_signature(conn, signature)
         end
+    end
+  end
+
+  # `kind` is resolved BEFORE the reset runs: a misspelled kind must not
+  # degrade into "no filter" and re-arm every breaker in the workspace when
+  # the operator asked for one.
+  defp reset_all(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, kind} <- resolve_kind(params["kind"]),
+         {:ok, confirm?} <- params |> Params.fetch_bool("confirm_all", false) |> Params.to_rest(),
+         filters = [] |> maybe_put(:workspace_id, ws_id) |> maybe_put(:kind, kind),
+         {:ok, count} <- scope_reset(filters, confirm?) do
+      json(conn, %{reset: count, workspace_id: ws_id})
+    end
+  end
+
+  defp scope_reset(filters, confirm?) do
+    case CircuitBreaker.reset_scope(filters, confirm?) do
+      {:error, :unscoped} -> {:error, {:invalid_request, CircuitBreaker.unscoped_message()}}
+      ok -> ok
     end
   end
 

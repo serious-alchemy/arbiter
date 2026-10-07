@@ -80,18 +80,22 @@ defmodule Arbiter.MCP.Tools.Breaker do
           end
 
         _ ->
-          if truthy(Map.get(args, "all")) do
-            filters = [] |> maybe_put(:workspace_id, ws_id) |> maybe_put(:kind, kind)
-
-            case CircuitBreaker.reset_scope(filters, truthy(Map.get(args, "confirm_all"))) do
-              {:ok, count} -> {:ok, %{reset: count, workspace_id: ws_id}}
-              {:error, :unscoped} -> {:error, {:invalid, CircuitBreaker.unscoped_message()}}
-            end
-          else
-            {:error,
-             {:invalid, "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}
-          end
+          reset_scope(args, ws_id, kind)
       end
+    end
+  end
+
+  defp reset_scope(args, ws_id, kind) do
+    if truthy(Map.get(args, "all")) do
+      filters = [] |> maybe_put(:workspace_id, ws_id) |> maybe_put(:kind, kind)
+
+      case CircuitBreaker.reset_scope(filters, truthy(Map.get(args, "confirm_all"))) do
+        {:ok, count} -> {:ok, %{reset: count, workspace_id: ws_id}}
+        {:error, :unscoped} -> {:error, {:invalid, CircuitBreaker.unscoped_message()}}
+      end
+    else
+      {:error,
+       {:invalid, "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}
     end
   end
 

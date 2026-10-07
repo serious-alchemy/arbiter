@@ -83,6 +83,15 @@ defmodule ArbiterCli.Cmd.Breaker do
     end
   end
 
+  defp all_body(args, opts) do
+    if args != [], do: Output.die("arb breaker reset: pass a signature or --all, not both")
+
+    %{all: true}
+    |> put_workspace(opts)
+    |> put_opt(opts, :kind)
+    |> put_opt(opts, :confirm_all)
+  end
+
   defp reset(args, opts, mode) do
     body =
       cond do
@@ -90,14 +99,8 @@ defmodule ArbiterCli.Cmd.Breaker do
           Workspace.reject_flag!("breaker reset --auth-hold")
           %{provider: provider}
 
-        opts[:all] && args != [] ->
-          Output.die("arb breaker reset: pass a signature or --all, not both")
-
         opts[:all] ->
-          %{all: true}
-          |> put_workspace(opts)
-          |> put_opt(opts, :kind)
-          |> put_opt(opts, :confirm_all)
+          all_body(args, opts)
 
         signature = List.first(args) ->
           Workspace.reject_flag!("breaker reset <signature>")
