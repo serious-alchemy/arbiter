@@ -88,9 +88,24 @@ defmodule ArbiterWeb.Api.IssueLifecycleApiTest do
       refute Map.has_key?(by_id[active.id], "hold_reason")
     end
 
-    test "requires a workspace_id", %{conn: conn} do
-      conn = get(conn, ~p"/api/issues/lifecycle")
-      assert %{"error" => _} = json_response(conn, 422)
+    test "with no workspace named it covers every workspace and echoes `workspace_id: null`",
+         %{conn: conn, ws: ws} do
+      issue = in_state(ws, :merging)
+
+      body = conn |> get(~p"/api/issues/lifecycle") |> json_response(200)
+
+      assert Map.fetch!(body, "workspace_id") == nil
+      assert issue.id in Enum.map(body["data"], & &1["id"])
+    end
+
+    test "accepts the workspace by name as well as by id", %{conn: conn, ws: ws} do
+      issue = in_state(ws, :merging)
+
+      for ref <- [ws.name, ws.id] do
+        body = conn |> get(~p"/api/issues/lifecycle", %{workspace: ref}) |> json_response(200)
+        assert body["workspace_id"] == ws.id
+        assert issue.id in Enum.map(body["data"], & &1["id"])
+      end
     end
   end
 

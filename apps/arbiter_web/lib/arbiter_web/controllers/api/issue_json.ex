@@ -7,6 +7,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias ArbiterWeb.Api.WorkspaceParam
 
   @doc "Renders a single issue."
   def show(%{issue: issue, warnings: warnings}) when warnings != [],
@@ -44,8 +45,8 @@ defmodule ArbiterWeb.Api.IssueJSON do
   def show(%{issue: issue}), do: data(issue)
 
   @doc "Renders a list of issues wrapped under :data."
-  def index(%{issues: issues}) do
-    %{data: Enum.map(issues, &data/1)}
+  def index(%{issues: issues} = assigns) do
+    %{data: Enum.map(issues, &data/1)} |> WorkspaceParam.echo(assigns)
   end
 
   @doc """
@@ -77,6 +78,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
           |> put_hold_reason(Map.get(holds, issue.id))
         end)
     }
+    |> WorkspaceParam.echo(assigns)
   end
 
   # bd-6i7yzq: newest first. `actor` is the `Arbiter.Actor` label of whoever made

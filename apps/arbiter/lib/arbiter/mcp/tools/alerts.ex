@@ -22,7 +22,13 @@ defmodule Arbiter.MCP.Tools.Alerts do
     with {:ok, ws_id} <- Arbiter.MCP.Tools.authorized_workspace(scope, args),
          {:ok, kind} <- kind_arg(args) do
       alerts = Alerts.active(workspace_id: ws_id, kind: kind)
-      {:ok, %{alerts: Enum.map(alerts, &Alerts.serialize/1), count: length(alerts)}}
+
+      {:ok,
+       %{
+         alerts: Enum.map(alerts, &Alerts.serialize/1),
+         count: length(alerts),
+         workspace_id: ws_id
+       }}
     end
   end
 

@@ -15,13 +15,17 @@ defmodule Arbiter.Worker.Image.RepoSource do
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspaces
 
   @type t :: %{repo: String.t(), path: String.t(), default_branch: String.t()}
 
   @doc """
-  Resolve `repo` (a `repo_paths` key). With no `workspace` ref, the first
-  workspace that registers the repo wins, else the global registry; a
-  `workspace` (id or name) restricts the lookup to that one.
+  Resolve `repo` (a `repo_paths` key). A `workspace` (id or name, resolved by
+  `Arbiter.Tasks.Workspaces`) restricts the lookup to that one. With none, the
+  lookup spans every workspace and the global registry: one registrant (or
+  several agreeing on the checkout path) is unambiguous, while a repo
+  registered at different paths in several workspaces is an error naming them
+  rather than a silent pick of whichever sorts first.
   """
   @spec resolve(String.t(), String.t() | nil) :: {:ok, t()} | {:error, String.t()}
   def resolve(repo, workspace_ref \\ nil)
@@ -30,9 +34,8 @@ defmodule Arbiter.Worker.Image.RepoSource do
     do: {:error, "a repo name is required"}
 
   def resolve(repo, workspace_ref) do
-    with {:ok, workspaces} <- candidates(workspace_ref) do
-      {workspace, path} = find(workspaces, repo)
-
+    with {:ok, workspaces} <- candidates(workspace_ref),
+         {:ok, {workspace, path}} <- find(workspaces, repo) do
       if is_binary(path) and path != "" do
         {:ok,
          %{
@@ -49,19 +52,30 @@ defmodule Arbiter.Worker.Image.RepoSource do
   defp candidates(nil), do: {:ok, load_workspaces()}
 
   defp candidates(ref) do
-    case Enum.filter(load_workspaces(), &(&1.id == ref or &1.name == ref)) do
-      [] -> {:error, "workspace #{inspect(ref)} not found"}
-      found -> {:ok, found}
+    case Workspaces.fetch(ref) do
+      {:ok, ws} -> {:ok, [ws]}
+      {:error, {_kind, message}} -> {:error, message}
     end
   end
 
   defp find(workspaces, repo) do
-    Enum.find_value(workspaces, {nil, global_path(repo)}, fn ws ->
-      case LocalCompare.repo_path(ws, repo) do
-        nil -> nil
-        path -> if registered_in?(ws, repo), do: {ws, path}
-      end
-    end)
+    registrants =
+      for ws <- workspaces,
+          path = LocalCompare.repo_path(ws, repo),
+          path != nil and registered_in?(ws, repo),
+          do: {ws, path}
+
+    case Enum.uniq_by(registrants, &elem(&1, 1)) do
+      [] -> {:ok, {nil, global_path(repo)}}
+      [found] -> {:ok, found}
+      _many -> {:error, ambiguous(repo, registrants)}
+    end
+  end
+
+  defp ambiguous(repo, registrants) do
+    names = registrants |> Enum.map(fn {ws, _} -> ws.name end) |> Enum.sort() |> Enum.join(", ")
+
+    "repo #{inspect(repo)} is registered at different paths in several workspaces; pass workspace (name or id): #{names}"
   end
 
   defp registered_in?(%Workspace{config: %{"repo_paths" => paths}}, repo) when is_map(paths),

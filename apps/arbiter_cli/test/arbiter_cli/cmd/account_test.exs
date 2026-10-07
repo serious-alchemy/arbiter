@@ -386,7 +386,7 @@ defmodule ArbiterCli.Cmd.AccountTest do
       "active" => true
     })
 
-    {out, _err, exit_code} =
+    {out, err, exit_code} =
       capture(fn ->
         Account.run([
           "rotate",
@@ -401,6 +401,9 @@ defmodule ArbiterCli.Cmd.AccountTest do
       end)
 
     assert exit_code == 0
+    # P-28: the argv form warns, and the warning does not echo the value.
+    assert err =~ "warning: a secret on the command line"
+    refute err =~ "sk-super-secret-value"
     assert out =~ "rotated oauth_token credential (fingerprint=fedcba987654)"
     refute out =~ "sk-super-secret-value"
     refute out =~ "secret"

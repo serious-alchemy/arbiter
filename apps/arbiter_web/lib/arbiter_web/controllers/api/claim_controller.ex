@@ -23,7 +23,7 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Tasks.{Claim, Workspace}
+  alias Arbiter.Tasks.Claim
   alias ArbiterWeb.Api.IssueJSON
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -33,7 +33,7 @@ defmodule ArbiterWeb.Api.ClaimController do
     force? = truthy?(params["force"])
 
     with :ok <- require_string(ref, "ref"),
-         {:ok, workspace} <- get_workspace(workspace_id),
+         {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, claim_opts} <- claim_opts(params),
          {:ok, status, task} <-
            Claim.claim(workspace, ref, Keyword.put(claim_opts, :force, force?)) do
@@ -81,7 +81,7 @@ defmodule ArbiterWeb.Api.ClaimController do
   end
 
   def plan(conn, %{"workspace_id" => workspace_id}) do
-    with {:ok, workspace} <- get_workspace(workspace_id),
+    with {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
       json(conn, %{data: Enum.map(plan, &serialize_action/1)})
     end
@@ -90,7 +90,7 @@ defmodule ArbiterWeb.Api.ClaimController do
   def sync(conn, %{"workspace_id" => workspace_id} = params) do
     dry? = truthy?(params["dry"])
 
-    with {:ok, workspace} <- get_workspace(workspace_id),
+    with {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
       if dry? do
         json(conn, %{data: Enum.map(plan, &serialize_action/1), applied: false})
@@ -152,12 +152,7 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   # ---- helpers ----------------------------------------------------------
 
-  defp get_workspace(id) do
-    case Ash.get(Workspace, id) do
-      {:ok, ws} -> {:ok, ws}
-      {:error, _} = err -> err
-    end
-  end
+  defp get_workspace(conn, id), do: ArbiterWeb.Api.WorkspaceParam.resolve_ref(conn, id)
 
   defp require_string(v, _name) when is_binary(v) and v != "", do: :ok
 

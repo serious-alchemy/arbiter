@@ -115,6 +115,15 @@ defmodule ArbiterCli.Client do
   def delete(path, params \\ []), do: request(:delete, path, params: params)
 
   @doc """
+  A request that carries exactly `token`, ignoring `ARB_TOKEN` and the cached
+  operator mint. For a route that needs *operator proof* (`arb dashboard
+  login`): the caller's own coordinator token would be refused there.
+  """
+  @spec post_with_token(String.t(), map(), String.t()) :: {:ok, any()} | {:error, Error.t()}
+  def post_with_token(path, body, token) when is_binary(token),
+    do: do_request(:post, path, token, json: body)
+
+  @doc """
   A request that deliberately carries **no** token, whatever `ARB_TOKEN` or
   the operator socket would give it. Only for `arb doctor`'s probe that the
   server refuses anonymous callers (bd-asawcq) — every other caller wants

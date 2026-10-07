@@ -24,6 +24,7 @@ defmodule ArbiterWeb.Api.ImageController do
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.Image.Refresher
   alias Arbiter.Worker.Image.RepoSource
+  alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -47,7 +48,7 @@ defmodule ArbiterWeb.Api.ImageController do
   end
 
   def build(conn, params) do
-    with {:ok, source} <- source(params),
+    with {:ok, source} <- source(conn, params),
          {:ok, plan} <- plan(source),
          {:ok, built} <- ensure(plan) do
       json(conn, %{
@@ -89,10 +90,12 @@ defmodule ArbiterWeb.Api.ImageController do
     end
   end
 
-  defp source(params) do
-    case RepoSource.resolve(params["repo"], blank_to_nil(params["workspace"])) do
-      {:ok, source} -> {:ok, source}
-      {:error, message} -> {:error, {:invalid_request, message}}
+  defp source(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
+      case RepoSource.resolve(params["repo"], ws_id) do
+        {:ok, source} -> {:ok, source}
+        {:error, message} -> {:error, {:invalid_request, message}}
+      end
     end
   end
 
@@ -142,7 +145,4 @@ defmodule ArbiterWeb.Api.ImageController do
       failed: Enum.map(failed, fn {tag, reason} -> %{tag: tag, reason: reason} end)
     }
   end
-
-  defp blank_to_nil(""), do: nil
-  defp blank_to_nil(value), do: value
 end

@@ -47,12 +47,28 @@ defmodule ArbiterWeb.Api.McpControllerTest do
 
       assert %{"valid" => true, "tier" => "coordinator"} =
                Phoenix.ConnTest.build_conn()
-               |> put_req_header(
-                 "authorization",
-                 "Bearer #{Scope.mint_worker(%{id: "bd-v", workspace_id: "ws-v"})}"
-               )
+               |> put_req_header("authorization", "Bearer #{Scope.mint_coordinator(nil)}")
                |> post("/api/mcp/tokens/verify", %{"token" => token})
                |> json_response(200)
+    end
+
+    test "a non-coordinator caller may only verify its own token (P-28)" do
+      own = Scope.mint_worker(%{id: "bd-v", workspace_id: "ws-v"})
+      other = Scope.mint_coordinator(nil)
+
+      as_worker = fn ->
+        Phoenix.ConnTest.build_conn() |> put_req_header("authorization", "Bearer #{own}")
+      end
+
+      assert %{"valid" => true, "tier" => "worker", "task_id" => "bd-v"} =
+               as_worker.()
+               |> post("/api/mcp/tokens/verify", %{"token" => own})
+               |> json_response(200)
+
+      resp =
+        as_worker.() |> post("/api/mcp/tokens/verify", %{"token" => other}) |> json_response(403)
+
+      refute Jason.encode!(resp) =~ "workspace_id"
     end
   end
 

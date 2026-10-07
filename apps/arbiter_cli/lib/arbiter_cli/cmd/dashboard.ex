@@ -4,14 +4,26 @@ defmodule ArbiterCli.Cmd.Dashboard do
 
   The dashboard has no address bypass (a request proxied by `tailscale serve`
   arrives from 127.0.0.1), so every browser needs a login. This mints a
-  one-time link over the authenticated API and prints it; open it in the
+  one-time link and prints it; open it in the
   browser and confirm. The link is valid for a couple of minutes and works
   once. The server's `ArbiterWeb.DashboardAuth` implementation decides what a
   login is — this command is the default implementation's escape hatch for
   the local operator.
+
+  Minting a dashboard login is an operator act (P-28,
+  `docs/design/tier-proof-boundaries.md`): the CLI first mints a short-lived
+  coordinator token over the operator socket (`ArbiterCli.OperatorSocket`,
+  peer-credential checked, refused for any process Arbiter spawned) and sends
+  that — never `ARB_TOKEN`, which a coordinator session also holds — to
+  `POST /api/dashboard/login_tokens`. Run it from your own shell on the
+  server host.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  # Long enough for the one request that follows; the login link itself has
+  # its own (separate) lifetime.
+  @proof_ttl 300
+
+  alias ArbiterCli.{ArgParser, Client, OperatorSocket, Output}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -27,15 +39,16 @@ defmodule ArbiterCli.Cmd.Dashboard do
   end
 
   defp login(mode) do
-    case Client.post("/api/dashboard/login_tokens", %{}) do
-      {:ok, %{"path" => path} = body} ->
-        url = Client.base_url() <> path
+    with {:ok, %{"token" => proof}} <- OperatorSocket.mint(%{"ttl" => @proof_ttl}),
+         {:ok, %{"path" => path} = body} <-
+           Client.post_with_token("/api/dashboard/login_tokens", %{}, proof) do
+      url = Client.base_url() <> path
 
-        case mode do
-          :json -> IO.puts(Jason.encode!(Map.put(body, "url", url)))
-          :text -> IO.puts(url)
-        end
-
+      case mode do
+        :json -> IO.puts(Jason.encode!(Map.put(body, "url", url)))
+        :text -> IO.puts(url)
+      end
+    else
       {:error, %Client.Error{} = err} ->
         Output.die(err)
     end

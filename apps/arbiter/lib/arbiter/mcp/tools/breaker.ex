@@ -51,6 +51,7 @@ defmodule Arbiter.MCP.Tools.Breaker do
        %{
          breakers: Enum.map(breakers, &serialize/1),
          open_count: Enum.count(breakers, & &1.open?),
+         workspace_id: ws_id,
          call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
          # bd-21bmdh: host-wide (credentials are per provider, not per
          # workspace), so unfiltered by `workspace` / `kind`.
@@ -82,7 +83,7 @@ defmodule Arbiter.MCP.Tools.Breaker do
           if truthy(Map.get(args, "all")) do
             filters = [] |> maybe_put(:workspace_id, ws_id) |> maybe_put(:kind, kind)
             {:ok, count} = CircuitBreaker.reset_all(filters)
-            {:ok, %{reset: count}}
+            {:ok, %{reset: count, workspace_id: ws_id}}
           else
             {:error,
              {:invalid, "pass `signature` to reset one breaker, or `all: true` to reset a scope"}}

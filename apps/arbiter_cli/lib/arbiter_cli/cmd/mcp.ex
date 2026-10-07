@@ -15,11 +15,11 @@ defmodule ArbiterCli.Cmd.Mcp do
           token's own authority. From another machine:
           `ssh <host> arb mcp token mint`.
 
-      arb mcp token verify <token> [--json]
+      arb mcp token verify (- | --file PATH | <token>) [--json]   # <token> on argv warns
           Decode and display the claims from a scope token (expiry, tier, workspace).
   """
 
-  alias ArbiterCli.{ArgParser, Client, OperatorSocket, Output}
+  alias ArbiterCli.{ArgParser, Client, OperatorSocket, Output, SecretInput}
 
   @default_ttl 2_592_000
 
@@ -124,14 +124,26 @@ defmodule ArbiterCli.Cmd.Mcp do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb mcp token verify", switches: [])
+      {opts, rest, mode} =
+        ArgParser.parse(argv, command: "arb mcp token verify", switches: [file: :string])
 
       token =
-        case rest do
-          [t] -> t
-          [] -> Output.die("mcp token verify requires a token argument")
-          _ -> Output.die("mcp token verify takes exactly one argument: the token")
+        case {rest, opts[:file]} do
+          {[], file} when is_binary(file) ->
+            SecretInput.from_file!(file, "--file")
+
+          {["-"], nil} ->
+            SecretInput.from_stdin!()
+
+          {[t], nil} ->
+            SecretInput.warn_argv("`arb mcp token verify -` (stdin) or `--file <path>`")
+            t
+
+          {[], nil} ->
+            Output.die("mcp token verify requires a token: <token>, - (stdin), or --file <path>")
+
+          _ ->
+            Output.die("mcp token verify takes one token: <token>, -, or --file <path>")
         end
 
       case Client.post("/api/mcp/tokens/verify", %{"token" => token}) do

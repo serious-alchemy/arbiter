@@ -123,17 +123,18 @@ defmodule Arbiter.MCP.Tools.Task do
   List ready tasks in a workspace — exactly the tickets whose column is
   `:ready` (bd-6fkgvo), epics excluded as on the board, in dispatch order
   (effective priority, then rank, age — the §4 key). Coordinator only. The workspace is resolved from the
-  optional `workspace` arg, else the scope's bound workspace, else the
-  installation default.
+  optional `workspace` arg, else the scope's bound workspace, else ALL
+  workspaces (`Arbiter.Tasks.Workspaces`); the resolved `workspace_id` (`nil`
+  for all) is echoed.
   """
   @spec task_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_ready(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
       tasks =
         for {issue, %{column: :ready} = view} <- Projection.open(ws_id),
             do: Tools.serialize_task_summary(issue, view)
 
-      {:ok, %{tasks: tasks, count: length(tasks)}}
+      {:ok, %{tasks: tasks, count: length(tasks), workspace_id: ws_id}}
     end
   end
 
@@ -167,8 +168,9 @@ defmodule Arbiter.MCP.Tools.Task do
 
   @doc """
   Create a task in a workspace. The target workspace is resolved from the optional
-  `workspace` arg (name or id), else the scope's bound workspace, else the
-  installation default — and `workspace_id` is then forced onto the task. Backs
+  `workspace` arg (name or id), else the scope's bound workspace, else the sole
+  workspace — and fails (`multiple workspaces; pass workspace …`) rather than
+  guess when several exist. `workspace_id` is then forced onto the task. Backs
   onto `Ash.create(Issue, …)` (the same path `arb create` / the REST
   `POST /api/issues` take), so a workspace with a tracker configured still mirrors
   the new task upstream.
@@ -774,9 +776,9 @@ defmodule Arbiter.MCP.Tools.Task do
   end
 
   defp dep_list_workspace(scope, args, type) do
-    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
          {:ok, rows} <- list_edges(workspace_id: ws_id, type: type) do
-      {:ok, serialize_dep_list(rows)}
+      {:ok, Map.put(serialize_dep_list(rows), :workspace_id, ws_id)}
     end
   end
 

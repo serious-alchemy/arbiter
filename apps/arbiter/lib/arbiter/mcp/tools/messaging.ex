@@ -133,6 +133,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
            %{
              messages: Enum.map(messages, &serialize_message/1),
              count: length(messages),
+             workspace_id: ws_id,
              deleted_read: deleted_read,
              deleted_unread: deleted_unread,
              remaining_unread: remaining_unread
@@ -145,7 +146,8 @@ defmodule Arbiter.MCP.Tools.Messaging do
           {:ok,
            %{
              messages: Enum.map(messages, &serialize_message/1),
-             count: length(messages)
+             count: length(messages),
+             workspace_id: ws_id
            }
            |> Map.merge(attention_queue(ws_id))}
       end
@@ -205,8 +207,9 @@ defmodule Arbiter.MCP.Tools.Messaging do
   trap that made `coordinator_inbox` silently return `count: 0` when the
   caller omitted `workspace`). `task_id` clears every coordinator message
   concerning that task; it resolves a workspace the normal way (explicit
-  `workspace` arg → the scope's bound workspace → the installation default),
-  erroring rather than guessing when that's ambiguous.
+  `workspace` arg → the scope's bound workspace → the sole workspace), erroring
+  rather than guessing when several exist — it is a write, so it never falls
+  back to the workspace that happens to be named `default`.
 
   Both forms clear **only the calling reader's view** (bd-8akewg): a session
   token writes its own receipts and leaves the shared row — and therefore every
@@ -368,26 +371,29 @@ defmodule Arbiter.MCP.Tools.Messaging do
 
   @doc """
   The most recent notifications (broadcast events: completions, milestones,
-  system events) for the scope's workspace. Available to both tiers and always
-  scoped to the bound workspace. Read-only — notifications are never consumed.
+  system events). Available to both tiers; a bound token is confined to its
+  workspace, an unbound coordinator naming no `workspace` reads ALL workspaces
+  (each row and the response echo `workspace_id`). Read-only — notifications
+  are never consumed.
   Optional `limit` (default 20). Backs onto `Messages.recent_notifications/2`.
   """
   @spec notify_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def notify_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
          {:ok, limit} <- Tools.optional_integer(args, "limit") do
       notifications =
         (limit || 20)
         |> Message.recent_notifications(workspace_id: ws_id)
         |> Enum.map(&serialize_message/1)
 
-      {:ok, %{notifications: notifications, count: length(notifications)}}
+      {:ok, %{notifications: notifications, count: length(notifications), workspace_id: ws_id}}
     end
   end
 
   defp serialize_message(%Message{} = m) do
     %{
       id: m.id,
+      workspace_id: m.workspace_id,
       kind: Tools.to_str(m.kind),
       from_ref: m.from_ref,
       to_ref: m.to_ref,

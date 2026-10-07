@@ -138,6 +138,40 @@ defmodule ArbiterCli.Cmd.McpTest do
     end
   end
 
+  describe "verify secret input (P-28)" do
+    setup do
+      stub_post("/api/mcp/tokens/verify", %{"valid" => true, "tier" => "worker"}, 200)
+      :ok
+    end
+
+    test "a token on argv still verifies but warns, never echoing it" do
+      {_out, err, 0} = capture(fn -> Mcp.run(~w(token verify argv-token)) end)
+      assert err =~ "warning: a secret on the command line"
+      refute err =~ "argv-token"
+    end
+
+    test "`-` reads the token from stdin without a warning" do
+      {out, err, 0} = capture(fn -> Mcp.run(~w(token verify -)) end, input: "stdin-token\n")
+      assert out =~ "worker"
+      refute err =~ "`arb mcp token verify -` (stdin)"
+    end
+
+    test "--file reads the token from a file without a warning" do
+      path = Path.join(System.tmp_dir!(), "tok-#{System.unique_integer([:positive])}")
+      File.write!(path, "file-token\n")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, err, 0} = capture(fn -> Mcp.run(["token", "verify", "--file", path]) end)
+      refute err =~ "`arb mcp token verify -` (stdin)"
+    end
+
+    test "no token at all is an error" do
+      {_out, err, code} = capture(fn -> Mcp.run(~w(token verify)) end)
+      assert code == 1
+      assert err =~ "requires a token"
+    end
+  end
+
   describe "flag strictness (bd-cqw11s)" do
     test "mint rejects an unknown flag" do
       {_out, err, code} = capture(fn -> Mcp.run(["token", "mint", "--tir", "coordinator"]) end)
