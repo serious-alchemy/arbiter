@@ -101,26 +101,60 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
-  test "--resume-review clears circuit_breaker_tripped and circuit_breaker_reason (bd-1atwts)" do
+  # P-14: PATCH no longer takes `circuit_breaker_*`; the flag drives the typed
+  # resume_review route.
+  test "--resume-review posts the typed resume_review route, never raw breaker fields" do
+    parent = self()
+
+    stub_routes([
+      {{"post", "/api/issues/bd-001/resume_review"},
+       fn conn ->
+         send(parent, :resumed)
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "circuit_breaker_tripped" => false})
+       end},
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         send(parent, :patched)
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Update.run(["bd-001", "--resume-review"]) end)
+
+    assert exit_code == 0
+    assert out =~ "bd-001"
+    assert_received :resumed
+    refute_received :patched
+  end
+
+  test "--resume-review with a field flag patches the field, then resumes" do
+    parent = self()
+
     stub_routes([
       {{"patch", "/api/issues/bd-001"},
        fn conn ->
          {:ok, body, conn} = Plug.Conn.read_body(conn)
          decoded = Jason.decode!(body)
-         assert decoded["circuit_breaker_tripped"] == false
-         assert Map.has_key?(decoded, "circuit_breaker_reason")
-         assert decoded["circuit_breaker_reason"] == nil
-
-         conn
-         |> Plug.Conn.put_status(200)
-         |> Req.Test.json(%{"id" => "bd-001", "circuit_breaker_tripped" => false})
+         send(parent, {:patched, decoded})
+         refute Map.has_key?(decoded, "circuit_breaker_tripped")
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001"})
+       end},
+      {{"post", "/api/issues/bd-001/resume_review"},
+       fn conn ->
+         send(parent, :resumed)
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001"})
        end}
     ])
 
-    {_out, _err, exit_code} =
-      capture(fn -> Update.run(["bd-001", "--resume-review"]) end)
+    {_out, _err, 0} =
+      capture(fn -> Update.run(["bd-001", "--priority", "1", "--resume-review"]) end)
 
-    assert exit_code == 0
+    assert_received {:patched, %{"priority" => 1}}
+    assert_received :resumed
   end
 
   test "--repo is sent as the repo field (bd-2jum8j)" do

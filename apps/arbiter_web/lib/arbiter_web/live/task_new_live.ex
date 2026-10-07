@@ -24,9 +24,8 @@ defmodule ArbiterWeb.TaskNewLive do
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dedup
-  alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Dispatch
@@ -130,19 +129,16 @@ defmodule ArbiterWeb.TaskNewLive do
     end
   end
 
-  # Runs off the LiveView process. Drains the `CreateUpstream` stash here
-  # because it is per-process — draining in `handle_async/3` would read the
-  # LiveView's (empty) slot and silently lose a tracker-mirror failure.
+  # Runs off the LiveView process: `Tasks.Create` drains the per-process
+  # `CreateUpstream` stash in the process that ran the create, so a
+  # tracker-mirror failure is never lost to the LiveView's (empty) slot.
   defp run_create(attrs, force?) do
-    case Dedup.check(attrs.title, attrs.workspace_id, force: force?) do
-      :ok ->
-        case Ash.create(Issue, attrs) do
-          {:ok, task} -> {:created, task, CreateUpstream.last_error()}
-          {:error, err} -> {:invalid, TaskForm.error_message(err)}
-        end
-
-      dup ->
-        {:duplicate, dup}
+    case Create.run(attrs, force: force?) do
+      {:ok, task, _warnings} -> {:created, task, nil}
+      {:partial, task, [failure | _]} -> {:created, task, failure}
+      {:duplicate, dup} -> {:duplicate, dup}
+      {:error, {_kind, message}} when is_binary(message) -> {:invalid, message}
+      {:error, err} -> {:invalid, TaskForm.error_message(err)}
     end
   end
 

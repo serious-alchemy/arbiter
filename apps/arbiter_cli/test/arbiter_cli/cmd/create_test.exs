@@ -34,17 +34,21 @@ defmodule ArbiterCli.Cmd.CreateTest do
     refute out =~ "arb workspace config set"
   end
 
-  test "--parent attaches the new issue to the parent task via a parent_of edge" do
+  test "--parent is sent with the create; the CLI posts no edge itself (P-14)" do
     parent = self()
 
     stub_routes([
       {{"get", "/api/workspaces"},
        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
-      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
-      {{"post", "/api/dependencies"},
+      {{"post", "/api/issues"},
        fn conn ->
          {:ok, body, conn} = Plug.Conn.read_body(conn)
-         send(parent, {:dep_body, Jason.decode!(body)})
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-007", "title" => "X"})
+       end},
+      {{"post", "/api/dependencies"},
+       fn conn ->
+         send(parent, :dependency_posted)
          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "dep-1"})
        end}
     ])
@@ -54,13 +58,27 @@ defmodule ArbiterCli.Cmd.CreateTest do
 
     assert exit_code == 0
     assert out =~ "bd-007"
+    assert_received {:posted, %{"parent_id" => "bd-epic"}}
+    refute_received :dependency_posted
+  end
 
-    assert_receive {:dep_body,
-                    %{
-                      "from_issue_id" => "bd-epic",
-                      "to_issue_id" => "bd-007",
-                      "type" => "parent_of"
-                    }}
+  test "--deps ids ride along as a list in the create body" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-007", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Create.run(["X", "--deps", "bd-1, bd-2"]) end)
+
+    assert_received {:posted, %{"deps" => ["bd-1", "bd-2"]}}
   end
 
   # #1973: the server needs the parent at create time to default a child of a
@@ -149,47 +167,87 @@ defmodule ArbiterCli.Cmd.CreateTest do
     refute Map.has_key?(body, "parent_id")
   end
 
-  test "--parent attach failure surfaces and exits non-zero" do
-    stub_routes([
-      {{"get", "/api/workspaces"},
-       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
-      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
-      {{"post", "/api/dependencies"},
-       {%{"error" => %{"type" => "not_found", "message" => "resource not found"}}, 404}}
-    ])
+  # P-14 AC5: a failed edge (or tracker mirror) leaves the ticket created; the
+  # server says so with `error.details.task_id`, and `--json` still prints it.
+  describe "a create the server answers with the ticket already filed" do
+    @edge_failed {%{
+                    "issue" => %{"id" => "bd-007", "title" => "X"},
+                    "error" => %{
+                      "type" => "edge_failed",
+                      "message" =>
+                        "ticket bd-007 was created, but failed to attach bd-007 to parent bd-epic: task bd-epic not found",
+                      "details" => %{"task_id" => "bd-007", "failures" => []}
+                    }
+                  }, 422}
 
-    {_out, err, exit_code} =
-      capture(fn -> Create.run(["X", "--parent", "bd-epic"]) end)
+    test "--json prints the created id on stdout and exits non-zero" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/issues"}, @edge_failed}
+      ])
 
-    assert exit_code == 4
-    assert err =~ "failed to attach bd-007 to parent bd-epic"
-  end
+      {out, err, exit_code} =
+        capture(fn -> Create.run(["X", "--parent", "bd-epic", "--json"]) end)
 
-  # bd-apj0gq: /api/dependencies now validates edges (cycles, cross-workspace).
-  # The operator has to see *why* the edge was refused, not a generic failure —
-  # the server's message names the cycle, and it must reach stderr intact.
-  test "--deps surfaces the server's edge-validation message verbatim" do
-    stub_routes([
-      {{"get", "/api/workspaces"},
-       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
-      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
-      {{"post", "/api/dependencies"},
-       {%{
-          "error" => %{
-            "type" => "invalid_request",
-            "message" =>
-              "blocks bd-009 → bd-007 would create a dependency cycle: bd-009 → bd-007 → bd-009",
-            "details" => %{}
-          }
-        }, 400}}
-    ])
+      assert exit_code != 0
 
-    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--deps", "bd-009"]) end)
+      assert {:ok, %{"id" => "bd-007", "created" => true, "error" => %{"type" => "edge_failed"}}} =
+               Jason.decode(String.trim(out))
 
-    refute exit_code == 0
-    assert err =~ "failed to add dependency bd-009 -> bd-007"
-    assert err =~ "would create a dependency cycle"
-    assert err =~ "bd-009 → bd-007 → bd-009"
+      assert err =~ "failed to attach bd-007 to parent bd-epic"
+    end
+
+    test "text mode names the id in the message and exits non-zero" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/issues"}, @edge_failed}
+      ])
+
+      {out, err, exit_code} = capture(fn -> Create.run(["X", "--parent", "bd-epic"]) end)
+
+      assert exit_code != 0
+      assert out == ""
+      assert err =~ "bd-007"
+    end
+
+    test "a tracker-mirror 502 prints the id under --json too" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/issues"},
+         {%{
+            "issue" => %{"id" => "bd-008"},
+            "error" => %{
+              "type" => "upstream_create_failed",
+              "message" => "ticket bd-008 mirror failed",
+              "details" => %{"task_id" => "bd-008"}
+            }
+          }, 502}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Create.run(["X", "--json"]) end)
+
+      assert exit_code != 0
+      assert {:ok, %{"id" => "bd-008"}} = Jason.decode(String.trim(out))
+    end
+
+    test "a refusal with no created ticket prints nothing on stdout" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/issues"},
+         {%{"error" => %{"type" => "not_found", "message" => "ticket bd-epic not found"}}, 404}}
+      ])
+
+      {out, err, exit_code} =
+        capture(fn -> Create.run(["X", "--parent", "bd-epic", "--json"]) end)
+
+      assert exit_code == 4
+      assert out == ""
+      assert err =~ "bd-epic not found"
+    end
   end
 
   test "no title argument exits non-zero" do

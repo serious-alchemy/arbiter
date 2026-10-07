@@ -78,10 +78,10 @@ defmodule ArbiterCli.Cmd.Create do
   that one run.
 
   `--parent <parent-id>` attaches the new issue as a child of an existing parent
-  task immediately after creation, by adding a `parent_of` dependency edge
+  task in the same call, by adding a `parent_of` dependency edge
   (`<parent-id> parent_of <new-id>`). The parent then rolls up child progress
-  and can auto-close. Like `--deps`, the task is durable even if the attach
-  fails — the failure is surfaced and arb exits non-zero.
+  and can auto-close. The server checks the parent exists and shares the
+  workspace *before* it creates anything, so a bad parent files nothing.
 
   If that parent is linked to a tracker ticket, the child does **not** mint its
   own by default (#1973): it stays local with the parent's ticket as read-only
@@ -110,30 +110,20 @@ defmodule ArbiterCli.Cmd.Create do
       `--tracker-ref`, `--target-branch`, `--repo`, `--labels`, `--assignee`
       (deprecated — bd-1ozks5).
 
-  `--deps id1,id2` is a convenience that creates `blocks` dependencies for
-  each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
-  itself is created. If any dependency creation fails the new issue is left
-  in place — the failure is reported and arb exits non-zero. Mirrors the
-  upstream-create failure semantics: the task is durable, the failure is
-  surfaced.
+  `--deps id1,id2` creates a `blocks` dependency for each listed issue (each
+  becomes `<dep_id> blocks <new_id>`), in the same call as the create.
 
-  ### Edge validation and the atomicity gap (bd-apj0gq)
+  ### Edges are the server's job (P-14, bd-apj0gq)
 
-  `--deps` and `--parent` POST to `/api/dependencies`, which now goes through
-  `Arbiter.Tasks.Dependencies` — so an edge into another workspace, or one that
-  would close a `depends_on`/`blocks` cycle, is refused, and the server's
-  message (naming the two workspaces, or the cycle) is what arb prints.
-
-  **Creation is still not atomic**: `arb create --deps/--parent` is one HTTP
-  call for the issue and one per edge, so a rejected edge leaves the task
-  created with the edge missing (arb says so and exits non-zero; re-run
-  `arb dep add` once the conflict is resolved). This is a deliberate remaining
-  gap, not an oversight — the CLI is a plain HTTP client and cannot call the
-  facade in-process, and closing it properly means teaching `POST /api/issues`
-  to accept edges so the issue and its edges share one transaction. It is
-  benign for scheduling: `state` is not in `Issue`'s `:create` accept list,
-  so a newly created task lands in Backlog and cannot be dispatched in the
-  window before its edges land.
+  `--deps` and `--parent` ride along in the `POST /api/issues` body: the server
+  (`Arbiter.Tasks.Create`) validates every endpoint — it must exist and share the
+  new ticket's workspace — before creating anything, then writes the issue and
+  its edges. An unknown or cross-workspace endpoint therefore refuses the whole
+  create with nothing filed. Only a race (an endpoint deleted between the check
+  and the write) can leave a ticket without an edge, and then — like a failed
+  tracker mirror — the ticket exists: arb exits non-zero, and with `--json` it
+  still prints `{"id": "<created id>", "created": true, "error": {...}}` so a
+  script can recover the id rather than file the ticket again.
 
   ## --require-provider / --exclude-provider (bd-13pqcp)
 
@@ -285,10 +275,11 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put("repo", opts[:repo])
-      # #1973: the parent rides along with the create so the server can default a
-      # child of a tracker-linked parent to context-only instead of minting a
-      # ticket. The `parent_of` edge itself is still attached below.
+      # P-14: the server creates the `parent_of` edge (and defaults a child of a
+      # tracker-linked parent to context-only), and the `blocks` edges for
+      # `--deps`, in the same call — the CLI no longer orchestrates edges.
       |> maybe_put("parent_id", opts[:parent])
+      |> maybe_put_deps(opts[:deps])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
@@ -306,28 +297,43 @@ defmodule ArbiterCli.Cmd.Create do
 
     issue =
       case Client.post("/api/issues", payload) do
-        {:ok, body} ->
-          body
-
-        {:error, err} ->
-          # Includes the upstream-create-failed (HTTP 502) path: the task was
-          # created locally but the upstream tracker call failed. The error
-          # message embeds the task id so the user can recover via
-          # `arb update <id> --tracker-ref N`.
-          Output.die(err)
+        {:ok, body} -> body
+        {:error, err} -> die_create(err, mode)
       end
 
     print_acceptance_warnings(issue, mode)
-
-    if opts[:deps] do
-      attach_deps(issue["id"], opts[:deps])
-    end
-
-    if opts[:parent] do
-      attach_parent(issue["id"], opts[:parent])
-    end
-
     Output.emit_issue(issue, mode)
+  end
+
+  # The server answers 502 (tracker mirror failed) or 422 (an edge failed) with
+  # the ticket already created: `error.details.task_id` names it. A script
+  # reading `--json` still needs that id, so print it before dying — the id is
+  # in the message text too, for `text` mode.
+  defp die_create(%Client.Error{body: %{"details" => %{"task_id" => id}} = body} = err, :json)
+       when is_binary(id) do
+    IO.puts(
+      Jason.encode!(%{
+        "id" => id,
+        "created" => true,
+        "error" => Map.take(body, ["type", "message", "details"])
+      })
+    )
+
+    Output.die(err)
+  end
+
+  defp die_create(err, _mode), do: Output.die(err)
+
+  defp maybe_put_deps(payload, nil), do: payload
+
+  defp maybe_put_deps(payload, raw) do
+    case raw
+         |> String.split(",", trim: true)
+         |> Enum.map(&String.trim/1)
+         |> Enum.reject(&(&1 == "")) do
+      [] -> payload
+      ids -> Map.put(payload, "deps", ids)
+    end
   end
 
   # bd-7mbrlg: non-blocking heads-up — the task was created either way, but
@@ -361,42 +367,4 @@ defmodule ArbiterCli.Cmd.Create do
 
   defp maybe_put_flag(map, _key, false), do: map
   defp maybe_put_flag(map, key, true), do: Map.put(map, key, true)
-
-  defp attach_deps(new_id, raw) do
-    raw
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.each(fn dep_id ->
-      body = %{"from_issue_id" => dep_id, "to_issue_id" => new_id, "type" => "blocks"}
-
-      case Client.post("/api/dependencies", body) do
-        {:ok, _} ->
-          :ok
-
-        {:error, err} ->
-          Output.die(%{
-            err
-            | message: "failed to add dependency #{dep_id} -> #{new_id}: #{err.message}"
-          })
-      end
-    end)
-  end
-
-  # Attach the freshly-created issue as a child of an existing parent task via a
-  # `parent_of` edge (`parent_id parent_of new_id`). The task is durable; a
-  # failed attach is surfaced and arb exits non-zero, mirroring `attach_deps/2`.
-  defp attach_parent(new_id, parent_id) do
-    body = %{"from_issue_id" => parent_id, "to_issue_id" => new_id, "type" => "parent_of"}
-
-    case Client.post("/api/dependencies", body) do
-      {:ok, _} ->
-        :ok
-
-      {:error, err} ->
-        Output.die(%{
-          err
-          | message: "failed to attach #{new_id} to parent #{parent_id}: #{err.message}"
-        })
-    end
-  end
 end
