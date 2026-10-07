@@ -78,6 +78,17 @@ defmodule Arbiter.Params do
     end
   end
 
+  @doc "Optional string arg: absent/nil is `{:ok, nil}`; any non-string is an `:invalid` error."
+  @spec fetch_string(map(), String.t()) ::
+          {:ok, String.t() | nil} | {:error, {:invalid, String.t()}}
+  def fetch_string(args, key) do
+    case Map.get(args, key) do
+      nil -> {:ok, nil}
+      v when is_binary(v) -> {:ok, v}
+      _ -> {:error, {:invalid, "`#{key}` must be a string"}}
+    end
+  end
+
   @spec integer(term()) :: {:ok, integer()} | :error
   def integer(n) when is_integer(n), do: {:ok, n}
 

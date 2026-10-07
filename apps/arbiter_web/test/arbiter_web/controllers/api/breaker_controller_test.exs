@@ -75,8 +75,27 @@ defmodule ArbiterWeb.Api.BreakerControllerTest do
     assert conn |> post("/api/breakers/reset", %{}) |> json_response(400)
   end
 
-  test "POST /api/breakers/reset on an unknown signature is a 4xx", %{conn: conn} do
-    assert conn |> post("/api/breakers/reset", %{"signature" => "nope"}) |> json_response(400)
+  test "POST /api/breakers/reset on an unknown signature is 404 (as on MCP)", %{conn: conn} do
+    assert conn |> post("/api/breakers/reset", %{"signature" => "nope"}) |> json_response(404)
+  end
+
+  test "POST /api/breakers/reset validates kind even alongside a signature", %{conn: conn} do
+    assert conn
+           |> post("/api/breakers/reset", %{"signature" => "nope", "kind" => "typo"})
+           |> json_response(400)
+  end
+
+  test "unscoped `all: true` is refused unless `confirm_all` is set", %{conn: conn, ws: ws} do
+    trip(ws)
+
+    resp = conn |> post("/api/breakers/reset", %{"all" => true}) |> json_response(400)
+    assert resp["error"]["message"] =~ "confirm_all"
+    assert conn |> get("/api/breakers") |> json_response(200) |> Map.fetch!("open_count") == 1
+
+    assert %{"reset" => 1} =
+             conn
+             |> post("/api/breakers/reset", %{"all" => true, "confirm_all" => true})
+             |> json_response(200)
   end
 
   # A misspelled kind used to resolve to `nil`, which `maybe_put/3` then dropped

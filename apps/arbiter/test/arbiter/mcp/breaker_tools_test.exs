@@ -119,6 +119,40 @@ defmodule Arbiter.MCP.BreakerToolsTest do
     end
   end
 
+  describe "breaker_reset/2 unscoped `all` guard (P-19)" do
+    test "`all: true` with no workspace and no kind is refused and resets nothing", ctx do
+      trip(ctx.ws)
+      agnostic = %Scope{tier: :coordinator}
+
+      assert {:error, {:invalid, message}} = Tools.breaker_reset(agnostic, %{"all" => true})
+      assert message =~ "confirm_all"
+      assert {:ok, %{open_count: 1}} = Tools.breaker_list(agnostic, %{})
+    end
+
+    test "`confirm_all: true` allows the installation-wide reset", ctx do
+      trip(ctx.ws)
+      agnostic = %Scope{tier: :coordinator}
+
+      assert {:ok, %{reset: 1}} =
+               Tools.breaker_reset(agnostic, %{"all" => true, "confirm_all" => true})
+    end
+
+    test "`kind` alone counts as a scope", ctx do
+      trip(ctx.ws)
+
+      assert {:ok, %{reset: 1}} =
+               Tools.breaker_reset(%Scope{tier: :coordinator}, %{
+                 "all" => true,
+                 "kind" => "coordinator_escalation"
+               })
+    end
+
+    test "an unknown kind is rejected even alongside a signature", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.breaker_reset(ctx.coordinator, %{"signature" => "x", "kind" => "typo"})
+    end
+  end
+
   # bd-21bmdh: the auth-shaped dispatch hold's operator surface rides the same
   # two verbs.
   describe "auth holds" do
