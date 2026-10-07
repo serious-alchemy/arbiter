@@ -54,6 +54,19 @@ defmodule Arbiter.Loop.PendingWrite do
     data_layer: AshSqlite.DataLayer,
     extensions: [AshPaperTrail.Resource]
 
+  # One list per vocabulary: the attribute constraints below, and every surface
+  # that validates a `state` / `kind` filter (REST, MCP), read these.
+  @kinds [:skill_patch, :skill_create, :difficulty_override, :config_set, :repo_doc_patch]
+  @states [:proposed, :hypothesis, :applied, :rejected, :superseded]
+
+  @doc "Every proposal kind."
+  @spec kinds() :: [atom()]
+  def kinds, do: @kinds
+
+  @doc "Every proposal state."
+  @spec states() :: [atom()]
+  def states, do: @states
+
   sqlite do
     table "loop_pending_writes"
     repo Arbiter.Repo
@@ -182,13 +195,7 @@ defmodule Arbiter.Loop.PendingWrite do
       allow_nil? false
       public? true
 
-      constraints one_of: [
-                    :skill_patch,
-                    :skill_create,
-                    :difficulty_override,
-                    :config_set,
-                    :repo_doc_patch
-                  ]
+      constraints one_of: @kinds
 
       description "What applying this proposal does; dispatched on by Arbiter.Loop.apply_pending/2."
     end
@@ -292,7 +299,7 @@ defmodule Arbiter.Loop.PendingWrite do
       allow_nil? false
       public? true
       default :hypothesis
-      constraints one_of: [:proposed, :hypothesis, :applied, :rejected, :superseded]
+      constraints one_of: @states
 
       description "Lifecycle state; only :proposed is applicable."
     end

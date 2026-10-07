@@ -165,6 +165,9 @@ defmodule Arbiter.MCP.RefinePolicy do
     "loop_pending_diff" => @deny_reason_ops,
     "loop_pending_apply" => @deny_reason_ops,
     "loop_pending_reject" => @deny_reason_ops,
+    "loop_analyze" => @deny_reason_ops,
+    "loop_propose" => @deny_reason_ops,
+    "loop_propose_repo_doc_patch" => @deny_reason_ops,
     "loop_propose_routing" => @deny_reason_ops,
     "loop_canary_status" => @deny_reason_ops,
 

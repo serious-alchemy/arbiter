@@ -904,6 +904,11 @@ defmodule Arbiter.Loop do
   The pipeline itself lives in `Arbiter.Loop.Apply` as four independently
   callable steps — `validate/1`, `side_effect/2`, `persist/2`, `notify/1` —
   so the no-auto-apply discipline can be asserted on the guard alone.
+
+  Options: `:actor` (attribution label), `:authority` — the caller's
+  `Arbiter.Guardrails.Authority` (default `:operator`, for in-process callers).
+  The REST and MCP adapters pass the token's authority so a `:config_set`
+  apply cannot loosen a guardrail the caller could not loosen directly.
   """
   @spec apply_pending(PendingWrite.t() | String.t(), keyword()) ::
           {:ok, PendingWrite.t()}
@@ -916,7 +921,7 @@ defmodule Arbiter.Loop do
   end
 
   def apply_pending(%PendingWrite{} = row, opts) do
-    Apply.run(row, Keyword.get(opts, :actor, "operator"))
+    Apply.run(row, Keyword.get(opts, :actor, "operator"), Keyword.take(opts, [:authority]))
   end
 
   # ---- reject -------------------------------------------------------------

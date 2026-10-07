@@ -25,7 +25,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        workspace_config_set workspace_config_unset
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
-                       loop_propose_routing loop_canary_status breaker_list breaker_reset
+                       loop_propose_routing loop_analyze loop_propose loop_propose_repo_doc_patch loop_canary_status breaker_list breaker_reset
                        alert_list account_list account_show provider_list usage_events_list
                        usage_calibration account_set
                        memory_pending_list memory_pending_diff memory_pending_apply
@@ -41,7 +41,7 @@ defmodule Arbiter.MCP.CatalogTest do
                                 external_review_list skill_create skill_update skill_list skill_get
                                 transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
-                                loop_pending_reject loop_propose_routing loop_canary_status breaker_list breaker_reset
+                                loop_pending_reject loop_propose_routing loop_analyze loop_propose loop_propose_repo_doc_patch loop_canary_status breaker_list breaker_reset
                                 alert_list repo_show usage_events_list usage_calibration)
 
   describe "tool descriptions" do

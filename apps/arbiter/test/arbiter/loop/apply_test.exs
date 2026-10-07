@@ -417,6 +417,48 @@ defmodule Arbiter.Loop.ApplyTest do
     end
   end
 
+  describe "Apply.run/3 — the caller's guardrail authority (D-C-27)" do
+    defp proposed_config_set(ws, patch) do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :config_set,
+            scope: :task,
+            target: "cfg-#{System.unique_integer([:positive])}",
+            gist: "set config",
+            payload: %{"workspace_id" => ws.id, "patch" => patch}
+          })
+        )
+
+      row
+    end
+
+    defp loosening_patch,
+      do: %{"agent" => %{"security" => %{"sandbox" => %{"enabled" => false}}}}
+
+    test "a coordinator-authority apply cannot loosen a guardrail", %{ws: ws} do
+      row = proposed_config_set(ws, loosening_patch())
+
+      assert {:error, {:invalid, msg}} = Loop.apply_pending(row, authority: :coordinator)
+      assert msg =~ "operator-only"
+      assert %PendingWrite{state: :proposed} = Ash.get!(PendingWrite, row.id)
+    end
+
+    test "the default (in-process, operator) authority still applies it", %{ws: ws} do
+      row = proposed_config_set(ws, loosening_patch())
+
+      assert {:ok, %PendingWrite{state: :applied}} = Loop.apply_pending(row)
+    end
+
+    test "a coordinator-authority apply of an unrelated config_set still lands", %{ws: ws} do
+      row = proposed_config_set(ws, %{"merge" => %{"auto_merge" => true}})
+
+      assert {:ok, %PendingWrite{state: :applied}} =
+               Loop.apply_pending(row, authority: :coordinator)
+    end
+  end
+
   describe "Apply.persist/2 — the persistence step, on its own" do
     test "stamps :applied and applied_at without running a side effect", %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "untouched", difficulty: 1, workspace_id: ws.id})
