@@ -88,6 +88,8 @@ defmodule Arbiter.MCP.TicketAliasTest do
 
   # A created ticket gets a fresh random id and timestamps each time; blank
   # those (and only those) so the rest of the payload is compared exactly.
+  @timestamp_keys ~w(created_at updated_at closed_at)a ++ ~w(created_at updated_at closed_at)
+
   defp normalize({:ok, %{} = data}, "ticket_create"),
     do: {:ok, Map.drop(data, [:id, "id", :created_at, :updated_at, "created_at", "updated_at"])}
 
@@ -97,8 +99,13 @@ defmodule Arbiter.MCP.TicketAliasTest do
   defp strip_timestamps(%NaiveDateTime{}), do: :timestamp
   defp strip_timestamps(%_{} = struct), do: struct
 
-  defp strip_timestamps(%{} = map),
-    do: Map.new(map, fn {k, v} -> {k, strip_timestamps(v)} end)
+  # The full record (P-13) carries its timestamps as ISO8601 strings.
+  defp strip_timestamps(%{} = map) do
+    Map.new(map, fn
+      {k, v} when is_binary(v) and k in @timestamp_keys -> {k, :timestamp}
+      {k, v} -> {k, strip_timestamps(v)}
+    end)
+  end
 
   defp strip_timestamps(list) when is_list(list), do: Enum.map(list, &strip_timestamps/1)
 

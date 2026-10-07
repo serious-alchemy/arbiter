@@ -6,6 +6,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
   """
 
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueSerializer
   alias Arbiter.Tasks.Lifecycle.Projection
   alias ArbiterWeb.Api.WorkspaceParam
 
@@ -44,9 +45,31 @@ defmodule ArbiterWeb.Api.IssueJSON do
 
   def show(%{issue: issue}), do: data(issue)
 
-  @doc "Renders a list of issues wrapped under :data."
+  @doc "A ranked ticket plus where it landed in its priority band."
+  def rank(%{issue: issue, band: band}), do: Map.merge(data(issue), band)
+
+  @doc "A ticket a hand-off / hand-back just moved: the record plus its projection."
+  def handoff(%{issue: issue, view: view}), do: IssueSerializer.row(data(issue), view)
+
+  @doc """
+  Renders a list of issues wrapped under :data. With `:views` (a
+  `%{ticket_id => view}` map from `Projection.views/2`) each row also carries
+  its lifecycle projection (`column`, `step`, `blocked_by`, ...), and with
+  `:holds` a Ready card the scheduler is holding carries its `hold_reason`.
+  """
   def index(%{issues: issues} = assigns) do
-    %{data: Enum.map(issues, &data/1)} |> WorkspaceParam.echo(assigns)
+    views = Map.get(assigns, :views, %{})
+    holds = Map.get(assigns, :holds, %{})
+
+    rows =
+      Enum.map(issues, fn issue ->
+        case Map.fetch(views, issue.id) do
+          {:ok, view} -> IssueSerializer.row(data(issue), view, Map.get(holds, issue.id))
+          :error -> data(issue)
+        end
+      end)
+
+    %{data: rows} |> WorkspaceParam.echo(assigns)
   end
 
   @doc """
@@ -74,104 +97,24 @@ defmodule ArbiterWeb.Api.IssueJSON do
             created_at: iso(issue.created_at),
             updated_at: iso(issue.updated_at)
           }
-          |> Map.merge(Projection.payload(view))
-          |> put_hold_reason(Map.get(holds, issue.id))
+          |> IssueSerializer.row(view, Map.get(holds, issue.id))
         end)
     }
     |> WorkspaceParam.echo(assigns)
   end
 
-  # bd-6i7yzq: newest first. `actor` is the `Arbiter.Actor` label of whoever made
-  # the write, or null when none is on record (written before actors existed, or
-  # with no actor in scope). `changed` names the fields; `state` is the new
-  # lifecycle state when the write moved it.
+  # bd-6i7yzq: newest first (`IssueSerializer.history/1`).
   defp put_history(map, nil), do: map
-
-  defp put_history(map, history) do
-    Map.put(
-      map,
-      :history,
-      Enum.map(history, fn entry ->
-        %{
-          at: DateTime.to_iso8601(entry.at),
-          action: entry.action,
-          actor: entry.actor,
-          changed: entry.changes |> Map.keys() |> Enum.sort(),
-          state: entry.changes["state"]
-        }
-      end)
-    )
-  end
-
-  # bd-dtdeff: why a Ready card is not being dispatched; absent when it is not held.
-  defp put_hold_reason(map, nil), do: map
-  defp put_hold_reason(map, reason), do: Map.put(map, :hold_reason, reason)
+  defp put_history(map, history), do: Map.put(map, :history, IssueSerializer.history(history))
 
   defp put_lifecycle(map, nil), do: map
   defp put_lifecycle(map, view), do: Map.merge(map, Projection.payload(view))
 
-  def data(%Issue{} = issue) do
-    %{
-      id: issue.id,
-      title: issue.title,
-      description: issue.description,
-      acceptance: issue.acceptance,
-      notes: issue.notes,
-      qa_notes: issue.qa_notes,
-      deployment_notes: issue.deployment_notes,
-      # bd-842qio: the stored lifecycle state — the ticket's one lifecycle
-      # field. `close_reason` is null unless the ticket is closed; `rank`
-      # orders a priority band.
-      state: to_string_atom(issue.state),
-      close_reason: to_string_atom(issue.close_reason),
-      rank: issue.rank,
-      priority: issue.priority,
-      # ES2: the epic priority floor (nil: none). Distinct from `priority`.
-      floor_priority: issue.floor_priority,
-      difficulty: issue.difficulty,
-      issue_type: to_string_atom(issue.issue_type),
-      auto_close: issue.auto_close,
-      verify_after_deploy: issue.verify_after_deploy,
-      # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or null.
-      provider_constraint: issue.provider_constraint,
-      awaiting_verification_at: iso(issue.awaiting_verification_at),
-      verification_outcome: to_string_atom(issue.verification_outcome),
-      verification_evidence: issue.verification_evidence,
-      tracker_type: to_string_atom(issue.tracker_type),
-      tracker_ref: issue.tracker_ref,
-      pr_ref: issue.pr_ref,
-      # bd-741sid: the ticket owns its open PR — its URL, the forge's last
-      # answer (as recorded, string-keyed) and when its Watchdog read it — and
-      # the cause a closed-unmerged PR sent it back to work with. A ReviewGate
-      # park is an attention cause too (`attention_since` is when it parked).
-      merger_url: issue.merger_url,
-      merger_status: issue.merger_status,
-      merger_checked_at: iso(issue.merger_checked_at),
-      attention_cause: to_string_atom(issue.attention_cause),
-      attention_detail: issue.attention_detail,
-      attention_since: iso(issue.attention_since),
-      # bd-8nlez1: the attention's owner when a hand-off, a hand-back or an
-      # expired limit moved it, and the note that came with the move.
-      attention_owner: to_string_atom(issue.attention_owner),
-      attention_note: issue.attention_note,
-      attention_owner_since: iso(issue.attention_owner_since),
-      pr_body: issue.pr_body,
-      target_branch: issue.target_branch,
-      repo: issue.repo,
-      workspace_id: issue.workspace_id,
-      acceptance_waived: issue.acceptance_waived,
-      closed_at: iso(issue.closed_at),
-      created_at: iso(issue.created_at),
-      updated_at: iso(issue.updated_at)
-    }
-    |> maybe_put(:child_total, issue.child_total)
-    |> maybe_put(:child_closed, issue.child_closed)
-  end
-
-  # Child-progress rollup is included only when the calcs are loaded (the show
-  # endpoint loads them); index keeps them unloaded so the field is omitted.
-  defp maybe_put(map, _key, %Ash.NotLoaded{}), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+  @doc """
+  The one ticket record (`Arbiter.Tasks.IssueSerializer.data/1`) — shared with
+  the MCP `ticket_*` tools.
+  """
+  def data(%Issue{} = issue), do: IssueSerializer.data(issue)
 
   defp to_string_atom(nil), do: nil
   defp to_string_atom(a) when is_atom(a), do: Atom.to_string(a)
@@ -179,5 +122,4 @@ defmodule ArbiterWeb.Api.IssueJSON do
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp iso(%NaiveDateTime{} = dt), do: NaiveDateTime.to_iso8601(dt)
 end

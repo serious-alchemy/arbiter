@@ -31,12 +31,34 @@ defmodule ArbiterCli.Cmd.DepTest do
     refute out =~ "Conductor"
   end
 
-  test "dep rm hits DELETE" do
-    stub_delete("/api/dependencies/a/b", "", 204)
+  test "dep rm hits DELETE and prints how many edges went" do
+    stub_routes([
+      {{"delete", "/api/dependencies/a/b"},
+       fn conn ->
+         Req.Test.json(conn, %{"from_issue_id" => "a", "to_issue_id" => "b", "removed" => 2})
+       end}
+    ])
 
     {out, _err, exit_code} = capture(fn -> Dep.run(["rm", "a", "b"]) end)
     assert exit_code == 0
-    assert out =~ "removed dependency edge"
+    assert out =~ "removed 2 dependency edge(s)"
+  end
+
+  # P-13 (D-T-20): an absent edge is `removed: 0`, not an error.
+  test "dep rm of an absent edge reports nothing removed and exits 0" do
+    stub_routes([
+      {{"delete", "/api/dependencies/a/b"},
+       fn conn ->
+         Req.Test.json(conn, %{"from_issue_id" => "a", "to_issue_id" => "b", "removed" => 0})
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Dep.run(["rm", "a", "b"]) end)
+    assert exit_code == 0
+    assert out =~ "nothing removed"
+
+    {json, _err, 0} = capture(fn -> Dep.run(["rm", "a", "b", "--json"]) end)
+    assert %{"ok" => true, "removed" => 0} = Jason.decode!(json)
   end
 
   test "dep rm with --type passes type as query" do

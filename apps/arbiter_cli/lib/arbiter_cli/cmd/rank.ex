@@ -66,42 +66,18 @@ defmodule ArbiterCli.Cmd.Rank do
     end
   end
 
-  defp emit(issue, :json) do
-    {position, size} = priority_band_position(issue)
-
-    issue
-    |> Map.put("priority_band_position", position)
-    |> Map.put("priority_band_size", size)
-    |> Output.emit_issue(:json)
-  end
+  # The server reports where the ticket landed (`priority_band_position` /
+  # `priority_band_size`, P-13 D-T-33) — no second, unbounded list call here.
+  defp emit(issue, :json), do: Output.emit_issue(issue, :json)
 
   defp emit(issue, :text) do
     Output.emit_issue(issue, :text)
 
-    {position, size} = priority_band_position(issue)
     IO.puts("rank: #{issue["rank"]}")
-    IO.puts("priority band #{issue["priority"]}: position #{position + 1} of #{size}")
-  end
 
-  # Fetches every open ticket in the same workspace + priority band to report
-  # where this ticket landed — matching the Ready queue order (priority, then
-  # rank, then age; `board/scheduler.ex`). Best-effort: if the list call
-  # fails, the rank update itself already succeeded, so we still show the
-  # ticket, just without the position.
-  defp priority_band_position(issue) do
-    with workspace_id when is_binary(workspace_id) <- issue["workspace_id"],
-         priority when is_integer(priority) <- issue["priority"],
-         {:ok, %{"data" => issues}} <-
-           Client.get("/api/issues", workspace_id: workspace_id, priority: priority) do
-      ordered =
-        issues
-        |> Enum.reject(&(&1["state"] == "closed"))
-        |> Enum.sort_by(&{&1["rank"], &1["created_at"]})
-
-      position = Enum.find_index(ordered, &(&1["id"] == issue["id"])) || 0
-      {position, length(ordered)}
-    else
-      _ -> {0, 1}
+    with position when is_integer(position) <- issue["priority_band_position"],
+         size when is_integer(size) <- issue["priority_band_size"] do
+      IO.puts("priority band #{issue["priority"]}: position #{position + 1} of #{size}")
     end
   end
 end
