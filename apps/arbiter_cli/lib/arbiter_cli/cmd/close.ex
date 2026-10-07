@@ -1,27 +1,26 @@
 defmodule ArbiterCli.Cmd.Close do
   @moduledoc """
-  `arb close <id> [--reason ...]` — close an issue.
+  `arb close <id> [--reason ...] [--no-upstream]` — close an issue.
 
-  If the directive has a `tracker_ref` and a non-`:none` tracker type, the
-  linked upstream tracker issue is automatically closed as well.
+  If the ticket has a `tracker_ref` and a non-`:none` tracker type, the linked
+  upstream tracker issue is closed as well — the server's default, so the CLI
+  neither looks the ticket up first nor sends anything extra.
+
+  `--no-upstream` leaves the upstream tracker issue open (MCP `ticket_close`
+  `close_upstream: false`). Use it when the upstream issue is already closed or
+  must stay open for follow-up work.
   """
 
   alias ArbiterCli.{ArgParser, Client, Output}
 
-  @switches [reason: :string, json: :boolean]
+  @switches [reason: :string, upstream: :boolean, json: :boolean]
 
-  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _mode} =
+      {opts, rest, mode} =
         ArgParser.parse(argv, command: "arb ticket close", switches: @switches)
-
-      mode = if opts[:json], do: :json, else: :text
 
       id =
         case rest do
@@ -30,16 +29,12 @@ defmodule ArbiterCli.Cmd.Close do
           _ -> Output.die("close takes exactly one positional argument: the ticket id")
         end
 
-      close_upstream =
-        case Client.get("/api/issues/" <> id) do
-          {:ok, issue} -> tracker_linked?(issue)
-          {:error, _} -> false
-        end
-
       body =
         %{}
         |> then(fn b -> if opts[:reason], do: Map.put(b, "reason", opts[:reason]), else: b end)
-        |> then(fn b -> if close_upstream, do: Map.put(b, "close_upstream", true), else: b end)
+        |> then(fn b ->
+          if opts[:upstream] == false, do: Map.put(b, "close_upstream", false), else: b
+        end)
 
       case Client.post("/api/issues/" <> id <> "/close", body) do
         {:ok, issue} -> Output.emit_issue(issue, mode)
@@ -47,10 +42,4 @@ defmodule ArbiterCli.Cmd.Close do
       end
     end
   end
-
-  defp tracker_linked?(%{"tracker_type" => tracker_type, "tracker_ref" => tracker_ref}) do
-    tracker_type not in [nil, "none", ""] and tracker_ref not in [nil, ""]
-  end
-
-  defp tracker_linked?(_), do: false
 end
