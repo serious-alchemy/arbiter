@@ -97,16 +97,27 @@ defmodule Arbiter.Nodes.Bridge.Core do
   end
 
   defp register(core, id, run, name) do
-    %{limits: limits, streams: streams, runs: runs} = core
+    with :ok <- valid_target(id, run, name),
+         :ok <- under_caps(core, run, id) do
+      {:ok, add_stream(core, id, run, name)}
+    end
+  end
 
+  defp valid_target(id, run, name) do
     cond do
       not (is_integer(id) and id in 1..@max_stream_id) -> {:error, :bad_stream}
       not (is_binary(run) and is_binary(name)) -> {:error, :bad_target}
+      true -> :ok
+    end
+  end
+
+  defp under_caps(%{limits: limits, streams: streams, runs: runs} = core, run, id) do
+    cond do
       Map.has_key?(streams, id) -> {:error, :duplicate_stream}
       core.node_bytes >= limits.max_node_bytes -> {:error, :node_byte_cap}
       map_size(streams) >= limits.max_streams_per_node -> {:error, :node_stream_cap}
       Map.get(runs, run, 0) >= limits.max_streams_per_run -> {:error, :run_stream_cap}
-      true -> {:ok, add_stream(core, id, run, name)}
+      true -> :ok
     end
   end
 
