@@ -28,7 +28,11 @@ defmodule ArbiterWeb.Api.ParamsAdoptionTest do
       offenders =
         for file <- files,
             src = File.read!(file),
-            src =~ "defp truthy(true)" or
+            src =~ "defp truthy(true)" or src =~ "defp truthy?(true)" or
+              Regex.match?(
+                ~r/Map\.get\(\w+, "\w+"\) in \[true|\[true, "true"|"true", true\]|defp truthy\?\(v\), do: v in/,
+                src
+              ) or
               Regex.match?(
                 ~r/(params|args|attrs)\["\w+"\] (==|in) (true|\["true", true\])|Map\.get\((params|args), "\w+"\) == true/,
                 src
@@ -133,6 +137,18 @@ defmodule ArbiterWeb.Api.ParamsAdoptionTest do
       assert json_response(get(conn, ~p"/api/messages?limit=0"), 400)
       assert json_response(get(conn, ~p"/api/workers/history?limit=999999"), 200)
       assert json_response(get(conn, ~p"/api/usage/events?limit=999999"), 200)
+    end
+
+    test "run_log_list and review_gate_rounds clamp/reject limit", %{conn: conn, task: task} do
+      assert json_response(get(conn, ~p"/api/workers/#{task.id}/run_log_list?limit=999999"), 200)
+      assert json_response(get(conn, ~p"/api/workers/#{task.id}/run_log_list?limit=0"), 400)
+
+      assert json_response(
+               get(conn, ~p"/api/review_gate_rounds?task_id=#{task.id}&limit=999999"),
+               200
+             )
+
+      assert json_response(get(conn, ~p"/api/review_gate_rounds?task_id=#{task.id}&limit=0"), 400)
     end
   end
 end

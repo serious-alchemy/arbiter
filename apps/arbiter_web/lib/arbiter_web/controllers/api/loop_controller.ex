@@ -439,11 +439,14 @@ defmodule ArbiterWeb.Api.LoopController do
   # and anything else is a 400 rather than a FunctionClauseError 500.
   # bd-4f6opo: the opt-in model pass. A string on the GET query, a boolean in
   # the POST JSON body; anything unrecognised is a 400, never a silent "off".
-  defp parse_discover(v) when v in [nil, "", false, "false", "0"], do: {:ok, false}
-  defp parse_discover(v) when v in [true, "true", "1"], do: {:ok, true}
+  defp parse_discover(v) when v in [nil, ""], do: {:ok, false}
 
-  defp parse_discover(_other),
-    do: {:error, {:invalid_request, "discover must be true or false"}}
+  defp parse_discover(v) do
+    case Params.boolean(v) do
+      {:ok, b} -> {:ok, b}
+      :error -> {:error, {:invalid_request, "discover must be true or false"}}
+    end
+  end
 
   # Absent means "no cap requested"; a supplied value is clamped to `@max_limit`.
   defp parse_limit(raw) when raw in [nil, ""], do: {:ok, nil}

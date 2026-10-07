@@ -16,6 +16,7 @@ defmodule ArbiterWeb.Api.McpController do
 
   alias Arbiter.MCP
   alias Arbiter.MCP.{OperatorSocket, Scope}
+  alias Arbiter.Params
   alias ArbiterWeb.ErrorResponse
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -156,11 +157,9 @@ defmodule ArbiterWeb.Api.McpController do
 
   defp narrow_can_dispatch(caller_can_dispatch, requested) do
     requested_bool =
-      case requested do
-        b when b in [false, "false"] -> false
-        b when b in [true, "true"] -> true
-        nil -> true
-        _ -> true
+      case Params.boolean(requested) do
+        {:ok, b} -> b
+        :error -> true
       end
 
     caller_can_dispatch and requested_bool

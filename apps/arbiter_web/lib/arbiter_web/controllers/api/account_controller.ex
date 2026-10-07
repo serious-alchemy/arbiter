@@ -25,6 +25,7 @@ defmodule ArbiterWeb.Api.AccountController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Accounts
+  alias Arbiter.Params
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -52,7 +53,7 @@ defmodule ArbiterWeb.Api.AccountController do
     end
   end
 
-  defp truthy?(v), do: v in ["true", "1", true]
+  defp truthy?(v), do: Params.boolean(v) == {:ok, true}
 
   def show(conn, %{"ref" => ref}) do
     with {:ok, account} <- ref |> Accounts.get_account() |> friendly() do

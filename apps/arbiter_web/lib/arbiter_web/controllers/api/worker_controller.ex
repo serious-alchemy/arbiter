@@ -181,9 +181,9 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
-  defp maybe_put_report_only(opts, true), do: Keyword.put(opts, :report_only, true)
-  defp maybe_put_report_only(opts, "true"), do: Keyword.put(opts, :report_only, true)
-  defp maybe_put_report_only(opts, _), do: opts
+  defp maybe_put_report_only(opts, raw) do
+    if truthy(raw) == true, do: Keyword.put(opts, :report_only, true), else: opts
+  end
 
   @doc """
   Resume a stopped worker at the SESSION level (bd-1z7624, #472). Re-spawns the
@@ -528,16 +528,20 @@ defmodule ArbiterWeb.Api.WorkerController do
   # `:index`'s `task_id` filter (exact match only), this also matches
   # anything prefixed `<task_id>#`. `transcript_exists` distinguishes a
   # missing durable log from an empty one without a separate `:log` call.
-  def run_log_list(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+  def run_log_list(conn, %{"task_id" => task_id} = params)
+      when is_binary(task_id) and task_id != "" do
     prefix = task_id <> "#"
 
-    runs =
-      Run
-      |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
-      |> Ash.Query.sort(started_at: :desc)
-      |> Ash.read!()
+    with {:ok, limit} <- params["limit"] |> Params.limit(200, 1000) |> Params.to_rest() do
+      runs =
+        Run
+        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
 
-    json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+      json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+    end
   end
 
   def run_log_list(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}

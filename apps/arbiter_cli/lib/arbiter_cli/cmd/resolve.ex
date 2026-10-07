@@ -18,10 +18,9 @@ defmodule ArbiterCli.Cmd.Resolve do
 
       --gate <g>     review_gate (default) | notes_gate | commit_gate
       --round <n>    the ReviewGate round this answers (default: the latest)
-      --actor <who>  who decided (default: coordinator)
       --json         print the recorded resolution as JSON
 
-  The decision, reasoning, actor and timestamp are persisted against the ticket
+  The decision, reasoning, actor (derived server-side from your token) and timestamp are persisted against the ticket
   and returned by `review_gate_rounds_list`, so an override of a reviewer's
   standing finding is on record where the argument is — not only in a commit
   message. It records; it does not resume, merge or close anything.
@@ -45,7 +44,6 @@ defmodule ArbiterCli.Cmd.Resolve do
     reject: :string,
     gate: :string,
     round: :integer,
-    actor: :string,
     json: :boolean
   ]
 
@@ -71,7 +69,6 @@ defmodule ArbiterCli.Cmd.Resolve do
         %{"decision" => decision, "reasoning" => reasoning}
         |> put_opt("gate", opts[:gate])
         |> put_opt("round", opts[:round])
-        |> put_opt("actor", opts[:actor])
 
       case Client.post("/api/issues/" <> id <> "/resolve", body) do
         {:ok, resolution} -> emit(resolution, mode)
