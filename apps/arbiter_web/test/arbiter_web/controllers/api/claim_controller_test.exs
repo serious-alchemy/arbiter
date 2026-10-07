@@ -171,6 +171,26 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       assert %{"error" => %{"type" => "not_assigned"}} = json_response(conn, 403)
     end
 
+    test "409 already_claimed when another installation holds the issue", %{conn: conn, gh: ws} do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [%{"body" => "Claimed. Arbiter installation: other-host."}])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload())
+        end
+      end)
+
+      conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "43"})
+
+      assert %{"error" => %{"type" => "already_claimed", "details" => %{"comment" => _}}} =
+               json_response(conn, 409)
+    end
+
     test "force=true bypasses the assignment check", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do

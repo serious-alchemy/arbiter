@@ -25,7 +25,6 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   alias Arbiter.Params
   alias Arbiter.Tasks.Claim
-  alias ArbiterWeb.Api.IssueJSON
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -35,56 +34,21 @@ defmodule ArbiterWeb.Api.ClaimController do
 
     with :ok <- require_string(ref, "ref"),
          {:ok, workspace} <- get_workspace(conn, workspace_id),
-         {:ok, claim_opts} <- claim_opts(params),
+         {:ok, claim_opts} <- Claim.claim_opts(params),
          {:ok, status, task} <-
-           Claim.claim(workspace, ref, Keyword.put(claim_opts, :force, force?)) do
+           workspace
+           |> Claim.claim(ref, Keyword.put(claim_opts, :force, force?))
+           |> Claim.typed() do
       conn
       |> put_status(status_code_for(status))
-      |> json(%{
-        status: Atom.to_string(status),
-        task: IssueJSON.data(task)
-      })
-    else
-      {:error, :tracker_not_supported} ->
-        {:error,
-         {:invalid_request,
-          "workspace has no tracker that supports claim; configure a tracker (github, jira, shortcut)"}}
-
-      {:error, {:already_claimed, body}} ->
-        conn
-        |> put_status(:conflict)
-        |> json(%{
-          error: %{
-            type: "already_claimed",
-            message: "this issue has already been claimed by another Arbiter installation",
-            details: %{comment: body}
-          }
-        })
-
-      {:error, {:not_assigned, login}} ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{
-          error: %{
-            type: "not_assigned",
-            message:
-              "issue is not assigned to workspace user #{inspect(login)}; pass force=true to override",
-            details: %{viewer: login}
-          }
-        })
-
-      {:error, {:invalid_ref, raw}} ->
-        {:error, {:invalid_request, "invalid issue ref: #{inspect(raw)}"}}
-
-      {:error, _} = err ->
-        err
+      |> json(Claim.serialize_claim(status, task))
     end
   end
 
   def plan(conn, %{"workspace_id" => workspace_id}) do
     with {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
-      json(conn, %{data: Enum.map(plan, &serialize_action/1)})
+      json(conn, %{data: Enum.map(plan, &Claim.serialize_action/1)})
     end
   end
 
@@ -94,61 +58,12 @@ defmodule ArbiterWeb.Api.ClaimController do
     with {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
       if dry? do
-        json(conn, %{data: Enum.map(plan, &serialize_action/1), applied: false})
+        json(conn, Claim.serialize_sync(plan, :dry))
       else
         {:ok, results} = Claim.apply_plan(workspace, plan)
-
-        json(conn, %{
-          data: Enum.map(plan, &serialize_action/1),
-          results: Enum.map(results, &serialize_result/1),
-          applied: true
-        })
+        json(conn, Claim.serialize_sync(plan, results))
       end
     end
-  end
-
-  # ---- serialization -----------------------------------------------------
-
-  defp serialize_action({:create, ref, summary}) do
-    %{
-      action: "create",
-      ref: ref,
-      title: summary[:title],
-      url: summary[:url]
-    }
-  end
-
-  defp serialize_action({:close, task_id, reason}) do
-    %{
-      action: "close",
-      task_id: task_id,
-      reason: reason
-    }
-  end
-
-  defp serialize_action({:drift, task_id, reason}) do
-    %{
-      action: "drift",
-      task_id: task_id,
-      reason: reason
-    }
-  end
-
-  defp serialize_result({:created, task}),
-    do: %{outcome: "created", task: IssueJSON.data(task)}
-
-  defp serialize_result({:closed, task}),
-    do: %{outcome: "closed", task: IssueJSON.data(task)}
-
-  defp serialize_result({:drifted, task}),
-    do: %{outcome: "drifted", task: IssueJSON.data(task)}
-
-  defp serialize_result({:error, action, reason}) do
-    %{
-      outcome: "error",
-      action: serialize_action(action),
-      reason: inspect(reason)
-    }
   end
 
   # ---- helpers ----------------------------------------------------------
@@ -159,49 +74,6 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   defp require_string(_v, name),
     do: {:error, {:invalid_request, "#{name} is required"}}
-
-  defp claim_opts(params) do
-    with {:ok, difficulty} <- fetch_optional_integer(params, "difficulty", 0..5),
-         {:ok, repo} <- fetch_optional_string(params, "repo") do
-      {:ok, [difficulty: difficulty, repo: repo]}
-    end
-  end
-
-  defp fetch_optional_integer(params, key, range) do
-    case Map.get(params, key) do
-      nil ->
-        {:ok, nil}
-
-      v when is_integer(v) ->
-        integer_in_range(v, key, range)
-
-      v when is_binary(v) ->
-        case Integer.parse(v) do
-          {n, ""} -> integer_in_range(n, key, range)
-          _ -> {:error, {:invalid_request, "#{key} must be an integer"}}
-        end
-
-      _ ->
-        {:error, {:invalid_request, "#{key} must be an integer"}}
-    end
-  end
-
-  defp integer_in_range(n, key, first..last//_ = range) do
-    if n in range do
-      {:ok, n}
-    else
-      {:error, {:invalid_request, "#{key} #{n} out of range #{first}..#{last}"}}
-    end
-  end
-
-  defp fetch_optional_string(params, key) do
-    case Map.get(params, key) do
-      nil -> {:ok, nil}
-      "" -> {:ok, nil}
-      v when is_binary(v) -> {:ok, v}
-      _ -> {:error, {:invalid_request, "#{key} must be a string"}}
-    end
-  end
 
   defp truthy?(v), do: Params.boolean(v) == {:ok, true}
 
