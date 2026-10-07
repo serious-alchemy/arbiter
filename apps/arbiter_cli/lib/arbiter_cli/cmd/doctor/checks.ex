@@ -2234,5 +2234,4 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp unknown_reason({:error, %Client.Error{message: message}}), do: to_string(message)
   defp unknown_reason({:ok, _body}), do: "the server answered in a shape this CLI does not read"
-  defp unknown_reason(_other), do: "no usable answer from the server"
 end
