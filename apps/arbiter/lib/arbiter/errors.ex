@@ -14,6 +14,8 @@ defmodule Arbiter.Errors do
       malformed (a missing or mistyped parameter).
     * `:conflict` — 409 `conflict` — the request is well formed and valid, the
       current state refuses it (closed ticket, live session, full account).
+    * `:bad_gateway` — 502 `bad_gateway` — an upstream system (the tracker)
+      failed; our side may have succeeded (the ticket exists).
     * `:busy` — 503 `busy` — a transient condition; retry after a short wait.
     * `:forbidden` / `:unauthorized` — 403 — the caller may not.
     * `:unauthenticated` — 401 — no usable credential.
@@ -30,6 +32,7 @@ defmodule Arbiter.Errors do
     unknown_provider: {"validation_error", 422},
     invalid_request: {"invalid_request", 400},
     conflict: {"conflict", 409},
+    bad_gateway: {"bad_gateway", 502},
     busy: {"busy", 503},
     forbidden: {"forbidden", 403},
     unauthorized: {"unauthorized", 403},

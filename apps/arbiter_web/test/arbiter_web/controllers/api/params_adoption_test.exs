@@ -68,9 +68,11 @@ defmodule ArbiterWeb.Api.ParamsAdoptionTest do
   end
 
   describe "attribution is derived, never asserted" do
-    test "issue create/update drop change_origin", %{conn: conn, task: task} do
+    # P-14 tightened P-07's silent drop: a forged `change_origin` on an issue
+    # write is refused (422) instead of ignored, and nothing is recorded.
+    test "issue create/update refuse change_origin", %{conn: conn, task: task} do
       conn = patch(conn, ~p"/api/issues/#{task.id}", %{title: "t2", change_origin: "forged"})
-      assert json_response(conn, 200)
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
 
       versions =
         Issue.Version

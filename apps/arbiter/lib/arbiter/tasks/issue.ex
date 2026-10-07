@@ -488,6 +488,27 @@ defmodule Arbiter.Tasks.Issue do
       accept [:reviewer_family]
     end
 
+    # P-14: the typed way to clear a tripped ReviewPatrol circuit breaker
+    # (bd-1atwts). No coordinator surface writes the raw `circuit_breaker_*`
+    # fields through `:update` any more (`Arbiter.Tasks.IssueFields`); REST (`POST /api/issues/:id/resume_review`),
+    # MCP (`ticket_resume_review`) and `arb ticket update --resume-review` all
+    # land here. Idempotent: clearing an untripped breaker changes nothing.
+    # `RecordCircuitBreakerClear` watermarks the head the breaker tripped at, so
+    # the next ReviewPatrol tick does not re-trip on the very same commit.
+    update :resume_review do
+      require_atomic? false
+      accept []
+
+      change set_attribute(:circuit_breaker_tripped, false)
+      change set_attribute(:circuit_breaker_reason, nil)
+      change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
+
+      change after_action(fn _changeset, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
     # bd-djapyj: reorder a ticket inside its workspace's rank order — the
     # space `board/scheduler.ex` and `board/autopilot.ex` read (priority,
     # then rank, then age). `rank` is deliberately not in `:update`'s

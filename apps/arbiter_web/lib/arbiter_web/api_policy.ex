@@ -116,6 +116,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/issues/:id/reopen"} => :coordinator,
     {:post, "/api/issues/:id/promote"} => :coordinator,
     {:post, "/api/issues/:id/demote"} => :coordinator,
+    {:post, "/api/issues/:id/resume_review"} => :coordinator,
     {:patch, "/api/issues/:id/rank"} => :coordinator,
     {:patch, "/api/issues/:id/floor"} => :coordinator,
     {:post, "/api/issues/:id/verify"} => :coordinator,
