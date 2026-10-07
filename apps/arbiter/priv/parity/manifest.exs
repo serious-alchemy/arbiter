@@ -74,18 +74,18 @@
       divergences: ["D-T-2", "D-T-16", "D-T-23"]
     },
     %{
-      id: "tickets/open_tickets_with_lifecycle_projection_hold_reas",
+      id: "tickets/open_tickets_with_lifecycle_projection",
       title: "Open tickets with lifecycle projection + hold reason (board feed)",
       mcp: nil,
       cli: ["arb prime"],
       rest: ["GET /api/issues/lifecycle"],
       status: {:gap, "P-13"},
       absent: %{
-        mcp: {:gap, "P-13", "add hold_reason (REST-I:97-111 ready_holds) to ticket_ready/ticket_list; coordinators cannot see why a Ready card is not dispatched."}
+        mcp: {:gap, "P-13", "`ticket_ready`/`ticket_list` carry column/step/blocked_by but not the scheduler `hold_reason`: a coordinator cannot see why a Ready card is not dispatched."}
       }
     },
     %{
-      id: "tickets/create_ticket_local_task_mirrors_upstream_tracke",
+      id: "tickets/create_ticket_local_task_mirrors",
       title: "Create ticket (local task, mirrors upstream tracker)",
       mcp: ["ticket_create", "task_create"],
       cli: ["arb ticket create", "arb create"],
@@ -94,14 +94,14 @@
       divergences: ["D-T-4", "D-T-9", "D-T-10", "D-T-21"]
     },
     %{
-      id: "tickets/create_tracker_only_unclaimed_ticket_no_local_ta",
+      id: "tickets/create_tracker_only_unclaimed_ticket_no",
       title: "Create tracker-only (unclaimed) ticket, no local task",
       mcp: nil,
       cli: ["arb ticket create"],
       rest: ["POST /api/workspaces/:workspace_id/tracker/tickets"],
       status: {:gap, "P-15"},
       absent: %{
-        mcp: {:gap, "P-15", "coordinator posting unclaimed work for the fleet (REST+CLI both have it; tracker_* tools already cover claim/sync)."}
+        mcp: {:gap, "P-15", "No MCP create of an unclaimed tracker-only ticket (REST and `arb ticket create --ticket-only` have it)."}
       }
     },
     %{
@@ -112,7 +112,7 @@
       rest: ["GET /api/workspaces/:workspace_id/tracker/issues"],
       status: {:gap, "P-15"},
       absent: %{
-        mcp: {:gap, "P-15", "tracker_claim needs a ref and the coordinator has no way to discover refs."}
+        mcp: {:gap, "P-15", "No MCP discovery of open tracker issues; `tracker_claim` needs a ref the coordinator has no way to find."}
       }
     },
     %{
@@ -125,7 +125,7 @@
       divergences: ["D-T-5", "D-T-6", "D-T-11", "D-T-18", "D-T-19"]
     },
     %{
-      id: "tickets/worker_progress_write_notes_qa_deployment_pr_bod",
+      id: "tickets/worker_progress_write_notes_qa",
       title: "Worker progress write (notes/qa/deployment/pr_body/verify_after_deploy on own ticket)",
       mcp: ["ticket_update_progress", "task_update_progress"],
       cli: nil,
@@ -133,7 +133,7 @@
       status: :partial,
       divergences: ["D-T-29"],
       absent: %{
-        cli: {:intentional, "ticket update serves."}
+        cli: {:intentional, "`arb ticket update --notes/--qa-notes/--deployment-notes/--pr-body/--verify-after-deploy` covers worker progress writes; a dedicated verb adds nothing."}
       }
     },
     %{
@@ -187,9 +187,9 @@
       rest: nil,
       status: {:gap, "P-15"},
       absent: %{
-        mcp: {:gap, "P-15", "low) - a board drag pins, CLI/MCP/REST rank \"leave the pin as it was\" (A/tasks/issue.ex:519-521) so a pinned card can only be unpinned in the browser."},
-        cli: {:gap, "P-15", "low) - a board drag pins, CLI/MCP/REST rank \"leave the pin as it was\" (A/tasks/issue.ex:519-521) so a pinned card can only be unpinned in the browser."},
-        rest: {:gap, "P-15", "low) - a board drag pins, CLI/MCP/REST rank \"leave the pin as it was\" (A/tasks/issue.ex:519-521) so a pinned card can only be unpinned in the browser."}
+        mcp: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."},
+        cli: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."},
+        rest: {:gap, "P-15", "`rank_pinned` can only be unpinned in the browser: a board drag pins, but MCP/CLI/REST rank leave the pin as it was (issue.ex:519-521)."}
       }
     },
     %{
@@ -233,18 +233,18 @@
       cli: ["arb ticket handback"],
       rest: ["POST /api/issues/:id/handback"],
       status: :partial,
-      note: "Same as 19."
+      note: "Same handoff behaviour and divergences as ticket_handoff (D-T-13, D-T-28)."
     },
     %{
-      id: "tickets/push_close_upstream_for_an_already_closed_ticket",
+      id: "tickets/push_close_upstream_for_an_already",
       title: "Push close upstream for an already-closed ticket",
       mcp: ["ticket_sync_upstream_close", "task_sync_upstream_close"],
       cli: nil,
       rest: nil,
       status: {:gap, "P-15"},
       absent: %{
-        cli: {:gap, "P-15", "arb sync reports drift entries whose remedy is exactly this action (A/tasks/claim.ex:122,542) but only MCP can run it."},
-        rest: {:gap, "P-15", "arb sync reports drift entries whose remedy is exactly this action (A/tasks/claim.ex:122,542) but only MCP can run it."}
+        cli: {:gap, "P-15", "`arb sync` reports drift whose remedy is exactly sync-upstream-close, but only MCP `ticket_sync_upstream_close` can run it."},
+        rest: {:gap, "P-15", "`arb sync` reports drift whose remedy is exactly sync-upstream-close, but only MCP `ticket_sync_upstream_close` can run it."}
       }
     },
     %{
@@ -307,10 +307,10 @@
       cli: ["arb ticket sync"],
       rest: ["GET /api/workspaces/:workspace_id/sync/plan"],
       status: :partial,
-      note: "As 27; MCP returns {applied:false, actions} vs REST {data}."
+      note: "Same as the apply form: MCP returns {applied:false, actions} where REST returns {data} (D-T-23, D-T-24)."
     },
     %{
-      id: "tickets/dispatch_a_ticket_s_worker_ticket_side_entry_onl",
+      id: "tickets/dispatch_a_ticket_s_worker_ticket_side",
       title: "Dispatch a ticket's worker (ticket-side entry only; owned by WORKERS analyst)",
       mcp: ["worker_dispatch"],
       cli: ["arb ticket dispatch", "arb dispatch"],
@@ -318,7 +318,7 @@
       status: :full
     },
     %{
-      id: "tickets/clear_review_circuit_breaker_via_ticket_update",
+      id: "tickets/clear_review_circuit_breaker_via_ticket",
       title: "Clear review circuit-breaker via ticket update",
       mcp: ["ticket_resume_review"],
       cli: ["arb ticket update"],
@@ -335,8 +335,8 @@
       rest: ["POST /api/issues", "PATCH /api/issues/:id"],
       status: {:gap, "P-14"},
       absent: %{
-        mcp: {:gap, "P-14", "low) or REST should stop accepting it; today only REST can set it (A2)."},
-        cli: {:gap, "P-14", "low) or REST should stop accepting it; today only REST can set it (A2)."}
+        mcp: {:gap, "P-14", "Per-ticket `skills` override is settable only by REST mass-assignment: expose it on every surface or stop REST accepting it (low priority)."},
+        cli: {:gap, "P-14", "Per-ticket `skills` override is settable only by REST mass-assignment: expose it on every surface or stop REST accepting it (low priority)."}
       }
     },
     %{
@@ -347,8 +347,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "CLI-only rename shim (bd-4jojpw), stderr note."},
-        rest: {:intentional, "CLI-only rename shim (bd-4jojpw), stderr note."}
+        mcp: {:intentional, "CLI-only deprecated rename shim (`arb issue` -> `arb ticket`, bd-4jojpw); no MCP/REST equivalent needed."},
+        rest: {:intentional, "CLI-only deprecated rename shim (`arb issue` -> `arb ticket`, bd-4jojpw); no MCP/REST equivalent needed."}
       }
     },
     %{
@@ -359,8 +359,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "CLI grammar shim. rank promote demote handoff handback resolve verify-less have no flat form (verify/dispatch are first-class, main.ex:335,337)."},
-        rest: {:intentional, "CLI grammar shim. rank promote demote handoff handback resolve verify-less have no flat form (verify/dispatch are first-class, main.ex:335,337)."}
+        mcp: {:intentional, "CLI-only grammar shim for the pre-`<resource> <verb>` flat verbs; no MCP/REST equivalent needed."},
+        rest: {:intentional, "CLI-only grammar shim for the pre-`<resource> <verb>` flat verbs; no MCP/REST equivalent needed."}
       }
     },
     %{
@@ -371,20 +371,20 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "CLI-only deprecated dual-mode verb (`arb update <id>` -> `ticket update`; bare -> `server deploy`)."},
+        rest: {:intentional, "CLI-only deprecated dual-mode verb (`arb update <id>` -> `ticket update`; bare -> `server deploy`)."}
       }
     },
     %{
-      id: "tickets/deprecated_mcp_aliases_13_show_ready_update_prog",
+      id: "tickets/deprecated_mcp_aliases_13_show_ready",
       title: "Deprecated MCP task_* aliases (13: show ready update_progress create update close reopen verify promote demote rank sync_upstream_close list)",
       mcp: ["task_show", "task_ready", "task_update_progress", "task_create", "task_update", "task_close", "task_reopen", "task_verify", "task_promote", "task_demote", "task_rank", "task_sync_upstream_close", "task_list"],
       cli: nil,
       rest: nil,
       status: :excluded,
       absent: %{
-        cli: {:intentional, "same-handler aliases, \"one release\", no removal date."},
-        rest: {:intentional, "same-handler aliases, \"one release\", no removal date."}
+        cli: {:intentional, "Deprecated same-handler `task_*` MCP aliases kept for one release; the CLI and REST never had them."},
+        rest: {:intentional, "Deprecated same-handler `task_*` MCP aliases kept for one release; the CLI and REST never had them."}
       }
     },
     # ---- workers ----
@@ -424,7 +424,7 @@
       status: {:gap, "P-12"},
       divergences: ["D-W-6"],
       absent: %{
-        cli: {:gap, "P-12", "CLI - REST route exists and ops need it; wire arb review --pr (revive CR as arb review, add to @known_verbs)."}
+        cli: {:gap, "P-12", "REST `POST /api/workers/review` (pr shape) exists but no CLI verb reaches it: `arb review --pr` is dead code (`Cmd.Review` is an orphan)."}
       }
     },
     %{
@@ -446,7 +446,7 @@
       divergences: ["D-W-3", "D-W-14", "D-W-23"]
     },
     %{
-      id: "workers/show_one_worker_current_run_recent_runs_output_t",
+      id: "workers/show_one_worker_current_run_recent_runs",
       title: "Show one worker (current run + recent runs + output tail)",
       mcp: ["worker_show"],
       cli: ["arb worker show"],
@@ -455,7 +455,7 @@
       divergences: ["D-W-13"]
     },
     %{
-      id: "workers/run_history_for_a_task_and_fleet_wide_run_query",
+      id: "workers/run_history_for_a_task_and_fleet_wide",
       title: "Run history for a task (and fleet-wide run query)",
       mcp: ["worker_runs"],
       cli: ["arb worker runs"],
@@ -471,8 +471,8 @@
       rest: ["GET /api/workers/history/:id"],
       status: {:gap, "P-11"},
       absent: %{
-        mcp: {:gap, "P-11", "MCP - run metadata by id (extend worker_runs with run_id);"},
-        cli: {:gap, "P-11", "CLI - arb worker runs --run <id>."}
+        mcp: {:gap, "P-11", "No MCP read of one run by id; extend `worker_runs` with `run_id`."},
+        cli: {:gap, "P-11", "No `arb worker runs --run <id>`."}
       }
     },
     %{
@@ -493,11 +493,11 @@
       status: {:gap, "P-11"},
       divergences: ["D-W-12"],
       absent: %{
-        cli: {:gap, "P-11", "CLI - arb worker prompt <id> [--run R] (read-only audit;"}
+        cli: {:gap, "P-11", "No `arb worker prompt <id> [--run R]` (the REST route exists)."}
       }
     },
     %{
-      id: "workers/enumerate_all_runs_incl_reviewgate_synthetic_chi",
+      id: "workers/enumerate_all_runs_incl_reviewgate",
       title: "Enumerate all runs incl. ReviewGate synthetic children + transcript presence",
       mcp: ["run_log_list"],
       cli: nil,
@@ -505,7 +505,7 @@
       status: {:gap, "P-11"},
       divergences: ["D-W-15"],
       absent: %{
-        cli: {:gap, "P-11", "CLI - fold into arb worker runs --corpus (REST route exists)."}
+        cli: {:gap, "P-11", "No `arb worker runs --corpus` (the REST route exists)."}
       }
     },
     %{
@@ -517,8 +517,8 @@
       status: :excluded,
       divergences: ["D-W-3"],
       absent: %{
-        cli: {:intentional, "one-off ops diagnostic over a hard-coded corpus window (@corpus_start_date, MW:25); but its class-A workspace default is a pitfall (D-W-3)."},
-        rest: {:intentional, "one-off ops diagnostic over a hard-coded corpus window (@corpus_start_date, MW:25); but its class-A workspace default is a pitfall (D-W-3)."}
+        cli: {:intentional, "One-off ops diagnostic over a hard-coded corpus window; MCP-only by design."},
+        rest: {:intentional, "One-off ops diagnostic over a hard-coded corpus window; MCP-only by design."}
       }
     },
     %{
@@ -530,23 +530,23 @@
       status: {:gap, "P-12"},
       divergences: ["D-W-20"],
       absent: %{
-        cli: {:gap, "P-12", "arb review list);"}
+        cli: {:gap, "P-12", "No `arb review list` (orphan `Cmd.Review` is not wired into the registry)."}
       }
     },
     %{
-      id: "workers/show_one_external_review_record_incl_proposed_co",
+      id: "workers/show_one_external_review_record_incl",
       title: "Show one external review record (incl. proposed_comments)",
       mcp: ["external_review_show"],
       cli: nil,
       rest: nil,
       status: {:gap, "P-12"},
       absent: %{
-        cli: {:gap, "P-12", "CLI (arb review show <id>)."},
-        rest: {:gap, "P-12", "REST (GET /api/external_reviews/:id) - report-only review findings must be readable before greenlight;"}
+        cli: {:gap, "P-12", "No `arb review show <id>`."},
+        rest: {:gap, "P-12", "No `GET /api/external_reviews/:id`: report-only findings must be readable before greenlight."}
       }
     },
     %{
-      id: "workers/read_an_external_review_s_prompt_transcript_tool",
+      id: "workers/read_an_external_review_s_prompt",
       title: "Read an external review's prompt/transcript/tool uses",
       mcp: ["external_review_transcript"],
       cli: nil,
@@ -554,7 +554,7 @@
       status: {:gap, "P-12"},
       divergences: ["D-W-22"],
       absent: %{
-        cli: {:gap, "P-12", "revive CR);"}
+        cli: {:gap, "P-12", "No `arb review transcript <id>` (orphan `Cmd.Review` is not wired into the registry)."}
       }
     },
     %{
@@ -566,23 +566,23 @@
       status: {:gap, "P-12"},
       divergences: ["D-W-21"],
       absent: %{
-        cli: {:gap, "P-12", "arb review rounds <task>; sibling of arb review resolve which already exists);"}
+        cli: {:gap, "P-12", "No `arb review rounds <task>` (sibling of `arb review resolve`, which exists)."}
       }
     },
     %{
-      id: "workers/greenlight_a_report_only_external_review_post_ap",
+      id: "workers/greenlight_a_report_only_external_review",
       title: "Greenlight a report-only external review (post approved comments)",
       mcp: ["review_greenlight"],
       cli: nil,
       rest: nil,
       status: {:gap, "P-12"},
       absent: %{
-        cli: {:gap, "P-12", "REST (POST /api/external_reviews/:id/greenlight, policy :dispatch like review) and CLI (arb review greenlight <id> [--select ..])…"},
-        rest: {:gap, "P-12", "REST (POST /api/external_reviews/:id/greenlight, policy :dispatch like review) and CLI (arb review greenlight <id> [--select ..])…"}
+        cli: {:gap, "P-12", "No `arb review greenlight <id> [--select ..]`."},
+        rest: {:gap, "P-12", "No `POST /api/external_reviews/:id/greenlight` (policy :dispatch like review)."}
       }
     },
     %{
-      id: "workers/re_arm_one_auto_resolve_attempt_on_parked_watchd",
+      id: "workers/re_arm_one_auto_resolve_attempt_on",
       title: "Re-arm one auto-resolve attempt on parked watchdog",
       mcp: ["queue_retry_auto_resolve"],
       cli: ["arb queue retry-auto-resolve"],
@@ -625,8 +625,8 @@
       rest: nil,
       status: {:gap, "P-10"},
       absent: %{
-        cli: {:gap, "P-10", "REST (worker-tier, own task) and CLI arb flake record - gemini/agy workers get only 6 MCP tools (agent_config/gemini.ex @worker_tools) so they cannot call it at all…"},
-        rest: {:gap, "P-10", "REST (worker-tier, own task) and CLI arb flake record - gemini/agy workers get only 6 MCP tools (agent_config/gemini.ex @worker_tools) so they cannot call it at all…"}
+        cli: {:gap, "P-10", "No `arb flake record`."},
+        rest: {:gap, "P-10", "No worker-tier REST route for `flake_record`; gemini/agy workers get only 6 MCP tools so cannot record a flake at all. No dedicated child: filed under P-10's worker-tier alignment."}
       }
     },
     %{
@@ -637,7 +637,7 @@
       rest: ["GET /api/coverage_shadow/preflip_gate"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "one-time operator rollout gate for merge.coverage_enabled; no coordinator workflow consumes it. (CLI exits 0 on FAIL verdict - cosmetic, noted in C.)"}
+        mcp: {:intentional, "One-time operator rollout gate for `merge.coverage_enabled`; no coordinator workflow consumes it."}
       }
     },
     %{
@@ -648,8 +648,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "host-local (systemctl --user), reads the CLI host's units."},
-        rest: {:intentional, "host-local (systemctl --user), reads the CLI host's units."}
+        mcp: {:intentional, "Host-local (`systemctl --user`): reads the CLI host's units."},
+        rest: {:intentional, "Host-local (`systemctl --user`): reads the CLI host's units."}
       }
     },
     %{
@@ -660,8 +660,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "interactive, host-local tmux socket ($XDG_RUNTIME_DIR/arbiter/session-<id>.sock)."},
-        rest: {:intentional, "interactive, host-local tmux socket ($XDG_RUNTIME_DIR/arbiter/session-<id>.sock)."}
+        mcp: {:intentional, "Interactive, host-local tmux socket."},
+        rest: {:intentional, "Interactive, host-local tmux socket."}
       }
     },
     %{
@@ -672,8 +672,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Deprecated flat alias, same behavior as row 2 + stderr note; remove with the other @legacy verbs."},
-        rest: {:intentional, "Deprecated flat alias, same behavior as row 2 + stderr note; remove with the other @legacy verbs."}
+        mcp: {:intentional, "Deprecated flat CLI alias for `arb worker resume`; MCP/REST have the canonical operation."},
+        rest: {:intentional, "Deprecated flat CLI alias for `arb worker resume`; MCP/REST have the canonical operation."}
       }
     },
     %{
@@ -684,8 +684,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Deprecated alias; BUT also swallows arb review --pr/--transcript (mis-route, task_id \"--pr\")."},
-        rest: {:intentional, "Deprecated alias; BUT also swallows arb review --pr/--transcript (mis-route, task_id \"--pr\")."}
+        mcp: {:intentional, "Deprecated flat CLI alias for `arb worker review`; MCP/REST have the canonical operation."},
+        rest: {:intentional, "Deprecated flat CLI alias for `arb worker review`; MCP/REST have the canonical operation."}
       }
     },
     # ---- accounts ----
@@ -706,7 +706,7 @@
       rest: ["GET /api/quota"],
       status: {:gap, "P-17"},
       absent: %{
-        mcp: {:gap, "P-17", "MCP - add account arg to quota_get; usage/provider_pause already take account refs, so a coordinator can name accounts but cannot read their quota."}
+        mcp: {:gap, "P-17", "`quota_get` has no `account` arg (REST `?account=` and `arb quota --account` do)."}
       }
     },
     %{
@@ -726,7 +726,7 @@
       rest: ["GET /api/usage/events"],
       status: {:gap, "P-17"},
       absent: %{
-        mcp: {:gap, "P-17", "MCP - read-only drill-down (usage_events_list: task_id/session_id/account/step/source/since/limit<=cap)…"}
+        mcp: {:gap, "P-17", "No MCP drill-down of raw usage events (needs a shared context function first)."}
       }
     },
     %{
@@ -737,7 +737,7 @@
       rest: ["GET /api/usage/calibration"],
       status: {:gap, "P-17"},
       absent: %{
-        mcp: {:gap, "P-17", "MCP - small read-only report that sits beside the loop_* analysis tools coordinators already use; low priority."}
+        mcp: {:gap, "P-17", "No MCP usage calibration report (low priority)."}
       }
     },
     %{
@@ -748,7 +748,7 @@
       rest: ["GET /api/providers/paused"],
       status: {:gap, "P-17"},
       absent: %{
-        mcp: {:gap, "P-17", "MCP - provider_list (read of Pause.to_json/0); today a coordinator can only see pauses by writing one or via an unrelated scheduler tool."}
+        mcp: {:gap, "P-17", "No MCP `provider_list` of paused providers/accounts."}
       }
     },
     %{
@@ -777,11 +777,11 @@
       rest: ["GET /api/alerts"],
       status: {:gap, "P-17"},
       absent: %{
-        cli: {:gap, "P-17", "CLI - arb alert list [--kind K] [--workspace W]; alerts (expired credential, quota poll failing, stale snapshot, overage, budget) are the installation-health signal and…"}
+        cli: {:gap, "P-17", "No `arb alert list` (alerts are readable over REST and MCP only)."}
       }
     },
     %{
-      id: "accounts/list_circuit_breakers_auth_holds_watchdog",
+      id: "accounts/list_circuit_breakers_auth_holds",
       title: "List circuit breakers + auth holds + watchdog",
       mcp: ["breaker_list"],
       cli: ["arb breaker list"],
@@ -808,7 +808,7 @@
       divergences: ["D-A-1", "D-A-2", "D-A-12"]
     },
     %{
-      id: "accounts/clear_provider_auth_hold_credential_watchdog_mar",
+      id: "accounts/clear_provider_auth_hold_credential",
       title: "Clear provider auth hold + credential-watchdog mark",
       mcp: ["breaker_reset"],
       cli: ["arb breaker reset"],
@@ -825,7 +825,7 @@
       status: {:gap, "P-17"},
       divergences: ["D-A-19"],
       absent: %{
-        mcp: {:gap, "P-17", "MCP - read-only account_list/account_show; the JSON carries credential kind + 12-char fingerprint prefix + active flag only, never a secret (account_controller.ex show…"}
+        mcp: {:gap, "P-17", "No MCP `account_list`; it is read-only and carries credential kind + fingerprint prefix, never a secret."}
       }
     },
     %{
@@ -836,7 +836,7 @@
       rest: ["GET /api/accounts/:ref"],
       status: {:gap, "P-17"},
       absent: %{
-        mcp: {:gap, "P-17", "MCP - as above (account_show)."}
+        mcp: {:gap, "P-17", "No MCP `account_show`; read-only, as `account_list`."}
       }
     },
     %{
@@ -848,11 +848,11 @@
       status: :partial,
       divergences: ["D-A-14"],
       absent: %{
-        mcp: {:intentional, "operator-asserted identity (design doc §2.4); creating accounts is an operator/UI action, not a coordinator-agent action."}
+        mcp: {:intentional, "Operator-asserted identity (design doc §2.4): creating an account is an operator/UI action, not a coordinator-agent one."}
       }
     },
     %{
-      id: "accounts/update_account_label_plan_enabled_max_concurrent",
+      id: "accounts/update_account_label_plan_enabled_max",
       title: "Update account (label/plan/enabled/max_concurrent/quota_config)",
       mcp: nil,
       cli: ["arb account set"],
@@ -860,7 +860,7 @@
       status: {:gap, "P-16"},
       divergences: ["D-A-15"],
       absent: %{
-        mcp: {:gap, "P-16", "MCP - account_set limited to the non-secret fields (same PATCH whitelist); it is the same class of fleet-routing lever as provider_pause which is already on MCP."}
+        mcp: {:gap, "P-16", "No MCP `account_set` for the non-secret fields (the same PATCH whitelist), though `provider_pause` is the same class of lever and is on MCP."}
       }
     },
     %{
@@ -872,7 +872,7 @@
       status: :partial,
       divergences: ["D-A-16", "D-A-17"],
       absent: %{
-        mcp: {:intentional, "topology change, operator action."}
+        mcp: {:intentional, "Topology change; operator action."}
       }
     },
     %{
@@ -883,9 +883,9 @@
       rest: nil,
       status: {:gap, "P-16"},
       absent: %{
-        mcp: {:intentional, "same reason as attach)."},
-        cli: {:gap, "P-16", "REST + CLI - DELETE /api/accounts/:ref/attach/:workspace_id + arb account detach WS REF…"},
-        rest: {:gap, "P-16", "REST + CLI - DELETE /api/accounts/:ref/attach/:workspace_id + arb account detach WS REF…"}
+        mcp: {:intentional, "Topology change; operator action (as attach)."},
+        cli: {:gap, "P-16", "No `arb account detach <ws> <ref>`."},
+        rest: {:gap, "P-16", "No `DELETE /api/accounts/:ref/attach/:workspace_id`; the context function is UI-only today."}
       }
     },
     %{
@@ -896,7 +896,7 @@
       rest: ["POST /api/accounts/:ref/rotate"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "the secret would be a tool argument, i.e. in the model transcript and MCP request logs."}
+        mcp: {:intentional, "The secret would be a tool argument, i.e. in the model transcript and MCP request logs."}
       }
     },
     %{
@@ -907,7 +907,7 @@
       rest: ["POST /api/accounts/:ref/merge"],
       status: :full,
       absent: %{
-        mcp: {:intentional, "irreversible re-pointing of ledger/credential rows; operator action."}
+        mcp: {:intentional, "Irreversible re-pointing of ledger/credential rows; operator action."}
       }
     },
     %{
@@ -918,7 +918,7 @@
       rest: ["DELETE /api/accounts/:ref"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "destructive, operator action."}
+        mcp: {:intentional, "Destructive; operator action."}
       }
     },
     %{
@@ -930,7 +930,7 @@
       status: :partial,
       divergences: ["D-A-18"],
       absent: %{
-        mcp: {:intentional, "interactive (URL/device code + hidden-echo paste prompt) and launches the provider CLI in a tmux session on the host; credential-adjacent."}
+        mcp: {:intentional, "Interactive (URL/device code plus hidden paste prompt) and launches the provider CLI in a host tmux session; credential-adjacent."}
       }
     },
     %{
@@ -941,7 +941,7 @@
       rest: ["GET /api/account_logins/:id"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "and no standalone CLI verb - machine hop of the interactive flow."}
+        mcp: {:intentional, "Machine hop of the interactive login flow."}
       }
     },
     %{
@@ -952,7 +952,7 @@
       rest: ["POST /api/account_logins/:id/paste"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "standalone - a code must never ride in argv or a tool arg (CLI refuses --code, login.ex:46-56)."}
+        mcp: {:intentional, "A pasted login code must never ride in a tool argument or argv."}
       }
     },
     %{
@@ -963,7 +963,7 @@
       rest: ["POST /api/account_logins/:id/cancel"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "; flow-internal."}
+        mcp: {:intentional, "Flow-internal step of the interactive login."}
       }
     },
     %{
@@ -974,8 +974,8 @@
       rest: ["GET /providers/logins/:id/transcript"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "redacted final-screen download for the dashboard."},
-        cli: {:intentional, "redacted final-screen download for the dashboard."}
+        mcp: {:intentional, "Redacted final-screen download for the dashboard (browser route, loopback-only)."},
+        cli: {:intentional, "Redacted final-screen download for the dashboard (browser route, loopback-only)."}
       }
     },
     %{
@@ -986,7 +986,7 @@
       rest: ["GET /api/images"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "host/podman operator surface; no UI. (A read-only image_list would be harmless but nothing needs it.)"}
+        mcp: {:intentional, "Host/podman operator surface; nothing needs a coordinator-side read."}
       }
     },
     %{
@@ -998,7 +998,7 @@
       status: :partial,
       divergences: ["D-A-1"],
       absent: %{
-        mcp: {:intentional, "minutes-long (25 min client timeout) synchronous host build, would block/timeout a JSON-RPC call."}
+        mcp: {:intentional, "Minutes-long synchronous host build; would block or time out a JSON-RPC call."}
       }
     },
     %{
@@ -1009,7 +1009,7 @@
       rest: ["POST /api/images/refresh"],
       status: :full,
       absent: %{
-        mcp: {:intentional, "host maintenance."}
+        mcp: {:intentional, "Host maintenance."}
       }
     },
     %{
@@ -1020,7 +1020,7 @@
       rest: ["POST /api/images/prune"],
       status: :full,
       absent: %{
-        mcp: {:intentional, "destructive host maintenance."}
+        mcp: {:intentional, "Destructive host maintenance."}
       }
     },
     %{
@@ -1031,7 +1031,7 @@
       rest: ["POST /api/grok/token"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "it returns a live bearer token;"}
+        mcp: {:intentional, "Returns a live bearer token and MCP results are model-visible; `arb grok-token` is the grok CLI's auth-provider command."}
       }
     },
     %{
@@ -1042,7 +1042,7 @@
       rest: ["GET /api/server/claude_credentials"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Cross-domain (server/doctor analyst owns the ruling); listed so every route is covered."}
+        mcp: {:intentional, "Host/credential posture diagnostic read by `arb doctor`; an operator-host fact a coordinator cannot act on."}
       }
     },
     %{
@@ -1053,7 +1053,7 @@
       rest: ["GET /api/server/grok_auth"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Cross-domain; as above."}
+        mcp: {:intentional, "Host/credential posture diagnostic read by `arb doctor`; an operator-host fact a coordinator cannot act on."}
       }
     },
     %{
@@ -1064,7 +1064,7 @@
       rest: ["GET /api/server/provider_accounts"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Cross-domain; as above."}
+        mcp: {:intentional, "Host/credential posture diagnostic read by `arb doctor`; an operator-host fact a coordinator cannot act on."}
       }
     },
     # ---- workspace ----
@@ -1095,11 +1095,11 @@
       status: :partial,
       divergences: ["D-C-19"],
       absent: %{
-        mcp: {:intentional, "provisioning starts merge/dispatch/PR patrol processes and registers repo paths; operator action, not a coordinator-LLM one."}
+        mcp: {:intentional, "Provisioning starts merge/dispatch/PR-patrol processes and registers repo paths; an operator action, not a coordinator-LLM one."}
       }
     },
     %{
-      id: "workspace/update_workspace_attrs_name_description_prefix_w",
+      id: "workspace/update_workspace_attrs_name_description",
       title: "Update workspace attrs (name/description/prefix/whole config)",
       mcp: nil,
       cli: nil,
@@ -1107,8 +1107,8 @@
       status: {:gap, "P-21"},
       divergences: ["D-C-6"],
       absent: %{
-        mcp: {:intentional, "rename/prefix change is operator-level; config goes through workspace_config_set."},
-        cli: {:gap, "P-21", "CLI - arb workspace update <ws> [--name --description --prefix] (UI has save_details, workspace_detail_live.ex:216)."}
+        mcp: {:intentional, "Rename/prefix change is operator-level; config goes through `workspace_config_set`."},
+        cli: {:gap, "P-21", "No `arb workspace update <ws> [--name --description --prefix]` (the UI has it)."}
       }
     },
     %{
@@ -1129,7 +1129,7 @@
       status: :partial,
       divergences: ["D-C-14"],
       absent: %{
-        rest: {:intentional, "pure view of config; but MCP and CLI are two separate copies (D-C-14, D-C-D1): host the grouping in one core function."}
+        rest: {:intentional, "Pure view of `config`, derivable from `GET /api/workspaces/:id`."}
       }
     },
     %{
@@ -1159,8 +1159,8 @@
       status: {:gap, "P-21"},
       divergences: ["D-C-17"],
       absent: %{
-        mcp: {:gap, "P-21", "MCP - accept patch/unset_paths maps in workspace_config_set (UI does multi-key atomic saves, policy_config_component.ex:56…"},
-        cli: {:intentional, "config set per key is the CLI contract; --file patch.json would be a nice-to-have."}
+        mcp: {:gap, "P-21", "`workspace_config_set` takes one dotted key; it cannot send a multi-key `patch`/`unset_paths` as REST and the UI can."},
+        cli: {:intentional, "`arb config set` per key is the CLI contract."}
       }
     },
     %{
@@ -1171,8 +1171,8 @@
       rest: nil,
       status: {:gap, "P-21"},
       absent: %{
-        mcp: {:gap, "P-21", "MCP - a coordinator editing config via workspace_config_set has no in-band schema."},
-        rest: {:gap, "P-21", "REST - GET /api/workspaces/config_schema."}
+        mcp: {:gap, "P-21", "A coordinator editing config has no in-band schema."},
+        rest: {:gap, "P-21", "No `GET /api/workspaces/config_schema`; the schema lives CLI-side (`config_schema.ex`)."}
       }
     },
     %{
@@ -1182,7 +1182,7 @@
       cli: ["arb workspace standing-order ls"],
       rest: ["GET /api/workspaces/:id"],
       status: :partial,
-      note: "No dedicated verb on MCP/REST: INTENTIONALLY ABSENT: MCP/REST - list lives in config; whole-config access suffices."
+      note: "No dedicated list verb on MCP/REST: the list lives in workspace config, read through whole-config access."
     },
     %{
       id: "workspace/standing_orders_add",
@@ -1200,7 +1200,7 @@
       cli: ["arb workspace standing-order rm"],
       rest: ["PATCH /api/workspaces/:id/config"],
       status: :partial,
-      note: "Same ruling as add."
+      note: "Remove is a full-list rewrite on MCP/REST; only the CLI has a per-entry verb."
     },
     %{
       id: "workspace/repo_scoped_standing_orders",
@@ -1228,7 +1228,7 @@
       status: :excluded,
       divergences: ["D-C-4", "D-C-5", "D-C-36"],
       absent: %{
-        mcp: {:intentional, "credential material must not transit an LLM context."}
+        mcp: {:intentional, "Credential material must not transit an LLM context."}
       }
     },
     %{
@@ -1239,7 +1239,7 @@
       rest: ["PATCH /api/workspaces/:id"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "same as set."}
+        mcp: {:intentional, "Credential material must not transit an LLM context."}
       }
     },
     %{
@@ -1250,8 +1250,8 @@
       rest: ["GET /api/workspaces"],
       status: {:gap, "P-21"},
       absent: %{
-        mcp: {:gap, "P-21", "MCP - names/flags in workspace_show (workers/coordinators need to know which env exists; no values)."},
-        cli: {:gap, "P-21", "CLI - arb workspace env ls."}
+        mcp: {:gap, "P-21", "`workspace_show` does not list worker_env names/secret flags."},
+        cli: {:gap, "P-21", "No `arb workspace env ls`."}
       }
     },
     %{
@@ -1262,9 +1262,9 @@
       rest: nil,
       status: {:gap, "P-21"},
       absent: %{
-        mcp: {:intentional, "may carry credentials; same rule as secrets."},
-        cli: {:gap, "P-21", "CLI - arb workspace env set <name> [--secret] [--value-file|-]."},
-        rest: {:gap, "P-21", "REST - add worker_env to the whitelist;"}
+        mcp: {:intentional, "May carry credentials; same rule as secrets."},
+        cli: {:gap, "P-21", "No `arb workspace env set`."},
+        rest: {:gap, "P-21", "`worker_env` is not in the workspace PATCH whitelist (UI-only today)."}
       }
     },
     %{
@@ -1275,9 +1275,9 @@
       rest: nil,
       status: {:gap, "P-21"},
       absent: %{
-        mcp: {:intentional, "."},
-        cli: {:gap, "P-21", "CLI env rm;"},
-        rest: {:gap, "P-21", "REST (worker_env:{name:null});"}
+        mcp: {:intentional, "May carry credentials; same rule as secrets."},
+        cli: {:gap, "P-21", "No `arb workspace env rm`."},
+        rest: {:gap, "P-21", "No way to remove a worker_env entry over REST (UI-only today)."}
       }
     },
     %{
@@ -1288,9 +1288,9 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "revealing a secret value must stay off every machine surface (MCP especially); browser (operator session) only."},
-        cli: {:intentional, "same; if ever added it needs :operator policy, never coordinator."},
-        rest: {:intentional, "revealing a secret value must stay off every machine surface (MCP especially); browser (operator session) only."}
+        mcp: {:intentional, "Revealing a secret value stays browser-only (operator session); never on a machine surface."},
+        cli: {:intentional, "Revealing a secret value stays browser-only (operator session); never on a machine surface."},
+        rest: {:intentional, "Revealing a secret value stays browser-only (operator session); never on a machine surface."}
       }
     },
     %{
@@ -1320,7 +1320,7 @@
       status: :full
     },
     %{
-      id: "workspace/installation_settings_schema_descriptions",
+      id: "workspace/installation_settings_schema",
       title: "Installation settings: schema/descriptions",
       mcp: nil,
       cli: ["arb settings schema"],
@@ -1328,7 +1328,7 @@
       status: :partial,
       divergences: ["D-C-11"],
       absent: %{
-        mcp: {:intentional, "installation_config_get should return the REST describe shape instead of a new tool (D-C-11)."}
+        mcp: {:intentional, "`installation_config_get` should return the REST describe shape rather than gain a new tool (D-C-11)."}
       }
     },
     %{
@@ -1385,7 +1385,7 @@
       status: {:gap, "P-23"},
       divergences: ["D-C-30"],
       absent: %{
-        mcp: {:gap, "P-23", "MCP - loop_analyze (coordinator tier, discover bounded like memory_distill's caps, memory_pending.ex:123)…"}
+        mcp: {:gap, "P-23", "No `loop_analyze` MCP tool (REST GET and `arb loop analyze` exist)."}
       }
     },
     %{
@@ -1396,7 +1396,7 @@
       rest: ["POST /api/loop/propose"],
       status: {:gap, "P-23"},
       absent: %{
-        mcp: {:gap, "P-23", "MCP - loop_propose (same tool as analyze with propose:true); proposals land only as reviewable pending rows, decision stays human/coordinator-apply."}
+        mcp: {:gap, "P-23", "No `loop_propose` MCP tool (analyze + persist pending proposals)."}
       }
     },
     %{
@@ -1407,7 +1407,7 @@
       rest: ["POST /api/loop/propose/repo_doc_patch"],
       status: {:gap, "P-23"},
       absent: %{
-        mcp: {:gap, "P-23", "MCP - loop_propose_repo_doc_patch; it is a pure queue write exactly like loop_propose_routing, which MCP has."}
+        mcp: {:gap, "P-23", "No `loop_propose_repo_doc_patch` MCP tool; it is a pure queue write like `loop_propose_routing`."}
       }
     },
     %{
@@ -1464,8 +1464,8 @@
       status: :excluded,
       divergences: ["D-C-2"],
       absent: %{
-        mcp: {:intentional, "deliberate \"never a server-side bulk write\" (loop.ex:479-480 comment); but CLI --workspace is dead so it applies across ALL workspaces (D-C-2, H)."},
-        rest: {:intentional, "deliberate \"never a server-side bulk write\" (loop.ex:479-480 comment); but CLI --workspace is dead so it applies across ALL workspaces (D-C-2, H)."}
+        mcp: {:intentional, "Deliberately a CLI-only convenience over the per-row endpoint: never a server-side bulk write."},
+        rest: {:intentional, "Deliberately a CLI-only convenience over the per-row endpoint: never a server-side bulk write."}
       }
     },
     %{
@@ -1484,8 +1484,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST - arb memory pending / GET /api/memory/pending; the write side is gated to a PLAIN coordinator token (no session id) i.e…"},
-        rest: {:gap, "P-25", "CLI/REST - arb memory pending / GET /api/memory/pending; the write side is gated to a PLAIN coordinator token (no session id) i.e…"}
+        cli: {:gap, "P-25", "No `arb memory pending` / `GET /api/memory/pending` (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No `arb memory pending` / `GET /api/memory/pending` (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1496,8 +1496,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST (same reason)."},
-        rest: {:gap, "P-25", "CLI/REST (same reason)."}
+        cli: {:gap, "P-25", "No CLI/REST show of a pending memory diff (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST show of a pending memory diff (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1508,8 +1508,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST - REST policy must be :operator (not :coordinator) to preserve \"session token refused\" (memory_pending.ex:138-143)."},
-        rest: {:gap, "P-25", "CLI/REST - REST policy must be :operator (not :coordinator) to preserve \"session token refused\" (memory_pending.ex:138-143)."}
+        cli: {:gap, "P-25", "No CLI/REST promote of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST promote of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1520,8 +1520,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST (:operator)."},
-        rest: {:gap, "P-25", "CLI/REST (:operator)."}
+        cli: {:gap, "P-25", "No CLI/REST reject of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST reject of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1532,8 +1532,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST."},
-        rest: {:gap, "P-25", "CLI/REST."}
+        cli: {:gap, "P-25", "No CLI/REST list of quarantined memory (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST list of quarantined memory (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1544,8 +1544,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST (:operator)."},
-        rest: {:gap, "P-25", "CLI/REST (:operator)."}
+        cli: {:gap, "P-25", "No CLI/REST restore from quarantine (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST restore from quarantine (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1556,8 +1556,8 @@
       rest: nil,
       status: {:gap, "P-25"},
       absent: %{
-        cli: {:gap, "P-25", "CLI/REST (:operator); memory root is a host-local file store (Paths.memory_root()) but the server owns it, so REST is fine."},
-        rest: {:gap, "P-25", "CLI/REST (:operator); memory root is a host-local file store (Paths.memory_root()) but the server owns it, so REST is fine."}
+        cli: {:gap, "P-25", "No CLI/REST distill of a session transcript (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
+        rest: {:gap, "P-25", "No CLI/REST distill of a session transcript (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
       }
     },
     %{
@@ -1578,7 +1578,7 @@
       status: {:gap, "P-24"},
       divergences: ["D-C-31"],
       absent: %{
-        rest: {:gap, "P-24", "REST - GET /api/repos/:name so the three finders collapse; low priority."}
+        rest: {:gap, "P-24", "No `GET /api/repos/:name` (MCP `repo_show` and `arb repo show` exist; low priority)."}
       }
     },
     %{
@@ -1590,7 +1590,7 @@
       status: :excluded,
       divergences: ["D-C-38"],
       absent: %{
-        mcp: {:intentional, "host-local scaffolding."}
+        mcp: {:intentional, "Host-local scaffolding."}
       }
     },
     %{
@@ -1602,7 +1602,7 @@
       status: :excluded,
       divergences: ["D-C-38"],
       absent: %{
-        mcp: {:intentional, "tokens/scope already carry the workspace."}
+        mcp: {:intentional, "Tokens/scope already carry the workspace."}
       }
     },
     # ---- misc ----
@@ -1616,18 +1616,18 @@
       divergences: ["D-M-2", "D-M-5", "D-M-6", "D-M-12"]
     },
     %{
-      id: "misc/read_coordinator_outstanding_queue_read_not_clea",
+      id: "misc/read_coordinator_outstanding_queue_read",
       title: "Read coordinator \"outstanding\" queue (read, not cleared)",
       mcp: ["coordinator_inbox"],
       cli: nil,
       rest: ["GET /api/messages"],
       status: {:gap, "P-26"},
       absent: %{
-        cli: {:gap, "P-26", "arb inbox --outstanding (inbox.ex:72-105 has no such form; --all = 20 newest of any state, not the triage queue)."}
+        cli: {:gap, "P-26", "No `arb inbox --outstanding` (MCP and REST can read the outstanding queue)."}
       }
     },
     %{
-      id: "misc/coordinator_attention_queue_open_tickets_whose_a",
+      id: "misc/coordinator_attention_queue_open_tickets",
       title: "Coordinator attention queue (open tickets whose attention the coordinator owns)",
       mcp: ["coordinator_inbox"],
       cli: nil,
@@ -1635,23 +1635,23 @@
       status: {:gap, "P-27"},
       divergences: ["D-M-7"],
       absent: %{
-        cli: {:gap, "P-27", "arb inbox prints it / arb attention."},
-        rest: {:gap, "P-27", "GET /api/attention?owner=&workspace_id= over Tasks.Attention.items/1 (MCP is the only consumer, MSG:158)."}
+        cli: {:gap, "P-27", "No REST or CLI view of the coordinator attention queue; MCP `coordinator_inbox` is its only consumer (`GET /api/attention` planned)."},
+        rest: {:gap, "P-27", "No REST or CLI view of the coordinator attention queue; MCP `coordinator_inbox` is its only consumer (`GET /api/attention` planned)."}
       }
     },
     %{
-      id: "misc/browse_coordinator_mailbox_history_incl_read_cle",
+      id: "misc/browse_coordinator_mailbox_history_incl",
       title: "Browse coordinator mailbox history incl. read+cleared",
       mcp: nil,
       cli: ["arb inbox"],
       rest: ["GET /api/messages"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "mailbox model is unread/outstanding queue only; archive browsing is REST/dashboard."}
+        mcp: {:intentional, "Archive browsing is REST/dashboard; the MCP mailbox model is the unread/outstanding queue only."}
       }
     },
     %{
-      id: "misc/drain_a_task_s_mailbox_unread_worker_reads_own_c",
+      id: "misc/drain_a_task_s_mailbox_unread_worker",
       title: "Drain a task's mailbox (unread; worker reads own, coordinator any)",
       mcp: ["inbox_check"],
       cli: ["arb message inbox", "arb inbox"],
@@ -1660,14 +1660,14 @@
       divergences: ["D-M-1", "D-M-5", "D-M-9"]
     },
     %{
-      id: "misc/task_mailbox_outstanding_read_not_cleared",
+      id: "misc/task_mailbox_outstanding_read_not",
       title: "Task mailbox, outstanding (read, not cleared)",
       mcp: ["inbox_check"],
       cli: nil,
       rest: ["GET /api/messages"],
       status: {:gap, "P-26"},
       absent: %{
-        cli: {:gap, "P-26", "same --outstanding flag as row 2."}
+        cli: {:gap, "P-26", "No `arb inbox --outstanding` for a task mailbox."}
       }
     },
     %{
@@ -1678,8 +1678,8 @@
       rest: ["GET /api/messages/:id"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "list results already carry full bodies."},
-        cli: {:intentional, "inbox read <id> shows one in full."}
+        mcp: {:intentional, "List results already carry full bodies."},
+        cli: {:intentional, "`inbox read <id>` shows one message in full."}
       }
     },
     %{
@@ -1691,7 +1691,7 @@
       status: :partial,
       divergences: ["D-M-10"],
       absent: %{
-        mcp: {:intentional, "unread listing already marks read; per-id ack is not a coordinator need."}
+        mcp: {:intentional, "The unread listing already marks read; a per-id ack is not a coordinator need."}
       }
     },
     %{
@@ -1704,7 +1704,7 @@
       divergences: ["D-M-2", "D-M-10"]
     },
     %{
-      id: "misc/clear_all_coordinator_messages_for_one_task",
+      id: "misc/clear_all_coordinator_messages_for_one",
       title: "Clear all coordinator messages for one task",
       mcp: ["coordinator_inbox_clear"],
       cli: ["arb inbox clear"],
@@ -1729,7 +1729,7 @@
       rest: ["DELETE /api/messages"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "clearing unseen mail is destructive;"}
+        mcp: {:intentional, "Clearing unseen mail is destructive; MCP lists then clears."}
       }
     },
     %{
@@ -1767,8 +1767,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Legacy aliases; remove with the next CLI cut. Same handlers as rows 1/5/15/13."},
-        rest: {:intentional, "Legacy aliases; remove with the next CLI cut. Same handlers as rows 1/5/15/13."}
+        mcp: {:intentional, "Deprecated flat CLI aliases (`arb inbox|notify|msg`); the canonical `arb message ...` forms are other rows."},
+        rest: {:intentional, "Deprecated flat CLI aliases (`arb inbox|notify|msg`); the canonical `arb message ...` forms are other rows."}
       }
     },
     %{
@@ -1813,8 +1813,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Client-side blocking poll over `scheduler_status`; the server has no wait primitive."},
+        rest: {:intentional, "Client-side blocking poll over `scheduler_status`; the server has no wait primitive."}
       }
     },
     %{
@@ -1825,7 +1825,7 @@
       rest: ["POST /api/nodes/join-tokens"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "operator proof required (POL:306); an LLM coordinator must not enrol machines that receive provider tokens (POL:24-28)."}
+        mcp: {:intentional, "Operator proof required: an LLM coordinator must not enrol machines that receive provider tokens."}
       }
     },
     %{
@@ -1836,7 +1836,7 @@
       rest: ["GET /api/nodes"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "follows REST policy (reads are operator-only)."}
+        mcp: {:intentional, "Node administration is operator-proof only (REST refuses coordinator tokens); relax REST reads first if coordinator visibility is wanted."}
       }
     },
     %{
@@ -1847,7 +1847,7 @@
       rest: ["GET /api/nodes/:ref"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same as 23."}
+        mcp: {:intentional, "Node administration is operator-proof only (REST refuses coordinator tokens); relax REST reads first if coordinator visibility is wanted."}
       }
     },
     %{
@@ -1858,11 +1858,11 @@
       rest: ["GET /api/nodes/:ref/events"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same as 23. (events local -> 404: fetch(\"local\") is nil, node_controller.ex:84,167.)"}
+        mcp: {:intentional, "Node administration is operator-proof only (REST refuses coordinator tokens); relax REST reads first if coordinator visibility is wanted."}
       }
     },
     %{
-      id: "misc/edit_node_name_labels_max_workers_takes_max_work",
+      id: "misc/edit_node_name_labels_max_workers_takes",
       title: "Edit node (name, labels, max_workers; local takes max_workers)",
       mcp: nil,
       cli: ["arb node set"],
@@ -1870,7 +1870,7 @@
       status: :excluded,
       divergences: ["D-M-16"],
       absent: %{
-        mcp: {:intentional, "operator-proof mutation)."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1881,7 +1881,7 @@
       rest: ["POST /api/nodes/:ref/drain"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "(operator-proof mutation)."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1892,7 +1892,7 @@
       rest: ["POST /api/nodes/:ref/undrain"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1903,7 +1903,7 @@
       rest: ["POST /api/nodes/:ref/revoke"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1914,7 +1914,7 @@
       rest: ["POST /api/nodes/:ref/upgrade"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1925,7 +1925,7 @@
       rest: ["DELETE /api/nodes/:ref"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same."}
+        mcp: {:intentional, "Operator-proof node mutation; an LLM coordinator must not drive it."}
       }
     },
     %{
@@ -1936,8 +1936,8 @@
       rest: ["GET /nodes/join", "GET /nodes/ping", "POST /nodes/enroll", "GET /nodes/agent/:file", "GET /nodes/files/:sha"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Machine endpoints for the node agent; join token / arbn_ credential, disjoint from Scope/ApiPolicy. Not for agents or the CLI. Handler details (unverified)."},
-        cli: {:intentional, "Machine endpoints for the node agent; join token / arbn_ credential, disjoint from Scope/ApiPolicy. Not for agents or the CLI. Handler details (unverified)."}
+        mcp: {:intentional, "Node-tier machine endpoint (join token / node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."},
+        cli: {:intentional, "Node-tier machine endpoint (join token / node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."}
       }
     },
     %{
@@ -1948,8 +1948,8 @@
       rest: ["WS /node/socket"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Node credential only; node agent transport. (unverified)"},
-        cli: {:intentional, "Node credential only; node agent transport. (unverified)"}
+        mcp: {:intentional, "Node-tier machine endpoint (node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."},
+        cli: {:intentional, "Node-tier machine endpoint (node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."}
       }
     },
     %{
@@ -1961,7 +1961,7 @@
       status: :partial,
       divergences: ["D-M-15"],
       absent: %{
-        mcp: {:intentional, "a tool that mints tokens would let any coordinator-tier call widen authority; minting is bearer/operator-socket only."}
+        mcp: {:intentional, "A token-minting tool would let any coordinator widen its own authority; minting is bearer/operator-socket only."}
       }
     },
     %{
@@ -1973,7 +1973,7 @@
       status: :partial,
       divergences: ["D-M-15"],
       absent: %{
-        mcp: {:intentional, "debug aid."}
+        mcp: {:intentional, "Debug aid; no tool surface needed."}
       }
     },
     %{
@@ -1984,12 +1984,12 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "operator proof must come from the peer-credential-checked unix socket (operator_socket.ex:224-240)."},
-        rest: {:intentional, "operator proof must come from the peer-credential-checked unix socket (operator_socket.ex:224-240)."}
+        mcp: {:intentional, "Operator proof must come from the peer-credential-checked unix socket."},
+        rest: {:intentional, "Operator proof must come from the peer-credential-checked unix socket."}
       }
     },
     %{
-      id: "misc/dashboard_login_token_operator_dashboard_session",
+      id: "misc/dashboard_login_token_operator_dashboard",
       title: "Dashboard login token (-> operator dashboard session)",
       mcp: nil,
       cli: ["arb dashboard login"],
@@ -1997,11 +1997,11 @@
       status: :partial,
       divergences: ["D-M-14"],
       absent: %{
-        mcp: {:intentional, "browser operator grant."}
+        mcp: {:intentional, "Browser operator grant; not for an LLM."}
       }
     },
     %{
-      id: "misc/server_version_sha_boot_time_update_check",
+      id: "misc/server_version_sha_boot_time_update",
       title: "Server version / sha / boot time / update check",
       mcp: nil,
       cli: ["arb version", "arb server version"],
@@ -2009,7 +2009,7 @@
       status: {:gap, "P-27"},
       divergences: ["D-M-18"],
       absent: %{
-        mcp: {:gap, "P-27", "read-only server_version (or server_status) returning /api/version (sha, built_at, booted_at): the Verifying flow needs \"did the restart land on the new sha\";"}
+        mcp: {:gap, "P-27", "No read-only `server_status` MCP tool (version/sha/built_at/booted_at); the Verifying flow needs it."}
       }
     },
     %{
@@ -2020,18 +2020,18 @@
       rest: ["GET /api/server/migrations"],
       status: {:gap, "P-27"},
       absent: %{
-        mcp: {:gap, "P-27", "fold into the server_status of row 44 (anonymous on REST)."}
+        mcp: {:gap, "P-27", "No MCP read of pending-migration status; fold into `server_status` with the version read."}
       }
     },
     %{
-      id: "misc/host_posture_diagnostics_13_bind_address_agy_wri",
+      id: "misc/host_posture_diagnostics_13_bind_address",
       title: "Host posture diagnostics (13): bind_address, agy_write_jail, egress_jail, guardrails, claude_credentials, grok_auth, provider_accounts, merge_routing, tmux, worker_tmp, podman_sandbox, worker_memory, dashboard_auth",
       mcp: nil,
       cli: ["arb server doctor"],
       rest: ["GET /api/server/bind_address", "GET /api/server/agy_write_jail", "GET /api/server/egress_jail", "GET /api/server/guardrails", "GET /api/server/merge_routing", "GET /api/server/podman_sandbox", "GET /api/server/tmux", "GET /api/server/worker_memory", "GET /api/server/worker_tmp", "GET /api/server/dashboard_auth"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "host paths, credential-gap and jail posture are operator-host facts an LLM cannot act on; egress_jail starts a proxy per call…"}
+        mcp: {:intentional, "Host paths, credential-gap and jail posture are operator-host facts an LLM cannot act on; `scheduler_status`/`alert_list`/`breaker_list` cover runtime health."}
       }
     },
     %{
@@ -2042,8 +2042,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Client-side composite plus host-local checks; REST/MCP expose the parts, not the composite."},
+        rest: {:intentional, "Client-side composite plus host-local checks; REST/MCP expose the parts, not the composite."}
       }
     },
     %{
@@ -2054,7 +2054,7 @@
       rest: ["GET /api/scheduler/status"],
       status: :partial,
       absent: %{
-        mcp: {:intentional, "as an MCP tool: a coordinator session composes the five calls; one fat tool would bloat context and hide per-call errors)."}
+        mcp: {:intentional, "A composite of existing calls; one fat tool would bloat context and hide per-call errors."}
       }
     },
     %{
@@ -2065,7 +2065,7 @@
       rest: ["GET /api/workspaces"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."}
+        mcp: {:intentional, "Reports the CLI's own workspace resolution; meaningless server-side."}
       }
     },
     %{
@@ -2076,7 +2076,7 @@
       rest: ["POST /api/mcp/tokens"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."}
+        mcp: {:intentional, "Host-local file writer (embeds a live token)."}
       }
     },
     %{
@@ -2087,8 +2087,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Spawns `mix phx.server` on the host."},
+        rest: {:intentional, "Spawns `mix phx.server` on the host."}
       }
     },
     %{
@@ -2099,8 +2099,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, ". systemctl/kill; kills in-flight workers; worker-session guard."},
-        rest: {:intentional, ". systemctl/kill; kills in-flight workers; worker-session guard."}
+        mcp: {:intentional, "systemctl/kill on the host; kills in-flight workers."},
+        rest: {:intentional, "systemctl/kill on the host; kills in-flight workers."}
       }
     },
     %{
@@ -2111,8 +2111,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Downloads and swaps the release, then restarts; a REST/MCP deploy route would let a coordinator replace the running server."},
+        rest: {:intentional, "Downloads and swaps the release, then restarts; a REST/MCP deploy route would let a coordinator replace the running server."}
       }
     },
     %{
@@ -2123,8 +2123,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Same as 53."},
-        rest: {:intentional, "Same as 53."}
+        mcp: {:intentional, "Host-local `git pull` deploy; as the release deploy."},
+        rest: {:intentional, "Host-local `git pull` deploy; as the release deploy."}
       }
     },
     %{
@@ -2135,8 +2135,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Restarts the server (migrations run on boot) or runs `mix arbiter.migrate` while it is down."},
+        rest: {:intentional, "Restarts the server (migrations run on boot) or runs `mix arbiter.migrate` while it is down."}
       }
     },
     %{
@@ -2147,8 +2147,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Host-local build+copy of the escript."},
-        rest: {:intentional, "Host-local build+copy of the escript."}
+        mcp: {:intentional, "Host-local build and copy of the escript."},
+        rest: {:intentional, "Host-local build and copy of the escript."}
       }
     },
     %{
@@ -2159,8 +2159,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into arbiter.env). --uninstall skips both guards (unverified, per inventory)."},
-        rest: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into arbiter.env). --uninstall skips both guards (unverified, per inventory)."}
+        mcp: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `arbiter.env`)."},
+        rest: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `arbiter.env`)."}
       }
     },
     %{
@@ -2172,8 +2172,8 @@
       status: :excluded,
       divergences: ["D-M-19"],
       absent: %{
-        mcp: {:intentional, "GitHub + local filesystem only. Progress lines go to stdout and break --json (self_update.ex:305-309, D-M-19)."},
-        rest: {:intentional, "GitHub + local filesystem only. Progress lines go to stdout and break --json (self_update.ex:305-309, D-M-19)."}
+        mcp: {:intentional, "GitHub plus local filesystem only."},
+        rest: {:intentional, "GitHub plus local filesystem only."}
       }
     },
     %{
@@ -2184,8 +2184,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "."},
-        rest: {:intentional, "."}
+        mcp: {:intentional, "Browser-launched tmux scopes owned by the dashboard; host-local."},
+        rest: {:intentional, "Browser-launched tmux scopes owned by the dashboard; host-local."}
       }
     },
     %{
@@ -2196,12 +2196,12 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "interactive TTY, host-local."},
-        rest: {:intentional, "interactive TTY, host-local."}
+        mcp: {:intentional, "Interactive TTY, host-local."},
+        rest: {:intentional, "Interactive TTY, host-local."}
       }
     },
     %{
-      id: "misc/event_stream_inbox_review_gate_worker_failed_top",
+      id: "misc/event_stream_inbox_review_gate_worker",
       title: "Event stream (inbox, review_gate, worker_failed, ... topics; NDJSON, replay by since)",
       mcp: nil,
       cli: nil,
@@ -2209,8 +2209,8 @@
       status: :excluded,
       divergences: ["D-M-22"],
       absent: %{
-        mcp: {:intentional, "tools/call is request/response and GET /mcp SSE is keepalive only; coordinator_inbox polling covers the inbox topic."},
-        cli: {:intentional, "consumed by the runbook's curl -N monitor (arb init template), not an operator verb."}
+        mcp: {:intentional, "`tools/call` is request/response and `GET /mcp` SSE is keepalive only; `coordinator_inbox` polling covers the inbox topic."},
+        cli: {:intentional, "Consumed by the runbook's `curl -N` monitor, not an operator verb."}
       }
     },
     %{
@@ -2221,8 +2221,8 @@
       rest: ["WS /session"],
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Browser/terminal transport; bridged workers refused. (handler unverified)"},
-        cli: {:intentional, "Browser/terminal transport; bridged workers refused. (handler unverified)"}
+        mcp: {:intentional, "Browser terminal WebSocket transport."},
+        cli: {:intentional, "Browser terminal WebSocket transport."}
       }
     },
     %{
@@ -2245,8 +2245,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Deprecated aliases to the server/install verbs; same handlers as rows 47, 51-57."},
-        rest: {:intentional, "Deprecated aliases to the server/install verbs; same handlers as rows 47, 51-57."}
+        mcp: {:intentional, "Deprecated CLI aliases to the `server`/`install` verbs."},
+        rest: {:intentional, "Deprecated CLI aliases to the `server`/`install` verbs."}
       }
     },
     %{

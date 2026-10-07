@@ -74,7 +74,7 @@ defmodule Arbiter.Parity.Manifest do
     """
     The parity manifest names #{label(kind)} that no longer exist: #{Enum.join(stale, ", ")}
 
-    Fix #{@path} (apps/arbiter): remove or rename the value in the row's `#{kind}:` cell. If the
+    Fix apps/arbiter/#{@path}: remove or rename the value in the row's `#{kind}:` cell. If the
     surface was dropped deliberately, set the cell to nil and add an `absent: %{#{kind}: ...}`
     ruling saying why.
     """
@@ -178,12 +178,17 @@ defmodule Arbiter.Parity.Manifest do
   defp cell_problem(:cli, "arb " <> _), do: []
 
   defp cell_problem(:rest, v) when is_binary(v),
-    do: if(Regex.match?(@rest_cell, v), do: [], else: ["rest cell #{inspect(v)} is not \"METHOD /path\""])
+    do:
+      if(Regex.match?(@rest_cell, v),
+        do: [],
+        else: ["rest cell #{inspect(v)} is not \"METHOD /path\""]
+      )
 
   defp cell_problem(surface, v), do: ["bad #{surface} cell #{inspect(v)}"]
 
   defp ruling_problems(op, absent) when is_map(absent) do
-    unknown = for k <- Map.keys(absent), k not in @surfaces, do: "unknown surface #{inspect(k)} in absent"
+    unknown =
+      for k <- Map.keys(absent), k not in @surfaces, do: "unknown surface #{inspect(k)} in absent"
 
     per_surface =
       Enum.flat_map(@surfaces, fn surface ->
@@ -211,7 +216,9 @@ defmodule Arbiter.Parity.Manifest do
   end
 
   defp one_ruling(surface, other),
-    do: ["#{surface} ruling must be {:intentional, why} or {:gap, \"P-xx\", what}: #{inspect(other)}"]
+    do: [
+      "#{surface} ruling must be {:intentional, why} or {:gap, \"P-xx\", what}: #{inspect(other)}"
+    ]
 
   defp reason_problem(surface, reason) do
     if is_binary(reason) and String.trim(reason) != "",
@@ -225,7 +232,9 @@ defmodule Arbiter.Parity.Manifest do
 
     case {op[:status], gap_ids} do
       {{:gap, id}, [_ | _]} ->
-        if id in gap_ids, do: [], else: ["status must be {:gap, #{inspect(hd(gap_ids))}} (a gap id of this row)"]
+        if id in gap_ids,
+          do: [],
+          else: ["status must be {:gap, #{inspect(hd(gap_ids))}} (a gap id of this row)"]
 
       {{:gap, id}, []} ->
         ["status {:gap, #{inspect(id)}} but no nil cell has a :gap ruling"]

@@ -24,7 +24,9 @@ defmodule Arbiter.Parity.ManifestTest do
     end
 
     test "every tool the manifest names exists in the catalog" do
-      catalog = MapSet.new(Enum.map(Catalog.all(), & &1.name) ++ Map.keys(Catalog.legacy_aliases()))
+      catalog =
+        MapSet.new(Enum.map(Catalog.all(), & &1.name) ++ Map.keys(Catalog.legacy_aliases()))
+
       stale = Manifest.mcp_tools() |> Enum.reject(&MapSet.member?(catalog, &1)) |> Enum.sort()
 
       assert stale == [], Manifest.stale_message(:mcp, stale)
