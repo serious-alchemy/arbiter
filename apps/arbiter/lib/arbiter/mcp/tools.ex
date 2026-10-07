@@ -1115,9 +1115,12 @@ defmodule Arbiter.MCP.Tools do
   def repo_show(%Scope{} = scope, args) do
     with {:ok, name} <- require_string(args, "name"),
          {:ok, target_ws} <- authorized_workspace(scope, args),
-         opts = if(target_ws, do: [workspace_id: target_ws], else: []),
-         {:ok, repo} <- Arbiter.Repos.get(name, opts) do
-      {:ok, serialize_repo(repo)}
+         opts = if(target_ws, do: [workspace_id: target_ws], else: []) do
+      case Arbiter.Repos.get(name, opts) do
+        {:ok, repo} -> {:ok, serialize_repo(repo)}
+        {:error, {:invalid_request, msg, _details}} -> {:error, {:invalid_request, msg}}
+        {:error, other} -> {:error, other}
+      end
     end
   rescue
     e -> {:error, {:internal, "repo_show failed: #{Exception.message(e)}"}}

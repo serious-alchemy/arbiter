@@ -6667,6 +6667,8 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "two-workspace same-name fixture rejects unqualified lookup and accepts workspace qualifier",
          ctx do
+      %Scope{} = coordinator = %{ctx.coordinator | workspace_id: nil}
+
       {:ok, ws2} =
         Ash.create(Workspace, %{
           name: "second-ws",
@@ -6683,20 +6685,20 @@ defmodule Arbiter.MCP.ToolsTest do
 
       # Unqualified lookup against multiple workspaces fails with ambiguity error
       assert {:error, {:invalid_request, msg}} =
-               Tools.repo_show(ctx.coordinator, %{"name" => "twin-repo"})
+               Tools.repo_show(coordinator, %{"name" => "twin-repo"})
 
       assert msg =~ "ambiguous"
 
       # Qualified lookup returns the specific workspace entry with its workspace_id
       assert {:ok, repo1} =
-               Tools.repo_show(ctx.coordinator, %{"name" => "twin-repo", "workspace" => ctx.ws.id})
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ctx.ws.id})
 
       assert repo1.path == "/tmp/twin-repo-1"
       assert repo1.source == ctx.ws.name
       assert repo1.workspace_id == ctx.ws.id
 
       assert {:ok, repo2} =
-               Tools.repo_show(ctx.coordinator, %{"name" => "twin-repo", "workspace" => ws2.name})
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ws2.name})
 
       assert repo2.path == "/tmp/twin-repo-2"
       assert repo2.source == "second-ws"
