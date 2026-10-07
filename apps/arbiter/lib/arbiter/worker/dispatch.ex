@@ -101,6 +101,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
@@ -3230,9 +3231,17 @@ defmodule Arbiter.Worker.Dispatch do
   # `sandbox.backend: podman` wraps only the task worker's private clone, so a
   # review keeping it was refused outright. `review_backend` is bwrap unless the
   # operator set it, and one with no implementation is still refused downstream.
+  #
+  # bd-7ays3v: a ReviewGate reviewer that names its `:provider` and stands in a
+  # private clone keeps a podman `sandbox.backend` for Claude
+  # (`SecurityPolicy.for_review_spawn/2`).
   defp review_backend_policy(policy, opts) do
     if Keyword.get(opts, :review, false) or review_checkout_path(opts) != nil,
-      do: SecurityPolicy.for_review_spawn(policy),
+      do:
+        SecurityPolicy.for_review_spawn(policy,
+          provider: Keyword.get(opts, :provider),
+          private_clone: PrivateClone.clone?(review_checkout_path(opts))
+        ),
       else: policy
   end
 
@@ -3441,11 +3450,8 @@ defmodule Arbiter.Worker.Dispatch do
 
   # The inputs `ClaudeSession` needs to wrap a `sandbox.backend: podman` spawn;
   # none for any other backend, so a bwrap or unsandboxed spawn is unchanged.
-  defp sandbox_session_opts(policy, workspace, opts) do
-    if ContainerSpawn.podman?(policy),
-      do: [security: policy, workspace: workspace] ++ Keyword.take(opts, [:repo, :node]),
-      else: []
-  end
+  defp sandbox_session_opts(policy, workspace, opts),
+    do: ContainerSpawn.session_opts(policy, workspace, Keyword.take(opts, [:repo, :node]))
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
     Keyword.get(opts, :agent_type) || revision_or_resume_provider(opts, task, id, workspace)

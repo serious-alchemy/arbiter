@@ -31,6 +31,26 @@ defmodule Arbiter.Worker.GitLayout do
   end
 
   @doc """
+  The layout a ReviewGate reviewer's checkout gets under `policy` (bd-7ays3v):
+  `:private_clone` when the review may run in a container
+  (`SecurityPolicy.review_container?/1`: `sandbox.backend` or
+  `sandbox.review_backend` is podman), else `:linked_worktree`. The merge
+  queue's fix and conflict passes need no counterpart: they run under the
+  implement backend, so `for_policy/1` is already theirs.
+  """
+  @spec for_review_policy(SecurityPolicy.t()) :: t()
+  def for_review_policy(%SecurityPolicy{} = policy),
+    do: if(SecurityPolicy.review_container?(policy), do: :private_clone, else: :linked_worktree)
+
+  @doc """
+  `for_review_policy/1` for the policy a reviewer in `workspace` and `repo`
+  resolves (`SecurityPolicy.resolve/3`).
+  """
+  @spec for_review_workspace(term(), String.t() | nil) :: t()
+  def for_review_workspace(workspace, repo \\ nil),
+    do: workspace |> SecurityPolicy.resolve(%{}, repo) |> for_review_policy()
+
+  @doc """
   The layout for a spawn in `workspace` (a struct, a config-bearing map or
   `nil`), scoped to `repo` and a per-dispatch security `override`, resolved
   exactly as the spawn's own policy is (`SecurityPolicy.resolve/3`).

@@ -56,21 +56,26 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
   end
 
-  describe "eligible/1 (eligibility first: only the podman Claude implementer)" do
+  describe "eligible/1 (eligibility first: only a podman Claude run on a private clone)" do
     test "the podman-backed Claude implementer with a private clone is eligible" do
       assert Placement.eligible(@eligible) == :ok
     end
 
+    # bd-7ays3v: these three run in the container on a private clone too.
+    test "so are a ReviewGate reviewer and the merge queue's fix and conflict passes" do
+      for kind <- [:reviewer, :fix_pass, :conflict_pass] do
+        assert Placement.eligible(%{@eligible | kind: kind}) == :ok
+
+        assert {:local_only, :not_podman} =
+                 Placement.eligible(%{@eligible | kind: kind, layout: :worktree})
+
+        assert {:local_only, :non_claude_provider} =
+                 Placement.eligible(%{@eligible | kind: kind, provider: :codex})
+      end
+    end
+
     test "every other spawn kind stays local" do
-      for kind <- [
-            :redispatch,
-            :resume,
-            :review,
-            :reviewer,
-            :fix_pass,
-            :conflict_pass,
-            :review_fix_round
-          ] do
+      for kind <- [:redispatch, :resume, :review, :review_fix_round] do
         assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: kind})
       end
     end
@@ -115,7 +120,7 @@ defmodule Arbiter.Nodes.PlacementTest do
       rows = fn -> flunk("the node pool must not be read for an ineligible run") end
 
       assert {:ok, {:local, {:local_only, :follow_up}}} =
-               Placement.place(%{@eligible | kind: :reviewer},
+               Placement.place(%{@eligible | kind: :redispatch},
                  nodes: rows,
                  remote_available?: true
                )
@@ -157,7 +162,7 @@ defmodule Arbiter.Nodes.PlacementTest do
 
     test "remote_only still lets an ineligible run go local" do
       assert {:ok, {:local, {:local_only, :follow_up}}} =
-               place(%{mode: :remote_only, kind: :reviewer}, [])
+               place(%{mode: :remote_only, kind: :redispatch}, [])
     end
 
     test "offline, suspect, draining, revoked and unhealthy nodes are not candidates" do

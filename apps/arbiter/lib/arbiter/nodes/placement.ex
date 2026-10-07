@@ -74,6 +74,10 @@ defmodule Arbiter.Nodes.Placement do
     :review_fix_round
   ]
 
+  # The kinds that run in a container on a private clone (bd-7ays3v), and so
+  # may run on a node once RW9 places them. The rest are bound to the primary.
+  @remote_kinds [:implementer, :reviewer, :fix_pass, :conflict_pass]
+
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::
           :follow_up
@@ -134,7 +138,7 @@ defmodule Arbiter.Nodes.Placement do
   @spec eligible(request()) :: :ok | {:local_only, reason()}
   def eligible(request) do
     cond do
-      request.kind != :implementer -> {:local_only, :follow_up}
+      request.kind not in @remote_kinds -> {:local_only, :follow_up}
       not claude?(request.provider) -> {:local_only, :non_claude_provider}
       request.layout != :private_clone -> {:local_only, :not_podman}
       Map.get(request, :no_pr?, false) -> {:local_only, :no_private_clone}

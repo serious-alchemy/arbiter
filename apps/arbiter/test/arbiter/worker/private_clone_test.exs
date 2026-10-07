@@ -282,6 +282,93 @@ defmodule Arbiter.Worker.PrivateCloneTest do
     end
   end
 
+  describe "create_review/3 (bd-7ays3v: a reviewer's read-only clone of the PR head)" do
+    setup ctx do
+      head = commit!(ctx.seed, %{"lib/pr.ex" => "pr\n"}, "the PR head")
+      git!(ctx.seed, ["push", "-q", "origin", "main:feature/pr"])
+      git!(ctx.checkout, ["fetch", "-q", "origin", "feature/pr"])
+      %{head: head, review_path: Path.join(ctx.worktree_root, "gate-review-abc-1")}
+    end
+
+    test "checks the head out in a clone of its own, at the path it is given", ctx do
+      assert {:ok, path} =
+               PrivateClone.create_review(ctx.checkout, ctx.head,
+                 path: ctx.review_path,
+                 base: "main"
+               )
+
+      assert path == ctx.review_path
+      assert PrivateClone.clone?(path)
+      assert PrivateClone.main_repo(path) == Path.expand(ctx.checkout)
+      assert git!(path, ["rev-parse", "HEAD"]) == ctx.head
+      assert File.read!(Path.join(path, "lib/pr.ex")) == "pr\n"
+      assert git!(path, ["rev-parse", "refs/remotes/origin/main"])
+      assert :ok = PrivateClone.verify(path)
+      assert {:ok, _mounts} = PrivateClone.mounts(path)
+
+      # The implementer's branch is neither created nor registered by it.
+      refute git!(ctx.checkout, ["worktree", "list", "--porcelain"]) =~ path
+    end
+
+    test "is marked read-only, and nothing in it ever reaches the main repo's branches", ctx do
+      {:ok, path} =
+        PrivateClone.create_review(ctx.checkout, ctx.head, path: ctx.review_path, base: "main")
+
+      assert PrivateClone.read_only?(path)
+      refute PrivateClone.read_only?(ctx.checkout)
+
+      before =
+        git!(ctx.checkout, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"])
+
+      commit_in(path, %{"lib/x.ex" => "x\n"}, "reviewer scribble")
+
+      assert {:error, :read_only_clone} = PrivateClone.sync_back(path)
+      assert :ok = PrivateClone.remove(path)
+      refute File.exists?(path)
+
+      assert git!(ctx.checkout, [
+               "for-each-ref",
+               "--format=%(refname) %(objectname)",
+               "refs/heads"
+             ]) ==
+               before
+    end
+
+    test "has no way to push: origin is read from the forge but pushes go nowhere", ctx do
+      {:ok, path} =
+        PrivateClone.create_review(ctx.checkout, ctx.head, path: ctx.review_path, base: "main")
+
+      assert git!(path, ["remote", "get-url", "origin"]) == ctx.forge
+      assert {out, code} = git(path, ["push", "origin", "HEAD:refs/heads/hijack"])
+      assert code != 0, out
+
+      assert {_, code} =
+               System.cmd("git", ["-C", ctx.forge, "rev-parse", "refs/heads/hijack"],
+                 stderr_to_stdout: true
+               )
+
+      assert code != 0
+    end
+
+    test "pins the head against gc in the main repo while it lives", ctx do
+      {:ok, path} =
+        PrivateClone.create_review(ctx.checkout, ctx.head, path: ctx.review_path, base: "main")
+
+      assert pins(ctx.checkout, Path.basename(path)) != []
+      assert :ok = PrivateClone.remove(path)
+      assert pins(ctx.checkout, Path.basename(path)) == []
+    end
+
+    test "refuses a sha the main repo does not have", ctx do
+      assert {:error, _} =
+               PrivateClone.create_review(ctx.checkout, String.duplicate("a", 40),
+                 path: ctx.review_path
+               )
+
+      refute File.exists?(ctx.review_path)
+    end
+  end
+
   describe "remove/1" do
     test "syncs back, removes the clone and drops its pins", ctx do
       {:ok, path} = PrivateClone.create(ctx.checkout, @branch, "main")

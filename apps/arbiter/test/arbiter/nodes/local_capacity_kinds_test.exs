@@ -2,8 +2,9 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
   @moduledoc """
   RW8 guard tests (bd-3igo6h): the set of spawn kinds counted against the
   primary's cap is documented and pinned, every spawn site goes through the
-  cap, and only the podman-backed Claude implementer is ever a placement
-  candidate.
+  cap, and only a podman-backed Claude run on a private clone (the implementer,
+  a ReviewGate reviewer, a merge-queue fix or conflict pass; bd-7ays3v) is ever
+  a placement candidate.
   """
   use ExUnit.Case, async: true
 
@@ -93,8 +94,8 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
     end
   end
 
-  describe "only the podman-backed Claude implementer is ever a placement candidate" do
-    test "across every kind, provider, layout and mode, exactly one combination is eligible" do
+  describe "only podman-backed Claude runs on a private clone are ever placement candidates" do
+    test "across every kind, provider, layout and mode, only those kinds are eligible" do
       kinds = Placement.kinds()
       providers = [:claude, :codex, :agy, :gemini, :grok, nil]
       layouts = [:private_clone, :worktree, :shared, nil]
@@ -116,10 +117,14 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
           {kind, provider, layout, no_pr?, mode}
         end
 
-      assert Enum.sort(eligible) == [
-               {:implementer, :claude, :private_clone, false, :prefer_remote},
-               {:implementer, :claude, :private_clone, false, :remote_only}
-             ]
+      # Exactly the Claude runs that have a container backend and a private clone
+      # (bd-7ays3v), in the two modes that allow a node.
+      assert Enum.sort(eligible) ==
+               for(
+                 kind <- [:conflict_pass, :fix_pass, :implementer, :reviewer],
+                 mode <- [:prefer_remote, :remote_only],
+                 do: {kind, :claude, :private_clone, false, mode}
+               )
     end
   end
 end
