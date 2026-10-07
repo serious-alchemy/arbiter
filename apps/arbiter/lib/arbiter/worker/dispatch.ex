@@ -2320,7 +2320,9 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
             layout = git_layout(task, opts)
-            seed_paths = seed_paths(task, repo)
+            # RW11: the home clone of a run placed on a node is thin (no deps seeding):
+            # the node's shadow clone is what the container works in.
+            seed_paths = if Keyword.get(opts, :node), do: false, else: seed_paths(task, repo)
 
             # bd-8ssxap: a redispatch can find its OLD per-task branch still on
             # disk with commits that are already merged upstream (a prior round
