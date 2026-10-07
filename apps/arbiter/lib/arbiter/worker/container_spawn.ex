@@ -103,14 +103,25 @@ defmodule Arbiter.Worker.ContainerSpawn do
   not remove a pod, so `TestServices.Reaper` also removes it when the owning
   worker process dies by any means.
 
+  ## Which spawns are covered (bd-7ays3v)
+
+  The task worker, a ReviewGate **reviewer** (Claude, in its round's read-only
+  private clone, `PrivateClone.create_review/3`) and the merge queue's CI
+  **fix pass** and **conflict pass** (Claude, in the pass's private clone). Each
+  passes `sandbox_wrap: true` to `Claude.default_argv/2` and hands
+  `session_opts/3` to `ClaudeSession`, which is what wraps it.
+
   ## Not covered
 
-  Reviewer, conflict-resolution and fix-pass spawns call `Claude.default_argv/2`
-  without `sandbox_wrap: true` and are therefore refused under `podman`, as they
-  were before this existed. So is a spawn whose cwd is not a private clone (a
-  review checkout, a task-type dispatch with no worktree). The container's
-  memory is not bounded by `MemoryScope`: it is not in the server's cgroup, but
-  nothing caps it either.
+  A ReviewGate fix round's implementer and a `review: true` dispatch still call
+  `Claude.default_argv/2` without `sandbox_wrap: true` and are refused under
+  `podman`, as they were before this existed. So is a spawn whose cwd is not a
+  private clone (a reviewer with no round checkout, which falls back to
+  `sandbox.review_backend`, or a task-type dispatch with no worktree), and any
+  provider but Claude and Codex: a reviewer or pass routed to one of those runs
+  under `sandbox.review_backend` or is refused. The container's memory is not
+  bounded by `MemoryScope`: it is not in the server's cgroup, but nothing caps
+  it either.
   """
 
   alias Arbiter.Agents.Claude.ConfigDir
@@ -182,6 +193,44 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec podman?(term()) :: boolean()
   def podman?(%SecurityPolicy{} = policy), do: SecurityPolicy.sandbox_backend(policy) == :podman
   def podman?(_), do: false
+
+  @doc """
+  The inputs `ClaudeSession.start/1` needs to wrap a spawn under `policy`
+  (`:security`, `:workspace`, plus `extra`, e.g. `:repo`): none for any policy
+  that is not podman, so a bwrap or unsandboxed spawn is unchanged. Every spawn
+  site that can run in a container builds its session opts through here
+  (the task worker, ReviewGate's reviewer, the merge queue's fix and conflict
+  passes).
+  """
+  @spec session_opts(term(), term(), keyword()) :: keyword()
+  def session_opts(policy, workspace, extra \\ []) do
+    if podman?(policy),
+      do: [security: policy, workspace: workspace] ++ extra,
+      else: []
+  end
+
+  @doc """
+  The policy a merge-queue pass (CI fix pass, conflict pass) runs in a container
+  under, or `nil` when it does not (bd-7ays3v). The pass resolves the workspace's
+  posture scoped to `repo` exactly as the task worker does
+  (`SecurityPolicy.resolve/3`), so the egress decisions and `egress_events` match
+  the implementer's; it runs in the container when that is podman and the
+  provider is Claude. For anything else the pass spawns as it always did.
+  """
+  @spec pass_policy(term(), String.t() | nil, atom() | String.t()) ::
+          SecurityPolicy.t() | nil
+  def pass_policy(workspace, repo, provider) do
+    policy = SecurityPolicy.resolve(workspace, %{}, repo)
+    if podman?(policy) and provider in [:claude, "claude"], do: policy
+  end
+
+  @doc """
+  The adapter opts a pass adds when `policy` (from `pass_policy/3`) is set:
+  the policy, and the promise to hand the spawn to `ClaudeSession` with it.
+  """
+  @spec pass_agent_opts(SecurityPolicy.t() | nil) :: keyword()
+  def pass_agent_opts(nil), do: []
+  def pass_agent_opts(%SecurityPolicy{} = policy), do: [security: policy, sandbox_wrap: true]
 
   # -- prepare ------------------------------------------------------------------
 

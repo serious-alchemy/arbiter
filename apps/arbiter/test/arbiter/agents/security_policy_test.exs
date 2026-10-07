@@ -519,6 +519,64 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert SecurityPolicy.for_review_spawn(base) == base
     end
 
+    # bd-7ays3v: a ReviewGate reviewer on a `backend: podman` repo runs in the
+    # container, when it is Claude and stands in a private clone.
+    test "for_review_spawn/2 keeps podman for a Claude reviewer in a private clone" do
+      podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
+
+      for provider <- [:claude, "claude"] do
+        review = SecurityPolicy.for_review_spawn(podman, provider: provider, private_clone: true)
+        assert SecurityPolicy.sandbox_backend(review) == :podman
+        assert review.sandbox == podman.sandbox
+        assert review.permissions == podman.permissions
+      end
+    end
+
+    test "for_review_spawn/2 falls back to the review backend whenever podman cannot hold" do
+      podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
+
+      # No private clone to mount, or a provider with no container wrap point.
+      for opts <- [
+            [provider: :claude, private_clone: false],
+            [provider: :claude],
+            [provider: :gemini, private_clone: true],
+            [provider: :grok, private_clone: true],
+            [private_clone: true],
+            []
+          ] do
+        assert SecurityPolicy.for_review_spawn(podman, opts) ==
+                 SecurityPolicy.for_review_spawn(podman),
+               inspect(opts)
+      end
+    end
+
+    test "for_review_spawn/2 leaves every non-podman repo exactly as for_review_spawn/1" do
+      base = SecurityPolicy.base()
+      opts = [provider: :claude, private_clone: true]
+
+      assert SecurityPolicy.for_review_spawn(base, opts) == SecurityPolicy.for_review_spawn(base)
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.for_review_spawn(base, opts)) == :bwrap
+
+      # An explicit podman review_backend is kept for any provider, as before.
+      review = SecurityPolicy.merge(base, %{sandbox: %{review_backend: :podman}})
+
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.for_review_spawn(review, opts)) ==
+               :podman
+    end
+
+    test "review_container?/1 is true when either backend asks for podman" do
+      base = SecurityPolicy.base()
+      refute SecurityPolicy.review_container?(base)
+
+      assert SecurityPolicy.review_container?(
+               SecurityPolicy.merge(base, %{sandbox: %{backend: :podman}})
+             )
+
+      assert SecurityPolicy.review_container?(
+               SecurityPolicy.merge(base, %{sandbox: %{review_backend: :podman}})
+             )
+    end
+
     test "summary/1 and one_line/1 surface a non-default review backend only" do
       assert SecurityPolicy.summary(SecurityPolicy.base())["sandbox"]["review_backend"] == "bwrap"
 

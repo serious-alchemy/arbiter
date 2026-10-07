@@ -56,6 +56,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.SeedPaths
@@ -409,9 +410,13 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           )
 
         # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
+        #
+        # bd-7ays3v: under podman, a Claude pass runs in the container, in the
+        # private clone `create_worktree/1` gave it, under the policy the task
+        # worker resolves; any other pass is spawned exactly as before.
         session_opts =
           ([owner: worker_pid, worktree_path: worktree_path] ++
-             Keyword.take(mcp_opts, [:arb_token]))
+             Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
           |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
         case ClaudeSession.start(session_opts) do
@@ -425,11 +430,19 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
+  defp container_opts(context, provider) do
+    case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
+      nil -> []
+      policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
+    end
+  end
+
   @doc false
   # The adapter opts for this pass's agent spawn. `:owner` is the pass's worker
   # (from the session opts): an agy adapter binds its egress run to it, so the
   # proxy lives exactly as long as the pass (bd-cfktou). `:task_id` keys that
-  # run's `egress_events` rows.
+  # run's `egress_events` rows. `:security` (`ContainerSpawn.pass_policy/3`,
+  # bd-7ays3v) is present when the pass runs in a podman container.
   @spec agent_opts(keyword(), map(), String.t(), keyword()) :: keyword()
   def agent_opts(opts, context, worktree_path, mcp_opts) do
     [
@@ -437,7 +450,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       worktree_path: worktree_path,
       owner: Keyword.get(opts, :owner),
       task_id: context.task.id
-    ] ++ mcp_opts
+    ] ++ mcp_opts ++ ContainerSpawn.pass_agent_opts(Keyword.get(opts, :security))
   end
 
   defp add_command_or_prompt(opts, context, args, worktree_path, provider, mcp_opts) do

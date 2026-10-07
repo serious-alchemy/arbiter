@@ -715,7 +715,13 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       """
     end
 
-    test "the reviewer is jailed under the review backend: spawned, not refused or parked" do
+    # bd-7ays3v: a Claude reviewer on a podman repo is no longer spawned under
+    # the review backend on the host: it is handed to the container backend, in
+    # its round's private clone. This host has no podman, so the proof here is
+    # the negative one: the spawn is refused at the container, and nothing runs
+    # unjailed. (The wrapped spawn itself is `container_spawn_test.exs`.)
+    test "the Claude reviewer goes to the container backend: with none available it is refused" do
+      put_app_env(:arbiter, :worker_container_available, false)
       ws = podman_gate_ws(%{})
       sandbox = Arbiter.TestSandbox.provision!("rg-podman-review", stub: spawn_stub())
       put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
@@ -730,17 +736,14 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       author = start_author(task, ws, sandbox.repo, branch, wt)
       {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
       Arbiter.TestSandbox.own!(sandbox, gate)
-
-      wait_until(fn -> File.exists?(log) end, 20_000)
       await_gate_down(gate, ref)
 
-      assert File.read!(log) =~ "cwd=", "the reviewer never spawned"
-
-      refute Enum.any?(escalations(ws, task), &(&1.body =~ "sandbox_backend_unavailable")),
-             "the review was refused for the podman backend"
+      refute File.exists?(log), "a podman repo's reviewer ran on the host"
+      assert Ash.get!(Issue, task.id).attention_cause in [:reviewer_failed, :inconclusive]
     end
 
-    test "an explicit podman review_backend still refuses, and nothing spawns" do
+    test "an explicit podman review_backend sends the Claude reviewer to the container too" do
+      put_app_env(:arbiter, :worker_container_available, false)
       ws = podman_gate_ws(%{"review_backend" => "podman"})
       sandbox = Arbiter.TestSandbox.provision!("rg-podman-refuse", stub: spawn_stub())
       put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
@@ -758,7 +761,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       await_gate_down(gate, ref)
 
       refute File.exists?(log), "a reviewer ran under a backend that cannot jail it"
-      assert Ash.get!(Issue, task.id).attention_cause == :reviewer_failed
+      assert Ash.get!(Issue, task.id).attention_cause in [:reviewer_failed, :inconclusive]
     end
   end
 
@@ -790,6 +793,207 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       body = Enum.map_join(escalations(ws, task), "\n", & &1.body)
       assert body =~ "review checkout"
       assert body =~ "enotdir"
+    end
+  end
+
+  # ---- bd-7ays3v: the reviewer's checkout and policy follow the sandbox backend ----
+
+  describe "a reviewer under the container backend (bd-7ays3v)" do
+    defp persisted_ws(sandbox) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-container-#{System.unique_integer([:positive])}",
+          prefix: "rc",
+          config: %{
+            "review" => %{"required" => true},
+            "agent" => %{
+              "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp pushed_branch(repo, tmp, branch) do
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      wt
+    end
+
+    defp gate_state(ws, wt, branch) do
+      %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: "rc-unit",
+        workspace_id: ws.id,
+        repo: "trib/repo",
+        target_branch: "main",
+        review_checkout: nil
+      }
+    end
+
+    test "on a podman repo the round's checkout is a read-only private clone of the pushed head",
+         %{repo: repo, tmp: tmp, root: root} do
+      branch = "feature/container-1"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: head}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      assert Path.dirname(path) == root
+      assert Worker.PrivateClone.clone?(path)
+      assert Worker.PrivateClone.read_only?(path)
+      assert {:ok, _mounts} = Worker.PrivateClone.mounts(path)
+      assert sha(path, "HEAD") == head
+      assert File.exists?(Path.join(path, "feature.txt"))
+
+      # No way to publish from it, and the implementer's branch is never touched.
+      assert {_, code} = git(["push", "origin", "HEAD:refs/heads/hijack"], path)
+      assert code != 0
+      assert sha(wt, "HEAD") == head
+
+      assert %{review_checkout: nil} = ReviewGate.release_review_checkout(state)
+      refute File.exists?(path)
+      assert sha(repo, "refs/heads/" <> branch) == head
+    end
+
+    # The production shape: on a podman repo the implementer's `worktree_path`
+    # is itself a private clone, not a linked worktree of the main repo.
+    test "a review clone cut from the implementer's private clone borrows the MAIN repo's objects",
+         %{repo: repo} do
+      branch = "feature/container-chain"
+      :ok = seed_feature_branch(repo, branch)
+      git!(["push", "-q", "-u", "origin", branch], repo)
+      git!(["fetch", "-q", "origin"], repo)
+
+      assert {:ok, impl} = Worker.PrivateClone.attach(repo, branch, "main", false)
+      refute impl == repo
+      assert Worker.PrivateClone.main_repo(impl) == repo
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: head}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, impl, branch))
+
+      assert Worker.PrivateClone.read_only?(path)
+      assert Worker.PrivateClone.main_repo(path) == repo
+      assert sha(path, "HEAD") == head
+
+      assert {:ok, mounts} = Worker.PrivateClone.mounts(path)
+      assert mounts[:objects] == Path.join(repo, ".git/objects")
+      refute String.starts_with?(mounts[:objects], impl)
+
+      alternates = File.read!(Path.join(path, ".git/objects/info/alternates"))
+      assert String.split(alternates, "\n", trim: true) == [mounts[:objects]]
+
+      # With only that one objects dir reachable (the implementer's clone gone),
+      # the whole history still reads, as it must inside the container.
+      Worker.PrivateClone.remove(impl)
+      assert {_, 0} = git(["log", "--oneline", "origin/main..HEAD"], path)
+      assert {_, 0} = git(["cat-file", "-e", "origin/main^{commit}"], path)
+      assert {_, 0} = git(["fsck", "--connectivity-only"], path)
+
+      # And ContainerSpawn's own builder accepts it: the review clone is
+      # mounted read-only, with the main repo's objects as the overlay.
+      argv =
+        Worker.Container.argv(
+          %{
+            podman: "podman",
+            image: "img",
+            name: "arb-rv",
+            worktree: path,
+            worktree_readonly: true,
+            git_dir: mounts[:git_dir],
+            objects: mounts[:objects],
+            readonly_paths: mounts[:readonly_paths]
+          },
+          ["true"]
+        )
+
+      assert Enum.any?(
+               argv,
+               &String.starts_with?(&1, mounts[:objects] <> ":" <> mounts[:objects])
+             )
+
+      assert Enum.any?(argv, &String.starts_with?(&1, path <> ":" <> path <> ":ro"))
+
+      ReviewGate.release_review_checkout(state)
+    end
+
+    test "an explicit podman review_backend gets the private clone too",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-2"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"review_backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      assert Worker.PrivateClone.read_only?(path)
+      ReviewGate.release_review_checkout(state)
+    end
+
+    # No-regression: a bwrap workspace is provisioned and policed exactly as before.
+    test "on a bwrap or default repo nothing changes: a detached linked worktree, the review backend",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-3"
+      wt = pushed_branch(repo, tmp, branch)
+
+      for sandbox <- [%{"backend" => "bwrap"}, %{}] do
+        ws = persisted_ws(sandbox)
+        state = gate_state(ws, wt, branch)
+
+        assert [prefix: "gate-review"] == ReviewGate.review_checkout_opts(state)
+
+        assert {:ok, %{review_checkout: %{path: path}} = state} =
+                 ReviewGate.provision_review_checkout(state)
+
+        refute Worker.PrivateClone.clone?(path)
+        refute Worker.PrivateClone.read_only?(path)
+
+        for provider <- [nil, :claude, :codex] do
+          policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+          assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+          refute Worker.ContainerSpawn.podman?(policy)
+        end
+
+        ReviewGate.release_review_checkout(state)
+      end
+    end
+
+    test "the reviewer's policy is podman only for Claude in a private clone",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-4"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      {:ok, state} = ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      podman = fn policy -> SecurityPolicy.sandbox_backend(policy) == :podman end
+
+      for provider <- [:claude, "claude"] do
+        policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+        assert podman.(policy), "#{provider} reviewer did not get the container"
+        # The reviewer keeps Edit/Write denied, as in the worktree.
+        assert Enum.any?(policy.permissions.deny, &(&1 =~ "Edit"))
+      end
+
+      # Any other provider, or none named: the review backend, as before.
+      for provider <- [nil, :codex, :gemini, :grok] do
+        policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+        refute podman.(policy), "#{inspect(provider)} reviewer got the container"
+      end
+
+      # The revise pass's implementer is not one of the three spawn kinds.
+      refute podman.(ReviewGate.session_security_policy(ws, state, :implementer, :claude))
+
+      ReviewGate.release_review_checkout(state)
+
+      # No private clone to mount (a reviewer with no round checkout): never podman.
+      bare = %{state | review_checkout: nil}
+      refute podman.(ReviewGate.session_security_policy(ws, bare, :reviewer, :claude))
     end
   end
 end
