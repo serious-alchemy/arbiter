@@ -29,11 +29,9 @@
 
 %{
   children: %{
-    "P-10" => "Review automation guard + task-review parity + tier alignment of CI/child-filing tools",
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-12" => "External-PR review surface: revive `arb review`, REST show/greenlight, field parity",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-14" => "Ticket create/update service: one `Tasks.Create` + issue-write allow-list",
     "P-15" => "Missing ticket operations: tracker discovery, tracker-only create, upstream close, rank pin",
     "P-16" => "Account field registry: edit parity across PATCH, `arb account`, UI and MCP",
     "P-17" => "MCP/CLI read gaps for accounts, usage, pauses, alerts",
@@ -122,7 +120,7 @@
       cli: ["arb ticket update", "arb update"],
       rest: ["PATCH /api/issues/:id", "PUT /api/issues/:id"],
       status: :partial,
-      divergences: ["D-T-5", "D-T-6", "D-T-11", "D-T-18", "D-T-19"]
+      divergences: ["D-T-11", "D-T-18", "D-T-19"]
     },
     %{
       id: "tickets/worker_progress_write_notes_qa",
@@ -322,21 +320,21 @@
       title: "Clear review circuit-breaker via ticket update",
       mcp: ["ticket_resume_review"],
       cli: ["arb ticket update"],
-      rest: ["PATCH /api/issues/:id", "POST /api/issues/:id/resume_review"],
-      status: :partial,
-      divergences: ["D-T-5"],
-      note: "MCP `ticket_resume_review` and REST `POST /api/issues/:id/resume_review` are the typed path; REST/CLI also still write the raw circuit_breaker fields via PATCH (D-T-5), which P-14 removes."
+      rest: ["POST /api/issues/:id/resume_review"],
+      status: :full,
+      note: "All three use the typed `Issue :resume_review` action (CLI: `arb ticket update --resume-review`); PATCH /api/issues/:id no longer accepts raw circuit_breaker_* writes (P-14, D-T-5)."
     },
     %{
       id: "tickets/set_per_ticket_override",
       title: "Set per-ticket skills override",
       mcp: nil,
       cli: nil,
-      rest: ["POST /api/issues", "PATCH /api/issues/:id"],
-      status: {:gap, "P-14"},
+      rest: nil,
+      status: :excluded,
       absent: %{
-        mcp: {:gap, "P-14", "Per-ticket `skills` override is settable only by REST mass-assignment: expose it on every surface or stop REST accepting it (low priority)."},
-        cli: {:gap, "P-14", "Per-ticket `skills` override is settable only by REST mass-assignment: expose it on every surface or stop REST accepting it (low priority)."}
+        mcp: {:intentional, "Internal-only: `Arbiter.Tasks.IssueFields` does not allow `skills` on any surface (P-14); it is read only at dispatch by `Arbiter.Skills.Selection`."},
+        cli: {:intentional, "Internal-only: `Arbiter.Tasks.IssueFields` does not allow `skills` on any surface (P-14); it is read only at dispatch by `Arbiter.Skills.Selection`."},
+        rest: {:intentional, "Internal-only: `Arbiter.Tasks.IssueFields` does not allow `skills` on any surface (P-14); it is read only at dispatch by `Arbiter.Skills.Selection`."}
       }
     },
     %{
@@ -623,10 +621,10 @@
       mcp: ["flake_record"],
       cli: nil,
       rest: nil,
-      status: {:gap, "P-10"},
+      status: :partial,
       absent: %{
-        cli: {:gap, "P-10", "No `arb flake record`."},
-        rest: {:gap, "P-10", "No worker-tier REST route for `flake_record`; gemini/agy workers get only 6 MCP tools so cannot record a flake at all. No dedicated child: filed under P-10's worker-tier alignment."}
+        cli: {:intentional, "Flake events are recorded by a worker agent in-session through MCP `flake_record`; an operator has no flake to record by hand."},
+        rest: {:intentional, "Worker-tier tool reached through the MCP transport only; no REST caller exists. Known limit: gemini/agy workers get only 6 MCP tools so cannot record a flake (no open child owns this; P-10 landed without it)."}
       }
     },
     %{
