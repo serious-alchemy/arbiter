@@ -12,6 +12,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
+  alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.EffectivePriority
@@ -194,6 +195,7 @@ defmodule Arbiter.MCP.Tools.Task do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, title} <- Tools.require_string(args, "title"),
          {:ok, parent_id} <- create_parent(scope, args, ws_id),
+         {:ok, force?} <- Params.fetch_bool(args, "force", false),
          {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()),
          # Gate *before* title/workspace_id are forced on: those two are set by
          # the tool, not by the caller, and a refine session is allowed both.
@@ -204,19 +206,102 @@ defmodule Arbiter.MCP.Tools.Task do
         |> Map.put("workspace_id", ws_id)
         |> put_tracker_parent(scope, parent_id)
 
-      case Ash.create(Issue, attrs) do
-        {:ok, issue} ->
-          issue
-          |> Tools.serialize_task_summary()
-          |> with_ac_warning(issue)
-          |> with_deprecation_warnings(args)
-          |> attach_parent(scope, issue, parent_id)
+      opts = [
+        force: force?,
+        created_by: Arbiter.PaperTrail.actor_label(scope)
+      ]
 
-        {:error, err} ->
+      case Create.run(attrs, opts) do
+        {:ok, issue, warnings} ->
+          {:ok,
+           issue
+           |> Tools.serialize_task_summary()
+           |> with_warnings(warnings)
+           |> with_deprecation_warnings(args)
+           |> with_parent_id(parent_id)}
+
+        {:duplicate, dup} ->
+          {:error, duplicate_error(dup)}
+
+        {:partial, issue, failures} ->
+          {:error, partial_error(scope, issue, failures, parent_id)}
+
+        {:error, %{__exception__: true} = err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
+
+        {:error, _} = err ->
+          err
       end
     end
   end
+
+  defp with_warnings(result, []), do: result
+  defp with_warnings(result, warnings), do: Map.put(result, :warnings, warnings)
+
+  defp with_parent_id(result, nil), do: result
+  defp with_parent_id(result, parent_id), do: Map.put(result, :parent_id, parent_id)
+
+  # `force: true` skips dedup (the REST/CLI/dashboard escape hatch).
+  defp duplicate_error({:local_dup, matches}) do
+    ids = Enum.map_join(matches, ", ", & &1.id)
+
+    {:conflict,
+     "an open ticket with this title already exists (#{ids}); pass `force: true` to file it anyway",
+     %{matches: Enum.map(matches, &%{id: &1.id, title: &1.title, state: to_string(&1.state)})}}
+  end
+
+  defp duplicate_error({:tracker_dup, matches}) do
+    urls = Enum.map_join(matches, ", ", &(Map.get(&1, :url) || Map.get(&1, :ref) || "?"))
+
+    {:conflict,
+     "an open tracker issue with this title already exists (#{urls}); pass `force: true` to file it anyway",
+     %{matches: Enum.map(matches, &%{ref: &1[:ref], title: &1[:title], url: &1[:url]})}}
+  end
+
+  @doc """
+  The error for a `{:partial, issue, failures}` create (`Arbiter.Tasks.Create`):
+  the ticket **exists**, but the tracker mirror and/or an edge failed. An error
+  response, not a clean create — and the message names the id.
+
+  The edge half of the contract is deliberate: an issue cannot be un-created
+  (`Ash.destroy` on a task whose paper-trail version row exists fails the
+  version table's foreign key), so there is no compensating delete. `Create`
+  preflights every endpoint, which leaves only a race (a parent deleted between
+  the preflight and the write) to land here. For a refine session the unparented
+  task sits outside the bound subtree and a `parent_of` add needs both endpoints
+  inside it, so the message says who can re-attach it.
+
+  Public so that contract is directly testable.
+  """
+  @spec partial_error(Scope.t(), Issue.t(), [Create.failure()], String.t() | nil) ::
+          {atom(), String.t(), map()}
+  def partial_error(scope, issue, failures, parent_id) do
+    upstream? = Enum.any?(failures, &(&1.kind == :upstream_create_failed))
+    kind = if upstream?, do: :bad_gateway, else: :invalid
+
+    {kind, partial_message(scope, issue, failures, parent_id),
+     %{task_id: issue.id, failures: Enum.map(failures, &Map.take(&1, [:kind, :message]))}}
+  end
+
+  defp partial_message(scope, issue, failures, parent_id) do
+    Enum.map_join(failures, "; ", fn
+      %{kind: :upstream_create_failed, message: message} ->
+        "ticket #{issue.id} was created locally, but the tracker mirror failed: #{message} — " <>
+          "re-link it with ticket_update tracker_ref rather than filing it again"
+
+      %{kind: :edge_failed, message: message} ->
+        edge_hint(scope, message, issue, parent_id)
+    end)
+  end
+
+  defp edge_hint(%Scope{tier: :refine}, message, issue, parent_id) do
+    message <>
+      " — it is filed in the workspace Backlog with no parent, which puts it outside this " <>
+      "session's subtree: ask a coordinator to attach it with dep_add, or file it again once " <>
+      "#{parent_id || "the parent"} is reachable (#{issue.id})"
+  end
+
+  defp edge_hint(%Scope{}, message, _issue, _parent_id), do: message
 
   # #1973: tell `Issue.create` who the parent is, so a child of a tracker-linked
   # parent defaults from the parent's linkage (per `tracker.child_policy`) rather
@@ -247,81 +332,6 @@ defmodule Arbiter.MCP.Tools.Task do
       end
     end
   end
-
-  @doc """
-  Attach `issue` under `parent_id` with a `parent_of` edge.
-
-  The edge is a second write, after `Ash.create(Issue, …)` and outside its
-  transaction, so it can fail on its own — a parent deleted between the
-  authorization and this call, or a resource-level rejection. When it does, the
-  task is **kept**, and the error says so. That is deliberate, not an oversight:
-
-    * An issue cannot be un-created. `Ash.destroy` on a task whose paper-trail
-      version row already exists fails the version table's foreign key, so there
-      is no compensating delete to run.
-    * Rolling the pair back in one `Ash.transaction/2` is not available either:
-      `Dependencies.add/4` opens its own, and under the test sandbox (and any
-      caller already inside a transaction) `Ash.rollback/2` would abort the
-      enclosing transaction rather than just this create.
-
-  So the contract is: *the task exists, the edge does not.* For a coordinator
-  that is a one-call fix (`dep_add`). For a refine session it is not — the
-  unparented task sits outside the bound subtree, and a `parent_of` add needs
-  both endpoints inside it (`Tools.authorize_subtree_edge/4`) — so the message
-  names the id and says who can re-attach it. Either way nothing is silently
-  half-done.
-
-  Public (rather than private) so that contract is directly testable; the
-  failure is otherwise only reachable by a race.
-  """
-  @spec attach_parent(map(), Scope.t(), Issue.t(), String.t() | nil) ::
-          {:ok, map()} | {:error, {:invalid, String.t()}}
-  def attach_parent(result, scope, issue, parent_id)
-
-  def attach_parent(result, _scope, _issue, nil), do: {:ok, result}
-
-  def attach_parent(result, %Scope{} = scope, %Issue{} = issue, parent_id) do
-    case Dependencies.add(parent_id, issue.id, :parent_of,
-           created_by: Arbiter.PaperTrail.actor_label(scope)
-         ) do
-      {:ok, _dep} ->
-        {:ok, Map.put(result, :parent_id, parent_id)}
-
-      {:error, reason} ->
-        {:error, {:invalid, orphan_message(scope, issue, parent_id, reason)}}
-    end
-  end
-
-  defp orphan_message(%Scope{tier: tier}, %Issue{} = issue, parent_id, reason) do
-    recovery =
-      if tier == :refine do
-        " — it is filed in the workspace Backlog with no parent, which puts it " <>
-          "outside this session's subtree: ask a coordinator to attach it with dep_add, or " <>
-          "file it again once #{parent_id} is reachable"
-      else
-        " — the task is filed with no parent; attach it with dep_add rather than filing it again"
-      end
-
-    "ticket #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
-      inspect(reason) <> recovery
-  end
-
-  # bd-7mbrlg: non-blocking heads-up at filing time — the task is created
-  # either way, but `ticket_promote` will later refuse it without `acceptance`
-  # or an explicit `acceptance_waived` reason.
-  defp with_ac_warning(result, %Issue{} = issue) do
-    if Issue.gated_type?(issue.issue_type) and blank?(issue.acceptance) do
-      Map.put(result, :warnings, [
-        "No acceptance criteria set. #{issue.issue_type} tasks need `acceptance` (or an " <>
-          "explicit `acceptance_waived` reason) before they can be promoted to Ready."
-      ])
-    else
-      result
-    end
-  end
-
-  defp blank?(nil), do: true
-  defp blank?(str), do: String.trim(str) == ""
 
   # bd-1ozks5: `assignee` is still accepted for one release — the local
   # assignee field is gone, so it's ignored and reported back as a
@@ -410,6 +420,7 @@ defmodule Arbiter.MCP.Tools.Task do
   def task_close(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, close_upstream} <- Tools.fetch_bool(args, "close_upstream", true) do
       attrs =
         %{close_upstream: close_upstream}
@@ -434,7 +445,8 @@ defmodule Arbiter.MCP.Tools.Task do
   @spec task_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_reopen(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
-         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :reopen) do
         {:ok, reopened} -> {:ok, Tools.serialize_task_summary(reopened)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -504,6 +516,32 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- ticket_resume_review -------------------------------------------------
+
+  @doc """
+  Clear a tripped ReviewPatrol circuit breaker on a ticket (P-14) via the typed
+  `:resume_review` action — the same one REST
+  (`POST /api/issues/:id/resume_review`) and `arb ticket update --resume-review`
+  use, instead of raw `circuit_breaker_*` writes through `ticket_update`.
+  Coordinator only, idempotent. The head the breaker tripped at is watermarked,
+  so the next ReviewPatrol tick does not re-trip on the same commit.
+  """
+  @spec ticket_resume_review(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def ticket_resume_review(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
+      case Ash.update(issue, %{}, action: :resume_review) do
+        {:ok, resumed} ->
+          {:ok, Map.put(Tools.serialize_task_summary(resumed), :circuit_breaker_tripped, false)}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
+      end
+    end
+  end
+
   # ---- task_rank ------------------------------------------------------------
 
   @doc """
@@ -563,6 +601,7 @@ defmodule Arbiter.MCP.Tools.Task do
   def epic_floor(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, raw} <- floor_arg(args),
          {:ok, floor} <- parse_floor(raw) do
       case Ash.update(issue, %{floor_priority: floor}, action: :set_floor, actor: scope) do
@@ -607,7 +646,8 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp move_attention(scope, args, to) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
-         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Attention.hand_off(issue.id, to, Tools.fetch_string(args, "note")) do
         {:ok, attention} ->
           {:ok, %{id: issue.id, attention: Tools.serialize_attention(attention)}}
@@ -632,7 +672,8 @@ defmodule Arbiter.MCP.Tools.Task do
           {:ok, map()} | {:error, {atom(), String.t()}}
   def task_sync_upstream_close(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
-         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :sync_upstream_close) do
         {:ok, synced} -> {:ok, Tools.serialize_task_summary(synced)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -655,6 +696,7 @@ defmodule Arbiter.MCP.Tools.Task do
   def task_verify(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, outcome, evidence} <- verify_verdict(args) do
       case Verification.record_outcome(issue, outcome, evidence) do
         {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}

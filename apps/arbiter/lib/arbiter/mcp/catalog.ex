@@ -26,7 +26,7 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `ticket_create` | coordinator | `Ash.create(Issue, …)` |
+  | `ticket_create` | coordinator | `Arbiter.Tasks.Create.run/2` (dedup, upstream drain, edges; P-14) |
   | `ticket_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
   | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
@@ -34,6 +34,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `ticket_resume_review` | coordinator | `Ash.update(issue, …, action: :resume_review)` (P-14) |
   | `epic_floor` | coordinator | `Ash.update(issue, …, action: :set_floor)` (ES2, bd-3e7inj) |
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
@@ -378,7 +379,11 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Create a ticket in the workspace. `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
-          "`tracker_type`, …. The ticket is always created in the coordinator's own workspace. " <>
+          "`tracker_type`, …. The ticket is created in the session's workspace (the bound one, or the " <>
+          "`workspace` you name). A ticket whose title matches an open one in that workspace is " <>
+          "refused as a duplicate unless `force: true`. If the upstream tracker mirror fails the " <>
+          "call is an error that names the ticket that WAS created (re-link it with " <>
+          "`ticket_update`; do not file it again). " <>
           "Created tickets land in the Backlog column (state `backlog`), not Ready, " <>
           "and stay there until a human promotes them from the ticket detail page. " <>
           "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
@@ -401,6 +406,12 @@ defmodule Arbiter.MCP.Catalog do
                 "default it stays local (`tracker_type: none`) with the parent's ticket as " <>
                 "`tracker_context_ref`, so no upstream ticket is minted. Refine-session " <>
                 "children are always context-only. Pass `tracker_type` to mint anyway."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "File the ticket even though an open ticket (or open tracker issue) with the same " <>
+                "title exists. Default false: a duplicate title is refused."
           },
           "description" => %{"type" => "string", "description" => "Markdown body."},
           "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},
@@ -670,7 +681,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Promote a ticket from Backlog to the queue (state `backlog` → `queued`: column Ready, or " <>
           "Blocked while a gating blocker is open) via the `promote` transition. " <>
-          "Coordinator only. Idempotent by design — promoting an already-queued ticket is a no-op success, " <>
+          "Coordinator tier, or a refine session within its subtree. Idempotent by design — promoting an already-queued ticket is a no-op success, " <>
           "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
           "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
           "auto-waived). **Promote last.** Autopilot can claim a ticket within seconds of it going " <>
@@ -746,6 +757,26 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
+    },
+    %{
+      name: "ticket_resume_review",
+      tiers: @coordinator,
+      description:
+        "Clear a tripped ReviewPatrol circuit breaker on a ticket so its PR review resumes, via the " <>
+          "typed `:resume_review` action (the same one `POST /api/issues/:id/resume_review` and " <>
+          "`arb ticket update --resume-review` use). Coordinator only. Idempotent — resuming an " <>
+          "untripped ticket is a no-op success. The head commit the breaker tripped at is " <>
+          "watermarked, so the next review tick does not re-trip on the same commit. " <>
+          "`ticket_update` does not write `circuit_breaker_*` — this is the one door.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_resume_review/2
     },
     %{
       name: "epic_floor",

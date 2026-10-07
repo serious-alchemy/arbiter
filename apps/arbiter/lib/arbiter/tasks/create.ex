@@ -91,7 +91,7 @@ defmodule Arbiter.Tasks.Create do
     result =
       Dedup.check(fetch(attrs, :title), fetch(attrs, :workspace_id),
         force: force?,
-        skip_upstream_create: truthy?(fetch(attrs, :skip_upstream_create)),
+        skip_upstream_create: truthy?(fetch(attrs, :skip_upstream_create)) or local_child?(attrs),
         tracker_ref: fetch(attrs, :tracker_ref)
       )
 
@@ -99,6 +99,18 @@ defmodule Arbiter.Tasks.Create do
       :ok -> :ok
       dup -> {:dup, dup}
     end
+  end
+
+  # A child of a tracked parent is, by default, context-only (`tracker.child_policy`,
+  # #1973) and a refine session's children always are: no upstream ticket will be
+  # minted, so searching the tracker for a title clash would be a pointless
+  # network call. An explicit `tracker_type` says "mint anyway" and keeps it. The
+  # tracker leg is advisory, so a workspace that chose `child_policy: mint` merely
+  # loses that one check for its children.
+  defp local_child?(attrs) do
+    fetch(attrs, :tracker_child_policy) in [:context_only, "context_only"] or
+      (not is_nil(blank_to_nil(fetch(attrs, :parent_id))) and
+         is_nil(blank_to_nil(fetch(attrs, :tracker_type))))
   end
 
   # ---- preflight ------------------------------------------------------------

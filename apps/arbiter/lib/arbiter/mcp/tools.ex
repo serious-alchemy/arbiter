@@ -2079,6 +2079,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_demote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_rank(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate ticket_resume_review(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate epic_floor(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate ticket_handoff(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate ticket_handback(scope, args), to: Arbiter.MCP.Tools.Task
