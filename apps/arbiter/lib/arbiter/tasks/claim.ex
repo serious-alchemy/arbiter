@@ -19,18 +19,17 @@ defmodule Arbiter.Tasks.Claim do
       against open tasks, in both directions.
   """
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, IssueSerializer, Workspace}
   alias Arbiter.Trackers
 
   require Ash.Query
 
   @typedoc "Outcome of a single claim attempt."
-  # The three tuple-shaped errors are NOT decoration: `ArbiterWeb.Api.
-  # ClaimController.create/2` matches each one to pick a distinct HTTP status
-  # (409 already_claimed, 403 not_assigned, 400 invalid_ref). While this type
-  # listed only `atom() | String.t() | map()` those three `else` branches were
-  # provably dead to dialyzer even though `claim/3` returns them at runtime —
-  # the type, not the code, was wrong.
+  # The three tuple-shaped errors are NOT decoration: `refusal/1` matches each one
+  # to pick a distinct HTTP status (409 already_claimed, 403 not_assigned, 400
+  # invalid_ref). While this type listed only `atom() | String.t() | map()` those
+  # branches were provably dead to dialyzer even though `claim/3` returns them at
+  # runtime — the type, not the code, was wrong.
   @type claim_result ::
           {:ok, :created | :existing, Issue.t()}
           | {:error, {:not_assigned, term()}}
@@ -155,6 +154,138 @@ defmodule Arbiter.Tasks.Claim do
   def apply_plan(%Workspace{} = workspace, plan, _opts \\ []) when is_list(plan) do
     results = Enum.map(plan, &apply_action(workspace, &1))
     {:ok, results}
+  end
+
+  # ---- surface contract: options, errors, shapes ---------------------------
+  #
+  # REST (`ClaimController`), the MCP `tracker_claim` / `tracker_sync` tools and
+  # the CLI (which reads REST) all go through these, so a claim or a sync reads
+  # the same on every surface (P-13, parity audit D-T-23, D-T-24).
+
+  @difficulties 0..5
+
+  @doc """
+  The `claim/3` options a caller may pass — `difficulty` (an integer or numeric
+  string in 0..5, checked here, before any tracker call) and `repo` — from a
+  string-keyed params map. `{:error, {:invalid_request, message}}` on a bad one.
+  """
+  @spec claim_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_request, String.t()}}
+  def claim_opts(params) when is_map(params) do
+    with {:ok, difficulty} <- optional_difficulty(Map.get(params, "difficulty")),
+         {:ok, repo} <- optional_repo(Map.get(params, "repo")) do
+      {:ok, [difficulty: difficulty, repo: repo]}
+    end
+  end
+
+  defp optional_difficulty(nil), do: {:ok, nil}
+  defp optional_difficulty(v) when is_integer(v), do: difficulty_in_range(v)
+
+  defp optional_difficulty(v) when is_binary(v) do
+    case Integer.parse(v) do
+      {n, ""} -> difficulty_in_range(n)
+      _ -> {:error, {:invalid_request, "difficulty must be an integer"}}
+    end
+  end
+
+  defp optional_difficulty(_), do: {:error, {:invalid_request, "difficulty must be an integer"}}
+
+  defp difficulty_in_range(n) when n in @difficulties, do: {:ok, n}
+
+  defp difficulty_in_range(n) do
+    first..last//_ = @difficulties
+    {:error, {:invalid_request, "difficulty #{n} out of range #{first}..#{last}"}}
+  end
+
+  defp optional_repo(nil), do: {:ok, nil}
+  defp optional_repo(""), do: {:ok, nil}
+  defp optional_repo(v) when is_binary(v), do: {:ok, v}
+  defp optional_repo(_), do: {:error, {:invalid_request, "repo must be a string"}}
+
+  @doc """
+  The typed refusal for a `claim/3` / `plan/1` failure the caller can act on, as
+  an `Arbiter.Errors` `{kind, message, details}` — `already_claimed` (409),
+  `not_assigned` (403), `invalid_request` (400) — or `nil` for anything else
+  (a tracker or Ash error, rendered by each surface's own fallback).
+  """
+  @spec refusal(term()) :: {atom(), String.t(), map()} | nil
+  def refusal(:tracker_not_supported) do
+    {:invalid_request,
+     "workspace has no tracker that supports claim; configure a tracker (github, jira, shortcut)",
+     %{}}
+  end
+
+  def refusal({:already_claimed, body}) do
+    {:already_claimed, "this issue has already been claimed by another Arbiter installation",
+     %{comment: body}}
+  end
+
+  def refusal({:not_assigned, login}) do
+    {:not_assigned,
+     "issue is not assigned to workspace user #{inspect(login)}; pass force=true to override",
+     %{viewer: login}}
+  end
+
+  def refusal({:invalid_ref, raw}), do: {:invalid_request, "invalid issue ref: #{inspect(raw)}", %{}}
+  def refusal(_other), do: nil
+
+  @doc """
+  Run a `claim/3` / `plan/1` result through `refusal/1`: a refusal the caller can
+  act on becomes `{:error, {kind, message, details}}`, anything else passes
+  through unchanged.
+  """
+  @spec typed(term()) :: term()
+  def typed({:error, reason} = result) do
+    case refusal(reason) do
+      nil -> result
+      refusal -> {:error, refusal}
+    end
+  end
+
+  def typed(other), do: other
+
+  @doc "The claim response: `%{status: \"created\" | \"existing\", task: <ticket record>}`."
+  @spec serialize_claim(:created | :existing, Issue.t()) :: map()
+  def serialize_claim(status, %Issue{} = task),
+    do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
+
+  @doc "A planned reconcile action as JSON."
+  @spec serialize_action(action()) :: map()
+  def serialize_action({:create, ref, summary}),
+    do: %{action: "create", ref: ref, title: summary[:title], url: summary[:url]}
+
+  def serialize_action({:close, task_id, reason}),
+    do: %{action: "close", task_id: task_id, reason: reason}
+
+  def serialize_action({:drift, task_id, reason}),
+    do: %{action: "drift", task_id: task_id, reason: reason}
+
+  @doc "The outcome of applying one planned action as JSON."
+  @spec serialize_result(action_result()) :: map()
+  def serialize_result({:created, task}),
+    do: %{outcome: "created", task: IssueSerializer.data(task)}
+
+  def serialize_result({:closed, task}),
+    do: %{outcome: "closed", task: IssueSerializer.data(task)}
+
+  def serialize_result({:drifted, task}),
+    do: %{outcome: "drifted", task: IssueSerializer.data(task)}
+
+  def serialize_result({:error, action, reason}),
+    do: %{outcome: "error", action: serialize_action(action), reason: inspect(reason)}
+
+  @doc """
+  The sync response: `%{data: [action], applied: boolean}`, plus `results` when
+  the plan was applied (`results` is the list `apply_plan/3` returned).
+  """
+  @spec serialize_sync([action()], [action_result()] | :dry) :: map()
+  def serialize_sync(plan, :dry), do: %{data: Enum.map(plan, &serialize_action/1), applied: false}
+
+  def serialize_sync(plan, results) when is_list(results) do
+    %{
+      data: Enum.map(plan, &serialize_action/1),
+      results: Enum.map(results, &serialize_result/1),
+      applied: true
+    }
   end
 
   # ---- internals: claim ----------------------------------------------------

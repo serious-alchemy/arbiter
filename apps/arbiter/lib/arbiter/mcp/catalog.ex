@@ -146,6 +146,21 @@ defmodule Arbiter.MCP.Catalog do
   # All other tools do not accept a workspace override.
   @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
 
+  # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
+  # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
+  # the ten-field slim row instead. Injected into each one below.
+  @summary_tools ~w(ticket_update_progress ticket_create ticket_update ticket_close ticket_reopen
+                    ticket_verify ticket_promote ticket_demote ticket_rank ticket_resume_review
+                    epic_floor ticket_handoff ticket_handback ticket_sync_upstream_close)
+
+  @summary_field %{
+    "type" => "boolean",
+    "description" =>
+      "Return the slim ten-field row (id, title, state, close_reason, priority, difficulty, " <>
+        "issue_type, workspace_id, acceptance_waived, rank) instead of the full ticket " <>
+        "record. Default false: the full record, the same shape `GET /api/issues/:id` returns."
+  }
+
   @raw_tools [
     %{
       name: "ticket_show",
@@ -164,7 +179,9 @@ defmodule Arbiter.MCP.Catalog do
           "own ticket (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
           "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
-          "verify_after_deploy + the verification state, timestamps). Every view also " <>
+          "verify_after_deploy + the verification state, timestamps) plus `dependencies`, " <>
+          "`history` (the audit trail, newest first, each write with its actor) and " <>
+          "`current_run` (what the ticket's run is doing, or null). Every view also " <>
           "carries `estimate`: what comparable closed tickets actually cost, as " <>
           "`{range: [p25, p75], median, p90, n, basis, fallback_level}` over a 60-day " <>
           "window. `basis` names the group the numbers came from " <>
@@ -203,7 +220,8 @@ defmodule Arbiter.MCP.Catalog do
           "state `queued` with no unsatisfied gating blocker. A blocker that is Verifying " <>
           "(merged, awaiting its verification) no longer blocks. Backlog, Blocked and " <>
           "epics are never listed. Each carries `state`, `column`, `step`, `blocked_by` " <>
-          "and `attention`.",
+          "and `attention` — and `hold_reason` when the scheduler is holding that card. The " <>
+          "same set `GET /api/issues/ready` and `arb ready` return.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.task_ready/2
     },
@@ -1733,10 +1751,12 @@ defmodule Arbiter.MCP.Catalog do
         "List tickets in the workspace with optional filters: `state` (backlog | queued | " <>
           "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
           "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
-          "`issue_type` (task | research | bug | feature | epic | chore | decision) and `engagements` " <>
+          "`difficulty` (integer 0–5), `issue_type` (task | research | bug | feature | epic | chore | " <>
+          "decision) and `engagements` " <>
           "(all | exclude | only — ReviewPatrol review engagements, i.e. review_only tickets with a " <>
           "source_pr; default all, so nothing is hidden unless you ask). Each ticket carries " <>
-          "`state`, `column`, `step`, `blocked_by` and `attention`.",
+          "`state`, `column`, `step`, `blocked_by` and `attention` — and, on a Ready card the " <>
+          "scheduler is holding, `hold_reason`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1745,6 +1765,10 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Filter by stored lifecycle state: backlog | queued | active | merging | " <>
                 "verifying | closed."
+          },
+          "difficulty" => %{
+            "type" => "integer",
+            "description" => "Filter by difficulty (0 = trivial … 5 = hardest)."
           },
           "column" => %{
             "type" => "string",
@@ -1781,7 +1805,9 @@ defmodule Arbiter.MCP.Catalog do
           "Idempotent — returns the existing ticket if one already references the issue. " <>
           "`difficulty` and `issue_type` are otherwise derived from the issue's tracker labels " <>
           "where the adapter supports it (currently GitHub); `difficulty` and `repo` below " <>
-          "override whatever would otherwise be derived or left unset.",
+          "override whatever would otherwise be derived or left unset (`difficulty` is checked " <>
+          "against 0..5 before the tracker is called). Returns `{status: created | existing, " <>
+          "task}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1824,7 +1850,9 @@ defmodule Arbiter.MCP.Catalog do
           "(a close that never propagated upstream — drift entries are report-only and never mutate the " <>
           "local ticket). `task`-type and `review_only` tickets are exempt: they are expected to close with " <>
           "their ticket still open. `dry: true` returns the plan without acting. No-ops cleanly when the " <>
-          "tracker does not support reconciliation.",
+          "tracker does not support reconciliation. Returns the REST shape — `data` (the planned " <>
+          "actions; a `create` carries `url`), `applied` and, once applied, `results` — plus " <>
+          "`actions` (= `data`) and `count`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -2990,9 +3018,18 @@ defmodule Arbiter.MCP.Catalog do
   # Inject the optional `workspace` field into every tool that calls resolve_workspace_id,
   # so callers can target a workspace explicitly without each tool restating the property by hand.
   @tools Enum.map(@raw_tools, fn tool ->
-           if tool.name in @workspace_tools do
+           tool =
+             if tool.name in @workspace_tools do
+               update_in(tool, [:input_schema, "properties"], fn props ->
+                 Map.put(props, "workspace", @workspace_field)
+               end)
+             else
+               tool
+             end
+
+           if tool.name in @summary_tools do
              update_in(tool, [:input_schema, "properties"], fn props ->
-               Map.put(props, "workspace", @workspace_field)
+               Map.put(props, "summary", @summary_field)
              end)
            else
              tool

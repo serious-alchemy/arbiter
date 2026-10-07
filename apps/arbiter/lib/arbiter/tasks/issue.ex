@@ -2257,7 +2257,8 @@ defmodule Arbiter.Tasks.Issue do
   @doc """
   Returns the "ready" tickets: exactly those whose `Arbiter.Tasks.Lifecycle.view/2`
   column is `:ready` (bd-6zapbl) — `:queued`, with every gating blocker
-  satisfied (`:verifying` or `:closed`, per `Lifecycle.blocker_satisfied?/1`).
+  satisfied (`:verifying` or `:closed`, per `Lifecycle.blocker_satisfied?/1`) —
+  in dispatch order (`Arbiter.Tasks.EffectivePriority.order/1`).
 
   So a `:backlog` ticket is never ready, whatever its edges: it has not been
   refined into the queue. And a blocker that has merged and is waiting on its
@@ -2269,10 +2270,11 @@ defmodule Arbiter.Tasks.Issue do
   Ready/Blocked split reads. Epics (`non_dispatchable_types/0`) are excluded
   up front: an epic is a rollup of children, never a unit of work.
 
-  This is the read behind the `ticket_ready` MCP tool, `GET /api/issues/ready`,
-  `arb ready` and `arb prime`'s "Ready issues". It passes no runs to the
-  projection: a `:queued` ticket whose run registered before dispatch's
-  `start` transition landed still reads as ready here, for that window.
+  This is a thin read over `Arbiter.Tasks.Lifecycle.Projection.ready/2` — the one
+  Ready implementation behind the `ticket_ready` MCP tool,
+  `GET /api/issues/ready`, `arb ready` and `arb prime`'s "Ready issues" (P-13).
+  Like the board it consults the live runs, so a `:queued` ticket whose run
+  registered before dispatch's `start` transition landed is not ready.
 
   ## Options
 
@@ -2280,35 +2282,16 @@ defmodule Arbiter.Tasks.Issue do
       workspace. Gating dependencies are still consulted across
       workspaces (a task in workspace A can be blocked by a task in
       workspace B). Default: no filter (all workspaces).
+    * `:workers` — the live worker rows, instead of reading them.
 
   At our scale (~thousands of issues) reading every issue and edge is fine.
   """
   def ready(opts \\ []) do
-    workspace_id = Keyword.get(opts, :workspace_id)
-    issues = Ash.read!(__MODULE__)
+    {workspace_id, opts} = Keyword.pop(opts, :workspace_id)
 
-    candidates =
-      Enum.filter(issues, fn i ->
-        i.state == :queued and i.issue_type not in @non_dispatchable_types and
-          (is_nil(workspace_id) or i.workspace_id == workspace_id)
-      end)
-
-    if candidates == [] do
-      []
-    else
-      gating = Arbiter.Tasks.DependencyGraph.gating_types()
-
-      blockers =
-        Arbiter.Tasks.Dependency
-        |> Ash.Query.filter(type in ^gating)
-        |> Ash.read!()
-        |> Arbiter.Tasks.EdgeGate.blockers(issues)
-
-      Enum.filter(candidates, fn i ->
-        Arbiter.Tasks.Lifecycle.view(i, %{blocked_by: Map.get(blockers, i.id, [])}).column ==
-          :ready
-      end)
-    end
+    workspace_id
+    |> Arbiter.Tasks.Lifecycle.Projection.ready(opts)
+    |> Enum.map(&elem(&1, 0))
   end
 
   # ---- parent-with-progress rollup ---------------------------------------

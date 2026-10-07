@@ -16,11 +16,15 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.EffectivePriority
+  alias Arbiter.Tasks.History
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueSerializer
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias Arbiter.Tasks.Rank
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.WorkerFiling
   alias Arbiter.Usage.Estimate
+  alias Arbiter.MCP.Tools.Worker
 
   require Ash.Query
 
@@ -103,12 +107,28 @@ defmodule Arbiter.MCP.Tools.Task do
       # bd-1defgu: the domain-layer edge read existed (`Dependencies.list/1`)
       # but wasn't reachable from here — full view only, same bandwidth
       # tradeoff as every other field this branch adds.
+      #
+      # P-13 (D-T-15): and the audit trail (each write with its actor) and what
+      # the ticket's current run is doing, which `GET /api/issues/:id` always
+      # carried and this view did not.
       result =
-        if full,
-          do: Map.put(result, :dependencies, dependency_rows(id)),
-          else: result
+        if full do
+          result
+          |> Map.put(:dependencies, dependency_rows(id))
+          |> Map.put(:history, id |> History.recent() |> IssueSerializer.history())
+          |> Map.put(:current_run, current_run(id))
+        else
+          result
+        end
 
       {:ok, result}
+    end
+  end
+
+  defp current_run(id) do
+    case Arbiter.Workers.Current.show(id, limit: 1) do
+      %{current: current} -> Worker.current_run_payload(current)
+      nil -> nil
     end
   end
 
@@ -132,9 +152,9 @@ defmodule Arbiter.MCP.Tools.Task do
   @spec task_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_ready(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
-      tasks =
-        for {issue, %{column: :ready} = view} <- Projection.open(ws_id),
-            do: Tools.serialize_task_summary(issue, view)
+      # P-13 (D-T-16): `Projection.ready/2` is the one Ready definition — the
+      # same rows `GET /api/issues/ready` returns.
+      tasks = ws_id |> Projection.ready() |> Tools.ready_rows(ws_id)
 
       {:ok, %{tasks: tasks, count: length(tasks), workspace_id: ws_id}}
     end
@@ -156,7 +176,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, attrs} <- progress_attrs(args),
          {:ok, attrs} <- refine_field_gate(scope, attrs) do
       case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
+        {:ok, updated} -> {:ok, Tools.serialize_ticket(updated, args)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
@@ -217,7 +237,7 @@ defmodule Arbiter.MCP.Tools.Task do
         {:ok, issue, warnings} ->
           {:ok,
            issue
-           |> Tools.serialize_task_summary()
+           |> Tools.serialize_ticket(args)
            |> with_warnings(warnings)
            |> with_deprecation_warnings(args)
            |> with_parent_id(parent_id)}
@@ -411,13 +431,13 @@ defmodule Arbiter.MCP.Tools.Task do
         {0, warnings} ->
           # Only a deprecated `assignee` was passed — nothing to write, but
           # that isn't a failure: report the task back with the warning.
-          {:ok, issue |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+          {:ok, issue |> Tools.serialize_ticket(args) |> with_deprecation_warnings(warnings)}
 
         {_, warnings} ->
           case Ash.update(issue, attrs, action: :update) do
             {:ok, updated} ->
               {:ok,
-               updated |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+               updated |> Tools.serialize_ticket(args) |> with_deprecation_warnings(warnings)}
 
             {:error, err} ->
               {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -445,7 +465,7 @@ defmodule Arbiter.MCP.Tools.Task do
         |> Tools.maybe_put(:reason, Tools.fetch_string(args, "reason"))
 
       case Ash.update(issue, attrs, action: :close) do
-        {:ok, closed} -> {:ok, Tools.serialize_task_summary(closed)}
+        {:ok, closed} -> {:ok, Tools.serialize_ticket(closed, args)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
@@ -466,7 +486,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :reopen) do
-        {:ok, reopened} -> {:ok, Tools.serialize_task_summary(reopened)}
+        {:ok, reopened} -> {:ok, Tools.serialize_ticket(reopened, args)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
@@ -492,7 +512,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
       case Ash.update(issue, promote_args, action: :promote_to_ready) do
         {:ok, promoted} ->
-          {:ok, with_promotion_note(Tools.serialize_task_summary(promoted), scope)}
+          {:ok, with_promotion_note(Tools.serialize_ticket(promoted, args), scope)}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -526,7 +546,7 @@ defmodule Arbiter.MCP.Tools.Task do
          :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :return_to_backlog) do
         {:ok, demoted} ->
-          {:ok, Tools.serialize_task_summary(demoted)}
+          {:ok, Tools.serialize_ticket(demoted, args)}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -552,7 +572,7 @@ defmodule Arbiter.MCP.Tools.Task do
          :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :resume_review) do
         {:ok, resumed} ->
-          {:ok, Map.put(Tools.serialize_task_summary(resumed), :circuit_breaker_tripped, false)}
+          {:ok, Map.put(Tools.serialize_ticket(resumed, args), :circuit_breaker_tripped, false)}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -578,8 +598,9 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, rank_args} <- rank_args(args) do
-      case Arbiter.Tasks.Rank.move(issue, rank_args) do
-        {:ok, ranked} -> {:ok, Tools.serialize_task_summary(ranked)}
+      case Rank.move(issue, rank_args) do
+        {:ok, ranked} ->
+          {:ok, ranked |> Tools.serialize_ticket(args) |> Map.merge(Rank.band_fields(ranked))}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
@@ -624,7 +645,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, floor} <- parse_floor(raw) do
       case Ash.update(issue, %{floor_priority: floor}, action: :set_floor, actor: scope) do
         {:ok, floored} ->
-          {:ok, floored |> Tools.serialize_task_summary() |> Map.put(:floor_priority, floor)}
+          {:ok, floored |> Tools.serialize_ticket(args) |> Map.put(:floor_priority, floor)}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -667,13 +688,22 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Attention.hand_off(issue.id, to, Tools.fetch_string(args, "note")) do
-        {:ok, attention} ->
-          {:ok, %{id: issue.id, attention: Tools.serialize_attention(attention)}}
+        {:ok, _attention} ->
+          # P-13 (D-T-13): the updated ticket — `attention` is part of its
+          # projection — as `POST /api/issues/:id/handoff` and the CLI return it.
+          {:ok, moved_ticket(issue.id, args)}
 
         {:error, reason} ->
           {:error, {:invalid, Attention.describe_error(reason)}}
       end
     end
+  end
+
+  # The ticket as the move left it, with its projection (`attention` included) —
+  # the shape `POST /api/issues/:id/handoff` renders (`IssueJSON.handoff/1`).
+  defp moved_ticket(id, args) do
+    issue = Ash.get!(Issue, id)
+    IssueSerializer.row(Tools.serialize_ticket(issue, args), Projection.view(issue))
   end
 
   # ---- task_sync_upstream_close --------------------------------------------
@@ -693,7 +723,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id) do
       case Ash.update(issue, %{}, action: :sync_upstream_close) do
-        {:ok, synced} -> {:ok, Tools.serialize_task_summary(synced)}
+        {:ok, synced} -> {:ok, Tools.serialize_ticket(synced, args)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
@@ -717,7 +747,7 @@ defmodule Arbiter.MCP.Tools.Task do
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, outcome, evidence} <- verify_verdict(args) do
       case Verification.record_outcome(issue, outcome, evidence) do
-        {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
+        {:ok, updated} -> {:ok, Tools.serialize_ticket(updated, args)}
         {:error, reason} -> {:error, {:invalid, verify_error_message(reason)}}
       end
     end

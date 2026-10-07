@@ -820,6 +820,32 @@ defmodule Arbiter.MCP.Tools.Worker do
     }
   end
 
+  @doc """
+  A ticket's current run as the slim `current_run` object `GET /api/issues/:id`
+  and `ticket_show full:true` carry (kind / state / outcome / phase, no
+  transcript), from an `Arbiter.Workers.Current` view.
+  """
+  @spec current_run_payload(map()) :: map()
+  def current_run_payload(view) do
+    view
+    |> run_fields()
+    |> Map.take([
+      :run_id,
+      :run_task_id,
+      :source,
+      :kind,
+      :state,
+      :outcome,
+      :waiting_on,
+      :role,
+      :phase,
+      :phase_label,
+      :started_at,
+      :completed_at
+    ])
+    |> Map.put(:failure_reason, stringify_reason(Map.get(view, :failure_reason)))
+  end
+
   defp serialize_worker_summary(view, spend) do
     meta = Map.get(view, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
