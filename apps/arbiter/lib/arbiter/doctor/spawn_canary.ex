@@ -201,6 +201,10 @@ defmodule Arbiter.Doctor.SpawnCanary do
 
     task =
       Task.async(fn ->
+        # If the caller dies (an HTTP client hanging up) this task must still
+        # run its cleanups; it is bounded by the probe deadline either way.
+        Process.flag(:trap_exit, true)
+
         try do
           spawn_and_probe(type, adapter_type, workspace, opts)
         rescue

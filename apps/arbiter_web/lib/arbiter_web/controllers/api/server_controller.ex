@@ -72,6 +72,16 @@ defmodule ArbiterWeb.Api.ServerController do
       egress modes this install uses (bd-7pnat1, `Arbiter.Doctor.Scope`), so
       `arb server doctor` reports a check that cannot matter here as `n/a`
       instead of probing it.
+    * `POST /api/server/spawn_canary` — the doctor's end-to-end canary spawn
+      (bd-8t4yui, `Arbiter.Doctor.SpawnCanary`): for each enabled, unpaused
+      provider, spawn the agent CLI through the real spawn pipeline with
+      `--version` (no model tokens, no ticket, run record, usage row or
+      scheduler slot) and report whether it spawned, reached the agent, its
+      exit and duration, and the first error line. One canary at a time: a
+      concurrent call is a 409. Coordinator tier, so a worker token is refused.
+    * `GET /api/server/spawn_canary` — the last canary report this boot ran
+      (`report: null` when none has), so `arb server doctor` runs the canary
+      once per boot rather than every time.
   """
 
   use ArbiterWeb, :controller
@@ -196,6 +206,22 @@ defmodule ArbiterWeb.Api.ServerController do
   # bd-7pnat1: which providers / sandbox backends this install uses, so
   # `arb server doctor` can report a check as n/a instead of probing it.
   def doctor_scope(conn, _params), do: json(conn, Arbiter.Doctor.Scope.report())
+
+  # bd-8t4yui: the end-to-end canary spawn, and its cached result for this boot.
+  def spawn_canary(conn, _params) do
+    case Arbiter.Doctor.SpawnCanary.run() do
+      {:ok, report} ->
+        json(conn, %{report: report})
+
+      {:error, :busy} ->
+        conn
+        |> put_status(:conflict)
+        |> json(%{error: "busy", detail: "a spawn canary is already running; try again shortly"})
+    end
+  end
+
+  def spawn_canary_report(conn, _params),
+    do: json(conn, %{report: Arbiter.Doctor.SpawnCanary.cached()})
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)
