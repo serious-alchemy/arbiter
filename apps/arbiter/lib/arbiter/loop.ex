@@ -410,32 +410,9 @@ defmodule Arbiter.Loop do
 
   defp routing_rule(tier, _), do: %{"model_tier" => tier}
 
-  @doc "Resolve a workspace reference (id first, then name)."
+  @doc "Resolve a workspace reference (id first, then name). See `Arbiter.Tasks.Workspaces`."
   @spec fetch_workspace(String.t()) :: {:ok, Workspace.t()} | {:error, term()}
-  def fetch_workspace(ref) when is_binary(ref) do
-    with :error <- workspace_by_id(ref),
-         :error <- workspace_by_name(ref) do
-      {:error, {:not_found, "workspace #{inspect(ref)} not found"}}
-    end
-  end
-
-  defp workspace_by_id(ref) do
-    case Ash.get(Workspace, ref) do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp workspace_by_name(ref) do
-    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
+  defdelegate fetch_workspace(ref), to: Arbiter.Tasks.Workspaces, as: :fetch
 
   defp required_string(attrs, key) do
     case fetch(attrs, key) do

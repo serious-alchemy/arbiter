@@ -6,7 +6,8 @@ defmodule ArbiterWeb.Api.BreakerController do
   Routes:
 
     * `GET  /api/breakers` — live breaker state plus the static registry of
-      gated call sites (`?workspace=`, `?kind=`, `?open_only=true`)
+      gated call sites (`?workspace=` — id or name, `workspace_id` accepted as an alias —
+      `?kind=`, `?open_only=true`; no workspace means all of them)
     * `POST /api/breakers/reset` — close one breaker by `signature`, or every
       breaker matching `workspace` / `kind` when `all` is set, or clear one
       provider's auth-shaped dispatch hold with `provider` (bd-21bmdh; the
@@ -22,16 +23,18 @@ defmodule ArbiterWeb.Api.BreakerController do
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.CircuitBreaker
   alias Arbiter.Params
+  alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @doc "Live breaker state plus the call-site registry."
   def index(conn, params) do
-    with {:ok, kind} <- resolve_kind(params["kind"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, kind} <- resolve_kind(params["kind"]),
          {:ok, open_only?} <- params |> Params.fetch_bool("open_only", false) |> Params.to_rest() do
       filters =
         []
-        |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
+        |> maybe_put(:workspace_id, ws_id)
         |> maybe_put(:kind, kind)
         |> maybe_put(:open_only, open_only?)
 
@@ -40,6 +43,7 @@ defmodule ArbiterWeb.Api.BreakerController do
       json(conn, %{
         breakers: Enum.map(breakers, &serialize/1),
         open_count: Enum.count(breakers, & &1.open?),
+        workspace_id: ws_id,
         call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1),
         auth_holds: Enum.map(AuthHold.list(), &AuthHold.serialize/1),
         credential_watchdog: CredentialWatchdog.list()
@@ -72,14 +76,15 @@ defmodule ArbiterWeb.Api.BreakerController do
           # `kind` is resolved BEFORE the reset runs: a misspelled kind must
           # not degrade into "no filter" and re-arm every breaker in the
           # workspace when the operator asked for one.
-          with {:ok, kind} <- resolve_kind(params["kind"]) do
+          with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+               {:ok, kind} <- resolve_kind(params["kind"]) do
             filters =
               []
-              |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
+              |> maybe_put(:workspace_id, ws_id)
               |> maybe_put(:kind, kind)
 
             {:ok, count} = CircuitBreaker.reset_all(filters)
-            json(conn, %{reset: count})
+            json(conn, %{reset: count, workspace_id: ws_id})
           end
         else
           {:error,

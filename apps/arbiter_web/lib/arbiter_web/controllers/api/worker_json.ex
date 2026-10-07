@@ -2,6 +2,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
   alias Arbiter.Usage.LiveSpend
   alias Arbiter.Workers.Run
   alias ArbiterWeb.Api.IssueJSON
+  alias ArbiterWeb.Api.WorkspaceParam
 
   def dispatch(%{result: result}) do
     %{
@@ -22,7 +23,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
   # bd-1uu19b: `index` and `show` render the same thing — a view of a
   # ticket's current run from `Arbiter.Workers.Current` — through the same
   # `run/1`, in the one run vocabulary (kind / state / outcome).
-  def index(%{runs: runs, costs: costs}) do
+  def index(%{runs: runs, costs: costs} = assigns) do
     %{
       data:
         Enum.map(runs, fn view ->
@@ -31,6 +32,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
           |> Map.merge(LiveSpend.cost_fields(Map.get(costs, view.task_id)))
         end)
     }
+    |> WorkspaceParam.echo(assigns)
   end
 
   def show(%{current: current, runs: runs} = assigns) do

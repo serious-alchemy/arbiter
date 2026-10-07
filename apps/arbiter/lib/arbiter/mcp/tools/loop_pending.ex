@@ -45,6 +45,7 @@ defmodule Arbiter.MCP.Tools.LoopPending do
        %{
          pending: Enum.map(rows, &serialize_pending_summary/1),
          count: length(rows),
+         workspace_id: ws_id,
          evidence_bar: Arbiter.Loop.evidence_bar(ws_id)
        }}
     end

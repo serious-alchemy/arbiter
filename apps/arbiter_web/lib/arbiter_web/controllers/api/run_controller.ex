@@ -27,6 +27,7 @@ defmodule ArbiterWeb.Api.RunController do
   alias Arbiter.Params
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
+  alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -47,7 +48,8 @@ defmodule ArbiterWeb.Api.RunController do
   }
 
   def index(conn, params) do
-    with {:ok, limit} <- parse_limit(params["limit"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, kind} <- parse_enum(params["kind"], "kind", Run.kinds()),
          {:ok, state} <- parse_enum(params["state"], "state", RunState.states()),
          {:ok, outcome} <- parse_enum(params["outcome"], "outcome", RunState.outcomes()),
@@ -56,7 +58,7 @@ defmodule ArbiterWeb.Api.RunController do
       runs =
         Run
         |> filter_eq(:task_id, params["task_id"])
-        |> filter_eq(:workspace_id, params["workspace_id"])
+        |> filter_eq(:workspace_id, ws_id)
         |> filter_eq(:kind, kind)
         |> filter_eq(:state, state)
         |> filter_eq(:outcome, outcome)

@@ -194,9 +194,10 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       assert row["id"] == kept.id
     end
 
-    test "requires workspace_id or issue_id", %{conn: conn} do
-      conn = get(conn, ~p"/api/dependencies")
-      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    test "with neither workspace nor issue named it lists every workspace's edges", %{conn: conn} do
+      body = conn |> get(~p"/api/dependencies") |> json_response(200)
+      assert Map.fetch!(body, "workspace_id") == nil
+      assert Enum.all?(body["data"], &is_binary(&1["workspace_id"]))
     end
 
     test "rejects a workspace_id/issue_id pair that don't match, naming both", %{

@@ -11,16 +11,16 @@ defmodule ArbiterWeb.Api.UsageController do
                                   also accepted as a deprecated alias for
                                   `epic`, and `account` accepted as an alias
                                   for `provider_account`). Optional:
-                                  `workspace_id`, `account`, `since`
-                                  (ISO8601), `limit`.
+                                  `workspace` (id or name; alias `workspace_id`),
+                                  `account`, `since` (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
-                                  filters: `workspace_id`, `account`, `task_id`,
+                                  filters: `workspace`, `account`, `task_id`,
                                   `session_id`, `since`, `step`, `source`,
                                   `limit` (default 50).
     * `GET /api/usage/calibration` — difficulty mis-rating report (bd-3j4ch4):
                                   closed tasks whose actual cost lands outside
                                   their own tier's p25–p75 but inside an
-                                  adjacent tier's. Optional: `workspace_id`,
+                                  adjacent tier's. Optional: `workspace`,
                                   `window_days`.
 
   `by=task` covers task-attributed spend only — probe / pre-flight / session
@@ -34,6 +34,10 @@ defmodule ArbiterWeb.Api.UsageController do
   is the rollup dimension; `account` narrows any rollup or the raw event list
   to one account.
 
+  A `workspace` that names nothing means every workspace; the body echoes the
+  resolved `workspace_id` (`null` for all). A token bound to one workspace is
+  confined to it, and an unknown workspace is a 404, never an empty rollup.
+
   Both back the `arb usage` CLI; the rollup is the primary surface (per-day
   spend, top tasks, rework cost). `events` is for debugging / drill-down.
   """
@@ -44,6 +48,7 @@ defmodule ArbiterWeb.Api.UsageController do
   alias Arbiter.Usage
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
+  alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -52,14 +57,15 @@ defmodule ArbiterWeb.Api.UsageController do
   @max_limit 1000
 
   def summarize(conn, params) do
-    with {:ok, by} <- parse_by(params["by"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, by} <- parse_by(params["by"]),
          {:ok, since} <- parse_since(params["since"]),
          {:ok, limit} <- parse_optional_limit(params["limit"]),
          {:ok, account_id} <- parse_account(params["account"]) do
       opts =
         [by: by]
         |> add_opt(:since, since)
-        |> add_opt(:workspace_id, params["workspace_id"])
+        |> add_opt(:workspace_id, ws_id)
         |> add_opt(:provider_account_id, account_id)
         |> add_opt(:limit, limit)
 
@@ -67,6 +73,7 @@ defmodule ArbiterWeb.Api.UsageController do
         {:ok, rollups} ->
           json(conn, %{
             by: Atom.to_string(Usage.normalize_by(by)),
+            workspace_id: ws_id,
             data: Enum.map(rollups, &render_rollup/1)
           })
 
@@ -84,15 +91,17 @@ defmodule ArbiterWeb.Api.UsageController do
   truncating it would silently hide the tail that matters most.
   """
   def calibration(conn, params) do
-    with {:ok, window_days} <- parse_window_days(params["window_days"]) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, window_days} <- parse_window_days(params["window_days"]) do
       opts =
         []
-        |> add_opt(:workspace_id, params["workspace_id"])
+        |> add_opt(:workspace_id, ws_id)
         |> add_opt(:window_days, window_days)
 
       report = Estimate.calibration(opts)
 
       json(conn, %{
+        workspace_id: ws_id,
         window_days: report.window_days,
         re_dispatched_flagged: report.re_dispatched_flagged,
         tiers: Enum.map(report.tiers, &render_tier/1),
@@ -102,14 +111,15 @@ defmodule ArbiterWeb.Api.UsageController do
   end
 
   def events(conn, params) do
-    with {:ok, since} <- parse_since(params["since"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, since} <- parse_since(params["since"]),
          {:ok, step} <- parse_step(params["step"]),
          {:ok, source} <- parse_source(params["source"]),
          {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, account_id} <- parse_account(params["account"]) do
       events =
         Event
-        |> filter_eq(:workspace_id, params["workspace_id"])
+        |> filter_eq(:workspace_id, ws_id)
         |> filter_eq(:provider_account_id, account_id)
         |> filter_eq(:task_id, params["task_id"])
         |> filter_eq(:session_id, params["session_id"])
@@ -120,7 +130,7 @@ defmodule ArbiterWeb.Api.UsageController do
         |> Ash.Query.limit(limit)
         |> Ash.read!()
 
-      json(conn, %{data: Enum.map(events, &render_event/1)})
+      json(conn, %{workspace_id: ws_id, data: Enum.map(events, &render_event/1)})
     end
   end
 

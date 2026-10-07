@@ -7,7 +7,7 @@ defmodule ArbiterWeb.Api.LoopController do
       a window and return its markdown report. Optional query params: `since`
       (`7d` / `24h` / `30m` shortcuts or ISO8601; default: last 7 days), `until`
       (ISO8601; default now), `limit` (cap on runs scanned, newest first),
-      `workspace_id`, `label`.
+      `workspace` (id or name; `workspace_id` is its alias), `label`.
     * `POST /api/loop/propose` — the same pass, plus persistence of the
       proposals it implies. Same params.
     * `discover=true` on either route (bd-4f6opo) — additionally run the
@@ -16,11 +16,11 @@ defmodule ArbiterWeb.Api.LoopController do
       `summary.discovery` and a markdown section. It queues nothing.
     * `POST /api/loop/propose/repo_doc_patch` — hand-author a `:repo_doc_patch`
       proposal directly: `repo` + `lesson` (required), optional `category` /
-      `workspace_id`. The Stage 1 pass cannot attribute a finding category to
+      `workspace`. The Stage 1 pass cannot attribute a finding category to
       one repo yet, so this is the entry point onto that write path today.
     * `GET  /api/loop/pending` — list queued proposals. Optional `state` (one
       name or a comma-separated list; default the two live states), `kind`,
-      `workspace_id`, `limit`.
+      `workspace`, `limit`.
     * `GET  /api/loop/pending/:id` — one proposal, including its unified `diff`.
     * `POST /api/loop/pending/:id/apply` — apply it through the same public
       domain API a human would use.
@@ -37,6 +37,7 @@ defmodule ArbiterWeb.Api.LoopController do
   alias Arbiter.Loop
   alias Arbiter.Loop.Analysis
   alias Arbiter.Params
+  alias ArbiterWeb.Api.WorkspaceParam
 
   # Documented `limit` cap for the loop list/analysis routes.
   @max_limit 500
@@ -60,41 +61,46 @@ defmodule ArbiterWeb.Api.LoopController do
   # `:repo_doc_patch` write path today — an operator names the repo and the
   # lesson text directly. See `Arbiter.Loop.propose_repo_doc_patch/1`.
   def propose_repo_doc_patch(conn, params) do
-    attrs = %{
-      repo: params["repo"],
-      lesson: params["lesson"],
-      category: blank_to_nil(params["category"]),
-      workspace_id: blank_to_nil(params["workspace_id"]),
-      actor: actor_label()
-    }
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
+      attrs = %{
+        repo: params["repo"],
+        lesson: params["lesson"],
+        category: blank_to_nil(params["category"]),
+        workspace_id: ws_id,
+        actor: actor_label()
+      }
 
-    case Loop.propose_repo_doc_patch(attrs) do
-      {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
-      {:error, reason} -> {:error, apply_error(reason)}
+      case Loop.propose_repo_doc_patch(attrs) do
+        {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
+        {:error, reason} -> {:error, apply_error(reason)}
+      end
     end
   end
 
   # Operator-started routing canary: see `Arbiter.Loop.propose_routing/1`.
   def propose_routing(conn, params) do
-    attrs = %{
-      workspace: blank_to_nil(params["workspace_id"]) || blank_to_nil(params["workspace"]),
-      difficulty: params["difficulty"],
-      model_tier: blank_to_nil(params["model_tier"]),
-      thinking: blank_to_nil(params["thinking"]),
-      actor: actor_label()
-    }
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write) do
+      attrs = %{
+        workspace: ws_id,
+        difficulty: params["difficulty"],
+        model_tier: blank_to_nil(params["model_tier"]),
+        thinking: blank_to_nil(params["thinking"]),
+        actor: actor_label()
+      }
 
-    case Loop.propose_routing(attrs) do
-      {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
-      {:error, reason} -> {:error, apply_error(reason)}
+      case Loop.propose_routing(attrs) do
+        {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
+        {:error, reason} -> {:error, apply_error(reason)}
+      end
     end
   end
 
   # `arb loop canary status`: both arms' metrics + verdict progress.
   def canary_status(conn, params) do
-    ref = blank_to_nil(params["workspace_id"]) || blank_to_nil(params["workspace"]) || "default"
-
-    with {:ok, ws} <- Loop.fetch_workspace(ref) |> map_ws_error() do
+    # One workspace's canary: the named / bound one, else the sole workspace —
+    # a 422 listing them when several exist, never the one called `default`.
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write),
+         {:ok, ws} <- Loop.fetch_workspace(ws_id) |> map_ws_error() do
       case Arbiter.Loop.Canary.status(ws) do
         {:ok, status} -> json(conn, %{running: true, status: status})
         {:none, message} -> json(conn, %{running: false, message: message})
@@ -106,7 +112,8 @@ defmodule ArbiterWeb.Api.LoopController do
   defp map_ws_error(ok), do: ok
 
   defp run_analysis(conn, params, propose?: propose?) do
-    with {:ok, since} <- parse_window(params["since"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, since} <- parse_window(params["since"]),
          {:ok, until} <- parse_iso(params["until"]),
          {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, discover?} <- parse_discover(params["discover"]) do
@@ -115,7 +122,7 @@ defmodule ArbiterWeb.Api.LoopController do
         |> put(:since, since)
         |> put(:until, until)
         |> put(:limit, limit)
-        |> put(:workspace_id, blank_to_nil(params["workspace_id"]))
+        |> put(:workspace_id, ws_id)
         |> put(:label, blank_to_nil(params["label"]))
 
       case Analysis.analyze(opts) do
@@ -156,43 +163,61 @@ defmodule ArbiterWeb.Api.LoopController do
   # ---- the proposal queue -------------------------------------------------
 
   def pending_index(conn, params) do
-    with {:ok, states} <- parse_states(params["state"]),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
+         {:ok, states} <- parse_states(params["state"]),
          {:ok, kind} <- parse_kind(params["kind"]),
          {:ok, limit} <- parse_limit(params["limit"]) do
       rows =
         []
         |> put(:state, states || Loop.live_states())
         |> put(:kind, kind)
-        |> put(:workspace_id, blank_to_nil(params["workspace_id"]))
+        |> put(:workspace_id, ws_id)
         |> put(:limit, limit)
         |> Loop.list_pending()
 
       json(conn, %{
         pending: Enum.map(rows, &render_pending/1),
-        evidence_bar: Loop.evidence_bar(blank_to_nil(params["workspace_id"]))
+        workspace_id: ws_id,
+        evidence_bar: Loop.evidence_bar(ws_id)
       })
     end
   end
 
   def pending_show(conn, %{"id" => id}) do
-    with {:ok, row} <- Loop.get_pending(id) do
+    with {:ok, row} <- visible_pending(conn, id) do
       json(conn, %{pending: render_pending(row, :full)})
     end
   end
 
   def pending_apply(conn, %{"id" => id}) do
-    case Loop.apply_pending(id, actor: actor_label()) do
-      {:ok, row} -> json(conn, %{pending: render_pending(row, :full), applied: true})
-      {:error, reason} -> {:error, apply_error(reason)}
+    with {:ok, _row} <- visible_pending(conn, id) do
+      case Loop.apply_pending(id, actor: actor_label()) do
+        {:ok, row} -> json(conn, %{pending: render_pending(row, :full), applied: true})
+        {:error, reason} -> {:error, apply_error(reason)}
+      end
     end
   end
 
   def pending_reject(conn, %{"id" => id} = params) do
     opts = [actor: actor_label()] |> put(:reason, blank_to_nil(params["reason"]))
 
-    case Loop.reject_pending(id, opts) do
-      {:ok, row} -> json(conn, %{pending: render_pending(row, :full), rejected: true})
-      {:error, reason} -> {:error, apply_error(reason)}
+    with {:ok, _row} <- visible_pending(conn, id) do
+      case Loop.reject_pending(id, opts) do
+        {:ok, row} -> json(conn, %{pending: render_pending(row, :full), rejected: true})
+        {:error, reason} -> {:error, apply_error(reason)}
+      end
+    end
+  end
+
+  # A proposal in another workspace is not found to a token bound to one —
+  # the same rule as MCP `loop_pending_*`, so existence does not leak.
+  defp visible_pending(conn, id) do
+    with {:ok, row} <- Loop.get_pending(id) do
+      bound = conn.assigns[:mcp_scope] && conn.assigns[:mcp_scope].workspace_id
+
+      if is_nil(bound) or row.workspace_id == bound,
+        do: {:ok, row},
+        else: {:error, :not_found}
     end
   end
 
@@ -218,6 +243,7 @@ defmodule ArbiterWeb.Api.LoopController do
       kind: row.kind,
       state: row.state,
       scope: row.scope,
+      workspace_id: row.workspace_id,
       gist: row.gist,
       evidence_count: row.evidence_count,
       distinct_tasks: row.distinct_tasks,
@@ -243,7 +269,6 @@ defmodule ArbiterWeb.Api.LoopController do
       task_refs: row.task_refs,
       fingerprint: row.fingerprint,
       origin: row.origin,
-      workspace_id: row.workspace_id,
       applied_at: row.applied_at,
       escalated_at: row.escalated_at,
       rejection_reason: row.rejection_reason,

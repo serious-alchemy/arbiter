@@ -63,6 +63,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspaces
   alias Arbiter.Trackers
   alias Arbiter.Usage
 
@@ -97,7 +98,7 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+    with {:ok, ws_id} <- Workspaces.resolve_default(scope, fetch_string(args, "workspace")) do
       # P5: quota rows are keyed by provider account; the workspace is the
       # lookup shorthand that resolves to one account per provider (§6).
       accounts = Arbiter.Quota.account_ids(ws_id)
@@ -132,19 +133,20 @@ defmodule Arbiter.MCP.Tools do
   asymmetry is intentional (Option 3 in bd-bs5b12): each transport follows its own
   convention for consistency within that transport. Optional `limit` (default 20,
   max 200), `status` filter, and `workspace` (resolved the same way as
-  `worker_list`/`ticket_ready` — explicit arg, then the installation default).
+  `worker_list`/`ticket_ready` — explicit arg, else the bound workspace, else
+  ALL workspaces; the response echoes `workspace_id`).
   """
   @spec external_review_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_list(%Scope{} = scope, args) do
     require Ash.Query
     alias Arbiter.Reviews.Record, as: ExternalReviewRecord
 
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+    with {:ok, ws_id} <- authorized_workspace(scope, args),
          {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200),
          {:ok, status} <- optional_enum(args, "status", ExternalReviewRecord.statuses()) do
       records =
         ExternalReviewRecord
-        |> Ash.Query.filter(workspace_id == ^ws_id)
+        |> filter_workspace(ws_id)
         |> then(fn q ->
           if status, do: Ash.Query.filter(q, status == ^status), else: q
         end)
@@ -153,7 +155,7 @@ defmodule Arbiter.MCP.Tools do
         |> Ash.read!()
         |> Enum.map(&serialize_external_review/1)
 
-      {:ok, %{external_reviews: records, count: length(records)}}
+      {:ok, %{external_reviews: records, count: length(records), workspace_id: ws_id}}
     end
   rescue
     e -> {:error, {:internal, "external_review_list failed: #{Exception.message(e)}"}}
@@ -565,7 +567,7 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec task_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+    with {:ok, ws_id} <- authorized_workspace(scope, args),
          {:ok, state} <- optional_enum(args, "state", Lifecycle.states()),
          {:ok, column} <- optional_enum(args, "column", Projection.columns()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
@@ -573,7 +575,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, engagements} <- optional_enum(args, "engagements", @engagement_modes) do
       issues =
         Issue
-        |> Ash.Query.filter(workspace_id == ^ws_id)
+        |> filter_workspace(ws_id)
         |> filter_engagements(engagements)
         |> maybe_filter_state(state)
         |> maybe_filter_column_states(column)
@@ -589,9 +591,13 @@ defmodule Arbiter.MCP.Tools do
             is_nil(column) or view.column == column,
             do: serialize_task_summary(issue, view)
 
-      {:ok, %{tasks: tasks, count: length(tasks)}}
+      {:ok, %{tasks: tasks, count: length(tasks), workspace_id: ws_id}}
     end
   end
+
+  # `nil` is "all workspaces" (`Workspaces.resolve/3`, `:read`).
+  defp filter_workspace(query, nil), do: query
+  defp filter_workspace(query, ws_id), do: Ash.Query.filter(query, workspace_id == ^ws_id)
 
   defp maybe_filter_state(query, nil), do: query
   defp maybe_filter_state(query, state), do: Ash.Query.filter(query, state == ^state)
@@ -638,7 +644,7 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec usage_summarize(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def usage_summarize(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+    with {:ok, ws_id} <- authorized_workspace(scope, args),
          {:ok, by} <- require_enum(args, "by", Usage.acceptable_groupings()),
          {:ok, since} <- optional_datetime(args, "since"),
          {:ok, limit} <- optional_bounded_limit(args, "limit", 1000) do
@@ -657,6 +663,7 @@ defmodule Arbiter.MCP.Tools do
            by: Atom.to_string(Usage.normalize_by(by)),
            rollups: rollups,
            count: length(rollups),
+           workspace_id: ws_id,
            warnings: Enum.map(flagged, &zero_token_warning/1)
          }}
       else
@@ -1529,86 +1536,23 @@ defmodule Arbiter.MCP.Tools do
   def workspace_match?(_ws, _target), do: false
 
   # The workspace this call is authorized to operate in, honoring an optional
-  # `workspace` arg (name or id). Returns `{:ok, ws_id}` where `ws_id` may be
-  # `nil` — meaning the caller is a workspace-agnostic coordinator that named no
-  # workspace, so entity inference / the installation default applies downstream.
+  # `workspace` arg (name or id) — `Arbiter.Tasks.Workspaces.resolve/3` in
+  # `:read` mode, the one rule shared with REST. `{:ok, nil}` means ALL
+  # workspaces (a workspace-agnostic coordinator that named none), so reads
+  # list everything and entity-inferring tools take the entity's own workspace.
   #
   # A scope bound to one workspace (every worker; a legacy workspace-bound
   # coordinator) may only ever resolve to its own workspace — naming a different
-  # one is `{:error, {:unauthorized, …}}`.
-  def authorized_workspace(%Scope{} = scope, args) do
-    case fetch_string(args, "workspace") do
-      nil ->
-        {:ok, scope.workspace_id}
+  # one is `{:error, {:unauthorized, …}}` (-32003).
+  def authorized_workspace(%Scope{} = scope, args),
+    do: Workspaces.resolve(scope, fetch_string(args, "workspace"), mode: :read)
 
-      ref ->
-        with {:ok, ws} <- resolve_workspace_ref(ref) do
-          cond do
-            is_nil(scope.workspace_id) -> {:ok, ws.id}
-            scope.workspace_id == ws.id -> {:ok, ws.id}
-            true -> {:error, {:unauthorized, "this scope is bound to a single workspace"}}
-          end
-        end
-    end
-  end
-
-  # A *concrete* workspace id for tools that operate within one workspace
-  # (create + enumerate). Resolution order: explicit `workspace` arg → the
-  # scope's bound workspace → the installation default workspace.
-  def resolve_workspace_id(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- authorized_workspace(scope, args) do
-      if is_binary(ws_id), do: {:ok, ws_id}, else: default_workspace_id()
-    end
-  end
-
-  # Resolve a `workspace` arg (workspace id first, then name) to a Workspace.
-  defp resolve_workspace_ref(ref) when is_binary(ref) do
-    with :error <- workspace_by_id(ref),
-         :error <- workspace_by_name(ref) do
-      {:error, {:not_found, "workspace #{inspect(ref)} not found"}}
-    end
-  end
-
-  defp workspace_by_id(ref) do
-    case Ash.get(Workspace, ref) do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp workspace_by_name(ref) do
-    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
-      {:ok, %Workspace{} = ws} -> {:ok, ws}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  # The installation default workspace, for a workspace-agnostic coordinator that
-  # named none: the lone workspace if there is exactly one, else the one named
-  # "default" (the boot-seeded default). Ambiguous otherwise — the caller must
-  # pass `workspace` explicitly.
-  defp default_workspace_id do
-    case Ash.read!(Workspace) do
-      [%Workspace{id: id}] ->
-        {:ok, id}
-
-      [] ->
-        {:error, {:invalid, "no workspaces exist on this installation"}}
-
-      many ->
-        case Enum.find(many, &(&1.name == "default")) do
-          %Workspace{id: id} ->
-            {:ok, id}
-
-          nil ->
-            {:error, {:invalid, "multiple workspaces; pass `workspace` (name or id) explicitly"}}
-        end
-    end
-  end
+  # A *concrete* workspace id for tools that write into / operate inside one
+  # workspace: explicit `workspace` arg → the scope's bound workspace → the sole
+  # workspace → `{:error, {:invalid, "multiple workspaces; pass workspace …"}}`.
+  # Never the workspace that merely happens to be named `default`.
+  def resolve_workspace_id(%Scope{} = scope, args),
+    do: Workspaces.resolve(scope, fetch_string(args, "workspace"), mode: :write)
 
   # ---- Phase 2 arg coercion + validation ---------------------------------
 

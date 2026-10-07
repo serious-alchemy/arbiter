@@ -4,9 +4,9 @@ defmodule ArbiterWeb.Api.DependencyController do
 
   Routes:
 
-    * `GET    /api/dependencies[?workspace_id=&type=&issue_id=]` — :index
+    * `GET    /api/dependencies[?workspace=&type=&issue_id=]` — :index
     * `POST   /api/dependencies` — :create  (from_issue_id, to_issue_id, type)
-    * `GET    /api/dependencies/:issue_id[?workspace_id=&type=]` — :show
+    * `GET    /api/dependencies/:issue_id[?workspace=&type=]` — :show
     * `DELETE /api/dependencies/:from/:to[?type=...]` — :delete
 
   `create` and `delete` go through `Arbiter.Tasks.Dependencies` (bd-apj0gq).
@@ -24,29 +24,31 @@ defmodule ArbiterWeb.Api.DependencyController do
   stay 422, unchanged.
 
   `index` / `show` (bd-1defgu) go through `Arbiter.Tasks.Dependencies.list/1`.
-  `index` requires at least one of `workspace_id` / `issue_id`; passing both
-  requires the issue to actually live in that workspace — a mismatch renders
-  400 `invalid_request`, the read-side analogue of `create`'s cross-workspace
-  rejection. `show` scopes to one issue by path segment and accepts the same
-  `workspace_id` / `type` filters as further narrowing, with the same
-  cross-workspace rejection when `workspace_id` doesn't contain the issue.
+  `workspace` (id or name; `workspace_id` is its alias) narrows either read to
+  one workspace; naming neither lists every workspace (the body echoes the
+  resolved `workspace_id`, `null` for all, and each edge carries its own).
+  Passing a workspace with an `issue_id` requires the issue to actually live in
+  that workspace — a mismatch renders 400 `invalid_request`, the read-side
+  analogue of `create`'s cross-workspace rejection. A token bound to one
+  workspace is confined to it (naming another is 403).
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
+  alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback ArbiterWeb.Api.FallbackController
 
   def index(conn, params) do
-    with {:ok, opts} <- list_opts(params) do
+    with {:ok, opts} <- list_opts(conn, params) do
       render_list(conn, opts)
     end
   end
 
   def show(conn, %{"issue_id" => issue_id} = params) do
-    with {:ok, opts} <- list_opts(Map.put(params, "issue_id", issue_id)) do
+    with {:ok, opts} <- list_opts(conn, Map.put(params, "issue_id", issue_id)) do
       render_list(conn, opts)
     end
   end
@@ -85,16 +87,18 @@ defmodule ArbiterWeb.Api.DependencyController do
 
   defp render_list(conn, opts) do
     case Dependencies.list(opts) do
-      {:ok, edges} -> render(conn, :index, dependencies: edges)
-      {:error, reason} -> {:error, translate(reason)}
+      {:ok, edges} ->
+        render(conn, :index, dependencies: edges, workspace_id: Keyword.get(opts, :workspace_id))
+
+      {:error, reason} ->
+        {:error, translate(reason)}
     end
   end
 
-  defp list_opts(params) do
-    ws_id = blank_to_nil(params["workspace_id"])
+  defp list_opts(conn, params) do
     issue_id = blank_to_nil(params["issue_id"])
 
-    with :ok <- require_scope(ws_id, issue_id),
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
          :ok <- require_issue_exists(issue_id),
          :ok <- require_same_workspace(ws_id, issue_id) do
       opts =
@@ -106,11 +110,6 @@ defmodule ArbiterWeb.Api.DependencyController do
       {:ok, opts}
     end
   end
-
-  defp require_scope(nil, nil),
-    do: {:error, {:invalid_request, "workspace_id or issue_id is required"}}
-
-  defp require_scope(_ws_id, _issue_id), do: :ok
 
   defp require_issue_exists(nil), do: :ok
 

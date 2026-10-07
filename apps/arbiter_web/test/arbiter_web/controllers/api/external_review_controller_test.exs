@@ -1,18 +1,27 @@
 defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Reviews.Record
 
-  @ws "ws-external-review-test"
-
+  # `workspace` is resolved server-side (id or name; unknown is a 404), so the
+  # fixtures hang off real workspaces.
   setup %{conn: conn} do
+    ws =
+      Ash.create!(Workspace, %{
+        name: "ws-external-review-test-#{System.unique_integer([:positive])}"
+      })
+
+    Process.put(:er_ws, ws.id)
     {:ok, conn: put_req_header(conn, "accept", "application/json")}
   end
+
+  defp ws_id, do: Process.get(:er_ws)
 
   defp insert_record!(attrs) do
     base = %{
       pr_ref: "github:owner/repo##{System.unique_integer([:positive])}",
-      workspace_id: @ws,
+      workspace_id: ws_id(),
       strategy: "github",
       status: :completed,
       started_at: DateTime.utc_now(),
@@ -36,7 +45,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
             "[info] file.ex:10 — first finding\n[error] file.ex:20 — second finding"
         })
 
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
 
       # The response status should be 200
       assert conn.status == 200
@@ -68,7 +77,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
             "[info] path/to/file.ex:42 — issue one\n[warning] another/file.py:99 — issue two\n[error] third/file.rs:7 — issue three"
         })
 
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
       response_body = conn.resp_body
 
       # Must parse with strict JSON decoder
@@ -98,7 +107,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
           findings_summary: "[info] file.ex:10 — first\n[error] file.ex:20 — second"
         })
 
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
       response_body = conn.resp_body
 
       # Simulate jq parsing by using Jason.decode which follows same rules
@@ -113,7 +122,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
           findings_summary: "[info] file.ex:10 — first\n[error] file.ex:20 — second"
         })
 
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
       response_body = conn.resp_body
 
       # The raw JSON should contain \n escape sequences (\\n in the raw string)
@@ -131,7 +140,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
         })
 
       # REST endpoint returns data key (matches /api convention)
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
       {:ok, rest_parsed} = Jason.decode(conn.resp_body)
       assert Map.has_key?(rest_parsed, "data"), "REST should return 'data' key"
       assert is_list(rest_parsed["data"]), "REST data should be a list"
@@ -140,7 +149,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
       # MCP tool returns external_reviews key (matches other MCP list tools)
       {:ok, mcp_result} =
         Arbiter.MCP.Tools.external_review_list(
-          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws_id(), can_dispatch: true},
           %{}
         )
 
@@ -160,7 +169,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
           failure_reason: "forbidden 403: rate limited"
         })
 
-      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: ws_id()})
       {:ok, rest_parsed} = Jason.decode(conn.resp_body)
       [rest_record] = rest_parsed["data"]
       assert rest_record["failure_stage"] == "read_diff"
@@ -168,7 +177,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
 
       {:ok, mcp_result} =
         Arbiter.MCP.Tools.external_review_list(
-          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws_id(), can_dispatch: true},
           %{}
         )
 
@@ -178,7 +187,7 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
 
       {:ok, show_result} =
         Arbiter.MCP.Tools.external_review_show(
-          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws_id(), can_dispatch: true},
           %{"record_id" => mcp_record.id}
         )
 

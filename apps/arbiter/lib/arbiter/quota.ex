@@ -1534,15 +1534,12 @@ defmodule Arbiter.Quota do
   @doc """
   The installation default workspace id: the lone workspace when there is
   exactly one, else the one named "default". `{:error, reason}` when ambiguous
-  or empty.
+  or empty. A display / pipeline-attribution default only — it is
+  `Arbiter.Tasks.Workspaces.default_id/0`, never how a request's workspace is
+  resolved (that is `Workspaces.resolve/3`).
   """
   @spec default_workspace_id() :: {:ok, String.t()} | {:error, term()}
-  def default_workspace_id do
-    case default_workspace() do
-      {:ok, %Workspace{id: id}} -> {:ok, id}
-      error -> error
-    end
-  end
+  defdelegate default_workspace_id(), to: Arbiter.Tasks.Workspaces, as: :default_id
 
   @doc """
   The installation default workspace itself — `default_workspace_id/0`'s rule,
@@ -1550,22 +1547,7 @@ defmodule Arbiter.Quota do
   needs the workspace's config does not read `workspaces` a second time.
   """
   @spec default_workspace() :: {:ok, Workspace.t()} | {:error, term()}
-  def default_workspace do
-    case Ash.read!(Workspace) do
-      [%Workspace{} = ws] -> {:ok, ws}
-      [] -> {:error, :no_workspaces}
-      many -> default_named(many)
-    end
-  rescue
-    _ -> {:error, :no_workspaces}
-  end
-
-  defp default_named(workspaces) do
-    case Enum.find(workspaces, &(&1.name == "default")) do
-      %Workspace{} = ws -> {:ok, ws}
-      nil -> {:error, :ambiguous_workspace}
-    end
-  end
+  defdelegate default_workspace(), to: Arbiter.Tasks.Workspaces, as: :default
 
   @doc """
   The `on_exhaustion` mode (`:throttle` / `:continue`) for the installation

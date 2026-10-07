@@ -36,8 +36,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
   A workspace: config and the resolved worker security posture, plus an `update`
   block (`enabled`, `current`, `latest`, `release_url`, `update_available`).
   Resolved from the optional `workspace` arg (name or id), else the scope's bound
-  workspace, else the installation default. A workspace-bound scope (worker) can
-  only ever inspect its own workspace.
+  workspace, else the sole workspace — with several it fails listing them
+  rather than guess (`Arbiter.Tasks.Workspaces`, `:write` mode: one concrete
+  workspace). A workspace-bound scope (worker) can only ever inspect its own
+  workspace.
   """
   @spec workspace_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def workspace_show(%Scope{} = scope, args) do
@@ -73,7 +75,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   never returned — only secret_keys (the names of configured secrets) and any
   `credentials_ref` pointers already embedded in the config JSON.
   Resolved from the optional `workspace` arg, else the scope's bound workspace,
-  else the installation default.
+  else the sole workspace (several: an error listing them).
 
   The `attention` section's escalation limits (bd-8nlez1,
   `Arbiter.Tasks.AttentionLimits`) read with their documented defaults filled

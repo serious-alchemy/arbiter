@@ -3,6 +3,7 @@ defmodule ArbiterWeb.Api.DependencyJSON do
 
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias ArbiterWeb.Api.WorkspaceParam
 
   def show(%{dependency: dep}), do: data(dep)
 
@@ -12,13 +13,14 @@ defmodule ArbiterWeb.Api.DependencyJSON do
   distinguishable from a closed↔closed one without a second lookup
   (bd-1defgu).
   """
-  def index(%{dependencies: rows}) do
-    %{data: Enum.map(rows, &edge_row/1)}
+  def index(%{dependencies: rows} = assigns) do
+    %{data: Enum.map(rows, &edge_row/1)} |> WorkspaceParam.echo(assigns)
   end
 
   defp edge_row(%{edge: dep, from: from, to: to}) do
     dep
     |> data()
+    |> Map.put(:workspace_id, from.workspace_id)
     |> Map.put(:from, endpoint(from))
     |> Map.put(:to, endpoint(to))
   end

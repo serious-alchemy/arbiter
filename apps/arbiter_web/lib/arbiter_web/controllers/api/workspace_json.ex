@@ -11,6 +11,21 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
     %{data: Enum.map(workspaces, &data/1)}
   end
 
+  @doc "The summary list a worker / refine token gets (no config, no posture)."
+  def summaries(%{workspaces: workspaces}) do
+    %{
+      data:
+        Enum.map(workspaces, fn ws ->
+          %{
+            id: ws.id,
+            name: ws.name,
+            prefix: ws.prefix,
+            tracker_type: ws |> Arbiter.Trackers.workspace_type() |> to_string()
+          }
+        end)
+    }
+  end
+
   def data(%Workspace{} = ws) do
     adapter = Agents.for_workspace(ws)
     policy = SecurityPolicy.resolve(ws)
