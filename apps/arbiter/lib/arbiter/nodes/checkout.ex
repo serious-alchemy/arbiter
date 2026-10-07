@@ -185,9 +185,15 @@ defmodule Arbiter.Nodes.Checkout do
 
   defp seed_size(path, cap) do
     case File.stat(path) do
-      {:ok, %{size: size}} when size <= cap -> {:ok, size}
-      {:ok, %{size: size}} -> File.rm(path) && {:error, {:too_large, size}}
-      {:error, reason} -> {:error, {:bundle_failed, reason}}
+      {:ok, %{size: size}} when size <= cap ->
+        {:ok, size}
+
+      {:ok, %{size: size}} ->
+        _ = File.rm(path)
+        {:error, {:too_large, size}}
+
+      {:error, reason} ->
+        {:error, {:bundle_failed, reason}}
     end
   end
 
