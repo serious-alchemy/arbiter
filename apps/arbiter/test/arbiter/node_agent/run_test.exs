@@ -115,7 +115,26 @@ defmodule Arbiter.NodeAgent.RunTest do
         :ok
     end
 
-    assert run not in Runs.run_ids()
+    wait_until(fn -> run not in Runs.run_ids() end, 5_000)
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
+    end
   end
 
   defp wait_event(run, event) do

@@ -59,14 +59,19 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
   end
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "prepush-gate-#{:erlang.unique_integer([:positive])}")
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "prepush-gate-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}"
+      )
+
     File.mkdir_p!(tmp)
     {repo, remote} = init_repo(tmp)
 
     put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
     put_app_env(:arbiter, :repo_paths, %{"gate/repo" => repo})
 
-    on_exit(fn -> File.rm_rf!(tmp) end)
+    on_exit(fn -> File.rm_rf(tmp) end)
 
     %{repo: repo, remote: remote, tmp: tmp}
   end
