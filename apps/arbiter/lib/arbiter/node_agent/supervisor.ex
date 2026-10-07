@@ -19,6 +19,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
   """
   use Supervisor
 
+  alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Connection
   alias Arbiter.NodeAgent.Runs
@@ -37,14 +38,21 @@ defmodule Arbiter.NodeAgent.Supervisor do
     case Config.load(opts) do
       {:ok, config} ->
         # The run table before the connection: `Connection` addresses runs.
-        config = %{config | live_runs_fun: config.live_runs_fun || (&Runs.inventory/0)}
+        config = %{
+          config
+          | live_runs_fun: config.live_runs_fun || (&Runs.inventory/0),
+            run_opts: bridge_run_opts(config.run_opts)
+        }
 
         Supervisor.init(
           [
             task_supervisor,
             {Status, path: config.status_path},
             {Upgrader, config: config}
-          ] ++ image_builder() ++ Runs.child_specs() ++ [{Connection, config: config}],
+          ] ++
+            image_builder() ++
+            Runs.child_specs() ++
+            [{Bridge, node_home: config.node_home}, {Connection, config: config}],
           strategy: :one_for_one
         )
 
@@ -53,6 +61,14 @@ defmodule Arbiter.NodeAgent.Supervisor do
         record_unconfigured(opts, reason)
         Supervisor.init([task_supervisor], strategy: :one_for_one)
     end
+  end
+
+  # The per-run bridge listeners (RW10): `Run` asks for them when it prepares and
+  # gives them back when it ends. A test's own `:bridges_fun` wins.
+  defp bridge_run_opts(run_opts) do
+    run_opts
+    |> Keyword.put_new(:bridges_fun, &Bridge.listen/2)
+    |> Keyword.put_new(:bridges_release_fun, &Bridge.release/1)
   end
 
   # `Image.Builder` builds a plan's image on this node (RW9). An agent boots

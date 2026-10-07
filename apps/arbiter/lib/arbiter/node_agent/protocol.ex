@@ -34,9 +34,14 @@ defmodule Arbiter.NodeAgent.Protocol do
       "proto" => Config.proto(),
       "kind" => "machine",
       "arch" => to_string(:erlang.system_info(:system_architecture)),
-      # Only what this agent actually implements; later children add `bundle`,
-      # `bridge_streams`, … as they land.
-      "caps" => %{"backend" => "podman", "image" => "build", "upgrade" => "tarball"},
+      # Only what this agent actually implements; later children add `bundle`, …
+      # as they land.
+      "caps" => %{
+        "backend" => "podman",
+        "image" => "build",
+        "upgrade" => "tarball",
+        "bridge_streams" => "mux"
+      },
       "capacity" => capacity(),
       "inventory" => %{"runs" => live_runs(config)},
       "readiness" => readiness
