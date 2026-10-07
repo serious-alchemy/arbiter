@@ -545,6 +545,89 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert exit_code != 0
     end
 
+    # bd-dtfe9x: the review_automation guard lives on the server; the CLI's job is
+    # to carry every guard-relevant flag the MCP tool has.
+    test "forwards the review_automation guard flags in the request body" do
+      parent = self()
+
+      stub_routes([
+        {{"post", "/api/workers/review"},
+         fn conn ->
+           {:ok, raw, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:body, Jason.decode!(raw)})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{"task" => %{"id" => "bd-110"}, "worker" => %{"pid" => "w"}})
+         end}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn ->
+          Worker.run([
+            "review",
+            "bd-110",
+            "--force",
+            "--force-quota",
+            "--automation",
+            "report_only",
+            "--pr-author",
+            "alice",
+            "--tracker-context-ref",
+            "AX-1",
+            "--tracker-context-type",
+            "jira"
+          ])
+        end)
+
+      assert exit_code == 0
+      assert_receive {:body, body}
+
+      assert body == %{
+               "task_id" => "bd-110",
+               "force" => true,
+               "force_quota" => true,
+               "automation" => "report_only",
+               "pr_author" => "alice",
+               "tracker_context_ref" => "AX-1",
+               "tracker_context_type" => "jira"
+             }
+    end
+
+    test "sends none of the guard flags unless asked" do
+      parent = self()
+
+      stub_routes([
+        {{"post", "/api/workers/review"},
+         fn conn ->
+           {:ok, raw, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:body, Jason.decode!(raw)})
+           conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"task" => %{"id" => "bd-111"}})
+         end}
+      ])
+
+      {_out, _err, 0} = capture(fn -> Worker.run(["review", "bd-111"]) end)
+      assert_receive {:body, body}
+      assert body == %{"task_id" => "bd-111"}
+    end
+
+    test "a server refusal for review_automation off exits non-zero with the reason" do
+      stub_post(
+        "/api/workers/review",
+        %{
+          "error" => %{
+            "type" => "validation_error",
+            "message" => "review_automation is \"off\" by default for this workspace"
+          }
+        },
+        422
+      )
+
+      {_out, err, exit_code} = capture(fn -> Worker.run(["review", "bd-112"]) end)
+      assert exit_code != 0
+      assert err =~ "review_automation"
+    end
+
     test "includes worktree_path if present" do
       stub_post("/api/workers/review", %{
         "task_id" => "bd-103",

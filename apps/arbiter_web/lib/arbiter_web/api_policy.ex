@@ -55,6 +55,11 @@ defmodule ArbiterWeb.ApiPolicy do
     * `:dependency_add` — coordinator; or a worker adding the `parent_of`
       edge from its own task to a ticket in its workspace that has no parent
       yet — the second half of `arb create --parent`.
+    * `:own_task` — coordinator; or a worker acting on **its own task** (the
+      `:task_id` path param). The REST twin of the worker-tier `ci_rerun` /
+      `ci_mark_external` MCP tools: a worker files them from its own CI failure,
+      and `Arbiter.MCP.Tools.resolve_task_id/3` pins the MCP side to the same
+      rule (bd-dtfe9x).
     * `:mailbox` — coordinator; or a worker reading its own mailbox
       (`to_ref` must be its own task).
     * `:message_send` — coordinator; or a worker. `MessageController.create/2`
@@ -74,6 +79,7 @@ defmodule ArbiterWeb.ApiPolicy do
   """
 
   alias Arbiter.MCP.Scope
+  alias Arbiter.Tasks.WorkerFiling
 
   @type policy ::
           :anonymous
@@ -86,6 +92,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :issue_progress
           | :issue_create
           | :dependency_add
+          | :own_task
           | :mailbox
           | :message_send
           | :message_show
@@ -95,12 +102,6 @@ defmodule ArbiterWeb.ApiPolicy do
   # The REST twin of `ticket_update_progress` (`Arbiter.MCP.Tools.Task`'s
   # `@progress_fields ++ @progress_flags`). "id" is the path param.
   @progress_params ~w(id notes qa_notes deployment_notes pr_body verify_after_deploy)
-
-  # What a worker may set on a follow-up it files (`arb create`'s descriptive
-  # flags). No `repo` / `target_branch` / `tracker_ref` / `auto_close` /
-  # `verify_after_deploy`: where and how work ships stays coordinator authority.
-  @worker_create_params ~w(title description acceptance workspace_id parent_id issue_type
-                           priority difficulty skip_upstream_create force)
 
   @policies %{
     # ---- issues -----------------------------------------------------------
@@ -255,8 +256,8 @@ defmodule ArbiterWeb.ApiPolicy do
     # ---- queue / alerts / breakers / scheduler ----------------------------
     {:post, "/api/queue/:task_id/retry_auto_resolve"} => :coordinator,
     {:post, "/api/queue/:task_id/restart_watchdog"} => :coordinator,
-    {:post, "/api/queue/:task_id/rerun_ci"} => :coordinator,
-    {:post, "/api/queue/:task_id/mark_ci_external"} => :coordinator,
+    {:post, "/api/queue/:task_id/rerun_ci"} => :own_task,
+    {:post, "/api/queue/:task_id/mark_ci_external"} => :own_task,
     {:get, "/api/alerts"} => :coordinator,
     {:get, "/api/breakers"} => :coordinator,
     {:post, "/api/breakers/reset"} => :coordinator,
@@ -335,6 +336,7 @@ defmodule ArbiterWeb.ApiPolicy do
              :issue_progress,
              :issue_create,
              :dependency_add,
+             :own_task,
              :mailbox,
              :message_send,
              :message_show,
@@ -346,7 +348,7 @@ defmodule ArbiterWeb.ApiPolicy do
       when tier in [:worker, :refine] do
     issue_id = params["id"] || params["issue_id"]
 
-    if issue_in_workspace?(issue_id, scope.workspace_id),
+    if WorkerFiling.issue_in_workspace?(issue_id, scope.workspace_id),
       do: :ok,
       else: forbidden(scope, "may only read tickets in its own workspace")
   end
@@ -370,38 +372,16 @@ defmodule ArbiterWeb.ApiPolicy do
     end
   end
 
-  def authorize(:issue_create, %Scope{tier: :worker} = scope, params) do
-    extra = params |> Map.keys() |> Enum.reject(&(&1 in @worker_create_params))
+  def authorize(:issue_create, %Scope{tier: :worker} = scope, params),
+    do: filing(scope, WorkerFiling.authorize_create(scope, params))
 
-    cond do
-      params["parent_id"] != scope.task_id ->
-        forbidden(scope, "may only file a ticket as a child of its own task (parent_id)")
+  def authorize(:dependency_add, %Scope{tier: :worker} = scope, params),
+    do: filing(scope, WorkerFiling.authorize_dependency(scope, params))
 
-      params["workspace_id"] != scope.workspace_id ->
-        forbidden(scope, "may only file a ticket in its own workspace")
-
-      extra != [] ->
-        forbidden(scope, "may not set #{Enum.join(extra, ", ")} on a ticket it files")
-
-      true ->
-        :ok
-    end
-  end
-
-  def authorize(:dependency_add, %Scope{tier: :worker} = scope, params) do
-    cond do
-      params["from_issue_id"] != scope.task_id or params["type"] != "parent_of" ->
-        forbidden(scope, "may only add a parent_of edge from its own task")
-
-      not issue_in_workspace?(params["to_issue_id"], scope.workspace_id) ->
-        forbidden(scope, "may only adopt a ticket in its own workspace")
-
-      has_parent?(params["to_issue_id"]) ->
-        forbidden(scope, "may only adopt a ticket that has no parent yet")
-
-      true ->
-        :ok
-    end
+  def authorize(:own_task, %Scope{tier: :worker, task_id: task_id} = scope, params) do
+    if params["task_id"] == task_id,
+      do: :ok,
+      else: forbidden(scope, "may only act on its own task")
   end
 
   def authorize(:mailbox, %Scope{tier: :worker, task_id: task_id} = scope, params) do
@@ -440,24 +420,6 @@ defmodule ArbiterWeb.ApiPolicy do
 
   defp forbidden(%Scope{tier: tier}, why), do: {:error, :forbidden, "a #{tier}-tier token #{why}"}
 
-  # An issue the caller cannot see is "not yours" — but an id that does not
-  # exist at all falls through to the controller's own 404.
-  defp issue_in_workspace?(issue_id, workspace_id) when is_binary(issue_id) do
-    case Ash.get(Arbiter.Tasks.Issue, issue_id) do
-      {:ok, %{workspace_id: ws}} -> ws == workspace_id
-      {:error, _} -> true
-    end
-  end
-
-  defp issue_in_workspace?(_issue_id, _workspace_id), do: false
-
-  defp has_parent?(issue_id) do
-    case Arbiter.Tasks.Dependencies.list(issue_id: issue_id) do
-      {:ok, deps} ->
-        Enum.any?(deps, &(&1.edge.type == :parent_of and &1.edge.to_issue_id == issue_id))
-
-      _ ->
-        true
-    end
-  end
+  defp filing(_scope, :ok), do: :ok
+  defp filing(scope, {:error, why}), do: forbidden(scope, why)
 end

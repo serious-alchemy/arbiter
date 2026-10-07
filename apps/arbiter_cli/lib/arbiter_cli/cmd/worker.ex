@@ -8,7 +8,9 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
       arb worker resume <task-id> [<repo>] [--model <name>] [--force-quota] [--force] — resume the prior session
-      arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
+      arb worker review <task-id> [--repo <repo>] [--model <name>] [--force] [--force-quota]
+                      [--automation <mode>] [--pr-author <login>]
+                      [--tracker-context-ref <ref>] [--tracker-context-type <type>] — spawn a review worker
 
   Use `arb dispatch` to start a worker in the first place.
 
@@ -40,7 +42,9 @@ defmodule ArbiterCli.Cmd.Worker do
   long the run.
 
   `review` spawns a worker specialized for review tasks, optionally overriding
-  the repo and model.
+  the repo and model. It is refused when the task's workspace resolves
+  `review_automation` to `off` for the repo, unless `--force` is given;
+  `--automation` overrides the resolved mode for this review.
   """
 
   alias ArbiterCli.{ArgParser, Client, Output, RunLabel}
@@ -50,7 +54,11 @@ defmodule ArbiterCli.Cmd.Worker do
     repo: :string,
     model: :string,
     force_quota: :boolean,
-    force: :boolean
+    force: :boolean,
+    automation: :string,
+    pr_author: :string,
+    tracker_context_ref: :string,
+    tracker_context_type: :string
   ]
 
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
@@ -185,6 +193,12 @@ defmodule ArbiterCli.Cmd.Worker do
       %{"task_id" => task_id}
       |> maybe_put("repo", flags[:repo])
       |> maybe_put("model", flags[:model])
+      |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force", if(flags[:force], do: true))
+      |> maybe_put("automation", flags[:automation])
+      |> maybe_put("pr_author", flags[:pr_author])
+      |> maybe_put("tracker_context_ref", flags[:tracker_context_ref])
+      |> maybe_put("tracker_context_type", flags[:tracker_context_type])
 
     case Client.post("/api/workers/review", body) do
       {:ok, payload} -> emit_review(payload, mode)

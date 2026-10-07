@@ -73,17 +73,25 @@ defmodule Arbiter.MCP.ProviderConstraintToolsTest do
     assert Ash.get!(Issue, ctx.task.id).provider_constraint == nil
   end
 
-  test "a worker token is refused ticket_create and ticket_update", ctx do
-    for {tool, args} <- [
-          {"ticket_create",
-           %{"title" => "x", "provider_constraint" => %{"exclude" => ["claude"]}}},
-          {"ticket_update",
-           %{"id" => ctx.task.id, "provider_constraint" => %{"exclude" => ["claude"]}}}
-        ] do
-      assert {:rpc_error, -32_003, message} = Catalog.call(ctx.worker, tool, args)
-      assert message =~ "not permitted"
-    end
+  test "a worker token is refused ticket_update, and may not set a constraint on a create",
+       ctx do
+    assert {:rpc_error, -32_003, message} =
+             Catalog.call(ctx.worker, "ticket_update", %{
+               "id" => ctx.task.id,
+               "provider_constraint" => %{"exclude" => ["claude"]}
+             })
 
+    assert message =~ "not permitted"
+
+    # bd-dtfe9x: a worker may file a child, but only with the descriptive subset.
+    assert {:rpc_error, -32_003, message} =
+             Catalog.call(ctx.worker, "ticket_create", %{
+               "title" => "x",
+               "parent_id" => ctx.task.id,
+               "provider_constraint" => %{"exclude" => ["claude"]}
+             })
+
+    assert message =~ "provider_constraint"
     assert Ash.get!(Issue, ctx.task.id).provider_constraint == nil
   end
 
