@@ -27,41 +27,36 @@ defmodule ArbiterCli.Cmd.Workspace.Env do
         switches: Keyword.fetch!(opts, :switches) ++ [file: :string, secret: :boolean]
       )
 
-    workspace_opt = parsed[:workspace]
-
-    case rest do
-      ["ls"] ->
-        ls(workspace_opt, mode)
-
-      ["ls" | _] ->
-        Output.die("workspace env ls takes no positional arguments")
-
-      ["set", name] ->
-        set(workspace_opt, name, value_from_flags(parsed), parsed[:secret], mode)
-
-      ["set", name, "-"] ->
-        set(workspace_opt, name, {:value, SecretInput.from_stdin!()}, parsed[:secret], mode)
-
-      ["set", name | vrest] when vrest != [] ->
-        SecretInput.warn_argv(@alt)
-        set(workspace_opt, name, {:value, Enum.join(vrest, " ")}, parsed[:secret], mode)
-
-      ["set" | _] ->
-        Output.die("workspace env set requires <NAME>")
-
-      ["rm", name] ->
-        rm(workspace_opt, name, mode)
-
-      ["rm" | _] ->
-        Output.die("workspace env rm requires exactly one <NAME>")
-
-      [] ->
-        Output.die("workspace env requires a subcommand", "verbs: ls, set, rm")
-
-      [unknown | _] ->
-        Output.die("unknown workspace env subcommand: #{unknown}", "verbs: ls, set, rm")
-    end
+    dispatch(rest, parsed, mode)
   end
+
+  defp dispatch(["ls"], parsed, mode), do: ls(parsed[:workspace], mode)
+
+  defp dispatch(["ls" | _], _parsed, _mode),
+    do: Output.die("workspace env ls takes no positional arguments")
+
+  defp dispatch(["set", name], parsed, mode),
+    do: set(parsed[:workspace], name, value_from_flags(parsed), parsed[:secret], mode)
+
+  defp dispatch(["set", name, "-"], parsed, mode),
+    do: set(parsed[:workspace], name, {:value, SecretInput.from_stdin!()}, parsed[:secret], mode)
+
+  defp dispatch(["set", name | vrest], parsed, mode) when vrest != [] do
+    SecretInput.warn_argv(@alt)
+    set(parsed[:workspace], name, {:value, Enum.join(vrest, " ")}, parsed[:secret], mode)
+  end
+
+  defp dispatch(["set" | _], _parsed, _mode), do: Output.die("workspace env set requires <NAME>")
+  defp dispatch(["rm", name], parsed, mode), do: rm(parsed[:workspace], name, mode)
+
+  defp dispatch(["rm" | _], _parsed, _mode),
+    do: Output.die("workspace env rm requires exactly one <NAME>")
+
+  defp dispatch([], _parsed, _mode),
+    do: Output.die("workspace env requires a subcommand", "verbs: ls, set, rm")
+
+  defp dispatch([unknown | _], _parsed, _mode),
+    do: Output.die("unknown workspace env subcommand: #{unknown}", "verbs: ls, set, rm")
 
   defp value_from_flags(parsed) do
     case parsed[:file] do

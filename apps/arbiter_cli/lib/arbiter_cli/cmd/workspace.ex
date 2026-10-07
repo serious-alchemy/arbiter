@@ -229,18 +229,7 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   defp update(argv) do
     {opts, rest, mode} =
-      ArgParser.parse(argv,
-        command: "arb workspace update",
-        switches: @switches
-      )
-
-    ref =
-      case {rest, opts[:workspace]} do
-        {[ref], nil} -> ref
-        {[], ref} when is_binary(ref) -> ref
-        {[], nil} -> nil
-        _ -> Output.die("workspace update takes exactly one workspace: <ws> or --workspace")
-      end
+      ArgParser.parse(argv, command: "arb workspace update", switches: @switches)
 
     body =
       %{}
@@ -255,24 +244,27 @@ defmodule ArbiterCli.Cmd.Workspace do
       )
     end
 
-    ws = Resolver.resolve_workspace!(ref)
+    ws = Resolver.resolve_workspace!(update_ref(rest, opts[:workspace]))
 
     case Client.patch("/api/workspaces/" <> ws["id"], body) do
-      {:ok, updated} ->
-        case mode do
-          :json ->
-            Output.emit_json(updated)
-
-          :text ->
-            IO.puts(
-              "updated workspace #{updated["name"]} (#{updated["id"] || ws["id"]}) " <>
-                "prefix=#{updated["prefix"]}"
-            )
-        end
-
-      {:error, err} ->
-        Output.die(err)
+      {:ok, updated} -> emit_updated(updated, ws, mode)
+      {:error, err} -> Output.die(err)
     end
+  end
+
+  defp update_ref([ref], nil), do: ref
+  defp update_ref([], ref) when is_binary(ref) or is_nil(ref), do: ref
+
+  defp update_ref(_, _),
+    do: Output.die("workspace update takes exactly one workspace: <ws> or --workspace")
+
+  defp emit_updated(updated, _ws, :json), do: Output.emit_json(updated)
+
+  defp emit_updated(updated, ws, :text) do
+    IO.puts(
+      "updated workspace #{updated["name"]} (#{updated["id"] || ws["id"]}) " <>
+        "prefix=#{updated["prefix"]}"
+    )
   end
 
   # Unlike create's `maybe_put`, an explicit empty string is kept: `--description ""`
