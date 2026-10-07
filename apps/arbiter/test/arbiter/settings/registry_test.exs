@@ -220,7 +220,7 @@ defmodule Arbiter.Settings.RegistryTest do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)
 
       for entry <- Registry.schema() do
-        assert entry.operator_only == (entry.key in @operator_only)
+        assert entry.operator_only == entry.key in @operator_only
       end
     end
 

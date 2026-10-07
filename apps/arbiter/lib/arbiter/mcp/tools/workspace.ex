@@ -12,6 +12,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   alias Arbiter.Guardrails.Authority
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Params
   alias Arbiter.Tasks.AttentionLimits
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.ConfigPath
@@ -161,10 +162,11 @@ defmodule Arbiter.MCP.Tools.Workspace do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, key} <- Tools.require_string(args, "key"),
          {:ok, value} <- require_config_value(args),
+         {:ok, force} <- Params.fetch_bool(args, "force", false),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
       patch = ConfigPath.put(%{}, ConfigPath.split(key), value)
 
-      case Ash.update(ws, %{patch: patch, unset_paths: [], force: force?(args)},
+      case Ash.update(ws, %{patch: patch, unset_paths: [], force: force},
              action: :patch_config,
              context: guardrail_context(scope)
            ) do
@@ -187,8 +189,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
   def workspace_config_unset(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, key} <- Tools.require_string(args, "key"),
+         {:ok, force} <- Params.fetch_bool(args, "force", false),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
-      case Ash.update(ws, %{patch: %{}, unset_paths: [key], force: force?(args)},
+      case Ash.update(ws, %{patch: %{}, unset_paths: [key], force: force},
              action: :patch_config,
              context: guardrail_context(scope)
            ) do
@@ -301,8 +304,6 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # `guardrails.*` / `agent.security` is refused for anything but operator proof.
   defp guardrail_context(%Scope{} = scope),
     do: %{guardrail_authority: Authority.from_scope(scope)}
-
-  defp force?(args), do: Map.get(args, "force") == true
 
   # Fetch the `value` argument; accepts any JSON-decoded type (boolean,
   # integer, string, object, array, or null). Distinguishing absent from null

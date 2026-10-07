@@ -14,6 +14,7 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Guardrails.Authority
+  alias Arbiter.Params
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.Api.WorkspaceParam
 
@@ -113,9 +114,9 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     patch = Map.get(params, "patch") || %{}
     unset_paths = Map.get(params, "unset_paths") || []
 
-    args = %{patch: patch, unset_paths: unset_paths, force: Map.get(params, "force") == true}
-
-    with {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
+    with {:ok, force} <- params |> Params.fetch_bool("force", false) |> Params.to_rest(),
+         args = %{patch: patch, unset_paths: unset_paths, force: force},
+         {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
          {:ok, updated} <-
            Ash.update(ws, args, action: :patch_config, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)

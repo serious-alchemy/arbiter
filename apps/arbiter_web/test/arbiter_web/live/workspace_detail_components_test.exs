@@ -81,7 +81,10 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
             },
             "standing_orders" => ["check your inbox"]
           },
-          unset_paths: []
+          unset_paths: [],
+          # a tracker type with no tracker.config is a safety-rail refusal
+          # (P-20); this fixture deliberately renders that half-set state
+          force: true
         },
         action: :patch_config
       )

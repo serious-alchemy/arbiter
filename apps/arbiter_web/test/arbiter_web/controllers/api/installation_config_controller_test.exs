@@ -172,7 +172,10 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
          %{conn: conn} do
       for {key, value} <- @operator_only_cases do
         resp = conn |> patch("/api/installation/config", %{"key" => key, "value" => value})
-        assert %{"error" => %{"type" => "unauthorized", "message" => msg}} = json_response(resp, 403)
+
+        assert %{"error" => %{"type" => "unauthorized", "message" => msg}} =
+                 json_response(resp, 403)
+
         assert msg =~ key
         assert Arbiter.Settings.Registry.override(key) == nil
       end
@@ -180,6 +183,7 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
 
     test "a coordinator without proof still writes the ordinary keys", %{conn: conn} do
       body = %{"key" => "scheduling_finish_first", "value" => true}
+
       assert %{"data" => %{"override" => true}} =
                conn |> patch("/api/installation/config", body) |> json_response(200)
     end

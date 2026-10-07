@@ -379,7 +379,9 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
             %{"name" => "renamed", "config" => %{"merge" => %{"auto_merge" => true}}}
           )
 
-        assert %{"error" => %{"type" => "validation_error", "message" => msg}} = json_response(conn, 422)
+        assert %{"error" => %{"type" => "validation_error", "message" => msg}} =
+                 json_response(conn, 422)
+
         assert msg =~ "/config"
 
         reloaded = Ash.get!(Workspace, ws.id)

@@ -193,7 +193,8 @@ defmodule ArbiterCli.Cmd.ConfigTest do
            |> Req.Test.json(%{
              "error" => %{
                "type" => "validation_error",
-               "message" => "cannot set \"secrets\" in the workspace config — use `arb workspace secret`",
+               "message" =>
+                 "cannot set \"secrets\" in the workspace config — use `arb workspace secret`",
                "details" => %{}
              }
            })

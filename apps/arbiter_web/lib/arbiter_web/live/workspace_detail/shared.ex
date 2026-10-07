@@ -60,10 +60,16 @@ defmodule ArbiterWeb.WorkspaceDetail.Shared do
   @doc """
   Applies a deep-merge patch (plus explicit unsets) through `:patch_config`,
   so the server-side `ValidateConfig` guardrails apply exactly as they do for
-  the API controller and the CLI.
+  the API controller and the CLI. `force: true`: the config safety rails
+  (`Changes.EnforceConfigSafetyRails` — `repo_paths` emptied, a tracker type
+  chosen before its fields are filled) exist to stop a one-line CLI/MCP write
+  from breaking a workspace; a form the operator is looking at is deliberate,
+  and the tracker section legitimately saves the type first.
   """
   def patch_config(ws, patch, unset_paths) do
-    case Ash.update(ws, %{patch: patch, unset_paths: unset_paths}, action: :patch_config) do
+    args = %{patch: patch, unset_paths: unset_paths, force: true}
+
+    case Ash.update(ws, args, action: :patch_config) do
       {:ok, updated} -> {:ok, updated}
       {:error, err} -> {:error, error_message(err)}
     end

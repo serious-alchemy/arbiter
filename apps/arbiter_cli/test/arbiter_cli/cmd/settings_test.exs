@@ -44,7 +44,8 @@ defmodule ArbiterCli.Cmd.SettingsTest do
              |> Req.Test.json(%{
                "error" => %{
                  "type" => "unauthorized",
-                 "message" => "nodes.public_url is operator-only — it needs an operator-proof token"
+                 "message" =>
+                   "nodes.public_url is operator-only — it needs an operator-proof token"
                }
              })
 
