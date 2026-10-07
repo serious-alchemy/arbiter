@@ -143,10 +143,12 @@ defmodule ArbiterCli.Cmd.Usage do
 
     by = Keyword.get(opts, :by, @default_by)
 
+    ws_id = resolve_workspace(opts)
+
     params =
       [by: by]
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:account, Keyword.get(opts, :account))
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
@@ -175,10 +177,12 @@ defmodule ArbiterCli.Cmd.Usage do
         ]
       )
 
+    ws_id = resolve_workspace(opts)
+
     params =
       []
       |> maybe_put(:task_id, Keyword.get(opts, :task))
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:account, Keyword.get(opts, :account))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:source, Keyword.get(opts, :source))
@@ -219,10 +223,12 @@ defmodule ArbiterCli.Cmd.Usage do
         ]
       )
 
+    ws_id = resolve_workspace(opts)
+
     params =
       []
       |> maybe_put(:session_id, session_id)
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:account, Keyword.get(opts, :account))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:source, Keyword.get(opts, :source))
@@ -247,9 +253,11 @@ defmodule ArbiterCli.Cmd.Usage do
         aliases: [w: :workspace]
       )
 
+    ws_id = resolve_workspace(opts)
+
     params =
       []
-      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:window_days, Keyword.get(opts, :window_days))
 
     case Client.get("/api/usage/calibration", params) do
@@ -400,6 +408,14 @@ defmodule ArbiterCli.Cmd.Usage do
   end
 
   # ---- helpers -----------------------------------------------------------
+
+  # `-w` / ARB_WORKSPACE accept an id or a name; the API wants the id.
+  defp resolve_workspace(opts) do
+    case Keyword.get(opts, :workspace) || System.get_env("ARB_WORKSPACE") do
+      target when is_binary(target) and target != "" -> ArbiterCli.Workspace.id_or_halt(target)
+      _ -> nil
+    end
+  end
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, _key, ""), do: opts

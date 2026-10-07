@@ -132,9 +132,17 @@ defmodule ArbiterCli.Cmd.Workspace do
 
     id =
       case rest do
-        [id] -> id
-        [] -> Output.die("workspace show requires a workspace id or name")
-        _ -> Output.die("workspace show takes exactly one argument: the workspace id")
+        [id] ->
+          id
+
+        [] ->
+          case ArbiterCli.Workspace.resolve() do
+            {:ok, ws} -> ws["id"]
+            {:error, _} -> Output.die("workspace show requires a workspace id or name")
+          end
+
+        _ ->
+          Output.die("workspace show takes exactly one argument: the workspace id or name")
       end
 
     case Client.get("/api/workspaces/" <> id) do

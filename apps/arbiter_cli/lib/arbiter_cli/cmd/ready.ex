@@ -40,10 +40,7 @@ defmodule ArbiterCli.Cmd.Ready do
     if opts[:all] == true do
       []
     else
-      case Workspace.resolve() do
-        {:ok, %{"id" => ws_id}} -> [workspace_id: ws_id]
-        {:error, _} -> []
-      end
+      [workspace_id: Workspace.id_or_halt()]
     end
   end
 end

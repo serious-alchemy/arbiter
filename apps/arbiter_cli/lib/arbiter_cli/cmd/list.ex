@@ -51,12 +51,15 @@ defmodule ArbiterCli.Cmd.List do
 
       warn_deprecated_flags(opts, mode)
 
+      ws_target = opts[:workspace_id] || System.get_env("ARB_WORKSPACE")
+      ws_id = if ws_target, do: Workspace.id_or_halt(ws_target)
+
       params =
         []
         |> put_if(:state, opts[:state])
         |> put_if(:issue_type, opts[:type])
         |> put_if(:priority, opts[:priority])
-        |> put_if(:workspace_id, opts[:workspace_id])
+        |> put_if(:workspace_id, ws_id)
 
       case fetch_tasks(params) do
         {:ok, tasks} ->

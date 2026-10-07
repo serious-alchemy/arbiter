@@ -64,9 +64,17 @@ defmodule ArbiterCli.Cmd.Breaker do
   end
 
   defp list(opts, mode) do
+    ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
+
     params =
       []
-      |> put_flag(opts, :workspace)
+      |> then(fn p ->
+        if ws_target do
+          [{:workspace, ArbiterCli.Workspace.id_or_halt(ws_target)} | p]
+        else
+          p
+        end
+      end)
       |> put_flag(opts, :kind)
       |> then(fn p -> if opts[:open], do: [{:open_only, "true"} | p], else: p end)
 
@@ -86,8 +94,17 @@ defmodule ArbiterCli.Cmd.Breaker do
           %{provider: provider}
 
         opts[:all] ->
-          %{all: true}
-          |> put_opt(opts, :workspace)
+          ws_target = opts[:workspace] || System.get_env("ARB_WORKSPACE")
+          base = %{all: true}
+
+          base =
+            if ws_target do
+              Map.put(base, :workspace, ArbiterCli.Workspace.id_or_halt(ws_target))
+            else
+              base
+            end
+
+          base
           |> put_opt(opts, :kind)
 
         signature = List.first(args) ->

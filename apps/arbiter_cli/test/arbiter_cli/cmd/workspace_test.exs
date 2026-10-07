@@ -1,7 +1,19 @@
 defmodule ArbiterCli.Cmd.WorkspaceTest do
-  use ArbiterCli.CliCase, async: true
+  # async: false — `Main.main(["-w", ...])` seeds the process-global ARB_WORKSPACE.
+  use ArbiterCli.CliCase, async: false
 
   alias ArbiterCli.Cmd.Workspace
+
+  setup do
+    prev = System.get_env("ARB_WORKSPACE")
+    System.delete_env("ARB_WORKSPACE")
+
+    on_exit(fn ->
+      if prev,
+        do: System.put_env("ARB_WORKSPACE", prev),
+        else: System.delete_env("ARB_WORKSPACE")
+    end)
+  end
 
   test "list renders the configured workspaces" do
     stub_get("/api/workspaces", %{
@@ -14,7 +26,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     assert out =~ "prefix=bd"
   end
 
-  test "show renders one workspace" do
+  test "show renders one workspace by id" do
     stub_get("/api/workspaces/ws-1", %{"id" => "ws-1", "name" => "default", "prefix" => "bd"})
 
     {out, _err, code} = capture(fn -> Workspace.run(["show", "ws-1"]) end)
@@ -22,10 +34,41 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     assert out =~ "default"
   end
 
-  test "show requires an id" do
+  test "show renders one workspace by name" do
+    stub_get("/api/workspaces/default", %{"id" => "ws-1", "name" => "default", "prefix" => "bd"})
+
+    {out, _err, code} = capture(fn -> Workspace.run(["show", "default"]) end)
+    assert code == 0
+    assert out =~ "default"
+    assert out =~ "prefix:      bd"
+  end
+
+  test "show with -w flag renders the targeted workspace" do
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}]}, 200}},
+      {{"get", "/api/workspaces/ws-acme"},
+       {%{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}, 200}}
+    ])
+
+    {out, _err, code} =
+      capture(fn -> ArbiterCli.Main.main(["workspace", "show", "-w", "acme"]) end)
+
+    assert code == 0
+    assert out =~ "acme"
+  end
+
+  test "show requires an id or name when no workspace can be resolved" do
+    stub_get("/api/workspaces", %{"data" => []})
     {_out, err, code} = capture(fn -> Workspace.run(["show"]) end)
     assert code == 1
-    assert err =~ "workspace show requires"
+    assert err =~ "workspace show requires a workspace id or name"
+  end
+
+  test "show with more than one argument errors" do
+    {_out, err, code} = capture(fn -> Workspace.run(["show", "a", "b"]) end)
+    assert code == 1
+    assert err =~ "workspace show takes exactly one argument: the workspace id or name"
   end
 
   test "unknown subcommand errors" do
