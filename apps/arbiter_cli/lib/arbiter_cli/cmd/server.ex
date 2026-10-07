@@ -51,7 +51,10 @@ defmodule ArbiterCli.Cmd.Server do
                           worker guard.
                           When the server is down: runs migrations standalone
                           (safe — no competing connection).
-      arb server doctor   [--json]
+      arb server doctor   [--all|-v] [--json]
+                          health checks: ok / warn / fail (exit 1 only on
+                          fail). Default output is the failing and warning
+                          checks only; --all lists every check, grouped.
       arb server version  [--json]
 
   ## Dev-runtime deploy runbook

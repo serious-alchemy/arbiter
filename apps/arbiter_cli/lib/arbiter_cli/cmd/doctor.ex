@@ -1,30 +1,47 @@
 defmodule ArbiterCli.Cmd.Doctor do
   @moduledoc """
-  `arb doctor` — health checks.
+  `arb server doctor [--all|-v] [--json]` — health checks.
 
-  Currently runs:
+  Every check has a severity:
 
-    1. Can we reach `GET /api/workspaces`? (Phoenix reachable)
-    2. Does at least one workspace exist? (DB reachable + reasonable state)
-    3. Can we resolve the configured workspace? (ARB_WORKSPACE, else the
-       workspace named "default", else the sole workspace if there's only one)
-    4. Do any repos resolve? (zero repos means nothing can be dispatched)
-    5. Do the CLI and server report the same version?
-    6. Are database migrations up to date?
-    7. Is the server bound to a loopback address? (the dashboard has no login)
-       And does `/api` refuse a caller with no bearer token? (`[fail]` and
-       exit 1 when an anonymous write or cross-workspace read is served)
-    8. Is Erlang distribution loopback-only, with an owner-only cookie?
-       (epmd + the release node's listener; `[fail]` and exit 1 otherwise)
-    9. Is it safe to restart? (the scheduler drain state — `[fail]` while a
-       paused scheduler is still draining; informational, never fatal)
+    * `ok` — healthy.
+    * `warn` — should be fixed, nothing is broken: a policy advisory (the
+      account/workspace quota policy), a scheduler that is not at a safe restart
+      point, a failed last deploy, an off-loopback bind, a check that could not
+      run (`could not check: <reason>` — an unreachable, erroring or older
+      server is never read as healthy).
+    * `fail` — broken now: server unreachable, migrations pending, CLI/server
+      version mismatch, no workspace or repo, an enabled provider's credential
+      unusable, an open `/api`, a `:strict` workspace the host cannot jail, a
+      podman backend the host cannot run.
+    * `n/a` — does not apply to this install (a provider no workspace uses or
+      that is paused, podman when no workspace uses it, an egress jail when no
+      workspace enforces an allowlist, no nodes enrolled). It is not probed.
 
-   10. Nodes (RW7): is `nodes.public_url` reachable (an anonymous `GET
-       /nodes/ping`) and a private endpoint, is each enrolled node online,
-       current and within its cap, is the local worker cap above 0, and do the
-       caps fit `conductor.max_concurrent`? (`[fail]` but never fatal)
+  Exit code is 1 when at least one check is `fail`, else 0 — `warn` never
+  fails a script. `--json` carries every check (with `id`, `group`, `severity`)
+  plus `result` (`ok`/`warn`/`fail`), `exit_code` and `summary`, and `ok` is
+  false exactly when the exit code is 1.
 
-  Exit code 0 on all green, 1 on any failure.
+  Default output is the header, a summary line (`27 ok · 1 warn · 0 fail`) and
+  only the `warn`/`fail` checks with their hint. `--all` (alias `-v`) prints
+  every check grouped as core, auth & providers, sandboxes and security
+  posture; the agy jail's six sub-checks collapse to one line while they pass.
+
+  Checks, by group:
+
+    * core — Phoenix reachable, a workspace exists, the active workspace
+      resolves, repos resolve, CLI and server versions match, the last deploy,
+      migrations are applied, safe to restart (the scheduler drain state), merge
+      routing, nodes.
+    * auth & providers — Claude worker credentials, grok auth, provider
+      accounts, tmux (the dashboard login relay), account/workspace quota policy.
+    * sandboxes — the agy jail (write jail, escape vectors, hidden reads,
+      network, keyring proxy, ssh transport), the egress jail, podman readiness,
+      the worker temp dir and the worker memory cap.
+    * security posture — bind address, anonymous `/api` refused, dashboard
+      login, Erlang distribution loopback-only with an owner-only cookie,
+      workspace safe-default categories, guardrail profiles.
   """
 
   alias ArbiterCli.ArgParser
@@ -33,17 +50,21 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   def run(argv) do
     ArgParser.unless_help(argv, @moduledoc, fn ->
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb server doctor", switches: [])
+      {opts, _rest, mode} =
+        ArgParser.parse(argv,
+          command: "arb server doctor",
+          switches: [all: :boolean, verbose: :boolean],
+          aliases: [v: :verbose]
+        )
+
       results = checks()
 
       case mode do
         :json -> Formatter.emit_json(results)
-        :text -> Formatter.emit_text(results)
+        :text -> Formatter.emit_text(results, all: opts[:all] == true or opts[:verbose] == true)
       end
 
-      if Enum.any?(results, fn r -> r.status == :fail and r.fatal end) do
-        Output.halt(1)
-      end
+      if Formatter.overall(results) == :fail, do: Output.halt(1)
     end)
   end
 
@@ -63,12 +84,12 @@ defmodule ArbiterCli.Cmd.Doctor do
   def reachable?, do: Checks.phoenix().status == :ok
 
   @doc """
-  True when every readiness-blocking health check passes. `fatal` alone can't
-  gate this: it also drives `arb doctor`'s exit code, and some checks (like
+  True when no readiness-blocking health check fails. A `fail` alone can't gate
+  this: it also drives `arb doctor`'s exit code, and some checks (like
   workspace resolution) are operator-actionable failures worth a non-zero
   exit without saying anything about whether the deployed server is healthy.
   `blocks_readiness` is the narrower signal `arb server deploy`'s
-  auto-rollback wait actually needs.
+  auto-rollback wait actually needs. A `warn` never blocks.
   """
   @spec green?() :: boolean()
   def green?, do: green?(checks())
@@ -81,15 +102,15 @@ defmodule ArbiterCli.Cmd.Doctor do
   """
   @spec green?([Checks.Result.t()]) :: boolean()
   def green?(results) do
-    Enum.all?(results, fn r ->
-      r.status == :ok or (r.status == :fail and not r.blocks_readiness)
-    end)
+    Enum.all?(results, fn r -> r.status != :fail or not r.blocks_readiness end)
   end
 
   @doc """
-  Print the human-readable health report to stdout and return whether all
-  checks passed. Lets `arb start` show the same status block `arb doctor`
-  does without duplicating the formatting.
+  Print the full, grouped health report (every check, as `arb server doctor
+  --all`) to stdout and return whether no check failed (a `[warn]` is not a
+  failure). Lets `arb start`, `arb restart`, `arb update` and `arb server
+  deploy` show the same status block `arb doctor` does without duplicating the
+  formatting.
   """
   @spec report() :: boolean()
   def report, do: report(checks())
@@ -100,7 +121,7 @@ defmodule ArbiterCli.Cmd.Doctor do
   """
   @spec report([Checks.Result.t()]) :: boolean()
   def report(results) do
-    Formatter.emit_text(results)
-    Enum.all?(results, fn r -> r.status == :ok end)
+    Formatter.emit_text(results, all: true)
+    Formatter.overall(results) != :fail
   end
 end

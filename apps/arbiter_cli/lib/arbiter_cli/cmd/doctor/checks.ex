@@ -6,62 +6,154 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   """
 
   alias ArbiterCli.{Client, SchedulerState, Workspace}
-  alias ArbiterCli.Cmd.Doctor.Distribution
+  alias ArbiterCli.Cmd.Doctor.{Distribution, Scope}
   alias ArbiterCli.Cmd.Start
 
   defmodule Result do
-    @moduledoc false
-    defstruct [:name, :status, :detail, :hint, :fatal, :blocks_readiness]
+    @moduledoc """
+    One check's verdict.
+
+    `status` is the severity: `:ok`, `:warn` (should be fixed, nothing is
+    broken), `:fail` (broken now; the only severity that makes `arb server
+    doctor` exit non-zero) or `:na` (the check does not apply to this install;
+    `detail` says why). `id` and `group` are stable keys for `--json`; `parent`
+    names the composite a sub-check collapses into (`agy_jail`); `meta` carries
+    the few facts the report header prints.
+    """
+    defstruct [
+      :id,
+      :group,
+      :parent,
+      :name,
+      :status,
+      :detail,
+      :hint,
+      meta: %{},
+      blocks_readiness: false
+    ]
+
+    @type status :: :ok | :warn | :fail | :na
+    @type group :: :core | :auth | :sandboxes | :security
 
     @type t :: %__MODULE__{
+            id: nil | String.t(),
+            group: nil | group(),
+            parent: nil | String.t(),
             name: String.t(),
-            status: :ok | :fail,
+            status: status(),
             detail: nil | String.t(),
             hint: nil | String.t(),
-            fatal: boolean(),
+            meta: map(),
             blocks_readiness: boolean()
           }
   end
 
+  # `{id, group, parent, applies_when, check}` in display order within a group.
+  # `applies_when` is read against the install's `Scope` (see
+  # `ArbiterCli.Cmd.Doctor.Scope`); a check that does not apply is reported as
+  # `:na` with the scope's reason and its endpoint is never called. A check
+  # that returns a list (nodes) gets one id per result, derived from its name.
+  defp registry do
+    [
+      {"phoenix_reachable", :core, nil, :always, plain(&phoenix/0)},
+      {"workspaces_exist", :core, nil, :always, plain(&check_workspaces_exist/0)},
+      {"active_workspace", :core, nil, :always, plain(&check_active_workspace/0)},
+      {"repos_resolved", :core, nil, :always, plain(&check_repos/0)},
+      {"version", :core, nil, :always, plain(&check_versions/0)},
+      {"last_deploy", :core, nil, :always, plain(&check_last_deploy/0)},
+      {"migrations", :core, nil, :always, plain(&check_migrations/0)},
+      {"restart_safety", :core, nil, :always, plain(&check_restart_safety/0)},
+      {"merge_routing", :core, nil, :always, plain(&check_merge_routing/0)},
+      {"nodes", :core, nil, :always, plain(&check_nodes/0)},
+      {"claude_worker_credentials", :auth, nil, :always,
+       plain(&check_claude_worker_credentials/0)},
+      {"grok_auth", :auth, nil, :always, plain(&check_grok_auth/0)},
+      {"provider_accounts", :auth, nil, :always, plain(&check_provider_accounts/0)},
+      {"tmux", :auth, nil, :always, plain(&check_tmux/0)},
+      {"quota_policy", :auth, nil, :always, plain(&check_account_policy_binding/0)},
+      {"agy_write_jail", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_write_jail/0)},
+      {"agy_jail_escape", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_escape/0)},
+      {"agy_jail_reads", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_reads/0)},
+      {"agy_jail_network", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_network/0)},
+      {"agy_jail_keyring", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_jail_keyring/0)},
+      {"agy_ssh_transport", :sandboxes, "agy_jail", {:provider, "gemini"},
+       plain(&check_agy_ssh_transport/0)},
+      {"egress_jail", :sandboxes, nil, :egress, &check_egress_jail/1},
+      {"podman_sandbox", :sandboxes, nil, :podman, &check_podman_sandbox/1},
+      {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
+      {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},
+      {"bind_address", :security, nil, :always, plain(&check_bind_address/0)},
+      {"anonymous_api", :security, nil, :always, plain(&check_anonymous_api/0)},
+      {"dashboard_auth", :security, nil, :always, plain(&check_dashboard_auth/0)},
+      {"erlang_distribution", :security, nil, :always, plain(&Distribution.check/0)},
+      {"safe_default_categories", :security, nil, :always, plain(&check_security_defaults/0)},
+      {"guardrails", :security, nil, :always, plain(&check_guardrails/0)}
+    ]
+  end
+
+  defp plain(fun), do: fn _scope -> fun.() end
+
+  @doc "The check ids, in display order (the node list is the single id `nodes`)."
+  @spec ids() :: [String.t()]
+  def ids, do: Enum.map(registry(), &elem(&1, 0))
+
   @doc """
-  Run every health check and return the result structs, in display order.
+  Run every health check and return the result structs, tagged with their
+  `id`/`group`/`parent`, in group order: core, auth & providers, sandboxes,
+  security posture.
+
+  Applicability is read once (`Scope.fetch/0`); a check that does not apply to
+  this install comes back as `:na` rather than being dropped, so `--all` and
+  `--json` still list it.
   """
   @spec run() :: [Result.t()]
   def run do
-    [
-      phoenix(),
-      check_workspaces_exist(),
-      check_active_workspace(),
-      check_repos(),
-      check_versions(),
-      check_last_deploy(),
-      check_migrations(),
-      check_bind_address(),
-      check_anonymous_api(),
-      check_dashboard_auth(),
-      Distribution.check(),
-      check_restart_safety(),
-      check_security_defaults(),
-      check_legacy_safe_defaults_key(),
-      check_agy_write_jail(),
-      check_agy_jail_escape(),
-      check_agy_jail_reads(),
-      check_agy_jail_network(),
-      check_agy_jail_keyring(),
-      check_egress_jail(),
-      check_guardrails(),
-      check_agy_ssh_transport(),
-      check_tmux(),
-      check_podman_sandbox(),
-      check_worker_tmp(),
-      check_worker_memory(),
-      check_claude_worker_credentials(),
-      check_grok_auth(),
-      check_provider_accounts(),
-      check_account_policy_binding(),
-      check_merge_routing()
-    ] ++ check_nodes()
+    scope = Scope.fetch()
+
+    registry()
+    |> Enum.flat_map(fn {id, group, parent, applies_when, check} ->
+      case Scope.applies?(scope, applies_when) do
+        :yes ->
+          check.(scope) |> List.wrap() |> tag(id, group, parent)
+
+        {:no, reason} ->
+          [%Result{name: na_name(id), status: :na, detail: reason} |> tag_one(id, group, parent)]
+      end
+    end)
+    |> Enum.sort_by(&group_rank(&1.group))
   end
+
+  @group_order [:core, :auth, :sandboxes, :security]
+  defp group_rank(group), do: Enum.find_index(@group_order, &(&1 == group))
+
+  defp tag([single], id, group, parent), do: [tag_one(single, id, group, parent)]
+
+  defp tag(results, id, group, parent),
+    do: Enum.map(results, &tag_one(&1, id <> "." <> slug(&1.name), group, parent))
+
+  defp tag_one(%Result{} = r, id, group, parent),
+    do: %{r | id: id, group: group, parent: parent}
+
+  defp slug(name),
+    do: name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
+
+  # The display name of a check that never ran.
+  @na_names %{
+    "agy_write_jail" => "agy write jail",
+    "agy_jail_escape" => "agy jail escape vectors",
+    "agy_jail_reads" => "agy jail hidden reads",
+    "agy_jail_network" => "agy jail network",
+    "agy_jail_keyring" => "agy jail keyring proxy",
+    "agy_ssh_transport" => "agy ssh transport",
+    "egress_jail" => "egress jail",
+    "podman_sandbox" => "podman sandbox readiness"
+  }
+  defp na_name(id), do: Map.fetch!(@na_names, id)
 
   @doc """
   Just the "is Phoenix reachable" check on its own — the cheap single-request
@@ -79,7 +171,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "phoenix reachable",
           status: :ok,
           detail: Client.base_url(),
-          fatal: true,
           blocks_readiness: true
         }
 
@@ -89,7 +180,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: err.message,
           hint: reachable_hint(),
-          fatal: true,
           blocks_readiness: true
         }
 
@@ -99,7 +189,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: err.message,
           hint: err.hint,
-          fatal: true,
           blocks_readiness: true
         }
     end
@@ -112,7 +201,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "at least one workspace exists",
           status: :ok,
           detail: "#{length(list)} workspace(s)",
-          fatal: true,
+          meta: %{workspaces: Enum.map(list, &workspace_label/1)},
           blocks_readiness: true
         }
 
@@ -122,7 +211,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: "no workspaces found",
           hint: "Run `mix run priv/repo/seeds.exs` or create one via the API.",
-          fatal: true,
           blocks_readiness: true
         }
 
@@ -132,7 +220,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: err.message,
           hint: reachable_hint(),
-          fatal: true,
           blocks_readiness: true
         }
 
@@ -142,7 +229,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: err.message,
           hint: err.hint,
-          fatal: true,
           blocks_readiness: true
         }
     end
@@ -161,30 +247,22 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         server_sha = Map.get(body, "sha", "unknown")
         version_result(cli_vsn, cli_sha, server_vsn, server_sha)
 
-      {:error, %Client.Error{kind: :connection_refused}} ->
-        %Result{
-          name: "version",
-          status: :ok,
-          detail: "CLI #{cli_vsn} @ #{cli_sha} (server unreachable)",
-          fatal: true,
-          blocks_readiness: true
-        }
+      other ->
+        %Result{} = result = unknown_result("version", other)
 
-      {:error, %Client.Error{} = err} ->
-        %Result{
-          name: "version",
-          status: :ok,
-          detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})",
-          fatal: true,
-          blocks_readiness: true
+        %{
+          result
+          | detail: result.detail <> " (CLI #{cli_vsn} @ #{cli_sha})",
+            blocks_readiness: true
         }
     end
   end
 
   @doc """
   The last `arb server deploy`, from its own status file (tag, time, outcome,
-  database backup path). Informational: a failed or rolled-back deploy shows as
-  `[fail]` with a hint but never blocks readiness or fails `arb doctor`.
+  database backup path). A failed or rolled-back deploy is a `[warn]` with a
+  hint: the server that is running is whatever it rolled back to, so nothing is
+  broken now. A host with no recorded deploy (a source checkout) is n/a.
   """
   @spec check_last_deploy() :: Result.t()
   def check_last_deploy do
@@ -194,9 +272,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       nil ->
         %Result{
           name: "last deploy",
-          status: :ok,
+          status: :na,
           detail: "no `arb server deploy` recorded on this host",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -205,23 +282,21 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
         %Result{
           name: "last deploy",
-          status: if(good?, do: :ok, else: :fail),
+          status: if(good?, do: :ok, else: :warn),
           detail: Status.describe(last),
           hint:
             if(good?,
               do: nil,
               else: "See #{Status.path()}; `arb server deploy` again once the cause is fixed."
             ),
-          fatal: false,
           blocks_readiness: false
         }
 
       _ ->
         %Result{
           name: "last deploy",
-          status: :ok,
-          detail: "deploy status file is unreadable",
-          fatal: false,
+          status: :warn,
+          detail: "could not check: the deploy status file is unreadable",
           blocks_readiness: false
         }
     end
@@ -249,7 +324,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "version",
           status: :ok,
           detail: "server #{server_vsn}, CLI #{cli_vsn} (CLI and server match)",
-          fatal: false,
+          meta: %{server_version: server_vsn},
           blocks_readiness: false
         }
 
@@ -259,7 +334,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
           hint: "Major version mismatch — upgrade both CLI and server to the same major.",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -280,7 +354,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
           hint: hint,
-          fatal: false,
           blocks_readiness: false
         }
     end
@@ -365,7 +438,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "active workspace resolves",
           status: :ok,
           detail: "#{ws["name"]} (#{ws["id"]})",
-          fatal: true,
           blocks_readiness: false
         }
 
@@ -375,7 +447,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: msg,
           hint: "Set ARB_WORKSPACE to pick one of the existing workspaces.",
-          fatal: true,
           blocks_readiness: false
         }
     end
@@ -428,7 +499,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       detail:
         "#{workspace_phrase(names)} still on the retired `rig_paths` key: #{Enum.join(names, ", ")}",
       hint: legacy_key_hint(),
-      fatal: true,
       blocks_readiness: false
     }
   end
@@ -454,49 +524,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "repos resolved",
           status: :ok,
           detail: "#{length(repos)} repo(s)",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"data" => []}} ->
         no_repos_result(workspaces)
 
-      {:ok, _other} ->
-        %Result{
-          name: "repos resolved",
-          status: :ok,
-          detail: "unexpected response — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{kind: :connection_refused}} ->
-        %Result{
-          name: "repos resolved",
-          status: :ok,
-          detail: "server unreachable",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        %Result{
-          name: "repos resolved",
-          status: :ok,
-          detail: "server does not expose repos",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{} = err} ->
-        %Result{
-          name: "repos resolved",
-          status: :fail,
-          detail: err.message,
-          hint: err.hint,
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("repos resolved", other)
     end
   end
 
@@ -508,9 +543,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp no_repos_result([]) do
     %Result{
       name: "repos resolved",
-      status: :ok,
+      status: :na,
       detail: "no workspaces — nothing to resolve",
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -521,7 +555,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       status: :fail,
       detail: "no repos registered",
       hint: "Register a repo with `arb config set repo_paths.<repo>.path <path>`.",
-      fatal: true,
       blocks_readiness: false
     }
   end
@@ -547,14 +580,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("workspace safe-default categories", err)
 
-      _ ->
-        %Result{
-          name: "workspace safe-default categories",
-          status: :ok,
-          detail: "server unreachable — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("workspace safe-default categories", other)
     end
   end
 
@@ -563,7 +590,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: "workspace safe-default categories",
       status: :ok,
       detail: "every workspace resolves every current default category",
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -576,12 +602,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     %Result{
       name: "workspace safe-default categories",
-      status: :fail,
+      status: :warn,
       detail: "missing default categories — #{detail}",
       hint:
         "These exclusions are named in `agent.security.permissions.safe_defaults_exclude`. " <>
           "Remove a category from that list to re-enable it, or leave it if intentional.",
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -595,53 +620,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  # bd-4420va: the legacy `permissions.safe_defaults` config key is inert
-  # (see `Arbiter.Agents.SecurityPolicy`) — a workspace that once opted out
-  # with `safe_defaults: []` now silently resolves every default category
-  # again. Flag any workspace whose raw config still carries the key so an
-  # operator relying on the old opt-out notices before it matters.
-  defp check_legacy_safe_defaults_key do
-    offenders =
-      workspace_entries()
-      |> Enum.filter(fn %{config: config} -> has_legacy_safe_defaults_key?(config) end)
-      |> Enum.map(& &1.name)
-
-    legacy_safe_defaults_result(offenders)
-  end
-
-  defp has_legacy_safe_defaults_key?(config) do
-    config
-    |> get_in(["agent", "security", "permissions"])
-    |> case do
-      %{} = permissions -> Map.has_key?(permissions, "safe_defaults")
-      _ -> false
-    end
-  end
-
-  defp legacy_safe_defaults_result([]) do
-    %Result{
-      name: "legacy safe_defaults key",
-      status: :ok,
-      detail: "no workspace config carries the inert legacy key",
-      fatal: false,
-      blocks_readiness: false
-    }
-  end
-
-  defp legacy_safe_defaults_result(offenders) do
-    %Result{
-      name: "legacy safe_defaults key",
-      status: :fail,
-      detail: "legacy key ignored — use safe_defaults_exclude: #{Enum.join(offenders, ", ")}",
-      hint:
-        "`agent.security.permissions.safe_defaults` no longer has any effect (it is always " <>
-          "the current default set minus safe_defaults_exclude). Remove the key, and if it " <>
-          "was used to opt a category out, move that category into " <>
-          "`agent.security.permissions.safe_defaults_exclude` instead.",
-      fatal: false,
-      blocks_readiness: false
-    }
-  end
+  # The `legacy safe_defaults key` check (bd-4420va) is gone: the migration off
+  # `agent.security.permissions.safe_defaults` finished and the key is inert, so a
+  # standing advisory for it is the noise bd-7pnat1 removes.
 
   # bd-3s82pf: the agy write jail is default-on in every mode now, keyed on
   # the base `sandbox.enabled` / `filesystem: :worktree` default. Outside
@@ -677,14 +658,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy write jail", err)
 
-      _ ->
-        %Result{
-          name: "agy write jail",
-          status: :ok,
-          detail: "server unreachable — skipping (host jail status: #{host_status_text(host)})",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy write jail", other)
     end
   end
 
@@ -708,31 +683,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "agy ssh transport",
           status: :ok,
           detail: "ssh config parses inside the jail",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"ssh" => %{"available" => false, "message" => message} = ssh}} ->
         %Result{
           name: "agy ssh transport",
-          status: :fail,
+          status: :warn,
           detail: "git over ssh inside the jail may fail: #{message}",
           hint: Map.get(ssh, "fix") || "See Arbiter.Worker.Jail.ssh_shadow_config/0 (bd-5d5mrs).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy ssh transport", err)
 
-      _ ->
-        %Result{
-          name: "agy ssh transport",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy ssh transport", other)
     end
   end
 
@@ -755,31 +722,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "agy jail escape vectors",
           status: :ok,
           detail: "no session bus, systemd, resolver or agent socket reachable; #{proxy}",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"escape" => %{"available" => false, "message" => message} = esc}} ->
         %Result{
           name: "agy jail escape vectors",
-          status: :fail,
+          status: :warn,
           detail: message,
           hint: Map.get(esc, "fix") || "See Arbiter.Worker.Jail.mask_paths/0 (bd-7o08mj).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy jail escape vectors", err)
 
-      _ ->
-        %Result{
-          name: "agy jail escape vectors",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy jail escape vectors", other)
     end
   end
 
@@ -798,31 +757,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           detail:
             "the install DB, credential dirs, log root and other workspaces' worktrees " <>
               "and repos cannot be read from inside the jail",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"reads" => %{"available" => false, "message" => message} = reads}} ->
         %Result{
           name: "agy jail hidden reads",
-          status: :fail,
+          status: :warn,
           detail: message,
           hint: Map.get(reads, "fix") || "See Arbiter.Worker.Jail.Hide.paths/1 (bd-3q2djr).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy jail hidden reads", err)
 
-      _ ->
-        %Result{
-          name: "agy jail hidden reads",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy jail hidden reads", other)
     end
   end
 
@@ -838,31 +789,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "agy jail network",
           status: :ok,
           detail: "agy runs in a network namespace; its only route out is the egress proxy",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"network" => %{"available" => false, "message" => message} = net}} ->
         %Result{
           name: "agy jail network",
-          status: :fail,
+          status: :warn,
           detail: "agy runs on the shared network: #{message}",
           hint: Map.get(net, "fix") || "See Arbiter.Worker.Jail.network_probe/0 (bd-cfktou).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy jail network", err)
 
-      _ ->
-        %Result{
-          name: "agy jail network",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy jail network", other)
     end
   end
 
@@ -876,31 +819,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "agy jail keyring proxy",
           status: :ok,
           detail: "the filtered keyring bus comes up with a per-run TMPDIR",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"keyring" => %{"available" => false, "message" => message} = kr}} ->
         %Result{
           name: "agy jail keyring proxy",
-          status: :fail,
+          status: :warn,
           detail: message,
           hint: Map.get(kr, "fix") || "See Arbiter.Worker.Jail.keyring_probe/0 (bd-c9fqsk).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("agy jail keyring proxy", err)
 
-      _ ->
-        %Result{
-          name: "agy jail keyring proxy",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("agy jail keyring proxy", other)
     end
   end
 
@@ -909,8 +844,13 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # self-test: `bwrap --unshare-net` and `socat` present, a proxy listener up,
   # and against a local stand-in (no internet) 1 allow and 1 deny.
   # `Arbiter.Worker.Egress.SelfTest` via `/api/server/egress_jail`. A FAIL is
-  # non-fatal: `egress: open`, the default, does not need it.
-  defp check_egress_jail do
+  # a FAIL when some workspace enforces an allowlist (n/a otherwise, see `Scope`).
+  defp check_egress_jail(scope) do
+    # With the scope known this only runs when a workspace enforces an
+    # allowlist, so a host that cannot is broken now; with it unknown, it may
+    # not be needed.
+    unavailable = if scope.known?, do: :fail, else: :warn
+
     case Client.get("/api/server/egress_jail") do
       {:ok, %{"available" => true} = body} ->
         %Result{
@@ -920,31 +860,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "bwrap --unshare-net and socat present; proxy listener up; self-test against a " <>
               "local stand-in saw #{Map.get(body, "allowed", 1)} allow and " <>
               "#{Map.get(body, "denied", 1)} deny",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"available" => false, "message" => message} = body} ->
         %Result{
           name: "egress jail",
-          status: :fail,
+          status: unavailable,
           detail: "`egress: allowlist` / `none` cannot be enforced on this host: #{message}",
           hint: Map.get(body, "fix") || "See Arbiter.Worker.Egress.SelfTest (bd-5yydxh).",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("egress jail", err)
 
-      _ ->
-        %Result{
-          name: "egress jail",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("egress jail", other)
     end
   end
 
@@ -961,7 +893,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "guardrail profiles",
           status: :ok,
           detail: "no subject rules configured, so guardrails are off and nothing is tiered",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -970,14 +901,13 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "guardrail profiles",
           status: :ok,
           detail: guardrail_tiers_detail(workspaces),
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"issues" => issues, "workspaces" => workspaces}} when is_list(issues) ->
         %Result{
           name: "guardrail profiles",
-          status: :fail,
+          status: :warn,
           detail:
             Enum.map_join(issues, "; ", fn i ->
               "#{Map.get(i, "workspace")}: #{Map.get(i, "message")}"
@@ -985,21 +915,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           hint:
             "Fix the subject rules (guardrail_subjects) or the workspace `guardrails` block; " <>
               "see docs/design/guardrail-profiles.md §7.",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("guardrail profiles", err)
 
-      _ ->
-        %Result{
-          name: "guardrail profiles",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("guardrail profiles", other)
     end
   end
 
@@ -1079,22 +1002,21 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: "agy write jail",
       status: :ok,
       detail: "host can jail agy — agy is :strict-eligible",
-      fatal: false,
       blocks_readiness: false
     }
   end
 
-  # `hint` is only ever printed for `:fail` results (see
-  # `ArbiterCli.Cmd.Doctor.Formatter`), so the "why this is still [ ok ]"
-  # explanation has to live in `detail` here, not `hint`.
-  defp agy_write_jail_result({:error, _, _} = host, []) do
+  # agy is in use and the host cannot jail it: outside `:strict` it runs
+  # unconfined rather than refusing, so nothing is broken, but it should be
+  # fixed before a scope is switched to `:strict`.
+  defp agy_write_jail_result({:error, _, fix} = host, []) do
     %Result{
       name: "agy write jail",
-      status: :ok,
+      status: :warn,
       detail:
         "host #{host_status_text(host)} — no workspace or repo currently resolves :strict " <>
-          "for agy, so this is informational only",
-      fatal: false,
+          "for agy, so agy runs unconfined rather than refusing",
+      hint: fix,
       blocks_readiness: false
     }
   end
@@ -1102,9 +1024,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp agy_write_jail_result(:unknown, []) do
     %Result{
       name: "agy write jail",
-      status: :ok,
-      detail: "no workspace has a degraded agy write jail (host jail status unknown)",
-      fatal: false,
+      status: :warn,
+      detail: "could not check: the server did not report the host's jail status",
+      hint: "Check the server log for the failing /api/server/agy_write_jail request.",
       blocks_readiness: false
     }
   end
@@ -1120,31 +1042,21 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     %Result{
       name: "agy write jail",
-      status: if(strict?, do: :fail, else: :ok),
+      status: if(strict?, do: :fail, else: :warn),
       detail: "host #{host_status_text(host)}; " <> detail,
       hint:
         if strict? do
           "A `:strict` workspace/repo can't fall back to running agy unconfined — see the " <>
             "cause and fix named above, or drop it out of `:strict` until the host can jail."
         end,
-      fatal: strict?,
       blocks_readiness: false
     }
   end
 
-  # A 5xx (or other non-404 HTTP error) from a server-backed check is a real
-  # failure, not "server unreachable or predates this check": only a 404
-  # (older server) or a transport error means skip.
-  defp server_error_result(name, %Client.Error{status: status} = err) do
-    %Result{
-      name: name,
-      status: :fail,
-      detail: "server returned HTTP #{status}: #{error_detail(err)}",
-      hint: "Check the server log for the failing /api/server request.",
-      fatal: false,
-      blocks_readiness: false
-    }
-  end
+  # A 5xx (or other non-404 HTTP error) from a server-backed check: the check
+  # did not run, so it is a `[warn]` naming the reason (see `unknown_result/2`).
+  defp server_error_result(name, %Client.Error{} = err),
+    do: unknown_result(name, {:error, err})
 
   defp error_detail(%Client.Error{message: message, body: body}) do
     case body do
@@ -1165,7 +1077,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "#{Map.get(body, "root")} is on #{Map.get(body, "fstype")} (RAM-backed): worker " <>
               "scratch files consume memory",
           hint: "Set ARBITER_WORKER_TMP_ROOT (or ARBITER_SCRATCH_ROOT) to a disk-backed path.",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -1177,7 +1088,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "#{Map.get(body, "root")} holds #{Map.get(body, "size_bytes")} bytes " <>
               "(warn threshold #{Map.get(body, "threshold_bytes")})",
           hint: "Orphaned per-run temp dirs are swept at server boot; restart or remove them.",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -1186,21 +1096,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "worker temp dir",
           status: :ok,
           detail: "#{root} is disk-backed and within its size threshold",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
         server_error_result("worker temp dir", err)
 
-      _ ->
-        %Result{
-          name: "worker temp dir",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("worker temp dir", other)
     end
   end
 
@@ -1221,8 +1124,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
         server_error_result("worker memory cap", err)
 
-      _ ->
-        worker_memory_ok("server unreachable or predates this check — skipping")
+      other ->
+        unknown_result("worker memory cap", other)
     end
   end
 
@@ -1296,7 +1199,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       status: :warn,
       detail: detail,
       hint: hint,
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -1306,7 +1208,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: "worker memory cap",
       status: :ok,
       detail: detail,
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -1330,51 +1231,48 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           detail:
             "installed (#{Map.get(tmux, "version") || "unknown version"}) — the dashboard " <>
               "login relay can run provider logins",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:ok, %{"available" => false} = tmux} ->
         %Result{
           name: "tmux",
-          status: :fail,
+          status: :warn,
           detail:
             "#{Map.get(tmux, "message") || "tmux is not installed"}: the dashboard cannot log " <>
               "in or re-authenticate a provider account",
           hint: Map.get(tmux, "fix") || "Install tmux.",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("tmux", err)
 
-      _ ->
-        %Result{
-          name: "tmux",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("tmux", other)
     end
   end
 
   # bd-46xndf: is this host ready for the rootless-podman worker sandbox
   # (docs/design/podman-worker-containers.md)? The backend is optional, so a
-  # failure is operator-actionable but neither fatal nor readiness-blocking.
-  defp check_podman_sandbox do
+  # failure is operator-actionable but never readiness-blocking; it is only probed
+  # (and only a fail) when a workspace uses the podman backend.
+  defp check_podman_sandbox(scope) do
+    # With the scope known this only runs when a workspace uses podman, so an
+    # unusable host is broken now. With the scope unknown it may not be used.
+    unready = if scope.known?, do: :fail, else: :warn
+
     # The server runs its probes in series (up to 60 s each for the two
     # container runs), so the default 10 s receive timeout is far too short.
     case Client.get("/api/server/podman_sandbox", [], receive_timeout: 150_000) do
       {:ok, %{"installed" => false}} ->
         %Result{
           name: "podman sandbox readiness",
-          status: :ok,
-          detail: "podman not installed — container sandbox unavailable (optional backend)",
+          status: unready,
+          detail: "podman is not installed, but a workspace's sandbox backend is podman",
           hint:
-            "Install podman (e.g. `sudo dnf install podman`) to enable the container sandbox.",
-          fatal: false,
+            "Install podman (e.g. `sudo dnf install podman`), or move the workspace off " <>
+              "`sandbox.backend: podman`.",
           blocks_readiness: false
         }
 
@@ -1384,39 +1282,33 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
         %Result{
           name: "podman sandbox readiness",
-          status: if(ready?, do: :ok, else: :fail),
+          status: if(ready?, do: :ok, else: unready),
           detail: podman_detail(checks, failed, ready?),
           hint:
             failed
             |> Enum.map(&Map.get(&1, "hint"))
             |> Enum.reject(&is_nil/1)
             |> Enum.join(" "),
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %{kind: kind} = err} when kind in [:timeout, :transport] ->
         %Result{
           name: "podman sandbox readiness",
-          status: :fail,
-          detail: "readiness probe did not complete: #{Map.get(err, :message) || kind}",
+          status: :warn,
+          detail:
+            "could not check: the readiness probe did not complete: " <>
+              "#{Map.get(err, :message) || kind}",
           hint:
             "The host is too slow or a `podman run` is hung; run `podman run --rm --userns=keep-id <image> true` by hand as the Arbiter user.",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("podman sandbox readiness", err)
 
-      _ ->
-        %Result{
-          name: "podman sandbox readiness",
-          status: :ok,
-          detail: "server unreachable or predates this check — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("podman sandbox readiness", other)
     end
   end
 
@@ -1437,6 +1329,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp check_claude_worker_credentials do
     case Client.get("/api/server/claude_credentials") do
+      {:ok, %{"checked" => 0, "missing" => []}} ->
+        %Result{
+          name: "claude worker credentials",
+          status: :na,
+          detail: "no workspace runs Claude",
+          blocks_readiness: false
+        }
+
       {:ok, %{"checked" => checked, "missing" => []}} ->
         %Result{
           name: "claude worker credentials",
@@ -1444,7 +1344,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           detail:
             "#{checked} Claude workspace(s), each with a setup token of its own — none falls " <>
               "back to the operator's .credentials.json",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -1462,21 +1361,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "Claude dispatch for these workspaces is held: Arbiter no longer copies the " <>
               "operator's ~/.claude/.credentials.json into a worker, since Claude rotates its " <>
               "refresh token on every refresh and two holders lock each other out.",
-          fatal: true,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("claude worker credentials", err)
 
-      _ ->
-        %Result{
-          name: "claude worker credentials",
-          status: :ok,
-          detail: "could not check — server unreachable, or it predates this check",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("claude worker credentials", other)
     end
   end
 
@@ -1499,7 +1391,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
                   " — the broker's last refresh worked, so it refreshes this on the next dispatch",
                 else: ""
               ),
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -1511,30 +1402,22 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "#{String.replace(state, "_", " ")} (#{Enum.join(Map.get(body, "workspaces", []), ", ")})" <>
               grok_credential_detail(body),
           hint: Map.get(body, "fix"),
-          fatal: true,
           blocks_readiness: false
         }
 
       {:ok, %{"enabled" => false}} ->
         %Result{
           name: "grok auth",
-          status: :ok,
+          status: :na,
           detail: "grok is not enabled for any workspace",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("grok auth", err)
 
-      _ ->
-        %Result{
-          name: "grok auth",
-          status: :ok,
-          detail: "could not check — server unreachable, or it predates this check",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("grok auth", other)
     end
   end
 
@@ -1567,7 +1450,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           hint:
             "Set a per-repo override with `arb config set merge.repos.<repo>.…` " <>
               "(see `arb config schema`, merge.repos).",
-          fatal: true,
           blocks_readiness: false
         }
 
@@ -1576,21 +1458,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "merge routing",
           status: :ok,
           detail: routing_summary(repos),
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("merge routing", err)
 
-      _ ->
-        %Result{
-          name: "merge routing",
-          status: :ok,
-          detail: "could not check — server unreachable, or it predates this check",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("merge routing", other)
     end
   end
 
@@ -1631,14 +1506,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("provider accounts", err)
 
-      _ ->
-        %Result{
-          name: "provider accounts",
-          status: :ok,
-          detail: "could not check — server unreachable, or it predates this check",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("provider accounts", other)
     end
   end
 
@@ -1654,7 +1523,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       hint:
         "Migrate them into provider accounts — census, migrate, restart — per " <>
           "#{runbook(status)}.",
-      fatal: true,
       blocks_readiness: false
     }
   end
@@ -1668,30 +1536,34 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           "still carry a provider credential in worker_env that no account supplies — their " <>
           "next spawn raises MissingCredentialError",
       hint: "Migrate those workspaces (census, then migrate) per #{runbook(status)}.",
-      fatal: true,
       blocks_readiness: false
     }
   end
 
   defp provider_accounts_result(decision, status) do
-    detail =
+    {severity, detail, hint} =
       case {decision, status["server_env_token"]} do
         {"unresolved", _} ->
-          "not resolved yet — the server is still booting"
+          {:warn,
+           "could not check: provider accounts are not resolved yet — the server is still booting",
+           "Re-run `arb server doctor` once the server has finished booting."}
 
         {_, true} ->
-          "on (#{decision}); CLAUDE_CODE_OAUTH_TOKEN in the server environment is " <>
-            "ignored — remove it"
+          {:warn,
+           "on (#{decision}); CLAUDE_CODE_OAUTH_TOKEN in the server environment is " <>
+             "ignored — remove it",
+           "Unset CLAUDE_CODE_OAUTH_TOKEN in the server's environment (e.g. its systemd unit) " <>
+             "and restart; provider accounts are the only credential source."}
 
         {_, _} ->
-          "on (#{decision})"
+          {:ok, "on (#{decision})", nil}
       end
 
     %Result{
       name: "provider accounts",
-      status: :ok,
+      status: severity,
       detail: detail,
-      fatal: false,
+      hint: hint,
       blocks_readiness: false
     }
   end
@@ -1735,14 +1607,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("account/workspace quota policy", err)
 
-      _ ->
-        %Result{
-          name: "account/workspace quota policy",
-          status: :ok,
-          detail: "server unreachable — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("account/workspace quota policy", other)
     end
   end
 
@@ -1786,7 +1652,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: "account/workspace quota policy",
       status: :ok,
       detail: "no workspace's own quota setting is overridden by a stricter account policy",
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -1794,13 +1659,12 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp account_policy_binding_result(offenders) do
     %Result{
       name: "account/workspace quota policy",
-      status: :fail,
+      status: :warn,
       detail: Enum.join(offenders, "; "),
       hint:
         "Arbiter.Quota.Gate resolves each ceiling as min(account, workspace) — the account's " <>
           "quota_config is a floor the workspace may only tighten, never loosen. `arb account " <>
           "set <ref> --threshold-mode ... / --weekly-threshold ...` adjusts the account side.",
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -1834,7 +1698,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "migrations up to date",
           status: :ok,
           detail: "all migrations applied",
-          fatal: false,
           blocks_readiness: false
         }
 
@@ -1845,65 +1708,36 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: "#{count} pending",
           hint: "The server has unapplied migrations. Wait for the deployment to complete.",
-          fatal: false,
           blocks_readiness: false
         }
 
-      {:ok, %{"status" => "unknown"}} ->
+      {:ok, %{"status" => "unknown"} = body} ->
         %Result{
           name: "migrations up to date",
-          status: :fail,
-          detail: "could not check",
+          status: :warn,
+          detail:
+            "could not check: the server could not verify its migration status" <>
+              case Map.get(body, "error") do
+                reason when is_binary(reason) -> " (#{reason})"
+                _ -> ""
+              end,
           hint: "The server could not verify migration status. Check server logs for errors.",
-          fatal: false,
           blocks_readiness: false
         }
 
-      {:ok, _other} ->
-        %Result{
-          name: "migrations up to date",
-          status: :ok,
-          detail: "unexpected response — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{kind: :connection_refused}} ->
-        %Result{
-          name: "migrations up to date",
-          status: :ok,
-          detail: "server unreachable",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{kind: :http, status: 404}} ->
-        %Result{
-          name: "migrations up to date",
-          status: :ok,
-          detail: "server does not expose migration status",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      {:error, %Client.Error{}} ->
-        %Result{
-          name: "migrations up to date",
-          status: :fail,
-          detail: "could not check migration status",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("migrations up to date", other)
     end
   end
 
   # ---- nodes (RW7, docs/design/remote-workers.md §4.3, §14) ------------------
   #
-  # Fed by the operator-only `GET /api/nodes`. Every result is informational
-  # (never fatal, never blocks deploy readiness): a sleeping laptop or a
+  # Fed by the operator-only `GET /api/nodes`. Every problem is a `[warn]`
+  # (never a fail, never blocks deploy readiness): a sleeping laptop or a
   # missing tailnet is the operator's to act on, not a reason to roll back a
   # deploy. A server that predates the endpoint, or a token without operator
-  # proof (403), skips the whole section.
+  # proof (403), is one `[warn] could not check` — never an all-clear. With no
+  # node enrolled the section is n/a.
 
   @doc """
   The nodes section: `nodes.public_url reachable` (an anonymous `GET
@@ -1920,8 +1754,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         [server_error_result("nodes", err)]
 
-      _other ->
-        [nodes_result("nodes", :ok, "could not read the node list — skipping")]
+      other ->
+        [unknown_result("nodes", other)]
     end
   end
 
@@ -1929,7 +1763,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     url = resp["public_url"]
 
     if nodes == [] and is_nil(url) and "local_cap_zero" not in (resp["warnings"] || []) do
-      [nodes_result("nodes", :ok, "none enrolled")]
+      [nodes_result("nodes", :na, "no remote nodes enrolled")]
     else
       [
         public_url_result(url, nodes),
@@ -1947,7 +1781,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp public_url_result(nil, _nodes) do
     nodes_result(
       "nodes.public_url reachable",
-      :fail,
+      :warn,
       "nodes are enrolled but nodes.public_url is not set",
       "arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
     )
@@ -1961,7 +1795,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, reason} ->
         nodes_result(
           "nodes.public_url reachable",
-          :fail,
+          :warn,
           "#{url}/nodes/ping did not answer: #{probe_reason(reason)}",
           "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:4848` " <>
             "on the primary, and check that this machine is on the same tailnet."
@@ -1979,7 +1813,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     nodes_result(
       "nodes.public_url is a private endpoint",
-      :fail,
+      :warn,
       "#{url} looks like a public internet address (not *.ts.net, not a private or loopback range)" <>
         if(allowed?,
           do: "; tolerated because nodes.allow_public_endpoint is on, a standing warning",
@@ -2000,7 +1834,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     nodes_result(
       "node #{n["name"]}",
-      if(ok?, do: :ok, else: :fail),
+      if(ok?, do: :ok, else: :warn),
       node_detail(n, state, health),
       unless(ok?, do: node_hint(state, health))
     )
@@ -2034,7 +1868,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp local_cap_result(%{"local" => %{"max" => 0}}) do
     nodes_result(
       "local worker cap",
-      :fail,
+      :warn,
       "the local cap is 0: work that can only run on this machine (reviewers, fix and " <>
         "conflict passes, agy/codex runs, research) will wait",
       "Raise it with `arb node set local --max-workers N`."
@@ -2054,7 +1888,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         [
           nodes_result(
             "node capacity vs conductor.max_concurrent",
-            :fail,
+            :warn,
             "the caps add up to #{total} but conductor.max_concurrent is #{ceiling}: " <>
               "the extra capacity will sit idle",
             "Raise conductor.max_concurrent (it is the operator-owned spend valve), or lower a cap."
@@ -2065,7 +1899,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         [
           nodes_result(
             "node capacity vs conductor.max_concurrent",
-            :fail,
+            :warn,
             "conductor.max_concurrent is #{ceiling} but the caps add up to only #{total}: " <>
               "the board will plan more than any machine can start",
             "Lower conductor.max_concurrent, or raise a cap."
@@ -2105,7 +1939,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       status: status,
       detail: detail,
       hint: hint,
-      fatal: false,
       blocks_readiness: false
     }
   end
@@ -2113,10 +1946,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
   # there is no login", so a server reachable off-loopback exposes
   # unauthenticated LiveView pages to anyone who can reach the port. This is
-  # purely informational — never fatal, never blocks readiness. An ambiguous
-  # response (server predates this endpoint, unreachable) is treated as green
-  # rather than risking a spurious [fail] on installs that are already fine,
-  # but a 5xx is a [fail] like every other server-backed check.
+  # a posture advisory ([warn], never blocks readiness). An ambiguous response
+  # (server predates this endpoint, unreachable, 5xx) is a [warn] "could not
+  # check", never an all-clear.
   defp check_bind_address do
     case Client.get("/api/server/bind_address") do
       {:ok, %{"loopback" => true, "ip" => ip}} ->
@@ -2124,14 +1956,15 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "bind address is loopback",
           status: :ok,
           detail: ip,
-          fatal: false,
+          meta: %{bind: ip},
           blocks_readiness: false
         }
 
       {:ok, %{"loopback" => false, "ip" => ip}} ->
         %Result{
           name: "bind address is loopback",
-          status: :fail,
+          status: :warn,
+          meta: %{bind: ip},
           detail:
             "bound to #{ip} — the dashboard has no login; " <>
               "anyone who can reach this address gets full access to its " <>
@@ -2142,21 +1975,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
               "back to loopback-only and use SSH port-forwarding instead " <>
               "(`ssh -L 4848:127.0.0.1:4848 <host>`), or leave it set only if " <>
               "you understand the exposure.",
-          fatal: false,
           blocks_readiness: false
         }
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("bind address is loopback", err)
 
-      _other ->
-        %Result{
-          name: "bind address is loopback",
-          status: :ok,
-          detail: "could not determine — skipping",
-          fatal: false,
-          blocks_readiness: false
-        }
+      other ->
+        unknown_result("bind address is loopback", other)
     end
   end
 
@@ -2178,32 +2004,40 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   @doc false
   @spec check_anonymous_api() :: Result.t()
   def check_anonymous_api do
-    accepted =
-      for {method, path, opts} <- @anonymous_probes,
-          status = accepted_status(Client.anonymous(method, path, opts)),
-          do: "#{method |> to_string() |> String.upcase()} #{path} → #{status}"
+    probes =
+      for {method, path, opts} <- @anonymous_probes do
+        label = "#{method |> to_string() |> String.upcase()} #{path}"
+        {label, probe_verdict(Client.anonymous(method, path, opts))}
+      end
 
-    result = %Result{
-      name: "anonymous /api access refused",
-      status: :ok,
-      detail: "a request without a bearer token gets 401",
-      fatal: true,
-      blocks_readiness: false
-    }
+    accepted = for {label, {:accepted, status}} <- probes, do: "#{label} → #{status}"
+    unanswered = for {label, {:unknown, why}} <- probes, do: "#{label} (#{why})"
 
-    case accepted do
-      [] ->
-        result
+    cond do
+      accepted != [] ->
+        %Result{
+          name: "anonymous /api access refused",
+          status: :fail,
+          detail: "served without a token: " <> Enum.join(accepted, ", "),
+          hint:
+            "Any process on this host — every worker included — can drive this server " <>
+              "with a plain curl. Upgrade the server (bd-asawcq); `/api` must answer " <>
+              "401 without `Authorization: Bearer <token>`."
+        }
 
-      _ ->
-        %{
-          result
-          | status: :fail,
-            detail: "served without a token: " <> Enum.join(accepted, ", "),
-            hint:
-              "Any process on this host — every worker included — can drive this server " <>
-                "with a plain curl. Upgrade the server (bd-asawcq); `/api` must answer " <>
-                "401 without `Authorization: Bearer <token>`."
+      unanswered != [] ->
+        %Result{
+          name: "anonymous /api access refused",
+          status: :warn,
+          detail: "could not check: " <> Enum.join(unanswered, ", "),
+          hint: "Re-run once the server answers; an open `/api` is a fail."
+        }
+
+      true ->
+        %Result{
+          name: "anonymous /api access refused",
+          status: :ok,
+          detail: "a request without a bearer token gets 401"
         }
     end
   end
@@ -2213,15 +2047,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # to the login page. Probe `GET /` without following redirects; a 2xx means
   # the dashboard is open. The auth mode comes from the authenticated
   # `/api/server/dashboard_auth` and is reported in the detail. An unreachable
-  # or unrecognising server (older build, 500) is "could not determine".
+  # or unrecognising server (older build, 500) is a `[warn]` "could not check".
   @doc false
   @spec check_dashboard_auth() :: Result.t()
   def check_dashboard_auth do
     result = %Result{
       name: "dashboard requires login",
-      status: :ok,
-      detail: "could not determine — skipping",
-      fatal: true,
+      status: :warn,
+      detail: "could not check: the anonymous dashboard probe was not answered by the server",
       blocks_readiness: false
     }
 
@@ -2248,7 +2081,11 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
 
       {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
-        %{result | detail: "anonymous requests are redirected to login (#{mode.text})"}
+        %{
+          result
+          | status: :ok,
+            detail: "anonymous requests are redirected to login (#{mode.text})"
+        }
 
       _ ->
         result
@@ -2280,7 +2117,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
         %{
           result
-          | detail:
+          | status: :ok,
+            detail:
               "loopback trusted (opt-in); forwarded requests are redirected to login (#{mode.text})"
         }
 
@@ -2299,27 +2137,35 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  # The status a probe was *served* with, or nil when the server refused it
-  # (401/403) or could not be asked at all.
-  defp accepted_status({:ok, _body}), do: 200
+  # What a no-token probe came to: `{:accepted, status}` (it got past auth),
+  # `:refused` (401/403), or `{:unknown, why}` (the server could not be asked
+  # or answered 5xx — which says nothing about auth).
+  defp probe_verdict({:ok, _body}), do: {:accepted, 200}
 
-  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in [401, 403],
-    do: nil
+  defp probe_verdict({:error, %Client.Error{kind: :http, status: s}}) when s in [401, 403],
+    do: :refused
 
-  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in 200..499, do: s
-  defp accepted_status({:error, _}), do: nil
+  defp probe_verdict({:error, %Client.Error{kind: :http, status: s}}) when s in 200..499,
+    do: {:accepted, s}
+
+  defp probe_verdict({:error, %Client.Error{kind: :http, status: s}}),
+    do: {:unknown, "HTTP #{s}"}
+
+  defp probe_verdict({:error, %Client.Error{message: message}}),
+    do: {:unknown, to_string(message)}
 
   # bd-9fgg04: "is it safe to restart?" is the question doctor is reached for.
-  # Informational like the bind-address check — never fatal, never blocks
-  # readiness (a deploy's own wait must not hang on a drain) — but a paused
-  # scheduler still draining is a [fail]: a restart now kills live work. A
-  # running scheduler is normal operation, so [ ok ], with the caveat spelled
-  # out. Only an unreadable state falls back to green, as the other
-  # informational checks do.
+  # It reports `[ ok ]` only when a restart is safe right now (a paused,
+  # quiescent scheduler). A running scheduler is normal operation but not a
+  # safe restart point, and a paused scheduler still draining would lose live
+  # work: both are `[warn]` carrying the command that gets to a safe point.
+  # Never a fail (a deploy's own wait must not hang on a drain, so it never
+  # blocks readiness), and an unreadable state is a `[warn]` too — never
+  # `[ ok ]` on a guess.
   defp check_restart_safety do
     case SchedulerState.fetch() do
       {:ok, body} -> restart_safety_result(SchedulerState.state(body), body)
-      {:error, _} -> restart_safety(:ok, "could not determine — skipping", nil)
+      {:error, _} = err -> unknown_result("safe to restart", err)
     end
   end
 
@@ -2327,7 +2173,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     lines = Enum.map(SchedulerState.entry_lines(body), &("\n          " <> &1))
 
     restart_safety(
-      :fail,
+      :warn,
       "scheduler " <> SchedulerState.headline(body) <> Enum.join(lines),
       "Wait for it to drain: `arb scheduler wait`, then restart promptly."
     )
@@ -2335,15 +2181,22 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp restart_safety_result("running", body) do
     restart_safety(
-      :ok,
-      "scheduler #{SchedulerState.headline(body)} — to restart: " <>
-        "`arb scheduler pause && arb scheduler wait`",
-      nil
+      :warn,
+      "scheduler #{SchedulerState.headline(body)}",
+      "To reach a safe restart point: `arb scheduler pause && arb scheduler wait`."
     )
   end
 
-  defp restart_safety_result(_state, body),
+  defp restart_safety_result("quiescent", body),
     do: restart_safety(:ok, "scheduler " <> SchedulerState.headline(body), nil)
+
+  defp restart_safety_result(_state, _body) do
+    restart_safety(
+      :warn,
+      "could not check: the scheduler reported a state this CLI does not recognise",
+      "Upgrade the CLI (`arb self-update`), or read `arb scheduler status`."
+    )
+  end
 
   defp restart_safety(status, detail, hint) do
     %Result{
@@ -2351,8 +2204,34 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       status: status,
       detail: detail,
       hint: hint,
-      fatal: false,
       blocks_readiness: false
     }
   end
+
+  # A server-backed check whose answer is missing or unusable is a `[warn]`
+  # saying so, never `[ ok ]` or "skipping": an all-clear on a check that did
+  # not run is how a broken install read as healthy (bd-8rvkqd, bd-34a0b4).
+  # `other` is the raw `Client` result.
+  defp unknown_result(name, other) do
+    %Result{
+      name: name,
+      status: :warn,
+      detail: "could not check: " <> unknown_reason(other),
+      hint:
+        "Re-run `arb server doctor`; if it persists, check the server log and `arb server version`.",
+      blocks_readiness: false
+    }
+  end
+
+  defp unknown_reason({:error, %Client.Error{kind: :connection_refused}}),
+    do: "the server is unreachable"
+
+  defp unknown_reason({:error, %Client.Error{kind: :http, status: 404}}),
+    do: "the server does not expose this check (HTTP 404; it may predate it)"
+
+  defp unknown_reason({:error, %Client.Error{kind: :http, status: status} = err}),
+    do: "the server returned HTTP #{status}: #{error_detail(err)}"
+
+  defp unknown_reason({:error, %Client.Error{message: message}}), do: to_string(message)
+  defp unknown_reason({:ok, _body}), do: "the server answered in a shape this CLI does not read"
 end

@@ -68,6 +68,10 @@ defmodule ArbiterWeb.Api.ServerController do
       login relay runs each provider CLI's login in a hidden tmux session, so
       without it no account can be logged in or re-authenticated.
       `arb server doctor` reports it with the install hint.
+    * `GET /api/server/doctor_scope` — which providers, sandbox backends and
+      egress modes this install uses (bd-7pnat1, `Arbiter.Doctor.Scope`), so
+      `arb server doctor` reports a check that cannot matter here as `n/a`
+      instead of probing it.
   """
 
   use ArbiterWeb, :controller
@@ -188,6 +192,10 @@ defmodule ArbiterWeb.Api.ServerController do
   def worker_memory(conn, _params), do: json(conn, MemoryDiagnosis.run())
 
   def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
+
+  # bd-7pnat1: which providers / sandbox backends this install uses, so
+  # `arb server doctor` can report a check as n/a instead of probing it.
+  def doctor_scope(conn, _params), do: json(conn, Arbiter.Doctor.Scope.report())
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)

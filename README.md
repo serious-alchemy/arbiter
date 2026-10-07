@@ -316,7 +316,27 @@ echo "ARB_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
 ```
 
 Any non-loopback value logs a boot `WARNING` naming the exposure, and
-`arb server doctor` reports a non-fatal warning check pointing back here.
+`arb server doctor` reports a `[warn]` check pointing back here.
+
+### Reading `arb server doctor`
+
+Every check has one of four severities:
+
+| Severity | Meaning | Exit code |
+|---|---|---|
+| `ok` | healthy | 0 |
+| `warn` | should be fixed, nothing is broken: a policy advisory (account/workspace quota policy), a scheduler that is not at a safe restart point, a failed last deploy, an off-loopback bind, a deprecated setting, **or a check that could not run** (`could not check: <reason>` — an unreachable, erroring or older server is never read as healthy) | 0 |
+| `fail` | broken now: server unreachable, migrations pending, CLI/server version mismatch, no workspace or repo, an enabled provider's credential unusable, an open `/api`, a `:strict` workspace the host cannot jail, a podman backend the host cannot run | **1** |
+| `n/a` | does not apply to this install, so it is not probed: a provider no workspace uses (or that is paused), podman when no workspace uses it, the egress jail when no workspace enforces an allowlist, no nodes enrolled | 0 |
+
+`arb server doctor --json` lists **every** check (n/a included) with `id`, `group`
+and `severity`, plus `result` (`ok`/`warn`/`fail`), `exit_code` and `summary`;
+`ok` is false exactly when the exit code is 1, so a script can use either. The
+default output is the header, the summary line and the warn/fail checks only;
+`--all` (alias `-v`) groups everything under core, auth & providers, sandboxes
+(the agy jail's six sub-checks collapse to one line while they pass) and
+security posture. Which providers and sandbox backends an install uses comes
+from `GET /api/server/doctor_scope`; when that cannot be read, nothing is hidden.
 
 ### Remote `arb` — access Arbiter over VPN
 
@@ -556,7 +576,7 @@ commands you'll reach for most.
 | `arb server start` | Boot the stack (no-op if already up) |
 | `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `arb` — see [docs/self-update.md](docs/self-update.md) |
 | `arb server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
-| `arb server doctor` | Health-check the server and database |
+| `arb server doctor [--all\|-v] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `arb server doctor`](#reading-arb-server-doctor) |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
 

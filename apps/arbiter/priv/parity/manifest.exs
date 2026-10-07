@@ -2023,10 +2023,10 @@
     },
     %{
       id: "misc/host_posture_diagnostics_13_bind_address",
-      title: "Host posture diagnostics (13): bind_address, agy_write_jail, egress_jail, guardrails, claude_credentials, grok_auth, provider_accounts, merge_routing, tmux, worker_tmp, podman_sandbox, worker_memory, dashboard_auth",
+      title: "Host posture diagnostics (14): bind_address, agy_write_jail, egress_jail, guardrails, claude_credentials, grok_auth, provider_accounts, merge_routing, tmux, worker_tmp, podman_sandbox, worker_memory, dashboard_auth, doctor_scope",
       mcp: nil,
       cli: ["arb server doctor"],
-      rest: ["GET /api/server/bind_address", "GET /api/server/agy_write_jail", "GET /api/server/egress_jail", "GET /api/server/guardrails", "GET /api/server/merge_routing", "GET /api/server/podman_sandbox", "GET /api/server/tmux", "GET /api/server/worker_memory", "GET /api/server/worker_tmp", "GET /api/server/dashboard_auth"],
+      rest: ["GET /api/server/bind_address", "GET /api/server/agy_write_jail", "GET /api/server/egress_jail", "GET /api/server/guardrails", "GET /api/server/merge_routing", "GET /api/server/podman_sandbox", "GET /api/server/tmux", "GET /api/server/worker_memory", "GET /api/server/worker_tmp", "GET /api/server/dashboard_auth", "GET /api/server/doctor_scope"],
       status: :partial,
       absent: %{
         mcp: {:intentional, "Host paths, credential-gap and jail posture are operator-host facts an LLM cannot act on; `scheduler_status`/`alert_list`/`breaker_list` cover runtime health."}
