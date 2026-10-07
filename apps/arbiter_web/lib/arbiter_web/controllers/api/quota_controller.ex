@@ -60,10 +60,8 @@ defmodule ArbiterWeb.Api.QuotaController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Quota
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Quota.Snapshot
   alias Arbiter.Tasks.Workspaces
-  alias Arbiter.Workflows.DispatchQueue
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -77,57 +75,7 @@ defmodule ArbiterWeb.Api.QuotaController do
     # response echoes the resolved `workspace_id`. A bound token stays confined.
     case Workspaces.resolve_default(conn.assigns[:mcp_scope], Workspaces.arg(params)) do
       {:ok, ws_id} ->
-        accounts = Quota.account_ids(ws_id)
-        codex = Quota.Codex.serialize_latest(accounts["codex"])
-
-        # Every `account`/`workspaces` block below carries each workspace's
-        # 30-day spend, read off `Arbiter.Quota.SpendCache`'s memoized
-        # grouped aggregate (bd-4p6pw7) rather than a scan per workspace, so
-        # the memo is built here once and threaded through all three calls.
-        spend = Quota.spend_cache(accounts)
-
-        # §6's `--json` gains `account` / `workspaces` at the top level. They
-        # describe the **headline** (Claude) provider's account; a workspace
-        # may sit on a different account per provider, so each `quotas` entry
-        # carries its own pair too.
-        headline = Quota.account_fields(accounts["claude"], "claude", spend)
-        headline_workspace = safe_workspace(ws_id)
-
-        policy =
-          Quota.policy_fields(
-            Arbiter.Accounts.Resolver.get(accounts["claude"]),
-            headline_workspace
-          )
-
-        render(conn, :show,
-          workspace_id: ws_id,
-          workspace: workspace_view(ws_id),
-          requested_workspace: Workspaces.arg(params),
-          claude:
-            Quota.serialize(accounts["claude"], "claude",
-              workspace_id: ws_id,
-              spend_cache: spend
-            ),
-          quotas: Quota.list_serialized_for_workspace(ws_id, spend_cache: spend),
-          account: headline[:account],
-          workspaces: headline[:workspaces],
-          account_policy: policy[:account_policy],
-          policy_binding: policy[:policy_binding],
-          effective_policy: policy[:effective],
-          codex: codex,
-          codex_message: Quota.codex_absence_message(codex),
-          # bd-1fpjgx: mirrors `claude`'s `credentials_expired` field, sourced
-          # the same way — live off `CredentialWatchdog`'s held state, not the
-          # persisted snapshot, so it reflects the free 401-streak / agy-exit
-          # signal `CloudProbe` now feeds it for these adapters too.
-          codex_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-          antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
-          gemini_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini),
-          held_dispatches: held_dispatches(ws_id),
-          paused_providers: Arbiter.Providers.Pause.to_json()
-        )
+        render(conn, :show, data: Snapshot.for_workspace(ws_id, Workspaces.arg(params)))
 
       {:error, _} = error ->
         error
@@ -142,38 +90,7 @@ defmodule ArbiterWeb.Api.QuotaController do
   defp show_by_account(conn, account_ref) do
     case Arbiter.Accounts.get_account(account_ref) do
       {:ok, account} ->
-        provider = Atom.to_string(account.provider)
-        spend = Quota.spend_cache(account.id)
-        fields = Quota.account_fields(account.id, provider, spend)
-
-        codex = if provider == "codex", do: Quota.Codex.serialize_latest(account.id)
-        policy = Quota.policy_fields(account, nil)
-
-        render(conn, :show,
-          workspace_id: nil,
-          workspace: nil,
-          requested_workspace: nil,
-          claude:
-            if(provider == "claude",
-              do: Quota.serialize(account.id, "claude", spend_cache: spend)
-            ),
-          quotas: Quota.list_serialized(account.id, spend_cache: spend),
-          account: fields[:account],
-          workspaces: fields[:workspaces],
-          account_policy: policy[:account_policy],
-          policy_binding: policy[:policy_binding],
-          effective_policy: policy[:effective],
-          codex: codex,
-          codex_message: Quota.codex_absence_message(codex),
-          codex_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-          antigravity:
-            if(provider == "antigravity",
-              do: Quota.CloudCode.serialize_latest(account.id, "antigravity")
-            ),
-          gemini_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
-        )
+        render(conn, :show, data: Snapshot.for_account(account))
 
       {:error, :not_found} ->
         {:error, {:not_found, "account #{inspect(account_ref)} not found"}}
@@ -184,30 +101,5 @@ defmodule ArbiterWeb.Api.QuotaController do
          {:invalid_request, "account #{inspect(account_ref)} is ambiguous; use \"provider:slug\"",
           %{}}}
     end
-  end
-
-  defp held_dispatches(ws_id) do
-    ws_id
-    |> DispatchQueue.held_items()
-    |> Enum.sort_by(&DateTime.to_unix(&1.opened_at, :microsecond))
-    |> Enum.map(&DispatchQueue.serialize_held/1)
-  end
-
-  defp workspace_view(ws_id) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, %Workspace{id: id, name: name}} -> %{id: id, name: name}
-      _ -> %{id: ws_id, name: nil}
-    end
-  rescue
-    _ -> %{id: ws_id, name: nil}
-  end
-
-  defp safe_workspace(ws_id) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, %Workspace{} = ws} -> ws
-      _ -> nil
-    end
-  rescue
-    _ -> nil
   end
 end

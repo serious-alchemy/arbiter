@@ -588,4 +588,50 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert code == 0
     end
   end
+
+  describe "--since parsing (P-18, D-A-9)" do
+    defp since_sent(argv) do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/usage"},
+         fn conn ->
+           send(test_pid, {:query, conn.query_string})
+           Req.Test.json(conn, %{"by" => "day", "data" => []})
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> ArbiterCli.Cmd.Usage.run(argv) end)
+
+      query =
+        receive do
+          {:query, q} -> URI.decode_query(q)
+        after
+          0 -> nil
+        end
+
+      {code, query}
+    end
+
+    test "a bare date becomes midnight UTC" do
+      assert {0, %{"since" => "2026-06-01T00:00:00Z"}} = since_sent(["--since", "2026-06-01"])
+    end
+
+    test "minutes are understood" do
+      assert {0, %{"since" => since}} = since_sent(["--since", "30m"])
+      {:ok, dt, _} = DateTime.from_iso8601(since)
+      assert_in_delta DateTime.diff(DateTime.utc_now(), dt), 1800, 5
+    end
+
+    test "a full ISO8601 datetime passes through" do
+      assert {0, %{"since" => "2026-06-01T12:00:00Z"}} =
+               since_sent(["--since", "2026-06-01T12:00:00Z"])
+    end
+
+    test "a zero window is refused instead of querying all time" do
+      {code, query} = since_sent(["--since", "0d"])
+      assert code != 0
+      assert query == nil
+    end
+  end
 end

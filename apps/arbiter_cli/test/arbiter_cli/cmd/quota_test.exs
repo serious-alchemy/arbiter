@@ -849,4 +849,30 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert code == 0
     end
   end
+
+  describe "arb quota — paused providers (P-18, D-A-4)" do
+    test "prints the PAUSED block when the payload carries paused_providers" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "paused_providers" => [
+            %{
+              "target" => "codex",
+              "label" => "codex",
+              "reason" => "jail escape",
+              "by" => "api",
+              "at" => "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "PAUSED providers (dropped from all routing):"
+      assert out =~ "codex — jail escape (by api, 2026-10-01T00:00:00Z)"
+    end
+  end
 end

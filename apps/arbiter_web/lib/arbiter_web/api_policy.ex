@@ -43,6 +43,10 @@ defmodule ArbiterWeb.ApiPolicy do
     * `:workspace_list` — any token; `WorkspaceController.index/2` lists only
       a worker/refine token's own workspace (`arb message` resolves
       `ARB_WORKSPACE` through it).
+    * `:quota_read` — coordinator; or a worker token reading the quota of its
+      own (bound) workspace, the REST twin of the worker-callable `quota_get`
+      MCP tool (P-18, D-A-6). `?account=` reaches past the workspace, so it
+      stays coordinator-only.
     * `:issue_progress` — coordinator; or a worker token updating **its own
       task**, with only the progress fields (`notes`, `qa_notes`,
       `deployment_notes`, `pr_body`, `verify_after_deploy`) — the REST twin
@@ -89,6 +93,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :any_token
           | :issue_read
           | :workspace_list
+          | :quota_read
           | :issue_progress
           | :issue_create
           | :dependency_add
@@ -247,7 +252,7 @@ defmodule ArbiterWeb.ApiPolicy do
     # Posts to the PR under the fleet's identity: dispatch tier, like the review itself.
     {:post, "/api/external_reviews/:id/greenlight"} => :dispatch,
     {:get, "/api/review_gate_rounds"} => :coordinator,
-    {:get, "/api/quota"} => :coordinator,
+    {:get, "/api/quota"} => :quota_read,
     {:get, "/api/coverage_shadow/preflip_gate"} => :coordinator,
 
     # ---- workers ------------------------------------------------------------
@@ -321,6 +326,18 @@ defmodule ArbiterWeb.ApiPolicy do
     do: :ok
 
   def authorize(:coordinator, %Scope{tier: :coordinator}, _params), do: :ok
+
+  def authorize(:quota_read, %Scope{tier: :coordinator}, _params), do: :ok
+
+  def authorize(:quota_read, %Scope{tier: :worker} = scope, params) do
+    case params["account"] do
+      acct when is_binary(acct) and acct != "" ->
+        forbidden(scope, "may only read its own workspace's quota, not ?account=")
+
+      _ ->
+        :ok
+    end
+  end
 
   def authorize(:operator, %Scope{} = scope, _params) do
     if Scope.operator?(scope),

@@ -48,6 +48,7 @@ defmodule ArbiterWeb.Api.UsageController do
   alias Arbiter.Usage
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
+  alias Arbiter.Usage.Serializer
   alias ArbiterWeb.Api.WorkspaceParam
   require Ash.Query
 
@@ -69,14 +70,17 @@ defmodule ArbiterWeb.Api.UsageController do
         |> add_opt(:provider_account_id, account_id)
         |> add_opt(:limit, limit)
 
-      case Usage.summarize(opts) do
-        {:ok, rollups} ->
-          json(conn, %{
-            by: Atom.to_string(Usage.normalize_by(by)),
-            workspace_id: ws_id,
-            data: Enum.map(rollups, &render_rollup/1)
-          })
+      zero_token_opts = opts |> Keyword.take([:since, :workspace_id, :provider_account_id])
 
+      with {:ok, rollups} <- Usage.summarize(opts),
+           {:ok, flagged} <- Usage.zero_token_providers(zero_token_opts) do
+        json(conn, %{
+          by: Atom.to_string(Usage.normalize_by(by)),
+          workspace_id: ws_id,
+          data: Enum.map(rollups, &render_rollup/1),
+          warnings: Serializer.warnings(flagged)
+        })
+      else
         {:error, reason} ->
           {:error, {:invalid_request, "could not summarize usage: #{inspect(reason)}"}}
       end
@@ -136,23 +140,7 @@ defmodule ArbiterWeb.Api.UsageController do
 
   # ---- rendering ---------------------------------------------------------
 
-  defp render_rollup(%{group: g} = r) do
-    %{
-      group: render_group(g),
-      rows: r.rows,
-      # nil (not 0.0) when no row in the group ever priced a cost — see
-      # `Arbiter.Usage.summarize/1`'s `cost_known` (bd-481sz7). A $0.00 here
-      # would misreport an agy/Antigravity subscription (no dollar figure,
-      # ever) as a session that happened to cost nothing.
-      total_cost_usd: if(r.cost_known, do: round_money(r.total_cost_usd)),
-      tokens_in: r.tokens_in,
-      tokens_out: r.tokens_out,
-      thinking_tokens: r.thinking_tokens,
-      cache_creation_tokens: r.cache_creation_tokens,
-      cache_read_tokens: r.cache_read_tokens,
-      duration_ms: r.duration_ms
-    }
-  end
+  defp render_rollup(r), do: Serializer.rollup(r)
 
   defp render_tier(tier) do
     %{
@@ -184,10 +172,7 @@ defmodule ArbiterWeb.Api.UsageController do
     }
   end
 
-  defp render_group(nil), do: nil
-  defp render_group(g) when is_binary(g), do: g
-  defp render_group(g) when is_atom(g), do: Atom.to_string(g)
-  defp render_group(g), do: inspect(g)
+  defp render_group(g), do: Serializer.group(g)
 
   defp render_event(%Event{} = ev) do
     %{
@@ -213,8 +198,7 @@ defmodule ArbiterWeb.Api.UsageController do
     }
   end
 
-  defp round_money(nil), do: nil
-  defp round_money(n) when is_number(n), do: Float.round(n / 1, 6)
+  defp round_money(n), do: Serializer.round_money(n)
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)

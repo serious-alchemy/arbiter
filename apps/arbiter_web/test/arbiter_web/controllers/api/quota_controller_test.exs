@@ -492,4 +492,28 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       assert_in_delta claude["cost_usd"], 1.5, 0.0001
     end
   end
+
+  describe "P-18 payload parity" do
+    test "carries paused_providers (D-A-4)", %{conn: conn} do
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "jail escape", by: "test")
+      on_exit(fn -> Arbiter.Providers.Pause.resume("codex", by: "test") end)
+
+      resp = conn |> get("/api/quota") |> json_response(200)
+
+      assert [%{"target" => "codex", "reason" => "jail escape"}] =
+               resp["data"]["paused_providers"]
+    end
+
+    test "REST and MCP quota_get share one key set (D-A-5)", %{conn: conn, ws: ws} do
+      rest = conn |> get("/api/quota") |> json_response(200) |> Map.fetch!("data")
+      scope = %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws.id}
+      {:ok, mcp} = Arbiter.MCP.Tools.quota_get(scope, %{})
+
+      assert Enum.sort(Map.keys(rest)) ==
+               mcp |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
+
+      assert "held_dispatches" in Map.keys(rest)
+      assert "quotas" in Map.keys(rest)
+    end
+  end
 end
