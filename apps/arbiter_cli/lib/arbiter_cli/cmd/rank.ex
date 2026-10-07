@@ -64,27 +64,29 @@ defmodule ArbiterCli.Cmd.Rank do
   @usage "give exactly one of: --top, --bottom, --before <id>, --after <id> (optionally with --pin or --unpin), or --pin / --unpin alone"
 
   defp rank_body(opts) do
-    forms =
-      [
-        opts[:top] && %{"top" => true},
-        opts[:bottom] && %{"bottom" => true},
-        opts[:before] && %{"before_id" => opts[:before]},
-        opts[:after] && %{"after_id" => opts[:after]}
-      ]
-      |> Enum.reject(&(&1 == nil || &1 == false))
-
-    pinned =
-      case {opts[:pin], opts[:unpin]} do
-        {true, true} -> Output.die("--pin and --unpin are mutually exclusive")
-        {true, _} -> %{"pinned" => true}
-        {_, true} -> %{"pinned" => false}
-        _ -> %{}
-      end
-
-    case forms do
-      [form] -> Map.merge(form, pinned)
-      [] when pinned != %{} -> pinned
+    case {move_form(opts), pin_form(opts)} do
+      {[form], pinned} -> Map.merge(form, pinned)
+      {[], pinned} when pinned != %{} -> pinned
       _ -> Output.die(@usage)
+    end
+  end
+
+  defp move_form(opts) do
+    [
+      opts[:top] && %{"top" => true},
+      opts[:bottom] && %{"bottom" => true},
+      opts[:before] && %{"before_id" => opts[:before]},
+      opts[:after] && %{"after_id" => opts[:after]}
+    ]
+    |> Enum.filter(& &1)
+  end
+
+  defp pin_form(opts) do
+    case {opts[:pin], opts[:unpin]} do
+      {true, true} -> Output.die("--pin and --unpin are mutually exclusive")
+      {true, _} -> %{"pinned" => true}
+      {_, true} -> %{"pinned" => false}
+      _ -> %{}
     end
   end
 
