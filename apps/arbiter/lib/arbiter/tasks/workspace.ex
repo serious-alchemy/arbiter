@@ -140,6 +140,7 @@ defmodule Arbiter.Tasks.Workspace do
         """
       end
 
+      change {Arbiter.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
@@ -178,6 +179,7 @@ defmodule Arbiter.Tasks.Workspace do
         """
       end
 
+      change {Arbiter.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
@@ -189,8 +191,10 @@ defmodule Arbiter.Tasks.Workspace do
     update :patch_config do
       description """
       Field-level config update. Deep-merges `patch` into the existing config
-      and removes `unset_paths` (dotted strings), then runs ValidateConfig on
-      the result. Unlike `:update`, this **never** replaces the whole config
+      and removes `unset_paths` (dotted strings; a literal dot in a key is
+      `\\.`, see `Workspace.ConfigPath`), then runs ValidateConfig and the
+      safety rails on the result. Top-level `secret*`/`credentials*` keys in
+      `patch` are refused. Unlike `:update`, this **never** replaces the whole config
       map — siblings of the changed key are preserved.
       """
 
@@ -208,8 +212,21 @@ defmodule Arbiter.Tasks.Workspace do
         description "Dotted paths to remove from the existing config (e.g. \"tracker.config.host\")."
       end
 
+      argument :force, :boolean do
+        allow_nil? true
+        default false
+
+        description """
+        Override the safety rails (`repo_paths` emptied, `tracker.type` set with
+        no `tracker.config`). Those only refuse a write that newly leaves the
+        config in such a state.
+        """
+      end
+
+      change {Arbiter.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Arbiter.Tasks.Workspace.Changes.PatchConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
+      change {Arbiter.Tasks.Workspace.Changes.EnforceConfigSafetyRails, []}
       change {Arbiter.Tasks.Workspace.Changes.EnforceGuardrailAuthority, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcilePatrols, []}

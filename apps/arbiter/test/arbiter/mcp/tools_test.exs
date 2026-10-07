@@ -2581,22 +2581,63 @@ defmodule Arbiter.MCP.ToolsTest do
       assert msg =~ "value"
     end
 
-    test "blocks secret key prefix", ctx do
-      assert {:error, {:unauthorized, msg}} =
+    test "blocks secret key prefix (enforced by the :patch_config change, P-20)", ctx do
+      assert {:error, {:invalid, msg}} =
                Tools.workspace_config_set(ctx.coordinator, %{
                  "key" => "secrets.my_token",
                  "value" => "tok_1234"
                })
 
       assert msg =~ "secrets"
+      assert msg =~ "arb workspace secret"
     end
 
     test "blocks credentials key prefix", ctx do
-      assert {:error, {:unauthorized, _}} =
+      assert {:error, {:invalid, _}} =
                Tools.workspace_config_set(ctx.coordinator, %{
                  "key" => "credentials.api_key",
                  "value" => "x"
                })
+    end
+
+    test "a key with an escaped dot addresses a repo name containing a dot (D-C-17)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "repo_paths.my\\.repo",
+                 "value" => "/srv/my.repo"
+               })
+
+      assert data.config["repo_paths"] == %{"my.repo" => "/srv/my.repo"}
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "repo_paths.other",
+                 "value" => "/srv/other"
+               })
+
+      assert {:ok, data} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "repo_paths.my\\.repo"})
+
+      assert data.config["repo_paths"] == %{"other" => "/srv/other"}
+    end
+
+    test "the server safety rails apply, and force overrides them (D-C-16)", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.type",
+                 "value" => "github"
+               })
+
+      assert msg =~ "tracker.config is missing/empty"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.type",
+                 "value" => "github",
+                 "force" => true
+               })
+
+      assert data.config["tracker"]["type"] == "github"
     end
   end
 
@@ -2620,15 +2661,15 @@ defmodule Arbiter.MCP.ToolsTest do
       assert get_in(data.config, ["merge", "strategy"]) == "direct"
     end
 
-    test "errors if the key does not exist", ctx do
-      assert {:error, {:invalid, msg}} =
+    test "an absent key is an idempotent success, as on REST (D-C-15)", ctx do
+      assert {:ok, data} =
                Tools.workspace_config_unset(ctx.coordinator, %{"key" => "nonexistent.key"})
 
-      assert msg =~ "nonexistent.key"
+      assert data.config == (Ash.get!(Workspace, ctx.ws.id).config || %{})
     end
 
-    test "blocks secret key prefix", ctx do
-      assert {:error, {:unauthorized, _}} =
+    test "a leaked secret key can be unset (cleanup is never refused)", ctx do
+      assert {:ok, _} =
                Tools.workspace_config_unset(ctx.coordinator, %{"key" => "secret.foo"})
     end
 
@@ -2700,14 +2741,51 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Arbiter.Settings.scheduling_max_lifted_in_flight() == nil
     end
 
-    test "returns the full settings map when no key is given (worker tier)", ctx do
-      assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})
-      assert is_nil(data.key)
-      assert data.value == @empty_settings
-      assert data.settings == @empty_settings
+    test "an operator-proof coordinator token may set an operator-only key (P-20)", ctx do
+      operator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id, operator: true}
+
+      assert {:ok, %{value: 2}} =
+               Tools.installation_config_set(operator, %{
+                 "key" => "scheduling_max_lifted_in_flight",
+                 "value" => 2
+               })
+
+      assert Arbiter.Settings.scheduling_max_lifted_in_flight() == 2
     end
 
-    test "returns a leaf value for a known key", ctx do
+    test "returns the effective values when no key is given (worker tier)", ctx do
+      assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})
+      assert is_nil(data.key)
+      assert data.settings == @empty_settings
+
+      effective =
+        Map.new(Arbiter.Settings.Registry.all(), fn item ->
+          {Arbiter.Settings.Registry.key_atom(item.key), item.value}
+        end)
+
+      assert data.value == effective
+      # the default is in force, so the effective value is not the bare override
+      assert data.value.conductor_system_max_concurrent ==
+               Arbiter.Settings.Registry.default("conductor_system_max_concurrent")
+
+      assert data.value.conductor_system_max_concurrent != nil
+      assert Enum.map(data.items, & &1.key) == Arbiter.Settings.Registry.keys()
+    end
+
+    test "returns the same item as REST/CLI for a known key (effective + override)", ctx do
+      default = Arbiter.Settings.Registry.default("conductor_system_max_concurrent")
+
+      assert {:ok, data} =
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "conductor_system_max_concurrent"
+               })
+
+      assert data.value == default
+      assert data.override == nil
+      assert data.overridden == false
+      assert data.default == default
+      assert data.type == "positive_integer"
+
       {:ok, 5} = Arbiter.Settings.set_conductor_system_max_concurrent(5)
 
       assert {:ok, data} =
@@ -2717,6 +2795,9 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert data.key == "conductor_system_max_concurrent"
       assert data.value == 5
+      assert data.override == 5
+      assert data.overridden == true
+      assert data.settings.conductor_system_max_concurrent == 5
     end
 
     test "errors for an unknown key", ctx do
@@ -2947,16 +3028,18 @@ defmodule Arbiter.MCP.ToolsTest do
       tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
       value_schema = tool.input_schema["properties"]["value"]
 
-      # Verify oneOf contains the four expected type schemas
+      # Verify oneOf contains the five expected type schemas (the string is
+      # nodes.public_url, P-20)
       one_of = value_schema["oneOf"]
       assert one_of != nil
-      assert length(one_of) == 4
+      assert length(one_of) == 5
 
       types = Enum.map(one_of, & &1["type"])
       assert "null" in types
       assert "integer" in types
       assert "boolean" in types
       assert "array" in types
+      assert "string" in types
 
       # Verify integer has minimum constraint
       integer_schema = Enum.find(one_of, &(&1["type"] == "integer"))

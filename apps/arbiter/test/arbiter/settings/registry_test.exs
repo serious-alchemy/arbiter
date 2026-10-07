@@ -210,4 +210,44 @@ defmodule Arbiter.Settings.RegistryTest do
       assert Enum.map(Registry.all(), & &1.key) == @keys
     end
   end
+
+  describe "put/3 authority (P-20, D-C-3)" do
+    @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+                      nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
+                      nodes.fence_after_s nodes.lost_after_s)
+
+    test "operator_only_keys/0 is the schema's operator-only set" do
+      assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)
+
+      for entry <- Registry.schema() do
+        assert entry.operator_only == (entry.key in @operator_only)
+      end
+    end
+
+    test "a coordinator or restricted authority is refused every operator-only key" do
+      for authority <- [:coordinator, :restricted], key <- @operator_only do
+        assert {:error, {:unauthorized, msg}} =
+                 Registry.put(key, 1, authority: authority)
+
+        assert msg =~ "operator-only"
+        assert Registry.override(key) == nil
+      end
+    end
+
+    test "a refusal comes before validation, so an invalid value is still unauthorized" do
+      assert {:error, {:unauthorized, _}} =
+               Registry.put("nodes.public_url", "not a url", authority: :coordinator)
+    end
+
+    test "a coordinator may still write the ordinary keys" do
+      assert {:ok, true} = Registry.put("scheduling_finish_first", true, authority: :coordinator)
+      assert {:ok, nil} = Registry.put("scheduling_finish_first", nil, authority: :coordinator)
+    end
+
+    test "operator authority, and in-process callers with no option, may write them" do
+      assert {:ok, 1} = Registry.put("scheduling_max_lifted_in_flight", 1, authority: :operator)
+      assert {:ok, 2} = Registry.put("scheduling_max_lifted_in_flight", 2)
+      assert {:ok, nil} = Registry.put("scheduling_max_lifted_in_flight", nil)
+    end
+  end
 end

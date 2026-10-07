@@ -1821,8 +1821,11 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Set a single dotted.key to a value via the deep-merge config endpoint, preserving all " <>
-          "sibling keys. Secret / credential key prefixes are blocked — use `arb workspace secret` " <>
-          "for secrets. Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
+          "sibling keys. A literal dot in a key segment (a repo name) is written `\\.` " <>
+          "(`repo_paths.my\\.repo`). Refused by the server, on every surface: `secret*` / " <>
+          "`credentials*` top-level keys (use `arb workspace secret` for secrets), emptying " <>
+          "`repo_paths`, and `tracker.type` with no `tracker.config` (`force: true` overrides the " <>
+          "last two). Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
           "can confirm the result.",
       input_schema: %{
         "type" => "object",
@@ -1830,6 +1833,11 @@ defmodule Arbiter.MCP.Catalog do
           "key" => %{
             "type" => "string",
             "description" => "Dotted config key to set (e.g. \"merge.auto_merge\"). Required."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "Override the safety rails (repo_paths emptied, tracker.type with no tracker.config)."
           },
           "value" => %{
             "oneOf" => [
@@ -1857,8 +1865,9 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Remove a single dotted.key from the config via the deep-merge endpoint, preserving all " <>
-          "sibling keys. Errors if the key does not exist. Secret / credential key prefixes are " <>
-          "blocked. Returns `{workspace, config, secret_keys}` after the removal.",
+          "sibling keys. Unsetting an absent key is a no-op success. A literal dot in a key " <>
+          "segment is written `\\.`. The server refuses to unset the last `repo_paths` entry or " <>
+          "`tracker.config` under a typed tracker unless `force: true`. Returns `{workspace, config, secret_keys}` after the removal.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1866,6 +1875,10 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" => "Override the safety rails (see above)."
           }
         },
         "required" => ["key"],
@@ -1884,20 +1897,18 @@ defmodule Arbiter.MCP.Catalog do
           "`credential_watchdog_recovery_interval_ms`, " <>
           "`quota_providers_shown` / `quota_providers_hidden` (the providers forced onto / off " <>
           "the status-bar quota chip and /usage; null = auto-detect). " <>
-          "Omit `key` to get the full settings map. Returns `{key, value, settings}`.",
+          "`output_offload_enabled`, the `scheduling_*` knobs and the `nodes.*` keys are readable " <>
+          "too. `value` is the value in force (the override, else the default); `override` is " <>
+          "the raw persisted value (null = none). " <>
+          "Omit `key` to get every setting (`value` = map of effective values, `items` = the " <>
+          "full per-key records). Returns `{key, type, description, allowed, value, override, " <>
+          "overridden, default, settings}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "key" => %{
             "type" => "string",
-            "enum" => [
-              "conductor_system_max_concurrent",
-              "credential_watchdog_adapters",
-              "credential_watchdog_interval_ms",
-              "credential_watchdog_recovery_interval_ms",
-              "quota_providers_shown",
-              "quota_providers_hidden"
-            ],
+            "enum" => Arbiter.Settings.Registry.keys(),
             "description" =>
               "Setting name (e.g. \"conductor_system_max_concurrent\"). Omit for all settings."
           }
@@ -1927,37 +1938,20 @@ defmodule Arbiter.MCP.Catalog do
           "(positive integer) tune the epic-aware Ready order's finish-first tiebreak " <>
           "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
           "`scheduling_max_lifted_in_flight` and the `nodes.*` keys (remote-node enrolment) " <>
-          "are operator-only and refused here. " <>
+          "are operator-only and refused without an operator-proof token. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "key" => %{
             "type" => "string",
-            "enum" => [
-              "conductor_system_max_concurrent",
-              "credential_watchdog_adapters",
-              "credential_watchdog_interval_ms",
-              "credential_watchdog_recovery_interval_ms",
-              "quota_providers_shown",
-              "quota_providers_hidden",
-              "output_offload_enabled",
-              "scheduling_epic_floors_enabled",
-              "scheduling_max_lifted_in_flight",
-              "scheduling_finish_first",
-              "scheduling_finish_first_max_wait_hours",
-              "nodes.public_url",
-              "nodes.allow_public_endpoint",
-              "nodes.join_token_ttl_minutes",
-              "nodes.fence_after_s",
-              "nodes.lost_after_s"
-            ],
+            "enum" => Arbiter.Settings.Registry.keys(),
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },
           "value" => %{
             "description" =>
               "Positive integer (or, for credential_watchdog_adapters, a list of agent-type " <>
-                "strings), or null to clear the override.",
+                "strings; for nodes.public_url, an https URL string), or null to clear the override.",
             "oneOf" => [
               %{
                 "type" => "null",
@@ -1974,8 +1968,12 @@ defmodule Arbiter.MCP.Catalog do
               %{
                 "type" => "boolean",
                 "description" =>
-                  "true/false for output_offload_enabled, scheduling_finish_first or " <>
-                    "scheduling_epic_floors_enabled."
+                  "true/false for output_offload_enabled, scheduling_finish_first, " <>
+                    "scheduling_epic_floors_enabled or nodes.allow_public_endpoint."
+              },
+              %{
+                "type" => "string",
+                "description" => "http(s) URL for nodes.public_url."
               },
               %{
                 "type" => "array",

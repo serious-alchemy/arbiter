@@ -170,4 +170,18 @@ defmodule Arbiter.MCP.CatalogTest do
       assert Enum.any?(one_of, &(&1["type"] == "boolean"))
     end
   end
+
+  describe "installation_config schemas (P-20, D-C-12)" do
+    test "installation_config_get's key enum is exactly the registry keys" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "installation_config_get"))
+      enum = tool.input_schema["properties"]["key"]["enum"]
+      assert enum == Arbiter.Settings.Registry.keys()
+    end
+
+    test "installation_config_set's value schema can express a string (nodes.public_url)" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "installation_config_set"))
+      one_of = tool.input_schema["properties"]["value"]["oneOf"]
+      assert Enum.any?(one_of, &(&1["type"] == "string"))
+    end
+  end
 end

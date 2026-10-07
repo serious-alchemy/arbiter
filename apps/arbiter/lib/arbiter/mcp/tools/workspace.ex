@@ -14,21 +14,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
   alias Arbiter.MCP.Tools
   alias Arbiter.Tasks.AttentionLimits
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.ConfigPath
 
   @install_settings_keys Arbiter.Settings.Registry.keys()
-
-  # `docs/design/epic-aware-scheduling.md` §6.6: the operator alone decides how
-  # much of the fleet a floor may take, so the coordinator's MCP door refuses
-  # these two (REST and `arb settings` carry the operator's token).
-  #
-  # The `nodes.*` keys (RW3, `docs/design/remote-workers.md` §15) are operator-only
-  # too: they decide where machines that receive provider tokens may enrol from
-  # and for how long a join token lives, so a coordinator *session* must not set
-  # them.
-  @operator_only_install_keys ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
-                                 nodes.public_url nodes.allow_public_endpoint
-                                 nodes.join_token_ttl_minutes nodes.fence_after_s
-                                 nodes.lost_after_s)
 
   # ---- workspace_show -----------------------------------------------------
 
@@ -94,7 +82,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
       value =
         if key do
-          config_get_in_path(config, String.split(key, "."))
+          ConfigPath.get(config, ConfigPath.split(key))
         else
           config
         end
@@ -160,8 +148,12 @@ defmodule Arbiter.MCP.Tools.Workspace do
   Set a single dotted.key to a value via the deep-merge config endpoint.
   Coordinator only (enforced in `Arbiter.MCP.Catalog`). Sibling keys are
   preserved — this uses `PATCH /api/workspaces/:id/config`, not the
-  whole-map replace path. Secret / credential top-level key prefixes are
-  blocked; route those through `arb workspace secret`.
+  whole-map replace path. A literal dot in a key segment (a repo name) is
+  written `\\.` (`Arbiter.Tasks.Workspace.ConfigPath`). The safety rails —
+  `secret*`/`credentials*` top-level keys refused, `repo_paths` emptied,
+  `tracker.type` with no `tracker.config` — are enforced by the `:patch_config`
+  action itself, so REST and `arb config` refuse the same writes; `force: true`
+  overrides the last two.
   Returns the workspace identity, the full updated config, and secret_keys.
   """
   @spec workspace_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -169,11 +161,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, key} <- Tools.require_string(args, "key"),
          {:ok, value} <- require_config_value(args),
-         :ok <- deny_secret_path(key),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
-      patch = config_put_in_path(%{}, String.split(key, "."), value)
+      patch = ConfigPath.put(%{}, ConfigPath.split(key), value)
 
-      case Ash.update(ws, %{patch: patch, unset_paths: []},
+      case Ash.update(ws, %{patch: patch, unset_paths: [], force: force?(args)},
              action: :patch_config,
              context: guardrail_context(scope)
            ) do
@@ -189,27 +180,20 @@ defmodule Arbiter.MCP.Tools.Workspace do
   Remove a single dotted.key from the config via the deep-merge endpoint.
   Coordinator only (enforced in `Arbiter.MCP.Catalog`). Sibling keys are
   preserved. Returns the workspace identity, the full updated config, and
-  secret_keys. Errors if the key does not exist in the current config.
+  secret_keys. Unsetting an absent key is an idempotent success (as on REST and
+  `arb config unset`).
   """
   @spec workspace_config_unset(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def workspace_config_unset(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, key} <- Tools.require_string(args, "key"),
-         :ok <- deny_secret_path(key),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
-      config = ws.config || %{}
-      path = String.split(key, ".")
-
-      if config_get_in_path(config, path) == nil do
-        {:error, {:invalid, "config key not found: #{key}"}}
-      else
-        case Ash.update(ws, %{patch: %{}, unset_paths: [key]},
-               action: :patch_config,
-               context: guardrail_context(scope)
-             ) do
-          {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
-          {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
-        end
+      case Ash.update(ws, %{patch: %{}, unset_paths: [key], force: force?(args)},
+             action: :patch_config,
+             context: guardrail_context(scope)
+           ) do
+        {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
+        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
   end
@@ -219,8 +203,12 @@ defmodule Arbiter.MCP.Tools.Workspace do
   @doc """
   Read an install-wide runtime setting (bd-2ogep0) — the system-wide
   concurrency ceiling and the `Arbiter.Agents.CredentialWatchdog` knobs
-  (bd-ajgve2). Returns the full settings map when `key` is omitted. Available to
-  both tiers (read-only, no workspace scoping — this is installation-wide).
+  (bd-ajgve2). Returns what REST/`arb settings` return: for one `key` the
+  `Arbiter.Settings.Registry.describe/1` item (`value` in force, `override`,
+  `overridden`, `default`, ...); with `key` omitted `value` is the map of
+  effective values and `items` every item. `settings` is the bare overrides map
+  either way. Available to both tiers (read-only, no workspace scoping — this
+  is installation-wide).
   """
   @spec installation_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def installation_config_get(%Scope{} = _scope, args) do
@@ -228,15 +216,16 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
     case Tools.fetch_string(args, "key") do
       nil ->
-        {:ok, %{key: nil, value: settings, settings: settings}}
+        items = Arbiter.Settings.Registry.all()
+
+        effective =
+          Map.new(items, &{Arbiter.Settings.Registry.key_atom(&1.key), &1.value})
+
+        {:ok, %{key: nil, value: effective, settings: settings, items: items}}
 
       key when key in @install_settings_keys ->
-        {:ok,
-         %{
-           key: key,
-           value: Map.get(settings, Arbiter.Settings.Registry.key_atom(key)),
-           settings: settings
-         }}
+        item = Arbiter.Settings.Registry.describe(key)
+        {:ok, Map.put(item, :settings, settings)}
 
       key ->
         {:error, {:not_found, "unknown installation setting: #{key}"}}
@@ -272,29 +261,26 @@ defmodule Arbiter.MCP.Tools.Workspace do
       (`docs/design/epic-aware-scheduling.md` §6.6). `null` is off / 24 hours.
     * `scheduling_epic_floors_enabled` (boolean kill switch) and
       `scheduling_max_lifted_in_flight` (positive integer lift cap) —
-      **operator only**: refused here, set through `arb settings` or REST.
+      and the `nodes.*` keys — **operator only**, enforced in
+      `Arbiter.Settings.Registry.put/3`: refused for any token without
+      operator proof (the same on REST and `arb settings`).
 
   The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
   is required for any of them.
   """
   @spec installation_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def installation_config_set(%Scope{} = _scope, args) do
+  def installation_config_set(%Scope{} = scope, args) do
     with {:ok, key} <- Tools.require_string(args, "key"),
          :ok <- validate_install_key(key),
-         :ok <- reject_operator_only_key(key),
          {:ok, raw} <- require_install_value(key, args),
-         {:ok, updated} <- Arbiter.Settings.Registry.put(key, raw) do
+         {:ok, updated} <-
+           Arbiter.Settings.Registry.put(key, raw, authority: Authority.from_scope(scope)) do
       {:ok, %{key: key, value: updated}}
     end
   end
 
   defp validate_install_key(key) when key in @install_settings_keys, do: :ok
   defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
-
-  defp reject_operator_only_key(key) when key in @operator_only_install_keys,
-    do: {:error, {:unauthorized, "#{key} is operator-only — set it with `arb settings`"}}
-
-  defp reject_operator_only_key(_key), do: :ok
 
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
@@ -311,26 +297,12 @@ defmodule Arbiter.MCP.Tools.Workspace do
     ws |> Workspace.secrets_map() |> Map.keys() |> Enum.sort()
   end
 
-  # Top-level config key prefixes that the MCP write tools refuse to set.
-  # Secrets live in the encrypted `secrets` column, not the config JSON;
-  # routing them here would silently store a plaintext ref with no effect.
   # G11: the config write carries the caller's authority, so loosening
   # `guardrails.*` / `agent.security` is refused for anything but operator proof.
   defp guardrail_context(%Scope{} = scope),
     do: %{guardrail_authority: Authority.from_scope(scope)}
 
-  defp deny_secret_path(key) when is_binary(key) do
-    blocked = ~w(secret secrets credentials)
-    prefix = key |> String.split(".") |> List.first() |> String.downcase()
-
-    if prefix in blocked do
-      {:error,
-       {:unauthorized,
-        "cannot set #{inspect(key)} via config tools — use `arb workspace secret` for secrets"}}
-    else
-      :ok
-    end
-  end
+  defp force?(args), do: Map.get(args, "force") == true
 
   # Fetch the `value` argument; accepts any JSON-decoded type (boolean,
   # integer, string, object, array, or null). Distinguishing absent from null
@@ -341,31 +313,6 @@ defmodule Arbiter.MCP.Tools.Workspace do
       {:ok, v} -> {:ok, Tools.unwrap_stringified_json(v, [:list, :map])}
     end
   end
-
-  # Build a nested map from a dotted-path segment list and a leaf value.
-  defp config_put_in_path(map, [k], value) when is_map(map), do: Map.put(map, k, value)
-
-  defp config_put_in_path(map, [k | rest], value) when is_map(map) do
-    sub =
-      case Map.get(map, k) do
-        %{} = s -> s
-        _ -> %{}
-      end
-
-    Map.put(map, k, config_put_in_path(sub, rest, value))
-  end
-
-  # Navigate a nested config map by path segments; nil if any segment is missing.
-  defp config_get_in_path(value, []), do: value
-
-  defp config_get_in_path(map, [k | rest]) when is_map(map) do
-    case Map.get(map, k) do
-      nil -> nil
-      sub -> config_get_in_path(sub, rest)
-    end
-  end
-
-  defp config_get_in_path(_, _), do: nil
 
   # The standard config result: workspace identity, full (secret-safe) config,
   # and the names of configured secrets so the caller can confirm the merge.
