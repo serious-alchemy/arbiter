@@ -101,7 +101,7 @@ defmodule ArbiterWeb.ApiPolicy do
 
   # The REST twin of `ticket_update_progress` (`Arbiter.MCP.Tools.Task`'s
   # `@progress_fields ++ @progress_flags`). "id" is the path param.
-  @progress_params ~w(id notes qa_notes deployment_notes pr_body verify_after_deploy)
+  @progress_params ~w(id notes append_notes qa_notes deployment_notes pr_body verify_after_deploy)
 
   @policies %{
     # ---- issues -----------------------------------------------------------
