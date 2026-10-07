@@ -37,6 +37,25 @@ defmodule ArbiterWeb.UpdateAvailableTest do
     assert body["update"]["release_url"] == "https://example.test/r"
   end
 
+  test "GET /api/version reports the release repo the install takes releases from", %{conn: conn} do
+    previous = System.get_env("ARB_RELEASE_REPO")
+    System.put_env("ARB_RELEASE_REPO", "acme/arbiter")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("ARB_RELEASE_REPO", previous),
+        else: System.delete_env("ARB_RELEASE_REPO")
+    end)
+
+    body =
+      conn
+      |> put_req_header("accept", "application/json")
+      |> get(~p"/api/version")
+      |> json_response(200)
+
+    assert body["release_repo"] == "acme/arbiter"
+  end
+
   test "GET /api/version reports disabled when the checker is not running", %{conn: conn} do
     body =
       conn

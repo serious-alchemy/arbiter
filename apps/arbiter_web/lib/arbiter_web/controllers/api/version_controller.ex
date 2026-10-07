@@ -4,7 +4,9 @@ defmodule ArbiterWeb.Api.VersionController do
 
   Returns the app version, git SHA, build timestamp, and boot timestamp so
   `arb version` can compare them against the installed CLI escript and flag
-  drift. The `update` block is `Arbiter.Release.UpdateCheck`'s last result
+  drift. `release_repo` is the GitHub `owner/repo` this install takes releases from
+  (`ARB_RELEASE_REPO`, else the repo the build was stamped with), so `arb server deploy`
+  can find its source without any exported environment. The `update` block is `Arbiter.Release.UpdateCheck`'s last result
   (latest published release, whether it is newer, and the last check error).
   """
 
@@ -23,6 +25,7 @@ defmodule ArbiterWeb.Api.VersionController do
       sha: Arbiter.Version.git_sha(),
       built_at: Arbiter.Version.built_at(),
       booted_at: booted_at,
+      release_repo: Arbiter.Version.release_repo(),
       update: update_payload()
     })
   end

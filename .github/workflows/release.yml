@@ -25,6 +25,10 @@ jobs:
       LC_ALL: en_US.UTF-8
       ELIXIR_ERL_OPTIONS: "+fnu"
       MIX_ENV: prod
+      # Stamped into the server release and the arb escript so `arb server
+      # deploy` / `arb self-update` find their release source with no
+      # ARB_RELEASE_REPO exported (ArbiterCli.ReleaseRepo, Arbiter.Version).
+      ARB_BUILD_RELEASE_REPO: ${{ github.repository }}
       # Build every `rustler_precompiled` NIF from source inside this
       # container instead of downloading upstream's prebuilt artifact.
       #
@@ -173,7 +177,13 @@ jobs:
           tar -czf "${TARBALL}" -C _build/prod/rel/arbiter .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
           sha256sum apps/arbiter_cli/arb > arb.sha256
+          # One migration name per line: lets a running server tell, before an
+          # operator clicks "Update", whether the release carries migrations it
+          # has not applied (Arbiter.Release.UpdateCheck).
+          MANIFEST="arbiter-${TAG}-migrations.txt"
+          (cd apps/arbiter/priv/repo/migrations && ls -1 *.exs | sed 's/\.exs$//' | sort) > "${MANIFEST}"
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+          echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
 
       - name: Check shipped binaries against the ubi8 glibc baseline
         # Last line of defence for #1728: fail the release here, naming the
@@ -201,6 +211,7 @@ jobs:
           files: |
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
+            ${{ env.MANIFEST }}
             apps/arbiter_cli/arb
             arb.sha256
         env:
