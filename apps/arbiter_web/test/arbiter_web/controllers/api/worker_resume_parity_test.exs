@@ -19,10 +19,12 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
   setup %{conn: conn} do
     # One line per spawn: the whole argv, then stay alive like a working agent.
+    # Files are written to a dot-name and renamed, so a reader never sees a
+    # partially written `spawn.*` / `token`.
     sandbox =
       ResumeSlotFixture.setup_repo!(
         stub:
-          ~s|printf '%s\\n' "$@" > "$(dirname "$0")/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$(dirname "$0")/token"\nexec sleep 30\n|
+          ~s|d="$(dirname "$0")"\nprintf '%s\\n' "$@" > "$d/.spawn.$$" && mv "$d/.spawn.$$" "$d/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$d/.token.$$" && mv "$d/.token.$$" "$d/token"\nexec sleep 30\n|
       )
 
     {:ok, ws} =
