@@ -151,4 +151,21 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
       send(runner, :release)
     end
   end
+
+  describe "internal failures are 5xx, not 400 (P-19)" do
+    setup do
+      :ok = :meck.new(Arbiter.Board.Drain, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Board.Drain) end)
+    end
+
+    test "a raise in status is 500", %{conn: conn} do
+      :meck.expect(Arbiter.Board.Drain, :status, fn -> raise "boom" end)
+      assert json_response(get(conn, "/api/scheduler/status"), 500)
+    end
+
+    test "an exit in status is 503", %{conn: conn} do
+      :meck.expect(Arbiter.Board.Drain, :status, fn -> exit(:timeout) end)
+      assert json_response(get(conn, "/api/scheduler/status"), 503)
+    end
+  end
 end

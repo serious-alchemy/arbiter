@@ -109,12 +109,12 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # `account` goes straight to that account's quota, the way REST `?account=`
-  # does (`Arbiter.Quota.account_snapshot/1`, the REST `data` map). An account
+  # does (`Arbiter.Quota.Snapshot.for_account/1`, the REST `data` map). An account
   # is installation-wide, so only a coordinator may name one.
   defp quota_for_account(%Scope{tier: :coordinator}, ref) do
     case Arbiter.Accounts.get_account(ref) do
       {:ok, account} ->
-        {:ok, Arbiter.Quota.account_snapshot(account)}
+        {:ok, Arbiter.Quota.Snapshot.for_account(account)}
 
       {:error, :not_found} ->
         {:error, {:not_found, "account #{inspect(ref)} not found"}}
@@ -131,27 +131,8 @@ defmodule Arbiter.MCP.Tools do
 
   defp quota_for_workspace(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Workspaces.resolve_default(scope, fetch_string(args, "workspace")) do
-      # P5: quota rows are keyed by provider account; the workspace is the
-      # lookup shorthand that resolves to one account per provider (§6).
-      accounts = Arbiter.Quota.account_ids(ws_id)
-      codex = Arbiter.Quota.Codex.serialize_latest(accounts["codex"])
-
-      {:ok,
-       %{
-         claude: Arbiter.Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id),
-         codex: codex,
-         codex_message: Arbiter.Quota.codex_absence_message(codex),
-         # bd-1fpjgx: read directly off `CredentialWatchdog`'s held state —
-         # the same free 401-streak / agy-exit signal `CloudProbe` feeds it
-         # for Claude (bd-1pmf9h) is now wired for these two adapters too, so
-         # this reports live regardless of whether a quota row has landed yet.
-         codex_credentials_expired:
-           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-         antigravity:
-           Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
-         gemini_credentials_expired:
-           Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
-       }}
+      # One builder shared with `GET /api/quota` (P-18, D-A-5).
+      {:ok, Arbiter.Quota.Snapshot.for_workspace(ws_id, fetch_string(args, "workspace"))}
     end
   end
 
@@ -554,41 +535,16 @@ defmodule Arbiter.MCP.Tools do
         {:ok,
          %{
            by: Atom.to_string(Usage.normalize_by(by)),
-           rollups: rollups,
+           rollups: Enum.map(rollups, &Arbiter.Usage.Serializer.rollup/1),
            count: length(rollups),
            workspace_id: ws_id,
-           warnings: Enum.map(flagged, &zero_token_warning/1)
+           warnings: Arbiter.Usage.Serializer.warnings(flagged)
          }}
       else
         {:error, reason} -> {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}
       end
     end
   end
-
-  # bd-96mn8i round 2, finding 3: a literal-zero row (the parser matched a
-  # terminal event and read no tokens out of it) is worded as the parser-bug
-  # signature it is. A provider with no literal zeros — every row is
-  # `tokens_in`/`tokens_out: nil` — never reached a terminal event at all
-  # (e.g. every probe in the window failed auth); wording that as "a stream
-  # parser silently dropping usage" would be its own false alarm once
-  # bd-96mn8i's fix is in place and correct.
-  defp zero_token_warning(%{provider: provider, rows: rows, zero_rows: zero_rows} = report)
-       when zero_rows > 0 do
-    "⚠ #{provider}: #{zero_rows} of #{rows} usage_events row(s) in this window carry literal zero " <>
-      "tokens — likely a stream parser silently dropping usage rather than a genuinely free provider." <>
-      unknown_suffix(report)
-  end
-
-  defp zero_token_warning(%{provider: provider, rows: rows}) do
-    "⚠ #{provider}: all #{rows} usage_events row(s) in this window recorded no usage at all " <>
-      "(NULL tokens, not zero) — check for failed probes or an unrecognized result shape; " <>
-      "these rows are excluded from cost/token aggregates, not counted as free."
-  end
-
-  defp unknown_suffix(%{unknown_rows: n}) when n > 0,
-    do: " (a further #{n} row(s) recorded no usage at all — NULL, not zero.)"
-
-  defp unknown_suffix(_report), do: ""
 
   # ---- tracker_claim ------------------------------------------------------
 
@@ -1141,10 +1097,10 @@ defmodule Arbiter.MCP.Tools do
     {:ok, scheduler_status_data()}
   rescue
     e ->
-      {:error, {:invalid, "status check failed: #{inspect(e)}"}}
+      {:error, {:internal, "status check failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
-      {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
+      {:error, {:busy, "status check failed: process error #{inspect(reason)}"}}
   end
 
   defp mcp_actor(scope), do: {Arbiter.PaperTrail.actor_label(scope), "mcp"}
@@ -1163,34 +1119,44 @@ defmodule Arbiter.MCP.Tools do
   running unless `stop_running` is true. Persisted. Coordinator only.
   """
   @spec provider_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def provider_pause(%Scope{} = _scope, args) do
+  def provider_pause(%Scope{} = scope, args) do
+    alias Arbiter.Providers.Pause
+
     with {:ok, ref} <- require_string(args, "ref"),
          {:ok, stop_running?} <- fetch_bool(args, "stop_running", false),
-         {:ok, entry} <-
-           Arbiter.Providers.Pause.pause(ref, reason: fetch_string(args, "reason"), by: "mcp") do
-      stopped =
-        if stop_running?, do: Arbiter.Providers.Pause.stop_running(ref), else: []
-
-      Logger.info("[provider_pause] #{entry.target} paused")
-      {:ok, %{paused: Arbiter.Providers.Pause.to_json(), stopped: stopped}}
-    else
-      {:error, {_, _} = err} -> {:error, err}
-      {:error, reason} -> {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
+         {:ok, reason} <- Arbiter.Params.fetch_string(args, "reason"),
+         {:ok, stopped} <-
+           ref
+           |> Pause.pause_and_stop(
+             reason: reason,
+             by: pause_by(scope),
+             stop_running: stop_running?
+           )
+           |> pause_failure(ref) do
+      Logger.info("[provider_pause] #{ref} paused")
+      {:ok, %{paused: Pause.to_json(), stopped: stopped}}
     end
   end
 
   @doc "Resume a paused provider or account. Coordinator only."
   @spec provider_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def provider_resume(%Scope{} = _scope, args) do
+  def provider_resume(%Scope{} = scope, args) do
+    alias Arbiter.Providers.Pause
+
     with {:ok, ref} <- require_string(args, "ref"),
-         {:ok, entry} <- Arbiter.Providers.Pause.resume(ref, by: "mcp") do
+         {:ok, entry} <- ref |> Pause.resume(by: pause_by(scope)) |> pause_failure(ref) do
       Logger.info("[provider_resume] #{entry.target} resumed")
-      {:ok, %{paused: Arbiter.Providers.Pause.to_json()}}
-    else
-      {:error, {_, _} = err} -> {:error, err}
-      {:error, reason} -> {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+      {:ok, %{paused: Pause.to_json()}}
     end
   end
+
+  defp pause_by(scope),
+    do: Arbiter.Providers.Pause.attribution(Arbiter.PaperTrail.actor_label(scope), "mcp")
+
+  defp pause_failure({:error, reason}, ref),
+    do: {:error, Arbiter.Providers.Pause.error_message(reason, ref)}
+
+  defp pause_failure(ok, _ref), do: ok
 
   # ---- shared resolution / fetch -----------------------------------------
 

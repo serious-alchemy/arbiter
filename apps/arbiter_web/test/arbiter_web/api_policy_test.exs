@@ -116,4 +116,32 @@ defmodule ArbiterWeb.ApiPolicyTest do
       assert {:error, :forbidden, _} = ApiPolicy.authorize(:operator, session, %{})
     end
   end
+
+  describe ":quota_read policy (P-18, D-A-6)" do
+    test "workers may read their workspace's quota, but not reach for ?account=" do
+      worker = %Arbiter.MCP.Scope{tier: :worker, task_id: "bd-1"}
+      assert ApiPolicy.policy(:get, "/api/quota") == :quota_read
+      assert ApiPolicy.authorize(:quota_read, worker, %{}) == :ok
+      assert ApiPolicy.authorize(:quota_read, worker, %{"workspace" => "x"}) == :ok
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:quota_read, worker, %{"account" => "claude:main"})
+    end
+
+    test "coordinators read everything; refine tokens and anonymous callers are refused" do
+      assert ApiPolicy.authorize(:quota_read, %Arbiter.MCP.Scope{tier: :coordinator}, %{
+               "account" => "a"
+             }) ==
+               :ok
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(
+                 :quota_read,
+                 %Arbiter.MCP.Scope{tier: :refine, issue_id: "bd-1"},
+                 %{}
+               )
+
+      assert {:error, :unauthenticated, _} = ApiPolicy.authorize(:quota_read, nil, %{})
+    end
+  end
 end

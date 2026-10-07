@@ -19,10 +19,12 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
   setup %{conn: conn} do
     # One line per spawn: the whole argv, then stay alive like a working agent.
+    # Files are written to a dot-name and renamed, so a reader never sees a
+    # partially written `spawn.*` / `token`.
     sandbox =
       ResumeSlotFixture.setup_repo!(
         stub:
-          ~s|printf '%s\\n' "$@" > "$(dirname "$0")/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$(dirname "$0")/token"\nexec sleep 30\n|
+          ~s|d="$(dirname "$0")"\nprintf '%s\\n' "$@" > "$d/.spawn.$$" && mv "$d/.spawn.$$" "$d/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$d/.token.$$" && mv "$d/.token.$$" "$d/token"\nexec sleep 30\n|
       )
 
     {:ok, ws} =
@@ -107,6 +109,13 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
     conn = post(ctx.conn, ~p"/api/workers/#{ctx.task.id}/resume", %{})
     assert json_response(conn, 201)
     [rest] = spawns(ctx.bin, 1)
+
+    # The agent has done some work. Failing the worker below wakes its Driver,
+    # which asynchronously removes a *clean* worktree; the MCP resume would then
+    # race that removal and see :invalid_worktree. A worktree with uncommitted
+    # work is kept (like a real parked run's), so the race can't happen.
+    [worktree] = Path.wildcard(Path.join([Path.dirname(ctx.bin), "worktrees", "*"]))
+    File.write!(Path.join(worktree, "wip.txt"), "work in progress\n")
 
     :ok = Worker.fail(Worker.whereis(ctx.task.id), :token_exhausted)
 

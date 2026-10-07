@@ -325,6 +325,23 @@ defmodule Arbiter.CircuitBreaker do
     end
   end
 
+  @doc """
+  `reset_all/1` behind the operator surfaces: an installation-wide reset (no
+  `:workspace_id`, no `:kind`) is refused with `{:error, :unscoped}` unless
+  `confirm_all?` is true, so a bare `all: true` cannot re-arm every breaker.
+  """
+  @spec reset_scope(keyword(), boolean()) :: {:ok, non_neg_integer()} | {:error, :unscoped}
+  def reset_scope(opts, confirm_all?) do
+    if opts == [] and not confirm_all?, do: {:error, :unscoped}, else: reset_all(opts)
+  end
+
+  @unscoped_message "`all: true` with no `workspace` or `kind` resets every breaker in the " <>
+                      "installation; pass a scope, or `confirm_all: true` to mean it"
+
+  @doc "Operator-facing text for `{:error, :unscoped}`."
+  @spec unscoped_message() :: String.t()
+  def unscoped_message, do: @unscoped_message
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true

@@ -893,6 +893,15 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Map.has_key?(payload, :gemini)
     end
 
+    test "carries the full REST payload, bare (P-18, D-A-5)", ctx do
+      assert {:ok, payload} = Tools.quota_get(ctx.worker, %{})
+
+      for key <- ~w(workspace_id quotas account workspaces held_dispatches paused_providers
+                    account_policy policy_binding effective_policy)a do
+        assert Map.has_key?(payload, key), "missing #{key}"
+      end
+    end
+
     test "includes a graceful codex no-op when Codex is not authenticated", ctx do
       assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
       assert result.codex == nil
@@ -5217,6 +5226,23 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
 
       assert rollups == []
+    end
+
+    # P-18 (D-A-7): same wire shape as REST — an unpriced group is null, not 0.0.
+    test "an unpriced group reports total_cost_usd: nil, like REST", ctx do
+      create_usage_event!(ctx,
+        provider: "antigravity",
+        model: "gemini-3.8-flash-low",
+        cost_usd: nil,
+        tokens_in: 10,
+        tokens_out: 5
+      )
+
+      assert {:ok, %{rollups: [row]}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "model"})
+
+      assert row.total_cost_usd == nil
+      assert row.cost_known == false
     end
 
     test "campaign is accepted as a deprecated alias and normalized to epic", ctx do
