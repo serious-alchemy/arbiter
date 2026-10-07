@@ -238,6 +238,25 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # A refused dispatch now schedules its own follow-up pass (bd-814vuy), so a
+    # hand-driven tick can land on that pass's in-flight dispatch (`:busy`) or
+    # on its fresh hold. Tick (moving the clock past the hold each time) until an
+    # attempt is observed.
+    defp tick_until_attempt(pid, clock, id, tries \\ 20) do
+      Autopilot.tick(pid)
+
+      receive do
+        {:dispatch_attempt, ^id} -> :ok
+      after
+        50 ->
+          Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+
+          if tries > 1,
+            do: tick_until_attempt(pid, clock, id, tries - 1),
+            else: flunk("no dispatch attempt for #{id}")
+      end
+    end
+
     # bd-8suxac: the board plans headroom on the workspace's default provider,
     # but `Admission` checks the account this ticket routes to. A refusal there
     # clears the moment a run on that account ends — never a `dispatch_stuck`
@@ -267,9 +286,8 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:dispatch_attempt, _}, 50
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -310,9 +328,8 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:dispatch_attempt, _}, 50
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -344,9 +361,8 @@ defmodule Arbiter.Board.AutopilotTest do
       assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
 
       for _ <- 1..5 do
-        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
-        Autopilot.tick(pid)
-        assert_receive {:dispatch_attempt, "bd-1"}
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
       end
 
       refute_receive {:escalated, _, _, _}, 50
@@ -445,6 +461,64 @@ defmodule Arbiter.Board.AutopilotTest do
       for _ <- 1..9, do: Autopilot.tick(pid)
 
       assert_receive {:escalated, "bd-1", :timeout, _attempts}
+    end
+  end
+
+  describe "a refused head card does not end the pass (bd-814vuy)" do
+    # A scheduler stand-in: names the first card that is not held by
+    # `:dispatch_holds`, and shows the held ones with their reason.
+    defp two_card_snapshot(opts) do
+      holds = Keyword.get(opts, :dispatch_holds, %{})
+
+      ready =
+        for id <- ["bd-1", "bd-2"] do
+          case holds do
+            %{^id => {:hold, detail}} ->
+              %{id: id, state: :blocked, reason: "held — provider constraint (#{detail})"}
+
+            _ ->
+              %{id: id, state: :queued, reason: "queued"}
+          end
+        end
+
+      promote = Enum.find_value(ready, fn e -> if e.state != :blocked, do: e.id end)
+      %{board("bd-1") | ready: ready, promote: promote}
+    end
+
+    for {label, error, phrase} <- [
+          {"account at capacity",
+           {:account_at_capacity, %{account: "claude:default", cap: 2, holders: ["a", "b"]}},
+           "claude:default at capacity"},
+          {"quota held", {:quota_held, "bd-1"}, "quota held"},
+          {"paused provider", {:provider_paused, :claude, "held — claude paused: x"},
+           "claude paused"}
+        ] do
+      test "#{label}: the next card is dispatched, quietly" do
+        test = self()
+        error = unquote(Macro.escape(error))
+
+        pid =
+          start(
+            paused: false,
+            snapshot: &two_card_snapshot/1,
+            dispatch: fn
+              "bd-1" -> {:error, error}
+              id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}}
+            end
+          )
+
+        log =
+          ExUnit.CaptureLog.capture_log([level: :warning], fn ->
+            assert {:error, ^error} = Autopilot.tick(pid)
+          end)
+
+        assert_receive {:dispatched, "bd-2"}
+        refute log =~ "failed"
+
+        board = Autopilot.board(pid)
+        assert %{state: :blocked, reason: reason} = Enum.find(board.ready, &(&1.id == "bd-1"))
+        assert reason =~ unquote(phrase)
+      end
     end
   end
 
