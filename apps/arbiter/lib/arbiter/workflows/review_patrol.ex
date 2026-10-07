@@ -2344,7 +2344,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # either direction — e.g. a coordinator can dispatch `worker_review` with an
   # explicit hard `automation: "report_only"` override even on a repo whose
   # `repo_overrides` says `auto` (the explicit dispatch arg wins per
-  # `Tools.guard_review_automation/3`), which is stored as `:report_only`
+  # `Reviews.Guard.check/3`), which is stored as `:report_only`
   # on the engagement. We must never let a *more permissive* live override
   # widen that back out to auto-posting — only a downgrade (more restrictive)
   # should take immediate effect. So we take the more restrictive of the two,
@@ -2390,7 +2390,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare repo-config
   # name that `review_automation.repo_overrides` is keyed by (bd-3cpcw2) — the
   # same identifier `worker_review`'s `args["repo"]` uses at dispatch time
-  # (`Arbiter.Mcp.Tools.guard_review_automation/3`). Public (not just used by
+  # (`Arbiter.Reviews.Guard.check/3`). Public (not just used by
   # this module's own ticks) so `ReviewPatrolSupervisor` can resolve the same
   # repo name to gate patrol startup on a repo's `:off`-mode override
   # (bd-4brb2j) without duplicating the repo_paths-remote-resolution logic.

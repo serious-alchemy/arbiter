@@ -1033,6 +1033,142 @@ defmodule Arbiter.MCP.ToolsTest do
 
   # ---- Phase 2: coordinator-only mutating tools --------------------------
 
+  # bd-dtfe9x (D-T-21): the REST `:issue_create` / `:dependency_add` worker
+  # rules (`Arbiter.Tasks.WorkerFiling`) now hold on MCP too.
+  describe "ticket_create/dep_add as a worker (bd-dtfe9x)" do
+    test "files a child of its own task, in its own workspace", ctx do
+      assert {:ok, child} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "deferred review thread",
+                 "description" => "follow-up",
+                 "parent_id" => ctx.task.id,
+                 "priority" => 3
+               })
+
+      assert child.parent_id == ctx.task.id
+      assert Ash.get!(Issue, child.id).workspace_id == ctx.ws.id
+      assert Ash.get!(Issue, child.id).state == :backlog
+    end
+
+    test "naming its own workspace explicitly is fine", ctx do
+      assert {:ok, _} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "explicit ws",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => ctx.ws.name
+               })
+    end
+
+    test "must name a parent — and it must be its own task", ctx do
+      {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.task_create(ctx.worker, %{"title" => "orphan"})
+
+      assert msg =~ "own task"
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_create(ctx.worker, %{"title" => "x", "parent_id" => sibling.id})
+    end
+
+    test "cannot file into another workspace", ctx do
+      {:ok, other} = Ash.create(Workspace, %{name: "mcp-tools-other", prefix: "mto"})
+
+      assert {:error, {kind, _}} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "elsewhere",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => other.name
+               })
+
+      assert kind in [:unauthorized, :not_found]
+    end
+
+    test "cannot set fields outside the worker's subset", ctx do
+      for extra <- [
+            %{"repo" => "r"},
+            %{"target_branch" => "x"},
+            %{"auto_close" => true},
+            %{"verify_after_deploy" => true},
+            %{"tracker_ref" => "7"},
+            %{"notes" => "n"}
+          ] do
+        args = Map.merge(%{"title" => "x", "parent_id" => ctx.task.id}, extra)
+        assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, args)
+        assert msg =~ extra |> Map.keys() |> hd()
+      end
+    end
+
+    test "dep_add: a worker adopts an unparented ticket under its own task", ctx do
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => orphan.id,
+                 "type" => "parent_of"
+               })
+    end
+
+    test "dep_add: nothing but a parent_of edge from its own task", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      for {from, to, type} <- [
+            {ctx.task.id, a.id, "blocks"},
+            {a.id, b.id, "parent_of"}
+          ] do
+        assert {:error, {:unauthorized, msg}} =
+                 Tools.dep_add(ctx.worker, %{
+                   "from_issue_id" => from,
+                   "to_issue_id" => to,
+                   "type" => type
+                 })
+
+        assert msg =~ "parent_of"
+      end
+    end
+
+    test "dep_add: refuses a ticket that already has a parent, and caller-set created_by/notes",
+         ctx do
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+      {:ok, other_parent} = Ash.create(Issue, %{title: "p", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => other_parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert msg =~ "no parent"
+
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan2", workspace_id: ctx.ws.id})
+
+      for extra <- [%{"created_by" => "coordinator"}, %{"notes" => "n"}] do
+        assert {:error, {:unauthorized, _}} =
+                 Tools.dep_add(
+                   ctx.worker,
+                   Map.merge(
+                     %{
+                       "from_issue_id" => ctx.task.id,
+                       "to_issue_id" => orphan.id,
+                       "type" => "parent_of"
+                     },
+                     extra
+                   )
+                 )
+      end
+    end
+  end
+
   describe "task_create/2" do
     test "a coordinator creates a task forced into its own workspace", ctx do
       assert {:ok, data} =
@@ -3314,7 +3450,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert full.tracker_context_type == "jira"
     end
 
-    test "worker_review persists :flag mode when no workspace review_automation config (bd-577w96)",
+    # bd-dtfe9x (D-W-2): with no review_automation config anywhere, the resolved
+    # :flag is the conservative fallback, not a decision — it must not be written
+    # onto the engagement (ReviewPatrol already reads an unset mode as :flag).
+    test "worker_review does not persist :flag when no review_automation config exists",
          ctx do
       {:ok, task} = Ash.create(Issue, %{title: "review mode default", workspace_id: ctx.ws.id})
 
@@ -3325,7 +3464,48 @@ defmodule Arbiter.MCP.ToolsTest do
         })
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.review_automation == :flag
+      assert reloaded.review_automation == nil
+    end
+
+    # bd-dtfe9x (D-W-2) regression: a normal coordinator token is
+    # workspace-agnostic (workspace_id: nil). The guard used to read the
+    # CALLER's workspace, found no config, and let an `off` workspace through.
+    test "worker_review refuses an off workspace for a workspace-agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-off-ws",
+          prefix: "raag",
+          config: %{"review_automation" => %{"default" => "off"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic off review", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      assert msg =~ "review_automation.default"
+      assert msg =~ "force"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "worker_review persists the TASK workspace's resolved mode for an agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-auto-ws",
+          prefix: "raaa",
+          config: %{"review_automation" => %{"default" => "report_only"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic report_only", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      _ = Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
     end
 
     test "worker_review: explicit automation override wins over policy (bd-577w96)", ctx do
@@ -6673,7 +6853,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, task} =
         Ash.update(ctx.task, %{pr_ref: "#7"}, action: :update)
 
-      assert {:error, {:invalid, msg}} =
+      assert {:error, {:conflict, msg}} =
                Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
 
       assert msg =~ "does not support"
@@ -6681,6 +6861,55 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "the coordinator must name a task", ctx do
       assert {:error, {:invalid, _}} = Tools.ci_rerun(ctx.coordinator, %{})
+    end
+
+    # bd-dtfe9x (D-W-17): the same own-task rule the REST route applies.
+    test "a worker re-runs CI on its own task through the live watchdog", ctx do
+      alias Arbiter.Test.StubMerger
+      StubMerger.reset()
+
+      {:ok, task} = Ash.create(Issue, %{title: "own ci", workspace_id: ctx.ws.id})
+      put_state!(task, :active)
+
+      {:ok, task} =
+        Issue.pr_opened(task.id, "!mcp-own-ci",
+          merger_url: "https://example.test/mr/mcp-own-ci",
+          merge_watch:
+            Arbiter.Tasks.PullRequest.lane(
+              adapter: StubMerger,
+              repo: "mcp/repo",
+              interval_ms: 600_000,
+              initial_delay_ms: 600_000
+            )
+        )
+
+      assert :ok = Arbiter.Worker.Watchdog.restart(task.id)
+
+      on_exit(fn ->
+        case Arbiter.Worker.Watchdog.whereis(task.id) do
+          nil -> :ok
+          wd -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, wd)
+        end
+      end)
+
+      worker = %{ctx.worker | task_id: task.id}
+
+      assert {:ok, %{task_id: id, via: "watchdog"}} =
+               Tools.ci_rerun(worker, %{"mode" => "all_jobs"})
+
+      assert id == task.id
+      assert [{"!mcp-own-ci", %{mode: :all_jobs}} | _] = StubMerger.ci_reruns()
+    end
+
+    test "with no watchdog the fallback is shared with REST (CIRerun)", ctx do
+      {:ok, task} = Ash.update(ctx.task, %{pr_ref: "#8"}, action: :update)
+
+      # Same outcome the REST route gives for the same task: the workspace's
+      # merger is reached, and says it cannot re-run.
+      assert {:error, :unsupported} = Arbiter.Worker.CIRerun.rerun(task.id, %{})
+
+      assert {:error, {:conflict, _}} =
+               Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
     end
   end
 

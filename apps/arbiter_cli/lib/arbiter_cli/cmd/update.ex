@@ -88,10 +88,12 @@ defmodule ArbiterCli.Cmd.Update do
   on an excluded one. The reviewer is not constrained. Coordinator/operator only.
 
   `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
-  breaker (`circuit_breaker_tripped` + `circuit_breaker_reason`, bd-1atwts),
-  letting the engagement post again after a coordinator has adjudicated a
-  review loop. It's a resume-only switch: it never sets the flag, only clears
-  it.
+  breaker (bd-1atwts), letting the engagement post again after a coordinator
+  has adjudicated a review loop. It calls the typed
+  `POST /api/issues/:id/resume_review` operation (P-14) — `PATCH /api/issues`
+  no longer accepts raw `circuit_breaker_*` writes. It's a resume-only switch:
+  it never sets the flag, only clears it. Given alongside field flags, the
+  fields are patched first, then the breaker is resumed.
 
   `--append-notes` appends the given string to the existing `notes` field
   (separated by two newlines). This requires fetching the issue first so we
@@ -334,28 +336,45 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("title", opts[:title])
       |> put_if("repo", opts[:repo])
       |> maybe_append_notes(opts[:append_notes], existing)
-      |> maybe_resume_review(opts[:resume_review])
       |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
       |> Map.merge(ProviderConstraintFlags.payload(opts))
 
-    if map_size(payload) == 0 and is_nil(opts[:assignee]) do
+    resume? = opts[:resume_review] == true
+
+    if map_size(payload) == 0 and not resume? and is_nil(opts[:assignee]) do
       Output.die(
         "update requires at least one field flag (e.g. --priority, --append-notes, --resume-review)"
       )
     end
 
-    if map_size(payload) == 0 do
-      # bd-1ozks5: only a deprecated --assignee was given — nothing to
-      # write, but that isn't a failure. Report the task back unchanged.
-      case Client.get("/api/issues/" <> id) do
-        {:ok, issue} -> Output.emit_issue(issue, mode)
-        {:error, err} -> Output.die(err)
+    patched =
+      if map_size(payload) > 0 do
+        case Client.patch("/api/issues/" <> id, payload) do
+          {:ok, issue} -> issue
+          {:error, err} -> Output.die(err)
+        end
       end
-    else
-      case Client.patch("/api/issues/" <> id, payload) do
-        {:ok, issue} -> Output.emit_issue(issue, mode)
-        {:error, err} -> Output.die(err)
-      end
+
+    resumed = if resume?, do: resume_review!(id)
+
+    case resumed || patched do
+      nil ->
+        # bd-1ozks5: only a deprecated --assignee was given — nothing to
+        # write, but that isn't a failure. Report the task back unchanged.
+        case Client.get("/api/issues/" <> id) do
+          {:ok, issue} -> Output.emit_issue(issue, mode)
+          {:error, err} -> Output.die(err)
+        end
+
+      issue ->
+        Output.emit_issue(issue, mode)
+    end
+  end
+
+  defp resume_review!(id) do
+    case Client.post("/api/issues/" <> id <> "/resume_review", %{}) do
+      {:ok, issue} -> issue
+      {:error, err} -> Output.die(err)
     end
   end
 
@@ -379,14 +398,6 @@ defmodule ArbiterCli.Cmd.Update do
 
     Map.put(payload, "notes", combined)
   end
-
-  defp maybe_resume_review(payload, true) do
-    payload
-    |> Map.put("circuit_breaker_tripped", false)
-    |> Map.put("circuit_breaker_reason", nil)
-  end
-
-  defp maybe_resume_review(payload, _), do: payload
 
   # bd-1ozks5: the local assignee field is gone — accept and ignore
   # `--assignee` for one release rather than breaking an existing script.

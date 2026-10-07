@@ -264,4 +264,90 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert msg =~ "ci_failed"
     end
   end
+
+  # bd-dtfe9x (D-W-17/D-W-18): the CI pair is worker-callable on REST exactly as
+  # on MCP — own task only — and a dead watchdog falls back to the workspace
+  # adapter on both surfaces instead of 404ing here.
+  describe "worker-tier tokens on the CI pair (bd-dtfe9x)" do
+    alias Arbiter.MCP.Scope
+
+    defp worker_conn(task) do
+      Phoenix.ConnTest.build_conn()
+      |> Map.put(:remote_ip, {127, 0, 0, 1})
+      |> put_req_header("accept", "application/json")
+      |> put_req_header("authorization", "Bearer #{Scope.mint_worker(task)}")
+    end
+
+    test "a worker re-runs CI on its own task", %{ws: ws} do
+      task = merging_ticket(ws, "!qc-wrk-rerun")
+      assert :ok = Watchdog.restart(task.id)
+
+      conn = post(worker_conn(task), ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "all_jobs"})
+
+      assert %{"rerun" => true, "task_id" => id, "via" => "watchdog"} = json_response(conn, 200)
+      assert id == task.id
+    end
+
+    test "a worker may not re-run CI on another task", %{ws: ws} do
+      task = merging_ticket(ws, "!qc-wrk-own")
+      other = merging_ticket(ws, "!qc-wrk-other")
+      assert :ok = Watchdog.restart(other.id)
+
+      conn = post(worker_conn(task), ~p"/api/queue/#{other.id}/rerun_ci", %{})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "own task"
+      assert StubMerger.ci_reruns() == []
+    end
+
+    test "a worker marks its own task's CI failure external, not another's", %{ws: ws} do
+      task = merging_ticket(ws, "!qc-wrk-ext")
+      other = merging_ticket(ws, "!qc-wrk-ext-other")
+      assert :ok = Watchdog.restart(task.id)
+
+      # Authorized (own task); the task is just not parked on a ci_failed block.
+      own =
+        post(worker_conn(task), ~p"/api/queue/#{task.id}/mark_ci_external", %{
+          "note" => "runners are down repo-wide"
+        })
+
+      assert json_response(own, 409)["error"]["message"] =~ "ci_failed"
+
+      foreign =
+        post(worker_conn(task), ~p"/api/queue/#{other.id}/mark_ci_external", %{
+          "note" => "runners are down repo-wide"
+        })
+
+      assert json_response(foreign, 403)["error"]["message"] =~ "own task"
+    end
+
+    test "a worker still cannot use the other queue routes", %{ws: ws} do
+      task = merging_ticket(ws, "!qc-wrk-restart")
+
+      conn = post(worker_conn(task), ~p"/api/queue/#{task.id}/restart_watchdog", %{})
+      assert json_response(conn, 403)
+    end
+
+    test "with no live watchdog, rerun falls back to the workspace adapter (not a 404)",
+         %{conn: conn, ws: ws} do
+      # `merging_ticket/2` records a PR but starts no watchdog. The workspace's
+      # `direct` merger has no CI to re-run, so reaching it proves the fallback
+      # ran — the old behavior was a bare 404 here.
+      task = merging_ticket(ws, "!qc-fallback")
+      assert Watchdog.whereis(task.id) == nil
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 409)
+      assert msg =~ "does not support"
+    end
+
+    test "with no live watchdog and no PR recorded, rerun is a clear 422", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no pr", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 422)
+      assert msg =~ "no PR"
+    end
+  end
 end

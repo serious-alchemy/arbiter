@@ -835,6 +835,176 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  # P-14 (D-T-5/6/34): the coordinator write surface is an explicit allow-list;
+  # ReviewPatrol / breaker / `pr_opened_*` state, `skills` and the audit label
+  # `change_origin` are never mass-assignable over REST.
+  describe "REST write allow-list (P-14)" do
+    setup %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "guarded", workspace_id: ws.id})
+      %{issue: issue}
+    end
+
+    for {field, value} <- [
+          {"circuit_breaker_tripped", true},
+          {"circuit_breaker_reason", "forged"},
+          {"circuit_breaker_sha", "abc"},
+          {"last_verdict", "approve"},
+          {"last_verdict_sha", "abc"},
+          {"review_count", 3},
+          {"review_cap_escalated", true},
+          {"pr_opened_notified_ref", "#7"},
+          {"pr_opened_transitioned_ref", "#7"},
+          {"review_only", true},
+          {"posted_findings", %{}},
+          {"skills", %{"opt_out" => true}},
+          {"change_origin", "loop:proposal:forged"}
+        ] do
+      test "PATCH refuses #{field} with 422 and writes nothing", %{conn: conn, issue: issue} do
+        conn =
+          patch(conn, ~p"/api/issues/#{issue.id}", %{
+            "title" => "renamed",
+            unquote(field) => unquote(Macro.escape(value))
+          })
+
+        assert %{"error" => %{"type" => "validation_error", "message" => msg}} =
+                 json_response(conn, 422)
+
+        assert msg =~ unquote(field)
+        assert Ash.get!(Issue, issue.id).title == "guarded"
+      end
+    end
+
+    test "POST refuses ReviewPatrol seed fields and skills with 422", %{conn: conn, ws: ws} do
+      for {field, value} <- [{"last_verdict", "approve"}, {"review_only", true}, {"skills", %{}}] do
+        conn =
+          post(conn, ~p"/api/issues", %{
+            "title" => "seeded-#{field}",
+            "workspace_id" => ws.id,
+            field => value
+          })
+
+        assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      end
+    end
+
+    test "PATCH still takes the user-facing fields", %{conn: conn, issue: issue} do
+      conn =
+        patch(conn, ~p"/api/issues/#{issue.id}", %{
+          "title" => "ok",
+          "acceptance" => "ac",
+          "pr_ref" => "#9",
+          "tracker_context_type" => "github",
+          "tracker_context_ref" => "12"
+        })
+
+      assert %{"title" => "ok", "pr_ref" => "#9"} = json_response(conn, 200)
+    end
+
+    test "a key Ash does not know is still the existing 422 (unknown-key behaviour)", %{
+      conn: conn,
+      issue: issue
+    } do
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{"no_such_field" => "x"})
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
+  describe "POST /api/issues/:id/resume_review (P-14)" do
+    test "clears a tripped breaker and watermarks the clear sha", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "tripped", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.update(issue, %{
+          circuit_breaker_tripped: true,
+          circuit_breaker_reason: "loop",
+          circuit_breaker_sha: "deadbeef"
+        })
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/resume_review", %{})
+
+      assert %{"id" => id} = json_response(conn, 200)
+      assert id == issue.id
+
+      reloaded = Ash.get!(Issue, issue.id)
+      refute reloaded.circuit_breaker_tripped
+      assert reloaded.circuit_breaker_reason == nil
+      assert reloaded.circuit_breaker_cleared_sha == "deadbeef"
+    end
+
+    test "is idempotent on an untripped ticket", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "calm", workspace_id: ws.id})
+      conn = post(conn, ~p"/api/issues/#{issue.id}/resume_review", %{})
+      assert json_response(conn, 200)
+    end
+
+    test "404s for an unknown ticket", %{conn: conn} do
+      conn = post(conn, ~p"/api/issues/bd-nope00/resume_review", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "is refused for a worker-tier token", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      token = Arbiter.MCP.Scope.mint_worker(task)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> post(~p"/api/issues/#{task.id}/resume_review", %{})
+
+      assert json_response(conn, 403)
+    end
+  end
+
+  describe "POST /api/issues — parent_id and deps edges (P-14, D-T-10)" do
+    test "parent_id attaches the parent_of edge server-side", %{conn: conn, ws: ws} do
+      {:ok, parent} = Ash.create(Issue, %{title: "p", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "child",
+          "workspace_id" => ws.id,
+          "parent_id" => parent.id
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :parent_of, from_issue_id: from}}]} =
+               Arbiter.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert from == parent.id
+    end
+
+    test "deps attach blocks edges", %{conn: conn, ws: ws} do
+      {:ok, dep} = Ash.create(Issue, %{title: "d", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "blocked child",
+          "workspace_id" => ws.id,
+          "deps" => [dep.id]
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :blocks, from_issue_id: from}}]} =
+               Arbiter.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert from == dep.id
+    end
+
+    test "an unknown parent refuses the whole create (nothing is filed)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "orphaned",
+          "workspace_id" => ws.id,
+          "parent_id" => "api-nope00"
+        })
+
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+      assert [] = Arbiter.Tasks.Dedup.local_matches("orphaned", ws.id)
+    end
+  end
+
   describe "POST /api/issues/:id/close" do
     test "closes an open issue", %{conn: conn, ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "close me", workspace_id: ws.id})

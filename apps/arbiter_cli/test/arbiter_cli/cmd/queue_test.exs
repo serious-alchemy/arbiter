@@ -249,7 +249,7 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert err =~ "requires: <task-id>"
     end
 
-    test "reports a friendly error when no watchdog is running" do
+    test "a 404 means no such task — a dead watchdog no longer 404s (bd-dtfe9x)" do
       stub_routes([
         {{"post", "/api/queue/bd-r3/rerun_ci"}, {%{"errors" => %{"detail" => "Not Found"}}, 404}}
       ])
@@ -257,8 +257,8 @@ defmodule ArbiterCli.Cmd.QueueTest do
       {_out, err, exit_code} = capture(fn -> Queue.run(["rerun-ci", "bd-r3"]) end)
 
       assert exit_code != 0
-      assert err =~ "no merge watchdog"
-      assert err =~ "restart-watchdog"
+      assert err =~ "no such task"
+      assert err =~ "bd-r3"
     end
 
     test "emits the raw body in --json mode" do

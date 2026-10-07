@@ -475,6 +475,94 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       Worker.stop(task.id)
     end
 
+    # bd-dtfe9x (D-W-2/D-W-24): REST used to apply no review_automation guard.
+    # The token is workspace-agnostic; the guard reads the TASK's workspace.
+    test "refuses a task whose workspace review_automation default is off", %{conn: conn} do
+      {:ok, off_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-off-ws",
+          prefix: "cof",
+          config: %{"review_automation" => %{"default" => "off"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "no reviews here", workspace_id: off_ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{"task_id" => task.id, "with_claude" => false})
+
+      body = json_response(conn, 422)
+      assert body["error"]["message"] =~ "review_automation"
+      assert body["error"]["message"] =~ "force"
+
+      # Nothing spawned, nothing persisted.
+      assert Worker.whereis(task.id) == nil
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "an explicit automation: off refuses, and force: true overrides it", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "explicit off", workspace_id: ws.id})
+
+      refused =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "off",
+          "with_claude" => false
+        })
+
+      assert json_response(refused, 422)["error"]["message"] =~ "automation argument"
+
+      forced =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "off",
+          "force" => true,
+          "with_claude" => false
+        })
+
+      assert json_response(forced, 201)["task"]["id"] == task.id
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :off
+      Worker.stop(task.id)
+    end
+
+    test "persists the resolved mode and tracker_context_* before dispatching",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "ctx review", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "report_only",
+          "tracker_context_ref" => "AX-18004",
+          "tracker_context_type" => "jira",
+          "with_claude" => false
+        })
+
+      assert json_response(conn, 201)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+      assert reloaded.tracker_context_ref == "AX-18004"
+      assert reloaded.tracker_context_type == :jira
+      Worker.stop(task.id)
+    end
+
+    test "does not persist :flag when the workspace has no review_automation config",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no config", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{"task_id" => task.id, "with_claude" => false})
+
+      assert json_response(conn, 201)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+      Worker.stop(task.id)
+    end
+
     test "returns 404 for an unknown task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/review", %{"task_id" => "no-such-task"})
       assert json_response(conn, 404)

@@ -769,8 +769,14 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
 
   defp passes(rig) do
     case File.read(Path.join(common_dir(rig), "review_ci_passes")) do
-      {:ok, n} -> n |> String.trim() |> String.to_integer()
-      _ -> 0
+      {:ok, n} ->
+        case Integer.parse(String.trim(n)) do
+          {count, ""} -> count
+          _ -> 0
+        end
+
+      _ ->
+        0
     end
   end
 

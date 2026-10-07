@@ -120,20 +120,28 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   @behaviour Arbiter.MCP.AgentConfig
 
   alias Arbiter.Agents.Gemini.ConfigDir
+  alias Arbiter.MCP.Catalog
+  alias Arbiter.MCP.Scope
 
   @dirname ".gemini"
   @filename "settings.json"
 
-  # The worker-tier tool allowlist. Matches the tools that a :worker scope
-  # token is permitted to call (see Arbiter.MCP.Scope and the tool catalog in
-  # docs/mcp-server-design.md §3).
-  @worker_tools ~w(
-    ticket_show
-    ticket_update_progress
-    inbox_check
-    message_send
-    notify_list
-    workspace_show
+  # Worker-tier tools a Gemini/agy worker is deliberately NOT shown (bd-dtfe9x,
+  # D-M-21). The allowlist is derived from the catalog's worker tier — a tool
+  # added to (or removed from) the worker tier reaches this menu without a
+  # second list to keep in step — minus these read-only browsing / config /
+  # skill tools, kept off a smaller-context agent's menu. The server still
+  # authorizes by token, so an excluded tool stays callable; it is just not
+  # advertised. `Arbiter.MCP.AgentConfigTest` pins each entry to a real tool.
+  @excluded_worker_tools ~w(
+    quota_get
+    dep_list
+    workspace_config_get
+    workspace_config_overview
+    installation_config_get
+    skill_list
+    skill_get
+    flake_record
   )
 
   @doc """
@@ -228,9 +236,24 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
     server_map(opts, "serverUrl", "enabledTools")
   end
 
-  @doc "The worker-tier tool allowlist written into `includeTools` / `enabledTools`."
+  @doc """
+  The worker-tier tool allowlist written into `includeTools` / `enabledTools`:
+  every canonical tool the catalog shows a `:worker` scope, less
+  `excluded_worker_tools/0`.
+  """
   @spec worker_tools() :: [String.t()]
-  def worker_tools, do: @worker_tools
+  def worker_tools do
+    legacy = Catalog.legacy_aliases()
+
+    %Scope{tier: :worker}
+    |> Catalog.visible()
+    |> Enum.map(& &1.name)
+    |> Enum.reject(&(Map.has_key?(legacy, &1) or &1 in @excluded_worker_tools))
+  end
+
+  @doc "Worker-tier catalog tools deliberately left off the Gemini/agy allowlist."
+  @spec excluded_worker_tools() :: [String.t()]
+  def excluded_worker_tools, do: @excluded_worker_tools
 
   @doc "The config directory name written into the worktree for the upstream `gemini` CLI (`.gemini`)."
   @spec dirname() :: String.t()
@@ -266,7 +289,7 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   # a list → use as-is
   defp resolve_include_tools(opts) do
     case Keyword.get(opts, :include_tools, :worker) do
-      :worker -> @worker_tools
+      :worker -> worker_tools()
       nil -> nil
       tools when is_list(tools) -> tools
     end

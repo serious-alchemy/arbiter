@@ -8,12 +8,15 @@ defmodule Arbiter.MCP.CatalogTest do
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
   # The both-tier tools a worker may also reach.
+  # `ticket_create` / `dep_add` are here since bd-dtfe9x: a worker files a child
+  # of its own task, the same as REST (`Arbiter.Tasks.WorkerFiling`).
   @both_tier ~w(ticket_show inbox_check ticket_update_progress workspace_show quota_get
-                message_send notify_list workspace_config_get workspace_config_overview)
+                message_send notify_list workspace_config_get workspace_config_overview
+                ticket_create dep_add ci_rerun ci_mark_external)
 
   # Coordinator-only tools; never visible to a worker.
-  @coordinator_only ~w(ticket_ready ticket_create ticket_update ticket_close ticket_reopen ticket_verify
-                       ticket_sync_upstream_close dep_add dep_remove
+  @coordinator_only ~w(ticket_ready ticket_update ticket_close ticket_reopen ticket_verify
+                       ticket_sync_upstream_close dep_remove
                        worker_dispatch
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
                        worker_log ticket_list

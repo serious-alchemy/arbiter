@@ -380,17 +380,37 @@ defmodule Arbiter.MCP.RefineToolsTest do
              |> Ash.read!() == []
     end
 
+    # `Create` preflights the parent, so what reaches here is only the race: the
+    # parent went away between the check and the edge write. An issue cannot be
+    # un-created (the paper-trail version row's FK refuses the destroy), so the
+    # documented contract is "task exists, edge missing" — asserted here so it
+    # stays a deliberate choice.
+    defp edge_failure(issue) do
+      [
+        %{
+          kind: :edge_failed,
+          task_id: issue.id,
+          edge: %{from: "bd-gone", to: issue.id, type: :parent_of},
+          message:
+            "ticket #{issue.id} was created, but failed to attach #{issue.id} to parent " <>
+              "bd-gone: task bd-gone not found — the ticket is filed without that edge; " <>
+              "add it with dep_add rather than filing again"
+        }
+      ]
+    end
+
     test "a failed parent_of attach: the task survives, and the error pins the contract", ctx do
       {:ok, orphan} = Ash.create(Issue, %{title: "would-be child", workspace_id: ctx.ws.id})
 
-      # The edge write is a second, non-transactional write; a parent that went
-      # away between the authorization and the attach is the production race.
-      # An issue cannot be un-created (the paper-trail version row's FK refuses
-      # the destroy), so the documented contract is "task exists, edge missing"
-      # — asserted here so it stays a deliberate choice.
-      assert {:error, {:invalid, message}} =
-               Arbiter.MCP.Tools.Task.attach_parent(%{}, ctx.refine, orphan, "bd-gone")
+      assert {:invalid, message, %{task_id: task_id}} =
+               Arbiter.MCP.Tools.Task.partial_error(
+                 ctx.refine,
+                 orphan,
+                 edge_failure(orphan),
+                 "bd-gone"
+               )
 
+      assert task_id == orphan.id
       assert message =~ orphan.id
       assert message =~ "bd-gone"
       assert {:ok, _} = Ash.get(Issue, orphan.id)
@@ -400,8 +420,13 @@ defmodule Arbiter.MCP.RefineToolsTest do
     test "the orphan message tells a refine session it cannot re-attach the task itself", ctx do
       {:ok, orphan} = Ash.create(Issue, %{title: "stranded", workspace_id: ctx.ws.id})
 
-      assert {:error, {:invalid, refine_message}} =
-               Arbiter.MCP.Tools.Task.attach_parent(%{}, ctx.refine, orphan, "bd-gone")
+      assert {:invalid, refine_message, _} =
+               Arbiter.MCP.Tools.Task.partial_error(
+                 ctx.refine,
+                 orphan,
+                 edge_failure(orphan),
+                 "bd-gone"
+               )
 
       # The unparented task is outside the bound subtree, and a parent_of add
       # needs both endpoints inside it — so dep_add is not a recovery the
@@ -410,8 +435,13 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
       coordinator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id}
 
-      assert {:error, {:invalid, coordinator_message}} =
-               Arbiter.MCP.Tools.Task.attach_parent(%{}, coordinator, orphan, "bd-gone")
+      assert {:invalid, coordinator_message, _} =
+               Arbiter.MCP.Tools.Task.partial_error(
+                 coordinator,
+                 orphan,
+                 edge_failure(orphan),
+                 "bd-gone"
+               )
 
       assert coordinator_message =~ "dep_add"
     end

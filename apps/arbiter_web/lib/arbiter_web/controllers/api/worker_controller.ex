@@ -51,6 +51,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   alias Arbiter.Params
   alias Arbiter.Reviews.ExternalReview
+  alias Arbiter.Reviews.Guard
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.OutputLog
@@ -129,21 +130,37 @@ defmodule ArbiterWeb.Api.WorkerController do
           review_external(conn, params)
 
         %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
-          opts = review_opts(params)
-
-          case Dispatch.dispatch(task_id, opts) do
-            {:ok, result} ->
-              conn
-              |> put_status(:created)
-              |> render(:dispatch, result: result)
-
-            {:error, reason} ->
-              refusal(reason, task_id, :review)
-          end
+          review_task(conn, task_id, params)
 
         _ ->
           {:error, {:invalid_request, "task_id or pr is required", %{}}}
       end
+    end
+  end
+
+  # Task-shaped review. Runs the same `review_automation` guard as the
+  # `worker_review` MCP tool (`Arbiter.Reviews.Guard`, resolved from the TASK's
+  # workspace): an `off` repo is refused unless `force` is set, nothing is
+  # written or spawned on a refusal. An unknown task skips the guard and falls
+  # through to `Dispatch`, which answers 404 as it always has.
+  defp review_task(conn, task_id, params) do
+    with {:ok, _task} <- guard_task_review(task_id, params) do
+      case Dispatch.dispatch(task_id, review_opts(params)) do
+        {:ok, result} ->
+          conn
+          |> put_status(:created)
+          |> render(:dispatch, result: result)
+
+        {:error, reason} ->
+          refusal(reason, task_id, :review)
+      end
+    end
+  end
+
+  defp guard_task_review(task_id, params) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, task} -> Guard.prepare(task, params, truthy(params["force"]) == true)
+      {:error, _} -> {:ok, nil}
     end
   end
 
@@ -166,9 +183,12 @@ defmodule ArbiterWeb.Api.WorkerController do
         # report_only (propose) / automation flow through to ExternalReview, which
         # resolves whether the review posts to the PR or only reports (bd-36qzgx).
         automation: params["automation"],
+        tracker_context_ref: blank_to_nil(params["tracker_context_ref"]),
+        tracker_context_type: blank_to_nil(params["tracker_context_type"]),
         dispatched_by: "http_api"
       ]
       |> maybe_put_report_only(params["report_only"])
+      |> maybe_put_force(params["force"])
 
     case ExternalReview.dispatch(opts) do
       {:ok, ack} ->
@@ -183,6 +203,13 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   defp maybe_put_report_only(opts, raw) do
     if truthy(raw) == true, do: Keyword.put(opts, :report_only, true), else: opts
+  end
+
+  defp maybe_put_force(opts, force) do
+    case truthy(force) do
+      nil -> opts
+      value -> Keyword.put(opts, :force, value)
+    end
   end
 
   @doc """
@@ -713,8 +740,34 @@ defmodule ArbiterWeb.Api.WorkerController do
       if start_claude, do: opts, else: Keyword.put(opts, :start_driver, false)
     end)
     |> add_model_override(params["model"])
+    |> maybe_add_quota_bypass(params)
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
+
+  # `force_quota` on a review bypasses the quota gate, recorded with this
+  # endpoint as the actor (and the optional `force_quota_reason`), like the
+  # `worker_review` MCP tool's `dispatch_opts`.
+  defp maybe_add_quota_bypass(opts, params) do
+    case truthy(params["force_quota"]) do
+      true ->
+        opts
+        |> Keyword.put(:skip_quota_gate, true)
+        |> Keyword.put(:quota_bypass_actor, "api")
+        |> Keyword.put(:quota_bypass_reason, blank_to_nil(params["force_quota_reason"]))
+
+      _ ->
+        opts
+    end
+  end
+
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_to_nil(_), do: nil
 
   @flag_keys ~w(force force_quota over_cap no_agent with_claude with_gemini)
 

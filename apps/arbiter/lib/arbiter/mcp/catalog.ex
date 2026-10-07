@@ -26,7 +26,7 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `ticket_create` | coordinator | `Ash.create(Issue, …)` |
+  | `ticket_create` | worker (child of own task only), coordinator | `Arbiter.Tasks.Create.run/2` (dedup, upstream drain, edges; P-14) |
   | `ticket_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
   | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
@@ -34,11 +34,12 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `ticket_resume_review` | coordinator | `Ash.update(issue, …, action: :resume_review)` (P-14) |
   | `epic_floor` | coordinator | `Ash.update(issue, …, action: :set_floor)` (ES2, bd-3e7inj) |
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
-  | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
+  | `dep_add` | worker (`parent_of` from own task only), coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
   | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
@@ -79,7 +80,7 @@ defmodule Arbiter.MCP.Catalog do
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/2` (bd-8jixav) |
-  | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
+  | `ci_rerun` | worker, coordinator | `Arbiter.Worker.CIRerun.rerun/2` → `Watchdog.rerun_ci/2` / `Merger.rerun_ci/2` (bd-5mzzww) |
   | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
@@ -374,11 +375,18 @@ defmodule Arbiter.MCP.Catalog do
     # ---- Phase 2: coordinator-only mutating tools ----
     %{
       name: "ticket_create",
-      tiers: @coordinator,
+      tiers: @both,
       description:
-        "Create a ticket in the workspace. `title` is required; optional `description`, " <>
+        "Create a ticket in the workspace. A worker may file only a follow-up CHILD of its own " <>
+          "task (`parent_id` = its own task id, required), in its own workspace, with only " <>
+          "`title`, `description`, `acceptance`, `issue_type`, `priority`, `difficulty` " <>
+          "(the same rule as `POST /api/issues`). `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
-          "`tracker_type`, …. The ticket is always created in the coordinator's own workspace. " <>
+          "`tracker_type`, …. The ticket is created in the session's workspace (the bound one, or the " <>
+          "`workspace` you name). A ticket whose title matches an open one in that workspace is " <>
+          "refused as a duplicate unless `force: true`. If the upstream tracker mirror fails the " <>
+          "call is an error that names the ticket that WAS created (re-link it with " <>
+          "`ticket_update`; do not file it again). " <>
           "Created tickets land in the Backlog column (state `backlog`), not Ready, " <>
           "and stay there until a human promotes them from the ticket detail page. " <>
           "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
@@ -401,6 +409,12 @@ defmodule Arbiter.MCP.Catalog do
                 "default it stays local (`tracker_type: none`) with the parent's ticket as " <>
                 "`tracker_context_ref`, so no upstream ticket is minted. Refine-session " <>
                 "children are always context-only. Pass `tracker_type` to mint anyway."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "File the ticket even though an open ticket (or open tracker issue) with the same " <>
+                "title exists. Default false: a duplicate title is refused."
           },
           "description" => %{"type" => "string", "description" => "Markdown body."},
           "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},
@@ -670,7 +684,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Promote a ticket from Backlog to the queue (state `backlog` → `queued`: column Ready, or " <>
           "Blocked while a gating blocker is open) via the `promote` transition. " <>
-          "Coordinator only. Idempotent by design — promoting an already-queued ticket is a no-op success, " <>
+          "Coordinator tier, or a refine session within its subtree. Idempotent by design — promoting an already-queued ticket is a no-op success, " <>
           "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
           "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
           "auto-waived). **Promote last.** Autopilot can claim a ticket within seconds of it going " <>
@@ -746,6 +760,26 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
+    },
+    %{
+      name: "ticket_resume_review",
+      tiers: @coordinator,
+      description:
+        "Clear a tripped ReviewPatrol circuit breaker on a ticket so its PR review resumes, via the " <>
+          "typed `:resume_review` action (the same one `POST /api/issues/:id/resume_review` and " <>
+          "`arb ticket update --resume-review` use). Coordinator only. Idempotent — resuming an " <>
+          "untripped ticket is a no-op success. The head commit the breaker tripped at is " <>
+          "watermarked, so the next review tick does not re-trip on the same commit. " <>
+          "`ticket_update` does not write `circuit_breaker_*` — this is the one door.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_resume_review/2
     },
     %{
       name: "epic_floor",
@@ -836,9 +870,11 @@ defmodule Arbiter.MCP.Catalog do
     },
     %{
       name: "dep_add",
-      tiers: @coordinator,
+      tiers: @both,
       description:
-        "Add a dependency edge between two tickets in the workspace. `type` is one of blocks, " <>
+        "Add a dependency edge between two tickets in the workspace. A worker may add only a " <>
+          "`parent_of` edge from its own task to an unparented ticket in its workspace (no " <>
+          "`notes`/`created_by`), the same rule as `POST /api/dependencies`. `type` is one of blocks, " <>
           "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
           "(from = parent, to = child) to attach a child to a parent ticket — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
