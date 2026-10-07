@@ -11,6 +11,7 @@ defmodule Arbiter.Release do
   alias Arbiter.Agents.Routing.ShadowReport
   alias Arbiter.Loop.CompetenceGenerator
   alias Arbiter.Loop.Scarcity.Draw
+  alias Arbiter.Settings
 
   @app :arbiter
 
@@ -188,18 +189,88 @@ defmodule Arbiter.Release do
 
   @doc """
   Generate the hand competence matrix and commit it to installation settings.
+
+  `target: :live` (default) overwrites the live matrix. `target: :candidate`
+  (bd-dde4l7) writes the candidate beside it: the scorer then also ranks with it
+  and records the result under `routing_decision["shadow_candidate"]`, but
+  dispatch keeps using the live matrix until `promote_candidate_matrix/1`.
+  The other options are `CompetenceGenerator.generate/1`'s (`:from`, `:until`,
+  `:min_n`, `:workspace_id`) — pass a rolling window for a reseed.
+
+      bin/arbiter eval 'Arbiter.Release.seed_competence_matrix(target: :candidate, until: DateTime.utc_now(), from: DateTime.add(DateTime.utc_now(), -28 * 86_400))'
   """
   @spec seed_competence_matrix(keyword()) :: {:ok, [map()]} | {:error, term()}
   def seed_competence_matrix(opts \\ []) do
     if Keyword.get(opts, :start, true), do: start_release_repo!()
 
-    case CompetenceGenerator.seed_installation!(opts) do
+    case CompetenceGenerator.seed_installation!(Keyword.delete(opts, :start)) do
       {:ok, rows} ->
         IO.puts(CompetenceGenerator.format(rows))
         {:ok, rows}
 
       {:error, reason} = error ->
         IO.puts(:stderr, "competence matrix seeding failed: #{inspect(reason)}")
+        error
+    end
+  end
+
+  @doc """
+  Promote the candidate competence matrix to live (bd-dde4l7). The live matrix
+  it replaces is kept for `rollback_competence_matrix/1`; the candidate slot is
+  cleared. `{:error, :no_candidate}` when none was seeded.
+
+      bin/arbiter eval 'Arbiter.Release.promote_candidate_matrix()'
+  """
+  @spec promote_candidate_matrix(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def promote_candidate_matrix(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    case Settings.promote_competence_matrix_candidate() do
+      {:ok, rows} = ok ->
+        IO.puts("candidate competence matrix promoted to live (#{length(rows)} rows)")
+        ok
+
+      {:error, reason} = error ->
+        IO.puts(:stderr, "competence matrix promotion failed: #{inspect(reason)}")
+        error
+    end
+  end
+
+  @doc """
+  Discard the candidate competence matrix (bd-dde4l7); the live matrix is
+  untouched.
+  """
+  @spec discard_candidate_matrix(keyword()) :: :ok | {:error, term()}
+  def discard_candidate_matrix(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    case Settings.set_competence_matrix_candidate(nil) do
+      {:ok, nil} ->
+        IO.puts("candidate competence matrix discarded")
+        :ok
+
+      {:error, reason} = error ->
+        IO.puts(:stderr, "discarding the candidate competence matrix failed: #{inspect(reason)}")
+        error
+    end
+  end
+
+  @doc """
+  Roll the live competence matrix back to the one the last
+  `promote_candidate_matrix/1` replaced (bd-dde4l7). Calling it again rolls
+  forward.
+  """
+  @spec rollback_competence_matrix(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def rollback_competence_matrix(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    case Settings.rollback_competence_matrix() do
+      {:ok, rows} = ok ->
+        IO.puts("live competence matrix rolled back (#{length(rows)} rows)")
+        ok
+
+      {:error, reason} = error ->
+        IO.puts(:stderr, "competence matrix rollback failed: #{inspect(reason)}")
         error
     end
   end

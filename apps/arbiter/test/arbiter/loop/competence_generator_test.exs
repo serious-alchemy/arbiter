@@ -199,5 +199,19 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
       assert length(rows) == 1
       assert Settings.competence_matrix() == rows
     end
+
+    test "seed_installation!/2 with target: :candidate leaves the live matrix alone" do
+      live = for i <- 1..5, do: make_task("l#{i}", "claude", "claude-sonnet-5", 2)
+      {:ok, live_rows} = CompetenceGenerator.seed_installation!(tasks: live, min_n: 5)
+
+      tasks = for i <- 1..5, do: make_task("t#{i}", "codex", "gpt-5", 3)
+
+      {:ok, rows} =
+        CompetenceGenerator.seed_installation!(tasks: tasks, min_n: 5, target: :candidate)
+
+      assert Settings.competence_matrix() == live_rows
+      assert Settings.competence_matrix_candidate() == rows
+      assert rows != live_rows
+    end
   end
 end
