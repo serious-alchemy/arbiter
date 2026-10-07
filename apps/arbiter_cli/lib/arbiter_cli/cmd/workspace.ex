@@ -9,6 +9,10 @@ defmodule ArbiterCli.Cmd.Workspace do
         [--prefix bd] [--tracker-type none] [--merger-strategy direct]
         [--description "..."]
 
+      arb workspace update <ws> [--name N] [--description D] [--prefix P]
+                                               rename / re-describe / re-prefix a
+                                               workspace (`--description ""` clears)
+
       arb workspace standing-order ls          list this workspace's standing orders
       arb workspace standing-order add <text>  append one standing order
       arb workspace standing-order rm <index|text>
@@ -27,6 +31,15 @@ defmodule ArbiterCli.Cmd.Workspace do
       arb workspace secret set <key> <value>   store/overwrite an encrypted secret
       arb workspace secret rm <key>            remove an encrypted secret
 
+      arb workspace env ls                     names + secret flags of the worker env vars
+      arb workspace env set <NAME> [<value>|-] [--file PATH] [--secret|--no-secret]
+                                               set a var, or just flip its flag
+      arb workspace env rm <NAME>              remove a var
+
+  Worker env vars are injected into every worker's subprocess. Values are
+  write-only on every machine surface (CLI, REST, MCP); reveal is the
+  dashboard's job.
+
   Secrets are stored encrypted at rest (ash_cloak) and are never returned in
   plaintext — only their key names are shown. Reference one from workspace
   config with `credentials_ref: "secret:<key>"`, e.g.
@@ -37,9 +50,9 @@ defmodule ArbiterCli.Cmd.Workspace do
   Standing orders live in `config.standing_orders` — a list of short imperative
   strings surfaced in `arb prime`, the **coordinator's** briefing. They are
   never injected into any worker prompt — put worker-facing instructions in
-  the repo's `CLAUDE.md` instead. The `add`/`rm` verbs edit individual entries
-  via `PATCH /api/workspaces/:id/config` so the rest of the config is never
-  clobbered.
+  the repo's `CLAUDE.md` instead. The `add`/`rm` verbs edit ONE entry
+  atomically on the server (`POST /api/workspaces/:id/standing_orders`), so
+  concurrent edits both survive and the rest of the config is never clobbered.
 
   All verbs accept `--workspace <name>` to target a workspace other than the
   default. Reads from `GET /api/workspaces`; writes via `PATCH /api/workspaces/:id`.
@@ -47,12 +60,12 @@ defmodule ArbiterCli.Cmd.Workspace do
   For the full reference of every `workspace.config` key (tracker, merge,
   agent/review_agent, security, routing, review/review_gate, review_automation,
   quota, conductor, standing_orders, repo_paths, pr_patrol, review_patrol) with
-  valid values and defaults, see `arb config schema` (also appended below).
+  valid values and defaults, see `arb config schema` (served by the running server).
   """
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Client, Output}
-  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
+  alias ArbiterCli.Cmd.Workspace.{Env, Resolver, Secrets, StandingOrders}
 
   # Mirrors Arbiter.Tasks.Workspace.valid_tracker_types/0 and
   # valid_merger_strategies/0 for friendly client-side errors on `create`. The
@@ -67,6 +80,7 @@ defmodule ArbiterCli.Cmd.Workspace do
     json: :boolean,
     prefix: :string,
     description: :string,
+    name: :string,
     tracker_type: :string,
     merger_strategy: :string
   ]
@@ -89,6 +103,12 @@ defmodule ArbiterCli.Cmd.Workspace do
       ["create" | rest] ->
         create(rest)
 
+      ["update" | rest] ->
+        update(rest)
+
+      ["env" | rest] ->
+        Env.run(rest, switches: @switches)
+
       ["standing-order" | rest] ->
         StandingOrders.run(rest, switches: @switches)
 
@@ -109,13 +129,9 @@ defmodule ArbiterCli.Cmd.Workspace do
     end
   end
 
-  defp verbs, do: "verbs: list, show, create, standing-order, secret"
+  defp verbs, do: "verbs: list, show, create, update, standing-order, secret, env"
 
-  defp print_help do
-    IO.puts(@moduledoc)
-    IO.puts("")
-    IO.puts(ArbiterCli.ConfigSchema.render())
-  end
+  defp print_help, do: IO.puts(@moduledoc)
 
   defp list(argv) do
     {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb workspace list", switches: [])
@@ -170,7 +186,6 @@ defmodule ArbiterCli.Cmd.Workspace do
 
     if String.trim(name) == "", do: Output.die("workspace create: name must not be empty")
 
-    prefix = opts[:prefix] || "bd"
     tracker_type = opts[:tracker_type] || "none"
     merger_strategy = opts[:merger_strategy] || "direct"
 
@@ -194,7 +209,8 @@ defmodule ArbiterCli.Cmd.Workspace do
     }
 
     body =
-      %{"name" => name, "prefix" => prefix, "config" => config}
+      %{"name" => name, "config" => config}
+      |> maybe_put("prefix", opts[:prefix])
       |> maybe_put("description", opts[:description])
 
     case Client.post("/api/workspaces", body) do
@@ -208,6 +224,61 @@ defmodule ArbiterCli.Cmd.Workspace do
         Output.die(err)
     end
   end
+
+  # ----- update ----------------------------------------------------------
+
+  defp update(argv) do
+    {opts, rest, mode} =
+      ArgParser.parse(argv,
+        command: "arb workspace update",
+        switches: @switches
+      )
+
+    ref =
+      case {rest, opts[:workspace]} do
+        {[ref], nil} -> ref
+        {[], ref} when is_binary(ref) -> ref
+        {[], nil} -> nil
+        _ -> Output.die("workspace update takes exactly one workspace: <ws> or --workspace")
+      end
+
+    body =
+      %{}
+      |> put_given("name", opts[:name])
+      |> put_given("description", opts[:description])
+      |> put_given("prefix", opts[:prefix])
+
+    if body == %{} do
+      Output.die(
+        "workspace update: nothing to update",
+        "pass at least one of --name, --description, --prefix"
+      )
+    end
+
+    ws = Resolver.resolve_workspace!(ref)
+
+    case Client.patch("/api/workspaces/" <> ws["id"], body) do
+      {:ok, updated} ->
+        case mode do
+          :json ->
+            Output.emit_json(updated)
+
+          :text ->
+            IO.puts(
+              "updated workspace #{updated["name"]} (#{updated["id"] || ws["id"]}) " <>
+                "prefix=#{updated["prefix"]}"
+            )
+        end
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
+  # Unlike create's `maybe_put`, an explicit empty string is kept: `--description ""`
+  # clears the description.
+  defp put_given(map, _key, nil), do: map
+  defp put_given(map, key, value), do: Map.put(map, key, value)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map

@@ -300,13 +300,30 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "ws-9"
     end
 
-    test "defaults prefix/tracker/merger when flags omitted" do
+    test "omits prefix when not given, so the server's own default applies (D-C-19)" do
+      stub_routes([
+        {{"post", "/api/workspaces"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           refute Map.has_key?(Jason.decode!(body), "prefix")
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{"id" => "ws-1", "name" => "plain", "prefix" => "ar"})
+         end}
+      ])
+
+      {out, _err, code} = capture(fn -> Workspace.run(["create", "plain"]) end)
+      assert code == 0
+      assert out =~ "prefix=ar"
+    end
+
+    test "defaults tracker/merger when flags omitted" do
       stub_routes([
         {{"post", "/api/workspaces"},
          fn conn ->
            {:ok, body, conn} = Plug.Conn.read_body(conn)
            decoded = Jason.decode!(body)
-           assert decoded["prefix"] == "bd"
            assert decoded["config"]["tracker"]["type"] == "none"
            assert decoded["config"]["merge"]["strategy"] == "direct"
            refute Map.has_key?(decoded, "description")
@@ -345,6 +362,228 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
   end
 
+  describe "update" do
+    defp stub_update(test_pid, expected) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"patch", "/api/workspaces/ws-1"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           decoded = Jason.decode!(body)
+           send(test_pid, {:patched, decoded})
+           assert decoded == expected
+
+           Req.Test.json(conn, %{
+             "id" => "ws-1",
+             "name" => decoded["name"] || "default",
+             "prefix" => decoded["prefix"] || "bd",
+             "description" => decoded["description"]
+           })
+         end}
+      ])
+    end
+
+    test "sends only the given fields" do
+      stub_update(self(), %{"name" => "renamed", "prefix" => "rn"})
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["update", "default", "--name", "renamed", "--prefix", "rn"])
+        end)
+
+      assert code == 0
+      assert out =~ "updated workspace renamed"
+      assert_received {:patched, %{"name" => "renamed"}}
+    end
+
+    test "--description can be cleared with an empty string" do
+      stub_update(self(), %{"description" => ""})
+
+      {_out, _err, code} =
+        capture(fn -> Workspace.run(["update", "default", "--description", ""]) end)
+
+      assert code == 0
+    end
+
+    test "requires at least one field" do
+      {_out, err, code} = capture(fn -> Workspace.run(["update", "default"]) end)
+      assert code == 1
+      assert err =~ "nothing to update"
+    end
+
+    test "takes the workspace from --workspace when no positional is given" do
+      stub_update(self(), %{"name" => "x"})
+
+      {_out, _err, code} =
+        capture(fn -> Workspace.run(["update", "--workspace", "default", "--name", "x"]) end)
+
+      assert code == 0
+    end
+
+    test "rejects a second positional" do
+      {_out, err, code} = capture(fn -> Workspace.run(["update", "a", "b", "--name", "x"]) end)
+      assert code == 1
+      assert err =~ "exactly one"
+    end
+  end
+
+  describe "env" do
+    @env_value "tok_cli_SECRET_value"
+
+    defp stub_env_ws(env) do
+      stub_get("/api/workspaces", %{
+        "data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "worker_env" => env}]
+      })
+    end
+
+    defp stub_env_patch(test_pid, response_env) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{
+                "id" => "ws-1",
+                "name" => "default",
+                "prefix" => "bd",
+                "worker_env" => [%{"name" => "OLD", "secret" => false}]
+              }
+            ]
+          }, 200}},
+        {{"patch", "/api/workspaces/ws-1"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:patched, Jason.decode!(body)})
+           Req.Test.json(conn, %{"id" => "ws-1", "worker_env" => response_env})
+         end}
+      ])
+    end
+
+    test "ls lists names and secret flags" do
+      stub_env_ws([%{"name" => "API_TOKEN", "secret" => true}, %{"name" => "LOG", "secret" => false}])
+
+      {out, _err, code} = capture(fn -> Workspace.run(["env", "ls", "--workspace", "default"]) end)
+      assert code == 0
+      assert out =~ "API_TOKEN"
+      assert out =~ "secret"
+      assert out =~ "LOG"
+    end
+
+    test "ls --json and the empty case" do
+      stub_env_ws([%{"name" => "A", "secret" => false}])
+
+      {out, _err, 0} =
+        capture(fn -> Workspace.run(["env", "ls", "--workspace", "default", "--json"]) end)
+
+      assert Jason.decode!(String.trim(out)) == %{
+               "worker_env" => [%{"name" => "A", "secret" => false}]
+             }
+
+      stub_env_ws([])
+      {out, _err, 0} = capture(fn -> Workspace.run(["env", "ls", "--workspace", "default"]) end)
+      assert out =~ "(no worker env vars)"
+    end
+
+    test "set --secret reads the value from stdin and never prints it" do
+      stub_env_patch(self(), [%{"name" => "API_TOKEN", "secret" => true}])
+
+      {out, err, 0} =
+        capture(
+          fn ->
+            Workspace.run(["env", "set", "API_TOKEN", "-", "--secret", "--workspace", "default"])
+          end,
+          input: @env_value <> "\n"
+        )
+
+      assert_received {:patched, %{"worker_env" => %{"API_TOKEN" => %{"value" => @env_value, "secret" => true}}}}
+      assert out =~ "API_TOKEN"
+      refute out =~ @env_value
+      refute err =~ @env_value
+      refute err =~ "warning: a secret on the command line"
+    end
+
+    test "set with the value on argv warns without echoing it" do
+      stub_env_patch(self(), [%{"name" => "LOG", "secret" => false}])
+
+      {out, err, 0} =
+        capture(fn ->
+          Workspace.run(["env", "set", "LOG", "debug", "--workspace", "default"])
+        end)
+
+      assert_received {:patched, %{"worker_env" => %{"LOG" => patch}}}
+      # No flag given: the server keeps an existing var's flag (false for a new one).
+      assert patch == %{"value" => "debug"}
+      assert err =~ "warning: a secret on the command line"
+      refute out =~ "debug"
+    end
+
+    test "set reads the value from --file" do
+      stub_env_patch(self(), [%{"name" => "F", "secret" => false}])
+      path = Path.join(System.tmp_dir!(), "ws-env-#{System.unique_integer([:positive])}")
+      File.write!(path, "from-file\n")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Workspace.run(["env", "set", "F", "--file", path, "--workspace", "default"])
+        end)
+
+      assert_received {:patched, %{"worker_env" => %{"F" => %{"value" => "from-file"}}}}
+    end
+
+    test "set --secret / --no-secret with no value toggles the flag only" do
+      stub_env_patch(self(), [%{"name" => "OLD", "secret" => true}])
+
+      {_out, _err, 0} =
+        capture(fn -> Workspace.run(["env", "set", "OLD", "--secret", "--workspace", "default"]) end)
+
+      assert_received {:patched, %{"worker_env" => %{"OLD" => patch}}}
+      assert patch == %{"secret" => true}
+    end
+
+    test "set without a value or a flag dies" do
+      {_out, err, code} =
+        capture(fn -> Workspace.run(["env", "set", "NAME", "--workspace", "default"]) end)
+
+      assert code == 1
+      assert err =~ "requires"
+    end
+
+    test "set rejects an invalid name client-side" do
+      {_out, err, code} =
+        capture(fn -> Workspace.run(["env", "set", "9bad", "v", "--workspace", "default"]) end)
+
+      assert code == 1
+      assert err =~ "invalid env var name"
+    end
+
+    test "rm sends a null for an existing name" do
+      stub_env_patch(self(), [])
+
+      {out, _err, 0} =
+        capture(fn -> Workspace.run(["env", "rm", "OLD", "--workspace", "default"]) end)
+
+      assert_received {:patched, %{"worker_env" => %{"OLD" => nil}}}
+      assert out =~ "ok"
+    end
+
+    test "rm rejects an unknown name" do
+      stub_env_ws([%{"name" => "A", "secret" => false}])
+
+      {_out, err, code} =
+        capture(fn -> Workspace.run(["env", "rm", "NOPE", "--workspace", "default"]) end)
+
+      assert code == 1
+      assert err =~ "no worker env var named"
+    end
+
+    test "unknown subcommand errors" do
+      {_out, err, code} = capture(fn -> Workspace.run(["env", "frobnicate"]) end)
+      assert code == 1
+      assert err =~ "unknown workspace env subcommand"
+    end
+  end
+
   describe "standing-order" do
     defp ws_with_orders(orders) do
       stub_get("/api/workspaces", %{
@@ -359,34 +598,100 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       })
     end
 
-    defp stub_order_patch(initial, expected, returned) do
+    defp stub_order_write(suffix, expected_body, response_status, response_body) do
+      test_pid = self()
+
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{
-            "data" => [
-              %{
-                "id" => "ws-1",
-                "name" => "default",
-                "prefix" => "bd",
-                "config" => %{"standing_orders" => initial}
-              }
-            ]
-          }, 200}},
-        {{"patch", "/api/workspaces/ws-1/config"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1" <> suffix},
          fn conn ->
            {:ok, body, conn} = Plug.Conn.read_body(conn)
-           decoded = Jason.decode!(body)
-           assert decoded["patch"]["standing_orders"] == expected
+           send(test_pid, {:posted, Jason.decode!(body)})
+           assert Jason.decode!(body) == expected_body
 
            conn
-           |> Plug.Conn.put_status(200)
-           |> Req.Test.json(%{
-             "id" => "ws-1",
-             "name" => "default",
-             "config" => %{"standing_orders" => returned}
-           })
+           |> Plug.Conn.put_status(response_status)
+           |> Req.Test.json(response_body)
          end}
       ])
+    end
+
+    test "add posts one entry to the server-side append, never the whole list" do
+      stub_order_write("/standing_orders", %{"text" => "Add two"}, 200, %{
+        "standing_orders" => ["Keep one", "Add two"]
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["standing-order", "add", "Add two", "--workspace", "default"])
+        end)
+
+      assert code == 0
+      assert out =~ "2 standing order(s)"
+      assert out =~ "Add two"
+      assert_received {:posted, %{"text" => "Add two"}}
+    end
+
+    test "add never patches the config (no read-modify-write)" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/standing_orders"}, {%{"standing_orders" => ["x"]}, 200}}
+        # no PATCH route: a config patch would 404 and fail the run
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Workspace.run(["standing-order", "add", "x", "--workspace", "default"]) end)
+
+      assert code == 0
+    end
+
+    test "rm sends the target; the server tells an index from text" do
+      stub_order_write("/standing_orders/remove", %{"target" => "2"}, 200, %{
+        "standing_orders" => ["a", "c"]
+      })
+
+      {out, _err, code} =
+        capture(fn -> Workspace.run(["standing-order", "rm", "2", "--workspace", "default"]) end)
+
+      assert code == 0
+      assert out =~ "2 standing order(s)"
+
+      stub_order_write("/standing_orders/remove", %{"target" => "drop me"}, 200, %{
+        "standing_orders" => ["keep"]
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["standing-order", "rm", "drop me", "--workspace", "default"])
+        end)
+
+      assert code == 0
+      assert out =~ "1 standing order(s)"
+    end
+
+    test "a server refusal (out of range, none left) is surfaced" do
+      stub_order_write(
+        "/standing_orders/remove",
+        %{"target" => "9"},
+        422,
+        %{"error" => %{"type" => "invalid", "message" => "standing order index 9 out of range (1..1)"}}
+      )
+
+      {_out, err, code} =
+        capture(fn -> Workspace.run(["standing-order", "rm", "9", "--workspace", "default"]) end)
+
+      assert code == 1
+      assert err =~ "out of range"
+    end
+
+    test "add rejects empty text before calling the server" do
+      {_out, err, code} =
+        capture(fn -> Workspace.run(["standing-order", "add", "  ", "--workspace", "default"]) end)
+
+      assert code == 1
+      assert err =~ "text must not be empty"
     end
 
     test "ls lists the orders with 1-based indices" do
@@ -410,60 +715,6 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "(no standing orders)"
     end
 
-    test "add appends without clobbering existing orders" do
-      stub_order_patch(["Keep one"], ["Keep one", "Add two"], ["Keep one", "Add two"])
-
-      {out, _err, code} =
-        capture(fn ->
-          Workspace.run(["standing-order", "add", "Add two", "--workspace", "default"])
-        end)
-
-      assert code == 0
-      assert out =~ "2 standing order(s)"
-      assert out =~ "Add two"
-    end
-
-    test "rm removes by 1-based index" do
-      stub_order_patch(["a", "b", "c"], ["a", "c"], ["a", "c"])
-
-      {out, _err, code} =
-        capture(fn -> Workspace.run(["standing-order", "rm", "2", "--workspace", "default"]) end)
-
-      assert code == 0
-      assert out =~ "2 standing order(s)"
-    end
-
-    test "rm removes by exact text match" do
-      stub_order_patch(["keep", "drop me"], ["keep"], ["keep"])
-
-      {out, _err, code} =
-        capture(fn ->
-          Workspace.run(["standing-order", "rm", "drop me", "--workspace", "default"])
-        end)
-
-      assert code == 0
-      assert out =~ "1 standing order(s)"
-    end
-
-    test "rm rejects an out-of-range index" do
-      ws_with_orders(["only one"])
-
-      {_out, err, code} =
-        capture(fn -> Workspace.run(["standing-order", "rm", "9", "--workspace", "default"]) end)
-
-      assert code == 1
-      assert err =~ "out of range"
-    end
-
-    test "rm errors when there are no orders" do
-      ws_with_orders([])
-
-      {_out, err, code} =
-        capture(fn -> Workspace.run(["standing-order", "rm", "1", "--workspace", "default"]) end)
-
-      assert code == 1
-      assert err =~ "no standing orders"
-    end
   end
 
   describe "standing-order --repo (canonical) and --rig (deprecated alias)" do
@@ -480,34 +731,73 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       })
     end
 
-    defp stub_repo_order_patch(repo_paths, expected_patch, returned_repo_paths) do
-      stub_routes([
-        {{"get", "/api/workspaces"},
-         {%{
-            "data" => [
-              %{
-                "id" => "ws-1",
-                "name" => "default",
-                "prefix" => "bd",
-                "config" => %{"repo_paths" => repo_paths}
-              }
-            ]
-          }, 200}},
-        {{"patch", "/api/workspaces/ws-1/config"},
-         fn conn ->
-           {:ok, body, conn} = Plug.Conn.read_body(conn)
-           decoded = Jason.decode!(body)
-           assert decoded["patch"]["repo_paths"] == expected_patch
+    test "add and rm carry the repo, and --rig is the same alias" do
+      stub_order_write("/standing_orders", %{"text" => "Add two", "repo" => "client"}, 200, %{
+        "standing_orders" => ["Keep one", "Add two"],
+        "repo" => "client"
+      })
 
-           conn
-           |> Plug.Conn.put_status(200)
-           |> Req.Test.json(%{
-             "id" => "ws-1",
-             "name" => "default",
-             "config" => %{"repo_paths" => returned_repo_paths}
-           })
-         end}
-      ])
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "add",
+            "Add two",
+            "--workspace",
+            "default",
+            "--rig",
+            "client"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "2 standing order(s)"
+
+      stub_order_write("/standing_orders/remove", %{"target" => "1", "repo" => "client"}, 200, %{
+        "standing_orders" => [],
+        "repo" => "client"
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "rm",
+            "1",
+            "--workspace",
+            "default",
+            "--repo",
+            "client"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "0 standing order(s)"
+    end
+
+    test "an unregistered repo is the server's 404, surfaced" do
+      stub_order_write(
+        "/standing_orders",
+        %{"text" => "text", "repo" => "nope"},
+        404,
+        %{"error" => %{"type" => "not_found", "message" => "no repo named \"nope\" registered"}}
+      )
+
+      {_out, err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "add",
+            "text",
+            "--workspace",
+            "default",
+            "--rig",
+            "nope"
+          ])
+        end)
+
+      assert code != 0
+      assert err =~ "no repo named"
     end
 
     test "ls lists a repo's own orders, not the workspace-global ones" do
@@ -534,118 +824,6 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
 
       assert code == 0
       assert out =~ "(no standing orders"
-    end
-
-    test "add appends onto a map-shaped repo entry, preserving its path" do
-      stub_repo_order_patch(
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one"]}},
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}},
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}}
-      )
-
-      {out, _err, code} =
-        capture(fn ->
-          Workspace.run([
-            "standing-order",
-            "add",
-            "Add two",
-            "--workspace",
-            "default",
-            "--rig",
-            "client"
-          ])
-        end)
-
-      assert code == 0
-      assert out =~ "2 standing order(s)"
-    end
-
-    test "add on a bare-string repo entry upgrades it to a map, keeping the path" do
-      stub_repo_order_patch(
-        %{"server" => "/x/server"},
-        %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}},
-        %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}}
-      )
-
-      {out, _err, code} =
-        capture(fn ->
-          Workspace.run([
-            "standing-order",
-            "add",
-            "First order",
-            "--workspace",
-            "default",
-            "--rig",
-            "server"
-          ])
-        end)
-
-      assert code == 0
-      assert out =~ "1 standing order(s)"
-    end
-
-    test "add errors when the named repo isn't registered in repo_paths" do
-      ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
-
-      {_out, err, code} =
-        capture(fn ->
-          Workspace.run([
-            "standing-order",
-            "add",
-            "text",
-            "--workspace",
-            "default",
-            "--rig",
-            "nope"
-          ])
-        end)
-
-      assert code == 1
-      assert err =~ "no repo named"
-    end
-
-    test "rm removes by index scoped to the repo, leaving the global list untouched" do
-      stub_repo_order_patch(
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a", "b"]}},
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}},
-        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}}
-      )
-
-      {out, _err, code} =
-        capture(fn ->
-          Workspace.run([
-            "standing-order",
-            "rm",
-            "2",
-            "--workspace",
-            "default",
-            "--rig",
-            "client"
-          ])
-        end)
-
-      assert code == 0
-      assert out =~ "1 standing order(s)"
-    end
-
-    test "rm errors when the repo has no orders" do
-      ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
-
-      {_out, err, code} =
-        capture(fn ->
-          Workspace.run([
-            "standing-order",
-            "rm",
-            "1",
-            "--workspace",
-            "default",
-            "--rig",
-            "client"
-          ])
-        end)
-
-      assert code == 1
-      assert err =~ "no standing orders"
     end
 
     test "ls accepts --repo as the canonical flag, same as --rig" do

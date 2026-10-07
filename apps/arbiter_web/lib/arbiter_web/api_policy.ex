@@ -189,10 +189,15 @@ defmodule ArbiterWeb.ApiPolicy do
     # ---- workspaces / tracker bridge --------------------------------------
     {:get, "/api/workspaces"} => :workspace_list,
     {:post, "/api/workspaces"} => :coordinator,
+    # The key reference is static documentation, readable by any token (the
+    # MCP `workspace_config_schema` tool is both-tier).
+    {:get, "/api/workspaces/config_schema"} => :any_token,
     {:get, "/api/workspaces/:id"} => :coordinator,
     {:patch, "/api/workspaces/:id"} => :coordinator,
     {:put, "/api/workspaces/:id"} => :coordinator,
     {:patch, "/api/workspaces/:id/config"} => :coordinator,
+    {:post, "/api/workspaces/:id/standing_orders"} => :coordinator,
+    {:post, "/api/workspaces/:id/standing_orders/remove"} => :coordinator,
     {:post, "/api/workspaces/:workspace_id/claim"} => :coordinator,
     {:get, "/api/workspaces/:workspace_id/sync/plan"} => :coordinator,
     {:post, "/api/workspaces/:workspace_id/sync"} => :coordinator,
