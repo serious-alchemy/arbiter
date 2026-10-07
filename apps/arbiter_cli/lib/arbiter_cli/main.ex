@@ -77,10 +77,18 @@ defmodule ArbiterCli.Main do
                                   [--metadata JSON]
       arb skill delete    <id|name> [--force]
 
-      arb account list                              [--provider p]
+      arb account list                              [--provider p] [--include-merged] [--include-deleted]
       arb account show    <ref>                      (uuid, provider:slug, or bare slug)
       arb account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
-      arb account attach  <workspace-id> <provider> <ref> [--share N]
+                          [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
+      arb account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
+                          [--max-concurrent N|none] [--threshold-mode flat|paced] [--throttle-threshold F]
+                          [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
+                          [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
+                          [--pace-exempt-priority 0..4|none] [--pace-exempt-threshold F]
+                          [--weekly-pace-exempt-threshold F] [--unset QUOTA_KEY]
+      arb account attach  <workspace> <provider> <ref> [--share N]
+      arb account detach  <workspace> <ref>
       arb account rotate  <ref> --kind k --env-var V (--secret S | --secret-file PATH | -)
       arb account merge   <from-ref> --into <into-ref>
 
