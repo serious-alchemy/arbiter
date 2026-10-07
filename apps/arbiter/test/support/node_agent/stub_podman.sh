@@ -23,6 +23,26 @@ case "$sub" in
       esac
       prev="$a"
     done
+    # RW11: stand in for the agent working in its shadow clone: write into the host
+    # directory mounted at /work/tree.
+    if [ -e "$D/edit" ]; then
+      prev=""
+      for a in "$@"; do
+        if [ "$prev" = "-v" ]; then
+          case "$a" in
+            *:/work/tree|*:/work/tree:*)
+              h="${a%%:*}"
+              echo "edited by the run" > "$h/edited.txt"
+              echo '{}' > "$h/.mcp.json" ;;
+            *:/work/config|*:/work/config:*)
+              h="${a%%:*}"
+              mkdir -p "$h/projects/-work-tree"
+              echo '{"type":"summary"}' > "$h/projects/-work-tree/s1.jsonl" ;;
+          esac
+        fi
+        prev="$a"
+      done
+    fi
     mode=$(cat "$D/mode" 2>/dev/null || echo lines)
     echo $$ > "$D/run.pid"
     case "$mode" in

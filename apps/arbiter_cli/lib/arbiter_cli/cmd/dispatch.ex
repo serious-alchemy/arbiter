@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>] [--force] [--over-cap] [--force-quota]`
+  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent] [--model <name>] [--force] [--over-cap] [--force-quota [--force-quota-reason <why>]]`
   — spawn a worker to work on a task.
 
   POSTs to `/api/workers/dispatch`. The server transitions the task to
@@ -10,20 +10,26 @@ defmodule ArbiterCli.Cmd.Dispatch do
 
   By default (no worker flag) the server reads the workspace's `agent.type`
   config and spawns that agent. Use `--provider` to force a specific provider,
-  or `--no-agent` to park the task for a manual attach instead.
+  or `--no-agent` to park the task for a manual attach instead. The flags are
+  sent to the server as given and judged there (`Arbiter.Worker.Dispatch.Params`,
+  the same rules as the MCP `worker_dispatch` tool): `--no-agent` together with a
+  provider flag is refused, nothing is spawned or parked; an unknown provider is
+  refused with the list of valid ones.
 
   Flags:
     --provider <p>   force the worker provider regardless of the workspace's
-                     `agent.type`. One of `claude` | `gemini` | `codex`.
+                     `agent.type`. One of `claude` | `gemini` | `codex` | `grok`.
                      `claude` requires the `claude` CLI on PATH (consumes
                      Anthropic credits); `gemini` requires the `agy`/`gemini`
                      CLI on PATH (consumes Google credits); `codex` requires the
-                     `codex` CLI on PATH (consumes OpenAI credits).
+                     `codex` CLI on PATH (consumes OpenAI credits); `grok` requires
+                     the `grok` CLI on PATH and a grok login.
     --with-claude    DEPRECATED alias for `--provider claude`.
     --with-gemini    DEPRECATED alias for `--provider gemini`.
     --no-agent       dry dispatch — move the task to `:active` for a hand
                      to attach, with no agent spawned. Preserves the old
-                     manual-attach path.
+                     manual-attach path. Cannot be combined with `--provider`,
+                     `--with-claude` or `--with-gemini`.
     --model <name>   one-shot override of the model the worker session runs
                      on (`haiku|sonnet|opus`). Takes precedence over the
                      workspace's `agent.config.model` and any routing rule
@@ -41,7 +47,10 @@ defmodule ArbiterCli.Cmd.Dispatch do
     --force-quota    ADVANCED: bypass the quota gate for this dispatch. Use only
                      when the gate holds despite judged-important work. Requires
                      explicit authorization; the quota gate protects against
-                     spend overage.
+                     spend overage. The bypass is recorded with who ran it.
+    --force-quota-reason <why>
+                     the rationale recorded with the `--force-quota` bypass.
+                     Requires `--force-quota`.
     --json           emit JSON instead of human-readable text
   """
 
@@ -56,12 +65,9 @@ defmodule ArbiterCli.Cmd.Dispatch do
     model: :string,
     force: :boolean,
     over_cap: :boolean,
-    force_quota: :boolean
+    force_quota: :boolean,
+    force_quota_reason: :string
   ]
-
-  # Mirrors Arbiter.Agents.valid_agent_types/0 (the arbiter app is only a
-  # test-time dep here, so the escript can't call it at runtime). Keep in sync.
-  @providers ~w(claude gemini codex)
 
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -85,37 +91,28 @@ defmodule ArbiterCli.Cmd.Dispatch do
           _ -> Output.die("dispatch takes at most two positional arguments: <task-id> [<repo>]")
         end
 
-      worker =
-        cond do
-          opts[:provider] -> %{"provider" => validate_provider(opts[:provider])}
-          # Deprecated aliases — map to the same `provider` wire field the server
-          # now understands so old scripts keep working unchanged.
-          opts[:with_claude] -> %{"with_claude" => true}
-          opts[:with_gemini] -> %{"with_gemini" => true}
-          opts[:no_agent] -> %{"no_agent" => true}
-          true -> %{}
-        end
-
       body =
         %{"task_id" => task_id}
-        |> Map.merge(worker)
+        # Every selector is sent as typed — the server rejects a combination it
+        # won't honour (`--no-agent` + `--provider`) instead of this client
+        # silently dropping one of them (D-W-5), and owns the provider list
+        # (D-W-10), so there is no client-side copy to drift.
+        |> maybe_put("provider", opts[:provider])
+        |> maybe_put("with_claude", if(opts[:with_claude], do: true))
+        |> maybe_put("with_gemini", if(opts[:with_gemini], do: true))
+        |> maybe_put("no_agent", if(opts[:no_agent], do: true))
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
         |> maybe_put("force", if(opts[:force], do: true))
         |> maybe_put("over_cap", if(opts[:over_cap], do: true))
         |> maybe_put("force_quota", if(opts[:force_quota], do: true))
+        |> maybe_put("force_quota_reason", opts[:force_quota_reason])
 
       case Client.post("/api/workers/dispatch", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end
     end
-  end
-
-  defp validate_provider(p) when p in @providers, do: p
-
-  defp validate_provider(p) do
-    Output.die("--provider must be one of #{Enum.join(@providers, " | ")} (got #{inspect(p)})")
   end
 
   defp maybe_put(map, _key, nil), do: map

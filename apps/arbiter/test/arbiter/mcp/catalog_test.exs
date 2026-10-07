@@ -116,9 +116,11 @@ defmodule Arbiter.MCP.CatalogTest do
       tool = Enum.find(Catalog.all(), &(&1.name == "worker_dispatch"))
       props = tool.input_schema["properties"]
 
-      assert props["provider"]["enum"] == ["claude", "gemini", "codex"]
-      # The deprecated boolean alias is still advertised so existing callers work.
+      # The schema enum is the handler's accepted set (D-W-10): grok included.
+      assert props["provider"]["enum"] == Arbiter.Agents.valid_agent_types()
+      # The deprecated boolean aliases are still advertised so existing callers work.
       assert props["with_claude"]["type"] == "boolean"
+      assert props["with_gemini"]["type"] == "boolean"
     end
   end
 

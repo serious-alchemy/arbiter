@@ -88,6 +88,10 @@ defmodule ArbiterWeb.Router do
 
     get("/agent/:file", NodeController, :agent)
     get("/files/:sha", NodeController, :file)
+    # RW11 checkout sync (docs/design/remote-workers.md §9).
+    get("/runs/:run/seed.bundle", NodeCheckoutController, :seed)
+    put("/runs/:run/checkout", NodeCheckoutController, :checkout)
+    put("/runs/:run/transcripts", NodeCheckoutController, :transcripts)
   end
 
   scope "/", ArbiterWeb do
