@@ -104,10 +104,11 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
 
       # The probe is the CLI's own version flag, last on the argv: no prompt is
       # ever answered, so no model tokens are spent.
-      invocations = calls(sandbox) |> String.split("\n", trim: true)
-
-      assert length(invocations) == 4
-      assert Enum.all?(invocations, &String.ends_with?(&1, " --version"))
+      # (a multi-line argv element spans several log lines, so count the ends)
+      assert calls(sandbox)
+             |> String.split("\n", trim: true)
+             |> Enum.count(&String.ends_with?(&1, " --version")) ==
+               4
     end
 
     test "a provider no workspace uses, or that is paused, is n/a and never spawned" do
@@ -183,7 +184,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       File.rm!(Path.join(sandbox.bin, "codex"))
       # a real `codex` further down PATH must not answer for the missing stub
       prev = System.get_env("PATH")
-      System.put_env("PATH", sandbox.bin)
+      System.put_env("PATH", sandbox.bin <> ":/usr/bin:/bin")
       on_exit(fn -> System.put_env("PATH", prev) end)
 
       report = run_canary!()
@@ -192,6 +193,17 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       assert %{status: "fail", spawned: false, error: error} = provider(report, "codex")
       assert error =~ "codex"
       assert %{status: "ok"} = provider(report, "claude")
+    end
+
+    test "an agent that never stops printing is cut off at the output cap" do
+      provision!(%{"claude" => "exec yes 'x'\n"})
+      workspace!(["claude"])
+
+      report = run_canary!(timeout_ms: 20_000)
+
+      refute report.ok
+      assert %{status: "fail", spawned: true, error: error} = provider(report, "claude")
+      assert error =~ "more than 65536 bytes"
     end
 
     test "an agent that never answers is killed and reported, within the timeout" do
@@ -249,12 +261,10 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
 
       assert [scope_run] = scope_runs
       assert scope_run =~ "MemoryMax=512M"
-      [_, unit] = Regex.run(~r/--unit=(arb-run-canary-claude-[0-9a-f]+)/, scope_run)
+      [_, unit] = Regex.run(~r/--unit=(arb-run-canary-claude-[0-9a-f-]+)/, scope_run)
 
-      assert fakes.ctl_log
-             |> File.read!()
-             |> String.split("\n", trim: true)
-             |> Enum.member?("--user stop #{unit}.scope")
+      ctl = fakes.ctl_log |> File.read!() |> String.split("\n", trim: true)
+      assert "--user stop #{unit}.scope" in ctl, inspect(ctl)
     end
   end
 
@@ -272,8 +282,11 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       })
 
       first = Task.async(fn -> SpawnCanary.run() end)
-      # blocks until the first canary's agent is running
-      assert File.read!(up) == "up\n"
+      # the stub announces itself on the fifo once the first canary's agent runs
+      reader =
+        Port.open({:spawn_executable, System.find_executable("cat")}, [:binary, args: [up]])
+
+      assert_receive {^reader, {:data, "up\n"}}, 10_000
 
       assert SpawnCanary.run() == {:error, :busy}
 
@@ -281,6 +294,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       assert {:ok, %{ok: true}} = Task.await(first, 10_000)
 
       # the guard is released
+      write_stubs!(sandbox, %{"claude" => version_stub(sandbox.log)})
       assert {:ok, _} = SpawnCanary.run()
     end
   end
@@ -310,7 +324,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       *printf*) printf '$'; exit 0 ;;
       *memory.max*) echo 536870912; exit 0 ;;
     esac
-    while [ "$1" != "env" ]; do shift; done
+    while [ $# -gt 0 ] && [ "$1" != "env" ]; do shift; done
     exec "$@"
     """)
 
