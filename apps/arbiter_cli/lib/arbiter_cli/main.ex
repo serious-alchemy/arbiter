@@ -9,23 +9,31 @@ defmodule ArbiterCli.Main do
       arb ticket list     [--state ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
       arb ticket show     <id>
       arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
+                                  [--acceptance a | --acceptance-file PATH]
+                                  [--notes t] [--qa-notes t] [--deployment-notes t]
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
-                                  [--auto-close]
+                                  [--auto-close] [--tracker-ref R] [--tracker-type T]
+                                  [--tracker-context-type T] [--tracker-context-ref R]
                                   [--require-provider p | --exclude-provider p]
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
-                                  [--description d] [--append-notes text]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
+                                  [--description d] [--notes t | --append-notes t]
+                                  [--acceptance a | --acceptance-file PATH]
                                   [--qa-notes text] [--deployment-notes text]
-                                  [--pr-body text]
+                                  [--pr-body text] [--pr-ref R] [--target-branch B]
+                                  [--tracker-ref R] [--tracker-type T]
+                                  [--tracker-context-type T] [--tracker-context-ref R]
+                                  [--auto-close | --no-auto-close]
                                   [--require-provider p | --exclude-provider p |
                                    --clear-provider-constraint]
-      arb ticket close    <id> [--reason ...]
+                                  ("" clears a field; `arb ticket update --help` lists all)
+      arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
                                   for a ticket in state verifying
       arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<reasoning>"
                                   [--gate review_gate|notes_gate|commit_gate] [--round N]
-                                  [--actor <who>]
+                                  [--fix-round-attempt N]
                                   record your answer to a gate escalation — what the
                                   coordinator decided and why (bd-4qjl0q)
       arb ticket claim    <ref> [--force] [--repo <repo>]

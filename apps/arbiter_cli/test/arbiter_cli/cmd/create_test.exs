@@ -720,4 +720,77 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert exit_code == 1
     assert err =~ "invalid --difficulty"
   end
+
+  # ---- P-08: flag parity with MCP / REST (D-T-8) ---------------------------
+
+  defp posted_body(argv) do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-010", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Create.run(["X" | argv]) end)
+    assert_received {:posted, body}
+    body
+  end
+
+  for {flag, key, value} <- [
+        {"--notes", "notes", "n"},
+        {"--qa-notes", "qa_notes", "q"},
+        {"--deployment-notes", "deployment_notes", "d"},
+        {"--tracker-type", "tracker_type", "github"},
+        {"--tracker-context-type", "tracker_context_type", "jira"},
+        {"--tracker-context-ref", "tracker_context_ref", "PROJ-1"}
+      ] do
+    test "#{flag} is sent as #{key}" do
+      body = posted_body([unquote(flag), unquote(value)])
+      assert body[unquote(key)] == unquote(value)
+    end
+  end
+
+  test "--acceptance-file reads the acceptance criteria from a file" do
+    path = Path.join(System.tmp_dir!(), "ac-#{System.unique_integer([:positive])}.md")
+    File.write!(path, "1. it works\n2. it is tested\n")
+    on_exit(fn -> File.rm(path) end)
+
+    assert posted_body(["--acceptance-file", path])["acceptance"] ==
+             "1. it works\n2. it is tested\n"
+  end
+
+  test "--acceptance and --acceptance-file together are refused before posting" do
+    {_out, err, exit_code} =
+      capture(fn -> Create.run(["X", "--acceptance", "a", "--acceptance-file", "/nope"]) end)
+
+    assert exit_code == 1
+    assert err =~ "--acceptance"
+  end
+
+  test "an unreadable --acceptance-file is refused before posting" do
+    {_out, err, exit_code} =
+      capture(fn -> Create.run(["X", "--acceptance-file", "/nonexistent/ac.md"]) end)
+
+    assert exit_code == 1
+    assert err =~ "/nonexistent/ac.md"
+  end
+
+  test "--help lists every flag create accepts" do
+    {out, _err, 0} = capture(fn -> Create.run(["--help"]) end)
+
+    for flag <-
+          ~w(--description --acceptance --acceptance-file --notes --qa-notes --deployment-notes
+             --priority --difficulty --type --deps --labels --tracker-ref --tracker-type
+             --tracker-context-type --tracker-context-ref --no-tracker --local-only
+             --target-branch --repo --parent --ticket-only --auto-close --verify-after-deploy
+             --force --require-provider --exclude-provider) do
+      assert out =~ flag, "create --help does not list #{flag}"
+    end
+  end
 end

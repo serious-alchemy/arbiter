@@ -10,18 +10,27 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--type ...] [--deps id1,id2] [--labels a,b]
                           [--parent <parent-id>] [--auto-close]
                           [--repo <repo_paths key>]
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
-                          [--description d]
-                          [--append-notes text] [--qa-notes text]
-                          [--deployment-notes text] [--pr-body text]
-      arb ticket close    <id> [--reason ...]
+                          [--acceptance a | --acceptance-file PATH]
+                          [--notes t] [--qa-notes t] [--deployment-notes t]
+                          [--tracker-ref R] [--tracker-type T]
+                          [--tracker-context-type T] [--tracker-context-ref R]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
+                          [--description d] [--notes t | --append-notes t]
+                          [--acceptance a | --acceptance-file PATH]
+                          [--qa-notes text] [--deployment-notes text]
+                          [--pr-body text] [--pr-ref R] [--target-branch B]
+                          [--tracker-ref R] [--tracker-type T]
+                          [--tracker-context-type T] [--tracker-context-ref R]
+                          [--auto-close | --no-auto-close]
+                          ("" clears a field)
+      arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>
       arb ticket promote  <id> [--waive REASON]
       arb ticket demote   <id>
       arb ticket rank     <id> --top | --bottom | --before <id> | --after <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
       arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"
-                          [--gate g] [--round N] [--actor who]
+                          [--gate g] [--round N] [--fix-round-attempt N]
                           (alias: arb review resolve — bd-4qjl0q)
       arb ticket handoff  <id> --note "<what the operator has to do>"
       arb ticket handback <id> [--note "<what changed>"]
