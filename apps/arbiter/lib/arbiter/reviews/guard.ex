@@ -51,7 +51,12 @@ defmodule Arbiter.Reviews.Guard do
     explicit = string(params, "automation")
 
     {mode, source} =
-      ReviewAutomation.resolve_with_source(config, string(params, "pr_author"), repo_name, explicit)
+      ReviewAutomation.resolve_with_source(
+        config,
+        string(params, "pr_author"),
+        repo_name,
+        explicit
+      )
 
     Logger.info(
       "worker_review(#{task.id}): resolved review_automation=#{mode} (source: #{source})" <>

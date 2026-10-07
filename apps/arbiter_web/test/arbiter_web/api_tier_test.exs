@@ -343,7 +343,8 @@ defmodule ArbiterWeb.ApiTierTest do
 
       cases = [
         {"own child, descriptive fields",
-         %{"title" => "a", "description" => "d", "parent_id" => ctx.task.id, "priority" => 3}, true},
+         %{"title" => "a", "description" => "d", "parent_id" => ctx.task.id, "priority" => 3},
+         true},
         {"no parent", %{"title" => "a"}, false},
         {"sibling as parent", %{"title" => "a", "parent_id" => ctx.sibling.id}, false},
         {"extra repo", %{"title" => "a", "parent_id" => ctx.task.id, "repo" => "r"}, false},

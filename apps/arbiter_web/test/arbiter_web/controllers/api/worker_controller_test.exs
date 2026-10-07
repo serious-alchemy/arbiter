@@ -500,7 +500,10 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert reloaded.review_automation == nil
     end
 
-    test "an explicit automation: off refuses, and force: true overrides it", %{conn: conn, ws: ws} do
+    test "an explicit automation: off refuses, and force: true overrides it", %{
+      conn: conn,
+      ws: ws
+    } do
       {:ok, task} = Ash.create(Issue, %{title: "explicit off", workspace_id: ws.id})
 
       refused =

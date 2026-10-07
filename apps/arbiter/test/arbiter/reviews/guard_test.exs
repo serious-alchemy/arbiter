@@ -56,7 +56,9 @@ defmodule Arbiter.Reviews.GuardTest do
   describe "persist? — never write a mode nobody configured" do
     test "no review_automation config at all: resolves :flag but does not persist" do
       task = task_in(%{})
-      assert {:ok, %{mode: :flag, source: :default, persist?: false}} = Guard.check(task, %{}, false)
+
+      assert {:ok, %{mode: :flag, source: :default, persist?: false}} =
+               Guard.check(task, %{}, false)
     end
 
     test "a task with no workspace resolves :flag and does not persist" do

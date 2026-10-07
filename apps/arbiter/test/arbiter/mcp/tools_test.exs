@@ -1062,7 +1062,9 @@ defmodule Arbiter.MCP.ToolsTest do
     test "must name a parent — and it must be its own task", ctx do
       {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
 
-      assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, %{"title" => "orphan"})
+      assert {:error, {:unauthorized, msg}} =
+               Tools.task_create(ctx.worker, %{"title" => "orphan"})
+
       assert msg =~ "own task"
 
       assert {:error, {:unauthorized, _}} =
@@ -1093,7 +1095,7 @@ defmodule Arbiter.MCP.ToolsTest do
           ] do
         args = Map.merge(%{"title" => "x", "parent_id" => ctx.task.id}, extra)
         assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, args)
-        assert msg =~ (extra |> Map.keys() |> hd())
+        assert msg =~ extra |> Map.keys() |> hd()
       end
     end
 
@@ -6808,7 +6810,10 @@ defmodule Arbiter.MCP.ToolsTest do
       end)
 
       worker = %{ctx.worker | task_id: task.id}
-      assert {:ok, %{task_id: id, via: "watchdog"}} = Tools.ci_rerun(worker, %{"mode" => "all_jobs"})
+
+      assert {:ok, %{task_id: id, via: "watchdog"}} =
+               Tools.ci_rerun(worker, %{"mode" => "all_jobs"})
+
       assert id == task.id
       assert [{"!mcp-own-ci", %{mode: :all_jobs}} | _] = StubMerger.ci_reruns()
     end
