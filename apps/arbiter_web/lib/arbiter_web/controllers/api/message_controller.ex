@@ -114,7 +114,9 @@ defmodule ArbiterWeb.Api.MessageController do
   end
 
   # A coordinator likewise sends as itself: `from_ref` is derived from the
-  # token, never asserted by the caller.
+  # token, never asserted by the caller. The literal "coordinator" (not the
+  # operator-flavoured `Params.actor_label/1`) is deliberate: it is the mailbox
+  # address coordinator-bound mail and directive matching key on.
   defp pin_sender(attrs, %Arbiter.MCP.Scope{tier: :worker} = scope),
     do: pin_worker_sender(attrs, scope)
 
@@ -220,20 +222,22 @@ defmodule ArbiterWeb.Api.MessageController do
   def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
     opts = [reader: reader_ref(params)]
 
-    {:ok, deleted_read, deleted_unread, remaining_unread} =
-      if params["all"] in ["true", true] do
-        Message.clear_all(to_ref, opts)
-      else
-        Message.clear_read(to_ref, opts)
-      end
+    with {:ok, all?} <- params |> Params.fetch_bool("all", false) |> Params.to_rest() do
+      {:ok, deleted_read, deleted_unread, remaining_unread} =
+        if all? do
+          Message.clear_all(to_ref, opts)
+        else
+          Message.clear_read(to_ref, opts)
+        end
 
-    json(conn, %{
-      data: %{
-        deleted_read: deleted_read,
-        deleted_unread: deleted_unread,
-        remaining_unread: remaining_unread
-      }
-    })
+      json(conn, %{
+        data: %{
+          deleted_read: deleted_read,
+          deleted_unread: deleted_unread,
+          remaining_unread: remaining_unread
+        }
+      })
+    end
   end
 
   def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}

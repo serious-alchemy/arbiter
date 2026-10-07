@@ -361,18 +361,21 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   defp rank_args(params) do
-    forms =
-      [
-        params["top"] == true && %{position: :top},
-        params["bottom"] == true && %{position: :bottom},
-        is_binary(params["before_id"]) && %{before_id: params["before_id"]},
-        is_binary(params["after_id"]) && %{after_id: params["after_id"]}
-      ]
-      |> Enum.reject(&(&1 == false))
+    with {:ok, top?} <- params |> Params.fetch_bool("top", false) |> Params.to_rest(),
+         {:ok, bottom?} <- params |> Params.fetch_bool("bottom", false) |> Params.to_rest() do
+      forms =
+        [
+          top? && %{position: :top},
+          bottom? && %{position: :bottom},
+          is_binary(params["before_id"]) && %{before_id: params["before_id"]},
+          is_binary(params["after_id"]) && %{after_id: params["after_id"]}
+        ]
+        |> Enum.reject(&(&1 == false))
 
-    case forms do
-      [form] -> {:ok, form}
-      _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+      case forms do
+        [form] -> {:ok, form}
+        _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+      end
     end
   end
 

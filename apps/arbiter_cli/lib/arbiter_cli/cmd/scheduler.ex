@@ -63,7 +63,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   defp json_flag(argv), do: if("--json" in argv, do: ["--json"], else: [])
 
   defp pause(mode) do
-    case Client.post("/api/scheduler/pause", %{"surface" => "cli"}) do
+    case Client.post("/api/scheduler/pause", %{}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -79,7 +79,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   end
 
   defp resume(mode) do
-    case Client.post("/api/scheduler/resume", %{"surface" => "cli"}) do
+    case Client.post("/api/scheduler/resume", %{}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))

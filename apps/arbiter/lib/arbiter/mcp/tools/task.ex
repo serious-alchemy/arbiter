@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.Dependencies
@@ -528,18 +529,21 @@ defmodule Arbiter.MCP.Tools.Task do
   end
 
   defp rank_args(args) do
-    forms =
-      [
-        args["top"] == true && %{position: :top},
-        args["bottom"] == true && %{position: :bottom},
-        is_binary(args["before_id"]) && %{before_id: args["before_id"]},
-        is_binary(args["after_id"]) && %{after_id: args["after_id"]}
-      ]
-      |> Enum.reject(&(&1 == false))
+    with {:ok, top?} <- Params.fetch_bool(args, "top", false),
+         {:ok, bottom?} <- Params.fetch_bool(args, "bottom", false) do
+      forms =
+        [
+          top? && %{position: :top},
+          bottom? && %{position: :bottom},
+          is_binary(args["before_id"]) && %{before_id: args["before_id"]},
+          is_binary(args["after_id"]) && %{after_id: args["after_id"]}
+        ]
+        |> Enum.reject(&(&1 == false))
 
-    case forms do
-      [form] -> {:ok, form}
-      _ -> {:error, {:invalid, "give exactly one of: top, bottom, before_id, after_id"}}
+      case forms do
+        [form] -> {:ok, form}
+        _ -> {:error, {:invalid, "give exactly one of: top, bottom, before_id, after_id"}}
+      end
     end
   end
 

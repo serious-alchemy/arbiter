@@ -307,7 +307,7 @@ defmodule Arbiter.MCP.Tools do
     alias Arbiter.ReviewGate.Round
 
     with {:ok, task_id} <- require_string(args, "task_id"),
-         {:ok, limit} <- optional_positive_integer(args, "limit") do
+         {:ok, limit} <- optional_bounded_limit(args, "limit", 200) do
       all_rounds =
         Round
         |> Ash.Query.filter(task_id == ^task_id)

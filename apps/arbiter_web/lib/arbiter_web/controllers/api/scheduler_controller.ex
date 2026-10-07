@@ -86,7 +86,9 @@ defmodule ArbiterWeb.Api.SchedulerController do
   end
 
   # The actor is derived from the token's scope (`coordinator`, ...) and the
-  # surface is the route's own; a caller-supplied `surface` is ignored.
+  # surface is the route's own; a caller-supplied `surface` is ignored (P-07:
+  # attribution is never caller-asserted; the CLI's former `surface: "cli"`
+  # claim was deliberately dropped rather than kept as unverified metadata).
   defp actor(conn, _params) do
     {Arbiter.PaperTrail.actor_label(conn.assigns[:mcp_scope]) || "unknown", "api"}
   end

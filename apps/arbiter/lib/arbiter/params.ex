@@ -23,7 +23,8 @@ defmodule Arbiter.Params do
     * `GET /api/usage/events` — 50 / 1000; `GET /api/usage` (summary) — none / 1000
     * `GET /api/loop/pending`, loop analysis — none / 500
     * MCP `notify_list` — 20 / 500; `worker_runs`, `external_review_list` — 20 / 200;
-      `run_log_list` — 200 / 1000; `usage_summarize` — none / 1000; `loop_pending_list` — none / 500
+      `run_log_list` — 200 / 1000; `usage_summarize` — none / 1000; `loop_pending_list` — none / 500;
+      `review_gate_rounds_list` — none / 200
 
   ## Attribution
 
