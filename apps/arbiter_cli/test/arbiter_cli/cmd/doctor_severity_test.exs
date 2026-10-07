@@ -574,7 +574,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
 
       assert Enum.sort(ids) == Enum.sort(Enum.uniq(ids))
       assert @expected_ids -- ids == []
-      assert ids -- (@expected_ids -- @spawn_ids) == []
+      assert ids -- (@expected_ids ++ @spawn_ids) == []
     end
 
     test "--json lists every check, n/a included" do
