@@ -147,7 +147,9 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
       assert {:ok, %RunSpec{checkout: nil}} = RunSpec.validate(spec())
 
       assert {:ok, %RunSpec{checkout: co}} =
-               RunSpec.validate(spec(%{"checkout" => %{"branch" => "arbiter/bd-abc", "base" => "main"}}))
+               RunSpec.validate(
+                 spec(%{"checkout" => %{"branch" => "arbiter/bd-abc", "base" => "main"}})
+               )
 
       assert co == %{branch: "arbiter/bd-abc", base: "main", interval_ms: 300_000}
 
@@ -168,7 +170,8 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
             %{"branch" => "b", "interval_s" => 100_000},
             %{"branch" => "b", "extra" => 1}
           ] do
-        assert {:error, {:refused, _}} = RunSpec.validate(spec(%{"checkout" => bad})), inspect(bad)
+        assert {:error, {:refused, _}} = RunSpec.validate(spec(%{"checkout" => bad})),
+               inspect(bad)
       end
     end
   end

@@ -432,7 +432,9 @@ defmodule Arbiter.Nodes.SessionTest do
       owner = self()
 
       task =
-        Task.async(fn -> Session.assign(pid, "run1", %{"run" => "run1"}, owner, checkout: ctx) end)
+        Task.async(fn ->
+          Session.assign(pid, "run1", %{"run" => "run1"}, owner, checkout: ctx)
+        end)
 
       assert_receive {:node_session, {:push, "assign", %{"run" => "run1"}}}
       Session.node_event(pid, "run.ready", %{"run" => "run1"})
@@ -440,7 +442,10 @@ defmodule Arbiter.Nodes.SessionTest do
       %{pid: pid, ctx: ctx}
     end
 
-    test "a run's checkout context is served only for a run placed with one", %{pid: pid, ctx: ctx} do
+    test "a run's checkout context is served only for a run placed with one", %{
+      pid: pid,
+      ctx: ctx
+    } do
       assert {:ok, ^ctx} = Session.checkout_context(pid, "run1")
       assert :error = Session.checkout_context(pid, "other")
     end
@@ -452,7 +457,9 @@ defmodule Arbiter.Nodes.SessionTest do
       assert {:ok, %{head: "abc"}} = Task.await(waiter)
     end
 
-    test "a collect for a run that is gone is an error, and releasing the run answers waiters", %{pid: pid} do
+    test "a collect for a run that is gone is an error, and releasing the run answers waiters", %{
+      pid: pid
+    } do
       assert {:error, :unknown_run} = Session.collect(pid, "nope", :checkout, 1_000)
 
       waiter = Task.async(fn -> Session.collect(pid, "run1", :checkout, 5_000) end)

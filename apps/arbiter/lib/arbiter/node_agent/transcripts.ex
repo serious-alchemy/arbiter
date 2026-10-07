@@ -11,7 +11,8 @@ defmodule Arbiter.NodeAgent.Transcripts do
   alias Arbiter.NodeAgent.Config
 
   @doc "Tar `config_dir`'s transcripts into `dest`. `{:ok, %{files, bytes}}`."
-  @spec pack(Path.t(), Path.t()) :: {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
+  @spec pack(Path.t(), Path.t()) ::
+          {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
   def pack(config_dir, dest) do
     files = config_dir |> Path.join("projects") |> walk() |> Enum.sort()
 

@@ -22,7 +22,13 @@ defmodule Arbiter.Nodes.TranscriptsTest do
           :ok = :erl_tar.add(tar, {String.to_charlist(name), bin}, [])
 
         :dir ->
-          :ok = :erl_tar.add(tar, String.to_charlist(Path.join(dir, "stage-dir")), String.to_charlist(name), [])
+          :ok =
+            :erl_tar.add(
+              tar,
+              String.to_charlist(Path.join(dir, "stage-dir")),
+              String.to_charlist(name),
+              []
+            )
 
         {:symlink, target} ->
           link = Path.join(dir, "lnk-#{System.unique_integer([:positive])}")
@@ -74,8 +80,16 @@ defmodule Arbiter.Nodes.TranscriptsTest do
     refute File.exists?(Path.join(dest, "settings.json"))
   end
 
-  test "an absolute or .. path rejects the whole archive and writes nothing", %{tmp_dir: tmp, dest: dest} do
-    for bad <- ["/etc/evil.jsonl", "../escape.jsonl", "projects/../../escape.jsonl", "projects/a/../../../x.jsonl"] do
+  test "an absolute or .. path rejects the whole archive and writes nothing", %{
+    tmp_dir: tmp,
+    dest: dest
+  } do
+    for bad <- [
+          "/etc/evil.jsonl",
+          "../escape.jsonl",
+          "projects/../../escape.jsonl",
+          "projects/a/../../../x.jsonl"
+        ] do
       tar = tar!(tmp, [{"projects/p/ok.jsonl", "x\n"}, {bad, "evil"}])
       assert {:error, {:unsafe_path, _}} = Transcripts.extract(tar, dest), bad
     end
@@ -85,13 +99,25 @@ defmodule Arbiter.Nodes.TranscriptsTest do
   end
 
   test "a symlink entry rejects the whole archive", %{tmp_dir: tmp, dest: dest} do
-    tar = tar!(tmp, [{"projects/p/ok.jsonl", "x\n"}, {"projects/p/link.jsonl", {:symlink, "/etc/passwd"}}])
-    assert {:error, {:unsafe_entry, "projects/p/link.jsonl", _type}} = Transcripts.extract(tar, dest)
+    tar =
+      tar!(tmp, [
+        {"projects/p/ok.jsonl", "x\n"},
+        {"projects/p/link.jsonl", {:symlink, "/etc/passwd"}}
+      ])
+
+    assert {:error, {:unsafe_entry, "projects/p/link.jsonl", _type}} =
+             Transcripts.extract(tar, dest)
+
     assert File.ls!(dest) == []
   end
 
   test "byte caps: per file and in total", %{tmp_dir: tmp, dest: dest} do
-    tar = tar!(tmp, [{"projects/p/a.jsonl", String.duplicate("x", 600)}, {"projects/p/b.jsonl", String.duplicate("x", 600)}])
+    tar =
+      tar!(tmp, [
+        {"projects/p/a.jsonl", String.duplicate("x", 600)},
+        {"projects/p/b.jsonl", String.duplicate("x", 600)}
+      ])
+
     assert {:error, {:too_large, :file, _}} = Transcripts.extract(tar, dest, max_file_bytes: 500)
     assert {:error, {:too_large, :total, _}} = Transcripts.extract(tar, dest, max_bytes: 1_000)
     assert {:ok, %{files: 2}} = Transcripts.extract(tar, dest, max_bytes: 2_000)
@@ -118,7 +144,10 @@ defmodule Arbiter.Nodes.TranscriptsTest do
     assert {:error, {:bad_archive, _}} = Transcripts.extract(path, dest)
   end
 
-  test "pack/2 builds what extract/2 takes: jsonl under projects/ only, no links", %{tmp_dir: tmp, dest: dest} do
+  test "pack/2 builds what extract/2 takes: jsonl under projects/ only, no links", %{
+    tmp_dir: tmp,
+    dest: dest
+  } do
     src = Path.join(tmp, "node-config")
     File.mkdir_p!(Path.join(src, "projects/p/s/subagents"))
     File.write!(Path.join(src, "projects/p/s.jsonl"), "a\n")

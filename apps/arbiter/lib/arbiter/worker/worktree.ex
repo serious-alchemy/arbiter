@@ -970,7 +970,9 @@ defmodule Arbiter.Worker.Worktree do
   # list: they differ per repo, so `seed_compiled_deps/3` records the ones it
   # copied in the worktree's own git dir and `seeded_entry?/3` consults that.
   @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/ .arbiter .arbiter/ .run-server.sh)
-  @excluded_checkout_roots @ignored_artifact_paths |> Enum.map(&String.trim_trailing(&1, "/")) |> Enum.uniq()
+  @excluded_checkout_roots @ignored_artifact_paths
+                           |> Enum.map(&String.trim_trailing(&1, "/"))
+                           |> Enum.uniq()
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes

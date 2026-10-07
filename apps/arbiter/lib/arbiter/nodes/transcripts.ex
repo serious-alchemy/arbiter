@@ -126,7 +126,8 @@ defmodule Arbiter.Nodes.Transcripts do
     end
   end
 
-  defp wanted?(path), do: String.starts_with?(path, "projects/") and String.ends_with?(path, ".jsonl")
+  defp wanted?(path),
+    do: String.starts_with?(path, "projects/") and String.ends_with?(path, ".jsonl")
 
   # ---- writing -----------------------------------------------------------------------
 
@@ -163,7 +164,10 @@ defmodule Arbiter.Nodes.Transcripts do
     try do
       names = Enum.map(plan.files, &String.to_charlist/1)
 
-      case :erl_tar.extract(String.to_charlist(tar_path), [{:cwd, String.to_charlist(staging)}, {:files, names}] ++ compression()) do
+      case :erl_tar.extract(
+             String.to_charlist(tar_path),
+             [{:cwd, String.to_charlist(staging)}, {:files, names}] ++ compression()
+           ) do
         :ok -> place(staging, dest, plan)
         {:error, _} -> extract_plain(tar_path, staging, dest, plan, names)
       end
@@ -173,7 +177,10 @@ defmodule Arbiter.Nodes.Transcripts do
   end
 
   defp extract_plain(tar_path, staging, dest, plan, names) do
-    case :erl_tar.extract(String.to_charlist(tar_path), [{:cwd, String.to_charlist(staging)}, {:files, names}]) do
+    case :erl_tar.extract(String.to_charlist(tar_path), [
+           {:cwd, String.to_charlist(staging)},
+           {:files, names}
+         ]) do
       :ok -> place(staging, dest, plan)
       {:error, reason} -> {:error, {:bad_archive, inspect(reason)}}
     end

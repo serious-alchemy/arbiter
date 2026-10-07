@@ -180,7 +180,8 @@ defmodule Arbiter.Nodes.CheckoutTest do
       refute File.exists?(marker)
     end
 
-    test "strips excluded paths from the snapshot on the primary, whatever the node excluded", c do
+    test "strips excluded paths from the snapshot on the primary, whatever the node excluded",
+         c do
       %{shadow: shadow, info: info} = seed!(c)
       # a compromised node edits its own exclude file, so the node-side filter hides nothing
       File.write!(Path.join(shadow, ".git/info/exclude"), "")
@@ -229,7 +230,11 @@ defmodule Arbiter.Nodes.CheckoutTest do
     end
 
     test "rejects a tree that carries .git/config or hooks (fsck is the gate)", c do
-      for parts <- [[".git", "config"], [".git", "hooks", "pre-commit"], ["sub", ".git", "config"]] do
+      for parts <- [
+            [".git", "config"],
+            [".git", "hooks", "pre-commit"],
+            ["sub", ".git", "config"]
+          ] do
         bundle = evil_bundle!(c, parts)
         assert {:error, {:fsck, _}} = Checkout.ingest(bundle, c.ctx)
         # nothing landed in the home clone
@@ -264,7 +269,16 @@ defmodule Arbiter.Nodes.CheckoutTest do
       stray = raw_commit!(shadow, ["ok.txt"], "x\n", nil, c.tmp)
       git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", stray])
       bundle = Path.join(c.tmp, "stray.bundle")
-      git!(shadow, ["bundle", "create", bundle, @branch, "refs/arbiter/snapshot/#{@run}", "^" <> hd(info.known)])
+
+      git!(shadow, [
+        "bundle",
+        "create",
+        bundle,
+        @branch,
+        "refs/arbiter/snapshot/#{@run}",
+        "^" <> hd(info.known)
+      ])
+
       assert {:error, :snapshot_not_on_branch} = Checkout.ingest(bundle, c.ctx)
     end
 
@@ -272,7 +286,10 @@ defmodule Arbiter.Nodes.CheckoutTest do
       %{shadow: shadow, info: info} = seed!(c)
       File.write!(Path.join(shadow, "big.txt"), :crypto.strong_rand_bytes(20_000))
       {:ok, up} = package!(shadow, info, c.tmp)
-      assert {:error, {:too_large, _}} = Checkout.ingest(up.path, Map.put(c.ctx, :max_bytes, 5_000))
+
+      assert {:error, {:too_large, _}} =
+               Checkout.ingest(up.path, Map.put(c.ctx, :max_bytes, 5_000))
+
       assert {:ok, _} = Checkout.ingest(up.path, Map.put(c.ctx, :max_bytes, 5_000_000))
     end
 
@@ -280,7 +297,9 @@ defmodule Arbiter.Nodes.CheckoutTest do
       %{shadow: shadow, info: info} = seed!(c)
       for i <- 1..30, do: File.write!(Path.join(shadow, "f#{i}.txt"), "file #{i}\n")
       {:ok, up} = package!(shadow, info, c.tmp)
-      assert {:error, {:too_many_objects, _}} = Checkout.ingest(up.path, Map.put(c.ctx, :max_objects, 10))
+
+      assert {:error, {:too_many_objects, _}} =
+               Checkout.ingest(up.path, Map.put(c.ctx, :max_objects, 10))
     end
 
     test "a bundle whose prerequisites the primary lacks is refused", c do
@@ -299,7 +318,14 @@ defmodule Arbiter.Nodes.CheckoutTest do
   describe "vetoes" do
     test "a submodule (gitlink) in the snapshot is vetoed", c do
       %{shadow: shadow, info: info} = seed!(c)
-      git!(shadow, ["update-index", "--add", "--cacheinfo", "160000,#{String.duplicate("a", 40)},vendor/dep"])
+
+      git!(shadow, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000,#{String.duplicate("a", 40)},vendor/dep"
+      ])
+
       git!(shadow, ["commit", "-q", "-m", "submodule"])
       {:ok, up} = package!(shadow, info, c.tmp)
       assert {:error, {:veto, :submodule, _}} = Checkout.ingest(up.path, c.ctx)
@@ -308,19 +334,34 @@ defmodule Arbiter.Nodes.CheckoutTest do
 
     test ".gitmodules is vetoed", c do
       %{shadow: shadow, info: info} = seed!(c)
-      File.write!(Path.join(shadow, ".gitmodules"), "[submodule \"x\"]\n\tpath = x\n\turl = ../x\n")
+
+      File.write!(
+        Path.join(shadow, ".gitmodules"),
+        "[submodule \"x\"]\n\tpath = x\n\turl = ../x\n"
+      )
+
       {:ok, up} = package!(shadow, info, c.tmp)
       assert {:error, {:veto, :submodule, _}} = Checkout.ingest(up.path, c.ctx)
     end
 
     test "LFS: a filter=lfs attribute, or a pointer blob, is vetoed", c do
       %{shadow: shadow, info: info} = seed!(c)
-      File.write!(Path.join(shadow, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+
+      File.write!(
+        Path.join(shadow, ".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n"
+      )
+
       {:ok, up} = package!(shadow, info, c.tmp)
       assert {:error, {:veto, :lfs, _}} = Checkout.ingest(up.path, c.ctx)
 
       File.rm!(Path.join(shadow, ".gitattributes"))
-      File.write!(Path.join(shadow, "big.dat"), "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 12345\n")
+
+      File.write!(
+        Path.join(shadow, "big.dat"),
+        "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 12345\n"
+      )
+
       {:ok, up} = package!(shadow, info, c.tmp)
       assert {:error, {:veto, :lfs, _}} = Checkout.ingest(up.path, c.ctx)
     end
@@ -348,7 +389,8 @@ defmodule Arbiter.Nodes.CheckoutTest do
   end
 
   describe "checkpoint" do
-    test "a checkpoint is kept as a ref and can be restored into the home clone and a new shadow", c do
+    test "a checkpoint is kept as a ref and can be restored into the home clone and a new shadow",
+         c do
       %{shadow: shadow, info: info} = seed!(c)
       edit_shadow!(shadow)
       expected = modes(shadow)
@@ -376,7 +418,9 @@ defmodule Arbiter.Nodes.CheckoutTest do
 
   # A bundle whose snapshot commit (child of the run tip) holds `parts` as a path.
   defp evil_bundle!(c, parts) do
-    %{shadow: shadow, info: _} = seed!(%{c | node: Path.join(c.tmp, "evil-node-#{System.unique_integer([:positive])}")})
+    %{shadow: shadow, info: _} =
+      seed!(%{c | node: Path.join(c.tmp, "evil-node-#{System.unique_integer([:positive])}")})
+
     commit = raw_commit!(shadow, parts, "[core]\n\tfsmonitor = touch /tmp/pwned\n", c.base, c.tmp)
     git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", commit])
     bundle = Path.join(c.tmp, "evil-#{System.unique_integer([:positive])}.bundle")

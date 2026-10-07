@@ -31,7 +31,8 @@ defmodule Arbiter.Nodes.Checkout.Git do
   @spec run([String.t()], keyword()) :: result()
   def run(args, opts \\ []) when is_list(args) do
     prefix =
-      @safety ++ dir_flag("--git-dir", opts[:git_dir]) ++ dir_flag("--work-tree", opts[:work_tree])
+      @safety ++
+        dir_flag("--git-dir", opts[:git_dir]) ++ dir_flag("--work-tree", opts[:work_tree])
 
     env =
       [

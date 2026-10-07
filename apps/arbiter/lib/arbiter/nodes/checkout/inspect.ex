@@ -30,7 +30,8 @@ defmodule Arbiter.Nodes.Checkout.Inspect do
   def entries(_git_dir, nil), do: {:ok, %{}}
 
   def entries(git_dir, rev) do
-    with {:ok, out} <- Git.run(["ls-tree", "-r", "-z", "-l", "--full-tree", rev], git_dir: git_dir) do
+    with {:ok, out} <-
+           Git.run(["ls-tree", "-r", "-z", "-l", "--full-tree", rev], git_dir: git_dir) do
       {:ok, parse(out)}
     end
   end

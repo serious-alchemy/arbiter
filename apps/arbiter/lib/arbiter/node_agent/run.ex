@@ -379,7 +379,9 @@ defmodule Arbiter.NodeAgent.Run do
     end
   end
 
-  defp shadow(state), do: Path.join([run_config(state).node_home, "runs", state.spec.run, "worktree"])
+  defp shadow(state),
+    do: Path.join([run_config(state).node_home, "runs", state.spec.run, "worktree"])
+
   defp run_config(state), do: Keyword.fetch!(state.opts, :config)
 
   defp schedule_checkpoint(%{spec: %{checkout: nil}} = state), do: state

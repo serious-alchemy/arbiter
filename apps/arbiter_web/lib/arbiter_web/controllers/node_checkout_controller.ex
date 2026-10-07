@@ -131,7 +131,8 @@ defmodule ArbiterWeb.NodeCheckoutController do
     end
   end
 
-  defp ingest_file(conn, _pid, _run, %{config_dir: dir}, upload, :transcripts) when is_binary(dir) do
+  defp ingest_file(conn, _pid, _run, %{config_dir: dir}, upload, :transcripts)
+       when is_binary(dir) do
     case Transcripts.extract(upload, dir) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> reject(conn, reason)
@@ -142,7 +143,10 @@ defmodule ArbiterWeb.NodeCheckoutController do
     do: error(conn, 409, "This run has no config dir to extract transcripts into")
 
   defp ingest_file(conn, pid, run, ctx, upload, :checkout) do
-    ctx = ctx |> Map.take([:home, :branch, :base, :seeded_paths]) |> Map.merge(%{run: run, scratch: scratch()})
+    ctx =
+      ctx
+      |> Map.take([:home, :branch, :base, :seeded_paths])
+      |> Map.merge(%{run: run, scratch: scratch()})
 
     case Checkout.ingest(upload, ctx) do
       {:ok, result} ->
@@ -150,7 +154,10 @@ defmodule ArbiterWeb.NodeCheckoutController do
         json(conn, Map.take(result, [:head, :snapshot, :status_hash, :filtered]))
 
       {:error, reason} ->
-        Logger.warning("node checkout for run #{run} rejected: #{inspect(reason, limit: 5, printable_limit: 300)}")
+        Logger.warning(
+          "node checkout for run #{run} rejected: #{inspect(reason, limit: 5, printable_limit: 300)}"
+        )
+
         Session.checkout_done(pid, run, {:error, reason})
         reject(conn, reason)
     end
@@ -218,11 +225,20 @@ defmodule ArbiterWeb.NodeCheckoutController do
   defp reject(conn, {:veto, kind, detail}) do
     conn
     |> put_status(422)
-    |> json(%{error: %{message: "Run cannot be placed on a node: #{kind}", veto: to_string(kind), detail: to_string(detail)}})
+    |> json(%{
+      error: %{
+        message: "Run cannot be placed on a node: #{kind}",
+        veto: to_string(kind),
+        detail: to_string(detail)
+      }
+    })
   end
 
   defp reject(conn, {:too_large, _}), do: error(conn, 413, "Bundle too large")
-  defp reject(conn, {:prerequisites_missing, _}), do: error(conn, 409, "Bundle prerequisites are not on the primary")
+
+  defp reject(conn, {:prerequisites_missing, _}),
+    do: error(conn, 409, "Bundle prerequisites are not on the primary")
+
   defp reject(conn, :no_branch), do: error(conn, 404, "Not found")
 
   defp reject(conn, reason)

@@ -704,7 +704,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp remote_checkout(opts, worktree, config_dir) do
     case PrivateClone.branch(worktree) do
       branch when is_binary(branch) ->
-        base = Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+        base =
+          Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
 
         case NodeCheckout.veto(worktree, branch) do
           :ok ->

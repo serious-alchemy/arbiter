@@ -40,7 +40,13 @@ defmodule Arbiter.Worker.Executor.Node do
          {:ok, pid} <- session(node_id),
          owner = Keyword.get(opts, :owner, self()),
          {:ok, handle} <-
-           Session.assign(pid, run, run_spec, owner, Keyword.take(opts, [:prepare_timeout_ms, :checkout])) do
+           Session.assign(
+             pid,
+             run,
+             run_spec,
+             owner,
+             Keyword.take(opts, [:prepare_timeout_ms, :checkout])
+           ) do
       {:ok, %{handle: handle, node_id: node_id, run: run, session: pid}}
     end
   end

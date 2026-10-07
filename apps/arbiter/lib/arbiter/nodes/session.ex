@@ -334,7 +334,8 @@ defmodule Arbiter.Nodes.Session do
     do: {:reply, {:error, :not_connected}, state}
 
   def handle_call({:collect, run, kind}, from, state) do
-    if Map.has_key?(state.checkouts, run) and match?({:ok, _}, RunStreams.fetch(state.streams, run)) do
+    if Map.has_key?(state.checkouts, run) and
+         match?({:ok, _}, RunStreams.fetch(state.streams, run)) do
       notify_channel(state, {:push, "collect", %{"run" => run, "kind" => Atom.to_string(kind)}})
       {:noreply, %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
     else

@@ -396,10 +396,11 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp place_remote(remote, port_args, owner) do
     with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
-         {:ok, prepared} <- Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
-           owner: owner,
-           checkout: remote.request.checkout
-         ),
+         {:ok, prepared} <-
+           Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
+             owner: owner,
+             checkout: remote.request.checkout
+           ),
          {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
       {:ok, handle}
     else

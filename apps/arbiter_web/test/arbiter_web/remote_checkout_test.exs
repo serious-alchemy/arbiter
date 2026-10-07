@@ -175,7 +175,8 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
     end
   end
 
-  test "the agent seeds its shadow from the primary and the final snapshot lands in the home clone", ctx do
+  test "the agent seeds its shadow from the primary and the final snapshot lands in the home clone",
+       ctx do
     assert {:ok, prepared} = place(ctx, "c1")
     assert {:ok, handle} = Executor.open(prepared)
     assert 0 = await_exit(handle)
@@ -192,7 +193,8 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
     assert File.read!(Path.join(ctx.config_dir, "projects/-work-tree/s1.jsonl")) =~ "summary"
   end
 
-  test "collect/2 takes a checkpoint of a live run and the home clone has it before the run ends", ctx do
+  test "collect/2 takes a checkpoint of a live run and the home clone has it before the run ends",
+       ctx do
     StubPodman.write_mode(ctx.stub, "slow")
     {:ok, prepared} = place(ctx, "c2")
     {:ok, handle} = Executor.open(prepared)
@@ -209,7 +211,13 @@ defmodule ArbiterWeb.RemoteCheckoutTest do
   end
 
   test "a repo the primary vetoes (submodule) is never seeded: the run is refused", ctx do
-    git!(ctx.repo, ["update-index", "--add", "--cacheinfo", "160000,#{String.duplicate("a", 40)},vendor/dep"])
+    git!(ctx.repo, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      "160000,#{String.duplicate("a", 40)},vendor/dep"
+    ])
+
     git!(ctx.repo, ["commit", "-q", "-m", "submodule"])
     assert {:error, {:refused, _code, detail}} = place(ctx, "c3")
     assert detail =~ "submodule"

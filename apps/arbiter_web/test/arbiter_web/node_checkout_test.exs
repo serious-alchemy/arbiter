@@ -238,7 +238,14 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       commit = git!(shadow, ["commit-tree", "-m", "evil", "-p", c.base, outer_sha])
       git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", commit])
       bundle = Path.join(c.tmp, "evil.bundle")
-      git!(shadow, ["bundle", "create", bundle, "refs/arbiter/snapshot/#{@run}", "^" <> hd(info.known)])
+
+      git!(shadow, [
+        "bundle",
+        "create",
+        bundle,
+        "refs/arbiter/snapshot/#{@run}",
+        "^" <> hd(info.known)
+      ])
 
       conn = upload("/nodes/runs/#{@run}/checkout", c.auth, File.read!(bundle))
       assert conn.status == 422
@@ -278,7 +285,12 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       assert upload("/nodes/runs/nope/checkout", c.auth, "x").status == 404
 
       conn =
-        request(:put, "/nodes/runs/#{@run}/checkout", [{"content-type", "application/x-git-bundle"} | c.auth], "x")
+        request(
+          :put,
+          "/nodes/runs/#{@run}/checkout",
+          [{"content-type", "application/x-git-bundle"} | c.auth],
+          "x"
+        )
 
       assert conn.status == 411
     end
@@ -293,7 +305,10 @@ defmodule ArbiterWeb.NodeCheckoutTest do
     defp tar_of(c, entries) do
       path = Path.join(c.tmp, "t.tar.gz")
       {:ok, tar} = :erl_tar.open(String.to_charlist(path), [:write, :compressed])
-      for {name, body} <- entries, do: :ok = :erl_tar.add(tar, {String.to_charlist(name), body}, [])
+
+      for {name, body} <- entries,
+          do: :ok = :erl_tar.add(tar, {String.to_charlist(name), body}, [])
+
       :ok = :erl_tar.close(tar)
       File.read!(path)
     end

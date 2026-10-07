@@ -79,7 +79,12 @@ defmodule Arbiter.Nodes.Checkout do
   @doc "The default untracked-payload cap, in bytes."
   @spec max_untracked_bytes() :: non_neg_integer()
   def max_untracked_bytes,
-    do: Application.get_env(:arbiter, :node_checkout_max_untracked_bytes, @default_max_untracked_bytes)
+    do:
+      Application.get_env(
+        :arbiter,
+        :node_checkout_max_untracked_bytes,
+        @default_max_untracked_bytes
+      )
 
   def snapshot_ref(run), do: "refs/arbiter/snapshot/" <> run
   def checkpoint_ref(run), do: "refs/arbiter/checkpoint/" <> run
@@ -122,7 +127,13 @@ defmodule Arbiter.Nodes.Checkout do
          {:ok, thin?} <- create_seed(git_dir, refs, have, dest),
          {:ok, bytes} <- seed_size(dest, Keyword.get(opts, :max_bytes, seed_max_bytes())),
          {:ok, heads} <- list_heads(git_dir, dest) do
-      {:ok, %{path: dest, bytes: bytes, thin?: thin?, refs: Map.new(heads, fn {sha, ref} -> {ref, sha} end)}}
+      {:ok,
+       %{
+         path: dest,
+         bytes: bytes,
+         thin?: thin?,
+         refs: Map.new(heads, fn {sha, ref} -> {ref, sha} end)
+       }}
     end
   end
 
@@ -154,7 +165,10 @@ defmodule Arbiter.Nodes.Checkout do
     File.mkdir_p!(Path.dirname(dest))
 
     with [_ | _] <- have,
-         {:ok, _} <- Git.run(["bundle", "create", dest] ++ refs ++ Enum.map(have, &("^" <> &1)), git_dir: git_dir) do
+         {:ok, _} <-
+           Git.run(["bundle", "create", dest] ++ refs ++ Enum.map(have, &("^" <> &1)),
+             git_dir: git_dir
+           ) do
       {:ok, true}
     else
       _ ->
@@ -297,7 +311,12 @@ defmodule Arbiter.Nodes.Checkout do
 
   defp bound(q, max_objects) do
     with {:ok, out} <- Git.run(["count-objects", "-v"], git_dir: q) do
-      stats = for line <- String.split(out, "\n"), [k, v] <- [String.split(line, ": ", parts: 2)], into: %{}, do: {k, v}
+      stats =
+        for line <- String.split(out, "\n"),
+            [k, v] <- [String.split(line, ": ", parts: 2)],
+            into: %{},
+            do: {k, v}
+
       count = Enum.sum(for key <- ["count", "in-pack"], do: String.to_integer(stats[key] || "0"))
       if count > max_objects, do: {:error, {:too_many_objects, count}}, else: :ok
     end
@@ -312,10 +331,17 @@ defmodule Arbiter.Nodes.Checkout do
     branch_tip = Git.rev_parse(q, "refs/heads/" <> branch)
 
     cond do
-      is_nil(parent) -> {:error, :snapshot_not_on_branch}
-      branch_tip && branch_tip != parent -> {:error, :snapshot_not_on_branch}
-      is_nil(branch_tip) and not Git.exists?(home_git, parent <> "^{commit}") -> {:error, :snapshot_not_on_branch}
-      true -> {:ok, %{tip: parent, snapshot: snap, filtered: []}}
+      is_nil(parent) ->
+        {:error, :snapshot_not_on_branch}
+
+      branch_tip && branch_tip != parent ->
+        {:error, :snapshot_not_on_branch}
+
+      is_nil(branch_tip) and not Git.exists?(home_git, parent <> "^{commit}") ->
+        {:error, :snapshot_not_on_branch}
+
+      true ->
+        {:ok, %{tip: parent, snapshot: snap, filtered: []}}
     end
   end
 
@@ -323,7 +349,10 @@ defmodule Arbiter.Nodes.Checkout do
   # branch in the home clone.
   defp trusted_entries(home_git, %{base: base}) do
     rev =
-      Enum.find_value(["refs/remotes/origin/" <> base, "refs/heads/" <> base], &Git.rev_parse(home_git, &1))
+      Enum.find_value(
+        ["refs/remotes/origin/" <> base, "refs/heads/" <> base],
+        &Git.rev_parse(home_git, &1)
+      )
 
     Inspect.entries(home_git, rev)
   end
@@ -349,7 +378,9 @@ defmodule Arbiter.Nodes.Checkout do
          :ok <- remove_from_index(q, work, env, denied),
          {:ok, tree} <- Git.run(["write-tree"], git_dir: q, env: env),
          {:ok, snap} <-
-           Git.run(["commit-tree", "-p", shape.tip, "-m", "arbiter snapshot (filtered)", tree], git_dir: q),
+           Git.run(["commit-tree", "-p", shape.tip, "-m", "arbiter snapshot (filtered)", tree],
+             git_dir: q
+           ),
          {:ok, _} <- Git.run(["update-ref", snapshot_ref(run), snap], git_dir: q) do
       File.rm(index)
 
@@ -364,7 +395,11 @@ defmodule Arbiter.Nodes.Checkout do
     denied
     |> Enum.chunk_every(200)
     |> Enum.reduce_while(:ok, fn chunk, :ok ->
-      case Git.run(["update-index", "--force-remove", "--"] ++ chunk, git_dir: q, work_tree: work, env: env) do
+      case Git.run(["update-index", "--force-remove", "--"] ++ chunk,
+             git_dir: q,
+             work_tree: work,
+             env: env
+           ) do
         {:ok, _} -> {:cont, :ok}
         {:error, _} = error -> {:halt, error}
       end
@@ -386,7 +421,10 @@ defmodule Arbiter.Nodes.Checkout do
     end
   end
 
-  defp handoff(q, home, home_git, %{tip: tip, snapshot: snap, filtered: filtered}, %{run: run, branch: branch}) do
+  defp handoff(q, home, home_git, %{tip: tip, snapshot: snap, filtered: filtered}, %{
+         run: run,
+         branch: branch
+       }) do
     checkpoint = checkpoint_ref(run)
 
     with {:ok, _} <-
@@ -395,7 +433,14 @@ defmodule Arbiter.Nodes.Checkout do
              work_tree: home
            ),
          {:ok, status_hash} <- apply_state(home, home_git, branch, tip, snap) do
-      {:ok, %{head: tip, snapshot: snap, status_hash: status_hash, filtered: filtered, checkpoint_ref: checkpoint}}
+      {:ok,
+       %{
+         head: tip,
+         snapshot: snap,
+         status_hash: status_hash,
+         filtered: filtered,
+         checkpoint_ref: checkpoint
+       }}
     end
   end
 
@@ -428,8 +473,10 @@ defmodule Arbiter.Nodes.Checkout do
   @spec restore(Path.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def restore(home, run, branch) do
     with {:ok, home_git} <- Git.git_dir(home),
-         snap when is_binary(snap) <- Git.rev_parse(home_git, checkpoint_ref(run)) || {:error, :no_checkpoint},
-         tip when is_binary(tip) <- Git.rev_parse(home_git, snap <> "^") || {:error, :no_checkpoint},
+         snap when is_binary(snap) <-
+           Git.rev_parse(home_git, checkpoint_ref(run)) || {:error, :no_checkpoint},
+         tip when is_binary(tip) <-
+           Git.rev_parse(home_git, snap <> "^") || {:error, :no_checkpoint},
          {:ok, status_hash} <- apply_state(home, home_git, branch, tip, snap) do
       {:ok, %{head: tip, snapshot: snap, status_hash: status_hash}}
     end

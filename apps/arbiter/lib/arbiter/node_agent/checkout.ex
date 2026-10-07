@@ -74,7 +74,12 @@ defmodule Arbiter.NodeAgent.Checkout do
   defp heads(store, bundle) do
     case Git.run(["bundle", "list-heads", bundle], git_dir: store) do
       {:ok, out} ->
-        {:ok, for(line <- String.split(out, "\n", trim: true), [_sha, ref] <- [String.split(line, " ", parts: 2)], do: ref)}
+        {:ok,
+         for(
+           line <- String.split(out, "\n", trim: true),
+           [_sha, ref] <- [String.split(line, " ", parts: 2)],
+           do: ref
+         )}
 
       {:error, {:git, _, out}} ->
         {:error, {:bad_bundle, out}}
@@ -121,18 +126,24 @@ defmodule Arbiter.NodeAgent.Checkout do
     dot_git = Path.join(shadow, ".git")
 
     with {:ok, _} <- Git.run(["init", "-q", "-b", branch, shadow]),
-         :ok <- File.write(Path.join(dot_git, "objects/info/alternates"), Path.join(store, "objects") <> "\n"),
+         :ok <-
+           File.write(
+             Path.join(dot_git, "objects/info/alternates"),
+             Path.join(store, "objects") <> "\n"
+           ),
          {:ok, _} <- Git.run(["config", "user.name", "arbiter"], git_dir: dot_git),
          {:ok, _} <- Git.run(["config", "user.email", "arbiter@localhost"], git_dir: dot_git),
          {:ok, _} <- Git.run(["update-ref", "refs/heads/" <> branch, shas.head], git_dir: dot_git),
          :ok <- base_ref(dot_git, base, shas),
-         {:ok, _} <- Git.run(["reset", "-q", "--hard", "HEAD"], git_dir: dot_git, work_tree: shadow) do
+         {:ok, _} <-
+           Git.run(["reset", "-q", "--hard", "HEAD"], git_dir: dot_git, work_tree: shadow) do
       restore_checkpoint(dot_git, shadow, shas)
     end
   end
 
   defp base_ref(dot_git, base, %{base: sha}) when is_binary(base) do
-    with {:ok, _} <- Git.run(["update-ref", "refs/remotes/origin/" <> base, sha], git_dir: dot_git),
+    with {:ok, _} <-
+           Git.run(["update-ref", "refs/remotes/origin/" <> base, sha], git_dir: dot_git),
          do: :ok
   end
 
@@ -273,7 +284,8 @@ defmodule Arbiter.NodeAgent.Checkout do
     File.mkdir_p!(Path.dirname(dest))
     File.rm(dest)
 
-    with {:ok, _} <- Git.run(["bundle", "create", dest] ++ refs ++ prerequisites, git_dir: snap_dir),
+    with {:ok, _} <-
+           Git.run(["bundle", "create", dest] ++ refs ++ prerequisites, git_dir: snap_dir),
          {:ok, %{size: size}} <- File.stat(dest) do
       {:ok, size}
     else
@@ -293,7 +305,11 @@ defmodule Arbiter.NodeAgent.Checkout do
   credential, then `seed/1`. `{:error, {:veto, kind}}` when the primary refuses the
   repo (submodules, LFS); `{:error, {:http, status}}` otherwise.
   """
-  @spec seed_from_primary(Config.t(), %{run: String.t(), branch: String.t(), base: String.t() | nil}, Path.t()) ::
+  @spec seed_from_primary(
+          Config.t(),
+          %{run: String.t(), branch: String.t(), base: String.t() | nil},
+          Path.t()
+        ) ::
           {:ok, map()} | {:error, term()}
   def seed_from_primary(%Config{} = config, %{run: run} = co, shadow) do
     store = store(config)
@@ -303,7 +319,14 @@ defmodule Arbiter.NodeAgent.Checkout do
     try do
       with :ok <- init_store(store),
            :ok <- download(config, run, have(store), bundle) do
-        seed(%{store: store, shadow: shadow, bundle: bundle, run: run, branch: co.branch, base: co.base})
+        seed(%{
+          store: store,
+          shadow: shadow,
+          bundle: bundle,
+          run: run,
+          branch: co.branch,
+          base: co.base
+        })
       end
     after
       File.rm(bundle)
