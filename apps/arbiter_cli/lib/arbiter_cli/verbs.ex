@@ -174,7 +174,7 @@ defmodule ArbiterCli.Verbs do
      [workspace: :resolve, probes: [["token", "mint"], ["token", "verify", "tok"]]]},
     {"skill", Module.concat(@cmd, Skill),
      [
-       workspace: :none,
+       workspace: :resolve,
        probes: [["list"], ["show", "s"], ["create", "s"], ["update", "s"], ["delete", "s"]]
      ]},
     {"session", Module.concat(@cmd, Session),

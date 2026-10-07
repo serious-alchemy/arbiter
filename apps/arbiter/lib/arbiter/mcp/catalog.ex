@@ -2270,7 +2270,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "skill_delete",
       tiers: @coordinator,
       description:
-        "Delete a system-wide skill identified by `skill` (its id or name). " <>
+        "Delete a skill identified by `skill` (its id, or its name resolved within the " <>
+          "`workspace` scope with a scoped skill shadowing the global). A caller bound to a " <>
+          "workspace cannot delete another workspace's scoped skill. " <>
           "Returns `{deleted: true, id, name}`.",
       input_schema: %{
         "type" => "object",
@@ -2278,6 +2280,11 @@ defmodule Arbiter.MCP.Catalog do
           "skill" => %{
             "type" => "string",
             "description" => "Skill id or name to delete. Required."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) that scopes a name lookup. Omit to target a global skill."
           }
         },
         "required" => ["skill"],
