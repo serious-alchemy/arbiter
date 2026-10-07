@@ -118,6 +118,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Agents.Codex.ConfigDir, as: CodexConfigDir
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers
+  alias Arbiter.Nodes.Files
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
@@ -635,6 +636,273 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   defp config_env_name(%{provider: "codex"}), do: "CODEX_HOME"
   defp config_env_name(_request), do: "CLAUDE_CONFIG_DIR"
+
+  # -- a run placed on a node (RW9) ----------------------------------------------------
+
+  @doc """
+  The primary half of a **remote** spawn (`docs/design/remote-workers.md` §7.1):
+  what `prepare/1` does that has to happen on the primary, and nothing that has
+  to happen on the node. Options are `prepare/1`'s plus `:node` (the placed
+  node's row: `:id`, and `:capacity` for the memory cap).
+
+  It starts the run's egress proxy and bridges (the policy never leaves the
+  primary), resolves the image **plan** instead of building it, publishes the
+  provider CLI and `arb` on the primary's file shelf (`Arbiter.Nodes.Files`) and
+  reads the config files and prompt a node cannot reach. The node builds the
+  image, fetches the files, makes the run's directories and starts the
+  container itself. The returned request rides in `port_args.remote`; each open
+  turns it into a spec with `remote_spec/3`.
+  """
+  @spec prepare_remote(keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_remote(opts) when is_list(opts) do
+    policy = Keyword.fetch!(opts, :policy)
+    provider = provider_name(Keyword.get(opts, :provider))
+    node = Keyword.fetch!(opts, :node)
+
+    with :ok <- remote_provider(provider),
+         :ok <- container_backend(policy, provider),
+         {:ok, worktree} <- fetch_worktree(opts),
+         {:ok, tmp_dir} <- fetch_tmp_dir(opts),
+         {:ok, image} <- remote_image(opts, worktree),
+         {:ok, cli} <- remote_cli(provider, opts),
+         {:ok, services} <- remote_services(opts),
+         {:ok, home, config_dir} <- remote_dirs(tmp_dir),
+         {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
+      name = container_name(opts)
+
+      {:ok,
+       %{
+         node_id: node.id,
+         name: name,
+         provider: provider,
+         image: image,
+         worktree: worktree,
+         home: home,
+         config_dir: config_dir,
+         config_files: config_files(Keyword.get(opts, :workspace)),
+         tmp_dir: tmp_dir,
+         cli: cli,
+         prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
+         network: network,
+         env: container_env(spec) ++ services.env,
+         services: services.presets,
+         limits: remote_limits(node),
+         task_id: Keyword.get(opts, :task_id)
+       }}
+    end
+  end
+
+  # Only Claude has a podman path that is placed remotely (bd-aowisc §5).
+  defp remote_provider("claude"), do: :ok
+  defp remote_provider(provider), do: {:error, {:provider_not_remote, provider}}
+
+  defp remote_image(opts, worktree) do
+    case Keyword.get(opts, :image) || Application.get_env(:arbiter, :worker_container_image) do
+      tag when is_binary(tag) and tag != "" ->
+        {:ok, %{tag: tag, plan: nil}}
+
+      _ ->
+        repo_path = PrivateClone.main_repo(worktree)
+
+        base =
+          Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+
+        with true <- is_binary(repo_path) or {:error, {:not_a_private_clone, worktree}},
+             {:ok, plan} <- Image.plan(repo_path, base) do
+          {:ok, %{tag: plan.tag, plan: plan}}
+        else
+          {:error, reason} -> {:error, {:image_unavailable, reason}}
+        end
+    end
+  end
+
+  # `[{sha256, name, container path}]`: the node fetches by hash.
+  defp remote_cli(provider, opts) do
+    with {:ok, mounts} <- cli_mounts(provider, opts) do
+      Enum.reduce_while(mounts, {:ok, []}, fn {host, dest}, {:ok, acc} ->
+        case Files.publish(host) do
+          {:ok, sha} -> {:cont, {:ok, acc ++ [{sha, Path.basename(dest), dest}]}}
+          {:error, reason} -> {:halt, {:error, {:cli_unavailable, reason}}}
+        end
+      end)
+    end
+  end
+
+  # Presets only cross the wire (`Arbiter.NodeAgent.RunSpec`); a custom service
+  # definition cannot be placed remotely.
+  defp remote_services(opts) do
+    configured = Application.get_env(:arbiter, :worker_test_services, %{})
+
+    terms =
+      case Keyword.fetch(opts, :services) do
+        {:ok, specs} ->
+          specs
+
+        :error ->
+          Map.get(Map.merge(TestServices.defaults(), configured), Keyword.get(opts, :repo), [])
+      end
+
+    with {:ok, presets} <- presets(terms),
+         {:ok, resolved} <- TestServices.resolve(terms) do
+      {:ok, %{presets: presets, env: TestServices.worker_env(resolved)}}
+    else
+      {:error, reason} -> {:error, {:test_services_unavailable, reason}}
+    end
+  end
+
+  defp presets(terms) do
+    Enum.reduce_while(terms, {:ok, []}, fn
+      :postgres, {:ok, acc} -> {:cont, {:ok, acc ++ [%{"preset" => "postgres"}]}}
+      :s3, {:ok, acc} -> {:cont, {:ok, acc ++ [%{"preset" => "s3"}]}}
+      {:postgres, o}, {:ok, acc} when is_list(o) -> {:cont, {:ok, acc ++ [postgres_preset(o)]}}
+      {:s3, o}, {:ok, acc} when is_list(o) -> {:cont, {:ok, acc ++ [s3_preset(o)]}}
+      other, _ -> {:halt, {:error, {:custom_service_not_remote, inspect(other, limit: 3)}}}
+    end)
+  end
+
+  defp postgres_preset(opts),
+    do:
+      Map.merge(
+        %{"preset" => "postgres"},
+        Map.new(Keyword.take(opts, [:version, :database]), fn {k, v} -> {Atom.to_string(k), v} end)
+      )
+
+  defp s3_preset(opts),
+    do:
+      Map.merge(
+        %{"preset" => "s3"},
+        Map.new(Keyword.take(opts, [:image]), fn {k, v} -> {Atom.to_string(k), v} end)
+      )
+
+  # The container-side paths equal the primary's (path transparency): the clone
+  # slug `claude --resume` keys its session store on is the same on both sides.
+  # The directories exist here too, so the transcript the node uploads has a
+  # place to land.
+  defp remote_dirs(tmp_dir) do
+    home = Path.join(tmp_dir, "home")
+    config_dir = Path.join(tmp_dir, "claude-config")
+
+    with :ok <- File.mkdir_p(home),
+         :ok <- File.mkdir_p(config_dir) do
+      {:ok, home, config_dir}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp config_files(workspace) do
+    case ConfigDir.ensure(workspace) do
+      {:ok, source} ->
+        for file <- ["settings.json", "CLAUDE.md"],
+            path = Path.join(source, file),
+            File.regular?(path),
+            {:ok, body} <- [File.read(path)],
+            into: %{},
+            do: {file, body}
+
+      _ ->
+        %{}
+    end
+  end
+
+  # A share of the node's memory for one worker (`docs/design/remote-workers.md`
+  # §7.4: a percentage of the node's `MemTotal`, 40 % by default). Nothing known,
+  # nothing asked: the agent then applies no memory cap of its own choosing.
+  @memory_share 0.4
+
+  defp remote_limits(node) do
+    share = Application.get_env(:arbiter, :remote_worker_memory_share, @memory_share)
+
+    case node |> Map.get(:capacity, %{}) |> then(&(&1 || %{})) |> Map.get("mem_total") do
+      total when is_integer(total) and total > 0 ->
+        %{"memory" => "#{max(div(round(total * share), 1_048_576), 256)}m"}
+
+      _ ->
+        %{}
+    end
+  end
+
+  @doc """
+  The declarative spec (string keys, JSON-safe) for one open of a remote spawn:
+  `request` from `prepare_remote/1`, the spawn's `port_args` (its argv and env)
+  and the `run_id` the node knows the run by. The secret half of the env
+  (everything the local path would pass as `-e NAME`) goes in `"secrets"`, never
+  in `"env"`.
+  """
+  @spec remote_spec(map(), map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def remote_spec(request, %{argv: [_ | _] = argv} = port_args, run_id) when is_binary(run_id) do
+    with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
+         {:ok, prompts} <- prompt_mounts(request.prompt_paths) do
+      {secret, literal} = split_env(env_pairs(port_args, request))
+
+      {:ok,
+       %{
+         "version" => 1,
+         "run" => run_id,
+         "task" => request.task_id && to_string(request.task_id),
+         "name" => request.name,
+         "image" => %{"tag" => request.image.tag, "plan" => plan_json(request.image.plan)},
+         "cwd" => request.worktree,
+         "mounts" =>
+           [
+             %{"kind" => "worktree", "path" => request.worktree},
+             %{"kind" => "home", "path" => request.home},
+             %{
+               "kind" => "config_dir",
+               "path" => request.config_dir,
+               "files" => Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
+             },
+             %{"kind" => "tmp", "path" => request.tmp_dir}
+           ] ++
+             Enum.map(request.cli, fn {sha, name, dest} ->
+               %{"kind" => "cli", "name" => name, "sha256" => sha, "path" => dest}
+             end) ++ prompts,
+         "bridges" => bridges(request.network),
+         "env" => Map.new(literal),
+         "secrets" => Map.new(secret),
+         "limits" => request.limits,
+         "network" => "none",
+         "services" => request.services,
+         "command" => Jail.network_command(jail, argv)
+       }}
+    end
+  end
+
+  defp prompt_mounts(paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
+      case File.read(path) do
+        {:ok, body} ->
+          {:cont,
+           {:ok, acc ++ [%{"kind" => "prompt", "path" => path, "content" => Base.encode64(body)}]}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:prompt_unreadable, path, reason}}}
+      end
+    end)
+  end
+
+  defp bridges(network) do
+    [%{"name" => "proxy", "path" => network[:proxy_socket]}] ++
+      for {name, path} <- network[:bridges] || [],
+          do: %{"name" => to_string(name), "path" => path}
+  end
+
+  defp plan_json(nil), do: nil
+
+  defp plan_json(plan) do
+    %{
+      "tag" => plan.tag,
+      "name" => plan.name,
+      "hash" => plan.hash,
+      "containerfile" => plan.containerfile,
+      "build_args" => Enum.map(plan.build_args, fn {k, v} -> [k, v] end),
+      "base" =>
+        Map.new(
+          ~w(tag name hash containerfile)a,
+          &{Atom.to_string(&1), Map.fetch!(plan.base, &1)}
+        )
+    }
+  end
 
   # -- wrap ----------------------------------------------------------------------
 

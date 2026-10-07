@@ -23,12 +23,25 @@ defmodule Arbiter.Nodes.Session do
   Silence is measured by the session's own monotonic clock, never a node's, so
   neither side depends on a shared clock.
 
+  ## Runs placed on the node (RW9)
+
+  `assign/5` puts a run on the node: it registers the run in a
+  `Arbiter.Nodes.RunStreams` table, pushes `assign{run, spec}` and answers when
+  the node says `run.ready` (or `run.refused`). From then on the node's `stdout`
+  frames and `exit` come in through `node_event/3` and the owner (the Worker)
+  gets Port-shaped messages (`Arbiter.Worker.Executor.Node`); the table, like
+  the rest of the session, survives a channel blip, and the node resends what
+  was not acknowledged. When the session ends (node lost, revoked) every live
+  run ends for its owner too, flagged `node_lost?`; and an owner that dies has
+  its runs cancelled.
+
   ## Messages to the channel
 
   `{:node_session, :drain}` / `{:node_session, :undrain}` and
   `{:node_session, {:disconnect, reason}}` with `reason` one of `:revoked`,
-  `:lost`, `:superseded`, and `{:node_session, {:upgrade, payload}}`. The channel owns turning those into pushes and a
-  socket close; the session never touches a socket.
+  `:lost`, `:superseded`, and `{:node_session, {:upgrade, payload}}` and `{:node_session, {:push, event, payload}}`
+  (the run protocol: `assign`, `cancel`, `signal`, `ack`, `exit_ack`). The channel owns
+  turning those into pushes and a socket close; the session never touches a socket.
 
   ## Events broadcast on `Arbiter.Nodes.topic/0`
 
@@ -41,9 +54,10 @@ defmodule Arbiter.Nodes.Session do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Hello, Liveness, Node, Skew}
+  alias Arbiter.Nodes.{Hello, Liveness, Node, RunStreams, Skew}
 
   @default_tick_ms 5_000
+  @default_prepare_timeout_ms 25 * 60_000
 
   defstruct [
     :node_id,
@@ -66,7 +80,8 @@ defmodule Arbiter.Nodes.Session do
     health: :ready,
     caps: %{},
     capacity: %{},
-    runs: %{}
+    runs: %{},
+    streams: %RunStreams{}
   ]
 
   # ---- client API ----------------------------------------------------------
@@ -130,6 +145,42 @@ defmodule Arbiter.Nodes.Session do
         ) :: :ok
   def notify(pid, message), do: GenServer.cast(pid, message)
 
+  @doc """
+  Place run `run` (a decoded `RunSpec` map) on the node, owned by `owner`.
+  Blocks until the node reports the container started (`{:ok, handle}`) or
+  refuses (`{:error, {:refused, reason, detail}}`); `{:error, :not_connected}`
+  when no channel is attached; `{:error, :prepare_timeout}` after
+  `:prepare_timeout_ms`; `{:error, :already_placed}` for a run id in use.
+  """
+  @spec assign(pid(), String.t(), map(), pid(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def assign(pid, run, spec, owner, opts \\ []),
+    do: GenServer.call(pid, {:assign, run, spec, owner, opts}, :infinity)
+
+  @doc "A run event from the node, via the channel: `run.ready`, `run.refused`, `stdout`, `exit`."
+  @spec node_event(pid(), String.t(), term()) :: :ok
+  def node_event(pid, event, payload), do: GenServer.cast(pid, {:node_event, event, payload})
+
+  @doc "Ask the node to stop `run` (idempotent; remembered across a reconnect)."
+  @spec cancel_run(pid(), String.t(), String.t()) :: :ok
+  def cancel_run(pid, run, reason), do: GenServer.cast(pid, {:cancel_run, run, reason})
+
+  @doc "Send `signal` (TERM or KILL) to the run's container."
+  @spec signal_run(pid(), String.t(), String.t()) :: :ok
+  def signal_run(pid, run, signal), do: GenServer.cast(pid, {:signal_run, run, signal})
+
+  @doc "The recorded outcome of an ended run: `{:ok, map}`, `:pending` or `:error`."
+  @spec run_outcome(pid(), String.t()) :: {:ok, map()} | :pending | :error
+  def run_outcome(pid, run), do: GenServer.call(pid, {:run_outcome, run})
+
+  @doc "Whether the node still has `run` running (assigned and not ended)."
+  @spec run_live?(pid(), String.t()) :: boolean()
+  def run_live?(pid, run), do: GenServer.call(pid, {:run_live?, run})
+
+  @doc "Forget an ended run."
+  @spec release_run(pid(), String.t()) :: :ok
+  def release_run(pid, run), do: GenServer.cast(pid, {:release_run, run})
+
   @doc "Run the liveness check now (what the timer does). Returns the resulting state."
   @spec tick(pid()) :: Liveness.state()
   def tick(pid), do: GenServer.call(pid, :tick)
@@ -158,7 +209,23 @@ defmodule Arbiter.Nodes.Session do
   @impl true
   def handle_call({:attach, channel, params}, _from, state) do
     state = state |> take_over(channel) |> apply_hello(params)
-    verdicts = Hello.verdicts(Hello.run_ids(params["runs"]))
+
+    # What the primary itself placed on this node is known by definition; the
+    # `worker_runs` check covers the rest.
+    verdicts =
+      params
+      |> hello_run_list()
+      |> Hello.run_ids()
+      |> Hello.verdicts()
+      |> Map.new(fn {id, verdict} ->
+        {id, if(id in RunStreams.live(state.streams), do: "known", else: verdict)}
+      end)
+
+    # Runs we hold that the agent no longer has are over; cancels it may have
+    # missed are asked again.
+    {streams, lost} = RunStreams.reconcile(state.streams, Hello.run_ids(hello_run_list(params)))
+    state = run_effects(%{state | streams: streams}, lost)
+    run_effects(state, RunStreams.reattach(state.streams))
 
     record(state, :connected, %{
       "agent_version" => state.agent_version,
@@ -185,6 +252,33 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
+  def handle_call({:assign, _run, _spec, _owner, _opts}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:assign, run, spec, owner, opts}, from, state) do
+    case RunStreams.fetch(state.streams, run) do
+      {:ok, _} ->
+        {:reply, {:error, :already_placed}, state}
+
+      :error ->
+        Process.monitor(owner)
+        # What `Arbiter.Worker.Executor.Node` calls `stop/1` and `signal/2` with.
+        handle = {:remote, {state.node_id, run, make_ref()}}
+        ms = Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
+        Process.send_after(self(), {:prepare_timeout, run}, ms)
+
+        state = %{state | streams: RunStreams.open(state.streams, run, handle, owner, from)}
+        notify_channel(state, {:push, "assign", %{"run" => run, "spec" => spec}})
+        {:noreply, state}
+    end
+  end
+
+  def handle_call({:run_outcome, run}, _from, state),
+    do: {:reply, RunStreams.outcome(state.streams, run), state}
+
+  def handle_call({:run_live?, run}, _from, state),
+    do: {:reply, run in RunStreams.live(state.streams), state}
+
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot_of(state), state}
   def handle_call(:assignable?, _from, state), do: {:reply, assignable_state?(state), state}
 
@@ -199,6 +293,24 @@ defmodule Arbiter.Nodes.Session do
   def handle_cast(:drain, state), do: {:noreply, set_draining(state, true)}
   def handle_cast(:undrain, state), do: {:noreply, set_draining(state, false)}
   def handle_cast({:operator_max, n}, state), do: {:noreply, %{state | operator_max: n}}
+
+  def handle_cast({:node_event, event, payload}, state),
+    do: {:noreply, node_event_apply(state, event, payload)}
+
+  def handle_cast({:cancel_run, run, reason}, state) do
+    {streams, effects} = RunStreams.cancel(state.streams, run, reason)
+    {:noreply, run_effects(%{state | streams: streams}, effects)}
+  end
+
+  def handle_cast({:signal_run, run, signal}, state) do
+    if run in RunStreams.live(state.streams),
+      do: notify_channel(state, {:push, "signal", %{"run" => run, "signal" => signal}})
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:release_run, run}, state),
+    do: {:noreply, %{state | streams: RunStreams.drop(state.streams, run)}}
 
   def handle_cast({:upgrade, payload}, state) do
     notify_channel(state, {:upgrade, payload})
@@ -224,7 +336,88 @@ defmodule Arbiter.Nodes.Session do
     {:noreply, %{state | channel: nil, channel_ref: nil}}
   end
 
+  # A run's owner (the Worker) died: its runs are cancelled and forgotten.
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    state =
+      Enum.reduce(RunStreams.owned_by(state.streams, pid), state, fn run, acc ->
+        {streams, effects} = RunStreams.cancel(acc.streams, run, "owner_down")
+        run_effects(%{acc | streams: RunStreams.drop(streams, run)}, effects)
+      end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:prepare_timeout, run}, state) do
+    case RunStreams.fetch(state.streams, run) do
+      {:ok, %{state: :assigned, waiter: waiter}} when not is_nil(waiter) ->
+        GenServer.reply(waiter, {:error, :prepare_timeout})
+        {streams, effects} = RunStreams.cancel(state.streams, run, "prepare_timeout")
+        {:noreply, run_effects(%{state | streams: RunStreams.drop(streams, run)}, effects)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    # The session ends (node lost, revoked, stopped): nothing will report these
+    # runs again, so each ends for its owner rather than leave a Worker waiting.
+    {_streams, effects} = RunStreams.node_lost(state.streams)
+    run_effects(%{state | channel: nil}, effects)
+    :ok
+  end
+
+  # ---- run events -----------------------------------------------------------------
+
+  defp node_event_apply(state, "run.ready", %{"run" => run}),
+    do: apply_streams(state, RunStreams.ready(state.streams, run))
+
+  defp node_event_apply(state, "run.refused", %{"run" => run} = payload),
+    do: apply_streams(state, RunStreams.refused(state.streams, run, payload))
+
+  # A cancel for a run the agent no longer has: it is over.
+  defp node_event_apply(state, "run.gone", %{"run" => run}) do
+    gone = %{
+      "status" => 255,
+      "oom" => false,
+      "size" => 0,
+      "cancelled" => true,
+      "reason" => "gone"
+    }
+
+    apply_streams(state, RunStreams.exit(state.streams, run, gone))
+  end
+
+  defp node_event_apply(state, "exit", %{"run" => run} = payload),
+    do: apply_streams(state, RunStreams.exit(state.streams, run, payload))
+
+  defp node_event_apply(state, "stdout", {:binary, frame}) do
+    case Arbiter.Nodes.StdoutFrame.decode(frame) do
+      {:ok, run, offset, bytes} ->
+        apply_streams(state, RunStreams.data(state.streams, run, offset, bytes))
+
+      {:error, :bad_frame} ->
+        state
+    end
+  end
+
+  defp node_event_apply(state, _event, _payload), do: state
+
+  defp apply_streams(state, {streams, effects}),
+    do: run_effects(%{state | streams: streams}, effects)
+
+  defp run_effects(state, effects) do
+    Enum.each(effects, fn
+      {:reply, from, value} -> GenServer.reply(from, value)
+      {:send, pid, message} -> send(pid, message)
+      {:push, event, payload} -> notify_channel(state, {:push, event, payload})
+    end)
+
+    state
+  end
 
   # ---- attach / hello ------------------------------------------------------
 
@@ -252,7 +445,7 @@ defmodule Arbiter.Nodes.Session do
         health: Skew.health(agent, Skew.primary()),
         caps: map(params["caps"]),
         capacity: map(params["capacity"]),
-        runs: hello_runs(params["runs"]),
+        runs: hello_runs(hello_run_list(params)),
         operator_max: node && node.max_workers,
         draining?: not is_nil(node) and node.status == :draining,
         thresholds: Liveness.current(),
@@ -261,6 +454,10 @@ defmodule Arbiter.Nodes.Session do
         last_hb: state.clock.()
     }
   end
+
+  # The agent reports its runs under `inventory.runs`; a bare `runs` is accepted too.
+  defp hello_run_list(params),
+    do: params["runs"] || get_in(params, ["inventory", "runs"])
 
   defp hello_runs(runs) when is_list(runs) do
     for %{"id" => id} = run <- runs, is_binary(id), into: %{}, do: {id, run}
@@ -330,6 +527,7 @@ defmodule Arbiter.Nodes.Session do
   # `hb` carries the node's whole per-run table: it replaces ours. A heartbeat
   # without one leaves the table alone.
   defp heartbeat_runs(runs, _old) when is_map(runs), do: runs
+  defp heartbeat_runs(runs, _old) when is_list(runs), do: hello_runs(runs)
   defp heartbeat_runs(_none, old), do: old
 
   defp ack(payload) do

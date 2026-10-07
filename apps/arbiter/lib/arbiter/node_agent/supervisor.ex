@@ -5,6 +5,9 @@ defmodule Arbiter.NodeAgent.Supervisor do
       TaskSupervisor      readiness probes, the upgrade download
       Status              <node_home>/status.json (what `arbiter-node status` reads)
       Upgrader            one self-upgrade at a time
+      Image.Builder       builds a run's image from the plan the spec carries
+      RunRegistry         the run table (RW9: `Arbiter.NodeAgent.Runs`)
+      RunSupervisor       one `Arbiter.NodeAgent.Run` per assigned run
       Connection          the WebSocket to the primary
 
   `start_link/1` takes the `Arbiter.NodeAgent.Config.load/1` options. A config
@@ -18,8 +21,10 @@ defmodule Arbiter.NodeAgent.Supervisor do
 
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Connection
+  alias Arbiter.NodeAgent.Runs
   alias Arbiter.NodeAgent.Status
   alias Arbiter.NodeAgent.Upgrader
+  alias Arbiter.Worker.Image
 
   require Logger
 
@@ -31,13 +36,15 @@ defmodule Arbiter.NodeAgent.Supervisor do
 
     case Config.load(opts) do
       {:ok, config} ->
+        # The run table before the connection: `Connection` addresses runs.
+        config = %{config | live_runs_fun: config.live_runs_fun || (&Runs.inventory/0)}
+
         Supervisor.init(
           [
             task_supervisor,
             {Status, path: config.status_path},
-            {Upgrader, config: config},
-            {Connection, config: config}
-          ],
+            {Upgrader, config: config}
+          ] ++ image_builder() ++ Runs.child_specs() ++ [{Connection, config: config}],
           strategy: :one_for_one
         )
 
@@ -46,6 +53,13 @@ defmodule Arbiter.NodeAgent.Supervisor do
         record_unconfigured(opts, reason)
         Supervisor.init([task_supervisor], strategy: :one_for_one)
     end
+  end
+
+  # `Image.Builder` builds a plan's image on this node (RW9). An agent boots
+  # without the primary's application tree, so it starts its own; an
+  # embedded one (a test that runs the primary tree alongside) already has it.
+  defp image_builder do
+    if Process.whereis(Image.Builder), do: [], else: [{Image.Builder, []}]
   end
 
   defp record_unconfigured(opts, reason) do

@@ -30,6 +30,24 @@ defmodule Arbiter.Worker.Image.Builder do
   @build_timeout_ms 20 * 60_000
   @call_margin_ms 30_000
 
+  # The slice of `Image.plan()` a build reads. A node agent builds from the
+  # plan a run spec carries, which has no `source` / `ref` / `pins`.
+  @type build_plan :: %{
+          required(:tag) => String.t(),
+          required(:name) => String.t(),
+          required(:hash) => String.t(),
+          required(:containerfile) => String.t(),
+          required(:build_args) => [{String.t(), String.t()}],
+          required(:base) => %{
+            required(:tag) => String.t(),
+            required(:name) => String.t(),
+            required(:hash) => String.t(),
+            required(:containerfile) => String.t(),
+            optional(atom()) => term()
+          },
+          optional(atom()) => term()
+        }
+
   @type result :: {:ok, %{tag: String.t(), built: [String.t()]}} | {:error, term()}
 
   def start_link(opts \\ []) do
@@ -44,7 +62,7 @@ defmodule Arbiter.Worker.Image.Builder do
   Options: `:runner` (see `Arbiter.Worker.Image.run/3`), `:scratch` (where build
   directories go, default `<scratch_root>/images`), `:timeout` (per build).
   """
-  @spec ensure(GenServer.server(), Image.plan(), keyword()) :: result()
+  @spec ensure(GenServer.server(), build_plan(), keyword()) :: result()
   def ensure(server \\ __MODULE__, plan, opts \\ []) do
     base = Map.put(plan.base, :build_args, [])
     toolchain = Map.take(plan, [:tag, :name, :hash, :containerfile, :build_args])
