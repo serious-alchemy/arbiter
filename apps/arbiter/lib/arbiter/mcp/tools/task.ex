@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.MCP.Tools.Worker
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
@@ -24,7 +25,6 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.WorkerFiling
   alias Arbiter.Usage.Estimate
-  alias Arbiter.MCP.Tools.Worker
 
   require Ash.Query
 

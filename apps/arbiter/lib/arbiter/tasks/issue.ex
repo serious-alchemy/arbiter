@@ -2305,7 +2305,7 @@ defmodule Arbiter.Tasks.Issue do
     {workspace_id, opts} = Keyword.pop(opts, :workspace_id)
 
     workspace_id
-    |> Arbiter.Tasks.Lifecycle.Projection.ready(opts)
+    |> Projection.ready(opts)
     |> Enum.map(&elem(&1, 0))
   end
 

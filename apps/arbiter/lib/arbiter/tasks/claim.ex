@@ -245,7 +245,7 @@ defmodule Arbiter.Tasks.Claim do
 
   def typed(other), do: other
 
-  @doc "The claim response: `%{status: \"created\" | \"existing\", task: <ticket record>}`."
+  @doc "The claim response: `%{status: status, task: <ticket record>}`, status `created` or `existing`."
   @spec serialize_claim(:created | :existing, Issue.t()) :: map()
   def serialize_claim(status, %Issue{} = task),
     do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
