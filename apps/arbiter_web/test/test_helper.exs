@@ -41,8 +41,16 @@ max_cases_opts =
 # bd-6tx1xv (RW2 spike): the remote-workers go/no-go prototypes move real bytes
 # over real sockets (and, for some, `tc netem` / `tailscale serve`); opt in with
 # `mix test --include spike_rw <file>`. See docs/design/remote-workers.md §17.
+#
+# bd-afcoop (RW13): `:node_agent` boots a second BEAM as a real node agent (`ARB_ROLE=agent`)
+# and drives the host's real rootless podman against a Bandit-served endpoint; opt in with
+# `mix test --include node_agent test/node_agent/`. See docs/remote-workers-runbook.md.
 ExUnit.start(
-  [exclude: [:podman, :spike_rw, :spike_serve, :spike_k8s] ++ node_exclude ++ browser_exclude] ++
+  [
+    exclude:
+      [:podman, :spike_rw, :spike_serve, :spike_k8s, :node_agent] ++
+        node_exclude ++ browser_exclude
+  ] ++
     max_cases_opts
 )
 
