@@ -1890,6 +1890,8 @@ defmodule Arbiter.MCP.Tools do
 
   defdelegate alert_list(scope, args), to: Arbiter.MCP.Tools.Alerts
 
+  defdelegate account_set(scope, args), to: Arbiter.MCP.Tools.Account
+
   defdelegate breaker_list(scope, args), to: Arbiter.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Arbiter.MCP.Tools.Breaker
 

@@ -87,6 +87,7 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
   | `provider_pause` | coordinator | `Arbiter.Providers.Pause.pause/2` (persisted, bd-5ef587) |
   | `provider_resume` | coordinator | `Arbiter.Providers.Pause.resume/2` |
+  | `account_set` | coordinator | `Arbiter.Accounts.edit_account/2` (non-secret fields only, bd-1kr3qf) |
   | `alert_list` | coordinator | `Arbiter.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
@@ -2715,6 +2716,24 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.provider_resume/2
+    },
+
+    # ---- provider accounts (bd-1kr3qf) --------------------------------------
+    %{
+      name: "account_set",
+      tiers: @coordinator,
+      description:
+        "Edit one provider account's non-secret settings in a single write: `label`, " <>
+          "`plan`, `enabled` (false parks it), `max_concurrent` (the account concurrency " <>
+          "ceiling; null clears it) and a `quota_config` patch — the gate settings " <>
+          "(thresholds, paced floors, weekly warning policy, window lengths, pace " <>
+          "exemption). A null `quota_config` value clears that key; keys not named are " <>
+          "left alone, and a bad value rejects the whole edit. `ref` is an account id, " <>
+          "`provider:slug` or a bare slug. Credentials, secrets, login, create, attach, " <>
+          "merge and delete are operator actions and are not available here. " <>
+          "Coordinator only.",
+      input_schema: Arbiter.MCP.Catalog.AccountSchema.account_set(),
+      handler: &Tools.account_set/2
     },
 
     # ---- system alerts (bd-7gt8rm) -------------------------------------------
