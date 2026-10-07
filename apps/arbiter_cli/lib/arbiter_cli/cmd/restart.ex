@@ -126,6 +126,33 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   end
 
+  @doc """
+  Stop the server and leave it stopped — the half of `perform/2` a rollback needs
+  before it may touch the database file (SQLite has one writer, so a restore only
+  runs against a stopped server).
+
+  Returns `:ok` once the service is stopped, `{:error, message}` when systemd
+  refused. Uses the same systemd-or-signal split as `perform/2`.
+  """
+  @spec stop(String.t()) :: :ok | {:error, String.t()}
+  def stop(_root) do
+    case systemd_state() do
+      :managed ->
+        Start.log_text("Stopping via systemd (systemctl --user stop arbiter.service)…")
+
+        case run_cmd("systemctl", ["--user", "stop", "arbiter.service"], stderr_to_stdout: true) do
+          {_out, 0} -> :ok
+          {out, code} -> {:error, "systemctl stop exited #{code}: #{String.trim(out)}"}
+        end
+
+      :unmanaged ->
+        _ = stop_phoenix(api_port())
+        :ok
+    end
+  rescue
+    e in ErlangError -> {:error, "could not run systemctl: #{inspect(e.original)}"}
+  end
+
   # bd-3t973v: the non-systemd path SIGTERMs whatever listens on the API port,
   # so reaching it must mean "systemd is positively not in charge" — never
   # "systemd could not be asked". A worker shell has no XDG_RUNTIME_DIR / D-Bus,

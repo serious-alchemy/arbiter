@@ -5,14 +5,22 @@ defmodule Arbiter.Release.UpdateCheck do
   never deploys or restarts anything.
 
   The result (`state/1`) is `%{enabled, latest, release_url, checked_at,
-  update_available?, error}`, held in memory and served by `GET /api/version`,
+  update_available?, migrations_pending, error}`, held in memory and served by `GET /api/version`,
   the home page and `arb version`. A failed check (rate limit, network, parse)
   is stored in `:error` and keeps the last good `latest`; it is never logged
   above `:debug` and never crashes the process.
 
+  `migrations_pending` answers the operator's "does this update migrate the
+  database?" before they click Update: the release workflow publishes
+  `arbiter-<tag>-migrations.txt` (one migration name per line), and the names not
+  yet in this database's `schema_migrations` are the pending ones. `nil` means
+  unknown (older release without the manifest, or the lookup failed); `[]` means
+  none.
+
   ## "Latest" matches `arb server deploy`
 
-  Both use `GET /repos/<ARB_RELEASE_REPO>/releases/latest`, which GitHub
+  Both use `GET /repos/<release repo>/releases/latest` (`ARB_RELEASE_REPO`, else
+  the repo the build was stamped with — `Arbiter.Version.release_repo/0`), which GitHub
   defines as the newest non-draft, non-prerelease release. `GITHUB_TOKEN` is
   sent when set (needed for a private repo); otherwise the request is
   unauthenticated and conditional (`If-None-Match`) so a 304 does not count
@@ -51,6 +59,7 @@ defmodule Arbiter.Release.UpdateCheck do
     release_url: nil,
     checked_at: nil,
     update_available?: false,
+    migrations_pending: nil,
     error: nil
   }
 
@@ -102,8 +111,10 @@ defmodule Arbiter.Release.UpdateCheck do
       etag: nil,
       task: nil,
       waiters: [],
-      repo: Keyword.get_lazy(opts, :repo, fn -> env("ARB_RELEASE_REPO") end),
+      repo: Keyword.get_lazy(opts, :repo, &Arbiter.Version.release_repo/0),
       running: Keyword.get_lazy(opts, :running_version, &Arbiter.Version.app_version/0),
+      applied_migrations: Keyword.get(opts, :applied_migrations, &applied_migrations/0),
+      manifest: nil,
       interval_ms: Keyword.get(opts, :interval_ms, interval_ms()),
       req_options: Keyword.get(opts, :req_options, [])
     }
@@ -169,20 +180,31 @@ defmodule Arbiter.Release.UpdateCheck do
 
   defp run_check(state) do
     case fetch(state) do
-      {:ok, tag, url, etag} ->
+      {:ok, tag, url, etag, manifest_url} ->
+        update? = newer?(tag, state.running)
+        manifest = if update?, do: load_manifest(state, tag, manifest_url)
+
         result = %{
           state.result
           | latest: tag,
             release_url: url,
             checked_at: DateTime.utc_now(),
-            update_available?: newer?(tag, state.running),
+            update_available?: update?,
+            migrations_pending: pending(manifest, state),
             error: nil
         }
 
-        %{state | result: result, etag: etag}
+        %{state | result: result, etag: etag, manifest: manifest}
 
       :not_modified ->
-        %{state | result: %{state.result | checked_at: DateTime.utc_now(), error: nil}}
+        result = %{
+          state.result
+          | checked_at: DateTime.utc_now(),
+            migrations_pending: pending(state.manifest, state),
+            error: nil
+        }
+
+        %{state | result: result}
 
       {:error, message} ->
         record_error(state, message)
@@ -212,7 +234,7 @@ defmodule Arbiter.Release.UpdateCheck do
       {:ok, %Req.Response{status: 200, body: %{"tag_name" => tag} = body} = resp}
       when is_binary(tag) and tag != "" ->
         etag = resp |> Req.Response.get_header("etag") |> List.first()
-        {:ok, tag, body["html_url"], etag}
+        {:ok, tag, body["html_url"], etag, manifest_url(body, tag)}
 
       {:ok, %Req.Response{status: 200}} ->
         {:error, "release response had no tag_name"}
@@ -226,6 +248,77 @@ defmodule Arbiter.Release.UpdateCheck do
       {:error, reason} ->
         {:error, "could not reach GitHub: " <> inspect(reason)}
     end
+  end
+
+  # The `arbiter-<tag>-migrations.txt` asset's download URL, if the release has one.
+  defp manifest_url(%{"assets" => assets}, tag) when is_list(assets) do
+    name = "arbiter-#{tag}-migrations.txt"
+
+    Enum.find_value(assets, fn
+      %{"name" => ^name, "browser_download_url" => url} when is_binary(url) -> url
+      _ -> nil
+    end)
+  end
+
+  defp manifest_url(_body, _tag), do: nil
+
+  # `{tag, [migration name]}` for the latest release, or nil when it has no
+  # manifest or it could not be read. Kept across 304s so the file is fetched
+  # once per release, not once per check.
+  defp load_manifest(_state, _tag, nil), do: nil
+
+  defp load_manifest(%{manifest: {tag, _names} = cached}, tag, _url), do: cached
+
+  defp load_manifest(state, tag, url) do
+    req =
+      [method: :get, url: url, headers: headers(nil), receive_timeout: 15_000, retry: false] ++
+        state.req_options
+
+    case Req.request(req) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
+        names =
+          body
+          |> String.split("\n", trim: true)
+          |> Enum.map(&String.trim/1)
+          |> Enum.filter(&Regex.match?(~r/\A\d+_/, &1))
+
+        if names == [], do: nil, else: {tag, names}
+
+      _ ->
+        nil
+    end
+  end
+
+  # Names in the manifest whose version is not yet applied here; nil = unknown.
+  defp pending(nil, _state), do: nil
+
+  defp pending({_tag, names}, state) do
+    case state.applied_migrations.() do
+      applied when is_list(applied) ->
+        applied = MapSet.new(applied)
+
+        Enum.reject(names, fn name ->
+          {version, _} = Integer.parse(name)
+          MapSet.member?(applied, version)
+        end)
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc false
+  # The versions recorded in this database's `schema_migrations`, or nil when
+  # the read fails (the check must never crash on it).
+  def applied_migrations do
+    case Ecto.Adapters.SQL.query(Arbiter.Repo, "SELECT version FROM schema_migrations", []) do
+      {:ok, %{rows: rows}} -> Enum.map(rows, fn [v] -> v end)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp headers(etag) do

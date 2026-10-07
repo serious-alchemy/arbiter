@@ -103,6 +103,10 @@ defmodule ArbiterWeb.Router do
 
     get("/about", PageController, :home)
 
+    # bd-6umf7z: the update banner's "Update to vX.Y.Z" button. A dashboard
+    # login only; deploys the release the update check offered.
+    post("/release/deploy", DashboardUpdateController, :create)
+
     # A finished session's artefacts. Not in the `live_session` below because
     # these are file downloads, not pages — they sit outside the "no
     # /sessions/:id page" rule the live_session comment documents.
@@ -267,6 +271,11 @@ defmodule ArbiterWeb.Router do
     post("/nodes/:ref/revoke", NodeController, :revoke)
     post("/nodes/:ref/upgrade", NodeController, :upgrade)
     delete("/nodes/:ref", NodeController, :delete)
+
+    # Operator-triggered self-update (bd-6umf7z): launches `arb server deploy`
+    # in its own systemd unit. `:operator` in `ArbiterWeb.ApiPolicy`.
+    post("/release/deploy", ReleaseDeployController, :create)
+    get("/release/deploy", ReleaseDeployController, :show)
 
     # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
     # backs `arb account list|show|create|attach|rotate|merge|delete`.

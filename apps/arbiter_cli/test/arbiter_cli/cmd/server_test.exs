@@ -188,7 +188,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
 
   # ---- deploy: dev-mode fallback when ARB_RELEASE_REPO is unset ------------
 
-  describe "deploy — dev-mode fallback (no ARB_RELEASE_REPO)" do
+  describe "deploy — no ARB_RELEASE_REPO" do
     setup do
       System.put_env("ARB_HOME", "/tmp/arbiter-server-deploy-test")
       System.delete_env("ARB_RELEASE_REPO")
@@ -242,22 +242,42 @@ defmodule ArbiterCli.Cmd.ServerTest do
       :ok
     end
 
-    test "falls back to the git-pull deploy path instead of dead-ending" do
-      {out, _err, code} = capture(fn -> Server.run(["deploy"]) end)
+    test "never falls back to git-pull silently when no release repo can be resolved" do
+      Process.put(:bd2_build_release_repo, false)
 
-      assert code == 0
-      refute out =~ "ARB_RELEASE_REPO is not set"
-      assert out =~ "already up to date" or out =~ "Already up to date"
-      # Went through the git-pull path (preflight + pull), not the release path.
-      assert_received {:cmd, "git", ["rev-parse", "--abbrev-ref", "HEAD"]}
-      assert_received {:cmd, "git", ["pull", "--ff-only"]}
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      assert code == 1
+      assert err =~ "--git-pull"
+      assert err =~ "ARB_RELEASE_REPO"
+      refute_received {:cmd, "git", _}
     end
 
-    test "explicit --git-pull still works the same way" do
-      {out, _err, code} = capture(fn -> Server.run(["deploy", "--git-pull"]) end)
+    test "an unset ARB_RELEASE_REPO deploys from the repo the server reports, naming the source" do
+      stub_routes([
+        {{"get", "/api/version"},
+         {%{"version" => "1.0.0", "release_repo" => "acme/arbiter"}, 200}},
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      # Proceeds down the release path (and dies reaching the unstubbed GitHub
+      # API), never the git-pull path.
+      assert code == 1
+      assert err =~ "Release source: acme/arbiter"
+      assert err =~ "running server"
+      refute err =~ "ARB_RELEASE_REPO is not set"
+      refute_received {:cmd, "git", _}
+    end
+
+    test "--git-pull is the only way to reach the legacy path, and names it" do
+      {out, err, code} = capture(fn -> Server.run(["deploy", "--git-pull"]) end)
 
       assert code == 0
       refute out =~ "ARB_RELEASE_REPO is not set"
+      assert err =~ "Deploy source: legacy git-pull"
       assert_received {:cmd, "git", ["pull", "--ff-only"]}
     end
   end
