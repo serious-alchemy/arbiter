@@ -400,6 +400,12 @@ defmodule Arbiter.Usage do
   defdelegate calibration(opts \\ []), to: Estimate
 
   @doc """
+  Raw ledger rows, newest first — see `Arbiter.Usage.Events.list/1`.
+  """
+  @spec list_events(keyword()) :: [Arbiter.Usage.Event.t()]
+  defdelegate list_events(opts \\ []), to: Arbiter.Usage.Events, as: :list
+
+  @doc """
   Epic cost rollup ("$X spent · ~$Y–Z to go") — see
   `Arbiter.Usage.Estimate.epic_cost_rollup/2`.
   """

@@ -80,6 +80,8 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_canary_status` | coordinator | `Arbiter.Loop.Canary.status/1` (both arms' metrics + verdict progress) |
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
+  | `usage_events_list` | coordinator | `Arbiter.Usage.list_events/1` (raw ledger rows, P-17) |
+  | `usage_calibration` | coordinator | `Arbiter.Usage.calibration/1` (difficulty mis-rating report, P-17) |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/2` (bd-8jixav) |
   | `ci_rerun` | worker, coordinator | `Arbiter.Worker.CIRerun.rerun/2` → `Watchdog.rerun_ci/2` / `Merger.rerun_ci/2` (bd-5mzzww) |
@@ -89,6 +91,9 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
   | `provider_pause` | coordinator | `Arbiter.Providers.Pause.pause/2` (persisted, bd-5ef587) |
   | `provider_resume` | coordinator | `Arbiter.Providers.Pause.resume/2` |
+  | `provider_list` | coordinator | `Arbiter.Providers.Pause.to_json/0` (active pauses, P-17) |
+  | `account_list` | coordinator | `Arbiter.Accounts.list_accounts/1` via `Accounts.Serializer` (P-17) |
+  | `account_show` | coordinator | `Arbiter.Accounts.get_account/1` via `Accounts.Serializer` (credential kind + fingerprint prefix only, P-17) |
   | `alert_list` | coordinator | `Arbiter.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
@@ -146,7 +151,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
@@ -346,8 +351,20 @@ defmodule Arbiter.MCP.Catalog do
           "`pacing` map (window length resolved per plan; `enabled: false` with a " <>
           "`disabled_reason` when the plan or length is unknown). `gemini` / `antigravity`: " <>
           "live per-model Cloud Code Assist quota (`null` when that CLI isn't authenticated on " <>
-          "this host).",
-      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+          "this host). Coordinator only: `account` (uuid, `provider:slug` or an unambiguous slug) " <>
+          "reads that one account's quota instead of a workspace's, in the REST " <>
+          "`GET /api/quota?account=` shape (`workspace` is then ignored).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "account" => %{
+            "type" => "string",
+            "description" =>
+              "Provider account ref to read instead of a workspace (coordinator only)."
+          }
+        },
+        "additionalProperties" => false
+      },
       handler: &Tools.quota_get/2
     },
     %{
@@ -2659,7 +2676,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Roll up the token/cost usage ledger for the workspace. `by` is required (day, task, " <>
-          "epic, workspace, repo, model, step, provider, source — `campaign` also accepted as a " <>
+          "epic, workspace, provider_account, repo, model, step, provider, source, session — " <>
+          "`campaign` also accepted as a " <>
           "deprecated alias for `epic`); optional `since` (ISO-8601) and `limit`. " <>
           "`by=task` covers ticket-attributed spend only: quota probes, auth pre-flights and " <>
           "coordinator/terminal sessions have no ticket and are grouped under `by=source` instead.",
@@ -2671,12 +2689,64 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" => "ISO-8601 datetime lower bound (optional)."
           },
-          "limit" => %{"type" => "integer", "description" => "Cap the returned rows (optional)."}
+          "limit" => %{"type" => "integer", "description" => "Cap the returned rows (optional)."},
+          "account" => %{
+            "type" => "string",
+            "description" =>
+              "Narrow to one provider account (uuid, `provider:slug` or an unambiguous slug)."
+          }
         },
         "required" => ["by"],
         "additionalProperties" => false
       },
       handler: &Tools.usage_summarize/2
+    },
+    %{
+      name: "usage_events_list",
+      tiers: @coordinator,
+      description:
+        "List raw usage-ledger rows, newest first (the drill-down behind `usage_summarize`). " <>
+          "Optional filters: `account` (uuid, `provider:slug` or slug), `task_id` (also matches " <>
+          "synthetic children `<id>#…`), `session_id`, `step` (work | review | impl …), " <>
+          "`source` (task | probe | preflight | coordinator_session | terminal_session | " <>
+          "maintenance), `since` (ISO-8601) and `limit` (default 50, max 1000). Omitting " <>
+          "`workspace` covers all workspaces; the response echoes `workspace_id`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "account" => %{"type" => "string", "description" => "Provider account ref."},
+          "task_id" => %{"type" => "string", "description" => "Ticket id."},
+          "session_id" => %{"type" => "string", "description" => "Session id."},
+          "step" => %{"type" => "string", "description" => "Usage step."},
+          "source" => %{"type" => "string", "description" => "Usage source."},
+          "since" => %{
+            "type" => "string",
+            "description" => "ISO-8601 datetime lower bound (optional)."
+          },
+          "limit" => %{"type" => "integer", "description" => "Row cap (default 50, max 1000)."}
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.usage_events_list/2
+    },
+    %{
+      name: "usage_calibration",
+      tiers: @coordinator,
+      description:
+        "The difficulty mis-rating report: closed tickets whose actual cost lands outside " <>
+          "their own difficulty tier's p25–p75 but inside an adjacent tier's, with per-tier " <>
+          "percentiles and under/over-rating rates. Optional `workspace` and `window_days`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "window_days" => %{
+            "type" => "integer",
+            "description" => "Look-back window in days (positive; default per report)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.usage_calibration/2
     },
 
     # ---- board scheduler (autopilot) pause/resume --------------------------
@@ -2759,6 +2829,67 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.provider_resume/2
+    },
+    %{
+      name: "provider_list",
+      tiers: @coordinator,
+      description:
+        "List the active provider / account pauses (set by `provider_pause`): each entry " <>
+          "carries `target`, `label`, `reason`, `by`, `actor` and `at`. Empty when nothing is " <>
+          "paused. Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.provider_list/2
+    },
+
+    # ---- provider accounts, read side (P-17) ------------------------------
+    %{
+      name: "account_list",
+      tiers: @coordinator,
+      description:
+        "List provider accounts (ordered by provider then slug): id, provider, slug, label, " <>
+          "plan, enabled, max_concurrent, quota_config and identity fields. Merged-away and " <>
+          "soft-deleted accounts are hidden unless `include_merged` / `include_deleted`. " <>
+          "Carries no credential material. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "provider" => %{
+            "type" => "string",
+            "enum" => ~w(claude codex antigravity grok),
+            "description" => "Restrict to one provider."
+          },
+          "include_merged" => %{
+            "type" => "boolean",
+            "description" => "Include merged-away accounts."
+          },
+          "include_deleted" => %{
+            "type" => "boolean",
+            "description" => "Include soft-deleted accounts."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.account_list/2
+    },
+    %{
+      name: "account_show",
+      tiers: @coordinator,
+      description:
+        "Show one provider account with its credentials and attached workspaces. A credential " <>
+          "is reported as `kind`, `env_var`, a 12-character `fingerprint` prefix, `active` and " <>
+          "lifecycle timestamps — the secret itself is never returned. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "ref" => %{
+            "type" => "string",
+            "description" => "Account uuid, `provider:slug` or an unambiguous bare slug."
+          }
+        },
+        "required" => ["ref"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.account_show/2
     },
 
     # ---- system alerts (bd-7gt8rm) -------------------------------------------

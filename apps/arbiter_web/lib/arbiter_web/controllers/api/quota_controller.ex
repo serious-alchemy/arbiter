@@ -142,38 +142,7 @@ defmodule ArbiterWeb.Api.QuotaController do
   defp show_by_account(conn, account_ref) do
     case Arbiter.Accounts.get_account(account_ref) do
       {:ok, account} ->
-        provider = Atom.to_string(account.provider)
-        spend = Quota.spend_cache(account.id)
-        fields = Quota.account_fields(account.id, provider, spend)
-
-        codex = if provider == "codex", do: Quota.Codex.serialize_latest(account.id)
-        policy = Quota.policy_fields(account, nil)
-
-        render(conn, :show,
-          workspace_id: nil,
-          workspace: nil,
-          requested_workspace: nil,
-          claude:
-            if(provider == "claude",
-              do: Quota.serialize(account.id, "claude", spend_cache: spend)
-            ),
-          quotas: Quota.list_serialized(account.id, spend_cache: spend),
-          account: fields[:account],
-          workspaces: fields[:workspaces],
-          account_policy: policy[:account_policy],
-          policy_binding: policy[:policy_binding],
-          effective_policy: policy[:effective],
-          codex: codex,
-          codex_message: Quota.codex_absence_message(codex),
-          codex_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-          antigravity:
-            if(provider == "antigravity",
-              do: Quota.CloudCode.serialize_latest(account.id, "antigravity")
-            ),
-          gemini_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
-        )
+        json(conn, %{data: Quota.account_snapshot(account)})
 
       {:error, :not_found} ->
         {:error, {:not_found, "account #{inspect(account_ref)} not found"}}
