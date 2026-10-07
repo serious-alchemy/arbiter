@@ -159,7 +159,11 @@ defmodule ArbiterWeb.Api.UsageController do
     end
   end
 
-  defp parse_limit(raw), do: raw |> UsageParams.event_limit() |> Params.to_rest()
+  defp parse_limit(raw) do
+    raw
+    |> Params.limit(UsageParams.default_event_limit(), UsageParams.max_event_limit())
+    |> Params.to_rest()
+  end
 
   defp parse_optional_limit(nil), do: {:ok, nil}
   defp parse_optional_limit(""), do: {:ok, nil}
