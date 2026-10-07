@@ -327,6 +327,23 @@ defmodule ArbiterWeb.UpdateAvailableTest do
       assert has_element?(view, "#deploy-status[data-state='failed']", "database backup failed")
     end
 
+    test "a deploy refused before it began (active workers) is shown with its reason",
+         %{conn: conn, home: home} do
+      start_checker_with(%{"tag_name" => "v99.0.0"}, "0.2.0", fn -> [] end)
+
+      write_status(home, %{
+        "state" => "failed",
+        "tag" => "v99.0.0",
+        "phase" => "preflight",
+        "message" => "1 worker(s) are actively working: bd-xyz",
+        "finished_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+
+      {:ok, view, _} = live(conn, ~p"/")
+      assert has_element?(view, "#deploy-status[data-state='failed']", "actively working")
+      assert has_element?(view, "#update-deploy-button")
+    end
+
     defp confirm_text(html) do
       html
       |> LazyHTML.from_fragment()

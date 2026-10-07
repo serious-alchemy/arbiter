@@ -217,6 +217,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
     run = %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts}
 
+    # Until `begin_status/2` takes over, a halt (repo resolution, the active-worker
+    # guard, the release lookup) must still leave a record: a deploy launched from
+    # the dashboard has no terminal, and the UI reads this file for the outcome.
+    early_tag = opts[:version] || if(opts[:local], do: "local", else: "latest")
+    Output.on_halt(fn _code, message -> Status.fail_early(early_tag, message) end)
+
     case opts[:local] do
       nil -> deploy_from_github(run)
       path -> deploy_from_local(path, run)

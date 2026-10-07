@@ -63,6 +63,28 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Status do
     merge(extra)
   end
 
+  @doc """
+  Record a deploy that stopped before `start/2` — an active-worker refusal, a
+  failed release lookup. Nothing ran, so this is written only when the stop
+  happens (never as a `running` placeholder): a no-op deploy that finds the
+  release already current leaves the prior record alone.
+  """
+  @spec fail_early(String.t(), String.t() | nil) :: :ok
+  def fail_early(tag, message) do
+    Process.put(:arb_deploy_status_finished, true)
+    now = now()
+
+    write(%{
+      "state" => "failed",
+      "tag" => tag,
+      "phase" => "preflight",
+      "started_at" => now,
+      "updated_at" => now,
+      "finished_at" => now,
+      "message" => message || "the deploy stopped before it began"
+    })
+  end
+
   @spec phase(String.t()) :: :ok
   def phase(name), do: merge(%{"phase" => name})
 

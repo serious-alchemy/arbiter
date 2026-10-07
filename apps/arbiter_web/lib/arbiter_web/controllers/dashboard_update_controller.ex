@@ -9,6 +9,10 @@ defmodule ArbiterWeb.DashboardUpdateController do
   operator's own browser session. A bearer token (coordinator, worker, MCP) is
   not one and is redirected to the login page without reaching this action.
 
+  It redirects to the board, a LiveView: the deploy restarts the server, and only a
+  LiveView page reconnects and re-reads the deploy record when the server is back.
+  A dead page would keep showing the banner as it was when it rendered.
+
   The tag is never taken from the form: the button deploys the release the update
   check offered, so a forged field cannot choose what runs as the operator.
   """
@@ -27,11 +31,11 @@ defmodule ArbiterWeb.DashboardUpdateController do
         "Updating to #{tag}: the server will restart when the deploy swaps in. " <>
           "This page shows the outcome once it is back."
       )
-      |> redirect(to: ~p"/about")
+      |> redirect(to: ~p"/")
     else
       {:error, reason} ->
         {_kind, message} = ReleaseDeployController.error(reason)
-        conn |> put_flash(:error, message) |> redirect(to: ~p"/about")
+        conn |> put_flash(:error, message) |> redirect(to: ~p"/")
     end
   end
 end

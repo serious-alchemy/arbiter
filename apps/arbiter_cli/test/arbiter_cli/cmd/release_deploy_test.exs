@@ -1807,6 +1807,35 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert msg =~ "checksum"
     end
 
+    test "an active-worker refusal is recorded as failed, with the reason" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"},
+         {%{"data" => [%{"task_id" => "bd-xyz", "kind" => "implement", "state" => "working"}]},
+          200}}
+      ])
+
+      stub_cmds()
+
+      {_out, _err, 1} = capture(fn -> ReleaseDeploy.run(["--version", @vsn]) end)
+
+      assert %{"state" => "failed", "tag" => @vsn, "message" => msg, "finished_at" => _} =
+               Status.read()
+
+      assert msg =~ "bd-xyz"
+    end
+
+    test "a release lookup failure is recorded as failed, with the reason" do
+      stub_routes([{{"get", "/api/workspaces"}, {@green, 200}}])
+      stub_cmds()
+
+      {_out, _err, code} = capture(fn -> ReleaseDeploy.run(["--version", "v404.0.0"]) end)
+
+      assert code != 0
+      assert %{"state" => "failed", "tag" => "v404.0.0", "message" => msg} = Status.read()
+      assert is_binary(msg) and msg != ""
+    end
+
     test "a refused rollback is recorded as refused", %{home: home} do
       prior = seed_release(home, "v0.0.2", [@m_base])
       point_current(home, prior)

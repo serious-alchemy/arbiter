@@ -73,7 +73,7 @@ defmodule ArbiterWeb.DashboardUpdateControllerTest do
 
     conn = post(session_only(), "/release/deploy", %{})
 
-    assert redirected_to(conn) == "/about"
+    assert redirected_to(conn) == "/"
     assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "v99.0.0"
     assert_received {:cmd, "systemd-run", args}
     assert "--unit=arbiter-deploy-v99.0.0" in args
@@ -86,7 +86,7 @@ defmodule ArbiterWeb.DashboardUpdateControllerTest do
     # update check offered, never a client-chosen tag.
     conn = post(session_only(), "/release/deploy", %{"version" => "v1.0.0"})
 
-    assert redirected_to(conn) == "/about"
+    assert redirected_to(conn) == "/"
     assert_received {:cmd, "systemd-run", args}
     assert "--unit=arbiter-deploy-v99.0.0" in args
     refute "--unit=arbiter-deploy-v1.0.0" in args
@@ -97,7 +97,7 @@ defmodule ArbiterWeb.DashboardUpdateControllerTest do
 
     conn = post(session_only(), "/release/deploy", %{})
 
-    assert redirected_to(conn) == "/about"
+    assert redirected_to(conn) == "/"
     assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "no update"
     refute_received {:cmd, "systemd-run", _}
   end
