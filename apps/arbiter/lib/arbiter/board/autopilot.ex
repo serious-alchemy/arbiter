@@ -487,6 +487,20 @@ defmodule Arbiter.Board.Autopilot do
   surface that only wants to know whether a ticket is waiting must not stall
   on a busy scheduler.
   """
+  @spec deferred_fix_pass_ids(GenServer.server()) :: [String.t()]
+  @doc """
+  Task ids whose deferred resume is a `:fix_pass`, like `deferred_resume_ids/1`
+  but ignoring other kinds (`:resume`, `:resume_session`, `:conflict`).
+  """
+  def deferred_fix_pass_ids(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> []
+      _pid -> server |> status(1_000) |> Map.get(:deferred_fix_passes, [])
+    end
+  catch
+    :exit, _ -> []
+  end
+
   @spec deferred_resume_ids(GenServer.server()) :: [String.t()]
   def deferred_resume_ids(server \\ __MODULE__) do
     case GenServer.whereis(server) do
@@ -610,7 +624,8 @@ defmodule Arbiter.Board.Autopilot do
        changed_by: state.paused_changed_by,
        dispatching: dispatching_id(state),
        holds: state.holds,
-       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id)
+       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id),
+       deferred_fix_passes: for(%{kind: :fix_pass, task_id: id} <- state.deferred_resumes, do: id)
      }, state}
   end
 

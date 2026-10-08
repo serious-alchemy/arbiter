@@ -496,7 +496,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   defp fix_pass_queued?(task_id) do
     deferrer = Application.get_env(:arbiter, :resume_deferrer, Arbiter.Board.Autopilot)
-    task_id in deferrer.deferred_resume_ids()
+    task_id in deferrer.deferred_fix_pass_ids()
   end
 
   # The filing itself, behind the shared circuit breaker (bd-5jr49o).

@@ -271,6 +271,18 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
     assert follow_up.description =~ "mix test"
   end
 
+  test "a queued non-fix-pass resume does not hold back the CI follow-up", %{ws: ws} do
+    task = authored_task(ws)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+    :ok = StubResumeDeferrer.defer_resume(task.id, :resume_session, [])
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Issue{}] = follow_ups()
+  end
+
   test "a running fix pass does not hold back a review-thread follow-up", %{ws: ws} do
     task = authored_task(ws)
     start_fix_pass_run(task, ws)

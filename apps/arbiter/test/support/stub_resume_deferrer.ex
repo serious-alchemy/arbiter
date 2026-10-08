@@ -45,6 +45,19 @@ defmodule Arbiter.Test.StubResumeDeferrer do
     |> Enum.reverse()
   end
 
+  @doc "Task ids whose current deferral is a `:fix_pass`."
+  def deferred_fix_pass_ids do
+    ensure_started()
+
+    Agent.get(@name, &Enum.reverse/1)
+    |> Enum.reduce(%{}, fn
+      {:cancel, id}, acc -> Map.delete(acc, id)
+      {id, kind, _opts}, acc -> Map.put(acc, id, kind)
+    end)
+    |> Enum.filter(fn {_id, kind} -> kind == :fix_pass end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
   def cancel_deferred(task_id) do
     ensure_started()
     Agent.update(@name, &[{:cancel, task_id} | &1])
