@@ -289,6 +289,25 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       assert Ash.get!(Issue, ctx.task.id).attention_owner != :operator
     end
 
+    test "an active ticket whose worker was stopped gets no run_crashed attention in the sweep",
+         ctx do
+      {:ok, pid} =
+        Worker.start(
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          meta: %{provider: "agy"}
+        )
+
+      :ok = Worker.advance(pid, :run_agy)
+      Arbiter.Actor.put(Arbiter.Actor.system("coordinator"))
+      :ok = Worker.operator_stop(ctx.task.id)
+
+      now = DateTime.add(DateTime.utc_now(), 120, :second)
+      assert Attention.current(Ash.get!(Issue, ctx.task.id), now: now) == nil
+      assert %{promoted: []} = AttentionSweep.run(now: now)
+    end
+
     test "a resumed run counts an attempt only when it resumes a failed run", ctx do
       for {outcome, expected} <- [{:succeeded, 0}, {:failed, 1}] do
         prior =

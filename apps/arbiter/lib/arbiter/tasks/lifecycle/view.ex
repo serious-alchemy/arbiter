@@ -93,7 +93,10 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workers.Run
   alias Arbiter.Workflows.DispatchQueue
+
+  require Ash.Query
 
   @type column ::
           :backlog | :blocked | :ready | :in_progress | :merging | :verifying | :closed
@@ -368,9 +371,42 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # No live author run at all: orphaned once past the dispatch grace. An epic
   # never gets a run, so it never reads as orphaned.
+  #
+  # bd-98gi5m: nor is a ticket whose latest run was deliberately stopped.
   defp orphaned?(ticket, ctx) do
     Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
-      past_grace?(ticket, Map.get(ctx, :now))
+      past_grace?(ticket, Map.get(ctx, :now)) and
+      not stopped?(ticket, ctx)
+  end
+
+  defp stopped?(ticket, ctx) do
+    runs = runs_for(ticket, ctx)
+    id = Map.get(ticket, :id)
+
+    cond do
+      Enum.any?(author_runs(runs, id), &(run_class(&1) == :stopped)) ->
+        true
+
+      is_binary(id) ->
+        latest_run_stopped?(id)
+
+      true ->
+        false
+    end
+  end
+
+  defp latest_run_stopped?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id or base_task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{state: :finished, outcome: :stopped}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp past_grace?(_ticket, nil), do: true

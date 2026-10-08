@@ -1128,17 +1128,30 @@ defmodule Arbiter.Worker do
   @spec operator_stop(ref()) :: :ok | {:error, :not_found}
   def operator_stop(ref) do
     # bd-98gi5m: the run records who stopped it. The actor is the caller's, so
-    # it is handed to the worker before it goes down.
     actor = Arbiter.Actor.current()
-    if actor && is_binary(ref), do: note_stopper(ref, Arbiter.Actor.label(actor))
+
+    if actor do
+      label = Arbiter.Actor.label(actor)
+
+      cond do
+        is_binary(ref) -> note_stopper(ref, label)
+        is_pid(ref) -> note_stopper_pid(ref, label)
+        true -> :ok
+      end
+    end
+
     stop(ref, {:shutdown, @operator_stop})
   end
 
   defp note_stopper(task_id, label) do
     case whereis(task_id) do
       nil -> :ok
-      pid -> GenServer.call(pid, {:note_stopper, label})
+      pid -> note_stopper_pid(pid, label)
     end
+  end
+
+  defp note_stopper_pid(pid, label) do
+    if Process.alive?(pid), do: GenServer.call(pid, {:note_stopper, label})
   catch
     :exit, _ -> :ok
   end
