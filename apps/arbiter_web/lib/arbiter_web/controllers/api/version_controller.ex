@@ -12,36 +12,8 @@ defmodule ArbiterWeb.Api.VersionController do
 
   use ArbiterWeb, :controller
 
-  def show(conn, _params) do
-    {uptime_ms, _} = :erlang.statistics(:wall_clock)
-
-    booted_at =
-      DateTime.utc_now()
-      |> DateTime.add(-div(uptime_ms, 1000), :second)
-      |> DateTime.to_iso8601()
-
-    json(conn, %{
-      version: Arbiter.Version.app_version(),
-      sha: Arbiter.Version.git_sha(),
-      built_at: Arbiter.Version.built_at(),
-      booted_at: booted_at,
-      release_repo: Arbiter.Version.release_repo(),
-      update: update_payload()
-    })
-  end
+  def show(conn, _params), do: json(conn, Arbiter.Server.Status.version())
 
   @doc false
-  def update_payload do
-    u = Arbiter.Release.UpdateCheck.state()
-
-    %{
-      enabled: u.enabled,
-      latest: u.latest,
-      release_url: u.release_url,
-      checked_at: u.checked_at && DateTime.to_iso8601(u.checked_at),
-      update_available: u.update_available?,
-      migrations_pending: u.migrations_pending,
-      error: u.error
-    }
-  end
+  def update_payload, do: Arbiter.Server.Status.update()
 end

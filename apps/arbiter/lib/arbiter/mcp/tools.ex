@@ -1103,6 +1103,15 @@ defmodule Arbiter.MCP.Tools do
       {:error, {:busy, "status check failed: process error #{inspect(reason)}"}}
   end
 
+  @doc """
+  Return the server's version stamp, git sha, build and boot times, the
+  update-check block and pending-migration status (`Arbiter.Server.Status`,
+  the same read as `GET /api/version` and `GET /api/server/migrations`).
+  Read-only; carries no host paths. Coordinator only.
+  """
+  @spec server_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def server_status(%Scope{} = _scope, _args), do: {:ok, Arbiter.Server.Status.snapshot()}
+
   defp mcp_actor(scope), do: {Arbiter.PaperTrail.actor_label(scope), "mcp"}
 
   # bd-9fgg04: the one drain-state definition, shared with the REST endpoint.

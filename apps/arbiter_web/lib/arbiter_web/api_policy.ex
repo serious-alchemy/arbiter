@@ -242,6 +242,9 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/server/spawn_canary"} => :coordinator,
     {:post, "/api/dashboard/login_tokens"} => :operator,
 
+    # ---- attention queue (the coordinator's triage read) ---------------------
+    {:get, "/api/attention"} => :coordinator,
+
     # ---- install-wide settings (the REST twin of installation_config_*) ------
     # Coordinator for both: `set` is coordinator-only over MCP, and reads match
     # `/api/server/*` and `/api/scheduler/*` (workers read via the MCP tool).
