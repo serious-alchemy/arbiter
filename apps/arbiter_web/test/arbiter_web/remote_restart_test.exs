@@ -310,7 +310,9 @@ defmodule ArbiterWeb.RemoteRestartTest do
       # removes the container, racing the stub-call check below. Draining the session
       # makes this deterministic: the run is still held, and no cancel was ever queued.
       _ = :sys.get_state(session)
-      assert {:ok, %{cancel?: false}} = Arbiter.Nodes.RunStreams.fetch(:sys.get_state(session).streams, run_id)
+
+      assert {:ok, %{cancel?: false}} =
+               Arbiter.Nodes.RunStreams.fetch(:sys.get_state(session).streams, run_id)
 
       # the run is not written off, and the node was not told to stop it
       assert %{state: :working, outcome: nil, node_id: ^node_id} = Ash.get!(Run, run_id)
