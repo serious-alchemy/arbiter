@@ -898,6 +898,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
         held.retry_not_before != nil ->
           GenServer.cast(queue, {:requeue, held})
 
+        # A replay the quota gate or a pause still holds is waiting, not
+        # failing: it requeues as often as it takes and is never counted
+        # toward the breaker, which would drop a legitimately held intent
+        # after K drains (bd-a6vh2x, seen on bd-4df3ma).
+        still_held?(reason) ->
+          GenServer.cast(queue, {:requeue, held})
+
         redispatch_broken?(ws_id, item, reason) ->
           Logger.warning(
             "DispatchQueue: circuit breaker open for #{item.task_id}; dropping held intent " <>
@@ -911,6 +918,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
       end
     end
   end
+
+  defp still_held?({:quota_held, _}), do: true
+  defp still_held?({:provider_paused, _, _}), do: true
+  defp still_held?(_reason), do: false
 
   defp redispatch_broken?(ws_id, item, reason) do
     match?(
