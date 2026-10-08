@@ -534,7 +534,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {ReviewGate, :escalate_commit_gate, 2},
-        {ReviewGate, :escalate_no_changes, 1}
+        {ReviewGate, :escalate_no_changes, 1},
+        {ReviewGate, :escalate_or_rerun_ci, 2}
       ],
       anchors: ["@commit_gate_no_changes_marker", "@commit_gate_uncommitted_marker"],
       summary:

@@ -12,6 +12,11 @@ defmodule ArbiterWeb.Api.NodeController do
       `local + Σ remote caps` against the `ceiling` (`conductor.max_concurrent`),
       `warnings`, and the `nodes.public_url` with its `exposure`
       (`private | public | unset`) for `arb server doctor`.
+    * `GET /api/nodes/pairings`, `POST /api/nodes/pairings/:ref/{approve,deny}` —
+      **operator**: the pending device-code pairing requests (code, hostname,
+      source address) and the decision on one. `:ref` is the typed code or the
+      request id. Approval creates no node itself: the node collects its
+      credential by polling (`Arbiter.Nodes.Pairing`).
     * `PATCH /api/nodes/:ref` — **operator**: edit `name`, `labels`,
       `max_workers`. `local` takes `max_workers` only (0 allowed, `null` clears).
     * `POST /api/nodes/:ref/{drain,undrain,revoke,upgrade}` and
@@ -25,7 +30,7 @@ defmodule ArbiterWeb.Api.NodeController do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{JoinScript, Overview, RateLimit}
+  alias Arbiter.Nodes.{JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.Api.NodeJSON
 
@@ -53,6 +58,46 @@ defmodule ArbiterWeb.Api.NodeController do
       {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
       {:error, {:rate_limited, seconds}} -> rate_limited(conn, seconds)
       {:error, other} -> {:error, other}
+    end
+  end
+
+  # ---- device-code pairing (design §5.7) --------------------------------------
+
+  def pairings(conn, _params),
+    do: json(conn, %{pairings: Enum.map(Pairing.list_pending(), &NodeJSON.pairing/1)})
+
+  def approve_pairing(conn, %{"ref" => ref} = params) do
+    attrs = Map.take(params, ["name", "max_workers"])
+
+    with :ok <- check_pairing_attrs(attrs),
+         {:ok, req} <- Pairing.approve(ref, attrs, nil) do
+      json(conn, %{pairing: NodeJSON.pairing(req)})
+    else
+      {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
+      {:error, :name_taken} -> {:error, {:conflict, "a node with that name already exists"}}
+      {:error, :not_pending} -> {:error, {:conflict, "that pairing request is no longer pending"}}
+      {:error, other} -> {:error, other}
+    end
+  end
+
+  def deny_pairing(conn, %{"ref" => ref}) do
+    case Pairing.deny(ref, nil) do
+      {:ok, req} -> json(conn, %{pairing: NodeJSON.pairing(req)})
+      {:error, :not_pending} -> {:error, {:conflict, "that pairing request is no longer pending"}}
+      {:error, other} -> {:error, other}
+    end
+  end
+
+  defp check_pairing_attrs(attrs) do
+    case attrs do
+      %{"max_workers" => n} when not is_nil(n) and not (is_integer(n) and n >= 1) ->
+        {:error, {:invalid, "max_workers must be a whole number, 1 or more"}}
+
+      %{"name" => n} when not is_binary(n) ->
+        {:error, :invalid_name}
+
+      _ ->
+        :ok
     end
   end
 

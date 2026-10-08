@@ -21,7 +21,13 @@ defmodule ArbiterWeb.NodeTierGuardTest do
   # The node-namespace routes that are deliberately reachable without a node
   # credential (the join script, enrolment with a join token in the body, the
   # reachability ping). `NodeJoinTest` covers what each of them does.
-  @anonymous_node_routes ["get /nodes/join", "get /nodes/ping", "post /nodes/enroll"]
+  @anonymous_node_routes [
+    "get /nodes/join",
+    "get /nodes/ping",
+    "post /nodes/enroll",
+    "post /nodes/pair",
+    "post /nodes/pair/poll"
+  ]
 
   @moduletag :tmp_dir
 

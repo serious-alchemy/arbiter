@@ -4,7 +4,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
   Whitelists fields: a credential or token hash is never rendered.
   """
 
-  alias Arbiter.Nodes.{JoinToken, Node, NodeEvent}
+  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, PairingRequest}
 
   def node(%Node{} = node) do
     %{
@@ -67,6 +67,26 @@ defmodule ArbiterWeb.Api.NodeJSON do
       max_workers: t.max_workers,
       expires_at: t.expires_at,
       created_by: t.created_by
+    }
+  end
+
+  @doc """
+  A pairing request as the operator sees it. The poll secret hash is never
+  rendered; the `code` is the typed form (`XXXX-XXXX`).
+  """
+  def pairing(%PairingRequest{} = r) do
+    %{
+      id: r.id,
+      code: Credentials.format_pairing_code(r.code),
+      state: r.state,
+      hostname: r.hostname,
+      peer: r.peer,
+      name: r.name,
+      labels: r.labels,
+      max_workers: r.max_workers,
+      expires_at: r.expires_at,
+      approved_by: r.approved_by,
+      inserted_at: r.inserted_at
     }
   end
 
