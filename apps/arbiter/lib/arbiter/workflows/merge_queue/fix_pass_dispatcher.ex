@@ -192,7 +192,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     if is_binary(mr_ref) and mr_ref != "" and not is_nil(workspace) do
       scoped = Mergers.scope(workspace, Map.get(args, :repo))
-      adapter = Mergers.for_workspace(scoped)
+      adapter = Mergers.for_repo(workspace, Map.get(args, :repo))
 
       safe_read(
         fn ->
