@@ -19,7 +19,7 @@ defmodule ArbiterWeb.DashboardUpdateController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Release.{SelfDeploy, UpdateCheck}
+  alias Arbiter.Release.{DeployStatus, SelfDeploy, UpdateCheck}
   alias Arbiter.Settings
   alias ArbiterWeb.Api.ReleaseDeployController
 
@@ -53,6 +53,21 @@ defmodule ArbiterWeb.DashboardUpdateController do
 
       _ ->
         :ok
+    end
+
+    redirect(conn, to: ~p"/")
+  end
+
+  @doc """
+  The deploy-outcome banner's × control: remember the deploy record currently on
+  disk (tag + finish time), so only that deploy's banner hides and the next one
+  shows again. A deploy still in flight cannot be dismissed. The key comes from
+  the record, never the form.
+  """
+  def dismiss_deploy(conn, _params) do
+    case DeployStatus.dismiss_key(DeployStatus.read()) do
+      nil -> :ok
+      key -> Settings.set_dismissed_deploy(key)
     end
 
     redirect(conn, to: ~p"/")
