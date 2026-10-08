@@ -41,4 +41,20 @@ defmodule Arbiter.Workers.RunNodeTest do
     id = Ecto.UUID.generate()
     assert RunNode.fields(%{node_id: id}) == %{node_id: id, node_name: id}
   end
+
+  test "the run row records its node on update (the worker backfills it when a remote session opens)" do
+    node = node!("upd-#{System.unique_integer([:positive])}")
+
+    run =
+      Ash.create!(Arbiter.Workers.Run, %{
+        task_id: "bd-rn-#{System.unique_integer([:positive])}",
+        repo: "r",
+        workspace_id: "ws",
+        started_at: DateTime.utc_now()
+      })
+
+    refute RunNode.remote?(run)
+    updated = Ash.update!(run, %{node_id: node.id}, action: :update)
+    assert RunNode.node_name(updated) == node.name
+  end
 end

@@ -464,6 +464,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :duration, :string, default: nil
   attr :cost, :string, default: nil
   attr :provider, :string, default: nil, doc: "e.g. 'claude', 'codex', 'gemini', 'ollama'"
+
   attr :node_name, :string,
     default: nil,
     doc: "the remote node the run executes on (a badge beside the provider); nil = local"

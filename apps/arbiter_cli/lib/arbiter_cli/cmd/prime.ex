@@ -599,7 +599,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
       IO.puts(
         "  #{p["task_id"]}  #{RunLabel.label(p)}  #{step}  repo=#{p["repo"]}" <>
-          RunLabel.run_suffix(p)
+          RunLabel.node_suffix(p) <> RunLabel.run_suffix(p)
       )
     end)
   end

@@ -31,5 +31,25 @@ defmodule ArbiterCli.RunLabel do
 
   def run_suffix(_run), do: ""
 
+  @doc """
+  Where the run executes (bd-1b4k9r): the node's name, `local` for the primary.
+  `nil` when the payload carries no `node_id` key at all (an older server), so
+  nothing is claimed that was not reported.
+  """
+  @spec where(map()) :: String.t() | nil
+  def where(%{"node_id" => nil}), do: "local"
+  def where(%{"node_name" => name}) when is_binary(name) and name != "", do: name
+  def where(%{"node_id" => id}) when is_binary(id), do: id
+  def where(_run), do: nil
+
+  @doc "`\"  node=<name|local>\"`, or `\"\"` when the payload does not say."
+  @spec node_suffix(map()) :: String.t()
+  def node_suffix(run) do
+    case where(run) do
+      nil -> ""
+      place -> "  node=#{place}"
+    end
+  end
+
   defp blank?(v), do: v in [nil, ""]
 end

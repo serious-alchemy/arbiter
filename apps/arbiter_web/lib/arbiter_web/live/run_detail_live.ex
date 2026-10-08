@@ -271,8 +271,8 @@ defmodule ArbiterWeb.RunDetailLive do
               id="run-node-local"
               class="flex items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
             >
-              <ArbiterWeb.CoreComponents.Core.icon name="hero-server-stack" size={14} />
-              Running on <.run_where class="font-medium text-[var(--text-title)]" />
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-server-stack" size={14} /> Running on
+              <.run_where class="font-medium text-[var(--text-title)]" />
             </div>
 
             <%!-- ── Live worker link ────────────────────────────────── --%>

@@ -130,6 +130,7 @@ defmodule ArbiterWeb.Api.RunController do
       :resumed_from_run_id,
       :provider_fallback,
       :provider_account_id,
+      :node_id,
       :model_family,
       :routing_decision
     ])

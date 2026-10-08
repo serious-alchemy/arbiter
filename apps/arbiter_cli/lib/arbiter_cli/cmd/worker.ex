@@ -248,6 +248,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
     IO.puts("Ticket:      #{snap["task_id"]}")
     IO.puts("Run:        #{RunLabel.label(snap)}")
+    if place = RunLabel.where(snap), do: IO.puts("Node:       #{place}")
 
     # A ReviewGate reviewer / implementer runs under its own `<ticket>#…` id.
     if snap["run_task_id"] && snap["run_task_id"] != snap["task_id"] do
@@ -302,7 +303,7 @@ defmodule ArbiterCli.Cmd.Worker do
       completed = if r["completed_at"], do: "  completed=#{r["completed_at"]}", else: ""
 
       IO.puts(
-        "  #{mark} #{r["run_id"]}  #{RunLabel.label(r)}  started=#{r["started_at"]}#{completed}"
+        "  #{mark} #{r["run_id"]}  #{RunLabel.label(r)}  started=#{r["started_at"]}#{completed}#{RunLabel.node_suffix(r)}"
       )
     end)
   end
@@ -322,7 +323,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
       IO.puts(
         "  #{r["id"]}  #{RunLabel.label(r)}  " <>
-          "started=#{r["started_at"]}  completed=#{completed}#{model_part}"
+          "started=#{r["started_at"]}  completed=#{completed}#{model_part}#{RunLabel.node_suffix(r)}"
       )
 
       if r["failure_reason"], do: IO.puts("      #{reason_label(r)}: #{r["failure_reason"]}")
@@ -431,6 +432,7 @@ defmodule ArbiterCli.Cmd.Worker do
       IO.puts(
         "  #{p["task_id"]}  #{RunLabel.label(p)}#{phase_part}#{agent_note(p)}  #{step}  " <>
           "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}" <>
+          RunLabel.node_suffix(p) <>
           RunLabel.run_suffix(p)
       )
     end)
