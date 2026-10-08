@@ -432,7 +432,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
     find = Keyword.get(opts, :find_executable, &System.find_executable/1)
 
     with {:ok, provider_mounts} <- provider_mounts(provider, opts, find) do
-      arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") end)
+      arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") || installed_arb(opts) end)
 
       arb_mount =
         case arb do
@@ -445,6 +445,23 @@ defmodule Arbiter.Worker.ContainerSpawn do
         end
 
       {:ok, provider_mounts ++ arb_mount}
+    end
+  end
+
+  # The coordinator's own PATH need not carry `arb` (a systemd service); fall
+  # back to where self-deploy installs it. Skipped when a test injects
+  # `:find_executable`, so the host's home never leaks into a spec.
+  defp installed_arb(opts) do
+    if Keyword.has_key?(opts, :find_executable) do
+      nil
+    else
+      path =
+        case System.get_env("ARB_INSTALL_BIN") do
+          p when is_binary(p) and p != "" -> Path.expand(p)
+          _ -> Path.join(System.user_home!(), ".local/bin/arb")
+        end
+
+      if File.regular?(path), do: path
     end
   end
 

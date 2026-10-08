@@ -124,6 +124,8 @@ defmodule Arbiter.Worker.ContainerArgvOptionsTest do
                "-e",
                "A=1",
                "-e",
+               "PATH=/opt/arbiter/cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+               "-e",
                "HOME=/h",
                "-i",
                "-w",

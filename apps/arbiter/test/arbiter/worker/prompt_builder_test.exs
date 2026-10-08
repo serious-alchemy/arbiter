@@ -83,6 +83,11 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            it to a file and read bounded slices rather than dumping it whole into
            context.
 
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
            EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
            artifacts. A screenshot must be a real capture of the real app, a source
            or licence citation must name where the thing actually came from, and a
@@ -279,6 +284,11 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            it to a file and read bounded slices rather than dumping it whole into
            context.
 
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
            EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
            artifacts. A screenshot must be a real capture of the real app, a source
            or licence citation must name where the thing actually came from, and a
@@ -392,6 +402,11 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            rather than the entire file. For a large `gh`/API command's output, pipe
            it to a file and read bounded slices rather than dumping it whole into
            context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
 
            Steps:
              1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
@@ -513,6 +528,11 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            rather than the entire file. For a large `gh`/API command's output, pipe
            it to a file and read bounded slices rather than dumping it whole into
            context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
 
            Steps:
              1. Read the diff under review with `git diff origin/main...HEAD` in this

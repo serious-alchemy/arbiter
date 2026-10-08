@@ -571,7 +571,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       env = [{"PATH", "/custom/bin"}, {"XDG_RUNTIME_DIR", "/run/user/9"}]
       assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, ctx.request, env))
 
-      assert has_literal?(wrapped.argv, "PATH=/custom/bin")
+      assert has_literal?(wrapped.argv, "PATH=/opt/arbiter/cli:/custom/bin")
       assert has_literal?(wrapped.argv, "XDG_RUNTIME_DIR=/run/user/9")
       assert has_literal?(wrapped.argv, "HTTPS_PROXY=http://127.0.0.1:#{ctx.proxy_port}")
       refute Enum.any?(wrapped.env, fn {k, _} -> k in ~w(PATH XDG_RUNTIME_DIR HTTPS_PROXY) end)

@@ -206,6 +206,30 @@ defmodule Arbiter.Worker.ContainerTest do
       assert "/home/u/.local/share/claude/2.1:/opt/arbiter/cli/claude:ro" in pairs(argv, "-v")
     end
 
+    # bd-4pxt2i: a repo Containerfile need not set PATH, so the spec does.
+    test "cli_mounts put /opt/arbiter/cli first on the container PATH" do
+      argv = argv(%{cli_mounts: [{"/home/u/arb", "/opt/arbiter/cli/arb"}]})
+      [path] = for "PATH=" <> value <- pairs(argv, "-e"), do: value
+      assert String.starts_with?(path, "/opt/arbiter/cli:")
+      assert path =~ "/usr/local/bin"
+    end
+
+    test "an explicit PATH gains the cli dir once; no cli_mounts leaves PATH alone" do
+      mounts = [{"/h/arb", "/opt/arbiter/cli/arb"}]
+
+      assert "PATH=/opt/arbiter/cli:/x/bin" in pairs(
+               argv(%{cli_mounts: mounts, env: [{"PATH", "/x/bin"}]}),
+               "-e"
+             )
+
+      assert "PATH=/opt/arbiter/cli:/x" in pairs(
+               argv(%{cli_mounts: mounts, env: [{"PATH", "/opt/arbiter/cli:/x"}]}),
+               "-e"
+             )
+
+      refute Enum.any?(pairs(argv(), "-e"), &String.starts_with?(&1, "PATH="))
+    end
+
     test "with the label disabled the gitdir is plain rw too" do
       argv = argv(%{git_dir: "/work/tree/.git", bridges: ["/run/arb/proxy.sock"]})
       assert "/work/tree/.git:/work/tree/.git:rw" in pairs(argv, "-v")
