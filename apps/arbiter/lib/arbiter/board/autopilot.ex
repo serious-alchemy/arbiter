@@ -481,17 +481,10 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   @doc """
-  The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
-  `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
-  the scheduler is not running or does not answer. Best-effort and quick: a
-  surface that only wants to know whether a ticket is waiting must not stall
-  on a busy scheduler.
-  """
-  @spec deferred_fix_pass_ids(GenServer.server()) :: [String.t()]
-  @doc """
   Task ids whose deferred resume is a `:fix_pass`, like `deferred_resume_ids/1`
   but ignoring other kinds (`:resume`, `:resume_session`, `:conflict`).
   """
+  @spec deferred_fix_pass_ids(GenServer.server()) :: [String.t()]
   def deferred_fix_pass_ids(server \\ __MODULE__) do
     case GenServer.whereis(server) do
       nil -> []
@@ -501,6 +494,13 @@ defmodule Arbiter.Board.Autopilot do
     :exit, _ -> []
   end
 
+  @doc """
+  The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
+  `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
+  the scheduler is not running or does not answer. Best-effort and quick: a
+  surface that only wants to know whether a ticket is waiting must not stall
+  on a busy scheduler.
+  """
   @spec deferred_resume_ids(GenServer.server()) :: [String.t()]
   def deferred_resume_ids(server \\ __MODULE__) do
     case GenServer.whereis(server) do
