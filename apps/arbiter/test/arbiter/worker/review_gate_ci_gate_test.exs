@@ -341,12 +341,12 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
 
     test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
       rig = rig(ctx, "feature/ci-mcp")
-      File.rm(Path.join(rig.worktree, ".mcp.json"))
+      File.rm(Path.join(rig.wt, ".mcp.json"))
 
       state = %{
         task_id: rig.task.id,
         workspace_id: ctx.ws.id,
-        worktree_path: rig.worktree,
+        worktree_path: rig.wt,
         repo: "trib/repo"
       }
 
