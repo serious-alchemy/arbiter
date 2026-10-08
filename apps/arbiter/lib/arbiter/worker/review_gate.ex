@@ -1694,11 +1694,11 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
-  defp post_noop_rerun?(_state), do: false
-
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
+  defp post_noop_rerun?(_state), do: false
 
   # Red CI the gate cannot clear by itself goes down the revise loop that already
   # exists: the same implementer round a reviewer's REQUEST_CHANGES opens, with the
@@ -3061,6 +3061,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # `{:done, state}` (escalated) if the implementer couldn't be spawned.
   defp enter_revise(state, findings, source \\ :reviewer) do
     state = record_enter_revise_thread(state, findings, source)
+
     state =
       if source == :reviewer,
         do: %{state | ci_fix_pending: nil, ci_noop_reruns: 0},
