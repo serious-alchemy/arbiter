@@ -73,42 +73,38 @@ defmodule ArbiterCli.Cmd.Node do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      case Output.drop_json(argv) do
-        ["add" | rest] ->
-          add(rest, Output.mode(argv))
-
-        ["pending" | rest] ->
-          _ = positional!(rest, "arb node pending")
-          pending(Output.mode(argv))
-
-        ["approve" | rest] ->
-          approve(rest, Output.mode(argv))
-
-        ["deny" | rest] ->
-          deny(positional!(rest, "arb node deny"), Output.mode(argv))
-
-        ["list" | rest] ->
-          _ = positional!(rest, "arb node list")
-          list(Output.mode(argv))
-
-        ["show" | rest] ->
-          show(positional!(rest, "arb node show"), Output.mode(argv))
-
-        ["set" | rest] ->
-          set(rest, Output.mode(argv))
-
-        ["events" | rest] ->
-          events(positional!(rest, "arb node events"), Output.mode(argv))
-
-        [verb | rest] when verb in @verbs ->
-          verb(verb, positional!(rest, "arb node #{verb}"), Output.mode(argv))
-
-        _ ->
-          IO.puts(:stderr, "arb: unknown node subcommand")
-          IO.puts(:stderr, "Run `arb node --help` for usage.")
-          Output.halt(2)
-      end
+      dispatch(Output.drop_json(argv), Output.mode(argv))
     end
+  end
+
+  defp dispatch(["add" | rest], mode), do: add(rest, mode)
+  defp dispatch(["approve" | rest], mode), do: approve(rest, mode)
+  defp dispatch(["set" | rest], mode), do: set(rest, mode)
+
+  defp dispatch(["pending" | rest], mode) do
+    _ = positional!(rest, "arb node pending")
+    pending(mode)
+  end
+
+  defp dispatch(["deny" | rest], mode), do: deny(positional!(rest, "arb node deny"), mode)
+
+  defp dispatch(["list" | rest], mode) do
+    _ = positional!(rest, "arb node list")
+    list(mode)
+  end
+
+  defp dispatch(["show" | rest], mode), do: show(positional!(rest, "arb node show"), mode)
+
+  defp dispatch(["events" | rest], mode),
+    do: events(positional!(rest, "arb node events"), mode)
+
+  defp dispatch([verb | rest], mode) when verb in @verbs,
+    do: verb(verb, positional!(rest, "arb node #{verb}"), mode)
+
+  defp dispatch(_argv, _mode) do
+    IO.puts(:stderr, "arb: unknown node subcommand")
+    IO.puts(:stderr, "Run `arb node --help` for usage.")
+    Output.halt(2)
   end
 
   # The positional args of a verb that takes no flags of its own: anything
