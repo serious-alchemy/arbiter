@@ -441,11 +441,62 @@ defmodule Arbiter.Workflows.PRPatrol do
            &handled?(pr_number, state.workspace_id, &1)
          ) do
       {reason, extra_protocol, fingerprint} when is_binary(reason) ->
-        file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
+        if ci_follow_up?(extra_protocol) and fix_pass_in_flight?(pr_number, state) do
+          {state, false}
+        else
+          file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
+        end
 
       _ ->
         {state, false}
     end
+  end
+
+  # Only the CI-failure trigger carries protocol text (`check_trigger/3`); the
+  # review and thread triggers return "".
+  defp ci_follow_up?(extra_protocol), do: extra_protocol != ""
+
+  # bd-4iah3e: MergeQueue.FixPassDispatcher already works a red CI on the PR's
+  # ticket — a fix pass running (a live run with role :fix_pass) or queued for a
+  # slot (deferred in the scheduler). A CI follow-up filed beside it duplicates
+  # the work (PR #522: bd-umi8p0 vs the fix pass). Skip with a log line; the
+  # next tick asks again, so a pass that fails to clear the CI still gets its
+  # follow-up. A read failure files as before.
+  defp fix_pass_in_flight?(pr_number, state) do
+    with %Issue{id: task_id} <-
+           GateActivity.authoring_task(state.workspace_id, to_string(pr_number), state.repo),
+         true <- fix_pass_running?(task_id) or fix_pass_queued?(task_id) do
+      Logger.info(
+        "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
+          "task #{task_id} already has a fix pass queued or running"
+      )
+
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp fix_pass_running?(task_id) do
+    case Worker.whereis(task_id) do
+      pid when is_pid(pid) ->
+        match?(
+          %{state: run_state, meta: %{role: :fix_pass}} when run_state != :finished,
+          Worker.state(pid)
+        )
+
+      _ ->
+        false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  defp fix_pass_queued?(task_id) do
+    deferrer = Application.get_env(:arbiter, :resume_deferrer, Arbiter.Board.Autopilot)
+    task_id in deferrer.deferred_fix_pass_ids()
   end
 
   # The filing itself, behind the shared circuit breaker (bd-5jr49o).
