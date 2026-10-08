@@ -121,7 +121,7 @@ defmodule Arbiter.Worker.MemoryScope.Diagnosis do
         dir -> [{"XDG_RUNTIME_DIR", dir}]
       end
 
-    ctl = Keyword.get(opts, :systemctl) || System.find_executable("systemctl")
+    ctl = MemoryScope.systemctl_path(opts)
 
     with ctl when is_binary(ctl) <- ctl,
          {out, 0} <-

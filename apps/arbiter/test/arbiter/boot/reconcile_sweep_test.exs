@@ -38,11 +38,17 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     @moduledoc false
     defdelegate reconcile_orphaned_runs(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_shutdown_casualties(opts), to: Arbiter.Workers.Reconciler
-    defdelegate sweep_worker_scopes(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_ci_waits(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_review_passes(opts), to: Arbiter.Workers.Reconciler
     defdelegate restarted_ids(lists), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Arbiter.Workers.Reconciler
+
+    # Never the real systemd user manager: the sweep would `systemctl --user stop`
+    # every live `arb-run-*` scope on the host (bd-8h3h3z). Same sweep, `:cmd` stubbed.
+    def sweep_worker_scopes(opts) do
+      scope_opts = [systemctl: "systemctl-stub", cmd: fn _bin, _args, _opts -> {"", 0} end]
+      Arbiter.Workers.Reconciler.sweep_worker_scopes(Keyword.put(opts, :scope_opts, scope_opts))
+    end
 
     def reconcile_resumable_tasks(opts) do
       test = Application.fetch_env!(:arbiter, :sweep_test_pid)

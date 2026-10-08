@@ -619,10 +619,12 @@ defmodule Arbiter.Worker.MemoryScope do
     end
   end
 
-  defp systemd_run_path(opts),
+  @doc false
+  def systemd_run_path(opts),
     do: Keyword.get(opts, :systemd_run) || binary(:systemd_run, "systemd-run")
 
-  defp systemctl_path(opts),
+  @doc false
+  def systemctl_path(opts),
     do: Keyword.get(opts, :systemctl) || binary(:systemctl, "systemctl")
 
   defp binary(key, name) do
