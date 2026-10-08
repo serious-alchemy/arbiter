@@ -384,7 +384,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                  tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
                ]
            ) do
-      run_id = Keyword.get(ctx, :run_id) || Ecto.UUID.generate()
+      run_id = Keyword.get(ctx, :run_id) || owner_run_id(ctx[:owner]) || Ecto.UUID.generate()
       port_args = Map.update!(port_args, :env, &ContainerSpawn.apply_env(&1, request))
       remote = %{node: node, request: request, run_id: run_id, prepared: nil}
 
@@ -393,6 +393,20 @@ defmodule Arbiter.Worker.ClaudeSession do
       end
     end
   end
+
+  # The node knows the run by the id of the Worker's `worker_runs` row, so a node's
+  # retained run (quiesced across a primary restart) is found by `Nodes.Recovery`,
+  # which looks runs up by row. A caller that is the owner itself cannot ask it.
+  defp owner_run_id(owner) when is_pid(owner) and owner != self() do
+    case Arbiter.Worker.state(owner) do
+      %{run_id: run_id} when is_binary(run_id) -> run_id
+      _ -> nil
+    end
+  catch
+    :exit, _ -> nil
+  end
+
+  defp owner_run_id(_owner), do: nil
 
   defp place_remote(remote, port_args, owner) do
     with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),

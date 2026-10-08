@@ -224,6 +224,106 @@ defmodule ArbiterWeb.RemoteRestartTest do
 
   defp calls(stub), do: File.read!(Path.join(stub, "calls"))
 
+  # A real Worker whose spawn is placed on the node (`ClaudeSession.start/1` with `node:`),
+  # the production path: the Run row, the handle's run id and the container all come from
+  # it. The worktree is `ctx.repo` made a private clone (the markers `PrivateClone` reads),
+  # so the run is placed with a checkout.
+  defp start_remote_worker!(ctx) do
+    alias Arbiter.Agents.SecurityPolicy
+    alias Arbiter.Worker
+    alias Arbiter.Worker.ClaudeSession
+
+    git!(ctx.repo, ["config", "arbiter.mainRepo", ctx.repo])
+    git!(ctx.repo, ["config", "arbiter.branch", @branch])
+
+    for {key, value} <- [
+          worker_container_available: true,
+          worker_container_network_available: true
+        ] do
+      put_env_restoring(:arbiter, key, value)
+    end
+
+    sockets = Path.join(ctx.root, "sockets")
+    File.mkdir_p!(sockets)
+    proxy = Path.join(sockets, "proxy.sock")
+    bridge = Path.join(sockets, "arb.sock")
+    File.write!(proxy, "")
+    File.write!(bridge, "")
+
+    egress = fn _opts ->
+      {:ok, [proxy_socket: proxy, proxy_port: 38_001, bridges: [{38_002, bridge}]], "rtest"}
+    end
+
+    task_id = "bd-rw12-#{System.unique_integer([:positive])}"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter")
+
+    policy =
+      SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+    StubPodman.write_mode(ctx.stub, "hang")
+    File.write!(Path.join(ctx.stub, "edit_at"), ctx.repo)
+
+    assert {:ok, {:remote, _} = handle} =
+             ClaudeSession.start(
+               owner: pid,
+               worktree_path: ctx.repo,
+               command: ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", "/opt/arbiter/cli/claude"],
+               env: [{"CLAUDE_CODE_OAUTH_TOKEN", "tok"}, {"ARB_WORKER_BEAD_ID", task_id}],
+               security: policy,
+               provider: "claude",
+               image: "localhost/arbiter-dev/beam:abc123",
+               claude_path: ctx.cli,
+               arb_path: ctx.cli,
+               egress: egress,
+               arb_token: "arb-tok",
+               node: %{id: ctx.node.id, capacity: %{}}
+             )
+
+    {pid, handle, task_id}
+  end
+
+  describe "a primary restart with a live Worker" do
+    test "the Worker's shutdown leaves its remote run alone, and the node's retained run is taken back",
+         ctx do
+      alias Arbiter.Worker
+
+      {pid, handle, _task_id} = start_remote_worker!(ctx)
+      _ = Worker.advance(pid, :claude)
+      %{run_id: run_id} = Worker.state(pid)
+      {:remote, {node_id, node_run, _ref}} = handle
+
+      # the primary's Run row and the node's run are the same run: the row names the node
+      # (what Recovery looks runs up by) and the node knows the run by the row's id
+      assert node_run == run_id
+      assert node_id == ctx.node.id
+      assert %{state: :working, node_id: ^node_id} = Ash.get!(Run, run_id)
+      assert_eventually(fn -> Executor.live?(handle) end)
+
+      # the application stops: the supervisor shuts the Worker down while the VM is going down
+      put_env_restoring(:arbiter, :worker_node_stopping_override, true)
+      :ok = GenServer.stop(pid, :shutdown)
+
+      # the run is not written off, and the node was not told to stop it
+      assert %{state: :working, outcome: nil, node_id: ^node_id} = Ash.get!(Run, run_id)
+      refute calls(ctx.stub) =~ "rm --force"
+
+      # the primary comes back: Recovery takes the retained run's work into the home clone
+      restart_primary!()
+      run_ctx = context(ctx)
+
+      assert {:ok, %{^run_id => :collected}} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 20_000,
+                 total_timeout_ms: 30_000,
+                 context_fun: fn %Run{id: ^run_id} -> {:ok, run_ctx} end
+               )
+
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "edited by the run\n"
+      assert Ash.get!(Run, run_id).state == :working
+    end
+  end
+
   describe "a primary restart" do
     test "the agent quiesces the run it was told is unknown, and Recovery lands its work in the home clone",
          ctx do
