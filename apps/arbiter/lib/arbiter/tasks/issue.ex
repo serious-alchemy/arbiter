@@ -408,6 +408,7 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
       change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, merged: true}
       change {Arbiter.Tasks.Issue.Changes.DropDispatchHold, []}
+      change {Arbiter.Tasks.Issue.Changes.CancelDeferredPasses, []}
 
       change fn changeset, _context ->
         Ash.Changeset.after_transaction(changeset, fn
@@ -657,6 +658,7 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
       change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, []}
       change {Arbiter.Tasks.Issue.Changes.DropDispatchHold, []}
+      change {Arbiter.Tasks.Issue.Changes.CancelDeferredPasses, []}
 
       # Propagate the close to the linked external tracker by default (see the
       # `close_upstream` argument above). Pass `close_upstream: false` to leave

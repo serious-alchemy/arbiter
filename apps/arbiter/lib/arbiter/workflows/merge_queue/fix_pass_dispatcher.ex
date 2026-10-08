@@ -83,6 +83,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           optional(:checks) => [failing_check()],
           optional(:outside_diff_files) => [String.t()],
           optional(:start_claude) => boolean(),
+          # bd-4l7l2n: test seam for the start-time PR/CI re-read.
+          optional(:pr_status) => (-> {:ok, map()} | {:error, term()}),
           optional(:claude_command) => [String.t()],
           # bd-741sid: a replay the scheduler already admitted into a slot, and
           # the test seam standing in for the fast lane (`PassAdmission`).
@@ -127,6 +129,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     if is_binary(task_id) and task_id != "" do
       with {:ok, task} <- load_task_or_use(task_id, args),
+           :ok <- revalidate(task, args),
            {:ok, context} <- resolve_context(task, args),
            :ok <- PassAdmission.admit(task, :fix_pass, args) do
         # bd-842qio: a CI failure takes the ticket back to work (merging →
@@ -143,6 +146,79 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   end
 
   def dispatch(_), do: {:error, :missing_task_id}
+
+  # bd-4l7l2n: a pass queued for a slot is started long after the Watchdog saw
+  # the red CI. By then the PR can have merged and the ticket closed, or the
+  # head gone green on a re-run. The ticket check is local and runs always; the
+  # forge read runs only on a replay (`slot_admitted`), the one path that
+  # waited. An unreadable forge does not hold a pass back.
+  defp revalidate(%Issue{} = task, args) do
+    cond do
+      task.state in [:closed, :verifying] ->
+        stale(task, "the ticket is #{task.state}", :task_closed)
+
+      Map.get(args, :slot_admitted) == true ->
+        revalidate_pr(task, args)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp revalidate_pr(task, args) do
+    case pr_status(task, args) do
+      {:ok, %{status: status}} when status in [:merged, :closed] ->
+        stale(task, "its PR is #{status}", :pr_not_open)
+
+      {:ok, %{pipeline: pipeline}} when pipeline != :failed ->
+        stale(task, "the head's CI is no longer failing (#{inspect(pipeline)})", :ci_not_failing)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp stale(task, why, error) do
+    Logger.info("FixPassDispatcher: fix pass for #{task.id} not started — #{why}")
+    {:error, error}
+  end
+
+  # `:pr_status` is a test seam: a 0-arity function standing in for the read.
+  defp pr_status(task, %{pr_status: read}) when is_function(read, 0), do: safe_read(read, task)
+
+  defp pr_status(task, args) do
+    mr_ref = Map.get(args, :pr_ref) || task.pr_ref
+    workspace = Map.get(args, :workspace) || maybe_load_workspace(task.workspace_id)
+
+    if is_binary(mr_ref) and mr_ref != "" and not is_nil(workspace) do
+      scoped = Mergers.scope(workspace, Map.get(args, :repo))
+      adapter = Mergers.for_workspace(scoped)
+
+      safe_read(
+        fn ->
+          if function_exported?(adapter, :with_workspace, 2),
+            do: adapter.with_workspace(scoped, fn -> adapter.get(mr_ref) end),
+            else: adapter.get(mr_ref)
+        end,
+        task
+      )
+    else
+      :skip
+    end
+  end
+
+  defp safe_read(read, task) do
+    read.()
+  rescue
+    e ->
+      Logger.warning(
+        "FixPassDispatcher: PR re-check for #{task.id} failed: #{Exception.message(e)}"
+      )
+
+      :skip
+  catch
+    :exit, _ -> :skip
+  end
 
   defp start_pass(task, context, args) do
     # bd-5ef587: the pause is checked before any worktree is created.
