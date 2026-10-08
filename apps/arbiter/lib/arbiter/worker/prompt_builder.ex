@@ -257,6 +257,11 @@ defmodule Arbiter.Worker.PromptBuilder do
     rather than the entire file. For a large `gh`/API command's output, pipe
     it to a file and read bounded slices rather than dumping it whole into
     context.
+
+    FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+    deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+    nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+    retrying the CLI.
     """
   end
 
