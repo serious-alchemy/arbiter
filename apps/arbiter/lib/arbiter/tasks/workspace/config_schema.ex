@@ -28,7 +28,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
   @top_level_keys ~w(tracker merge agent review_agent security guardrails routing review
                      review_gate notes_gate review_automation quota conductor worker attention
                      loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
-                     refine coordinator_notifications)
+                     refine coordinator_notifications review_scope)
 
   # Roots whose children live under `agent.security.` — writing one at the top
   # is the mistake this table exists to catch (bd-311cun).
@@ -271,6 +271,10 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                           candidate whose model is below the tier the routing policy
                           chose, so choosing among accounts can't buy quota with
                           quality.
+
+    review_scope  (map) — how deep external PR reviews go
+      default         the default review scope when none is requested
+      sensitive_globs list of path globs that always get a full review
 
     review / review_gate  (map)
       required    bool — whether a review round gates completion
