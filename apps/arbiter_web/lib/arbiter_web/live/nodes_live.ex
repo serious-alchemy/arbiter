@@ -191,7 +191,7 @@ defmodule ArbiterWeb.NodesLive do
     end
   end
 
-  def handle_event("approve_pairing", %{"id" => id} = params, socket) do
+  def handle_event("approve_pairing", %{"pairing_id" => id} = params, socket) do
     with {:ok, attrs} <- pairing_attrs(params),
          {:ok, _} <- Pairing.approve(id, attrs, actor()) do
       {:noreply,
@@ -678,7 +678,7 @@ defmodule ArbiterWeb.NodesLive do
           phx-submit="approve_pairing"
           class="flex flex-wrap items-end gap-3"
         >
-          <input type="hidden" name="id" value={p.id} />
+          <input type="hidden" name="pairing_id" value={p.id} />
           <Forms.input
             name="name"
             id={"pairing-name-#{p.id}"}
