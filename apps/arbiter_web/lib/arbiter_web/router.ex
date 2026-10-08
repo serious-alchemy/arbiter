@@ -80,6 +80,14 @@ defmodule ArbiterWeb.Router do
     get("/join", NodeController, :join)
     get("/ping", NodeController, :ping)
     post("/enroll", NodeController, :enroll)
+    # Device-code pairing (design §5.7): the node asks, the operator approves.
+    post("/pair", NodeController, :pair)
+    post("/pair/poll", NodeController, :poll)
+  end
+
+  # The same join script on the short path an operator types: `curl .../join`.
+  scope "/", ArbiterWeb do
+    get("/join", NodeController, :join)
   end
 
   # Node routes behind `ArbiterWeb.Plugs.NodeAuth`.

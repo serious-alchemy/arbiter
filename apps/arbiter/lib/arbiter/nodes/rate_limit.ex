@@ -14,7 +14,14 @@ defmodule Arbiter.Nodes.RateLimit do
     * `:socket_connect` — `NodeSocket.connect/3`: 30 *failures* a minute
       globally. A check costs nothing; only `record_failure/3` spends.
 
-  `check/3` answers `:ok` or `{:error, {:rate_limited, retry_after_seconds}}`
+    * `:pair` — `POST /nodes/pair` (a device-code pairing request,
+      `Arbiter.Nodes.Pairing`): 5 per 10 minutes per source `key`. The cap on
+      pending requests is the domain's.
+    * `:pair_poll` — a node polling its request: 60 a minute per source `key`,
+      and 10 *failures* (unknown request or wrong poll secret) per 10 minutes.
+
+  `check/3` answers
+ `:ok` or `{:error, {:rate_limited, retry_after_seconds}}`
   (the route's `429` + `Retry-After`). A failure bucket blocks while empty: five
   recorded failures block that source until one token refills.
 
@@ -35,12 +42,14 @@ defmodule Arbiter.Nodes.RateLimit do
   @rules %{
     enroll: %{attempts: {:global, 10, 60_000}, failures: {:key, 5, 600_000}},
     mint: %{attempts: {:key, 20, 3_600_000}, failures: nil},
-    socket_connect: %{attempts: nil, failures: {:global, 30, 60_000}}
+    socket_connect: %{attempts: nil, failures: {:global, 30, 60_000}},
+    pair: %{attempts: {:key, 5, 600_000}, failures: nil},
+    pair_poll: %{attempts: {:key, 60, 60_000}, failures: {:key, 10, 600_000}}
   }
   @rule_names Map.keys(@rules)
   @sweep_interval_ms 5 * 60_000
 
-  @type rule :: :enroll | :mint | :socket_connect
+  @type rule :: :enroll | :mint | :socket_connect | :pair | :pair_poll
 
   # ---- client ------------------------------------------------------------
 

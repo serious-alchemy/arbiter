@@ -30,7 +30,17 @@ defmodule Arbiter.Nodes do
   require Ash.Query
 
   alias Arbiter.Actor
-  alias Arbiter.Nodes.{Agent, Credentials, JoinToken, Node, NodeEvent, Registry}
+
+  alias Arbiter.Nodes.{
+    Agent,
+    Credentials,
+    JoinToken,
+    Node,
+    NodeEvent,
+    PairingRequest,
+    Registry
+  }
+
   alias Arbiter.Repo
   alias Arbiter.Settings
 
@@ -38,6 +48,7 @@ defmodule Arbiter.Nodes do
     resource Node
     resource JoinToken
     resource NodeEvent
+    resource PairingRequest
   end
 
   @max_ttl_seconds 24 * 3600
@@ -206,34 +217,55 @@ defmodule Arbiter.Nodes do
   end
 
   defp enroll(token, node_id, name, attrs, now, hint) do
-    cred = Credentials.generate_node_credential(node_id)
-
-    fields = %{
-      id: node_id,
+    binding = %{
+      node_id: node_id,
       name: name,
       labels: bound_labels(token, attrs),
       max_workers: token.max_workers || attr(attrs, :max_workers),
+      join_token_id: token.id,
+      detail: %{"join_token_id" => token.id}
+    }
+
+    case insert_node(binding, now, hint) do
+      {:ok, _} = ok ->
+        broadcast({:node_enrolled, node_id, token.id})
+        ok
+
+      {:error, _} = error ->
+        unclaim(token, node_id)
+        error
+    end
+  end
+
+  @doc false
+  # Create the node row, its first credential and the `enrolled` event for an
+  # enrolment whose authority is already established: a claimed join token, or
+  # an approved pairing request (`Arbiter.Nodes.Pairing.redeem/3`). `binding`
+  # carries `:node_id`, `:name`, `:labels`, `:max_workers`, an optional
+  # `:join_token_id` and the audit `:detail`. `{:error, :name_taken}` when the
+  # insert loses a name race.
+  @spec insert_node(map(), DateTime.t(), String.t() | nil) ::
+          {:ok, enrolled()} | {:error, :name_taken}
+  def insert_node(binding, now, hint) do
+    cred = Credentials.generate_node_credential(binding.node_id)
+
+    fields = %{
+      id: binding.node_id,
+      name: binding.name,
+      labels: binding.labels,
+      max_workers: binding.max_workers,
       credential_hash: cred.hash,
       credential_prefix: cred.prefix,
-      join_token_id: token.id,
+      join_token_id: binding[:join_token_id],
       enrolled_at: now
     }
 
     case Ash.create(Node, fields, action: :enroll) do
       {:ok, node} ->
-        record(
-          :enrolled,
-          node.id,
-          Actor.label(Actor.node(node.name)),
-          %{"join_token_id" => token.id},
-          hint
-        )
-
-        broadcast({:node_enrolled, node.id, token.id})
+        record(:enrolled, node.id, Actor.label(Actor.node(node.name)), binding.detail, hint)
         {:ok, %{node: node, credential: cred.credential}}
 
       {:error, _} ->
-        unclaim(token, node_id)
         {:error, :name_taken}
     end
   end
@@ -260,12 +292,13 @@ defmodule Arbiter.Nodes do
   defp ensure_name_valid(name),
     do: if(valid_name?(name), do: :ok, else: {:error, :invalid_name})
 
-  defp ensure_name_free(name) do
-    case Node |> Ash.Query.filter(name == ^name) |> Ash.read_one!() do
-      nil -> :ok
-      _ -> {:error, :name_taken}
-    end
-  end
+  defp ensure_name_free(name),
+    do: if(name_taken?(name), do: {:error, :name_taken}, else: :ok)
+
+  @doc "Whether a node already goes by `name`."
+  @spec name_taken?(String.t()) :: boolean()
+  def name_taken?(name),
+    do: Node |> Ash.Query.filter(name == ^name) |> Ash.read_one!() != nil
 
   # ---- node credential ---------------------------------------------------
 
@@ -602,7 +635,8 @@ defmodule Arbiter.Nodes do
     end
   end
 
-  defp broadcast(message) do
+  @doc false
+  def broadcast(message) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(), message)
   end
 

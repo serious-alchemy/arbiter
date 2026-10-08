@@ -12,6 +12,13 @@ defmodule ArbiterWeb.NodeController do
       or the query string) for a node credential. Rate limited
       (`Arbiter.Nodes.RateLimit`); every token failure is the same generic
       `401`.
+    * `GET /join` — the same script on a short, stable path.
+    * `POST /nodes/pair` and `POST /nodes/pair/poll` — device-code pairing
+      (`Arbiter.Nodes.Pairing`, design §5.7): the node asks for a short code to
+      show the operator, then polls with its poll secret **in the JSON body**
+      until the operator has approved it on the primary. Rate limited per
+      source. An unapproved, denied, expired or redeemed request never yields a
+      credential.
 
   Behind `ArbiterWeb.Plugs.NodeAuth` (a node credential, nothing else):
 
@@ -23,11 +30,14 @@ defmodule ArbiterWeb.NodeController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Agent, JoinScript, RateLimit}
+  alias Arbiter.Nodes.{Agent, Credentials, JoinScript, Pairing, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.Loopback
 
   @unauthorized "Invalid or expired join token"
+  @bad_name "The node name may only contain A-Za-z0-9._=:/@- (1-128 characters)"
+  @poll_interval 3
+  @pair_retry_after 60
 
   # ---- anonymous -----------------------------------------------------------
 
@@ -109,7 +119,92 @@ defmodule ArbiterWeb.NodeController do
         error(conn, 409, "A node with that name already exists")
 
       {:error, :invalid_name} ->
-        error(conn, 422, "The node name may only contain A-Za-z0-9._=:/@- (1-128 characters)")
+        error(conn, 422, @bad_name)
+    end
+  end
+
+  # ---- pairing ---------------------------------------------------------------
+
+  def pair(conn, _params) do
+    key = source_key(conn)
+    body = body_params(conn)
+
+    with :ok <- RateLimit.check(:pair, key),
+         {:ok, _url} <- public_url(),
+         {:ok, _artifact} <- agent_artifact(),
+         {:ok, %{request: req, secret: secret}} <- Pairing.request(pair_attrs(body), peer: key) do
+      respond_paired(conn, req, secret)
+    else
+      {:error, {:rate_limited, seconds}} -> too_many(conn, seconds)
+      {:error, :too_many_pending} -> too_many(conn, @pair_retry_after)
+      {:error, :unconfigured} -> error(conn, 503, "nodes.public_url is not set on the primary")
+      {:error, :unavailable} -> error(conn, 503, "The primary cannot take a pairing request now")
+      {:error, :invalid_name} -> error(conn, 422, @bad_name)
+    end
+  end
+
+  defp too_many(conn, seconds) do
+    conn
+    |> put_resp_header("retry-after", Integer.to_string(seconds))
+    |> error(429, "Too many pairing requests")
+  end
+
+  defp pair_attrs(params), do: put_if(attrs(params), :hostname, params["hostname"], &is_binary/1)
+
+  defp respond_paired(conn, req, secret) do
+    body = %{
+      id: req.id,
+      code: Credentials.format_pairing_code(req.code),
+      secret: secret,
+      expires_in: Pairing.ttl_seconds(),
+      interval: @poll_interval
+    }
+
+    conn = put_resp_header(conn, "cache-control", "no-store")
+
+    if wants_text?(conn) do
+      conn
+      |> put_resp_content_type("text/plain")
+      |> send_resp(201, kv(body, [:id, :code, :secret, :expires_in, :interval]))
+    else
+      conn |> put_status(201) |> json(body)
+    end
+  end
+
+  def poll(conn, _params) do
+    key = source_key(conn)
+    body = body_params(conn)
+
+    with :ok <- RateLimit.check(:pair_poll, key),
+         {:ok, url} <- public_url(),
+         {:ok, artifact} <- agent_artifact() do
+      case Pairing.redeem(body["id"], body["secret"], remote_addr_hint: key) do
+        {:ok, %{node: node, credential: credential}} ->
+          respond_enrolled(conn, node, credential, url, artifact)
+
+        {:pending, _req} ->
+          conn
+          |> put_resp_header("cache-control", "no-store")
+          |> put_status(202)
+          |> json(%{state: "pending"})
+
+        {:error, :denied} ->
+          error(conn, 403, "The operator denied this pairing request")
+
+        {:error, :expired} ->
+          error(conn, 410, "This pairing request expired; start again")
+
+        {:error, :name_taken} ->
+          error(conn, 409, "A node with that name already exists; the operator must rename it")
+
+        {:error, :invalid} ->
+          RateLimit.record_failure(:pair_poll, key)
+          error(conn, 401, "Invalid pairing request")
+      end
+    else
+      {:error, {:rate_limited, seconds}} -> too_many(conn, seconds)
+      {:error, :unconfigured} -> error(conn, 503, "nodes.public_url is not set on the primary")
+      {:error, :unavailable} -> error(conn, 503, "The primary has no agent build to serve")
     end
   end
 
@@ -154,10 +249,10 @@ defmodule ArbiterWeb.NodeController do
 
   # `KEY=value` lines for the join script, which has no JSON parser. Only the
   # scalar fields it reads, each from a restricted character set.
-  defp kv(body) do
-    [:node_id, :name, :credential, :ws_url, :agent_version, :tarball_sha256]
-    |> Enum.map_join("", fn key -> "#{key}=#{Map.fetch!(body, key)}\n" end)
-  end
+  @enrolled_keys [:node_id, :name, :credential, :ws_url, :agent_version, :tarball_sha256]
+
+  defp kv(body, keys \\ @enrolled_keys),
+    do: Enum.map_join(keys, "", fn key -> "#{key}=#{Map.fetch!(body, key)}\n" end)
 
   defp wants_text?(conn), do: get_req_header(conn, "accept") |> Enum.any?(&(&1 =~ "text/plain"))
 
