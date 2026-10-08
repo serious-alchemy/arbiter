@@ -181,6 +181,7 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
       # nothing from the worker's own environment leaks into the scenario
       {"ARB_JOIN_TOKEN", nil},
       {"ARB_JOIN_TOKEN_FILE", nil},
+      {"ARB_JOIN_MODE", nil},
       {"ARB_JOIN_CHECK_ONLY", nil},
       {"ARB_NODE_NAME", nil},
       {"ARB_NODE_LABELS", nil},
@@ -337,9 +338,10 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
   end
 
   describe "the token" do
-    test "without a file, env var or terminal the script refuses, and spends nothing", ctx do
+    test "in token mode, without a file, env var or terminal the script refuses, and spends nothing",
+         ctx do
       mint()
-      {out, status} = run_script(ctx)
+      {out, status} = run_script(ctx, [{"ARB_JOIN_MODE", "token"}])
       assert status == 1
       assert out =~ "no terminal to read the join token from"
       assert out =~ "ARB_JOIN_TOKEN_FILE"
@@ -393,6 +395,77 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
       assert stub_log =~ "-K -"
       refute out =~ token
       refute out =~ credential
+    end
+  end
+
+  describe "pairing (no token supplied)" do
+    # The node script runs in a task; this plays the operator on the primary.
+    defp approve_when_pending(attrs) do
+      Enum.find_value(1..100, fn _ ->
+        case Arbiter.Nodes.Pairing.list_pending() do
+          [req | _] ->
+            {:ok, _} = Arbiter.Nodes.Pairing.approve(req.id, attrs, @operator)
+            req
+
+          [] ->
+            Process.sleep(100)
+            nil
+        end
+      end)
+    end
+
+    test "shows a short code, installs after the operator approves it, and types nothing", ctx do
+      task = Task.async(fn -> run_script(ctx, [{"ARB_NODE_NAME", "paired-box"}]) end)
+      req = approve_when_pending(%{})
+      assert req, "the script never opened a pairing request"
+      {out, 0} = Task.await(task, 60_000)
+
+      shown = Arbiter.Nodes.Credentials.format_pairing_code(req.code)
+      assert out =~ "Pairing code:   #{shown}"
+      assert out =~ "arb node approve #{shown}"
+      assert out =~ "Done."
+
+      assert [node] = Nodes.list_nodes()
+      assert node.name == "paired-box"
+      assert [_] = Nodes.events(kind: :pairing_approved)
+      assert [_] = Nodes.events(kind: :enrolled)
+
+      credential =
+        File.read!(Path.join(ctx.home, ".config/arbiter-node/credential")) |> String.trim()
+
+      assert credential =~ "arbn_"
+      stub_log = log(ctx)
+      refute stub_log =~ "arbp_"
+      refute stub_log =~ credential
+      refute out =~ "arbp_"
+      refute out =~ credential
+      assert stub_log =~ ~r{curl .*-X POST --data-binary @- .*/nodes/pair/poll}
+    end
+
+    test "a denied request installs nothing and exits non-zero", ctx do
+      task = Task.async(fn -> run_script(ctx) end)
+
+      req =
+        Enum.find_value(1..100, fn _ ->
+          case Arbiter.Nodes.Pairing.list_pending() do
+            [req | _] -> req
+            [] -> Process.sleep(100) && nil
+          end
+        end)
+
+      {:ok, _} = Arbiter.Nodes.Pairing.deny(req.id, @operator)
+      {out, status} = Task.await(task, 60_000)
+
+      assert status == 1
+      assert out =~ "denied"
+      assert Nodes.list_nodes() == []
+      refute File.exists?(Path.join(ctx.home, ".arbiter-node"))
+    end
+
+    test "ARB_JOIN_CHECK_ONLY opens no pairing request", ctx do
+      {out, 0} = run_script(ctx, [{"ARB_JOIN_CHECK_ONLY", "1"}])
+      assert out =~ "no pairing was requested"
+      assert Arbiter.Nodes.Pairing.list_pending() == []
     end
   end
 
@@ -479,6 +552,34 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
 
       assert out =~ "Done."
       assert File.exists?(Path.join(ctx.home, ".arbiter-node/current/bin/arbiter"))
+    end
+
+    test "the printed one-liner selects token mode: it asks for the token, not a pairing", ctx do
+      mint()
+
+      {out, status} =
+        System.cmd(
+          "setsid",
+          ["--wait", "bash", "-c", Arbiter.Nodes.JoinScript.one_liner(ctx.url)],
+          env: [
+            {"PATH", ctx.bin <> ":/usr/bin:/bin"},
+            {"HOME", ctx.home},
+            {"XDG_RUNTIME_DIR", ctx.run},
+            {"TMPDIR", ctx.run},
+            {"STUB_LOG", ctx.log},
+            {"REAL_STAT", System.find_executable("stat")},
+            {"REAL_CURL", System.find_executable("curl")},
+            {"ARB_JOIN_FS_ROOT", ctx.fsroot}
+          ],
+          stderr_to_stdout: true
+        )
+
+      # no terminal under setsid, so token mode refuses; pairing mode would
+      # have opened a request instead
+      assert status == 1
+      assert out =~ "no terminal to read the join token from"
+      refute log(ctx) =~ "nodes/pair"
+      assert length(pending_tokens()) == 1
     end
 
     test "is idempotent: a re-run with a new token enrols again and repairs", ctx do
