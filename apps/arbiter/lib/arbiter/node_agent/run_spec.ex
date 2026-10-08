@@ -37,6 +37,10 @@ defmodule Arbiter.NodeAgent.RunSpec do
   under `/opt/arbiter/cli`: a content-addressed file the node fetches and
   caches), `prompt` (`content` base64, mounted read-only at `path`) and, on
   `config_dir`, optional `files` (`settings.json`, `CLAUDE.md`, base64). The
+  `worktree` mount takes optional `files` too (bd-8y8ztm): the untracked agent
+  config the primary injects into a worktree (`.mcp.json`, `.claude/skills/…`,
+  base64, relative paths under an allowlist of roots) that a git bundle cannot
+  carry; the agent writes them into the shadow clone after seeding it. The
   host side of every mount is **resolved by the agent**; the spec never names a
   host path.
   """
@@ -66,6 +70,12 @@ defmodule Arbiter.NodeAgent.RunSpec do
   @mount_kinds ~w(worktree home config_dir tmp cli prompt)
   @dir_kinds ~w(worktree home config_dir tmp)
   @config_files ~w(settings.json CLAUDE.md)
+  # What a worktree mount may be seeded with: the roots of the agent config
+  # `Arbiter.Worker.Dispatch` writes into a worktree and git does not carry.
+  @worktree_file_roots [".mcp.json", ".claude/skills"]
+  @max_worktree_file_bytes 1_048_576
+  @max_worktree_files_bytes 4_194_304
+  @max_worktree_files 256
   @run_re ~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z/
   @name_re ~r/\Aarb-[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\z/
   @env_re ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
@@ -81,6 +91,10 @@ defmodule Arbiter.NodeAgent.RunSpec do
   # What no spec may ask podman for, named so the refusal says which.
   @unsafe_flags ~w(--privileged --cap-add --device --userns --pid --network --ipc --uts
                    --security-opt --volume -v --mount --cgroupns --group-add --user -u --entrypoint)
+
+  @doc "The roots a `worktree` mount's `files` may be written under."
+  @spec worktree_file_roots() :: [String.t()]
+  def worktree_file_roots, do: @worktree_file_roots
 
   @doc "The flags no spec can pass; asking for one is refused as `{:unsafe_flag, flag}`."
   @spec unsafe_flags() :: [String.t()]
@@ -308,6 +322,11 @@ defmodule Arbiter.NodeAgent.RunSpec do
     with {:ok, files} <- seeded, do: {:ok, %{kind: "config_dir", path: path, files: files}}
   end
 
+  defp mount_for("worktree", path, %{"files" => files}) when is_map(files) do
+    with {:ok, files} <- worktree_files(files),
+         do: {:ok, %{kind: "worktree", path: path, files: files}}
+  end
+
   defp mount_for(kind, path, _mount) when kind in @dir_kinds, do: {:ok, %{kind: kind, path: path}}
 
   defp mount_for("cli", path, %{"name" => name, "sha256" => sha})
@@ -333,6 +352,45 @@ defmodule Arbiter.NodeAgent.RunSpec do
   end
 
   defp mount_for("prompt", _path, _mount), do: refuse({:bad_value, "mounts.prompt"})
+
+  defp worktree_files(files) do
+    decoded =
+      Enum.reduce_while(files, {:ok, %{}}, fn
+        {name, content}, {:ok, acc} when is_binary(name) and is_binary(content) ->
+          with :ok <- worktree_file_name(name),
+               {:ok, bytes} when byte_size(bytes) <= @max_worktree_file_bytes <-
+                 Base.decode64(content) do
+            {:cont, {:ok, Map.put(acc, name, bytes)}}
+          else
+            {:error, _} = error -> {:halt, error}
+            _ -> {:halt, refuse({:bad_value, "mounts.worktree.files"})}
+          end
+
+        {name, _}, _ ->
+          {:halt, refuse({:bad_worktree_file, to_string(name)})}
+      end)
+
+    with {:ok, map} <- decoded do
+      total = map |> Map.values() |> Enum.map(&byte_size/1) |> Enum.sum()
+
+      if map_size(map) <= @max_worktree_files and total <= @max_worktree_files_bytes,
+        do: {:ok, map},
+        else: refuse({:bad_value, "mounts.worktree.files"})
+    end
+  end
+
+  # Relative, no `..`, no NUL, and under one of the allowlisted roots (exactly the
+  # root, or a path below it): never `.git`, never a tracked source path.
+  defp worktree_file_name(name) do
+    segments = Path.split(name)
+
+    ok? =
+      name != "" and Path.type(name) == :relative and ".." not in segments and "." not in segments and
+        not String.contains?(name, ["\0", "\n"]) and
+        Enum.any?(@worktree_file_roots, &(name == &1 or String.starts_with?(name, &1 <> "/")))
+
+    if ok?, do: :ok, else: refuse({:bad_worktree_file, name})
+  end
 
   # One directory mount per kind; a second `worktree` is ambiguous, not a feature.
   defp unique_kinds(mounts) do
