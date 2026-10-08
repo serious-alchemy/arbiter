@@ -3674,9 +3674,18 @@ defmodule Arbiter.Worker do
   defp terminate_live_sessions(%State{claude_sessions: sessions} = state, leave_to_node?)
        when map_size(sessions) > 0 do
     Enum.each(sessions, fn {port, session} ->
-      if is_nil(Map.get(session, :exit_status)) and
-           not (leave_to_node? and remote_handle?(port)),
-         do: terminate_session_port(state, port)
+      cond do
+        not is_nil(Map.get(session, :exit_status)) ->
+          :ok
+
+        # The node session monitors this Worker too and would read its death as
+        # "owner down: cancel the run". Say first that the run is left alone.
+        leave_to_node? and remote_handle?(port) ->
+          Arbiter.Worker.Executor.Node.abandon(port)
+
+        true ->
+          terminate_session_port(state, port)
+      end
 
       # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
       # reparented), so stop the scope too. Idempotent if already reaped.
