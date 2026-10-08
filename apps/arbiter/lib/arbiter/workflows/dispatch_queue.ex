@@ -369,6 +369,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp iso(%DateTime{} = at), do: DateTime.to_iso8601(at)
   defp iso(_), do: nil
 
+  # bd-1u15tl: a conflict round spends no fix round, so it queues as round 0.
+  defp intent(_opts, 0), do: "ReviewGate conflict round"
   defp intent(_opts, round) when is_integer(round), do: "ReviewGate fix round #{round}"
 
   defp intent(opts, _round),

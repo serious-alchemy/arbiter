@@ -202,6 +202,67 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
                view(ticket(:merging), %{watchdog_alive: false}).attention
     end
 
+    # bd-1u15tl: the Watchdog hands a stale head to a re-review round and stops;
+    # while that round waits in the autopilot's deferred queue for a slot the
+    # merge is not blocked, only waiting.
+    test "a merging ticket whose re-review is queued for a slot is not blocked" do
+      assert view(ticket(:merging), %{watchdog_alive: false, resume_queued: true}).attention ==
+               nil
+
+      stale = %{status: :open, approved: false, block_reason: :conflict}
+
+      assert view(ticket(:merging), %{
+               watchdog_alive: false,
+               resume_queued: true,
+               merger_status: stale
+             }).attention == nil
+    end
+
+    test "a merging ticket with no Watchdog and no queued round is still blocked" do
+      for ctx <- [
+            %{watchdog_alive: false},
+            %{watchdog_alive: false, resume_queued: false}
+          ] do
+        assert %{cause: :merge_blocked, reason: "no Watchdog is polling its PR"} =
+                 view(ticket(:merging), ctx).attention
+      end
+    end
+
+    test "a queued re-review does not hide an approval only a person can give" do
+      ctx = %{
+        watchdog_alive: false,
+        resume_queued: true,
+        merger_status: %{status: :open, approved: true, block_reason: :needs_nonauthor_approval}
+      }
+
+      assert %{owner: :operator, waiting_on: :approval} = view(ticket(:merging), ctx).attention
+    end
+
+    # bd-1u15tl: the stored status still says `conflict` for the moment between
+    # a conflict pass finishing and the Watchdog's next poll refreshing it.
+    test "a conflict block is not flagged while a conflict pass is on the ticket" do
+      conflict = %{status: :open, approved: true, block_reason: :conflict}
+
+      for pass <- [
+            run(%{state: :working, meta: %{role: :conflict_resolver}}),
+            run(%{state: :finished, outcome: :succeeded, meta: %{role: :conflict_resolver}})
+          ] do
+        assert view(ticket(:merging), %{merger_status: conflict, runs: [pass]}).attention == nil
+      end
+
+      # queued for a slot
+      assert view(ticket(:merging), %{merger_status: conflict, resume_queued: true}).attention ==
+               nil
+    end
+
+    test "a conflict block with no conflict pass anywhere is still flagged" do
+      conflict = %{status: :open, approved: true, block_reason: :conflict}
+      other = run(%{state: :finished, outcome: :succeeded, meta: %{role: :fix_pass}})
+
+      assert %{cause: :merge_blocked} =
+               view(ticket(:merging), %{merger_status: conflict, runs: [other]}).attention
+    end
+
     test "queued, backlog and closed tickets never need attention, whatever is stored" do
       for state <- [:backlog, :queued, :closed] do
         assert view(ticket(state, %{attention_cause: :pr_closed})).attention == nil

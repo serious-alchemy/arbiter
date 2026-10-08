@@ -238,6 +238,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
@@ -2369,30 +2370,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # The escalation findings for a branch that conflicts with its target: name
   # the conflicting files and instruct resolution. A request_changes verdict, so
   # the author parks + escalates to the coordinator rather than merging stale work.
-  defp conflict_escalation(state, %{files: files}) do
-    files_block =
-      case files do
-        [] -> "  (conflicting paths could not be determined)"
-        _ -> Enum.map_join(files, "\n", &("  - " <> &1))
-      end
-
-    """
-    Branch `#{state.branch}` conflicts with its target `#{state.target_branch}`
-    and cannot be reviewed in a stale/conflicted state. The review gate fetched
-    `origin/#{state.target_branch}` and tried to merge it into the branch to bring
-    the diff current, but the merge hit textual conflicts. The merge was ABORTED,
-    so the worktree is left clean on the branch's own HEAD.
-
-    Resolve the conflict before review: merge or rebase `origin/#{state.target_branch}`
-    into `#{state.branch}`, resolve the conflicting files, commit, and re-run the
-    gate. Surfacing the conflict here is intentional — reviewing a stale base would
-    mis-attribute the target's commits to this branch (bd-ased52).
-
-    Conflicting files:
-    #{files_block}
-    """
-    |> String.trim()
-  end
+  # bd-1u15tl: `ConflictAbortFindings` owns the text, and its marker is how the
+  # author's fix-round decision tells this from a code finding.
+  defp conflict_escalation(state, %{files: files}),
+    do: ConflictAbortFindings.findings(state, files)
 
   # A ReviewGate is NOT a worker, but it lives under Arbiter.Worker.Supervisor —
   # so a stray enumeration (dashboard / list_children) could probe it with the
