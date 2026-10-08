@@ -211,13 +211,20 @@ defmodule ArbiterCli.Cmd.Node do
       IO.puts("2. The token is in #{token_file} (mode 0600), not printed. For an unattended")
       IO.puts("   install, copy the file to the node and run:")
       IO.puts("")
-      IO.puts("  ARB_JOIN_TOKEN_FILE=#{token_file} #{liner}")
+      IO.puts("  #{token_file_liner(liner, token_file)}")
     else
       IO.puts("2. When the script asks, enter this token (shown once; never put it on a")
       IO.puts("   command line):")
       IO.puts("")
       IO.puts("  #{token}")
     end
+  end
+
+  # The env var has to sit on the `bash` side of the pipe: `VAR=x curl ... | bash`
+  # would hand it to curl and the script would never see it. The server's
+  # one-liner ends in `ARB_JOIN_MODE=token bash`; swap that for the file.
+  defp token_file_liner(liner, token_file) do
+    String.replace(liner, ~r/ARB_JOIN_MODE=token bash\z/, "ARB_JOIN_TOKEN_FILE=#{token_file} bash")
   end
 
   # ---- pairing (device code) --------------------------------------------------

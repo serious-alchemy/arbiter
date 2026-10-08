@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.NodeTest do
   alias ArbiterCli.Cmd.Node
 
   @token "arbj_" <> String.duplicate("a", 52)
-  @one_liner "curl --proto '=https' --tlsv1.2 -fsSL https://primary.ts.net/nodes/join | bash"
+  @one_liner "curl --proto '=https' --tlsv1.2 -fsSL https://primary.ts.net/nodes/join | ARB_JOIN_MODE=token bash"
 
   @minted %{
     "token" => @token,
@@ -134,7 +134,7 @@ defmodule ArbiterCli.Cmd.NodeTest do
       refute out =~ @token
       assert out =~ path
       assert out =~ @one_liner
-      assert out =~ "ARB_JOIN_TOKEN_FILE"
+      assert out =~ "| ARB_JOIN_TOKEN_FILE=#{path} bash"
     end
 
     test "--token-file refuses to overwrite a file" do

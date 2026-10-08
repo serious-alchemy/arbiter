@@ -101,6 +101,12 @@ defmodule Arbiter.Nodes.Pairing do
   defp check_name(name),
     do: if(Nodes.valid_name?(name), do: :ok, else: {:error, :invalid_name})
 
+  # Best-effort, not atomic with the insert that follows: concurrent requests
+  # from one source can briefly pass the per-peer cap. The per-source request
+  # rate limit in front of `POST /nodes/pair` bounds the overshoot, and every
+  # request still expires after the TTL. (Wrapping count + insert in one
+  # transaction is avoided: the audit write in `reject/2` and the code-collision
+  # retry in `insert/5` must not be rolled back with it.)
   defp check_caps(peer, now) do
     cond do
       count_pending(now, nil) >= @max_pending -> reject(peer, "total")

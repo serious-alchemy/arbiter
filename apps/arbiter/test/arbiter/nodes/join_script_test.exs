@@ -15,17 +15,16 @@ defmodule Arbiter.Nodes.JoinScriptTest do
   defp script(opts \\ []), do: JoinScript.render(Keyword.merge([public_url: @url], opts))
 
   describe "one_liner/1" do
-    test "pipes the join script to bash and carries no secret" do
+    test "pipes the join script to bash in token mode and carries no secret" do
       line = JoinScript.one_liner(@url)
 
-      assert line == "curl --proto '=https' --tlsv1.2 -fsSL #{@url}/nodes/join | bash"
+      assert line == "curl --proto '=https' --tlsv1.2 -fsSL #{@url}/nodes/join | ARB_JOIN_MODE=token bash"
       refute line =~ "arbj_"
-      refute line =~ "token"
     end
 
     test "a loopback http primary (ssh -L) gets plain curl" do
       assert JoinScript.one_liner("http://127.0.0.1:4848") ==
-               "curl -fsSL http://127.0.0.1:4848/nodes/join | bash"
+               "curl -fsSL http://127.0.0.1:4848/nodes/join | ARB_JOIN_MODE=token bash"
     end
   end
 

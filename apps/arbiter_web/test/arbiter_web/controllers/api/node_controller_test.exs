@@ -54,7 +54,7 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert body["token"] =~ ~r/\Aarbj_[a-z2-7]{52}\z/
 
       assert body["one_liner"] ==
-               "curl --proto '=https' --tlsv1.2 -fsSL #{@url}/nodes/join | bash"
+               "curl --proto '=https' --tlsv1.2 -fsSL #{@url}/nodes/join | ARB_JOIN_MODE=token bash"
 
       refute body["one_liner"] =~ body["token"]
       assert body["public_url"] == @url

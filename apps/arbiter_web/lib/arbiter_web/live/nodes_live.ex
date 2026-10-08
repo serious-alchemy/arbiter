@@ -684,7 +684,7 @@ defmodule ArbiterWeb.NodesLive do
             id={"pairing-name-#{p.id}"}
             label="Name"
             value={p.name}
-            placeholder={p.hostname}
+            placeholder="generated if blank"
           />
           <Forms.input
             name="max_workers"

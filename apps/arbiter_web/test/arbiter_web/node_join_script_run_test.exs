@@ -554,6 +554,34 @@ defmodule ArbiterWeb.NodeJoinScriptRunTest do
       assert File.exists?(Path.join(ctx.home, ".arbiter-node/current/bin/arbiter"))
     end
 
+    test "the printed one-liner selects token mode: it asks for the token, not a pairing", ctx do
+      mint()
+
+      {out, status} =
+        System.cmd(
+          "setsid",
+          ["--wait", "bash", "-c", Arbiter.Nodes.JoinScript.one_liner(ctx.url)],
+          env: [
+            {"PATH", ctx.bin <> ":/usr/bin:/bin"},
+            {"HOME", ctx.home},
+            {"XDG_RUNTIME_DIR", ctx.run},
+            {"TMPDIR", ctx.run},
+            {"STUB_LOG", ctx.log},
+            {"REAL_STAT", System.find_executable("stat")},
+            {"REAL_CURL", System.find_executable("curl")},
+            {"ARB_JOIN_FS_ROOT", ctx.fsroot}
+          ],
+          stderr_to_stdout: true
+        )
+
+      # no terminal under setsid, so token mode refuses; pairing mode would
+      # have opened a request instead
+      assert status == 1
+      assert out =~ "no terminal to read the join token from"
+      refute log(ctx) =~ "nodes/pair"
+      assert length(pending_tokens()) == 1
+    end
+
     test "is idempotent: a re-run with a new token enrols again and repairs", ctx do
       {_, 0} = run_script(ctx, [{"ARB_JOIN_TOKEN_FILE", token_file(ctx, mint())}])
       File.rm!(Path.join(ctx.home, ".config/systemd/user/arbiter-node.service"))
