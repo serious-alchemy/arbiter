@@ -1102,11 +1102,21 @@ defmodule Arbiter.Tasks.Issue do
 
       change fn changeset, _context ->
         if Ash.Changeset.get_argument(changeset, :resumed_from_failure) do
-          Ash.Changeset.force_change_attribute(
-            changeset,
-            :attention_resume_attempts,
-            (changeset.data.attention_resume_attempts || 0) + 1
-          )
+          now = DateTime.utc_now()
+
+          # bd-98gi5m: attempts count within a failure streak — a resume long
+          # after the last one starts the count over.
+          prior =
+            if Arbiter.Tasks.AttentionLimits.streak_live?(
+                 changeset.data.attention_resumed_at,
+                 now
+               ),
+               do: changeset.data.attention_resume_attempts || 0,
+               else: 0
+
+          changeset
+          |> Ash.Changeset.force_change_attribute(:attention_resume_attempts, prior + 1)
+          |> Ash.Changeset.force_change_attribute(:attention_resumed_at, now)
         else
           changeset
         end
@@ -1584,6 +1594,17 @@ defmodule Arbiter.Tasks.Issue do
       allow_nil? true
       public? true
       description "When `attention_owner` was last set."
+    end
+
+    attribute :attention_resumed_at, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+
+      description """
+      When the ticket was last resumed out of a failed run (bd-98gi5m). The
+      `run_crashed` attempt limit only counts `attention_resume_attempts`
+      while this is within the resume streak window.
+      """
     end
 
     attribute :attention_resume_attempts, :integer do

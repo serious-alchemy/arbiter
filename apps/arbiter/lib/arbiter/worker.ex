@@ -1126,7 +1126,22 @@ defmodule Arbiter.Worker do
   convergence never count it as a success.
   """
   @spec operator_stop(ref()) :: :ok | {:error, :not_found}
-  def operator_stop(ref), do: stop(ref, {:shutdown, @operator_stop})
+  def operator_stop(ref) do
+    # bd-98gi5m: the run records who stopped it. The actor is the caller's, so
+    # it is handed to the worker before it goes down.
+    actor = Arbiter.Actor.current()
+    if actor && is_binary(ref), do: note_stopper(ref, Arbiter.Actor.label(actor))
+    stop(ref, {:shutdown, @operator_stop})
+  end
+
+  defp note_stopper(task_id, label) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.call(pid, {:note_stopper, label})
+    end
+  catch
+    :exit, _ -> :ok
+  end
 
   # ---- GenServer callbacks -----------------------------------------------
 
@@ -2477,6 +2492,9 @@ defmodule Arbiter.Worker do
   def handle_call(:agent_session_live?, _from, %State{} = state) do
     {:reply, session_live?(state), state}
   end
+
+  def handle_call({:note_stopper, label}, _from, %State{} = state),
+    do: {:reply, :ok, %State{state | meta: Map.put(state.meta || %{}, :stopped_by, label)}}
 
   def handle_call({:advance, step}, _from, %State{state: run_state, outcome: outcome} = state)
       when run_state == :starting or (run_state == :finished and outcome == :failed) do
@@ -8758,6 +8776,14 @@ defmodule Arbiter.Worker do
             })
         end
 
+      # bd-98gi5m: a deliberate operator stop is neither a crash nor a shutdown.
+      :interrupted when reason == {:shutdown, @operator_stop} ->
+        record_run_finished(%State{
+          finished
+          | outcome: :stopped,
+            meta: Map.put(state.meta, :failure_reason, stopped_reason(state.meta))
+        })
+
       :interrupted ->
         record_run_finished(%State{
           finished
@@ -8796,7 +8822,13 @@ defmodule Arbiter.Worker do
     :ok
   end
 
-  defp interrupted_reason({:shutdown, @operator_stop}), do: Atom.to_string(@operator_stop)
+  defp stopped_reason(meta) do
+    case Map.get(meta || %{}, :stopped_by) do
+      nil -> Atom.to_string(@operator_stop)
+      by -> "#{@operator_stop} by #{by}"
+    end
+  end
+
   defp interrupted_reason(_), do: @shutdown_reason
 
   defp terminate_outcome(:normal), do: :completed

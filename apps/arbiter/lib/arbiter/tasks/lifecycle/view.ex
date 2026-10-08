@@ -360,6 +360,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       {state, _} when state in [:starting, :working] -> :running
       {:waiting, _} -> if Worker.awaiting_review_gate?(run), do: :running, else: :waiting
       {:finished, :succeeded} -> :succeeded
+      {:finished, :stopped} -> :stopped
       {:finished, _} -> :waiting
       _ -> nil
     end
@@ -494,6 +495,11 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
       match?(%{state: :waiting}, primary(runs, id)) ->
         :question
+
+      # bd-98gi5m: a deliberate stop is not a crash.
+      authors != [] and Enum.all?(authors, &(run_class(&1) in [:waiting, :stopped])) and
+          Enum.any?(authors, &(run_class(&1) == :stopped)) ->
+        nil
 
       authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) ->
         held_or(:failed, ticket, ctx)
