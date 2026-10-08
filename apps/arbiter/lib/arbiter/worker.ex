@@ -3664,6 +3664,7 @@ defmodule Arbiter.Worker do
       if is_nil(Map.get(session, :exit_status)) and
            not (leave_to_node? and remote_handle?(port)),
          do: terminate_session_port(state, port)
+
       # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
       # reparented), so stop the scope too. Idempotent if already reaped.
       reap_scope(session)

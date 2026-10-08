@@ -339,7 +339,9 @@ defmodule ArbiterWeb.RemoteRestartTest do
       assert %{state: :finished, outcome: :interrupted, failure_reason: "server shutdown"} =
                Ash.get!(Run, run_id)
 
-      assert_eventually(fn -> File.exists?(ctx.stub <> "/calls") and calls(ctx.stub) =~ "rm --force" end)
+      assert_eventually(fn ->
+        File.exists?(ctx.stub <> "/calls") and calls(ctx.stub) =~ "rm --force"
+      end)
     end
   end
 
