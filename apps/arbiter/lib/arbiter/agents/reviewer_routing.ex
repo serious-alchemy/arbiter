@@ -102,6 +102,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Workers.Run
 
   @families [:anthropic, :google, :openai, :xai, :local]
@@ -109,7 +110,8 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # Drop reasons that may push a pass back into the implementer's own family.
   # `timed_out` is deliberately absent — see the moduledoc.
   @fallback_triggers ~w(unconfigured write_confinement_none disabled merged
-                        auth_expired circuit_broken quota_held paused capability_missing)
+                        auth_expired circuit_broken quota_held paused capability_missing
+                        sandbox_backend)
 
   @type selection :: %{
           provider: atom(),
@@ -535,6 +537,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       &check_excluded/2,
       &check_adapter/2,
       &check_confinement/2,
+      &check_sandbox_backend/2,
       &check_account/2,
       &check_auth/2,
       &check_circuit/2,
@@ -570,6 +573,19 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
       {:error, :ineligible} ->
         {:drop, "write_confinement_none", "cannot confine writes under :strict"}
+    end
+  end
+
+  # Reviewers spawn under `sandbox.review_backend`, not `sandbox.backend`.
+  defp check_sandbox_backend(%{type: type} = entry, ctx) do
+    policy = SecurityPolicy.for_review_spawn(ctx.security)
+
+    case Sandbox.module(policy, type) do
+      {:ok, _} ->
+        {:ok, entry}
+
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        {:drop, "sandbox_backend", "#{type} unsupported by #{backend}"}
     end
   end
 

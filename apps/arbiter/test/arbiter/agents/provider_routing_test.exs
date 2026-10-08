@@ -368,6 +368,27 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert agy.slug in slugs(relaxed["candidates"])
     end
 
+    test "under sandbox.backend podman an agy account is dropped, bwrap leaves it", %{
+      ws: ws,
+      healthy: healthy
+    } do
+      agy = account!(:antigravity, "no-container")
+      allow!(ws, agy, 1)
+
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"backend" => "podman"}})
+      decision = ProviderRouting.evaluate(ws, task!(ws), opts([], security: podman))
+
+      assert reasons(decision)[agy.slug] == "sandbox_backend"
+      refute agy.slug in slugs(decision["candidates"])
+      assert healthy.slug in slugs(decision["candidates"])
+
+      assert inspect(decision) =~ "gemini: not supported by sandbox.backend podman"
+
+      bwrap = SecurityPolicy.resolve(nil, %{})
+      relaxed = ProviderRouting.evaluate(ws, task!(ws), opts([], security: bwrap))
+      assert agy.slug in slugs(relaxed["candidates"])
+    end
+
     test "agy and codex count as available on a healthy probe with no account credential row", %{
       ws: ws
     } do

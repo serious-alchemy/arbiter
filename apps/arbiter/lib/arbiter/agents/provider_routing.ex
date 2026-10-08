@@ -61,6 +61,10 @@ defmodule Arbiter.Agents.ProviderRouting do
       known tier below the repo's blast-radius floor, or — with
       `routing.floors.policy_floor` — below the tier the routing policy
       chose; checked ahead of quota, like `capability_missing`;
+    * `sandbox_backend` — the workspace's resolved `sandbox.backend` has no
+      wrap point for the provider (`Arbiter.Worker.Sandbox.module/2`; podman
+      runs claude and codex only), so a spawn would be refused. Checked ahead
+      of the account checks so no slot or attention item is burnt on it;
     * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
       `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
@@ -136,6 +140,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Workers.Run
 
   @selections ~w(failover most_quota scored)
@@ -774,6 +779,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp check(entry, ctx) do
     checks = [
       &check_constraint/2,
+      &check_sandbox_backend/2,
       &check_account/2,
       &check_adapter/2,
       &check_cli/2,
@@ -809,6 +815,20 @@ defmodule Arbiter.Agents.ProviderRouting do
       do: {:ok, entry},
       else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
   end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn
+  # (`sandbox_backend_unavailable`); never route to it.
+  defp check_sandbox_backend(%{agent_type: type} = entry, %{security: %SecurityPolicy{} = policy}) do
+    case Sandbox.module(policy, type) do
+      {:ok, _} ->
+        {:ok, entry}
+
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        {:drop, "sandbox_backend", "#{type}: not supported by sandbox.backend #{backend}"}
+    end
+  end
+
+  defp check_sandbox_backend(entry, _ctx), do: {:ok, entry}
 
   defp check_account(%{account: %ProviderAccount{enabled: false}}, _ctx),
     do: {:drop, "disabled", nil}
