@@ -363,6 +363,13 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # bd-24o760: the primary decided a held run is to be collected, not kept.
+  defp push(state, "quiesce", %{"run" => run}) when is_binary(run) do
+    Logger.warning("node agent: primary asked to quiesce run #{run} for recovery")
+    Run.quiesce(run)
+    state
+  end
+
   defp push(state, "retained.drop", %{"run" => run}) when is_binary(run) do
     Retained.drop(state.config, run)
     state
@@ -522,13 +529,20 @@ defmodule Arbiter.NodeAgent.Connection do
   # retained locally for the primary to recover.
   defp attach_runs(verdicts) do
     unknown = for {run, "unknown"} <- verdicts || %{}, do: run
+    # bd-24o760: a held run is the primary's, not yet decided: neither quiesced nor attached
+    # (it has no stream to resend into) until the primary says `quiesce`.
+    held = for {run, "hold"} <- verdicts || %{}, do: run
+
+    Enum.each(held, fn run ->
+      Logger.info("node agent: primary is holding run #{run} for recovery")
+    end)
 
     Enum.each(unknown, fn run ->
       Logger.warning("node agent: primary does not know run #{run}; quiescing it")
       Run.quiesce(run)
     end)
 
-    Runs.attach_all(unknown)
+    Runs.attach_all(unknown ++ held)
   end
 
   defp run_opts(state) do

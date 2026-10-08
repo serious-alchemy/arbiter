@@ -259,10 +259,34 @@ defmodule Arbiter.Worker.Container do
   defp mount_opts(:rw_private, false), do: "rw,Z"
 
   defp env_args(spec, home) do
-    literal = Map.get(spec, :env, []) ++ if(home, do: [{"HOME", home}], else: [])
+    literal =
+      spec
+      |> Map.get(:env, [])
+      |> cli_path_env(Map.get(spec, :cli_mounts, []))
+      |> Kernel.++(if(home, do: [{"HOME", home}], else: []))
 
     Enum.flat_map(Map.get(spec, :inherit_env, []), &["-e", &1]) ++
       Enum.flat_map(literal, fn {k, v} -> ["-e", "#{k}=#{v}"] end)
+  end
+
+  # The mounted CLIs live in `@cli_dir`. The image's own PATH already has it
+  # (the base image prepends it, and a repo Containerfile `FROM ${ARBITER_BASE}`
+  # keeps its additions), so with no PATH in the spec nothing is emitted. An
+  # explicit PATH (the local host-PATH case) would shadow the image's, so the
+  # dir is prepended to it.
+  @cli_dir "/opt/arbiter/cli"
+
+  defp cli_path_env(env, []), do: env
+
+  defp cli_path_env(env, _cli_mounts) do
+    case List.keytake(env, "PATH", 0) do
+      {{_, path}, rest} ->
+        on_path = @cli_dir in String.split(path, ":")
+        rest ++ [{"PATH", if(on_path, do: path, else: @cli_dir <> ":" <> path)}]
+
+      nil ->
+        env
+    end
   end
 
   # -- Sandbox.wrap/2 ----------------------------------------------------------

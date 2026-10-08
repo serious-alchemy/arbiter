@@ -270,6 +270,44 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
     end
 
+    test "falls back to the installed arb when none is on PATH", ctx do
+      installed = Path.join(ctx.dir, "installed-arb")
+      File.write!(installed, "#!/bin/sh\n")
+
+      find = fn
+        "claude" -> ctx.opts[:claude_path]
+        _ -> nil
+      end
+
+      opts =
+        ctx.opts
+        |> Keyword.delete(:arb_path)
+        |> Keyword.merge(find_executable: find, installed_arb_path: installed)
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+
+      assert {resolved, "/opt/arbiter/cli/arb"} =
+               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
+
+      assert Path.basename(resolved) == "installed-arb"
+    end
+
+    test "a missing installed arb yields no arb mount", ctx do
+      opts =
+        ctx.opts
+        |> Keyword.delete(:arb_path)
+        |> Keyword.merge(
+          find_executable: fn
+            "claude" -> ctx.opts[:claude_path]
+            _ -> nil
+          end,
+          installed_arb_path: Path.join(ctx.dir, "nope")
+        )
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
+    end
+
     test "needs the run's temp dir", ctx do
       assert {:error, :no_run_tmp_dir} =
                ContainerSpawn.prepare(Keyword.delete(ctx.opts, :tmp_dir))
@@ -571,7 +609,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       env = [{"PATH", "/custom/bin"}, {"XDG_RUNTIME_DIR", "/run/user/9"}]
       assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, ctx.request, env))
 
-      assert has_literal?(wrapped.argv, "PATH=/custom/bin")
+      assert has_literal?(wrapped.argv, "PATH=/opt/arbiter/cli:/custom/bin")
       assert has_literal?(wrapped.argv, "XDG_RUNTIME_DIR=/run/user/9")
       assert has_literal?(wrapped.argv, "HTTPS_PROXY=http://127.0.0.1:#{ctx.proxy_port}")
       refute Enum.any?(wrapped.env, fn {k, _} -> k in ~w(PATH XDG_RUNTIME_DIR HTTPS_PROXY) end)

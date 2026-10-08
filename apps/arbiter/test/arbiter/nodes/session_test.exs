@@ -609,6 +609,93 @@ defmodule Arbiter.Nodes.SessionTest do
       assert :error = Session.checkout_context(pid, "r1")
     end
 
+    # bd-24o760: the hello can beat Nodes.Recovery; the verdict comes from the row.
+    defp hold_hello(ids) do
+      hello(%{
+        "caps" => %{"backend" => "podman", "run_hold" => "quiesce"},
+        "runs" => Enum.map(ids, &%{"id" => &1, "state" => "running"})
+      })
+    end
+
+    test "a live run on this node with no stream here is held, never told unknown", %{
+      node: node,
+      clock: c
+    } do
+      live = run!(:working, node.id)
+      other = run!(:working, enroll!("other-node").id)
+      done = run!(:finished, node.id)
+      elsewhere = run!(:working)
+      params = hold_hello([live.id, other.id, done.id, elsewhere.id])
+
+      assert {:ok, %{pid: pid, hello_ok: ok}} = attach(node, c, self(), params)
+
+      assert ok["runs"] == %{
+               live.id => "hold",
+               other.id => "unknown",
+               done.id => "unknown",
+               elsewhere.id => "unknown"
+             }
+
+      assert %{} = Session.snapshot(pid)
+    end
+
+    test "an agent that cannot be told to quiesce later gets the old verdict", %{
+      node: node,
+      clock: c
+    } do
+      live = run!(:working, node.id)
+      params = hello(%{"runs" => [%{"id" => live.id, "state" => "running"}]})
+      assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), params)
+      assert ok["runs"] == %{live.id => "unknown"}
+    end
+
+    test "recover on a held run quiesces it, then collects it once it is retained", %{
+      node: node,
+      clock: c
+    } do
+      live = run!(:working, node.id)
+      {:ok, %{pid: pid}} = attach(node, c, self(), hold_hello([live.id]))
+      refute_received {:node_session, {:push, "quiesce", _}}
+
+      waiter = Task.async(fn -> Session.recover(pid, live.id, @ctx, 5_000) end)
+      assert_receive {:node_session, {:push, "quiesce", %{"run" => id}}}
+      assert id == live.id
+      refute_received {:node_session, {:push, "recover", _}}
+
+      Session.node_event(pid, "retained", retained_report(live.id))
+      assert_receive {:node_session, {:push, "recover", %{"run" => ^id}}}
+
+      Session.node_event(pid, "recovered", %{
+        "run" => id,
+        "transcripts" => "none",
+        "checkout" => "none"
+      })
+
+      assert {:ok, _} = Task.await(waiter)
+      # no hold timer left to quiesce it a second time
+      refute_receive {:node_session, {:push, "quiesce", _}}, 50
+    end
+
+    test "a hold nobody claims in time quiesces the run once, and the next hello says unknown",
+         %{node: node, clock: c} do
+      live = run!(:working, node.id)
+
+      {:ok, %{pid: pid}} =
+        Registry.attach(node, self(), hold_hello([live.id]),
+          clock: fn -> Agent.get(c, & &1) end,
+          tick_ms: :infinity,
+          hold_ms: 30
+        )
+
+      assert_receive {:node_session, {:push, "quiesce", %{"run" => id}}}, 2_000
+      assert id == live.id
+      refute_receive {:node_session, {:push, "quiesce", _}}, 100
+
+      assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), hold_hello([live.id]))
+      assert ok["runs"] == %{live.id => "unknown"}
+      assert Process.alive?(pid)
+    end
+
     test "a run the node neither holds nor retained is not on the node", %{node: node, clock: c} do
       {:ok, %{pid: pid}} = attach(node, c)
       assert {:error, :not_on_node} = Session.recover(pid, "ghost", @ctx, 1_000)
@@ -738,8 +825,9 @@ defmodule Arbiter.Nodes.SessionTest do
     handle
   end
 
-  defp run!(state) do
+  defp run!(state, node_id \\ nil) do
     Ash.create!(Run, %{
+      node_id: node_id,
       task_id: "bd-node-test",
       base_task_id: "bd-node-test",
       repo: "trib/repo",

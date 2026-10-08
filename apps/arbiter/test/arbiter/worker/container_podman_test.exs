@@ -149,4 +149,66 @@ defmodule Arbiter.Worker.ContainerPodmanTest do
     Container.reset()
     assert Container.status() == :ok
   end
+
+  # bd-4pxt2i: a mounted `arb` resolves on the container PATH.
+  test "a mounted arb resolves with command -v and runs, with a host-style PATH", ctx do
+    stub = Path.join(ctx.dir, "arb-stub")
+    File.write!(stub, "#!/bin/sh\necho \"arb 0.0.0-stub\"\n")
+    File.chmod!(stub, 0o755)
+
+    run = fn extra ->
+      Container.run(
+        ["sh", "-c", "command -v arb && arb --version"],
+        opts(ctx, [cli_mounts: [{stub, "/opt/arbiter/cli/arb"}]] ++ extra)
+      )
+    end
+
+    assert {:ok, {out, 0}} = run.(env: [{"PATH", "/usr/local/bin:/usr/bin:/bin"}])
+    assert out =~ "/opt/arbiter/cli/arb"
+    assert out =~ "arb 0.0.0-stub"
+
+    # No PATH in the spec: the image's own PATH is left alone (the Arbiter base
+    # image carries /opt/arbiter/cli; plain debian does not).
+    assert {:ok, {_, rc}} = run.([])
+    assert rc != 0
+  end
+
+  # bd-4pxt2i: the REAL host `arb` escript, mounted as the spec builds it, runs
+  # in the Arbiter beam image (an escript needs erl, which plain debian lacks).
+  # Skipped when this host has no `arb` or no beam image.
+  test "the real host arb resolves and answers --version in the beam image", ctx do
+    arb = System.find_executable("arb")
+
+    image =
+      with {out, 0} <- System.cmd("podman", ["images", "--format", "{{.Repository}}:{{.Tag}}"]),
+           [img | _] <-
+             String.split(out, "\n", trim: true) |> Enum.filter(&(&1 =~ "arbiter-dev/beam-")) do
+        img
+      else
+        _ -> nil
+      end
+
+    if arb && image do
+      bridge = Path.join(ctx.dir, "bridge.sock")
+      File.write!(bridge, "")
+
+      {:ok, {out, rc}} =
+        Container.run(
+          ["sh", "-c", "command -v arb && arb --version"],
+          opts(ctx,
+            image: image,
+            cli_mounts: [{Path.expand(arb), "/opt/arbiter/cli/arb"}],
+            # A bridge (as every real run has) disables SELinux relabelling,
+            # without which the host's home-labelled arb is unreadable.
+            bridges: [bridge],
+            env: [{"PATH", "/usr/local/bin:/usr/bin:/bin"}]
+          )
+        )
+
+      assert rc == 0, out
+      assert out =~ "/opt/arbiter/cli/arb"
+    else
+      IO.puts("skipped: no host arb or no local arbiter-dev/beam image")
+    end
+  end
 end
