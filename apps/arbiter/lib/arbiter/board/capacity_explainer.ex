@@ -342,7 +342,7 @@ defmodule Arbiter.Board.CapacityExplainer do
         kind: :quota,
         badge: "Quota hold",
         summary:
-          "The provider's quota is too used up to start new work right now (#{reason}). " <>
+          "#{quota_subject(reason)} too used up to start new work right now. " <>
             "The scheduler starts it on its own when the quota window allows.",
         details: opts[:raw] || reason
       }
@@ -387,6 +387,25 @@ defmodule Arbiter.Board.CapacityExplainer do
     }
   end
 
+  # Who is out of quota, in words. The gate's sentence is free text
+  # (`claude:default 7d 20% ≥ paced 20%`, `7d quota warning (weekly_warning_policy:
+  # hold)`), so only the provider names are lifted from it; the sentence itself
+  # stays in `details`.
+  defp quota_subject(reason) do
+    providers =
+      ~r/\b([a-z][a-z0-9]*):[A-Za-z0-9._-]+/
+      |> Regex.scan(reason, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.uniq()
+      |> Enum.map(&provider_label/1)
+
+    case providers do
+      [] -> "The provider's quota is"
+      [one] -> "The #{one} quota is"
+      many -> "The #{Enum.join(many, " and ")} quotas are"
+    end
+  end
+
   # ---- wording the capacity holds --------------------------------------------------------
 
   defp no_slot_summary(nil, _account, holders),
@@ -399,6 +418,16 @@ defmodule Arbiter.Board.CapacityExplainer do
       "#{account_phrase(terms, account)} allows #{limit_word(account)} at once and " <>
       "#{in_use(account.limit, length(Map.get(account, :runs, [])))} in use#{runs}. " <>
       "It starts when one finishes."
+  end
+
+  defp no_slot_summary(
+         %{binding: :account},
+         %{kind: :routed, names: names, capacity: capacity},
+         holders
+       ) do
+    "Waiting for a free worker slot. The provider accounts (#{Enum.join(names, ", ")}) have " <>
+      "room for #{capacity} at once and all are in use" <>
+      "#{using(holders)}. It starts when one finishes."
   end
 
   defp no_slot_summary(%{binding: binding} = terms, _account, holders) do

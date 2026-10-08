@@ -124,6 +124,15 @@ defmodule Arbiter.Board.CapacityExplainerTest do
     {cap, terms, Snapshot.effective_max_concurrent(ws, counted, opts)}
   end
 
+  # The binding term really is a minimum: its value is the effective cap, and
+  # no other listed term is below it. (Ties go to the limit the operator set on
+  # purpose; the value still has to be the minimum.)
+  defp assert_binding_is_minimum(terms) do
+    values = Keyword.values(terms.terms)
+    assert terms.terms[terms.binding] == terms.effective
+    assert terms.effective == Enum.min(values)
+  end
+
   defp limit_of(cap, key), do: Enum.find(cap.limits, &(&1.key == key))
 
   describe "node-bound" do
@@ -138,6 +147,15 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert terms.effective == scheduler
       assert scheduler == 5
       assert cap.binding == :nodes
+      assert_binding_is_minimum(terms)
+
+      # Binding means raising it raises the cap: one more local worker, one more slot.
+      local_cap!(4)
+
+      assert elem(
+               explained(ws, [node("big", 2), node("ryan-oryx-pro", 4, %{state: :offline})]),
+               2
+             ) == 6
 
       assert limit_of(cap, :nodes).binding?
 
@@ -169,11 +187,16 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       local_cap!(5)
       ws = workspace!(%{"conductor" => %{"max_concurrent" => 2}})
 
-      {cap, _terms, scheduler} = explained(ws, [])
+      {cap, terms, scheduler} = explained(ws, [])
 
       assert cap.effective == scheduler
       assert scheduler == 2
       assert cap.binding == :workspace
+      assert_binding_is_minimum(terms)
+
+      # Lifting the workspace setting lifts the cap to the next limit (the machines).
+      raised = workspace!(%{"conductor" => %{"max_concurrent" => 9}})
+      assert elem(explained(raised, []), 2) == 5
       assert cap.headline == "Limited to 2 by the workspace setting."
       assert limit_of(cap, :workspace).binding?
       refute limit_of(cap, :nodes).binding?
@@ -187,11 +210,15 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(3)
       ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
 
-      {cap, _terms, scheduler} = explained(ws, [node("a", 4)])
+      {cap, terms, scheduler} = explained(ws, [node("a", 4)])
 
       assert cap.effective == scheduler
       assert scheduler == 3
       assert cap.binding == :ceiling
+      assert_binding_is_minimum(terms)
+
+      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(nil)
+      assert elem(explained(ws, [node("a", 4)]), 2) == 9
       assert limit_of(cap, :ceiling).text =~ "Install-wide limit: 3"
 
       assert limit_of(cap, :ceiling).change =~
@@ -207,11 +234,16 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       link!(ws, account)
       _key = live_worker!(ws)
 
-      {cap, _terms, scheduler} = explained(ws, [], 0)
+      {cap, terms, scheduler} = explained(ws, [], 0)
 
       assert cap.effective == scheduler
       assert scheduler == 1
       assert cap.binding == :account
+      assert_binding_is_minimum(terms)
+
+      # Raising the account's limit raises the cap.
+      Ash.update!(account, %{max_concurrent: 5})
+      assert elem(explained(ws, [], 0), 2) > scheduler
 
       assert cap.headline =~
                "Limited to 1 by the Claude account (claude:#{account.slug}): 1 of 2 in use."
@@ -337,6 +369,32 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert hold.summary =~ second
     end
 
+    test "routed accounts bound the hold: the provider accounts are named, not the machines" do
+      local_cap!(6)
+      ws = workspace!(%{"conductor" => %{"max_concurrent" => 6}})
+
+      routing = %{
+        capacity: 2,
+        available: [
+          %{account: %{provider: :claude, slug: "one"}},
+          %{account: %{provider: :codex, slug: "two"}}
+        ]
+      }
+
+      terms = Snapshot.capacity_terms(ws, 2, routing: routing)
+      assert terms.binding == :account
+      assert %{kind: :routed} = terms.account
+
+      hold =
+        CapacityExplainer.hold(:no_slot, %{capacity: terms, slot_holders: ["bd-a", "bd-b"]})
+
+      assert hold.summary =~
+               "The provider accounts (claude:one, codex:two) have room for 2 at once"
+
+      assert hold.summary =~ "bd-a, bd-b"
+      refute hold.summary =~ "available machines"
+    end
+
     test "a workspace-bound hold says the workspace is the limit" do
       local_cap!(6)
       ws = workspace!(%{"conductor" => %{"max_concurrent" => 2}})
@@ -378,6 +436,34 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert hold.kind == :quota
       assert hold.badge == "Quota hold"
       assert hold.details == "7d quota 62% ≥ paced 55%"
+    end
+
+    test "a quota hold's summary is plain words whatever the gate's sentence contains" do
+      reasons = [
+        "claude:default 7d 20% ≥ paced 20%",
+        "7d quota warning (weekly_warning_policy: hold)",
+        "claude:default 7d exhausted (status=rejected)",
+        "claude:default 7d 20% ≥ paced 20%; codex:work at capacity " <>
+          "(no concurrency slot left (max_concurrent / share))"
+      ]
+
+      for reason <- reasons do
+        hold = CapacityExplainer.hold({:quota, reason}, %{})
+
+        assert hold.kind == :quota
+        assert hold.details == reason
+        refute hold.summary =~ "="
+        refute hold.summary =~ "_"
+        refute hold.summary =~ "max_concurrent"
+        refute hold.summary =~ "("
+        assert hold.summary =~ "too used up to start new work right now"
+      end
+
+      assert CapacityExplainer.hold({:quota, List.last(reasons)}, %{}).summary =~
+               "The Claude and Codex quotas are too used up"
+
+      assert CapacityExplainer.hold({:quota, "7d quota warning"}, %{}).summary =~
+               "The provider's quota is too used up"
     end
 
     test "an auth hold is not called a quota hold" do
