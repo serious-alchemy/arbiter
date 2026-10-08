@@ -324,6 +324,25 @@ defmodule ArbiterWeb.RemoteRestartTest do
     end
   end
 
+  describe "a Worker stopped while the application keeps running" do
+    test "is finalized as before: the run is cancelled on the node and written off", ctx do
+      alias Arbiter.Worker
+
+      {pid, handle, _task_id} = start_remote_worker!(ctx)
+      %{run_id: run_id} = Worker.state(pid)
+      _ = Worker.advance(pid, :claude)
+      assert_eventually(fn -> Executor.live?(handle) end)
+
+      put_env_restoring(:arbiter, :worker_node_stopping_override, false)
+      :ok = GenServer.stop(pid, :shutdown)
+
+      assert %{state: :finished, outcome: :interrupted, failure_reason: "server shutdown"} =
+               Ash.get!(Run, run_id)
+
+      assert_eventually(fn -> File.exists?(ctx.stub <> "/calls") and calls(ctx.stub) =~ "rm --force" end)
+    end
+  end
+
   describe "a primary restart" do
     test "the agent quiesces the run it was told is unknown, and Recovery lands its work in the home clone",
          ctx do

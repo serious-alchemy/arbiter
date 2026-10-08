@@ -10,7 +10,10 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
   alias Arbiter.Boot.{ReconcileSweep, ResumeGate}
   alias Arbiter.Nodes
   alias Arbiter.Nodes.Registry
-  alias Arbiter.Workers.Run
+  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Workers.{Reconciler, Run}
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 3]
 
   defmodule RecordingReconciler do
     @moduledoc false
@@ -26,6 +29,30 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     defp note(step) do
       send(Application.fetch_env!(:arbiter, :sweep_test_pid), {:step, step})
       {:ok, 0}
+    end
+  end
+
+  # The real Reconciler, with its resume swapped for a message: what the sweep does to
+  # rows and tickets is real, only the dispatch is not.
+  defmodule ResumeCountingReconciler do
+    @moduledoc false
+    defdelegate reconcile_orphaned_runs(opts), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_shutdown_casualties(opts), to: Arbiter.Workers.Reconciler
+    defdelegate sweep_worker_scopes(opts), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_ci_waits(opts), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_review_passes(opts), to: Arbiter.Workers.Reconciler
+    defdelegate restarted_ids(lists), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_open_pr_tasks(opts), to: Arbiter.Workers.Reconciler
+
+    def reconcile_resumable_tasks(opts) do
+      test = Application.fetch_env!(:arbiter, :sweep_test_pid)
+
+      resume = fn %Issue{id: id} ->
+        send(test, {:resumed, id})
+        {:ok, %{task_id: id}}
+      end
+
+      Arbiter.Workers.Reconciler.reconcile_resumable_tasks(Keyword.put(opts, :resume_fun, resume))
     end
   end
 
@@ -117,6 +144,102 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     assert drain_steps() == @reconcile_steps
     # recovery ran first and classified the lost node's run; the sweep then found nothing to do
     assert %{outcome: :interrupted, stop_category: "node_lost"} = Ash.get!(Run, run.id)
+  end
+
+  defp node_run!(node, task_id, state \\ :working) do
+    Ash.create!(Run, %{
+      task_id: task_id,
+      base_task_id: task_id,
+      repo: "trib/repo",
+      kind: :implement,
+      provider: "claude",
+      state: state,
+      node_id: node.id,
+      started_at: DateTime.utc_now()
+    })
+  end
+
+  defp active_ticket! do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "sweep-ws-2691",
+        prefix: "sw"
+      })
+
+    {:ok, issue} = Ash.create(Issue, %{title: "remote work", workspace_id: ws.id})
+    put_state!(issue, :active, [])
+  end
+
+  defp enroll!(name) do
+    {:ok, %{token: t}} = Nodes.mint_join_token([name: name], "operator:test")
+    {:ok, %{node: node}} = Nodes.redeem_join_token(t)
+    node
+  end
+
+  describe "a run that belongs to a node" do
+    test "a node that never returns: the run ends interrupted (node_lost) and its ticket is resumed exactly once" do
+      issue = active_ticket!()
+      run = node_run!(enroll!("never-back"), issue.id)
+
+      recovery = fn opts ->
+        Nodes.Recovery.await(Keyword.merge(opts, node_timeout_ms: 150, total_timeout_ms: 300))
+      end
+
+      ReconcileSweep.steps(
+        primary?: true,
+        reconciler: ResumeCountingReconciler,
+        recovery: recovery
+      )
+
+      issue_id = issue.id
+      assert_received {:resumed, ^issue_id}
+      refute_received {:resumed, _}
+
+      assert %{state: :finished, outcome: :interrupted, stop_category: "node_lost"} =
+               Ash.get!(Run, run.id)
+    end
+
+    test "while Recovery has not settled the run, the sweep neither interrupts it nor resumes its ticket" do
+      issue = active_ticket!()
+      owned = node_run!(enroll!("owned"), issue.id)
+
+      # a Recovery that cannot say what became of the run (it crashed: `await/1` then
+      # reports nothing), which is not the same as the run being lost or recovered
+      ReconcileSweep.steps(
+        primary?: true,
+        reconciler: ResumeCountingReconciler,
+        recovery: fn _opts -> {:ok, %{}} end
+      )
+
+      refute_received {:resumed, _}
+      assert %{state: :working, outcome: nil} = Ash.get!(Run, owned.id)
+    end
+
+    test "once Recovery has collected it, the run is interrupted for the resume and the ticket resumed once" do
+      issue = active_ticket!()
+      run = node_run!(enroll!("collected"), issue.id)
+
+      ReconcileSweep.steps(
+        primary?: true,
+        reconciler: ResumeCountingReconciler,
+        recovery: fn _opts -> {:ok, %{run.id => :collected}} end
+      )
+
+      issue_id = issue.id
+      assert_received {:resumed, ^issue_id}
+      refute_received {:resumed, _}
+
+      assert %{state: :finished, outcome: :interrupted, failure_reason: "server restarted"} =
+               Ash.get!(Run, run.id)
+    end
+
+    test "a run on a node is not mistaken for a local one by the orphan sweep alone" do
+      issue = active_ticket!()
+      run = node_run!(enroll!("direct"), issue.id)
+
+      assert {:ok, 0} = Reconciler.reconcile_orphaned_runs(primary?: true, skip_run_ids: [run.id])
+      assert %{state: :working} = Ash.get!(Run, run.id)
+    end
   end
 
   test "a non-primary instance skips recovery as it skips the Reconciler" do
