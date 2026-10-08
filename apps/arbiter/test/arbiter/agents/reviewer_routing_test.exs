@@ -9,6 +9,7 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Agents
   alias Arbiter.Agents.{CredentialWatchdog, ModelFamily, ProviderPool, ReviewerRouting}
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workers.Run
@@ -282,6 +283,23 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       assert sel.fallback_reason =~ "implementer family"
       assert sel.record["authoring_families"] == ["google", "anthropic"]
       assert Ash.get!(Issue, task.id).reviewer_family == "google"
+    end
+
+    test "a review_backend podman drops gemini and falls back to the same family" do
+      ws = workspace!(["claude", "gemini"])
+      task = task!(ws, "anthropic")
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"review_backend" => "podman"}})
+
+      assert {:ok, sel} =
+               ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts([], security: podman))
+
+      assert sel.family == :anthropic
+      assert sel.same_family_fallback
+      assert sel.fallback_reason =~ "gemini unsupported by podman"
+
+      assert {:ok, bwrap_sel} = ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts())
+      assert bwrap_sel.family == :google
+      refute bwrap_sel.same_family_fallback
     end
 
     test "switching to the only configured family records a same-family fallback" do
