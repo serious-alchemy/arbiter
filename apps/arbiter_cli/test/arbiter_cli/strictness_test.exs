@@ -59,7 +59,9 @@ defmodule ArbiterCli.StrictnessTest do
              [] -> [[]]
              other -> other
            end) do
-      for flag <- ["-w", "--workspace"] do
+      # `arb node set --workspace W` is the node's own pin switch (not the gate).
+      for flag <- ["-w", "--workspace"],
+          not (name == "node" and probe == ["set", "n"] and flag == "--workspace") do
         argv = [name | probe] ++ [flag, "dummy"]
         label = "arb #{Enum.join(argv, " ")}"
 
