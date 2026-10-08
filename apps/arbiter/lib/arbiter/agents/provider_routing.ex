@@ -605,6 +605,20 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
+  @doc """
+  Refuse to start a pass on a provider the workspace's sandbox backend cannot
+  run (`sandbox_backend_unavailable` at spawn). Checked before any worktree or
+  run exists, like `ensure_unpaused/2`, so the pass is held with the reason.
+  """
+  @spec ensure_sandbox_backend(atom(), term(), term()) ::
+          :ok | {:error, {:sandbox_backend, atom(), String.t()}}
+  def ensure_sandbox_backend(provider, task, workspace) do
+    case backend_refusal(legacy_policy(task, workspace, []), provider) do
+      nil -> :ok
+      detail -> {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    end
+  end
+
   # ---- legacy --------------------------------------------------------------
 
   defp legacy(task, workspace, opts) do
@@ -633,7 +647,10 @@ defmodule Arbiter.Agents.ProviderRouting do
   # A provider the workspace's sandbox backend cannot run is refused at spawn,
   # so the pre-routing resolution swaps it for the first pool provider that
   # both the backend and the ticket's constraint allow. When none is left the
-  # original stands (with the reason) and the dispatch gate holds it.
+  # original stands (with the reason) and the caller holds it: dispatch at
+  # `Dispatch.ensure_sandbox_backend/2`, the fix, conflict and ReviewGate
+  # implementer passes at `ensure_sandbox_backend/3`. Alternatives come only
+  # from the workspace's `agent.type` pool, as in `Dispatch.backend_unrouted/3`.
   defp backend_aware(provider, fallback, task, workspace, opts) do
     policy = legacy_policy(task, workspace, opts)
 
@@ -646,8 +663,7 @@ defmodule Arbiter.Agents.ProviderRouting do
         pool = Agents.agent_pool(workspace)
 
         alt =
-          (pool ++ [:claude, :codex])
-          |> Enum.uniq()
+          pool
           |> then(&ProviderConstraint.filter(constraint, &1))
           |> Enum.find(&(&1 != provider and is_nil(backend_refusal(policy, &1))))
 

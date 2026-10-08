@@ -561,6 +561,57 @@ defmodule Arbiter.Worker.ProviderConstraintDispatchTest do
     end
   end
 
+  # ---- #553: a backend that cannot run the only allowed provider ---------------------------
+
+  describe "a podman workspace whose only pool provider is gemini (#553)" do
+    setup %{sandbox: sandbox} do
+      ws =
+        workspace!(%{
+          "agent" => %{
+            "type" => ["gemini"],
+            "security" => %{"sandbox" => %{"backend" => "podman"}}
+          }
+        })
+
+      task = task!(ws, %{issue_type: :feature})
+      branch = BranchNamer.derive(task)
+      :ok = TestSandbox.seed_branch!(sandbox, branch)
+
+      context = %{
+        task: Ash.get!(Issue, task.id),
+        repo: @repo,
+        repo_path: sandbox.repo,
+        branch: branch,
+        target_branch: "main",
+        workspace: ws,
+        start_claude: false
+      }
+
+      %{task: task, context: context}
+    end
+
+    test "the fix pass is held with the backend reason before any run exists", %{
+      task: task,
+      context: context
+    } do
+      assert {:error, {:sandbox_backend, :gemini, detail}} = FixPassDispatcher.dispatch(context)
+      assert detail =~ "held — gemini: not supported by sandbox.backend podman"
+      assert runs(task.id, :fix_pass) == []
+    end
+
+    test "the conflict resolver is held with the backend reason before any run exists", %{
+      task: task,
+      context: context,
+      sandbox: sandbox
+    } do
+      move_main_on!(sandbox)
+
+      assert {:error, {:sandbox_backend, :gemini, detail}} = ConflictResolver.dispatch(context)
+      assert detail =~ "sandbox.backend podman"
+      assert runs(task.id, :conflict) == []
+    end
+  end
+
   # ---- unconstrained tickets route exactly as today ----------------------------------------
 
   describe "a ticket without a constraint" do
