@@ -382,6 +382,7 @@ defmodule Arbiter.NodeAgent.Run do
          {:ok, argv} <-
            build_argv(spec, opts, %{
              dirs: dirs,
+             config: config,
              cli: cli,
              prompts: prompts,
              limit_opts: limit_opts,
@@ -717,6 +718,8 @@ defmodule Arbiter.NodeAgent.Run do
     %{dirs: dirs, prompts: prompts, bridge_paths: bridge_paths, secrets_file: secrets_file} =
       parts
 
+    store_objects = store_objects(spec, parts.config)
+
     wrap_opts =
       [
         worktree: dirs["worktree"].host,
@@ -725,7 +728,7 @@ defmodule Arbiter.NodeAgent.Run do
         podman: podman_path(opts),
         home: dirs["home"] && dirs["home"].host,
         writable_paths: for(kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host),
-        readonly_paths: Enum.map(prompts, &elem(&1, 0)),
+        readonly_paths: Enum.map(prompts, &elem(&1, 0)) ++ store_objects,
         cli_mounts: parts.cli,
         bridges: Enum.map(bridge_paths, &elem(&1, 1)),
         env: Map.to_list(spec.env) ++ parts.service_env,
@@ -746,6 +749,16 @@ defmodule Arbiter.NodeAgent.Run do
       {:error, reason} -> {:error, {:unschedulable, {:wrap, reason}}}
     end
   end
+
+  # bd-1zp3ji: the shadow's `.git/objects/info/alternates` names the node store's
+  # `objects/` by its host path (`Checkout.seed/1`). Git in the container resolves it
+  # as written, so the store's objects are bound read-only at that same path; without
+  # it every git command fails (`unable to normalize alternate object path`). A bind
+  # rather than a `:O` overlay: concurrent seeds keep adding packs to the store, and
+  # changing an overlay's lower layer while it is mounted is undefined. Read-only, so
+  # a run cannot write into objects the node's other runs borrow.
+  defp store_objects(%RunSpec{checkout: nil}, _config), do: []
+  defp store_objects(%RunSpec{}, config), do: [Path.join(Checkout.store(config), "objects")]
 
   defp mount_map(dirs, prompts, bridge_paths) do
     Map.new(
