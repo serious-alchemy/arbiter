@@ -26,6 +26,20 @@ other in-flight worker down with it.
   var) — process command lines are visible host-wide and false-positive
   matches are exactly what caused this problem before.
 
+## Stopping processes — never kill by pattern match
+
+This applies to every process you stop, not just servers. Two workers have
+already been killed this way (bd-8fjkir, bd-8t4yui): a `ps`/`pgrep`/`grep`/`awk`
+pattern match hit the worker's own session tree, or another worker's processes.
+
+- **Never** kill processes you found with `ps`, `pgrep`, `pkill -f`, `killall`,
+  or `awk`/`grep` pattern matching over process lists — even if the match looks
+  scoped to your worktree.
+- To stop something you started in the background, record its PID when you
+  start it (`cmd & echo $! > "$TMPDIR/x.pid"`) and later run `kill "$(cat "$TMPDIR/x.pid")"`,
+  or bound it up front with `timeout` (e.g. `timeout 300 cmd`) so it cannot outlive you.
+- Never touch processes outside your own worktree.
+
 ## Project guidelines
 
 - **Before every commit and push** (including fix-pass rounds), run `mix precommit && mix audit`, fix any issues, and re-run if you make further edits. Format failures can occur after precommit if code changes are made after running it.

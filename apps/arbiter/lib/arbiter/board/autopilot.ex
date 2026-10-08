@@ -464,6 +464,23 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   @doc """
+  Drop any round deferred for `task_id` (bd-4l7l2n): the ticket closed or its
+  PR merged while the round waited for a slot, so starting it would spend a
+  scarce slot on finished work. `:ok` whether or not one was queued, and when
+  no scheduler is running. A round already being replayed is not interrupted;
+  the dispatcher re-checks the ticket at start.
+  """
+  @spec cancel_deferred(GenServer.server(), String.t()) :: :ok
+  def cancel_deferred(server \\ __MODULE__, task_id) when is_binary(task_id) do
+    case GenServer.whereis(server) do
+      nil -> :ok
+      _pid -> GenServer.call(server, {:cancel_deferred, task_id})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
   `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
   the scheduler is not running or does not answer. Best-effort and quick: a
@@ -606,6 +623,16 @@ defmodule Arbiter.Board.Autopilot do
         else: state.deferred_resumes ++ [entry]
 
     {:reply, :ok, request_plan(%{state | deferred_resumes: deferred})}
+  end
+
+  def handle_call({:cancel_deferred, task_id}, _from, state) do
+    {dropped, kept} = Enum.split_with(state.deferred_resumes, &(&1.task_id == task_id))
+
+    for %{kind: kind} <- dropped do
+      Logger.info("board autopilot: deferred #{kind} for #{task_id} cancelled — ticket finished")
+    end
+
+    {:reply, :ok, %{state | deferred_resumes: kept}}
   end
 
   def handle_call({:paused, paused?, by}, _from, state) do
@@ -996,6 +1023,8 @@ defmodule Arbiter.Board.Autopilot do
   @benign_resume_errors [
     :worker_active,
     :task_closed,
+    :pr_not_open,
+    :ci_not_failing,
     :task_not_found,
     :fix_pass_already_running,
     :resolver_already_running,
