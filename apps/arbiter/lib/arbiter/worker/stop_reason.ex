@@ -194,6 +194,7 @@ defmodule Arbiter.Worker.StopReason do
           | :credit_exhausted
           | :rate_limited
           | :gateway_error
+          | :session_not_found
           | :context_thrash
           | :killed
           | :memory_cap_exceeded
@@ -427,6 +428,10 @@ defmodule Arbiter.Worker.StopReason do
     | receive[ _]timeout
   /ix
 
+  # `claude --resume <sid>` for a session whose JSONL is not in the run's config
+  # dir. Deterministic: a retry with the same `--resume` fails identically.
+  @session_not_found_signature ~r/no[ _]conversation[ _]found[ _]with[ _]session[ _]id/i
+
   # bd-80kdgy: the marker an agent stream parser emits when it meets an event
   # vocabulary it doesn't know (see `Arbiter.Agents.Codex.Stream`). Its presence
   # means the transcript is incomplete by construction, so whatever the exit
@@ -555,6 +560,22 @@ defmodule Arbiter.Worker.StopReason do
             "Deterministic for this task's file set — retrying identically will fail the " <>
               "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
               "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # The CLI's own refusal of `--resume`, before any work. Checked ahead of
+      # the gateway signature: the container's socat "Connection reset by peer"
+      # on exit is collateral noise, not a transport failure.
+      exit_status != 0 and Regex.match?(@session_not_found_signature, haystack) ->
+        %__MODULE__{
+          category: :session_not_found,
+          summary:
+            "the agent CLI has no record of the session it was told to --resume " <>
+              "(No conversation found with session ID)",
+          remediation:
+            "The prior run's session history is not in this run's config dir. Resume in " <>
+              "briefing mode (`arb worker resume <id> --mode briefing`) instead of --resume.",
           exit_status: exit_status,
           signal: signal
         }
