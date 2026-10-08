@@ -55,7 +55,7 @@ defmodule Arbiter.MCP.Catalog do
   | `external_review_transcript` | coordinator | `Arbiter.Reviews.Transcript.read_lines/1` + `tool_uses/1` for one non-task-linked review (by review record id) |
   | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, rendered-transcript capture rate plus the session-JSONL archive rate (reported separately) |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
-  | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
+  | `notify_list` | worker, coordinator | `Messages.Mailbox.notifications/1` |
   | `ticket_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
   | `tracker_list_issues` | coordinator | `Arbiter.Trackers.list_open/1` |
@@ -245,7 +245,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Read the mailbox for a ticket — the structured replacement for `arb inbox`. " <>
           "A worker checks its own ticket; a coordinator passes `task_id`. " <>
-          "Two states: `state: \"unread\"` (default) lists unread messages and marks them read; " <>
+          "Two states: `state: \"unread\"` (default) lists unread messages and, unless `mark_read: false`, marks them read; " <>
           "`state: \"outstanding\"` lists read-but-uncleared messages as a pure read — no mutations.",
       input_schema: %{
         "type" => "object",
@@ -261,6 +261,12 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Mailbox state to return. \"unread\" (default): unread messages, marked read on return. " <>
                 "\"outstanding\": read-but-uncleared messages, no mutations."
+          },
+          "mark_read" => %{
+            "type" => "boolean",
+            "description" =>
+              "Stamp the returned unread messages read. Default true; pass false to peek " <>
+                "(the REST/CLI default is false — those are plain reads)."
           }
         },
         "additionalProperties" => false
@@ -291,6 +297,12 @@ defmodule Arbiter.MCP.Catalog do
               "Mailbox state to return. \"unread\" (default): unread messages, marked read on return. " <>
                 "\"outstanding\": read-but-uncleared messages, no mutations."
           },
+          "mark_read" => %{
+            "type" => "boolean",
+            "description" =>
+              "Stamp the returned unread messages read. Default true; pass false to peek " <>
+                "(the REST/CLI default is false — those are plain reads)."
+          },
           "clear" => %{
             "type" => "boolean",
             "description" =>
@@ -310,12 +322,11 @@ defmodule Arbiter.MCP.Catalog do
           "`arb inbox clear <id> ...` / `arb inbox clear --task <task-id>`. Accepts `ids` " <>
           "(a list of message ids) and/or `task_id`; at least one is required. `ids` resolve " <>
           "directly by id, regardless of workspace. `task_id` clears every coordinator message " <>
-          "concerning that ticket; pass `workspace` to scope it explicitly, else it resolves the " <>
-          "usual way for a write (bound workspace, then the sole workspace) and errors rather than " <>
-          "guessing when several exist. Rows are retained (soft-clear), never destroyed. " <>
+          "concerning that ticket in every workspace you may see (a bound token: its own; pass " <>
+          "`workspace` to narrow it). Returns the same keys as REST `DELETE /api/messages`. Rows are retained (soft-clear), never destroyed. " <>
           "Clears only YOUR view of the shared mailbox: a session token clears its own copy, " <>
           "leaving every other session and the sessionless coordinator still owing the message. " <>
-          "Returns what was cleared and what id wasn't found.",
+          "Returns `cleared` (ids), `cleared_count` and `not_found`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

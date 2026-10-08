@@ -47,6 +47,7 @@ defmodule ArbiterCli.WorkspaceFlagPlumbingTest do
     do: %{"token" => "T", "tier" => "coordinator", "expires_in" => 1}
 
   defp respond("/api/usage/calibration"), do: %{"data" => %{}}
+  defp respond("/api/nodes/box-1"), do: %{"node" => %{"name" => "box-1"}}
   defp respond(_path), do: %{"data" => []}
 
   defp run(argv), do: capture(fn -> Main.main(argv) end)
@@ -153,6 +154,26 @@ defmodule ArbiterCli.WorkspaceFlagPlumbingTest do
     {_out, err, code} = run(["queue", "rerun-ci", "bd-1", "-w", "acme"])
     assert code == 1
     assert err =~ "unknown option -w for arb queue"
+  end
+
+  test "node set --workspace is the node's own pin switch, not the global selector" do
+    {_out, err, code} =
+      run(["node", "set", "box-1", "--workspace", "ws-a", "--workspace=ws-b"])
+
+    refute err =~ "unknown option"
+    assert code == 0
+
+    assert_received {:request, "PATCH", "/api/nodes/box-1", _,
+                     %{"workspace_ids" => ["ws-a", "ws-b"]}}
+
+    {_out, _err, 0} = run(["node", "set", "box-1", "--workspace", "none"])
+    assert_received {:request, "PATCH", "/api/nodes/box-1", _, %{"workspace_ids" => []}}
+  end
+
+  test "node list -w is still rejected" do
+    {_out, err, code} = run(["node", "list", "-w", "acme"])
+    assert code == 1
+    assert err =~ "unknown option -w for arb node"
   end
 
   test "worker list -w" do

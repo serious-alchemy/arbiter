@@ -108,6 +108,25 @@ defmodule Arbiter.Workflows.DispatchQueue do
   snapshot reset (the reset-buffer or a no-reset-time backoff) still gets its
   own precise wake instead of waiting on the next 5-minute broadcast.
 
+  ## A provider quota stop is held until the reset, resumed, or rerouted (bd-a6vh2x)
+
+  A run that *stopped* because its provider account ran out of allowance
+  (`Arbiter.Worker.StopReason` `:quota_exhausted`: agy `RESOURCE_EXHAUSTED`,
+  Claude's session/weekly limit, grok's free-usage limit) is not a crash.
+  `Arbiter.Worker` opens a timed account hold (`Arbiter.Providers.Pause.quota_hold/4`)
+  and enqueues the ticket here with `quota_resume: true`, the hold's reset
+  time as `retry_not_before`, and the reset as the wake time. The item then
+  waits like any held dispatch (`arb quota` → Held dispatches, "held — quota"
+  on the board, no `run_crashed` attention) and leaves in one of two ways:
+
+    * **resume** — the reset passes and the account is no longer held:
+      `Arbiter.Worker.Dispatch.dispatch/2` turns `quota_resume: true` into a
+      session-level resume of the same session in the preserved worktree;
+    * **reroute** — before the reset, another provider is neither paused nor
+      quota-gated and the ticket's provider constraint lets routing pick it
+      (`reroutable?/3`): the item drains early, and the same resume continues the
+      work there from the preserved worktree, briefed from its git state.
+
   ## `:continue` — overage alert debounce
 
   When the gate returns `{:overage, spend_usd}` (dispatch proceeds past the cap),
@@ -216,6 +235,25 @@ defmodule Arbiter.Workflows.DispatchQueue do
   end
 
   def hold(_workspace_id, _task_id, _opts, _reason, _provider), do: {:error, :no_workspace}
+
+  @doc """
+  `hold/5` for a dispatch that must not be replayed before `until` (bd-a6vh2x):
+  a provider quota stop's reset time. The item is skipped by the drain until
+  then — unless it can be rerouted to another provider sooner (see the
+  moduledoc).
+  """
+  @spec hold_until(String.t(), String.t(), keyword(), term(), atom(), DateTime.t()) ::
+          :ok | {:error, term()}
+  def hold_until(workspace_id, task_id, opts, reason, provider, %DateTime{} = until)
+      when is_binary(workspace_id) and is_binary(task_id) do
+    with {:ok, pid} <- DispatchQueueSupervisor.ensure_started(workspace_id) do
+      GenServer.call(pid, {:hold, task_id, opts, reason, provider, until})
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, r -> {:error, {:exit, r}}
+  end
 
   @doc """
   Record windowed overage `spend_usd` for `workspace_id` (the `:continue` path)
@@ -373,8 +411,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp intent(_opts, 0), do: "ReviewGate conflict round"
   defp intent(_opts, round) when is_integer(round), do: "ReviewGate fix round #{round}"
 
-  defp intent(opts, _round),
-    do: if(Keyword.get(opts, :resume) == true, do: "resume", else: "dispatch")
+  defp intent(opts, _round) do
+    if Keyword.get(opts, :resume) == true or Keyword.get(opts, :quota_resume) == true,
+      do: "resume",
+      else: "dispatch"
+  end
 
   @doc """
   A held provider as an operator names it. The agent type `:gemini` is the
@@ -460,8 +501,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
   end
 
   @impl true
-  def handle_call({:hold, task_id, opts, reason, provider}, _from, %State{} = state) do
-    item = new_item(state, task_id, opts, reason, provider)
+  def handle_call({:hold, task_id, opts, reason, provider}, from, %State{} = state),
+    do: handle_call({:hold, task_id, opts, reason, provider, nil}, from, state)
+
+  def handle_call({:hold, task_id, opts, reason, provider, until}, _from, %State{} = state) do
+    item = %{new_item(state, task_id, opts, reason, provider) | retry_not_before: until}
 
     # A second hold for a task already held replaces the intent (bd-6omte4):
     # the newest dispatch is the one wanted — a later fix round's findings, a
@@ -563,7 +607,16 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # `retry_not_before` passes (bd-8lnnnt) — set aside before the gate check
     # even runs, since the gate has no notion of this per-item hold.
     now = DateTime.utc_now()
+    gate = Arbiter.Quota.gate_for_workspace(state.workspace)
     {on_hold, eligible} = Enum.split_with(state.items, &preflight_held?(&1, now))
+
+    # bd-a6vh2x: a provider quota stop waits for its reset, but not if routing
+    # can already hand the ticket to a provider with headroom — that one leaves
+    # the hold now and is replayed (and rerouted) by the drain below.
+    {rerouted, on_hold} =
+      Enum.split_with(on_hold, &(quota_resume?(&1) and reroutable?(state, gate, &1)))
+
+    eligible = eligible ++ rerouted
 
     # One snapshot read per distinct provider held in this queue (bd-2mpo3f) —
     # a Codex hold must be re-checked against CodexQuota, not AnthropicQuota, or
@@ -574,7 +627,6 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # the drain re-check has to hand it the same account `Dispatch` does or a
     # held intent could drain on a ceiling the dispatcher would re-hold at.
     accounts = provider_accounts(state)
-    gate = Arbiter.Quota.gate_for_workspace(state.workspace)
 
     # Partition (fast: a pure gate check per item) into those the gate still
     # holds and those there is now headroom for. The gate check and quota read
@@ -677,6 +729,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
       (match?(%Arbiter.Accounts.ProviderAccount{}, account) and
          Arbiter.Providers.Pause.for_account(account) != nil)
   end
+
+  defp quota_resume?(%{opts: opts}) when is_list(opts),
+    do: Keyword.get(opts, :quota_resume) == true
+
+  defp quota_resume?(_item), do: false
 
   defp preflight_held?(%{retry_not_before: %DateTime{} = at}, now),
     do: DateTime.compare(now, at) == :lt
@@ -843,6 +900,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
         held.retry_not_before != nil ->
           GenServer.cast(queue, {:requeue, held})
 
+        # A replay the quota gate or a pause still holds is waiting, not
+        # failing: it requeues as often as it takes and is never counted
+        # toward the breaker, which would drop a legitimately held intent
+        # after K drains (bd-a6vh2x, seen on bd-4df3ma).
+        still_held?(reason) ->
+          GenServer.cast(queue, {:requeue, held})
+
         redispatch_broken?(ws_id, item, reason) ->
           Logger.warning(
             "DispatchQueue: circuit breaker open for #{item.task_id}; dropping held intent " <>
@@ -856,6 +920,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
       end
     end
   end
+
+  defp still_held?({:quota_held, _}), do: true
+  defp still_held?({:provider_paused, _, _}), do: true
+  defp still_held?(_reason), do: false
 
   defp redispatch_broken?(ws_id, item, reason) do
     match?(
@@ -1089,8 +1157,16 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   # ---- helpers ------------------------------------------------------------
 
-  defp replace_intent(held, item),
-    do: Map.merge(held, Map.take(item, [:opts, :reason, :provider, :held_state, :held_run_id]))
+  defp replace_intent(held, item) do
+    held = Map.merge(held, Map.take(item, [:opts, :reason, :provider, :held_state, :held_run_id]))
+
+    # A later hold that names no replay time (an ordinary gate hold) leaves the
+    # one already recorded; a quota stop's reset replaces it.
+    case item.retry_not_before do
+      %DateTime{} = at -> %{held | retry_not_before: at}
+      _ -> held
+    end
+  end
 
   defp already_held?(%State{items: items}, task_id),
     do: Enum.any?(items, &(&1.task_id == task_id))

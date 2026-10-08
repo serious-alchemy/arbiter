@@ -589,19 +589,45 @@ defmodule Arbiter.Worker.Driver do
   # node's own work is lost beyond the last checkpoint, but the checkpoint is here).
   # The Worker is gone by the time this runs, so the run row says which it was.
   defp maybe_cleanup_worktree(%{task_id: task_id} = state) when is_binary(task_id) do
-    if node_lost_run?(task_id) do
-      Logger.info(
-        "Worker.Driver: run for task=#{task_id} was interrupted by a lost node; " <>
-          "keeping its worktree for the resume"
-      )
+    cond do
+      node_lost_run?(task_id) ->
+        Logger.info(
+          "Worker.Driver: run for task=#{task_id} was interrupted by a lost node; " <>
+            "keeping its worktree for the resume"
+        )
 
-      :ok
-    else
-      cleanup_unless_merging(state)
+        :ok
+
+      # bd-a6vh2x: a run stopped on its provider's quota is queued to resume in
+      # this very worktree once the account is free.
+      quota_held_run?(task_id) ->
+        Logger.info(
+          "Worker.Driver: run for task=#{task_id} is held for provider quota; " <>
+            "keeping its worktree for the resume"
+        )
+
+        :ok
+
+      true ->
+        cleanup_unless_merging(state)
     end
   end
 
   defp maybe_cleanup_worktree(state), do: cleanup_unless_merging(state)
+
+  defp quota_held_run?(task_id) do
+    with {:ok, %{workspace_id: ws_id}} when is_binary(ws_id) <-
+           Ash.get(Arbiter.Tasks.Issue, task_id),
+         %{opts: opts} <- Arbiter.Workflows.DispatchQueue.held_item(ws_id, task_id) do
+      Keyword.get(opts, :quota_resume) == true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
 
   # bd-741sid: a Merging ticket's worktree belongs to its merge path — a fix or
   # conflict pass works in it, and the ticket's close removes it.

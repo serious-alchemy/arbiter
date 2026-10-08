@@ -1104,4 +1104,123 @@ defmodule Arbiter.Worker.StopReasonTest do
       end
     end
   end
+
+  # bd-a6vh2x: recorded stop output (run ddebab52 for agy, 4a76953c for grok,
+  # 47d5023b for Claude, all from the live fleet DB) must classify as a
+  # provider quota stop rather than a crash / rate limit, with the reset time
+  # parsed when the message carries one.
+  describe "classify/3 — provider quota stops from recorded output (bd-a6vh2x)" do
+    @agy_lines [
+      "\u2699 gemini session started",
+      "error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 11m34s.",
+      ~s|AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 11m34s.","status":"RESOURCE_EXHAUSTED","error_code":429,"code_kind":"http","retryable":true,"error_id":"2d3d611d-c69c-45d6-aa7e-f17597af7117-674"}|,
+      "\u2699 gemini session ERROR \u00B7 2035.9s \u00B7 1665908 tok"
+    ]
+
+    test "agy RESOURCE_EXHAUSTED 429 is a quota stop with its reset time" do
+      before = DateTime.utc_now()
+      reason = StopReason.classify(3, @agy_lines, "gemini")
+
+      assert reason.category == :quota_exhausted
+      assert %DateTime{} = reason.retry_after
+      secs = DateTime.diff(reason.retry_after, before)
+      assert secs in (11 * 60 + 34 - 2)..(11 * 60 + 34 + 5)
+      assert reason.summary =~ "quota"
+    end
+
+    test "agy's reset duration forms: hours, minutes, seconds in any combination" do
+      for {text, expected} <- [
+            {"Resets in 2h5m.", 2 * 3600 + 5 * 60},
+            {"Resets in 45s.", 45},
+            {"Resets in 1h.", 3600}
+          ] do
+        line =
+          ~s|AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. #{text}"}|
+
+        reason = StopReason.classify(3, [line], "gemini")
+        assert reason.category == :quota_exhausted
+        assert_in_delta DateTime.diff(reason.retry_after, DateTime.utc_now()), expected, 3
+      end
+    end
+
+    test "agy quota stop without a reset time still classifies, with no retry_after" do
+      line =
+        ~s|AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached."}|
+
+      reason = StopReason.classify(3, [line], "gemini")
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == nil
+    end
+
+    test "agy RESOURCE_EXHAUSTED that is not a quota message stays a rate limit" do
+      line = ~s|AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Too many requests"}|
+      assert StopReason.classify(3, [line], "gemini").category == :rate_limited
+    end
+
+    test "agy quota wording quoted in a tool result or prose is not a stop" do
+      lines = [
+        "\u23F4 " <> Enum.at(@agy_lines, 2),
+        "The runbook says: error: Individual quota reached. Resets in 11m34s."
+      ]
+
+      refute StopReason.classify(3, lines, "gemini").category == :quota_exhausted
+    end
+
+    test "Claude's session-limit message is a quota stop" do
+      # The wall-clock reset only parses on a host in the named zone
+      # (bd-cfhj7z), so the reset time is asserted on the epoch form below.
+      reason =
+        StopReason.classify(
+          1,
+          ["You've hit your session limit \u00B7 resets 4:40pm (America/New_York)"],
+          "claude"
+        )
+
+      assert reason.category == :quota_exhausted
+    end
+
+    test "Claude's usage-limit message with an epoch reset carries retry_after" do
+      at = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
+      reason = StopReason.classify(1, ["Claude AI usage limit reached|#{at}"], "claude")
+
+      assert reason.category == :quota_exhausted
+      assert DateTime.to_unix(reason.retry_after) == at
+    end
+
+    test "Claude's weekly and Opus limit messages are quota stops" do
+      for text <- [
+            "You've hit your weekly limit \u00B7 resets Oct 9, 2am (America/New_York)",
+            "You\u2019ve hit your Opus limit \u00B7 resets 4:40pm (America/New_York)"
+          ] do
+        assert StopReason.classify(1, [text], "claude").category == :quota_exhausted,
+               "category for #{text}"
+      end
+    end
+
+    test "Claude's monthly spend limit is not a time-boxed quota stop" do
+      line =
+        "You've hit your monthly spend limit \u00B7 raise it at claude.ai/settings/usage?from=cc_cli_limit_message"
+
+      refute StopReason.classify(1, [line], "claude").category == :quota_exhausted
+    end
+
+    @grok_limit "You\u2019ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build"
+
+    test "grok's free Grok Build usage-limit message is a quota stop" do
+      reason =
+        StopReason.classify(1, ["grok error: " <> @grok_limit, "Error: " <> @grok_limit], "grok")
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == nil
+    end
+
+    test "grok's usage-limit text quoted in prose or on a clean exit is not a stop" do
+      refute StopReason.classify(1, ["The log said: " <> @grok_limit], "grok").category ==
+               :quota_exhausted
+
+      refute StopReason.classify(0, ["grok error: " <> @grok_limit], "grok").category ==
+               :quota_exhausted
+    end
+  end
 end

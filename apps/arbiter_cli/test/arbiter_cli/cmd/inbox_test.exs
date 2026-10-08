@@ -318,75 +318,110 @@ defmodule ArbiterCli.Cmd.InboxTest do
   end
 
   describe "arb inbox <task-id> (worker path)" do
-    test "lists a task's unread mail and marks each read" do
-      stub_routes([
+    defp task_routes(test_pid, mail) do
+      [
+        {{"get", "/api/issues/bd-1"}, {%{"data" => %{"id" => "bd-1"}}, 200}},
+        {{"get", "/api/issues/sned"},
+         {%{"error" => %{"type" => "not_found", "message" => "not found"}}, 404}},
         {{"get", "/api/messages"},
-         {%{
-            "data" => [
-              %{
-                "id" => "m-1",
-                "kind" => "direction",
-                "from_ref" => "coordinator",
-                "to_ref" => "bd-1",
-                "body" => "check the API contract"
-              }
-            ]
-          }, 200}},
-        {{"post", "/api/messages/m-1/read"}, {%{"id" => "m-1"}, 200}}
-      ])
+         fn conn ->
+           send(test_pid, {:messages_query, conn.query_string})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => mail})
+         end},
+        {{"post", "/api/messages/m-1/read"},
+         fn conn ->
+           send(test_pid, :per_message_read)
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "m-1"})
+         end}
+      ]
+    end
+
+    test "lists a task's unread mail and marks it read in the same call" do
+      mail = [
+        %{
+          "id" => "m-1",
+          "kind" => "direction",
+          "from_ref" => "coordinator",
+          "to_ref" => "bd-1",
+          "body" => "check the API contract"
+        }
+      ]
+
+      stub_routes(task_routes(self(), mail))
 
       {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
       assert code == 0
       assert out =~ "Unread mail for bd-1 (1)"
       assert out =~ "check the API contract"
+
+      assert_received {:messages_query, query}
+
+      assert %{"mark_read" => "true", "unread" => "true", "to_ref" => "bd-1"} =
+               URI.decode_query(query)
+
+      refute_received :per_message_read
     end
 
-    test "filters out notifications (never mail)" do
-      stub_routes([
-        {{"get", "/api/messages"},
-         {%{
-            "data" => [
-              %{"id" => "n-1", "kind" => "notification", "body" => "noise"},
-              %{"id" => "m-1", "kind" => "mailbox", "from_ref" => "bd-2", "body" => "real mail"}
-            ]
-          }, 200}},
-        {{"post", "/api/messages/m-1/read"}, {%{"id" => "m-1"}, 200}}
-      ])
+    test "--outstanding lists read-but-uncleared mail and never marks anything read" do
+      mail = [%{"id" => "m-1", "kind" => "info", "from_ref" => "bd-2", "body" => "still owed"}]
+      stub_routes(task_routes(self(), mail))
 
-      {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
+      {out, _err, code} = capture(fn -> Inbox.run(["bd-1", "--outstanding"]) end)
       assert code == 0
-      assert out =~ "real mail"
-      refute out =~ "noise"
+      assert out =~ "Outstanding mail for bd-1 (1)"
+
+      assert_received {:messages_query, query}
+      params = URI.decode_query(query)
+      assert params["outstanding"] == "true"
+      refute Map.has_key?(params, "mark_read")
+    end
+
+    test "a mistyped verb is an error, not a drain of a mailbox that does not exist" do
+      stub_routes(task_routes(self(), []))
+
+      {_out, err, code} = capture(fn -> Inbox.run(["sned"]) end)
+      assert code != 0
+      assert err =~ "no task"
+      refute_received {:messages_query, _}
     end
   end
 
-  describe "arb inbox <task-id> (worker path): full bodies" do
-    test "prints each message in full, with its full id, not a truncated gist" do
-      id = "0b9d1f2a-1111-2222-3333-444455556666"
-      long = String.duplicate("word ", 80) <> "\nsecond line: fix lib/a.ex"
+  describe "arb inbox --outstanding / --mark-read (coordinator)" do
+    test "--outstanding asks for the triage queue" do
+      test_pid = self()
 
       stub_routes([
         {{"get", "/api/messages"},
-         {%{
-            "data" => [
-              %{
-                "id" => id,
-                "kind" => "info",
-                "from_ref" => "coordinator",
-                "to_ref" => "bd-1",
-                "subject" => "directive",
-                "body" => long
-              }
-            ]
-          }, 200}},
-        {{"post", "/api/messages/#{id}/read"}, {%{"id" => id}, 200}}
+         fn conn ->
+           send(test_pid, {:query, URI.decode_query(conn.query_string)})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => [coordinator_msg(%{})]})
+         end}
       ])
 
-      {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
+      {out, _err, code} = capture(fn -> Inbox.run(["--outstanding"]) end)
       assert code == 0
-      assert out =~ id
-      assert out =~ "second line: fix lib/a.ex"
-      assert out =~ String.duplicate("word ", 80)
+      assert out =~ "1 outstanding"
+      assert_received {:query, %{"outstanding" => "true", "to_ref" => "coordinator"} = q}
+      refute Map.has_key?(q, "unread")
+    end
+
+    test "the coordinator view is a pure read unless --mark-read is given" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/messages"},
+         fn conn ->
+           send(test_pid, {:query, URI.decode_query(conn.query_string)})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, 0} = capture(fn -> Inbox.run([]) end)
+      assert_received {:query, plain}
+      refute Map.has_key?(plain, "mark_read")
+
+      {_out, _err, 0} = capture(fn -> Inbox.run(["--mark-read"]) end)
+      assert_received {:query, %{"mark_read" => "true"}}
     end
   end
 

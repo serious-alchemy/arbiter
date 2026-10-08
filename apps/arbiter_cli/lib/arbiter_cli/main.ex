@@ -216,7 +216,7 @@ defmodule ArbiterCli.Main do
 
     # Strip -w / --workspace from the full argv before splitting into cmd/rest,
     # so the flag works at any position (including before the subcommand).
-    {flag, workspace, argv} = ArbiterCli.Workspace.extract_flag(argv)
+    {flag, workspace, argv} = extract_workspace_flag(argv)
 
     case argv do
       [] ->
@@ -240,6 +240,24 @@ defmodule ArbiterCli.Main do
     end
   end
 
+  # `arb node set --workspace W` (repeatable, or `none`) is the node's own pin
+  # switch, not the global workspace selector: leave it for node.ex to parse.
+  # Only the long form is the pin; `-w` stays global everywhere.
+  defp extract_workspace_flag(["node", "set" | _] = argv) do
+    {flag, name, rest} =
+      ArbiterCli.Workspace.extract_flag(Enum.map(argv, &protect_pin/1))
+
+    {flag, name, Enum.map(rest, &unprotect_pin/1)}
+  end
+
+  defp extract_workspace_flag(argv), do: ArbiterCli.Workspace.extract_flag(argv)
+
+  defp protect_pin("--workspace"), do: {:pin, "--workspace"}
+  defp protect_pin("--workspace=" <> _ = a), do: {:pin, a}
+  defp protect_pin(a), do: a
+  defp unprotect_pin({:pin, a}), do: a
+  defp unprotect_pin(a), do: a
+
   # `-w` means nothing to help/version/the bare usage screen: refuse it rather
   # than run the command and ignore it.
   defp reject_flag!(nil, _verb), do: :ok
@@ -252,7 +270,8 @@ defmodule ArbiterCli.Main do
     # the active workspace, exactly as `ARB_WORKSPACE` does. Strip it centrally —
     # before any subcommand's own `OptionParser` runs — and seed the env so every
     # subcommand honors it uniformly, without each declaring the switch.
-    {extra_flag, extra_name, args} = ArbiterCli.Workspace.extract_flag(args)
+    {extra_flag, extra_name, args} = extract_workspace_flag([cmd | args])
+    args = tl(args)
     flag = flag || extra_flag
     ws_val = ws_val || extra_name
 
