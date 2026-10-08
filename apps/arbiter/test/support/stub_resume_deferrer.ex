@@ -33,6 +33,31 @@ defmodule Arbiter.Test.StubResumeDeferrer do
     for {:cancel, id} <- Agent.get(@name, &Enum.reverse/1), do: id
   end
 
+  @doc "Task ids currently deferred (deferred and not cancelled), like Autopilot's."
+  def deferred_resume_ids do
+    ensure_started()
+
+    Agent.get(@name, &Enum.reverse/1)
+    |> Enum.reduce([], fn
+      {:cancel, id}, acc -> List.delete(acc, id)
+      {id, _kind, _opts}, acc -> [id | List.delete(acc, id)]
+    end)
+    |> Enum.reverse()
+  end
+
+  @doc "Task ids whose current deferral is a `:fix_pass`."
+  def deferred_fix_pass_ids do
+    ensure_started()
+
+    Agent.get(@name, &Enum.reverse/1)
+    |> Enum.reduce(%{}, fn
+      {:cancel, id}, acc -> Map.delete(acc, id)
+      {id, kind, _opts}, acc -> Map.put(acc, id, kind)
+    end)
+    |> Enum.filter(fn {_id, kind} -> kind == :fix_pass end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
   def cancel_deferred(task_id) do
     ensure_started()
     Agent.update(@name, &[{:cancel, task_id} | &1])
