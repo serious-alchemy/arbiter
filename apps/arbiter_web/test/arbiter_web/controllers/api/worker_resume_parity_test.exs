@@ -16,6 +16,7 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
   alias Arbiter.Test.ResumeSlotFixture
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   setup %{conn: conn} do
     # One line per spawn: the whole argv, then stay alive like a working agent.
@@ -46,6 +47,29 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
         provider: "claude",
         session_id: session_id,
         occurred_at: DateTime.utc_now()
+      })
+
+    # bd-atsde3: a Claude `--resume <sid>` is only passed when the session's
+    # JSONL can be found (the prior Run's config dir, or its archive); otherwise
+    # resume degrades to a briefing. A real prior run records both, so the
+    # fixture must too, or REST resume silently drops `--resume`.
+    config_dir = Path.join(Path.dirname(sandbox.bin), "prior-claude-config")
+    project_dir = Path.join([config_dir, "projects", "-some-slug"])
+    File.mkdir_p!(project_dir)
+    File.write!(Path.join(project_dir, session_id <> ".jsonl"), "{}\n")
+
+    {:ok, _} =
+      Ash.create(Run, %{
+        task_id: task.id,
+        task_title: task.title,
+        repo: ResumeSlotFixture.repo(),
+        workspace_id: ws.id,
+        state: :finished,
+        outcome: :failed,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        provider: "claude"
       })
 
     %{
