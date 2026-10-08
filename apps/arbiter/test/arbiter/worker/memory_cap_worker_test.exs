@@ -66,7 +66,9 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     saved = %{
       xdg: System.get_env("XDG_RUNTIME_DIR"),
       max: System.get_env("ARBITER_WORKER_MEMORY_MAX"),
-      app_max: Application.get_env(:arbiter, :worker_memory_max)
+      app_max: Application.get_env(:arbiter, :worker_memory_max),
+      systemd_run: Application.get_env(:arbiter, :systemd_run),
+      systemctl: Application.get_env(:arbiter, :systemctl)
     }
 
     System.put_env("XDG_RUNTIME_DIR", dir)
@@ -84,8 +86,9 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
         do: Application.put_env(:arbiter, :worker_memory_max, saved.app_max),
         else: Application.delete_env(:arbiter, :worker_memory_max)
 
-      Application.delete_env(:arbiter, :systemd_run)
-      Application.delete_env(:arbiter, :systemctl)
+      # restore the test-config stubs (bd-8h3h3z), never delete them
+      Application.put_env(:arbiter, :systemd_run, saved.systemd_run)
+      Application.put_env(:arbiter, :systemctl, saved.systemctl)
       MemoryScope.reset_probe()
       File.rm_rf(dir)
     end)

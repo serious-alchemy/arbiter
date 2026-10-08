@@ -441,3 +441,15 @@ config :arbiter,
 config :arbiter,
        :sessions_agy_source_home,
        Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-home")
+
+# bd-8h3h3z: no test may reach the operator's real systemd user manager. A sweep
+# that resolved the real `systemctl` ran `--user stop` on every live `arb-run-*`
+# scope on the host, SIGTERMing running workers. Tests that need a working binary
+# override these keys explicitly (see memory_cap_worker_test).
+config :arbiter,
+       :systemctl,
+       Path.expand("../apps/arbiter/test/support/stub_bin/systemctl", __DIR__)
+
+config :arbiter,
+       :systemd_run,
+       Path.expand("../apps/arbiter/test/support/stub_bin/systemd-run", __DIR__)
