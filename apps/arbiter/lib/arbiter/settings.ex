@@ -553,6 +553,18 @@ defmodule Arbiter.Settings do
   @spec max_join_token_ttl_minutes() :: pos_integer()
   def max_join_token_ttl_minutes, do: @max_join_token_ttl_minutes
 
+  @doc "The release tag whose update banner was dismissed, or `nil`."
+  @spec dismissed_update_version() :: String.t() | nil
+  def dismissed_update_version, do: read_setting(:dashboard_dismissed_update_version)
+
+  @doc "Persist the dismissed update tag; `nil` clears it."
+  @spec set_dismissed_update_version(String.t() | nil) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def set_dismissed_update_version(v) when is_nil(v) or (is_binary(v) and v != ""),
+    do: write_setting(:dashboard_dismissed_update_version, v)
+
+  def set_dismissed_update_version(_), do: {:error, :invalid_value}
+
   @doc "`nodes.public_url` (no trailing slash), or `nil` when unset."
   @spec nodes_public_url() :: String.t() | nil
   def nodes_public_url, do: read_setting(:nodes_public_url)
