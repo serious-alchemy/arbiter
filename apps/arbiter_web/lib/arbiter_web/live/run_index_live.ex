@@ -19,6 +19,7 @@ defmodule ArbiterWeb.RunIndexLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunNode
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
@@ -198,6 +199,7 @@ defmodule ArbiterWeb.RunIndexLive do
       :thinking,
       :difficulty_at_dispatch,
       :provider,
+      :node_id,
       :session_id,
       :resumed_from_run_id
     ])
@@ -317,6 +319,7 @@ defmodule ArbiterWeb.RunIndexLive do
                     duration={humanize_duration(r.started_at, r.completed_at)}
                     role={ArbiterWeb.StatusHelpers.run_role(r)}
                     provider={r.provider}
+                    node_name={RunNode.node_name(r)}
                     selected={false}
                     expanded={false}
                     class="cursor-pointer hover:bg-[var(--surface-raised)]"

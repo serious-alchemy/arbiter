@@ -747,6 +747,43 @@ defmodule ArbiterWeb.BoardLiveTest do
                ~s(#board-column-in_progress [id="card-#{task.id}"] [aria-label="Codex"])
              )
     end
+
+    test "a remote run's card carries a node badge naming the node", %{conn: conn, ws: ws} do
+      node = enroll_node!("gpu-box")
+      task = issue(ws, "work on a node")
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.report(pid, :node_id, node.id)
+
+      {:ok, view, _html} = live_board(conn)
+
+      badge = ~s(#board-column-in_progress [id="card-#{task.id}"] [data-node-badge="gpu-box"])
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
+      assert has_element?(view, badge)
+      assert has_element?(view, ~s(#{badge}[title="Runs on node gpu-box"]))
+    end
+
+    test "a local run's card has no node badge", %{conn: conn, ws: ws} do
+      task = issue(ws, "work on the primary")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
+      refute has_element?(view, "[data-node-badge]")
+    end
+
+    defp enroll_node!(name) do
+      Ash.create!(
+        Arbiter.Nodes.Node,
+        %{
+          name: name,
+          credential_hash: "h-#{System.unique_integer([:positive])}",
+          credential_prefix: "p",
+          enrolled_at: DateTime.utc_now()
+        },
+        action: :enroll
+      )
+    end
   end
 
   # bd-79w1fs: what used to share the Waiting column now sits in its own
