@@ -7381,6 +7381,34 @@ defmodule Arbiter.MCP.ToolsTest do
       assert task_ref == sibling.id
     end
 
+    test "a message sent the way the CLI sends it (no workspace) reaches the recipient's inbox_check in a multi-workspace install",
+         ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-multi", prefix: "pmu"})
+
+      {:ok, other_task} =
+        Ash.create(Issue, %{title: "elsewhere", workspace_id: other_ws.id, acceptance: "- x"})
+
+      # `POST /api/messages` as `arb message send` issues it: recipient only.
+      assert {:ok, %{workspace_id: ws_id}} =
+               Arbiter.Messages.Mailbox.send_message(%Scope{tier: :coordinator}, %{
+                 to_ref: other_task.id,
+                 body: "from the cli",
+                 kind: "info"
+               })
+
+      assert ws_id == other_ws.id
+
+      worker = %Scope{
+        tier: :worker,
+        workspace_id: other_ws.id,
+        task_id: other_task.id,
+        repo: "shipyard"
+      }
+
+      assert {:ok, %{count: 1, messages: [%{body: "from the cli"}]}} =
+               Tools.inbox_check(worker, %{})
+    end
+
     test "inbox_check mark_read: false peeks without consuming", ctx do
       {:ok, _} =
         Message.send_mail(%{

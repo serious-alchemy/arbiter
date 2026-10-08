@@ -10,14 +10,21 @@ defmodule ArbiterCli.Cmd.Message do
       arb message send   <recipient> <body> [--subject ...] [--task bd-x]
                          [--kind notification|completion|failure|escalation|info]
                          (--directive is a deprecated alias for --task)
-                         send a message up (or across) the chain. The `from`
-                         identity defaults to $ARB_FROM, falling back to "cli".
+                         send a message up (or across) the chain. The recipient
+                         must be `coordinator` or an existing task; the server
+                         files the message under the RECIPIENT task's workspace
+                         (`-w` may only restate it). The `from` identity is set
+                         by the server from your token; $ARB_FROM / "cli" only
+                         applies to an unauthenticated call.
       arb message notify [--limit N]
                          the recent notification feed.
 
   As a shorthand, `arb message <task-id> <text>` (no verb) sends a
   `:direction` from the coordinator down to a running worker — the worker
-  picks it up next time it runs `arb message inbox <task-id>`.
+  picks it up next time it runs `arb message inbox <task-id>`. The first word
+  must be an existing task: `arb message sned bd-1 hi` fails with "task sned
+  not found" rather than posting to a mailbox called `sned`. The text is
+  required and may not be empty.
   """
 
   alias ArbiterCli.{ArgParser, Client, Cmd, Output, Workspace}
@@ -63,19 +70,16 @@ defmodule ArbiterCli.Cmd.Message do
   defp send_msg(recipient, body, opts, mode) do
     case validate_kind(opts[:kind]) do
       {:ok, kind} ->
+        if opts[:directive], do: warn_directive_deprecated()
         task_ref = opts[:task] || opts[:directive]
-        workspace_id = resolve_message_workspace(recipient, task_ref)
 
+        # No `workspace_id`: the server files the message under the recipient
+        # task's workspace (the CLI's own default must never be stamped on it).
         payload =
-          %{
-            kind: kind,
-            from_ref: from_identity(),
-            to_ref: recipient,
-            body: body,
-            workspace_id: workspace_id
-          }
+          %{kind: kind, from_ref: from_identity(), to_ref: recipient, body: body}
           |> put_optional(:subject, opts[:subject])
           |> put_optional(:task_ref, task_ref)
+          |> put_optional(:workspace, Workspace.selected_id())
 
         case Client.post("/api/messages", payload) do
           {:ok, message} -> emit_send(message, recipient, kind, mode)
@@ -85,6 +89,10 @@ defmodule ArbiterCli.Cmd.Message do
       {:error, msg} ->
         Output.die(msg)
     end
+  end
+
+  defp warn_directive_deprecated do
+    IO.puts(:stderr, "arb: note: `--directive` is deprecated; use `--task`.")
   end
 
   defp validate_kind(nil), do: {:ok, @default_kind}
@@ -109,15 +117,14 @@ defmodule ArbiterCli.Cmd.Message do
   defp direction(task_id, words) do
     mode = Output.mode(words)
     text = words |> Output.drop_json() |> Enum.join(" ")
-    workspace_id = resolve_message_workspace(task_id, task_id)
 
-    body = %{
-      kind: "direction",
-      from_ref: "coordinator",
-      to_ref: task_id,
-      body: text,
-      workspace_id: workspace_id
-    }
+    if String.trim(text) == "" do
+      Output.die("message requires text: `arb message <task-id> <text>`")
+    end
+
+    body =
+      %{kind: "direction", from_ref: "coordinator", to_ref: task_id, body: text}
+      |> put_optional(:workspace, Workspace.selected_id())
 
     case Client.post("/api/messages", body) do
       {:ok, message} -> emit_direction(message, task_id, mode)
@@ -127,31 +134,6 @@ defmodule ArbiterCli.Cmd.Message do
 
   defp emit_direction(message, _task_id, :json), do: IO.puts(Jason.encode!(message))
   defp emit_direction(_message, task_id, :text), do: IO.puts("Direction sent to #{task_id}.")
-
-  # D-M-1: A message sent to a recipient task files under that recipient task's
-  # workspace, not the CLI's default workspace. Check if recipient (or task_ref)
-  # is a task on the server and use its workspace_id if so.
-  defp resolve_message_workspace(recipient, task_ref) do
-    target = recipient_task_candidate(recipient) || recipient_task_candidate(task_ref)
-
-    case target && Client.get("/api/issues/" <> URI.encode(target)) do
-      {:ok, %{"data" => %{"workspace_id" => ws_id}}} when is_binary(ws_id) and ws_id != "" ->
-        ws_id
-
-      {:ok, %{"workspace_id" => ws_id}} when is_binary(ws_id) and ws_id != "" ->
-        ws_id
-
-      _ ->
-        Workspace.id_or_halt()
-    end
-  end
-
-  defp recipient_task_candidate(nil), do: nil
-  defp recipient_task_candidate(""), do: nil
-  defp recipient_task_candidate("coordinator"), do: nil
-  defp recipient_task_candidate("cli"), do: nil
-  defp recipient_task_candidate("system"), do: nil
-  defp recipient_task_candidate(target), do: target
 
   defp usage_hint do
     "verbs: inbox, send, notify"
