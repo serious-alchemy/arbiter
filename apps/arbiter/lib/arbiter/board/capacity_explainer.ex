@@ -51,9 +51,15 @@ defmodule Arbiter.Board.CapacityExplainer do
   """
   @spec explain(map()) :: %{cap: map() | nil, holds: %{String.t() => map()}}
   def explain(board) when is_map(board) do
+    # Only the holds that have something to say: a mutex or file-overlap hold
+    # is already one short line on its card.
     ready =
-      for %{id: id, hold: hold} = entry <- Map.get(board, :ready, []), hold != nil, into: %{} do
-        {id, hold(hold, board, raw: entry.reason, workspace_id: entry.card[:workspace_id])}
+      for %{id: id, hold: hold} = entry <- Map.get(board, :ready, []),
+          hold != nil,
+          explained = hold(hold, board, raw: entry.reason, workspace_id: entry.card[:workspace_id]),
+          explained.kind != :other,
+          into: %{} do
+        {id, explained}
       end
 
     quota_held =
