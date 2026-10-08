@@ -17,7 +17,7 @@ defmodule Arbiter.Nodes.Recovery do
   persisted row (`hold`, see `Arbiter.Nodes.Session`): the agent keeps the container
   running until `recover` below quiesces it, so it is never told "unknown run" for a run
   with a live row on it. Re-attaching such a run to a new Worker instead of collecting
-  it needs Worker adoption, which `docs/design/remote-workers.md` §10.4 decides against.
+  it needs Worker adoption, which `docs/design/remote-workers.md` §10.4 decides against for v1 (bd-4p1vui).
 
   For every run in a live state with a `node_id` (and no live Worker) it waits, in
   parallel across nodes, for the node's session to be connected, then asks the
