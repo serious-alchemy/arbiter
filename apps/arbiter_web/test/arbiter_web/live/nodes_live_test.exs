@@ -59,7 +59,17 @@ defmodule ArbiterWeb.NodesLiveTest do
         overrides
       )
 
-    {:ok, _} = Registry.attach(node, self(), params, tick_ms: :infinity)
+    # A stand-in channel that outlives the test process. Attaching `self()` made
+    # the test's own exit a channel :DOWN, so the session wrote a `disconnected`
+    # event (and the page re-read) mid sandbox teardown, dropping the connection.
+    # Stop the session first, then the channel, so nothing writes on the way out.
+    channel = spawn(fn -> Process.sleep(:infinity) end)
+    {:ok, %{pid: pid}} = Registry.attach(node, channel, params, tick_ms: :infinity)
+
+    on_exit(fn ->
+      Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
+      Process.exit(channel, :kill)
+    end)
   end
 
   describe "the list" do
@@ -215,6 +225,7 @@ defmodule ArbiterWeb.NodesLiveTest do
     test "drain and undrain", %{conn: conn} do
       node = enroll!("alpha")
       connect!(node)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Nodes.topic())
       {:ok, view, _} = live(conn, ~p"/nodes")
 
       view |> element("#drain-#{node.id}") |> render_click()
@@ -224,6 +235,11 @@ defmodule ArbiterWeb.NodesLiveTest do
       view |> element("#undrain-#{node.id}") |> render_click()
       assert Nodes.get_node(node.id).status == :active
       assert [_, _] = Nodes.events(kind: :drained)
+
+      # The session broadcasts the undrain from a cast, after the click returns;
+      # let the page finish that refresh so it isn't killed mid-read at teardown.
+      assert_receive {:node_draining, id, false} when id == node.id
+      render(view)
     end
 
     test "revoke, then remove", %{conn: conn} do
