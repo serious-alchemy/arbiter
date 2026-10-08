@@ -1414,7 +1414,9 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp grok_routed?(task, workspace, opts) do
     Keyword.get(opts, :routing_role, :main) == :main and is_nil(caller_override(opts)) and
-      GrokRouting.route?(workspace, ByDifficulty.effective_difficulty(task.difficulty)) and
+      GrokRouting.route?(workspace, ByDifficulty.effective_difficulty(task.difficulty),
+        task: task
+      ) and
       match?(%{type: :grok}, Keyword.get(opts, :routing_choice))
   end
 
