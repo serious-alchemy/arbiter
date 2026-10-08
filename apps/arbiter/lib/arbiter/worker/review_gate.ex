@@ -309,6 +309,10 @@ defmodule Arbiter.Worker.ReviewGate do
   @commit_gate_uncommitted_marker "ReviewGate fix round: implementer left uncommitted work"
   @commit_gate_no_changes_marker "ReviewGate fix round: fix round produced no changes"
 
+  # bd-dun10t: how many times a no-diff, CI-triggered fix round may send the gate
+  # back to re-read (and rerun) CI before it parks.
+  @ci_noop_rerun_cap 2
+
   # bd-cb7wpq: the literal line an implementer prints (see `revise_prompt/2`)
   # to declare a finding resolved through something other than a file change
   # on this branch — a PR title/description edit, a label, a comment reply.
@@ -3272,10 +3276,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     # bd-dun10t: a fix round that red CI launched and that changed nothing may
     # simply have met a flake. Rerun CI (bounded) and re-read it before parking.
-    {outcome, commit_gate} =
-      if outcome == :escalate_no_changes and ci_noop_rerun_allowed?(state),
-        do: {:rerun_ci_after_no_changes, :reran_ci_after_no_changes},
-        else: {outcome, commit_gate}
+    {outcome, commit_gate} = ci_noop_outcome({outcome, commit_gate}, state)
 
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
@@ -3320,32 +3321,8 @@ defmodule Arbiter.Worker.ReviewGate do
       :escalate_uncommitted ->
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
-      :rerun_ci_after_no_changes ->
-        Logger.info(
-          "ReviewGate: task=#{state.task_id} round #{state.round} CI-triggered fix round produced " <>
-            "no changes; rerunning CI (#{state.ci_noop_reruns + 1}/#{@ci_noop_rerun_cap}) " <>
-            "before deciding"
-        )
-
-        state =
-          record_thread(
-            state,
-            :system,
-            "Round #{state.round}: no diff after red CI",
-            "The fix round for red CI on #{state.ci_fix_pending.sha} changed nothing, which " <>
-              "points to a flake. The gate is rerunning CI on the same head " <>
-              "(#{state.ci_noop_reruns + 1}/#{@ci_noop_rerun_cap}); if it goes green the head " <>
-              "is re-reviewed, if it stays red the ticket is parked."
-          )
-
-        dispatch_next_review(%{
-          state
-          | head_sha: new_head_sha,
-            ci_noop_reruns: state.ci_noop_reruns + 1
-        })
-
       :escalate_no_changes ->
-        {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
+        escalate_or_rerun_ci(state, new_head_sha)
 
       :escalate_no_changes_after_non_file_fix ->
         {:done,
@@ -3386,9 +3363,44 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
 
-  # bd-dun10t: how many times a no-diff, CI-triggered fix round may send the gate
-  # back to re-read (and rerun) CI before it parks.
-  @ci_noop_rerun_cap 2
+  defp ci_noop_outcome({:escalate_no_changes, _} = outcome, state) do
+    if ci_noop_rerun_allowed?(state),
+      do: {:escalate_no_changes, :reran_ci_after_no_changes},
+      else: outcome
+  end
+
+  defp ci_noop_outcome(outcome, _state), do: outcome
+
+  defp escalate_or_rerun_ci(state, new_head_sha) do
+    if ci_noop_rerun_allowed?(state),
+      do: rerun_ci_after_no_changes(state, new_head_sha),
+      else: {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
+  end
+
+  defp rerun_ci_after_no_changes(state, new_head_sha) do
+    attempt = "#{state.ci_noop_reruns + 1}/#{@ci_noop_rerun_cap}"
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} CI-triggered fix round produced " <>
+        "no changes; rerunning CI (#{attempt}) before deciding"
+    )
+
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round}: no diff after red CI",
+        "The fix round for red CI on #{state.ci_fix_pending.sha} changed nothing, which " <>
+          "points to a flake. The gate is rerunning CI on the same head (#{attempt}); if it " <>
+          "goes green the head is re-reviewed, if it stays red the ticket is parked."
+      )
+
+    dispatch_next_review(%{
+      state
+      | head_sha: new_head_sha,
+        ci_noop_reruns: state.ci_noop_reruns + 1
+    })
+  end
 
   defp ci_noop_rerun_allowed?(%{ci_fix_pending: %{}, ci_noop_reruns: n, ci_ctx: ctx})
        when n < @ci_noop_rerun_cap and not is_nil(ctx),
