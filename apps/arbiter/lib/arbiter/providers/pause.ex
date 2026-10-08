@@ -12,6 +12,14 @@ defmodule Arbiter.Providers.Pause do
 
   `entry` is `%{"reason", "by", "at"}` — who, when and why, the audit trail.
 
+  A **quota hold** (`quota_hold/4`, bd-a6vh2x) is the same entry plus
+  `"kind" => "quota"` and `"until"`: opened by the fleet itself when a run
+  stopped because its provider account ran out of allowance, and lifted by
+  itself at the reset time — an entry past its `until` is simply not found by
+  any lookup below. Every router that honours a pause therefore routes round a
+  quota-stopped account with no further wiring, and the operator can still
+  `resume/2` one early.
+
   Every router consults `for_account/1` and drops a paused candidate with the
   reason `paused`: `ProviderRouting`, `ReviewerRouting`, the `ProviderPool`
   failover (`Arbiter.Agents.ProviderPool`) and `Arbiter.Agents.provider_available?/1`
@@ -27,14 +35,16 @@ defmodule Arbiter.Providers.Pause do
 
   require Ash.Query
 
-  @providers ~w(claude codex antigravity)
+  @providers ~w(claude codex antigravity grok)
 
   @type entry :: %{
           target: String.t(),
           reason: String.t() | nil,
           by: String.t() | nil,
           actor: String.t() | nil,
-          at: DateTime.t() | nil
+          at: DateTime.t() | nil,
+          kind: :operator | :quota,
+          until: DateTime.t() | nil
         }
 
   @doc "Every active pause, oldest first."
@@ -42,6 +52,7 @@ defmodule Arbiter.Providers.Pause do
   def list do
     Settings.provider_pauses()
     |> Enum.map(fn {target, e} -> to_entry(target, e) end)
+    |> Enum.reject(&expired?/1)
     |> Enum.sort_by(&(&1.at && DateTime.to_unix(&1.at)), :asc)
   end
 
@@ -160,6 +171,71 @@ defmodule Arbiter.Providers.Pause do
   def error_message(other, ref),
     do: {:internal, "pause/resume of `#{ref}` failed: #{inspect(other)}"}
 
+  @doc """
+  Hold `account` (else the whole `provider`, when the run had no resolvable
+  account) until `until`, because its allowance ran out (bd-a6vh2x).
+
+  Never displaces an operator pause, and a quota hold already open is only
+  ever extended — two runs stopping on the same reset must not shorten each
+  other. Expired entries are pruned on the way through.
+  """
+  @spec quota_hold(atom() | String.t() | nil, ProviderAccount.t() | nil, DateTime.t(), keyword()) ::
+          {:ok, entry()} | {:error, term()}
+  def quota_hold(provider, account, %DateTime{} = until, opts \\ []) do
+    case hold_target(provider, account) do
+      nil ->
+        {:error, :unknown_provider}
+
+      target ->
+        pauses = prune_expired(Settings.provider_pauses())
+
+        case Map.get(pauses, target) do
+          %{} = existing when not is_map_key(existing, "until") ->
+            {:ok, to_entry(target, existing)}
+
+          %{"until" => held} = existing ->
+            if later?(until, parse_at(held)),
+              do: write_hold(pauses, target, until, opts),
+              else: {:ok, to_entry(target, existing)}
+
+          nil ->
+            write_hold(pauses, target, until, opts)
+        end
+    end
+  end
+
+  defp hold_target(_provider, %ProviderAccount{id: id}), do: "account:#{id}"
+  defp hold_target(provider, _account), do: normalize(provider)
+
+  defp later?(_until, nil), do: true
+  defp later?(until, held), do: DateTime.compare(until, held) == :gt
+
+  defp write_hold(pauses, target, until, opts) do
+    entry = %{
+      "reason" => Keyword.get(opts, :reason),
+      "by" => "arbiter (provider quota stop)",
+      "actor" => nil,
+      "at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "kind" => "quota",
+      "until" => DateTime.to_iso8601(until)
+    }
+
+    with {:ok, _} <- Settings.set_provider_pauses(Map.put(pauses, target, entry)) do
+      result = to_entry(target, entry)
+      broadcast("provider_paused", result, label(target))
+      {:ok, result}
+    end
+  end
+
+  defp prune_expired(pauses) do
+    Map.reject(pauses, fn {target, e} -> expired?(to_entry(target, e)) end)
+  end
+
+  defp expired?(%{until: %DateTime{} = until}),
+    do: DateTime.compare(DateTime.utc_now(), until) != :lt
+
+  defp expired?(_entry), do: false
+
   @doc "Resume `ref`; `{:error, :not_paused}` when it was not paused."
   @spec resume(String.t(), keyword()) :: {:ok, entry()} | {:error, term()}
   def resume(ref, opts \\ []) do
@@ -223,7 +299,9 @@ defmodule Arbiter.Providers.Pause do
         "reason" => e.reason,
         "by" => e.by,
         "actor" => e.actor,
-        "at" => e.at && DateTime.to_iso8601(e.at)
+        "at" => e.at && DateTime.to_iso8601(e.at),
+        "kind" => Atom.to_string(e.kind),
+        "until" => e.until && DateTime.to_iso8601(e.until)
       }
     end)
   end
@@ -263,9 +341,12 @@ defmodule Arbiter.Providers.Pause do
   end
 
   defp lookup(pauses, key) do
-    case Map.get(pauses, key) do
-      nil -> nil
-      e -> to_entry(key, e)
+    with %{} = e <- Map.get(pauses, key),
+         entry = to_entry(key, e),
+         false <- expired?(entry) do
+      entry
+    else
+      _ -> nil
     end
   end
 
@@ -275,7 +356,9 @@ defmodule Arbiter.Providers.Pause do
       reason: e["reason"],
       by: e["by"],
       actor: e["actor"],
-      at: parse_at(e["at"])
+      at: parse_at(e["at"]),
+      kind: if(e["kind"] == "quota", do: :quota, else: :operator),
+      until: parse_at(e["until"])
     }
   end
 

@@ -43,6 +43,17 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  # Answers every replay the way `Dispatch.dispatch/2` does when the quota or a
+  # pause still holds the task: `{:error, {:quota_held, task_id}}`.
+  defmodule StillHeldDispatcher do
+    def dispatch(task_id, _opts) do
+      if pid = Application.get_env(:arbiter, :test_dispatch_pid),
+        do: send(pid, {:dispatch_attempt, task_id})
+
+      {:error, {:quota_held, task_id}}
+    end
+  end
+
   # Always fails with a quota-exhausted pre-flight refusal, the exact shape
   # `Arbiter.Worker.Dispatch.dispatch/2` returns from `run_preflight/2`
   # (bd-8lnnnt) — used to prove the drain path itself holds instead of
@@ -1068,6 +1079,60 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       assert length(trips) == 1
       assert hd(trips).body =~ "dispatch_queue_redispatch"
+    end
+
+    # A held task that the gate still holds is waiting, not failing: counting
+    # each `{:quota_held, _}` replay toward the breaker dropped a legitimately
+    # held intent after K re-drains (seen on bd-4df3ma: 6 in 60 minutes).
+    test "a replay the quota still holds never counts toward the breaker or drops the intent" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :dispatch_queue_redispatch, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+
+      {:ok, pid} =
+        DispatchQueueSupervisor.start_dispatch_queue(ws.id,
+          dispatcher: StillHeldDispatcher,
+          auto_subscribe: false
+        )
+
+      on_exit(fn ->
+        try do
+          Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      task = make_task(ws)
+      :ok = DispatchQueue.hold(ws.id, task.id, [], %{phrase: "7d quota 91% ≥ 90%"})
+
+      # Well past K=2: every replay is answered "still held".
+      for _ <- 1..5 do
+        :ok = DispatchQueue.drain(pid)
+        assert_receive {:dispatch_attempt, _}, 1_000
+        assert wait_for_held_item(pid).task_id == task.id
+      end
+
+      trips =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert trips == []
     end
 
     # The exemption (round 2, finding 1). A quota-exhausted pre-flight refusal

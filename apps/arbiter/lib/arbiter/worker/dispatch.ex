@@ -177,11 +177,33 @@ defmodule Arbiter.Worker.Dispatch do
 
   @spec dispatch(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def dispatch(task_id, opts \\ []) when is_binary(task_id) do
-    # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
-    # invisible to the worker supervisor — track it so a drain report sees it.
-    # This covers every caller: `arb dispatch`, the Conductor's DispatchQueue,
-    # Watchdog auto-resume and the autopilot's promotion task.
-    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_dispatch(task_id, opts) end)
+    case Keyword.pop(opts, :quota_resume) do
+      {true, rest} ->
+        quota_resume(task_id, rest)
+
+      {_, _} ->
+        # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
+        # invisible to the worker supervisor — track it so a drain report sees it.
+        # This covers every caller: `arb dispatch`, the Conductor's DispatchQueue,
+        # Watchdog auto-resume and the autopilot's promotion task.
+        Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_dispatch(task_id, opts) end)
+    end
+  end
+
+  # bd-a6vh2x: the replay of a run that stopped on its provider's quota
+  # (`Arbiter.Worker` holds it in the DispatchQueue with `quota_resume: true`).
+  # It is the same thing `arb worker resume` does: continue the stopped
+  # session in the preserved worktree — on whichever provider routing now
+  # picks, so a hold that outlasts a sibling's headroom reroutes (a different
+  # provider has no use for the old session id and is briefed from the
+  # worktree's git state instead, see `resolve_session_resume_provider/3`). A
+  # task with no captured session id has nothing to continue, so it gets the
+  # git-derived briefing outright rather than a fresh start.
+  defp quota_resume(task_id, opts) do
+    case resume_task(task_id, opts) do
+      {:error, :no_session} -> resume(task_id, Keyword.delete(opts, :resume_mode))
+      other -> other
+    end
   end
 
   # bd-8suxac: an account admission (`ensure_account_capacity/2`) reserves its
