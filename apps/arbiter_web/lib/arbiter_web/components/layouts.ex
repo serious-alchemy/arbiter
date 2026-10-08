@@ -260,7 +260,7 @@ defmodule ArbiterWeb.Layouts do
       <.update_notice
         update={@update}
         deploy={@deploy}
-        dismissed={dismissed_update(@current_path)}
+        dismissed={dismissed_update(@update, @current_path)}
       />
       {render_slot(@inner_block)}
     </main>
@@ -613,8 +613,12 @@ defmodule ArbiterWeb.Layouts do
 
   # The dismissal is cosmetic: `/about` always shows the notice, so the update
   # and its details stay reachable from the UI.
-  defp dismissed_update("/about"), do: nil
-  defp dismissed_update(_), do: Arbiter.Settings.dismissed_update_version()
+  # The setting is only read while an update is on offer, so the chrome of an
+  # up-to-date install still issues no DB query per render.
+  defp dismissed_update(%{update_available?: true}, current_path) when current_path != "/about",
+    do: Arbiter.Settings.dismissed_update_version()
+
+  defp dismissed_update(_update, _current_path), do: nil
 
   # "running" is only believed while the deploy's process is alive: a record
   # whose process died reads as an interrupted (failed) deploy.
