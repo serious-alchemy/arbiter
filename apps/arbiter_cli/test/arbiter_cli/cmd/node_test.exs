@@ -525,6 +525,141 @@ defmodule ArbiterCli.Cmd.NodeTest do
     end
   end
 
+  describe "pairing (device code)" do
+    @pairing %{
+      "id" => "019a-req",
+      "code" => "K7QM-2X9D",
+      "state" => "pending",
+      "hostname" => "laptop",
+      "peer" => "100.64.0.7",
+      "name" => nil,
+      "labels" => [],
+      "max_workers" => nil,
+      "expires_at" => "2026-10-08T12:10:00Z"
+    }
+
+    # Route by "METHOD path"; every request is also sent to the test process.
+    defp stub_pairing_routes(routes) do
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test, {:request, conn.method, conn.request_path, raw})
+        {status, body} = Map.fetch!(routes, conn.method <> " " <> conn.request_path)
+        conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+      end)
+    end
+
+    @list {200, %{"pairings" => [@pairing]}}
+    @approved {200, %{"pairing" => %{@pairing | "state" => "approved"}}}
+
+    test "pending lists each request with its code, hostname and source address" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      {out, _err, 0} = capture(fn -> Node.run(["pending"]) end)
+      assert out =~ "K7QM-2X9D"
+      assert out =~ "laptop"
+      assert out =~ "100.64.0.7"
+    end
+
+    test "pending with none says so" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => {200, %{"pairings" => []}}})
+      {out, _err, 0} = capture(fn -> Node.run(["pending"]) end)
+      assert out =~ "No pending pairing requests"
+    end
+
+    test "approve shows the requesting host and address, asks, then approves" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {out, _err, 0} =
+        capture(
+          fn -> Node.run(["approve", "k7qm2x9d", "--name", "gpu-1", "--max-workers", "2"]) end,
+          input: "y\n"
+        )
+
+      assert out =~ "laptop"
+      assert out =~ "100.64.0.7"
+      assert out =~ "Approve"
+      assert out =~ "Approved"
+
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/approve", raw}
+      assert Jason.decode!(raw) == %{"name" => "gpu-1", "max_workers" => 2}
+    end
+
+    test "approve aborts, sending nothing, unless the operator says yes" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D"]) end, input: "n\n")
+      assert out =~ "aborted"
+      refute_received {:request, "POST", _, _}
+    end
+
+    test "approve --yes skips the question" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--yes"]) end)
+      assert out =~ "Approved"
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/approve", _}
+    end
+
+    test "approve --json needs --yes and prints the pairing" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {_out, err, code} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--json"]) end)
+      assert code != 0
+      assert err =~ "--yes"
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--yes", "--json"]) end)
+      assert %{"pairing" => %{"state" => "approved"}} = Jason.decode!(out)
+    end
+
+    test "approve of an unknown or malformed code is an error and approves nothing" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      for code <- ["ZZZZ-ZZZZ", "nope"] do
+        {_out, err, status} = capture(fn -> Node.run(["approve", code, "--yes"]) end)
+        assert status != 0
+        assert err =~ "arb node pending"
+      end
+
+      refute_received {:request, "POST", _, _}
+    end
+
+    test "approve needs a code" do
+      {_out, err, code} = capture(fn -> Node.run(["approve"]) end)
+      assert code != 0
+      assert err =~ "code"
+    end
+
+    test "deny posts to the request and says so" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/deny" =>
+          {200, %{"pairing" => %{@pairing | "state" => "denied"}}}
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["deny", "K7QM-2X9D"]) end)
+      assert out =~ "Denied"
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/deny", _}
+    end
+
+    test "the help documents pairing" do
+      {out, _err, 0} = capture(fn -> Node.run(["--help"]) end)
+      assert out =~ "arb node approve"
+      assert out =~ "arb node pending"
+      assert out =~ "arb node deny"
+    end
+  end
+
   test "an unknown subcommand is a usage error" do
     {_out, err, code} = capture(fn -> Node.run(["frobnicate"]) end)
     assert code == 2

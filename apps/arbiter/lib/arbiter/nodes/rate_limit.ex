@@ -20,8 +20,7 @@ defmodule Arbiter.Nodes.RateLimit do
     * `:pair_poll` — a node polling its request: 60 a minute per source `key`,
       and 10 *failures* (unknown request or wrong poll secret) per 10 minutes.
 
-  `check/3` answers
- `:ok` or `{:error, {:rate_limited, retry_after_seconds}}`
+  `check/3` answers `:ok` or `{:error, {:rate_limited, retry_after_seconds}}`
   (the route's `429` + `Retry-After`). A failure bucket blocks while empty: five
   recorded failures block that source until one token refills.
 

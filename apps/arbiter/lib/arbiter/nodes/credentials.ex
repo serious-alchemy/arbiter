@@ -14,7 +14,7 @@ defmodule Arbiter.Nodes.Credentials do
       mean) and a **poll secret** `arbp_<52 base32>` (256 bits) that only the
       requesting node holds and that alone can collect the credential.
 
-  The 256-bit values are 256-bit random values, so a fast hash (SHA-256) is appropriate: there
+  The 256-bit secrets are random, so a fast hash (SHA-256) is appropriate: there
   is nothing to brute-force, and the hash exists so a database read does not
   yield a usable credential. Neither format is an `Arbiter.MCP.Scope` token, so
   `Scope.from_token/1` rejects them and no `/api` or `/mcp` route accepts one.
