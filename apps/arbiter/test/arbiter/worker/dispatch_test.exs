@@ -2669,9 +2669,10 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     # The checkout a podman dispatch gets is a private clone, and only Claude and
-    # Codex have a container wrap point: an explicit provider that has none is refused
-    # at the gate, before anything is spawned.
-    test "sandbox.backend: podman refuses an explicit non-claude provider at the gate",
+    # Codex have a container wrap point: an explicit provider that has none is held
+    # at the dispatch gate (#553) with the reason, before anything is spawned. The
+    # spawn-time `sandbox_backend_unavailable` refusal stays as the backstop.
+    test "sandbox.backend: podman holds an explicit non-claude provider at the gate",
          %{ws: ws, tmp: tmp} do
       gemini_file = Path.join(tmp, "gemini-argv.txt")
       :ok = stub_named_on_path(tmp, "agy", gemini_file)
@@ -2692,7 +2693,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "podman gemini", workspace_id: ws.id})
 
-      assert {:error, {:claude_start_failed, {:sandbox_backend_unavailable, :podman, message}}} =
+      assert {:error, {:sandbox_backend, :gemini, message}} =
                Dispatch.dispatch(task.id,
                  force: true,
                  repo: "pg/repo",
@@ -2702,7 +2703,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      assert message =~ "claude and codex only"
+      assert message =~ "gemini: not supported by sandbox.backend podman"
       refute File.exists?(gemini_file)
     end
 

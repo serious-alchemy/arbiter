@@ -61,6 +61,10 @@ defmodule Arbiter.Agents.ProviderRouting do
       known tier below the repo's blast-radius floor, or — with
       `routing.floors.policy_floor` — below the tier the routing policy
       chose; checked ahead of quota, like `capability_missing`;
+    * `sandbox_backend` — the workspace's resolved `sandbox.backend` has no
+      wrap point for the provider (`Arbiter.Worker.Sandbox.module/2`; podman
+      runs claude and codex only), so a spawn would be refused. Checked ahead
+      of the account checks so no slot or attention item is burnt on it;
     * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
       `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
@@ -136,6 +140,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Workers.Run
 
   @selections ~w(failover most_quota scored)
@@ -600,6 +605,20 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
+  @doc """
+  Refuse to start a pass on a provider the workspace's sandbox backend cannot
+  run (`sandbox_backend_unavailable` at spawn). Checked before any worktree or
+  run exists, like `ensure_unpaused/2`, so the pass is held with the reason.
+  """
+  @spec ensure_sandbox_backend(atom(), term(), term()) ::
+          :ok | {:error, {:sandbox_backend, atom(), String.t()}}
+  def ensure_sandbox_backend(provider, task, workspace) do
+    case backend_refusal(legacy_policy(task, workspace, []), provider) do
+      nil -> :ok
+      detail -> {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    end
+  end
+
   # ---- legacy --------------------------------------------------------------
 
   defp legacy(task, workspace, opts) do
@@ -618,9 +637,72 @@ defmodule Arbiter.Agents.ProviderRouting do
         {override, nil}
 
       _ ->
-        Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
+        {provider, fallback} =
+          Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
+
+        backend_aware(provider, fallback, task, workspace, opts)
     end
   end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn,
+  # so the pre-routing resolution swaps it for the first pool provider that
+  # both the backend and the ticket's constraint allow. When none is left the
+  # original stands (with the reason) and the caller holds it: dispatch at
+  # `Dispatch.ensure_sandbox_backend/2`, the fix, conflict and ReviewGate
+  # implementer passes at `ensure_sandbox_backend/3`. Alternatives come only
+  # from the workspace's `agent.type` pool, as in `Dispatch.backend_unrouted/3`.
+  defp backend_aware(provider, fallback, task, workspace, opts) do
+    policy = legacy_policy(task, workspace, opts)
+
+    case backend_refusal(policy, provider) do
+      nil ->
+        {provider, fallback}
+
+      detail ->
+        constraint = constraint_of(task)
+        pool = Agents.agent_pool(workspace)
+
+        alt =
+          pool
+          |> then(&ProviderConstraint.filter(constraint, &1))
+          |> Enum.find(&(&1 != provider and is_nil(backend_refusal(policy, &1))))
+
+        if alt,
+          do: {alt, "fell back from #{provider}: #{detail}"},
+          else: {provider, detail}
+    end
+  end
+
+  defp legacy_policy(task, workspace, opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy ->
+        policy
+
+      _ when is_nil(workspace) ->
+        nil
+
+      _ ->
+        repo = repo_opt(opts) || task_repo(task)
+        SecurityPolicy.resolve(workspace, %{}, repo)
+    end
+  end
+
+  @doc """
+  Why the policy's sandbox backend cannot run `provider`, or `nil` when it can
+  (or no policy is known). Same text as the routing drop detail.
+  """
+  @spec backend_refusal(SecurityPolicy.t() | nil, atom() | String.t()) :: String.t() | nil
+  def backend_refusal(%SecurityPolicy{} = policy, provider) do
+    case Sandbox.module(policy, provider) do
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        "#{provider}: not supported by sandbox.backend #{backend}"
+
+      _ ->
+        nil
+    end
+  end
+
+  def backend_refusal(_policy, _provider), do: nil
 
   defp task_id_of(%Issue{id: id}), do: id
   defp task_id_of(id) when is_binary(id), do: id
@@ -649,7 +731,10 @@ defmodule Arbiter.Agents.ProviderRouting do
       routed: routed,
       tier: routed.config["model_tier"],
       agent_config: get_in(ws.config || %{}, ["agent", "config"]) || %{},
-      security: Keyword.get_lazy(opts, :security, fn -> SecurityPolicy.resolve(ws) end),
+      security:
+        Keyword.get_lazy(opts, :security, fn ->
+          SecurityPolicy.resolve(ws, %{}, repo_opt(opts) || task_repo(task))
+        end),
       quota_fun: Keyword.get(opts, :quota_fun, &latest_quota/1),
       gemini_code:
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
@@ -774,6 +859,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp check(entry, ctx) do
     checks = [
       &check_constraint/2,
+      &check_sandbox_backend/2,
       &check_account/2,
       &check_adapter/2,
       &check_cli/2,
@@ -809,6 +895,20 @@ defmodule Arbiter.Agents.ProviderRouting do
       do: {:ok, entry},
       else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
   end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn
+  # (`sandbox_backend_unavailable`); never route to it.
+  defp check_sandbox_backend(%{agent_type: type} = entry, %{security: %SecurityPolicy{} = policy}) do
+    case Sandbox.module(policy, type) do
+      {:ok, _} ->
+        {:ok, entry}
+
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        {:drop, "sandbox_backend", "#{type}: not supported by sandbox.backend #{backend}"}
+    end
+  end
+
+  defp check_sandbox_backend(entry, _ctx), do: {:ok, entry}
 
   defp check_account(%{account: %ProviderAccount{enabled: false}}, _ctx),
     do: {:drop, "disabled", nil}

@@ -5752,11 +5752,17 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # bd-13pqcp: an implementer round also refuses a provider the ticket's own
   # constraint excludes (`resolve_revision/2` already steers away from it; this
-  # is the last word). The reviewer (`resolve_revision/2`'s `nil`) is not
+  # is the last word), and one the workspace's sandbox backend cannot run (#553).
+  # The reviewer (`resolve_revision/2`'s `nil`) is not
   # constrained.
   defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
-    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id) do
-      ProviderConstraint.check(state.task_id, provider)
+    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id),
+         :ok <- ProviderConstraint.check(state.task_id, provider) do
+      ProviderRouting.ensure_sandbox_backend(
+        provider,
+        state.task_id,
+        load_workspace(state.workspace_id)
+      )
     end
   end
 

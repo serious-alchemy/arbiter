@@ -119,6 +119,7 @@ defmodule ArbiterWeb.Router do
     # login only; deploys the release the update check offered.
     post("/release/deploy", DashboardUpdateController, :create)
     post("/release/update/dismiss", DashboardUpdateController, :dismiss)
+    post("/release/deploy/dismiss", DashboardUpdateController, :dismiss_deploy)
 
     # A finished session's artefacts. Not in the `live_session` below because
     # these are file downloads, not pages — they sit outside the "no
