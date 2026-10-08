@@ -62,6 +62,20 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
    end
   """
 
+  @authored_diff """
+  diff --git a/lib/a.ex b/lib/a.ex
+  index 1111111..5555555 100644
+  --- a/lib/a.ex
+  +++ b/lib/a.ex
+  @@ -10,6 +10,8 @@ defmodule A do
+    def run do
+      :ok
+  +    :extra
+  +    :authored_after_approval
+    end
+   end
+  """
+
   setup do
     StubMerger.reset()
     StubAutoResumeDispatcher.reset()
@@ -298,33 +312,72 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
   end
 
   describe "AC2 — merge.coverage_enabled true" do
-    test "decide/3 refuses a head with no coverage that the old guard would merge" do
-      head = sha("flip-on-refuse")
+    test "a head equal to the reviewed SHA merges even with no coverage row (bd-13ghdd)" do
+      # The review covers exactly this commit; `main` having moved since only
+      # changes the head's net diff against it, which is not an unreviewed delta.
+      head = sha("flip-on-same-head")
       mr_ref = "!flipon1"
       ws = workspace(true)
 
       task = reviewed_task(ws, %{last_reviewed_sha: head})
-      StubMerger.set_diff(mr_ref, head, @reviewed_diff)
+      StubMerger.set_diff(mr_ref, head, @base_merged_diff)
 
       StubMerger.queue_get(mr_ref, [
         %{status: :open, approved: true, head_sha: head, base_ref: "main"}
       ])
 
-      log =
-        capture_log(fn ->
-          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
-          wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
-        end)
+      capture_log(fn ->
+        start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
+        assert_merged(task.id)
+      end)
 
-      assert StubMerger.merge_count(mr_ref) == 0,
-             "with the flag on, an uncovered head must not merge on the old stamp alone"
+      assert StubMerger.last_merge() == {mr_ref, head}
+      assert StubAutoResumeDispatcher.resume_count() == 0
+    end
 
-      assert log =~ "DISAGREEMENT"
-      assert log =~ "old=covered"
-      assert log =~ "new=uncovered"
+    test "a real post-approval commit is still refused and re-reviewed (bd-24uf5f shape)" do
+      reviewed = sha("flip-on-reviewed")
+      head = sha("flip-on-authored")
+      mr_ref = "!flipon3"
+      ws = workspace(true)
 
-      assert log =~ "coverage predicate's answer (uncovered) is the one acted on",
-             "the disagreement line must name the answer that was acted on"
+      task = reviewed_task(ws, %{last_reviewed_sha: reviewed})
+      StubMerger.set_diff(mr_ref, reviewed, @reviewed_diff)
+      StubMerger.set_diff(mr_ref, head, @authored_diff)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, approved: true, head_sha: head, base_ref: "main"}
+      ])
+
+      capture_log(fn ->
+        start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: reviewed, local_head_sha: head)
+        wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+    end
+
+    test "a merge-from-main-only delta is content-neutral with the flag on" do
+      reviewed = sha("flip-on-bm-reviewed")
+      head = sha("flip-on-bm-head")
+      mr_ref = "!flipon4"
+      ws = workspace(true)
+
+      task = reviewed_task(ws, %{last_reviewed_sha: reviewed})
+      StubMerger.set_diff(mr_ref, reviewed, @reviewed_diff)
+      StubMerger.set_diff(mr_ref, head, @base_merged_diff)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, approved: true, head_sha: head, base_ref: "main"}
+      ])
+
+      capture_log(fn ->
+        start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: reviewed, local_head_sha: head)
+        assert_merged(task.id)
+      end)
+
+      assert StubMerger.last_merge() == {mr_ref, head}
+      assert StubAutoResumeDispatcher.resume_count() == 0
     end
 
     test "decide/3 merges a covered head the old guard would refuse" do

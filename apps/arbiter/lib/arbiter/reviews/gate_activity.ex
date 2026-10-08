@@ -173,7 +173,12 @@ defmodule Arbiter.Reviews.GateActivity do
   # The open task in this workspace whose OWN PR is `number` in `repo`. `pr_ref`
   # is what the merger stamps when it opens a task's PR; a review engagement
   # carries `source_pr` instead and so is never selected here.
-  defp authoring_task(workspace_id, number, repo) do
+  @doc """
+  The open task in `workspace_id` whose `pr_ref` is PR `number` of `repo`, or
+  nil. `number` is the string form of the PR number.
+  """
+  @spec authoring_task(String.t(), String.t(), String.t()) :: Issue.t() | nil
+  def authoring_task(workspace_id, number, repo) do
     Issue
     |> Ash.Query.filter(workspace_id == ^workspace_id and not is_nil(pr_ref) and state != :closed)
     |> Ash.read!()

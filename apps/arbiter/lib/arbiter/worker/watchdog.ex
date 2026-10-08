@@ -4799,14 +4799,44 @@ defmodule Arbiter.Worker.Watchdog do
     do: {:merge, sha, clear_coverage_wait(state)}
 
   defp apply_coverage_decision(state, {:uncovered, reason}, head) do
-    case cover_clean_integration(state, head) do
-      :covered -> {:merge, head, clear_coverage_wait(state)}
-      :no -> refuse_uncovered_head(state, reason, head)
+    case reviewed_head_cover(state, head) do
+      :covered ->
+        {:merge, head, clear_coverage_wait(state)}
+
+      :no ->
+        case cover_clean_integration(state, head) do
+          :covered -> {:merge, head, clear_coverage_wait(state)}
+          :no -> refuse_uncovered_head(state, reason, head)
+        end
     end
   end
 
   defp apply_coverage_decision(state, {:unknown, reason}, head),
     do: wait_for_coverage(state, reason, head)
+
+  # bd-13ghdd. No coverage row is not "unreviewed": the head the task's reviewer
+  # approved (or a head differing from it only by merges from the base) is
+  # covered whatever `main` has since become. The net diff against TODAY's base
+  # moves as other PRs merge, so an unchanged branch can look "advanced"; the
+  # reviewed commit itself is the stable reference. A latch-suspended baseline
+  # floats to the polled head and proves nothing, so it never counts.
+  defp reviewed_head_cover(%{latch_suspended_at_head: at}, _head) when not is_nil(at), do: :no
+
+  # Only the task's durable `last_reviewed_sha` counts: a sweeper-retry stamp
+  # (`state.reviewed_sha`) can name a head no reviewer round saw (#540), and
+  # coverage-enabled merges must not trust it alone.
+  defp reviewed_head_cover(state, head) do
+    case recorded_reviewed_sha(state) do
+      ^head ->
+        :covered
+
+      reviewed when is_binary(reviewed) and reviewed != "" ->
+        if base_merge_only?(state, reviewed, head), do: :covered, else: :no
+
+      _ ->
+        :no
+    end
+  end
 
   defp refuse_uncovered_head(state, reason, head) do
     Logger.warning(
