@@ -127,6 +127,7 @@ defmodule Arbiter.Worker do
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
   alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictPassOutcome
+  alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OsProcess
@@ -7157,6 +7158,13 @@ defmodule Arbiter.Worker do
         # paging twice about the same verdict.
         :ok
 
+      # bd-1u15tl: the gate's own "branch conflicts with its target, merge
+      # aborted" rejection is not a code finding, and a sibling ticket merging
+      # into the same files must not spend the author's fix-round budget. It
+      # gets a conflict round on its own, separately bounded count.
+      ConflictAbortFindings.escalation?(findings) ->
+        conflict_round(dispatcher, state, findings, attempts)
+
       # bd-80talz: the reviewer says the work fabricated or falsified its
       # evidence. A fix round would put that back to the same provider; a
       # human has to judge it (the reviewer can be wrong about provenance
@@ -7203,7 +7211,9 @@ defmodule Arbiter.Worker do
   # app-wide Task.Supervisor so the stop lands on a worker that is no longer
   # mid-callback, and so a slow resume (repo resolution, worktree, agent spawn)
   # doesn't block this worker's teardown.
-  defp start_fix_round(dispatcher, %State{} = state, findings, digest, attempt) do
+  defp start_fix_round(dispatcher, %State{} = state, findings, digest, attempt, opts \\ []) do
+    conflict? = Keyword.get(opts, :conflict, false)
+
     args =
       %{
         task_id: state.task_id,
@@ -7214,10 +7224,13 @@ defmodule Arbiter.Worker do
         findings_digest: digest
       }
       |> maybe_arg(:claude_command, Map.get(state.meta, :fix_round_command))
+      |> then(&if(conflict?, do: Map.put(&1, :conflict, true), else: &1))
 
     task_id = state.task_id
     workspace_id = state.workspace_id
-    prior_attempts = attempt - 1
+    # A conflict round did not count (bd-1u15tl): `attempt` is the unchanged
+    # number of fix rounds already run.
+    prior_attempts = if conflict?, do: attempt, else: attempt - 1
 
     run = fn ->
       case dispatcher.dispatch(args) do
@@ -7269,6 +7282,21 @@ defmodule Arbiter.Worker do
         )
 
         :ok
+    end
+  end
+
+  # bd-1u15tl: re-attach the author to integrate the target branch. The round
+  # carries the fix-round count and findings digest through unchanged, so it
+  # spends none of `max_fix_rounds` and cannot read as "not converging" against
+  # the findings a real fix round was dispatched for. What bounds it is
+  # `ConflictAbortFindings.max_rounds/0`, counted from the gate's recorded rounds
+  # (the one being handled included).
+  defp conflict_round(dispatcher, %State{} = state, findings, attempts) do
+    if ConflictAbortFindings.rejected_rounds(state.task_id) > ConflictAbortFindings.max_rounds() do
+      give_up_fix_round(dispatcher, state, attempts, :conflict_rounds_exhausted)
+    else
+      digest = Map.get(state.meta, :review_gate_findings_digest)
+      start_fix_round(dispatcher, state, findings, digest, attempts, conflict: true)
     end
   end
 

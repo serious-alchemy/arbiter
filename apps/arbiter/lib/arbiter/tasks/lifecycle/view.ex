@@ -20,7 +20,10 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       defaulting to the one the ticket's Watchdog recorded on its row;
     * `:now` — for the interim board's dispatch grace (`board_column/2`);
     * `:watchdog_alive` — whether the ticket's Watchdog is running, when the
-      caller knows (a Registry read, so an input like the rest).
+      caller knows (a Registry read, so an input like the rest);
+    * `:resume_queued` — whether a round for the ticket is deferred until a
+      worker slot frees (`Arbiter.Board.Autopilot.deferred_resume_ids/1`), when
+      the caller knows (bd-1u15tl).
 
   ## Column
 
@@ -454,9 +457,16 @@ defmodule Arbiter.Tasks.Lifecycle.View do
           do: run_fact(ticket, runs, ctx) |> waiting_not_crashed(ci_wait, cut_off)
         ),
       block: if(state == :merging, do: block_fact(merger_status(ticket, ctx))),
-      watchdog_alive: Map.get(ctx, :watchdog_alive)
+      watchdog_alive: Map.get(ctx, :watchdog_alive),
+      resume_queued: Map.get(ctx, :resume_queued),
+      conflict_pass: if(state == :merging, do: conflict_pass?(runs))
     }
   end
+
+  # bd-1u15tl: a conflict-resolver pass on the ticket, whatever its state — it
+  # lingers `:finished` until the Watchdog's next poll tears it down, and that
+  # poll is also what refreshes the stored `conflict` status.
+  defp conflict_pass?(runs), do: Enum.any?(runs, &(meta(&1, :role) == :conflict_resolver))
 
   # bd-2gc809: a gate waiting on CI has no agent by design, and after a restart
   # not even the author row: the run that finished or vanished is not a crash.

@@ -464,6 +464,23 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   @doc """
+  The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
+  `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
+  the scheduler is not running or does not answer. Best-effort and quick: a
+  surface that only wants to know whether a ticket is waiting must not stall
+  on a busy scheduler.
+  """
+  @spec deferred_resume_ids(GenServer.server()) :: [String.t()]
+  def deferred_resume_ids(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> []
+      _pid -> server |> status(1_000) |> Map.get(:deferred_resumes, [])
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
   Whether this install runs the autopilot at all. A board talking to a
   process that isn't there should say so rather than raise.
   """
@@ -556,7 +573,12 @@ defmodule Arbiter.Board.Autopilot do
 
   def handle_call({:board, opts}, _from, state) do
     {_status, snapshot} =
-      read_board(state, Keyword.put_new(opts, :dispatch_holds, dispatch_holds(state)))
+      read_board(
+        state,
+        opts
+        |> Keyword.put_new(:dispatch_holds, dispatch_holds(state))
+        |> Keyword.put_new(:resume_queued, queued_resume_ids(state))
+      )
 
     {:reply, snapshot, state}
   end
@@ -818,7 +840,11 @@ defmodule Arbiter.Board.Autopilot do
   defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
 
   defp plan(state) do
-    {read_status, snapshot} = read_board(state, dispatch_holds: dispatch_holds(state))
+    {read_status, snapshot} =
+      read_board(state,
+        dispatch_holds: dispatch_holds(state),
+        resume_queued: queued_resume_ids(state)
+      )
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     cond do
@@ -1020,6 +1046,9 @@ defmodule Arbiter.Board.Autopilot do
     Logger.warning("board autopilot: dispatch of #{id} returned #{inspect(other)}")
     {{:error, other}, record_failure(state, id, other)}
   end
+
+  # bd-1u15tl: the ids of the tickets with a round deferred for a slot.
+  defp queued_resume_ids(%{deferred_resumes: deferred}), do: Enum.map(deferred, & &1.task_id)
 
   # bd-814vuy: a card whose last dispatch was refused for a placement reason
   # (account cap, provider constraint, quota hold, paused provider …) and is

@@ -46,7 +46,8 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
 
     * `:verifying` → `:awaiting_verification`;
     * `:merging` whose PR is blocked for a reason the Watchdog does not clear
-      by itself, or whose Watchdog is gone → `:merge_blocked`;
+      by itself, or whose Watchdog is gone → `:merge_blocked` — unless a
+      round is on its way (see "Hand-offs in flight" below);
     * `:active` whose primary author run is waiting on a question →
       `:run_asked_question`;
     * `:active` whose author runs all finished without succeeding, or that
@@ -55,6 +56,23 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
       under way is the machine's turn, not anyone's attention.
 
   Every other ticket has no attention (`nil`).
+
+  ## Hand-offs in flight (bd-1u15tl)
+
+  Two moments of a merge look blocked and are not:
+
+    * **A re-review waiting for a slot.** A commit landed after approval, the
+      Watchdog refused to merge a head no review covers, handed it to a
+      ReviewGate round and stopped — and the round is deferred until a worker
+      slot frees. There is no Watchdog and no review yet, by design.
+      (`:resume_queued`.)
+    * **A conflict pass that just finished.** The stored merger status still
+      says `conflict` until the Watchdog's next poll refreshes it. A conflict
+      pass on the ticket — working, queued or finished and not yet torn down —
+      means that block is already being handled. (`:conflict_pass`.)
+
+  Neither hides a block only a person can clear (an approval), and a merge
+  with no round queued and no pass at all still reads as blocked.
 
   The stored cause is cleared when the ticket's state moves on or its run
   restarts (`Arbiter.Tasks.Attention.clear/2`), and the ticket's escalations
@@ -85,13 +103,18 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
       live), `:held` (the quota gate is holding its next round) or nil;
     * `:block` — the PR's effective block reason, or nil;
     * `:watchdog_alive` — whether the ticket's Watchdog is running (nil when
-      unknown).
+      unknown);
+    * `:resume_queued` — whether a round for the ticket (a re-review, a fix
+      or a conflict pass) is deferred until a worker slot frees;
+    * `:conflict_pass` — whether a conflict-resolver pass is on the ticket.
   """
   @type facts :: %{
           optional(:state) => atom() | nil,
           optional(:run) => :question | :failed | :orphaned | :live | :held | nil,
           optional(:block) => atom() | nil,
-          optional(:watchdog_alive) => boolean() | nil
+          optional(:watchdog_alive) => boolean() | nil,
+          optional(:resume_queued) => boolean() | nil,
+          optional(:conflict_pass) => boolean() | nil
         }
 
   @approval_blocks [:needs_approval, :needs_nonauthor_approval]
@@ -169,7 +192,13 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
     block = Map.get(facts, :block)
 
     cond do
-      block != nil and block not in @auto_resolving_blocks ->
+      block in @approval_blocks ->
+        {:merge_blocked, nil, nil}
+
+      Map.get(facts, :resume_queued) == true ->
+        nil
+
+      block != nil and block not in @auto_resolving_blocks and not conflict_in_hand?(block, facts) ->
         {:merge_blocked, nil, nil}
 
       Map.get(facts, :watchdog_alive) == false ->
@@ -188,6 +217,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
       _ -> nil
     end
   end
+
+  defp conflict_in_hand?(:conflict, facts), do: Map.get(facts, :conflict_pass) == true
+  defp conflict_in_hand?(_block, _facts), do: false
 
   defp build(cause, detail, since, facts) do
     qualifier =
