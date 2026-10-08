@@ -130,6 +130,84 @@ defmodule ArbiterCli.Cmd.MessageTest do
     end
   end
 
+  describe "inherited ARB_WORKSPACE" do
+    setup do
+      System.put_env("ARB_WORKSPACE", "ws-a")
+      :ok
+    end
+
+    @two_workspaces %{
+      "data" => [
+        %{"id" => "ws-a", "name" => "a", "prefix" => "aa"},
+        %{"id" => "ws-b", "name" => "b", "prefix" => "bb"}
+      ]
+    }
+
+    test "is not forwarded as a claim on a send to a task" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "bb-1", "hello"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      refute Map.has_key?(payload, "workspace")
+    end
+
+    test "is not forwarded on the direction shorthand" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :direction_body, "direction")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["bb-1", "please re-check"]) end)
+
+      assert code == 0
+      assert_received {:direction_body, payload}
+      refute Map.has_key?(payload, "workspace")
+    end
+
+    test "still scopes a send to the coordinator" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "coordinator", "ping"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      assert payload["workspace"] == "ws-a"
+    end
+  end
+
+  describe "send to the coordinator with no ARB_WORKSPACE" do
+    test "resolves the default workspace as before" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-x", "name" => "x", "prefix" => "xx"},
+              %{"id" => "ws-d", "name" => "default", "prefix" => "bd"}
+            ]
+          }, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "coordinator", "ping"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      assert payload["workspace"] == "ws-d"
+    end
+  end
+
   describe "verb-less typo (D-M-9)" do
     test "a typo'd verb is surfaced as the server's not-found, not a sent message" do
       stub_routes([

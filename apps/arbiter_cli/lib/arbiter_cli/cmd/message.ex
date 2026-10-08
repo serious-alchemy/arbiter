@@ -13,7 +13,8 @@ defmodule ArbiterCli.Cmd.Message do
                          send a message up (or across) the chain. The recipient
                          must be `coordinator` or an existing task; the server
                          files the message under the RECIPIENT task's workspace
-                         (`-w` may only restate it). The `from` identity is set
+                         (an explicit `-w` may only restate it; an inherited
+                         `ARB_WORKSPACE` is ignored for a task recipient). The `from` identity is set
                          by the server from your token; $ARB_FROM / "cli" only
                          applies to an unauthenticated call.
       arb message notify [--limit N]
@@ -79,7 +80,7 @@ defmodule ArbiterCli.Cmd.Message do
           %{kind: kind, from_ref: from_identity(), to_ref: recipient, body: body}
           |> put_optional(:subject, opts[:subject])
           |> put_optional(:task_ref, task_ref)
-          |> put_optional(:workspace, Workspace.selected_id())
+          |> put_optional(:workspace, workspace_claim(recipient))
 
         case Client.post("/api/messages", payload) do
           {:ok, message} -> emit_send(message, recipient, kind, mode)
@@ -100,6 +101,25 @@ defmodule ArbiterCli.Cmd.Message do
 
   defp validate_kind(k),
     do: {:error, "invalid --kind #{inspect(k)} (allowed: #{Enum.join(@allowed_kinds, ", ")})"}
+
+  # A task recipient's workspace is the server's call, so only an explicit `-w`
+  # is forwarded (the server checks it against the task); an `ARB_WORKSPACE`
+  # inherited from the shell never is. `coordinator` has no task to ask, so it
+  # keeps the CLI's usual workspace resolution (`ARB_WORKSPACE`, then "default" /
+  # the sole workspace); when that is ambiguous nothing is sent and the server
+  # answers for the token (a worker's bound workspace, or its own 422).
+  defp workspace_claim(recipient) when recipient in ["coordinator", "admiral"] do
+    if Workspace.flag_given?() do
+      Workspace.selected_id()
+    else
+      case Workspace.resolve() do
+        {:ok, ws} -> ws["id"]
+        {:error, _} -> nil
+      end
+    end
+  end
+
+  defp workspace_claim(_task_id), do: if(Workspace.flag_given?(), do: Workspace.selected_id())
 
   defp from_identity, do: System.get_env("ARB_FROM") || "cli"
 
@@ -124,7 +144,7 @@ defmodule ArbiterCli.Cmd.Message do
 
     body =
       %{kind: "direction", from_ref: "coordinator", to_ref: task_id, body: text}
-      |> put_optional(:workspace, Workspace.selected_id())
+      |> put_optional(:workspace, workspace_claim(task_id))
 
     case Client.post("/api/messages", body) do
       {:ok, message} -> emit_direction(message, task_id, mode)
