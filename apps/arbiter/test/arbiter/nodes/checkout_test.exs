@@ -86,6 +86,41 @@ defmodule Arbiter.Nodes.CheckoutTest do
     File.chmod!(Path.join(shadow, "untracked.sh"), 0o755)
   end
 
+  describe "the shadow's git metadata (bd-1zp3ji)" do
+    # The shadow is bind-mounted into a container that sees only its own mounts, and git
+    # resolves every path in `.git` as written. Anything host-absolute that is not
+    # mounted breaks every git command in the run.
+    test "holds no host path but the store's objects, which the run mounts", c do
+      %{shadow: shadow} = seed!(c)
+      dot_git = Path.join(shadow, ".git")
+      store = Path.join(c.node, "repos/r.git")
+
+      # a self-contained `.git` directory, not a `gitdir:` pointer into another repo
+      assert File.dir?(dot_git)
+      refute File.exists?(Path.join(dot_git, "commondir"))
+      refute File.exists?(Path.join(dot_git, "gitdir"))
+      refute File.exists?(Path.join(dot_git, "worktrees"))
+
+      # the one borrowed path is the store's objects dir: what Run binds read-only
+      assert Node.borrowed_objects(shadow) == [Path.join(store, "objects")]
+
+      assert Node.store_objects(%Arbiter.NodeAgent.Config{node_home: c.node}) ==
+               Path.join(c.node, "repos/primary.git/objects")
+
+      # and nothing else in config / HEAD names a host path
+      config = File.read!(Path.join(dot_git, "config"))
+      refute config =~ c.node
+      refute config =~ ~r/^\s*(worktree|gitdir|include|path)\s*=/m
+      assert File.read!(Path.join(dot_git, "HEAD")) =~ ~r/\Aref: refs\/heads\/[^\n]+\n\z/
+    end
+
+    test "a shadow with no alternates borrows nothing", c do
+      %{shadow: shadow} = seed!(c)
+      File.rm!(Path.join(shadow, ".git/objects/info/alternates"))
+      assert Node.borrowed_objects(shadow) == []
+    end
+  end
+
   describe "round trip" do
     test "exec bits, symlinks, deletions, renames and uncommitted work survive", c do
       %{shadow: shadow, info: info} = seed!(c)
