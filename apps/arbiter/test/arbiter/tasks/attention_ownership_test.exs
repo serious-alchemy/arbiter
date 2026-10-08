@@ -364,6 +364,19 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       refute Enum.any?(after_close.attention, &(&1.ticket_id == ctx.task.id))
     end
 
+    # bd-1u15tl: a Merging ticket whose re-review waits for a worker slot has no
+    # Watchdog by design; the sweep must not page it, and must still page one
+    # that has nothing queued.
+    test "a merging ticket with a re-review queued for a slot is not listed", ctx do
+      merging = put_state!(ctx.task, :merging)
+      opts = [workers: [], issues: [merging], owner: :coordinator]
+
+      assert Attention.items(opts) |> Enum.map(& &1.ticket_id) == [merging.id]
+      assert Attention.items([resume_queued: [merging.id]] ++ opts) == []
+      assert Attention.current(merging, workers: [], resume_queued: [merging.id]) == nil
+      assert %{cause: :merge_blocked} = Attention.current(merging, workers: [], resume_queued: [])
+    end
+
     test "an item handed to the operator leaves the coordinator's queue", ctx do
       raise_crash(ctx.task)
       {:ok, _} = Attention.hand_off(ctx.task.id, :operator, "yours")

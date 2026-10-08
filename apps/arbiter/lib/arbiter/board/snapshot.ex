@@ -229,7 +229,14 @@ defmodule Arbiter.Board.Snapshot do
     # Epics stay off the board.
     views =
       issues
-      |> ticket_views(workers, blocked_by, now, watchdog_live, Map.get(input, :held, %{}))
+      |> ticket_views(
+        workers,
+        blocked_by,
+        now,
+        watchdog_live,
+        Map.get(input, :held, %{}),
+        Map.get(input, :resume_queued, [])
+      )
       |> Map.reject(fn {id, _view} -> epic?(Map.get(issues_by_id, id)) end)
 
     columns = Map.new(views, fn {id, view} -> {id, view.column} end)
@@ -432,6 +439,7 @@ defmodule Arbiter.Board.Snapshot do
           ticket_constraint_holds(workspace, issues, opts)
         end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
+      resume_queued: Keyword.get(opts, :resume_queued, []),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -1102,7 +1110,11 @@ defmodule Arbiter.Board.Snapshot do
   # bd-abg443: `held` is `%{ticket_id => DispatchQueue.describe/1 map}` for a
   # caller that already knows the quota holds; a ticket it does not name is
   # asked of the workspace's queue by `Lifecycle.view/2`.
-  defp ticket_views(issues, workers, blocked_by, now, watchdog_live, held) do
+  #
+  # bd-1u15tl: `resume_queued` is the ids of tickets with a round deferred for a
+  # slot (`Autopilot.status/0`'s `deferred_resumes`); it keeps a re-review that
+  # is only waiting from reading as a blocked merge.
+  defp ticket_views(issues, workers, blocked_by, now, watchdog_live, held, resume_queued) do
     runs = runs_by_ticket(workers)
     known = MapSet.new(issues, & &1.id)
 
@@ -1118,7 +1130,8 @@ defmodule Arbiter.Board.Snapshot do
         runs: Map.get(runs, ticket.id, []),
         blocked_by: Map.get(blocked_by, ticket.id, []),
         now: now,
-        watchdog_alive: ticket_watchdog_alive(ticket.id, watchdog_live)
+        watchdog_alive: ticket_watchdog_alive(ticket.id, watchdog_live),
+        resume_queued: ticket.id in resume_queued
       }
 
       ctx = if Map.has_key?(held, ticket.id), do: Map.put(ctx, :held, held[ticket.id]), else: ctx
