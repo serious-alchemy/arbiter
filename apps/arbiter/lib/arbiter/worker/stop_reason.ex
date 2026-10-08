@@ -29,7 +29,13 @@ defmodule Arbiter.Worker.StopReason do
       failure. When the CLI reports a reset timestamp it is parsed into
       `retry_after`; remediation is to wait for the window to reset (or
       switch to a workspace/key not sharing the exhausted plan), never a
-      re-dispatch against the same account.
+      re-dispatch against the same account. Provider-agnostic since bd-a6vh2x:
+      Claude's session/weekly limit, agy's `RESOURCE_EXHAUSTED` quota 429
+      (`Resets in 11m34s` parsed into `retry_after`) and grok's free
+      Grok Build usage limit all land here. A ticket's own run that stops on
+      it is held, not failed: `Arbiter.Worker` opens a timed account hold
+      (`Arbiter.Providers.Pause.quota_hold/4`) and queues a resume
+      (`Arbiter.Workflows.DispatchQueue`).
     * `:credit_exhausted` — out of credits / insufficient balance / quota /
       billing. Remediation: top up credits or rotate to a funded key.
     * `:rate_limited` — 429 / rate-limit / overloaded / resource exhausted.

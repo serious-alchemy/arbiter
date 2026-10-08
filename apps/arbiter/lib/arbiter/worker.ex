@@ -5270,7 +5270,7 @@ defmodule Arbiter.Worker do
   defp do_maybe_resume_continuation(%State{} = state, session) do
     reason = classify_stop(session)
 
-    case quota_stop_hold(state, session, reason) do
+    case quota_stop_hold(state, reason) do
       {:held, held_state} -> held_state
       :not_held -> resume_or_fail(state, session, reason)
     end
@@ -5357,14 +5357,14 @@ defmodule Arbiter.Worker do
   # window — returns `:not_held` and takes the older path unchanged.
   @quota_stop_default_wait_ms :timer.hours(1)
 
-  defp quota_stop_hold(%State{} = state, session, %{category: :quota_exhausted} = reason) do
+  defp quota_stop_hold(%State{} = state, %{category: :quota_exhausted} = reason) do
     with true <- ticket_run?(state),
          %Arbiter.Tasks.Issue{state: :active, workspace_id: ws_id} when is_binary(ws_id) <-
            load_issue(state.task_id),
          {:ok, agent_type} <- quota_stop_agent_type(state),
          false <- quota_wait_exceeds_max?(reason.retry_after),
          until = quota_stop_until(ws_id, agent_type, reason) do
-      {:held, hold_quota_stop(state, session, reason, ws_id, agent_type, until)}
+      {:held, hold_quota_stop(state, reason, ws_id, agent_type, until)}
     else
       _ -> :not_held
     end
@@ -5379,7 +5379,7 @@ defmodule Arbiter.Worker do
     :exit, _ -> :not_held
   end
 
-  defp quota_stop_hold(_state, _session, _reason), do: :not_held
+  defp quota_stop_hold(_state, _reason), do: :not_held
 
   # The run that authors the ticket: not a fix/conflict pass, not a reviewer.
   defp ticket_run?(%State{task_id: task_id, meta: meta}) do
@@ -5430,7 +5430,7 @@ defmodule Arbiter.Worker do
     :exit, _ -> nil
   end
 
-  defp hold_quota_stop(%State{} = state, session, reason, ws_id, agent_type, until) do
+  defp hold_quota_stop(%State{} = state, reason, ws_id, agent_type, until) do
     label = DispatchQueue.provider_label(agent_type)
 
     Logger.info(
@@ -5461,7 +5461,6 @@ defmodule Arbiter.Worker do
       until: DateTime.to_iso8601(until)
     })
 
-    _ = session
     new_state
   end
 

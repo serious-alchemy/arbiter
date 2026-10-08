@@ -314,6 +314,42 @@ flagged). So grok's quota is an estimate, `Arbiter.Quota.GrokLedger`:
     rate_limit_retry_threshold` (default 2; `rate_limit_retry_threshold:` in the
     same config key) so grok does not spend 15 retries on a spent window.
 
+## A run that stops on its provider's quota is held, not crashed (bd-a6vh2x)
+
+A ticket's own run that ends because the provider says its allowance is spent
+classifies as `:quota_exhausted` (`Arbiter.Worker.StopReason`): agy's
+`RESOURCE_EXHAUSTED (code 429): Individual quota reached … Resets in 11m34s`,
+Claude's session / weekly / model limit, grok's free Grok Build usage limit.
+Before, agy's came out as `:rate_limited` and grok's as `:crashed`, both of which
+left the ticket waiting on the coordinator. Now `Arbiter.Worker`:
+
+1. **Holds the account** until the reset — the provider's stated reset time,
+   else the quota probe's latest reset for the account, else 1 hour — as a timed
+   `Arbiter.Providers.Pause` entry (`kind: quota`, `until`). Every router that
+   honours a pause (`ProviderRouting`, `ReviewerRouting`, `ProviderPool`,
+   `Dispatch`'s pause gate) routes round it with no further wiring; it lifts
+   itself at `until`, and `arb provider resume` lifts it early. An operator pause
+   on the same target is never displaced or shortened.
+2. **Queues a held resume** in the workspace's `DispatchQueue` (`quota_resume:
+   true`, `retry_not_before` = the reset). It shows in `arb quota` → Held
+   dispatches and as "held — quota" on the board.
+3. **Counts nothing and tells nobody**: no `worker_stopped` escalation, no
+   `run_crashed` attention (the held item keeps the ticket's attention empty),
+   no resume attempt, and the resumed run is not counted against
+   `attention.run_crashed_max_resumes`.
+
+The held resume leaves the queue in one of two ways. At the reset, `Dispatch`
+turns `quota_resume: true` into `resume_session/2`: the same session continues in
+the preserved worktree. Before the reset, if routing can already place the
+ticket on another provider (not paused, not quota-gated, allowed by the ticket's
+`provider_constraint`), the drain releases it early and the same resume runs
+there, briefed from the worktree's git state rather than the foreign session id.
+A run with no captured session gets the briefing resume outright.
+
+A stop this cannot hold cleanly (a fix/conflict pass or reviewer, a ticket no
+longer In progress, an unknown provider, a reset beyond 8 days, or no queue to
+hold in) takes the older path unchanged.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:
