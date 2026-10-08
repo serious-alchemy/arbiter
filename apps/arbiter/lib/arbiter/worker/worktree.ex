@@ -161,9 +161,45 @@ defmodule Arbiter.Worker.Worktree do
       has_uncommitted?(path) == {:ok, false}
   end
 
+  # bd-d0sgb6: the reverse of `create_clone/4`. The leaf may hold the private
+  # clone an earlier run left under a podman backend; a clean one on this branch
+  # is carried back into the main repo (`PrivateClone.remove/1` syncs first) and
+  # replaced by a linked worktree of the same branch. One holding uncommitted
+  # work, mid-operation, read-only or tampered with is refused, never mounted
+  # into the wrong sandbox.
+  defp replace_clone(path, branch_name) do
+    if PrivateClone.clone?(path) do
+      if replaceable_clone?(path, branch_name) do
+        Logger.info("Worktree: replacing the private clone at #{path} with a linked worktree")
+        with :ok <- PrivateClone.remove(path), do: :replaced
+      else
+        {:error, {:layout_mismatch, path}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp replaceable_clone?(path, branch_name) do
+    not PrivateClone.read_only?(path) and PrivateClone.verify(path) == :ok and
+      PrivateClone.branch(path) == branch_name and
+      checked_out_branch(path) == {:ok, branch_name} and
+      in_progress_operation(path) == nil and
+      has_uncommitted?(path) == {:ok, false}
+  end
+
   defp create_linked(repo_path, branch_name, base_branch, seed_paths) do
     path = worktree_path(branch_name)
 
+    case replace_clone(path, branch_name) do
+      :ok -> create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path)
+      # The branch now lives in the main repo (the clone's sync-back): check it out.
+      :replaced -> attach_linked_checked(repo_path, branch_name, seed_paths, path)
+      {:error, _} = refused -> refused
+    end
+  end
+
+  defp create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path) do
     result =
       if File.dir?(path) do
         case checked_out_branch(path) do
@@ -671,16 +707,38 @@ defmodule Arbiter.Worker.Worktree do
 
     case layout(opts) do
       :private_clone ->
-        PrivateClone.attach(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
+        attach_clone(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
 
       :linked_worktree ->
         attach_linked(repo_path, branch_name, seed_paths)
     end
   end
 
+  defp attach_clone(repo_path, branch_name, base, seed_paths) do
+    case PrivateClone.attach(repo_path, branch_name, base, seed_paths) do
+      {:error, {:layout_mismatch, path}} = mismatch ->
+        with true <- replaceable_linked?(path, branch_name),
+             :ok <- cleanup_linked(path) do
+          PrivateClone.attach(repo_path, branch_name, base, seed_paths)
+        else
+          _ -> mismatch
+        end
+
+      other ->
+        other
+    end
+  end
+
   defp attach_linked(repo_path, branch_name, seed_paths) do
     path = worktree_path(branch_name)
 
+    case replace_clone(path, branch_name) do
+      {:error, _} = refused -> refused
+      _ -> attach_linked_checked(repo_path, branch_name, seed_paths, path)
+    end
+  end
+
+  defp attach_linked_checked(repo_path, branch_name, seed_paths, path) do
     if File.dir?(path) do
       case checked_out_branch(path) do
         {:ok, ^branch_name} ->

@@ -67,6 +67,57 @@ defmodule Arbiter.Worker.WorktreePrivateCloneTest do
       refute PrivateClone.clone?(path)
     end
 
+    # bd-d0sgb6: the reverse flip. A ticket first worked under podman and
+    # redispatched under bwrap finds a clone at the leaf.
+    test "replaces a clean private clone on the branch with a linked worktree", ctx do
+      {:ok, path} = Worktree.create(ctx.checkout, @branch, "main", layout: :private_clone)
+      head = commit_in(path, "w.txt", "work")
+
+      assert {:ok, ^path} =
+               Worktree.create(ctx.checkout, @branch, "main", layout: :linked_worktree)
+
+      refute PrivateClone.clone?(path)
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(path, ".git"))
+      assert git!(path, ["rev-parse", "HEAD"]) == head
+      assert git!(ctx.checkout, ["worktree", "list", "--porcelain"]) =~ path
+    end
+
+    test "never replaces a private clone holding uncommitted work", ctx do
+      {:ok, path} = Worktree.create(ctx.checkout, @branch, "main", layout: :private_clone)
+      File.write!(Path.join(path, "dirty.txt"), "unsaved\n")
+
+      assert {:error, {:layout_mismatch, ^path}} =
+               Worktree.create(ctx.checkout, @branch, "main", layout: :linked_worktree)
+
+      assert File.read!(Path.join(path, "dirty.txt")) == "unsaved\n"
+      assert PrivateClone.clone?(path)
+    end
+
+    test "attach/3 swaps a clean linked worktree for a clone, and back", ctx do
+      {:ok, path} = Worktree.create(ctx.checkout, @branch, "main")
+      head = commit_in(path, "w.txt", "work")
+
+      assert {:ok, ^path} =
+               Worktree.attach(ctx.checkout, @branch, layout: :private_clone, base: "main")
+
+      assert PrivateClone.clone?(path)
+      assert git!(path, ["rev-parse", "HEAD"]) == head
+
+      assert {:ok, ^path} = Worktree.attach(ctx.checkout, @branch, layout: :linked_worktree)
+      refute PrivateClone.clone?(path)
+      assert git!(path, ["rev-parse", "HEAD"]) == head
+    end
+
+    test "attach/3 refuses a mismatched layout holding uncommitted work", ctx do
+      {:ok, path} = Worktree.create(ctx.checkout, @branch, "main")
+      File.write!(Path.join(path, "dirty.txt"), "unsaved\n")
+
+      assert {:error, {:layout_mismatch, ^path}} =
+               Worktree.attach(ctx.checkout, @branch, layout: :private_clone, base: "main")
+
+      assert File.exists?(Path.join(path, "dirty.txt"))
+    end
+
     test "the default layout is still a linked worktree", ctx do
       assert {:ok, path} = Worktree.create(ctx.checkout, @branch, "main", [])
       refute PrivateClone.clone?(path)
