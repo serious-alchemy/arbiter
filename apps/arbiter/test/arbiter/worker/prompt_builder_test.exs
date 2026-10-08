@@ -213,6 +213,24 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       end
     end
 
+    test "the PR-review and PRPatrol follow-up prompts do not send a host-pushes worker to push" do
+      review = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), host_pushes?: true)
+      assert review =~ "Arbiter pushes it; do NOT push"
+      refute review =~ "push commits to the existing branch"
+
+      follow =
+        PromptBuilder.prompt_for_task(
+          task(%{issue_type: :research, source_pr: "42"}),
+          host_pushes?: true
+        )
+
+      assert follow =~ "do NOT `git push`"
+      refute follow =~ "+ push (`git push`)"
+
+      plain = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), [])
+      assert plain =~ "push commits to the existing branch"
+    end
+
     test "without the flag the worker still pushes itself" do
       prompt = PromptBuilder.prompt_for_task(task(%{}), [])
 

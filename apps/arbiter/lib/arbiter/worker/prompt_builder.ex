@@ -294,7 +294,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     create`). The MergeQueue opens the single canonical PR for this task, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_review_instruction(task)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
+    #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{task.id}
@@ -401,7 +401,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     This is a `#{kind}`-type directive: it has NO branch or pull request of its
     own, and none will be opened for it.
-    #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
+    #{pr_follow_up_note(task, opts)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}
@@ -496,7 +496,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # directory (when one is provisioned) is a disposable, detached checkout
   # with no branch of its own, so `gh pr checkout` there is always safe: there
   # is nothing Arbiter-owned to collide with or lose.
-  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr})
+  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr}, opts)
        when is_binary(source_pr) and source_pr != "" do
     """
 
@@ -509,7 +509,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     by convention, not a branch of its own) — good enough to inspect the code
     and run `gh`/`git`. If a fix genuinely is needed: check out the ORIGINAL
     PR's branch directly — `gh pr checkout #{source_pr}` — right there, and
-    commit + push (`git push`), which updates PR ##{source_pr} in place. Do
+    commit#{if Keyword.get(opts, :host_pushes?, false), do: " (Arbiter pushes it for you; do NOT `git push`)", else: " + push (`git push`)"}, which updates PR ##{source_pr} in place. Do
     NOT `git push -u origin <new-branch>` or `gh pr create` — that opens a
     duplicate PR against the original's entire diff.
 
@@ -522,7 +522,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
-  defp pr_follow_up_note(_task) do
+  defp pr_follow_up_note(_task, _opts) do
     """
 
     No worktree is provisioned by default — you are not expected to edit a repo.
@@ -693,7 +693,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # (above) are the primary source, but the PR reviews are the canonical
   # record — fetching them explicitly guards against a `Round` row being
   # stale or missing.
-  defp pr_review_instruction(%Issue{pr_ref: pr_ref})
+  defp pr_review_instruction(%Issue{pr_ref: pr_ref}, opts)
        when is_binary(pr_ref) and pr_ref != "" do
     """
 
@@ -703,11 +703,11 @@ defmodule Arbiter.Worker.PromptBuilder do
         gh pr view #{pr_ref} --json reviews,reviewComments
 
     Address every finding (fix the code or rebut with justification), then
-    push commits to the existing branch. Do NOT open a new PR.
+    #{if Keyword.get(opts, :host_pushes?, false), do: "commit to the existing branch (Arbiter pushes it; do NOT push)", else: "push commits to the existing branch"}. Do NOT open a new PR.
     """
   end
 
-  defp pr_review_instruction(_task), do: ""
+  defp pr_review_instruction(_task, _opts), do: ""
 
   # For tracker-backed tasks (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires
