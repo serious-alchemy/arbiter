@@ -768,6 +768,42 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "Worker needs direction"
     end
 
+    test "the Coordinator Inboxes show the 5 newest of an oldest-first unread queue" do
+      msg = fn n ->
+        %{
+          "id" => "m-#{n}",
+          "kind" => "escalation",
+          "directive_ref" => "bd-n#{n}",
+          "subject" => "subject #{n}",
+          "inserted_at" => "2026-05-28T12:0#{n}:00.000000Z",
+          "workspace_id" => "ws-1"
+        }
+      end
+
+      # The REST unread queue is oldest-first; 7 messages, so 2 are cut.
+      queue = Enum.map(1..7, msg)
+
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        queue
+      )
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      for section <- [
+            "== Global Coordinator Inbox (7 unread) ==",
+            "== Coordinator Inbox (7 unread) =="
+          ] do
+        [_, rest] = String.split(out, section, parts: 2)
+        block = rest |> String.split("\n\n", parts: 2) |> hd()
+
+        for n <- 3..7, do: assert(block =~ "[bd-n#{n}]")
+        for n <- 1..2, do: refute(block =~ "[bd-n#{n}]")
+      end
+    end
+
     test "omits the Coordinator Inbox section when there is no unread coordinator mail" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],

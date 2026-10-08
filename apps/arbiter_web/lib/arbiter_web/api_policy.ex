@@ -65,10 +65,11 @@ defmodule ArbiterWeb.ApiPolicy do
       and `Arbiter.MCP.Tools.resolve_task_id/3` pins the MCP side to the same
       rule (bd-dtfe9x).
     * `:mailbox` — coordinator; or a worker reading its own mailbox
-      (`to_ref` must be its own task).
+      (`to_ref` must be its own task) or the notification feed
+      (`kind=notification` with no `to_ref`; always its own workspace).
     * `:message_send` — coordinator; or a worker. `MessageController.create/2`
-      pins a worker's `from_ref` and `workspace_id` to its own task, like the
-      `message_send` MCP tool.
+      pins a worker's `from_ref` to its own task (`Mailbox.send_message/2`, shared
+      with the `message_send` MCP tool).
     * `:message_show` — coordinator; or a worker reading, by id, a message
       addressed to its own task (whoever sent it). Anything else is a 403 that
       names the scope rule, never a silent miss.
@@ -420,10 +421,15 @@ defmodule ArbiterWeb.ApiPolicy do
       else: forbidden(scope, "may only act on its own task")
   end
 
+  # A worker reads its own mailbox, or the notification feed (`arb notify`, MCP
+  # `notify_list`) — a broadcast, not anyone's mail. The controller confines the
+  # latter to the worker's own workspace (a bound token resolves to it).
   def authorize(:mailbox, %Scope{tier: :worker, task_id: task_id} = scope, params) do
-    if params["to_ref"] == task_id,
-      do: :ok,
-      else: forbidden(scope, "may only read its own mailbox (to_ref=#{task_id})")
+    cond do
+      params["to_ref"] == task_id -> :ok
+      params["kind"] == "notification" and params["to_ref"] in [nil, ""] -> :ok
+      true -> forbidden(scope, "may only read its own mailbox (to_ref=#{task_id})")
+    end
   end
 
   def authorize(:message_send, %Scope{tier: :worker}, _params), do: :ok

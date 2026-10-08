@@ -31,8 +31,7 @@
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-25" => "Memory operator surface (REST + CLI)",
-    "P-26" => "Mailbox: one context function, correct workspace and reader identity"
+    "P-25" => "Memory operator surface (REST + CLI)"
   },
   operations: [
     # ---- tickets ----
@@ -1498,18 +1497,16 @@
       cli: ["arb message inbox", "arb inbox"],
       rest: ["GET /api/messages"],
       status: :partial,
-      divergences: ["D-M-2", "D-M-5", "D-M-6", "D-M-12"]
+      divergences: ["D-M-5"],
+      note: "mark_read is an explicit param on all three; the default differs by design (MCP true, REST/CLI false)."
     },
     %{
       id: "misc/read_coordinator_outstanding_queue_read",
       title: "Read coordinator \"outstanding\" queue (read, not cleared)",
       mcp: ["coordinator_inbox"],
-      cli: nil,
+      cli: ["arb inbox", "arb message inbox"],
       rest: ["GET /api/messages"],
-      status: {:gap, "P-26"},
-      absent: %{
-        cli: {:gap, "P-26", "No `arb inbox --outstanding` (MCP and REST can read the outstanding queue)."}
-      }
+      status: :full
     },
     %{
       id: "misc/coordinator_attention_queue_open_tickets",
@@ -1538,18 +1535,16 @@
       cli: ["arb message inbox", "arb inbox"],
       rest: ["GET /api/messages", "POST /api/messages/:id/read"],
       status: :partial,
-      divergences: ["D-M-1", "D-M-5", "D-M-9"]
+      divergences: ["D-M-5"],
+      note: "mark_read is an explicit param on all three; the default differs by design (MCP and the CLI drain true, a plain REST GET false)."
     },
     %{
       id: "misc/task_mailbox_outstanding_read_not",
       title: "Task mailbox, outstanding (read, not cleared)",
       mcp: ["inbox_check"],
-      cli: nil,
+      cli: ["arb inbox", "arb message inbox"],
       rest: ["GET /api/messages"],
-      status: {:gap, "P-26"},
-      absent: %{
-        cli: {:gap, "P-26", "No `arb inbox --outstanding` for a task mailbox."}
-      }
+      status: :full
     },
     %{
       id: "misc/show_one_message_in_full",
@@ -1581,8 +1576,7 @@
       mcp: ["coordinator_inbox_clear"],
       cli: ["arb inbox clear"],
       rest: ["DELETE /api/messages"],
-      status: :partial,
-      divergences: ["D-M-2", "D-M-10"]
+      status: :full
     },
     %{
       id: "misc/clear_all_coordinator_messages_for_one",
@@ -1590,8 +1584,7 @@
       mcp: ["coordinator_inbox_clear"],
       cli: ["arb inbox clear"],
       rest: ["DELETE /api/messages"],
-      status: :partial,
-      divergences: ["D-M-3", "D-M-10"]
+      status: :full
     },
     %{
       id: "misc/clear_the_read_tail_bulk",
@@ -1599,8 +1592,7 @@
       mcp: ["coordinator_inbox"],
       cli: ["arb inbox clear"],
       rest: ["DELETE /api/messages"],
-      status: :partial,
-      divergences: ["D-M-5", "D-M-10"]
+      status: :full
     },
     %{
       id: "misc/clear_everything_incl_unread",
@@ -1620,7 +1612,8 @@
       cli: ["arb message send", "arb msg"],
       rest: ["POST /api/messages"],
       status: :partial,
-      divergences: ["D-M-1", "D-M-8", "D-M-9"]
+      divergences: ["D-M-8"],
+      note: "Recipient, workspace and sender are shared (Mailbox.send_message/2); the allowed kinds still differ (MCP and the CLI take five, REST any)."
     },
     %{
       id: "misc/direct_a_worker_coordinator_direction",
@@ -1628,8 +1621,7 @@
       mcp: ["message_send"],
       cli: ["arb message"],
       rest: ["POST /api/messages"],
-      status: :partial,
-      divergences: ["D-M-9"]
+      status: :full
     },
     %{
       id: "misc/list_recent_notifications",
@@ -1637,8 +1629,7 @@
       mcp: ["notify_list"],
       cli: ["arb message notify", "arb notify"],
       rest: ["GET /api/messages"],
-      status: :partial,
-      divergences: ["D-M-4"]
+      status: :full
     },
     %{
       id: "misc/deprecated_flat_aliases",

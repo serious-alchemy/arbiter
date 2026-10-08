@@ -652,10 +652,10 @@ defmodule Arbiter.MCP.ToolsTest do
 
       {:ok, _} = Message.mark_read(read)
 
-      assert {:ok, %{cleared: cleared, not_found: [], cleared_by_task: []}} =
+      assert {:ok, %{cleared: cleared, not_found: [], cleared_count: 2}} =
                Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [unread.id, read.id]})
 
-      assert Enum.map(cleared, & &1.id) |> Enum.sort() == Enum.sort([unread.id, read.id])
+      assert Enum.sort(cleared) == Enum.sort([unread.id, read.id])
 
       assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, unread.id)
       assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, read.id)
@@ -672,7 +672,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{cleared: [cleared], not_found: []}} =
                Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [foreign.id]})
 
-      assert cleared.id == foreign.id
+      assert cleared == foreign.id
     end
 
     test "reports unknown ids as not_found", ctx do
@@ -684,7 +684,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{cleared: [cleared], not_found: [^bogus]}} =
                Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [m.id, bogus]})
 
-      assert cleared.id == m.id
+      assert cleared == m.id
     end
 
     test "clears every coordinator message concerning a task_id", ctx do
@@ -708,10 +708,10 @@ defmodule Arbiter.MCP.ToolsTest do
           body: "not this task"
         })
 
-      assert {:ok, %{cleared_by_task: [cleared]}} =
+      assert {:ok, %{cleared: [cleared]}} =
                Tools.coordinator_inbox_clear(ctx.coordinator, %{"task_id" => ctx.task.id})
 
-      assert cleared.id == escalation.id
+      assert cleared == escalation.id
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
     end
 
@@ -729,7 +729,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{cleared: [cleared], not_found: []}} =
                Tools.coordinator_inbox_clear(a, %{"ids" => [m.id]})
 
-      assert cleared.id == m.id
+      assert cleared == m.id
 
       # The shared row survives, so the sessionless coordinator and session B
       # both still owe the message.
@@ -752,10 +752,10 @@ defmodule Arbiter.MCP.ToolsTest do
           body: "needs a decision"
         })
 
-      assert {:ok, %{cleared_by_task: [cleared]}} =
+      assert {:ok, %{cleared: [cleared]}} =
                Tools.coordinator_inbox_clear(a, %{"task_id" => ctx.task.id})
 
-      assert cleared.id == m.id
+      assert cleared == m.id
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
       assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
@@ -774,7 +774,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, m} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e-clear"})
 
-      assert {:ok, %{cleared: [%{id: cleared_id}]}} =
+      assert {:ok, %{cleared: [cleared_id]}} =
                Catalog.call(scope_a, "coordinator_inbox_clear", %{"ids" => [m.id]})
 
       assert cleared_id == m.id
@@ -7359,6 +7359,91 @@ defmodule Arbiter.MCP.ToolsTest do
     with {:ok, session} <-
            Ash.create(Session, %{cwd: "/tmp/mcp-tools-session", workspace_id: ws_id}) do
       {:ok, %Scope{tier: :coordinator, workspace_id: ws_id, session_id: session.id}}
+    end
+  end
+
+  describe "P-26 mailbox parity" do
+    test "message_send refuses a recipient that is not a task, for both tiers", ctx do
+      for scope <- [ctx.coordinator, ctx.worker] do
+        assert {:error, {:not_found, _}} =
+                 Tools.message_send(scope, %{"task_id" => "no-such-task", "body" => "hi"})
+      end
+    end
+
+    test "message_send files a worker's message under the recipient's workspace", ctx do
+      {:ok, sibling} =
+        Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id, acceptance: "- x"})
+
+      assert {:ok, %{workspace_id: ws_id, task_ref: task_ref}} =
+               Tools.message_send(ctx.worker, %{"task_id" => sibling.id, "body" => "hi"})
+
+      assert ws_id == ctx.ws.id
+      assert task_ref == sibling.id
+    end
+
+    test "a message sent the way the CLI sends it (no workspace) reaches the recipient's inbox_check in a multi-workspace install",
+         ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-multi", prefix: "pmu"})
+
+      {:ok, other_task} =
+        Ash.create(Issue, %{title: "elsewhere", workspace_id: other_ws.id, acceptance: "- x"})
+
+      # `POST /api/messages` as `arb message send` issues it: recipient only.
+      assert {:ok, %{workspace_id: ws_id}} =
+               Arbiter.Messages.Mailbox.send_message(%Scope{tier: :coordinator}, %{
+                 to_ref: other_task.id,
+                 body: "from the cli",
+                 kind: "info"
+               })
+
+      assert ws_id == other_ws.id
+
+      worker = %Scope{
+        tier: :worker,
+        workspace_id: other_ws.id,
+        task_id: other_task.id,
+        repo: "shipyard"
+      }
+
+      assert {:ok, %{count: 1, messages: [%{body: "from the cli"}]}} =
+               Tools.inbox_check(worker, %{})
+    end
+
+    test "inbox_check mark_read: false peeks without consuming", ctx do
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: ctx.ws.id,
+          from_ref: "coordinator",
+          to_ref: ctx.task.id,
+          body: "peek"
+        })
+
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{"mark_read" => false})
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{"mark_read" => false})
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{})
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
+    end
+
+    test "coordinator_inbox_clear task_id clears the thread in every workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-clear-other", prefix: "pcl"})
+
+      {:ok, other_task} =
+        Ash.create(Issue, %{title: "other", workspace_id: other_ws.id, acceptance: "- x"})
+
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :failure,
+          workspace_id: other_ws.id,
+          to_ref: "coordinator",
+          task_ref: other_task.id,
+          body: "elsewhere"
+        })
+
+      unbound = %Scope{tier: :coordinator}
+
+      assert {:ok, %{cleared_count: 1}} =
+               Tools.coordinator_inbox_clear(unbound, %{"task_id" => other_task.id})
     end
   end
 end

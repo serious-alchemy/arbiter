@@ -184,7 +184,7 @@ JSON. `R` = readable, `W` = writable.
 | `convoy_status` | worker (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
 | `inbox_check` | worker (own task), coordinator | R | `Messages.inbox/2` + `mark_read` |
-| `notify_list` | worker (own ws), coordinator | R | `Messages.recent_notifications/2` |
+| `notify_list` | worker (own ws), coordinator | R | `Messages.Mailbox.notifications/1` |
 | `message_send` | worker, coordinator | W | `Messages.send_mail/1` — coordinator→direction, worker→flag-to-sibling |
 | `worker_list` | coordinator | R | `Ash.read(Workers.Run)` / live snapshot |
 | `worker_dispatch` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.dispatch/2` |
