@@ -311,7 +311,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # bd-dun10t: how many times a no-diff, CI-triggered fix round may send the gate
   # back to re-read (and rerun) CI before it parks.
-  @ci_noop_rerun_cap 2
+  @ci_noop_rerun_cap 1
 
   # bd-cb7wpq: the literal line an implementer prints (see `revise_prompt/2`)
   # to declare a finding resolved through something other than a file change
@@ -1645,7 +1645,7 @@ defmodule Arbiter.Worker.ReviewGate do
             "re-run (#{why}); treating it as a real failure"
         )
 
-        ci_fix(state, wait, checks, false)
+        ci_act(state, wait, :fix, nil)
     end
   end
 
@@ -5882,6 +5882,27 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp arb_token_opts(_state, _role), do: []
 
+  # bd-dun10t: a revise-round implementer needs the `arbiter` MCP tools
+  # (`ci_rerun`, `flake_record`) like a fix_pass worker. Re-inject a fresh
+  # `.mcp.json` + worker token (bd-7e8ezw): the original run's file may carry an
+  # expired 4h lease or be absent. Falls back to the bare token when the task
+  # cannot be loaded.
+  @doc false
+  def implementer_mcp_opts(state, :implementer, adapter) do
+    case load_issue(state.task_id) do
+      %Issue{} = task ->
+        Dispatch.inject_mcp_config(task, state.worktree_path,
+          repo: Map.get(state, :repo),
+          agent_adapter: adapter
+        )
+
+      nil ->
+        arb_token_opts(state, :implementer)
+    end
+  end
+
+  def implementer_mcp_opts(state, role, _adapter), do: arb_token_opts(state, role)
+
   defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
@@ -5991,7 +6012,7 @@ defmodule Arbiter.Worker.ReviewGate do
           timeout_ms: state.timeout_ms,
           owner: pid,
           task_id: state.task_id
-        ] ++ arb_token_opts(state, role) ++ sandbox_wrap_opts(policy, role)
+        ] ++ implementer_mcp_opts(state, role, adapter) ++ sandbox_wrap_opts(policy, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 

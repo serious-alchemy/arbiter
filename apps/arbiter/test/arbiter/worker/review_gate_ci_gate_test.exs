@@ -339,6 +339,27 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert prompt =~ "flake_record"
     end
 
+    test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
+      rig = rig(ctx, "feature/ci-mcp")
+      File.rm(Path.join(rig.worktree, ".mcp.json"))
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ctx.ws.id,
+        worktree_path: rig.worktree,
+        repo: "trib/repo"
+      }
+
+      opts = ReviewGate.implementer_mcp_opts(state, :implementer, Arbiter.Agents.Claude)
+
+      assert path = opts[:mcp_config]
+      assert File.exists?(path)
+      assert Path.basename(path) == ".mcp.json"
+      assert is_binary(opts[:arb_token])
+
+      assert ReviewGate.implementer_mcp_opts(state, :reviewer, Arbiter.Agents.Claude) == []
+    end
+
     test "red CI at the round cap escalates instead of reviewing", ctx do
       rig = rig(ctx, "feature/ci-5")
       start_forge(ctx, rig, [:failed, :running, :failed])
