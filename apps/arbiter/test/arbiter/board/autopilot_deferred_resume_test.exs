@@ -121,6 +121,24 @@ defmodule Arbiter.Board.AutopilotDeferredResumeTest do
     refute_received {:dispatched, _}
   end
 
+  # bd-4l7l2n: a ticket that closed or merged while its pass waited is dropped.
+  test "cancel_deferred/2 drops a ticket's queued round and leaves the others" do
+    {pid, free} = start(slots_free: 0)
+    :ok = Autopilot.defer_resume(pid, "bd-closed", :fix_pass, [])
+    :ok = Autopilot.defer_resume(pid, "bd-other", :fix_pass, [])
+
+    assert :ok = Autopilot.cancel_deferred(pid, "bd-closed")
+    assert Autopilot.deferred_resume_ids(pid) == ["bd-other"]
+
+    free_slot(free)
+    assert {:resumed, "bd-other"} = Autopilot.tick(pid)
+    refute_received {:resumed, "bd-closed", _, _}
+  end
+
+  test "cancel_deferred/2 against a scheduler that is not running is a no-op" do
+    assert :ok = Autopilot.cancel_deferred(:no_such_autopilot, "bd-x")
+  end
+
   test "deferring schedules a pass by itself, so a free slot is taken without a tick" do
     {pid, _free} = start(slots_free: 1, debounce_ms: 5)
     :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])

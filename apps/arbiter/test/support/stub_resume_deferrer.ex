@@ -24,7 +24,19 @@ defmodule Arbiter.Test.StubResumeDeferrer do
   @doc "Every `defer_resume/3` call as `{task_id, kind, opts}`, oldest first."
   def deferrals do
     ensure_started()
-    Agent.get(@name, &Enum.reverse/1)
+    for {_id, _kind, _opts} = deferral <- Agent.get(@name, &Enum.reverse/1), do: deferral
+  end
+
+  @doc "Every `cancel_deferred/1` call's task id (bd-4l7l2n), oldest first."
+  def cancellations do
+    ensure_started()
+    for {:cancel, id} <- Agent.get(@name, &Enum.reverse/1), do: id
+  end
+
+  def cancel_deferred(task_id) do
+    ensure_started()
+    Agent.update(@name, &[{:cancel, task_id} | &1])
+    :ok
   end
 
   def defer_resume(task_id, kind, opts) do

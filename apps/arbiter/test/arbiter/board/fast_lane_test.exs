@@ -104,6 +104,7 @@ defmodule Arbiter.Board.FastLaneTest do
                repo: "fl/repo",
                checks: [],
                start_claude: false,
+               pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end,
                defer_resume: &Autopilot.defer_resume(autopilot, &1, &2, &3)
              })
 
