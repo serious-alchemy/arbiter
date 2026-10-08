@@ -481,6 +481,20 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   @doc """
+  Task ids whose deferred resume is a `:fix_pass`, like `deferred_resume_ids/1`
+  but ignoring other kinds (`:resume`, `:resume_session`, `:conflict`).
+  """
+  @spec deferred_fix_pass_ids(GenServer.server()) :: [String.t()]
+  def deferred_fix_pass_ids(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> []
+      _pid -> server |> status(1_000) |> Map.get(:deferred_fix_passes, [])
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
   The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
   `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
   the scheduler is not running or does not answer. Best-effort and quick: a
@@ -610,7 +624,8 @@ defmodule Arbiter.Board.Autopilot do
        changed_by: state.paused_changed_by,
        dispatching: dispatching_id(state),
        holds: state.holds,
-       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id)
+       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id),
+       deferred_fix_passes: for(%{kind: :fix_pass, task_id: id} <- state.deferred_resumes, do: id)
      }, state}
   end
 
