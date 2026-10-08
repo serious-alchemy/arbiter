@@ -283,11 +283,50 @@ defmodule Arbiter.Worker.StopReason do
     | ^[ \t]*5[ -]hour[ _]limit[ _]reached
     | ^[ \t]*5h[ _]limit[ _]reached
     | usage[ _]limit[ _]reached\|\d+
-    | ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](session|usage)[ ]limit
-    | ^[ \t]*(session|usage)[ _]limit[ _]reached
+    | ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](session|usage|weekly|opus|sonnet)[ ]limit
+    | ^[ \t]*(session|usage|weekly)[ _]limit[ _]reached
   /mix
 
   @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
+
+  # bd-a6vh2x: agy's own quota stop (run ddebab52, exit 3):
+  #
+  #     error: Individual quota reached. Please upgrade your subscription to
+  #       increase your limits. Resets in 11m34s.
+  #     AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual
+  #       quota reached. ... Resets in 11m34s.","status":"RESOURCE_EXHAUSTED",
+  #       "error_code":429,"retryable":true,...}
+  #
+  # It used to fall through to `@rate_limit_signature` (`resource_exhausted`)
+  # and so to `:rate_limited`, whose remediation is "retry" — but this is a
+  # time-boxed allowance, the same thing as Claude's session limit. Anchored to
+  # the two line heads agy emits it under (`AGY_ERROR:` / `error:`), the same
+  # discipline as `@grok_free_usage_signature`, so prose or a tool result that
+  # quotes the wording cannot park a run; and it needs the *quota* wording, so
+  # a plain `RESOURCE_EXHAUSTED ... too many requests` stays a rate limit.
+  @agy_quota_signature ~r/
+      ^[ \t]*AGY_ERROR:[^\n]*RESOURCE_EXHAUSTED[^\n]*quota[ ](?:reached|exceeded|exhausted)
+    | ^[ \t]*error:[ ](?:individual[ ]|team[ ])?quota[ ](?:reached|exceeded|exhausted)
+  /imx
+
+  # `Resets in 11m34s` / `2h5m` / `45s`, as agy renders the time left.
+  @relative_reset_signature ~r/
+      \bresets[ ]in[ ]
+      (?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?
+  /ix
+
+  # bd-a6vh2x: grok's free-tier cap reached the other way round — not the 429
+  # `subscription:free-usage-exhausted` above but the CLI's own refusal (run
+  # 4a76953c, exit 1, which classified as a plain `:crashed`):
+  #
+  #     grok error: You\u2019ve reached your free Grok Build usage limit for now.
+  #       Get SuperGrok for much higher limits, or try again later: ...
+  #
+  # No reset time and no token counts. Anchored to the `grok error:` /
+  # `Error:` heads and checked on a non-zero exit only, as above.
+  @grok_build_limit_signature ~r/
+      ^[ \t]*(?:grok[ ]error:|error:)[ ]*you.{0,3}ve[ ]reached[ ]your[ ]free[ ]grok[ ]build[ ]usage[ ]limit
+  /imx
 
   # bd-cwq8b0: grok's free-tier 429, `subscription:free-usage-exhausted: You've
   # used all the included free usage for model grok-4.7 for now. Usage resets
@@ -540,6 +579,29 @@ defmodule Arbiter.Worker.StopReason do
               "there is no fixed reset time. Dispatch to grok stays held until the trailing " <>
               "24h of usage drains below the cap (Arbiter.Quota.GrokLedger), or route to " <>
               "another provider.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      exit_status != 0 and Regex.match?(@agy_quota_signature, haystack) ->
+        retry_after = relative_reset_from(haystack)
+
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "agy's provider quota was reached (RESOURCE_EXHAUSTED, code 429)",
+          remediation: quota_remediation(retry_after),
+          exit_status: exit_status,
+          signal: signal,
+          retry_after: retry_after
+        }
+
+      exit_status != 0 and Regex.match?(@grok_build_limit_signature, haystack) ->
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "grok's free Grok Build usage limit was reached (no reset time reported)",
+          remediation:
+            "The free tier is spent and grok reports no reset time. Dispatch to grok stays " <>
+              "held for a bounded wait, or the task moves to another provider.",
           exit_status: exit_status,
           signal: signal
         }
@@ -1173,6 +1235,22 @@ defmodule Arbiter.Worker.StopReason do
   defp retry_after_from(haystack) do
     epoch_reset_from(haystack) || wallclock_reset_from(haystack)
   end
+
+  # bd-a6vh2x: `Resets in 11m34s` is a duration from the moment the message was
+  # printed — which is about when the run stopped, so "now" is the anchor. A
+  # match with no units (`Resets in .`) is no reset time.
+  defp relative_reset_from(haystack) do
+    with %{"h" => h, "m" => m, "s" => s} <-
+           Regex.named_captures(@relative_reset_signature, haystack),
+         secs when secs > 0 <- unit_secs(h, 3600) + unit_secs(m, 60) + unit_secs(s, 1) do
+      DateTime.add(DateTime.utc_now(), secs, :second)
+    else
+      _ -> nil
+    end
+  end
+
+  defp unit_secs("", _per), do: 0
+  defp unit_secs(n, per), do: String.to_integer(n) * per
 
   defp epoch_reset_from(haystack) do
     with [_, secs] <- Regex.run(@quota_reset_signature, haystack),

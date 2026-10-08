@@ -1835,8 +1835,11 @@ defmodule Arbiter.Worker do
     :ok
   end
 
+  # bd-a6vh2x: a run that stopped on its provider's quota did not crash, so
+  # resuming it once the hold lifts is not another attempt at a crashed run.
   defp prior_run_failed?(run_id) do
     case Ash.get(Arbiter.Workers.Run, run_id) do
+      {:ok, %{stop_category: "quota_exhausted"}} -> false
       {:ok, %{outcome: outcome}} -> outcome in [:failed, :interrupted]
       _ -> false
     end
@@ -5264,9 +5267,16 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp do_maybe_resume_continuation(%State{meta: meta} = state, session) do
+  defp do_maybe_resume_continuation(%State{} = state, session) do
     reason = classify_stop(session)
 
+    case quota_stop_hold(state, session, reason) do
+      {:held, held_state} -> held_state
+      :not_held -> resume_or_fail(state, session, reason)
+    end
+  end
+
+  defp resume_or_fail(%State{meta: meta} = state, session, reason) do
     session_id =
       session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
 
@@ -5320,6 +5330,163 @@ defmodule Arbiter.Worker do
 
         fail_unresumable(state, session, reason)
     end
+  end
+
+  # ---- bd-a6vh2x: a provider quota stop is a hold, not a crash ----------------
+  #
+  # A ticket's own run that stopped because its provider account ran out of
+  # allowance (`StopReason` `:quota_exhausted`: agy `RESOURCE_EXHAUSTED`,
+  # Claude's session/weekly limit, grok's free-usage limit) used to park this
+  # worker — and its slot, port bookkeeping and worktree — for hours until the
+  # reset, or fail into a `run_crashed` attention that the coordinator cleared
+  # by hand with `arb worker resume`. Now the worker finishes at once and the
+  # fleet remembers what to do:
+  #
+  #   1. the account is held until the reset (`Providers.Pause.quota_hold/4`):
+  #      routing stops sending it work, and the quota surfaces list the hold;
+  #   2. the ticket is queued as a held resume (`DispatchQueue.hold_until/6`,
+  #      `quota_resume: true`), which `Dispatch.dispatch/2` replays as a
+  #      session resume in the preserved worktree once the account is free —
+  #      or earlier, on another provider, if routing can already place it;
+  #   3. neither a resume attempt nor a crash is counted, and no escalation
+  #      goes to the coordinator: the held item keeps the ticket's attention
+  #      empty (`Tasks.Lifecycle.Attention`, run fact `:held`).
+  #
+  # Anything this cannot do cleanly — a pass or reviewer, a ticket that has
+  # moved on, an unknown provider, a reset further out than any real plan
+  # window — returns `:not_held` and takes the older path unchanged.
+  @quota_stop_default_wait_ms :timer.hours(1)
+
+  defp quota_stop_hold(%State{} = state, session, %{category: :quota_exhausted} = reason) do
+    with true <- ticket_run?(state),
+         %Arbiter.Tasks.Issue{state: :active, workspace_id: ws_id} when is_binary(ws_id) <-
+           load_issue(state.task_id),
+         {:ok, agent_type} <- quota_stop_agent_type(state),
+         false <- quota_wait_exceeds_max?(reason.retry_after),
+         until = quota_stop_until(ws_id, agent_type, reason) do
+      {:held, hold_quota_stop(state, session, reason, ws_id, agent_type, until)}
+    else
+      _ -> :not_held
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: task=#{state.task_id} could not hold a quota stop: #{Exception.message(e)}"
+      )
+
+      :not_held
+  catch
+    :exit, _ -> :not_held
+  end
+
+  defp quota_stop_hold(_state, _session, _reason), do: :not_held
+
+  # The run that authors the ticket: not a fix/conflict pass, not a reviewer.
+  defp ticket_run?(%State{task_id: task_id, meta: meta}) do
+    is_nil(role_from_meta(meta)) and not review_only?(meta) and
+      Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id
+  end
+
+  defp load_issue(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, issue} -> issue
+      _ -> nil
+    end
+  end
+
+  # The agent type (`:claude` / `:gemini` / …) the stopped run was routed to —
+  # the key the quota gate, the pauses and the dispatch queue all share.
+  defp quota_stop_agent_type(%State{} = state) do
+    {provider, _model} = respawn_routing(state)
+    atom = String.to_existing_atom(provider)
+
+    if Map.has_key?(Arbiter.Agents.adapters(), atom), do: {:ok, atom}, else: :error
+  rescue
+    ArgumentError -> :error
+  end
+
+  # The reset: the provider's own word in the stop message, else the quota
+  # probe's latest reading for the account, else a bounded default (the stop
+  # simply re-holds if the account is still dry when it lifts).
+  defp quota_stop_until(ws_id, agent_type, reason) do
+    now = DateTime.utc_now()
+
+    case reason.retry_after || probe_reset_at(ws_id, agent_type, now) do
+      %DateTime{} = at -> DateTime.add(now, quota_resume_backoff_ms(at), :millisecond)
+      nil -> DateTime.add(now, @quota_stop_default_wait_ms, :millisecond)
+    end
+  end
+
+  defp probe_reset_at(ws_id, agent_type, now) do
+    case ws_id
+         |> Arbiter.Quota.latest_for_workspace(agent_type)
+         |> Arbiter.Quota.Gate.Snapshot.normalize() do
+      %{reset_at: %DateTime{} = at} -> if DateTime.compare(at, now) == :gt, do: at
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp hold_quota_stop(%State{} = state, session, reason, ws_id, agent_type, until) do
+    label = DispatchQueue.provider_label(agent_type)
+
+    Logger.info(
+      "Worker: task=#{state.task_id} stopped on #{label} quota — holding the account until " <>
+        "#{DateTime.to_iso8601(until)} and queueing a resume (no crash counted)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+      |> Map.put(:quota_hold_until, until)
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    # The run row first: the queued resume records the newest run it continues.
+    record_run_finished(new_state)
+
+    unless open_quota_hold(new_state, ws_id, agent_type, until, "#{label} quota exhausted") do
+      # No hold to wait on: this is an ordinary stop after all.
+      Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    end
+
+    broadcast_lifecycle(:updated, new_state)
+
+    Arbiter.Events.broadcast(ws_id, "worker_quota_held", %{
+      task_id: state.task_id,
+      provider: to_string(agent_type),
+      until: DateTime.to_iso8601(until)
+    })
+
+    _ = session
+    new_state
+  end
+
+  # The account hold plus the queued resume; `true` only when the resume is
+  # queued (the account hold alone would strand the ticket).
+  defp open_quota_hold(%State{task_id: task_id}, ws_id, agent_type, until, phrase) do
+    account = quota_stop_account(ws_id, agent_type)
+    _ = Arbiter.Providers.Pause.quota_hold(agent_type, account, until, reason: phrase)
+
+    DispatchQueue.hold_until(
+      ws_id,
+      task_id,
+      [quota_resume: true, routing_role: :resume_session],
+      %{phrase: phrase, window: nil},
+      agent_type,
+      until
+    ) == :ok
+  end
+
+  defp quota_stop_account(ws_id, agent_type) do
+    AccountResolver.get(Arbiter.Quota.account_id(ws_id, agent_type))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # A quota stop parks the worker for hours before the resume, so refuse the
