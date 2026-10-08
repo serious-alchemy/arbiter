@@ -6,10 +6,12 @@ defmodule ArbiterCli.Cmd.Resolve do
   its round cap without converging, or the notes / commit gate spending its
   send-back budget. One decision flag, whose value is your reasoning:
 
-      --accept-as-is "<why>"   ship it with the finding standing
+      --accept-as-is "<why>"   ship it with the finding standing   (permits a merge)
       --amend        "<why>"   you change the requirement / direct the change
-      --send-back    "<why>"   return it to the implementer
-      --reject       "<why>"   abandon the work
+                               (permits a merge)
+      --send-back    "<why>"   return it to the implementer; another review
+                               round follows when it finishes (no merge)
+      --reject       "<why>"   abandon the work (no merge)
 
       arb review resolve vs-acnaup --amend "heuristic need not be airtight; provenance tag instead"
       arb review resolve bd-2bydpv --send-back "worker skipped the notes write" --gate notes_gate
@@ -27,7 +29,10 @@ defmodule ArbiterCli.Cmd.Resolve do
   The decision, reasoning, actor (derived server-side from your token) and timestamp are persisted against the ticket
   and returned by `review_gate_rounds_list`, so an override of a reviewer's
   standing finding is on record where the argument is — not only in a commit
-  message. It records; it does not resume, merge or close anything.
+  message. It records; it does not resume, merge or close anything. The merge
+  path does read it: a PR whose latest reviewer verdict is not APPROVE merges
+  only after an `--accept-as-is` / `--amend` recorded for its head — a
+  `--send-back` ticket needs the next review round to approve.
 
   Wraps `POST /api/issues/:id/resolve`.
   """

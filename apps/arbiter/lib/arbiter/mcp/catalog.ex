@@ -1723,8 +1723,12 @@ defmodule Arbiter.MCP.Catalog do
           "`review_gate_rounds_list` then returns it after the rounds with `outcome: resolved`, " <>
           "so an override of a reviewer's standing finding is visible where the argument is, " <>
           "not only in a commit message. A record, not an action: it does not resume, merge " <>
-          "or close anything — do that with the usual tools. CLI: `arb review resolve <ticket> " <>
-          "--amend \"<reasoning>\"`.",
+          "or close anything — do that with the usual tools. But it is read by the merge path: " <>
+          "ONLY accept_as_is / amend permit a merge without a fresh reviewer APPROVE (and only " <>
+          "of the head they were recorded against). send_back means ANOTHER REVIEW ROUND FOLLOWS " <>
+          "the implementer's next completion — it never authorises a merge, and a PR whose " <>
+          "latest reviewer verdict is not APPROVE stays unmerged until that round approves. " <>
+          "CLI: `arb review resolve <ticket> --amend \"<reasoning>\"`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1736,9 +1740,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "enum" => ["accept_as_is", "amend", "send_back", "reject"],
             "description" =>
-              "accept_as_is: ship with the finding standing. amend: you change the " <>
-                "requirement or direct a specific change on your own authority. send_back: " <>
-                "return it to the implementer. reject: abandon the work. (required)"
+              "accept_as_is: ship with the finding standing (permits the merge). amend: you " <>
+                "change the requirement or direct a specific change on your own authority " <>
+                "(permits the merge). send_back: return it to the implementer — another review " <>
+                "round follows when it finishes; does NOT permit a merge. reject: abandon the " <>
+                "work (does not permit a merge). (required)"
           },
           "reasoning" => %{
             "type" => "string",
@@ -1761,6 +1767,13 @@ defmodule Arbiter.MCP.Catalog do
           "fix_round_attempt" => %{
             "type" => "integer",
             "description" => "The fix-round pass `round` belongs to (default 0 with `round`)."
+          },
+          "head_sha" => %{
+            "type" => "string",
+            "description" =>
+              "The commit your accept_as_is / amend covers. Default: the head of the ticket's " <>
+                "PR as last observed. A head pushed after it needs a reviewer round or a new " <>
+                "decision."
           }
         },
         "required" => ["task_id", "decision", "reasoning"],

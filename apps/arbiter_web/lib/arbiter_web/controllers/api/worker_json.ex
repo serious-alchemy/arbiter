@@ -1,6 +1,7 @@
 defmodule ArbiterWeb.Api.WorkerJSON do
   alias Arbiter.Usage.LiveSpend
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunNode
   alias ArbiterWeb.Api.IssueJSON
   alias ArbiterWeb.Api.WorkspaceParam
 
@@ -61,7 +62,9 @@ defmodule ArbiterWeb.Api.WorkerJSON do
     meta = Map.get(view, :meta) || %{}
     model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
 
-    %{
+    view
+    |> RunNode.fields()
+    |> Map.merge(%{
       task_id: view.ticket_id,
       run_task_id: view.task_id,
       run_id: Map.get(view, :run_id),
@@ -94,7 +97,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       model: Arbiter.Worker.Stats.short_model_name(model_id),
       failure_reason: stringify(Map.get(view, :failure_reason)),
       failure_summary: Map.get(meta, :failure_summary)
-    }
+    })
   end
 
   @doc """
@@ -116,6 +119,8 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       :outcome,
       :waiting_on,
       :role,
+      :node_id,
+      :node_name,
       :phase,
       :phase_label,
       :started_at,
@@ -136,6 +141,8 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       :state,
       :outcome,
       :role,
+      :node_id,
+      :node_name,
       :model,
       :started_at,
       :completed_at,

@@ -322,8 +322,11 @@ defmodule Arbiter.MCP.Tools do
   Record the coordinator's answer to a gate escalation (bd-4qjl0q): `decision`
   (`accept_as_is` / `amend` / `send_back` / `reject`), `reasoning`, and
   optionally `gate` (`review_gate` default, `notes_gate`, `commit_gate`),
-  `round` / `fix_round_attempt`. Coordinator
-  only. A record, not an action — see `Arbiter.ReviewGate.Resolution`.
+  `round` / `fix_round_attempt` / `head_sha`. Coordinator only. Not an action,
+  but the merge path reads it (`Arbiter.ReviewGate.MergeAuthorization`): only
+  `accept_as_is` / `amend` permit a merge without a fresh reviewer APPROVE;
+  `send_back` means another review round follows the implementer's completion.
+  See `Arbiter.ReviewGate.Resolution`.
   """
   @spec review_gate_resolve(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def review_gate_resolve(%Scope{} = scope, args) do
@@ -332,7 +335,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, _reasoning} <- require_string(args, "reasoning"),
          {:ok, resolution} <-
            args
-           |> Map.take(~w(task_id decision reasoning gate round fix_round_attempt))
+           |> Map.take(~w(task_id decision reasoning gate round fix_round_attempt head_sha))
            |> Map.put("actor", Arbiter.Params.actor_label(scope) || "coordinator")
            |> Resolutions.record() do
       {:ok, %{resolution: Resolutions.serialize(resolution)}}

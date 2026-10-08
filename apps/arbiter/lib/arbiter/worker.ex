@@ -2682,10 +2682,18 @@ defmodule Arbiter.Worker do
       |> Map.put(:config_dir, config_dir)
       |> Map.put(:cwd, Map.get(port_args, :cd))
       |> maybe_put(:provider, provider && to_string(provider))
+      |> maybe_put(:node_id, handle_node_id(port))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
+
+    # The run's row records where it executes (nil = the primary).
+    node_id = handle_node_id(port)
+
+    if node_id && new_state.run_id do
+      backfill_run_fields(new_state.run_id, %{node_id: node_id}, new_state.task_id)
+    end
 
     backfill_session_dispatch(
       new_state.run_id,
@@ -3247,6 +3255,10 @@ defmodule Arbiter.Worker do
     Arbiter.Nodes.LostResume.schedule(state.task_id)
     new_state
   end
+
+  # The node a session handle executes on; nil for a local port.
+  defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
+  defp handle_node_id(_handle), do: nil
 
   defp node_name({:remote, {node_id, _run, _ref}}) do
     case Arbiter.Nodes.get_node(node_id) do

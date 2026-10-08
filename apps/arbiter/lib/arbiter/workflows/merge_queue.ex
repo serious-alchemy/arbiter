@@ -218,6 +218,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.Issue
@@ -283,7 +284,8 @@ defmodule Arbiter.Workflows.MergeQueue do
           phantom_conflicts: non_neg_integer(),
           coverage_unknown_polls: non_neg_integer(),
           coverage_unknown_head: String.t() | nil,
-          coverage_parked?: boolean()
+          coverage_parked?: boolean(),
+          review_refused_head: String.t() | :unknown | nil
         }
 
   defmodule State do
@@ -1409,9 +1411,74 @@ defmodule Arbiter.Workflows.MergeQueue do
   # and `Coverage.decide/3` shadows. Flag on, the two swap roles. Returns
   # `{result, item}`: the coverage path carries a bounded wait on the item, and
   # a bound that lived in a local variable would reset every tick.
+  #
+  # bd-651ine / #529: ahead of both predicates, the ReviewGate's own record must
+  # permit the merge. They compare the head with an APPROVED head, so a ticket
+  # the gate REJECTED — no approval, no baseline — went through unguarded, a
+  # `send_back` resolution included. `MergeAuthorization` closes that: a latest
+  # reviewer round that did not approve blocks the merge unless an
+  # `accept_as_is` / `amend` resolution covers this head.
   defp merge_guarded(state, item) do
     head = Map.get(item, :last_head_sha)
 
+    case MergeAuthorization.check(item.task_id, head) do
+      :ok ->
+        merge_coverage_guarded(state, item, head)
+
+      {:error, {:review_not_approved, _} = refusal} ->
+        {{:error, refusal}, note_review_refusal(state, item, head, refusal)}
+    end
+  end
+
+  # The refusal is answered by a reviewer round or an `accept_as_is` / `amend`
+  # resolution, both of which a person or the ReviewGate supplies — the queue
+  # dispatches nothing itself. So it says so ONCE per head (log + one page) and
+  # then re-reads the record each tick without a forge call, log line or page:
+  # the shape the guard-policy doc lists as defect M3 (303+ identical retries)
+  # is a loud retry, and this one is neither loud nor a merge attempt.
+  defp note_review_refusal(state, item, head, refusal) do
+    key = head || :unknown
+
+    if item.review_refused_head == key do
+      item
+    else
+      page_review_refusal(state, item, refusal, key)
+    end
+  end
+
+  defp page_review_refusal(state, item, refusal, key) do
+    Logger.warning(
+      "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+        MergeAuthorization.describe(refusal) <>
+        " — paging the coordinator once and making no merge call until the record changes"
+    )
+
+    safe_notify_review_refusal(state, item)
+
+    %{item | review_refused_head: key}
+  end
+
+  defp safe_notify_review_refusal(%State{} = state, item) do
+    Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+      %{task_id: item.task_id, workspace_id: state.workspace_id},
+      item.mr_ref,
+      :review_not_approved
+    )
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue.safe_notify_review_refusal: swallowed exception for task=#{item.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp merge_coverage_guarded(state, item, head) do
     cond do
       coverage_parked_on?(item, head) ->
         # Terminal for this head (AC4): already waited out and paged. Issue no
@@ -1943,6 +2010,12 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
 
+      # bd-651ine: the gate's record forbids the merge until a reviewer round
+      # approves the head or the coordinator accepts it. Non-terminal for the
+      # same reason: the next tick re-reads the record.
+      {:error, {:review_not_approved, _} = reason} ->
+        {%{item | last_error: reason}, state}
+
       {:error, reason} ->
         {%{item | status: :failed, last_error: reason}, state}
     end
@@ -2106,6 +2179,9 @@ defmodule Arbiter.Workflows.MergeQueue do
       coverage_unknown_polls: 0,
       coverage_unknown_head: nil,
       coverage_parked?: false,
+      # bd-651ine / #529. The head `MergeAuthorization` last refused (and paged
+      # for): one page per head, not one per tick.
+      review_refused_head: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,

@@ -7,6 +7,7 @@ defmodule ArbiterWeb.Api.RunJSON do
   """
 
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunNode
 
   def index(%{runs: runs}) do
     %{data: Enum.map(runs, &summary/1)}
@@ -15,7 +16,8 @@ defmodule ArbiterWeb.Api.RunJSON do
   def show(%{run: run}), do: %{data: detail(run)}
 
   defp summary(%Run{} = r) do
-    %{
+    RunNode.fields(r)
+    |> Map.merge(%{
       id: r.id,
       task_id: r.task_id,
       task_title: r.task_title,
@@ -46,7 +48,7 @@ defmodule ArbiterWeb.Api.RunJSON do
       routing_decision: r.routing_decision,
       session_id: r.session_id,
       resumed_from_run_id: r.resumed_from_run_id
-    }
+    })
   end
 
   defp detail(%Run{} = r) do

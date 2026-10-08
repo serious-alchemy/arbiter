@@ -140,6 +140,8 @@ defmodule ArbiterWeb do
       # Provider logo (`<.provider_icon provider={...} />`) — Claude/Codex/Gemini,
       # with a fallback for nil/unknown. See bd-1gj7l5.
       import ArbiterWeb.CoreComponents.ProviderIcon
+      # Where a run executes: node badge + local/remote label (bd-1b4k9r)
+      import ArbiterWeb.CoreComponents.NodeBadge
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # One `parent_of` edge at two sizes: the board card's `↳ bd-epic` chip

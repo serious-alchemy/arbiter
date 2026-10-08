@@ -89,6 +89,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workers.RunNode
 
   require Ash.Query
 
@@ -1350,6 +1351,7 @@ defmodule Arbiter.Board.Snapshot do
       live: live?,
       activity: if(live?, do: activity(w, gate_worker), else: waiting_reason(w)),
       provider: card_provider(w, gate_worker),
+      node_name: card_node_name(w, gate_worker),
       collapsed_note: collapsed_note(w, group),
       since: since(w)
     })
@@ -1892,6 +1894,16 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp card_provider(worker, _gate_worker), do: Worker.provider(Map.get(worker, :meta))
+
+  # Where the card's run executes: the node's name, nil for the primary. A card
+  # waiting on its review gate shows the gate's agent, like the provider.
+  defp card_node_name(worker, %{} = gate_worker) do
+    if Worker.awaiting_review_gate?(worker),
+      do: RunNode.node_name(gate_worker),
+      else: RunNode.node_name(worker)
+  end
+
+  defp card_node_name(worker, _gate_worker), do: RunNode.node_name(worker)
 
   # A reviewer/implementer's synthetic id is `<base>#<suffix>` where suffix
   # may itself be a chain (e.g. `#review#impl2`, `#review#r2#v2`) —

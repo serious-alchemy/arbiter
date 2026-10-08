@@ -452,7 +452,7 @@ defmodule ArbiterCli.Output do
 
   defp current_run_label(%{} = run) do
     phase = if run["phase"] in [nil, ""], do: "", else: "  phase=#{run["phase"]}"
-    RunLabel.label(run) <> phase <> RunLabel.run_suffix(run)
+    RunLabel.label(run) <> phase <> RunLabel.node_suffix(run) <> RunLabel.run_suffix(run)
   end
 
   defp current_run_label(_), do: nil
