@@ -90,6 +90,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunNode
   alias ArbiterWeb.SessionUsage
   alias ArbiterWeb.StatusHelpers
   alias ArbiterWeb.TaskForm
@@ -3009,6 +3010,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     duration={humanize_run_duration(r.started_at, r.completed_at)}
                     cost={run_cost_label(Map.get(@usage_by_run, r.id))}
                     provider={r.provider}
+                    node_name={RunNode.node_name(r)}
                     selected={@expanded_run == r.id}
                     expanded={@expanded_run == r.id}
                     class="cursor-pointer"
@@ -3038,6 +3040,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                         <.provider_icon :if={r.provider} provider={r.provider} class="size-3.5" />
                         {r.model}
                       </span>
+                      <.run_where node_name={RunNode.node_name(r)} id={"run-where-#{r.id}"} />
                       <span>{length(lines)} lines</span>
                       <span>started {format_started(r.started_at)}</span>
                       <span :if={run_failed?(r)} class="text-[var(--arb-fail-text)]">
@@ -3175,6 +3178,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                       />
                     </div>
                     <div class="flex items-center justify-between gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
+                      <.run_where node_name={RunNode.node_name(@worker)} id="worker-where" />
                       <span>started {format_started(@worker && @worker.started_at)}</span>
                       <span :if={worker_activity(@worker)}>{worker_activity(@worker)}</span>
                     </div>

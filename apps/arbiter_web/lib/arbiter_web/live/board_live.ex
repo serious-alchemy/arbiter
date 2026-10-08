@@ -656,7 +656,7 @@ defmodule ArbiterWeb.BoardLive do
     socket
     |> assign(:board_loading?, true)
     |> assign(:board_stale?, false)
-    |> start_async(:board, fn -> load_board() end)
+    |> start_async(:board, load_board_fun(self()))
   end
 
   defp worker_debounce_ms,
@@ -676,7 +676,9 @@ defmodule ArbiterWeb.BoardLive do
   # that connection (under test, the one shared sandbox connection,
   # bd-5scl0c). Trapping turns the view's exit into a message: the query in
   # flight finishes, and the task goes before it starts another.
-  defp load_board do
+  defp load_board_fun(view), do: fn -> load_board(view) end
+
+  defp load_board(view) do
     Process.flag(:trap_exit, true)
     running? = InstallationSettings.scheduler_running?()
     paused? = not running? or InstallationSettings.scheduler_paused?()
@@ -684,11 +686,11 @@ defmodule ArbiterWeb.BoardLive do
     board =
       Snapshot.load(now: DateTime.utc_now(), paused: paused?, exclude_engagements?: true)
 
-    exit_if_view_gone()
+    exit_if_view_gone(view)
     alerts = load_alerts()
-    exit_if_view_gone()
+    exit_if_view_gone(view)
     workspaces = load_workspaces()
-    exit_if_view_gone()
+    exit_if_view_gone(view)
 
     %{
       board: board,
@@ -709,9 +711,11 @@ defmodule ArbiterWeb.BoardLive do
     match?(%{cap: 0, enforced?: true}, Arbiter.Nodes.LocalCapacity.cap())
   end
 
-  defp exit_if_view_gone do
+  # Only the view's own exit: a linked port or helper that finished normally
+  # (the snapshot shells out once a node is enrolled) is not the view going.
+  defp exit_if_view_gone(view) do
     receive do
-      {:EXIT, _view, _reason} -> exit(:shutdown)
+      {:EXIT, ^view, _reason} -> exit(:shutdown)
     after
       0 -> :ok
     end
@@ -1564,6 +1568,7 @@ defmodule ArbiterWeb.BoardLive do
             provider={@card.provider}
             class="size-3.5 text-[var(--text-label)]"
           />
+          <.node_badge :if={@column == "in_progress"} node_name={@card[:node_name]} />
           <%!-- bd-aw2cyt: the pulse is a claim that something is running.
                Only a card with a live agent gets it. --%>
           <span

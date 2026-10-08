@@ -14,6 +14,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Workers.RunNode
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
@@ -306,6 +307,10 @@ defmodule ArbiterWeb.WorkerIndexLive do
                       <.provider_icon
                         provider={Worker.provider(p.meta)}
                         class="size-3.5 text-[var(--text-label)] shrink-0"
+                      />
+                      <.run_where
+                        node_name={RunNode.node_name(p)}
+                        class="text-[10.5px] text-[var(--text-label)] truncate"
                       />
                     </div>
                     <div class="flex items-center gap-2 flex-none">

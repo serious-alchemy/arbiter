@@ -19,6 +19,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   alias Arbiter.Worker.Dispatch.Params
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Current
+  alias Arbiter.Workers.RunNode
 
   require Ash.Query
   require Logger
@@ -382,7 +383,8 @@ defmodule Arbiter.MCP.Tools.Worker do
   end
 
   defp serialize_worker_run_summary(%Arbiter.Workers.Run{} = run) do
-    %{
+    RunNode.fields(run)
+    |> Map.merge(%{
       id: run.id,
       task_id: run.task_id,
       task_title: run.task_title,
@@ -411,7 +413,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       model_tier: run.model_tier,
       thinking: run.thinking,
       difficulty_at_dispatch: run.difficulty_at_dispatch
-    }
+    })
   end
 
   # ---- worker_prompt ----------------------------------------------------
@@ -501,7 +503,8 @@ defmodule Arbiter.MCP.Tools.Worker do
   end
 
   defp serialize_run_log_entry(%Arbiter.Workers.Run{} = run) do
-    %{
+    RunNode.fields(run)
+    |> Map.merge(%{
       run_id: run.id,
       task_id: run.task_id,
       kind: Tools.to_str(run.kind),
@@ -511,7 +514,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       started_at: Tools.iso(run.started_at),
       transcript_exists: File.regular?(Arbiter.Worker.OutputLog.path_for(run.id)),
       line_count: run.id |> Arbiter.Worker.OutputLog.read_lines() |> line_count_of()
-    }
+    })
   end
 
   defp line_count_of({:ok, lines}), do: length(lines)
@@ -781,7 +784,9 @@ defmodule Arbiter.MCP.Tools.Worker do
   # the one run vocabulary. `task_id` is the ticket; `run_task_id` is the id
   # the run itself runs under (a ReviewGate reviewer: `<ticket>#review`).
   defp run_fields(view) do
-    %{
+    view
+    |> RunNode.fields()
+    |> Map.merge(%{
       task_id: view.ticket_id,
       run_task_id: view.task_id,
       run_id: Map.get(view, :run_id),
@@ -806,7 +811,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       repo: view.repo,
       started_at: Tools.iso(view.started_at),
       completed_at: Tools.iso(Map.get(view, :completed_at))
-    }
+    })
   end
 
   @doc """
@@ -827,6 +832,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       :outcome,
       :waiting_on,
       :role,
+      :node_id,
+      :node_name,
       :phase,
       :phase_label,
       :started_at,
@@ -925,6 +932,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       :state,
       :outcome,
       :role,
+      :node_id,
+      :node_name,
       :started_at,
       :completed_at
     ])

@@ -26,6 +26,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     only: [priority_tag: 1, type_tag: 1, difficulty_meter: 1, status_chip: 1]
 
   import ArbiterWeb.CoreComponents.ProviderIcon, only: [provider_icon: 1]
+  import ArbiterWeb.CoreComponents.NodeBadge, only: [node_badge: 1]
 
   @doc """
   A dashboard counter: an uppercase mono eyebrow, one big tabular number,
@@ -463,6 +464,11 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :duration, :string, default: nil
   attr :cost, :string, default: nil
   attr :provider, :string, default: nil, doc: "e.g. 'claude', 'codex', 'gemini', 'ollama'"
+
+  attr :node_name, :string,
+    default: nil,
+    doc: "the remote node the run executes on (a badge beside the provider); nil = local"
+
   attr :selected, :boolean, default: false
   attr :expanded, :boolean, default: false, doc: "rotates the chevron upright"
   attr :class, :any, default: nil
@@ -508,6 +514,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           provider={@provider}
           class="size-3.5 shrink-0 text-[var(--text-label)]"
         />
+        <.node_badge node_name={@node_name} class="size-3.5 shrink-0 text-[var(--text-label)]" />
       </div>
 
       <span class="flex items-baseline gap-2 min-w-0">

@@ -34,6 +34,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunNode
   alias Arbiter.Workflows.MachineState
   require Ash.Query
   require Logger
@@ -1259,6 +1260,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
                         {provider_display_name(Worker.provider(@snapshot.meta))}
                       </code>
                     </span>
+                  </:item>
+                  <:item label="Runs on">
+                    <.run_where
+                      node_name={RunNode.node_name(@snapshot)}
+                      id="worker-detail-where"
+                      class="text-xs"
+                    />
                   </:item>
                   <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
                     <code class="font-mono text-xs">{thinking}</code>
