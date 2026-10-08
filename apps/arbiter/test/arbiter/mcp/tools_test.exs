@@ -2584,7 +2584,7 @@ defmodule Arbiter.MCP.ToolsTest do
         Ash.update(
           ctx.ws,
           %{
-            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}, "x" => 1},
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}, "skills" => 1},
             unset_paths: []
           },
           action: :patch_config
@@ -2596,13 +2596,13 @@ defmodule Arbiter.MCP.ToolsTest do
                    "merge" => %{"auto_merge" => true},
                    "routing" => %{"policy" => "static"}
                  },
-                 "unset_paths" => ["x"]
+                 "unset_paths" => ["skills"]
                })
 
       assert get_in(data.config, ["merge", "auto_merge"]) == true
       assert get_in(data.config, ["merge", "strategy"]) == "direct"
       assert get_in(data.config, ["routing", "policy"]) == "static"
-      refute Map.has_key?(data.config, "x")
+      refute Map.has_key?(data.config, "skills")
     end
 
     test "a patch can write a key containing a dot", ctx do
@@ -2636,15 +2636,37 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "an unset_paths-only call works", ctx do
       {:ok, _} =
-        Ash.update(ctx.ws, %{patch: %{"x" => 1, "y" => 2}, unset_paths: []},
+        Ash.update(ctx.ws, %{patch: %{"skills" => 1, "standing_orders" => 2}, unset_paths: []},
           action: :patch_config
         )
 
       assert {:ok, data} =
-               Tools.workspace_config_set(ctx.coordinator, %{"unset_paths" => ["x"]})
+               Tools.workspace_config_set(ctx.coordinator, %{"unset_paths" => ["skills"]})
 
-      refute Map.has_key?(data.config, "x")
-      assert data.config["y"] == 2
+      refute Map.has_key?(data.config, "skills")
+      assert data.config["standing_orders"] == 2
+    end
+  end
+
+  describe "workspace_config_set/2 unknown top-level key (bd-311cun)" do
+    test "refuses sandbox.backend at the root and names the canonical path", ctx do
+      assert {:error, {_, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "sandbox.backend",
+                 "value" => "podman"
+               })
+
+      assert msg =~ "agent.security.sandbox.backend"
+    end
+
+    test "the canonical path writes", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.security.sandbox.backend",
+                 "value" => "podman"
+               })
+
+      assert get_in(data.config, ["agent", "security", "sandbox", "backend"]) == "podman"
     end
   end
 
@@ -2846,30 +2868,30 @@ defmodule Arbiter.MCP.ToolsTest do
       # for workspace_config_set, not scalars.
       assert {:ok, data} =
                Tools.workspace_config_set(ctx.coordinator, %{
-                 "key" => "version.constraint",
+                 "key" => "worker.constraint",
                  "value" => "5.0"
                })
 
       # Should be stored as string "5.0", not float 5.0
-      assert get_in(data.config, ["version", "constraint"]) == "5.0"
+      assert get_in(data.config, ["worker", "constraint"]) == "5.0"
 
       assert {:ok, data} =
                Tools.workspace_config_set(ctx.coordinator, %{
-                 "key" => "feature.flag",
+                 "key" => "worker.flag",
                  "value" => "true"
                })
 
       # Should be stored as string "true", not boolean true
-      assert get_in(data.config, ["feature", "flag"]) == "true"
+      assert get_in(data.config, ["worker", "flag"]) == "true"
 
       assert {:ok, data} =
                Tools.workspace_config_set(ctx.coordinator, %{
-                 "key" => "count.value",
+                 "key" => "worker.count",
                  "value" => "5"
                })
 
       # Should be stored as string "5", not integer 5
-      assert get_in(data.config, ["count", "value"]) == "5"
+      assert get_in(data.config, ["worker", "count"]) == "5"
     end
 
     test "requires a key argument", ctx do

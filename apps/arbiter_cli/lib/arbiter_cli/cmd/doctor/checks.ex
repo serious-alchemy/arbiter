@@ -1388,7 +1388,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           detail: "podman is not installed, but a workspace's sandbox backend is podman",
           hint:
             "Install podman (e.g. `sudo dnf install podman`), or move the workspace off " <>
-              "`sandbox.backend: podman`.",
+              "`agent.security.sandbox.backend: podman`.",
           blocks_readiness: false
         }
 

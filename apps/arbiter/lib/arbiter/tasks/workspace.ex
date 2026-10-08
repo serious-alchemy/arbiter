@@ -218,12 +218,13 @@ defmodule Arbiter.Tasks.Workspace do
 
         description """
         Override the safety rails (`repo_paths` emptied, `tracker.type` set with
-        no `tracker.config`). Those only refuse a write that newly leaves the
+        no `tracker.config`) and the unknown-top-level-key refusal. Those only refuse a write that newly leaves the
         config in such a state.
         """
       end
 
       change {Arbiter.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
+      change {Arbiter.Tasks.Workspace.Changes.RejectUnknownConfigKeys, []}
       change {Arbiter.Tasks.Workspace.Changes.PatchConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.EnforceConfigSafetyRails, []}

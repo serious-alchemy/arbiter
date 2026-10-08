@@ -50,7 +50,9 @@ defmodule Arbiter.Agents.Routing do
     # clamp is idempotent and a no-op with no `routing.floors` config.
     task
     |> policy.choose(workspace, ledger_snapshot)
-    |> GrokRouting.apply_choice(workspace, ByDifficulty.effective_difficulty(task.difficulty))
+    |> GrokRouting.apply_choice(workspace, ByDifficulty.effective_difficulty(task.difficulty),
+      task: task
+    )
     |> Floors.clamp(workspace, task.repo)
   end
 

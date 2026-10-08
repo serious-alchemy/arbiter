@@ -61,21 +61,36 @@ defmodule Arbiter.Agents.GrokRouting do
   Moves `choice` to grok when `route?/2` holds. The pinned `"model"` is
   dropped — it belongs to the provider the policy picked, not to grok.
   """
-  @spec apply_choice(map(), Workspace.t() | nil, 0..5) :: map()
-  def apply_choice(choice, workspace, difficulty) do
-    if route?(workspace, difficulty),
+  @spec apply_choice(map(), Workspace.t() | nil, 0..5, keyword()) :: map()
+  def apply_choice(choice, workspace, difficulty, opts \\ []) do
+    if route?(workspace, difficulty, opts),
       do: %{choice | type: :grok, config: Map.drop(choice.config, ["model"])},
       else: choice
   end
 
   @doc """
   Whether a task of `difficulty` (already clamped, 0..5) goes to grok: opted in,
-  a routed difficulty, and no open grok auth hold. Options (tests): `:auth_hold`
-  and `:credential_watchdog`, the servers to ask.
+  a routed difficulty, no open grok auth hold, grok not paused (provider- or
+  account-wide, bd-bvx07f) and, when `:task` is given, grok allowed by the
+  ticket's provider constraint. Grok is a routing candidate like any other: a
+  pause or a constraint that rules it out sends the ticket to the policy's own
+  choice. Options: `:task`; (tests) `:auth_hold` and `:credential_watchdog`.
   """
   @spec route?(Workspace.t() | nil, 0..5, keyword()) :: boolean()
-  def route?(workspace, difficulty, opts \\ []),
-    do: enabled?(workspace) and difficulty in difficulties(workspace) and not held?(opts)
+  def route?(workspace, difficulty, opts \\ []) do
+    enabled?(workspace) and difficulty in difficulties(workspace) and not held?(opts) and
+      not paused?(workspace) and allowed?(Keyword.get(opts, :task))
+  end
+
+  defp paused?(workspace) do
+    ws_id = if match?(%Workspace{}, workspace), do: workspace.id
+    Arbiter.Providers.Pause.blocking(:grok, ws_id) != nil
+  rescue
+    _ -> false
+  end
+
+  defp allowed?(nil), do: true
+  defp allowed?(task), do: Arbiter.Agents.ProviderConstraint.allows?(task, :grok)
 
   @doc """
   Whether grok dispatch is held on its credential: an open `AuthHold`

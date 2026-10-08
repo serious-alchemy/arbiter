@@ -528,6 +528,16 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["config"]["repo_paths"]["arbiter"] == "/srv/arbiter"
     end
 
+    test "refuses sandbox.backend at the root and names the canonical path", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"sandbox" => %{"backend" => "podman"}}
+        })
+
+      body = json_response(conn, 422)
+      assert inspect(body) =~ "agent.security.sandbox.backend"
+    end
+
     test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
       conn =
         patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{

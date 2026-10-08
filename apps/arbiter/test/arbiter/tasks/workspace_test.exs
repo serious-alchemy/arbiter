@@ -261,6 +261,42 @@ defmodule Arbiter.Tasks.WorkspaceTest do
   end
 
   describe "patch_config/2" do
+    test "refuses an unknown top-level key and names the canonical path" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unknown-root"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "podman"}}},
+                 action: :patch_config
+               )
+
+      msg = Exception.message(err)
+      assert msg =~ "agent.security.sandbox.backend"
+      assert Ash.get!(Workspace, ws.id).config == %{}
+    end
+
+    test "an unknown top-level key without a suggestion is refused, force overrides" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unknown-root-force"})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(ws, %{patch: %{"bogus_key" => 1}}, action: :patch_config)
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{"bogus_key" => 1}, force: true}, action: :patch_config)
+
+      assert updated.config["bogus_key"] == 1
+    end
+
+    test "a stored unknown key does not block an unrelated patch" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "legacy-unknown", config: %{"legacy" => 1}})
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{"merge" => %{"auto_merge" => true}}},
+                 action: :patch_config
+               )
+
+      assert updated.config["legacy"] == 1
+    end
+
     test "deep-merges a patch without clobbering sibling keys" do
       initial = %{
         "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
@@ -335,27 +371,27 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
 
     test "patch + unset can be combined in one call" do
-      initial = %{"a" => %{"b" => 1, "c" => 2}, "d" => 3}
+      initial = %{"skills" => %{"b" => 1, "c" => 2}, "d" => 3}
       {:ok, ws} = Ash.create(Workspace, %{name: "combo", config: initial})
 
       {:ok, updated} =
         Ash.update(
           ws,
-          %{patch: %{"a" => %{"e" => 4}}, unset_paths: ["a.b"]},
+          %{patch: %{"skills" => %{"e" => 4}}, unset_paths: ["skills.b"]},
           action: :patch_config
         )
 
-      assert updated.config == %{"a" => %{"c" => 2, "e" => 4}, "d" => 3}
+      assert updated.config == %{"skills" => %{"c" => 2, "e" => 4}, "d" => 3}
     end
 
     test "lists replace (not append) — matches deep_merge contract" do
       {:ok, ws} =
-        Ash.create(Workspace, %{name: "list-replace", config: %{"xs" => [1, 2, 3]}})
+        Ash.create(Workspace, %{name: "list-replace", config: %{"standing_orders" => [1, 2, 3]}})
 
       {:ok, updated} =
-        Ash.update(ws, %{patch: %{"xs" => [9]}}, action: :patch_config)
+        Ash.update(ws, %{patch: %{"standing_orders" => [9]}}, action: :patch_config)
 
-      assert updated.config["xs"] == [9]
+      assert updated.config["standing_orders"] == [9]
     end
   end
 

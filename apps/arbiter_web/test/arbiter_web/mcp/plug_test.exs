@@ -417,14 +417,14 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.coordinator_token,
           req("tools/call", %{
             "name" => "workspace_config_set",
-            "arguments" => %{"key" => "some.string.setting", "value" => "5"}
+            "arguments" => %{"key" => "default_repo", "value" => "5"}
           })
         )
 
       result = json_response(conn, 200)["result"]
       assert result["isError"] == false
       # The value should be stored as the string "5", not the integer 5
-      assert result["structuredContent"]["config"]["some"]["string"]["setting"] == "5"
+      assert result["structuredContent"]["config"]["default_repo"] == "5"
     end
 
     test "installation_config_set accepts a real JSON array value end-to-end", ctx do

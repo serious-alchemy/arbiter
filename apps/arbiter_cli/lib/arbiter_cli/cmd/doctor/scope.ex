@@ -45,7 +45,9 @@ defmodule ArbiterCli.Cmd.Doctor.Scope do
     do: {:no, "no workspace uses the podman sandbox backend"}
 
   def applies?(%__MODULE__{egress_enforced: false}, :egress),
-    do: {:no, "no workspace enforces an egress allowlist (`sandbox.egress: allowlist | none`)"}
+    do:
+      {:no,
+       "no workspace enforces an egress allowlist (`agent.security.sandbox.egress: allowlist | none`)"}
 
   def applies?(%__MODULE__{providers: providers}, {:provider, type}) do
     label = Map.get(@labels, type, type)

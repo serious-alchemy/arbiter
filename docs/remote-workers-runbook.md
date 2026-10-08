@@ -215,6 +215,20 @@ passes, non-Claude providers and bwrap/unsandboxed runs stay local whatever the 
 (the ineligible reasons in `Arbiter.Nodes.Placement`).
 Switch it off instantly, install-wide, with `config :arbiter, remote_execution: false`.
 
+### Select the podman sandbox
+
+A run is only eligible for placement when its workspace resolves the podman sandbox
+backend. The key lives under `agent.security`, so write the full path:
+
+```sh
+arb config set agent.security.sandbox.backend podman
+arb config set agent.security.sandbox.review_backend bwrap   # optional; reviews stay local
+```
+
+A bare `sandbox.backend` is not a config key: `arb config set` (and REST and MCP) refuse
+it and name the full path (pass `--force` only to store a key on purpose). `arb server
+doctor` reports "no workspace uses the podman sandbox backend" until the full path is set.
+
 ## 4. Drain, revoke, upgrade, remove
 
 | Goal | Command | Effect |
