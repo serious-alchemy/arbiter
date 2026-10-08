@@ -298,7 +298,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   # happens here and rides in `port_args.sandbox`, so every later open of the
   # same args (a nudge, an auto-resume) is wrapped the same way. Any other
   # policy, or none, leaves the args exactly as they were.
-  defp port_args(opts, exec, argv, worktree_path, env, ctx) do
+  @doc false
+  def port_args(opts, exec, argv, worktree_path, env, ctx) do
     port_args = %{exec: exec, argv: argv, cd: worktree_path, env: env}
 
     case Keyword.get(opts, :security) do

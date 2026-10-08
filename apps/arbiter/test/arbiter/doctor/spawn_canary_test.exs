@@ -207,6 +207,177 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
     end
   end
 
+  describe "podman-backed workspaces (bd-c2cew2)" do
+    setup %{tmp_root: tmp_root} do
+      keys = ~w(worker_container_available worker_container_network_available
+                worker_container_image worker_container_runner worker_deps_cache)a
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+
+      Application.put_env(:arbiter, :worker_container_available, true)
+      Application.put_env(:arbiter, :worker_container_network_available, true)
+      Application.put_env(:arbiter, :worker_container_image, "localhost/arb-test/claude:1")
+      Application.put_env(:arbiter, :worker_deps_cache, false)
+
+      test_pid = self()
+
+      Application.put_env(:arbiter, :worker_container_runner, fn cmd, args, _opts ->
+        send(test_pid, {:ran, cmd, args})
+        {"", 0}
+      end)
+
+      on_exit(fn ->
+        Enum.each(prev, fn
+          {k, nil} -> Application.delete_env(:arbiter, k)
+          {k, v} -> Application.put_env(:arbiter, k, v)
+        end)
+      end)
+
+      proxy = Path.join(tmp_root, "proxy.sock")
+      bridge = Path.join(tmp_root, "arb.sock")
+      File.write!(proxy, "")
+      File.write!(bridge, "")
+      arb = Path.join(tmp_root, "arb")
+      File.write!(arb, "#!/bin/sh\n")
+
+      egress = fn _opts ->
+        send(test_pid, :egress_started)
+        {:ok, [proxy_socket: proxy, proxy_port: 3128, bridges: [{4848, bridge}]], "ctest"}
+      end
+
+      # Stand-in podman: records the argv it was handed and answers `--version`.
+      sandbox = provision!()
+      podman = Path.join(sandbox.bin, "podman")
+
+      File.write!(
+        podman,
+        ~s(#!/bin/sh\necho "podman $@" >> #{sandbox.log}\necho "stub 9.9.9"\nexit 0\n)
+      )
+
+      File.chmod!(podman, 0o755)
+
+      %{
+        sandbox: sandbox,
+        container_opts: [podman: podman, egress: egress, arb_path: arb],
+        scratch: tmp_root
+      }
+    end
+
+    defp clones, do: Arbiter.Config.Paths.worktree_root() |> File.ls() |> elem(1) |> List.wrap()
+
+    defp podman_workspace!(types) do
+      Ash.create!(Workspace, %{
+        name: "canary-#{unique()}",
+        config: %{
+          "agent" => %{
+            "type" => types,
+            "security" => %{"sandbox" => %{"backend" => "podman"}}
+          }
+        }
+      })
+    end
+
+    test "claude runs the real podman spawn path and leaves nothing behind", ctx do
+      podman_workspace!(["claude"])
+      before = counts()
+      clones_before = clones()
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      assert report.ok
+
+      assert %{status: "ok", spawned: true, reached_agent: true, exit_code: 0} =
+               r = provider(report, "claude")
+
+      assert r.detail == "stub 9.9.9"
+
+      log = calls(ctx.sandbox)
+      assert log =~ ~r/podman run .*--name arb-canary-claude-/
+      assert log =~ "localhost/arb-test/claude:1"
+      assert log =~ "--version"
+
+      assert_received :egress_started
+      assert_received {:ran, _, ["rm", "--force" | _] = args}
+      assert Enum.any?(args, &String.starts_with?(&1, "arb-canary-claude-"))
+
+      assert counts() == before
+      assert File.ls!(ctx.scratch) |> Enum.reject(&(&1 in ~w(proxy.sock arb.sock arb))) == []
+      assert clones() == clones_before
+    end
+
+    test "a failing container spawn fails the report and still cleans up", ctx do
+      podman_workspace!(["claude"])
+      File.write!(Path.join(ctx.sandbox.bin, "podman"), "#!/bin/sh\necho boom >&2\nexit 125\n")
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      refute report.ok
+
+      assert %{status: "fail", exit_code: 125, error: "exit 125: boom"} =
+               provider(report, "claude")
+
+      assert_received {:ran, _, ["rm", "--force" | _]}
+      assert File.ls!(ctx.scratch) |> Enum.reject(&(&1 in ~w(proxy.sock arb.sock arb))) == []
+    end
+
+    test "agy has no container wrap point: canaried through bwrap, labelled", ctx do
+      podman_workspace!(["gemini"])
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      assert %{status: "ok", spawned: true, detail: detail} = provider(report, "gemini")
+      assert detail =~ "canaried through the bwrap path"
+      refute calls(ctx.sandbox) =~ "podman run"
+    end
+
+    test "a failing bwrap fallback is labelled too", ctx do
+      podman_workspace!(["gemini"])
+      File.write!(Path.join(ctx.sandbox.bin, "agy"), "#!/bin/sh\necho nope >&2\nexit 3\n")
+      File.write!(Path.join(ctx.sandbox.bin, "gemini"), "#!/bin/sh\necho nope >&2\nexit 3\n")
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      refute report.ok
+      assert %{status: "fail", error: error} = provider(report, "gemini")
+      assert error =~ "ran through the bwrap path"
+    end
+
+    test "a non-main merge.base with no configured image still resolves the image", ctx do
+      Application.delete_env(:arbiter, :worker_container_image)
+
+      Application.put_env(:arbiter, :worker_image_runner, fn
+        "skopeo", ["inspect" | _], _ -> {"sha256:" <> String.duplicate("a", 64), 0}
+        _, _, _ -> {"", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_image_runner) end)
+
+      Ash.create!(Workspace, %{
+        name: "canary-#{unique()}",
+        config: %{
+          "agent" => %{
+            "type" => ["claude"],
+            "security" => %{"sandbox" => %{"backend" => "podman"}}
+          },
+          "merge" => %{"base" => "develop"}
+        }
+      })
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      assert %{status: "ok"} = provider(report, "claude")
+    end
+
+    test "a bwrap workspace is unchanged: no container, no scratch repo", ctx do
+      workspace!(["claude"])
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      assert %{status: "ok", detail: "stub 9.9.9"} = provider(report, "claude")
+      refute calls(ctx.sandbox) =~ "podman"
+      refute_received :egress_started
+    end
+  end
+
   describe "spawn-path failures fail the report with the first error line" do
     test "a FunctionClauseError in RunTmp.create (the 2026-10-04 v0.2.14 shape)" do
       sandbox = provision!()
