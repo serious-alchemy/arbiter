@@ -15,6 +15,9 @@ defmodule Arbiter.NodeAgent.Config do
       credential is the **only** secret an agent keeps at rest; it is read from
       that file, never from the environment or argv, and never printed
       (`inspect/1` hides it).
+    * `ARB_NODE_MAX_WORKERS` — optional, a positive integer: the node owner's
+      hard ceiling on concurrent workers, reported in `hello` as
+      `capacity.ceiling` (§13). Anything else is ignored.
 
   `load/1` returns an error tuple instead of raising: an agent that cannot start
   reports why in its status file (`arbiter-node status`) rather than crash-looping
@@ -34,6 +37,7 @@ defmodule Arbiter.NodeAgent.Config do
     :halt_fun,
     :live_runs_fun,
     :readiness_fun,
+    :max_workers,
     run_opts: [],
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
@@ -84,6 +88,7 @@ defmodule Arbiter.NodeAgent.Config do
            credential_file: credential_file,
            credential: credential,
            node_id: node_id,
+           max_workers: max_workers(opts, env),
            status_path: Path.join(node_home, "status.json"),
            version: Keyword.get_lazy(opts, :version, &Arbiter.Version.app_version/0)
          )
@@ -138,6 +143,13 @@ defmodule Arbiter.NodeAgent.Config do
   defp setting(opts, env, key, env_name) do
     non_empty(Keyword.get(opts, key)) || non_empty(env[env_name]) ||
       non_empty(app_config(opts)[key])
+  end
+
+  defp max_workers(opts, env) do
+    case Integer.parse(to_string(setting(opts, env, :max_workers, "ARB_NODE_MAX_WORKERS") || "")) do
+      {n, ""} when n > 0 -> n
+      _ -> nil
+    end
   end
 
   defp non_empty(value) when value in [nil, ""], do: nil
