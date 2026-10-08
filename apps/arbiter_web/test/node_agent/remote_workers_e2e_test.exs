@@ -1076,6 +1076,102 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert Executor.live?(handle) == false
     end
 
+    # bd-1dzyhb: the cases above give the run to the test process and rebuild the primary's
+    # tables by hand, which is why they never went through a Worker's shutdown. This one
+    # does: a real Worker owns the run, the application stops it, and the node keeps
+    # the run until the primary is back.
+    test "a Worker shut down with the application leaves its run to the node; Recovery lands the work since the last sync",
+         ctx do
+      alias Arbiter.Worker
+      alias Arbiter.Worker.ClaudeSession
+
+      task_id = "bd-e2e-#{System.unique_integer([:positive])}"
+      {:ok, worker} = Worker.start(task_id: task_id, repo: "arbiter")
+      %{run_id: id} = Worker.state(worker)
+
+      command = ~S"""
+      echo "since the last sync" > /work/tree/edited.txt
+      echo up
+      sleep 600
+      """
+
+      # the placement `ClaudeSession.start/1` makes, owned by the Worker and handed to it
+      # the way the Worker takes its first session (`:__claude_session_open__`)
+      assert {:ok, prepared} =
+               Executor.prepare(ctx.node.id, spec(ctx, id, command, checkout_spec()),
+                 owner: worker,
+                 checkout: checkout_context(ctx)
+               ),
+             "refused; agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      assert {:ok, handle} = Executor.open(prepared)
+
+      port_args = %{
+        exec: "claude",
+        argv: ["claude"],
+        cd: ctx.repo,
+        env: [],
+        remote: %{node: ctx.node.id, request: %{}, run_id: id, prepared: handle}
+      }
+
+      session_config =
+        ClaudeSession.build_session_config(task_id, nil,
+          provider: "claude",
+          redact_values: [],
+          argv: ["claude"]
+        )
+
+      assert {:ok, ^handle} =
+               GenServer.call(worker, {:__claude_session_open__, port_args, session_config})
+
+      _ = Worker.advance(worker, :claude)
+      assert_eventually(fn -> container_exists?(ctx, "arb-#{id}") end)
+      assert_eventually(fn -> Executor.live?(handle) end)
+      node_id = ctx.node.id
+      assert %{state: :working, node_id: ^node_id} = Ash.get!(Run, id)
+      refute File.exists?(Path.join(ctx.repo, "edited.txt"))
+
+      # the application stops: the supervisor shuts the Worker down, then the sessions go
+      previous = Application.fetch_env(:arbiter, :worker_node_stopping_override)
+      Application.put_env(:arbiter, :worker_node_stopping_override, true)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:arbiter, :worker_node_stopping_override, v)
+          :error -> Application.delete_env(:arbiter, :worker_node_stopping_override)
+        end
+      end)
+
+      :ok = GenServer.stop(worker, :shutdown)
+
+      # the run is not written off and the node was not told to stop it
+      assert %{state: :working, outcome: nil, node_id: ^node_id} = Ash.get!(Run, id)
+      assert container_exists?(ctx, "arb-#{id}")
+
+      restart_primary!(ctx)
+
+      run_ctx = checkout_context(ctx)
+
+      assert {:ok, report} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 90_000,
+                 total_timeout_ms: 120_000,
+                 context_fun: fn %Run{id: ^id} -> {:ok, run_ctx} end
+               ),
+             "recovery failed; agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      assert report == %{id => :collected}
+
+      # the run wrote to the shadow after the checkout was seeded and before any sync
+      # (those are minutes apart); that work only existed on the node, and it is now in
+      # the home clone, with the row left for the Reconciler
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "since the last sync\n"
+      assert Ash.get!(Run, id).state == :working
+      refute container_exists?(ctx, "arb-#{id}")
+      assert RealAgent.alive?(ctx.agent)
+    end
+
     test "a run the primary still holds survives a socket blip: the container is untouched and no output is lost",
          ctx do
       row = run_row!(ctx.node, "rr2")
