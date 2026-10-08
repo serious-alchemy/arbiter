@@ -523,7 +523,6 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   # attention.
   defp run_fact(ticket, runs, ctx) do
     id = Map.get(ticket, :id)
-    authors = author_runs(runs, id)
 
     cond do
       Enum.any?(runs, &(run_class(&1) == :running)) ->
@@ -532,16 +531,27 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       match?(%{state: :waiting}, primary(runs, id)) ->
         :question
 
+      true ->
+        author_fact(author_runs(runs, id), ticket, ctx)
+    end
+  end
+
+  defp author_fact([], ticket, ctx) do
+    if Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) do
+      held_or(:orphaned, ticket, ctx)
+    end
+  end
+
+  defp author_fact(authors, ticket, ctx) do
+    classes = Enum.map(authors, &run_class/1)
+
+    cond do
       # bd-98gi5m: a deliberate stop is not a crash.
-      authors != [] and Enum.all?(authors, &(run_class(&1) in [:waiting, :stopped])) and
-          Enum.any?(authors, &(run_class(&1) == :stopped)) ->
+      Enum.all?(classes, &(&1 in [:waiting, :stopped])) and :stopped in classes ->
         nil
 
-      authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) ->
+      Enum.all?(classes, &(&1 == :waiting)) ->
         held_or(:failed, ticket, ctx)
-
-      authors == [] and Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) ->
-        held_or(:orphaned, ticket, ctx)
 
       true ->
         nil
