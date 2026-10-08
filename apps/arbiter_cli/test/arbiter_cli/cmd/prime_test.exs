@@ -10,8 +10,22 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {{"get", "/api/workspaces"}, {%{"data" => workspaces}, 200}},
       {{"get", "/api/workers"}, {%{"data" => workers}, 200}},
       {{"get", "/api/issues/lifecycle"}, {%{"data" => tickets}, 200}},
+      {{"get", "/api/attention"}, {%{"attention" => attention_items(tickets)}, 200}},
       {{"get", "/api/messages"}, {%{"data" => messages}, 200}}
     ])
+  end
+
+  # What `GET /api/attention` serves for these lifecycle tickets: one flat item
+  # per ticket carrying attention.
+  defp attention_items(tickets) do
+    for %{"attention" => %{} = a} = t <- tickets do
+      Map.merge(a, %{
+        "ticket_id" => t["id"],
+        "title" => t["title"],
+        "state" => t["column"],
+        "workspace_id" => t["workspace_id"]
+      })
+    end
   end
 
   # bd-6fkgvo — the per-workspace lifecycle sections, from
@@ -267,12 +281,65 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert sec |> Map.get("== In progress", []) |> Enum.join("\n") =~ "(none)"
     end
 
+    test "Needs attention is the /api/attention queue, not a filter of the lifecycle read" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "d", "prefix" => "bd", "config" => %{}}]}, 200}},
+        {{"get", "/api/workers"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues/lifecycle"},
+         {%{
+            "data" => [
+              ticket("bd-life", "in_progress", %{
+                "attention" => attention("coordinator", "run_crashed", "lifecycle only")
+              })
+            ]
+          }, 200}},
+        {{"get", "/api/attention"},
+         {%{
+            "attention" => [
+              %{
+                "ticket_id" => "bd-queue",
+                "title" => "from the queue",
+                "state" => "active",
+                "owner" => "operator",
+                "reason" => "queue reason"
+              }
+            ]
+          }, 200}},
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      [{_, lines}] = Enum.filter(sections(out), &match?({"== Needs attention", _}, &1))
+      text = Enum.join(lines, "\n")
+
+      assert text =~ "bd-queue"
+      assert text =~ "queue reason"
+      refute text =~ "bd-life"
+    end
+
+    test "an unreadable attention read is marked, not omitted" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "d", "prefix" => "bd", "config" => %{}}]}, 200}},
+        {{"get", "/api/workers"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues/lifecycle"}, {%{"data" => []}, 200}},
+        {{"get", "/api/attention"}, {%{"error" => "boom"}, 500}},
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      assert out =~ "== Tickets =="
+      assert out =~ "(error:"
+    end
+
     test "an unreadable lifecycle read is marked, not omitted" do
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-1", "name" => "d", "prefix" => "bd", "config" => %{}}]}, 200}},
         {{"get", "/api/workers"}, {%{"data" => []}, 200}},
         {{"get", "/api/issues/lifecycle"}, {%{"error" => "boom"}, 500}},
+        {{"get", "/api/attention"}, {%{"attention" => []}, 200}},
         {{"get", "/api/messages"}, {%{"data" => []}, 200}}
       ])
 

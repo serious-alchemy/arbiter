@@ -23,7 +23,8 @@ defmodule ArbiterCli.Cmd.Prime do
           `GET /api/issues/lifecycle` — every open ticket with its state,
           column, step, blockers and attention, in dispatch order. Each ticket
           appears in exactly one section:
-            1. Needs attention — every ticket with attention, the
+            1. Needs attention — the attention queue (`GET /api/attention`,
+               `arb attention`): every ticket with attention, the
                coordinator's first, then the operator's, each with its reason.
                The routine verification wait (a Verifying ticket whose
                attention is still the coordinator's `awaiting_verification`)
@@ -246,11 +247,27 @@ defmodule ArbiterCli.Cmd.Prime do
 
   # bd-6fkgvo: every open ticket in the workspace, projected (state, column,
   # step, blockers, attention) and in dispatch order, grouped into the
-  # lifecycle sections.
+  # lifecycle sections. P-27: the Needs-attention section is the attention
+  # queue itself (`GET /api/attention`), not a filter over this list.
   defp gather_tickets(ws_id) do
+    with {:ok, list} <- fetch_lifecycle(ws_id),
+         {:ok, items} <- fetch_attention(ws_id) do
+      {:ok, group_tickets(list, items)}
+    end
+  end
+
+  defp fetch_lifecycle(ws_id) do
     case Client.get("/api/issues/lifecycle", workspace_id: ws_id) do
-      {:ok, %{"data" => list}} -> {:ok, group_tickets(list)}
-      {:ok, _} -> {:ok, group_tickets([])}
+      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, _} -> {:ok, []}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
+    end
+  end
+
+  defp fetch_attention(ws_id) do
+    case Client.get("/api/attention", workspace_id: ws_id) do
+      {:ok, %{"attention" => items}} -> {:ok, items}
+      {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
     end
   end
@@ -268,9 +285,10 @@ defmodule ArbiterCli.Cmd.Prime do
   # (except the routine verification wait, which is the Verifying section),
   # and a ticket with no column this surface shows (closed) lands nowhere.
   # Order within a section is the server's dispatch order, but for Needs
-  # attention, which leads with the coordinator's items.
-  defp group_tickets(list) do
+  # attention, which is the attention queue, the coordinator's items first.
+  defp group_tickets(list, items) do
     empty = Map.new([:needs_attention | Map.values(@columns)], &{&1, []})
+    columns = Map.new(list, &{&1["id"], &1["column"]})
 
     list
     |> Enum.reduce(empty, fn t, acc ->
@@ -280,21 +298,41 @@ defmodule ArbiterCli.Cmd.Prime do
       end
     end)
     |> Map.new(fn {key, tickets} -> {key, Enum.reverse(tickets)} end)
-    |> Map.update!(:needs_attention, fn tickets ->
-      Enum.sort_by(tickets, &owner_rank(get_in(&1, ["attention", "owner"])))
-    end)
+    |> Map.put(:needs_attention, needs_attention(items, columns))
   end
 
-  defp section(%{"attention" => %{} = attention} = t) do
-    if routine_verification?(t, attention), do: :verifying, else: :needs_attention
+  # An attention item as the section renders it: the ticket's id and title, the
+  # attention map, and the board column when the lifecycle read has the ticket
+  # (the item's own `state` otherwise).
+  defp needs_attention(items, columns) do
+    items
+    |> Enum.reject(&routine_verification?/1)
+    |> Enum.map(fn item ->
+      %{
+        "id" => item["ticket_id"],
+        "title" => item["title"],
+        "column" => Map.get(columns, item["ticket_id"]) || item["state"],
+        "attention" => Map.drop(item, ["ticket_id", "title", "state", "workspace_id"])
+      }
+    end)
+    |> Enum.sort_by(&owner_rank(&1["attention"]["owner"]))
   end
+
+  # A ticket with attention is either the routine verification wait (the
+  # Verifying section) or an attention item; it never lands in a column.
+  defp section(%{"attention" => %{} = attention} = t),
+    do: if(routine_verification?(t, attention), do: :verifying)
 
   defp section(t), do: Map.get(@columns, t["column"])
 
   defp routine_verification?(t, attention) do
-    t["column"] == "verifying" and attention["cause"] == "awaiting_verification" and
-      attention["owner"] == "coordinator"
+    t["column"] == "verifying" and routine_verification?(attention)
   end
+
+  defp routine_verification?(%{"cause" => "awaiting_verification", "owner" => "coordinator"}),
+    do: true
+
+  defp routine_verification?(_), do: false
 
   defp owner_rank("coordinator"), do: 0
   defp owner_rank(_operator), do: 1
