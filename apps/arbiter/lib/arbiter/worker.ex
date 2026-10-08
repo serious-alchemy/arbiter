@@ -126,8 +126,8 @@ defmodule Arbiter.Worker do
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
   alias Arbiter.ReviewGate.Resolutions
-  alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.ConflictAbortFindings
+  alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OsProcess

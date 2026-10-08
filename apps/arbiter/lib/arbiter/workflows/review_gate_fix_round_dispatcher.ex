@@ -216,9 +216,10 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   @spec dispatch(dispatch_args()) :: {:ok, map()} | {:error, term()}
   def dispatch(%{task_id: task_id, attempt: attempt} = args)
       when is_binary(task_id) and is_integer(attempt) and attempt >= 0 do
+    round = if Map.get(args, :conflict), do: "conflict round", else: "fix round #{attempt}"
+
     Logger.info(
-      "ReviewGateFixRoundDispatcher: dispatching implementer " <>
-        "#{if Map.get(args, :conflict), do: "conflict round", else: "fix round #{attempt}"} " <>
+      "ReviewGateFixRoundDispatcher: dispatching implementer #{round} " <>
         "for task=#{task_id} after a ReviewGate #{inspect(Map.get(args, :verdict))} verdict"
     )
 

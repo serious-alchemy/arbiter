@@ -238,8 +238,8 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
-  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.ConflictAbortFindings
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
