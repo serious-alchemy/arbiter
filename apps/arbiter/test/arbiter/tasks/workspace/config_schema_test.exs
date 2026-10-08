@@ -99,4 +99,34 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
     assert enums.tracker_types == ConfigSchema.tracker_types()
     assert enums.quota_modes == ConfigSchema.quota_modes()
   end
+
+  test "suggest_path/1 maps a known leaf written at the wrong root" do
+    assert ConfigSchema.suggest_path("sandbox.backend") == "agent.security.sandbox.backend"
+
+    assert ConfigSchema.suggest_path("sandbox.review_backend") ==
+             "agent.security.sandbox.review_backend"
+
+    assert ConfigSchema.suggest_path("permissions.mode") == "agent.security.permissions.mode"
+    assert ConfigSchema.suggest_path("totally_unknown") == nil
+  end
+
+  test "known_top_level_keys/0 covers every top-level key the reference documents" do
+    for key <- ~w(tracker merge agent review_agent routing worker repo_paths) do
+      assert key in ConfigSchema.known_top_level_keys()
+    end
+  end
+
+  # Hand-kept inventory of every root the code reads off `workspace.config`
+  # (grep `config["…"]` / `Map.get(config, "…")` in apps/*/lib). Add a root
+  # here when code starts reading one; a miss in `known_top_level_keys/0`
+  # would otherwise silently refuse valid operator writes.
+  @config_roots ~w(tracker merge agent review_agent security guardrails routing review
+                   review_gate notes_gate review_automation quota conductor worker attention
+                   loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
+                   refine coordinator_notifications review_scope)
+
+  test "every root the code reads is a known top-level key" do
+    assert @config_roots -- ConfigSchema.known_top_level_keys() == []
+    assert "review_scope" in ConfigSchema.known_top_level_keys()
+  end
 end

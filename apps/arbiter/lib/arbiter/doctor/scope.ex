@@ -18,7 +18,7 @@ defmodule Arbiter.Doctor.Scope do
       `paused` (a provider-wide or account-level pause,
       `Arbiter.Providers.Pause.blocking/2`) with its `pause_reason`.
     * `podman_in_use` — a workspace, or a repo override, resolves
-      `sandbox.backend` or `sandbox.review_backend` to podman.
+      `agent.security.sandbox.backend` or `agent.security.sandbox.review_backend` to podman.
     * `egress_enforced` — a workspace or repo override resolves a non-`open`
       egress.
   """
