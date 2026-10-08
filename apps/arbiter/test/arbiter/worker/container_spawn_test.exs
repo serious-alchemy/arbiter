@@ -471,6 +471,37 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert "the prompt" in rest
     end
 
+    # bd-8y8ztm: a local podman run is handed the very worktree directory the
+    # primary wrote `.mcp.json` into (same path on both sides), so `--mcp-config`
+    # resolves there; the remote path has to reproduce this by shipping the file.
+    test "the real argv's --mcp-config path is a file inside a read-write mount of the clone",
+         ctx do
+      :ok =
+        Arbiter.MCP.AgentConfig.Claude.write_mcp_config(ctx.clone,
+          mcp_url: "http://127.0.0.1:4848/mcp",
+          scope_token: "scope-token",
+          server_name: "arbiter"
+        )
+
+      mcp_config = Path.join(ctx.clone, Arbiter.MCP.AgentConfig.Claude.filename())
+
+      {:ok, inner} =
+        Arbiter.Agents.Claude.default_argv("the prompt",
+          security: podman_policy(),
+          sandbox_wrap: true,
+          mcp_config: mcp_config
+        )
+
+      args = %{port_args(ctx, ctx.request) | argv: inner}
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(args)
+
+      assert ["--mcp-config", ^mcp_config] =
+               wrapped.argv |> Enum.drop_while(&(&1 != "--mcp-config")) |> Enum.take(2)
+
+      assert "#{ctx.clone}:#{ctx.clone}:rw" in mounts(wrapped.argv)
+      assert File.regular?(mcp_config)
+    end
+
     test "no secret reaches argv; the values travel in the client's env as -e NAME", ctx do
       env = [
         {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-secret-value"},

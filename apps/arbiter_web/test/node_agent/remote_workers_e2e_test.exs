@@ -48,6 +48,9 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{Overview, Placement, RateLimit, Recovery, Registry}
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Agents.{Claude, SecurityPolicy}
+  alias Arbiter.MCP.AgentConfig
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Egress
   alias Arbiter.Worker.Egress.{Event, JailRun}
   alias Arbiter.Worker.Executor.Node, as: Executor
@@ -725,6 +728,128 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
   end
 
   # ---- bundle ingest -------------------------------------------------------------------------
+
+  describe "the real claude argv shape (bd-8y8ztm)" do
+    # RW13's canary died one second in: `Error: MCP config file not found:
+    # <primary worktree>/.mcp.json`. The injected `.mcp.json` is untracked, so
+    # the git bundle never carried it. This builds the run spec with the real
+    # argv builder (`--mcp-config` included) and the real `remote_spec/3`, and
+    # runs it on the real agent in a real container whose `claude` is a stub that
+    # does what claude does first: open the file `--mcp-config` names.
+    test "--mcp-config resolves inside the container, and the scope token never rests on the node",
+         ctx do
+      owner = start_supervised!({Agent, fn -> :ok end}, id: make_ref())
+      token = Scope.mint_worker(ctx.task)
+
+      {:ok, network, run} =
+        JailRun.start(
+          owner: owner,
+          dir: ctx.egress_dir,
+          arbiter_url: "http://127.0.0.1:#{ctx.api_port}/mcp",
+          arb_token: token,
+          task_id: ctx.task.id,
+          enforce: true,
+          infra: [],
+          allow_local_dial: true
+        )
+
+      on_exit(fn -> Egress.stop_run(run) end)
+
+      # what Dispatch.inject_mcp_config/3 and the skills materializer leave in the worktree
+      :ok =
+        AgentConfig.Claude.write_mcp_config(ctx.repo,
+          mcp_url: "http://127.0.0.1:#{ctx.api_port}/mcp",
+          scope_token: token,
+          server_name: "arbiter"
+        )
+
+      File.mkdir_p!(Path.join(ctx.repo, ".claude/skills/tdd"))
+      File.write!(Path.join(ctx.repo, ".claude/skills/tdd/SKILL.md"), "# tdd\n")
+      git!(ctx.repo, ["config", "core.excludesFile", "/dev/null"])
+      File.write!(Path.join(ctx.repo, ".git/info/exclude"), ".mcp.json\n.claude/skills/\n")
+
+      stub = Path.join(ctx.root, "claude")
+
+      File.write!(stub, ~S"""
+      #!/bin/sh
+      while [ $# -gt 0 ]; do
+        [ "$1" = "--mcp-config" ] && cfg="$2"
+        shift
+      done
+      echo "cfg=$cfg"
+      [ -f "$cfg" ] || { echo "MCP config file not found: $cfg"; exit 1; }
+      echo "auth=$(grep -o 'Bearer [^"]*' "$cfg")"
+      echo "env-token=$ARBITER_MCP_TOKEN"
+      echo "skill=$(cat .claude/skills/tdd/SKILL.md)"
+      echo "tracked=$(cat lib/a.txt)"
+      echo claude-reached
+      """)
+
+      File.chmod!(stub, 0o755)
+      {:ok, sha} = Arbiter.Nodes.Files.publish(stub)
+
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      mcp_config = Path.join(ctx.repo, AgentConfig.Claude.filename())
+
+      {:ok, argv} =
+        Claude.default_argv("go",
+          security: policy,
+          sandbox_wrap: true,
+          mcp_config: mcp_config
+        )
+
+      assert "--mcp-config" in argv and mcp_config in argv
+
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(ctx.repo)
+      run_dir = Path.join(ctx.root, "ctr")
+
+      request = %{
+        name: "arb-m1",
+        image: %{tag: ctx.image, plan: nil},
+        worktree: ctx.repo,
+        home: Path.join(run_dir, "home"),
+        config_dir: Path.join(run_dir, "claude-config"),
+        config_files: %{},
+        tmp_dir: Path.join(run_dir, "tmp"),
+        cli: [{sha, "claude", ContainerSpawn.claude_path()}],
+        prompt_paths: [],
+        network: network,
+        env: [],
+        services: [],
+        limits: %{"memory" => "512m"},
+        checkout: Map.merge(checkout_context(ctx), %{base: "main"}),
+        task_id: ctx.task.id,
+        worktree_files: files,
+        worktree_secrets: secrets
+      }
+
+      assert {:ok, spec} = ContainerSpawn.remote_spec(request, %{argv: argv, env: []}, "m1")
+      assert spec["secrets"]["ARBITER_MCP_TOKEN"] == token
+      refute inspect(Map.delete(spec, "secrets")) =~ token
+
+      refute Base.decode64!(
+               Enum.find(spec["mounts"], &(&1["kind"] == "worktree"))["files"][".mcp.json"]
+             ) =~ token
+
+      handle = open!(ctx, spec, checkout: request.checkout)
+      events = collect(ctx, handle)
+      out = lines(events)
+
+      assert "cfg=#{mcp_config}" in out, "got #{inspect(out)}\n" <> RealAgent.log_tail(ctx.agent)
+      assert "claude-reached" in out
+      assert "auth=Bearer ${ARBITER_MCP_TOKEN}" in out
+      assert "env-token=#{token}" in out
+      assert "skill=# tdd" in out
+      assert "tracked=a" in out
+      assert {:exit, 0} = List.last(events)
+
+      # the scope token reached no disk the node owns
+      {found, _} = System.cmd("grep", ["-rl", token, ctx.join.agent_env["ARB_NODE_HOME"]])
+      assert found == ""
+    end
+  end
 
   describe "checkout sync" do
     test "the node seeds a shadow clone from the primary and the run's work is ingested through the quarantine",
