@@ -683,11 +683,16 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:attempts, {:config, :default_max_auto_resumes}},
       episode: {:task, :mr_ref, :head_sha},
       terminal: :resumed,
-      sites: [{Watchdog, :resolve_stale_reviewed_head, 3}],
-      anchors: [":unreviewed_head", "@default_max_auto_resumes"],
+      sites: [
+        {Watchdog, :resolve_stale_reviewed_head, 3},
+        {Watchdog, :route_unapproved_head_to_review, 2}
+      ],
+      anchors: [":unreviewed_head", "@default_max_auto_resumes", ":review_not_approved"],
       summary:
         "an unreviewed head is handed to a review round (a new run on the ticket); " <>
-          "bd-741sid removed the worker failure it used to buy it with"
+          "bd-741sid removed the worker failure it used to buy it with. bd-651ine: a head " <>
+          "the gate's own record refuses (`MergeAuthorization`, e.g. after a `send_back`) " <>
+          "is routed the same way instead of entering the merge-fail page loop"
     },
     %{
       id: :merge_expected_sha,
@@ -968,6 +973,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [
         {MergeQueue, :merge_guarded, 2},
         {MergeQueue, :merge_coverage_guarded, 3},
+        {MergeQueue, :note_review_refusal, 4},
+        {MergeQueue, :safe_notify_review_refusal, 2},
         {MergeQueue, :legacy_merge_decision, 3},
         {MergeQueue, :apply_legacy_decision, 3},
         {MergeQueue, :apply_coverage_decision, 4}
@@ -977,7 +984,9 @@ defmodule Arbiter.Reviews.GuardRegistry do
         "the queue's merge refusal: `decide/3` under `merge.coverage_enabled`, else the " <>
           "reviewed-SHA guard plus W5's content check (P7) — none of W2–W4/W6's recovery; " <>
           "ahead of both, `ReviewGate.MergeAuthorization` refuses a ticket whose latest " <>
-          "reviewer round did not approve unless accept_as_is/amend covers the head (bd-651ine)"
+          "reviewer round did not approve unless accept_as_is/amend covers the head " <>
+          "(bd-651ine) — the queue dispatches no review round itself, so it pages once " <>
+          "per head and makes no merge call until the record changes"
     },
     %{
       id: :coverage_unknown_wait,

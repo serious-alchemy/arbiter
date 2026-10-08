@@ -3,6 +3,15 @@ defmodule Arbiter.Worker.ReviewGateSendBackTest do
   bd-651ine / #529: a `send_back` resolution is not a pass. A ticket the gate
   parked after a REQUEST_CHANGES, whose implementer then pushed a fix commit and
   was resumed, must get a reviewer round on the new head before anything merges.
+
+  This pins the Worker's own completion path (local `Direct` merger): a resumed
+  implementer's `arb done` re-enters the ReviewGate. That path was already
+  correct — this test passes on the fork point — so it is a regression pin, NOT
+  the reproduction of the incident. The reproduction is the production lane
+  (open PR, `via_review_gate` Watchdog / MergeQueue) in
+  `Arbiter.Worker.WatchdogReviewAuthorizationTest` and
+  `Arbiter.Workflows.MergeQueueReviewAuthorizationTest`, which fail without the
+  `MergeAuthorization` check and the review-round routing.
   """
 
   use Arbiter.DataCase, async: false

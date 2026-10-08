@@ -6,6 +6,17 @@ defmodule Arbiter.Worker.WatchdogReviewAuthorizationTest do
   so the reviewed-SHA guard has no baseline and used to merge unguarded. A
   `send_back` resolution ("another review round follows") does not change that;
   only `accept_as_is` / `amend` — or a later APPROVE — does.
+
+  And the refusal is not the end of it: "another review round follows" is only
+  true if something dispatches the round. The Watchdog routes the refused head
+  to a review round (an auto-resume of the Merging ticket, whose completion
+  re-enters the ReviewGate) exactly as it does a stale reviewed SHA, and pages
+  once — never a per-poll retry — when there is no path back.
+
+  The incident shape: the PR sits on the production lane (`via_review_gate`,
+  which pins the outcome to `:approved`; the forge itself reports
+  `approved=false`), the gate's latest round is REQUEST_CHANGES, and the
+  coordinator has recorded `send_back`.
   """
   use Arbiter.DataCase, async: false
 
@@ -50,19 +61,21 @@ defmodule Arbiter.Worker.WatchdogReviewAuthorizationTest do
     {task, ws}
   end
 
-  defp start_watchdog(task, ref, ws) do
+  defp start_watchdog(task, ref, ws, extra \\ []) do
     :ok = Watchdog.subscribe(task.id)
 
     {:ok, pid} =
       Watchdog.start(
-        task_id: task.id,
-        mr_ref: ref,
-        adapter: StubMerger,
-        workspace: ws,
-        auto_merge: true,
-        interval_ms: 15,
-        initial_delay_ms: 0,
-        auto_resume_dispatcher: StubAutoResumeDispatcher
+        [
+          task_id: task.id,
+          mr_ref: ref,
+          adapter: StubMerger,
+          workspace: ws,
+          auto_merge: true,
+          interval_ms: 15,
+          initial_delay_ms: 0,
+          auto_resume_dispatcher: StubAutoResumeDispatcher
+        ] ++ extra
       )
 
     on_exit(fn -> stop_quietly(pid) end)
@@ -75,32 +88,77 @@ defmodule Arbiter.Worker.WatchdogReviewAuthorizationTest do
         %{status: :open, approved: true, head_sha: "sha-fix", base_ref: "main"}
       ])
 
-  defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait(fun, deadline)
-  end
-
-  defp do_wait(fun, deadline) do
-    cond do
-      fun.() -> :ok
-      System.monotonic_time(:millisecond) > deadline -> flunk("condition not met within timeout")
-      true -> Process.sleep(10) && do_wait(fun, deadline)
-    end
-  end
-
-  test "a send_back resolution does not let a REQUEST_CHANGES PR merge" do
+  test "a send_back resolution does not let a REQUEST_CHANGES PR merge: a review round is dispatched" do
     {task, ws} = rejected_task()
 
     {:ok, _} =
       Resolutions.record(%{task_id: task.id, decision: "send_back", reasoning: "fix, re-review"})
 
-    approved_get("!ra1")
-    start_watchdog(task, "!ra1", ws)
+    # The incident lane: the gate "approved" in-process (`via_review_gate`), the
+    # forge says approved=false. On main this merged.
+    StubMerger.queue_get("!ra1", [
+      %{status: :open, approved: false, head_sha: "sha-fix", base_ref: "main"}
+    ])
 
-    # The refusal is retried (it is not terminal), and never reaches the forge.
-    wait_until(fn -> StubMerger.get_count("!ra1") >= 3 end)
+    pid = start_watchdog(task, "!ra1", ws, via_review_gate: true)
+    ref = Process.monitor(pid)
+
+    # The refusal buys a reviewer round (a new run on the ticket) and the
+    # Watchdog's episode ends there; the merge is never attempted.
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+
+    assert [%{task_id: task_id, attempt: 1, briefing: briefing}] =
+             StubAutoResumeDispatcher.resumes()
+
+    assert task_id == task.id
+    assert briefing =~ "REVIEW ROUND ONLY"
+    assert StubAutoResumeDispatcher.escalations() == []
     assert StubMerger.merge_count("!ra1") == 0
     assert Ash.get!(Issue, task.id).state != :closed
+  end
+
+  test "with no auto-resume budget the refusal pages once and stops (no per-poll retry)" do
+    {task, ws} = rejected_task()
+
+    {:ok, _} =
+      Resolutions.record(%{task_id: task.id, decision: "send_back", reasoning: "fix, re-review"})
+
+    approved_get("!ra3")
+    pid = start_watchdog(task, "!ra3", ws, via_review_gate: true, max_auto_resumes: 0)
+    ref = Process.monitor(pid)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+
+    assert [{task_id, _ws, "!ra3", 0, {:review_not_approved, "sha-fix", _refusal}}] =
+             StubAutoResumeDispatcher.escalations()
+
+    assert task_id == task.id
+    assert StubAutoResumeDispatcher.resume_count() == 0
+    assert StubMerger.merge_count("!ra3") == 0
+  end
+
+  test "after the review round approves the new head the merge goes through" do
+    {task, ws} = rejected_task()
+
+    {:ok, _} =
+      Resolutions.record(%{task_id: task.id, decision: "send_back", reasoning: "fix, re-review"})
+
+    {:ok, _} =
+      Ash.create(Round, %{
+        task_id: task.id,
+        round: 1,
+        role: :review,
+        verdict: :approve,
+        findings: "",
+        finding_count: 0
+      })
+
+    approved_get("!ra4")
+    start_watchdog(task, "!ra4", ws, via_review_gate: true)
+
+    assert_receive {:watchdog, _, {:merged, _}}, 2_000
+    assert StubMerger.merge_count("!ra4") == 1
+    assert StubAutoResumeDispatcher.resume_count() == 0
   end
 
   test "an accept_as_is resolution authorises the merge" do

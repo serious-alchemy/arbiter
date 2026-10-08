@@ -284,7 +284,8 @@ defmodule Arbiter.Workflows.MergeQueue do
           phantom_conflicts: non_neg_integer(),
           coverage_unknown_polls: non_neg_integer(),
           coverage_unknown_head: String.t() | nil,
-          coverage_parked?: boolean()
+          coverage_parked?: boolean(),
+          review_refused_head: String.t() | :unknown | nil
         }
 
   defmodule State do
@@ -1425,13 +1426,56 @@ defmodule Arbiter.Workflows.MergeQueue do
         merge_coverage_guarded(state, item, head)
 
       {:error, {:review_not_approved, _} = refusal} ->
-        Logger.warning(
-          "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
-            MergeAuthorization.describe({:review_not_approved, elem(refusal, 1)})
-        )
-
-        {{:error, refusal}, item}
+        {{:error, refusal}, note_review_refusal(state, item, head, refusal)}
     end
+  end
+
+  # The refusal is answered by a reviewer round or an `accept_as_is` / `amend`
+  # resolution, both of which a person or the ReviewGate supplies — the queue
+  # dispatches nothing itself. So it says so ONCE per head (log + one page) and
+  # then re-reads the record each tick without a forge call, log line or page:
+  # the shape the guard-policy doc lists as defect M3 (303+ identical retries)
+  # is a loud retry, and this one is neither loud nor a merge attempt.
+  defp note_review_refusal(state, item, head, refusal) do
+    key = head || :unknown
+
+    if item.review_refused_head == key do
+      item
+    else
+      page_review_refusal(state, item, refusal, key)
+    end
+  end
+
+  defp page_review_refusal(state, item, refusal, key) do
+    Logger.warning(
+      "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+        MergeAuthorization.describe(refusal) <>
+        " — paging the coordinator once and making no merge call until the record changes"
+    )
+
+    safe_notify_review_refusal(state, item)
+
+    %{item | review_refused_head: key}
+  end
+
+  defp safe_notify_review_refusal(%State{} = state, item) do
+    Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+      %{task_id: item.task_id, workspace_id: state.workspace_id},
+      item.mr_ref,
+      :review_not_approved
+    )
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue.safe_notify_review_refusal: swallowed exception for task=#{item.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp merge_coverage_guarded(state, item, head) do
@@ -2135,6 +2179,9 @@ defmodule Arbiter.Workflows.MergeQueue do
       coverage_unknown_polls: 0,
       coverage_unknown_head: nil,
       coverage_parked?: false,
+      # bd-651ine / #529. The head `MergeAuthorization` last refused (and paged
+      # for): one page per head, not one per tick.
+      review_refused_head: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,

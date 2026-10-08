@@ -46,6 +46,18 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
   A resolution recorded before the latest reviewer round answers an older
   argument and authorises nothing.
 
+  Only reviewer `Round` rows and `:review_gate` resolutions are read. An approval
+  recorded elsewhere — an operator's `arb review cover`, an ExternalReview approval
+  in `Arbiter.Reviews.Coverage` — after a REQUEST_CHANGES round does **not** lift the
+  refusal: the coordinator records `accept_as_is` for the head instead. (That is the
+  one decision this module treats as the coordinator overriding the gate; a
+  coverage row says "this head was looked at", not "the gate's rejection is
+  withdrawn".)
+
+  What happens after a refusal is the caller's: the Watchdog routes the head to a
+  review round (`Watchdog.route_unapproved_head_to_review/2`, bounded by the
+  auto-resume budget, one page when spent) and the MergeQueue pages once per head.
+
   Read failures fail OPEN with a loud log line: a database fault must not
   strand every merge in the fleet, and this guard is one layer among several.
   """

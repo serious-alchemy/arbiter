@@ -1857,6 +1857,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp block_label(:coverage_unknown),
     do: "review coverage for the current head could not be established"
 
+  # bd-651ine / #529. The ReviewGate's own record refuses the merge: the latest
+  # reviewer round did not approve this head and no accept_as_is / amend covers it.
+  defp block_label(:review_not_approved),
+    do: "the latest ReviewGate round did not approve the current head"
+
   defp block_label(:draft), do: "the PR is still a draft"
   defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
   defp block_label(other), do: "merge is blocked (#{other})"
@@ -1902,6 +1907,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "happens (nothing merges in the meantime). Merging by hand is the escape hatch until " <>
         "the operator override lands — `arb review cover <task> <sha> --reason \"…\"`, P11 " <>
         "of docs/review-coverage-and-guard-policy.md."
+
+  defp block_remediation(:review_not_approved, _auto_merge?),
+    do:
+      "resume the task so the ReviewGate reviews the current head (`worker_resume`) — a " <>
+        "`send_back` resolution means another review round follows, it does not permit a " <>
+        "merge. If the work should ship as it is, record `accept_as_is` or `amend` with " <>
+        "`review_gate_resolve`."
 
   defp block_remediation(:needs_approval, auto_merge?),
     do:

@@ -2485,6 +2485,16 @@ defmodule Arbiter.Worker.Watchdog do
         finish_merged(state)
         {:stop, :normal, state}
 
+      # bd-651ine / #529: the gate's own record refuses this head (the latest
+      # reviewer round did not approve, and no accept_as_is / amend covers it).
+      # Retrying the same merge can never change that answer; what changes it is
+      # a reviewer round on this head, so buy one — the same routing a stale
+      # reviewed SHA gets (`resolve_stale_reviewed_head/3`) — rather than
+      # entering the merge-fail page loop below.
+      {:error, {:review_not_approved, _detail} = refusal} ->
+        PendingMerge.clear(state.task_id)
+        route_unapproved_head_to_review(%{state | pending_merge_stamp: nil}, refusal)
+
       {:error, reason} ->
         # Merge failed (race, branch conflict, transient). Stay parked and let
         # the next poll re-attempt rather than failing the task outright.
@@ -4164,6 +4174,15 @@ defmodule Arbiter.Worker.Watchdog do
     )
   end
 
+  defp log_resumed(%{resume_reason: {:review_not_approved, detail, head}} = state, attempt) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} has no " <>
+        "reviewer APPROVE (#{MergeAuthorization.describe({:review_not_approved, detail})}); " <>
+        "dispatched a review round on it (attempt #{attempt}/#{state.max_auto_resumes}" <>
+        deferral_suffix(state) <> ") instead of retrying the merge"
+    )
+  end
+
   defp log_resumed(state, attempt) do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
@@ -4189,6 +4208,21 @@ defmodule Arbiter.Worker.Watchdog do
     Your only job: confirm the branch is committed and pushed (`git status`, `git log
     --oneline -3`), make NO further changes, and print `arb done`. The ReviewGate then
     reviews just the commits since #{reviewed}.
+
+    """)
+  end
+
+  defp put_resume_briefing(args, {:review_not_approved, _detail, head}) do
+    Map.put(args, :briefing, """
+    REVIEW ROUND ONLY — do not change any code.
+
+    This task's PR head #{head} has no reviewer APPROVE: the latest ReviewGate round did
+    not approve it, and a `send_back` resolution only means another review round follows
+    — it does not authorise a merge.
+
+    Your only job: confirm the branch is committed and pushed (`git status`, `git log
+    --oneline -3`), make NO further changes unless the unaddressed findings are still
+    open, and print `arb done`. The ReviewGate then reviews the current head.
 
     """)
   end
@@ -5438,6 +5472,38 @@ defmodule Arbiter.Worker.Watchdog do
       end
     else
       escalate_auto_resume_give_up(state, snap, attempts, stale_reason(reviewed, head, delta))
+
+      {:stop, :normal, state}
+    end
+  end
+
+  # bd-651ine / #529. `resolve_stale_reviewed_head/3`'s sibling for the head the
+  # ReviewGate itself did not approve: a `send_back` resolution (or a REQUEST_CHANGES
+  # round nobody answered) followed by an implementer completion leaves a head with
+  # no APPROVE, and "another review round follows" is only true if something
+  # dispatches it. This does: a fresh run on the Merging ticket whose completion
+  # re-enters the gate, bounded by the same auto-resume budget, with one page —
+  # never a per-poll retry — when there is no path back to review.
+  defp route_unapproved_head_to_review(state, {:review_not_approved, detail} = refusal) do
+    snap = snapshot(state)
+    attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
+    head = detail.head || state.last_head_sha
+
+    if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
+      announce(state, {:unreviewed_head, head})
+
+      state = %{
+        state
+        | resume_attempts_seen: attempts,
+          resume_reason: {:review_not_approved, detail, head}
+      }
+
+      case auto_resume(state, attempts + 1) do
+        {:defer, state} -> {:noreply, schedule_resume_retry(state)}
+        {:stop, state} -> {:stop, :normal, state}
+      end
+    else
+      escalate_auto_resume_give_up(state, snap, attempts, {:review_not_approved, head, refusal})
 
       {:stop, :normal, state}
     end

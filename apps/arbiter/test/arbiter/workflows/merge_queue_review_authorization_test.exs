@@ -142,6 +142,25 @@ defmodule Arbiter.Workflows.MergeQueueReviewAuthorizationTest do
              MergeQueue.state(name)
   end
 
+  test "the refusal is raised once per head, not once per tick", %{workspace: ws} do
+    task = rejected_task(ws)
+
+    {:ok, _} =
+      Resolutions.record(%{task_id: task.id, decision: "send_back", reasoning: "try again"})
+
+    name = start_queue(ws)
+
+    log =
+      capture_log(fn ->
+        :ok = MergeQueue.enqueue(name, task.id)
+        for _ <- 1..5, do: :ok = MergeQueue.tick(name)
+      end)
+
+    assert length(String.split(log, "MergeQueue: refusing merge for task=")) == 2
+    assert %{items: [%{review_refused_head: @head}]} = MergeQueue.state(name)
+    refute_received :merged
+  end
+
   test "an unanswered REQUEST_CHANGES ticket does not merge", %{workspace: ws} do
     task = rejected_task(ws)
     name = start_queue(ws)
