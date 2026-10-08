@@ -10,7 +10,10 @@ defmodule Arbiter.NodeAgent.Checkout do
   object store (`<node_home>/repos/<slug>.git`, under `refs/arbiter/in/<run>/*`) and builds
   the shadow from it: a private clone with its own `.git` whose objects borrow the
   store through `objects/info/alternates`, the branch at the seeded tip, and, when
-  the bundle carries a checkpoint, the work tree restored to it.
+  the bundle carries a checkpoint, the work tree restored to it. The alternates entry
+  is a host path, so `Arbiter.NodeAgent.Run` binds the store's `objects/` read-only at
+  that same path in the container (`borrowed_objects/1`, `store_objects/1`); the shadow
+  holds no other host path.
   It returns `known`, the shas the primary has, which are the `^prerequisites` of
   every bundle sent back, and `have`, what the store holds, for the next seed.
 
@@ -159,6 +162,26 @@ defmodule Arbiter.NodeAgent.Checkout do
   end
 
   defp restore_checkpoint(_dot_git, _shadow, _shas), do: :ok
+
+  @doc """
+  The host paths the shadow's git metadata borrows objects from: the entries of
+  `<shadow>/.git/objects/info/alternates`. Git resolves them as written, so each one
+  must exist at the same path inside the container (bd-1zp3ji). The shadow is a
+  `git init` clone with its own `.git` directory, so alternates are the only host
+  path its metadata holds: there is no `gitdir:` pointer, `commondir` or registered
+  worktree.
+  """
+  @spec borrowed_objects(Path.t()) :: [Path.t()]
+  def borrowed_objects(shadow) do
+    case File.read(Path.join(shadow, ".git/objects/info/alternates")) do
+      {:ok, body} -> body |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+      {:error, _} -> []
+    end
+  end
+
+  @doc "The store's `objects/` directory: what a shadow's alternates name, and what a container must mount."
+  @spec store_objects(Config.t()) :: Path.t()
+  def store_objects(%Config{} = config), do: Path.join(store(config), "objects")
 
   # ---- snapshot + package ------------------------------------------------------------
 

@@ -878,6 +878,94 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert git!(ctx.repo, ["rev-parse", "refs/arbiter/checkpoint/k1"]) != ""
     end
 
+    # bd-1zp3ji: the shadow's objects are borrowed from the node's shared store through
+    # `objects/info/alternates`, an absolute host path. A container that does not see
+    # that path cannot even parse HEAD, so this runs git the way a worker does against
+    # the checkout the agent really built: status, log, commit, and a push of the whole
+    # branch (every object comes through the alternate) to a forge reached only over
+    # the egress proxy bridge.
+    test "git works in the container against the production shadow clone, push included", ctx do
+      forge = Path.join(ctx.root, "forge")
+      File.mkdir_p!(forge)
+      git!(forge, ["init", "-q", "--bare", "-b", "main", "remote.git"])
+      git!(Path.join(forge, "remote.git"), ["config", "http.receivepack", "true"])
+
+      server =
+        start_supervised!(
+          {Bandit,
+           plug: {ArbiterWeb.GitHttpBackend, root: forge},
+           scheme: :http,
+           ip: {127, 0, 0, 1},
+           port: 0},
+          id: :git_forge
+        )
+
+      {:ok, {_address, forge_port}} = ThousandIsland.listener_info(server)
+      allowed = "127.0.0.1:#{forge_port}"
+      owner = start_supervised!({Agent, fn -> :ok end}, id: make_ref())
+
+      {:ok, _network, run} =
+        JailRun.start(
+          owner: owner,
+          dir: ctx.egress_dir,
+          arbiter_url: "http://127.0.0.1:#{ctx.api_port}/mcp",
+          arb_token: Scope.mint_worker(ctx.task),
+          task_id: ctx.task.id,
+          enforce: true,
+          infra: [allowed],
+          allow_local_dial: true
+        )
+
+      on_exit(fn -> Egress.stop_run(run) end)
+      proxy = Egress.socket_path(run, ctx.egress_dir)
+
+      # A tcp port in the container that tunnels through the proxy's CONNECT, then
+      # drops the proxy's two-line reply: what a worker's git sees as "the forge".
+      command = """
+      cd /work/tree
+      cat > /work/tmp/tunnel.sh <<'EOF'
+      { printf 'CONNECT #{allowed} HTTP/1.1\\r\\nHost: #{allowed}\\r\\n\\r\\n'; cat; } | socat -t5 - UNIX-CONNECT:#{proxy} | { read -r a; read -r b; cat; }
+      EOF
+      socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr EXEC:'sh /work/tmp/tunnel.sh' &
+      echo "alternates: $(cat .git/objects/info/alternates)"
+      echo "status: $(git status --short | wc -l)"
+      echo "log: $(git log -1 --format=%s)"
+      echo from-the-container > committed.txt
+      git add committed.txt
+      git commit -q -m "committed in the container" && echo "commit: $(git log -1 --format=%s)"
+      if git push -q http://127.0.0.1:3128/remote.git HEAD:refs/heads/pushed 2>&1; then echo push-ok; else echo push-failed; fi
+      echo git-done
+      """
+
+      handle =
+        open!(
+          ctx,
+          spec(
+            ctx,
+            run,
+            command,
+            checkout_spec(%{"bridges" => [%{"name" => "proxy", "path" => proxy}]})
+          ),
+          checkout: checkout_context(ctx)
+        )
+
+      events = collect(ctx, handle)
+      out = lines(events)
+      assert "git-done" in out, "got #{inspect(out)}\n" <> RealAgent.log_tail(ctx.agent)
+
+      assert "status: 0" in out
+      assert "log: base" in out
+      assert "commit: committed in the container" in out
+      assert "push-ok" in out, "got #{inspect(out)}\n" <> RealAgent.log_tail(ctx.agent)
+      assert {:exit, 0} = List.last(events)
+
+      # the forge has the branch and a clean object graph
+      remote = Path.join(forge, "remote.git")
+      assert git!(remote, ["log", "-1", "--format=%s", "pushed"]) == "committed in the container"
+      assert git!(remote, ["rev-list", "--count", "pushed"]) == "2"
+      assert git!(remote, ["fsck", "--no-dangling"]) == ""
+    end
+
     test "collect/2 checkpoints a live run into the home clone before it ends", ctx do
       command = ~S"""
       echo "mid-run" > /work/tree/mid.txt
