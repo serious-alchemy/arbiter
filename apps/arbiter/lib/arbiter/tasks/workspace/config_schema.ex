@@ -22,6 +22,36 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
   @review_automation_modes ~w(auto report_only propose flag notify off never disabled)
   @quota_modes ~w(throttle continue)
 
+  # Every top-level key the reference below documents, plus the ones other
+  # subsystems own (skills, refine, coordinator_notifications, the deprecated
+  # security block). A `:patch_config` write of any other root is refused.
+  @top_level_keys ~w(tracker merge agent review_agent security guardrails routing review
+                     review_gate notes_gate review_automation quota conductor worker attention
+                     loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
+                     refine coordinator_notifications)
+
+  # Roots whose children live under `agent.security.` — writing one at the top
+  # is the mistake this table exists to catch (bd-311cun).
+  @security_roots ~w(sandbox permissions)
+
+  @doc "The top-level keys a config write may set without `force`."
+  @spec known_top_level_keys() :: [String.t()]
+  def known_top_level_keys, do: @top_level_keys
+
+  @doc """
+  The canonical dotted path for a key written at the wrong root, or `nil` when
+  there is no confident suggestion (e.g. `sandbox.backend` ->
+  `agent.security.sandbox.backend`).
+  """
+  @spec suggest_path(String.t()) :: String.t() | nil
+  def suggest_path(path) when is_binary(path) do
+    case String.split(path, ".", parts: 2) do
+      [root | _] when root in @security_roots -> "agent.security." <> path
+      ["security" | _] -> "agent." <> path
+      _ -> nil
+    end
+  end
+
   @doc false
   def tracker_types, do: @tracker_types
   @doc false
@@ -69,10 +99,12 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
     """
     WORKSPACE CONFIG REFERENCE
 
-    Every top-level key of `workspace.config` (all optional; unknown keys are
-    allowed for forward-compat). Enforced server-side by
-    Arbiter.Tasks.Workspace.Changes.ValidateConfig — this reference is tested
-    against that module so it can't silently drift.
+    Every top-level key of `workspace.config` (all optional). An unknown
+    top-level key is refused by `arb config set` / REST / MCP unless forced, and
+    a known leaf written at the wrong root is answered with the canonical path
+    (e.g. `sandbox.backend` -> `agent.security.sandbox.backend`). Enforced
+    server-side by Arbiter.Tasks.Workspace.Changes.ValidateConfig — this
+    reference is tested against that module so it can't silently drift.
 
     tracker  (map)
       type    one of: #{Enum.join(@tracker_types, ", ")}     (default: none)
@@ -128,6 +160,8 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
 
     security  (map, nested at agent.security)
       CANONICAL PATH: agent.security.permissions.mode
+      ALWAYS WRITE THE FULL PATH: `arb config set agent.security.sandbox.backend
+      podman`, never `sandbox.backend` (a root `sandbox` key is refused).
 
       permissions.mode          one of: #{Enum.join(@security_modes, ", ")}  (default: bypass)
         bypass  — headless-safe default; skips the interactive permission
