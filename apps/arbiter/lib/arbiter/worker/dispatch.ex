@@ -71,6 +71,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
+  alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
@@ -228,6 +229,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
+         :ok <- ensure_sandbox_backend(task, opts),
          :ok <- ensure_capability(task, opts),
          :ok <- ensure_floor(task, opts),
          :ok <- maybe_pause_gate(task, opts),
@@ -1208,6 +1210,7 @@ defmodule Arbiter.Worker.Dispatch do
              :account_at_capacity,
              :no_node_capacity,
              :provider_constraint,
+             :sandbox_backend,
              :capability_missing,
              :below_floor,
              :slot_cap_full
@@ -1468,6 +1471,49 @@ defmodule Arbiter.Worker.Dispatch do
         opts
         |> Keyword.put(:routing_decision, decision)
         |> then(&constrain_unrouted(task, workspace, &1))
+        |> then(&backend_unrouted(task, workspace, &1))
+    end
+  end
+
+  # The no-candidate fall-through picks from the `agent.type` pool, which knows
+  # nothing about the sandbox backend. When that pick is one the backend cannot
+  # run, take the first pool provider it can (and the ticket's constraint
+  # allows); with none, leave it for `ensure_sandbox_backend/2` to hold.
+  defp backend_unrouted(task, workspace, opts) do
+    policy = routing_security(workspace, opts)
+
+    with %SecurityPolicy{} <- policy,
+         nil <- caller_override(opts),
+         provider = quota_gate_provider(task, workspace, opts),
+         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider),
+         constraint = ProviderConstraint.from(task),
+         pool = ProviderConstraint.filter(constraint, Agents.agent_pool(workspace)),
+         allowed = Enum.filter(pool, &is_nil(ProviderRouting.backend_refusal(policy, &1))),
+         alt when not is_nil(alt) <- ProviderPool.pick(allowed) do
+      opts
+      |> Keyword.put(:agent_type, alt)
+      |> Keyword.put(:routed_agent_type, alt)
+      |> put_opt_if_present(:provider_fallback, "fell back from #{provider}: #{detail}")
+    else
+      _ -> opts
+    end
+  end
+
+  # The sandbox backend's refusal as the last word before any state moves:
+  # the provider this dispatch will run on must be runnable by it, or the
+  # dispatch is held with the reason instead of burning a slot on a spawn
+  # that `Sandbox.module/2` refuses. Reviews pick theirs in `ReviewerRouting`.
+  defp ensure_sandbox_backend(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+    policy = routing_security(workspace, opts)
+
+    with false <- Keyword.get(opts, :review, false) == true,
+         %SecurityPolicy{} <- policy,
+         provider = quota_gate_provider(task, workspace, opts),
+         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider) do
+      {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    else
+      _ -> :ok
     end
   end
 

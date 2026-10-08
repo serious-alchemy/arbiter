@@ -207,6 +207,12 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
          :ok <- ProviderConstraint.check(task, provider),
+         :ok <-
+           ProviderRouting.ensure_sandbox_backend(
+             provider,
+             task,
+             context.workspace || maybe_load_workspace(task.workspace_id)
+           ),
          {:ok, worktree_path} <- create_worktree(context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
