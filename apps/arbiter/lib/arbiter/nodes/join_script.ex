@@ -55,15 +55,17 @@ defmodule Arbiter.Nodes.JoinScript do
   end
 
   @doc """
-  The command the operator pastes on the new node: it fetches the script and
-  pipes it to bash. It carries **no secret** — the token is handed over
-  separately and read from the terminal.
+  The command the operator pastes on the new node when a join token was
+  minted: it fetches the script and pipes it to bash in token mode
+  (`ARB_JOIN_MODE=token`, set on the `bash` side of the pipe), so the script
+  asks for the token instead of opening a pairing request. It carries **no
+  secret** — the token is handed over separately and read from the terminal.
   """
   @spec one_liner(String.t()) :: String.t()
   def one_liner("https://" <> _ = url),
-    do: "curl --proto '=https' --tlsv1.2 -fsSL #{url}/nodes/join | bash"
+    do: "curl --proto '=https' --tlsv1.2 -fsSL #{url}/nodes/join | ARB_JOIN_MODE=token bash"
 
-  def one_liner(url), do: "curl -fsSL #{url}/nodes/join | bash"
+  def one_liner(url), do: "curl -fsSL #{url}/nodes/join | ARB_JOIN_MODE=token bash"
 
   @doc false
   @spec sh_quote(term()) :: String.t()

@@ -8,6 +8,13 @@ defmodule ArbiterCli.Cmd.Node do
                       on the new node (it carries no secret) and, separately,
                       the token: to a terminal, or to --token-file (mode 0600).
                       It never prints the token to a pipe or a log.
+      arb node pending [--json]                         (device-code pairing requests waiting)
+      arb node approve <code> [--name N] [--max-workers N] [--yes] [--json]
+                      approve the pairing request showing <code> (XXXX-XXXX) on
+                      a new node. Shows its hostname and source address first
+                      and asks, unless --yes. The node then collects its own
+                      credential; nothing long is typed anywhere.
+      arb node deny   <code>                             (refuse a pairing request)
       arb node list   [--json]
       arb node show   <name|id> [--json]
       arb node set    <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
@@ -29,8 +36,17 @@ defmodule ArbiterCli.Cmd.Node do
 
   Everything but `list`, `show` and `events` — and those too — needs the operator's own token (the human's `arb`, not a
   coordinator session): enrolling a machine hands it provider credentials.
-  The node enrols by running the printed command; the token is typed at its
-  prompt, or supplied with `ARB_JOIN_TOKEN_FILE=<path>` for unattended installs.
+  Two ways to enrol a node:
+
+    * **Pairing (interactive):** on the new node run `curl -fsSL <primary>/join |
+      bash`. It prints a short code; run `arb node approve <code>` here (or
+      approve it on the dashboard's Nodes page). The code is not a secret: it
+      only says which request you mean. Approve only a code you can see on a
+      machine you recognise, and check the hostname and address `approve` shows.
+      A request expires in 10 minutes and works once.
+    * **Join token (unattended):** `arb node add` mints a single-use token; give
+      the node `ARB_JOIN_TOKEN_FILE=<path>` (or `ARB_JOIN_MODE=token` to type it
+      at a prompt).
   """
 
   alias ArbiterCli.{ArgParser, Client, Output}
@@ -49,38 +65,46 @@ defmodule ArbiterCli.Cmd.Node do
     workspace: [:string, :keep]
   ]
 
+  @approve_switches [name: :string, max_workers: :integer, yes: :boolean]
+
   @verbs ~w(drain undrain revoke upgrade remove)
 
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      case Output.drop_json(argv) do
-        ["add" | rest] ->
-          add(rest, Output.mode(argv))
-
-        ["list" | rest] ->
-          _ = positional!(rest, "arb node list")
-          list(Output.mode(argv))
-
-        ["show" | rest] ->
-          show(positional!(rest, "arb node show"), Output.mode(argv))
-
-        ["set" | rest] ->
-          set(rest, Output.mode(argv))
-
-        ["events" | rest] ->
-          events(positional!(rest, "arb node events"), Output.mode(argv))
-
-        [verb | rest] when verb in @verbs ->
-          verb(verb, positional!(rest, "arb node #{verb}"), Output.mode(argv))
-
-        _ ->
-          IO.puts(:stderr, "arb: unknown node subcommand")
-          IO.puts(:stderr, "Run `arb node --help` for usage.")
-          Output.halt(2)
-      end
+      dispatch(Output.drop_json(argv), Output.mode(argv))
     end
+  end
+
+  defp dispatch(["add" | rest], mode), do: add(rest, mode)
+  defp dispatch(["approve" | rest], mode), do: approve(rest, mode)
+  defp dispatch(["set" | rest], mode), do: set(rest, mode)
+
+  defp dispatch(["pending" | rest], mode) do
+    _ = positional!(rest, "arb node pending")
+    pending(mode)
+  end
+
+  defp dispatch(["deny" | rest], mode), do: deny(positional!(rest, "arb node deny"), mode)
+
+  defp dispatch(["list" | rest], mode) do
+    _ = positional!(rest, "arb node list")
+    list(mode)
+  end
+
+  defp dispatch(["show" | rest], mode), do: show(positional!(rest, "arb node show"), mode)
+
+  defp dispatch(["events" | rest], mode),
+    do: events(positional!(rest, "arb node events"), mode)
+
+  defp dispatch([verb | rest], mode) when verb in @verbs,
+    do: verb(verb, positional!(rest, "arb node #{verb}"), mode)
+
+  defp dispatch(_argv, _mode) do
+    IO.puts(:stderr, "arb: unknown node subcommand")
+    IO.puts(:stderr, "Run `arb node --help` for usage.")
+    Output.halt(2)
   end
 
   # The positional args of a verb that takes no flags of its own: anything
@@ -187,12 +211,152 @@ defmodule ArbiterCli.Cmd.Node do
       IO.puts("2. The token is in #{token_file} (mode 0600), not printed. For an unattended")
       IO.puts("   install, copy the file to the node and run:")
       IO.puts("")
-      IO.puts("  ARB_JOIN_TOKEN_FILE=#{token_file} #{liner}")
+      IO.puts("  #{token_file_liner(liner, token_file)}")
     else
       IO.puts("2. When the script asks, enter this token (shown once; never put it on a")
       IO.puts("   command line):")
       IO.puts("")
       IO.puts("  #{token}")
+    end
+  end
+
+  # The env var has to sit on the `bash` side of the pipe: `VAR=x curl ... | bash`
+  # would hand it to curl and the script would never see it. The server's
+  # one-liner ends in `ARB_JOIN_MODE=token bash`; swap that for the file.
+  defp token_file_liner(liner, token_file) do
+    String.replace(
+      liner,
+      ~r/ARB_JOIN_MODE=token bash\z/,
+      "ARB_JOIN_TOKEN_FILE=#{token_file} bash"
+    )
+  end
+
+  # ---- pairing (device code) --------------------------------------------------
+
+  defp pending(mode) do
+    case Client.get("/api/nodes/pairings") do
+      {:ok, resp} when mode == :json ->
+        Output.emit_json(resp)
+
+      {:ok, %{"pairings" => []}} ->
+        IO.puts(
+          "No pending pairing requests. On the new node run: curl -fsSL <primary>/join | bash"
+        )
+
+      {:ok, %{"pairings" => rows}} ->
+        IO.puts(
+          pairing_row(["CODE", "HOSTNAME", "FROM", "EXPIRES", "NAME"])
+          |> String.trim_trailing()
+        )
+
+        for r <- rows, do: IO.puts(pairing_row(pairing_cells(r)) |> String.trim_trailing())
+        IO.puts("\nApprove one with: arb node approve <code>")
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
+  defp pairing_cells(r),
+    do: [r["code"], r["hostname"], r["peer"], r["expires_at"], r["name"] || "-"]
+
+  defp pairing_row(cells) do
+    cells
+    |> Enum.zip([11, 26, 40, 26, 0])
+    |> Enum.map_join("  ", fn {cell, w} -> String.pad_trailing(to_string(cell), w) end)
+  end
+
+  defp approve(argv, mode) do
+    {opts, rest, _} =
+      ArgParser.parse_strict!(argv, "arb node approve", strict: @approve_switches)
+
+    typed = pairing_ref!(rest, "approve")
+    yes? = opts[:yes] == true
+
+    if mode == :json and not yes?,
+      do: Output.die("arb node approve --json needs --yes (there is no prompt in JSON mode)")
+
+    req = find_pairing!(typed)
+    body = %{} |> put(:name, opts[:name]) |> put(:max_workers, opts[:max_workers])
+
+    unless yes? do
+      print_pairing(req, opts)
+      confirm_approve!(req)
+    end
+
+    case Client.post(pairing_path(req, "approve"), stringify(body)) do
+      {:ok, resp} when mode == :json ->
+        Output.emit_json(resp)
+
+      {:ok, _} ->
+        IO.puts(
+          "Approved #{req["code"]} (#{req["hostname"]}, #{req["peer"]}). The node will collect its credential within a few seconds."
+        )
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
+  defp deny(argv, mode) do
+    req = find_pairing!(pairing_ref!(argv, "deny"))
+
+    case Client.post(pairing_path(req, "deny"), %{}) do
+      {:ok, resp} when mode == :json -> Output.emit_json(resp)
+      {:ok, _} -> IO.puts("Denied #{req["code"]} (#{req["hostname"]}, #{req["peer"]}).")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp pairing_ref!([ref | _], _verb) when is_binary(ref) and ref != "", do: ref
+
+  defp pairing_ref!(_, verb),
+    do: Output.die("arb node #{verb}: the pairing code the node shows is required")
+
+  defp pairing_path(req, verb),
+    do: "/api/nodes/pairings/" <> URI.encode(req["id"], &URI.char_unreserved?/1) <> "/" <> verb
+
+  # The pending request whose code matches what was typed (case, dashes and
+  # spaces ignored), so the operator always sees what they are approving.
+  defp find_pairing!(typed) do
+    wanted = normalize_code(typed)
+
+    case Client.get("/api/nodes/pairings") do
+      {:ok, %{"pairings" => rows}} ->
+        Enum.find(rows, &(normalize_code(&1["code"]) == wanted)) ||
+          Output.die(
+            "no pending pairing request with code #{typed}",
+            "list them with `arb node pending`; a request lasts 10 minutes"
+          )
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
+  defp normalize_code(code),
+    do: code |> to_string() |> String.replace(~r/[\s-]/, "") |> String.upcase()
+
+  defp print_pairing(req, opts) do
+    IO.puts("Pairing request #{req["code"]}")
+    IO.puts("  hostname:    #{req["hostname"]}   (the node's own claim)")
+    IO.puts("  from:        #{req["peer"]}   (the address the primary saw)")
+    IO.puts("  name:        #{opts[:name] || req["name"] || "(generated)"}")
+    IO.puts("  expires:     #{req["expires_at"]}")
+    IO.puts("")
+    IO.puts("Approving gives this machine access to run workers with this install's")
+    IO.puts("provider credentials. Approve only if the code is on a screen you are looking at.")
+  end
+
+  defp confirm_approve!(req) do
+    answer =
+      IO.gets("Approve #{req["code"]} from #{req["hostname"]} (#{req["peer"]})? [y/N] ")
+      |> to_string()
+      |> String.trim()
+
+    unless answer in ["y", "Y", "yes"] do
+      IO.puts("aborted")
+      Output.halt(0)
     end
   end
 

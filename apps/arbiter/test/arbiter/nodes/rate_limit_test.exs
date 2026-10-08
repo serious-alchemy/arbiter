@@ -11,6 +11,39 @@ defmodule Arbiter.Nodes.RateLimitTest do
 
   @t0 1_000_000
 
+  describe ":pair" do
+    test "allows 5 pairing requests per source per 10 minutes", %{server: s} do
+      for _ <- 1..5,
+          do: assert(:ok = RateLimit.check(:pair, "100.64.0.1", server: s, now_ms: @t0))
+
+      assert {:error, {:rate_limited, retry}} =
+               RateLimit.check(:pair, "100.64.0.1", server: s, now_ms: @t0)
+
+      assert retry in 1..600
+      assert :ok = RateLimit.check(:pair, "100.64.0.2", server: s, now_ms: @t0)
+    end
+  end
+
+  describe ":pair_poll" do
+    test "allows 60 polls a minute per source", %{server: s} do
+      for _ <- 1..60, do: assert(:ok = RateLimit.check(:pair_poll, "a", server: s, now_ms: @t0))
+
+      assert {:error, {:rate_limited, _}} =
+               RateLimit.check(:pair_poll, "a", server: s, now_ms: @t0)
+
+      assert :ok = RateLimit.check(:pair_poll, "b", server: s, now_ms: @t0)
+    end
+
+    test "10 failed polls in 10 minutes block that source only", %{server: s} do
+      for _ <- 1..10, do: RateLimit.record_failure(:pair_poll, "bad", server: s, now_ms: @t0)
+
+      assert {:error, {:rate_limited, _}} =
+               RateLimit.check(:pair_poll, "bad", server: s, now_ms: @t0)
+
+      assert :ok = RateLimit.check(:pair_poll, "good", server: s, now_ms: @t0)
+    end
+  end
+
   describe ":enroll" do
     test "allows 10 attempts a minute globally, then 429s with a Retry-After", %{server: s} do
       for _ <- 1..10,

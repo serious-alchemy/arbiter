@@ -4,11 +4,16 @@
 # ~/.arbiter-node/ and a user systemd unit. It never uses sudo and refuses to
 # run as root.
 #
-#   curl ... /nodes/join | bash      the join token is read from /dev/tty
+#   curl ... /join | bash      pairing: this script shows a short code (XXXX-XXXX) and
+#                               the operator approves it on the primary with
+#                               `arb node approve`. No secret is typed anywhere.
 #
 # Unattended installs:  ARB_JOIN_TOKEN_FILE=/path (mode 0600)  or  ARB_JOIN_TOKEN
+#                       (a join token from `arb node add`; no approval step).
+# Typed token:          ARB_JOIN_MODE=token  reads the join token from /dev/tty.
 # Check only:           ARB_JOIN_CHECK_ONLY=1  runs every prerequisite check and
-#                       exits; no token is read and none is spent.
+#                       exits; no token is read, none is spent and no pairing
+#                       request is opened.
 # Optional:             ARB_NODE_NAME, ARB_NODE_LABELS=k=v,k=v, ARB_NODE_MAX_WORKERS
 #
 # Nothing in this file is executed until the final line: a truncated download
@@ -42,6 +47,12 @@ NODE_NAME=""
 CREDENTIAL=""
 AGENT_VERSION=""
 AGENT_SHA=""
+OPT_JSON=""
+PAIR_ID=""
+PAIR_CODE=""
+PAIR_SECRET=""
+PAIR_EXPIRES=""
+PAIR_INTERVAL=""
 
 say() { printf '%s\n' "$*"; }
 die() {
@@ -358,9 +369,10 @@ safe_value() {
   esac
 }
 
-enroll() {
-  local body labels="" item name="${ARB_NODE_NAME:-}" workers="${ARB_NODE_MAX_WORKERS:-}"
-  local code out="$TMP_DIR/enroll.out" k v
+# node_options: set OPT_JSON to the optional `,"name":...` fields shared by the
+# enrol and pairing requests (each value restricted to a safe character set).
+node_options() {
+  local labels="" item name="${ARB_NODE_NAME:-}" workers="${ARB_NODE_MAX_WORKERS:-}"
   if [ -n "$name" ]; then
     safe_value "$name" ARB_NODE_NAME
   fi
@@ -376,11 +388,38 @@ enroll() {
       if [ -n "$workers" ]; then die "ARB_NODE_MAX_WORKERS must be a number"; fi
       ;;
   esac
-  body="{\"token\":\"$JOIN_TOKEN\",\"proto\":$ARB_JOIN_PROTO"
-  if [ -n "$name" ]; then body="$body,\"name\":\"$name\""; fi
-  if [ -n "$labels" ]; then body="$body,\"labels\":[$labels]"; fi
-  if [ -n "$workers" ]; then body="$body,\"max_workers\":$workers"; fi
-  body="$body}"
+  OPT_JSON=""
+  if [ -n "$name" ]; then OPT_JSON="$OPT_JSON,\"name\":\"$name\""; fi
+  if [ -n "$labels" ]; then OPT_JSON="$OPT_JSON,\"labels\":[$labels]"; fi
+  if [ -n "$workers" ]; then OPT_JSON="$OPT_JSON,\"max_workers\":$workers"; fi
+}
+
+# read_enrolled FILE: read and validate the KEY=value lines of an enrolled
+# response (the credential and what is needed to fetch the agent).
+read_enrolled() {
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      node_id) NODE_ID="$v" ;;
+      name) NODE_NAME="$v" ;;
+      credential) CREDENTIAL="$v" ;;
+      agent_version) AGENT_VERSION="$v" ;;
+      tarball_sha256) AGENT_SHA="$v" ;;
+      *) ;;
+    esac
+  done <"$1"
+  rm -f -- "$1"
+  [[ "$NODE_ID" =~ ^[0-9a-f-]{36}$ ]] || die "the primary sent a malformed node id"
+  [[ "$NODE_NAME" =~ ^[A-Za-z0-9._=:/@-]+$ ]] || die "the primary sent a malformed node name"
+  [[ "$CREDENTIAL" =~ ^arbn_[0-9a-f-]{36}\.[a-z2-7]{52}$ ]] || die "the primary sent a malformed credential"
+  [[ "$AGENT_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "the primary sent a malformed agent version"
+  [[ "$AGENT_SHA" =~ ^[0-9a-f]{64}$ ]] || die "the primary sent a malformed checksum"
+}
+
+enroll() {
+  local body code out="$TMP_DIR/enroll.out"
+  node_options
+  body="{\"token\":\"$JOIN_TOKEN\",\"proto\":$ARB_JOIN_PROTO$OPT_JSON}"
   # The token travels on curl's stdin only: not on argv, not in the environment.
   code="$(printf '%s' "$body" | curl_safe -X POST --data-binary @- \
     -H 'Content-Type: application/json' -H 'Accept: text/plain' \
@@ -396,22 +435,89 @@ enroll() {
     503) die "the primary cannot serve an agent build yet (the token was not used)" ;;
     *) die "enrolment failed (HTTP ${code:-none})" ;;
   esac
+  read_enrolled "$out"
+}
+
+# ---- pairing (device code) -------------------------------------------------
+# No secret is typed anywhere: this node asks the primary for a short code,
+# shows it, and the operator approves that code on the primary. The credential
+# comes back on this node's own polling, authorised by a long poll secret that
+# never leaves this process (curl's stdin only).
+
+pair_request() {
+  local host body code out="$TMP_DIR/pair.out" k v
+  host="${HOSTNAME:-}"
+  host="${host//[!A-Za-z0-9._-]/}"
+  node_options
+  body="{\"hostname\":\"${host:-unknown}\",\"proto\":$ARB_JOIN_PROTO$OPT_JSON}"
+  code="$(printf '%s' "$body" | curl_safe -X POST --data-binary @- \
+    -H 'Content-Type: application/json' -H 'Accept: text/plain' \
+    -o "$out" -w '%{http_code}' "$ARB_PRIMARY_URL/nodes/pair" || true)"
+  case "$code" in
+    201) ;;
+    422) die "the primary refused the node name (allowed: A-Za-z0-9._=:/@-, up to 128 characters)" ;;
+    429) die "the primary is rate limiting pairing requests (or too many are waiting); wait a few minutes and retry" ;;
+    503) die "the primary cannot take a pairing request yet (no public URL or agent build)" ;;
+    *) die "the pairing request failed (HTTP ${code:-none})" ;;
+  esac
   while IFS='=' read -r k v; do
     case "$k" in
-      node_id) NODE_ID="$v" ;;
-      name) NODE_NAME="$v" ;;
-      credential) CREDENTIAL="$v" ;;
-      agent_version) AGENT_VERSION="$v" ;;
-      tarball_sha256) AGENT_SHA="$v" ;;
+      id) PAIR_ID="$v" ;;
+      code) PAIR_CODE="$v" ;;
+      secret) PAIR_SECRET="$v" ;;
+      expires_in) PAIR_EXPIRES="$v" ;;
+      interval) PAIR_INTERVAL="$v" ;;
       *) ;;
     esac
   done <"$out"
   rm -f -- "$out"
-  [[ "$NODE_ID" =~ ^[0-9a-f-]{36}$ ]] || die "the primary sent a malformed node id"
-  [[ "$NODE_NAME" =~ ^[A-Za-z0-9._=:/@-]+$ ]] || die "the primary sent a malformed node name"
-  [[ "$CREDENTIAL" =~ ^arbn_[0-9a-f-]{36}\.[a-z2-7]{52}$ ]] || die "the primary sent a malformed credential"
-  [[ "$AGENT_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "the primary sent a malformed agent version"
-  [[ "$AGENT_SHA" =~ ^[0-9a-f]{64}$ ]] || die "the primary sent a malformed checksum"
+  [[ "$PAIR_ID" =~ ^[0-9a-f-]{36}$ ]] || die "the primary sent a malformed pairing id"
+  [[ "$PAIR_CODE" =~ ^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$ ]] || die "the primary sent a malformed pairing code"
+  [[ "$PAIR_SECRET" =~ ^arbp_[a-z2-7]{52}$ ]] || die "the primary sent a malformed poll secret"
+  [[ "$PAIR_EXPIRES" =~ ^[0-9]{1,5}$ ]] || die "the primary sent a malformed expiry"
+  [[ "$PAIR_INTERVAL" =~ ^[0-9]{1,2}$ ]] && [ "$PAIR_INTERVAL" -ge 1 ] || PAIR_INTERVAL=3
+}
+
+pair_wait() {
+  local body code out="$TMP_DIR/poll.out" deadline errors=0
+  deadline=$((SECONDS + PAIR_EXPIRES + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep "$PAIR_INTERVAL"
+    body="{\"id\":\"$PAIR_ID\",\"secret\":\"$PAIR_SECRET\"}"
+    code="$(printf '%s' "$body" | curl_safe -X POST --data-binary @- \
+      -H 'Content-Type: application/json' -H 'Accept: text/plain' \
+      -o "$out" -w '%{http_code}' "$ARB_PRIMARY_URL/nodes/pair/poll" || true)"
+    body=""
+    case "$code" in
+      200)
+        PAIR_SECRET=""
+        read_enrolled "$out"
+        return 0
+        ;;
+      202 | 429) errors=0 ;;
+      403) die "the operator denied this pairing request; nothing was installed" ;;
+      410) die "the pairing request expired before it was approved; run this again" ;;
+      409) die "a node with that name already exists; ask the operator to approve under another name, or run this again with ARB_NODE_NAME" ;;
+      401) die "the primary no longer knows this pairing request; run this again" ;;
+      *)
+        errors=$((errors + 1))
+        if [ "$errors" -ge 10 ]; then die "lost contact with the primary while waiting for approval (HTTP ${code:-none})"; fi
+        ;;
+    esac
+  done
+  die "gave up waiting for approval; run this again"
+}
+
+pair() {
+  pair_request
+  say ""
+  say "  Pairing code:   $PAIR_CODE"
+  say ""
+  say "On the primary, approve it (the code is not a secret, but approve only a code"
+  say "you see here, from a host you recognise):"
+  say "    arb node approve $PAIR_CODE        (or the dashboard: Nodes > Pending)"
+  say "Waiting for approval (expires in $((PAIR_EXPIRES / 60)) minutes)..."
+  pair_wait
 }
 
 # ---- install ----------------------------------------------------------------
@@ -549,18 +655,23 @@ main() {
   UNIT_DIR="$HOME/.config/systemd/user"
 
   say "Arbiter node join: $ARB_PRIMARY_URL"
-  say "Plan: check this machine, exchange a join token for a node credential,"
-  say "      install the agent under $NODE_ROOT and a user systemd unit."
+  say "Plan: check this machine, get a node credential (an operator-approved pairing"
+  say "      code, or a join token), install the agent under $NODE_ROOT and a user"
+  say "      systemd unit."
   run_checks || exit 1
   if [ "${ARB_JOIN_CHECK_ONLY:-0}" = 1 ]; then
-    say "ARB_JOIN_CHECK_ONLY=1: stopping here. No token was read or used."
+    say "ARB_JOIN_CHECK_ONLY=1: stopping here. No token was read or used and no pairing was requested."
     exit 0
   fi
 
   TMP_DIR="$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/arbiter-join.XXXXXX")"
   trap cleanup EXIT
-  read_token
-  enroll
+  if [ -n "$ENV_TOKEN" ] || [ -n "${ARB_JOIN_TOKEN_FILE:-}" ] || [ "${ARB_JOIN_MODE:-}" = token ]; then
+    read_token
+    enroll
+  else
+    pair
+  fi
   ok "enrolled as $NODE_NAME ($NODE_ID)"
   store_credential
   download_agent

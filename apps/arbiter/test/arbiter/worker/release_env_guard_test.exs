@@ -132,6 +132,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/worker/podman_readiness.ex" => :scrubbed,
+    # bd-c2cew2: the spawn canary builds its scratch git repo for podman (git only).
+    "apps/arbiter/lib/arbiter/doctor/spawn_canary.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     # bd-svczq4: the OS-process-tree kill helpers extracted out of `worker.ex`

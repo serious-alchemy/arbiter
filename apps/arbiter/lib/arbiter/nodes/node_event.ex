@@ -39,7 +39,12 @@ defmodule Arbiter.Nodes.NodeEvent do
     :checkout_rejected,
     :retained,
     :recovered,
-    :reaped
+    :reaped,
+    :pairing_requested,
+    :pairing_approved,
+    :pairing_denied,
+    :pairing_expired,
+    :pairing_rejected
   ]
 
   @doc "Every event kind."

@@ -63,4 +63,39 @@ defmodule Arbiter.Nodes.CredentialsTest do
       refute Credentials.matches?(secret, "")
     end
   end
+
+  describe "pairing" do
+    test "codes are 8 characters from an alphabet without look-alikes" do
+      codes = for _ <- 1..200, do: Credentials.generate_pairing_code()
+
+      for code <- codes do
+        assert code =~ ~r/\A[2-9A-HJ-NP-Z]{8}\z/
+        refute code =~ ~r/[01IOl]/
+      end
+
+      assert length(Enum.uniq(codes)) > 190
+    end
+
+    test "format_pairing_code/1 groups as XXXX-XXXX" do
+      assert Credentials.format_pairing_code("ABCD2345") == "ABCD-2345"
+    end
+
+    test "normalize_pairing_code/1 is lenient about case, dashes and spaces only" do
+      assert Credentials.normalize_pairing_code("abcd-2345") == {:ok, "ABCD2345"}
+      assert Credentials.normalize_pairing_code(" ABCD 2345 ") == {:ok, "ABCD2345"}
+      assert Credentials.normalize_pairing_code("ABCD234") == :error
+      assert Credentials.normalize_pairing_code("ABCD-23O5") == :error
+      assert Credentials.normalize_pairing_code(nil) == :error
+    end
+
+    test "the poll secret is arbp_ + 52 base32 chars and is not a join token" do
+      {secret, hash} = Credentials.generate_pairing_secret()
+
+      assert "arbp_" <> body = secret
+      assert body =~ ~r/\A[a-z2-7]{52}\z/
+      assert hash == Credentials.hash(secret)
+      refute Credentials.join_token?(secret)
+      assert Credentials.parse_node_credential(secret) == :error
+    end
+  end
 end
