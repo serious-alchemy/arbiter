@@ -62,6 +62,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Doctor.Scope
   alias Arbiter.MCP
+  alias Arbiter.Mergers
   alias Arbiter.Providers.Pause
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.ClaudeSession
@@ -278,7 +279,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
     policy = if mode == :bwrap_fallback, do: bwrap_policy(policy), else: policy
 
     with {:ok, tmp_dir} <- create_tmp(canary_id),
-         {:ok, worktree} <- canary_worktree(mode, canary_id, tmp_dir) do
+         {:ok, worktree} <- canary_worktree(mode, canary_id, tmp_dir, workspace) do
       :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
       track_agent_home(adapter_type, worktree)
       on_cleanup(fn -> JailRun.stop(self()) end)
@@ -312,7 +313,8 @@ defmodule Arbiter.Doctor.SpawnCanary do
         |> probe(canary_id, opts)
         |> label_fallback(mode, type)
       else
-        {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
+        {:error, reason} ->
+          label_fallback({:failed, %{error: first_line(describe(reason))}}, mode, type)
       end
     else
       {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
@@ -327,20 +329,30 @@ defmodule Arbiter.Doctor.SpawnCanary do
     {:ok, %{ok | detail: if(detail, do: detail <> " (" <> note <> ")", else: note)}}
   end
 
+  defp label_fallback({:failed, fields}, :bwrap_fallback, type) do
+    note = "ran through the bwrap path: podman has no wrap point for #{type}"
+    {:failed, Map.update(fields, :error, note, &(&1 <> " (" <> note <> ")"))}
+  end
+
   defp label_fallback(outcome, _mode, _type), do: outcome
 
   # A podman canary mounts a real private clone (the only layout a container is
   # handed) of a throwaway repo: a bare "forge", a checkout with one commit
   # pushed to it, and the clone a dispatch would make. The forge and checkout
   # live in the canary's temp dir; the clone is placed by `PrivateClone` under
-  # the worktree root and removed first (cleanups run newest first).
-  defp canary_worktree(:podman, canary_id, tmp_dir) do
+  # the worktree root and removed first (cleanups run newest first). The repo's
+  # branch is the workspace's `merge.base`, which the image lookup also uses.
+  # The scratch repo has no `.tool-versions`/`.arbiter/Containerfile`, so with no
+  # configured `worker_container_image` the canary uses the default-toolchain
+  # image, not the workspace repo's own; a cold host builds it during prepare.
+  defp canary_worktree(:podman, canary_id, tmp_dir, workspace) do
+    base = Mergers.base_branch(workspace, nil) || "main"
     forge = Path.join(tmp_dir, "forge.git")
     checkout = Path.join(tmp_dir, "checkout")
     branch = "arbiter/" <> canary_id
 
-    with :ok <- git(tmp_dir, ["init", "-q", "--bare", "-b", "main", forge]),
-         :ok <- git(tmp_dir, ["init", "-q", "-b", "main", checkout]),
+    with :ok <- git(tmp_dir, ["init", "-q", "--bare", "-b", base, forge]),
+         :ok <- git(tmp_dir, ["init", "-q", "-b", base, checkout]),
          :ok <- write_readme(checkout),
          :ok <- git(checkout, ["add", "README.md"]),
          :ok <-
@@ -355,8 +367,8 @@ defmodule Arbiter.Doctor.SpawnCanary do
              "canary"
            ]),
          :ok <- git(checkout, ["remote", "add", "origin", forge]),
-         :ok <- git(checkout, ["push", "-q", "origin", "main"]),
-         {:ok, clone} <- PrivateClone.create(checkout, branch, "main") do
+         :ok <- git(checkout, ["push", "-q", "origin", base]),
+         {:ok, clone} <- PrivateClone.create(checkout, branch, base) do
       on_cleanup(fn -> PrivateClone.remove(clone) end)
       {:ok, clone}
     else
@@ -364,7 +376,8 @@ defmodule Arbiter.Doctor.SpawnCanary do
     end
   end
 
-  defp canary_worktree(_mode, canary_id, _tmp_dir), do: create_tmp(canary_id <> "-worktree")
+  defp canary_worktree(_mode, canary_id, _tmp_dir, _workspace),
+    do: create_tmp(canary_id <> "-worktree")
 
   defp write_readme(checkout) do
     File.write(Path.join(checkout, "README.md"), "arbiter doctor spawn canary\n")

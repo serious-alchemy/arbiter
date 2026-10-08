@@ -329,6 +329,44 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       refute calls(ctx.sandbox) =~ "podman run"
     end
 
+    test "a failing bwrap fallback is labelled too", ctx do
+      podman_workspace!(["gemini"])
+      File.write!(Path.join(ctx.sandbox.bin, "agy"), "#!/bin/sh\necho nope >&2\nexit 3\n")
+      File.write!(Path.join(ctx.sandbox.bin, "gemini"), "#!/bin/sh\necho nope >&2\nexit 3\n")
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      refute report.ok
+      assert %{status: "fail", error: error} = provider(report, "gemini")
+      assert error =~ "ran through the bwrap path"
+    end
+
+    test "a non-main merge.base with no configured image still resolves the image", ctx do
+      Application.delete_env(:arbiter, :worker_container_image)
+
+      Application.put_env(:arbiter, :worker_image_runner, fn
+        "podman", ["image", "exists" | _], _ -> {"", 0}
+        _, _, _ -> {"", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_image_runner) end)
+
+      Ash.create!(Workspace, %{
+        name: "canary-#{unique()}",
+        config: %{
+          "agent" => %{
+            "type" => ["claude"],
+            "security" => %{"sandbox" => %{"backend" => "podman"}}
+          },
+          "merge" => %{"base" => "develop"}
+        }
+      })
+
+      report = run_canary!(container_opts: ctx.container_opts)
+
+      assert %{status: "ok"} = provider(report, "claude")
+    end
+
     test "a bwrap workspace is unchanged: no container, no scratch repo", ctx do
       workspace!(["claude"])
 
