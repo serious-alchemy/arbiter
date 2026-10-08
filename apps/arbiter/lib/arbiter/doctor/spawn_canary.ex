@@ -59,6 +59,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.MemoryScope
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.RunTmp
@@ -264,7 +265,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
            {:ok, worktree} <- create_tmp(canary_id <> "-worktree") do
         :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
         track_agent_home(adapter_type, worktree)
-        on_cleanup(fn -> Arbiter.Worker.Egress.JailRun.stop(self()) end)
+        on_cleanup(fn -> JailRun.stop(self()) end)
 
         token = mint_token(workspace, canary_id)
 
