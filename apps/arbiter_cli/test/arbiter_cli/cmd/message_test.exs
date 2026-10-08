@@ -68,24 +68,20 @@ defmodule ArbiterCli.Cmd.MessageTest do
     end
   end
 
-  describe "recipient task workspace inference (D-M-1)" do
-    test "message send files under recipient task workspace rather than CLI default" do
-      test_pid = self()
+  describe "workspace is the server's call (D-M-1)" do
+    defp capture_post(test_pid, tag, kind) do
+      fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {tag, Jason.decode!(body)})
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "m", "kind" => kind})
+      end
+    end
 
+    test "message send names no workspace, so the server files it under the recipient's" do
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-default", "name" => "default", "prefix" => "bd"}]}, 200}},
-        {{"get", "/api/issues/bd-other"},
-         {%{"data" => %{"id" => "bd-other", "workspace_id" => "ws-recipient"}}, 200}},
-        {{"post", "/api/messages"},
-         fn conn ->
-           {:ok, body, conn} = Plug.Conn.read_body(conn)
-           send(test_pid, {:message_body, Jason.decode!(body)})
-
-           conn
-           |> Plug.Conn.put_status(201)
-           |> Req.Test.json(%{"id" => "m-2", "kind" => "info"})
-         end}
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
       ])
 
       {out, _err, code} =
@@ -94,28 +90,15 @@ defmodule ArbiterCli.Cmd.MessageTest do
       assert code == 0
       assert out =~ "Sent info to bd-other."
       assert_received {:message_body, payload}
-      assert payload["workspace_id"] == "ws-recipient"
+      refute Map.has_key?(payload, "workspace_id")
+      refute Map.has_key?(payload, "workspace")
       assert payload["to_ref"] == "bd-other"
       assert payload["body"] == "hello from cli"
     end
 
-    test "direction shorthand files under recipient task workspace rather than CLI default" do
-      test_pid = self()
-
+    test "direction shorthand names no workspace either" do
       stub_routes([
-        {{"get", "/api/workspaces"},
-         {%{"data" => [%{"id" => "ws-default", "name" => "default", "prefix" => "bd"}]}, 200}},
-        {{"get", "/api/issues/bd-other"},
-         {%{"data" => %{"id" => "bd-other", "workspace_id" => "ws-recipient"}}, 200}},
-        {{"post", "/api/messages"},
-         fn conn ->
-           {:ok, body, conn} = Plug.Conn.read_body(conn)
-           send(test_pid, {:direction_body, Jason.decode!(body)})
-
-           conn
-           |> Plug.Conn.put_status(201)
-           |> Req.Test.json(%{"id" => "m-3", "kind" => "direction"})
-         end}
+        {{"post", "/api/messages"}, capture_post(self(), :direction_body, "direction")}
       ])
 
       {out, _err, code} =
@@ -124,26 +107,15 @@ defmodule ArbiterCli.Cmd.MessageTest do
       assert code == 0
       assert out =~ "Direction sent to bd-other."
       assert_received {:direction_body, payload}
-      assert payload["workspace_id"] == "ws-recipient"
+      refute Map.has_key?(payload, "workspace_id")
       assert payload["to_ref"] == "bd-other"
     end
 
-    test "message send with -w overrides CLI default workspace when recipient is not a task" do
-      test_pid = self()
-
+    test "-w is forwarded as a claim the server validates against the recipient" do
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
-        {{"get", "/api/issues/coordinator"}, {%{"error" => "not found"}, 404}},
-        {{"post", "/api/messages"},
-         fn conn ->
-           {:ok, body, conn} = Plug.Conn.read_body(conn)
-           send(test_pid, {:message_body, Jason.decode!(body)})
-
-           conn
-           |> Plug.Conn.put_status(201)
-           |> Req.Test.json(%{"id" => "m-4", "kind" => "info"})
-         end}
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
       ])
 
       {out, _err, code} =
@@ -154,7 +126,126 @@ defmodule ArbiterCli.Cmd.MessageTest do
       assert code == 0
       assert out =~ "Sent info to coordinator."
       assert_received {:message_body, payload}
-      assert payload["workspace_id"] == "ws-custom"
+      assert payload["workspace"] == "ws-custom"
+    end
+  end
+
+  describe "inherited ARB_WORKSPACE" do
+    setup do
+      System.put_env("ARB_WORKSPACE", "ws-a")
+      :ok
+    end
+
+    @two_workspaces %{
+      "data" => [
+        %{"id" => "ws-a", "name" => "a", "prefix" => "aa"},
+        %{"id" => "ws-b", "name" => "b", "prefix" => "bb"}
+      ]
+    }
+
+    test "is not forwarded as a claim on a send to a task" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "bb-1", "hello"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      refute Map.has_key?(payload, "workspace")
+    end
+
+    test "is not forwarded on the direction shorthand" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :direction_body, "direction")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["bb-1", "please re-check"]) end)
+
+      assert code == 0
+      assert_received {:direction_body, payload}
+      refute Map.has_key?(payload, "workspace")
+    end
+
+    test "still scopes a send to the coordinator" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@two_workspaces, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "coordinator", "ping"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      assert payload["workspace"] == "ws-a"
+    end
+  end
+
+  describe "send to the coordinator with no ARB_WORKSPACE" do
+    test "resolves the default workspace as before" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-x", "name" => "x", "prefix" => "xx"},
+              %{"id" => "ws-d", "name" => "default", "prefix" => "bd"}
+            ]
+          }, 200}},
+        {{"post", "/api/messages"}, capture_post(self(), :message_body, "info")}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["send", "coordinator", "ping"]) end)
+
+      assert code == 0
+      assert_received {:message_body, payload}
+      assert payload["workspace"] == "ws-d"
+    end
+  end
+
+  describe "verb-less typo (D-M-9)" do
+    test "a typo'd verb is surfaced as the server's not-found, not a sent message" do
+      stub_routes([
+        {{"post", "/api/messages"},
+         {%{"error" => %{"type" => "not_found", "message" => "task sned not found"}}, 404}}
+      ])
+
+      {out, err, code} =
+        capture(fn -> ArbiterCli.Cmd.Message.run(["sned", "bd-1", "hi"]) end)
+
+      assert code != 0
+      refute out =~ "sent"
+      assert err =~ "task sned not found"
+    end
+
+    test "an empty body (only --json) is refused before anything is posted" do
+      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Message.run(["bd-1", "--json"]) end)
+      assert code != 0
+      assert err =~ "message requires text"
+    end
+  end
+
+  describe "--directive" do
+    test "warns that it is deprecated" do
+      stub_routes([
+        {{"post", "/api/messages"},
+         fn conn ->
+           conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "m", "kind" => "info"})
+         end}
+      ])
+
+      {_out, err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Message.run(["send", "bd-x", "hi", "--directive", "bd-y"])
+        end)
+
+      assert code == 0
+      assert err =~ "--directive` is deprecated"
     end
   end
 end

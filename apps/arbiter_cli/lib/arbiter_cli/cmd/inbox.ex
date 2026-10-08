@@ -6,6 +6,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   Usage:
 
       arb inbox                 unread mail addressed to the coordinator
+      arb inbox --outstanding   read-but-uncleared mail (the triage queue)
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
       arb inbox clear           soft-clear the outstanding (read) tail
@@ -16,9 +17,13 @@ defmodule ArbiterCli.Cmd.Inbox do
                                 soft-clear every coordinator message
                                 concerning that task
       arb inbox <task-id>       (worker path) a task's unread mail; drained
-                                — marked read on fetch
+                                — marked read on fetch. The task must exist
+                                (a mistyped verb is an error, not an empty
+                                mailbox). `--outstanding` lists its
+                                read-but-uncleared mail instead (no mutation).
 
-  The coordinator view is read-only triage: listing does NOT mark mail read. You
+  The coordinator view is read-only triage: listing does NOT mark mail read
+  (pass `--mark-read` to stamp what it lists). You
   drain it deliberately with `read <id>` (one) and `clear` (the read tail) or
   `clear --all` (everything). `clear` is a **soft** state transition — it stamps
   `cleared_at` and the rows are retained (the durable escalation record), not
@@ -36,13 +41,20 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   Flags:
     --json             emit JSON instead of human-readable text
+    --outstanding      list read-but-uncleared mail instead of unread mail
+    --mark-read        stamp the listed unread mail read (the coordinator view
+                       defaults to a pure read; the task drain always marks)
     --session <id>     act as that browser session's reader instead of the
-                       shared sessionless coordinator one (bd-8akewg)
+                       shared sessionless coordinator one (bd-8akewg). Inside a
+                       browser coordinator session the token already names its
+                       session and this flag is not needed.
 
   ## Reader identity (bd-8akewg)
 
   The coordinator mailbox is a single shared queue, but read/cleared state is
-  per reader. With no `--session`, `arb inbox` is the **sessionless
+  per reader, derived from your token exactly as the MCP `coordinator_inbox`
+  tool derives it. A session token is its own reader; with neither that nor
+  `--session`, `arb inbox` is the **sessionless
   coordinator** reader — the same identity the dashboard drawer and a plain
   `arb mcp token mint` token share, and the one that carries the operator's
   existing triage state. `--session <id>` reads and clears one browser
@@ -54,8 +66,8 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   @coordinator "coordinator"
   @all_limit 20
-  # Kinds the worker (task) path surfaces — addressed, read-acknowledged.
-  @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
+  # How many coordinator messages a short id prefix is matched against (REST ceiling).
+  @prefix_window 500
 
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -68,19 +80,26 @@ defmodule ArbiterCli.Cmd.Inbox do
       {opts, rest, mode} =
         ArgParser.parse(argv,
           command: "arb message inbox",
-          switches: [all: :boolean, task: :string, session: :string]
+          switches: [
+            all: :boolean,
+            outstanding: :boolean,
+            mark_read: :boolean,
+            task: :string,
+            session: :string
+          ]
         )
 
       session = opts[:session]
       all? = opts[:all] == true
       task = opts[:task]
+      view = %{outstanding?: opts[:outstanding] == true, mark_read?: opts[:mark_read] == true}
 
       case {rest, all?, task} do
         {[], false, nil} ->
-          coordinator_inbox_view(true, mode, session)
+          coordinator_inbox_view(view, true, mode, session)
 
         {[], true, nil} ->
-          coordinator_inbox_view(false, mode, session)
+          coordinator_inbox_view(view, false, mode, session)
 
         {["read", id], false, nil} ->
           read_one(id, mode, session)
@@ -98,7 +117,7 @@ defmodule ArbiterCli.Cmd.Inbox do
           clear_ids(ids, mode, session)
 
         {[task_id], false, nil} ->
-          task_inbox(task_id, mode)
+          task_inbox(task_id, view, mode)
 
         _ ->
           Output.die("inbox: unrecognized arguments. See `arb help`.")
@@ -122,13 +141,25 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- coordinator views ----------------------------------------------------
 
-  defp coordinator_inbox_view(unread_only, mode, session) do
+  defp coordinator_inbox_view(%{outstanding?: true} = view, _unread_only, mode, session) do
+    params =
+      [to_ref: @coordinator, outstanding: "true"] ++
+        reader_params(session) ++ workspace_params() ++ mark_read_params(view)
+
+    case Client.get("/api/messages", params) do
+      {:ok, %{"data" => list}} -> emit_list(list, mode, outstanding_label(list))
+      {:ok, _} -> emit_list([], mode, outstanding_label([]))
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp coordinator_inbox_view(view, unread_only, mode, session) do
     params =
       if unread_only,
         do: [to_ref: @coordinator, unread: "true"],
         else: [to_ref: @coordinator, limit: @all_limit]
 
-    params = params ++ reader_params(session) ++ workspace_params()
+    params = params ++ reader_params(session) ++ workspace_params() ++ mark_read_params(view)
 
     case Client.get("/api/messages", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode, coordinator_label(unread_only, list))
@@ -136,6 +167,14 @@ defmodule ArbiterCli.Cmd.Inbox do
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp mark_read_params(%{mark_read?: true}), do: [mark_read: "true"]
+  defp mark_read_params(_view), do: []
+
+  defp outstanding_label(list),
+    do:
+      {"Coordinator inbox — #{length(list)} outstanding:",
+       "(coordinator inbox empty — nothing outstanding)"}
 
   defp coordinator_label(true, list),
     do:
@@ -147,15 +186,21 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- worker (task) path -------------------------------------------------
 
-  defp task_inbox(task_id, mode) do
+  defp task_inbox(task_id, view, mode) do
     Workspace.reject_flag!("inbox <task-id> (a task id already names its workspace)")
+    verify_task!(task_id)
 
-    case Client.get("/api/messages", to_ref: task_id, unread: "true") do
+    # One call: the server lists the unread mail and stamps it read atomically
+    # (`mark_read=true`), instead of N best-effort POSTs that could half-fail.
+    # `--outstanding` is the pure-read view of what was read but not cleared.
+    params =
+      if view.outstanding?,
+        do: [to_ref: task_id, outstanding: "true"],
+        else: [to_ref: task_id, unread: "true", mark_read: "true"]
+
+    case Client.get("/api/messages", params) do
       {:ok, %{"data" => list}} ->
-        mail = Enum.filter(list, &(&1["kind"] in @mailbox_kinds))
-        Enum.each(mail, &mark_read/1)
-
-        emit_task_mail(mail, mode, task_id)
+        emit_task_mail(list, mode, task_id, view)
 
       {:ok, _} ->
         emit_list([], mode, {"", "(no unread mail)"})
@@ -165,15 +210,36 @@ defmodule ArbiterCli.Cmd.Inbox do
     end
   end
 
+  # `arb inbox sned` must not read (and mark read) a mailbox that does not exist.
+  defp verify_task!(task_id) do
+    case Client.get("/api/issues/" <> URI.encode(task_id, &URI.char_unreserved?/1)) do
+      {:ok, _} ->
+        :ok
+
+      {:error, %Client.Error{status: 404}} ->
+        Output.die(
+          "inbox: no task #{inspect(task_id)}. The task path takes a task id; " <>
+            "the verbs are `read <id>` and `clear`."
+        )
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
   # The worker path drains on fetch, so what is printed here is the only copy
   # the worker will ever list: show every message in full (full id, sender,
   # subject, whole body), not the triage gist the coordinator view uses.
-  defp emit_task_mail(mail, :json, _task_id), do: emit_list(mail, :json, nil)
+  defp emit_task_mail(mail, :json, _task_id, _view), do: emit_list(mail, :json, nil)
 
-  defp emit_task_mail([], :text, _task_id), do: IO.puts("(no unread mail)")
+  defp emit_task_mail([], :text, _task_id, %{outstanding?: true}),
+    do: IO.puts("(nothing outstanding)")
 
-  defp emit_task_mail(mail, :text, task_id) do
-    IO.puts("Unread mail for #{task_id} (#{length(mail)}):")
+  defp emit_task_mail([], :text, _task_id, _view), do: IO.puts("(no unread mail)")
+
+  defp emit_task_mail(mail, :text, task_id, view) do
+    label = if view.outstanding?, do: "Outstanding", else: "Unread"
+    IO.puts("#{label} mail for #{task_id} (#{length(mail)}):")
 
     Enum.each(mail, fn m ->
       IO.puts("")
@@ -187,10 +253,6 @@ defmodule ArbiterCli.Cmd.Inbox do
       |> Enum.each(&IO.puts("    " <> &1))
     end)
   end
-
-  # Best-effort acknowledgement. A failed read shouldn't abort the listing —
-  # the operator still sees the message; it just stays unread.
-  defp mark_read(%{"id" => id}), do: Client.post("/api/messages/#{id}/read", %{})
 
   defp mark_read_as(id, nil), do: Client.post("/api/messages/#{id}/read", %{})
 
@@ -220,7 +282,7 @@ defmodule ArbiterCli.Cmd.Inbox do
     if full_uuid?(token) do
       {:ok, token}
     else
-      case Client.get("/api/messages", to_ref: @coordinator, limit: 50) do
+      case Client.get("/api/messages", to_ref: @coordinator, limit: @prefix_window) do
         {:ok, %{"data" => list}} -> match_prefix(list, token)
         {:ok, _} -> {:error, "no coordinator message matches id #{inspect(token)}"}
         {:error, %Client.Error{status: 403} = err} -> {:error, scope_refused(err, token)}

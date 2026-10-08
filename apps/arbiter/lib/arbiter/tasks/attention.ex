@@ -213,13 +213,15 @@ defmodule Arbiter.Tasks.Attention do
   `issue`'s attention (`Arbiter.Tasks.Lifecycle.Attention.t/0`), or nil —
   read through `Lifecycle.view/2` with the ticket's live runs and its
   Watchdog's liveness, as the board reads it. Opts: `:workers` (the live
-  worker rows; default `Arbiter.Worker.list_children/0`) and `:now`.
+  worker rows; default `Arbiter.Worker.list_children/0`), `:now` and
+  `:resume_queued` (the ids of tickets with a round deferred for a slot;
+  default: asked of `Arbiter.Board.Autopilot`).
   """
   @spec current(Issue.t(), keyword()) :: Lifecycle.Attention.t() | nil
   def current(%Issue{} = issue, opts \\ []) do
     workers = Keyword.get_lazy(opts, :workers, &live_workers/0)
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
-    view(issue, workers, now).attention
+    view(issue, workers, now, resume_queued([issue], opts)).attention
   end
 
   @typedoc "One open ticket's attention, as the coordinator's queue lists it."
@@ -235,8 +237,8 @@ defmodule Arbiter.Tasks.Attention do
   @doc """
   Every open ticket with attention, oldest first. Opts: `:workspace_id`
   (nil: every workspace), `:owner` (`:coordinator` / `:operator`; nil: both),
-  `:workers`, `:now`, and `:issues` (the tickets to read, instead of the
-  open ones).
+  `:workers`, `:now`, `:resume_queued` and `:issues` (the tickets to read,
+  instead of the open ones).
 
   `owner: :coordinator` is the coordinator's computed queue. It has no read
   or clear state: an item is listed exactly while its ticket's attention is.
@@ -247,10 +249,14 @@ defmodule Arbiter.Tasks.Attention do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     owner = Keyword.get(opts, :owner)
 
-    opts
-    |> Keyword.get_lazy(:issues, fn -> open_tickets(Keyword.get(opts, :workspace_id)) end)
+    issues =
+      Keyword.get_lazy(opts, :issues, fn -> open_tickets(Keyword.get(opts, :workspace_id)) end)
+
+    queued = resume_queued(issues, opts)
+
+    issues
     |> Enum.flat_map(fn issue ->
-      case view(issue, workers, now).attention do
+      case view(issue, workers, now, queued).attention do
         %{owner: o} = attention when is_nil(owner) or o == owner ->
           [
             %{
@@ -270,12 +276,28 @@ defmodule Arbiter.Tasks.Attention do
     |> Enum.sort_by(&(&1.attention.since || now), DateTime)
   end
 
-  defp view(issue, workers, now) do
+  defp view(issue, workers, now, queued) do
     Lifecycle.view(issue, %{
       runs: workers,
       now: now,
-      watchdog_alive: watchdog_alive(issue)
+      watchdog_alive: watchdog_alive(issue),
+      resume_queued: issue.id in queued
     })
+  end
+
+  # bd-1u15tl: a Merging ticket whose re-review (or pass) waits for a worker
+  # slot has no Watchdog and no review yet, by design — it is waiting, not
+  # blocked. Opts: `:resume_queued`, the ids so waiting.
+  defp resume_queued(issues, opts) do
+    case Keyword.fetch(opts, :resume_queued) do
+      {:ok, ids} ->
+        ids
+
+      :error ->
+        if Enum.any?(issues, &(Lifecycle.state_of(&1) == :merging)),
+          do: Arbiter.Board.Autopilot.deferred_resume_ids(),
+          else: []
+    end
   end
 
   defp open_tickets(workspace_id) do

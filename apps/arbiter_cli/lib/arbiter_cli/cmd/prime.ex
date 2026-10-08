@@ -228,7 +228,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp repo_standing_orders(_), do: []
 
   # Up to 5 most recent unread messages addressed to the coordinator. The REST
-  # index already sorts newest-first, so a take/2 gives "most recent".
+  # unread queue is oldest-first, so the render takes the tail (`newest_first/1`).
   defp gather_global_coordinator_inbox do
     case Client.get("/api/messages", to_ref: "coordinator", unread: "true") do
       {:ok, %{"data" => list}} -> {:ok, list}
@@ -456,13 +456,19 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Global Coordinator Inbox (#{length(list)} unread) ==")
 
     list
-    |> Enum.take(5)
+    |> newest_first(5)
     |> Enum.each(fn m -> IO.puts("  " <> inbox_line(m)) end)
 
     IO.puts("")
   end
 
   defp maybe_emit_global_coordinator_inbox(_), do: :ok
+
+  defp newest_first(list, n) do
+    list
+    |> Enum.sort_by(&(&1["inserted_at"] || ""), :desc)
+    |> Enum.take(n)
+  end
 
   # Omitted entirely when there's no unread coordinator mail.
   defp maybe_emit_coordinator_inbox({:ok, []}), do: :ok
@@ -471,7 +477,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Coordinator Inbox (#{length(list)} unread) ==")
 
     list
-    |> Enum.take(5)
+    |> newest_first(5)
     |> Enum.each(fn m -> IO.puts("  " <> inbox_line(m)) end)
 
     IO.puts("")
