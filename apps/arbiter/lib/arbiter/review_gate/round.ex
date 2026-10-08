@@ -150,6 +150,9 @@ defmodule Arbiter.ReviewGate.Round do
                           show for either: escalated, with a park reason that
                           reads as "resolved out of band, still stalled" rather
                           than a generic idle-worker no-changes failure.
+                          `:reran_ci_after_no_changes` — bd-dun10t: a fix round
+                          launched by red CI left HEAD unchanged; the gate reran
+                          CI itself (bounded) and re-reads it before any park.
                           Nil for a round whose HEAD advanced normally, for a
                           round with no worktree to check, and for every
                           `:review` row.
@@ -174,7 +177,8 @@ defmodule Arbiter.ReviewGate.Round do
   @roles ~w(review impl conflict_review)a
   @verdicts ~w(approve request_changes timed_out)a
   @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes
-                   advanced_non_file_fix escalated_no_changes_after_non_file_fix)a
+                   advanced_non_file_fix escalated_no_changes_after_non_file_fix
+                   reran_ci_after_no_changes)a
 
   sqlite do
     table "review_gate_rounds"

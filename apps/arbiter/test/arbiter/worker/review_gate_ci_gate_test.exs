@@ -32,6 +32,7 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
 
   @probe Path.expand("../../fixtures/review_ci_probe.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @echo_done Path.expand("../../fixtures/echo_with_done.sh", __DIR__)
   @pr "#1"
 
   setup do
@@ -271,6 +272,93 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert reviewed_head(rig) == fixed
       assert :sys.get_state(gate).current_prompt =~ "CI passed on #{fixed}"
       stop_gate(gate)
+    end
+
+    test "a CI-red fix round with no diff reruns CI; green re-reviews the head instead of parking",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-green")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      # red, rerun red -> fix round (no diff) -> red, the gate's own rerun -> green
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :success])
+
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 4, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      # The fix round changed nothing, and the head it left is what got reviewed.
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      assert length(StubMerger.ci_reruns()) == 2
+
+      assert [%FlakeEvent{ci_job: "unit tests"}] =
+               FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id))
+
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      stop_gate(gate)
+    end
+
+    test "a CI-red fix round with no diff parks, naming the jobs, when CI stays red", ctx do
+      rig = rig(ctx, "feature/ci-noop-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      # red, rerun red -> one fix round (no diff) -> red, the gate's own rerun red -> park
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
+
+      gate = start_gate(rig, ctx, revise_command: [@echo_done], rounds: 3)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 30_000
+
+      assert passes(rig) == 0
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+
+      bodies = gate_messages(ctx, rig) |> Enum.map_join("\n", &"#{&1.subject}\n#{&1.body}")
+      assert bodies =~ "Failing jobs: unit tests"
+    end
+
+    test "the fix-round prompt for red CI names ci_rerun and flake_record", ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-prompt").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-prompt",
+        target_branch: "main",
+        round: 1,
+        thread: [],
+        ci_fix_pending: %{sha: "abc", checks: []}
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "CI is red")
+      assert prompt =~ "ci_rerun"
+      assert prompt =~ "flake_record"
+    end
+
+    test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
+      rig = rig(ctx, "feature/ci-mcp")
+      put_app_env(:arbiter, Arbiter.MCP, inject_config: true)
+      File.rm(Path.join(rig.wt, ".mcp.json"))
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ctx.ws.id,
+        worktree_path: rig.wt,
+        repo: "trib/repo"
+      }
+
+      opts = ReviewGate.implementer_mcp_opts(state, :implementer, Arbiter.Agents.Claude)
+
+      assert path = opts[:mcp_config]
+      assert File.exists?(path)
+      assert Path.basename(path) == ".mcp.json"
+      assert is_binary(opts[:arb_token])
+
+      assert ReviewGate.implementer_mcp_opts(state, :reviewer, Arbiter.Agents.Claude) == []
     end
 
     test "red CI at the round cap escalates instead of reviewing", ctx do

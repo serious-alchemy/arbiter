@@ -309,6 +309,10 @@ defmodule Arbiter.Worker.ReviewGate do
   @commit_gate_uncommitted_marker "ReviewGate fix round: implementer left uncommitted work"
   @commit_gate_no_changes_marker "ReviewGate fix round: fix round produced no changes"
 
+  # bd-dun10t: how many times a no-diff, CI-triggered fix round may send the gate
+  # back to re-read (and rerun) CI before it parks.
+  @ci_noop_rerun_cap 1
+
   # bd-cb7wpq: the literal line an implementer prints (see `revise_prompt/2`)
   # to declare a finding resolved through something other than a file change
   # on this branch — a PR title/description edit, a label, a comment reply.
@@ -1151,6 +1155,11 @@ defmodule Arbiter.Worker.ReviewGate do
       # token that identifies its poll timer. nil whenever no reviewer is being
       # held back.
       ci_wait: nil,
+      # bd-dun10t: set when red CI launched the current fix round (`ci_fix/4`):
+      # `%{sha:, checks:}`. A round that ends with no diff reruns CI instead of
+      # parking, `ci_noop_reruns` times at most.
+      ci_fix_pending: nil,
+      ci_noop_reruns: 0,
       # RW8: a pass held because the primary's own worker cap is 0
       # (`Arbiter.Nodes.LocalCapacity`): `%{token:, info:, resume:}`, else nil.
       # The retry timer re-enters `resume` (a reviewer's `ci_gate/2` entry, or a
@@ -1636,7 +1645,7 @@ defmodule Arbiter.Worker.ReviewGate do
             "re-run (#{why}); treating it as a real failure"
         )
 
-        ci_fix(state, wait, checks, false)
+        ci_act(state, wait, :fix, nil)
     end
   end
 
@@ -1673,11 +1682,23 @@ defmodule Arbiter.Worker.ReviewGate do
         fresh -> fresh
       end
 
-    ci_fix(state, wait, checks, not is_nil(wait.rerun))
+    if post_noop_rerun?(state) do
+      # bd-dun10t: the gate's own rerun after a no-diff CI fix round stayed red.
+      # Park with the failing jobs named; another implementer round would only
+      # burn the round budget on a head already judged a no-op.
+      state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
+      state = %{state | ci_fix_pending: %{state.ci_fix_pending | checks: checks}}
+      {:done, escalate_no_changes(state)}
+    else
+      ci_fix(state, wait, checks, not is_nil(wait.rerun))
+    end
   end
 
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
+  defp post_noop_rerun?(_state), do: false
 
   # Red CI the gate cannot clear by itself goes down the revise loop that already
   # exists: the same implementer round a reviewer's REQUEST_CHANGES opens, with the
@@ -1686,6 +1707,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # non-convergence — and the Worker's own fix round takes it from there.
   defp ci_fix(state, wait, checks, rerun?) do
     state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
+    state = %{state | ci_fix_pending: %{sha: wait.sha, checks: checks}}
     findings = ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?)
 
     Logger.warning(
@@ -3040,6 +3062,11 @@ defmodule Arbiter.Worker.ReviewGate do
   defp enter_revise(state, findings, source \\ :reviewer) do
     state = record_enter_revise_thread(state, findings, source)
 
+    state =
+      if source == :reviewer,
+        do: %{state | ci_fix_pending: nil, ci_noop_reruns: 0},
+        else: state
+
     # The reviewer's subprocess has exited; stop its worker so it can't linger
     # (it may not have self-completed if it never printed `arb done`).
     stop_worker(state)
@@ -3263,6 +3290,10 @@ defmodule Arbiter.Worker.ReviewGate do
     # new diff to re-review).
     {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha, response)
 
+    # bd-dun10t: a fix round that red CI launched and that changed nothing may
+    # simply have met a flake. Rerun CI (bounded) and re-read it before parking.
+    {outcome, commit_gate} = ci_noop_outcome({outcome, commit_gate}, state)
+
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
     # real re-review that entry is wrong AND actively harmful — the implementer
@@ -3287,7 +3318,9 @@ defmodule Arbiter.Worker.ReviewGate do
           state
           | head_sha: new_head_sha,
             commit_nudge_used: false,
-            non_file_fix_used: false
+            non_file_fix_used: false,
+            ci_fix_pending: nil,
+            ci_noop_reruns: 0
         })
 
       :advance_non_file_fix ->
@@ -3305,7 +3338,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
       :escalate_no_changes ->
-        {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
+        escalate_or_rerun_ci(state, new_head_sha)
 
       :escalate_no_changes_after_non_file_fix ->
         {:done,
@@ -3345,6 +3378,64 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
+
+  defp ci_noop_outcome({:escalate_no_changes, _} = outcome, state) do
+    if ci_noop_rerun_allowed?(state),
+      do: {:escalate_no_changes, :reran_ci_after_no_changes},
+      else: outcome
+  end
+
+  defp ci_noop_outcome(outcome, _state), do: outcome
+
+  defp escalate_or_rerun_ci(state, new_head_sha) do
+    if ci_noop_rerun_allowed?(state),
+      do: rerun_ci_after_no_changes(state, new_head_sha),
+      else: {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
+  end
+
+  defp rerun_ci_after_no_changes(state, new_head_sha) do
+    attempt = "#{state.ci_noop_reruns + 1}/#{@ci_noop_rerun_cap}"
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} CI-triggered fix round produced " <>
+        "no changes; rerunning CI (#{attempt}) before deciding"
+    )
+
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round}: no diff after red CI",
+        "The fix round for red CI on #{state.ci_fix_pending.sha} changed nothing, which " <>
+          "points to a flake. The gate is rerunning CI on the same head (#{attempt}); if it " <>
+          "goes green the head is re-reviewed, if it stays red the ticket is parked."
+      )
+
+    dispatch_next_review(%{
+      state
+      | head_sha: new_head_sha,
+        ci_noop_reruns: state.ci_noop_reruns + 1
+    })
+  end
+
+  defp ci_noop_rerun_allowed?(%{ci_fix_pending: %{}, ci_noop_reruns: n, ci_ctx: ctx})
+       when n < @ci_noop_rerun_cap and not is_nil(ctx),
+       do: true
+
+  defp ci_noop_rerun_allowed?(_state), do: false
+
+  defp ci_red_park_note(%{ci_fix_pending: %{sha: sha, checks: checks}} = state) do
+    jobs =
+      case checks |> Enum.map(&(&1 |> Map.get(:name) |> to_string())) |> Enum.uniq() do
+        [] -> "(none named)"
+        names -> Enum.join(names, ", ")
+      end
+
+    "CI stayed red on #{sha} after the fix round made no change and the gate reran it " <>
+      "#{state.ci_noop_reruns} time(s). Failing jobs: #{jobs}.\n\n"
+  end
+
+  defp ci_red_park_note(_state), do: ""
 
   defp approval_gap_pending?(%{approval_gap_pending: %{gap: gap}}), do: not is_nil(gap)
   defp approval_gap_pending?(_state), do: false
@@ -3604,7 +3695,7 @@ defmodule Arbiter.Worker.ReviewGate do
       "#{@commit_gate_no_changes_marker} (task #{state.task_id}, round #{state.round}). " <>
         "HEAD did not move and the worktree is clean — the revise round produced no code " <>
         "change. No further review round was dispatched against an identical diff.\n\n" <>
-        escalation_payload(state)
+        ci_red_park_note(state) <> escalation_payload(state)
 
     finish(state, {:parked, :commit_gate_no_changes, msg})
   end
@@ -5791,6 +5882,27 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp arb_token_opts(_state, _role), do: []
 
+  # bd-dun10t: a revise-round implementer needs the `arbiter` MCP tools
+  # (`ci_rerun`, `flake_record`) like a fix_pass worker. Re-inject a fresh
+  # `.mcp.json` + worker token (bd-7e8ezw): the original run's file may carry an
+  # expired 4h lease or be absent. Falls back to the bare token when the task
+  # cannot be loaded.
+  @doc false
+  def implementer_mcp_opts(state, :implementer, adapter) do
+    case load_issue(state.task_id) do
+      %Issue{} = task ->
+        Dispatch.inject_mcp_config(task, state.worktree_path,
+          repo: Map.get(state, :repo),
+          agent_adapter: adapter
+        )
+
+      nil ->
+        arb_token_opts(state, :implementer)
+    end
+  end
+
+  def implementer_mcp_opts(state, role, _adapter), do: arb_token_opts(state, role)
+
   defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
@@ -5900,7 +6012,7 @@ defmodule Arbiter.Worker.ReviewGate do
           timeout_ms: state.timeout_ms,
           owner: pid,
           task_id: state.task_id
-        ] ++ arb_token_opts(state, role) ++ sandbox_wrap_opts(policy, role)
+        ] ++ implementer_mcp_opts(state, role, adapter) ++ sandbox_wrap_opts(policy, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 
@@ -6646,6 +6758,8 @@ defmodule Arbiter.Worker.ReviewGate do
   """
   @spec revise_prompt(map(), String.t()) :: String.t()
   def revise_prompt(state, findings) do
+    # bd-dun10t: the ci_flake_guidance/1 block below gives a CI-triggered round the
+    # same flake outs a fix_pass worker has; the MCP scope is the ticket's own.
     task = load_task(state.task_id)
 
     adapter =
@@ -6700,6 +6814,7 @@ defmodule Arbiter.Worker.ReviewGate do
     *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
     no `mix run`. (Reading files, editing, and running `git` is fine.)
 
+    #{ci_flake_guidance(state)}
     #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:
@@ -6707,6 +6822,18 @@ defmodule Arbiter.Worker.ReviewGate do
         arb done
     """
   end
+
+  defp ci_flake_guidance(%{ci_fix_pending: %{}}) do
+    """
+    If a failing check is NOT caused by this branch (a flake you cannot reproduce
+    locally), make no code change: call the `ci_rerun` MCP tool, record the
+    conclusion with the `flake_record` MCP tool (`ci_job`, `signature`), say so in
+    your reply and print `arb done`. The gate also reruns CI itself and re-reviews
+    the head if it goes green.
+    """
+  end
+
+  defp ci_flake_guidance(_state), do: ""
 
   # Stage 3 (bd-1na62i): the same-mind-continuity briefing prepended to a
   # revise-round implementer. Each revision is a FRESH mind (literal Claude/Gemini
