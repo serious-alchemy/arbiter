@@ -94,6 +94,7 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
   | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
+  | `server_status` | coordinator | `Arbiter.Server.Status.snapshot/0` (P-27) |
   | `provider_pause` | coordinator | `Arbiter.Providers.Pause.pause/2` (persisted, bd-5ef587) |
   | `provider_resume` | coordinator | `Arbiter.Providers.Pause.resume/2` |
   | `provider_list` | coordinator | `Arbiter.Providers.Pause.to_json/0` (active pauses, P-17) |
@@ -2981,6 +2982,17 @@ defmodule Arbiter.MCP.Catalog do
           "server restart. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
+    },
+    %{
+      name: "server_status",
+      tiers: @coordinator,
+      description:
+        "Return the server's version, git `sha`, `built_at`, `booted_at`, `release_repo`, " <>
+          "the `update` block (latest release, `update_available`) and `migrations` " <>
+          "(`status` ok/warning/unknown, `pending_count`). Read-only; use it after a restart " <>
+          "to confirm the new build is live before verifying a ticket. Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.server_status/2
     },
 
     # ---- provider pause/resume (bd-5ef587) ---------------------------------

@@ -32,8 +32,7 @@
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
     "P-25" => "Memory operator surface (REST + CLI)",
-    "P-26" => "Mailbox: one context function, correct workspace and reader identity",
-    "P-27" => "Coordinator attention queue on REST/CLI and read-only `server_status` on MCP"
+    "P-26" => "Mailbox: one context function, correct workspace and reader identity"
   },
   operations: [
     # ---- tickets ----
@@ -1516,14 +1515,10 @@
       id: "misc/coordinator_attention_queue_open_tickets",
       title: "Coordinator attention queue (open tickets whose attention the coordinator owns)",
       mcp: ["coordinator_inbox"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-27"},
-      divergences: ["D-M-7"],
-      absent: %{
-        cli: {:gap, "P-27", "No REST or CLI view of the coordinator attention queue; MCP `coordinator_inbox` is its only consumer (`GET /api/attention` planned)."},
-        rest: {:gap, "P-27", "No REST or CLI view of the coordinator attention queue; MCP `coordinator_inbox` is its only consumer (`GET /api/attention` planned)."}
-      }
+      cli: ["arb attention"],
+      rest: ["GET /api/attention"],
+      status: :full,
+      note: "All three read `Arbiter.Tasks.Attention.items/1`; `arb prime`'s Needs-attention section uses the REST route."
     },
     %{
       id: "misc/browse_coordinator_mailbox_history_incl",
@@ -1889,25 +1884,19 @@
     %{
       id: "misc/server_version_sha_boot_time_update",
       title: "Server version / sha / boot time / update check",
-      mcp: nil,
+      mcp: ["server_status"],
       cli: ["arb version", "arb server version"],
       rest: ["GET /api/version"],
-      status: {:gap, "P-27"},
-      divergences: ["D-M-18"],
-      absent: %{
-        mcp: {:gap, "P-27", "No read-only `server_status` MCP tool (version/sha/built_at/booted_at); the Verifying flow needs it."}
-      }
+      status: :full,
+      note: "`Arbiter.Server.Status`; the MCP tool folds in pending-migration status and carries no host paths."
     },
     %{
       id: "misc/pending_migration_status",
       title: "Pending-migration status",
-      mcp: nil,
+      mcp: ["server_status"],
       cli: ["arb server doctor"],
       rest: ["GET /api/server/migrations"],
-      status: {:gap, "P-27"},
-      absent: %{
-        mcp: {:gap, "P-27", "No MCP read of pending-migration status; fold into `server_status` with the version read."}
-      }
+      status: :full
     },
     %{
       id: "misc/host_posture_diagnostics_13_bind_address",

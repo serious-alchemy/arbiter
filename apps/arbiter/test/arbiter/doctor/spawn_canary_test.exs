@@ -125,6 +125,28 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       assert %{status: "ok", detail: "codex-cli 9.9.9"} = provider(report, "codex")
     end
 
+    test "a provider paused on its account (grok:default) is n/a and never spawned" do
+      sandbox = provision!()
+      ws = workspace!(["claude", "grok"])
+      account = Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :grok, slug: "default"})
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :grok,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} = Pause.pause("grok:default", by: "test", reason: "grok login expired")
+
+      report = run_canary!()
+
+      assert report.ok
+      assert %{status: "n/a", spawned: false, detail: detail} = provider(report, "grok")
+      assert detail =~ "paused"
+      assert detail =~ "grok login expired"
+      refute calls(sandbox) =~ "/bin/grok "
+    end
+
     test "a provider no workspace uses, or that is paused, is n/a and never spawned" do
       sandbox = provision!()
       workspace!(["claude", "gemini"])
@@ -144,6 +166,44 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       assert [claude] = invocations
       assert claude =~ "claude"
       refute calls(sandbox) =~ "agy"
+    end
+  end
+
+  describe "agy through the jail's egress run (bd-96r8yw)" do
+    setup do
+      keys = ~w(worker_isolate_config worker_jail_available worker_jail_network_available
+                worker_jail_network worker_jail_bwrap)a
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+
+      on_exit(fn ->
+        Enum.each(prev, fn
+          {k, nil} -> Application.delete_env(:arbiter, k)
+          {k, v} -> Application.put_env(:arbiter, k, v)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "is spawned with an owner, so the egress run starts, and nothing is left behind" do
+      sandbox = provision!(%{"bwrap" => "exit 0\n", "socat" => "exit 0\n"})
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+      Application.delete_env(:arbiter, :worker_jail_network)
+      Application.put_env(:arbiter, :worker_jail_bwrap, Path.join(sandbox.bin, "bwrap"))
+      workspace!(["gemini"])
+      socks = fn -> Path.wildcard(Path.join(Arbiter.Worker.Egress.socket_dir(), "*.sock")) end
+      before = socks.()
+
+      report = run_canary!()
+
+      assert %{status: "ok", spawned: true} = provider(report, "gemini")
+      assert socks.() -- before == []
+      assert before -- socks.() == []
+
+      assert Registry.select(Arbiter.Worker.Egress.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}]) ==
+               []
     end
   end
 

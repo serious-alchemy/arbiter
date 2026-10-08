@@ -119,6 +119,34 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
     end
   end
 
+  describe "server_status/2" do
+    test "returns the version stamp and migration status, with no host paths", ctx do
+      assert {:ok, data} = Tools.server_status(ctx.coordinator, %{})
+
+      assert data |> Map.keys() |> Enum.sort() ==
+               Enum.sort([
+                 :version,
+                 :sha,
+                 :built_at,
+                 :booted_at,
+                 :release_repo,
+                 :update,
+                 :migrations
+               ])
+
+      assert is_binary(data.version)
+      assert %{status: status} = data.migrations
+      assert status in ["ok", "warning", "unknown"]
+
+      refute inspect(data) =~ System.user_home!()
+    end
+
+    test "is a coordinator-only tool" do
+      {:ok, tool} = Arbiter.MCP.Catalog.fetch("server_status")
+      assert tool.tiers == [:coordinator]
+    end
+  end
+
   describe "scheduler_status/2" do
     test "returns the current pause state", ctx do
       :ok = Autopilot.pause()
