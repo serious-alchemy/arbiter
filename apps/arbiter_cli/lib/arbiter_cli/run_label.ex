@@ -42,7 +42,7 @@ defmodule ArbiterCli.RunLabel do
   def where(%{"node_id" => id}) when is_binary(id), do: id
   def where(_run), do: nil
 
-  @doc "`\"  node=<name|local>\"`, or `\"\"` when the payload does not say."
+  @doc "The `  node=<name or local>` suffix for a run line, or an empty string when the payload does not say."
   @spec node_suffix(map()) :: String.t()
   def node_suffix(run) do
     case where(run) do
