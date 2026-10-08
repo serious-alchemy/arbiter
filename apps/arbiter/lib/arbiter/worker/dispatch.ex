@@ -1668,6 +1668,7 @@ defmodule Arbiter.Worker.Dispatch do
   # so the replay routes afresh instead of reading it as a caller override.
   defp unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
+
     opts =
       Keyword.drop(opts, [
         :routing_decision,
