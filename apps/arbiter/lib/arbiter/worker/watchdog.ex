@@ -4822,8 +4822,11 @@ defmodule Arbiter.Worker.Watchdog do
   # floats to the polled head and proves nothing, so it never counts.
   defp reviewed_head_cover(%{latch_suspended_at_head: at}, _head) when not is_nil(at), do: :no
 
+  # Only the task's durable `last_reviewed_sha` counts: a sweeper-retry stamp
+  # (`state.reviewed_sha`) can name a head no reviewer round saw (#540), and
+  # coverage-enabled merges must not trust it alone.
   defp reviewed_head_cover(state, head) do
-    case reviewed_sha(state) do
+    case recorded_reviewed_sha(state) do
       ^head ->
         :covered
 
