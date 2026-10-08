@@ -845,6 +845,7 @@ defmodule Arbiter.Board.Autopilot do
         dispatch_holds: dispatch_holds(state),
         resume_queued: queued_resume_ids(state)
       )
+
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     cond do
