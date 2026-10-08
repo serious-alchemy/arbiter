@@ -345,7 +345,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       Application.delete_env(:arbiter, :worker_container_image)
 
       Application.put_env(:arbiter, :worker_image_runner, fn
-        "podman", ["image", "exists" | _], _ -> {"", 0}
+        "skopeo", ["inspect" | _], _ -> {"sha256:" <> String.duplicate("a", 64), 0}
         _, _, _ -> {"", 0}
       end)
 
