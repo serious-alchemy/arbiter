@@ -78,6 +78,9 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_list` | coordinator | `Arbiter.Loop.list_pending/1` + `evidence_bar/1` |
   | `loop_pending_diff` | coordinator | `Arbiter.Loop.get_pending/1` (full row incl. unified diff) |
   | `loop_pending_apply` | coordinator | `Arbiter.Loop.apply_pending/2` (dispatches to the existing domain API) |
+  | `loop_analyze` | coordinator | `Arbiter.Loop.Analysis.analyze/1` via `Analysis.Request` + `Analysis.Summary` (report-only, bounded) |
+  | `loop_propose` | coordinator | `Arbiter.Loop.Analysis.analyze/1` with `propose?: true` (queues reviewable proposals) |
+  | `loop_propose_repo_doc_patch` | coordinator | `Arbiter.Loop.propose_repo_doc_patch/1` (hand-authored queue write) |
   | `loop_propose_routing` | coordinator | `Arbiter.Loop.propose_routing/1` (operator-authored routing canary proposal) |
   | `loop_canary_status` | coordinator | `Arbiter.Loop.Canary.status/1` (both arms' metrics + verdict progress) |
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
@@ -2700,6 +2703,120 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.memory_distill/2
+    },
+    %{
+      name: "loop_analyze",
+      tiers: @coordinator,
+      description:
+        "Run the operator-invoked loop-analysis pass over a window (`arb loop analyze`) and " <>
+          "return its markdown report plus a structured `summary` and the `usage_event_id` of " <>
+          "its own cost row. Report-only: it queues and applies nothing (use `loop_propose` to " <>
+          "queue what the report implies). Bounded: `limit` defaults to and is clamped at 500 runs.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "since" => %{
+            "type" => "string",
+            "description" =>
+              "Window start: `7d` / `24h` / `30m` shortcut or ISO8601. Default: last 7 days."
+          },
+          "until" => %{
+            "type" => "string",
+            "description" => "Window end, ISO8601. Default now."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" =>
+              "Cap on runs scanned, newest first. Default and maximum 500 (larger values are clamped)."
+          },
+          "label" => %{"type" => "string", "description" => "Only runs carrying this label."},
+          "discover" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also run the opt-in discovery model pass (one bounded model call; queues nothing). Default false."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Workspace (id or name); omitted = every workspace (or the token's own)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_analyze/2
+    },
+    %{
+      name: "loop_propose",
+      tiers: @coordinator,
+      description:
+        "The `loop_analyze` pass plus persistence of the proposals it implies " <>
+          "(`arb loop analyze --propose`): each lands as a reviewable `hypothesis`/`proposed` " <>
+          "row (returned under `proposals`; candidates the write path refused under " <>
+          "`proposals_dropped`). Nothing is applied — decide with `loop_pending_apply` / " <>
+          "`loop_pending_reject`. Same params and bounds as `loop_analyze`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "since" => %{
+            "type" => "string",
+            "description" =>
+              "Window start: `7d` / `24h` / `30m` shortcut or ISO8601. Default: last 7 days."
+          },
+          "until" => %{
+            "type" => "string",
+            "description" => "Window end, ISO8601. Default now."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" =>
+              "Cap on runs scanned, newest first. Default and maximum 500 (larger values are clamped)."
+          },
+          "label" => %{"type" => "string", "description" => "Only runs carrying this label."},
+          "discover" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also run the opt-in discovery model pass (one bounded model call; queues nothing). Default false."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Workspace (id or name); omitted = every workspace (or the token's own)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_propose/2
+    },
+    %{
+      name: "loop_propose_repo_doc_patch",
+      tiers: @coordinator,
+      description:
+        "Hand-author a `repo_doc_patch` proposal (`arb loop propose repo-doc-patch`): a one-line " <>
+          "`lesson` for `repo`'s CLAUDE.md, already `proposed`. A pure queue write — review it with " <>
+          "`loop_pending_diff` and apply it with `loop_pending_apply`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "repo" => %{
+            "type" => "string",
+            "description" => "The repo (its `repo_paths` key in the workspace). Required."
+          },
+          "lesson" => %{
+            "type" => "string",
+            "description" =>
+              "Single-line lesson text, no `arbiter:begin`/`arbiter:end` marker. Required."
+          },
+          "category" => %{"type" => "string", "description" => "Optional category label."},
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Workspace (id or name); the sole workspace when omitted, else required."
+          }
+        },
+        "required" => ["repo", "lesson"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_propose_repo_doc_patch/2
     },
     %{
       name: "loop_propose_routing",

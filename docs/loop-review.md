@@ -19,8 +19,14 @@ arb loop analyze --since 7d        # weekly is a sensible cadence
 arb loop analyze --since 7d --json # markdown + a structured summary envelope
 ```
 
-Under the hood it hits `GET /api/loop/analyze`, which runs
-`Arbiter.Loop.Analysis.analyze/1`.
+Under the hood it hits `POST /api/loop/analyze`, which runs
+`Arbiter.Loop.Analysis.analyze/1`. (It is a POST because the pass records its
+own `usage_events` row and `--discover` makes a model call. `GET
+/api/loop/analyze` still answers identically but is a deprecated alias,
+flagged by `Deprecation` / `Link` / `Warning` response headers.) Over MCP the
+same pass is `loop_analyze` (report-only) and `loop_propose` (queues the
+proposals), both bounded to 500 runs scanned; `loop_propose_repo_doc_patch`
+hand-authors a repo-doc lesson.
 
 Offline / server-not-running, there is a direct entry point that starts only
 the database layer (never the worker fleet, web endpoint, or patrols, so it is
@@ -177,7 +183,7 @@ arb loop reject <id> --reason "handled in CLAUDE.md instead"
 Without `--propose` the pass is **byte-identical to Stage 1** — the zero-writes
 guarantee above still holds, and it is structural: `--propose` is a different
 verb on a different route (`POST /api/loop/propose`), not a flag on the
-report-only `GET /api/loop/analyze`.
+report-only `POST /api/loop/analyze`.
 
 The same queue is on the dashboard at `/loop` (gist + state + evidence in the
 list, the full diff in the detail pane) and over MCP as `loop_pending_list` /

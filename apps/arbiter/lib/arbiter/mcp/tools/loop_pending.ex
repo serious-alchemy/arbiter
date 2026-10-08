@@ -12,13 +12,15 @@ defmodule Arbiter.MCP.Tools.LoopPending do
   (or the coordinator acting for one) can read the diff first.
   """
 
+  alias Arbiter.Guardrails.Authority
+  alias Arbiter.Loop.Analysis.{Request, Summary}
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
 
   require Logger
 
-  @loop_states ~w(proposed hypothesis applied rejected superseded)a
-  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)a
+  @loop_states Arbiter.Loop.PendingWrite.states()
+  @loop_kinds Arbiter.Loop.PendingWrite.kinds()
 
   # ---- loop_pending_list ---------------------------------------------------
 
@@ -76,7 +78,10 @@ defmodule Arbiter.MCP.Tools.LoopPending do
   @spec loop_pending_apply(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def loop_pending_apply(%Scope{} = scope, args) do
     with {:ok, row} <- fetch_pending(scope, args) do
-      case Arbiter.Loop.apply_pending(row, actor: Arbiter.PaperTrail.actor_label(scope)) do
+      case Arbiter.Loop.apply_pending(row,
+             actor: Arbiter.PaperTrail.actor_label(scope),
+             authority: Authority.from_scope(scope)
+           ) do
         {:ok, applied} ->
           Logger.info("[loop_pending_apply] proposal #{applied.id} (#{applied.kind}) applied")
           {:ok, applied |> serialize_pending() |> Map.put(:applied, true)}
@@ -107,6 +112,78 @@ defmodule Arbiter.MCP.Tools.LoopPending do
 
         {:error, reason} ->
           {:error, loop_error(reason)}
+      end
+    end
+  end
+
+  # ---- loop_analyze / loop_propose / loop_propose_repo_doc_patch ------------
+
+  @doc """
+  The operator-invoked loop-analysis pass over a window (`arb loop analyze`).
+  Coordinator only. Report-only: writes nothing but its own `usage_events` cost
+  row. Bounded like `memory_distill`: `limit` (runs scanned) defaults to and is
+  clamped at `Arbiter.Loop.Analysis.Request.max_limit/0`; `discover` runs the
+  discovery pass, itself capped by its own server-side budget.
+  """
+  @spec loop_analyze(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def loop_analyze(%Scope{} = scope, args), do: run_analysis(scope, args, false)
+
+  @doc """
+  The same pass as `loop_analyze`, plus persistence of the proposals it implies
+  (`arb loop analyze --propose`). Proposals land only as reviewable pending rows
+  — nothing is applied; the decision stays with `loop_pending_apply`.
+  """
+  @spec loop_propose(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def loop_propose(%Scope{} = scope, args), do: run_analysis(scope, args, true)
+
+  defp run_analysis(scope, args, propose?) do
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
+         {:ok, opts} <- analysis_opts(args) do
+      opts =
+        opts
+        |> Keyword.put(:propose?, propose?)
+        |> Tools.maybe_put_kw(:workspace_id, ws_id)
+
+      # `analyze/1` has no failure path today (dialyzer infers `{:ok, _}` only),
+      # so a future one should fail loudly here rather than be silently shaped.
+      {:ok, result} = Arbiter.Loop.Analysis.analyze(opts)
+
+      {:ok,
+       result
+       |> Summary.envelope(&serialize_pending_summary/1)
+       |> Map.put(:workspace_id, ws_id)}
+    end
+  end
+
+  defp analysis_opts(args) do
+    case Request.build(args, default_limit: Request.max_limit()) do
+      {:ok, opts} -> {:ok, opts}
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
+  @doc """
+  Hand-author a `:repo_doc_patch` proposal (`arb loop propose repo-doc-patch`):
+  `repo` + `lesson` required, optional `category`. A pure queue write like
+  `loop_propose_routing`; lands `:proposed`, applied only by `loop_pending_apply`.
+  """
+  @spec loop_propose_repo_doc_patch(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def loop_propose_repo_doc_patch(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, repo} <- Tools.require_string(args, "repo"),
+         {:ok, lesson} <- Tools.require_string(args, "lesson") do
+      attrs = %{
+        repo: repo,
+        lesson: lesson,
+        category: Tools.fetch_string(args, "category"),
+        workspace_id: ws_id,
+        actor: Arbiter.PaperTrail.actor_label(scope)
+      }
+
+      case Arbiter.Loop.propose_repo_doc_patch(attrs) do
+        {:ok, row} -> {:ok, row |> serialize_pending() |> Map.put(:proposed, true)}
+        {:error, reason} -> {:error, loop_error(reason)}
       end
     end
   end
@@ -219,6 +296,7 @@ defmodule Arbiter.MCP.Tools.LoopPending do
       kind: row.kind,
       state: row.state,
       scope: row.scope,
+      workspace_id: row.workspace_id,
       gist: row.gist,
       evidence_count: row.evidence_count,
       distinct_tasks: row.distinct_tasks,

@@ -138,6 +138,7 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- loop ---------------------------------------------------------------
     {:get, "/api/loop/analyze"} => :coordinator,
+    {:post, "/api/loop/analyze"} => :coordinator,
     {:post, "/api/loop/propose"} => :coordinator,
     {:post, "/api/loop/propose/repo_doc_patch"} => :coordinator,
     {:post, "/api/loop/propose/routing"} => :coordinator,

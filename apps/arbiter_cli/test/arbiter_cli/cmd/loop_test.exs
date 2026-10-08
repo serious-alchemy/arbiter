@@ -17,11 +17,15 @@ defmodule ArbiterCli.Cmd.LoopTest do
   alias ArbiterCli.Cmd.Loop
 
   test "loop analyze prints the markdown report" do
-    stub_get("/api/loop/analyze", %{
-      "markdown" => "# Loop-analysis report — last 7d\n\nbody",
-      "usage_event_id" => "ev-1",
-      "summary" => %{"totals" => %{"failed" => 2}}
-    })
+    stub_post(
+      "/api/loop/analyze",
+      %{
+        "markdown" => "# Loop-analysis report — last 7d\n\nbody",
+        "usage_event_id" => "ev-1",
+        "summary" => %{"totals" => %{"failed" => 2}}
+      },
+      200
+    )
 
     {out, _err, exit_code} = capture(fn -> Loop.run(["analyze", "--since", "7d"]) end)
     assert exit_code == 0
@@ -30,11 +34,11 @@ defmodule ArbiterCli.Cmd.LoopTest do
   end
 
   test "loop with no subcommand defaults to analyze" do
-    stub_get("/api/loop/analyze", %{
-      "markdown" => "# report",
-      "usage_event_id" => "e",
-      "summary" => %{}
-    })
+    stub_post(
+      "/api/loop/analyze",
+      %{"markdown" => "# report", "usage_event_id" => "e", "summary" => %{}},
+      200
+    )
 
     {out, _err, exit_code} = capture(fn -> Loop.run([]) end)
     assert exit_code == 0
@@ -42,11 +46,15 @@ defmodule ArbiterCli.Cmd.LoopTest do
   end
 
   test "loop analyze --json prints the raw envelope" do
-    stub_get("/api/loop/analyze", %{
-      "markdown" => "# report",
-      "usage_event_id" => "ev-9",
-      "summary" => %{"totals" => %{"failed" => 1}}
-    })
+    stub_post(
+      "/api/loop/analyze",
+      %{
+        "markdown" => "# report",
+        "usage_event_id" => "ev-9",
+        "summary" => %{"totals" => %{"failed" => 1}}
+      },
+      200
+    )
 
     {out, _err, exit_code} = capture(fn -> Loop.run(["analyze", "--json"]) end)
     assert exit_code == 0
@@ -54,12 +62,12 @@ defmodule ArbiterCli.Cmd.LoopTest do
     assert out =~ "ev-9"
   end
 
-  test "loop analyze passes --since through as a query param" do
+  test "loop analyze POSTs --since in the body (the route writes a usage row)" do
     stub_routes([
-      {{"get", "/api/loop/analyze"},
+      {{"post", "/api/loop/analyze"},
        fn conn ->
-         conn = Plug.Conn.fetch_query_params(conn)
-         assert conn.query_params["since"] == "24h"
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body)["since"] == "24h"
 
          Req.Test.json(conn, %{
            "markdown" => "# report",
@@ -73,14 +81,14 @@ defmodule ArbiterCli.Cmd.LoopTest do
     assert exit_code == 0
   end
 
-  # bd-4f6opo — `--discover` is the opt-in model pass: a query param on the
-  # same read-only GET, absent unless the flag is given.
+  # bd-4f6opo — `--discover` is the opt-in model pass: a body param on the
+  # analyze POST, absent unless the flag is given.
   test "loop analyze sends no discover param without --discover" do
     stub_routes([
-      {{"get", "/api/loop/analyze"},
+      {{"post", "/api/loop/analyze"},
        fn conn ->
-         conn = Plug.Conn.fetch_query_params(conn)
-         refute Map.has_key?(conn.query_params, "discover")
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         refute Map.has_key?(Jason.decode!(body), "discover")
 
          Req.Test.json(conn, %{
            "markdown" => "# report",
@@ -94,12 +102,12 @@ defmodule ArbiterCli.Cmd.LoopTest do
     assert exit_code == 0
   end
 
-  test "loop analyze --discover sends discover=true and prints the section" do
+  test "loop analyze --discover sends discover: true and prints the section" do
     stub_routes([
-      {{"get", "/api/loop/analyze"},
+      {{"post", "/api/loop/analyze"},
        fn conn ->
-         conn = Plug.Conn.fetch_query_params(conn)
-         assert conn.query_params["discover"] == "true"
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body)["discover"] == true
 
          Req.Test.json(conn, %{
            "markdown" =>
@@ -135,8 +143,8 @@ defmodule ArbiterCli.Cmd.LoopTest do
     assert exit_code == 0
   end
 
-  # bd-9j2g3x — `--propose` is a different verb on a different route, so the
-  # read-only GET can never write.
+  # bd-9j2g3x — `--propose` is a different verb on a different route from the
+  # report-only analyze.
   test "loop analyze --propose posts to /api/loop/propose and lists what it queued" do
     stub_post(
       "/api/loop/propose",
@@ -442,6 +450,100 @@ defmodule ArbiterCli.Cmd.LoopTest do
       assert out =~ "applied p-2"
     end
 
+    test "loop diff --json prints the full row" do
+      stub_get("/api/loop/pending/p-1", %{
+        "pending" => %{"id" => "p-1", "state" => "proposed", "diff" => "--- a\n+++ b\n"}
+      })
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(["diff", "p-1", "--json"]) end)
+
+      assert exit_code == 0
+      assert %{"id" => "p-1", "diff" => "--- a\n+++ b\n"} = Jason.decode!(out)
+    end
+
+    test "loop apply all --json emits one array of the applied rows" do
+      stub_routes([
+        {{"get", "/api/loop/pending"},
+         {%{"pending" => [%{"id" => "p-1", "gist" => "one"}, %{"id" => "p-2", "gist" => "two"}]},
+          200}},
+        {{"post", "/api/loop/pending/p-1/apply"},
+         {%{"pending" => %{"id" => "p-1", "state" => "applied"}}, 200}},
+        {{"post", "/api/loop/pending/p-2/apply"},
+         {%{"pending" => %{"id" => "p-2", "state" => "applied"}}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(["apply", "all", "--json"]) end)
+
+      assert exit_code == 0
+      assert [%{"id" => "p-1"}, %{"id" => "p-2"}] = Jason.decode!(out)
+    end
+
+    test "loop apply all keeps going past a failed row, then exits non-zero" do
+      stub_routes([
+        {{"get", "/api/loop/pending"},
+         {%{"pending" => [%{"id" => "p-1", "gist" => "one"}, %{"id" => "p-2", "gist" => "two"}]},
+          200}},
+        {{"post", "/api/loop/pending/p-1/apply"},
+         {%{"error" => %{"type" => "conflict", "message" => "cannot be applied"}}, 409}},
+        {{"post", "/api/loop/pending/p-2/apply"},
+         {%{"pending" => %{"id" => "p-2", "gist" => "two", "state" => "applied"}}, 200}}
+      ])
+
+      {out, err, exit_code} = capture(fn -> Loop.run(["apply", "all"]) end)
+
+      assert exit_code == 1
+      assert out =~ "applied p-2"
+      assert err =~ "p-1"
+      assert err =~ "1 of 2"
+    end
+
+    test "loop apply all --json lists the failed row as an error entry and exits non-zero" do
+      stub_routes([
+        {{"get", "/api/loop/pending"},
+         {%{"pending" => [%{"id" => "p-1", "gist" => "one"}, %{"id" => "p-2", "gist" => "two"}]},
+          200}},
+        {{"post", "/api/loop/pending/p-1/apply"},
+         {%{"error" => %{"type" => "conflict", "message" => "cannot be applied"}}, 409}},
+        {{"post", "/api/loop/pending/p-2/apply"},
+         {%{"pending" => %{"id" => "p-2", "gist" => "two", "state" => "applied"}}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(["apply", "all", "--json"]) end)
+
+      assert exit_code == 1
+      assert [failed, ok] = Jason.decode!(out)
+      assert failed["id"] == "p-1"
+      assert failed["error"] =~ "cannot be applied"
+      assert ok["id"] == "p-2"
+    end
+
+    test "loop pending and apply all reject an unknown --state before any request" do
+      {_out, err, exit_code} = capture(fn -> Loop.run(["pending", "--state", "bogus"]) end)
+      assert exit_code == 1
+      assert err =~ "unknown state"
+      assert err =~ "proposed"
+
+      {_out, err, exit_code} = capture(fn -> Loop.run(["apply", "all", "--state", "bogus"]) end)
+      assert exit_code == 1
+      assert err =~ "unknown state"
+    end
+
+    test "loop pending accepts a comma-separated list of valid states" do
+      stub_routes([
+        {{"get", "/api/loop/pending"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["state"] == "proposed,hypothesis"
+           Req.Test.json(conn, %{"pending" => []})
+         end}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn -> Loop.run(["pending", "--state", "proposed,hypothesis"]) end)
+
+      assert exit_code == 0
+    end
+
     test "loop diff without an id is a usage error" do
       {_out, err, exit_code} = capture(fn -> Loop.run(["diff"]) end)
       assert exit_code == 1
@@ -630,16 +732,63 @@ defmodule ArbiterCli.Cmd.LoopTest do
       assert_received {:apply_all_params, %{"workspace_id" => "ws-custom", "state" => "proposed"}}
     end
 
-    test "arb loop analyze -w X sends resolved workspace_id query param" do
+    # AC 3 (P-23): `arb loop apply all -w X` only touches X. The stub plays the
+    # server's workspace filter, so a request that failed to carry the
+    # workspace would be handed (and would apply) the other workspace's rows.
+    test "arb loop apply all -w X applies only X's proposals" do
+      test_pid = self()
+
+      rows = [
+        %{"id" => "x-1", "workspace_id" => "ws-x", "gist" => "mine"},
+        %{"id" => "y-1", "workspace_id" => "ws-y", "gist" => "theirs"}
+      ]
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-x", "name" => "x", "prefix" => "xx"},
+              %{"id" => "ws-y", "name" => "y", "prefix" => "yy"}
+            ]
+          }, 200}},
+        {{"get", "/api/loop/pending"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           ws = conn.query_params["workspace_id"]
+           visible = Enum.filter(rows, fn r -> is_nil(ws) or r["workspace_id"] == ws end)
+           Req.Test.json(conn, %{"pending" => visible})
+         end},
+        {{"post", "/api/loop/pending/x-1/apply"},
+         fn conn ->
+           send(test_pid, {:applied, "x-1"})
+           Req.Test.json(conn, %{"pending" => %{"id" => "x-1", "gist" => "mine"}})
+         end},
+        {{"post", "/api/loop/pending/y-1/apply"},
+         fn conn ->
+           send(test_pid, {:applied, "y-1"})
+           Req.Test.json(conn, %{"pending" => %{"id" => "y-1", "gist" => "theirs"}})
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> ArbiterCli.Main.main(~w(loop apply all -w x)) end)
+
+      assert exit_code == 0
+      assert out =~ "applied x-1"
+      assert_received {:applied, "x-1"}
+      refute_received {:applied, "y-1"}
+    end
+
+    test "arb loop analyze -w X sends resolved workspace_id in the body" do
       test_pid = self()
 
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-custom", "name" => "custom", "prefix" => "cx"}]}, 200}},
-        {{"get", "/api/loop/analyze"},
+        {{"post", "/api/loop/analyze"},
          fn conn ->
-           conn = Plug.Conn.fetch_query_params(conn)
-           send(test_pid, {:analyze_params, conn.query_params})
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(test_pid, {:analyze_params, Jason.decode!(body)})
 
            conn
            |> Plug.Conn.put_status(200)

@@ -53,6 +53,55 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     run
   end
 
+  describe "POST /api/loop/analyze (P-23)" do
+    test "runs the pass, records its own cost row and returns the same envelope as GET", %{
+      conn: conn
+    } do
+      _ = run!(%{task_id: "bd-ctrl-post", state: :finished, outcome: :succeeded})
+      before = Event |> Ash.read!() |> length()
+
+      conn = post(conn, ~p"/api/loop/analyze", %{since: "24h"})
+      body = json_response(conn, 200)
+
+      assert body["markdown"] =~ "Loop-analysis report"
+      assert body["summary"]["totals"]
+      assert {:ok, _} = Ash.get(Event, body["usage_event_id"])
+      assert length(Ash.read!(Event)) == before + 1
+      refute Map.has_key?(body, "proposals")
+      assert get_resp_header(conn, "deprecation") == []
+    end
+
+    test "accepts an integer limit and rejects a bad one with 400", %{conn: conn} do
+      assert conn |> post(~p"/api/loop/analyze", %{limit: 25}) |> json_response(200)
+
+      conn = post(conn, ~p"/api/loop/analyze", %{limit: 0})
+      assert json_response(conn, 400)
+    end
+
+    test "rejects a malformed since with 400", %{conn: conn} do
+      assert conn |> post(~p"/api/loop/analyze", %{since: "not-a-date"}) |> json_response(400)
+    end
+
+    test "an unknown workspace is a 404, not an empty report", %{conn: conn} do
+      conn = post(conn, ~p"/api/loop/analyze", %{workspace: "no-such-ws"})
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "GET /api/loop/analyze is a deprecated alias (P-23)" do
+    test "still answers, and is marked deprecated in the response headers", %{conn: conn} do
+      conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
+
+      assert %{"markdown" => _, "usage_event_id" => _} = json_response(conn, 200)
+      assert get_resp_header(conn, "deprecation") == ["true"]
+      assert [link] = get_resp_header(conn, "link")
+      assert link =~ "/api/loop/analyze"
+      assert link =~ "successor-version"
+      assert [warning] = get_resp_header(conn, "warning")
+      assert warning =~ "deprecated"
+    end
+  end
+
   describe "GET /api/loop/analyze" do
     test "runs the pass over a window and returns the markdown report", %{conn: conn} do
       # A context-exhaustion run mislabelled as rate-limited.
@@ -563,6 +612,36 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert inspect(body) =~ "1 incident"
       {:ok, unchanged} = Loop.get_pending(hyp.id)
       assert unchanged.state == :hypothesis
+    end
+
+    # D-C-27: the apply carries the token's guardrail authority, so a
+    # coordinator token cannot loosen a guardrail by way of a queued proposal.
+    test "POST .../apply refuses a guardrail-loosening config_set for a coordinator token", %{
+      conn: conn
+    } do
+      ws = workspace!()
+
+      {:ok, row} =
+        Loop.record(%{
+          kind: :config_set,
+          scope: :task,
+          category: "cfg",
+          target: "cfg-#{System.unique_integer([:positive])}",
+          gist: "loosen the sandbox",
+          workspace_id: ws.id,
+          incident_refs: ["r"],
+          task_refs: ["t"],
+          payload: %{
+            "workspace_id" => ws.id,
+            "patch" => %{"agent" => %{"security" => %{"sandbox" => %{"enabled" => false}}}}
+          },
+          origin: "test"
+        })
+
+      conn = post(conn, ~p"/api/loop/pending/#{row.id}/apply", %{})
+      body = json_response(conn, 422)
+      assert inspect(body) =~ "operator-only"
+      assert {:ok, %{state: :proposed}} = Loop.get_pending(row.id)
     end
 
     test "POST .../reject is soft and records the reason", %{conn: conn, row: row} do

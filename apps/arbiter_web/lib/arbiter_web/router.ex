@@ -237,7 +237,10 @@ defmodule ArbiterWeb.Router do
     # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only.
     # Persisting the proposals it implies is a separate POST (Stage 2,
     # bd-9j2g3x), so the GET's zero-writes guarantee is structural.
-    get("/loop/analyze", LoopController, :analyze)
+    post("/loop/analyze", LoopController, :analyze)
+    # Deprecated alias of the POST above (D-C-30): same pass, flagged by headers.
+    # Its own action, so one action is never both a GET and a POST route.
+    get("/loop/analyze", LoopController, :analyze_deprecated)
     post("/loop/propose", LoopController, :propose)
     post("/loop/propose/repo_doc_patch", LoopController, :propose_repo_doc_patch)
     post("/loop/propose/routing", LoopController, :propose_routing)

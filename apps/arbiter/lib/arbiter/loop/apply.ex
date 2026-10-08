@@ -46,11 +46,17 @@ defmodule Arbiter.Loop.Apply do
 
   Stops at the first step that fails, and never marks the row unless the side
   effect actually landed.
+
+  Option `:authority` (`Arbiter.Guardrails.Authority`, default `:operator` — an
+  in-process caller is trusted) is the caller's guardrail authority. A
+  `:config_set` row writes workspace config, so it is carried onto that write:
+  a coordinator token applying a proposal cannot loosen a guardrail the
+  coordinator could not loosen directly (D-C-27).
   """
-  @spec run(PendingWrite.t(), String.t()) :: {:ok, PendingWrite.t()} | error()
-  def run(%PendingWrite{} = row, operator) do
+  @spec run(PendingWrite.t(), String.t(), keyword()) :: {:ok, PendingWrite.t()} | error()
+  def run(%PendingWrite{} = row, operator, opts \\ []) do
     with :ok <- validate(row),
-         :ok <- side_effect(row, attribution(row)),
+         :ok <- side_effect(row, attribution(row), opts),
          {:ok, applied} <- persist(row, operator) do
       notify(applied)
       {:ok, applied}
@@ -91,8 +97,14 @@ defmodule Arbiter.Loop.Apply do
   applied as written, or `{:error, {:invalid, msg}}` when the domain refused
   the write. Does not touch `row` itself; that is `persist/2`.
   """
-  @spec side_effect(PendingWrite.t(), String.t()) :: :ok | error()
-  def side_effect(%PendingWrite{kind: :difficulty_override, payload: payload}, attribution) do
+  @spec side_effect(PendingWrite.t(), String.t(), keyword()) :: :ok | error()
+  def side_effect(row, attribution, opts \\ [])
+
+  def side_effect(
+        %PendingWrite{kind: :difficulty_override, payload: payload},
+        attribution,
+        _opts
+      ) do
     with {:ok, %{task_id: task_id, difficulty: difficulty}} <-
            difficulty_override_args(payload),
          {:ok, issue} <- fetch_issue(task_id) do
@@ -111,7 +123,7 @@ defmodule Arbiter.Loop.Apply do
   # The skill is fetched *before* the attrs are built, because a clause-carrying
   # payload (bd-5w8h0r) is resolved against the skill's current body — the
   # splice happens here, at apply time, not when the proposal was authored.
-  def side_effect(%PendingWrite{kind: :skill_patch, payload: payload}, attribution) do
+  def side_effect(%PendingWrite{kind: :skill_patch, payload: payload}, attribution, _opts) do
     with {:ok, ref} <- skill_patch_args(payload),
          {:ok, skill} <- fetch_skill(ref),
          {:ok, attrs} <- Payload.skill_attrs(payload, skill.body) do
@@ -122,7 +134,7 @@ defmodule Arbiter.Loop.Apply do
     end
   end
 
-  def side_effect(%PendingWrite{kind: :skill_create, payload: payload}, attribution) do
+  def side_effect(%PendingWrite{kind: :skill_create, payload: payload}, attribution, _opts) do
     with {:ok, %{name: name, body: body}} <- skill_create_args(payload) do
       # bd-blxwla: the loop authored this row, full stop — not something the
       # payload gets a say in, so `managed_by: :loop` is forced here rather
@@ -137,13 +149,14 @@ defmodule Arbiter.Loop.Apply do
 
   # Invariant 4: config changes go through the deep-merge `:patch_config`
   # action, never a raw overwrite of `config`.
-  def side_effect(%PendingWrite{kind: :config_set} = row, attribution) do
+  def side_effect(%PendingWrite{kind: :config_set} = row, attribution, opts) do
     with {:ok, %{ws_id: ws_id, patch: patch, unset: unset}} <- config_set_args(row),
          {:ok, ws} <- fetch_workspace(ws_id) do
       ws
       |> Ash.update(%{patch: patch, unset_paths: unset},
         action: :patch_config,
-        actor: attribution
+        actor: attribution,
+        context: %{guardrail_authority: Keyword.get(opts, :authority, :operator)}
       )
       |> ok_or_invalid()
     end
@@ -151,7 +164,7 @@ defmodule Arbiter.Loop.Apply do
 
   # Rung 2 of the destination ladder (Amendment D) — see `Loop.Apply.RepoDoc`
   # for the worktree/commit/PR mechanics this hands off to.
-  def side_effect(%PendingWrite{kind: :repo_doc_patch} = row, attribution) do
+  def side_effect(%PendingWrite{kind: :repo_doc_patch} = row, attribution, _opts) do
     with {:ok, %{repo: repo, lesson: lesson, ws_id: ws_id}} <- repo_doc_args(row),
          {:ok, ws} <- fetch_workspace(ws_id) do
       RepoDoc.run(row, ws, repo, lesson, attribution)

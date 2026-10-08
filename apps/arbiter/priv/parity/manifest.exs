@@ -31,7 +31,6 @@
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-23" => "Loop parity",
     "P-25" => "Memory operator surface (REST + CLI)",
     "P-26" => "Mailbox: one context function, correct workspace and reader identity",
     "P-27" => "Coordinator attention queue on REST/CLI and read-only `server_status` on MCP"
@@ -1283,36 +1282,27 @@
     %{
       id: "workspace/loop_analysis_report",
       title: "Loop: analysis report",
-      mcp: nil,
+      mcp: ["loop_analyze"],
       cli: ["arb loop analyze", "arb loop"],
-      rest: ["GET /api/loop/analyze"],
-      status: {:gap, "P-23"},
-      divergences: ["D-C-30"],
-      absent: %{
-        mcp: {:gap, "P-23", "No `loop_analyze` MCP tool (REST GET and `arb loop analyze` exist)."}
-      }
+      rest: ["POST /api/loop/analyze", "GET /api/loop/analyze"],
+      status: :full,
+      note: "`GET /api/loop/analyze` is a deprecated alias of the POST (Deprecation/Link/Warning headers); the pass writes a usage_events row, so POST is the route."
     },
     %{
       id: "workspace/loop_analysis_persist_proposals",
       title: "Loop: analysis + persist proposals",
-      mcp: nil,
+      mcp: ["loop_propose"],
       cli: ["arb loop analyze"],
       rest: ["POST /api/loop/propose"],
-      status: {:gap, "P-23"},
-      absent: %{
-        mcp: {:gap, "P-23", "No `loop_propose` MCP tool (analyze + persist pending proposals)."}
-      }
+      status: :full
     },
     %{
       id: "workspace/loop_hand_author_repo_doc_patch_proposal",
       title: "Loop: hand-author repo-doc patch proposal",
-      mcp: nil,
+      mcp: ["loop_propose_repo_doc_patch"],
       cli: ["arb loop propose repo-doc-patch"],
       rest: ["POST /api/loop/propose/repo_doc_patch"],
-      status: {:gap, "P-23"},
-      absent: %{
-        mcp: {:gap, "P-23", "No `loop_propose_repo_doc_patch` MCP tool; it is a pure queue write like `loop_propose_routing`."}
-      }
+      status: :full
     },
     %{
       id: "workspace/loop_hand_author_routing_canary_proposal",
@@ -1320,8 +1310,7 @@
       mcp: ["loop_propose_routing"],
       cli: ["arb loop propose routing"],
       rest: ["POST /api/loop/propose/routing"],
-      status: :partial,
-      divergences: ["D-C-1", "D-C-9"]
+      status: :full
     },
     %{
       id: "workspace/loop_canary_status",
@@ -1329,8 +1318,7 @@
       mcp: ["loop_canary_status"],
       cli: ["arb loop canary status"],
       rest: ["GET /api/loop/canary"],
-      status: :partial,
-      divergences: ["D-C-2", "D-C-8"]
+      status: :full
     },
     %{
       id: "workspace/loop_list_pending",
@@ -1338,8 +1326,7 @@
       mcp: ["loop_pending_list"],
       cli: ["arb loop pending"],
       rest: ["GET /api/loop/pending"],
-      status: :partial,
-      divergences: ["D-C-2", "D-C-9"]
+      status: :full
     },
     %{
       id: "workspace/loop_show_pending_diff",
@@ -1347,8 +1334,7 @@
       mcp: ["loop_pending_diff"],
       cli: ["arb loop diff"],
       rest: ["GET /api/loop/pending/:id"],
-      status: :partial,
-      divergences: ["D-C-29"]
+      status: :full
     },
     %{
       id: "workspace/loop_apply_one",
@@ -1356,8 +1342,7 @@
       mcp: ["loop_pending_apply"],
       cli: ["arb loop apply"],
       rest: ["POST /api/loop/pending/:id/apply"],
-      status: :full,
-      divergences: ["D-C-28", "D-C-34"]
+      status: :full
     },
     %{
       id: "workspace/loop_apply_all",
@@ -1366,7 +1351,7 @@
       cli: ["arb loop apply all"],
       rest: nil,
       status: :excluded,
-      divergences: ["D-C-2"],
+      note: "Honours -w/--workspace; keeps going past a failed row, emits one array under --json and exits non-zero if any row failed.",
       absent: %{
         mcp: {:intentional, "Deliberately a CLI-only convenience over the per-row endpoint: never a server-side bulk write."},
         rest: {:intentional, "Deliberately a CLI-only convenience over the per-row endpoint: never a server-side bulk write."}

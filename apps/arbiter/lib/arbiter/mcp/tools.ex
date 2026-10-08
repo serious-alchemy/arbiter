@@ -1752,6 +1752,9 @@ defmodule Arbiter.MCP.Tools do
   defdelegate loop_pending_reject(scope, args), to: Arbiter.MCP.Tools.LoopPending
 
   defdelegate loop_propose_routing(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_analyze(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_propose(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_propose_repo_doc_patch(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_canary_status(scope, args), to: Arbiter.MCP.Tools.LoopPending
 
   defdelegate memory_pending_list(scope, args), to: Arbiter.MCP.Tools.MemoryPending

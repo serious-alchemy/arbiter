@@ -3,8 +3,10 @@ defmodule ArbiterWeb.Api.LoopController do
   REST surface for the loop-analysis pass (Stage 1, bd-dyfaq3) and its
   reviewable-proposal queue (Stage 2, bd-9j2g3x).
 
-    * `GET /api/loop/analyze` — run the operator-invoked loop-analysis pass over
-      a window and return its markdown report. Optional query params: `since`
+    * `POST /api/loop/analyze` — run the operator-invoked loop-analysis pass over
+      a window and return its markdown report. (`GET /api/loop/analyze` is a
+      **deprecated alias** with the same behaviour, marked by `Deprecation`,
+      `Link` and `Warning` response headers.) Optional params: `since`
       (`7d` / `24h` / `30m` shortcuts or ISO8601; default: last 7 days), `until`
       (ISO8601; default now), `limit` (cap on runs scanned, newest first),
       `workspace` (id or name; `workspace_id` is its alias), `label`.
@@ -26,7 +28,7 @@ defmodule ArbiterWeb.Api.LoopController do
       domain API a human would use.
     * `POST /api/loop/pending/:id/reject` — soft-reject it (optional `reason`).
 
-  `GET /api/loop/analyze` is **report-only**: it writes nothing but its own
+  `/api/loop/analyze` is **report-only**: it writes nothing but its own
   `usage_events` cost row (`Arbiter.Loop.Analysis`). Persisting proposals is a
   separate verb on a separate route, so the read-only guarantee is structural
   rather than a flag on a GET. Backs the `arb loop` CLI.
@@ -34,8 +36,10 @@ defmodule ArbiterWeb.Api.LoopController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.Loop
   alias Arbiter.Loop.Analysis
+  alias Arbiter.Loop.Analysis.{Request, Summary}
   alias Arbiter.Params
   alias ArbiterWeb.Api.WorkspaceParam
 
@@ -50,6 +54,22 @@ defmodule ArbiterWeb.Api.LoopController do
   # bd-6i7yzq: the token's actor (`Arbiter.Actor`, installed by `ApiAuth`) when
   # there is one, else the surface's historical `"cli"` label.
   defp actor_label, do: Arbiter.Actor.resolve_label(nil) || @actor
+
+  # `POST` is the route: the pass writes its own `usage_events` cost row and
+  # `discover=true` makes a model call, neither of which a GET may do (D-C-30).
+  # `GET` still answers identically, but is a deprecated alias — every response
+  # carries `Deprecation` / `Link` / `Warning` so a caller sees it.
+  def analyze_deprecated(conn, params) do
+    conn
+    |> put_resp_header("deprecation", "true")
+    |> put_resp_header("link", ~s(</api/loop/analyze>; rel="successor-version"; method="POST"))
+    |> put_resp_header(
+      "warning",
+      ~s(299 - "GET /api/loop/analyze is deprecated: it records a usage_events row and may ) <>
+        ~s(run a model call; use POST /api/loop/analyze")
+    )
+    |> run_analysis(params, propose?: false)
+  end
 
   def analyze(conn, params), do: run_analysis(conn, params, propose?: false)
 
@@ -113,27 +133,15 @@ defmodule ArbiterWeb.Api.LoopController do
 
   defp run_analysis(conn, params, propose?: propose?) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
-         {:ok, since} <- parse_window(params["since"]),
-         {:ok, until} <- parse_iso(params["until"]),
-         {:ok, limit} <- parse_limit(params["limit"]),
-         {:ok, discover?} <- parse_discover(params["discover"]) do
+         {:ok, opts} <- analysis_opts(params) do
       opts =
-        [propose?: propose?, discover?: discover?]
-        |> put(:since, since)
-        |> put(:until, until)
-        |> put(:limit, limit)
+        opts
+        |> Keyword.put(:propose?, propose?)
         |> put(:workspace_id, ws_id)
-        |> put(:label, blank_to_nil(params["label"]))
 
       case Analysis.analyze(opts) do
-        {:ok, %{markdown: markdown, report: report, usage_event_id: uid} = envelope} ->
-          json(
-            conn,
-            maybe_put_proposals(
-              %{markdown: markdown, usage_event_id: uid, summary: summary(report)},
-              envelope
-            )
-          )
+        {:ok, result} ->
+          json(conn, Summary.envelope(result, &render_pending/1))
 
         {:error, reason} ->
           {:error, {:server_error, "loop analysis failed", %{reason: inspect(reason)}}}
@@ -141,24 +149,12 @@ defmodule ArbiterWeb.Api.LoopController do
     end
   end
 
-  # `:proposals` (and `:proposals_dropped`) are only present when the caller
-  # opted in, so the analyze response body is byte-identical to what it was
-  # before Stage 2. `:proposals_dropped` (bd-3dasqm) surfaces a candidate
-  # `record/2` refused — e.g. an ambiguous install with no unambiguous
-  # workspace to attribute a fleet finding to — instead of it only ever
-  # showing up in a log line.
-  defp maybe_put_proposals(body, %{proposals: rows} = envelope) do
-    dropped = Map.get(envelope, :proposals_dropped, [])
-
-    body
-    |> Map.put(:proposals, Enum.map(rows, &render_pending/1))
-    |> Map.put(
-      :proposals_dropped,
-      Enum.map(dropped, &%{gist: &1.gist, reason: inspect(&1.reason)})
-    )
+  defp analysis_opts(params) do
+    case Request.build(params) do
+      {:ok, opts} -> {:ok, opts}
+      {:error, message} -> {:error, {:invalid_request, message}}
+    end
   end
-
-  defp maybe_put_proposals(body, _envelope), do: body
 
   # ---- the proposal queue -------------------------------------------------
 
@@ -191,7 +187,10 @@ defmodule ArbiterWeb.Api.LoopController do
 
   def pending_apply(conn, %{"id" => id}) do
     with {:ok, _row} <- visible_pending(conn, id) do
-      case Loop.apply_pending(id, actor: actor_label()) do
+      case Loop.apply_pending(id,
+             actor: actor_label(),
+             authority: Authority.from_scope(conn.assigns[:mcp_scope])
+           ) do
         {:ok, row} -> json(conn, %{pending: render_pending(row, :full), applied: true})
         {:error, reason} -> {:error, apply_error(reason)}
       end
@@ -277,116 +276,14 @@ defmodule ArbiterWeb.Api.LoopController do
     })
   end
 
-  # A compact structured summary alongside the markdown, for programmatic callers.
-  defp summary(report) do
-    %{
-      window: report.window[:label],
-      totals: report.totals,
-      misclassification_rate: report.misclassification[:rate],
-      finding_categories: length(report.finding_categories),
-      finding_residue: finding_residue_summary(report.finding_residue),
-      difficulty_misestimates: length(report.difficulty_misestimates),
-      fleet_wide_suggestions: Enum.count(report.suggestions, &(&1.verdict == :fleet_wide)),
-      ci: ci_summary(report.ci)
-    }
-    |> maybe_put_discovery(report.discovery)
-  end
-
-  # bd-4f6opo: present only under `discover=true`, so the default summary is
-  # byte-identical to before. Carries the verified candidates and every
-  # rejection with its reason — nothing the pre-check dropped goes unreported.
-  defp maybe_put_discovery(summary, nil), do: summary
-
-  defp maybe_put_discovery(summary, d) do
-    Map.put(summary, :discovery, %{
-      status: d.status,
-      error: d.error,
-      slice: d.slice,
-      history: d.history,
-      candidates: d.candidates,
-      rejected: d.rejected,
-      cost: d.cost
-    })
-  end
-
-  # bd-cuu8n3: the CI section, structured. Per-run rows carry their class,
-  # basis and reason (not the briefed check logs — those can run to kilobytes
-  # per run); `meta` states the approved-PR-only undercount so a JSON caller
-  # reads the same caveat the markdown prints.
-  defp ci_summary(ci) do
-    %{
-      red_rate: ci.red_rate,
-      by_repo: ci.by_repo,
-      by_model: ci.by_model,
-      by_difficulty: ci.by_difficulty,
-      outcomes: ci.outcomes,
-      outcomes_by_repo: ci.outcomes_by_repo,
-      runs: Enum.map(ci.runs, &Map.take(&1, [:run_id, :task_id, :repo, :class, :basis, :reason])),
-      lint_flags: Enum.map(ci.lint_flags, &Map.drop(&1, [:run_ids])),
-      recurring_flakes: Enum.map(ci.recurring_flakes, &Map.drop(&1, [:run_ids])),
-      meta: %{
-        undercount: ci.undercount,
-        classes: Arbiter.Loop.FixPassClassifier.classes(),
-        lint_share_threshold: ci.lint_share_threshold,
-        min_fix_passes: ci.min_fix_passes,
-        flake_recurrence_threshold: ci.flake_recurrence_threshold,
-        red_rate_definition:
-          "share of tasks with a main run in the window and a PR that needed >= 1 CI fix_pass " <>
-            "started in the window; attributed to the task's latest main run in the window"
-      }
-    }
-  end
-
-  # bd-5ja2vb: the count/rate/distinct-task shape, without the retained
-  # `units` sample (potentially hundreds of finding-text strings) — that
-  # belongs to the in-process `Report` a future backfill pass reads, not the
-  # compact summary a CLI/dashboard renders.
-  defp finding_residue_summary(fr) do
-    %{
-      total_units: Map.get(fr, :total_units, 0),
-      count: Map.get(fr, :count, 0),
-      rate: Map.get(fr, :rate),
-      distinct_tasks: Map.get(fr, :distinct_tasks, 0)
-    }
-  end
-
   # ---- param parsing ------------------------------------------------------
-
-  # Accepts relative shortcuts (7d / 24h / 30m) or absolute ISO8601.
-  defp parse_window(nil), do: {:ok, nil}
-  defp parse_window(""), do: {:ok, nil}
-
-  defp parse_window(raw) when is_binary(raw) do
-    case Regex.run(~r/^(\d+)([dhm])$/, raw) do
-      [_, n, unit] ->
-        seconds = String.to_integer(n) * unit_seconds(unit)
-        {:ok, DateTime.add(DateTime.utc_now(), -seconds, :second)}
-
-      nil ->
-        parse_iso(raw)
-    end
-  end
-
-  defp parse_iso(nil), do: {:ok, nil}
-  defp parse_iso(""), do: {:ok, nil}
-
-  defp parse_iso(raw) when is_binary(raw) do
-    case DateTime.from_iso8601(raw) do
-      {:ok, dt, _} ->
-        {:ok, dt}
-
-      _ ->
-        {:error,
-         {:invalid_request, "expected ISO8601 or a 7d/24h/30m shortcut, got #{inspect(raw)}"}}
-    end
-  end
 
   # `state=` accepts one name or a comma-separated list; absent means the two
   # live states (an operator wants the queue, not the archive). Unknown names are
   # rejected rather than silently dropped, so a typo can't look like an empty
   # queue.
-  @states ~w(proposed hypothesis applied rejected superseded)
-  @kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)
+  @states Enum.map(Arbiter.Loop.PendingWrite.states(), &Atom.to_string/1)
+  @kinds Enum.map(Arbiter.Loop.PendingWrite.kinds(), &Atom.to_string/1)
 
   defp parse_states(nil), do: {:ok, nil}
   defp parse_states(""), do: {:ok, nil}
@@ -433,28 +330,9 @@ defmodule ArbiterWeb.Api.LoopController do
     {:error, {:invalid_request, "kind must be a string, got #{inspect(other)}"}}
   end
 
-  # `limit` arrives as a string on the GET query-string routes and as a real
-  # integer in the JSON body of `POST /api/loop/propose` (`arb loop analyze
-  # --propose --limit N` sends `%{"limit" => 50}`), so both shapes are accepted
-  # and anything else is a 400 rather than a FunctionClauseError 500.
-  # bd-4f6opo: the opt-in model pass. A string on the GET query, a boolean in
-  # the POST JSON body; anything unrecognised is a 400, never a silent "off".
-  defp parse_discover(v) when v in [nil, ""], do: {:ok, false}
-
-  defp parse_discover(v) do
-    case Params.boolean(v) do
-      {:ok, b} -> {:ok, b}
-      :error -> {:error, {:invalid_request, "discover must be true or false"}}
-    end
-  end
-
   # Absent means "no cap requested"; a supplied value is clamped to `@max_limit`.
   defp parse_limit(raw) when raw in [nil, ""], do: {:ok, nil}
   defp parse_limit(raw), do: raw |> Params.limit(@max_limit, @max_limit) |> Params.to_rest()
-
-  defp unit_seconds("d"), do: 24 * 3600
-  defp unit_seconds("h"), do: 3600
-  defp unit_seconds("m"), do: 60
 
   defp put(opts, _key, nil), do: opts
   defp put(opts, key, value), do: Keyword.put(opts, key, value)

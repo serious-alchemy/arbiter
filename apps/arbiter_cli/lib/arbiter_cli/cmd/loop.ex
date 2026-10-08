@@ -56,9 +56,9 @@ defmodule ArbiterCli.Cmd.Loop do
 
       arb loop pending [--state proposed|hypothesis|applied|rejected|superseded]
                        [--kind <kind>] [--workspace <id>] [--limit N] [--json]
-      arb loop diff <id>
+      arb loop diff <id> [--json]
       arb loop apply <id>
-      arb loop apply all [--state proposed]
+      arb loop apply all [--state proposed] [--workspace <ws>] [--limit N] [--json]
       arb loop reject <id> [--reason "..."]
 
   ## Hand-authoring a repo CLAUDE.md lesson (bd-1cusio)
@@ -149,7 +149,7 @@ defmodule ArbiterCli.Cmd.Loop do
 
         ["diff", id | tail] ->
           _ = ArgParser.parse(tail, command: "arb loop diff", switches: [])
-          diff(id)
+          diff(id, mode)
 
         ["diff" | _] ->
           Output.die("usage: arb loop diff <id>")
@@ -207,32 +207,22 @@ defmodule ArbiterCli.Cmd.Loop do
       |> maybe_put(:limit, Keyword.get(opts, :limit))
       |> maybe_put(:workspace_id, ws_id)
 
+    # Both routes are POSTs: the pass records its own `usage_events` row (and
+    # `--discover` makes a model call), so neither is a GET (D-C-30).
     # `--propose` is a different verb on a different route, not a flag on the
-    # read-only GET — the analyze endpoint can never write. `--discover`
-    # (bd-4f6opo) writes nothing either, so it is a param on whichever route
-    # runs; it makes a model call, so it gets a longer receive timeout. Without
-    # it the request is exactly what it always was.
-    discover? = Keyword.get(opts, :discover, false)
+    # report-only analyze. `--discover` (bd-4f6opo) queues nothing either, so it
+    # is a body param on whichever route runs; it makes a model call, so it gets
+    # a longer receive timeout.
+    route =
+      if Keyword.get(opts, :propose, false), do: "/api/loop/propose", else: "/api/loop/analyze"
 
     result =
-      case {Keyword.get(opts, :propose, false), discover?} do
-        {true, false} ->
-          Client.post("/api/loop/propose", Map.new(params))
-
-        {true, true} ->
-          Client.post(
-            "/api/loop/propose",
-            params |> Map.new() |> Map.put(:discover, true),
-            receive_timeout: @discover_timeout_ms
-          )
-
-        {false, false} ->
-          Client.get("/api/loop/analyze", params)
-
-        {false, true} ->
-          Client.get("/api/loop/analyze", Keyword.put(params, :discover, "true"),
-            receive_timeout: @discover_timeout_ms
-          )
+      if Keyword.get(opts, :discover, false) do
+        Client.post(route, params |> Map.new() |> Map.put(:discover, true),
+          receive_timeout: @discover_timeout_ms
+        )
+      else
+        Client.post(route, Map.new(params))
       end
 
     case result do
@@ -395,10 +385,11 @@ defmodule ArbiterCli.Cmd.Loop do
       )
 
     ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+    state = validate_states(Keyword.get(opts, :state))
 
     params =
       []
-      |> maybe_put(:state, Keyword.get(opts, :state))
+      |> maybe_put(:state, state)
       |> maybe_put(:kind, Keyword.get(opts, :kind))
       |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:limit, Keyword.get(opts, :limit))
@@ -460,8 +451,9 @@ defmodule ArbiterCli.Cmd.Loop do
 
   defp context_cost_detail(_), do: "0 tokens (charged once, not to every dispatch)"
 
-  defp diff(id) do
+  defp diff(id, mode) do
     case Client.get("/api/loop/pending/#{id}") do
+      {:ok, %{"pending" => row}} when mode == :json -> IO.puts(Jason.encode!(row))
       {:ok, %{"pending" => row}} -> print_detail(row)
       {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
       {:error, err} -> Output.die(err)
@@ -499,7 +491,9 @@ defmodule ArbiterCli.Cmd.Loop do
   end
 
   # `apply all` is a convenience over the same per-row endpoint — never a
-  # server-side bulk write, so one bad row cannot take the batch with it.
+  # server-side bulk write, so one bad row cannot take the batch with it. It
+  # keeps going past a failed row, reports every row (`--json`: one array, a
+  # failed row is `{"id", "error"}`), and exits non-zero if any failed.
   defp apply_all(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
@@ -509,37 +503,67 @@ defmodule ArbiterCli.Cmd.Loop do
       )
 
     ws_id = ArbiterCli.Workspace.selected_id(Keyword.get(opts, :workspace))
+    state = validate_states(Keyword.get(opts, :state, "proposed"))
 
     params =
-      [state: Keyword.get(opts, :state, "proposed")]
+      [state: state]
       |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
     case Client.get("/api/loop/pending", params) do
-      {:ok, %{"pending" => []}} ->
-        IO.puts("nothing to apply")
-
-      {:ok, %{"pending" => rows}} ->
-        Enum.each(rows, fn row -> apply_in_batch(row, mode) end)
-
-      {:ok, other} ->
-        Output.die("unexpected response: #{inspect(other)}")
-
-      {:error, err} ->
-        Output.die(err)
+      {:ok, %{"pending" => []}} when mode == :json -> IO.puts("[]")
+      {:ok, %{"pending" => []}} -> IO.puts("nothing to apply")
+      {:ok, %{"pending" => rows}} -> rows |> Enum.map(&apply_in_batch/1) |> report_batch(mode)
+      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
+      {:error, err} -> Output.die(err)
     end
   end
 
-  defp apply_in_batch(row, mode) do
+  defp apply_in_batch(row) do
     case Client.post("/api/loop/pending/#{row["id"]}/apply", %{}) do
       {:ok, %{"pending" => applied}} ->
-        emit_decision(applied, "applied", mode)
+        {:ok, applied}
 
       {:ok, other} ->
-        IO.puts("#{row["id"]} skipped: unexpected response #{inspect(other)}")
+        {:error, row["id"], "unexpected response #{inspect(other)}"}
 
       {:error, err} ->
-        IO.puts("#{row["id"]} skipped: #{error_message(err)}")
+        {:error, row["id"], error_message(err)}
+    end
+  end
+
+  defp report_batch(results, :json) do
+    results
+    |> Enum.map(fn
+      {:ok, applied} -> applied
+      {:error, id, message} -> %{"id" => id, "error" => message}
+    end)
+    |> Output.emit_json()
+
+    exit_unless_all_applied(results)
+  end
+
+  defp report_batch(results, :text) do
+    Enum.each(results, fn
+      {:ok, applied} -> emit_decision(applied, "applied", :text)
+      {:error, id, message} -> IO.puts(:stderr, "arb: error: #{id} not applied: #{message}")
+    end)
+
+    exit_unless_all_applied(results)
+  end
+
+  defp exit_unless_all_applied(results) do
+    case Enum.count(results, &match?({:error, _, _}, &1)) do
+      0 ->
+        :ok
+
+      failed ->
+        IO.puts(
+          :stderr,
+          "arb: error: #{failed} of #{length(results)} proposal(s) failed to apply"
+        )
+
+        Output.halt(1)
     end
   end
 
@@ -558,6 +582,31 @@ defmodule ArbiterCli.Cmd.Loop do
 
   defp emit_decision(row, _verb, :json), do: IO.puts(Jason.encode!(row))
   defp emit_decision(row, verb, :text), do: IO.puts("#{verb} #{row["id"]}: #{row["gist"]}")
+
+  # Mirrors `Arbiter.Loop.PendingWrite.states/0` (the CLI escript cannot depend
+  # on the server app). The server validates too; this refuses a typo before a
+  # request is made, so it cannot look like an empty queue, and `apply all`
+  # cannot be pointed at a state it never meant.
+  @states ~w(proposed hypothesis applied rejected superseded)
+
+  defp validate_states(nil), do: nil
+
+  defp validate_states(raw) when is_binary(raw) do
+    names = raw |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+
+    case {names, Enum.reject(names, &(&1 in @states))} do
+      {[], _} ->
+        Output.die("--state needs at least one of: #{Enum.join(@states, ", ")}")
+
+      {_, []} ->
+        Enum.join(names, ",")
+
+      {_, bad} ->
+        Output.die(
+          "unknown state(s) #{inspect(bad)}; expected one of #{Enum.join(@states, ", ")}"
+        )
+    end
+  end
 
   defp error_message(%Client.Error{message: message}) when is_binary(message), do: message
   defp error_message(err), do: inspect(err)
