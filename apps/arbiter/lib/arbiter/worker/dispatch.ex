@@ -222,6 +222,7 @@ defmodule Arbiter.Worker.Dispatch do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_dispatchable(task, opts),
          opts = apply_issue_repo_default(task, opts),
+         opts = put_security_policy(task, opts),
          :ok <- ensure_not_awaiting_review(task, opts),
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = put_routing_choice(task, opts),
@@ -235,6 +236,7 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, opts} <- ensure_node_capacity(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
+         opts = put_security_policy(task, opts),
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_active(task, opts),
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
@@ -1632,14 +1634,47 @@ defmodule Arbiter.Worker.Dispatch do
   # drop — resolved exactly as `build_agent_session_opts/4` resolves it.
   defp routing_security(nil, _opts), do: nil
 
-  defp routing_security(workspace, opts),
-    do: SecurityPolicy.resolve(workspace, security_override(opts), Keyword.get(opts, :repo))
+  defp routing_security(workspace, opts), do: dispatch_policy(workspace, opts)
+
+  # bd-d0sgb6: a dispatch reads the security policy once. The worktree layout
+  # (`git_layout/2`), node placement and the spawn all take their sandbox
+  # backend from this one resolution, so a `sandbox.backend` flip mid-dispatch
+  # cannot give a bwrap-shaped checkout to a podman spawn. It rides in opts
+  # keyed by the repo it was scoped to; a dispatch that later settles on a
+  # different repo re-resolves (the posture is per-repo scoped).
+  defp put_security_policy(%Issue{} = task, opts) do
+    repo = Keyword.get(opts, :repo)
+
+    case Keyword.get(opts, :resolved_policy) do
+      {^repo, %SecurityPolicy{}} ->
+        opts
+
+      _ ->
+        policy = SecurityPolicy.resolve(load_workspace(task), security_override(opts), repo)
+        Keyword.put(opts, :resolved_policy, {repo, policy})
+    end
+  end
+
+  defp dispatch_policy(workspace, opts) do
+    repo = Keyword.get(opts, :repo)
+
+    case Keyword.get(opts, :resolved_policy) do
+      {^repo, %SecurityPolicy{} = policy} -> policy
+      _ -> SecurityPolicy.resolve(workspace, security_override(opts), repo)
+    end
+  end
 
   # A held dispatch is replayed verbatim on drain; strip routing's own choice
   # so the replay routes afresh instead of reading it as a caller override.
   defp unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
-    opts = Keyword.drop(opts, [:routing_decision, :routing_choice, :routed_agent_type])
+    opts =
+      Keyword.drop(opts, [
+        :routing_decision,
+        :routing_choice,
+        :routed_agent_type,
+        :resolved_policy
+      ])
 
     if routed && Keyword.get(opts, :agent_type) == routed,
       do: Keyword.drop(opts, [:agent_type, :provider_fallback]),
@@ -2470,12 +2505,7 @@ defmodule Arbiter.Worker.Dispatch do
   # run in, resolved from the same policy layers `build_agent_session_opts/4`
   # resolves: a container (`sandbox.backend: podman`) gets a private clone.
   defp git_layout(%Issue{} = task, opts),
-    do:
-      GitLayout.for_workspace(
-        load_workspace(task),
-        Keyword.get(opts, :repo),
-        security_override(opts)
-      )
+    do: task |> load_workspace() |> dispatch_policy(opts) |> GitLayout.for_policy()
 
   defp resolve_repo_path(_task, nil), do: nil
 
@@ -3327,7 +3357,7 @@ defmodule Arbiter.Worker.Dispatch do
         # the routed one, again below if the strict gate swaps it.
         base_policy =
           workspace
-          |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
+          |> dispatch_policy(opts)
           |> review_security_policy(opts)
 
         policy = guardrail_floor(base_policy, workspace, choice, opts)
