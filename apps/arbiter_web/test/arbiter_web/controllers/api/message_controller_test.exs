@@ -396,6 +396,24 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
              )
     end
 
+    test "index mark_read=true without to_ref is refused and consumes nothing", ctx do
+      %{conn: conn, message: m} = ctx
+
+      body =
+        conn
+        |> get(~p"/api/messages", %{unread: "true", mark_read: "true"})
+        |> json_response(400)
+
+      assert inspect(body) =~ "mark_read requires to_ref"
+
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true"})
+        |> json_response(200)
+
+      assert m.id in Enum.map(listed["data"], & &1["id"])
+    end
+
     test "index unread=true with `session` is that session's unread view", ctx do
       %{conn: conn, message: m, session: session} = ctx
 

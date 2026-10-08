@@ -11,7 +11,9 @@ defmodule ArbiterWeb.Api.MessageController do
                                        both nil], outstanding=true [read, not
                                        cleared], limit, mark_read=true [stamp the
                                        returned unread messages read; default
-                                       false — a plain GET is a pure read]).
+                                       false — a plain GET is a pure read; with
+                                       unread=true it requires `to_ref`, since
+                                       receipts are per reader per mailbox]).
                                        Unread/outstanding are oldest-first and
                                        uncapped unless `limit` is given; the
                                        history view is newest-first, 50 by default.
@@ -74,7 +76,8 @@ defmodule ArbiterWeb.Api.MessageController do
          {:ok, outstanding?} <-
            params |> Params.fetch_bool("outstanding", false) |> Params.to_rest(),
          {:ok, mark_read?} <- params |> Params.fetch_bool("mark_read", false) |> Params.to_rest(),
-         {:ok, state} <- parse_state(unread?, outstanding?) do
+         {:ok, state} <- parse_state(unread?, outstanding?),
+         :ok <- check_mark_read(mark_read?, state, params["to_ref"]) do
       messages =
         Mailbox.list(
           workspace_id: ws_id,
@@ -180,6 +183,14 @@ defmodule ArbiterWeb.Api.MessageController do
   # (whose state is mirrored onto the row — which is why callers that never
   # pass `session` see no change at all).
   defp reader_ref(conn, params), do: Mailbox.reader(conn.assigns[:mcp_scope], params["session"])
+
+  # Receipts are per-reader on the coordinator mailbox, which is only known from
+  # the mailbox being read. Without a `to_ref` the mark would be row-level and
+  # consume the message for every other reader.
+  defp check_mark_read(true, :unread, to_ref) when to_ref in [nil, ""],
+    do: {:error, {:invalid_request, "mark_read requires to_ref"}}
+
+  defp check_mark_read(_mark_read?, _state, _to_ref), do: :ok
 
   defp parse_state(true, true),
     do: {:error, {:invalid_request, "unread and outstanding are mutually exclusive"}}
