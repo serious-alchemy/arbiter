@@ -66,6 +66,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_overview` | worker, coordinator | `Ash.get(Workspace, id)` → grouped config summary |
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
+  | `workspace_config_schema` | worker, coordinator | `Workspace.ConfigSchema.describe/0` |
+  | `workspace_standing_order_add` / `_remove` | coordinator | `Workspace.Operations` (atomic append/remove) |
   | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog + quota-provider visibility) |
   | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility + output-offload sweeper switch) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
@@ -155,7 +157,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list repo_show)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset workspace_standing_order_add workspace_standing_order_remove external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
@@ -2001,9 +2003,12 @@ defmodule Arbiter.MCP.Catalog do
       name: "workspace_config_set",
       tiers: @coordinator,
       description:
-        "Set a single dotted.key to a value via the deep-merge config endpoint, preserving all " <>
-          "sibling keys. A literal dot in a key segment (a repo name) is written `\\.` " <>
-          "(`repo_paths.my\\.repo`). Refused by the server, on every surface: `secret*` / " <>
+        "Set config via the deep-merge config endpoint, preserving all sibling keys. Either one " <>
+          "dotted `key` + `value`, or a multi-key atomic write: `patch` (a nested object deep-merged " <>
+          "in; a key containing a dot is just a map key) and/or `unset_paths` (dotted keys to remove, " <>
+          "applied first) — never both forms. A literal dot in a dotted key segment (a repo name) is " <>
+          "written `\\.` (`repo_paths.my\\.repo`). Call `workspace_config_schema` for every key and its " <>
+          "valid values. Refused by the server, on every surface: `secret*` / " <>
           "`credentials*` top-level keys (use `arb workspace secret` for secrets), emptying " <>
           "`repo_paths`, and `tracker.type` with no `tracker.config` (`force: true` overrides the " <>
           "last two). Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
@@ -2013,7 +2018,21 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "key" => %{
             "type" => "string",
-            "description" => "Dotted config key to set (e.g. \"merge.auto_merge\"). Required."
+            "description" =>
+              "Dotted config key to set (e.g. \"merge.auto_merge\"). Required with `value` unless " <>
+                "`patch` / `unset_paths` is used."
+          },
+          "patch" => %{
+            "type" => "object",
+            "description" =>
+              "Multi-key form: a partial config deep-merged into the existing one (objects recurse, " <>
+                "scalars and arrays replace). Use instead of key/value."
+          },
+          "unset_paths" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Multi-key form: dotted paths to remove before `patch` is merged (an absent path is a no-op)."
           },
           "force" => %{
             "type" => "boolean",
@@ -2036,10 +2055,67 @@ defmodule Arbiter.MCP.Catalog do
                 "[\"claude\", \"gemini\"]) — do NOT pass a JSON-encoded string."
           }
         },
-        "required" => ["key", "value"],
         "additionalProperties" => false
       },
       handler: &Tools.workspace_config_set/2
+    },
+    %{
+      name: "workspace_config_schema",
+      tiers: @both,
+      description:
+        "The reference for every `workspace.config` key (tracker, merge, agent, security, routing, " <>
+          "review, quota, standing_orders, repo_paths, …) with valid values and defaults — what " <>
+          "`workspace_config_set` accepts. Same text as `arb config schema` and " <>
+          "`GET /api/workspaces/config_schema`. Returns `{text, enums}`.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.workspace_config_schema/2
+    },
+    %{
+      name: "workspace_standing_order_add",
+      tiers: @coordinator,
+      description:
+        "Append ONE standing order (coordinator-facing, shown in `arb prime`) atomically on the " <>
+          "server — two concurrent adds both survive, unlike rewriting the list with " <>
+          "`workspace_config_set`. `repo` targets a registered repo's `repo_paths.<repo>." <>
+          "standing_orders`. Returns `{workspace, repo, standing_orders}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "text" => %{"type" => "string", "description" => "The standing order. Required."},
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
+          }
+        },
+        "required" => ["text"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.workspace_standing_order_add/2
+    },
+    %{
+      name: "workspace_standing_order_remove",
+      tiers: @coordinator,
+      description:
+        "Remove ONE standing order atomically on the server, by 1-based index or exact text. " <>
+          "`repo` targets a registered repo's list. Returns `{workspace, repo, standing_orders}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "target" => %{
+            "oneOf" => [%{"type" => "integer"}, %{"type" => "string"}],
+            "description" => "1-based index, or the order's exact text. Required."
+          },
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "A registered repo name, for a repo-scoped order. Omit for workspace-wide."
+          }
+        },
+        "required" => ["target"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.workspace_standing_order_remove/2
     },
     %{
       name: "workspace_config_unset",
@@ -2273,7 +2349,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "skill_delete",
       tiers: @coordinator,
       description:
-        "Delete a system-wide skill identified by `skill` (its id or name). " <>
+        "Delete a skill identified by `skill` (its id, or its name resolved within the " <>
+          "`workspace` scope with a scoped skill shadowing the global). A caller bound to a " <>
+          "workspace cannot delete another workspace's scoped skill. " <>
           "Returns `{deleted: true, id, name}`.",
       input_schema: %{
         "type" => "object",
@@ -2281,6 +2359,11 @@ defmodule Arbiter.MCP.Catalog do
           "skill" => %{
             "type" => "string",
             "description" => "Skill id or name to delete. Required."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) that scopes a name lookup. Omit to target a global skill."
           }
         },
         "required" => ["skill"],

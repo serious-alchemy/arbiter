@@ -308,10 +308,13 @@ defmodule ArbiterWeb.Router do
     # Workspaces
     get("/workspaces", WorkspaceController, :index)
     post("/workspaces", WorkspaceController, :create)
+    get("/workspaces/config_schema", WorkspaceController, :config_schema)
     get("/workspaces/:id", WorkspaceController, :show)
     patch("/workspaces/:id", WorkspaceController, :update)
     put("/workspaces/:id", WorkspaceController, :update)
     patch("/workspaces/:id/config", WorkspaceController, :patch_config)
+    post("/workspaces/:id/standing_orders", WorkspaceController, :add_standing_order)
+    post("/workspaces/:id/standing_orders/remove", WorkspaceController, :remove_standing_order)
 
     # Tracker bridge (assignment-as-claim for GitHub Issues)
     post("/workspaces/:workspace_id/claim", ClaimController, :claim)

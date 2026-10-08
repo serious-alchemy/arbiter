@@ -19,10 +19,15 @@ defmodule Arbiter.Nodes.Overview do
   (`Arbiter.Board.Snapshot.system_max_concurrent/0`), so an install that never
   overrides it behaves as before. Its override may be 0.
 
-  `total` is `local + Σ remote caps` (revoked nodes excluded) set against
-  `ceiling`, the operator-owned `conductor.max_concurrent`, which is never
-  derived from node caps. `warnings` names what the operator should look at:
-  `:local_cap_zero`, `:ceiling_below_total` and `:ceiling_far_above_total`.
+  `total` is the install's capacity, `local + Σ the caps of every available
+  node` (`Arbiter.Nodes.Capacity`: an offline, lost, draining, suspect, revoked
+  or unhealthy node adds 0, and so does every node while remote execution is
+  off), and each node row's `:contributes` is what it added. `ceiling` is the
+  operator's `conductor.max_concurrent` when set and `nil` when not, and
+  `effective` is `min(total, ceiling)`, the concurrency the board plans to. The
+  ceiling is never derived from node caps. `warnings` names what the operator
+  should look at: `:local_cap_zero`, and `:ceiling_below_total` only while an
+  explicit ceiling cuts the sum.
   """
 
   import Bitwise
@@ -31,18 +36,20 @@ defmodule Arbiter.Nodes.Overview do
 
   alias Arbiter.Board.Snapshot, as: Board
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Hello, Node, Registry, Session, Skew}
+  alias Arbiter.Nodes.{Capacity, Hello, Node, Registry, Session, Skew}
   alias Arbiter.Settings
   alias Arbiter.Workers.{Run, RunState}
 
   @type row :: map()
 
-  @doc "The whole overview: `%{local:, nodes:, total:, ceiling:, warnings:}`."
+  @doc "The whole overview: `%{local:, nodes:, total:, effective:, ceiling:, remote_execution?:, warnings:}`."
   @spec build() :: %{
           local: row(),
           nodes: [row()],
           total: non_neg_integer(),
-          ceiling: pos_integer(),
+          effective: non_neg_integer(),
+          ceiling: pos_integer() | nil,
+          remote_execution?: boolean(),
           warnings: [atom()]
         }
   def build do
@@ -50,18 +57,18 @@ defmodule Arbiter.Nodes.Overview do
     nodes = Enum.map(Nodes.list_nodes(), &node_row(&1, Map.get(snapshots, &1.id)))
     remote_ids = snapshots |> Map.values() |> Enum.flat_map(&run_ids/1)
     local = local_row(remote_ids)
-
-    total =
-      local.max + (nodes |> Enum.reject(&(&1.state == :revoked)) |> Enum.sum_by(&(&1.max || 0)))
-
-    ceiling = Board.system_max_concurrent()
+    capacity = Capacity.breakdown(nodes: nodes, local_cap: local.max)
+    contributions = Map.new(capacity.nodes, &{&1.id, &1.contributes})
+    nodes = Enum.map(nodes, &Map.put(&1, :contributes, Map.fetch!(contributions, &1.id)))
 
     %{
       local: local,
       nodes: nodes,
-      total: total,
-      ceiling: ceiling,
-      warnings: warnings(local, total, ceiling)
+      total: capacity.sum,
+      effective: capacity.effective,
+      ceiling: capacity.ceiling,
+      remote_execution?: capacity.remote_execution?,
+      warnings: warnings(local, capacity)
     }
   end
 
@@ -147,6 +154,7 @@ defmodule Arbiter.Nodes.Overview do
       last_heartbeat_at: nil,
       live: local_live(remote_run_ids),
       max: override || suggested,
+      contributes: override || suggested,
       cap_source: if(override, do: :override, else: :suggestion),
       suggested: suggested,
       override: override,
@@ -193,13 +201,9 @@ defmodule Arbiter.Nodes.Overview do
 
   # ---- warnings --------------------------------------------------------------
 
-  defp warnings(local, total, ceiling) do
+  defp warnings(local, capacity) do
     Enum.filter(
-      [
-        local.max == 0 && :local_cap_zero,
-        ceiling < total && :ceiling_below_total,
-        total > 0 && ceiling > 2 * total && :ceiling_far_above_total
-      ],
+      [local.max == 0 && :local_cap_zero, capacity.ceiling_cuts? && :ceiling_below_total],
       & &1
     )
   end

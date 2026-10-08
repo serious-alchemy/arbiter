@@ -31,7 +31,6 @@
   children: %{
     "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-21" => "Workspace operations parity: update, schema, multi-key patch, worker_env, standing orders",
     "P-25" => "Memory operator surface (REST + CLI)",
     "P-26" => "Mailbox: one context function, correct workspace and reader identity",
     "P-27" => "Coordinator attention queue on REST/CLI and read-only `server_status` on MCP"
@@ -1018,16 +1017,15 @@
     },
     %{
       id: "workspace/update_workspace_attrs_name_description",
-      title: "Update workspace attrs (name/description/prefix/whole config)",
+      title: "Update workspace attrs (name/description/prefix)",
       mcp: nil,
-      cli: nil,
+      cli: ["arb workspace update"],
       rest: ["PATCH /api/workspaces/:id", "PUT /api/workspaces/:id"],
-      status: {:gap, "P-21"},
-      divergences: ["D-C-6"],
+      status: :full,
       absent: %{
-        mcp: {:intentional, "Rename/prefix change is operator-level; config goes through `workspace_config_set`."},
-        cli: {:gap, "P-21", "No `arb workspace update <ws> [--name --description --prefix]` (the UI has it)."}
-      }
+        mcp: {:intentional, "Rename/prefix change is operator-level; config goes through `workspace_config_set`."}
+      },
+      note: "`config` is not replaceable here (P-20): config is written through the deep-merge `PATCH .../config`."
     },
     %{
       id: "workspace/get_workspace_config_whole_dotted_key",
@@ -1071,27 +1069,21 @@
     %{
       id: "workspace/multi_key_patch_unset_in_one_write",
       title: "Multi-key patch + unset in one write",
-      mcp: nil,
+      mcp: ["workspace_config_set"],
       cli: nil,
       rest: ["PATCH /api/workspaces/:id/config"],
-      status: {:gap, "P-21"},
-      divergences: ["D-C-17"],
+      status: :full,
       absent: %{
-        mcp: {:gap, "P-21", "`workspace_config_set` takes one dotted key; it cannot send a multi-key `patch`/`unset_paths` as REST and the UI can."},
         cli: {:intentional, "`arb config set` per key is the CLI contract."}
       }
     },
     %{
       id: "workspace/config_schema_key_docs",
       title: "Config schema / key docs",
-      mcp: nil,
+      mcp: ["workspace_config_schema"],
       cli: ["arb config schema"],
-      rest: nil,
-      status: {:gap, "P-21"},
-      absent: %{
-        mcp: {:gap, "P-21", "A coordinator editing config has no in-band schema."},
-        rest: {:gap, "P-21", "No `GET /api/workspaces/config_schema`; the schema lives CLI-side (`config_schema.ex`)."}
-      }
+      rest: ["GET /api/workspaces/config_schema"],
+      status: :full
     },
     %{
       id: "workspace/standing_orders_list",
@@ -1105,29 +1097,29 @@
     %{
       id: "workspace/standing_orders_add",
       title: "Standing orders: add",
-      mcp: ["workspace_config_set"],
+      mcp: ["workspace_standing_order_add"],
       cli: ["arb workspace standing-order add"],
-      rest: ["PATCH /api/workspaces/:id/config"],
-      status: :partial,
-      divergences: ["D-C-37"]
+      rest: ["POST /api/workspaces/:id/standing_orders"],
+      status: :full,
+      note: "Server-side atomic append (D-C-37): concurrent adds both survive."
     },
     %{
       id: "workspace/standing_orders_remove",
       title: "Standing orders: remove",
-      mcp: ["workspace_config_set"],
+      mcp: ["workspace_standing_order_remove"],
       cli: ["arb workspace standing-order rm"],
-      rest: ["PATCH /api/workspaces/:id/config"],
-      status: :partial,
-      note: "Remove is a full-list rewrite on MCP/REST; only the CLI has a per-entry verb."
+      rest: ["POST /api/workspaces/:id/standing_orders/remove"],
+      status: :full,
+      note: "Server-side atomic remove, by 1-based index or exact text."
     },
     %{
       id: "workspace/repo_scoped_standing_orders",
       title: "Repo-scoped standing orders",
-      mcp: ["workspace_config_set"],
+      mcp: ["workspace_standing_order_add", "workspace_standing_order_remove"],
       cli: ["arb workspace standing-order"],
-      rest: ["PATCH /api/workspaces/:id/config"],
-      status: :partial,
-      divergences: ["D-C-17"]
+      rest: ["POST /api/workspaces/:id/standing_orders", "POST /api/workspaces/:id/standing_orders/remove"],
+      status: :full,
+      note: "`repo` names a registered repo (matched loosely); a dotted repo name needs no escaping."
     },
     %{
       id: "workspace/secrets_list_names",
@@ -1163,39 +1155,32 @@
     %{
       id: "workspace/worker_env_vars_list_names_secret_flags",
       title: "Worker env vars: list names + secret flags",
-      mcp: nil,
-      cli: nil,
+      mcp: ["workspace_show"],
+      cli: ["arb workspace env ls"],
       rest: ["GET /api/workspaces"],
-      status: {:gap, "P-21"},
-      absent: %{
-        mcp: {:gap, "P-21", "`workspace_show` does not list worker_env names/secret flags."},
-        cli: {:gap, "P-21", "No `arb workspace env ls`."}
-      }
+      status: :full,
+      note: "Names and flags only, on every surface; no value is ever returned."
     },
     %{
       id: "workspace/worker_env_vars_set_toggle_secret_flag",
       title: "Worker env vars: set / toggle secret flag",
       mcp: nil,
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-21"},
+      cli: ["arb workspace env set"],
+      rest: ["PATCH /api/workspaces/:id"],
+      status: :excluded,
       absent: %{
-        mcp: {:intentional, "May carry credentials; same rule as secrets."},
-        cli: {:gap, "P-21", "No `arb workspace env set`."},
-        rest: {:gap, "P-21", "`worker_env` is not in the workspace PATCH whitelist (UI-only today)."}
+        mcp: {:intentional, "May carry credentials; same rule as secrets."}
       }
     },
     %{
       id: "workspace/worker_env_vars_remove",
       title: "Worker env vars: remove",
       mcp: nil,
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-21"},
+      cli: ["arb workspace env rm"],
+      rest: ["PATCH /api/workspaces/:id"],
+      status: :excluded,
       absent: %{
-        mcp: {:intentional, "May carry credentials; same rule as secrets."},
-        cli: {:gap, "P-21", "No `arb workspace env rm`."},
-        rest: {:gap, "P-21", "No way to remove a worker_env entry over REST (UI-only today)."}
+        mcp: {:intentional, "May carry credentials; same rule as secrets."}
       }
     },
     %{

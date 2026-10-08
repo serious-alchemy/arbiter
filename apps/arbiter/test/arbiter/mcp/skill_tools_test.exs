@@ -226,6 +226,56 @@ defmodule Arbiter.MCP.SkillToolsTest do
       assert {:ok, %{count: 0}} = Tools.skill_list(wk, %{})
     end
 
+    test "a bound coordinator cannot update or delete another workspace's scoped skill", %{
+      coordinator: sc,
+      ws: ws
+    } do
+      {:ok, other} = Ash.create(Workspace, %{name: "other-del", prefix: "od"})
+
+      {:ok, theirs} =
+        Tools.skill_create(sc, %{"name" => "theirs", "body" => "# t", "workspace" => other.id})
+
+      bound = %Scope{tier: :coordinator, workspace_id: ws.id}
+
+      assert {:error, {:not_found, _}} = Tools.skill_delete(bound, %{"skill" => theirs.id})
+      assert {:error, {:not_found, _}} = Tools.skill_delete(bound, %{"skill" => "theirs"})
+
+      assert {:error, {:not_found, _}} =
+               Tools.skill_update(bound, %{"skill" => theirs.id, "body" => "x"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.skill_delete(bound, %{"skill" => "theirs", "workspace" => other.id})
+
+      assert {:ok, _} = Skills.get_skill(theirs.id)
+    end
+
+    test "delete by name with a workspace removes the scoped skill, returns the shared shape", %{
+      coordinator: sc,
+      ws: ws
+    } do
+      {:ok, _} = Tools.skill_create(sc, %{"name" => "dup", "body" => "# g"})
+
+      {:ok, scoped} =
+        Tools.skill_create(sc, %{"name" => "dup", "body" => "# s", "workspace" => ws.id})
+
+      assert {:ok, %{deleted: true, id: id, name: "dup"}} =
+               Tools.skill_delete(sc, %{"skill" => "dup", "workspace" => ws.name})
+
+      assert id == scoped.id
+      assert {:ok, %{workspace_id: nil}} = Skills.get_skill("dup")
+    end
+
+    test "list and get share one shape: list has no body, get has it, same other keys", %{
+      coordinator: sc
+    } do
+      {:ok, _} = Tools.skill_create(sc, %{"name" => "shape", "body" => "# b"})
+      {:ok, %{skills: [summary]}} = Tools.skill_list(sc, %{})
+      {:ok, full} = Tools.skill_get(sc, %{"skill" => "shape"})
+
+      refute Map.has_key?(summary, :body)
+      assert (Map.keys(full) -- [:body]) |> Enum.sort() == Map.keys(summary) |> Enum.sort()
+    end
+
     test "a worker naming another workspace is rejected", %{worker: wk} do
       {:ok, other} = Ash.create(Workspace, %{name: "elsewhere", prefix: "el"})
 

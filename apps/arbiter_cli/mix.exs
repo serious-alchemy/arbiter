@@ -85,11 +85,9 @@ defmodule ArbiterCli.MixProject do
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
       # Test-only: Req.Test stubs run a Plug under the hood.
       {:plug, "~> 1.15", only: :test},
-      # Test-only: lets ArbiterCli.ConfigSchemaTest assert its hardcoded enum
-      # lists match the real validator (Arbiter.Tasks.Workspace.Changes.
-      # ValidateConfig and friends) so the CLI's config reference can't drift
-      # out of sync with the server-side source of truth. Never shipped in
-      # the escript build (only: :test).
+      # Test-only: lets CLI tests assert against the real server-side modules
+      # (e.g. the parity manifest guard). Never shipped in the escript build
+      # (only: :test).
       {:arbiter, in_umbrella: true, only: :test, runtime: false},
       # bd-2oelme: the shared release-env scrub applied by `Start.run_cmd/3`
       # before every `mix` / `sh` spawn. A runtime dep (unlike :arbiter) —

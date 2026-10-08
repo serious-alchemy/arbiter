@@ -106,23 +106,43 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#node-#{gone.id} [data-role=state]", "revoked")
     end
 
-    test "the header sums local plus remote caps against conductor.max_concurrent", %{conn: conn} do
+    test "the header breaks capacity down by machine, under an optional ceiling", %{conn: conn} do
+      Application.put_env(:arbiter, :remote_execution, true)
+      on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
+
       {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
       {:ok, _} = Settings.set_conductor_system_max_concurrent(10)
-      enroll!("alpha", max_workers: 3)
+      connect!(enroll!("alpha", max_workers: 3))
 
       {:ok, view, _} = live(conn, ~p"/nodes")
 
-      assert has_element?(view, "#nodes-capacity-summary", "2")
-      assert has_element?(view, "#nodes-capacity-summary", "3")
+      assert has_element?(view, "#nodes-capacity-summary", "local 2")
+      assert has_element?(view, "#nodes-capacity-summary", "alpha 3")
       assert has_element?(view, "#nodes-capacity-summary", "5")
       assert has_element?(view, "#nodes-capacity-summary", "10")
       refute has_element?(view, "#nodes-ceiling-warning")
     end
 
-    test "warns when conductor.max_concurrent is below the sum", %{conn: conn} do
+    test "with no ceiling the sum applies and nothing warns", %{conn: conn} do
+      Application.put_env(:arbiter, :remote_execution, true)
+      on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
+
+      {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
+      connect!(enroll!("alpha", max_workers: 3))
+
+      {:ok, view, _} = live(conn, ~p"/nodes")
+
+      assert has_element?(view, "#nodes-capacity-summary", "not set")
+      refute has_element?(view, "#nodes-ceiling-warning")
+    end
+
+    test "warns only when an explicit conductor.max_concurrent cuts the sum", %{conn: conn} do
+      Application.put_env(:arbiter, :remote_execution, true)
+      on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
+
+      {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
       {:ok, _} = Settings.set_conductor_system_max_concurrent(2)
-      enroll!("alpha", max_workers: 5)
+      connect!(enroll!("alpha", max_workers: 5))
 
       {:ok, view, _} = live(conn, ~p"/nodes")
       assert has_element?(view, "#nodes-ceiling-warning")

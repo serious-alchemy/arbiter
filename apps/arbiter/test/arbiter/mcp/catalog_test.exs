@@ -12,6 +12,7 @@ defmodule Arbiter.MCP.CatalogTest do
   # of its own task, the same as REST (`Arbiter.Tasks.WorkerFiling`).
   @both_tier ~w(ticket_show inbox_check ticket_update_progress workspace_show quota_get
                 message_send notify_list workspace_config_get workspace_config_overview
+                workspace_config_schema
                 ticket_create dep_add ci_rerun ci_mark_external)
 
   # Coordinator-only tools; never visible to a worker.
@@ -23,6 +24,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_list usage_summarize coordinator_inbox
                        coordinator_inbox_clear
                        workspace_config_set workspace_config_unset
+                       workspace_standing_order_add workspace_standing_order_remove
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
                        loop_propose_routing loop_analyze loop_propose loop_propose_repo_doc_patch loop_canary_status breaker_list breaker_reset
@@ -38,7 +40,8 @@ defmodule Arbiter.MCP.CatalogTest do
                                 quota_get ticket_create worker_list ticket_list usage_summarize notify_list
                                 tracker_claim tracker_sync tracker_list_issues tracker_create_ticket worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
-                                external_review_list skill_create skill_update skill_list skill_get
+                                workspace_standing_order_add workspace_standing_order_remove
+                                external_review_list skill_create skill_update skill_delete skill_list skill_get
                                 transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject loop_propose_routing loop_analyze loop_propose loop_propose_repo_doc_patch loop_canary_status breaker_list breaker_reset

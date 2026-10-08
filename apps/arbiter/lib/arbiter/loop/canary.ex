@@ -13,7 +13,7 @@ defmodule Arbiter.Loop.Canary do
   on the slower human path. `standing_orders` is operator-applied
   for a different reason: it's coordinator-facing config (surfaced in `arb
   prime`, never injected into any worker prompt — see
-  `ArbiterCli.ConfigSchema`), so there's no per-dispatch prompt effect to
+  `Arbiter.Tasks.Workspace.ConfigSchema`), so there's no per-dispatch prompt effect to
   canary in the first place. A routing rule is numeric, bounded, trivially
   reversible, and directly measurable — which is why it goes first, and alone.
 

@@ -9,6 +9,14 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     * `GET   /api/workspaces/:id`        — :show (`:id` is an id or a name)
     * `PATCH /api/workspaces/:id`        — :update (also `PUT`)
     * `PATCH /api/workspaces/:id/config` — :patch_config (deep-merge / unset)
+    * `GET   /api/workspaces/config_schema` — :config_schema (key reference)
+    * `POST  /api/workspaces/:id/standing_orders` — :add_standing_order
+    * `POST  /api/workspaces/:id/standing_orders/remove` — :remove_standing_order
+
+  Writes go through `Arbiter.Tasks.Workspace.Operations` — the same context
+  functions the dashboard calls — so a lock-guarded read-modify-write is the one
+  place a workspace row is edited. No response ever carries a `secrets` or
+  `worker_env` value, only names and flags (`WorkspaceJSON`).
   """
 
   use ArbiterWeb, :controller
@@ -16,6 +24,8 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   alias Arbiter.Guardrails.Authority
   alias Arbiter.Params
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.ConfigSchema
+  alias Arbiter.Tasks.Workspace.Operations
   alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -49,9 +59,10 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   end
 
   def create(conn, params) do
-    # `secrets` is a write-only action argument (merge-patched then encrypted
-    # via ash_cloak); it is never read back in any response. See WorkspaceJSON.
-    attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
+    # `secrets` / `worker_env` are write-only action arguments (merge-patched
+    # then encrypted via ash_cloak); they are never read back in any response.
+    # See WorkspaceJSON.
+    attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets", "worker_env"])
 
     case Ash.create(Workspace, attrs, context: guardrail_context(conn)) do
       {:ok, ws} ->
@@ -68,16 +79,18 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     # `secrets`, when present, is merge-patched into the existing encrypted
     # secrets (a key with a null value removes it); omitting it leaves them
     # untouched. Write-only — never serialised back. See WorkspaceJSON.
+    # `worker_env` is the same shape per env var name — `{"value", "secret"}` sets,
+    # `{"secret"}` toggles the flag, `null` removes — and write-only too.
     #
     # `config` is not accepted here (P-20, D-C-6): the `:update` action
     # *replaces* the whole map, which wipes every sibling key — including
     # system-written ones such as `loop.canary` — for a client that meant a
     # partial edit. Config is written through `PATCH …/config` (deep-merge).
-    attrs = Map.take(params, ["name", "description", "prefix", "secrets"])
+    attrs = Map.take(params, ["name", "description", "prefix", "secrets", "worker_env"])
 
     with :ok <- reject_config(params),
          {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
-         {:ok, updated} <- Ash.update(ws, attrs, context: guardrail_context(conn)) do
+         {:ok, updated} <- Operations.update(ws.id, attrs, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)
     end
   end
@@ -120,6 +133,61 @@ defmodule ArbiterWeb.Api.WorkspaceController do
          {:ok, updated} <-
            Ash.update(ws, args, action: :patch_config, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)
+    end
+  end
+
+  @doc "`GET /api/workspaces/config_schema` — the reference for every `workspace.config` key."
+  def config_schema(conn, _params), do: json(conn, ConfigSchema.describe())
+
+  @doc """
+  `POST /api/workspaces/:id/standing_orders` — append one order. Body: `text`
+  (required), `repo` (a registered repo, for a repo-scoped order). Atomic on the
+  server: concurrent adds all survive (D-C-37).
+  """
+  def add_standing_order(conn, %{"id" => id} = params) do
+    repo = repo_param(params)
+
+    with {:ok, text} <- require_param(params, "text"),
+         {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
+         {:ok, updated} <-
+           Operations.add_standing_order(ws.id, text,
+             repo: repo,
+             context: guardrail_context(conn)
+           ) do
+      json(conn, Operations.view(updated, repo))
+    end
+  end
+
+  @doc """
+  `POST /api/workspaces/:id/standing_orders/remove` — remove one order. Body:
+  `target` (1-based index or exact text; required), `repo`.
+  """
+  def remove_standing_order(conn, %{"id" => id} = params) do
+    repo = repo_param(params)
+
+    with {:ok, target} <- require_param(params, "target"),
+         {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
+         {:ok, updated} <-
+           Operations.remove_standing_order(ws.id, target,
+             repo: repo,
+             context: guardrail_context(conn)
+           ) do
+      json(conn, Operations.view(updated, repo))
+    end
+  end
+
+  defp repo_param(params) do
+    case params["repo"] || params["rig"] do
+      repo when is_binary(repo) and repo != "" -> repo
+      _ -> nil
+    end
+  end
+
+  defp require_param(params, key) do
+    case Map.get(params, key) do
+      v when is_binary(v) and v != "" -> {:ok, v}
+      v when is_integer(v) -> {:ok, v}
+      _ -> {:error, {:invalid, "`#{key}` is required"}}
     end
   end
 

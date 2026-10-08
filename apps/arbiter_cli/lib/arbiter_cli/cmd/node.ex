@@ -19,8 +19,11 @@ defmodule ArbiterCli.Cmd.Node do
 
   `list` shows the primary first as `local`, then each node's state, live/max
   capacity, the node's own suggestion, your override, any ceiling set on the node
-  itself (which the override cannot beat) and its last heartbeat, with
-  `local + Σ remote caps` against `conductor.max_concurrent`. `drain` stops new
+  itself (which the override cannot beat) and its last heartbeat, then the
+  capacity breakdown, `capacity N = local a + node b`: the sum of every
+  available machine's cap. `conductor.max_concurrent` is an optional hard
+  ceiling over it, and the idle-capacity warning appears only when a ceiling
+  you set cuts it. `drain` stops new
   work, `revoke` cuts the node off, `upgrade` asks a connected node to move to
   the release this install serves. Each writes a node event (`arb node events`).
 
@@ -252,19 +255,49 @@ defmodule ArbiterCli.Cmd.Node do
   defp dash(nil), do: "-"
   defp dash(value), do: to_string(value)
 
-  defp print_totals(
-         %{"local" => %{"max" => local}, "total" => total, "ceiling" => ceiling} = resp
-       ) do
+  defp print_totals(%{"local" => %{"max" => _}, "total" => _} = resp) do
     IO.puts("")
-
-    IO.puts(
-      "local #{local} + nodes #{total - local} = #{total}, against conductor.max_concurrent = #{ceiling}"
-    )
+    IO.puts(capacity_line(resp))
+    IO.puts(ceiling_line(resp))
 
     for w <- resp["warnings"] || [], do: IO.puts("warning: " <> warning(w, resp))
   end
 
   defp print_totals(_), do: :ok
+
+  @doc """
+  `capacity N = local a + box-1 b`: the install's capacity broken down by
+  machine (RW14). Only machines that add something are summed; the ones that
+  do not (offline, draining, revoked, lost) are listed after it with why.
+  Shared with `arb server doctor`.
+  """
+  @spec capacity_line(map()) :: String.t()
+  def capacity_line(%{"local" => %{"max" => local}, "total" => total} = resp) do
+    {adding, idle} =
+      Enum.split_with(resp["nodes"] || [], &((&1["contributes"] || 0) > 0))
+
+    parts = ["local #{local}"] ++ Enum.map(adding, &"#{&1["name"]} #{&1["contributes"]}")
+    line = "capacity #{total} = #{Enum.join(parts, " + ")}"
+
+    case idle do
+      [] -> line
+      _ -> line <> " (not counted: " <> Enum.map_join(idle, ", ", &idle_phrase/1) <> ")"
+    end
+  end
+
+  defp idle_phrase(n), do: "#{n["name"]} #{n["state"] || n["status"] || "unavailable"}"
+
+  defp ceiling_line(%{"ceiling" => nil}),
+    do: "conductor.max_concurrent: not set (the sum applies)"
+
+  defp ceiling_line(%{"ceiling" => ceiling} = resp) do
+    effective = resp["effective"] || min(resp["total"] || ceiling, ceiling)
+
+    "conductor.max_concurrent = #{ceiling}: a hard ceiling, so the board plans #{effective} " <>
+      "(clear it with `arb settings unset conductor_system_max_concurrent`)"
+  end
+
+  defp ceiling_line(_), do: "conductor.max_concurrent: not reported"
 
   defp warning("local_cap_zero", _),
     do:
@@ -274,12 +307,7 @@ defmodule ArbiterCli.Cmd.Node do
   defp warning("ceiling_below_total", resp),
     do:
       "conductor.max_concurrent (#{resp["ceiling"]}) is below #{resp["total"]}, the sum " <>
-        "of the caps: the extra capacity will sit idle"
-
-  defp warning("ceiling_far_above_total", resp),
-    do:
-      "conductor.max_concurrent (#{resp["ceiling"]}) is far above #{resp["total"]}, the sum " <>
-        "of the caps: the board will plan more than any machine can start"
+        "of the available machines' caps: the extra capacity will sit idle"
 
   defp warning(other, _), do: other
 
