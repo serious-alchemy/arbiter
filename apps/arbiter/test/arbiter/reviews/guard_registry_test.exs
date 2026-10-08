@@ -148,6 +148,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker, :fail, 2,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
+    {Arbiter.Worker, :hold_quota_stop, 5,
+     "bd-a6vh2x: a run stopped on its provider's quota is held and resumed at the reset; " <>
+       "the escalation is only the fallback when no hold could be queued — not a review/merge guard"},
     {Arbiter.Worker, :fail_unresolved_pass, 2,
      "records a conflict pass that did not deliver as failed (bd-4olwyg); the Watchdog's own conflict budget bounds the next pass"},
     {Arbiter.Worker, :fail_unresumable, 3,

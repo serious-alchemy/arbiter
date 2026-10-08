@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Quota.Gate.Snapshot, as: GateSnapshot
   alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
@@ -5362,8 +5363,8 @@ defmodule Arbiter.Worker do
          %Arbiter.Tasks.Issue{state: :active, workspace_id: ws_id} when is_binary(ws_id) <-
            load_issue(state.task_id),
          {:ok, agent_type} <- quota_stop_agent_type(state),
-         false <- quota_wait_exceeds_max?(reason.retry_after),
-         until = quota_stop_until(ws_id, agent_type, reason) do
+         false <- quota_wait_exceeds_max?(reason.retry_after) do
+      until = quota_stop_until(ws_id, agent_type, reason)
       {:held, hold_quota_stop(state, reason, ws_id, agent_type, until)}
     else
       _ -> :not_held
@@ -5420,7 +5421,7 @@ defmodule Arbiter.Worker do
   defp probe_reset_at(ws_id, agent_type, now) do
     case ws_id
          |> Arbiter.Quota.latest_for_workspace(agent_type)
-         |> Arbiter.Quota.Gate.Snapshot.normalize() do
+         |> GateSnapshot.normalize() do
       %{reset_at: %DateTime{} = at} -> if DateTime.compare(at, now) == :gt, do: at
       _ -> nil
     end
