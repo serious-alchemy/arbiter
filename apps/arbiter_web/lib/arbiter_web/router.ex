@@ -334,6 +334,9 @@ defmodule ArbiterWeb.Router do
     post("/mcp/tokens", McpController, :mint_token)
     post("/mcp/tokens/verify", McpController, :verify_token)
 
+    # Attention queue (open tickets with attention)
+    get("/attention", AttentionController, :index)
+
     # Version stamp
     get("/version", VersionController, :show)
 

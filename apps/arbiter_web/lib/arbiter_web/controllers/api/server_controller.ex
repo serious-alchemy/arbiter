@@ -97,28 +97,7 @@ defmodule ArbiterWeb.Api.ServerController do
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  def migrations(conn, _params) do
-    case Arbiter.Migrations.count_pending() do
-      {:ok, 0} ->
-        json(conn, %{
-          status: "ok",
-          pending_count: 0
-        })
-
-      {:ok, count} ->
-        json(conn, %{
-          status: "warning",
-          pending_count: count
-        })
-
-      {:error, reason} ->
-        json(conn, %{
-          status: "unknown",
-          pending_count: nil,
-          error: Atom.to_string(reason)
-        })
-    end
-  end
+  def migrations(conn, _params), do: json(conn, Arbiter.Server.Status.migrations())
 
   def dashboard_auth(conn, _params), do: json(conn, ArbiterWeb.DashboardAuth.mode())
 
