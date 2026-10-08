@@ -101,10 +101,11 @@ defmodule ArbiterWeb.Api.WorkspaceResolutionTest do
       end
     end
 
-    test "clearing a task's thread names the workspace too", %{conn: conn} do
+    # P-26 (D-M-3): a task id is unambiguous, so clearing its thread is NOT a
+    # write that needs a workspace — it sweeps every workspace, like MCP.
+    test "clearing a task's thread needs no workspace", %{conn: conn} do
       conn = delete(conn, ~p"/api/messages", %{"task_id" => "bd-x"})
-      assert %{"error" => %{"message" => message}} = json_response(conn, 422)
-      assert message =~ "multiple workspaces"
+      assert %{"data" => %{"cleared_count" => 0}} = json_response(conn, 200)
     end
   end
 

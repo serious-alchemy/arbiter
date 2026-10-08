@@ -82,12 +82,12 @@ defmodule ArbiterWeb.Api.ParamsAdoptionTest do
       refute Enum.any?(versions, &(inspect(&1.version_action_inputs) =~ "forged"))
     end
 
-    test "message from_ref is pinned for a coordinator", %{conn: conn, ws: ws} do
+    test "message from_ref is pinned for a coordinator", %{conn: conn, task: task, ws: ws} do
       conn =
         post(conn, ~p"/api/messages", %{
           kind: "mailbox",
           from_ref: "someone-else",
-          to_ref: "bd-xyz",
+          to_ref: task.id,
           body: "hi",
           workspace_id: ws.id
         })

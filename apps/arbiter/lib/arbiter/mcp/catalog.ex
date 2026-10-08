@@ -55,7 +55,7 @@ defmodule Arbiter.MCP.Catalog do
   | `external_review_transcript` | coordinator | `Arbiter.Reviews.Transcript.read_lines/1` + `tool_uses/1` for one non-task-linked review (by review record id) |
   | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, rendered-transcript capture rate plus the session-JSONL archive rate (reported separately) |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
-  | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
+  | `notify_list` | worker, coordinator | `Messages.Mailbox.notifications/1` |
   | `ticket_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
   | `tracker_list_issues` | coordinator | `Arbiter.Trackers.list_open/1` |

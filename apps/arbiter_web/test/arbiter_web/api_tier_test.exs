@@ -325,14 +325,29 @@ defmodule ArbiterWeb.ApiTierTest do
           kind: "direction",
           from_ref: "coordinator",
           to_ref: ctx.sibling.id,
-          body: "heads up",
-          workspace_id: ctx.other_ws.id
+          body: "heads up"
         })
 
       body = json_response(conn, 201)
       assert body["from_ref"] == ctx.task.id
       assert body["kind"] == "flag"
       assert body["workspace_id"] == ctx.ws.id
+    end
+
+    test "cannot name another workspace for its mail, nor mail a task in one", ctx do
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/messages", %{
+               to_ref: ctx.sibling.id,
+               body: "heads up",
+               workspace_id: ctx.other_ws.id
+             })
+             |> json_response(403)
+
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/messages", %{to_ref: ctx.foreign.id, body: "heads up"})
+             |> json_response(404)
     end
   end
 
