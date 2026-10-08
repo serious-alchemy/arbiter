@@ -164,6 +164,9 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- nodes (RW4, RW7): operator-proof only, reads included ---------------
     {:post, "/api/nodes/join-tokens"} => :operator,
+    {:get, "/api/nodes/pairings"} => :operator,
+    {:post, "/api/nodes/pairings/:ref/approve"} => :operator,
+    {:post, "/api/nodes/pairings/:ref/deny"} => :operator,
     {:get, "/api/nodes"} => :operator,
     {:get, "/api/nodes/:ref"} => :operator,
     {:get, "/api/nodes/:ref/events"} => :operator,

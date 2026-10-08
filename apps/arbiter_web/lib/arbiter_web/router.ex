@@ -281,6 +281,11 @@ defmodule ArbiterWeb.Router do
     # Node administration (RW4, `docs/design/remote-workers.md` §5.3, §5.6).
     # Minting and editing are `:operator`; reads are `:coordinator`.
     post("/nodes/join-tokens", NodeController, :create_join_token)
+    # Device-code pairing, the operator's side (design §5.7). Declared before
+    # `/nodes/:ref` so `pairings` is not read as a node reference.
+    get("/nodes/pairings", NodeController, :pairings)
+    post("/nodes/pairings/:ref/approve", NodeController, :approve_pairing)
+    post("/nodes/pairings/:ref/deny", NodeController, :deny_pairing)
     get("/nodes", NodeController, :index)
     get("/nodes/:ref", NodeController, :show)
     get("/nodes/:ref/events", NodeController, :events)
