@@ -623,9 +623,70 @@ defmodule Arbiter.Agents.ProviderRouting do
         {override, nil}
 
       _ ->
-        Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
+        {provider, fallback} =
+          Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
+
+        backend_aware(provider, fallback, task, workspace, opts)
     end
   end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn,
+  # so the pre-routing resolution swaps it for the first pool provider that
+  # both the backend and the ticket's constraint allow. When none is left the
+  # original stands (with the reason) and the dispatch gate holds it.
+  defp backend_aware(provider, fallback, task, workspace, opts) do
+    policy = legacy_policy(task, workspace, opts)
+
+    case backend_refusal(policy, provider) do
+      nil ->
+        {provider, fallback}
+
+      detail ->
+        constraint = constraint_of(task)
+        pool = Agents.agent_pool(workspace)
+
+        alt =
+          (pool ++ [:claude, :codex])
+          |> Enum.uniq()
+          |> then(&ProviderConstraint.filter(constraint, &1))
+          |> Enum.find(&(&1 != provider and is_nil(backend_refusal(policy, &1))))
+
+        if alt,
+          do: {alt, "fell back from #{provider}: #{detail}"},
+          else: {provider, detail}
+    end
+  end
+
+  defp legacy_policy(task, workspace, opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy ->
+        policy
+
+      _ when is_nil(workspace) ->
+        nil
+
+      _ ->
+        repo = repo_opt(opts) || task_repo(task)
+        SecurityPolicy.resolve(workspace, %{}, repo)
+    end
+  end
+
+  @doc """
+  Why the policy's sandbox backend cannot run `provider`, or `nil` when it can
+  (or no policy is known). Same text as the routing drop detail.
+  """
+  @spec backend_refusal(SecurityPolicy.t() | nil, atom() | String.t()) :: String.t() | nil
+  def backend_refusal(%SecurityPolicy{} = policy, provider) do
+    case Sandbox.module(policy, provider) do
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        "#{provider}: not supported by sandbox.backend #{backend}"
+
+      _ ->
+        nil
+    end
+  end
+
+  def backend_refusal(_policy, _provider), do: nil
 
   defp task_id_of(%Issue{id: id}), do: id
   defp task_id_of(id) when is_binary(id), do: id
@@ -654,7 +715,10 @@ defmodule Arbiter.Agents.ProviderRouting do
       routed: routed,
       tier: routed.config["model_tier"],
       agent_config: get_in(ws.config || %{}, ["agent", "config"]) || %{},
-      security: Keyword.get_lazy(opts, :security, fn -> SecurityPolicy.resolve(ws) end),
+      security:
+        Keyword.get_lazy(opts, :security, fn ->
+          SecurityPolicy.resolve(ws, %{}, repo_opt(opts) || task_repo(task))
+        end),
       quota_fun: Keyword.get(opts, :quota_fun, &latest_quota/1),
       gemini_code:
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),

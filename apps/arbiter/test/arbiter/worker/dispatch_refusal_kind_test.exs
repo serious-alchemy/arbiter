@@ -15,6 +15,7 @@ defmodule Arbiter.Worker.DispatchRefusalKindTest do
     {{:account_at_capacity, %{}}, :conflict},
     {{:no_node_capacity, %{}}, :conflict},
     {{:provider_constraint, :claude, "p"}, :conflict},
+    {{:sandbox_backend, :gemini, "p"}, :conflict},
     {{:capability_missing, :claude, "p"}, :conflict},
     {{:below_floor, :claude, "p"}, :conflict},
     {{:slot_cap_full, %{}}, :conflict},

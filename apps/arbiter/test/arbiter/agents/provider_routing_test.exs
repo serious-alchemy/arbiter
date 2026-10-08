@@ -389,6 +389,36 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert agy.slug in slugs(relaxed["candidates"])
     end
 
+    test "backend_refusal/2 names the backend for gemini under podman, nil under bwrap" do
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"backend" => "podman"}})
+      bwrap = SecurityPolicy.resolve(nil, %{})
+
+      assert ProviderRouting.backend_refusal(podman, :gemini) ==
+               "gemini: not supported by sandbox.backend podman"
+
+      assert is_nil(ProviderRouting.backend_refusal(podman, :claude))
+      assert is_nil(ProviderRouting.backend_refusal(bwrap, :gemini))
+    end
+
+    test "the pre-routing resolution of a pass swaps a gemini default for an allowed provider" do
+      ws = workspace!()
+      ws = %{ws | config: Map.put(ws.config || %{}, "agent", %{"type" => ["gemini", "claude"]})}
+      task = task!(ws)
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"backend" => "podman"}})
+      bwrap = SecurityPolicy.resolve(nil, %{})
+
+      {provider, fallback, _} =
+        ProviderRouting.implementer_provider(task, ws, :review_gate_fix_round, security: podman)
+
+      assert provider in [:claude, :codex]
+      assert fallback =~ "sandbox.backend podman"
+
+      {provider, _, _} =
+        ProviderRouting.implementer_provider(task, ws, :review_gate_fix_round, security: bwrap)
+
+      assert provider == :gemini
+    end
+
     test "agy and codex count as available on a healthy probe with no account credential row", %{
       ws: ws
     } do

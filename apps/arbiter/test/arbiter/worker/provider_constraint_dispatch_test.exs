@@ -184,6 +184,24 @@ defmodule Arbiter.Worker.ProviderConstraintDispatchTest do
 
   # ---- the main dispatch ---------------------------------------------------------
 
+  describe "sandbox.backend podman (#553)" do
+    test "an unrouted pool with only gemini is held, not spawned" do
+      ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
+      task = task!(ws)
+
+      assert {:error, {:sandbox_backend, :gemini, phrase}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false,
+                 security: %{"sandbox" => %{"backend" => "podman"}}
+               )
+
+      assert phrase =~ "gemini: not supported by sandbox.backend podman"
+      assert no_runs?(task.id)
+    end
+  end
+
   describe "a new dispatch" do
     test "most_quota: the excluded account loses although it has the most headroom" do
       %{ws: ws, claude: claude} = routed!()
