@@ -45,10 +45,17 @@ defmodule Arbiter.Doctor.SpawnCanary do
   last report is kept for the life of the server (`cached/0`), so the doctor can
   run it once per boot.
 
-  A provider whose workspace resolves `sandbox.backend: podman` is reported
-  `skipped` rather than `ok`: its spawn needs a real worktree checkout mounted
-  into a container, which a canary does not have. The podman readiness check
-  covers that backend.
+  ## Podman workspaces
+
+  A provider whose workspace resolves `sandbox.backend: podman` runs the real
+  container spawn: a throwaway repo (bare forge, checkout, one commit) in the
+  canary's temp dir, a private clone of it as the worktree, then the same
+  `ContainerSpawn.prepare/1` (egress run, image, mounts) and `podman run` a
+  dispatch uses, with `--version` as the command. The container, clone, scratch
+  repo and egress run are removed afterwards. A provider with no container wrap
+  point (agy, grok: `Sandbox.module/2` refuses them under podman, so a dispatch
+  never spawns them there) is canaried through the bwrap path instead, and the
+  result's detail says so.
   """
 
   alias Arbiter.Agents
@@ -62,7 +69,9 @@ defmodule Arbiter.Doctor.SpawnCanary do
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.MemoryScope
   alias Arbiter.Worker.OsProcess
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.RunTmp
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SpawnEnv
   alias Arbiter.Worker.WorkerEnv
 
@@ -257,43 +266,148 @@ defmodule Arbiter.Doctor.SpawnCanary do
     adapter = Agents.for_type(adapter_type)
     policy = if workspace, do: SecurityPolicy.resolve(workspace), else: SecurityPolicy.default()
 
-    if ContainerSpawn.podman?(policy) do
-      {:skipped,
-       "agent.security.sandbox.backend is podman: a canary has no worktree to mount (see `podman_sandbox`)"}
-    else
-      with {:ok, tmp_dir} <- create_tmp(canary_id),
-           {:ok, worktree} <- create_tmp(canary_id <> "-worktree") do
-        :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
-        track_agent_home(adapter_type, worktree)
-        on_cleanup(fn -> JailRun.stop(self()) end)
+    mode =
+      cond do
+        not ContainerSpawn.podman?(policy) -> :plain
+        match?({:ok, _}, Sandbox.module(policy, adapter_type)) -> :podman
+        true -> :bwrap_fallback
+      end
 
-        token = mint_token(workspace, canary_id)
+    # A provider with no container wrap point (agy, grok) is never spawned under
+    # podman by a dispatch either; its canary goes through the bwrap path.
+    policy = if mode == :bwrap_fallback, do: bwrap_policy(policy), else: policy
 
-        agent_opts =
-          [
-            security: policy,
-            workspace: workspace,
-            worktree_path: worktree,
-            task_id: canary_id,
-            sandbox_wrap: true,
-            # The agy jail's egress run lives and dies with its owner: this
-            # task, which outlives the probe and runs the cleanups below.
-            owner: self()
-          ] ++ mcp_opts(adapter_type, worktree, token) ++ arb_token_opts(token)
+    with {:ok, tmp_dir} <- create_tmp(canary_id),
+         {:ok, worktree} <- canary_worktree(mode, canary_id, tmp_dir) do
+      :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
+      track_agent_home(adapter_type, worktree)
+      on_cleanup(fn -> JailRun.stop(self()) end)
 
-        with {:ok, argv} <- adapter.default_argv(@prompt, agent_opts),
-             argv = probe_argv(argv, Keyword.get(opts, :probe_args, @probe_args)),
-             {:ok, exec} <- resolve_executable(argv) do
-          env = port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir, token)
-          probe(%{exec: exec, argv: argv, cd: worktree, env: env}, canary_id, opts)
-        else
-          {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
-        end
+      token = mint_token(workspace, canary_id)
+
+      agent_opts =
+        [
+          security: policy,
+          workspace: workspace,
+          worktree_path: worktree,
+          task_id: canary_id,
+          sandbox_wrap: true,
+          # The agy jail's egress run lives and dies with its owner: this
+          # task, which outlives the probe and runs the cleanups below.
+          owner: self()
+        ] ++ mcp_opts(adapter_type, worktree, token) ++ arb_token_opts(token)
+
+      with {:ok, argv} <- adapter.default_argv(@prompt, agent_opts),
+           argv = probe_argv(argv, Keyword.get(opts, :probe_args, @probe_args)),
+           {:ok, exec} <- canary_executable(mode, argv),
+           env = port_env(type, adapter, agent_opts, workspace, canary_id, tmp_dir, token),
+           {:ok, port_args} <-
+             canary_port_args(mode, adapter_type, agent_opts, opts, canary_id, tmp_dir, %{
+               exec: exec,
+               argv: argv,
+               cd: worktree,
+               env: env
+             }) do
+        port_args
+        |> probe(canary_id, opts)
+        |> label_fallback(mode, type)
       else
         {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
       end
+    else
+      {:error, reason} -> {:failed, %{error: first_line(describe(reason))}}
     end
   end
+
+  defp bwrap_policy(%SecurityPolicy{} = policy),
+    do: %{policy | sandbox: %{policy.sandbox | backend: :bwrap}}
+
+  defp label_fallback({:ok, %{detail: detail} = ok}, :bwrap_fallback, type) do
+    note = "podman has no wrap point for #{type}: canaried through the bwrap path"
+    {:ok, %{ok | detail: if(detail, do: detail <> " (" <> note <> ")", else: note)}}
+  end
+
+  defp label_fallback(outcome, _mode, _type), do: outcome
+
+  # A podman canary mounts a real private clone (the only layout a container is
+  # handed) of a throwaway repo: a bare "forge", a checkout with one commit
+  # pushed to it, and the clone a dispatch would make. The forge and checkout
+  # live in the canary's temp dir; the clone is placed by `PrivateClone` under
+  # the worktree root and removed first (cleanups run newest first).
+  defp canary_worktree(:podman, canary_id, tmp_dir) do
+    forge = Path.join(tmp_dir, "forge.git")
+    checkout = Path.join(tmp_dir, "checkout")
+    branch = "arbiter/" <> canary_id
+
+    with :ok <- git(tmp_dir, ["init", "-q", "--bare", "-b", "main", forge]),
+         :ok <- git(tmp_dir, ["init", "-q", "-b", "main", checkout]),
+         :ok <- write_readme(checkout),
+         :ok <- git(checkout, ["add", "README.md"]),
+         :ok <-
+           git(checkout, [
+             "-c",
+             "user.name=arbiter-canary",
+             "-c",
+             "user.email=canary@arbiter.invalid",
+             "commit",
+             "-q",
+             "-m",
+             "canary"
+           ]),
+         :ok <- git(checkout, ["remote", "add", "origin", forge]),
+         :ok <- git(checkout, ["push", "-q", "origin", "main"]),
+         {:ok, clone} <- PrivateClone.create(checkout, branch, "main") do
+      on_cleanup(fn -> PrivateClone.remove(clone) end)
+      {:ok, clone}
+    else
+      {:error, reason} -> {:error, "canary scratch repo: #{describe(reason)}"}
+    end
+  end
+
+  defp canary_worktree(_mode, canary_id, _tmp_dir), do: create_tmp(canary_id <> "-worktree")
+
+  defp write_readme(checkout) do
+    File.write(Path.join(checkout, "README.md"), "arbiter doctor spawn canary\n")
+  end
+
+  defp git(dir, args) do
+    case System.cmd("git", args, cd: dir, stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {out, code} -> {:error, "git #{hd(args)} exited #{code}: #{String.trim(out)}"}
+    end
+  end
+
+  # Under podman the argv head is the CLI's path inside the image, which does
+  # not exist on the host.
+  defp canary_executable(:podman, [exec | _]), do: {:ok, exec}
+  defp canary_executable(_mode, argv), do: resolve_executable(argv)
+
+  # The same `port_args` `ClaudeSession.start/1` builds: for podman, the host-side
+  # container preparation (egress run, image, mounts) rides in `:sandbox`, and the
+  # container is removed by name when the canary is done.
+  defp canary_port_args(:podman, adapter_type, agent_opts, opts, canary_id, tmp_dir, port_args) do
+    session_opts =
+      Keyword.take(agent_opts, [:security, :workspace, :arb_token]) ++
+        Keyword.get(opts, :container_opts, []) ++ [provider: Atom.to_string(adapter_type)]
+
+    with {:ok, prepared} <-
+           ClaudeSession.port_args(
+             session_opts,
+             port_args.exec,
+             port_args.argv,
+             port_args.cd,
+             port_args.env,
+             owner: self(),
+             task_id: canary_id,
+             tmp_dir: tmp_dir
+           ) do
+      on_cleanup(fn -> ContainerSpawn.teardown(prepared) end)
+      {:ok, prepared}
+    end
+  end
+
+  defp canary_port_args(_mode, _adapter_type, _agent_opts, _opts, _id, _tmp_dir, port_args),
+    do: {:ok, port_args}
 
   # The adapter's argv with the probe flag at the end, which is the agent CLI's
   # own argument list. A `-- <prompt>` tail (codex puts the prompt after `--`)
