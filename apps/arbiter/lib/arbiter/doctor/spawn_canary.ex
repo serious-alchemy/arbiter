@@ -55,6 +55,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Doctor.Scope
   alias Arbiter.MCP
+  alias Arbiter.Providers.Pause
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
@@ -160,10 +161,11 @@ defmodule Arbiter.Doctor.SpawnCanary do
         not_applicable(type, label, "#{label} is not configured for any workspace")
 
       paused?(info) ->
-        not_applicable(type, label, "#{label} is paused (`arb provider resume`); not spawned")
+        not_applicable(type, label, paused_detail(label, info))
 
       true ->
-        workspace = Enum.find(workspaces, &(&1.name in info.workspaces))
+        candidates = Enum.filter(workspaces, &(&1.name in info.workspaces))
+        workspace = Enum.find(candidates, &(Pause.blocking(type, &1.id) == nil)) || hd(candidates)
         canary(type, adapter_type, label, workspace, opts)
     end
   end
@@ -173,6 +175,11 @@ defmodule Arbiter.Doctor.SpawnCanary do
 
   defp paused?(%{paused: true}), do: true
   defp paused?(_), do: false
+
+  defp paused_detail(label, info) do
+    reason = if r = info[:pause_reason], do: ": #{r}", else: ""
+    "#{label} is paused#{reason} (`arb provider resume`); not spawned"
+  end
 
   defp not_applicable(type, label, detail), do: result(type, label, "n/a", %{detail: detail})
 
@@ -257,6 +264,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
            {:ok, worktree} <- create_tmp(canary_id <> "-worktree") do
         :ok = if workspace, do: Agents.prepare(workspace, :agent), else: :ok
         track_agent_home(adapter_type, worktree)
+        on_cleanup(fn -> Arbiter.Worker.Egress.JailRun.stop(self()) end)
 
         token = mint_token(workspace, canary_id)
 
@@ -266,7 +274,10 @@ defmodule Arbiter.Doctor.SpawnCanary do
             workspace: workspace,
             worktree_path: worktree,
             task_id: canary_id,
-            sandbox_wrap: true
+            sandbox_wrap: true,
+            # The agy jail's egress run lives and dies with its owner: this
+            # task, which outlives the probe and runs the cleanups below.
+            owner: self()
           ] ++ mcp_opts(adapter_type, worktree, token) ++ arb_token_opts(token)
 
         with {:ok, argv} <- adapter.default_argv(@prompt, agent_opts),

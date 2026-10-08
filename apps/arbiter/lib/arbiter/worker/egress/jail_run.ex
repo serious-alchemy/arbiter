@@ -105,6 +105,10 @@ defmodule Arbiter.Worker.Egress.JailRun do
     network
   end
 
+  @doc "Stops the egress run `start/1` made for `owner`, if one is running."
+  @spec stop(pid()) :: :ok
+  def stop(owner) when is_pid(owner), do: Egress.stop_run(run_id(owner))
+
   # One short, filename-safe id per owner pid. Deterministic, so the same
   # worker always maps to the same run and the same socket paths.
   defp run_id(owner) do

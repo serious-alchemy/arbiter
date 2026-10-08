@@ -15,7 +15,8 @@ defmodule Arbiter.Doctor.Scope do
       `grok`): `in_use` (some workspace's implementer or reviewer set, per
       `Arbiter.Accounts.ProviderSettings.effective/2`, names it; grok also when
       `Arbiter.Agents.GrokRouting.in_use?/1`), the workspaces that use it, and
-      `paused` (`Arbiter.Providers.Pause.provider_paused?/1`).
+      `paused` (a provider-wide or account-level pause,
+      `Arbiter.Providers.Pause.blocking/2`) with its `pause_reason`.
     * `podman_in_use` — a workspace, or a repo override, resolves
       `sandbox.backend` or `sandbox.review_backend` to podman.
     * `egress_enforced` — a workspace or repo override resolves a non-`open`
@@ -46,7 +47,25 @@ defmodule Arbiter.Doctor.Scope do
   defp provider(type, workspaces) do
     using = for ws <- workspaces, uses?(ws, type), do: ws.name
 
-    %{in_use: using != [], workspaces: using, paused: Pause.provider_paused?(type)}
+    pause = pause(type, workspaces, using)
+
+    %{
+      in_use: using != [],
+      workspaces: using,
+      paused: pause != nil,
+      pause_reason: pause && (pause.reason || "no reason given")
+    }
+  end
+
+  # A provider-wide pause, else the pause on the account every using workspace
+  # meters the provider under (`grok:default` is account-scoped). A provider
+  # still spawnable from one workspace is not paused.
+  defp pause(type, workspaces, using) do
+    Pause.for_provider(type) ||
+      case for(ws <- workspaces, ws.name in using, do: Pause.blocking(type, ws.id)) do
+        [] -> nil
+        pauses -> if Enum.all?(pauses, & &1), do: hd(pauses)
+      end
   end
 
   defp uses?(ws, type) do
