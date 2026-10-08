@@ -17,7 +17,8 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
 
   Each read is best-effort, like the board's: an unreadable input degrades to
   "none", never to a raise. Opts override the reads: `:workers`, `:now`,
-  `:blocked_by` (a `%{ticket_id => [blocker_id]}` map).
+  `:blocked_by` (a `%{ticket_id => [blocker_id]}` map), `:resume_queued` (the
+  ids of tickets with a round deferred for a slot).
 
   `payload/1` is the one JSON shape of a view — string values, attention
   flattened — that the REST API, MCP and the `task_state` event all emit.
@@ -63,6 +64,7 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
     workers = Keyword.get_lazy(opts, :workers, &live_workers/0)
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     blocked_by = Keyword.get_lazy(opts, :blocked_by, fn -> blockers(issues) end)
+    queued = resume_queued(issues, opts)
 
     Map.new(issues, fn issue ->
       {issue.id,
@@ -70,7 +72,8 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
          runs: workers,
          now: now,
          blocked_by: Map.get(blocked_by, issue.id, []),
-         watchdog_alive: watchdog_alive(issue)
+         watchdog_alive: watchdog_alive(issue),
+         resume_queued: issue.id in queued
        })}
     end)
   end
@@ -232,6 +235,20 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
     if Lifecycle.state_of(issue) == :merging, do: Watchdog.alive?(issue.id)
   rescue
     _ -> nil
+  end
+
+  # bd-1u15tl: the tickets whose round is deferred for a slot. Asked of the
+  # scheduler only when a Merging ticket is among those projected.
+  defp resume_queued(issues, opts) do
+    case Keyword.fetch(opts, :resume_queued) do
+      {:ok, ids} ->
+        ids
+
+      :error ->
+        if Enum.any?(issues, &(Lifecycle.state_of(&1) == :merging)),
+          do: Arbiter.Board.Autopilot.deferred_resume_ids(),
+          else: []
+    end
   end
 
   defp str(nil), do: nil

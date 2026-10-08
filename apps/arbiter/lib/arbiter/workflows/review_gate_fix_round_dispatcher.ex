@@ -74,10 +74,11 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
 
   @type dispatch_args :: %{
           required(:task_id) => String.t(),
-          required(:attempt) => pos_integer(),
+          required(:attempt) => non_neg_integer(),
           required(:verdict) => atom(),
           required(:findings) => String.t(),
-          required(:findings_digest) => String.t(),
+          required(:findings_digest) => String.t() | nil,
+          optional(:conflict) => boolean(),
           optional(:workspace_id) => String.t() | nil,
           optional(:claude_command) => [String.t()]
         }
@@ -95,6 +96,11 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       but could not start. Typically `:no_outpost` (the worktree was cleaned
       up, so there is nothing to re-attach to and a fresh dispatch is needed
       rather than a resume).
+    * `:conflict_rounds_exhausted` — the gate rejected the branch for conflicting
+      with its target `Arbiter.Worker.ConflictAbortFindings.max_rounds/0` times
+      and each conflict round handed back a branch that still conflicts
+      (bd-1u15tl). Conflict rounds do not spend the fix-round budget, so this is
+      their own bound.
     * `:fabricated_evidence` — the reviewer says the work fabricated or
       falsified its evidence (`Arbiter.Worker.EvidenceIntegrity`, bd-80talz).
       A fix round would hand that back to the same provider, and the reviewer
@@ -115,6 +121,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   @type give_up_reason ::
           :budget_exhausted
           | :not_converging
+          | :conflict_rounds_exhausted
           | :fabricated_evidence
           | :needs_coordinator
           | {:dispatch_failed, term()}
@@ -138,6 +145,11 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   on the same task can tell how much of the budget is left.
   `args.findings_digest` rides along the same way so the next rejection can tell
   whether this round moved anything.
+
+  `args.conflict` (bd-1u15tl) marks a conflict round — the gate could not review
+  a branch that conflicts with its target. It is briefed as "integrate the
+  target", and `args.attempt` is then the count of fix rounds already run, not
+  one more: a conflict round spends none of the budget, so it may be 0.
   """
   @callback dispatch(args :: dispatch_args()) :: {:ok, map()} | {:error, term()}
 
@@ -203,9 +215,11 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   @impl true
   @spec dispatch(dispatch_args()) :: {:ok, map()} | {:error, term()}
   def dispatch(%{task_id: task_id, attempt: attempt} = args)
-      when is_binary(task_id) and is_integer(attempt) and attempt > 0 do
+      when is_binary(task_id) and is_integer(attempt) and attempt >= 0 do
+    round = if Map.get(args, :conflict), do: "conflict round", else: "fix round #{attempt}"
+
     Logger.info(
-      "ReviewGateFixRoundDispatcher: dispatching implementer fix round #{attempt} " <>
+      "ReviewGateFixRoundDispatcher: dispatching implementer #{round} " <>
         "for task=#{task_id} after a ReviewGate #{inspect(Map.get(args, :verdict))} verdict"
     )
 
@@ -237,6 +251,25 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   # Prepended to the resume briefing by `Dispatch.prepend_revise_feedback/2`, so
   # the fresh implementer reads the findings before the git-derived "work so
   # far" context — same shape the bd-95lsjb human-review revise pass uses.
+  defp briefing(%{conflict: true, task_id: task_id} = args) do
+    """
+    ## ReviewGate could not review your branch — it conflicts with its target
+
+    The internal ReviewGate tried to bring task #{task_id}'s branch up to date
+    before reviewing it and the merge hit conflicts (typically a sibling ticket
+    merged into the same files). Nothing was reviewed, so there are no code
+    findings: integrate the target branch into YOUR branch, resolve the
+    conflicts keeping both sides' intent, run the tests, commit and push to the
+    SAME branch (do not open a new PR), then finish as usual so the gate can
+    review.
+
+    ### What the gate reported
+
+    #{Map.get(args, :findings) |> to_string() |> String.trim()}
+
+    """
+  end
+
   defp briefing(%{task_id: task_id} = args) do
     """
     ## ReviewGate requested changes — fix round #{args.attempt}
@@ -343,6 +376,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   defp subject(task_id, _attempts, :not_converging, _total_reviews),
     do: "#{task_id}: ReviewGate fix round is not converging (identical findings)"
 
+  defp subject(task_id, _attempts, :conflict_rounds_exhausted, _total_reviews),
+    do: "#{task_id}: ReviewGate cannot review the branch — it keeps conflicting with its target"
+
   defp subject(task_id, _attempts, :fabricated_evidence, _total_reviews),
     do: "#{task_id}: ReviewGate reviewer flagged fabricated evidence — no automatic fix round"
 
@@ -388,6 +424,21 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     Look at whether the implementer is failing to understand the finding, or the
     finding is unactionable as written: `review_gate_rounds_list #{task_id}` shows
     both sides of the exchange.
+    """
+  end
+
+  defp body(task_id, attempts, :conflict_rounds_exhausted, _total_reviews) do
+    """
+    Task #{task_id}'s branch conflicted with its target when the ReviewGate went to
+    review it, #{Arbiter.Worker.ConflictAbortFindings.max_rounds()} times over, and each automatic conflict
+    round handed back a branch that still conflicts. Nothing was reviewed and
+    no code finding was raised; the #{attempts} fix round(s) already run were
+    not spent on this.
+
+    Most likely other tickets keep merging into the same files faster than this
+    one can integrate them. Rebase or merge the target into the branch by hand
+    (or send it back), then re-run the gate: `review_gate_rounds_list #{task_id}`
+    shows each conflict rejection and the files it named.
     """
   end
 
