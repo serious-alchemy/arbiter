@@ -634,6 +634,7 @@ Architecture and design decision records live in [`docs/`](docs/):
 - [Quota and Auth Posture](docs/quota-and-auth.md) — Provider quota management and credential lifecycle.
 - [Worker Security Policy](docs/worker-security.md) — Execution sandbox and security isolation for agent workers.
 - [Remote Access](docs/remote-access.md) — Connecting to dashboard and sessions over SSH tunnels.
+- [Remote Workers Runbook](docs/remote-workers-runbook.md) — Joining, operating and debugging remote worker nodes.
 
 ## Contributing
 

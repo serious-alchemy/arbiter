@@ -18,12 +18,20 @@ defmodule ArbiterWeb.NodeTestEndpoint do
 
   # The node HTTP routes (`/nodes/*`: files, RW11's seed and checkout bundles) over the
   # same real listener, for the end-to-end tests that need the agent's real client.
+  # JSON is parsed as the real endpoint does (`/nodes/enroll` takes its token in the body);
+  # a bundle upload is `application/octet-stream` and passes through untouched.
+  plug Plug.Parsers, parsers: [:json], pass: ["*/*"], json_decoder: Phoenix.json_library()
+
   plug ArbiterWeb.Router
 
-  @doc "Puts the endpoint's config (free loopback port). Then `start_supervised!(#{inspect(__MODULE__)})`."
-  def configure do
+  @doc """
+  Puts the endpoint's config (a free loopback port, or `port:` to rebind the one a
+  previous run used: the primary-restart tests). Then
+  `start_supervised!(#{inspect(__MODULE__)})`.
+  """
+  def configure(opts \\ []) do
     Application.put_env(:arbiter_web, __MODULE__,
-      http: [ip: {127, 0, 0, 1}, port: 0],
+      http: [ip: {127, 0, 0, 1}, port: Keyword.get(opts, :port, 0)],
       server: true,
       adapter: Bandit.PhoenixAdapter,
       secret_key_base: Base.encode64(:crypto.strong_rand_bytes(48)),

@@ -131,8 +131,19 @@ defmodule Arbiter.Nodes.PlacementTest do
                place(%{mode: :local_only}, [row("a")])
     end
 
-    test "until remote execution exists placement always returns local (prefer_remote)" do
+    test "the seam can switch remote execution off: placement is then always local" do
       assert {:ok, {:local, :no_node}} = place(%{}, [row("a")], remote_available?: false)
+    end
+
+    # bd-afcoop (RW13): `Executor.Node` exists since RW9, so nothing but `worker.placement`
+    # (default local_only) keeps a run off a node. With the old default of `false`, a real
+    # dispatch could never reach a node whatever the operator configured.
+    test "with no seam, remote execution is available: a free node is picked" do
+      assert {:ok, {:node, %{name: "a"}}} =
+               Placement.place(Map.merge(@eligible, %{mode: :prefer_remote}), nodes: [row("a")])
+
+      assert {:ok, {:local, {:local_only, :placement_local_only}}} =
+               Placement.place(Map.merge(@eligible, %{mode: :local_only}), nodes: [row("a")])
     end
 
     test "prefer_remote picks a node with headroom" do
