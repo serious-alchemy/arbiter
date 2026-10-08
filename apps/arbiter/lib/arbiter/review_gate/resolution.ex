@@ -25,8 +25,11 @@ defmodule Arbiter.ReviewGate.Resolution do
     * `decision`     — `:accept_as_is` (ship it with the finding standing),
                        `:amend` (the coordinator changes the requirement or
                        directs a specific change, on its own authority),
-                       `:send_back` (return it to the implementer), `:reject`
-                       (abandon the work).
+                       `:send_back` (return it to the implementer — **another
+                       review round follows** its next completion), `:reject`
+                       (abandon the work). Only `:accept_as_is` and `:amend`
+                       permit a merge without a fresh reviewer APPROVE
+                       (`Arbiter.ReviewGate.MergeAuthorization`).
     * `reasoning`    — why. Required and non-blank: a decision without its
                        reasoning is the gap this resource exists to close.
     * `actor`        — who decided (`"coordinator"` by default).
@@ -34,6 +37,11 @@ defmodule Arbiter.ReviewGate.Resolution do
                      — the ReviewGate round this answers, when there is one
                        (see `Arbiter.ReviewGate.Round` for the two axes). Nil
                        for a gate with no rounds.
+
+    * `head_sha`     — the commit the decision was recorded against, when one
+                       was known (bd-651ine). An `:accept_as_is` / `:amend`
+                       authorises merging that head; a head pushed afterwards
+                       needs a reviewer round or a new decision.
 
   ## What a resolution does NOT do
 
@@ -43,6 +51,13 @@ defmodule Arbiter.ReviewGate.Resolution do
   coordinator then does (resume the worker, merge, close the ticket) goes
   through the existing verbs, as it did before. What changes is that the
   decision is addressable: who, when, which round, and why.
+
+  It is also a *gate on merging*, in one direction only. The merge path
+  (`Arbiter.ReviewGate.MergeAuthorization`) refuses a ticket whose latest
+  reviewer round did not approve, and only an `:accept_as_is` / `:amend`
+  recorded after that round lifts the refusal. `:send_back` and `:reject` never
+  do: a `:send_back` ticket merges only after the implementer finishes and the
+  gate's next reviewer round approves the new head.
 
   ## Retention
 
@@ -81,7 +96,8 @@ defmodule Arbiter.ReviewGate.Resolution do
         :reasoning,
         :actor,
         :round,
-        :fix_round_attempt
+        :fix_round_attempt,
+        :head_sha
       ]
     end
   end
@@ -137,6 +153,13 @@ defmodule Arbiter.ReviewGate.Resolution do
       public? true
       constraints min: 0
       description "The fix-round pass `round` belongs to. Nil alongside a nil `round`."
+    end
+
+    attribute :head_sha, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The commit the decision was recorded against, when known. See `Arbiter.ReviewGate.MergeAuthorization`."
     end
 
     create_timestamp :inserted_at

@@ -220,6 +220,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Verification
@@ -1409,9 +1410,31 @@ defmodule Arbiter.Workflows.MergeQueue do
   # and `Coverage.decide/3` shadows. Flag on, the two swap roles. Returns
   # `{result, item}`: the coverage path carries a bounded wait on the item, and
   # a bound that lived in a local variable would reset every tick.
+  #
+  # bd-651ine / #529: ahead of both predicates, the ReviewGate's own record must
+  # permit the merge. They compare the head with an APPROVED head, so a ticket
+  # the gate REJECTED — no approval, no baseline — went through unguarded, a
+  # `send_back` resolution included. `MergeAuthorization` closes that: a latest
+  # reviewer round that did not approve blocks the merge unless an
+  # `accept_as_is` / `amend` resolution covers this head.
   defp merge_guarded(state, item) do
     head = Map.get(item, :last_head_sha)
 
+    case MergeAuthorization.check(item.task_id, head) do
+      :ok ->
+        merge_coverage_guarded(state, item, head)
+
+      {:error, {:review_not_approved, _} = refusal} ->
+        Logger.warning(
+          "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+            MergeAuthorization.describe({:review_not_approved, elem(refusal, 1)})
+        )
+
+        {{:error, refusal}, item}
+    end
+  end
+
+  defp merge_coverage_guarded(state, item, head) do
     cond do
       coverage_parked_on?(item, head) ->
         # Terminal for this head (AC4): already waited out and paged. Issue no
@@ -1941,6 +1964,12 @@ defmodule Arbiter.Workflows.MergeQueue do
       # above — a re-review or a coordinator fix can clear this, and marking
       # the item :failed here would give it no way back in.
       {:error, :empty_net_diff = reason} ->
+        {%{item | last_error: reason}, state}
+
+      # bd-651ine: the gate's record forbids the merge until a reviewer round
+      # approves the head or the coordinator accepts it. Non-terminal for the
+      # same reason: the next tick re-reads the record.
+      {:error, {:review_not_approved, _} = reason} ->
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->

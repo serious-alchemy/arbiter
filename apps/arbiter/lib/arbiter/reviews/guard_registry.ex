@@ -967,14 +967,17 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {MergeQueue, :merge_guarded, 2},
+        {MergeQueue, :merge_coverage_guarded, 3},
         {MergeQueue, :legacy_merge_decision, 3},
         {MergeQueue, :apply_legacy_decision, 3},
         {MergeQueue, :apply_coverage_decision, 4}
       ],
-      anchors: [":stale_reviewed_sha", "coverage_enabled?"],
+      anchors: [":stale_reviewed_sha", "coverage_enabled?", "MergeAuthorization.check"],
       summary:
         "the queue's merge refusal: `decide/3` under `merge.coverage_enabled`, else the " <>
-          "reviewed-SHA guard plus W5's content check (P7) — none of W2–W4/W6's recovery"
+          "reviewed-SHA guard plus W5's content check (P7) — none of W2–W4/W6's recovery; " <>
+          "ahead of both, `ReviewGate.MergeAuthorization` refuses a ticket whose latest " <>
+          "reviewer round did not approve unless accept_as_is/amend covers the head (bd-651ine)"
     },
     %{
       id: :coverage_unknown_wait,

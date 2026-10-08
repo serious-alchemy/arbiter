@@ -304,6 +304,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
@@ -5473,11 +5474,29 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp unreviewed_delta(_state, _reviewed, _head), do: nil
 
-  defp do_safe_merge(%{adapter: adapter, mr_ref: mr_ref}, expected_sha) do
-    case adapter.merge(mr_ref, expected_sha) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:bad_return, other}}
+  # bd-651ine / #529: the one place every Watchdog merge passes. The reviewed-SHA
+  # and coverage guards above compare the head with an APPROVED head; a ticket
+  # the gate rejected has none, and merged unguarded. `MergeAuthorization`
+  # refuses it here — a returned error, so it takes the same retry-and-page path
+  # as any other refused merge and the coordinator hears about it.
+  defp do_safe_merge(%{adapter: adapter, mr_ref: mr_ref} = state, expected_sha) do
+    head = expected_sha || Map.get(state, :last_head_sha)
+
+    with :ok <- MergeAuthorization.check(Map.get(state, :task_id), head),
+         result <- adapter.merge(mr_ref, expected_sha) do
+      case result do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:bad_return, other}}
+      end
+    else
+      {:error, {:review_not_approved, detail} = reason} ->
+        Logger.warning(
+          "Worker.Watchdog: refusing merge for task=#{Map.get(state, :task_id)} mr=#{mr_ref}; " <>
+            MergeAuthorization.describe({:review_not_approved, detail})
+        )
+
+        {:error, reason}
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}

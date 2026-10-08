@@ -32,6 +32,10 @@ defmodule Arbiter.ReviewGate.Resolutions do
       `:review_gate` resolution that names neither, the task's most recent
       reviewer round is linked, so the override sits next to the argument it
       ends.
+    * `head_sha` — the commit the decision is about. Absent, the head of the
+      task's PR as last observed is stamped (`task_head/1`); nil when none is
+      known. An `accept_as_is` / `amend` authorises a merge of this head only
+      (`Arbiter.ReviewGate.MergeAuthorization`).
 
   Broadcasts a `gate_resolved` event on the task's workspace stream.
   """
@@ -55,7 +59,8 @@ defmodule Arbiter.ReviewGate.Resolutions do
         reasoning: reasoning,
         actor: actor(fetch(attrs, :actor)),
         round: round,
-        fix_round_attempt: fix_round_attempt
+        fix_round_attempt: fix_round_attempt,
+        head_sha: head_sha(fetch(attrs, :head_sha), task)
       })
       |> Ash.create()
       |> case do
@@ -123,7 +128,9 @@ defmodule Arbiter.ReviewGate.Resolutions do
         arb review resolve #{task_id}#{gate_flag} --amend "<why>"
 
     (MCP: `review_gate_resolve`.) It records the decision against the ticket;
-    act on it with the usual tools.
+    act on it with the usual tools. Only --accept-as-is / --amend permit a
+    merge without a fresh reviewer APPROVE; --send-back means another review
+    round follows the implementer's next completion.
     """
   end
 
@@ -184,6 +191,7 @@ defmodule Arbiter.ReviewGate.Resolutions do
       actor: r.actor,
       round: r.round,
       fix_round_attempt: r.fix_round_attempt,
+      head_sha: r.head_sha,
       inserted_at: r.inserted_at && DateTime.to_iso8601(r.inserted_at)
     }
   end
@@ -209,6 +217,25 @@ defmodule Arbiter.ReviewGate.Resolutions do
 
   defp link_round(_gate, _task_id, round, nil) when is_integer(round), do: {round, 0}
   defp link_round(_gate, _task_id, round, fix_round_attempt), do: {round, fix_round_attempt}
+
+  defp head_sha(explicit, task) when is_binary(explicit) do
+    case String.trim(explicit) do
+      "" -> head_sha(nil, task)
+      sha -> sha
+    end
+  end
+
+  defp head_sha(_explicit, task), do: task_head(task)
+
+  # The head the ticket's PR was last seen at: the forge's last answer
+  # (`merger_status`), else the head the worker pushed (`merge_watch` lane).
+  defp task_head(task) do
+    status = task.merger_status || %{}
+    lane = task.merge_watch || %{}
+
+    [Map.get(status, "head_sha"), Map.get(status, :head_sha), Map.get(lane, "local_head_sha")]
+    |> Enum.find(&(is_binary(&1) and &1 != ""))
+  end
 
   defp fetch_task(task_id) do
     case Ash.get(Issue, task_id) do
