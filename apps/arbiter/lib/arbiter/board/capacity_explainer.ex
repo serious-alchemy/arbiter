@@ -56,7 +56,8 @@ defmodule Arbiter.Board.CapacityExplainer do
     ready =
       for %{id: id, hold: hold} = entry <- Map.get(board, :ready, []),
           hold != nil,
-          explained = hold(hold, board, raw: entry.reason, workspace_id: entry.card[:workspace_id]),
+          explained =
+            hold(hold, board, raw: entry.reason, workspace_id: entry.card[:workspace_id]),
           explained.kind != :other,
           into: %{} do
         {id, explained}
@@ -164,7 +165,8 @@ defmodule Arbiter.Board.CapacityExplainer do
     do: "Workspace setting: at most #{max} at once"
 
   defp limit_text(:placement, %{placement: placement}, _account),
-    do: "Where this workspace's work may run (#{mode_phrase(placement.mode)}): up to #{placement.cap}"
+    do:
+      "Where this workspace's work may run (#{mode_phrase(placement.mode)}): up to #{placement.cap}"
 
   defp limit_text(:placement_free, %{placement: placement}, _account),
     do:
@@ -228,7 +230,8 @@ defmodule Arbiter.Board.CapacityExplainer do
   # ---- what changes each limit ---------------------------------------------------
 
   defp change_hint(:nodes, _terms, _a),
-    do: "Change with `arb node set local --max-workers N` (this machine) or `arb node set <node> --max-workers N`."
+    do:
+      "Change with `arb node set local --max-workers N` (this machine) or `arb node set <node> --max-workers N`."
 
   defp change_hint(:ceiling, _terms, _a),
     do:
@@ -325,26 +328,24 @@ defmodule Arbiter.Board.CapacityExplainer do
   end
 
   def hold({:quota, reason}, _board, opts) do
-    cond do
-      String.contains?(reason, "auth hold") ->
-        %{
-          kind: :auth,
-          badge: "Auth hold",
-          summary:
-            "The provider's login failed several times in a row, so new work is held until " <>
-              "its credentials are fixed. Check the Providers page.",
-          details: opts[:raw] || reason
-        }
-
-      true ->
-        %{
-          kind: :quota,
-          badge: "Quota hold",
-          summary:
-            "The provider's quota is too used up to start new work right now (#{reason}). " <>
-              "The scheduler starts it on its own when the quota window allows.",
-          details: opts[:raw] || reason
-        }
+    if String.contains?(reason, "auth hold") do
+      %{
+        kind: :auth,
+        badge: "Auth hold",
+        summary:
+          "The provider's login failed several times in a row, so new work is held until " <>
+            "its credentials are fixed. Check the Providers page.",
+        details: opts[:raw] || reason
+      }
+    else
+      %{
+        kind: :quota,
+        badge: "Quota hold",
+        summary:
+          "The provider's quota is too used up to start new work right now (#{reason}). " <>
+            "The scheduler starts it on its own when the quota window allows.",
+        details: opts[:raw] || reason
+      }
     end
   end
 
@@ -476,7 +477,9 @@ defmodule Arbiter.Board.CapacityExplainer do
     ~r/([a-z0-9_]+):([A-Za-z0-9_.-]+) at capacity/
     |> Regex.scan(detail, capture: :all_but_first)
     |> Enum.uniq()
-    |> Enum.map(fn [provider, slug] -> full_account(provider, "#{provider}:#{slug}", workspace_id) end)
+    |> Enum.map(fn [provider, slug] ->
+      full_account(provider, "#{provider}:#{slug}", workspace_id)
+    end)
   end
 
   defp full_account(provider, name, workspace_id) do

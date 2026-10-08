@@ -140,7 +140,10 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert cap.binding == :nodes
 
       assert limit_of(cap, :nodes).binding?
-      assert limit_of(cap, :nodes).text =~ "Capacity 5 = this machine (3) + big (2) + ryan-oryx-pro (0, offline)"
+
+      assert limit_of(cap, :nodes).text =~
+               "Capacity 5 = this machine (3) + big (2) + ryan-oryx-pro (0, offline)"
+
       assert limit_of(cap, :nodes).change =~ "arb node set local --max-workers N"
       assert cap.headline =~ "machine capacity"
     end
@@ -190,7 +193,9 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert scheduler == 3
       assert cap.binding == :ceiling
       assert limit_of(cap, :ceiling).text =~ "Install-wide limit: 3"
-      assert limit_of(cap, :ceiling).change =~ "arb settings set conductor_system_max_concurrent N"
+
+      assert limit_of(cap, :ceiling).change =~
+               "arb settings set conductor_system_max_concurrent N"
     end
   end
 
@@ -207,10 +212,15 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert cap.effective == scheduler
       assert scheduler == 1
       assert cap.binding == :account
-      assert cap.headline =~ "Limited to 1 by the Claude account (claude:#{account.slug}): 1 of 2 in use."
+
+      assert cap.headline =~
+               "Limited to 1 by the Claude account (claude:#{account.slug}): 1 of 2 in use."
+
       assert limit_of(cap, :account).binding?
       assert limit_of(cap, :account).text =~ "1 of 2 in use"
-      assert limit_of(cap, :account).change =~ "arb account set claude:#{account.slug} --max-concurrent N"
+
+      assert limit_of(cap, :account).change =~
+               "arb account set claude:#{account.slug} --max-concurrent N"
     end
 
     test "an account with no limit set is listed but never binding" do

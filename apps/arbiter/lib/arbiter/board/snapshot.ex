@@ -405,17 +405,8 @@ defmodule Arbiter.Board.Snapshot do
     # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
     routing_opts = routing_opts(workspace, opts)
 
-    # bd-5fl9sx: `slots_total` is the minimum of these terms, kept so the board
-    # can explain it. A read that fails leaves the pre-terms fallback.
-    capacity =
-      Keyword.get_lazy(opts, :capacity, fn ->
-        safe_capacity_terms(workspace || workspace_id, SlotGate.slots_used(issues), routing_opts)
-      end)
-
-    slots_total =
-      Keyword.get(opts, :slots_total) ||
-        (capacity && capacity.effective) ||
-        system_max_concurrent()
+    {capacity, slots_total} =
+      capacity_and_slots(workspace || workspace_id, issues, routing_opts, opts)
 
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
@@ -457,6 +448,22 @@ defmodule Arbiter.Board.Snapshot do
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
+  end
+
+  # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
+  # board can explain it. A read that fails leaves the pre-terms fallback.
+  defp capacity_and_slots(workspace, issues, routing_opts, opts) do
+    capacity =
+      Keyword.get_lazy(opts, :capacity, fn ->
+        safe_capacity_terms(workspace, SlotGate.slots_used(issues), routing_opts)
+      end)
+
+    slots_total =
+      Keyword.get(opts, :slots_total) ||
+        (capacity && capacity.effective) ||
+        system_max_concurrent()
+
+    {capacity, slots_total}
   end
 
   # ES3: Ready-since only feeds finish-first's aging escape, so the
@@ -756,7 +763,11 @@ defmodule Arbiter.Board.Snapshot do
 
   Raises when a read fails; `effective_max_concurrent/3` rescues.
   """
-  @spec capacity_terms(Arbiter.Tasks.Workspace.t() | String.t() | nil, non_neg_integer() | nil, keyword()) ::
+  @spec capacity_terms(
+          Arbiter.Tasks.Workspace.t() | String.t() | nil,
+          non_neg_integer() | nil,
+          keyword()
+        ) ::
           map()
   def capacity_terms(workspace_or_id, already_counted \\ nil, opts \\ [])
 
@@ -810,7 +821,10 @@ defmodule Arbiter.Board.Snapshot do
     effective = Concurrency.clamp(after_account, placement.free, counted)
 
     clamp_terms =
-      if(headroom == :unlimited, do: [], else: [account: Concurrency.clamp(base, headroom, counted)]) ++
+      if(headroom == :unlimited,
+        do: [],
+        else: [account: Concurrency.clamp(base, headroom, counted)]
+      ) ++
         if(placement.free == :unlimited,
           do: [],
           else: [placement_free: Concurrency.clamp(base, placement.free, counted)]

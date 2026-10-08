@@ -125,9 +125,21 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
       workspace_cap!(ws, 2)
       view = mount_board(conn)
 
-      assert has_element?(view, "#board-slot-cap-headline", "Limited to 2 by the workspace setting.")
-      assert has_element?(view, "#board-slot-cap-limits [data-limit='workspace'][data-binding='true']")
-      assert has_element?(view, "#board-slot-cap-limits [data-limit='nodes'][data-binding='false']")
+      assert has_element?(
+               view,
+               "#board-slot-cap-headline",
+               "Limited to 2 by the workspace setting."
+             )
+
+      assert has_element?(
+               view,
+               "#board-slot-cap-limits [data-limit='workspace'][data-binding='true']"
+             )
+
+      assert has_element?(
+               view,
+               "#board-slot-cap-limits [data-limit='nodes'][data-binding='false']"
+             )
     end
 
     test "lists every input in plain language and where each is changed", %{conn: conn, ws: ws} do
@@ -173,7 +185,11 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
     test "wear one short badge instead of the long warning", %{conn: conn, waiting: waiting} do
       view = mount_board(conn)
 
-      assert has_element?(view, "#card-#{waiting.id} [data-hold-badge='capacity']", "Waiting for capacity")
+      assert has_element?(
+               view,
+               "#card-#{waiting.id} [data-hold-badge='capacity']",
+               "Waiting for capacity"
+             )
 
       card = view |> element("#card-#{waiting.id}") |> render()
       # The visible card text is the badge; the long phrase lives only in the popup's details.

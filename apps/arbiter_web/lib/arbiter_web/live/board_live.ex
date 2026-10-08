@@ -1652,7 +1652,8 @@ defmodule ArbiterWeb.BoardLive do
   end
 
   defp hold_badge_class(:capacity),
-    do: "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)] text-[var(--arb-attention)]"
+    do:
+      "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)] text-[var(--arb-attention)]"
 
   defp hold_badge_class(:scheduler_paused), do: hold_badge_class(:capacity)
 
@@ -1660,7 +1661,11 @@ defmodule ArbiterWeb.BoardLive do
     do: "border-[var(--arb-fail-edge)] text-[var(--arb-fail-text)]"
 
   attr(:board, :map, required: true)
-  attr(:cap, :map, default: nil, doc: "`CapacityExplainer.cap/1`, or nil when it could not be built")
+
+  attr(:cap, :map,
+    default: nil,
+    doc: "`CapacityExplainer.cap/1`, or nil when it could not be built"
+  )
 
   # The toolbar's cap figure. With the explanation it is a button that opens a
   # popup on hover, focus or tap; without it, just the number.
