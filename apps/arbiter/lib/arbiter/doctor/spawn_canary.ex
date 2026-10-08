@@ -259,7 +259,7 @@ defmodule Arbiter.Doctor.SpawnCanary do
 
     if ContainerSpawn.podman?(policy) do
       {:skipped,
-       "sandbox.backend is podman: a canary has no worktree to mount (see `podman_sandbox`)"}
+       "agent.security.sandbox.backend is podman: a canary has no worktree to mount (see `podman_sandbox`)"}
     else
       with {:ok, tmp_dir} <- create_tmp(canary_id),
            {:ok, worktree} <- create_tmp(canary_id <> "-worktree") do

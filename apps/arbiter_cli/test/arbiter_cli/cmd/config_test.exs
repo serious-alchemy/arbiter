@@ -206,6 +206,29 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert err =~ "arb workspace secret"
     end
 
+    test "an unknown top-level key is refused with the canonical path (bd-311cun)" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(422)
+           |> Req.Test.json(%{
+             "error" => %{
+               "type" => "validation_error",
+               "message" =>
+                 "unknown top-level config key \"sandbox\" — did you mean agent.security.sandbox.backend?",
+               "details" => %{}
+             }
+           })
+         end}
+      ])
+
+      {_out, err, code} = capture(fn -> Config.run(["set", "sandbox.backend", "podman"]) end)
+      assert code == 1
+      assert err =~ "agent.security.sandbox.backend"
+    end
+
     test "a quoted value is sent as the string, not the boolean" do
       stub_routes([
         {{"get", "/api/workspaces"}, {default_ws(%{}), 200}},
