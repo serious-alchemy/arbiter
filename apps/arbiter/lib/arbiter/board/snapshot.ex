@@ -141,6 +141,8 @@ defmodule Arbiter.Board.Snapshot do
           slots_total: non_neg_integer(),
           slots_free: non_neg_integer(),
           slots_used: non_neg_integer(),
+          slot_holders: [String.t()],
+          capacity: map() | nil,
           agents_live: non_neg_integer(),
           quota: Scheduler.quota(),
           paused: boolean(),
@@ -302,6 +304,11 @@ defmodule Arbiter.Board.Snapshot do
       slots_total: slots_total,
       slots_free: slots_free,
       slots_used: slots_used,
+      # bd-5fl9sx: the tickets holding the slots just counted, and the terms
+      # `slots_total` is the minimum of — what `Arbiter.Board.CapacityExplainer`
+      # reads, so the board can say *why* the cap is what it is.
+      slot_holders: SlotGate.slot_holders(issues),
+      capacity: Map.get(input, :capacity),
       agents_live: agents_live,
       quota: quota,
       paused: paused?,
@@ -398,13 +405,17 @@ defmodule Arbiter.Board.Snapshot do
     # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
     routing_opts = routing_opts(workspace, opts)
 
+    # bd-5fl9sx: `slots_total` is the minimum of these terms, kept so the board
+    # can explain it. A read that fails leaves the pre-terms fallback.
+    capacity =
+      Keyword.get_lazy(opts, :capacity, fn ->
+        safe_capacity_terms(workspace || workspace_id, SlotGate.slots_used(issues), routing_opts)
+      end)
+
     slots_total =
       Keyword.get(opts, :slots_total) ||
-        effective_max_concurrent(
-          workspace || workspace_id,
-          SlotGate.slots_used(issues),
-          routing_opts
-        )
+        (capacity && capacity.effective) ||
+        system_max_concurrent()
 
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
@@ -423,6 +434,7 @@ defmodule Arbiter.Board.Snapshot do
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: now,
       slots_total: slots_total,
+      capacity: capacity,
       slot_note:
         Keyword.get_lazy(opts, :slot_note, fn -> slot_note(workspace, issues, slots_total) end),
       quota:
@@ -535,6 +547,12 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
+  defp safe_capacity_terms(workspace_or_id, used, opts) do
+    capacity_terms(workspace_or_id, used, opts)
+  rescue
+    _ -> nil
+  end
+
   # What `load/1` reads for `slots_total`, for the default workspace.
   defp slots_total(issues, opts) do
     workspace = safe_workspace(default_workspace_id())
@@ -589,6 +607,8 @@ defmodule Arbiter.Board.Snapshot do
       slots_total: 0,
       slots_free: 0,
       slots_used: 0,
+      slot_holders: [],
+      capacity: nil,
       agents_live: 0,
       quota: :ok,
       paused: true,
@@ -694,35 +714,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
-    workspace_id = ws.id
-    capacity_opts = capacity_opts(opts)
-    install = install_capacity(opts)
-    placement = Arbiter.Nodes.Capacity.placement(Arbiter.Nodes.Placement.mode(ws), capacity_opts)
-
-    base =
-      case workspace_config_max(ws) do
-        n when is_integer(n) and n > 0 -> min(n, install)
-        _ -> install
-      end
-      |> min(placement.cap)
-
-    {headroom, live_count} =
-      case routed_availability(ws, opts) do
-        %{capacity: capacity, available: available} ->
-          {capacity, fn -> routed_live_count(workspace_id, available) end}
-
-        nil ->
-          provider = Arbiter.Quota.default_provider(ws)
-
-          {Concurrency.headroom(workspace_id, provider),
-           fn -> Concurrency.workspace_live_count(workspace_id, provider) end}
-      end
-
-    counted = already_counted || live_count.()
-
-    base
-    |> Concurrency.clamp(headroom, counted)
-    |> Concurrency.clamp(placement.free, counted)
+    ws |> capacity_terms(already_counted, opts) |> Map.fetch!(:effective)
   rescue
     _ -> system_max_concurrent()
   end
@@ -739,6 +731,136 @@ defmodule Arbiter.Board.Snapshot do
   rescue
     _ -> system_max_concurrent()
   end
+
+  @doc """
+  Every term `effective_max_concurrent/3` takes the minimum of, with the one
+  that binds named. `effective_max_concurrent/3` *is* `capacity_terms(...).effective`,
+  so an explanation built from these terms (`Arbiter.Board.CapacityExplainer`)
+  cannot drift from what the scheduler plans to.
+
+  Returns `%{effective:, already_counted:, install:, workspace:, placement:,
+  account:, terms:, binding:}`:
+
+    * `install` — `Arbiter.Nodes.Capacity.breakdown/1` (local cap, nodes,
+      ceiling);
+    * `workspace` — `%{id:, name:, max:}` (`max` is `conductor.max_concurrent`
+      on the workspace, or `nil`), `nil` for a fleet-wide read;
+    * `placement` — `%{mode:, cap:, free:}`;
+    * `account` — `nil`, `%{kind: :account, provider:, name:, limit:, headroom:}`
+      or `%{kind: :routed, names:, capacity:}`;
+    * `terms` — `[{key, value}]`, each limit in the board's own frame
+      (`key` is `:nodes`, `:ceiling`, `:workspace`, `:placement`,
+      `:placement_free` or `:account`); `effective` is their minimum;
+    * `binding` — the key of the lowest term, ties going to the limit set
+      on purpose (account, workspace, ceiling, then the machines, placement).
+
+  Raises when a read fails; `effective_max_concurrent/3` rescues.
+  """
+  @spec capacity_terms(Arbiter.Tasks.Workspace.t() | String.t() | nil, non_neg_integer() | nil, keyword()) ::
+          map()
+  def capacity_terms(workspace_or_id, already_counted \\ nil, opts \\ [])
+
+  def capacity_terms(nil, already_counted, opts) do
+    install = Arbiter.Nodes.Capacity.breakdown(capacity_opts(opts))
+
+    finish_terms(%{
+      already_counted: already_counted || 0,
+      install: install,
+      workspace: nil,
+      placement: nil,
+      account: nil,
+      terms: install_terms(install)
+    })
+  end
+
+  def capacity_terms(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
+    capacity_opts = capacity_opts(opts)
+    install = Arbiter.Nodes.Capacity.breakdown(capacity_opts)
+    mode = Arbiter.Nodes.Placement.mode(ws)
+    placement = Arbiter.Nodes.Capacity.placement(mode, capacity_opts)
+    ws_max = workspace_config_max(ws)
+
+    {headroom, live_count, account} =
+      case routed_availability(ws, opts) do
+        %{capacity: capacity, available: available} = view ->
+          {capacity, fn -> routed_live_count(ws.id, available) end,
+           %{kind: :routed, names: routed_names(view), capacity: capacity}}
+
+        nil ->
+          provider = Arbiter.Quota.default_provider(ws)
+          resolved = Arbiter.Accounts.Resolver.account(ws.id, provider)
+          headroom = Concurrency.account_headroom(resolved, ws.id)
+
+          {headroom, fn -> Concurrency.workspace_live_count(ws.id, provider) end,
+           account_term(resolved, provider, ws, headroom)}
+      end
+
+    counted = already_counted || live_count.()
+
+    # The same fold as ever: workspace cap under the install, under the
+    # placement cap; then the account and placement headroom, each in the
+    # board's frame (`Concurrency.clamp/3`).
+    base_terms =
+      install_terms(install) ++
+        if(is_integer(ws_max) and ws_max > 0, do: [workspace: ws_max], else: []) ++
+        [placement: placement.cap]
+
+    base = base_terms |> Keyword.values() |> Enum.min()
+    after_account = Concurrency.clamp(base, headroom, counted)
+    effective = Concurrency.clamp(after_account, placement.free, counted)
+
+    clamp_terms =
+      if(headroom == :unlimited, do: [], else: [account: Concurrency.clamp(base, headroom, counted)]) ++
+        if(placement.free == :unlimited,
+          do: [],
+          else: [placement_free: Concurrency.clamp(base, placement.free, counted)]
+        )
+
+    finish_terms(%{
+      already_counted: counted,
+      install: install,
+      workspace: %{id: ws.id, name: ws.name, max: ws_max},
+      placement: Map.put(placement, :mode, mode),
+      account: account,
+      terms: base_terms ++ clamp_terms,
+      effective: effective
+    })
+  end
+
+  def capacity_terms(workspace_id, already_counted, opts) when is_binary(workspace_id) do
+    capacity_terms(safe_workspace(workspace_id), already_counted, opts)
+  end
+
+  # Ties go to the limit the operator set on purpose (account, workspace,
+  # ceiling), then to machine capacity — a placement term that merely repeats
+  # the machine total, or a free-slot term that is still all free, is not what
+  # is limiting anything.
+  @binding_order [:account, :workspace, :ceiling, :nodes, :placement, :placement_free]
+
+  defp finish_terms(%{terms: terms} = acc) do
+    effective = Map.get_lazy(acc, :effective, fn -> terms |> Keyword.values() |> Enum.min() end)
+    binding = Enum.find(@binding_order, fn key -> terms[key] == effective end)
+    acc |> Map.put(:effective, effective) |> Map.put(:binding, binding)
+  end
+
+  # `min(sum, ceiling)`: the install's own two terms.
+  defp install_terms(%{sum: sum, ceiling: ceiling}),
+    do: [nodes: sum] ++ if(is_integer(ceiling), do: [ceiling: ceiling], else: [])
+
+  defp account_term(nil, _provider, _ws, _headroom), do: nil
+
+  defp account_term(account, provider, ws, headroom) do
+    %{
+      kind: :account,
+      provider: provider,
+      name: "#{account.provider}:#{account.slug}",
+      limit: Concurrency.limit(account, ws),
+      headroom: headroom
+    }
+  end
+
+  defp routed_names(%{available: available}),
+    do: Enum.map(available, &"#{&1.account.provider}:#{&1.account.slug}")
 
   # The workspace's live workers on every provider its available candidates run.
   defp routed_live_count(workspace_id, available) do
