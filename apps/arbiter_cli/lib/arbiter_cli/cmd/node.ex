@@ -224,7 +224,11 @@ defmodule ArbiterCli.Cmd.Node do
   # would hand it to curl and the script would never see it. The server's
   # one-liner ends in `ARB_JOIN_MODE=token bash`; swap that for the file.
   defp token_file_liner(liner, token_file) do
-    String.replace(liner, ~r/ARB_JOIN_MODE=token bash\z/, "ARB_JOIN_TOKEN_FILE=#{token_file} bash")
+    String.replace(
+      liner,
+      ~r/ARB_JOIN_MODE=token bash\z/,
+      "ARB_JOIN_TOKEN_FILE=#{token_file} bash"
+    )
   end
 
   # ---- pairing (device code) --------------------------------------------------
