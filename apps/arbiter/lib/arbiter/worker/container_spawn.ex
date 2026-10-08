@@ -951,23 +951,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
     root = Path.join(worktree, @skills_dir)
 
     case File.lstat(root) do
-      {:ok, %File.Stat{type: :directory}} ->
-        paths = root |> walk_files() |> Enum.sort()
-
-        if length(paths) > @max_skill_files do
-          {:error, {:too_many_skill_files, length(paths)}}
-        else
-          Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, acc} ->
-            case File.read(path) do
-              {:ok, body} -> {:cont, {:ok, Map.put(acc, Path.relative_to(path, worktree), body)}}
-              {:error, reason} -> {:halt, {:error, {:skill_unreadable, path, reason}}}
-            end
-          end)
-        end
-
-      _ ->
-        {:ok, %{}}
+      {:ok, %File.Stat{type: :directory}} -> read_skill_files(worktree, walk_files(root))
+      _ -> {:ok, %{}}
     end
+  end
+
+  defp read_skill_files(_worktree, paths) when length(paths) > @max_skill_files,
+    do: {:error, {:too_many_skill_files, length(paths)}}
+
+  defp read_skill_files(worktree, paths) do
+    Enum.reduce_while(Enum.sort(paths), {:ok, %{}}, fn path, {:ok, acc} ->
+      case File.read(path) do
+        {:ok, body} -> {:cont, {:ok, Map.put(acc, Path.relative_to(path, worktree), body)}}
+        {:error, reason} -> {:halt, {:error, {:skill_unreadable, path, reason}}}
+      end
+    end)
   end
 
   # Regular files only: a symlink is never followed out of the tree.
