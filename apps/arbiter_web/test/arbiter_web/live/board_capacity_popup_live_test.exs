@@ -92,6 +92,10 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
 
       assert board |> element("#board-slot-cap-figure") |> render() =~ "3"
       assert has_element?(board, "#board-slot-cap-limits [data-limit='ceiling']")
+
+      # The autopilot audits the change from its own process; let it finish
+      # before the sandbox owner exits.
+      _ = :sys.get_state(Autopilot)
     end
   end
 
