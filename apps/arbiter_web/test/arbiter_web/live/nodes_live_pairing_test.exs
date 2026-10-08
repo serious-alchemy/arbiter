@@ -28,6 +28,14 @@ defmodule ArbiterWeb.NodesLivePairingTest do
     {req, secret}
   end
 
+  # Approve, deny and redeem broadcast on the nodes topic, and the page answers
+  # each with a refresh that queries the DB. Such a message can still be in the
+  # LiveView's mailbox when the test body returns, and teardown kills the channel mid-query, which
+  # drops the shared sandbox connection (bd-5scl0c) and fails the next DB
+  # writer: the `on_exit` that resets the public URL. A `render/1` is a call
+  # queued behind the broadcast, so it returns only once the refresh is done.
+  defp settle(view), do: render(view)
+
   test "shows nothing when no node is waiting", %{conn: conn} do
     {:ok, view, _} = live(conn, ~p"/nodes")
     refute has_element?(view, "#pairing-requests")
@@ -76,6 +84,9 @@ defmodule ArbiterWeb.NodesLivePairingTest do
     assert {:ok, %{node: node, credential: "arbn_" <> _}} = Pairing.redeem(req.id, secret)
     assert node.name == "gpu-1"
     assert node.max_workers == 2
+
+    # redeeming creates the node and broadcasts again
+    settle(view)
   end
 
   test "denying leaves the node without a credential", %{conn: conn} do
@@ -85,6 +96,7 @@ defmodule ArbiterWeb.NodesLivePairingTest do
     view |> element("#pairing-deny-#{req.id}") |> render_click()
 
     refute has_element?(view, "#pairing-#{req.id}")
+    settle(view)
     assert {:error, :denied} = Pairing.redeem(req.id, secret)
     assert [_] = Nodes.events(kind: :pairing_denied)
   end
