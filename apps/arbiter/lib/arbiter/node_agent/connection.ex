@@ -533,7 +533,9 @@ defmodule Arbiter.NodeAgent.Connection do
     # (it has no stream to resend into) until the primary says `quiesce`.
     held = for {run, "hold"} <- verdicts || %{}, do: run
 
-    Enum.each(held, fn run -> Logger.info("node agent: primary is holding run #{run} for recovery") end)
+    Enum.each(held, fn run ->
+      Logger.info("node agent: primary is holding run #{run} for recovery")
+    end)
 
     Enum.each(unknown, fn run ->
       Logger.warning("node agent: primary does not know run #{run}; quiescing it")

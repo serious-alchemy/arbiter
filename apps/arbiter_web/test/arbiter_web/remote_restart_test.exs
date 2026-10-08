@@ -445,7 +445,8 @@ defmodule ArbiterWeb.RemoteRestartTest do
       assert Runs.run_ids() == []
     end
 
-    test "a held run nobody asks for is quiesced when the hold runs out, and collected once", ctx do
+    test "a held run nobody asks for is quiesced when the hold runs out, and collected once",
+         ctx do
       put_env_restoring(:arbiter_web, :node_session_opts, tick_ms: :infinity, hold_ms: 200)
       row = run_row!(ctx.node, "rr4")
       id = row.id
