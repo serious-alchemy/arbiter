@@ -201,7 +201,9 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       assert %{status: "ok", spawned: true} = provider(report, "gemini")
       assert socks.() -- before == []
       assert before -- socks.() == []
-      assert Registry.select(Arbiter.Worker.Egress.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}]) == []
+
+      assert Registry.select(Arbiter.Worker.Egress.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}]) ==
+               []
     end
   end
 
