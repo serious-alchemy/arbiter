@@ -10,7 +10,7 @@ against scratch clones under `/tmp`. The ticket plan is in
 
 ## Decision
 
-1. **Containers: yes, as a second backend behind `sandbox.backend: bwrap |
+1. **Containers: yes, as a second backend behind `agent.security.sandbox.backend: bwrap |
    podman`, and used first for the providers that have no jail at all, Claude
    and Codex (G7, G8).** agy stays on bwrap, where G6 has already shipped and
    where its Secret Service keyring auth is easier to serve. A container is
@@ -423,7 +423,7 @@ Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
 
 ### 4.1 Claude under podman (P7)
 
-`sandbox.backend: podman` runs a Claude worker's `claude --print` in a
+`agent.security.sandbox.backend: podman` runs a Claude worker's `claude --print` in a
 container. The wrap point is `ClaudeSession`, at the two places every spawn goes
 through (bd-d2o3xb):
 
@@ -461,13 +461,13 @@ so the **reviewer, conflict-resolution and fix-pass spawns are not wrapped**:
 they need a wrap point of their own, and a reviewer's checkout is not a private
 clone.
 
-**`sandbox.review_backend` (bd-4rvf98).** Refusing those spawns outright meant a
+**`agent.security.sandbox.review_backend` (bd-4rvf98).** Refusing those spawns outright meant a
 podman repo could not stay on podman: the first live trial (vs-clks8c, v0.2.15)
 implemented in a container, then parked at the ReviewGate reviewer with
 `{:sandbox_backend_unavailable, :podman, …}` (`reviewer_failed`). So the spawns
 that are not a task worker's implement pass (a ReviewGate reviewer, a ReviewGate
-revise pass, a `review: true` dispatch) resolve **`sandbox.review_backend`**
-instead of `sandbox.backend` (`SecurityPolicy.for_review_spawn/1`). It defaults
+revise pass, a `review: true` dispatch) resolve **`agent.security.sandbox.review_backend`**
+instead of `agent.security.sandbox.backend` (`SecurityPolicy.for_review_spawn/1`). It defaults
 to `bwrap`, so `backend: podman` alone gives a containerised implement worker and
 bwrap-backed reviews. It layers exactly like `backend` (most-restrictive-wins,
 settable at installation, workspace, repo and dispatch level, independently of
@@ -510,7 +510,7 @@ only config) and keeps the sandbox flags of the policy mode. `write_confinement/
 and `egress_confinement/1` answer `:os_jail` under podman (except `:strict`,
 which stays refused for an implementer), so the guardrail gates see the
 container. Reviews, conflict resolution and fix passes resolve
-`sandbox.review_backend` and are unchanged.
+`agent.security.sandbox.review_backend` and are unchanged.
 
 **Refresh-token rotation (`Codex.AuthSync`).** The CLI refreshes the ChatGPT
 access token near expiry and rotates the *refresh* token. In a copy that means
@@ -745,7 +745,7 @@ difficulty.
 | # | Title | D | Depends on |
 |---|---|---|---|
 | **P1** | **Spike/doctor: rootless podman readiness.** Re-scoped 2026-10-02 (no EC2 access): laptop go/no-go ([Appendix C](#appendix-c-p1-laptop-results-and-gono-go-bd-46xndf)) plus the portable `podman sandbox readiness` doctor check (`/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman version and storage driver, `label=disable` socket-bridge self-test). **Done (bd-46xndf).** The gate for any other host is that check | 2 | none |
-| P2 | `sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
+| P2 | `agent.security.sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
 | P3 | **Done (bd-bu4ye2).** `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
 | P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
 | P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
@@ -921,7 +921,7 @@ What was **not** run: vstim's or tonic's own `mix test`. Neither repo's image or
 deps exist in this container (no network, by design), so the suite in the test
 is a stand-in (DDL and queries through the injected `DATABASE_URL`). The first
 run of a real suite needs the repo's image (P4/P6) and a deps cache, then is
-checked by dispatching a vstim ticket with `sandbox.backend: podman`.
+checked by dispatching a vstim ticket with `agent.security.sandbox.backend: podman`.
 
 
 ## Appendix F: P8 Codex live run (bd-50d5j6)
