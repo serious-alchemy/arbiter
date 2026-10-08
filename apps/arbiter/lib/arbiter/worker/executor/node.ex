@@ -139,6 +139,20 @@ defmodule Arbiter.Worker.Executor.Node do
     :exit, _ -> false
   end
 
+  @doc """
+  Leave a live run to the node as its owner goes away (the primary is stopping): the
+  session stops treating the owner's death as a cancel. `:ok` when the session is gone.
+  """
+  @spec abandon(Arbiter.Worker.Executor.handle()) :: :ok
+  def abandon({:remote, {node_id, run, _ref}}) do
+    case Nodes.Registry.lookup(node_id) do
+      nil -> :ok
+      pid -> Session.abandon_run(pid, run)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
   @doc "Tell the session an ended run can be forgotten."
   @spec release(Arbiter.Worker.Executor.handle()) :: :ok
   def release({:remote, {node_id, run, _ref}}) do

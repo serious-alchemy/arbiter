@@ -494,6 +494,52 @@ defmodule Arbiter.Nodes.SessionTest do
     end
   end
 
+  describe "a run's owner going away" do
+    setup %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      task =
+        Task.async(fn -> Session.assign(pid, "run1", %{"run" => "run1"}, owner, []) end)
+
+      assert_receive {:node_session, {:push, "assign", %{"run" => "run1"}}}
+      Session.node_event(pid, "run.ready", %{"run" => "run1"})
+      assert {:ok, _handle} = Task.await(task)
+      %{pid: pid, owner: owner}
+    end
+
+    defp kill!(owner) do
+      ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^owner, _}
+    end
+
+    test "an owner that dies has its run cancelled on the node", %{pid: pid, owner: owner} do
+      kill!(owner)
+      _ = Session.snapshot(pid)
+
+      assert_receive {:node_session,
+                      {:push, "cancel", %{"run" => "run1", "reason" => "owner_down"}}}
+    end
+
+    test "an owner that abandoned the run first leaves it running on the node", %{
+      pid: pid,
+      owner: owner
+    } do
+      assert :ok = Session.abandon_run(pid, "run1")
+      kill!(owner)
+      _ = Session.snapshot(pid)
+
+      refute_received {:node_session, {:push, "cancel", _}}
+      assert Session.run_live?(pid, "run1")
+
+      # the run ending afterwards has no owner to tell, and breaks nothing
+      Session.node_event(pid, "exit", %{"run" => "run1", "status" => 0, "size" => 0})
+      _ = Session.snapshot(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
   describe "restart recovery (RW12)" do
     @ctx %{home: "/h", branch: "arbiter/b", base: "main", seeded_paths: [], config_dir: "/c"}
 

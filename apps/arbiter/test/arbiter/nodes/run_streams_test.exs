@@ -111,6 +111,15 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert S.reattach(t) == []
     end
 
+    test "an abandoned run has no owner to send to, and its owner's death owns nothing" do
+      owner = self()
+      {t, _} = S.ready(table(), "r1")
+      t = S.abandon(t, "r1")
+
+      assert S.owned_by(t, owner) == []
+      assert {:ok, %{owner: nil, cancel?: false}} = S.fetch(t, "r1")
+    end
+
     test "a lost node ends every live run, flagged, so no worker waits forever" do
       owner = self()
       {t, _} = S.ready(table(), "r1")
