@@ -38,7 +38,8 @@ defmodule ArbiterWeb.NodePairingTest do
     |> Phoenix.ConnTest.dispatch(@endpoint, :post, path, Jason.encode!(body))
   end
 
-  defp pair(body \\ %{"hostname" => "laptop"}, opts \\ []), do: post_json("/nodes/pair", body, opts)
+  defp pair(body \\ %{"hostname" => "laptop"}, opts \\ []),
+    do: post_json("/nodes/pair", body, opts)
 
   defp pair!(body \\ %{"hostname" => "laptop"}) do
     conn = pair(body)
@@ -167,7 +168,11 @@ defmodule ArbiterWeb.NodePairingTest do
       resp = pair!(%{"hostname" => "laptop", "name" => "box-2"})
       {:ok, _} = Pairing.approve(resp["id"], %{}, @operator)
 
-      conn = post_json("/nodes/pair/poll", %{"id" => resp["id"], "secret" => resp["secret"]}, accept: "text/plain")
+      conn =
+        post_json("/nodes/pair/poll", %{"id" => resp["id"], "secret" => resp["secret"]},
+          accept: "text/plain"
+        )
+
       assert conn.status == 200
       assert conn.resp_body =~ ~r/^credential=arbn_/m
       assert conn.resp_body =~ ~r/^name=box-2$/m
@@ -187,7 +192,9 @@ defmodule ArbiterWeb.NodePairingTest do
       resp = pair!()
       {:ok, _} = Pairing.approve(resp["id"], %{}, @operator)
 
-      Arbiter.Repo.query!("UPDATE pairing_requests SET expires_at = '2000-01-01T00:00:00.000000Z'")
+      Arbiter.Repo.query!(
+        "UPDATE pairing_requests SET expires_at = '2000-01-01T00:00:00.000000Z'"
+      )
 
       conn = poll(resp)
       assert conn.status == 410

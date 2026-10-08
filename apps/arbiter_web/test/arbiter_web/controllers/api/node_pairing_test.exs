@@ -43,7 +43,9 @@ defmodule ArbiterWeb.Api.NodePairingTest do
     end
 
     test "is empty when nothing is pending" do
-      assert json_response(get(operator_conn(), "/api/nodes/pairings"), 200) == %{"pairings" => []}
+      assert json_response(get(operator_conn(), "/api/nodes/pairings"), 200) == %{
+               "pairings" => []
+             }
     end
 
     test "a coordinator session without operator proof is forbidden" do

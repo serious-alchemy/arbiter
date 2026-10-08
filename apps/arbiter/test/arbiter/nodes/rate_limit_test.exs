@@ -13,7 +13,8 @@ defmodule Arbiter.Nodes.RateLimitTest do
 
   describe ":pair" do
     test "allows 5 pairing requests per source per 10 minutes", %{server: s} do
-      for _ <- 1..5, do: assert(:ok = RateLimit.check(:pair, "100.64.0.1", server: s, now_ms: @t0))
+      for _ <- 1..5,
+          do: assert(:ok = RateLimit.check(:pair, "100.64.0.1", server: s, now_ms: @t0))
 
       assert {:error, {:rate_limited, retry}} =
                RateLimit.check(:pair, "100.64.0.1", server: s, now_ms: @t0)
@@ -44,7 +45,6 @@ defmodule Arbiter.Nodes.RateLimitTest do
   end
 
   describe ":enroll" do
-
     test "allows 10 attempts a minute globally, then 429s with a Retry-After", %{server: s} do
       for _ <- 1..10,
           do: assert(:ok = RateLimit.check(:enroll, "100.64.0.1", server: s, now_ms: @t0))

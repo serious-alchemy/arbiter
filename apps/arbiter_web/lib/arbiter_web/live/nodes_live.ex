@@ -43,7 +43,7 @@ defmodule ArbiterWeb.NodesLive do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{JoinScript, Overview, RateLimit}
+  alias Arbiter.Nodes.{Credentials, JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Domain
@@ -51,7 +51,15 @@ defmodule ArbiterWeb.NodesLive do
 
   @refresh_ms 10_000
   # What `Arbiter.Nodes.Session` and `Arbiter.Nodes` broadcast on the topic.
-  @node_events [:node_state, :node_connection, :node_draining, :node_lost, :node_revoked]
+  @node_events [
+    :node_state,
+    :node_connection,
+    :node_draining,
+    :node_lost,
+    :node_revoked,
+    :pairing_requested,
+    :pairing_resolved
+  ]
   @tick_ms 1_000
 
   @impl true
@@ -72,6 +80,7 @@ defmodule ArbiterWeb.NodesLive do
      |> assign(:events, [])
      |> assign(:overview, nil)
      |> assign(:public_url, nil)
+     |> assign(:pairings, [])
      |> stream_configure(:nodes, dom_id: &"node-#{&1.id}")
      |> stream(:nodes, [])}
   end
@@ -100,6 +109,7 @@ defmodule ArbiterWeb.NodesLive do
     socket
     |> assign(:overview, overview)
     |> assign(:public_url, Settings.nodes_public_url())
+    |> assign(:pairings, Pairing.list_pending())
     |> assign(:node, node)
     |> assign(:node_row, node && Enum.find(overview.nodes, &(&1.id == node.id)))
     |> assign(:events, if(node, do: Enum.reverse(Nodes.events(node_id: node.id)), else: []))
@@ -181,6 +191,38 @@ defmodule ArbiterWeb.NodesLive do
     end
   end
 
+  def handle_event("approve_pairing", %{"id" => id} = params, socket) do
+    with {:ok, attrs} <- pairing_attrs(params),
+         {:ok, _} <- Pairing.approve(id, attrs, actor()) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Approved. The node collects its credential in a few seconds.")
+       |> refresh()}
+    else
+      {:error, message} when is_binary(message) ->
+        {:noreply, put_flash(socket, :error, message)}
+
+      {:error, :invalid_name} ->
+        {:noreply, put_flash(socket, :error, name_message())}
+
+      {:error, :name_taken} ->
+        {:noreply, put_flash(socket, :error, "A node with that name already exists.")}
+
+      {:error, _} ->
+        {:noreply, socket |> put_flash(:error, "That request is no longer pending.") |> refresh()}
+    end
+  end
+
+  def handle_event("deny_pairing", %{"id" => id}, socket) do
+    case Pairing.deny(id, actor()) do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Denied.") |> refresh()}
+
+      {:error, _} ->
+        {:noreply, socket |> put_flash(:error, "That request is no longer pending.") |> refresh()}
+    end
+  end
+
   def handle_event("drain", %{"id" => id}, socket),
     do: act(socket, id, &Nodes.drain/2, "draining")
 
@@ -244,6 +286,17 @@ defmodule ArbiterWeb.NodesLive do
           {:error, :revoked} -> {:noreply, put_flash(socket, :error, "#{node.name} is revoked.")}
           {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update #{node.name}.")}
         end
+    end
+  end
+
+  # The operator's edits to the node's proposal; a blank field keeps it.
+  defp pairing_attrs(params) do
+    with {:ok, max_workers} <-
+           optional_int(params["max_workers"], 1, "A cap must be a whole number, 1 or more.") do
+      {:ok,
+       %{}
+       |> then(&if(name = blank_to_nil(params["name"]), do: Map.put(&1, :name, name), else: &1))
+       |> then(&if(max_workers, do: Map.put(&1, :max_workers, max_workers), else: &1))}
     end
   end
 
@@ -464,6 +517,7 @@ defmodule ArbiterWeb.NodesLive do
             streams={@streams}
             public_url={@public_url}
             cap_errors={@cap_errors}
+            pairings={@pairings}
           />
         <% end %>
 
@@ -477,6 +531,7 @@ defmodule ArbiterWeb.NodesLive do
   attr :streams, :any, required: true
   attr :public_url, :string, default: nil
   attr :cap_errors, :map, required: true
+  attr :pairings, :list, default: []
 
   defp fleet(assigns) do
     ~H"""
@@ -510,6 +565,8 @@ defmodule ArbiterWeb.NodesLive do
       (<code class="font-[family-name:var(--font-mono)]">arb settings set nodes.public_url https://…</code>)
       before adding a node: it is the address the join script and the agent dial.
     </div>
+
+    <.pairing_requests :if={@pairings != []} pairings={@pairings} />
 
     <div
       id="nodes-capacity-summary"
@@ -576,6 +633,83 @@ defmodule ArbiterWeb.NodesLive do
         </tbody>
       </table>
     </div>
+    """
+  end
+
+  # Nodes waiting for approval (`curl …/join | bash`). The code is not a
+  # secret; it binds the request on this page to the screen it was read from.
+  attr :pairings, :list, required: true
+
+  defp pairing_requests(assigns) do
+    ~H"""
+    <section
+      id="pairing-requests"
+      class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[var(--arb-panel)] p-3 space-y-3"
+    >
+      <div>
+        <h2 class="m-0 text-[13px] font-semibold text-[var(--text-title)]">
+          Nodes waiting for approval
+        </h2>
+        <p class="m-0 mt-0.5 text-[12px] text-[var(--text-secondary)]">
+          Approving hands the node this install's provider credentials. Approve only a code
+          you can see on a machine you recognise, and check the hostname and address match it.
+        </p>
+      </div>
+      <div
+        :for={p <- @pairings}
+        id={"pairing-#{p.id}"}
+        class="flex flex-wrap items-end gap-x-6 gap-y-3 border-t border-solid border-[var(--border-default)] pt-3"
+      >
+        <div class="space-y-1 min-w-[10rem]">
+          <div
+            data-role="code"
+            class="text-[22px] font-semibold tracking-[0.15em] font-[family-name:var(--font-mono)] text-[var(--text-title)]"
+          >
+            {Credentials.format_pairing_code(p.code)}
+          </div>
+          <div class="text-[12px] text-[var(--text-secondary)]">
+            <span data-role="hostname" class="font-medium">{p.hostname}</span>
+            from <span data-role="peer" class="font-[family-name:var(--font-mono)]">{p.peer}</span>
+          </div>
+        </div>
+        <.form
+          for={%{}}
+          id={"pairing-form-#{p.id}"}
+          phx-submit="approve_pairing"
+          class="flex flex-wrap items-end gap-3"
+        >
+          <input type="hidden" name="id" value={p.id} />
+          <Forms.input
+            name="name"
+            id={"pairing-name-#{p.id}"}
+            label="Name"
+            value={p.name}
+            placeholder={p.hostname}
+          />
+          <Forms.input
+            name="max_workers"
+            id={"pairing-max-workers-#{p.id}"}
+            label="Max workers"
+            hint="optional"
+            value={p.max_workers}
+            inputmode="numeric"
+          />
+          <Core.button id={"pairing-approve-#{p.id}"} type="submit" variant="primary" size="sm">
+            Approve
+          </Core.button>
+          <Core.button
+            id={"pairing-deny-#{p.id}"}
+            type="button"
+            variant="ghost"
+            size="sm"
+            phx-click="deny_pairing"
+            phx-value-id={p.id}
+          >
+            Deny
+          </Core.button>
+        </.form>
+      </div>
+    </section>
     """
   end
 
