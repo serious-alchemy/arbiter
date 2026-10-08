@@ -532,13 +532,15 @@ defmodule ArbiterWeb.Api.IssueController do
   Record the coordinator's answer to a gate escalation (bd-4qjl0q) — what
   `arb review resolve` wraps. Body: `decision` (`accept_as_is` / `amend` /
   `send_back` / `reject`) and `reasoning` (both required); optional `gate`,
-  `actor`, `round`, `fix_round_attempt`. Returns the recorded resolution (201).
+  `actor`, `round`, `fix_round_attempt`, `head_sha`. Returns the recorded
+  resolution (201). Only `accept_as_is` / `amend` permit a merge without a fresh
+  reviewer APPROVE; `send_back` means another review round follows.
   See `Arbiter.ReviewGate.Resolutions.record/1`.
   """
   def resolve(conn, %{"id" => id} = params) do
     attrs =
       params
-      |> Map.take(~w(decision reasoning gate round fix_round_attempt))
+      |> Map.take(~w(decision reasoning gate round fix_round_attempt head_sha))
       |> Map.put("actor", Params.actor_label(conn.assigns[:mcp_scope]) || "coordinator")
       |> Map.put("task_id", id)
 

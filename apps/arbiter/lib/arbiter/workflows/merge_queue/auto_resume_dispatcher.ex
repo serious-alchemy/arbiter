@@ -105,6 +105,10 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       no path back to review. bd-wjpxok / #26: `delta` (when local git could
       list it) names the unreviewed commits and files, so the page carries what
       the coordinator would otherwise reconstruct by hand.
+    * `{:review_not_approved, head, refusal}` — bd-651ine / #529. The ReviewGate's own
+      record refuses the merge (`Arbiter.ReviewGate.MergeAuthorization`: the latest
+      reviewer round did not approve and no `accept_as_is` / `amend` covers `head`)
+      and there is no path back to a review round.
   """
   @type give_up_reason ::
           :budget_exhausted
@@ -114,6 +118,8 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
           | {:stale_reviewed_sha, String.t(), String.t()}
           | {:stale_reviewed_sha, String.t(), String.t(),
              %{commits: [String.t()], files: [String.t()]}}
+          | {:review_not_approved, String.t() | nil,
+             Arbiter.ReviewGate.MergeAuthorization.refusal()}
 
   @doc """
   Page the coordinator that the Watchdog has stopped auto-resuming this task.
@@ -252,6 +258,21 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
 
   defp subject(task_id, attempts, {:stale_reviewed_sha, reviewed, head, _delta}),
     do: subject(task_id, attempts, {:stale_reviewed_sha, reviewed, head})
+
+  defp subject(task_id, _attempts, {:review_not_approved, head, _refusal}),
+    do: "#{task_id}: PR head #{short_sha(head)} has no reviewer APPROVE, not merged"
+
+  defp body(task_id, mr_ref, attempts, {:review_not_approved, head, refusal}) do
+    """
+    Task #{task_id}: MR #{mr_ref || "(unknown)"} was not merged — the ReviewGate's record
+    refuses head #{short_sha(head)}: #{Arbiter.ReviewGate.MergeAuthorization.describe(refusal)}.
+
+    The Watchdog has no path back to a review round (auto-resume budget: #{attempts}
+    attempt(s) used, or auto-resume is off). Resume the task so the ReviewGate reviews
+    the current head (`worker_resume #{task_id}`), or — if the work should ship as it
+    is — record `accept_as_is` / `amend` with `review_gate_resolve`.
+    """
+  end
 
   defp body(task_id, mr_ref, attempts, {:stale_reviewed_sha, reviewed, head}),
     do: stale_body(task_id, mr_ref, attempts, reviewed, head, nil)
