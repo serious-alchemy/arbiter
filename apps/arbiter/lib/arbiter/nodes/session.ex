@@ -37,7 +37,16 @@ defmodule Arbiter.Nodes.Session do
 
   ## Restart recovery and reaping (RW12)
 
-  A run is `known` to a node's `hello` iff this session holds it (§10.4); the rest the
+  A run is `known` to a node's `hello` iff this session holds it (§10.4). A run the
+  session does not hold whose persisted `worker_runs` row is live and names this node is
+  **`hold`** (bd-24o760): the hello can beat `Arbiter.Nodes.Recovery` (the boot sweep
+  runs while the endpoint comes up), so the verdict is read from the row, never from what
+  recovery has loaded, and the node is not told "unknown" for it. The agent leaves a held
+  run running (unattached, not quiesced) until `recover/4` asks for its work (the session
+  pushes `quiesce`, then `recover` once it is `retained`), or `hold_ms` (default 150 s,
+  above Recovery's 90 s budget) runs out and the session quiesces it like an unknown run;
+  each held run is quiesced once. Only agents advertising `caps["run_hold"]` are sent
+  `hold`. The rest the
   agent quiesces and reports `retained` (stored here, also read from `hello`'s
   `inventory.retained`). `recover/4` asks for a retained run's work and, while it
   lasts, lets the upload endpoints accept it (`checkout_context/2`); see

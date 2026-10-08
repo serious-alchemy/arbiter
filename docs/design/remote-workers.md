@@ -328,6 +328,8 @@ Reasons, in order of weight:
 
 **Revisit when:** deploys are frequent enough that long remote runs are repeatedly interrupted *and* resumption cost (not outage) dominates. The design leaves the door open: stdout is offset-addressed and acked, the run table is on the node, `hello` already reports live runs.
 
+**Hello before Recovery (bd-24o760).** The node's `hello` can arrive before `Nodes.Recovery` has registered anything. The session therefore answers from the persisted `worker_runs` row: a run the session holds is `known`; a run with a live row naming this node is `hold` (the agent keeps it running, unattached); anything else is `unknown`. `Recovery`'s `recover` turns a hold into a `quiesce` push, then the usual `retained` → `recover` → `recovered`; if nobody asks within `hold_ms` (150 s) the session quiesces it itself, once. So the agent is never told "unknown run" for a run with a live row on its node, and collect-then-resume-local runs exactly once. Re-attaching the run to a new Worker is still not done (the Worker adoption in item 2 above).
+
 **What a restart does instead (one path for graceful and hard):**
 * Graceful stop: `Worker.terminate/2` (`worker.ex:8049`) sends `cancel{reason: "server shutdown", collect: false}` and stamps the run interrupted ("server shutdown") exactly as today. No upload is attempted inside the terminate budget.
 * Hard kill or crash: nothing is sent; the sockets die with the BEAM.

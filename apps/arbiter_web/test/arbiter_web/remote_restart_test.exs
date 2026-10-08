@@ -445,6 +445,37 @@ defmodule ArbiterWeb.RemoteRestartTest do
       assert Runs.run_ids() == []
     end
 
+    test "a held run nobody asks for is quiesced when the hold runs out, and collected once", ctx do
+      put_env_restoring(:arbiter_web, :node_session_opts, tick_ms: :infinity, hold_ms: 200)
+      row = run_row!(ctx.node, "rr4")
+      id = row.id
+      StubPodman.write_mode(ctx.stub, "hang")
+      assert {:ok, prepared} = place(ctx, id)
+      assert {:ok, handle} = Executor.open(prepared)
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+
+      restart_primary!()
+
+      # the hold runs out with no Recovery: the agent quiesces and retains the work
+      assert_eventually(fn -> match?([%{}], Retained.list(ctx.agent_config)) end)
+      assert calls(ctx.stub) =~ "rm --force --ignore --time 0 arb-#{id}"
+
+      # a late Recovery still collects it, exactly once
+      run_ctx = context(ctx)
+
+      assert {:ok, %{^id => :collected}} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 20_000,
+                 total_timeout_ms: 30_000,
+                 context_fun: fn %Run{id: ^id} -> {:ok, run_ctx} end
+               )
+
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "edited by the run\n"
+      assert Retained.list(ctx.agent_config) == []
+      assert Runs.run_ids() == []
+    end
+
     test "a run with no live row on the node is still told it is unknown and quiesced", ctx do
       id = Ecto.UUID.generate()
       StubPodman.write_mode(ctx.stub, "hang")

@@ -1076,6 +1076,52 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert Executor.live?(handle) == false
     end
 
+    # bd-24o760: the agent's hello can beat Recovery (the boot sweep runs while the endpoint
+    # comes up). The primary answers from the persisted row: the real container is not
+    # quiesced ("unknown run") while it waits, and Recovery then collects it, once.
+    test "an agent that reconnects before Recovery has loaded keeps the live run until it is collected",
+         ctx do
+      row = run_row!(ctx.node, "rr5")
+      id = row.id
+
+      command = ~S"""
+      echo "held, then collected" > /work/tree/edited.txt
+      echo up
+      sleep 600
+      """
+
+      handle =
+        open!(ctx, spec(ctx, id, command, checkout_spec()), checkout: checkout_context(ctx))
+
+      assert_receive {^handle, {:data, {:eol, "up"}}}, 60_000
+      restart_primary!(ctx)
+
+      # the real agent reconnects and says hello before anything asks for the run
+      assert_eventually(fn ->
+        with pid when is_pid(pid) <- Registry.lookup(ctx.node.id),
+             do: :sys.get_state(pid).channel != nil
+      end)
+
+      _ = :sys.get_state(Registry.lookup(ctx.node.id))
+      assert container_exists?(ctx, "arb-#{id}")
+      refute RealAgent.log_tail(ctx.agent, 500) =~ "does not know run #{id}"
+
+      run_ctx = checkout_context(ctx)
+
+      assert {:ok, report} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 90_000,
+                 total_timeout_ms: 120_000,
+                 context_fun: fn %Run{id: ^id} -> {:ok, run_ctx} end
+               ),
+             "recovery failed; agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      assert report == %{id => :collected}
+      refute container_exists?(ctx, "arb-#{id}")
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "held, then collected\n"
+    end
+
     # bd-1dzyhb: the cases above give the run to the test process and rebuild the primary's
     # tables by hand, which is why they never went through a Worker's shutdown. This one
     # does: a real Worker owns the run, the application stops it, and the node keeps
