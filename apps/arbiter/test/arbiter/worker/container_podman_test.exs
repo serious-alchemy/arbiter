@@ -172,4 +172,43 @@ defmodule Arbiter.Worker.ContainerPodmanTest do
     assert {:ok, {_, rc}} = run.([])
     assert rc != 0
   end
+
+  # bd-4pxt2i: the REAL host `arb` escript, mounted as the spec builds it, runs
+  # in the Arbiter beam image (an escript needs erl, which plain debian lacks).
+  # Skipped when this host has no `arb` or no beam image.
+  test "the real host arb resolves and answers --version in the beam image", ctx do
+    arb = System.find_executable("arb")
+
+    image =
+      with {out, 0} <- System.cmd("podman", ["images", "--format", "{{.Repository}}:{{.Tag}}"]),
+           [img | _] <-
+             String.split(out, "\n", trim: true) |> Enum.filter(&(&1 =~ "arbiter-dev/beam-")) do
+        img
+      else
+        _ -> nil
+      end
+
+    if arb && image do
+      bridge = Path.join(ctx.dir, "bridge.sock")
+      File.write!(bridge, "")
+
+      {:ok, {out, rc}} =
+        Container.run(
+          ["sh", "-c", "command -v arb && arb --version"],
+          opts(ctx,
+            image: image,
+            cli_mounts: [{Path.expand(arb), "/opt/arbiter/cli/arb"}],
+            # A bridge (as every real run has) disables SELinux relabelling,
+            # without which the host's home-labelled arb is unreadable.
+            bridges: [bridge],
+            env: [{"PATH", "/usr/local/bin:/usr/bin:/bin"}]
+          )
+        )
+
+      assert rc == 0, out
+      assert out =~ "/opt/arbiter/cli/arb"
+    else
+      IO.puts("skipped: no host arb or no local arbiter-dev/beam image")
+    end
+  end
 end
