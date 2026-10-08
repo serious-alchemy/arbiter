@@ -341,6 +341,7 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
 
     test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
       rig = rig(ctx, "feature/ci-mcp")
+      put_app_env(:arbiter, Arbiter.MCP, inject_config: true)
       File.rm(Path.join(rig.wt, ".mcp.json"))
 
       state = %{
