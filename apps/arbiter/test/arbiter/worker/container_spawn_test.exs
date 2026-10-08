@@ -270,6 +270,44 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
     end
 
+    test "falls back to the installed arb when none is on PATH", ctx do
+      installed = Path.join(ctx.dir, "installed-arb")
+      File.write!(installed, "#!/bin/sh\n")
+
+      find = fn
+        "claude" -> ctx.opts[:claude_path]
+        _ -> nil
+      end
+
+      opts =
+        ctx.opts
+        |> Keyword.delete(:arb_path)
+        |> Keyword.merge(find_executable: find, installed_arb_path: installed)
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+
+      assert {resolved, "/opt/arbiter/cli/arb"} =
+               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
+
+      assert Path.basename(resolved) == "installed-arb"
+    end
+
+    test "a missing installed arb yields no arb mount", ctx do
+      opts =
+        ctx.opts
+        |> Keyword.delete(:arb_path)
+        |> Keyword.merge(
+          find_executable: fn
+            "claude" -> ctx.opts[:claude_path]
+            _ -> nil
+          end,
+          installed_arb_path: Path.join(ctx.dir, "nope")
+        )
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
+    end
+
     test "needs the run's temp dir", ctx do
       assert {:error, :no_run_tmp_dir} =
                ContainerSpawn.prepare(Keyword.delete(ctx.opts, :tmp_dir))

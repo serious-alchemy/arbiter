@@ -149,4 +149,27 @@ defmodule Arbiter.Worker.ContainerPodmanTest do
     Container.reset()
     assert Container.status() == :ok
   end
+
+  # bd-4pxt2i: a mounted `arb` resolves on the container PATH.
+  test "a mounted arb resolves with command -v and runs, with a host-style PATH", ctx do
+    stub = Path.join(ctx.dir, "arb-stub")
+    File.write!(stub, "#!/bin/sh\necho \"arb 0.0.0-stub\"\n")
+    File.chmod!(stub, 0o755)
+
+    run = fn extra ->
+      Container.run(
+        ["sh", "-c", "command -v arb && arb --version"],
+        opts(ctx, [cli_mounts: [{stub, "/opt/arbiter/cli/arb"}]] ++ extra)
+      )
+    end
+
+    assert {:ok, {out, 0}} = run.(env: [{"PATH", "/usr/local/bin:/usr/bin:/bin"}])
+    assert out =~ "/opt/arbiter/cli/arb"
+    assert out =~ "arb 0.0.0-stub"
+
+    # No PATH in the spec: the image's own PATH is left alone (the Arbiter base
+    # image carries /opt/arbiter/cli; plain debian does not).
+    assert {:ok, {_, rc}} = run.([])
+    assert rc != 0
+  end
 end

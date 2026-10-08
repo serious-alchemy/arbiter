@@ -428,7 +428,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # The provider CLI and `arb` are mounted from the host, so the image carries
   # no CLI that can drift from the one Arbiter probed. The provider CLI is
   # mandatory; a host with no `arb` on PATH still gets a worker, minus the CLI.
-  defp cli_mounts(provider, opts) do
+  @doc false
+  def cli_mounts(provider, opts) do
     find = Keyword.get(opts, :find_executable, &System.find_executable/1)
 
     with {:ok, provider_mounts} <- provider_mounts(provider, opts, find) do
@@ -449,19 +450,26 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   # The coordinator's own PATH need not carry `arb` (a systemd service); fall
-  # back to where self-deploy installs it. Skipped when a test injects
-  # `:find_executable`, so the host's home never leaks into a spec.
+  # back to where self-deploy installs it (`:installed_arb_path` overrides, for
+  # tests; tests injecting `:find_executable` otherwise get no fallback so the
+  # host's home never leaks into a spec).
   defp installed_arb(opts) do
-    if Keyword.has_key?(opts, :find_executable) do
-      nil
-    else
-      path =
-        case System.get_env("ARB_INSTALL_BIN") do
-          p when is_binary(p) and p != "" -> Path.expand(p)
-          _ -> Path.join(System.user_home!(), ".local/bin/arb")
-        end
+    path =
+      case Keyword.fetch(opts, :installed_arb_path) do
+        {:ok, p} ->
+          p
 
-      if File.regular?(path), do: path
+        :error ->
+          if Keyword.has_key?(opts, :find_executable), do: nil, else: default_installed_arb()
+      end
+
+    if is_binary(path) and File.regular?(path), do: path
+  end
+
+  defp default_installed_arb do
+    case System.get_env("ARB_INSTALL_BIN") do
+      p when is_binary(p) and p != "" -> Path.expand(p)
+      _ -> Path.join(System.user_home!(), ".local/bin/arb")
     end
   end
 

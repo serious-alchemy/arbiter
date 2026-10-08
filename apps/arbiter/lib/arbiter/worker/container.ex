@@ -269,22 +269,24 @@ defmodule Arbiter.Worker.Container do
       Enum.flat_map(literal, fn {k, v} -> ["-e", "#{k}=#{v}"] end)
   end
 
-  # The mounted CLIs live in `@cli_dir`; the spec puts it on PATH itself rather
-  # than trusting the image (a repo-supplied Containerfile need not set it).
+  # The mounted CLIs live in `@cli_dir`. The image's own PATH already has it
+  # (the base image prepends it, and a repo Containerfile `FROM ${ARBITER_BASE}`
+  # keeps its additions), so with no PATH in the spec nothing is emitted. An
+  # explicit PATH (the local host-PATH case) would shadow the image's, so the
+  # dir is prepended to it.
   @cli_dir "/opt/arbiter/cli"
-  @default_path "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
   defp cli_path_env(env, []), do: env
 
   defp cli_path_env(env, _cli_mounts) do
-    {path, rest} =
-      case List.keytake(env, "PATH", 0) do
-        {{_, p}, rest} -> {p, rest}
-        nil -> {@default_path, env}
-      end
+    case List.keytake(env, "PATH", 0) do
+      {{_, path}, rest} ->
+        on_path = @cli_dir in String.split(path, ":")
+        rest ++ [{"PATH", if(on_path, do: path, else: @cli_dir <> ":" <> path)}]
 
-    on_path = @cli_dir in String.split(path, ":")
-    rest ++ [{"PATH", if(on_path, do: path, else: @cli_dir <> ":" <> path)}]
+      nil ->
+        env
+    end
   end
 
   # -- Sandbox.wrap/2 ----------------------------------------------------------

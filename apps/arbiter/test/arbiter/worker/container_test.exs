@@ -206,12 +206,11 @@ defmodule Arbiter.Worker.ContainerTest do
       assert "/home/u/.local/share/claude/2.1:/opt/arbiter/cli/claude:ro" in pairs(argv, "-v")
     end
 
-    # bd-4pxt2i: a repo Containerfile need not set PATH, so the spec does.
-    test "cli_mounts put /opt/arbiter/cli first on the container PATH" do
+    # bd-4pxt2i: with no PATH in the spec the image's own PATH (which has the
+    # cli dir) stays; emitting a default would drop a repo Containerfile's additions.
+    test "cli_mounts without an explicit PATH leave the image PATH alone" do
       argv = argv(%{cli_mounts: [{"/home/u/arb", "/opt/arbiter/cli/arb"}]})
-      [path] = for "PATH=" <> value <- pairs(argv, "-e"), do: value
-      assert String.starts_with?(path, "/opt/arbiter/cli:")
-      assert path =~ "/usr/local/bin"
+      refute Enum.any?(pairs(argv, "-e"), &String.starts_with?(&1, "PATH="))
     end
 
     test "an explicit PATH gains the cli dir once; no cli_mounts leaves PATH alone" do
