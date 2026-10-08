@@ -17,9 +17,26 @@ defmodule ArbiterWeb.BoardLive do
     * **Blocked** — `waiting on <ids>`, its unsatisfied gating blockers;
     * **Ready** — the scheduler's reason: `next up`, `N ahead in queue`, or a
       hold (slot, quota, paused, conflict, file overlap). A hold reads
-      `held — …` here, because *blocked* is the column next door;
+      `held — …` here, because *blocked* is the column next door. A hold on
+      capacity wears one short badge — *Waiting for capacity* — and a quota
+      hold, a paused provider and a paused scheduler wear their own; the
+      full plain-English reason (which limit, how full, what is holding it,
+      when it clears) is in the badge's hover / focus / tap popup, with the
+      scheduler's own phrase kept as a "details" line
+      (`Arbiter.Board.CapacityExplainer`, bd-5fl9sx);
     * **In progress** and **Merging** — the computed `step`;
     * **Closed** — the `close_reason` (completed / won't do / duplicate).
+
+  ## The slot cap, explained
+
+  The toolbar's cap figure opens a popup that lists every input to the cap
+  (machine capacity, the install-wide limit, the workspace setting, where the
+  workspace's work may run, the provider account), marks the one that is
+  binding, lists the tickets using the slots — those parked with no agent
+  included — and says which command changes each. It is computed from the same
+  terms the scheduler plans with (`Arbiter.Board.Snapshot.capacity_terms/3`);
+  nothing on the page edits the cap. Capacity is set per machine
+  (`arb node set <node> --max-workers N`) and per account.
 
   ## Attention is an overlay, not a column
 
@@ -71,6 +88,7 @@ defmodule ArbiterWeb.BoardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Board.CapacityExplainer
   alias Arbiter.Board.Snapshot
   alias Arbiter.Settings
   alias Arbiter.Tasks.EdgeGate
@@ -121,7 +139,8 @@ defmodule ArbiterWeb.BoardLive do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Autopilot.topic())
-      # The concurrency cap is also editable on /settings, REST and the CLI.
+      # The concurrency cap is edited on /settings, REST and the CLI; the board
+      # only shows (and explains) it.
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
       # System alerts and attention changes are announced on the event stream
       # (`inbox` topic), not the tasks topic — the global copy carries every
@@ -155,8 +174,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
-      |> assign(:system_cap, nil)
-      |> assign(:system_cap_override?, false)
+      |> assign(:explain, %{cap: nil, holds: %{}})
       |> assign(:board_loaded?, false)
       |> assign(:board_error, nil)
       |> assign(:board_loading?, false)
@@ -225,8 +243,7 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:paused_providers, loaded.paused_providers)
     |> assign(:local_cap_zero?, loaded.local_cap_zero?)
     |> assign(:scheduler_running, loaded.scheduler_running)
-    |> assign(:system_cap, loaded.system_cap)
-    |> assign(:system_cap_override?, loaded.system_cap_override?)
+    |> assign(:explain, loaded.explain)
     |> assign(:workspaces, loaded.workspaces)
     |> assign(:now, loaded.board.now)
     |> assign(:board_loaded?, true)
@@ -301,22 +318,6 @@ defmodule ArbiterWeb.BoardLive do
 
       _ ->
         {:noreply, socket}
-    end
-  end
-
-  # ---- the install-wide concurrency cap ---------------------------------------
-
-  # A blank value clears the override (back to the app-env / built-in default);
-  # anything but a positive whole number is refused before the setter sees it.
-  # The parsing and saving are `ArbiterWeb.InstallationSettings`', shared with
-  # /settings.
-  def handle_event("set_system_cap", params, socket) do
-    case InstallationSettings.save_int("conductor_system_max_concurrent", params["max"]) do
-      {:ok, _} ->
-        {:noreply, refresh_board(socket)}
-
-      {:error, message} ->
-        {:noreply, put_flash(socket, :error, "Scheduler concurrency: #{message}")}
     end
   end
 
@@ -699,9 +700,16 @@ defmodule ArbiterWeb.BoardLive do
       local_cap_zero?: local_cap_zero?(),
       scheduler_running: running?,
       workspaces: workspaces,
-      system_cap: Snapshot.system_max_concurrent(),
-      system_cap_override?: is_integer(Settings.conductor_system_max_concurrent())
+      explain: explain(board)
     }
+  end
+
+  # The explanation is presentation: a read of it that fails leaves the board
+  # as it was, with the figures and no popups.
+  defp explain(board) do
+    CapacityExplainer.explain(board)
+  rescue
+    _ -> %{cap: nil, holds: %{}}
   end
 
   # RW8: the primary's own worker cap is overridden to 0 — nothing runs on this
@@ -1020,9 +1028,14 @@ defmodule ArbiterWeb.BoardLive do
               <span
                 :if={@board_loaded?}
                 id="board-slots"
-                class="hidden sm:inline text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+                class="inline-flex items-center gap-1 text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
               >
-                agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of {@board.slots_total} · {@board.slots_free} slots free
+                <span class="hidden sm:inline">
+                  agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of
+                </span>
+                <span class="sm:hidden">{slots_used(@board)}/</span>
+                <.slot_cap board={@board} cap={@explain.cap} />
+                <span class="hidden sm:inline">· {@board.slots_free} slots free</span>
               </span>
               <span
                 :if={not @board_loaded?}
@@ -1030,48 +1043,6 @@ defmodule ArbiterWeb.BoardLive do
                 class="hidden sm:inline-block w-[260px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse"
               >
               </span>
-
-              <form
-                :if={@board_loaded?}
-                id="board-concurrency-form"
-                phx-submit="set_system_cap"
-                class="hidden sm:flex items-center gap-1.5"
-              >
-                <span
-                  id="board-concurrency"
-                  data-override={to_string(@system_cap_override?)}
-                  title="Install-wide scheduler concurrency cap. Leave blank to use the default."
-                  class="flex items-center gap-1.5 text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
-                >
-                  <label for="board-concurrency-input">max concurrent</label>
-                  <input
-                    id="board-concurrency-input"
-                    name="max"
-                    type="text"
-                    inputmode="numeric"
-                    autocomplete="off"
-                    value={if(@system_cap_override?, do: @system_cap, else: "")}
-                    placeholder={to_string(@system_cap)}
-                    class="w-12 px-1.5 py-[2px] rounded-[var(--radius-chip)] border border-solid border-[var(--border-default)] bg-transparent text-[11px] text-[var(--text-primary)]"
-                  />
-                  <span :if={not @system_cap_override?}>(default)</span>
-                  <button
-                    id="board-concurrency-save"
-                    type="submit"
-                    class="cursor-pointer px-1.5 py-[2px] rounded-[var(--radius-chip)] border border-solid border-[var(--border-default)] text-[10px] uppercase tracking-[0.08em] hover:text-[var(--text-primary)] transition-colors"
-                  >
-                    save
-                  </button>
-                </span>
-                <span
-                  :if={@board.slots_total < @system_cap}
-                  id="board-concurrency-limited"
-                  title="A workspace or provider-account cap is lower than the scheduler cap."
-                  class="text-[10px] text-[var(--arb-attention)] font-[family-name:var(--font-mono)]"
-                >
-                  board limited to {@board.slots_total} by workspace/account cap
-                </span>
-              </form>
 
               <.link
                 :if={@board_loaded? and @local_cap_zero?}
@@ -1359,7 +1330,7 @@ defmodule ArbiterWeb.BoardLive do
                 class="contents"
                 phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.board_card card={card} column={column.key} now={@now} />
+                <.board_card card={card} column={column.key} now={@now} holds={@explain.holds} />
               </div>
 
               <.more
@@ -1526,6 +1497,7 @@ defmodule ArbiterWeb.BoardLive do
   attr(:card, :map, required: true)
   attr(:column, :string, required: true)
   attr(:now, :any, required: true)
+  attr(:holds, :map, default: %{}, doc: "ticket id => `CapacityExplainer` hold explanation")
 
   # One card, any column. What differs per column is read through the
   # `detail/2`, `activity/2`, `footer/3` and `accent/2` helpers above rather
@@ -1534,6 +1506,7 @@ defmodule ArbiterWeb.BoardLive do
     assigns =
       assign(assigns,
         detail: detail(assigns.column, assigns.card),
+        hold: hold_of(assigns.column, assigns.card, assigns.holds),
         activity: activity(assigns.column, assigns.card),
         activity_href: activity_href(assigns.column, assigns.card),
         footer: footer(assigns.column, assigns.card, assigns.now)
@@ -1588,7 +1561,10 @@ defmodule ArbiterWeb.BoardLive do
           </span>
         </span>
       </:status>
-      <:detail :if={@detail}>
+      <:detail :if={@hold}>
+        <.hold_badge card_id={@card.id} column={@column} hold={@hold} />
+      </:detail>
+      <:detail :if={@detail && !@hold}>
         <span
           data-detail={@column}
           data-step={@card[:step]}
@@ -1627,6 +1603,149 @@ defmodule ArbiterWeb.BoardLive do
         </span>
       </:actions>
     </.task_card>
+    """
+  end
+
+  # The explanation of the hold on a Ready card, or on a Blocked one the quota
+  # gate is holding; nothing for any other card.
+  defp hold_of(column, card, holds) when column in ["ready", "blocked"],
+    do: Map.get(holds, card.id)
+
+  defp hold_of(_column, _card, _holds), do: nil
+
+  attr(:card_id, :string, required: true)
+  attr(:column, :string, required: true)
+  attr(:hold, :map, required: true)
+
+  # A held card's one short badge; the reason, in words, opens on hover, focus
+  # or tap, with the scheduler's own phrase kept underneath as "details".
+  defp hold_badge(assigns) do
+    ~H"""
+    <.info_popup
+      id={"hold-#{@card_id}"}
+      label={"#{@hold.badge}: #{@card_id}"}
+      data-hold-kind={@hold.kind}
+    >
+      <:trigger>
+        <span
+          data-detail={@column}
+          data-hold-badge={@hold.kind}
+          class={[
+            "px-[6px] py-[1px] rounded-[var(--radius-chip)] border border-solid text-[10px] font-medium",
+            "font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] whitespace-nowrap",
+            hold_badge_class(@hold.kind)
+          ]}
+        >
+          {@hold.badge}
+        </span>
+      </:trigger>
+      <p class="m-0 text-[var(--text-primary)]" data-hold-summary>{@hold.summary}</p>
+      <p
+        :if={@hold.details}
+        class="m-0 text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] break-words"
+        data-hold-details
+      >
+        Details: {ready_reason(@hold.details)}
+      </p>
+    </.info_popup>
+    """
+  end
+
+  defp hold_badge_class(:capacity),
+    do:
+      "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)] text-[var(--arb-attention)]"
+
+  defp hold_badge_class(:scheduler_paused), do: hold_badge_class(:capacity)
+
+  defp hold_badge_class(_quota_auth_or_paused_provider),
+    do: "border-[var(--arb-fail-edge)] text-[var(--arb-fail-text)]"
+
+  attr(:board, :map, required: true)
+
+  attr(:cap, :map,
+    default: nil,
+    doc: "`CapacityExplainer.cap/1`, or nil when it could not be built"
+  )
+
+  # The toolbar's cap figure. With the explanation it is a button that opens a
+  # popup on hover, focus or tap; without it, just the number.
+  defp slot_cap(%{cap: nil} = assigns) do
+    ~H"""
+    <span id="board-slot-cap">{@board.slots_total}</span>
+    """
+  end
+
+  defp slot_cap(assigns) do
+    ~H"""
+    <.info_popup
+      id="board-slot-cap"
+      label={"Why the slot cap is #{@board.slots_total}"}
+      align="end"
+      trigger_class="px-[3px] underline decoration-dotted underline-offset-[3px] text-[var(--text-primary)] hover:text-[var(--text-title)]"
+      data-binding={@cap.binding}
+    >
+      <:trigger>
+        <span id="board-slot-cap-figure">{@board.slots_total}</span>
+      </:trigger>
+      <p id="board-slot-cap-headline" class="m-0 font-medium text-[var(--text-title)]">
+        {@cap.headline}
+      </p>
+      <p class="m-0">
+        {@cap.used} of {@cap.effective} slots in use, {@cap.free} free.
+      </p>
+      <ul id="board-slot-cap-limits" class="m-0 p-0 list-none flex flex-col gap-[6px]">
+        <li
+          :for={limit <- @cap.limits}
+          data-limit={limit.key}
+          data-binding={to_string(limit.binding?)}
+          class={[
+            "flex flex-col gap-[2px] pl-[8px] border-l-2 border-solid",
+            if(limit.binding?,
+              do: "border-[var(--arb-attention)]",
+              else: "border-[var(--border-default)]"
+            )
+          ]}
+        >
+          <span class={limit.binding? && "text-[var(--text-primary)]"}>
+            {limit.text}
+            <span
+              :if={limit.binding?}
+              class="ml-1 text-[10px] uppercase tracking-[0.06em] text-[var(--arb-attention)]"
+            >
+              limiting now
+            </span>
+          </span>
+          <span class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+            {String.replace(limit.change, "`", "")}
+          </span>
+        </li>
+      </ul>
+      <div id="board-slot-cap-users" class="flex flex-col gap-[4px]">
+        <p class="m-0 font-medium text-[var(--text-title)]">Using slots now</p>
+        <p :if={@cap.users == []} class="m-0">Nothing holds a slot.</p>
+        <ul :if={@cap.users != []} class="m-0 p-0 list-none flex flex-col gap-[3px]">
+          <li :for={user <- @cap.users} data-slot-user={user.id} data-state={user.state}>
+            <.link navigate={~p"/tasks/#{user.id}"} class="font-medium hover:underline">
+              {user.id}
+            </.link>
+            <span :if={user.title}>{user.title}</span>
+            <span class={[
+              "text-[10.5px]",
+              if(user.state == :parked,
+                do: "text-[var(--arb-attention)]",
+                else: "text-[var(--arb-live)]"
+              )
+            ]}>
+              {user.text}
+            </span>
+          </li>
+        </ul>
+        <p :if={@cap.parked > 0} id="board-slot-cap-parked" class="m-0 text-[10.5px]">
+          {@cap.parked} of these hold a slot with no agent running, so the board counts them as
+          full until their next round starts or they move on.
+        </p>
+      </div>
+    </.info_popup>
     """
   end
 

@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.CoreComponents.Core do
   @moduledoc """
   Core primitives from the operator-console design handoff: Button, Icon,
-  KeyHint, Toggle, Panel.
+  KeyHint, Toggle, Panel, InfoPopup.
 
   Colors and spacing are drawn from the `--arb-*`/semantic design tokens in
   `assets/css/app.css` via Tailwind arbitrary values (`bg-[var(--...)]`)
@@ -9,6 +9,8 @@ defmodule ArbiterWeb.CoreComponents.Core do
   implementation token-for-token.
   """
   use Phoenix.Component
+
+  alias Phoenix.LiveView.JS
 
   @doc """
   The console's button; every action that changes machine state is one of these.
@@ -280,6 +282,118 @@ defmodule ArbiterWeb.CoreComponents.Core do
       }
     </script>
     """
+  end
+
+  @doc """
+  A small explanation that opens on **hover, keyboard focus and tap**.
+
+  The trigger is a real `<button>` (focusable, Enter/Space) wrapping whatever
+  the `:trigger` slot holds — a figure, a badge. The panel is in the DOM
+  all along, so it is there for tests and `aria-controls`, and CSS decides
+  when it shows:
+
+    * hover — the pointer is over the trigger *or the panel* (so its text can
+      be selected and its links followed);
+    * keyboard focus — `:focus-visible` on the trigger; Escape dismisses it;
+    * tap / click — toggles `aria-expanded`, so touch needs no hover; a tap
+      outside closes it.
+
+  The client-side `JS` commands cost no round trip, and LiveView keeps the
+  attributes they set across server patches (a board refresh does not shut a
+  popup the operator is reading).
+
+  The panel hangs below the trigger (`align="start"` grows rightward from its
+  left edge, `"end"` leftward from its right edge). Put it inside a card that
+  navigates on click and the click stays here: the button carries its own
+  `phx-click`, which LiveView resolves ahead of an ancestor's.
+
+  ## Examples
+
+      <.info_popup id="cap-popup" label="Why the slot cap is 3">
+        <:trigger>3</:trigger>
+        Capacity 3 = this machine (3).
+      </.info_popup>
+  """
+  attr :id, :string, required: true
+  attr :label, :string, required: true, doc: "accessible name of the trigger"
+  attr :align, :string, values: ~w(start end), default: "start"
+  attr :class, :any, default: nil, doc: "classes on the wrapper"
+  attr :trigger_class, :any, default: nil
+  attr :panel_class, :any, default: nil
+  attr :rest, :global, doc: "attributes on the trigger button (data-*, etc.)"
+
+  slot :trigger, required: true
+  slot :inner_block, required: true, doc: "the panel's content"
+
+  def info_popup(assigns) do
+    ~H"""
+    <span
+      id={@id}
+      class={["group/pop relative inline-flex", @class]}
+      phx-click-away={close_info_popup(@id)}
+      phx-keydown={dismiss_info_popup(@id)}
+      phx-key="Escape"
+    >
+      <button
+        type="button"
+        id={"#{@id}-trigger"}
+        aria-label={@label}
+        aria-expanded="false"
+        aria-controls={"#{@id}-panel"}
+        phx-click={toggle_info_popup(@id)}
+        phx-focus={JS.remove_attribute("data-dismissed", to: "##{@id}")}
+        class={[
+          "inline-flex items-center cursor-pointer appearance-none bg-transparent border-0 p-0 m-0 text-left",
+          "focus-visible:outline-none focus-visible:shadow-[var(--ring-focus)] rounded-[var(--radius-chip)]",
+          @trigger_class
+        ]}
+        {@rest}
+      >
+        {render_slot(@trigger)}
+      </button>
+      <%!-- `pt` rather than a margin, so the pointer never crosses a dead gap on
+           its way from the trigger to the panel. --%>
+      <div
+        id={"#{@id}-panel"}
+        role="region"
+        aria-label={@label}
+        class={[
+          "hidden absolute top-full z-30 pt-[6px]",
+          "group-hover/pop:block group-has-[:focus-visible]/pop:block group-has-[[aria-expanded=true]]/pop:block",
+          "group-data-dismissed/pop:hidden!",
+          if(@align == "end", do: "right-0", else: "left-0")
+        ]}
+      >
+        <div class={[
+          "w-[340px] max-w-[calc(100vw-24px)] max-h-[70vh] overflow-y-auto p-[12px] flex flex-col gap-[8px]",
+          "rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)]",
+          "bg-[var(--surface-chrome)] shadow-[var(--shadow-float)]",
+          "text-[11.5px] leading-[1.5] font-normal normal-case tracking-normal",
+          "text-[var(--text-secondary)] cursor-auto",
+          @panel_class
+        ]}>
+          {render_slot(@inner_block)}
+        </div>
+      </div>
+    </span>
+    """
+  end
+
+  defp toggle_info_popup(id) do
+    JS.toggle_attribute({"aria-expanded", "true", "false"}, to: "##{id}-trigger")
+    |> JS.remove_attribute("data-dismissed", to: "##{id}")
+  end
+
+  defp close_info_popup(id),
+    do: JS.set_attribute({"aria-expanded", "false"}, to: "##{id}-trigger")
+
+  # Escape (pressed with focus on the trigger) hides it even while the pointer
+  # is over it, until the trigger is focused or tapped again. Bound to the
+  # wrapper, not the window, so an Escape elsewhere leaves every popup alone.
+  defp dismiss_info_popup(id) do
+    id
+    |> close_info_popup()
+    |> JS.set_attribute({"data-dismissed", "true"}, to: "##{id}")
   end
 
   @doc """

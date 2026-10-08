@@ -134,6 +134,7 @@ defmodule Arbiter.Board.Scheduler do
           id: String.t(),
           state: state(),
           reason: String.t(),
+          hold: Arbiter.Tasks.Lifecycle.Dispatchable.hold() | nil,
           card: card()
         }
 
@@ -244,21 +245,27 @@ defmodule Arbiter.Board.Scheduler do
 
       # Paused holds every otherwise-eligible card, not just the head.
       {:held, :paused} ->
-        {entry(card, :blocked, @paused_reason), bump(acc)}
+        {entry(card, :blocked, @paused_reason, :paused), bump(acc)}
 
       # Only the head of the queue carries a board-wide hold.
       {:held, :no_slot} ->
-        decide(card, no_slot_reason(board.slot_note), acc)
+        card |> decide(no_slot_reason(board.slot_note), acc) |> with_hold(:no_slot)
 
       {:held, {:quota, _} = hold} ->
-        decide(card, phrase(hold, acc.mutex), acc)
+        card |> decide(phrase(hold, acc.mutex), acc) |> with_hold(hold)
 
       # A card's own block never advances the queue position: the card behind
       # it is still next in line.
       {:held, hold} ->
-        {entry(card, :blocked, phrase(hold, acc.mutex)), acc}
+        {entry(card, :blocked, phrase(hold, acc.mutex), hold), acc}
     end
   end
+
+  # bd-5fl9sx: the structured hold rides on the entry beside its phrase, so a
+  # reader that wants to explain it never parses the phrase. A card that was
+  # queued behind the head is not held by it (`N ahead in queue`).
+  defp with_hold({%{state: :blocked} = entry, acc}, hold), do: {%{entry | hold: hold}, acc}
+  defp with_hold(result, _hold), do: result
 
   # A card handed to `plan/1` is a Ready candidate, so one that carries no
   # state of its own (a hand-built plan) reads as queued. `Arbiter.Board.Snapshot`
@@ -314,8 +321,8 @@ defmodule Arbiter.Board.Scheduler do
 
   defp ahead_reason(n), do: "#{n} ahead in queue"
 
-  defp entry(card, state, reason),
-    do: %{id: card.id, state: state, reason: reason, card: card}
+  defp entry(card, state, reason, hold \\ nil),
+    do: %{id: card.id, state: state, reason: reason, hold: hold, card: card}
 
   # The hold, as the card says it. The counterpart's state is the half of a
   # mutex reason the predicate cannot know: it answers *whether* the mutex
