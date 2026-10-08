@@ -881,6 +881,74 @@ defmodule Arbiter.Worker.DispatchTest do
       refute registered =~ result.worktree_path
     end
 
+    # bd-d0sgb6: the policy is read once per dispatch. The workspace says podman
+    # but the dispatch already holds a bwrap resolution (as if the config flipped
+    # after it was read): layout and spawn both follow the held one, so the spawn
+    # is not refused with `:not_a_private_clone`.
+    test "layout and spawn use the one policy the dispatch resolved, not a fresh read",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+
+      repo = seed_repo!(tmp, "flip-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "flip-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"flip/repo" => repo})
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "flipped", workspace_id: ws.id})
+      held = Arbiter.Agents.SecurityPolicy.resolve(nil, %{}, "flip/repo")
+      assert Arbiter.Agents.SecurityPolicy.sandbox_backend(held) != :podman
+
+      assert {:ok, %{worktree_path: path}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "flip/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false,
+                 resolved_policy: {"flip/repo", held}
+               )
+
+      refute Arbiter.Worker.PrivateClone.clone?(path)
+    end
+
+    test "a redispatch under podman replaces the linked worktree an earlier bwrap run left",
+         %{ws: ws, tmp: tmp} do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "was bwrap", workspace_id: ws.id})
+      repo = seed_repo!(tmp, "redispatch-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "redispatch-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"re/repo" => repo})
+
+      branch = BranchNamer.derive(task)
+      {:ok, old} = Worktree.create(repo, branch, "main")
+      refute Arbiter.Worker.PrivateClone.clone?(old)
+
+      assert {:ok, %{worktree_path: ^old}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "re/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["sleep", "2"]
+               )
+
+      assert Arbiter.Worker.PrivateClone.clone?(old)
+    end
+
     test "a default workspace still gets a linked worktree", %{ws: ws, tmp: tmp} do
       {:ok, task} = Ash.create(Issue, %{title: "plain work", workspace_id: ws.id})
       repo = seed_repo!(tmp, "plain-repo")

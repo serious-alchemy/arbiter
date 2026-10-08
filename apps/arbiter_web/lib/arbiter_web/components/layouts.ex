@@ -257,7 +257,11 @@ defmodule ArbiterWeb.Layouts do
           page while talking to a session is the whole reason the Side preset
           exists. --%>
     <main class="pl-[var(--nav-rail-page-inset)] pr-[var(--session-dock-page-inset)]">
-      <.update_notice update={@update} deploy={@deploy} />
+      <.update_notice
+        update={@update}
+        deploy={@deploy}
+        dismissed={dismissed_update(@update, @current_path)}
+      />
       {render_slot(@inner_block)}
     </main>
 
@@ -510,16 +514,18 @@ defmodule ArbiterWeb.Layouts do
   """
   attr :update, :map, required: true
   attr :deploy, :map, default: nil
+  attr :dismissed, :string, default: nil
 
   def update_notice(assigns) do
     assigns =
       assigns
+      |> assign(:update_visible?, update_visible?(assigns.update, assigns.dismissed))
       |> assign(:deploy_state, deploy_state(assigns.deploy))
       |> assign(:deploy_visible?, deploy_visible?(assigns.deploy))
 
     ~H"""
     <div
-      :if={@update.update_available?}
+      :if={@update_visible?}
       id="update-available"
       role="status"
       class="alert alert-info mx-4 mt-4 text-sm"
@@ -541,6 +547,24 @@ defmodule ArbiterWeb.Layouts do
           · deploy with <code id="update-deploy-command">arb server deploy</code>
         </p>
       </div>
+      <.form
+        for={%{}}
+        as={:update_dismiss}
+        id="update-dismiss-form"
+        action={~p"/release/update/dismiss"}
+        method="post"
+        class="shrink-0 order-last"
+      >
+        <button
+          type="submit"
+          id="update-dismiss-button"
+          aria-label={"Dismiss the update notice for " <> to_string(@update.latest)}
+          title="Dismiss until a newer version is available"
+          class="inline-flex items-center rounded-[var(--radius-field)] p-1 text-[var(--text-label)] cursor-pointer transition-colors duration-150 hover:text-[var(--text-title)]"
+        >
+          <.icon name="hero-x-mark" class="size-4" />
+        </button>
+      </.form>
       <.form
         :if={@deploy_state != "running"}
         for={%{}}
@@ -578,6 +602,23 @@ defmodule ArbiterWeb.Layouts do
     </div>
     """
   end
+
+  # Shown when an update is offered and the operator has not dismissed this
+  # version or a newer one (a lower `latest` than the dismissed tag stays hidden).
+  defp update_visible?(%{update_available?: true, latest: latest}, dismissed) do
+    is_nil(dismissed) or Arbiter.Release.UpdateCheck.newer?(latest, dismissed)
+  end
+
+  defp update_visible?(_, _), do: false
+
+  # The dismissal is cosmetic: `/about` always shows the notice, so the update
+  # and its details stay reachable from the UI.
+  # The setting is only read while an update is on offer, so the chrome of an
+  # up-to-date install still issues no DB query per render.
+  defp dismissed_update(%{update_available?: true}, current_path) when current_path != "/about",
+    do: Arbiter.Settings.dismissed_update_version()
+
+  defp dismissed_update(_update, _current_path), do: nil
 
   # "running" is only believed while the deploy's process is alive: a record
   # whose process died reads as an interrupted (failed) deploy.
