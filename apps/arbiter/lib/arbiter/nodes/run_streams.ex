@@ -219,6 +219,16 @@ defmodule Arbiter.Nodes.RunStreams do
   @spec drop(t(), String.t()) :: t()
   def drop(table, run), do: %{table | streams: Map.delete(table.streams, run)}
 
+  @doc """
+  The owner is leaving `run` to the node on purpose (the primary is shutting down):
+  nothing is sent to it from now on, and its death no longer cancels the run.
+  """
+  @spec abandon(t(), String.t()) :: t()
+  def abandon(table, run) do
+    {table, []} = update(table, run, fn stream -> {%{stream | owner: nil}, []} end)
+    table
+  end
+
   @doc "Every run owned by `owner`."
   @spec owned_by(t(), pid()) :: [String.t()]
   def owned_by(%__MODULE__{streams: streams}, owner),
