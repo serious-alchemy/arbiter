@@ -37,7 +37,16 @@ defmodule Arbiter.Nodes.Session do
 
   ## Restart recovery and reaping (RW12)
 
-  A run is `known` to a node's `hello` iff this session holds it (§10.4); the rest the
+  A run is `known` to a node's `hello` iff this session holds it (§10.4). A run the
+  session does not hold whose persisted `worker_runs` row is live and names this node is
+  **`hold`** (bd-24o760): the hello can beat `Arbiter.Nodes.Recovery` (the boot sweep
+  runs while the endpoint comes up), so the verdict is read from the row, never from what
+  recovery has loaded, and the node is not told "unknown" for it. The agent leaves a held
+  run running (unattached, not quiesced) until `recover/4` asks for its work (the session
+  pushes `quiesce`, then `recover` once it is `retained`), or `hold_ms` (default 150 s,
+  above Recovery's 90 s budget) runs out and the session quiesces it like an unknown run;
+  each held run is quiesced once. Only agents advertising `caps["run_hold"]` are sent
+  `hold`. The rest the
   agent quiesces and reports `retained` (stored here, also read from `hello`'s
   `inventory.retained`). `recover/4` asks for a retained run's work and, while it
   lasts, lets the upload endpoints accept it (`checkout_context/2`); see
@@ -69,6 +78,7 @@ defmodule Arbiter.Nodes.Session do
   @default_tick_ms 5_000
   @default_reap_interval_ms 10 * 60_000
   @default_prepare_timeout_ms 25 * 60_000
+  @default_hold_ms 150_000
 
   defstruct [
     :node_id,
@@ -101,6 +111,12 @@ defmodule Arbiter.Nodes.Session do
     # (`run => %{ctx, waiters, phase, checkout}`) and the periodic reap.
     retained: %{},
     recoveries: %{},
+    # bd-24o760: runs the agent lists that have a live row on this node but no stream here
+    # (`run => timer`): held, neither known nor quiesced, until Recovery asks for them or
+    # `hold_ms` runs out; `hold_expired` are the ones that ran out (told "unknown" next hello).
+    held: %{},
+    hold_expired: MapSet.new(),
+    hold_ms: @default_hold_ms,
     reap_interval_ms: :infinity
   ]
 
@@ -310,7 +326,8 @@ defmodule Arbiter.Nodes.Session do
       thresholds: Liveness.current(),
       allow_skew?: Keyword.get(opts, :allow_skew, false),
       last_hb: clock.(),
-      reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms)
+      reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms),
+      hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms)
     }
 
     {:ok, state |> schedule_tick() |> schedule_reap()}
@@ -324,14 +341,14 @@ defmodule Arbiter.Nodes.Session do
     # (§10.4). A live `worker_runs` row is not enough: after a primary restart the row
     # is still live but its Worker is gone, and the agent must quiesce the run rather
     # than reattach it.
-    verdicts =
-      params
-      |> hello_run_list()
-      |> Hello.run_ids()
-      |> Map.new(fn id ->
-        {id,
-         if(match?({:ok, _}, RunStreams.fetch(state.streams, id)), do: "known", else: "unknown")}
-      end)
+    #
+    # bd-24o760: a live row on THIS node with no stream here is a restart that Recovery has
+    # not got to yet (the hello can beat it): the verdict comes from the persisted row, so it
+    # is "hold", never "unknown". The agent leaves the run running and unattached; Recovery's
+    # `recover` quiesces it and takes its work, and `hold_ms` bounds the wait.
+    ids = params |> hello_run_list() |> Hello.run_ids()
+    state = release_gone_holds(state, ids)
+    {verdicts, state} = hello_verdicts(state, ids)
 
     # Runs we hold that the agent no longer has are over; cancels it may have
     # missed are asked again.
@@ -415,7 +432,8 @@ defmodule Arbiter.Nodes.Session do
       # The agent still has it, so it is being quiesced: asked for once it says retained.
       Map.has_key?(state.runs, run) ->
         recovery = %{ctx: ctx, waiters: [from], phase: :waiting, checkout: nil}
-        {:noreply, %{state | recoveries: Map.put(state.recoveries, run, recovery)}}
+        state = %{state | recoveries: Map.put(state.recoveries, run, recovery)}
+        {:noreply, quiesce_held(state, run)}
 
       true ->
         {:reply, {:error, :not_on_node}, state}
@@ -553,6 +571,21 @@ defmodule Arbiter.Nodes.Session do
     {:noreply, state}
   end
 
+  # A hold ran out with nobody asking for the run: it is quiesced like an unknown one.
+  def handle_info({:hold_expired, run}, state) do
+    if Map.has_key?(state.held, run) and not Map.has_key?(state.recoveries, run) do
+      state = %{
+        state
+        | held: Map.delete(state.held, run),
+          hold_expired: MapSet.put(state.hold_expired, run)
+      }
+
+      {:noreply, push_quiesce(state, run)}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info(:reap, state), do: {:noreply, state |> send_reap() |> schedule_reap()}
 
   def handle_info({:prepare_timeout, run}, state) do
@@ -621,6 +654,7 @@ defmodule Arbiter.Nodes.Session do
   defp node_event_apply(state, "retained", %{"run" => run} = report) do
     record(state, :retained, %{"run" => run, "report" => report})
     state = %{state | retained: Map.put(state.retained, run, report)}
+    state = forget_hold(state, run)
 
     case Map.fetch(state.recoveries, run) do
       {:ok, %{phase: :waiting, ctx: ctx, waiters: [from | _]}} ->
@@ -745,6 +779,79 @@ defmodule Arbiter.Nodes.Session do
     end
 
     %{state | channel: channel, channel_ref: Process.monitor(channel)}
+  end
+
+  defp hello_verdicts(state, ids) do
+    holds? = state.caps["run_hold"] != nil
+
+    Enum.reduce(ids, {%{}, state}, fn id, {verdicts, acc} ->
+      cond do
+        match?({:ok, _}, RunStreams.fetch(acc.streams, id)) ->
+          {Map.put(verdicts, id, "known"), acc}
+
+        Map.has_key?(acc.held, id) ->
+          {Map.put(verdicts, id, "hold"), acc}
+
+        holds? and not MapSet.member?(acc.hold_expired, id) and live_row_here?(acc, id) ->
+          {Map.put(verdicts, id, "hold"), hold(acc, id)}
+
+        true ->
+          {Map.put(verdicts, id, "unknown"), acc}
+      end
+    end)
+  end
+
+  # Whether `run` has a row in a live state that says it is on this node.
+  defp live_row_here?(state, run) do
+    case Ash.get(Arbiter.Workers.Run, run) do
+      {:ok, %{node_id: node_id, state: row_state}} ->
+        node_id == state.node_id and Arbiter.Workers.RunState.live?(row_state)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp hold(state, run) do
+    timer = Process.send_after(self(), {:hold_expired, run}, state.hold_ms)
+    %{state | held: Map.put(state.held, run, timer)}
+  end
+
+  # Holds for runs the agent no longer has are over.
+  defp release_gone_holds(state, ids) do
+    {gone, held} = Map.split_with(state.held, fn {run, _} -> run not in ids end)
+    Enum.each(gone, fn {_run, timer} -> Process.cancel_timer(timer) end)
+    %{state | held: held, hold_expired: MapSet.intersection(state.hold_expired, MapSet.new(ids))}
+  end
+
+  defp forget_hold(state, run) do
+    case Map.pop(state.held, run) do
+      {nil, _} ->
+        state
+
+      {timer, held} ->
+        Process.cancel_timer(timer)
+        %{state | held: held}
+    end
+  end
+
+  # Recovery wants a held run's work: the agent quiesces it and reports `retained`.
+  defp quiesce_held(state, run) do
+    case Map.pop(state.held, run) do
+      {nil, _} ->
+        state
+
+      {timer, held} ->
+        Process.cancel_timer(timer)
+        push_quiesce(%{state | held: held}, run)
+    end
+  end
+
+  defp push_quiesce(state, run) do
+    notify_channel(state, {:push, "quiesce", %{"run" => run}})
+    state
   end
 
   defp apply_hello(state, params) do

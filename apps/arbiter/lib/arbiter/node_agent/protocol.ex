@@ -41,7 +41,8 @@ defmodule Arbiter.NodeAgent.Protocol do
         "backend" => "podman",
         "image" => "build",
         "upgrade" => "tarball",
-        "bridge_streams" => "mux"
+        "bridge_streams" => "mux",
+        "run_hold" => "quiesce"
       },
       "capacity" => capacity(),
       "inventory" => %{
