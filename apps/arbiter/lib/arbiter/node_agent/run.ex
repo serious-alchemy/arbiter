@@ -424,9 +424,24 @@ defmodule Arbiter.NodeAgent.Run do
   defp seed_shadow(%RunSpec{checkout: nil}, _config, _dirs), do: {:ok, nil}
 
   defp seed_shadow(%RunSpec{checkout: co, run: run}, config, dirs) do
-    case Checkout.seed_from_primary(config, Map.put(co, :run, run), dirs["worktree"].host) do
-      {:ok, %{known: known}} -> {:ok, known}
+    shadow = dirs["worktree"].host
+
+    with {:ok, %{known: known}} <-
+           Checkout.seed_from_primary(config, Map.put(co, :run, run), shadow),
+         :ok <- check_borrowed(shadow, config) do
+      {:ok, known}
+    else
+      {:error, {:unmounted_objects, _} = reason} -> {:error, {:unschedulable, reason}}
       {:error, reason} -> {:error, {:unschedulable, {:seed_failed, reason}}}
+    end
+  end
+
+  # A host path in the shadow's metadata that the container will not see is a run that
+  # cannot use git; refuse it here, loudly, rather than start it (bd-1zp3ji).
+  defp check_borrowed(shadow, config) do
+    case Checkout.borrowed_objects(shadow) -- [Checkout.store_objects(config)] do
+      [] -> :ok
+      unmounted -> {:error, {:unmounted_objects, unmounted}}
     end
   end
 
@@ -758,7 +773,7 @@ defmodule Arbiter.NodeAgent.Run do
   # changing an overlay's lower layer while it is mounted is undefined. Read-only, so
   # a run cannot write into objects the node's other runs borrow.
   defp store_objects(%RunSpec{checkout: nil}, _config), do: []
-  defp store_objects(%RunSpec{}, config), do: [Path.join(Checkout.store(config), "objects")]
+  defp store_objects(%RunSpec{}, config), do: [Checkout.store_objects(config)]
 
   defp mount_map(dirs, prompts, bridge_paths) do
     Map.new(
