@@ -401,6 +401,63 @@ defmodule ArbiterWeb.RemoteRestartTest do
       assert Runs.run_ids() == []
     end
 
+    # bd-24o760: the node's hello can beat `Nodes.Recovery` (the sweep Task starts while the
+    # endpoint comes up). The primary answers from the persisted row (live, on this node),
+    # not from what recovery has loaded: the node is never told "unknown" for it, so it
+    # keeps the container until Recovery asks for the work, and it is collected once.
+    test "a node that reconnects before Recovery has loaded is not told its live run is unknown",
+         ctx do
+      row = run_row!(ctx.node, "rr3")
+      id = row.id
+      StubPodman.write_mode(ctx.stub, "hang")
+      assert {:ok, prepared} = place(ctx, id)
+      assert {:ok, handle} = Executor.open(prepared)
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+
+      restart_primary!()
+
+      # the agent reconnects and says hello; nothing has asked for the run yet
+      assert_eventually(fn ->
+        with pid when is_pid(pid) <- Registry.lookup(ctx.node.id),
+             do: :sys.get_state(pid).channel != nil
+      end)
+
+      _ = :sys.get_state(Registry.lookup(ctx.node.id))
+
+      refute File.exists?(ctx.stub <> "/calls") and calls(ctx.stub) =~ "rm --force"
+      assert Retained.list(ctx.agent_config) == []
+      assert Runs.run_ids() == [id]
+
+      # Recovery loads late and takes the work, exactly once
+      run_ctx = context(ctx)
+
+      assert {:ok, %{^id => :collected}} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 20_000,
+                 total_timeout_ms: 30_000,
+                 context_fun: fn %Run{id: ^id} -> {:ok, run_ctx} end
+               )
+
+      assert calls(ctx.stub) =~ "rm --force --ignore --time 0 arb-#{id}"
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "edited by the run\n"
+      assert Retained.list(ctx.agent_config) == []
+      assert Runs.run_ids() == []
+    end
+
+    test "a run with no live row on the node is still told it is unknown and quiesced", ctx do
+      id = Ecto.UUID.generate()
+      StubPodman.write_mode(ctx.stub, "hang")
+      assert {:ok, prepared} = place(ctx, id)
+      assert {:ok, handle} = Executor.open(prepared)
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+
+      restart_primary!()
+
+      assert_eventually(fn -> Enum.any?(Retained.list(ctx.agent_config)) end)
+      assert calls(ctx.stub) =~ "rm --force --ignore --time 0 arb-#{id}"
+    end
+
     test "a run the primary still holds is not quiesced: only unknown runs are", ctx do
       row = run_row!(ctx.node, "rr2")
       StubPodman.write_mode(ctx.stub, "hang")
