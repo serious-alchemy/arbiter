@@ -89,7 +89,8 @@ defmodule Arbiter.Settings.Installation do
     :nodes_join_token_ttl_minutes,
     :nodes_fence_after_s,
     :nodes_lost_after_s,
-    :nodes_local_max_workers
+    :nodes_local_max_workers,
+    :dashboard_dismissed_update_version
   ]
 
   actions do
@@ -246,6 +247,13 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1
 
       description "Hours a card may wait Ready and unblocked before it escapes the finish-first tiebreak (ES3); nil = 24."
+    end
+
+    attribute :dashboard_dismissed_update_version, :string do
+      public? true
+      allow_nil? true
+
+      description "dashboard.dismissed_update_version: the release tag whose update banner the operator dismissed; nil = none."
     end
 
     attribute :nodes_public_url, :string do

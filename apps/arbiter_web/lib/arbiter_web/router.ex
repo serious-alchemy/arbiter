@@ -110,6 +110,7 @@ defmodule ArbiterWeb.Router do
     # bd-6umf7z: the update banner's "Update to vX.Y.Z" button. A dashboard
     # login only; deploys the release the update check offered.
     post("/release/deploy", DashboardUpdateController, :create)
+    post("/release/update/dismiss", DashboardUpdateController, :dismiss)
 
     # A finished session's artefacts. Not in the `live_session` below because
     # these are file downloads, not pages — they sit outside the "no
