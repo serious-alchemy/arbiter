@@ -278,6 +278,14 @@ defmodule Arbiter.Nodes.Session do
   @spec bridge_target(pid(), String.t(), String.t()) :: {:ok, Path.t()} | {:error, atom()}
   def bridge_target(pid, run, name), do: GenServer.call(pid, {:bridge_target, run, name})
 
+  @doc """
+  The run's owner is going away and leaves the run to the node (RW12 §10.4: the primary
+  is stopping). Synchronous, so it lands before the owner's `DOWN`, which would
+  otherwise cancel the run (`owner_down`) and have the node remove its container.
+  """
+  @spec abandon_run(pid(), String.t()) :: :ok
+  def abandon_run(pid, run), do: GenServer.call(pid, {:abandon_run, run})
+
   @doc "Forget an ended run."
   @spec release_run(pid(), String.t()) :: :ok
   def release_run(pid, run), do: GenServer.cast(pid, {:release_run, run})
@@ -449,6 +457,9 @@ defmodule Arbiter.Nodes.Session do
 
   def handle_call({:run_outcome, run}, _from, state),
     do: {:reply, RunStreams.outcome(state.streams, run), state}
+
+  def handle_call({:abandon_run, run}, _from, state),
+    do: {:reply, :ok, %{state | streams: RunStreams.abandon(state.streams, run)}}
 
   def handle_call({:run_live?, run}, _from, state),
     do: {:reply, run in RunStreams.live(state.streams), state}
@@ -713,6 +724,7 @@ defmodule Arbiter.Nodes.Session do
   defp run_effects(state, effects) do
     Enum.each(effects, fn
       {:reply, from, value} -> GenServer.reply(from, value)
+      {:send, nil, _message} -> :ok
       {:send, pid, message} -> send(pid, message)
       {:push, event, payload} -> notify_channel(state, {:push, event, payload})
     end)

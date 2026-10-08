@@ -27,7 +27,8 @@ defmodule ArbiterWeb.RemoteRestartTest do
   setup %{tmp_dir: tmp_dir} do
     root = Path.join(System.tmp_dir!(), "rc-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf!(root) end)
+    # best effort: a node-side process may still be writing under it as the test exits
+    on_exit(fn -> File.rm_rf(root) end)
     ArbiterWeb.NodeFixtures.use_data_home!(Path.join(tmp_dir, "data"))
     put_env_restoring(:arbiter, :node_primary_version, @version)
     put_env_restoring(:arbiter_web, :node_session_opts, tick_ms: :infinity)
@@ -301,7 +302,15 @@ defmodule ArbiterWeb.RemoteRestartTest do
 
       # the application stops: the supervisor shuts the Worker down while the VM is going down
       put_env_restoring(:arbiter, :worker_node_stopping_override, true)
+      session = Registry.lookup(node_id)
       :ok = GenServer.stop(pid, :shutdown)
+
+      # The node session monitors the run's owner. Its DOWN (the Worker is gone) must not
+      # read as "the owner died, cancel the run": that sends `cancel` and the agent
+      # removes the container, racing the stub-call check below. Draining the session
+      # makes this deterministic: the run is still held, and no cancel was ever queued.
+      _ = :sys.get_state(session)
+      assert {:ok, %{cancel?: false}} = Arbiter.Nodes.RunStreams.fetch(:sys.get_state(session).streams, run_id)
 
       # the run is not written off, and the node was not told to stop it
       assert %{state: :working, outcome: nil, node_id: ^node_id} = Ash.get!(Run, run_id)
