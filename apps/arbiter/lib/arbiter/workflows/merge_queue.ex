@@ -218,9 +218,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
-  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Verification

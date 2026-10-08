@@ -301,10 +301,10 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
-  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
