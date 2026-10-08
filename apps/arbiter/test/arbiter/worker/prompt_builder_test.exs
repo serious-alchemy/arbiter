@@ -202,6 +202,25 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            """
   end
 
+  describe "host-pushed (container) runs (bd-dh1gg1)" do
+    test "a host-pushes run is told not to push, fresh or resumed" do
+      for extra <- [[], [resume_context: "## Resuming prior work\n\n"]] do
+        prompt = PromptBuilder.prompt_for_task(task(%{}), [host_pushes?: true] ++ extra)
+
+        assert prompt =~ "commit on this branch, and stop there."
+        assert prompt =~ "Do NOT push"
+        refute prompt =~ "and push it."
+      end
+    end
+
+    test "without the flag the worker still pushes itself" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "commit on this branch, and push it."
+      refute prompt =~ "Do NOT push"
+    end
+  end
+
   describe "no-PR type prompts (bd-9s9dqz)" do
     test "research asks for findings and names the notes gate" do
       prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])

@@ -288,7 +288,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
-    commit on this branch, and push it.
+    commit on this branch, #{push_instruction(opts)}
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
     create`). The MergeQueue opens the single canonical PR for this task, on
@@ -328,6 +328,20 @@ defmodule Arbiter.Worker.PromptBuilder do
     on a line by itself, exactly. The worker watches your stdout and
     will mark the task complete when it sees that marker.
     """
+  end
+
+  # bd-dh1gg1: a sandboxed container run has no forge credential, so `git push`
+  # / `ssh github.com` can never succeed there; the host pushes the committed
+  # branch when the run completes. A worker told to push anyway retries until it
+  # gives up without printing the completion sentinel.
+  defp push_instruction(opts) do
+    if Keyword.get(opts, :host_pushes?, false) do
+      "and stop there.\n\n    Do NOT push (`git push`, `git fetch`, `ssh` to the forge): this " <>
+        "sandbox has no\n    forge credentials and the push cannot succeed. Arbiter pushes your " <>
+        "committed\n    branch itself when you print the completion line below."
+    else
+      "and push it."
+    end
   end
 
   # bd-buefg4: agy-only. Claude's Read tool already tells the model about

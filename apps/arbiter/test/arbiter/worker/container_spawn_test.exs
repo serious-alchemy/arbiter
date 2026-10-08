@@ -645,7 +645,10 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
-  # bd-dh1gg1: every open of a podman run (the dispatch, a briefing or session
+  # bd-dh1gg1: scope note: this pins that `prepare/1` + `wrap_port/1` are
+  # deterministic in the egress inputs (they carry no per-resume state). That the
+  # entry points hand them the same inputs is covered by the prompt/dispatch
+  # change above, not here. Every open of a podman run (the dispatch, a briefing or session
   # resume, the auto-resume) is `prepare/1` + `wrap_port/1` over the same
   # inputs; only the inner argv (prompt, `--resume <id>`) and the owner differ.
   # The egress, git-ssh and bridge parts of the container must not.
