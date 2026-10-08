@@ -345,6 +345,7 @@ defmodule Arbiter.Worker.ReviewGate do
     :credit_exhausted,
     :rate_limited,
     :gateway_error,
+    :session_not_found,
     :spawn_exec_failed,
     :stream_schema_drift,
     :agent_print_timeout,

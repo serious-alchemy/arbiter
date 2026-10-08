@@ -121,6 +121,39 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "prepare/1 with --resume (bd-atsde3)" do
+    test "carries the resumed session's JSONL into the run's fresh config dir", ctx do
+      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+
+      sid = "ead93203-0505-4188-8e74-125d64ac68dc"
+      prior = Path.join(ctx.dir, "prior-config")
+      File.mkdir_p!(Path.join([prior, "projects", "-old-slug"]))
+      File.write!(Path.join([prior, "projects", "-old-slug", sid <> ".jsonl"]), "{}\n")
+
+      {:ok, _run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: "bd-p7test",
+          task_title: "t",
+          repo: "r/r",
+          state: :finished,
+          outcome: :failed,
+          started_at: DateTime.utc_now(),
+          session_id: sid,
+          config_dir: prior,
+          provider: "claude"
+        })
+
+      opts = Keyword.put(ctx.opts, :argv, ["claude", "--print", "--resume", sid, "continue"])
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.clone)
+
+      assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
+               "{}\n"
+    end
+  end
+
   describe "prepare/1" do
     test "describes a rootless container over the private clone, bridges and per-run dirs",
          ctx do
