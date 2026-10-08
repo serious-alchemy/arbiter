@@ -48,6 +48,51 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
     assert Enum.map(s.mounts, & &1.kind) == ["worktree", "home", "cli"]
   end
 
+  describe "worktree files (bd-8y8ztm)" do
+    defp with_files(files) do
+      spec(%{
+        "mounts" => [
+          %{"kind" => "worktree", "path" => "/work/tree", "files" => files},
+          %{"kind" => "home", "path" => "/tmp/run/home"}
+        ]
+      })
+    end
+
+    test "the injected agent config an untracked worktree needs is accepted, decoded" do
+      files = %{
+        ".mcp.json" => Base.encode64("{}"),
+        ".claude/skills/tdd/SKILL.md" => Base.encode64("# tdd")
+      }
+
+      assert {:ok, %RunSpec{mounts: [worktree | _]}} = RunSpec.validate(with_files(files))
+
+      assert worktree.files == %{".mcp.json" => "{}", ".claude/skills/tdd/SKILL.md" => "# tdd"}
+    end
+
+    for {label, name} <- [
+          {"an absolute path", "/etc/passwd"},
+          {"a parent segment", ".claude/skills/../../x"},
+          {"the git dir", ".git/hooks/pre-commit"},
+          {"a path outside the allowlisted roots", "lib/a.ex"},
+          {"a path that merely starts with a root", ".mcp.json.bak"}
+        ] do
+      test "refuses #{label}" do
+        assert {:error, {:refused, {:bad_worktree_file, _}}} =
+                 RunSpec.validate(with_files(%{unquote(name) => Base.encode64("x")}))
+      end
+    end
+
+    test "refuses content that is not base64 and a file over the size cap" do
+      assert {:error, {:refused, {:bad_value, "mounts.worktree.files"}}} =
+               RunSpec.validate(with_files(%{".mcp.json" => "not base64!"}))
+
+      big = Base.encode64(String.duplicate("a", 1_048_577))
+
+      assert {:error, {:refused, {:bad_value, "mounts.worktree.files"}}} =
+               RunSpec.validate(with_files(%{".mcp.json" => big}))
+    end
+  end
+
   describe "refuses unsafe container flags" do
     for flag <-
           ~w(--privileged --cap-add --device --userns --pid --network --security-opt -v --user --entrypoint) do

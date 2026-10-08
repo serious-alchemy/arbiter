@@ -719,6 +719,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(tmp_dir),
          {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
+         {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
 
@@ -730,6 +731,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          image: image,
          worktree: worktree,
          checkout: checkout,
+         worktree_files: worktree_files,
+         worktree_secrets: worktree_secrets,
          home: home,
          config_dir: config_dir,
          config_files: config_files(Keyword.get(opts, :workspace)),
@@ -874,6 +877,116 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
+  # bd-8y8ztm: the agent config `Worker.Dispatch` injects into the worktree is
+  # untracked (git-excluded), so the checkout's git bundle cannot carry it, yet
+  # the claude argv names it by its primary path (`--mcp-config <worktree>/.mcp.json`)
+  # and the container sees the shadow clone at that same path. These are the
+  # files the node writes into the shadow after seeding it: `.mcp.json` and the
+  # materialized skills tree.
+  #
+  # The `.mcp.json` carries the run's scope token in a bearer header. A secret
+  # never rests on the node's disk (§11), so the file ships with the token
+  # replaced by a `${ARBITER_MCP_TOKEN}` reference, which Claude expands from its
+  # environment (even in a `--mcp-config` file), and the token itself rides in
+  # the spec's `secrets`. Returns `{:ok, %{relative_path => bytes}, %{name => token}}`.
+  @mcp_token_env "ARBITER_MCP_TOKEN"
+  @skills_dir ".claude/skills"
+  @max_skill_files 200
+
+  @doc false
+  @spec worktree_files(String.t()) ::
+          {:ok, %{String.t() => binary()}, %{String.t() => String.t()}} | {:error, term()}
+  def worktree_files(worktree) when is_binary(worktree) do
+    with {:ok, mcp, secrets} <- mcp_file(worktree),
+         {:ok, skills} <- skill_files(worktree) do
+      {:ok, Map.merge(mcp, skills), secrets}
+    end
+  end
+
+  defp mcp_file(worktree) do
+    name = Arbiter.MCP.AgentConfig.Claude.filename()
+    path = Path.join(worktree, name)
+
+    with true <- regular_file?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = config} <- Jason.decode(body) do
+      {config, secrets} = redact_bearer_tokens(config)
+      {:ok, %{name => Jason.encode!(config, pretty: true)}, secrets}
+    else
+      false -> {:ok, %{}, %{}}
+      {:error, reason} -> {:error, {:mcp_config_unreadable, path, reason}}
+      _ -> {:error, {:mcp_config_unreadable, path, :not_an_object}}
+    end
+  end
+
+  defp redact_bearer_tokens(%{"mcpServers" => %{} = servers} = config) do
+    {servers, secrets} =
+      servers
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.with_index()
+      |> Enum.map_reduce(%{}, fn {{server, entry}, index}, secrets ->
+        var = if index == 0, do: @mcp_token_env, else: "#{@mcp_token_env}_#{index}"
+
+        case entry do
+          %{"headers" => %{"Authorization" => "Bearer " <> token} = headers}
+          when token != "" ->
+            if String.starts_with?(token, "$") do
+              {{server, entry}, secrets}
+            else
+              headers = Map.put(headers, "Authorization", "Bearer ${#{var}}")
+              {{server, %{entry | "headers" => headers}}, Map.put(secrets, var, token)}
+            end
+
+          _ ->
+            {{server, entry}, secrets}
+        end
+      end)
+
+    {%{config | "mcpServers" => Map.new(servers)}, secrets}
+  end
+
+  defp redact_bearer_tokens(config), do: {config, %{}}
+
+  defp skill_files(worktree) do
+    root = Path.join(worktree, @skills_dir)
+
+    case File.lstat(root) do
+      {:ok, %File.Stat{type: :directory}} ->
+        paths = root |> walk_files() |> Enum.sort()
+
+        if length(paths) > @max_skill_files do
+          {:error, {:too_many_skill_files, length(paths)}}
+        else
+          Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, acc} ->
+            case File.read(path) do
+              {:ok, body} -> {:cont, {:ok, Map.put(acc, Path.relative_to(path, worktree), body)}}
+              {:error, reason} -> {:halt, {:error, {:skill_unreadable, path, reason}}}
+            end
+          end)
+        end
+
+      _ ->
+        {:ok, %{}}
+    end
+  end
+
+  # Regular files only: a symlink is never followed out of the tree.
+  defp walk_files(dir) do
+    dir
+    |> File.ls!()
+    |> Enum.flat_map(fn entry ->
+      path = Path.join(dir, entry)
+
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :directory}} -> walk_files(path)
+        {:ok, %File.Stat{type: :regular}} -> [path]
+        _ -> []
+      end
+    end)
+  end
+
+  defp regular_file?(path), do: match?({:ok, %File.Stat{type: :regular}}, File.lstat(path))
+
   defp config_files(workspace) do
     case ConfigDir.ensure(workspace) do
       {:ok, source} ->
@@ -918,6 +1031,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
     with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, prompts} <- prompt_mounts(request.prompt_paths) do
       {secret, literal} = split_env(env_pairs(port_args, request))
+      worktree_files = Map.get(request, :worktree_files, %{})
+      worktree_secrets = Map.get(request, :worktree_secrets, %{})
 
       {:ok,
        %{
@@ -930,7 +1045,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "cwd" => request.worktree,
          "mounts" =>
            [
-             %{"kind" => "worktree", "path" => request.worktree},
+             put_worktree_files(
+               %{"kind" => "worktree", "path" => request.worktree},
+               worktree_files
+             ),
              %{"kind" => "home", "path" => request.home},
              %{
                "kind" => "config_dir",
@@ -944,7 +1062,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
              end) ++ prompts,
          "bridges" => bridges(request.network),
          "env" => Map.new(literal),
-         "secrets" => Map.new(secret),
+         "secrets" => Map.merge(Map.new(secret), worktree_secrets),
          "limits" => request.limits,
          "network" => "none",
          "services" => request.services,
@@ -953,6 +1071,11 @@ defmodule Arbiter.Worker.ContainerSpawn do
        |> put_checkout(request.checkout)}
     end
   end
+
+  defp put_worktree_files(mount, files) when map_size(files) == 0, do: mount
+
+  defp put_worktree_files(mount, files),
+    do: Map.put(mount, "files", Map.new(files, fn {k, v} -> {k, Base.encode64(v)} end))
 
   defp put_checkout(spec, nil), do: spec
 

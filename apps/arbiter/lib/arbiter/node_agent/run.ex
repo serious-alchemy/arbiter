@@ -370,6 +370,7 @@ defmodule Arbiter.NodeAgent.Run do
 
     with {:ok, dirs} <- make_dirs(spec, run_dir),
          {:ok, known} <- seed_shadow(spec, config, dirs),
+         :ok <- seed_worktree_files(spec, dirs),
          :ok <- ensure_image(spec, opts),
          {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
@@ -425,6 +426,55 @@ defmodule Arbiter.NodeAgent.Run do
     case Checkout.seed_from_primary(config, Map.put(co, :run, run), dirs["worktree"].host) do
       {:ok, %{known: known}} -> {:ok, known}
       {:error, reason} -> {:error, {:unschedulable, {:seed_failed, reason}}}
+    end
+  end
+
+  # bd-8y8ztm: the untracked agent config the primary injected into its worktree
+  # (`.mcp.json`, `.claude/skills/…`) is not in a git bundle, so it travels in the
+  # spec and is written into the shadow after the seed. The shadow's own
+  # `info/exclude` names it, so a snapshot (`git add -A`) never sweeps it up.
+  defp seed_worktree_files(%RunSpec{mounts: mounts}, dirs) do
+    with %{files: files} when map_size(files) > 0 <- Enum.find(mounts, &(&1.kind == "worktree")),
+         %{host: host} <- dirs["worktree"] do
+      with :ok <- write_files(host, files, :worktree_files),
+           do: exclude_files(host, Map.keys(files))
+    else
+      _ -> :ok
+    end
+  end
+
+  defp write_files(host, files, tag) do
+    Enum.reduce_while(files, :ok, fn {name, bytes}, :ok ->
+      dest = Path.join(host, name)
+
+      with :ok <- File.mkdir_p(Path.dirname(dest)),
+           :ok <- File.write(dest, bytes) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, {:unschedulable, {tag, reason}}}}
+      end
+    end)
+  end
+
+  defp exclude_files(host, names) do
+    info = Path.join(host, ".git/info")
+
+    if File.dir?(info) do
+      roots =
+        for root <- RunSpec.worktree_file_roots(),
+            Enum.any?(names, &(&1 == root or String.starts_with?(&1, root <> "/"))),
+            do: root
+
+      case File.write(
+             Path.join(info, "exclude"),
+             Enum.map_join(roots, "", &("/" <> &1 <> "\n")),
+             [:append]
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:unschedulable, {:worktree_files, reason}}}
+      end
+    else
+      :ok
     end
   end
 
