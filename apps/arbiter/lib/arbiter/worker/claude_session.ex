@@ -2092,7 +2092,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   it on the run and ask systemd afterwards whether it was OOM-killed.
   """
   @spec open_scoped_port(map(), String.t() | nil) ::
-          {port(), Arbiter.Worker.MemoryScope.scope() | nil}
+          {port() | Arbiter.Worker.Executor.handle(), Arbiter.Worker.MemoryScope.scope() | nil}
   def open_scoped_port(%{remote: %{}} = port_args, _task_id) do
     # RW9: no local process. The first open takes the handle `start/1` placed;
     # a re-open places the run again (from the worker's own process, so the

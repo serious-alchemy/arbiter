@@ -164,6 +164,7 @@ defmodule Arbiter.Worker do
           step_started_at: DateTime.t() | nil,
           mr_ref: String.t() | nil,
           merger_url: String.t() | nil,
+          run_id: String.t() | nil,
           meta: map()
         }
 
