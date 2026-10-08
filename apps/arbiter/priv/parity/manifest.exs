@@ -1801,11 +1801,44 @@
       }
     },
     %{
+      id: "misc/list_pending_node_pairings",
+      title: "List pending node pairing requests",
+      mcp: nil,
+      cli: ["arb node pending"],
+      rest: ["GET /api/nodes/pairings"],
+      status: :excluded,
+      absent: %{
+        mcp: {:intentional, "Operator-proof only: pairing hands the node provider credentials, so an LLM coordinator must not see or drive it."}
+      }
+    },
+    %{
+      id: "misc/approve_node_pairing",
+      title: "Approve a node pairing request",
+      mcp: nil,
+      cli: ["arb node approve"],
+      rest: ["POST /api/nodes/pairings/:ref/approve"],
+      status: :excluded,
+      absent: %{
+        mcp: {:intentional, "Operator-proof node enrolment; an LLM coordinator must not enrol machines that receive provider tokens."}
+      }
+    },
+    %{
+      id: "misc/deny_node_pairing",
+      title: "Deny a node pairing request",
+      mcp: nil,
+      cli: ["arb node deny"],
+      rest: ["POST /api/nodes/pairings/:ref/deny"],
+      status: :excluded,
+      absent: %{
+        mcp: {:intentional, "Operator-proof node enrolment; an LLM coordinator must not drive it."}
+      }
+    },
+    %{
       id: "misc/node_enrolment_agent_download",
       title: "Node enrolment + agent download",
       mcp: nil,
       cli: nil,
-      rest: ["GET /nodes/join", "GET /nodes/ping", "POST /nodes/enroll", "GET /nodes/agent/:file", "GET /nodes/files/:sha"],
+      rest: ["GET /nodes/join", "GET /nodes/ping", "POST /nodes/enroll", "POST /nodes/pair", "POST /nodes/pair/poll", "GET /nodes/agent/:file", "GET /nodes/files/:sha"],
       status: :excluded,
       absent: %{
         mcp: {:intentional, "Node-tier machine endpoint (join token / node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."},
