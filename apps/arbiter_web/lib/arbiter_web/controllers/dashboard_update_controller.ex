@@ -20,6 +20,7 @@ defmodule ArbiterWeb.DashboardUpdateController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Release.{SelfDeploy, UpdateCheck}
+  alias Arbiter.Settings
   alias ArbiterWeb.Api.ReleaseDeployController
 
   def create(conn, _params) do
@@ -37,5 +38,23 @@ defmodule ArbiterWeb.DashboardUpdateController do
         {_kind, message} = ReleaseDeployController.error(reason)
         conn |> put_flash(:error, message) |> redirect(to: ~p"/")
     end
+  end
+
+  @doc """
+  The banner's × control: remember the version the update check currently
+  offers, so the banner stays hidden until a newer one appears. Cosmetic only;
+  the update check, `/api/version` and the deploy action are untouched. The
+  version comes from the update check, never the form.
+  """
+  def dismiss(conn, _params) do
+    case UpdateCheck.state() do
+      %{update_available?: true, latest: latest} when is_binary(latest) ->
+        Settings.set_dismissed_update_version(latest)
+
+      _ ->
+        :ok
+    end
+
+    redirect(conn, to: ~p"/")
   end
 end

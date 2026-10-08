@@ -161,6 +161,24 @@ defmodule Arbiter.Nodes.RecoveryTest do
     assert updated.completed_at
   end
 
+  test "a node task that overruns the whole budget is killed and its run is node_lost, not unaccounted for" do
+    node = enroll!("wedged")
+    run = run!(node)
+    start_agent(node, [run.id])
+
+    # the context lookup never returns: only the backstop in `await/1` ends the node's task
+    wedged = fn _run ->
+      receive do
+        :never -> :ok
+      end
+    end
+
+    assert {:ok, report} = Recovery.await(opts(context_fun: wedged))
+    assert {:unreachable, :timeout} = report[run.id]
+    assert %{state: :finished, outcome: :interrupted, stop_category: "node_lost"} = reload(run)
+    assert Recovery.unsettled(report) == []
+  end
+
   test "many unreachable nodes are waited for in parallel, inside the total budget" do
     runs = for i <- 1..4, do: run!(enroll!("gone-#{i}"))
     started = System.monotonic_time(:millisecond)

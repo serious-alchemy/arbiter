@@ -93,9 +93,12 @@ defmodule Arbiter.Nodes.Recovery do
         |> Enum.map(fn {node_id, node_runs} ->
           node_deadline = min(deadline, now() + node_ms)
 
-          Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
-            recover_node(node_id, node_runs, node_deadline, opts)
-          end)
+          task =
+            Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
+              recover_node(node_id, node_runs, node_deadline, opts)
+            end)
+
+          {task, node_id, node_runs}
         end)
         |> collect(deadline)
         |> Enum.reduce(%{}, &Map.merge/2)
@@ -111,16 +114,38 @@ defmodule Arbiter.Nodes.Recovery do
     |> Enum.reject(&(not is_nil(Arbiter.Worker.whereis(&1.task_id))))
   end
 
-  # A node task that overruns the total budget (its own deadline is the earlier of the
-  # two, so this is the backstop) is killed and its runs reported unreachable.
-  defp collect(tasks, deadline) do
-    wait = max(deadline - now(), 0) + 500
+  @doc """
+  The runs on a node that `report` (what `await/1` returned) did not account for:
+  still live, still without a Worker, and with no outcome here. They belong to
+  Recovery, so the Reconciler leaves them (and their tickets) alone and the next
+  boot's `await/1` takes them again. A run with any outcome is settled: collected,
+  stamped `node_lost`, or (`:not_on_node` and the like) left to the Reconciler, as
+  the moduledoc says.
+  """
+  @spec unsettled(%{String.t() => outcome()}) :: [Run.t()]
+  def unsettled(report) when is_map(report),
+    do: Enum.reject(remote_runs(), &Map.has_key?(report, &1.id))
 
-    tasks
+  # A node task that overruns the total budget (its own deadline is the earlier of the
+  # two, so this is the backstop) is killed and its runs treated as a node that did not
+  # come back: stamped `node_lost`, rather than left unaccounted for.
+  defp collect(entries, deadline) do
+    wait = max(deadline - now(), 0) + 500
+    by_task = Map.new(entries, fn {task, node_id, runs} -> {task.ref, {node_id, runs}} end)
+
+    entries
+    |> Enum.map(&elem(&1, 0))
     |> Task.yield_many(wait)
     |> Enum.map(fn
-      {_task, {:ok, result}} -> result
-      {task, _} -> Task.shutdown(task, :brutal_kill) && %{}
+      {_task, {:ok, result}} ->
+        result
+
+      {task, _} ->
+        Task.shutdown(task, :brutal_kill)
+        {node_id, runs} = Map.fetch!(by_task, task.ref)
+        results = Map.new(runs, &{&1.id, {:unreachable, :timeout}})
+        mark_lost(node_id, runs, results)
+        results
     end)
   end
 

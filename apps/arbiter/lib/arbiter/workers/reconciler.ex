@@ -98,12 +98,15 @@ defmodule Arbiter.Workers.Reconciler do
       When `false`, the sweep is skipped and `{:ok, :skipped}` is returned
       without touching any row — this is what keeps a transient/duplicate boot
       from failing the primary instance's live runs.
+    * `:skip_run_ids` — run ids left alone: the runs on a node that
+      `Arbiter.Nodes.Recovery` has not settled (RW12), whose work the node may
+      still hand over. Interrupting one here would end it for good.
   """
   @spec reconcile_orphaned_runs(keyword()) ::
           {:ok, non_neg_integer() | :skipped} | {:error, term()}
   def reconcile_orphaned_runs(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
-      do_reconcile()
+      do_reconcile(Keyword.get(opts, :skip_run_ids, []))
     else
       Logger.info(
         "Workers.Reconciler: not the primary instance; skipping orphan sweep " <>
@@ -148,12 +151,12 @@ defmodule Arbiter.Workers.Reconciler do
       []
   end
 
-  defp do_reconcile do
+  defp do_reconcile(skip_run_ids) do
     orphans =
       Run
       |> Ash.Query.filter(state in [:starting, :working, :waiting])
       |> Ash.read!()
-      |> Enum.reject(&live_worker?/1)
+      |> Enum.reject(&(live_worker?(&1) or &1.id in skip_run_ids))
 
     reconciled = Enum.count(orphans, &mark_interrupted/1)
 
