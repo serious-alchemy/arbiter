@@ -142,6 +142,47 @@ defmodule Arbiter.NodeAgent.RunTest do
     payload
   end
 
+  describe "worktree files (bd-8y8ztm)" do
+    test "the injected agent config is written into the worktree mount before the container starts",
+         %{opts: opts, home: home, stub: stub} do
+      body =
+        ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer ${ARBITER_MCP_TOKEN}"}}}})
+
+      spec =
+        spec("rwf", %{
+          "mounts" => [
+            %{
+              "kind" => "worktree",
+              "path" => "/work/tree",
+              "files" => %{
+                ".mcp.json" => Base.encode64(body),
+                ".claude/skills/tdd/SKILL.md" => Base.encode64("# tdd")
+              }
+            },
+            %{"kind" => "home", "path" => "/work/home"},
+            %{"kind" => "config_dir", "path" => "/work/config"},
+            %{"kind" => "tmp", "path" => "/work/tmp"}
+          ],
+          "secrets" => %{"ARBITER_MCP_TOKEN" => "mcp-tok-123"}
+        })
+
+      assert {:ok, "rwf"} = Runs.assign(spec, opts)
+      wait_event("rwf", "exit")
+
+      tree = Path.join([home, "runs", "rwf", "worktree"])
+      assert File.read!(Path.join(tree, ".mcp.json")) == body
+      assert File.read!(Path.join(tree, ".claude/skills/tdd/SKILL.md")) == "# tdd"
+
+      # the host side of the mount is the dir the files were written to
+      argv = File.read!(Path.join(stub, "run.argv")) |> String.split("\n", trim: true)
+      assert Enum.any?(argv, &(&1 == tree <> ":/work/tree:rw,Z"))
+
+      # the token never lands in a file under the node's home
+      {out, _} = System.cmd("grep", ["-rl", "mcp-tok-123", home])
+      assert out == ""
+    end
+  end
+
   describe "a run to completion" do
     test "streams stdout, reports exit status 0 and oom false", %{opts: opts, stub: stub} do
       File.write!(Path.join(stub, "lines"), "5")

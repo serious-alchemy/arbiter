@@ -48,4 +48,141 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
 
     assert spec["install"] == InstallId.get()
   end
+
+  describe "worktree files and host paths (bd-8y8ztm)" do
+    alias Arbiter.Agents.{Claude, SecurityPolicy}
+    alias Arbiter.MCP.AgentConfig
+
+    # The real argv the dispatcher builds for a podman-sandboxed Claude run that
+    # was handed an injected `.mcp.json` (the shape that crashed the RW13 canary).
+    defp real_argv(mcp_config) do
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      {:ok, argv} =
+        Claude.default_argv("do the thing",
+          security: policy,
+          sandbox_wrap: true,
+          mcp_config: mcp_config
+        )
+
+      argv
+    end
+
+    defp injected_worktree(dir) do
+      worktree = Path.join(dir, "wt")
+      File.mkdir_p!(Path.join(worktree, ".claude/skills/tdd"))
+      File.write!(Path.join(worktree, ".claude/skills/tdd/SKILL.md"), "# tdd")
+
+      :ok =
+        AgentConfig.Claude.write_mcp_config(worktree,
+          mcp_url: "http://127.0.0.1:4848/mcp",
+          scope_token: "scope-token-xyz",
+          server_name: "arbiter"
+        )
+
+      worktree
+    end
+
+    test "worktree_files/1 ships .mcp.json with the token swapped for an env reference", %{
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+
+      assert {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+
+      assert secrets == %{"ARBITER_MCP_TOKEN" => "scope-token-xyz"}
+      refute files[".mcp.json"] =~ "scope-token-xyz"
+
+      assert %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => auth}}}} =
+               Jason.decode!(files[".mcp.json"])
+
+      assert auth == "Bearer ${ARBITER_MCP_TOKEN}"
+      assert files[".claude/skills/tdd/SKILL.md"] == "# tdd"
+    end
+
+    test "worktree_files/1 of a worktree with nothing injected is empty", %{tmp_dir: dir} do
+      File.mkdir_p!(Path.join(dir, "bare"))
+      assert {:ok, %{}, %{}} = ContainerSpawn.worktree_files(Path.join(dir, "bare"))
+    end
+
+    test "the spec carries the files on the worktree mount and the token as a secret", %{
+      request: request,
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+      request = Map.merge(request, %{worktree_files: files, worktree_secrets: secrets})
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      mount = Enum.find(spec["mounts"], &(&1["kind"] == "worktree"))
+
+      assert Map.keys(mount["files"]) |> Enum.sort() == [
+               ".claude/skills/tdd/SKILL.md",
+               ".mcp.json"
+             ]
+
+      assert Base.decode64!(mount["files"][".mcp.json"]) == files[".mcp.json"]
+      assert spec["secrets"]["ARBITER_MCP_TOKEN"] == "scope-token-xyz"
+      refute inspect(spec["env"]) =~ "scope-token-xyz"
+    end
+
+    # AC2: every absolute path the primary hands the node must resolve on the
+    # node side: under a mount the agent makes (worktree files declared or
+    # tracked, home, config_dir, tmp), a published CLI, or a prompt file.
+    test "every host path in the real argv resolves inside the container", %{
+      request: request,
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+
+      request =
+        Map.merge(request, %{
+          worktree: worktree,
+          home: Path.join(dir, "run/home"),
+          config_dir: Path.join(dir, "run/claude-config"),
+          tmp_dir: Path.join(dir, "run"),
+          cli: [{String.duplicate("a", 64), "claude", ContainerSpawn.claude_path()}],
+          worktree_files: files,
+          worktree_secrets: secrets
+        })
+
+      argv = real_argv(Path.join(worktree, AgentConfig.Claude.filename()))
+      env = [{"TMPDIR", request.tmp_dir}, {"CLAUDE_CONFIG_DIR", request.config_dir}]
+
+      assert {:ok, spec} = ContainerSpawn.remote_spec(request, %{argv: argv, env: env}, "run-1")
+
+      # Every argv element and env value that is itself an absolute path (free
+      # text, such as the prompt or the inline settings JSON, is not a path).
+      mounts = spec["mounts"] ++ spec["bridges"]
+      worktree_mount = Enum.find(mounts, &(&1["kind"] == "worktree"))
+
+      values =
+        spec["command"] ++
+          Map.values(spec["env"]) ++
+          Map.values(Map.delete(spec["secrets"], "ARBITER_MCP_TOKEN"))
+
+      paths = Enum.filter(values, &String.starts_with?(&1, "/"))
+
+      assert Enum.any?(paths, &String.ends_with?(&1, "/.mcp.json")),
+             "the argv should carry --mcp-config: #{inspect(spec["command"] |> Enum.take(-8))}"
+
+      for path <- paths, path not in ["/dev/null"] do
+        under =
+          Enum.find(mounts, &(path == &1["path"] or String.starts_with?(path, &1["path"] <> "/")))
+
+        assert under, "#{path} is under no mount of the spec"
+
+        if under == worktree_mount do
+          rel = Path.relative_to(path, worktree_mount["path"])
+
+          assert Map.has_key?(worktree_mount["files"] || %{}, rel),
+                 "#{path} is inside the worktree but is neither tracked nor shipped as a worktree file"
+        end
+      end
+    end
+  end
 end
