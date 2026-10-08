@@ -160,6 +160,7 @@ defmodule Arbiter.Workers.Run do
         :provider,
         :provider_fallback,
         :provider_account_id,
+        :node_id,
         :model_family,
         :routing_decision
       ]

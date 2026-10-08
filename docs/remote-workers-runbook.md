@@ -253,6 +253,11 @@ new token (a re-run on the same host repairs the install).
 
 Deploys and crashes restart the primary. What happens to a run on a node (§10.4–10.5):
 
+0. On `systemctl restart` the primary's Workers are shut down by the supervisor. A Worker
+   whose run is on a node does **not** cancel it and does **not** write the run row off
+   as `interrupted` / "server shutdown" (that is only for local runs): the row stays
+   `working` and names its node (`worker_runs.node_id`), which is what `Nodes.Recovery`
+   looks runs up by. The node's run id is the row's id.
 1. The sockets drop; the agent stays quiet and reconnects with backoff (1 s → 30 s).
 2. Under `fence_after` (default 60 s, 30–90) the container is left alone, output is
    replayed from the last acked offset and nothing is lost: that is a *blip*. After a
@@ -264,7 +269,14 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
    work through the quarantine into the home clone, and only then does the normal
    reconcile resume the run from it.
 4. A node that never comes back has its runs stamped `interrupted` / `node_lost`
-   (no resume attempt consumed) and auto-resumed through placement.
+   (no resume attempt consumed) and auto-resumed through placement, once. A run
+   `Recovery` could not account for at all (it crashed) is left alone by the sweep, row
+   and ticket, and taken by the next boot's `Recovery`.
+5. A retained run the primary truly does not know (no live row for it) is reported (a
+   `retained` node event) and removed by the node's reaper: the primary sends `reap`
+   on every `hello` and every 10 minutes, and a run directory outside the live set is
+   removed once it is **24 h** old, so at most ~24 h 10 min after the run was last
+   touched. Until then it takes disk but no slot.
 
 What good looks like: `arb node events <name>` shows `disconnected` then `connected`; the
 run's history shows the resume, and the commits made before the restart are present.

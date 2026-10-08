@@ -164,6 +164,7 @@ defmodule Arbiter.Worker do
           step_started_at: DateTime.t() | nil,
           mr_ref: String.t() | nil,
           merger_url: String.t() | nil,
+          run_id: String.t() | nil,
           meta: map()
         }
 
@@ -2694,6 +2695,8 @@ defmodule Arbiter.Worker do
       session_config
     )
 
+    stamp_run_node(new_state.run_id, new_state.task_id, port)
+
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
     {:reply, {:ok, port}, announce_phase(new_state)}
@@ -2821,6 +2824,13 @@ defmodule Arbiter.Worker do
       end
     end
   end
+
+  # RW12: the row names the node the run is placed on. `Nodes.Recovery` finds a restart's
+  # remote runs by it, and the shutdown path leaves a run that has it to the node.
+  defp stamp_run_node(run_id, task_id, {:remote, {node_id, _run, _ref}}) when not is_nil(run_id),
+    do: backfill_run_fields(run_id, %{node_id: node_id}, task_id)
+
+  defp stamp_run_node(_run_id, _task_id, _port), do: :ok
 
   defp backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config) do
     if run_id && provider do
@@ -3647,10 +3657,15 @@ defmodule Arbiter.Worker do
   # Erlang does NOT terminate a `:spawn_executable` port's OS process on
   # `Port.close/1`, so the explicit SIGKILL is load-bearing, not belt-and-
   # suspenders. Best-effort throughout: a kill hiccup must not crash teardown.
-  defp terminate_live_sessions(%State{claude_sessions: sessions} = state)
+  defp terminate_live_sessions(state, leave_to_node? \\ false)
+
+  defp terminate_live_sessions(%State{claude_sessions: sessions} = state, leave_to_node?)
        when map_size(sessions) > 0 do
     Enum.each(sessions, fn {port, session} ->
-      if is_nil(Map.get(session, :exit_status)), do: terminate_session_port(state, port)
+      if is_nil(Map.get(session, :exit_status)) and
+           not (leave_to_node? and remote_handle?(port)),
+         do: terminate_session_port(state, port)
+
       # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
       # reparented), so stop the scope too. Idempotent if already reaped.
       reap_scope(session)
@@ -3664,7 +3679,26 @@ defmodule Arbiter.Worker do
     teardown_container(state)
   end
 
-  defp terminate_live_sessions(%State{} = state), do: teardown_container(state)
+  defp terminate_live_sessions(%State{} = state, _leave_to_node?), do: teardown_container(state)
+
+  defp remote_handle?({:remote, _}), do: true
+  defp remote_handle?(_port), do: false
+
+  # RW12 (docs/design/remote-workers.md §10.4): a run on a node does not stop with the
+  # primary. When the application is stopping, the supervisor shutting this Worker down
+  # is the primary going away, not the run ending: the node is not told to cancel it and
+  # its row is not written off as `interrupted` / "server shutdown". Both would end the
+  # run before the new primary boots, where `Nodes.Recovery` takes the work the node
+  # retains (the row names the node, `stamp_run_node/3`) and only then does the
+  # Reconciler resume the ticket. A Worker stopped for any other reason, or one whose
+  # session on the node already ended, is finalized as before.
+  defp leave_run_to_node?(reason, %State{claude_sessions: sessions}) do
+    terminate_outcome(reason) == :interrupted and reason != {:shutdown, @operator_stop} and
+      node_stopping?() and
+      Enum.any?(sessions, fn {port, session} ->
+        remote_handle?(port) and is_nil(Map.get(session, :exit_status))
+      end)
+  end
 
   # A run on a node: ask the agent to remove the container by name. There is no
   # local process to kill; the agent's fence stops it if the node is unreachable.
@@ -8404,7 +8438,7 @@ defmodule Arbiter.Worker do
     # makes "StopWorker returned" actually imply "the agent is dead", which is
     # what lets the registry drain serve as a sound proxy for the worktree
     # being unowned. Synchronous and bounded (see terminate_session_port/2).
-    state = terminate_live_sessions(state)
+    state = terminate_live_sessions(state, leave_run_to_node?(reason, state))
 
     # Finalize the run row before we tear down. This is the normal-path
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
@@ -8413,7 +8447,7 @@ defmodule Arbiter.Worker do
     # from a live state (:starting/:working/:waiting). Nothing on that path
     # ever marks the row finished, so it stayed :working until the next
     # server boot. See finalize_run_on_terminate/2.
-    finalize_run_on_terminate(reason, state)
+    unless leave_run_to_node?(reason, state), do: finalize_run_on_terminate(reason, state)
 
     # bd-4olwyg: a pass stopped while live leaves no worktree mid-rebase, and
     # hands its slot back — `finish_pass`/`fail_now` send the ticket back to

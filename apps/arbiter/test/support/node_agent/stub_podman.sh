@@ -29,8 +29,11 @@ case "$sub" in
       prev=""
       for a in "$@"; do
         if [ "$prev" = "-v" ]; then
+          # a run placed through a Worker mounts the shadow at the primary's worktree path
+          # (named in `edit_at`), not at /work/tree
+          at=$(cat "$D/edit_at" 2>/dev/null || echo /work/tree)
           case "$a" in
-            *:/work/tree|*:/work/tree:*)
+            *:/work/tree|*:/work/tree:*|*:"$at"|*:"$at":*)
               h="${a%%:*}"
               echo "edited by the run" > "$h/edited.txt"
               echo '{}' > "$h/.mcp.json" ;;
