@@ -565,6 +565,17 @@ defmodule Arbiter.Settings do
 
   def set_dismissed_update_version(_), do: {:error, :invalid_value}
 
+  @doc "The deploy record key (`DeployStatus.dismiss_key/1`) whose banner was dismissed, or `nil`."
+  @spec dismissed_deploy() :: String.t() | nil
+  def dismissed_deploy, do: read_setting(:dashboard_dismissed_deploy)
+
+  @doc "Persist the dismissed deploy key; `nil` clears it."
+  @spec set_dismissed_deploy(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def set_dismissed_deploy(v) when is_nil(v) or (is_binary(v) and v != ""),
+    do: write_setting(:dashboard_dismissed_deploy, v)
+
+  def set_dismissed_deploy(_), do: {:error, :invalid_value}
+
   @doc "`nodes.public_url` (no trailing slash), or `nil` when unset."
   @spec nodes_public_url() :: String.t() | nil
   def nodes_public_url, do: read_setting(:nodes_public_url)
