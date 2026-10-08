@@ -309,19 +309,10 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
         %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
       ])
 
-      start_forge(ctx, rig, [
-        :failed,
-        :running,
-        :failed,
-        :failed,
-        :running,
-        :failed,
-        :failed,
-        :running,
-        :failed
-      ])
+      # red, rerun red -> one fix round (no diff) -> red, the gate's own rerun red -> park
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
 
-      gate = start_gate(rig, ctx, revise_command: [@echo_done], rounds: 6)
+      gate = start_gate(rig, ctx, revise_command: [@echo_done], rounds: 3)
       ref = Process.monitor(gate)
       assert_receive {:DOWN, ^ref, :process, ^gate, _}, 30_000
 

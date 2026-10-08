@@ -1682,8 +1682,20 @@ defmodule Arbiter.Worker.ReviewGate do
         fresh -> fresh
       end
 
-    ci_fix(state, wait, checks, not is_nil(wait.rerun))
+    if post_noop_rerun?(state) do
+      # bd-dun10t: the gate's own rerun after a no-diff CI fix round stayed red.
+      # Park with the failing jobs named; another implementer round would only
+      # burn the round budget on a head already judged a no-op.
+      state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
+      state = %{state | ci_fix_pending: %{state.ci_fix_pending | checks: checks}}
+      {:done, escalate_no_changes(state)}
+    else
+      ci_fix(state, wait, checks, not is_nil(wait.rerun))
+    end
   end
+
+  defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
+  defp post_noop_rerun?(_state), do: false
 
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
@@ -3049,7 +3061,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # `{:done, state}` (escalated) if the implementer couldn't be spawned.
   defp enter_revise(state, findings, source \\ :reviewer) do
     state = record_enter_revise_thread(state, findings, source)
-    state = if source == :reviewer, do: %{state | ci_fix_pending: nil}, else: state
+    state =
+      if source == :reviewer,
+        do: %{state | ci_fix_pending: nil, ci_noop_reruns: 0},
+        else: state
 
     # The reviewer's subprocess has exited; stop its worker so it can't linger
     # (it may not have self-completed if it never printed `arb done`).
