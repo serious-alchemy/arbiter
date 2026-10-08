@@ -3,6 +3,21 @@ defmodule Arbiter.Worker.StopReasonTest do
 
   alias Arbiter.Worker.StopReason
 
+  describe "classify/3 — session not found on --resume" do
+    test "\"No conversation found\" is :session_not_found, not a gateway error" do
+      reason =
+        StopReason.classify(1, [
+          "No conversation found with session ID: ead93203-0505-4188-8e74-125d64ac68dc",
+          "claude session error · 0.0s · $0.0",
+          "socat[63] E read(6, 0x1, 8192): Connection reset by peer"
+        ])
+
+      assert reason.category == :session_not_found
+      assert reason.exit_status == 1
+      assert reason.summary =~ "session"
+    end
+  end
+
   describe "classify/2 — auth expiry (provider-agnostic)" do
     test "Claude 401 / invalid authentication credentials" do
       reason =

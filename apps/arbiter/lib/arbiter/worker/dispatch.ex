@@ -571,7 +571,7 @@ defmodule Arbiter.Worker.Dispatch do
       # the old fallback dropped resume_session_id but never built the
       # briefing it claimed to fall back to).
       resume_opts =
-        if provider == session_provider do
+        if provider == session_provider and session_history_present?(provider, session_id) do
           Keyword.put(base_opts, :resume_session_id, session_id)
         else
           require Logger
@@ -581,18 +581,17 @@ defmodule Arbiter.Worker.Dispatch do
           case ResumeContext.build(task, worktree_path, target_branch) do
             {:ok, context} ->
               Logger.info(
-                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
-                  "provider #{inspect(session_provider)} does not match resolved provider " <>
-                  "#{inspect(provider)}; degrading to a git-derived resume briefing instead"
+                "Dispatch.resume_session: dropping session_id for #{task.id} — " <>
+                  "#{no_resume_reason(provider, session_provider, session_id)}; " <>
+                  "degrading to a git-derived resume briefing instead"
               )
 
               Keyword.put(base_opts, :resume_context, context)
 
             {:error, reason} ->
               Logger.warning(
-                "Dispatch.resume_session: dropping session_id for #{task.id} — session " <>
-                  "provider #{inspect(session_provider)} does not match resolved provider " <>
-                  "#{inspect(provider)}; failed to build a git-derived resume briefing " <>
+                "Dispatch.resume_session: dropping session_id for #{task.id} — " <>
+                  "#{no_resume_reason(provider, session_provider, session_id)}; failed to build a git-derived resume briefing " <>
                   "(#{inspect(reason)}), proceeding with no briefing"
               )
 
@@ -610,6 +609,26 @@ defmodule Arbiter.Worker.Dispatch do
     else
       {:deferred, result} -> {:ok, result}
       other -> other
+    end
+  end
+
+  # bd-atsde3: `claude --resume <sid>` only works when the session's JSONL can
+  # be put in the new run's config dir (podman runs get a fresh one). A Claude
+  # session whose history is neither on disk nor archived would fail with "No
+  # conversation found" — resume it as a briefing instead. Other providers
+  # keep their own session stores and are not checked.
+  defp session_history_present?(:claude, session_id),
+    do: Arbiter.Worker.SessionHistory.available?(session_id)
+
+  defp session_history_present?(_provider, _session_id), do: true
+
+  defp no_resume_reason(provider, session_provider, session_id) do
+    if provider == session_provider do
+      "session #{session_id} has no history on disk or in the run archive " <>
+        "(--resume would fail with \"No conversation found\")"
+    else
+      "session provider #{inspect(session_provider)} does not match resolved provider " <>
+        inspect(provider)
     end
   end
 

@@ -138,6 +138,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
   alias Arbiter.Worker.Worktree
 
@@ -606,6 +607,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
     with :ok <- File.mkdir_p(home),
          :ok <- File.mkdir_p(config_dir) do
       seed_config(config_dir, Keyword.get(opts, :workspace))
+      seed_session(config_dir, opts)
       {:ok, home, config_dir, nil}
     else
       {:error, reason} -> {:error, {:run_dirs_failed, reason}}
@@ -642,6 +644,19 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   defp track_codex_auth(_opts, nil), do: :ok
+
+  # bd-atsde3: a `--resume <sid>` argv needs that session's JSONL in THIS run's
+  # config dir, which starts empty. Copy in that one session's history; when it
+  # is gone the CLI says so and the stop is classified `:session_not_found`.
+  defp seed_session(config_dir, opts) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(Keyword.get(opts, :argv)),
+         cwd when is_binary(cwd) <- Keyword.get(opts, :worktree_path),
+         {:error, reason} <- SessionHistory.seed(config_dir, cwd, sid) do
+      Logger.warning("ContainerSpawn: cannot carry session #{sid} over: #{inspect(reason)}")
+    end
+
+    :ok
+  end
 
   defp seed_config(config_dir, workspace) do
     with {:ok, source} <- ConfigDir.ensure(workspace) do

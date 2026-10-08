@@ -4540,6 +4540,123 @@ defmodule Arbiter.Worker.DispatchTest do
       assert routing.provider == "gemini"
     end
 
+    # bd-atsde3: `claude --resume <sid>` for a session whose JSONL exists nowhere
+    # ("No conversation found with session ID") must degrade to a briefing
+    # resume; one whose JSONL is on disk keeps `--resume`.
+    for {label, with_history?} <- [{"missing", false}, {"present", true}] do
+      test "resume_session/2 with claude session history #{label}", %{ws: ws, tmp: tmp} do
+        argv_file = Path.join(tmp, "claude-resume-session-argv.txt")
+        :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
+        sid = "11111111-2222-3333-4444-#{:erlang.unique_integer([:positive])}"
+
+        {:ok, task} = Ash.create(Issue, %{title: "claude resume session", workspace_id: ws.id})
+
+        {:ok, first} =
+          Dispatch.dispatch(task.id,
+            force: true,
+            repo: "rs/repo",
+            start_driver: false,
+            start_claude: true,
+            agent_type: :claude,
+            preflight: false
+          )
+
+        _ = wait_for_argv!(argv_file)
+        :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+        config_dir = Path.join(tmp, "prior-config")
+
+        if unquote(with_history?) do
+          File.mkdir_p!(Path.join([config_dir, "projects", "-some-slug"]))
+          File.write!(Path.join([config_dir, "projects", "-some-slug", sid <> ".jsonl"]), "{}\n")
+        end
+
+        {:ok, _run} =
+          Ash.create(Run, %{
+            task_id: task.id,
+            task_title: task.title,
+            repo: "rs/repo",
+            workspace_id: ws.id,
+            state: :finished,
+            outcome: :failed,
+            started_at: DateTime.utc_now(),
+            session_id: sid,
+            config_dir: config_dir,
+            provider: "claude"
+          })
+
+        {:ok, _event} =
+          Ash.create(UsageEvent, %{
+            task_id: task.id,
+            workspace_id: ws.id,
+            repo: "rs/repo",
+            step: :work,
+            provider: "claude",
+            session_id: sid,
+            occurred_at: DateTime.utc_now()
+          })
+
+        File.rm!(argv_file)
+
+        assert {:ok, _} = Dispatch.resume_session(task.id, start_driver: false, preflight: false)
+
+        args = wait_for_argv!(argv_file)
+
+        if unquote(with_history?) do
+          assert "--resume" in args and sid in args
+        else
+          refute "--resume" in args
+        end
+      end
+    end
+
+    # bd-atsde3 AC2: the Reconciler's post-restart auto-resume is a briefing
+    # resume (`Dispatch.resume/2`), never `claude --resume <sid>`, so it cannot
+    # hit "No conversation found" in a podman run's fresh config dir.
+    test "Reconciler.default_resume/1 respawns claude without --resume", %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "claude-reconciler-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
+
+      {:ok, task} = Ash.create(Issue, %{title: "reconciler resume", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :claude,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(argv_file)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      {:ok, _event} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "rs/repo",
+          step: :work,
+          provider: "claude",
+          session_id: "99999999-2222-3333-4444-555555555555",
+          occurred_at: DateTime.utc_now()
+        })
+
+      File.rm!(argv_file)
+      {:ok, issue} = Ash.get(Issue, task.id)
+
+      assert {:ok, _} =
+               Arbiter.Workers.Reconciler.default_resume(issue,
+                 start_driver: false,
+                 preflight: false
+               )
+
+      args = wait_for_argv!(argv_file)
+      refute "--resume" in args
+      refute "99999999-2222-3333-4444-555555555555" in args
+    end
+
     # bd-b7e33c post-merge finding (2026-09-19), corrected 2026-09-21 per
     # round-1 review finding 1: the provider and the session_id used to come
     # from two INDEPENDENT "newest row" queries, so a task whose most recent

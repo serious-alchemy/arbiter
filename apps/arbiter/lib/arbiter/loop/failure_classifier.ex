@@ -141,6 +141,7 @@ defmodule Arbiter.Loop.FailureClassifier do
     credit_exhausted: {:operational, :credit_exhausted},
     rate_limited: {:operational, :rate_limited},
     gateway_error: {:operational, :gateway_error},
+    session_not_found: {:operational, :session_not_found},
     stream_schema_drift: {:operational, :stream_schema_drift},
     killed: {:operational, :killed},
     # bd-6zuoo6: the worker's capped scope was OOM-killed. Infrastructure by
