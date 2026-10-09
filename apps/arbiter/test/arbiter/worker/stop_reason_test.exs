@@ -1238,4 +1238,32 @@ defmodule Arbiter.Worker.StopReasonTest do
                :quota_exhausted
     end
   end
+
+  describe "label/1 covers every category" do
+    # Every member of the `category` type, so a newly added reason without a
+    # label clause fails here instead of crashing Worker.fail_stopped/2.
+    defp all_categories do
+      {:ok, types} = Code.Typespec.fetch_types(StopReason)
+      {:type, {:category, ast, _}} = Enum.find(types, &match?({:type, {:category, _, _}}, &1))
+      collect_atoms(ast)
+    end
+
+    defp collect_atoms({:atom, _, a}), do: [a]
+    defp collect_atoms({:type, _, :union, members}), do: Enum.flat_map(members, &collect_atoms/1)
+
+    test "every category has a label clause" do
+      categories = all_categories()
+      assert :session_not_found in categories
+
+      for category <- categories do
+        reason = %StopReason{category: category, summary: "s", exit_status: 1, signal: 9}
+        assert is_binary(StopReason.label(reason)), "no label for #{inspect(category)}"
+      end
+    end
+
+    test ":session_not_found label suggests briefing mode" do
+      reason = StopReason.classify(1, ["No conversation found with session ID: abc"])
+      assert StopReason.label(reason) =~ "--mode briefing"
+    end
+  end
 end
