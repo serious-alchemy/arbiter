@@ -24,23 +24,92 @@ defmodule Arbiter.Worker.SessionHistory do
 
   @type source :: {:file, String.t()} | {:archive, String.t()}
 
+  @doc """
+  Directory of the host-side session store: `<output_log_root>/session-history/`,
+  one `<session_id>.jsonl` per session.
+
+  A podman run's config dir lives in its run tmp dir and is deleted when the
+  worker goes down (a finished run's stop, a server restart, the boot sweep).
+  `preserve/1` copies the session out first, so the resume lookup finds it after
+  the container and its tmp dir are gone, whether or not the run ever reached
+  its completion-time `SessionArchive`.
+  """
+  @spec store_dir() :: String.t()
+  def store_dir, do: Path.join(Arbiter.Worker.OutputLog.root(), "session-history")
+
+  @doc "Absolute path of the stored JSONL for `session_id`."
+  @spec store_path(String.t()) :: String.t()
+  def store_path(session_id), do: Path.join(store_dir(), session_id <> ".jsonl")
+
+  @doc """
+  Copy every session JSONL under `<run_tmp>/claude-config/projects/*/` into
+  `store_dir/0` (`0600`, atomically). Returns the session ids kept. Best-effort:
+  never raises, and a dir with no Claude config is a no-op.
+  """
+  @spec preserve(String.t() | nil) :: [String.t()]
+  def preserve(run_tmp) when is_binary(run_tmp) do
+    run_tmp
+    |> Path.join("claude-config/projects/*/*.jsonl")
+    |> Path.wildcard()
+    |> Enum.flat_map(&preserve_file/1)
+  rescue
+    _ -> []
+  end
+
+  def preserve(_), do: []
+
+  defp preserve_file(path) do
+    sid = Path.basename(path, ".jsonl")
+    dest = store_path(sid)
+    tmp = dest <> ".#{System.unique_integer([:positive])}.tmp"
+
+    with :ok <- File.mkdir_p(store_dir()),
+         :ok <- File.cp(path, tmp),
+         _ = File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, dest) do
+      [sid]
+    else
+      {:error, reason} ->
+        File.rm(tmp)
+        Logger.warning("SessionHistory: cannot preserve #{path}: #{inspect(reason)}")
+        []
+    end
+  end
+
   @doc "Where `session_id`'s JSONL can be read from, or `:not_found`."
   @spec find(String.t() | nil) :: {:ok, source()} | :not_found
   def find(session_id) when is_binary(session_id) and session_id != "" do
-    session_id
-    |> runs_for()
-    |> Enum.find_value(:not_found, fn run ->
-      case ClaudeSessionFile.locate(run.config_dir, session_id) do
-        {:ok, path} ->
-          {:ok, {:file, path}}
+    runs = runs_for(session_id)
 
-        :not_found ->
-          if SessionArchive.archived?(run.id), do: {:ok, {:archive, run.id}}
+    with :not_found <- find_live(runs, session_id),
+         :not_found <- find_stored(session_id) do
+      find_archived(runs)
+    end
+  end
+
+  def find(_), do: :not_found
+
+  defp find_live(runs, session_id) do
+    Enum.find_value(runs, :not_found, fn run ->
+      case ClaudeSessionFile.locate(run.config_dir, session_id) do
+        {:ok, path} -> {:ok, {:file, path}}
+        :not_found -> nil
       end
     end)
   end
 
-  def find(_), do: :not_found
+  defp find_stored(session_id) do
+    if File.regular?(store_path(session_id)),
+      do: {:ok, {:file, store_path(session_id)}},
+      else: :not_found
+  end
+
+  defp find_archived(runs) do
+    case Enum.find(runs, &SessionArchive.archived?(&1.id)) do
+      nil -> :not_found
+      run -> {:ok, {:archive, run.id}}
+    end
+  end
 
   @spec available?(String.t() | nil) :: boolean()
   def available?(session_id), do: match?({:ok, _}, find(session_id))
@@ -90,7 +159,24 @@ defmodule Arbiter.Worker.SessionHistory do
     ])
   end
 
-  defp read({:file, path}), do: File.read(path)
+  # A run's tmp dir is reaped asynchronously when its worker stops, so a `:file`
+  # source found a moment ago may be gone by the time it is read; the reaper
+  # preserves the session into the store first, so fall back to that.
+  defp read({:file, path}) do
+    case File.read(path) do
+      {:error, :enoent} = error ->
+        with {sid, ".jsonl"} <- {Path.basename(path, ".jsonl"), Path.extname(path)},
+             {:ok, _} <- File.stat(store_path(sid)) do
+          File.read(store_path(sid))
+        else
+          _ -> error
+        end
+
+      other ->
+        other
+    end
+  end
+
   defp read({:archive, run_id}), do: SessionArchive.read(run_id)
 
   defp runs_for(session_id) do

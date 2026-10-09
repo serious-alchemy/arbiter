@@ -83,4 +83,47 @@ defmodule Arbiter.Worker.SessionHistoryTest do
     dest = jsonl_path(new, Arbiter.Usage.ClaudeSessionFile.project_slug(@cwd))
     assert File.read!(dest) == "{\"b\":2}\n"
   end
+
+  describe "preserve/1 (bd-9qazat: container removal must not lose the session)" do
+    defp run_tmp_with_session(root, body) do
+      tmp = Path.join(root, "run-tmp-#{System.unique_integer([:positive])}")
+      config = Path.join(tmp, "claude-config")
+      File.mkdir_p!(Path.dirname(jsonl_path(config, "-slug")))
+      File.write!(jsonl_path(config, "-slug"), body)
+      File.write!(Path.join(config, ".credentials.json"), "secret")
+      tmp
+    end
+
+    test "keeps the JSONL host-side so resume works once the run tmp is gone", %{
+      base: base,
+      new_config: new
+    } do
+      tmp = run_tmp_with_session(base, "{\"c\":3}\n")
+
+      assert [@sid] = SessionHistory.preserve(tmp)
+      assert File.read!(SessionHistory.store_path(@sid)) == "{\"c\":3}\n"
+      assert File.ls!(SessionHistory.store_dir()) == [@sid <> ".jsonl"]
+
+      File.rm_rf!(tmp)
+
+      assert SessionHistory.available?(@sid)
+      assert :ok = SessionHistory.seed(new, @cwd, @sid)
+      dest = jsonl_path(new, Arbiter.Usage.ClaudeSessionFile.project_slug(@cwd))
+      assert File.read!(dest) == "{\"c\":3}\n"
+    end
+
+    test "RunTmp.remove/1 preserves before deleting" do
+      root = Arbiter.Config.Paths.worker_tmp_root()
+      File.mkdir_p!(root)
+      inside = run_tmp_with_session(root, "{\"d\":4}\n")
+
+      assert :ok = Arbiter.Worker.RunTmp.remove(inside)
+      refute File.exists?(inside)
+      assert File.read!(SessionHistory.store_path(@sid)) == "{\"d\":4}\n"
+    end
+
+    test "a dir with no session is a no-op", %{base: base} do
+      assert [] = SessionHistory.preserve(Path.join(base, "nothing"))
+    end
+  end
 end
