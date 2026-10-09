@@ -58,8 +58,10 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.SeedPaths
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueue.PassAdmission
@@ -225,6 +227,12 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
          :ok <- ProviderConstraint.check(task, provider),
+         :ok <-
+           ProviderRouting.ensure_sandbox_backend(
+             provider,
+             task,
+             context.workspace || maybe_load_workspace(task.workspace_id)
+           ),
          {:ok, worktree_path} <- create_worktree(context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
@@ -479,10 +487,18 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         # long expired, or a re-created one with no config at all. Either way
         # the pass reported the `arbiter` server "not connected" and could not
         # call `ci_mark_external` / `ci_rerun`, which its prompt tells it to use.
+        # bd-ld8qde (G14): the same dispatch-time withholding as the first-round
+        # worker. A guarded install seals a spawn that carries no projection, so
+        # a pass without one would run with no `secrets:` env and no
+        # `tracker_write` claim. The pass names no model (the adapter picks its
+        # default), so a rule keyed on model family sees `nil`.
+        projection = spawn_projection(context, provider)
+
         mcp_opts =
           Dispatch.inject_mcp_config(context.task, worktree_path,
             repo: context.repo,
-            agent_type: provider
+            agent_type: provider,
+            permissions: projection.claims
           )
 
         # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
@@ -490,21 +506,53 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         # bd-7ays3v: under podman, a Claude pass runs in the container, in the
         # private clone `create_worktree/1` gave it, under the policy the task
         # worker resolves; any other pass is spawned exactly as before.
-        session_opts =
-          ([owner: worker_pid, worktree_path: worktree_path] ++
-             Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-          |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
+        #
+        # bd-9cygoo (G16): the pass pushes, so it needs a repo-scoped git
+        # credential (or an explicit legacy opt-in) like any other implementer.
+        case GitCredential.plan(context.workspace, context.repo,
+               role: :implementer,
+               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+               host_pushes?: container_pass?(context, provider)
+             ) do
+          {:ok, git_credential} ->
+            session_opts =
+              ([
+                 owner: worker_pid,
+                 worktree_path: worktree_path,
+                 projection: projection,
+                 git_credential: git_credential
+               ] ++
+                 Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+              |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
-        case ClaudeSession.start(session_opts) do
-          {:ok, port} ->
-            _ = Worker.advance(worker_pid, :fix_ci)
-            {:ok, port}
+            case ClaudeSession.start(session_opts) do
+              {:ok, port} ->
+                _ = Worker.advance(worker_pid, :fix_ci)
+                {:ok, port}
+
+              {:error, reason} ->
+                {:error, {:claude_start_failed, reason}}
+            end
 
           {:error, reason} ->
             {:error, {:claude_start_failed, reason}}
         end
     end
   end
+
+  @doc false
+  @spec spawn_projection(map(), atom()) :: Arbiter.Guardrails.Projection.t()
+  def spawn_projection(context, provider) do
+    Withholding.for_spawn(context.task.id, context.workspace, provider, nil,
+      repo: context.repo,
+      role: :implementer
+    )
+  end
+
+  # bd-7rxy1c: a pass in a podman container holds no credential; the host
+  # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
+  defp container_pass?(context, provider),
+    do: not is_nil(ContainerSpawn.pass_policy(context.workspace, context.repo, provider))
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
@@ -525,7 +573,9 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       workspace: context.workspace,
       worktree_path: worktree_path,
       owner: Keyword.get(opts, :owner),
-      task_id: context.task.id
+      task_id: context.task.id,
+      projection: Keyword.get(opts, :projection),
+      git_credential: Keyword.get(opts, :git_credential)
     ] ++ mcp_opts ++ ContainerSpawn.pass_agent_opts(Keyword.get(opts, :security))
   end
 

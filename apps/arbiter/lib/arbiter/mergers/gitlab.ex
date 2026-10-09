@@ -62,6 +62,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   alias Arbiter.Http.Client
   alias Arbiter.Http.Error, as: ErrorSpec
+  alias Arbiter.Mergers.CILogExcerpt
   alias Arbiter.Mergers.Gitlab.{Config, Error}
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
@@ -1090,18 +1091,13 @@ defmodule Arbiter.Mergers.Gitlab do
     summary =
       case request(cfg, :get, "/jobs/#{job_id}/trace", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-          body |> to_string() |> log_tail(@log_tail_limit)
+          body |> to_string() |> CILogExcerpt.extract(@log_tail_limit)
 
         _ ->
           ""
       end
 
     %{name: name, summary: summary, url: url}
-  end
-
-  defp log_tail(text, limit) when is_binary(text) do
-    len = String.length(text)
-    if len > limit, do: "…" <> String.slice(text, len - limit, limit), else: text
   end
 
   defp handle_ok(result), do: Client.expect_ok(error_spec(), result)

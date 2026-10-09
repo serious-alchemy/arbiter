@@ -90,7 +90,10 @@ defmodule Arbiter.MCP.Tools do
   and `extra_usage` overage spend, and `gating_window` / `gating_reason` naming
   which window (if any) is currently holding dispatch (bd-1tuxv8) — both the 5h
   and the 7d figures are reported, but only one of them, or neither, is what the
-  gate is acting on. `nil` until the first poll. `codex` is `nil` with a
+  gate is acting on (`gating_window` is `"paused"` when an operator pause holds
+  it). `gating_workspaces` lists other workspaces on the account whose own
+  ceiling holds dispatch (`workspace_id`, `workspace`, `window`, `reason`;
+  bd-aw325c). `nil` until the first poll. `codex` is `nil` with a
   `codex_message` until the Codex probe has stored a snapshot (i.e. the `codex`
   CLI is authenticated on this host); once stored it also reports the pacing
   state (`elapsed_fraction`, `used_fraction`, `gating_reason`, `pacing`;
@@ -1386,6 +1389,18 @@ defmodule Arbiter.MCP.Tools do
   def coerce_field(:map, nil), do: {:ok, nil}
   def coerce_field(:map, v) when is_map(v), do: {:ok, v}
   def coerce_field(:map, _), do: {:error, "must be an object"}
+
+  # bd-54m4vv: a JSON array of strings (`permissions`). The Issue change
+  # canonicalises and vets each entry; `null` is the empty list.
+  def coerce_field(:string_list, nil), do: {:ok, []}
+
+  def coerce_field(:string_list, v) when is_list(v) do
+    if Enum.all?(v, &is_binary/1),
+      do: {:ok, v},
+      else: {:error, "must be an array of strings"}
+  end
+
+  def coerce_field(:string_list, _), do: {:error, "must be an array of strings"}
 
   def coerce_field({:enum, allowed}, v) do
     case to_allowed_atom(v, allowed) do

@@ -9,10 +9,12 @@ defmodule Arbiter.Worker.Egress.GrantCache do
   grant takes effect without a restart. The TTL is only a backstop for a
   writer that forgot to invalidate; it is not the mechanism.
 
-  Keyed by task id, because grants belong to the ticket and a resumed run of
-  the same ticket shares them. The loader is supplied per run
-  (`Arbiter.Worker.Egress.start_run/2`), so this module knows nothing about
-  where grants are stored.
+  Keyed by `{task_id, run_id}`. Grants belong to the ticket, but the loader is
+  supplied per run (`Arbiter.Worker.Egress.start_run/2`) and a guarded spawn's
+  loader returns that spawn's projection (bd-ld8qde, G14): the implementer's
+  hosts must never serve the reviewer of the same task, nor the reverse.
+  `invalidate/1` still drops every run of a task. This module knows nothing
+  about where grants are stored.
   """
   use GenServer
 
@@ -29,43 +31,45 @@ defmodule Arbiter.Worker.Egress.GrantCache do
   end
 
   @doc """
-  The grants for `task_id`: the cached list, or `loader.(task_id)` stored for
-  next time. A loader that raises or returns a non-list yields `[]` and is
+  The grants for run `run_id` of `task_id`: the cached list, or
+  `loader.(task_id)` stored for next time. A loader that raises or returns a non-list yields `[]` and is
   not cached, so a transient failure denies (fail closed) and retries on the
   next `CONNECT`.
   """
-  @spec fetch(String.t() | nil, (String.t() | nil -> [String.t()])) :: [String.t()]
-  def fetch(task_id, loader) do
+  @spec fetch(String.t() | nil, String.t() | nil, (String.t() | nil -> [String.t()])) ::
+          [String.t()]
+  def fetch(task_id, run_id, loader) do
     now = System.monotonic_time(:millisecond)
+    key = {task_id, run_id}
 
-    case lookup(task_id) do
+    case lookup(key) do
       {:ok, grants, inserted_at} when now - inserted_at < @ttl_ms -> grants
-      _ -> load(task_id, loader, now)
+      _ -> load(key, task_id, loader, now)
     end
   end
 
-  @doc "Drops the cached grants for `task_id`. Safe before the table exists."
+  @doc "Drops the cached grants of every run of `task_id`. Safe before the table exists."
   @spec invalidate(String.t() | nil) :: :ok
   def invalidate(task_id) do
-    :ets.delete(@table, task_id)
+    :ets.match_delete(@table, {{task_id, :_}, :_, :_})
     :ok
   rescue
     ArgumentError -> :ok
   end
 
-  defp lookup(task_id) do
-    case :ets.lookup(@table, task_id) do
-      [{^task_id, grants, inserted_at}] -> {:ok, grants, inserted_at}
+  defp lookup(key) do
+    case :ets.lookup(@table, key) do
+      [{^key, grants, inserted_at}] -> {:ok, grants, inserted_at}
       [] -> :miss
     end
   rescue
     ArgumentError -> :miss
   end
 
-  defp load(task_id, loader, now) do
+  defp load(key, task_id, loader, now) do
     case safe_load(loader, task_id) do
       {:ok, grants} ->
-        store(task_id, grants, now)
+        store(key, grants, now)
         grants
 
       :error ->
@@ -84,8 +88,8 @@ defmodule Arbiter.Worker.Egress.GrantCache do
     _, _ -> :error
   end
 
-  defp store(task_id, grants, now) do
-    :ets.insert(@table, {task_id, grants, now})
+  defp store(key, grants, now) do
+    :ets.insert(@table, {key, grants, now})
   rescue
     ArgumentError -> true
   end

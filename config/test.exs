@@ -197,6 +197,10 @@ config :arbiter, :worker_jail_available, false
 # bd-8btihu: spawning agy refuses without a keyring; pin it on so tests that
 # build an agy argv don't depend on the host's session bus.
 config :arbiter, :worker_gemini_keyring_available, true
+# bd-9cygoo (G16): a pushing worker is refused without a scoped git credential
+# or an explicit legacy opt-in. Tests that are not about that keep the pre-G16
+# behaviour; the G16 tests put_env this to false (or build a guarded install).
+config :arbiter, :git_credential_unenforced, true
 config :arbiter, :worker_jail_probe_root, Path.join(scratch_root, "jail-probe-test")
 
 # Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the

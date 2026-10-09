@@ -750,6 +750,8 @@ defmodule Arbiter.MCP.Tools.Worker do
   defp dispatch_error_message({:worker_active, run}, task_id),
     do: Dispatch.worker_active_message(run, task_id)
 
+  defp dispatch_error_message({:quota_held, id}, _task_id), do: Dispatch.quota_held_message(id)
+
   defp dispatch_error_message(other, _task_id), do: dispatch_error_message(other)
 
   defp validate_positive_integer(nil, _key) do

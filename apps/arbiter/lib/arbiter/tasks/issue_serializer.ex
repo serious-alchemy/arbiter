@@ -45,6 +45,9 @@ defmodule Arbiter.Tasks.IssueSerializer do
       verify_after_deploy: issue.verify_after_deploy,
       # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or null.
       provider_constraint: issue.provider_constraint,
+      # bd-54m4vv: the declared permissions (canonical, sorted). A `requested`
+      # one is carried but not in force — see `Arbiter.Tasks.Permissions`.
+      permissions: issue.permissions || [],
       awaiting_verification_at: iso(issue.awaiting_verification_at),
       verification_outcome: str(issue.verification_outcome),
       verification_evidence: issue.verification_evidence,

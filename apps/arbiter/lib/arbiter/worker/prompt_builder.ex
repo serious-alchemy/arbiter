@@ -16,6 +16,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.PermissionsBlock
   alias Arbiter.Worker.ReviewVerification
 
   @doc false
@@ -54,18 +55,20 @@ defmodule Arbiter.Worker.PromptBuilder do
   adds the intent context and an explicit "run the tests, fix what the rebase
   broke" step the old mechanical-only prompt lacked.
   """
-  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t()) :: String.t()
-  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch)
+  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t(), keyword()) :: String.t()
+  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch, opts \\ [])
       when is_binary(branch) and is_binary(target_branch) do
+    host_git? = Keyword.get(opts, :host_git, false)
+
     """
     You are a conflict-resolution worker for task #{task.id}.
 
     Your branch (#{branch}) is APPROVED but CONFLICTS with the current head of
     #{target_branch}: it was mergeable in isolation, but the base has moved and
     it no longer applies cleanly. Your ONLY job is to rebase it onto the current
-    base, resolve the conflicts, and force-push — NOT to re-implement the change
+    base, resolve the conflicts, and #{if host_git?, do: "commit the result", else: "force-push"} — NOT to re-implement the change
     or open a new PR.
-
+    #{conflict_host_git_section(host_git?, target_branch)}
     ## Original intent — resolve conflicts so the result still satisfies THIS
 
     Title: #{task.title}
@@ -78,17 +81,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     ## Steps
 
-      1. Fetch the latest base: `git fetch origin #{target_branch}`
-      2. Rebase your branch onto it: `git rebase origin/#{target_branch}`
-      3. Resolve every conflict so the result still honors the intent above.
-         Most collisions are parallel edits to non-overlapping sections — keep
-         both sides. Where two changes touch the same logic, keep the behaviour
-         the acceptance criteria describe, then `git rebase --continue`.
-      4. Run the test suite and fix anything the rebase broke — a clean rebase
-         that fails tests is NOT done. Re-run until green.
-      5. Force-push with lease to update the existing PR in place:
-         `git push --force-with-lease origin #{branch}`
-      6. Print `arb done` on a line by itself.
+    #{conflict_steps(host_git?, branch, target_branch)}
 
     DO NOT:
       * re-implement the change set or open a new PR,
@@ -103,6 +96,66 @@ defmodule Arbiter.Worker.PromptBuilder do
     then print `arb done`. A loud escalation beats a silent miscompile in
     #{target_branch}.
     """
+  end
+
+  # bd-19skda: a podman conflict pass has no `git fetch`/`git push` (no forge
+  # credential or GitHub host key, by design). The host fetches the target into
+  # the clone before the pass starts and force-with-lease pushes the rebased
+  # branch after `arb done`, so the briefing says so instead of sending the
+  # worker at a fetch and push that dead-end in "Host key verification failed".
+  defp conflict_host_git_section(false, _target_branch), do: ""
+
+  defp conflict_host_git_section(true, target_branch) do
+    """
+
+    NO FETCH OR PUSH ACCESS — this container has no forge credential or GitHub
+    host key, by design. The Arbiter host has already fetched the current
+    #{target_branch} into your clone (`origin/#{target_branch}` is up to date)
+    and force-pushes your rebased branch after `arb done`. Do not run `git
+    fetch` or `git push`: a failure ("Host key verification failed", no
+    credentials) is expected and is not a reason to withhold `arb done`.
+    """
+    |> indent_block()
+    |> Kernel.<>("\n")
+  end
+
+  defp conflict_steps(true, _branch, target_branch) do
+    """
+      1. Rebase your branch onto the already-fetched base:
+         `git rebase origin/#{target_branch}`
+      2. Resolve every conflict so the result still honors the intent above.
+         Most collisions are parallel edits to non-overlapping sections — keep
+         both sides. Where two changes touch the same logic, keep the behaviour
+         the acceptance criteria describe, then `git rebase --continue`.
+      3. Run the test suite and fix anything the rebase broke — a clean rebase
+         that fails tests is NOT done. Re-run until green. Commit any fix.
+      4. Print `arb done` on a line by itself. The host pushes the branch.
+    """
+    |> indent_block()
+  end
+
+  defp conflict_steps(false, branch, target_branch) do
+    """
+      1. Fetch the latest base: `git fetch origin #{target_branch}`
+      2. Rebase your branch onto it: `git rebase origin/#{target_branch}`
+      3. Resolve every conflict so the result still honors the intent above.
+         Most collisions are parallel edits to non-overlapping sections — keep
+         both sides. Where two changes touch the same logic, keep the behaviour
+         the acceptance criteria describe, then `git rebase --continue`.
+      4. Run the test suite and fix anything the rebase broke — a clean rebase
+         that fails tests is NOT done. Re-run until green.
+      5. Force-push with lease to update the existing PR in place:
+         `git push --force-with-lease origin #{branch}`
+      6. Print `arb done` on a line by itself.
+    """
+    |> indent_block()
+  end
+
+  # Text interpolated into the briefing's heredoc is not re-indented past its
+  # first line: indent every later line by the heredoc's four spaces, and drop
+  # the trailing newline (the enclosing heredoc supplies its own).
+  defp indent_block(text) do
+    text |> String.trim_trailing() |> String.replace("\n", "\n    ")
   end
 
   # When resuming (bd-auma3z) the work prompt is prefixed with a git-derived
@@ -181,6 +234,10 @@ defmodule Arbiter.Worker.PromptBuilder do
     materialized? = Keyword.get(opts, :skills_materialized?, true)
     Arbiter.Skills.Materializer.prompt_section(resolved, materialized?)
   end
+
+  # bd-ld8qde (G14): what the ticket's declared permissions were projected into.
+  # Empty for an unguarded spawn, so the prompt is unchanged there.
+  defp permissions_section(opts), do: PermissionsBlock.render(Keyword.get(opts, :projection))
 
   # bd-8cn795: whole-file reads of large modules (or a large PR body / API
   # dump piped straight into context) refill the window faster than
@@ -265,6 +322,32 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # bd-capkj9: a podman container has no forge credential or host key by design;
+  # the host pushes after `arb done`. Without this a worker that tries
+  # `git push`, fails, and treats the push as required never prints `arb done`.
+  # Only the authoring work prompt gets it. The ReviewGate fix-round, conflict
+  # and rebase briefings are host-spawned on bwrap today (bd-49l0eo), so they
+  # keep their push instructions until G16 moves them to podman.
+  defp podman_push_section(opts) do
+    if Keyword.get(opts, :sandbox_backend) == :podman do
+      """
+
+      NO PUSH ACCESS — this container has no forge credential or GitHub host key,
+      by design. Commit on your branch, but do not push: the Arbiter host pushes
+      the branch and opens the PR after `arb done`. A failed `git push` or `gh`
+      call ("Host key verification failed", no credentials) is expected and is
+      not a reason to withhold `arb done`.
+
+      """
+    else
+      ""
+    end
+  end
+
+  defp push_clause(opts) do
+    if Keyword.get(opts, :sandbox_backend) == :podman, do: "", else: ", and push it"
+  end
+
   defp base_work_prompt(%Issue{} = task, opts) do
     mcp? = mcp_tools?(opts)
     worktree_path = Keyword.get(opts, :worktree_path)
@@ -286,9 +369,9 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}
+    #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
-    commit on this branch, #{push_instruction(opts)}
+    commit on this branch#{push_clause(opts)}.
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
     create`). The MergeQueue opens the single canonical PR for this task, on
@@ -328,22 +411,6 @@ defmodule Arbiter.Worker.PromptBuilder do
     on a line by itself, exactly. The worker watches your stdout and
     will mark the task complete when it sees that marker.
     """
-  end
-
-  # bd-dh1gg1: a sandboxed container run has no forge credential, so `git push`
-  # / `ssh github.com` can never succeed there; the host pushes the committed
-  # branch when the run completes. A worker told to push anyway retries until it
-  # gives up without printing the completion sentinel.
-  defp push_instruction(opts) do
-    if Keyword.get(opts, :host_pushes?, false) do
-      "and stop there.\n\n    Do NOT `git push`: this " <>
-        "sandbox has no\n    forge credentials and the push cannot succeed (a `git fetch` of the " <>
-        "target\n    branch may fail too; work from the refs already in the worktree). " <>
-        "Arbiter pushes your " <>
-        "committed\n    branch itself when you print the completion line below."
-    else
-      "and push it."
-    end
   end
 
   # bd-buefg4: agy-only. Claude's Read tool already tells the model about
@@ -406,7 +473,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{pr_follow_up_note(task, opts)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{EvidenceIntegrity.worker_block()}
+    #{EvidenceIntegrity.worker_block()}#{permissions_section(opts)}
     #{no_pr_job(task, kind, mcp?)}
     #{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running

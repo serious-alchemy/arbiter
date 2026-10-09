@@ -976,6 +976,42 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  describe "push/2 with :force_with_lease (bd-19skda)" do
+    setup %{repo: repo} do
+      {:ok, path} = Worktree.create(repo, "feature/lease", "main")
+      :ok = commit(path, "a.txt", "a\n", "first")
+      {:ok, _} = Worktree.push(path, set_upstream: true)
+      {sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: path)
+      %{path: path, old_head: String.trim(sha)}
+    end
+
+    test "replaces a rewritten branch when the remote is still at the expected head",
+         %{path: path, old_head: old_head, remote: remote} do
+      {_, 0} = System.cmd("git", ["commit", "--amend", "-m", "rewritten"], cd: path)
+
+      assert {:error, {:git_failed, _}} = Worktree.push(path, branch: "feature/lease")
+
+      assert {:ok, _} =
+               Worktree.push(path, branch: "feature/lease", force_with_lease: old_head)
+
+      {new, 0} = System.cmd("git", ["-C", remote, "rev-parse", "feature/lease"])
+      refute String.trim(new) == old_head
+    end
+
+    test "refuses when the remote moved past the expected head", %{path: path, remote: remote} do
+      {_, 0} = System.cmd("git", ["commit", "--amend", "-m", "rewritten"], cd: path)
+
+      assert {:error, {:git_failed, _}} =
+               Worktree.push(path,
+                 branch: "feature/lease",
+                 force_with_lease: String.duplicate("0", 40)
+               )
+
+      {out, 0} = System.cmd("git", ["-C", remote, "log", "-1", "--format=%s", "feature/lease"])
+      assert String.trim(out) == "first"
+    end
+  end
+
   describe "rebase_onto_origin/2" do
     test "rebases local-only commits onto a diverged remote tip, preserving both sides (bd-3doy0y)",
          %{repo: repo, remote: remote, root: root} do

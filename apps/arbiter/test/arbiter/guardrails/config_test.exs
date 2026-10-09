@@ -39,6 +39,39 @@ defmodule Arbiter.Guardrails.ConfigTest do
     assert Config.validate(@valid) == []
   end
 
+  describe "bindings feed ticket grants (G14)" do
+    defp binding_errors(binding), do: Config.validate(%{"bindings" => %{"prod_read" => binding}})
+
+    test "a binding host is never a wildcard: ticket grants don't wildcard" do
+      assert [error] = binding_errors(%{"hosts" => ["*.internal.example.com:443"]})
+      assert error =~ "guardrails.bindings.prod_read.hosts"
+    end
+
+    test "a tunnel is HOST:PORT or LOCAL:HOST:PORT" do
+      assert binding_errors(%{
+               "tunnels" => ["replica.internal:5432", "15432:replica.internal:5432"]
+             }) ==
+               []
+
+      assert [_] = binding_errors(%{"tunnels" => ["replica.internal"]})
+      assert [_] = binding_errors(%{"tunnels" => ["x:replica.internal:5432"]})
+      assert [_] = binding_errors(%{"tunnels" => ["*.internal:5432"]})
+    end
+
+    test "token_env names the env var a tracker token lands in" do
+      assert Config.validate(%{
+               "bindings" => %{
+                 "tracker_write" => %{"token_secret" => "t", "token_env" => "GITLAB_TOKEN"}
+               }
+             }) == []
+
+      assert [_] =
+               Config.validate(%{
+                 "bindings" => %{"tracker_write" => %{"token_env" => "bad name"}}
+               })
+    end
+  end
+
   test "nil is valid (no block)" do
     assert Config.validate(nil) == []
   end
@@ -92,6 +125,25 @@ defmodule Arbiter.Guardrails.ConfigTest do
     assert Enum.any?(Config.validate(%{"subjects" => [%{"match" => %{}}]}), &(&1 =~ "match"))
   end
 
+  test "defaults must be in the ticket permission vocabulary (G12)" do
+    errors =
+      Config.validate(%{"defaults" => %{"permissions" => ["network:API.example.com", "root"]}})
+
+    assert [msg] = errors
+    assert msg =~ "root"
+
+    assert Config.validate(%{
+             "defaults" => %{"permissions" => ["phi_data", "network?:h.io:8080"]}
+           }) == []
+  end
+
+  test "binding tags must be a list of strings" do
+    assert Config.validate(%{"bindings" => %{"secrets:db" => %{"tags" => ["prod"]}}}) == []
+
+    assert [msg] = Config.validate(%{"bindings" => %{"secrets:db" => %{"tags" => "prod"}}})
+    assert msg =~ "tags"
+  end
+
   test "binding names, hosts and secret maps are checked" do
     errors =
       Config.validate(%{
@@ -99,7 +151,7 @@ defmodule Arbiter.Guardrails.ConfigTest do
           "Not Valid" => %{},
           "prod_ssh" => %{"hosts" => ["not a host"], "env_from_secret" => %{"X" => ""}}
         },
-        "defaults" => %{"permissions" => ["ok_perm", "bad perm"]}
+        "defaults" => %{"permissions" => ["prod_read", "bad perm"]}
       })
 
     assert Enum.any?(errors, &(&1 =~ "Not Valid"))

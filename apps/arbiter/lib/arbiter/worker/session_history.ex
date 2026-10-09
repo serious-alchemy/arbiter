@@ -18,29 +18,173 @@ defmodule Arbiter.Worker.SessionHistory do
   require Logger
   require Ash.Query
 
+  alias Arbiter.Redaction
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Worker.SessionArchive
+  alias Arbiter.Worker.WorkerEnv
   alias Arbiter.Workers.Run
 
+  @max_age_seconds 14 * 86_400
+
   @type source :: {:file, String.t()} | {:archive, String.t()}
+
+  @doc """
+  Directory of the host-side session store: `<output_log_root>/session-history/`,
+  one `<session_id>.jsonl` per session.
+
+  A podman run's config dir lives in its run tmp dir and is deleted when the
+  worker goes down (a finished run's stop, a server restart, the boot sweep).
+  `preserve/1` copies the session out first, so the resume lookup finds it after
+  the container and its tmp dir are gone, whether or not the run ever reached
+  its completion-time `SessionArchive`.
+  """
+  @spec store_dir() :: String.t()
+  def store_dir, do: Path.join(Arbiter.Worker.OutputLog.root(), "session-history")
+
+  @doc "Absolute path of the stored JSONL for `session_id`."
+  @spec store_path(String.t()) :: String.t()
+  def store_path(session_id), do: Path.join(store_dir(), session_id <> ".jsonl")
+
+  @doc """
+  Copy every session JSONL under `<run_tmp>/claude-config/projects/*/` into
+  `store_dir/0` (`0600`, atomically), **redacted** with the run's workspace
+  secret values exactly as `Arbiter.Worker.SessionArchive` does — this is a
+  second persistence path, and a secret must not escape redaction on it. The
+  task is resolved from the `Run` row carrying the session id, else from the
+  run tmp dir's label (`RunTmp.create/1`). Returns the session ids kept, and
+  prunes entries older than 14 days. Best-effort: never raises, and a dir
+  with no Claude config is a no-op.
+  """
+  @spec preserve(String.t() | nil) :: [String.t()]
+  def preserve(run_tmp) when is_binary(run_tmp) do
+    kept =
+      run_tmp
+      |> Path.join("claude-config/projects/*/*.jsonl")
+      |> Path.wildcard()
+      |> Enum.flat_map(&preserve_file(&1, run_tmp))
+
+    if kept != [], do: prune()
+    kept
+  rescue
+    _ -> []
+  end
+
+  def preserve(_), do: []
+
+  @doc "Remove the stored copy of `session_id` (it has been seeded into a new run)."
+  @spec discard(String.t()) :: :ok
+  def discard(session_id) when is_binary(session_id) and session_id != "" do
+    _ = File.rm(store_path(session_id))
+    :ok
+  end
+
+  @doc "Delete store entries older than the retention window. Returns the count."
+  @spec prune() :: non_neg_integer()
+  def prune do
+    cutoff = System.os_time(:second) - @max_age_seconds
+
+    case File.ls(store_dir()) do
+      {:ok, entries} ->
+        entries
+        |> Enum.map(&Path.join(store_dir(), &1))
+        |> Enum.count(fn path ->
+          case File.stat(path, time: :posix) do
+            {:ok, %File.Stat{mtime: mtime}} when mtime < cutoff -> File.rm(path) == :ok
+            _ -> false
+          end
+        end)
+
+      _ ->
+        0
+    end
+  end
+
+  defp preserve_file(path, run_tmp) do
+    sid = Path.basename(path, ".jsonl")
+    dest = store_path(sid)
+    tmp = dest <> ".#{System.unique_integer([:positive])}.tmp"
+
+    with :ok <- File.mkdir_p(store_dir()),
+         {:ok, raw} <- File.read(path),
+         redacted = Redaction.redact(raw, secret_values(sid, run_tmp)),
+         :ok <- check_not_stale(dest, redacted),
+         :ok <- File.write(tmp, redacted),
+         _ = File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, dest) do
+      [sid]
+    else
+      :stale ->
+        []
+
+      {:error, reason} ->
+        File.rm(tmp)
+        Logger.warning("SessionHistory: cannot preserve #{path}: #{inspect(reason)}")
+        []
+    end
+  end
+
+  # The store is keyed by session id alone, and the boot sweep can reap an older
+  # run tmp of the same session after a newer run was preserved. A transcript only
+  # grows, so a shorter copy is the stale one: keep the stored entry.
+  defp check_not_stale(dest, redacted) do
+    case File.stat(dest) do
+      {:ok, %File.Stat{size: size}} when size > byte_size(redacted) -> :stale
+      _ -> :ok
+    end
+  end
+
+  defp secret_values(sid, run_tmp) do
+    task_id =
+      case runs_for(sid) do
+        [%{task_id: task_id} | _] -> task_id
+        [] -> label_task_id(run_tmp)
+      end
+
+    WorkerEnv.secret_values(task_id)
+  end
+
+  # `RunTmp.create/1` names dirs `<slug>-<unix seconds>-<unique int>`.
+  defp label_task_id(run_tmp) do
+    case Regex.run(~r/^(.+)-\d+-\d+$/, Path.basename(run_tmp)) do
+      [_, slug] -> slug
+      _ -> nil
+    end
+  end
 
   @doc "Where `session_id`'s JSONL can be read from, or `:not_found`."
   @spec find(String.t() | nil) :: {:ok, source()} | :not_found
   def find(session_id) when is_binary(session_id) and session_id != "" do
-    session_id
-    |> runs_for()
-    |> Enum.find_value(:not_found, fn run ->
-      case ClaudeSessionFile.locate(run.config_dir, session_id) do
-        {:ok, path} ->
-          {:ok, {:file, path}}
+    runs = runs_for(session_id)
 
-        :not_found ->
-          if SessionArchive.archived?(run.id), do: {:ok, {:archive, run.id}}
+    with :not_found <- find_live(runs, session_id),
+         :not_found <- find_stored(session_id) do
+      find_archived(runs)
+    end
+  end
+
+  def find(_), do: :not_found
+
+  defp find_live(runs, session_id) do
+    Enum.find_value(runs, :not_found, fn run ->
+      case ClaudeSessionFile.locate(run.config_dir, session_id) do
+        {:ok, path} -> {:ok, {:file, path}}
+        :not_found -> nil
       end
     end)
   end
 
-  def find(_), do: :not_found
+  defp find_stored(session_id) do
+    if File.regular?(store_path(session_id)),
+      do: {:ok, {:file, store_path(session_id)}},
+      else: :not_found
+  end
+
+  defp find_archived(runs) do
+    case Enum.find(runs, &SessionArchive.archived?(&1.id)) do
+      nil -> :not_found
+      run -> {:ok, {:archive, run.id}}
+    end
+  end
 
   @spec available?(String.t() | nil) :: boolean()
   def available?(session_id), do: match?({:ok, _}, find(session_id))
@@ -61,6 +205,10 @@ defmodule Arbiter.Worker.SessionHistory do
              dest = destination(config_dir, cwd, session_id),
              :ok <- File.mkdir_p(Path.dirname(dest)),
              :ok <- File.write(dest, bytes) do
+          # Only a store-sourced seed discards the entry. When the live file is
+          # read instead and the reaper preserves it afterwards, the entry stays
+          # until the 14-day `prune/0`.
+          if source == {:file, store_path(session_id)}, do: discard(session_id)
           Logger.info("SessionHistory: seeded session #{session_id} into #{config_dir}")
           :ok
         else
@@ -90,7 +238,24 @@ defmodule Arbiter.Worker.SessionHistory do
     ])
   end
 
-  defp read({:file, path}), do: File.read(path)
+  # A run's tmp dir is reaped asynchronously when its worker stops, so a `:file`
+  # source found a moment ago may be gone by the time it is read; the reaper
+  # preserves the session into the store first, so fall back to that.
+  defp read({:file, path}) do
+    case File.read(path) do
+      {:error, :enoent} = error ->
+        with {sid, ".jsonl"} <- {Path.basename(path, ".jsonl"), Path.extname(path)},
+             {:ok, _} <- File.stat(store_path(sid)) do
+          File.read(store_path(sid))
+        else
+          _ -> error
+        end
+
+      other ->
+        other
+    end
+  end
+
   defp read({:archive, run_id}), do: SessionArchive.read(run_id)
 
   defp runs_for(session_id) do

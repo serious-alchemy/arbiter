@@ -522,6 +522,10 @@ defmodule ArbiterWeb.Layouts do
       |> assign(:update_visible?, update_visible?(assigns.update, assigns.dismissed))
       |> assign(:deploy_state, deploy_state(assigns.deploy))
       |> assign(:deploy_visible?, deploy_visible?(assigns.deploy))
+      |> assign(
+        :deploy_dismissable?,
+        Arbiter.Release.DeployStatus.dismiss_key(assigns.deploy) != nil
+      )
 
     ~H"""
     <div
@@ -599,6 +603,25 @@ defmodule ArbiterWeb.Layouts do
         <p class="font-semibold">{deploy_headline(@deploy, @deploy_state)}</p>
         <p class="break-words">{deploy_detail(@deploy, @deploy_state)}</p>
       </div>
+      <.form
+        :if={@deploy_dismissable?}
+        for={%{}}
+        as={:deploy_dismiss}
+        id="deploy-dismiss-form"
+        action={~p"/release/deploy/dismiss"}
+        method="post"
+        class="shrink-0"
+      >
+        <button
+          type="submit"
+          id="deploy-dismiss-button"
+          aria-label="Dismiss the deploy notice"
+          title="Dismiss this notice"
+          class="inline-flex items-center rounded-[var(--radius-field)] p-1 cursor-pointer transition-colors duration-150 hover:opacity-70"
+        >
+          <.icon name="hero-x-mark" class="size-4" />
+        </button>
+      </.form>
     </div>
     """
   end
@@ -636,11 +659,25 @@ defmodule ArbiterWeb.Layouts do
   # deploy replaces the record.
   @success_visible_s 24 * 3600
 
+  # A dismissal hides exactly the record it was made at (tag + finish time), so a
+  # later deploy, whatever its outcome, shows again.
   defp deploy_visible?(deploy) do
     case deploy_state(deploy) do
       nil -> false
-      "succeeded" -> within?(deploy["finished_at"], @success_visible_s)
-      _ -> true
+      "running" -> true
+      state -> not deploy_dismissed?(deploy) and outcome_fresh?(state, deploy)
+    end
+  end
+
+  defp outcome_fresh?("succeeded", deploy), do: within?(deploy["finished_at"], @success_visible_s)
+  defp outcome_fresh?(_, _), do: true
+
+  # An interrupted "running" record reads as failed and has no key; it is never
+  # dismissable, so it is not looked up.
+  defp deploy_dismissed?(deploy) do
+    case Arbiter.Release.DeployStatus.dismiss_key(deploy) do
+      nil -> false
+      key -> key == Arbiter.Settings.dismissed_deploy()
     end
   end
 

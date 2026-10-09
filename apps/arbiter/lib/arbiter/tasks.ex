@@ -41,6 +41,8 @@ defmodule Arbiter.Tasks do
     # One row per change of a ticket's lifecycle state (bd-5gkqdr), written by
     # triggers on `issues`; the history every report reads.
     resource Arbiter.Tasks.TicketTransition
+    # bd-54m4vv: append-only trail of ticket-declared permissions (G12).
+    resource Arbiter.Tasks.PermissionEvent
   end
 
   require Ash.Query

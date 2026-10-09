@@ -68,6 +68,26 @@ convention above is the contract; treat `<run_id>.jsonl.gz` as stable.
 Volume: ~16 MB/day raw, ~110 MB/week; gzip measures ~5:1, so ~22 MB/week on
 disk. The one-time rescue of the surviving corpus wrote 149 MB.
 
+### `session-history/` — the resume handoff store (bd-9qazat)
+
+```
+<output_log_root>/session-history/<session_id>.jsonl    # redacted, 0600, uncompressed
+```
+
+A podman run's Claude config dir lives in its run tmp dir, which is deleted
+when the worker goes down. `Arbiter.Worker.SessionHistory.preserve/1` copies the
+session JSONL here first (`RunTmp.remove/1` and the boot `RunTmp.sweep/1`), so
+`worker_resume` in session mode can seed `--resume <sid>` into a new container.
+It is **not** an archive and not a stable contract: every byte goes through
+`Arbiter.Redaction` with the task's workspace secret values (same as the
+archive), the entry is deleted once a resume has seeded it, and entries older
+than 14 days are pruned on the next preserve.
+
+The seed happens in `ContainerSpawn.wrap_port/1` (every port open), not only in
+`prepare/1`: `Worker` splices `--resume <sid>` into the argv at port open, after
+`prepare/1` has run with the pristine argv, so a seed at prepare time never saw
+it (the v0.2.31 live failure, "No conversation found").
+
 ## Redaction: the decision, and why
 
 The raw JSONL is unredacted. `Arbiter.Worker.StepSummary` warns that a second

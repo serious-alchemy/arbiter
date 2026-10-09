@@ -74,6 +74,14 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     bytes
   end
 
+  # One build, one checksum: `:erl_tar.add/4` stamps the current time as each
+  # entry's mtime, so two `release_tarball/1` calls straddling a second
+  # boundary yield different bytes. Always hash the bytes that get served.
+  defp release_tarball_with_sha(tag) do
+    tarball = release_tarball(tag)
+    {tarball, "#{sha256_hex(tarball)}  x\n"}
+  end
+
   defp sha256_hex(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp tarball_path(tag), do: "/dl/arbiter-#{tag}-linux.tar.gz"
@@ -1785,7 +1793,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       System.put_env("GITHUB_TOKEN", "ghp_supersecrettokenvalue123")
       on_exit(fn -> System.delete_env("GITHUB_TOKEN") end)
 
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
@@ -1884,7 +1892,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
     test "a green deploy prints and logs no token", %{home: home} do
       write_db_for_secrets(home)
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
       stub_backup(home)
@@ -1897,7 +1905,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
     test "a failed backup whose eval output echoes the token is redacted", %{home: home} do
       write_db_for_secrets(home)
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
@@ -1930,7 +1938,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
   describe "CLI self-update after a green deploy" do
     test "installs the escript for the same tag and reports it", %{home: home} do
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
@@ -1943,7 +1951,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
 
     test "text output says the CLI was updated", %{home: home} do
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
@@ -1954,7 +1962,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
 
     test "--no-self-update leaves the CLI alone", %{home: home} do
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
@@ -1999,7 +2007,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
 
     test "the output names the release repo and where it was resolved from" do
-      {tarball, sha} = {release_tarball(@vsn), "#{sha256_hex(release_tarball(@vsn))}  x\n"}
+      {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 

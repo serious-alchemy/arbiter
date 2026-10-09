@@ -1844,6 +1844,10 @@ defmodule Arbiter.Worker.Worktree do
     * `:set_upstream` — when `true`, passes `-u` to git push.
     * `:branch` — explicit branch ref to push; defaults to the worktree's
       current branch.
+    * `:force_with_lease` — a sha: the push replaces the remote branch only
+      while it still points there (`--force-with-lease=<ref>:<sha>`), so a
+      rewritten branch (a rebase) lands without clobbering a newer push
+      (bd-19skda).
   """
   @spec push(path(), keyword()) :: {:ok, String.t()} | {:error, error_reason()}
   def push(path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -1853,12 +1857,18 @@ defmodule Arbiter.Worker.Worktree do
     with {:ok, branch} <- resolve_branch(path, opts) do
       args =
         ["push"] ++
+          lease_args(Keyword.get(opts, :force_with_lease), branch) ++
           if(set_upstream, do: ["-u"], else: []) ++
           [remote, branch]
 
       run_git(args, cd: path)
     end
   end
+
+  defp lease_args(sha, branch) when is_binary(sha),
+    do: ["--force-with-lease=refs/heads/#{branch}:#{sha}"]
+
+  defp lease_args(_, _), do: []
 
   @doc """
   Carry a private clone's branch into its main repo (`PrivateClone.sync_back/1`).

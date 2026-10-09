@@ -44,7 +44,7 @@ defmodule Arbiter.NodeAgent.Protocol do
         "bridge_streams" => "mux",
         "run_hold" => "quiesce"
       },
-      "capacity" => capacity(),
+      "capacity" => capacity(config),
       "inventory" => %{
         "runs" => live_runs(config),
         "retained" => Enum.map(Retained.list(config), &Retained.report/1)
@@ -68,9 +68,30 @@ defmodule Arbiter.NodeAgent.Protocol do
 
   # -- facts ------------------------------------------------------------------------
 
-  defp capacity do
-    %{"cpus" => :erlang.system_info(:logical_processors_available) |> cpus()}
-    |> put_present("mem_total", meminfo("MemTotal"))
+  # Facts plus the derived `suggestion` (computed here, agent-side, so the primary
+  # only reads it) and the owner's `ceiling` (`ARB_NODE_MAX_WORKERS`) when set.
+  defp capacity(%Config{} = config) do
+    cpus = :erlang.system_info(:logical_processors_available) |> cpus()
+    mem_total = meminfo("MemTotal")
+
+    %{"cpus" => cpus, "suggestion" => suggestion(cpus, mem_total)}
+    |> put_present("mem_total", mem_total)
+    |> put_present("ceiling", config.max_workers)
+  end
+
+  @cpus_per_worker 2
+  @worker_mem_cap 4 * 1024 * 1024 * 1024
+
+  @doc """
+  The node's worker suggestion (`docs/design/remote-workers.md` §13):
+  `min(floor(cpus / #{@cpus_per_worker}), floor(0.8 × mem_total / 4 GiB))`, at least 1.
+  `mem_total` in bytes; `nil` (unreadable) leaves the CPU term alone.
+  """
+  @spec suggestion(pos_integer(), non_neg_integer() | nil) :: pos_integer()
+  def suggestion(cpus, mem_total) do
+    by_cpu = div(cpus, @cpus_per_worker)
+    by_mem = if mem_total, do: div(mem_total * 8, 10 * @worker_mem_cap), else: by_cpu
+    max(1, min(by_cpu, by_mem))
   end
 
   defp cpus(:unknown), do: System.schedulers_online()

@@ -1122,6 +1122,64 @@ a cap that matches nothing, an unknown repo or an unreachable binding. The REST
 the ReviewGate's reviewer spawn path are G13; ticket permissions are G12. G11 wires
 the floor into the implementer dispatch spawn.
 
+## Dispatch-time withholding: undeclared means withheld (bd-ld8qde, G14)
+
+A ticket's declared permissions (`issues.permissions`, G12) are turned into
+exactly the reach a spawn gets, and nothing else
+(`Arbiter.Guardrails.Projection`, pure; `Arbiter.Worker.Withholding`, the DB
+half). It applies **only to a guarded install**: with no subject rule configured
+(`Arbiter.Guardrails.guarded?/0` is false) a spawn is exactly what it was before.
+Once rules exist, a spawn whose projection was not computed is **sealed** (given
+nothing), never unguarded.
+
+| Surface | What a declared, in-force permission projects | Where |
+|---|---|---|
+| Env | `secrets:<n>` / `prod_read`: the binding's `env_from_secret` pairs; `tracker_write`: `GH_TOKEN` (the binding's `token_env`) from `token_secret`. A secret-flagged workspace `worker_env` var is **withheld** unless projected; plain vars stay; provider credentials are untouched | `WorkerEnv.resolve/2` |
+| Jail | `prod_ssh`: a per-worker `ssh-agent` (`Arbiter.Worker.SshAgent`) holding only the binding's `ssh_key_secret`, its socket bound into the jail at its own path over a blanked dir, `SSH_AUTH_SOCK` pointing at it. The key is never a file or env var the worker can read | `Jail.wrap/2` `:ssh_agent`, `Gemini` |
+| Egress | `network:` and binding `hosts` become proxy grants (never a wildcard); `prod_read` `tunnels` become fixed-destination bridges | `JailRun` (agy jail, podman spawn) |
+| MCP | the worker scope token carries a `permissions` claim (`tracker_write`) | `Scope.mint_worker/3`, `Scope.permission?/2` |
+| Prompt | a PERMISSIONS block: granted, withheld and why, what a `403` means, how to ask | `PermissionsBlock` |
+
+A permission is withheld although declared when the role is a reviewer (no action
+permissions), the profile is out of scope, the tier is below the binding's
+`min_tier` (or the §5.1 default), the profile does not list the kind, or the
+workspace has no usable binding. A `requested` permission still awaiting an
+operator's grant is not in force and projects nothing.
+
+**Refusals, never fallbacks.** A `prod_ssh` spawn is refused if the key secret is
+missing, if agy cannot be jailed, or under `sandbox.backend: podman` (a confined
+container cannot reach a host socket): it never runs on the operator's agent.
+
+**Honest limits.**
+
+  * The egress proxy is still in **learn mode** (the agy infra host set is not
+    recorded, see `Arbiter.Agents.Gemini`), so a withheld host is logged in
+    `egress_events` as `not_granted` rather than denied until enforcement is
+    turned on (G4, G20). Env, mount, claim and prompt withholding are real now.
+  * Claude workers are not under the bwrap jail yet (G7), so `prod_ssh` is
+    available to agy only: a `prod_ssh` spawn of any other provider is refused
+    (`ClaudeSession.start/1`, `Withholding.check_spawn/2`) rather than run on the
+    operator's agent.
+  * The CI fix pass (`FixPassDispatcher`) computes the same projection as a
+    first-round implementer (`spawn_projection/2`, no model named, so a rule
+    keyed on model family sees `nil`) and mints its token with those claims, so
+    it keeps the ticket's declared `secrets:` env and `tracker_write`. The
+    conflict-resolver pass and the doctor canary (`Doctor.SpawnCanary`) compute
+    none: on a guarded install they run **sealed** deliberately (a merge needs no
+    ticket reach; the canary has a workspace but no ticket).
+  * The egress grant cache is keyed `{task_id, run_id}`, so a reviewer's `[]` and
+    an implementer's hosts for the same ticket never serve each other; a grant
+    writer's `Egress.invalidate_grants/1` still drops every run of the task.
+  * The MCP `permissions` claim is minted into the worker token and exposed as
+    `MCP.Scope.permission?/2`, but no tool calls it yet: nothing enforces
+    `tracker_write` server-side today. The env withholding (no `GH_TOKEN`) is
+    what bites; the claim is for the tools that will check it.
+  * `permission_request` and live grants are G15; `guardrail_decision` on runs
+    is G13.
+
+`arb server doctor` (guardrails report) flags a binding that names a secret the
+workspace does not have (`binding_secret_missing`).
+
 ## Operator proof for token minting (bd-8381tk)
 
 ### The problem
@@ -1450,3 +1508,28 @@ on ingest through `Arbiter.Redaction`, but that only covers secrets a human
 marked; a key printed by a subprocess is not covered. The root is therefore
 also protected by filesystem permissions (`0700` root, `0600` archives) and
 must be treated as secret-bearing storage. See `docs/session-archive.md`.
+
+## Scoped git and tracker credentials (bd-9cygoo, G16)
+
+A worker pushes with a credential that reaches **one repo** — a deploy key, a
+repo-restricted GitHub App installation token, or a repo-scoped fine-grained /
+project token — instead of the operator's ssh-agent or keys, and the tracker token
+it is given is scoped the same way. No worker is given a token with `gist` or
+`delete_repo`. Operator setup and the full mechanism: `docs/git-credentials.md`.
+
+| Surface | What changes | Where |
+|---|---|---|
+| Config | `git_credentials.repos.<repo>` (`deploy_key` / `github_app` / `token`) and `legacy_operator`; validated on write | `GitCredential.validate/1`, `ValidateConfig` |
+| Dispatch | An implementer spawn (task dispatch, revise round, CI fix pass, conflict pass the host does not push for) is **refused** with a clear message when its repo has no scoped credential and the workspace has not opted into `legacy_operator`. Enforced on a guarded install or once a `git_credentials` block exists; otherwise unchanged | `GitCredential.plan/3`, `Dispatch`, `ReviewGate`, `FixPassDispatcher`, `ConflictResolver` |
+| Env | Unsandboxed: key file + `GIT_SSH_COMMAND` (`IdentitiesOnly`, `IdentityAgent=none`), or `ARB_GIT_TOKEN` + a credential helper that answers only for the repo's path; the tracker var carries the repo-scoped token. `SSH_AUTH_SOCK` is never set | `ClaudeSession`, `GitCredential.spawn_env/4` |
+| Jail | agy: the key is bound at its own path over a blanked key dir; the operator's default `~/.ssh` identities are no longer bound back | `Jail` `:git_ssh_key`, `Jail.Hide` `:scoped_git` |
+| Podman | The key / token is a `podman run --secret`, never a flag value, a host-file mount or an env literal; removed with the container, on owner death and at boot | `Container`, `ContainerSpawn` |
+| Doctor | `git_credential_unconfigured` (a repo whose pushes would be refused) and `git_credential_secret_missing` | `Guardrails.Report` |
+
+**Honest limits.** Unsandboxed Claude/Codex still run as the operator's uid, so
+scoping stops Arbiter *handing over* the operator's credential but cannot stop
+a same-uid process from reading `~/.ssh` (see "Residual risk: same UID"); the
+bwrap jail and podman close that. A remote-node podman run that needs a scoped
+credential is refused. The forge enforces the one-repo scope of a key or token;
+Arbiter's tests cover the mint request, the helper's path pinning and every
+delivery path, not GitHub itself.

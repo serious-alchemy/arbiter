@@ -262,7 +262,26 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
       }
     end
 
-    defp clones, do: Arbiter.Config.Paths.worktree_root() |> File.ls() |> elem(1) |> List.wrap()
+    # A missing clone root and an empty one both mean "no clones": the root is
+    # created lazily, so a baseline taken before the first clone sees :enoent.
+    defp clones(root \\ Arbiter.Config.Paths.worktree_root()) do
+      case File.ls(root) do
+        {:ok, entries} -> Enum.sort(entries)
+        {:error, :enoent} -> []
+      end
+    end
+
+    test "clones/1 treats a missing root like an empty one but still sees leftovers" do
+      root = Path.join(System.tmp_dir!(), "clones-#{System.unique_integer([:positive])}")
+      assert clones(root) == []
+
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf(root) end)
+      assert clones(root) == []
+
+      File.mkdir_p!(Path.join(root, "leftover-clone"))
+      assert clones(root) == ["leftover-clone"]
+    end
 
     defp podman_workspace!(types) do
       Ash.create!(Workspace, %{

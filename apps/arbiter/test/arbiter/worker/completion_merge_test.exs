@@ -56,6 +56,38 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     end
   end
 
+  # Teardown writes into the tmp root after the task is closed, from more than
+  # one process: the Driver reaps the worktree (a `cleanup-dirty-probe` git call
+  # plus `git worktree remove`), and the task's Watchdog — which performs the
+  # `:close` on a direct merge — runs `CleanupWorktree` (dirty probe, private
+  # clone sync-back) in its own `after_transaction` hook, i.e. AFTER the DB row
+  # already reads `:closed`. Block until the worker, the Driver and every other
+  # process registered under the task are down, so the setup's `rm_rf!` cannot
+  # race those writes.
+  defp drain(%{worker_pid: worker, driver_pid: driver, task: %{id: task_id}}) do
+    if Process.alive?(worker), do: GenServer.stop(worker, :normal)
+    await_down([worker, driver])
+
+    pids = for {_key, pid} <- Arbiter.Worker.Registry.all_for(task_id), do: pid
+
+    for pid <- pids, Process.alive?(pid) do
+      try do
+        GenServer.stop(pid, :normal, 10_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    await_down(pids)
+  end
+
+  defp await_down(pids) do
+    for pid <- pids, is_pid(pid) do
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 10_000
+    end
+  end
+
   setup do
     tmp = Path.join(System.tmp_dir!(), "completion-merge-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
@@ -93,9 +125,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
         max_ticks: 200
       )
 
-    on_exit(fn ->
-      if Process.alive?(result.worker_pid), do: GenServer.stop(result.worker_pid, :normal)
-    end)
+    on_exit(fn -> drain(result) end)
 
     # Wait for the whole path: worker done → Direct merge → task closes.
     # We use the task's DB status (not worker in-memory state) because the
@@ -144,9 +174,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
         max_ticks: 200
       )
 
-    on_exit(fn ->
-      if Process.alive?(result.worker_pid), do: GenServer.stop(result.worker_pid, :normal)
-    end)
+    on_exit(fn -> drain(result) end)
 
     assert Arbiter.Worker.PrivateClone.clone?(result.worktree_path)
 
@@ -200,6 +228,46 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     assert escalation
     assert escalation.body =~ "feature/x"
+  end
+
+  test "arb done on a podman-backed worker waits for the container before force-removing it",
+       %{repo: repo, ws: ws} do
+    # bd-9ss153 / #590: the done path must pass `grace_ms:` to the container stop,
+    # so `podman wait` runs ahead of `rm --force` and a clean exit is not
+    # recorded as 137.
+    {:ok, task} =
+      Ash.create(Issue, %{title: "podman done", workspace_id: ws.id, issue_type: :feature})
+
+    {_, 0} = git(["branch", "feature/podman"], repo)
+    test_pid = self()
+
+    put_app_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+      send(test_pid, {:podman, args})
+      {"", 0}
+    end)
+
+    name = "arb-#{task.id}-1234"
+
+    meta = %{
+      branch: "feature/podman",
+      repo_path: repo,
+      target_branch: "no-such-target",
+      merge_title: "Merge #{task.id}"
+    }
+
+    {:ok, pid} =
+      Worker.start(task_id: task.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+    :ok = Worker.report(pid, :claude_spawn, %{sandbox: %{name: name}})
+
+    send(pid, {:__claude_session_done__, "arb done"})
+
+    # Plain `receive` takes messages in mailbox order, so this pins the order.
+    assert_receive {:podman, first}, 5_000
+    assert first == ["wait", name]
+    assert_receive {:podman, ["rm", "--force" | _]}, 5_000
   end
 
   test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the task",

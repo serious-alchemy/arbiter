@@ -96,6 +96,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Gemini.RereadDetector
   alias Arbiter.Worker
   alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.StepSummary
@@ -232,15 +233,33 @@ defmodule Arbiter.Worker.ClaudeSession do
   def start(opts) when is_list(opts) do
     with {:ok, owner} <- fetch_owner(opts),
          {:ok, worktree_path} <- fetch_worktree(opts),
+         # bd-ld8qde (G14): never run a `prod_ssh` spawn without its agent.
+         :ok <-
+           Arbiter.Worker.Withholding.check_spawn(
+             Keyword.get(opts, :projection),
+             Keyword.get(opts, :provider)
+           ),
          {:ok, argv} <- resolve_argv(opts),
-         {:ok, exec} <- resolve_executable(argv) do
-      task_id = task_id_for(owner)
-
-      # One workspace load serves both halves (bd-62d3jh): the pairs go into the
-      # child's env, the secret values into the session's redaction list.
-      {worker_env, redact_values} =
-        Arbiter.Worker.WorkerEnv.resolve(task_id, provider: Keyword.get(opts, :provider))
-
+         {:ok, exec} <- resolve_executable(argv),
+         task_id = task_id_for(owner),
+         # bd-9cygoo (G16): the repo-scoped git credential, or a refusal. Never the
+         # operator's agent: the spawn env has no SSH_AUTH_SOCK (`SpawnEnv`).
+         {:ok, git} <- prepare_git_credential(opts, owner, worktree_path, task_id),
+         # One workspace load serves both halves (bd-62d3jh): the pairs go into the
+         # child's env, the secret values into the session's redaction list.
+         {worker_env, redact_values} =
+           Arbiter.Worker.WorkerEnv.resolve(task_id,
+             provider: Keyword.get(opts, :provider),
+             # bd-ld8qde (G14): what this spawn is given of the ticket's permissions.
+             projection: Keyword.get(opts, :projection)
+           ),
+         {:ok, worker_env} <-
+           GitCredential.spawn_env(
+             git,
+             Keyword.get(opts, :projection) || %{},
+             worker_env,
+             []
+           ) do
       # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any
       # ANTHROPIC_API_KEY) travel in via the caller-explicit `:env` opt
       # (`Claude.spawn_env/1`'s output), not the workspace's `worker_env`
@@ -248,7 +267,7 @@ defmodule Arbiter.Worker.ClaudeSession do
       # this, a worker that runs `env` or whose error output quotes its
       # environment would emit the long-TTL token verbatim into
       # worker_runs.output_lines / the dashboard stream / OutputLog.
-      redact_values = redact_values ++ credential_env_values(opts)
+      redact_values = redact_values ++ credential_env_values(opts) ++ git.redact
 
       session_config =
         build_session_config(task_id, Keyword.get(opts, :topic),
@@ -279,7 +298,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
       with {:ok, port_args} <-
              port_args(
-               opts,
+               Keyword.put(opts, :git_material, git.material),
                exec,
                argv,
                worktree_path,
@@ -292,6 +311,27 @@ defmodule Arbiter.Worker.ClaudeSession do
       end
     end
   end
+
+  # bd-9cygoo (G16): resolve the spawn's repo-scoped git credential. A spawn that
+  # carries no plan (a caller that predates G16) is `:unenforced`: as before.
+  defp prepare_git_credential(opts, owner, worktree_path, task_id) do
+    case Keyword.get(opts, :git_credential) do
+      %GitCredential{} = plan ->
+        GitCredential.prepare(plan, Arbiter.Worker.WorkerEnv.workspace_for(task_id), owner,
+          worktree_path: worktree_path,
+          projection: Keyword.get(opts, :projection),
+          container?: container_spawn?(Keyword.get(opts, :security))
+        )
+
+      _ ->
+        GitCredential.prepare(nil, nil, owner, [])
+    end
+  end
+
+  defp container_spawn?(%Arbiter.Agents.SecurityPolicy{} = policy),
+    do: ContainerSpawn.podman?(policy)
+
+  defp container_spawn?(_), do: false
 
   # bd-d2o3xb (P7): a spawn that carries a `sandbox.backend: podman` policy runs
   # in a container (`Arbiter.Worker.ContainerSpawn`); its host-side preparation
@@ -331,6 +371,8 @@ defmodule Arbiter.Worker.ClaudeSession do
                :image,
                :podman,
                :egress,
+               :projection,
+               :git_material,
                :codex_path,
                :codex_source_home
              ]) ++
@@ -351,6 +393,11 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  # A run placed on another node has no podman secret to carry a key: refuse rather
+  # than run it on whatever credential the node has (bd-9cygoo).
+  defp no_remote_git_credential(nil), do: :ok
+  defp no_remote_git_credential(_), do: {:error, {:git_credential_unsupported, :remote_node}}
+
   # RW9: a run placed on a node (`opts[:node]`, from `Worker.Dispatch`'s
   # `ensure_node_capacity/2`). The primary half runs here (egress, image plan,
   # published CLI files), then the run is *assigned* to the node and this waits
@@ -360,7 +407,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp prepare_remote_container(opts, policy, port_args, ctx, node) do
     provider = Keyword.get(opts, :provider) || "claude"
 
-    with {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
+    with :ok <- no_remote_git_credential(Keyword.get(opts, :git_material)),
+         {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            ContainerSpawn.prepare_remote(
              Keyword.take(opts, [

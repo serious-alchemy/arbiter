@@ -2419,6 +2419,41 @@ defmodule Arbiter.Mergers.GithubTest do
       assert check.summary =~ "assertion failed"
     end
 
+    test "appends the filtered Actions job log when the check run has an id (bd-1fzpx8)" do
+      log =
+        Enum.map_join(1..100, "\n", &"2026-10-09T12:00:00.0000000Z compiling #{&1}") <>
+          "\n2026-10-09T12:00:01.0000000Z   1) test boom (Widget.FooTest)\n" <>
+          "2026-10-09T12:00:01.0000000Z      test/foo_test.exs:12\n" <>
+          "2026-10-09T12:00:01.0000000Z      Assertion with == failed\n"
+
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha9"}})
+
+          "/repos/octo/widget/commits/sha9/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [%{"id" => 77, "name" => "test", "conclusion" => "failure"}]
+            })
+
+          "/repos/octo/widget/check-runs/77/annotations" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/actions/jobs/77/logs" ->
+            conn |> Plug.Conn.put_resp_content_type("text/plain") |> Plug.Conn.send_resp(200, log)
+        end
+      end)
+
+      assert {:ok, [check]} = Github.failing_check_logs(@ref)
+      assert check.summary =~ "1) test boom (Widget.FooTest)"
+      assert check.summary =~ "test/foo_test.exs:12"
+      refute check.summary =~ "compiling 3\n"
+    end
+
     test "returns an empty list when there is no head sha" do
       stub(fn conn ->
         case conn.request_path do
@@ -2500,6 +2535,9 @@ defmodule Arbiter.Mergers.GithubTest do
                 }
               ]
             })
+
+          "/repos/octo/widget/actions/jobs/77/logs" ->
+            Plug.Conn.send_resp(conn, 404, "")
 
           "/repos/octo/widget/check-runs/77/annotations" ->
             conn

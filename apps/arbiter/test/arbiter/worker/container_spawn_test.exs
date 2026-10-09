@@ -12,6 +12,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Test.GitFixture
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
@@ -121,6 +122,49 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "prepare/1 with a guardrail projection (G14, bd-ld8qde)" do
+    defp capture_egress(ctx) do
+      test = self()
+      inner = Keyword.fetch!(ctx.opts, :egress)
+
+      fn opts ->
+        send(test, {:egress_opts, opts})
+        inner.(opts)
+      end
+    end
+
+    test "the projection's tunnels join the run's fixed bridges and its hosts become the grants",
+         ctx do
+      projection = %{
+        Projection.sealed()
+        | hosts: ["api.example.com:443"],
+          tunnels: [{5432, "replica.internal", 5432}]
+      }
+
+      opts = [egress: capture_egress(ctx), projection: projection] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+
+      assert_received {:egress_opts, egress_opts}
+      assert {5432, "replica.internal", 5432} in Keyword.fetch!(egress_opts, :tunnels)
+      assert Keyword.fetch!(egress_opts, :grants).("bd-p7test") == ["api.example.com:443"]
+    end
+
+    test "a spawn with no projection asks the ticket's live network: grants", ctx do
+      opts = [egress: capture_egress(ctx)] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+      assert_received {:egress_opts, egress_opts}
+      assert is_function(Keyword.fetch!(egress_opts, :grants), 1)
+    end
+
+    test "prod_ssh is refused under podman: no agent socket can reach the container", ctx do
+      projection = %{Projection.sealed() | ssh: %{key_secret: "k", hosts: ["prod.internal:22"]}}
+      opts = [projection: projection] ++ ctx.opts
+
+      assert {:error, {:prod_ssh_unsupported, :podman}} = ContainerSpawn.prepare(opts)
+      refute_received {:egress_opts, _}
+    end
+  end
+
   describe "prepare/1 with --resume (bd-atsde3)" do
     test "carries the resumed session's JSONL into the run's fresh config dir", ctx do
       owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
@@ -151,6 +195,70 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
                "{}\n"
+    end
+  end
+
+  describe "wrap_port/1 with a --resume injected after prepare (bd-9qazat)" do
+    # `Worker` splices `--resume <sid>` into the argv at port open, long after
+    # `prepare/1` ran with the pristine argv, so the seed has to happen here.
+    test "seeds the resumed session into the config dir the container mounts", ctx do
+      sid = "bbf6ebc2-0d53-4838-99f7-381156aad1e9"
+      store = Arbiter.Worker.SessionHistory.store_path(sid)
+      File.mkdir_p!(Path.dirname(store))
+      File.write!(store, "{\"type\":\"user\"}\n")
+      on_exit(fn -> File.rm(store) end)
+
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      refute File.exists?(Path.join(request.config_dir, "projects"))
+
+      args = port_args(ctx, request)
+      resumed = %{args | argv: Enum.take(args.argv, 5) ++ ["--print", "--resume", sid, "go"]}
+
+      assert {:ok, _wrapped} = ContainerSpawn.wrap_port(resumed)
+
+      # The path claude computes for the container's cwd (the clone is mounted
+      # at the same path).
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.clone)
+
+      assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
+               "{\"type\":\"user\"}\n"
+    end
+  end
+
+  describe "resume after the prior run's tmp dir is gone (bd-jrzq4q)" do
+    test "preserved session is available, seeded into the new config dir and resumed", ctx do
+      sid = "c1d2e3f4-0d53-4838-99f7-381156aad1e9"
+      store = Arbiter.Worker.SessionHistory.store_path(sid)
+      on_exit(fn -> File.rm(store) end)
+
+      # Prior run: a session JSONL in its config dir, then preserved and removed.
+      prior_tmp = Path.join(ctx.dir, "prior-run-tmp")
+      prior_jsonl = Path.join([prior_tmp, "claude-config", "projects", "-old", sid <> ".jsonl"])
+      File.mkdir_p!(Path.dirname(prior_jsonl))
+      File.write!(prior_jsonl, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
+
+      assert [^sid] = Arbiter.Worker.SessionHistory.preserve(prior_tmp)
+      File.rm_rf!(prior_tmp)
+      refute File.exists?(prior_tmp)
+
+      # What Dispatch.resume_session gates on.
+      assert Arbiter.Worker.SessionHistory.available?(sid)
+
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      args = port_args(ctx, request)
+      resumed = %{args | argv: Enum.take(args.argv, 5) ++ ["--print", "--resume", sid, "go"]}
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(resumed)
+
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.clone)
+
+      assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
+               "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n"
+
+      assert Arbiter.Worker.SessionHistory.resume_session_id(wrapped.argv) == sid
+
+      assert ["--resume", sid] ==
+               Enum.slice(wrapped.argv, Enum.find_index(wrapped.argv, &(&1 == "--resume")), 2)
     end
   end
 
@@ -721,6 +829,104 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "a scoped git credential (G16, bd-9cygoo)" do
+    alias Arbiter.Worker.GitCredential.Material
+
+    setup do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :worker_container_runner, fn cmd, args, _opts ->
+        case args do
+          ["secret", "create", name, file] ->
+            send(test_pid, {:secret_created, name, File.read!(file)})
+
+          _ ->
+            send(test_pid, {:ran, cmd, args})
+        end
+
+        {"", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+      :ok
+    end
+
+    test "a deploy key becomes a podman --secret mount; no host path, agent or value on argv",
+         ctx do
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+      assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+
+      assert_received {:secret_created, secret, "PRIVATE-KEY\n"}
+      assert secret == request.name <> "-git-key"
+
+      assert [%{name: ^secret, type: :mount, target: "arb_git_key", uid: uid}] =
+               request.git_secrets
+
+      assert is_integer(uid)
+      refute Enum.any?(request.git_secrets, &Map.has_key?(&1, :value))
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      argv = wrapped.argv
+      assert "--secret" in argv
+      assert Enum.any?(argv, &(&1 =~ "#{secret},type=mount,target=arb_git_key"))
+      refute Enum.any?(argv, &(&1 =~ "PRIVATE-KEY"))
+      refute Enum.any?(argv, &(&1 =~ "SSH_AUTH_SOCK"))
+
+      assert {"GIT_SSH_COMMAND", ssh} = List.keyfind(wrapped.env, "GIT_SSH_COMMAND", 0)
+      assert ssh =~ "-i /run/secrets/arb_git_key"
+      assert ssh =~ "IdentityAgent=none"
+      # the egress proxy stays the only way out
+      assert ssh =~ "ProxyCommand"
+    end
+
+    test "a token is a --secret env var, with only the helper config in the environment", ctx do
+      material = %Material{
+        kind: :token,
+        token: "tok-123",
+        host: "github.com",
+        remote: "acme/tonic"
+      }
+
+      assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+
+      assert_received {:secret_created, secret, "tok-123"}
+      assert secret == request.name <> "-git-token"
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert Enum.any?(wrapped.argv, &(&1 == "#{secret},type=env,target=ARB_GIT_TOKEN"))
+      refute Enum.any?(wrapped.argv, &(&1 =~ "tok-123"))
+      refute Enum.any?(wrapped.env, fn {_, v} -> to_string(v) =~ "tok-123" end)
+      assert Enum.any?(wrapped.argv, &(&1 =~ "GIT_CONFIG_PARAMETERS"))
+    end
+
+    test "teardown removes the secrets with the container", ctx do
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+      {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+      secret = request.name <> "-git-key"
+
+      assert :ok = ContainerSpawn.teardown(%{sandbox: request})
+      assert_received {:ran, _, ["secret", "rm", "--ignore", ^secret]}
+    end
+
+    test "a secret that cannot be created refuses the spawn and leaves nothing behind", ctx do
+      Application.put_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+        if match?(["secret", "create" | _], args), do: {"no space", 125}, else: {"", 0}
+      end)
+
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+
+      assert {:error, {:git_credential_secret_failed, {:podman_secret_failed, 125, "no space"}}} =
+               ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+    end
+
+    test "no material: no secrets, as before", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert request.git_secrets == []
+      {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      refute "--secret" in wrapped.argv
+    end
+  end
+
   describe "teardown/1" do
     test "removes the container by name, and is a no-op for any other spawn" do
       test_pid = self()
@@ -889,4 +1095,29 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     do: Enum.chunk_every(argv, 2, 1) |> Enum.any?(&(&1 == ["-e", name]))
 
   defp has_literal?(argv, pair), do: has_inherit?(argv, pair)
+
+  describe "stop/2 (bd-9ss153)" do
+    setup do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+        send(test_pid, {:podman, args})
+        {"0\n", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+    end
+
+    test "with a grace period waits for the clean exit before the force-remove" do
+      assert :ok = ContainerSpawn.stop(%{sandbox: %{name: "arb-t1"}}, grace_ms: 1_000)
+      assert_received {:podman, ["wait", "arb-t1"]}
+      assert_received {:podman, ["rm", "--force" | _]}
+    end
+
+    test "without one it force-removes at once" do
+      assert :ok = ContainerSpawn.stop(%{sandbox: %{name: "arb-t1"}})
+      assert_received {:podman, ["rm", "--force" | _]}
+      refute_received {:podman, ["wait" | _]}
+    end
+  end
 end

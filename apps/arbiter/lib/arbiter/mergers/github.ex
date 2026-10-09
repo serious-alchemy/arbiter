@@ -73,6 +73,7 @@ defmodule Arbiter.Mergers.Github do
   alias Arbiter.Http.Client
 
   alias Arbiter.Mergers.{
+    CILogExcerpt,
     CIRerun,
     Github.BlockedState,
     Github.Config,
@@ -1692,7 +1693,13 @@ defmodule Arbiter.Mergers.Github do
          runs
          |> latest_per_check()
          |> Enum.filter(&failing_check?/1)
-         |> Enum.map(&summarize_check(&1, fn id -> fetch_annotations(cfg, owner, repo, id) end))}
+         |> Enum.map(
+           &summarize_check(
+             &1,
+             fn id -> fetch_annotations(cfg, owner, repo, id) end,
+             fn id -> fetch_job_log_excerpt(cfg, owner, repo, id) end
+           )
+         )}
 
       {:ok, _} ->
         {:ok, []}
@@ -1741,16 +1748,22 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
-  defp summarize_check(run, annotations_fun) do
+  defp summarize_check(run, annotations_fun, log_fun) do
     output = Map.get(run, "output") || %{}
     annotations = failure_annotations(run, output, annotations_fun)
 
-    summary =
+    head =
       ([Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")] ++
          Enum.map(annotations, &render_annotation/1))
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.join("\n")
       |> truncate(@log_tail_limit)
+
+    # The log excerpt is bounded on its own so a long output summary cannot crowd it out.
+    summary =
+      [head, job_log_excerpt(run, log_fun)]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("\n")
 
     %{
       name: Map.get(run, "name") || "check",
@@ -1800,6 +1813,32 @@ defmodule Arbiter.Mergers.Github do
          |> handle_json() do
       {:ok, annotations} when is_list(annotations) -> annotations
       _ -> []
+    end
+  end
+
+  # The filtered job log (failing tests, file:line, assertion blocks). A GitHub
+  # Actions job's id is its check-run id. Fetched host-side so a podman worker,
+  # which has neither `gh` nor a token, still sees why CI failed (bd-1fzpx8).
+  defp job_log_excerpt(run, log_fun) do
+    case Map.get(run, "id") do
+      id when is_integer(id) -> log_fun.(id)
+      _ -> nil
+    end
+  end
+
+  # Best-effort, like annotations: GitHub answers `/logs` with a redirect to a
+  # short-lived download URL (Req follows it), and non-Actions check runs 404.
+  defp fetch_job_log_excerpt(cfg, owner, repo, job_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/jobs/#{job_id}/logs", []) do
+      {:ok, %Req.Response{status: status, body: body}}
+      when status in 200..299 and is_binary(body) ->
+        case CILogExcerpt.extract(body, @log_tail_limit) do
+          "" -> nil
+          excerpt -> "--- job log (filtered) ---\n" <> excerpt
+        end
+
+      _ ->
+        nil
     end
   end
 

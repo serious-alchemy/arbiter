@@ -129,6 +129,64 @@ defmodule Arbiter.Guardrails.ReportTest do
     assert :unreachable_binding in kinds(report)
   end
 
+  describe "binding secrets exist (G14, bd-ld8qde)" do
+    defp with_secrets(guardrails, secrets) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rep-#{System.unique_integer([:positive])}",
+          prefix: "rp#{:rand.uniform(99_999)}",
+          config: %{"guardrails" => guardrails},
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    @bindings %{
+      "bindings" => %{
+        "prod_read" => %{"env_from_secret" => %{"RO_URL" => "prod_ro_url"}},
+        "prod_ssh" => %{"ssh_key_secret" => "prod_ssh_key", "hosts" => ["prod.internal:22"]},
+        "tracker_write" => %{"token_secret" => "gh_token"}
+      }
+    }
+
+    test "a binding naming a secret the workspace lacks is flagged, once per secret" do
+      ws = with_secrets(@bindings, %{"prod_ro_url" => "x"})
+      report = Report.build([ws], rules: [])
+
+      missing =
+        for %{kind: :binding_secret_missing, message: m} <- report.issues, do: m
+
+      assert length(missing) == 2
+      assert Enum.any?(missing, &(&1 =~ "prod_ssh_key" and &1 =~ "prod_ssh"))
+      assert Enum.any?(missing, &(&1 =~ "gh_token" and &1 =~ "tracker_write"))
+      refute Enum.any?(missing, &(&1 =~ "prod_ro_url"))
+    end
+
+    test "nothing to flag when every named secret exists" do
+      ws =
+        with_secrets(@bindings, %{"prod_ro_url" => "x", "prod_ssh_key" => "y", "gh_token" => "z"})
+
+      refute :binding_secret_missing in kinds(Report.build([ws], rules: []))
+    end
+
+    test "a worker_env var of that name also satisfies it" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rep-#{System.unique_integer([:positive])}",
+          prefix: "rp#{:rand.uniform(99_999)}",
+          config: %{
+            "guardrails" => %{
+              "bindings" => %{"prod_read" => %{"env_from_secret" => %{"X" => "ro_tok"}}}
+            }
+          },
+          worker_env: %{"ro_tok" => %{"value" => "v", "secret" => true}}
+        })
+
+      refute :binding_secret_missing in kinds(Report.build([ws], rules: []))
+    end
+  end
+
   test "posture/1 is string-keyed for the REST and MCP workspace surfaces" do
     ws = workspace!(%{})
     posture = Report.posture(ws, rules: [%{match: %{provider: "claude"}, tier: :trusted}])
@@ -139,5 +197,82 @@ defmodule Arbiter.Guardrails.ReportTest do
              posture["subjects"]
 
     assert posture["issues"] == []
+  end
+end
+
+defmodule Arbiter.Guardrails.ReportGitCredentialTest do
+  @moduledoc "G16 (bd-9cygoo): the doctor flags a repo whose pushes would be refused, and a credential naming a missing secret."
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Guardrails.Report
+  alias Arbiter.Tasks.Workspace
+
+  @rules [%{match: %{provider: "claude"}, tier: :trusted}]
+
+  defp workspace!(config, secrets \\ %{}) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "repgc-#{System.unique_integer([:positive])}",
+        prefix: "rg#{:rand.uniform(99_999)}",
+        config: config,
+        secrets: secrets
+      })
+
+    ws
+  end
+
+  defp messages(report, kind), do: for(%{kind: ^kind, message: m} <- report.issues, do: m)
+
+  test "a guarded install flags each repo with no scoped credential and no legacy opt-in" do
+    ws = workspace!(%{"repo_paths" => %{"tonic" => "/r/tonic", "vstim" => "/r/vstim"}})
+
+    assert [one, two] = messages(Report.build([ws], rules: @rules), :git_credential_unconfigured)
+    assert Enum.sort([one, two]) |> Enum.all?(&(&1 =~ "refused"))
+  end
+
+  test "nothing is flagged on an install with neither guardrails nor a git_credentials block" do
+    ws = workspace!(%{"repo_paths" => %{"tonic" => "/r/tonic"}})
+    assert messages(Report.build([ws], rules: []), :git_credential_unconfigured) == []
+  end
+
+  test "a configured repo, or an explicit legacy opt-in, is not flagged" do
+    covered =
+      workspace!(
+        %{
+          "repo_paths" => %{"tonic" => "/r/tonic", "vstim" => "/r/vstim"},
+          "git_credentials" => %{
+            "repos" => %{
+              "tonic" => %{"kind" => "deploy_key", "key_secret" => "K"},
+              "vstim" => %{"legacy_operator" => true}
+            }
+          }
+        },
+        %{"K" => "key"}
+      )
+
+    report = Report.build([covered], rules: @rules)
+    assert messages(report, :git_credential_unconfigured) == []
+    assert messages(report, :git_credential_secret_missing) == []
+  end
+
+  test "a credential naming a secret the workspace lacks is flagged" do
+    ws =
+      workspace!(%{
+        "git_credentials" => %{
+          "repos" => %{
+            "tonic" => %{"kind" => "deploy_key", "key_secret" => "NOPE"},
+            "vstim" => %{
+              "kind" => "github_app",
+              "app_id" => "1",
+              "installation_id" => "2",
+              "private_key_secret" => "ALSO_NOPE"
+            }
+          }
+        }
+      })
+
+    missing = messages(Report.build([ws], rules: []), :git_credential_secret_missing)
+    assert Enum.any?(missing, &(&1 =~ "NOPE" and &1 =~ "tonic"))
+    assert Enum.any?(missing, &(&1 =~ "ALSO_NOPE" and &1 =~ "vstim"))
   end
 end

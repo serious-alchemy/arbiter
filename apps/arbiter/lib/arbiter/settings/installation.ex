@@ -90,7 +90,8 @@ defmodule Arbiter.Settings.Installation do
     :nodes_fence_after_s,
     :nodes_lost_after_s,
     :nodes_local_max_workers,
-    :dashboard_dismissed_update_version
+    :dashboard_dismissed_update_version,
+    :dashboard_dismissed_deploy
   ]
 
   actions do
@@ -254,6 +255,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "dashboard.dismissed_update_version: the release tag whose update banner the operator dismissed; nil = none."
+    end
+
+    attribute :dashboard_dismissed_deploy, :string do
+      public? true
+      allow_nil? true
+
+      description "dashboard.dismissed_deploy: key (tag + finish time) of the deploy-outcome banner the operator dismissed; nil = none."
     end
 
     attribute :nodes_public_url, :string do

@@ -48,7 +48,9 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
   # goes through this helper so it isn't racing either stage.
   defp live_sessions!(conn) do
     {:ok, view, _html} = live(conn, ~p"/sessions")
-    html = render_async(view)
+    # Two-stage load: :sessions, then a chained :usage task. Await both.
+    _ = render_async(view, 2_000)
+    html = render_async(view, 2_000)
     {:ok, view, html}
   end
 
@@ -190,8 +192,21 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
         raw: %{"arb_usage_source" => %{"cost_source" => "cost_state"}}
       })
 
+      # The tick handler starts the async read; make sure the LiveView has
+      # processed the message (so the task exists) before awaiting it.
       send(view.pid, :refresh_session_usage)
-      render_async(view)
+      _ = :sys.get_state(view.pid)
+
+      # Loading is two-stage (:sessions then a chained :usage task), so one
+      # render_async can return before the second task exists. Await each
+      # stage in turn, bounded.
+      Enum.reduce_while(1..5, nil, fn _, _ ->
+        render_async(view, 2_000)
+
+        if has_element?(view, "#session-#{session.id}-usage", "$0.75"),
+          do: {:halt, nil},
+          else: {:cont, nil}
+      end)
 
       assert has_element?(view, "#session-#{session.id}-usage", "$0.75")
       refute has_element?(view, "#session-#{session.id}-usage-empty")
@@ -1017,7 +1032,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       view |> element("#kill-session-#{session.id}") |> render_click()
       view |> element("#confirm-kill") |> render_click()
-      html = render_async(view)
+      html = render_async(view, 2_000)
 
       assert {:ok, %{status: :ended}} = Sessions.get(session.id)
       refute has_element?(view, "#kill-session-modal")

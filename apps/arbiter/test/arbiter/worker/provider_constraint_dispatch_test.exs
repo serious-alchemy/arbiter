@@ -184,6 +184,24 @@ defmodule Arbiter.Worker.ProviderConstraintDispatchTest do
 
   # ---- the main dispatch ---------------------------------------------------------
 
+  describe "sandbox.backend podman (#553)" do
+    test "an unrouted pool with only gemini is held, not spawned" do
+      ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
+      task = task!(ws)
+
+      assert {:error, {:sandbox_backend, :gemini, phrase}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false,
+                 security: %{"sandbox" => %{"backend" => "podman"}}
+               )
+
+      assert phrase =~ "gemini: not supported by sandbox.backend podman"
+      assert no_runs?(task.id)
+    end
+  end
+
   describe "a new dispatch" do
     test "most_quota: the excluded account loses although it has the most headroom" do
       %{ws: ws, claude: claude} = routed!()
@@ -539,6 +557,57 @@ defmodule Arbiter.Worker.ProviderConstraintDispatchTest do
       assert {:error, {:provider_constraint, _provider, _phrase}} =
                ConflictResolver.dispatch(%{context | task: Ash.get!(Issue, task.id)})
 
+      assert runs(task.id, :conflict) == []
+    end
+  end
+
+  # ---- #553: a backend that cannot run the only allowed provider ---------------------------
+
+  describe "a podman workspace whose only pool provider is gemini (#553)" do
+    setup %{sandbox: sandbox} do
+      ws =
+        workspace!(%{
+          "agent" => %{
+            "type" => ["gemini"],
+            "security" => %{"sandbox" => %{"backend" => "podman"}}
+          }
+        })
+
+      task = task!(ws, %{issue_type: :feature})
+      branch = BranchNamer.derive(task)
+      :ok = TestSandbox.seed_branch!(sandbox, branch)
+
+      context = %{
+        task: Ash.get!(Issue, task.id),
+        repo: @repo,
+        repo_path: sandbox.repo,
+        branch: branch,
+        target_branch: "main",
+        workspace: ws,
+        start_claude: false
+      }
+
+      %{task: task, context: context}
+    end
+
+    test "the fix pass is held with the backend reason before any run exists", %{
+      task: task,
+      context: context
+    } do
+      assert {:error, {:sandbox_backend, :gemini, detail}} = FixPassDispatcher.dispatch(context)
+      assert detail =~ "held — gemini: not supported by sandbox.backend podman"
+      assert runs(task.id, :fix_pass) == []
+    end
+
+    test "the conflict resolver is held with the backend reason before any run exists", %{
+      task: task,
+      context: context,
+      sandbox: sandbox
+    } do
+      move_main_on!(sandbox)
+
+      assert {:error, {:sandbox_backend, :gemini, detail}} = ConflictResolver.dispatch(context)
+      assert detail =~ "sandbox.backend podman"
       assert runs(task.id, :conflict) == []
     end
   end

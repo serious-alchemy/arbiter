@@ -128,18 +128,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Agents.Codex.AuthSync
   alias Arbiter.Agents.Codex.ConfigDir, as: CodexConfigDir
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Mergers
   alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -176,7 +179,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:env) => [{String.t(), String.t()}],
           optional(:codex_auth) => {Path.t(), Path.t()} | nil,
           optional(:pod) => String.t() | nil,
-          optional(:deps_cache) => map() | nil
+          optional(:deps_cache) => map() | nil,
+          optional(:git_secrets) => [map()]
         }
 
   @doc "The path of the `claude` binary inside the container."
@@ -259,6 +263,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
     with :ok <- container_backend(policy, provider),
          :ok <- host_ready(),
+         :ok <- no_ssh_agent(Keyword.get(opts, :projection)),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
@@ -269,7 +274,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          deps_cache = seed_deps(opts, worktree, image, home),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
          name = container_name(opts),
-         {:ok, services} <- start_services(opts, name) do
+         {:ok, services} <- start_services(opts, name),
+         {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services) do
       track_codex_auth(opts, codex_auth)
 
       {:ok,
@@ -285,13 +291,83 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli_mounts: cli_mounts,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec) ++ if(services, do: services.env, else: []),
+         env:
+           container_env(spec, Keyword.get(opts, :git_material)) ++
+             GitCredential.container_env(Keyword.get(opts, :git_material)) ++
+             if(services, do: services.env, else: []),
+         git_secrets: git_secrets,
          pod: services && services.pod,
          deps_cache: deps_cache,
          codex_auth: codex_auth
        }}
     end
   end
+
+  # bd-9cygoo (G16): the scoped git credential travels as `podman run --secret`s,
+  # created here on the host (value through a 0600 file, never argv) and removed
+  # at `teardown/1`, when the owning worker exits, and by `Container.reap_git_secrets/1`
+  # at boot. The request keeps the names and targets only, never a value.
+  defp create_git_secrets(opts, name, tmp_dir, services) do
+    secrets = GitCredential.podman_secrets(Keyword.get(opts, :git_material), name)
+
+    if secrets == [] do
+      {:ok, []}
+    else
+      container_opts = Keyword.take(opts, [:podman, :runner])
+      uid = host_uid()
+
+      result =
+        Enum.reduce_while(secrets, :ok, fn secret, :ok ->
+          case Container.create_secret(secret, [dir: tmp_dir] ++ container_opts) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, {:git_credential_secret_failed, reason}}}
+          end
+        end)
+
+      names = Enum.map(secrets, & &1.name)
+
+      case result do
+        :ok ->
+          track_git_secrets(Keyword.get(opts, :owner), names, container_opts)
+
+          {:ok,
+           Enum.map(secrets, fn secret ->
+             secret |> Map.delete(:value) |> Map.put(:uid, uid)
+           end)}
+
+        {:error, _} = error ->
+          Enum.each(names, &Container.remove_secret(&1, container_opts))
+          if services, do: TestServices.teardown(services.pod)
+          error
+      end
+    end
+  end
+
+  # The uid the container maps to itself (`--userns=keep-id`): this process's.
+  defp host_uid do
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} -> uid
+      _ -> 0
+    end
+  end
+
+  # A worker killed without its `teardown/1` must not leave a deploy key in
+  # podman's secret store.
+  defp track_git_secrets(owner, names, container_opts) when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} ->
+            Enum.each(names, &Container.remove_secret(&1, container_opts))
+        end
+      end)
+
+    :ok
+  end
+
+  defp track_git_secrets(_owner, _names, _container_opts), do: :ok
 
   defp container_backend(policy, provider) do
     case Sandbox.module(policy, provider) do
@@ -588,6 +664,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # The in-container `socat` is `Jail`'s own listener script.
   defp start_egress(provider, opts, policy, worktree) do
     start = Keyword.get(opts, :egress, &JailRun.start/1)
+    projection = projection(opts)
 
     start_opts = [
       owner: Keyword.get(opts, :owner),
@@ -596,7 +673,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
       safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
       worktree: worktree,
       infra: Map.fetch!(@egress_infra, provider),
-      tunnels: SecurityPolicy.egress_tunnels(policy)
+      tunnels: SecurityPolicy.egress_tunnels(policy) ++ projection.tunnels,
+      grants: Withholding.grants(Keyword.get(opts, :task_id), projection)
     ]
 
     with {:ok, network, _run_id} <- start.(start_opts),
@@ -607,8 +685,35 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  defp container_env(spec),
-    do: Jail.network_env(spec) ++ Jail.ssh_command(nil, spec) ++ arb_host()
+  # bd-ld8qde (G14): what the ticket's declared permissions project into this
+  # run's proxy (grants) and fixed bridges (tunnels). No projection (a caller
+  # that predates it) is an unguarded one.
+  defp projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection -> projection
+      _ -> Projection.unguarded()
+    end
+  end
+
+  # `prod_ssh` hands the worker a key through a per-worker ssh-agent socket bound
+  # into a jail. A confined container cannot connect() to a host socket (only the
+  # egress bridges are made reachable), so under podman the spawn is refused
+  # rather than run without the agent it was promised.
+  defp no_ssh_agent(%Projection{ssh: ssh}) when not is_nil(ssh),
+    do: {:error, {:prod_ssh_unsupported, :podman}}
+
+  defp no_ssh_agent(_), do: :ok
+
+  # A deploy key is named by `GIT_SSH_COMMAND` too, so the proxy `ProxyCommand` is
+  # composed onto it (`Jail.ssh_command/2`) and `GitCredential.container_env/1` leaves
+  # that variable alone.
+  defp container_env(spec, material),
+    do: Jail.network_env(spec) ++ Jail.ssh_command(ssh_base(material), spec) ++ arb_host()
+
+  defp ssh_base(%GitCredential.Material{kind: :deploy_key}),
+    do: GitCredential.ssh_command(GitCredential.podman_key_path())
+
+  defp ssh_base(_), do: nil
 
   # `arb` reads `ARB_HOST` (a base URL); the bridge listens on the same loopback
   # port the server does, so the default `http://127.0.0.1:4848` is only right
@@ -673,9 +778,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # bd-atsde3: a `--resume <sid>` argv needs that session's JSONL in THIS run's
   # config dir, which starts empty. Copy in that one session's history; when it
   # is gone the CLI says so and the stop is classified `:session_not_found`.
-  defp seed_session(config_dir, opts) do
-    with sid when is_binary(sid) <- SessionHistory.resume_session_id(Keyword.get(opts, :argv)),
-         cwd when is_binary(cwd) <- Keyword.get(opts, :worktree_path),
+  defp seed_session(config_dir, opts),
+    do: seed_resume(config_dir, Keyword.get(opts, :argv), Keyword.get(opts, :worktree_path))
+
+  # `Worker` splices `--resume <sid>` into the argv when the port opens, after
+  # `prepare/1` ran with the pristine argv (bd-9qazat), so `wrap_port/1` seeds
+  # again with the final one. Seeding is idempotent.
+  defp seed_resume(config_dir, argv, cwd) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(argv),
+         cwd when is_binary(cwd) <- cwd,
          {:error, reason} <- SessionHistory.seed(config_dir, cwd, sid) do
       Logger.warning("ContainerSpawn: cannot carry session #{sid} over: #{inspect(reason)}")
     end
@@ -780,7 +891,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec) ++ services.env,
+         env: container_env(spec, nil) ++ services.env,
          services: services.presets,
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
@@ -1171,6 +1282,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
   def wrap_port(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
     sync_codex_auth(request, :reopen)
 
+    if request.provider == "claude",
+      do: seed_resume(request.config_dir, argv, request.mounts[:worktree])
+
     with {:ok, spec} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, [podman | args]} <-
            Container.wrap(Jail.network_command(spec, argv), opts(request, port_args)) do
@@ -1199,6 +1313,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       ],
       cli_mounts: request.cli_mounts,
       env: literal,
+      podman_secrets: Map.get(request, :git_secrets, []),
       inherit_env: Enum.map(inherit, &elem(&1, 0))
     ]
 
@@ -1240,6 +1355,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec teardown(map() | nil) :: :ok
   def teardown(%{sandbox: %{name: name} = request}) when is_binary(name) do
     Container.teardown(name)
+    remove_git_secrets(request)
     reclaim_clone(request)
     sync_codex_auth(request, :final)
     TestServices.teardown(request[:pod])
@@ -1247,14 +1363,34 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   def teardown(_), do: :ok
 
+  defp remove_git_secrets(request) do
+    for %{name: secret} <- Map.get(request, :git_secrets, []),
+        do: Container.remove_secret(secret, podman: request.podman)
+
+    :ok
+  end
+
   @doc """
   Remove just the container of `port_args` (a spawn's args, or `nil`), so
   nothing of the worker's is left running in its clone. `teardown/1` is this
   plus the pod, the auth sync and the clone check.
+
+  `opts` takes `:grace_ms`: how long a container that is still finishing may
+  take to exit on its own before it is force-removed (see `Container.stop/2`).
   """
-  @spec stop(map() | nil) :: :ok
-  def stop(%{sandbox: %{name: name}}) when is_binary(name), do: Container.teardown(name)
-  def stop(_), do: :ok
+  @spec stop(map() | nil, keyword()) :: :ok
+  def stop(port_args, opts \\ [])
+
+  def stop(%{sandbox: %{name: name}}, opts) when is_binary(name) do
+    case Container.stop(name, opts) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("container stop of #{name} failed: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  def stop(_, _opts), do: :ok
 
   # With the container gone, whatever it left at the clone's `.git` is checked
   # before any host-side git runs there again (bd-6t7u81): the `.git` mount

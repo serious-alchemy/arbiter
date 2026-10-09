@@ -28,6 +28,46 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     )
   end
 
+  describe "PERMISSIONS block (G14, bd-ld8qde)" do
+    alias Arbiter.Guardrails.Projection
+
+    test "a guarded spawn's work prompt carries it" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt",
+          projection: %{
+            Projection.sealed()
+            | granted: ["tracker_write"],
+              claims: ["tracker_write"]
+          }
+        )
+
+      assert prompt =~ "PERMISSIONS"
+      assert prompt =~ "tracker_write"
+    end
+
+    test "a task-type (no-PR) prompt carries it too" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :task}),
+          worktree_path: "/tmp/wt",
+          projection: Projection.sealed()
+        )
+
+      assert prompt =~ "PERMISSIONS"
+    end
+
+    test "an unguarded or absent projection leaves the prompt byte-identical" do
+      plain = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert PromptBuilder.prompt_for_task(task(%{}),
+               worktree_path: "/tmp/wt",
+               projection: Projection.unguarded()
+             ) == plain
+
+      refute plain =~ "PERMISSIONS"
+    end
+  end
+
   test "work prompt is byte-identical for fixed inputs" do
     prompt =
       PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
@@ -668,6 +708,28 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              Arbiter.Worker.Dispatch.conflict_resolve_briefing(t, "feature/x", "main")
   end
 
+  describe "conflict_resolve_briefing/4 host git (bd-19skda)" do
+    test "default briefing tells the worker to fetch and force-push itself" do
+      prompt = PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main")
+
+      assert prompt =~ "git fetch origin main"
+      assert prompt =~ "git push --force-with-lease origin feature/x"
+      refute prompt =~ "NO FETCH OR PUSH ACCESS"
+    end
+
+    test "a containerized pass is told the host fetches before and pushes after" do
+      prompt =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main", host_git: true)
+
+      assert prompt =~ "NO FETCH OR PUSH ACCESS"
+      assert prompt =~ "Host key verification failed"
+      assert prompt =~ "origin/main"
+      refute prompt =~ "git push --force-with-lease"
+      refute prompt =~ "git fetch origin main"
+      assert prompt =~ "arb done"
+    end
+  end
+
   # bd-9so315: the worker is the only party that can see its own diff, so the
   # work prompt has to tell it when to raise the flag.
   describe "post-merge verification doctrine" do
@@ -719,6 +781,29 @@ defmodule Arbiter.Worker.PromptBuilderTest do
         )
 
       refute prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+  end
+
+  describe "podman push-access block (bd-capkj9)" do
+    test "a podman work prompt says the host pushes and a failed push is not a reason to withhold arb done" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman)
+
+      assert prompt =~ "NO PUSH ACCESS"
+      assert prompt =~ "host pushes"
+      assert prompt =~ "not a reason to withhold `arb done`"
+    end
+
+    test "a podman work prompt does not tell the worker to push" do
+      refute PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman) =~ "and push it"
+    end
+
+    test "bwrap and default work prompts carry no such block" do
+      for opts <- [[sandbox_backend: :bwrap], []] do
+        assert PromptBuilder.prompt_for_task(task(%{}), opts) =~
+                 "commit on this branch, and push it."
+
+        refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "NO PUSH ACCESS"
+      end
     end
   end
 

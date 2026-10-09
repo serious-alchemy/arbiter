@@ -23,6 +23,24 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherAgentOptsTest do
     assert Keyword.fetch!(opts, :arb_token) == "t"
   end
 
+  test "agent_opts/4 hands the pass's projection to the adapter" do
+    projection = Arbiter.Guardrails.Projection.sealed()
+    context = %{workspace: nil, task: %{id: "bd-pass3"}}
+
+    opts = FixPassDispatcher.agent_opts([projection: projection], context, "/w", [])
+
+    assert Keyword.fetch!(opts, :projection) == projection
+  end
+
+  test "agent_opts/4 hands the pass's scoped git credential to the adapter (bd-9cygoo)" do
+    plan = %Arbiter.Worker.GitCredential{mode: :legacy, repo: "r"}
+    context = %{workspace: nil, task: %{id: "bd-pass4"}}
+
+    opts = FixPassDispatcher.agent_opts([git_credential: plan], context, "/w", [])
+
+    assert Keyword.fetch!(opts, :git_credential) == plan
+  end
+
   # bd-7ays3v: a pass on a podman repo runs in the container, so its adapter
   # opts carry the policy and the promise to wrap; any other pass is untouched.
   describe "under the container backend (bd-7ays3v)" do

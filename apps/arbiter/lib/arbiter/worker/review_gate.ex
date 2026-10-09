@@ -216,6 +216,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.CapabilityMatrix
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
@@ -243,6 +244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
@@ -254,6 +256,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
 
@@ -838,6 +841,54 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  @doc """
+  The findings for a coordinator-dispatched review's REQUEST_CHANGES verdict
+  (bd-2ujj2p).
+
+  `parse_verdict/1` keeps only the text from the `VERDICT:` line onward, but a
+  reviewer that posts its review to the PR and then prints the sentinel puts the
+  findings BEFORE it — leaving the verdict, `VERIFICATION:` and `arb done` as the
+  whole "findings" and the implementer's fix round with nothing to fix. When
+  `findings` carries nothing actionable, the output before the verdict line is
+  spliced in right after it (keeping `VERDICT:` first, as every consumer
+  expects). `source` is `parse_verdict/3`'s: for `:transcript` the in-memory
+  `lines` are the truncated tail, so the durable log is re-read.
+
+  Returns `{:ok, findings}`, or `:empty` when there is no findings text anywhere.
+  """
+  @spec recover_findings([String.t()], String.t() | nil, verdict_source(), String.t()) ::
+          {:ok, String.t()} | :empty
+  def recover_findings(lines, run_id, source, findings) when is_binary(findings) do
+    if findings_present?(findings) do
+      {:ok, findings}
+    else
+      lines = if source == :transcript, do: durable_or(run_id, lines), else: lines
+
+      preamble =
+        lines
+        |> Enum.join("\n")
+        |> String.split("\n")
+        |> Enum.take_while(
+          &(not Regex.match?(@verdict_request_changes, normalize_verdict_line(&1)))
+        )
+        |> Enum.reject(&Regex.match?(~r/\barb done\b|^\s*⚙/, &1))
+        |> Enum.join("\n")
+        |> String.trim()
+
+      [verdict_line | rest] = String.split(findings, "\n", parts: 2) ++ [""]
+      candidate = [verdict_line, preamble, rest] |> Enum.join("\n") |> String.trim()
+
+      if preamble != "" and findings_present?(candidate), do: {:ok, candidate}, else: :empty
+    end
+  end
+
+  defp durable_or(run_id, lines) do
+    case durable_lines(run_id) do
+      {:ok, durable} -> durable
+      _ -> lines
+    end
+  end
+
   defp durable_lines(run_id) when is_binary(run_id) and run_id != "" do
     Arbiter.Worker.OutputLog.read_lines(run_id)
   rescue
@@ -1037,6 +1088,11 @@ defmodule Arbiter.Worker.ReviewGate do
       #   1. prove which commit the reviewer saw (surfaces in the prompt and thread)
       #   2. detect whether the revise implementer actually committed new changes
       head_sha: nil,
+      # bd-cbbgot: the `head_sha` a reviewer pass was last LAUNCHED on in this
+      # gate. nil until the first reviewer starts. A fix round that changes
+      # nothing parks only when it left the head a reviewer already read;
+      # anything else is a head no reviewer has judged (`unreviewed_head?/2`).
+      reviewed_sha: nil,
       # bd-ased52: the merge-base (fork point) between the branch and its target,
       # resolved once at reviewer spawn time after the branch is brought current.
       # The reviewer (and the escalation diff) diff `base_sha..HEAD` so commits
@@ -1641,12 +1697,24 @@ defmodule Arbiter.Worker.ReviewGate do
         {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
 
       {:error, why} ->
-        Logger.warning(
-          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
-            "re-run (#{why}); treating it as a real failure"
-        )
+        if run_in_flight?(why) and wait.polls < wait.max_polls do
+          # bd-9m6wl0: the forge only reruns a FINISHED run, and a sibling job (e.g.
+          # `mix audit`) is still going. The failure is not yet judged real: poll
+          # again and rerun once the run has finished.
+          Logger.info(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
+              "still in progress; waiting to re-run the failed jobs"
+          )
 
-        ci_act(state, wait, :fix, nil)
+          {:wait, ci_schedule(state, wait)}
+        else
+          Logger.warning(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
+              "re-run (#{why}); treating it as a real failure"
+          )
+
+          ci_act(state, wait, :fix, nil)
+        end
     end
   end
 
@@ -1689,7 +1757,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # burn the round budget on a head already judged a no-op.
       state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
       state = %{state | ci_fix_pending: %{state.ci_fix_pending | checks: checks}}
-      {:done, escalate_no_changes(state)}
+
+      if unreviewed_head?(state, state.head_sha) do
+        # bd-cbbgot: CI stays red on a head no reviewer has read (main's own CI
+        # may be what is red). Parking leaves a coordinator to hand-merge an
+        # unreviewed head, so a reviewer reads it, told CI cannot vouch for it.
+        {:proceed, ci_review_unreviewed_red_head(state, wait.sha)}
+      else
+        {:done, escalate_no_changes(state)}
+      end
     else
       ci_fix(state, wait, checks, not is_nil(wait.rerun))
     end
@@ -1697,6 +1773,26 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  defp run_in_flight?(why) when is_binary(why),
+    do: String.contains?(why, "a run is still running")
+
+  defp run_in_flight?(_why), do: false
+
+  defp ci_review_unreviewed_red_head(state, sha) do
+    jobs =
+      state.ci_fix_pending.checks
+      |> Enum.map(&(&1 |> Map.get(:name) |> to_string()))
+      |> Enum.uniq()
+      |> Enum.join(", ")
+
+    state
+    |> ci_fall_back(
+      "CI stayed red on #{sha} after a fix round made no change and the gate reran it" <>
+        if(jobs == "", do: ".", else: " (failing jobs: #{jobs}).")
+    )
+    |> Map.merge(%{ci_fix_pending: nil, ci_noop_reruns: 0})
+  end
 
   defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
   defp post_noop_rerun?(_state), do: false
@@ -2876,7 +2972,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # primary defense against flourishes.
   @min_findings_chars 16
 
-  defp findings_present?(findings) when is_binary(findings) do
+  @doc false
+  @spec findings_present?(String.t()) :: boolean()
+  def findings_present?(findings) when is_binary(findings) do
     body =
       findings
       |> String.split("\n")
@@ -2892,6 +2990,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # (bd-4yhv4x).
         String.trim(line) == "" or
           Regex.match?(~r/\barb done\b/, line) or
+          Regex.match?(~r/^\s*VERIFICATION:\s*FULL\b/i, line) or
           Regex.match?(~r/^\s*⚙/, line) or
           ReviewVerification.criteria_line?(line)
       end)
@@ -3289,11 +3388,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # left real work uncommitted" (resume it once, then escalate if it's still
     # dirty) from "nothing changed at all" (escalate immediately; there is no
     # new diff to re-review).
-    {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha, response)
-
-    # bd-dun10t: a fix round that red CI launched and that changed nothing may
-    # simply have met a flake. Rerun CI (bounded) and re-read it before parking.
-    {outcome, commit_gate} = ci_noop_outcome({outcome, commit_gate}, state)
+    {outcome, commit_gate} = no_change_outcome(state, new_head_sha, response)
 
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
@@ -3339,7 +3434,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
       :escalate_no_changes ->
-        escalate_or_rerun_ci(state, new_head_sha)
+        finish_no_change(state, new_head_sha, commit_gate)
 
       :escalate_no_changes_after_non_file_fix ->
         {:done,
@@ -3380,6 +3475,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
 
+  # The commit gate's verdict on this round, refined for the two ways a no-diff
+  # round is not a stall: red CI that may be a flake (bd-dun10t), and a head no
+  # reviewer has read yet (bd-cbbgot) — the latter reviews it rather than parks.
+  defp no_change_outcome(state, new_head_sha, response) do
+    state
+    |> commit_gate_outcome(new_head_sha, response)
+    |> ci_noop_outcome(state)
+    |> unreviewed_head_outcome(state, new_head_sha)
+  end
+
   defp ci_noop_outcome({:escalate_no_changes, _} = outcome, state) do
     if ci_noop_rerun_allowed?(state),
       do: {:escalate_no_changes, :reran_ci_after_no_changes},
@@ -3387,6 +3492,63 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp ci_noop_outcome(outcome, _state), do: outcome
+
+  # bd-cbbgot (bd-ckx0uf / PR #559): the plain "nothing changed" park, unless the
+  # head the round left was never read by a reviewer. The CI-triggered shape is
+  # left to `ci_noop_outcome/2` (rerun first); `ci_act/4` makes the same call once
+  # that rerun stays red. Not for an approval-gap round, which has its own rule.
+  defp unreviewed_head_outcome({:escalate_no_changes, :escalated_no_changes}, state, new_head_sha) do
+    if not approval_gap_pending?(state) and unreviewed_head?(state, new_head_sha),
+      do: {:escalate_no_changes, :rereviewed_unreviewed_head},
+      else: {:escalate_no_changes, :escalated_no_changes}
+  end
+
+  defp unreviewed_head_outcome(outcome, _state, _new_head_sha), do: outcome
+
+  defp review_unreviewed_head(state, new_head_sha) do
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round}: no diff, head not yet reviewed",
+        "The fix round changed nothing, but #{new_head_sha} has not been read by any " <>
+          "reviewer, so there is no verdict on it to stand on. It goes to a reviewer " <>
+          "now. If that review requests changes and the next fix round again changes " <>
+          "nothing, the ticket parks."
+      )
+
+    dispatch_next_review(%{
+      state
+      | head_sha: new_head_sha,
+        ci_fix_pending: nil,
+        ci_noop_reruns: 0
+    })
+  end
+
+  # True when `head` is known and no reviewer pass was launched on it in this
+  # gate, nor did a past APPROVE stamp it on the ticket (`last_reviewed_sha`,
+  # full SHA; `head` may be abbreviated). An unknowable head keeps the old park.
+  defp unreviewed_head?(_state, head) when not is_binary(head) or head == "", do: false
+
+  defp unreviewed_head?(%{reviewed_sha: head}, head), do: false
+
+  defp unreviewed_head?(state, head) do
+    case Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      {:ok, %{last_reviewed_sha: sha}} when is_binary(sha) and sha != "" ->
+        not String.starts_with?(sha, head)
+
+      _ ->
+        true
+    end
+  rescue
+    _ -> true
+  end
+
+  defp finish_no_change(state, new_head_sha, :rereviewed_unreviewed_head),
+    do: review_unreviewed_head(state, new_head_sha)
+
+  defp finish_no_change(state, new_head_sha, _commit_gate),
+    do: escalate_or_rerun_ci(state, new_head_sha)
 
   defp escalate_or_rerun_ci(state, new_head_sha) do
     if ci_noop_rerun_allowed?(state),
@@ -5668,7 +5830,8 @@ defmodule Arbiter.Worker.ReviewGate do
             lines: [],
             denial_pending: false,
             current_prompt: prompt,
-            timeout_ms: timeout_ms
+            timeout_ms: timeout_ms,
+            reviewed_sha: if(role == :reviewer, do: state.head_sha, else: state.reviewed_sha)
         }
 
         {:ok, mark_pass(launched, role, id)}
@@ -5754,11 +5917,17 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # bd-13pqcp: an implementer round also refuses a provider the ticket's own
   # constraint excludes (`resolve_revision/2` already steers away from it; this
-  # is the last word). The reviewer (`resolve_revision/2`'s `nil`) is not
+  # is the last word), and one the workspace's sandbox backend cannot run (#553).
+  # The reviewer (`resolve_revision/2`'s `nil`) is not
   # constrained.
   defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
-    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id) do
-      ProviderConstraint.check(state.task_id, provider)
+    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id),
+         :ok <- ProviderConstraint.check(state.task_id, provider) do
+      ProviderRouting.ensure_sandbox_backend(
+        provider,
+        state.task_id,
+        load_workspace(state.workspace_id)
+      )
     end
   end
 
@@ -5871,11 +6040,15 @@ defmodule Arbiter.Worker.ReviewGate do
   # so it gets the same narrow worker-tier token as its ARB_TOKEN — never a
   # coordinator one. The reviewer only reads the diff and prints a verdict; it
   # gets none. A missing signing secret never blocks the spawn.
-  defp arb_token_opts(%{task_id: task_id, workspace_id: ws_id} = state, :implementer)
+  defp arb_token_opts(state, role, claims \\ [])
+
+  defp arb_token_opts(%{task_id: task_id, workspace_id: ws_id} = state, :implementer, claims)
        when is_binary(task_id) and is_binary(ws_id) do
     [
       arb_token:
-        Arbiter.MCP.Scope.mint_worker(%{id: task_id, workspace_id: ws_id}, Map.get(state, :repo))
+        Arbiter.MCP.Scope.mint_worker(%{id: task_id, workspace_id: ws_id}, Map.get(state, :repo),
+          permissions: claims
+        )
     ]
   rescue
     e ->
@@ -5883,7 +6056,7 @@ defmodule Arbiter.Worker.ReviewGate do
       []
   end
 
-  defp arb_token_opts(_state, _role), do: []
+  defp arb_token_opts(_state, _role, _claims), do: []
 
   # bd-dun10t: a revise-round implementer needs the `arbiter` MCP tools
   # (`ci_rerun`, `flake_record`) like a fix_pass worker. Re-inject a fresh
@@ -5891,20 +6064,24 @@ defmodule Arbiter.Worker.ReviewGate do
   # expired 4h lease or be absent. Falls back to the bare token when the task
   # cannot be loaded.
   @doc false
-  def implementer_mcp_opts(state, :implementer, adapter) do
+  def implementer_mcp_opts(state, role, adapter, claims \\ [])
+
+  def implementer_mcp_opts(state, :implementer, adapter, claims) do
     case load_issue(state.task_id) do
       %Issue{} = task ->
         Dispatch.inject_mcp_config(task, state.worktree_path,
           repo: Map.get(state, :repo),
-          agent_adapter: adapter
+          agent_adapter: adapter,
+          # bd-ld8qde (G14): the permissions the projection granted this spawn.
+          permissions: claims
         )
 
       nil ->
-        arb_token_opts(state, :implementer)
+        arb_token_opts(state, :implementer, claims)
     end
   end
 
-  def implementer_mcp_opts(state, role, _adapter), do: arb_token_opts(state, role)
+  def implementer_mcp_opts(state, role, _adapter, _claims), do: arb_token_opts(state, role)
 
   defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
@@ -6003,19 +6180,58 @@ defmodule Arbiter.Worker.ReviewGate do
     # it.
     policy = session_security_policy(ws, state, role, adapter.provider())
 
+    role_opts =
+      ws
+      |> agent_opts_for_role(role_atom, state.task_id, adapter)
+      |> apply_conflict_tier(state, role)
+      |> apply_reviewer_selection(state, role)
+
+    # bd-ld8qde (G14): the same dispatch-time withholding as a first-round worker
+    # — a revise-round implementer is given what the ticket declared for this
+    # (provider, model) subject, a reviewer none of it.
+    projection =
+      Withholding.for_spawn(
+        state.task_id,
+        ws,
+        adapter.provider(),
+        Keyword.get(role_opts, :model) ||
+          ModelFamily.model_for_tier(
+            adapter.provider(),
+            Keyword.get(role_opts, :model_tier),
+            Keyword.get(role_opts, :config)
+          ),
+        repo: Map.get(state, :repo),
+        role: role
+      )
+
+    # bd-9cygoo (G16): a revise-round implementer pushes, so it needs a repo-scoped
+    # git credential (or the workspace's explicit legacy opt-in); a reviewer does not.
+    git_plan =
+      GitCredential.plan(ws, Map.get(state, :repo),
+        role: role,
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+      )
+
+    git_credential =
+      case git_plan do
+        {:ok, plan} -> plan
+        {:error, _} -> nil
+      end
+
     agent_opts =
-      (ws
-       |> agent_opts_for_role(role_atom, state.task_id, adapter)
-       |> apply_conflict_tier(state, role)
-       |> apply_reviewer_selection(state, role)) ++
+      role_opts ++
         [
           security: policy,
           workspace: ws,
           worktree_path: session_cwd(state, role),
           timeout_ms: state.timeout_ms,
           owner: pid,
-          task_id: state.task_id
-        ] ++ implementer_mcp_opts(state, role, adapter) ++ sandbox_wrap_opts(policy, role)
+          task_id: state.task_id,
+          projection: projection,
+          git_credential: git_credential
+        ] ++
+        implementer_mcp_opts(state, role, adapter, projection.claims) ++
+        sandbox_wrap_opts(policy, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 
@@ -6041,25 +6257,26 @@ defmodule Arbiter.Worker.ReviewGate do
       })
     end
 
-    case adapter.default_argv(prompt, agent_opts) do
-      {:ok, argv} ->
-        env = safe_spawn_env(adapter, agent_opts)
+    with {:ok, _plan} <- git_plan,
+         {:ok, argv} <- adapter.default_argv(prompt, agent_opts) do
+      env = safe_spawn_env(adapter, agent_opts)
 
-        # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
-        # resolution — it's carried purely so `Arbiter.Worker` can persist
-        # what this reviewer/implementer was actually told.
-        {:ok,
-         base ++
-           [
-             command: argv,
-             prompt: prompt,
-             env: env,
-             provider: adapter.provider(),
-             model: session_model
-           ] ++ sandbox_session_opts(policy, ws, role, state)}
-
-      {:error, reason} ->
-        {:error, reason}
+      # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+      # resolution — it's carried purely so `Arbiter.Worker` can persist
+      # what this reviewer/implementer was actually told.
+      {:ok,
+       base ++
+         [
+           command: argv,
+           prompt: prompt,
+           env: env,
+           provider: adapter.provider(),
+           model: session_model,
+           projection: projection,
+           git_credential: git_credential
+         ] ++ sandbox_session_opts(policy, ws, role, state)}
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 

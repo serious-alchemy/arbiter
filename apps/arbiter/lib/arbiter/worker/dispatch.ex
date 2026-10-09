@@ -71,6 +71,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
+  alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
@@ -100,6 +101,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Driver
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
@@ -111,6 +113,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
@@ -228,6 +231,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
+         :ok <- ensure_sandbox_backend(task, opts),
          :ok <- ensure_capability(task, opts),
          :ok <- ensure_floor(task, opts),
          :ok <- maybe_pause_gate(task, opts),
@@ -572,6 +576,10 @@ defmodule Arbiter.Worker.Dispatch do
       # briefing it claimed to fall back to).
       resume_opts =
         if provider == session_provider and session_history_present?(provider, session_id) do
+          Logger.info(
+            "Dispatch.resume_session: resuming #{task.id} in session mode (--resume #{session_id})"
+          )
+
           Keyword.put(base_opts, :resume_session_id, session_id)
         else
           require Logger
@@ -583,7 +591,7 @@ defmodule Arbiter.Worker.Dispatch do
               Logger.info(
                 "Dispatch.resume_session: dropping session_id for #{task.id} — " <>
                   "#{no_resume_reason(provider, session_provider, session_id)}; " <>
-                  "degrading to a git-derived resume briefing instead"
+                  "resuming #{task.id} in briefing mode (git-derived resume briefing)"
               )
 
               Keyword.put(base_opts, :resume_context, context)
@@ -1206,8 +1214,10 @@ defmodule Arbiter.Worker.Dispatch do
              :no_outpost,
              :no_session,
              :account_at_capacity,
+             :quota_held,
              :no_node_capacity,
              :provider_constraint,
+             :sandbox_backend,
              :capability_missing,
              :below_floor,
              :slot_cap_full
@@ -1215,6 +1225,66 @@ defmodule Arbiter.Worker.Dispatch do
       do: :conflict
 
   def refusal_kind(_reason), do: :internal
+
+  @doc """
+  `quota_held_message/2` with the hold read from the task's workspace queue —
+  what the MCP tool and the REST API render for `{:quota_held, task_id}`.
+  """
+  @spec quota_held_message(String.t()) :: String.t()
+  def quota_held_message(task_id) do
+    reason =
+      with {:ok, %Issue{workspace_id: ws_id}} <- load_task(task_id),
+           %{reason: reason} <- DispatchQueue.held_item(ws_id, task_id) do
+        reason
+      else
+        _ -> nil
+      end
+
+    quota_held_message(task_id, reason)
+  end
+
+  @doc """
+  The operator-facing refusal for `{:error, {:quota_held, task_id}}`
+  (bd-aw325c). Two gates answer `:quota_held` — the provider/account **pause**
+  gate (`reason.gate == :pause`) and the **quota** gate — and the bare
+  `{:quota_held, id}` named neither. `reason` is the hold recorded in the
+  workspace's `DispatchQueue` (`nil` when it could not be read); the quota
+  gate's reason carries its window and numbers.
+  """
+  @spec quota_held_message(String.t(), term()) :: String.t()
+  def quota_held_message(task_id, %{gate: :pause} = reason) do
+    "#{task_id} was refused by the pause gate: #{Map.get(reason, :phrase)}. " <>
+      "`force`/`force_quota` does not lift a pause; resume the provider or account " <>
+      "(`arb provider resume`) and retry"
+  end
+
+  def quota_held_message(task_id, reason) do
+    "#{task_id} was held by the quota gate" <>
+      quota_hold_detail(reason) <>
+      ". It is queued and starts when the window has headroom; to dispatch past the " <>
+      "gate now pass `force_quota: true` (`force` only bypasses the Ready check)"
+  end
+
+  defp quota_hold_detail(%{window: window} = reason) when is_binary(window) do
+    numbers =
+      [
+        reason[:utilization] && "used #{pct(reason.utilization)}",
+        reason[:threshold] && "threshold #{pct(reason.threshold)}",
+        reason[:status] && "status=#{reason.status}",
+        reason[:mode] && "mode=#{reason.mode}"
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join(", ")
+
+    phrase = if is_binary(reason[:phrase]), do: " (#{reason.phrase})", else: ""
+    ": #{window} window" <> if(numbers == "", do: "", else: " — #{numbers}") <> phrase
+  end
+
+  defp quota_hold_detail(%{phrase: phrase}) when is_binary(phrase), do: ": #{phrase}"
+  defp quota_hold_detail(_), do: " (hold details unavailable)"
+
+  defp pct(value) when is_number(value), do: "#{Float.round(value * 100, 1)}%"
+  defp pct(value), do: to_string(value)
 
   @doc """
   The operator-facing refusal for `{:error, {:not_dispatchable, task_id, hold}}`
@@ -1468,6 +1538,49 @@ defmodule Arbiter.Worker.Dispatch do
         opts
         |> Keyword.put(:routing_decision, decision)
         |> then(&constrain_unrouted(task, workspace, &1))
+        |> then(&backend_unrouted(task, workspace, &1))
+    end
+  end
+
+  # The no-candidate fall-through picks from the `agent.type` pool, which knows
+  # nothing about the sandbox backend. When that pick is one the backend cannot
+  # run, take the first pool provider it can (and the ticket's constraint
+  # allows); with none, leave it for `ensure_sandbox_backend/2` to hold.
+  defp backend_unrouted(task, workspace, opts) do
+    policy = routing_security(workspace, opts)
+
+    with %SecurityPolicy{} <- policy,
+         nil <- caller_override(opts),
+         provider = quota_gate_provider(task, workspace, opts),
+         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider),
+         constraint = ProviderConstraint.from(task),
+         pool = ProviderConstraint.filter(constraint, Agents.agent_pool(workspace)),
+         allowed = Enum.filter(pool, &is_nil(ProviderRouting.backend_refusal(policy, &1))),
+         alt when not is_nil(alt) <- ProviderPool.pick(allowed) do
+      opts
+      |> Keyword.put(:agent_type, alt)
+      |> Keyword.put(:routed_agent_type, alt)
+      |> put_opt_if_present(:provider_fallback, "fell back from #{provider}: #{detail}")
+    else
+      _ -> opts
+    end
+  end
+
+  # The sandbox backend's refusal as the last word before any state moves:
+  # the provider this dispatch will run on must be runnable by it, or the
+  # dispatch is held with the reason instead of burning a slot on a spawn
+  # that `Sandbox.module/2` refuses. Reviews pick theirs in `ReviewerRouting`.
+  defp ensure_sandbox_backend(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+    policy = routing_security(workspace, opts)
+
+    with false <- Keyword.get(opts, :review, false) == true,
+         %SecurityPolicy{} <- policy,
+         provider = quota_gate_provider(task, workspace, opts),
+         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider) do
+      {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    else
+      _ -> :ok
     end
   end
 
@@ -1740,7 +1853,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp safe_pause_hold(ws_id, task_id, opts, phrase, provider) do
-    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{phrase: phrase}, provider)
+    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{gate: :pause, phrase: phrase}, provider)
   rescue
     _ -> :error
   catch
@@ -3038,7 +3151,10 @@ defmodule Arbiter.Worker.Dispatch do
             # bd-7e8ezw: the returned `mcp_config:` path is threaded to the
             # adapter so Claude is handed the file explicitly (`--mcp-config`)
             # rather than trusting cwd auto-load — see `inject_mcp_config/3`.
-            opts = Keyword.merge(opts, inject_mcp_config(task, worktree_path, opts))
+            opts =
+              opts
+              |> Keyword.merge(inject_mcp_config(task, worktree_path, opts))
+              |> Keyword.put(:mcp_worktree, worktree_path)
 
             # Resolve the layered effective skill set and materialize ONLY it
             # into the isolated worktree (bd-d5hy7y), under a provider-aware
@@ -3403,6 +3519,7 @@ defmodule Arbiter.Worker.Dispatch do
           choice.type
           |> sandbox_checked_provider(policy, swap_pool, explicit: not is_nil(agent_type))
           |> guardrail_checked(base_policy, workspace, choice, opts)
+          |> git_credential_checked(workspace, policy, opts)
 
         case checked do
           {:error, reason} ->
@@ -3412,6 +3529,14 @@ defmodule Arbiter.Worker.Dispatch do
             choice = apply_agent_type_override(choice, effective_type)
             policy = guardrail_floor(base_policy, workspace, choice, opts)
             adapter = Agents.for_type(choice.type)
+
+            # bd-ld8qde (G14): what this (provider, model) subject is given of the
+            # ticket's declared permissions, and nothing else. A `tracker_write`
+            # projection re-mints the worker token with that claim (the first one,
+            # minted before routing, carries none).
+            projection = guardrail_projection(task, workspace, choice, opts)
+            {:ok, git_credential} = git_credential_plan(workspace, policy, opts)
+            opts = reinject_permission_claims(task, projection, opts)
 
             # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
             # the worker OAuth token from this workspace's `worker_env` before
@@ -3430,6 +3555,8 @@ defmodule Arbiter.Worker.Dispatch do
                   worktree_path: worktree_path,
                   owner: worker_pid,
                   task_id: task.id,
+                  projection: projection,
+                  git_credential: git_credential,
                   # bd-d2o3xb: this dispatch hands the spawn to `ClaudeSession`
                   # with `policy`, which is what wraps it under `podman`.
                   sandbox_wrap: true
@@ -3447,6 +3574,8 @@ defmodule Arbiter.Worker.Dispatch do
               # `~/.ssh` is not mounted), so the host pushes the branch when the
               # run completes; the prompt must not send the worker to push.
               |> Keyword.put(:host_pushes?, ContainerSpawn.podman?(policy))
+              |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
+              |> Keyword.put(:projection, projection)
               |> then(&prompt_for_task(task, &1))
 
             provider = Atom.to_string(choice.type)
@@ -3517,6 +3646,7 @@ defmodule Arbiter.Worker.Dispatch do
                    [command: argv, prompt: prompt, env: env] ++
                    session_meta ++
                    sandbox_session_opts(policy, workspace, opts) ++
+                   [projection: projection, git_credential: git_credential] ++
                    Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
@@ -3697,14 +3827,69 @@ defmodule Arbiter.Worker.Dispatch do
   # resolved `policy`, for the (provider, model) this `choice` will run. A no-op
   # unless subject rules are configured (`Arbiter.Guardrails.effective/4`).
   defp guardrail_floor(%SecurityPolicy{} = policy, workspace, choice, opts) do
-    provider = choice.type
-    config = choice.config || %{}
+    Guardrails.apply_to_policy(
+      policy,
+      workspace,
+      choice.type,
+      choice_model(choice),
+      repo: Keyword.get(opts, :repo)
+    )
+  end
 
-    model =
-      Map.get(config, "model") ||
-        ModelFamily.model_for_tier(provider, Map.get(config, "model_tier"), config)
+  defp choice_model(%{type: provider, config: config}) do
+    config = config || %{}
 
-    Guardrails.apply_to_policy(policy, workspace, provider, model, repo: Keyword.get(opts, :repo))
+    Map.get(config, "model") ||
+      ModelFamily.model_for_tier(provider, Map.get(config, "model_tier"), config)
+  end
+
+  # bd-ld8qde (G14): the projection of the ticket's in-force permissions for the
+  # subject `choice` will run as. A review dispatch is a reviewer, which is given
+  # no action permissions (design §5.4).
+  defp guardrail_projection(%Issue{id: id}, workspace, choice, opts) do
+    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+
+    Withholding.for_spawn(id, workspace, choice.type, choice_model(choice),
+      repo: Keyword.get(opts, :repo),
+      role: role
+    )
+  end
+
+  # bd-9cygoo (G16): a spawn that pushes needs a repo-scoped git credential. A
+  # reviewer does not push. Pure, so it can be asked again once the provider is
+  # settled; the refusal comes out here so no worktree session is built for it.
+  # A podman run holds no credential by design: the host pushes its branch after
+  # `arb done` (bd-capkj9), so it plans as `host_pushes?` (bd-7rxy1c).
+  defp git_credential_plan(workspace, policy, opts) do
+    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+
+    GitCredential.plan(workspace, Keyword.get(opts, :repo),
+      role: role,
+      guarded?: Guardrails.guarded?(),
+      host_pushes?: ContainerSpawn.podman?(policy)
+    )
+  end
+
+  defp git_credential_checked({:ok, _type} = ok, workspace, policy, opts) do
+    case git_credential_plan(workspace, policy, opts) do
+      {:ok, _plan} -> ok
+      {:error, _} = refusal -> refusal
+    end
+  end
+
+  defp git_credential_checked(other, _workspace, _policy, _opts), do: other
+
+  defp reinject_permission_claims(_task, %{claims: []}, opts), do: opts
+
+  defp reinject_permission_claims(%Issue{} = task, %{claims: claims}, opts) do
+    Keyword.merge(
+      opts,
+      inject_mcp_config(
+        task,
+        Keyword.get(opts, :mcp_worktree),
+        Keyword.put(opts, :permissions, claims)
+      )
+    )
   end
 
   # A guardrail profile states what must hold and the adapter says whether it
@@ -3773,6 +3958,9 @@ defmodule Arbiter.Worker.Dispatch do
     do: ineligible_provider_error(provider_type, policy, workspace, opts)
 
   defp provider_refusal({:guardrail_unenforceable, _} = refusal, _type, _policy, _ws, _opts),
+    do: refusal
+
+  defp provider_refusal({:git_credential_missing, _, _} = refusal, _type, _policy, _ws, _opts),
     do: refusal
 
   # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
@@ -3903,7 +4091,8 @@ defmodule Arbiter.Worker.Dispatch do
   # A missing signing secret is logged and swallowed: never blocks a spawn.
   defp mint_worker_token(%Issue{} = task, opts) do
     Arbiter.MCP.Scope.mint_worker(task, Keyword.get(opts, :repo),
-      depth: Keyword.get(opts, :depth, 0)
+      depth: Keyword.get(opts, :depth, 0),
+      permissions: Keyword.get(opts, :permissions, [])
     )
   rescue
     e ->
@@ -4146,10 +4335,10 @@ defmodule Arbiter.Worker.Dispatch do
   Briefing for a **conflict-resolve** worker (#354, Phase 2b). See
   `Arbiter.Worker.PromptBuilder.conflict_resolve_briefing/3`.
   """
-  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t()) :: String.t()
-  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch)
+  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t(), keyword()) :: String.t()
+  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch, opts \\ [])
       when is_binary(branch) and is_binary(target_branch) do
-    PromptBuilder.conflict_resolve_briefing(task, branch, target_branch)
+    PromptBuilder.conflict_resolve_briefing(task, branch, target_branch, opts)
   end
 
   # Fetch acceptance-criteria context from a tracker issue referenced by

@@ -73,6 +73,7 @@ defmodule Arbiter.Worker.ContainerTest do
       flags = flags(argv())
       assert "--init" in flags
       assert "--rm" in flags
+      assert "--log-driver=none" in flags
     end
   end
 
@@ -519,6 +520,43 @@ defmodule Arbiter.Worker.ContainerTest do
 
       assert_received {:ran, "/usr/bin/podman",
                        ["rm", "--force", "--ignore", "--time", "0", "arb-run1"]}
+    end
+
+    test "with a grace period it waits for the container to exit before removing it" do
+      test_pid = self()
+
+      runner = fn cmd, args, opts ->
+        send(test_pid, {:ran, cmd, args, opts})
+        {"0\n", 0}
+      end
+
+      assert :ok = Container.stop("arb-run1", runner: runner, podman: "podman", grace_ms: 5_000)
+
+      assert_received {:ran, "podman", ["wait", "arb-run1"], wait_opts}
+      assert wait_opts[:timeout] == 5_000
+
+      assert_received {:ran, "podman", ["rm", "--force", "--ignore", "--time", "0", "arb-run1"],
+                       _}
+    end
+
+    test "a container that outlives the grace period is still force-removed" do
+      test_pid = self()
+
+      runner = fn
+        _cmd, ["wait" | _], _ -> {"timed out", 124}
+        cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0}
+      end
+
+      assert :ok = Container.stop("arb-run1", runner: runner, podman: "podman", grace_ms: 10)
+      assert_received {:ran, "podman", ["rm", "--force", "--ignore", "--time", "0", "arb-run1"]}
+    end
+
+    test "no grace option means no wait (stop, timeout and OOM paths kill at once)" do
+      test_pid = self()
+      runner = fn _cmd, args, _ -> send(test_pid, {:args, args}) && {"", 0} end
+      assert :ok = Container.stop("arb-run1", runner: runner, podman: "podman")
+      assert_received {:args, ["rm" | _]}
+      refute_received {:args, ["wait" | _]}
     end
 
     test "teardown/1 takes the name, or the run map wrap callers keep" do

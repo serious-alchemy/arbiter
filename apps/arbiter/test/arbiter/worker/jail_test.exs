@@ -297,7 +297,9 @@ defmodule Arbiter.Worker.JailTest do
                    "/run/user/#{uid}",
                    "/run/dbus",
                    "/run/systemd/resolve",
-                   Arbiter.MCP.OperatorProof.socket_dir()
+                   Arbiter.MCP.OperatorProof.socket_dir(),
+                   Arbiter.Worker.SshAgent.default_dir(),
+                   Arbiter.Worker.GitCredential.default_dir()
                  ])
              )
 

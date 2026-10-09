@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.TargetBranch
@@ -207,6 +208,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
          :ok <- ProviderConstraint.check(task, provider),
+         :ok <-
+           ProviderRouting.ensure_sandbox_backend(
+             provider,
+             task,
+             context.workspace || maybe_load_workspace(task.workspace_id)
+           ),
+         :ok <- host_fetch(context, host_git?(context, provider)),
          {:ok, worktree_path} <- create_worktree(context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
@@ -221,6 +229,30 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          worktree_path: worktree_path,
          branch: context.branch
        }}
+    end
+  end
+
+  @doc """
+  Whether the host does this pass's `git fetch` / `git push` (bd-19skda): true
+  when the pass runs in a podman container (`ContainerSpawn.pass_policy/3`),
+  which has no forge credential or GitHub host key. Such a pass would otherwise
+  rebase onto the clone's stale `origin/<target>` and be unable to push.
+  """
+  @spec host_git?(map(), atom() | String.t()) :: boolean()
+  def host_git?(context, provider),
+    do: ContainerSpawn.pass_policy(context.workspace, context.repo, provider) != nil
+
+  # bd-19skda: the container cannot `git fetch`, so the host refreshes the main
+  # repo's `origin/<target>` before the clone is cut or re-attached
+  # (`Worktree.attach/2` copies it in): the pass rebases onto the CURRENT target,
+  # not whatever the repo last fetched. A failed fetch refuses the pass rather
+  # than let it rebase onto a stale base and push a still-conflicting branch.
+  defp host_fetch(_context, false), do: :ok
+
+  defp host_fetch(%{repo_path: repo_path, target_branch: target}, true) do
+    case Worktree.fetch_origin(repo_path, target) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:host_fetch_failed, reason}}
     end
   end
 
@@ -519,7 +551,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       # bd-4olwyg: the PR head this pass must move — `ConflictPassOutcome.verdict/1`
       # fails a pass that ends with the branch still here on origin.
       conflict_start_head: Worktree.remote_head(worktree_path, context.branch),
-      repo_path: context.repo_path
+      repo_path: context.repo_path,
+      # bd-19skda: a containerized pass can't push; the Worker pushes for it.
+      conflict_host_push: host_git?(context, provider)
     }
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
@@ -590,17 +624,37 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         # bd-7ays3v: under podman, a Claude pass runs in the container, in the
         # private clone `create_worktree/1` gave it, under the policy the task
         # worker resolves; any other pass is spawned exactly as before.
-        session_opts =
-          ([
-             owner: worker_pid,
-             worktree_path: worktree_path
-           ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-          |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
+        #
+        # bd-9cygoo (G16): a pass that force-pushes itself needs a repo-scoped git
+        # credential; a containerized pass is pushed for by the host (bd-19skda).
+        case GitCredential.plan(context.workspace, context.repo,
+               role: :implementer,
+               guarded?: Arbiter.Guardrails.guarded?(),
+               host_pushes?: host_git?(context, provider)
+             ) do
+          {:ok, git_credential} ->
+            session_opts =
+              ([
+                 owner: worker_pid,
+                 worktree_path: worktree_path,
+                 git_credential: git_credential
+               ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+              |> add_command_or_prompt(
+                Map.put(context, :host_git, host_git?(context, provider)),
+                args,
+                worktree_path,
+                provider,
+                mcp_opts
+              )
 
-        case ClaudeSession.start(session_opts) do
-          {:ok, port} ->
-            _ = Worker.advance(worker_pid, :resolve_conflict)
-            {:ok, port}
+            case ClaudeSession.start(session_opts) do
+              {:ok, port} ->
+                _ = Worker.advance(worker_pid, :resolve_conflict)
+                {:ok, port}
+
+              {:error, reason} ->
+                {:error, {:claude_start_failed, reason}}
+            end
 
           {:error, reason} ->
             {:error, {:claude_start_failed, reason}}
@@ -627,7 +681,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       workspace: context.workspace,
       worktree_path: worktree_path,
       owner: Keyword.get(opts, :owner),
-      task_id: context.task.id
+      task_id: context.task.id,
+      git_credential: Keyword.get(opts, :git_credential)
     ] ++ mcp_opts ++ ContainerSpawn.pass_agent_opts(Keyword.get(opts, :security))
   end
 
@@ -687,8 +742,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   silently.
   """
   @spec prompt_for(map()) :: String.t()
-  def prompt_for(%{task: %Issue{} = task, branch: branch, target_branch: target}) do
-    Arbiter.Worker.Dispatch.conflict_resolve_briefing(task, branch, target)
+  def prompt_for(%{task: %Issue{} = task, branch: branch, target_branch: target} = context) do
+    Arbiter.Worker.Dispatch.conflict_resolve_briefing(task, branch, target,
+      host_git: Map.get(context, :host_git, false)
+    )
   end
 
   def prompt_for(_) do

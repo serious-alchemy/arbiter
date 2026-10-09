@@ -43,6 +43,21 @@ defmodule Arbiter.Release.DeployStatus do
   def interrupted?(%{"state" => "running"} = status), do: not running?(status)
   def interrupted?(_), do: false
 
+  @doc """
+  The identity of a finished deploy record, for the dashboard's dismissal: tag plus
+  the time it finished (or started), so the next deploy is a different key. `nil`
+  for no record or one still in flight, which cannot be dismissed.
+  """
+  @spec dismiss_key(map() | nil) :: String.t() | nil
+  def dismiss_key(%{"state" => state}) when state in [nil, "running"], do: nil
+
+  def dismiss_key(%{"state" => state, "tag" => tag} = status)
+      when is_binary(state) and is_binary(tag) do
+    "#{tag}|#{status["finished_at"] || status["started_at"]}"
+  end
+
+  def dismiss_key(_), do: nil
+
   defp alive?(pid) when is_binary(pid) and pid != "", do: File.exists?("/proc/" <> pid)
   defp alive?(_), do: false
 

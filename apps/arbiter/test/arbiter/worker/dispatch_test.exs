@@ -2669,9 +2669,10 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     # The checkout a podman dispatch gets is a private clone, and only Claude and
-    # Codex have a container wrap point: an explicit provider that has none is refused
-    # at the gate, before anything is spawned.
-    test "sandbox.backend: podman refuses an explicit non-claude provider at the gate",
+    # Codex have a container wrap point: an explicit provider that has none is held
+    # at the dispatch gate (#553) with the reason, before anything is spawned. The
+    # spawn-time `sandbox_backend_unavailable` refusal stays as the backstop.
+    test "sandbox.backend: podman holds an explicit non-claude provider at the gate",
          %{ws: ws, tmp: tmp} do
       gemini_file = Path.join(tmp, "gemini-argv.txt")
       :ok = stub_named_on_path(tmp, "agy", gemini_file)
@@ -2692,7 +2693,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "podman gemini", workspace_id: ws.id})
 
-      assert {:error, {:claude_start_failed, {:sandbox_backend_unavailable, :podman, message}}} =
+      assert {:error, {:sandbox_backend, :gemini, message}} =
                Dispatch.dispatch(task.id,
                  force: true,
                  repo: "pg/repo",
@@ -2702,7 +2703,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      assert message =~ "claude and codex only"
+      assert message =~ "gemini: not supported by sandbox.backend podman"
       refute File.exists?(gemini_file)
     end
 
@@ -2770,7 +2771,8 @@ defmodule Arbiter.Worker.DispatchTest do
             "agent" => %{
               "type" => "claude",
               "security" => %{"permissions" => %{"mode" => "bypass"}}
-            }
+            },
+            "git_credentials" => %{"legacy_operator" => true}
           }
         })
 
@@ -2787,6 +2789,236 @@ defmodule Arbiter.Worker.DispatchTest do
 
       argv = wait_for_argv!(claude_file)
       assert "--dangerously-skip-permissions" in argv
+    end
+
+    # bd-ld8qde (G14): undeclared means withheld. The spawned child's real env,
+    # captured by a stand-in `claude`.
+    defp stub_claude_dumping_env(tmp, env_file) do
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      env > #{env_file}
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+      :ok
+    end
+
+    defp withholding_workspace(ws) do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "guardrails" => %{
+              "bindings" => %{
+                "prod_read" => %{
+                  "enforced_read_only" => true,
+                  "env_from_secret" => %{"RO_URL" => "prod_ro_url"}
+                }
+              }
+            },
+            "git_credentials" => %{"legacy_operator" => true}
+          },
+          secrets: %{"prod_ro_url" => "postgres://ro-secret-value"},
+          worker_env: %{
+            "WH_SECRET_TOK" => %{"value" => "tok-secret-value", "secret" => true},
+            "WH_PLAIN" => %{"value" => "plain-value", "secret" => false}
+          }
+        })
+
+      ws
+    end
+
+    defp dispatch_for_env(ws, tmp, permissions) do
+      env_file = Path.join(tmp, "claude-env.txt")
+      :ok = stub_claude_dumping_env(tmp, env_file)
+      repo = seed_repo!(tmp, "wh-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wh-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"wh/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "withholding", workspace_id: ws.id, permissions: permissions},
+          context: %{guardrail_authority: :coordinator, permission_actor: "c"}
+        )
+
+      {:ok, _} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "wh/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      wait_until(fn -> File.exists?(env_file) end, 5_000)
+      _ = wait_for_argv!(env_file)
+      File.read!(env_file)
+    end
+
+    test "guarded: only the declared permission's secret reaches the worker's env", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, ["prod_read"])
+
+      assert env =~ "RO_URL=postgres://ro-secret-value"
+      assert env =~ "WH_PLAIN=plain-value"
+      refute env =~ "WH_SECRET_TOK"
+    end
+
+    test "guarded: a ticket that declares nothing gets none of the secrets", %{ws: ws, tmp: tmp} do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, [])
+
+      refute env =~ "RO_URL"
+      refute env =~ "WH_SECRET_TOK"
+      refute env =~ "postgres://ro-secret-value"
+      assert env =~ "WH_PLAIN=plain-value"
+    end
+
+    test "guarded: a declared permission the subject's tier cannot hold is withheld", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :trusted}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, ["prod_read"])
+      refute env =~ "RO_URL"
+    end
+
+    test "no guardrail rules: nothing is withheld, as before G14", %{ws: ws, tmp: tmp} do
+      env = dispatch_for_env(withholding_workspace(ws), tmp, [])
+      assert env =~ "WH_SECRET_TOK=tok-secret-value"
+      refute env =~ "RO_URL"
+    end
+
+    # bd-9cygoo (G16): a worker that pushes gets a repo-scoped credential, or the
+    # dispatch is refused — never the operator's keys by default.
+    defp guarded_claude_rules do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+    end
+
+    defp git_credential_workspace(ws, git_credentials, secrets \\ %{}) do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => "claude"}, "git_credentials" => git_credentials},
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    test "G16: a guarded dispatch with no scoped git credential for its repo is refused", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+      repo = seed_repo!(tmp, "gc-refuse-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gc-refuse-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gc/repo" => repo})
+      :ok = stub_claude_dumping_env(tmp, Path.join(tmp, "never.txt"))
+
+      {:ok, ws} = Ash.update(ws, %{config: %{"agent" => %{"type" => "claude"}}})
+      {:ok, task} = Ash.create(Issue, %{title: "no creds", workspace_id: ws.id})
+
+      assert {:error, reason} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "gc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert {:claude_start_failed, {:git_credential_missing, "gc/repo", message}} = reason
+      assert message =~ "legacy_operator"
+      refute File.exists?(Path.join(tmp, "never.txt"))
+    end
+
+    # bd-7rxy1c: a podman run holds no credential by design and the host pushes
+    # its branch after `arb done`, so it is never refused for lacking one. The
+    # unavailable container proves dispatch got past the credential gate.
+    test "G16: a podman workspace with no git_credentials block is not refused for a credential",
+         %{ws: ws, tmp: tmp} do
+      guarded_claude_rules()
+      repo = seed_repo!(tmp, "gc-podman-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gc-podman-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gc/repo" => repo})
+      put_app_env(:arbiter, :worker_container_available, false)
+      :ok = stub_claude_dumping_env(tmp, Path.join(tmp, "never.txt"))
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman no creds", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:podman_unavailable, _}}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "gc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+    end
+
+    test "G16: the legacy operator credential is an explicit workspace opt-in", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+      ws = git_credential_workspace(ws, %{"legacy_operator" => true})
+      env = dispatch_for_env(ws, tmp, [])
+      refute env =~ "GIT_SSH_COMMAND=ssh"
+      refute env =~ "SSH_AUTH_SOCK"
+    end
+
+    test "G16: a deploy key reaches the worker as its only identity, never an agent", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+
+      ws =
+        git_credential_workspace(
+          ws,
+          %{"repos" => %{"wh/repo" => %{"kind" => "deploy_key", "key_secret" => "WH_KEY"}}},
+          %{"WH_KEY" => "-----BEGIN KEY-----\nscoped\n-----END KEY-----"}
+        )
+
+      env = dispatch_for_env(ws, tmp, [])
+
+      assert [_, key_path] = Regex.run(~r{GIT_SSH_COMMAND=ssh -F /dev/null -i (\S+) }, env)
+      assert env =~ "IdentitiesOnly=yes"
+      assert env =~ "IdentityAgent=none"
+      refute env =~ "SSH_AUTH_SOCK"
+      assert File.read!(key_path) =~ "scoped"
+      assert File.stat!(key_path).mode |> Bitwise.band(0o777) == 0o600
     end
 
     # AC5: nothing configured, nothing changes. A workspace `guardrails` block
@@ -4610,14 +4842,89 @@ defmodule Arbiter.Worker.DispatchTest do
       end
     end
 
-    # bd-atsde3 AC2: the Reconciler's post-restart auto-resume is a briefing
-    # resume (`Dispatch.resume/2`), never `claude --resume <sid>`, so it cannot
-    # hit "No conversation found" in a podman run's fresh config dir.
-    test "Reconciler.default_resume/1 respawns claude without --resume", %{ws: ws, tmp: tmp} do
-      argv_file = Path.join(tmp, "claude-reconciler-argv.txt")
+    # bd-33n9v4: the Reconciler's post-restart auto-resume continues the
+    # interrupted Claude session (`--resume <sid>`) when its JSONL is anywhere
+    # SessionHistory can find it (the interrupted run's live config dir here),
+    # and degrades to a briefing resume (no `--resume`) only when it is not.
+    for {label, with_history?} <- [{"present", true}, {"missing", false}] do
+      test "Reconciler.default_resume/1 with claude session history #{label}", %{ws: ws, tmp: tmp} do
+        argv_file = Path.join(tmp, "claude-reconciler-argv.txt")
+        :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
+        sid = "99999999-2222-3333-4444-#{:erlang.unique_integer([:positive])}"
+
+        {:ok, task} = Ash.create(Issue, %{title: "reconciler resume", workspace_id: ws.id})
+
+        {:ok, first} =
+          Dispatch.dispatch(task.id,
+            force: true,
+            repo: "rs/repo",
+            start_driver: false,
+            start_claude: true,
+            agent_type: :claude,
+            preflight: false
+          )
+
+        _ = wait_for_argv!(argv_file)
+        :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+        config_dir = Path.join(tmp, "interrupted-config")
+
+        if unquote(with_history?) do
+          File.mkdir_p!(Path.join([config_dir, "projects", "-some-slug"]))
+          File.write!(Path.join([config_dir, "projects", "-some-slug", sid <> ".jsonl"]), "{}\n")
+        end
+
+        {:ok, _run} =
+          Ash.create(Run, %{
+            task_id: task.id,
+            task_title: task.title,
+            repo: "rs/repo",
+            workspace_id: ws.id,
+            state: :finished,
+            outcome: :failed,
+            started_at: DateTime.utc_now(),
+            session_id: sid,
+            config_dir: config_dir,
+            provider: "claude"
+          })
+
+        {:ok, _event} =
+          Ash.create(UsageEvent, %{
+            task_id: task.id,
+            workspace_id: ws.id,
+            repo: "rs/repo",
+            step: :work,
+            provider: "claude",
+            session_id: sid,
+            occurred_at: DateTime.utc_now()
+          })
+
+        File.rm!(argv_file)
+        {:ok, issue} = Ash.get(Issue, task.id)
+
+        assert {:ok, _} =
+                 Arbiter.Workers.Reconciler.default_resume(issue,
+                   start_driver: false,
+                   preflight: false
+                 )
+
+        args = wait_for_argv!(argv_file)
+
+        if unquote(with_history?) do
+          assert "--resume" in args and sid in args
+        else
+          refute "--resume" in args
+          refute sid in args
+        end
+      end
+    end
+
+    test "Reconciler.default_resume/1 with no session at all falls back to a briefing resume",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "claude-reconciler-nosession-argv.txt")
       :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
 
-      {:ok, task} = Ash.create(Issue, %{title: "reconciler resume", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "reconciler no session", workspace_id: ws.id})
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
@@ -4631,18 +4938,6 @@ defmodule Arbiter.Worker.DispatchTest do
 
       _ = wait_for_argv!(argv_file)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
-
-      {:ok, _event} =
-        Ash.create(UsageEvent, %{
-          task_id: task.id,
-          workspace_id: ws.id,
-          repo: "rs/repo",
-          step: :work,
-          provider: "claude",
-          session_id: "99999999-2222-3333-4444-555555555555",
-          occurred_at: DateTime.utc_now()
-        })
-
       File.rm!(argv_file)
       {:ok, issue} = Ash.get(Issue, task.id)
 
@@ -4652,9 +4947,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      args = wait_for_argv!(argv_file)
-      refute "--resume" in args
-      refute "99999999-2222-3333-4444-555555555555" in args
+      refute "--resume" in wait_for_argv!(argv_file)
     end
 
     # bd-b7e33c post-merge finding (2026-09-19), corrected 2026-09-21 per

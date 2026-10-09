@@ -23,6 +23,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolverAgentOptsTest do
     assert Keyword.fetch!(opts, :arb_token) == "t"
   end
 
+  test "agent_opts/4 hands the pass's scoped git credential to the adapter (bd-9cygoo)" do
+    plan = %Arbiter.Worker.GitCredential{mode: :legacy, repo: "r"}
+    context = %{workspace: nil, task: %{id: "bd-pass4"}}
+
+    opts = ConflictResolver.agent_opts([git_credential: plan], context, "/w", [])
+
+    assert Keyword.fetch!(opts, :git_credential) == plan
+  end
+
   # bd-7ays3v: a pass on a podman repo runs in the container, so its adapter
   # opts carry the policy and the promise to wrap; any other pass is untouched.
   describe "under the container backend (bd-7ays3v)" do
@@ -38,6 +47,22 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolverAgentOptsTest do
 
     defp context(workspace),
       do: %{workspace: workspace, repo: "trib/repo", task: %{id: "bd-pass2"}}
+
+    test "the podman conflict-pass prompt says the host fetches and pushes" do
+      task = %Arbiter.Tasks.Issue{id: "bd-pass2", title: "t"}
+      ctx = %{task: task, branch: "feature/x", target_branch: "main"}
+
+      assert ConflictResolver.prompt_for(Map.put(ctx, :host_git, true)) =~
+               "NO FETCH OR PUSH ACCESS"
+
+      refute ConflictResolver.prompt_for(ctx) =~ "NO FETCH OR PUSH ACCESS"
+    end
+
+    test "only a podman Claude pass has the host do its git" do
+      assert ConflictResolver.host_git?(context(ws("podman")), :claude)
+      refute ConflictResolver.host_git?(context(ws("bwrap")), :claude)
+      refute ConflictResolver.host_git?(context(ws("podman")), :codex)
+    end
 
     test "a Claude pass on a podman workspace gets the policy and sandbox_wrap" do
       workspace = ws("podman")
