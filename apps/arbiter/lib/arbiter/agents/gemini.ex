@@ -722,6 +722,11 @@ defmodule Arbiter.Agents.Gemini do
     match?(%GitCredential{mode: :scoped}, Keyword.get(opts, :git_credential))
   end
 
+  defp git_jail_opts(opts, git_key) do
+    if(git_key, do: [git_ssh_key: git_key], else: []) ++
+      if(scoped_git?(opts), do: [scoped_git: true], else: [])
+  end
+
   defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key) do
     jail_opts =
       [
@@ -736,8 +741,7 @@ defmodule Arbiter.Agents.Gemini do
       ] ++
         if(network, do: [network: network], else: []) ++
         if(ssh_agent, do: [ssh_agent: ssh_agent], else: []) ++
-        if(git_key, do: [git_ssh_key: git_key], else: []) ++
-        if(scoped_git?(opts), do: [scoped_git: true], else: [])
+        git_jail_opts(opts, git_key)
 
     case Sandbox.wrap(policy, command, jail_opts) do
       {:ok, argv} ->
