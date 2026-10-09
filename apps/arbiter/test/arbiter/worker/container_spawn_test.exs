@@ -753,6 +753,79 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  # bd-dh1gg1: unit-level determinism: `prepare/1` + `wrap_port/1` carry no
+  # per-resume state, so only the inner argv (prompt, `--resume <id>`) and the
+  # owner differ between runs. That the real entry points (`Dispatch.dispatch/2`,
+  # `resume_task/2`, the Reconciler's auto-resume) hand the spawn the same inputs
+  # is asserted in `dispatch_podman_egress_parity_test.exs`.
+  describe "egress parity across dispatch and every resume path (bd-dh1gg1)" do
+    defp inner(ctx, extra) do
+      %{
+        exec: "/bin/sh",
+        argv:
+          ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", ContainerSpawn.claude_path()] ++ extra,
+        cd: ctx.clone,
+        env: [{"ARB_TOKEN", "arb-secret-token"}, {"ARB_WORKER_BEAD_ID", "bd-p7test"}]
+      }
+    end
+
+    # What the container is given to reach the outside: everything ahead of the
+    # inner command (network mode, bridge/proxy mounts, proxy and git-ssh env,
+    # the in-container socat listeners) with the per-run name dropped.
+    defp egress_part(ctx, port_args, opts) do
+      {:ok, request} = ContainerSpawn.prepare(opts)
+
+      args =
+        port_args
+        |> Map.put(:sandbox, request)
+        |> Map.update!(:env, &ContainerSpawn.apply_env(&1, request))
+
+      {:ok, wrapped} = ContainerSpawn.wrap_port(args)
+
+      {head, _command} = Enum.split_while(wrapped.argv, &(&1 != "--"))
+
+      %{
+        head: Enum.reject(head, &(&1 == request.name)),
+        git_ssh: for({"GIT_SSH_COMMAND", v} <- wrapped.env, do: v),
+        git_ssh_passed: has_inherit?(head, "GIT_SSH_COMMAND"),
+        mounts: Enum.filter(mounts(head), &(&1 =~ ctx.proxy or &1 =~ ctx.bridge)),
+        env: Map.new(request.env)
+      }
+    end
+
+    test "dispatch, briefing resume, session resume and auto-resume build the same egress", ctx do
+      fresh = egress_part(ctx, inner(ctx, ["--print", "the prompt"]), ctx.opts)
+
+      # A resumed worker is a new owner pid; the stand-in egress is what
+      # `JailRun` returns for any owner.
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(owner, :kill) end)
+      resumed_opts = Keyword.put(ctx.opts, :owner, owner)
+
+      paths = [
+        briefing: egress_part(ctx, inner(ctx, ["--print", "briefing: continue"]), resumed_opts),
+        session:
+          egress_part(
+            ctx,
+            inner(ctx, ["--print", "--resume", "sess-1", "continue"]),
+            resumed_opts
+          ),
+        auto_resume:
+          egress_part(ctx, inner(ctx, ["--print", "--resume", "sess-2", "continue"]), ctx.opts)
+      ]
+
+      assert fresh.git_ssh != []
+      assert hd(fresh.git_ssh) =~ "ProxyCommand socat"
+      assert fresh.git_ssh_passed
+      assert fresh.mounts != []
+      assert "--network=none" in fresh.head
+
+      for {path, part} <- paths do
+        assert part == fresh, "#{path} diverged from a fresh dispatch's egress setup"
+      end
+    end
+  end
+
   describe "a scoped git credential (G16, bd-9cygoo)" do
     alias Arbiter.Worker.GitCredential.Material
 

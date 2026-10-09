@@ -242,6 +242,47 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            """
   end
 
+  describe "host-pushed (container) runs (bd-dh1gg1)" do
+    test "a host-pushes run is told not to push, fresh or resumed" do
+      for extra <- [[], [resume_context: "## Resuming prior work\n\n"]] do
+        prompt =
+          PromptBuilder.prompt_for_task(
+            task(%{}),
+            [sandbox_backend: :podman, host_pushes?: true] ++ extra
+          )
+
+        assert prompt =~ "commit on this branch."
+        assert prompt =~ "NO PUSH ACCESS"
+        refute prompt =~ "and push it."
+      end
+    end
+
+    test "the PR-review and PRPatrol follow-up prompts do not send a host-pushes worker to push" do
+      review = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), host_pushes?: true)
+      assert review =~ "Arbiter pushes it; do NOT push"
+      refute review =~ "push commits to the existing branch"
+
+      follow =
+        PromptBuilder.prompt_for_task(
+          task(%{issue_type: :research, source_pr: "42"}),
+          host_pushes?: true
+        )
+
+      assert follow =~ "do NOT `git push`"
+      refute follow =~ "+ push (`git push`)"
+
+      plain = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), [])
+      assert plain =~ "push commits to the existing branch"
+    end
+
+    test "without the flag the worker still pushes itself" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "commit on this branch, and push it."
+      refute prompt =~ "Do NOT push"
+    end
+  end
+
   describe "no-PR type prompts (bd-9s9dqz)" do
     test "research asks for findings and names the notes gate" do
       prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])

@@ -10,6 +10,12 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcherTest do
   alias Arbiter.Workflows.MergeQueue.ReviseDispatcher
 
   describe "render_feedback/1" do
+    test "does not send a credential-less sandbox to retry git push (bd-dh1gg1)" do
+      text = ReviseDispatcher.render_feedback(%{task_id: "bd-abc123", feedback: []})
+
+      assert text =~ "Arbiter pushes for it"
+    end
+
     test "still renders the existing feedback + same-branch instructions" do
       text =
         ReviseDispatcher.render_feedback(%{
