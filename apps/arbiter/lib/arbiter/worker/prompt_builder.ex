@@ -287,6 +287,10 @@ defmodule Arbiter.Worker.PromptBuilder do
     end
   end
 
+  defp push_clause(opts) do
+    if Keyword.get(opts, :sandbox_backend) == :podman, do: "", else: ", and push it"
+  end
+
   defp base_work_prompt(%Issue{} = task, opts) do
     mcp? = mcp_tools?(opts)
     worktree_path = Keyword.get(opts, :worktree_path)
@@ -310,7 +314,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
-    commit on this branch, and push it.
+    commit on this branch#{push_clause(opts)}.
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
     create`). The MergeQueue opens the single canonical PR for this task, on

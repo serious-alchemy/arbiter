@@ -692,8 +692,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert prompt =~ "not a reason to withhold `arb done`"
     end
 
+    test "a podman work prompt does not tell the worker to push" do
+      refute PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman) =~ "and push it"
+    end
+
     test "bwrap and default work prompts carry no such block" do
       for opts <- [[sandbox_backend: :bwrap], []] do
+        assert PromptBuilder.prompt_for_task(task(%{}), opts) =~
+                 "commit on this branch, and push it."
+
         refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "NO PUSH ACCESS"
       end
     end
