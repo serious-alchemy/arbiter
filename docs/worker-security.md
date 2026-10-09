@@ -1160,8 +1160,20 @@ container cannot reach a host socket): it never runs on the operator's agent.
     available to agy only: a `prod_ssh` spawn of any other provider is refused
     (`ClaudeSession.start/1`, `Withholding.check_spawn/2`) rather than run on the
     operator's agent.
-  * Merge-queue passes (CI fix, conflict) and the doctor canary compute no
-    projection: on a guarded install they run sealed.
+  * The CI fix pass (`FixPassDispatcher`) computes the same projection as a
+    first-round implementer (`spawn_projection/2`, no model named, so a rule
+    keyed on model family sees `nil`) and mints its token with those claims, so
+    it keeps the ticket's declared `secrets:` env and `tracker_write`. The
+    conflict-resolver pass and the doctor canary (`Doctor.SpawnCanary`) compute
+    none: on a guarded install they run **sealed** deliberately (a merge needs no
+    ticket reach; the canary has a workspace but no ticket).
+  * The egress grant cache is keyed `{task_id, run_id}`, so a reviewer's `[]` and
+    an implementer's hosts for the same ticket never serve each other; a grant
+    writer's `Egress.invalidate_grants/1` still drops every run of the task.
+  * The MCP `permissions` claim is minted into the worker token and exposed as
+    `MCP.Scope.permission?/2`, but no tool calls it yet: nothing enforces
+    `tracker_write` server-side today. The env withholding (no `GH_TOKEN`) is
+    what bites; the claim is for the tools that will check it.
   * `permission_request` and live grants are G15; `guardrail_decision` on runs
     is G13.
 

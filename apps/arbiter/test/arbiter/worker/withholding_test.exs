@@ -10,7 +10,9 @@ defmodule Arbiter.Worker.WithholdingTest do
   alias Arbiter.Guardrails.Projection
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Egress.GrantCache
   alias Arbiter.Worker.Withholding
+  alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
   @guardrails %{
     "bindings" => %{
@@ -161,6 +163,49 @@ defmodule Arbiter.Worker.WithholdingTest do
       {_ws, issue} = setup_ticket(["network:api.example.com"], coordinator())
       loader = Withholding.grants(issue.id <> "#r1", Projection.unguarded())
       assert loader.(issue.id <> "#r1") == ["api.example.com:443"]
+    end
+
+    test "two spawns of one task never read each other's grants through the cache" do
+      {_ws, issue} = setup_ticket(["network:api.example.com"], coordinator())
+
+      implementer =
+        Withholding.grants(issue.id, %{Projection.sealed() | hosts: ["api.example.com:443"]})
+
+      reviewer = Withholding.grants(issue.id, Projection.sealed(role: :reviewer))
+
+      assert GrantCache.fetch(issue.id, "run-impl", implementer) == ["api.example.com:443"]
+      assert GrantCache.fetch(issue.id, "run-review", reviewer) == []
+      # and back: the reviewer's empty answer is not what the implementer now reads
+      assert GrantCache.fetch(issue.id, "run-impl", reviewer) == ["api.example.com:443"]
+
+      # a grant writer's invalidation still reaches every run of the task
+      GrantCache.invalidate(issue.id)
+      assert GrantCache.fetch(issue.id, "run-impl", reviewer) == []
+    end
+  end
+
+  describe "CI fix-pass spawn (FixPassDispatcher.spawn_projection/2)" do
+    test "a guarded install projects the pass like any implementer spawn, not a seal" do
+      Application.put_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      on_exit(fn -> Application.delete_env(:arbiter, :guardrail_subject_rules) end)
+
+      {ws, issue} = setup_ticket(["prod_read", "tracker_write"], coordinator())
+      context = %{task: issue, workspace: ws, repo: nil}
+
+      projection = FixPassDispatcher.spawn_projection(context, :claude)
+
+      assert projection.guarded?
+      assert projection.env == [{"RO_URL", "prod_ro_url"}]
+      assert "tracker_write" in projection.claims
+    end
+
+    test "with no subject rule configured the pass is unguarded, as before G14" do
+      {ws, issue} = setup_ticket([], coordinator())
+      context = %{task: issue, workspace: ws, repo: nil}
+      refute FixPassDispatcher.spawn_projection(context, :claude).guarded?
     end
   end
 
