@@ -167,10 +167,10 @@ defmodule Arbiter.Guardrails.Events do
     run = if opts[:run_id], do: nil, else: latest_run(task_id)
 
     record(%{
-      run_id: opts[:run_id] || (run && run.id) || task_id || "unknown",
+      run_id: opts[:run_id] || run_field(run, :id) || task_id || "unknown",
       task_id: task_id,
-      provider: opts[:provider] || (run && run.provider),
-      model: opts[:model] || (run && run.model),
+      provider: opts[:provider] || run_field(run, :provider),
+      model: opts[:model] || run_field(run, :model),
       kind: :self_grant_attempt,
       severity: :critical,
       source: :bridge_audit,
@@ -178,4 +178,7 @@ defmodule Arbiter.Guardrails.Events do
       detail: what
     })
   end
+
+  defp run_field(nil, _field), do: nil
+  defp run_field(run, field), do: Map.get(run, field)
 end

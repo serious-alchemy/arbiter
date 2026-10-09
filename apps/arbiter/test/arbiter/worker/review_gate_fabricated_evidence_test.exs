@@ -231,7 +231,6 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
   end
 
   describe "the author's automatic fix round" do
-
     # G17: the same escalation is a critical guardrail event on the author's run.
     test "records a critical fabricated_evidence guardrail event on the author's run",
          %{repo: repo, ws: ws} do
@@ -255,6 +254,7 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
 
       assert task_id == task.id
     end
+
     test "is not dispatched when the gate stopped on fabricated evidence",
          %{repo: repo, ws: ws} do
       findings = EvidenceIntegrity.escalation_findings(@aro53b_round2, "FULL TRANSCRIPT")

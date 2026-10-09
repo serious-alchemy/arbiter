@@ -138,7 +138,11 @@ defmodule Arbiter.Guardrails.EventsTest do
         })
 
       scope = %Arbiter.MCP.Scope{tier: :worker, task_id: "bd-sg"}
-      assert :ok = Events.record_self_grant(scope, "workspace_config_set guardrails.x", tool: "workspace_config_set")
+
+      assert :ok =
+               Events.record_self_grant(scope, "workspace_config_set guardrails.x",
+                 tool: "workspace_config_set"
+               )
 
       assert [
                %Event{

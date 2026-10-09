@@ -167,23 +167,23 @@ defmodule Arbiter.Guardrails.Scan do
 
   defp segment_category(words) do
     case command(words) do
-      {"git", args} ->
-        if "push" in args and force_flag?(args), do: "no_force_push"
-
-      {"rm", args} ->
-        if recursive_force?(args), do: "no_destructive_fs"
-
-      {"gh", args} ->
-        gh_category(Enum.reject(args, &String.starts_with?(&1, "-")))
-
-      {"glab", args} ->
-        if Enum.take(Enum.reject(args, &String.starts_with?(&1, "-")), 2) == ["mr", "create"],
-          do: "no_pr_create"
-
-      _ ->
-        nil
+      {exe, args} -> exe_category(exe, args)
+      nil -> nil
     end
   end
+
+  defp exe_category("git", args),
+    do: if("push" in args and force_flag?(args), do: "no_force_push")
+
+  defp exe_category("rm", args), do: if(recursive_force?(args), do: "no_destructive_fs")
+  defp exe_category("gh", args), do: gh_category(positional(args))
+
+  defp exe_category("glab", args),
+    do: if(Enum.take(positional(args), 2) == ["mr", "create"], do: "no_pr_create")
+
+  defp exe_category(_exe, _args), do: nil
+
+  defp positional(args), do: Enum.reject(args, &String.starts_with?(&1, "-"))
 
   defp gh_category(["gist", verb | _]) when verb in ["create", "edit"], do: "no_gh_publish"
   defp gh_category(["issue", "comment" | _]), do: "no_gh_publish"

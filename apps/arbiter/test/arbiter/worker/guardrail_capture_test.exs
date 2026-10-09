@@ -76,7 +76,8 @@ defmodule Arbiter.Worker.GuardrailCaptureTest do
 
       assert Enum.any?(
                events,
-               &(&1.kind == :permission_denial and &1.detail == "no_force_push" and &1.tool == "Bash")
+               &(&1.kind == :permission_denial and &1.detail == "no_force_push" and
+                   &1.tool == "Bash")
              )
 
       assert Enum.any?(events, &(&1.kind == :public_upload_attempt))

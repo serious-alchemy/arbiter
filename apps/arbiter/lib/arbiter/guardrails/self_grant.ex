@@ -60,23 +60,12 @@ defmodule Arbiter.Guardrails.SelfGrant do
   # An edit that names a path through `guardrails` or `permissions`: the dotted
   # `key`, the keys of a `patch` at any depth, or an `unset_paths` entry.
   defp config_args?(args) do
-    key_hit? = is_binary(args["key"]) and sensitive_path?(args["key"])
-
-    patch_hit? =
-      case args["patch"] do
-        %{} = patch -> map_hit?(patch)
-        _ -> false
-      end
-
-    unset_hit? =
-      case args["unset_paths"] do
-        list when is_list(list) -> Enum.any?(list, &(is_binary(&1) and sensitive_path?(&1)))
-        _ -> false
-      end
-
-    key_hit? or patch_hit? or unset_hit? or
-      map_hit?(Map.drop(args, ["key", "patch", "unset_paths"]))
+    path_hit?(args["key"]) or
+      (is_list(args["unset_paths"]) and Enum.any?(args["unset_paths"], &path_hit?/1)) or
+      map_hit?(Map.drop(args, ["key", "unset_paths"]))
   end
+
+  defp path_hit?(path), do: is_binary(path) and sensitive_path?(path)
 
   defp map_hit?(%{} = map) do
     Enum.any?(map, fn {k, v} ->
