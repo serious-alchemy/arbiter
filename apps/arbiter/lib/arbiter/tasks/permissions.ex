@@ -59,8 +59,8 @@ defmodule Arbiter.Tasks.Permissions do
   `revoked`: carried, but not yet granted. `suggested` events are ignored — a
   suggestion changes nothing (§5.3 (3)).
   """
-  @spec pending(Issue.t()) :: [String.t()]
-  def pending(%Issue{} = issue), do: issue |> events() |> pending_from() |> Enum.sort()
+  @spec pending(Issue.t() | %{id: String.t()}) :: [String.t()]
+  def pending(%{id: id}) when is_binary(id), do: id |> events() |> pending_from() |> Enum.sort()
 
   defp pending_from(events) do
     events
@@ -73,8 +73,8 @@ defmodule Arbiter.Tasks.Permissions do
   end
 
   @doc "The ticket's permissions that are in force: carried and not pending."
-  @spec in_force(Issue.t()) :: [String.t()]
-  def in_force(%Issue{permissions: permissions} = issue), do: permissions -- pending(issue)
+  @spec in_force(Issue.t() | %{id: String.t(), permissions: [String.t()]}) :: [String.t()]
+  def in_force(%{permissions: permissions} = issue), do: (permissions || []) -- pending(issue)
 
   # ---- writing events ------------------------------------------------------------
 

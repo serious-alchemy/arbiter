@@ -36,6 +36,8 @@ defmodule Arbiter.Mergers.CILogExcerpt do
     ~r/^---\s+FAIL:/
   ]
 
+  @summary ~r/^\s*\d+ (tests?|doctests?|properties|examples?), \d+ failures?/
+
   @context_before 1
   @context_after 2
 
@@ -46,10 +48,22 @@ defmodule Arbiter.Mergers.CILogExcerpt do
   @spec extract(term(), pos_integer()) :: String.t()
   def extract(log, limit) when is_binary(log) and is_integer(limit) and limit > 0 do
     lines = clean_lines(log)
+    total = length(lines)
+    indexed = Enum.with_index(lines)
 
-    case keep_ranges(lines) do
-      [] -> tail(Enum.join(lines, "\n") |> String.trim(), limit)
-      ranges -> ranges |> render(lines) |> bound(limit)
+    blocks = indexed |> block_ranges(total) |> Enum.sort() |> merge()
+    summaries = for {line, i} <- indexed, Regex.match?(@summary, line), do: {i, i}
+    primary = merge(Enum.sort(blocks ++ summaries))
+
+    markers =
+      for {line, i} <- indexed, marker?(line) do
+        {max(i - @context_before, 0), min(i + @context_after, total - 1)}
+      end
+
+    if primary == [] and markers == [] do
+      tail(Enum.join(lines, "\n") |> String.trim(), limit)
+    else
+      assemble(blocks, summaries, markers, lines, limit)
     end
   end
 
@@ -65,20 +79,44 @@ defmodule Arbiter.Mergers.CILogExcerpt do
     |> Enum.map(&String.trim_trailing/1)
   end
 
-  # Inclusive `{first, last}` index ranges to keep, merged and ordered.
-  defp keep_ranges(lines) do
-    indexed = Enum.with_index(lines)
-    total = length(lines)
+  # Failure blocks and the run's summary line are what a fix pass needs most,
+  # so they are budgeted first (blocks up to 80% of the limit); generic
+  # file:line / error lines — which a noisy compile or slow-test report can
+  # produce in bulk — only fill whatever budget is left. Rendered in log order.
+  defp assemble(blocks, summaries, markers, lines, limit) do
+    kept_blocks = take_within(blocks, lines, div(limit * 4, 5), 0, [])
+    primary = merge(Enum.sort(kept_blocks ++ summaries))
+    left = limit - rendered_size(primary, lines)
 
-    blocks = block_ranges(indexed, total)
+    kept_markers =
+      markers
+      |> Enum.sort()
+      |> merge()
+      |> Enum.reject(&overlaps_any?(&1, blocks ++ summaries))
+      |> take_within(lines, left, 0, [])
 
-    markers =
-      for {line, i} <- indexed, marker?(line) do
-        {max(i - @context_before, 0), min(i + @context_after, total - 1)}
-      end
-
-    (blocks ++ markers) |> Enum.sort() |> merge()
+    (primary ++ kept_markers)
+    |> Enum.sort()
+    |> render(lines)
+    |> bound(limit)
   end
+
+  # Greedy, in log order; the first range is always kept so a single oversized
+  # failure block is truncated by `bound/2` rather than dropped.
+  defp take_within([], _lines, _budget, _used, acc), do: Enum.reverse(acc)
+
+  defp take_within([range | rest], lines, budget, used, acc) do
+    size = rendered_size([range], lines)
+
+    if used + size <= budget or (acc == [] and used == 0),
+      do: take_within(rest, lines, budget, used + size, [range | acc]),
+      else: take_within(rest, lines, budget, used, acc)
+  end
+
+  defp rendered_size(ranges, lines), do: ranges |> render(lines) |> String.length() |> Kernel.+(3)
+
+  defp overlaps_any?({s, e}, ranges),
+    do: Enum.any?(ranges, fn {ps, pe} -> s <= pe and e >= ps end)
 
   defp block_ranges(indexed, total) do
     for {line, i} <- indexed, Regex.match?(@block_header, line) do

@@ -1174,11 +1174,86 @@ container cannot reach a host socket): it never runs on the operator's agent.
     `MCP.Scope.permission?/2`, but no tool calls it yet: nothing enforces
     `tracker_write` server-side today. The env withholding (no `GH_TOKEN`) is
     what bites; the claim is for the tools that will check it.
-  * `permission_request` and live grants are G15; `guardrail_decision` on runs
-    is G13.
+  * `permission_request` and live grants are G15; routing eligibility and
+    `guardrail_decision` on runs are G13 (below).
 
 `arb server doctor` (guardrails report) flags a binding that names a secret the
 workspace does not have (`binding_secret_missing`).
+
+## Routing eligibility from guardrails (bd-atll60, G13)
+
+Guardrail eligibility is a **hard filter that runs before any optimisation**
+(`docs/design/guardrail-profiles.md` §5.4, §5.7, §8). It applies only to a
+**guarded** install (`Arbiter.Guardrails.guarded?/0`: a subject rule is
+configured); with none, every code path below is the one it was before.
+
+`Arbiter.Guardrails.Eligibility.evaluate/2` is the pure question *"may this
+subject take this ticket in this role?"*. It requires, in order: the workspace
+and repo are inside the rule's `scope`; the ticket's difficulty (`nil` is D2) is
+within the profile's `max_difficulty` (a reviewer needs `max_review_difficulty`
+at that difficulty); every **required** action permission projects under the
+profile (a binding, the tier at or above `min_tier`, the kind listed — reviewers
+get no action permissions); and every data class (`phi_data`) is satisfied for
+**every role**: the tier may see it *and* the account holds the operator's data
+agreement. An *optional* permission (`network?:host`) that is withheld does not
+make the subject ineligible: it is returned as `permission_fallback`.
+
+**Data agreements** are operator-declared installation config, not earned:
+
+```elixir
+config :arbiter, :guardrail_data_agreements, %{"phi_data" => ["claude:default"]}
+```
+
+The values are `"provider:slug"` account labels. Empty by default, so a guarded
+install with `phi_data` tickets and no declared agreement routes those tickets
+nowhere (fail closed).
+
+| Path | How eligibility is applied |
+|---|---|
+| `ProviderRouting` (`most_quota`/`scored`) | `check_guardrails` is the **first** check: an ineligible candidate is dropped `guardrail_ineligible` (with a detail naming the tier and the rule) however much headroom it has, so every other drop reason is, by construction, an *eligible* subject. `check_guardrail_floor` then asks the adapter whether the tier's floor (`:strict`, egress) can hold here, dropping `write_confinement_none` / `egress_unenforceable` — never a weaker spawn |
+| `ReviewerRouting` | the same check with `role: :reviewer`; `guardrail_ineligible` and `egress_unenforceable` are **same-family fallback triggers**. The implementer's profile `review` knobs apply: `cross_family: required` routes the pass cross-family even where `review_agent.cross_family` is off (`ReviewerRouting.applies?/2`), `same_family_fallback: hold` turns the fallback into a hold, `min_reviewer_tier` raises the reviewer's tier |
+| Dispatch (any provider, any path) | `Dispatch.ensure_guardrails/2` is the **final gate** on the provider the dispatch will run on: routing's own pick, its `no_candidate` fall-through, an unrouted workspace's `agent.type` pool (which is pre-filtered to an eligible provider), a resume, or a caller's explicit provider (refused, never swapped) |
+| Fix pass, conflict resolver, ReviewGate implementer rounds, ReviewGate reviewer | `Arbiter.Guardrails.Gate.check_and_notify/5` at each spawn site |
+
+**Never a fallback to an ineligible subject.** When the dispatch's provider is
+ineligible, `Arbiter.Guardrails.Alternatives` decides what waiting can do:
+
+  * an eligible subject exists but is unavailable for a reason that clears (quota,
+    capacity, auth, a pause): the dispatch is **held** in the `DispatchQueue` with a
+    `gate: :guardrail` reason naming both sides (*"eligible: claude:default (quota
+    held: …); ineligible: antigravity:default (guardrail ineligible: …)"*), drained
+    on the eligible provider. `force`/`force_quota` does not lift it;
+  * no subject is eligible at all: not a quota problem, so it is **refused**
+    (`{:error, {:guardrail_ineligible, provider, phrase}}`) and the coordinator is
+    told with a `:no_eligible_model` escalation (attention cause of the same name,
+    one open item per ticket);
+  * the board shows the same thing before dispatch: a `{:guardrail, reason}` card
+    hold (`held — guardrail (…)`, its own block, it does not hold the queue), either
+    *no eligible model* or *awaiting operator grant: prod_ssh* for a permission
+    still pending a grant.
+
+A ReviewGate reviewer pass with no eligible reviewer (or a same-family review the
+implementer's profile holds) is **not started**: the round is refused with the
+reason and parked, rather than falling through to the ordinary reviewer
+resolution, which knows nothing of tiers.
+
+**`guardrail_decision` on runs.** Each run records, beside `routing_decision`, the
+subject, tier, a digest of the effective profile, the in-force permissions and
+what they projected or had withheld, and any `permission_fallback`
+(`worker_runs.guardrail_decision`; shown on the task page). `nil` on an unguarded
+install.
+
+**Honest limits.**
+
+  * The subject for the `gemini` adapter is `antigravity` when agy is the CLI
+    installed here (`Guardrails.subject/2`), so a rule written for `antigravity`
+    matches an adapter-typed dispatch.
+  * A model that cannot be worked out is `nil`, which a rule keyed on `model`
+    does not match (only the provider-level rule does). The fix-pass, conflict
+    and ReviewGate gates predict the model from the routing choice; a pinned
+    model that differs at spawn time is not re-checked.
+  * Waiting for a permission grant (§5.6 mid-run requests, `ticket_permission_grant`)
+    is G15; this ticket reads the grant state (`Permissions.in_force/1`/`pending/1`).
 
 ## Operator proof for token minting (bd-8381tk)
 

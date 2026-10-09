@@ -1528,7 +1528,13 @@ defmodule Arbiter.Worker do
   defp provider_fallback_from_meta(_), do: nil
 
   defp routing_from_meta(meta) when is_map(meta),
-    do: Map.take(meta, [:routing_decision, :provider_account_id, :model_family])
+    do:
+      Map.take(meta, [
+        :routing_decision,
+        :provider_account_id,
+        :model_family,
+        :guardrail_decision
+      ])
 
   defp routing_from_meta(_), do: %{}
 

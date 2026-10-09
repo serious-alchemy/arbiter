@@ -189,6 +189,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
                "localhost"
              ) == :error
 
+      Code.ensure_loaded!(ArbiterWeb.Api.QueueController)
       refute function_exported?(ArbiterWeb.Api.QueueController, :resume, 2)
 
       # The sibling queue routes are untouched.

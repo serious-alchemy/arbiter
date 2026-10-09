@@ -481,6 +481,25 @@ usable `review_backend`. The CI fix-pass and conflict-resolver dispatchers
 (`MergeQueue.FixPassDispatcher`, `.ConflictResolver`) resolve no workspace
 policy at all, so neither key reaches them.
 
+**A ReviewGate fix round follows `backend` (bd-49l0eo).** The revise pass is the
+writing pass with the most iterations, so it must not escape the operator's
+chosen boundary. On a `backend: podman` repo it keeps podman
+(`ReviewGate.session_security_policy/4`, `:implementer`) when the implementer's
+worktree is the private clone the main run wrote in (mounted read-write, not
+re-cloned) and its provider has a container wrap point (Claude, Codex). The
+commit-gate resume follows the same rule. It pushes with G16's scoped
+credential: when the repo has a `git_credentials` entry (deploy key, token or
+App), the spawn is planned as a pushing implementer and `ContainerSpawn` hands
+the credential in as a podman secret, so no ssh-agent, `gh` or host token
+reaches the container; the gate's own push gate stays as a no-op backstop. A repo
+with no scoped credential cannot push from the container, so that spawn plans as
+`host_pushes?` (as bd-7rxy1c), the prompts say so (`NO PUSH ACCESS`) and the push
+gate pushes the commit from the host before the next review round. Anything
+else keeps `review_backend`: a bwrap or default repo (unchanged), a worktree that is not a private clone, a provider without a wrap
+point. `review_backend` still governs the reviewer, except bd-7ays3v's. The
+merge queue's CI fix and conflict passes already follow the same rule
+(`ContainerSpawn.pass_policy/3`).
+
 **Push credentials: G16's scoped key versus agent forwarding.** Mounting the
 operator's ssh-agent socket gives every key and fails under SELinux for the
 same `connectto` reason as the bridges. G16 (a per-repo deploy key delivered

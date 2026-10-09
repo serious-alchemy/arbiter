@@ -641,6 +641,14 @@ defmodule Arbiter.MCP.Tools.Worker do
       "#{phrase} — the ticket never runs on an excluded provider; wait for an eligible " <>
         "account to free up, or change the ticket's constraint (`ticket_update`)"
 
+  # bd-atll60 (G13): the guardrails leave no eligible model for this ticket. The
+  # phrase already reads `held — guardrail (<detail>)`.
+  defp dispatch_error_message({:guardrail_ineligible, _provider, phrase}),
+    do:
+      "#{phrase} — dispatch refused; the ticket never runs on a model its guardrails rule out. " <>
+        "Lower its difficulty or declared permissions, attach an eligible account, or ask the " <>
+        "operator to change the subject's tier"
+
   # bd-57uzkl: the provider this dispatch would run on lacks a capability the
   # role or the repo requires. The phrase already reads `held — capability
   # missing (<detail>)`.

@@ -225,6 +225,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
@@ -247,6 +248,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
@@ -254,6 +256,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.Withholding
@@ -366,7 +369,7 @@ defmodule Arbiter.Worker.ReviewGate do
   NOTE: the server restarted while an earlier attempt at this round was running.
   That attempt was cut off, and this worktree may hold its uncommitted work. Run
   `git status` and `git diff` first, keep what is right, finish the rest, then
-  commit and push as usual.
+  commit and push as usual, unless the instructions below say you cannot push.
 
   """
 
@@ -1192,6 +1195,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # whenever cross-family review is off, which leaves every path below
       # exactly as it was.
       reviewer_selection: nil,
+      # bd-atll60 (G13): set (a reason) when `ReviewerRouting` found no reviewer
+      # the guardrails allow for this pass, or the implementer's profile holds a
+      # same-family review. The pass is then not started: `gated_adapter/4` refuses
+      # it with the reason, which parks the round, instead of falling through to
+      # the ordinary resolution (which knows nothing of tiers).
+      reviewer_hold: nil,
       # bd-a22hib: the CURRENT review round's own detached checkout,
       # `%{path:, head_sha:}` — provisioned by `provision_review_checkout/1`
       # at the pushed head right before the round's first reviewer pass, shared
@@ -2353,9 +2362,17 @@ defmodule Arbiter.Worker.ReviewGate do
   Both roles spawn under `sandbox.review_backend`, not `sandbox.backend`
   (`SecurityPolicy.for_review_spawn/1`, bd-4rvf98): a podman repo still gets a
   jailed, un-parked review, and a `review_backend` that cannot run is refused.
-  The one exception (bd-7ays3v) is a Claude `:reviewer` whose `provider` is
-  given and whose checkout is a private clone: on a `sandbox.backend: podman`
-  repo it keeps podman and runs in the container.
+  There are two exceptions, each keeping a `sandbox.backend: podman` repo's
+  podman:
+
+    * (bd-7ays3v) a Claude `:reviewer` whose `provider` is given and whose
+      checkout is a private clone runs in the container;
+    * (bd-49l0eo) the `:implementer` — a fix round, its commit-gate resume —
+      runs in the container when its `provider` is given and has a container
+      wrap point (`Sandbox.module/2`) and its worktree is a private clone. It
+      writes in the very tree the main run wrote in, under the backend the
+      operator chose for it, not the weaker host-level one the review backend
+      is. Any other fix round still takes the review backend.
   """
   @spec session_security_policy(
           Workspace.t() | map() | nil,
@@ -2384,11 +2401,56 @@ defmodule Arbiter.Worker.ReviewGate do
         )
 
       # The revise pass writes in the implementer's tree, so it keeps the plain
-      # posture, but not the implement backend: `sandbox.backend: podman` wraps
-      # the task worker only, so a gate pass under it was refused (bd-4rvf98).
+      # posture. Its backend is the implement backend when it can run in the
+      # implementer's private clone (bd-49l0eo); otherwise the review backend,
+      # as `sandbox.backend: podman` wraps a private clone only and a gate pass
+      # under it elsewhere was refused (bd-4rvf98).
       :implementer ->
-        SecurityPolicy.for_review_spawn(policy)
+        if fix_round_container?(policy, state, provider),
+          do: policy,
+          else: SecurityPolicy.for_review_spawn(policy)
     end
+  end
+
+  # bd-49l0eo: whether a fix round keeps the workspace's podman backend: `policy`
+  # is podman, the implementer's worktree is the private clone a container is
+  # handed (`ContainerSpawn.prepare/1` refuses anything else), and the provider
+  # has a container wrap point.
+  defp fix_round_container?(policy, state, provider) do
+    ContainerSpawn.podman?(policy) and not is_nil(provider) and
+      PrivateClone.clone?(Map.get(state, :worktree_path)) and
+      match?({:ok, _}, Sandbox.module(policy, provider))
+  end
+
+  # bd-49l0eo: whether the host pushes a fix round's branch. A container fix round
+  # whose repo has a scoped G16 credential (deploy key / token / App) pushes
+  # itself — `ContainerSpawn` hands that credential in as a podman secret, so
+  # neither the host's ssh-agent nor its gh token is involved. Without one the
+  # container holds no forge credential (and planning it as a pusher would only
+  # be refused), so the host `push_gate/1` pushes for it. Not podman: unchanged.
+  defp fix_round_host_pushes?(ws, repo, policy, role) do
+    ContainerSpawn.podman?(policy) and not (role == :implementer and scoped_credential?(ws, repo))
+  end
+
+  defp scoped_credential?(ws, repo) do
+    match?({:ok, %GitCredential{mode: :scoped}}, GitCredential.plan(ws, repo, role: :implementer))
+  end
+
+  # The same question for the prompts, which are built before a provider is
+  # resolved: does this round's implementer run in a container? An unsupported
+  # provider on a podman repo is held before it ever spawns, so the answer
+  # does not depend on it.
+  defp container_fix_round?(state) do
+    ws = load_workspace(Map.get(state, :workspace_id))
+    policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
+
+    ContainerSpawn.podman?(policy) and PrivateClone.clone?(Map.get(state, :worktree_path))
+  end
+
+  # A containerised fix round the host pushes for: no scoped credential to push with.
+  defp host_pushed_fix_round?(state) do
+    container_fix_round?(state) and
+      not scoped_credential?(load_workspace(Map.get(state, :workspace_id)), Map.get(state, :repo))
   end
 
   # The head an APPROVE stamps and records coverage for. With a round checkout
@@ -3867,14 +3929,28 @@ defmodule Arbiter.Worker.ReviewGate do
       1. `git status` to see what is uncommitted.
       2. `git add -A`
       3. `git commit -m "<a short message describing the work>"`
-      4. `git push -u origin #{state.branch}` — the re-review and the merge
-         request both read the PUSHED head (bd-2jkrqu). If the push fails
-         because this sandbox has no forge credential, do NOT retry: Arbiter
-         pushes the committed branch itself, so the commit is all you owe.
+      4. #{nudge_push_step(state)}
 
     Do not redo the work — just commit what is already on disk. If a hunk looks
     half-finished or wrong, finish it first, then commit it.
     """
+  end
+
+  # bd-49l0eo: a containerised implementer with no scoped credential cannot push;
+  # the push gate runs on the host before the re-review. With a G16 credential it
+  # pushes like any other implementer.
+  defp nudge_push_step(state) do
+    if host_pushed_fix_round?(state) do
+      "Do NOT push. " <> String.replace(PromptBuilder.no_push_access(), "\n", "\n         ")
+    else
+      """
+      `git push -u origin #{state.branch}` — the re-review and the merge
+               request both read the PUSHED head (bd-2jkrqu). If the push fails
+               because this sandbox has no forge credential, do NOT retry: Arbiter
+               pushes the committed branch itself, so the commit is all you owe.
+      """
+      |> String.trim_trailing()
+    end
   end
 
   # bd-2eyf9y: all three escalations report the same shape as
@@ -4190,8 +4266,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # nil, which is today's resolution exactly.
   defp route_reviewer_pass(%{reviewer_provider: nil} = state, :reviewer, nil) do
     case select_reviewer(state, []) do
-      {:ok, selection} -> %{state | reviewer_selection: selection}
-      _ -> %{state | reviewer_selection: nil}
+      {:ok, selection} ->
+        %{state | reviewer_selection: selection, reviewer_hold: nil}
+
+      {:none, %{"guardrail_hold" => reason}} ->
+        %{state | reviewer_selection: nil, reviewer_hold: reason}
+
+      _ ->
+        %{state | reviewer_selection: nil, reviewer_hold: nil}
     end
   end
 
@@ -4199,7 +4281,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp select_reviewer(state, exclude) do
     with %Workspace{} = ws <- load_workspace(state.workspace_id),
-         true <- ReviewerRouting.enabled?(ws) do
+         true <- ReviewerRouting.applies?(ws, state.task_id) do
       ReviewerRouting.select(ws, state.task_id,
         tier: round_reviewer_tier(state, ws.config),
         exclude: exclude,
@@ -5968,7 +6050,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # constrained.
   defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
     with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id),
-         :ok <- ProviderConstraint.check(state.task_id, provider) do
+         :ok <- ProviderConstraint.check(state.task_id, provider),
+         :ok <- implementer_guardrails(state, provider) do
       ProviderRouting.ensure_sandbox_backend(
         provider,
         state.task_id,
@@ -5978,6 +6061,16 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp ensure_revision_unpaused(_state, _), do: :ok
+
+  # bd-atll60 (G13): the guardrail hard gate on the implementer round's provider
+  # (the pin, or the legacy resolution): it never asked `ProviderRouting`'s
+  # candidates for this exact spawn, so a tier cannot be walked around by a
+  # revise round. Reviewers are gated in `gated_adapter/4`.
+  defp implementer_guardrails(state, provider) do
+    Gate.check_and_notify(state.task_id, load_workspace(state.workspace_id), provider, :predicted,
+      repo: state.repo
+    )
+  end
 
   defp start_worker_process(state, id, role, revision) do
     case Worker.start(
@@ -6001,7 +6094,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # meta names the workspace's intended reviewer type rather than an
     # adapter that will actually be refused a moment later.
     provider =
-      case adapter_for(state, ws, :reviewer, revision) do
+      case gated_adapter(state, ws, :reviewer, revision) do
         {:ok, {rev_adapter, _}} -> rev_adapter.provider()
         {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
       end
@@ -6012,6 +6105,7 @@ defmodule Arbiter.Worker.ReviewGate do
       difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
       provider: provider
     }
+    |> put_guardrail_decision(state, ws, provider, :reviewer)
   end
 
   defp worker_meta(state, :implementer, {provider, fallback_reason, decision}) do
@@ -6023,6 +6117,21 @@ defmodule Arbiter.Worker.ReviewGate do
       provider_fallback: fallback_reason
     }
     |> Map.merge(ProviderRouting.run_meta(decision))
+    |> put_guardrail_decision(state, load_workspace(state.workspace_id), provider, :implementer)
+  end
+
+  # bd-atll60 (G13): the guardrail decision the round's run records, as the
+  # dispatcher's does. Best-effort: the gate refused what it must; this records.
+  defp put_guardrail_decision(meta, state, ws, provider, role) do
+    model =
+      if role == :reviewer, do: reviewer_model(state, ws, to_string(provider)), else: :predicted
+
+    case Gate.decision(state.task_id, ws, provider, model, role: role, repo: state.repo) do
+      %{} = decision -> Map.put(meta, :guardrail_decision, decision)
+      _ -> meta
+    end
+  rescue
+    _ -> meta
   end
 
   # bd-3xultf: `state.task_id` is the BASE task id (not a synthetic ReviewGate
@@ -6129,7 +6238,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def implementer_mcp_opts(state, role, _adapter, _claims), do: arb_token_opts(state, role)
 
-  defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
+  @doc false
+  def build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
     # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
@@ -6151,7 +6261,7 @@ defmodule Arbiter.Worker.ReviewGate do
             :reviewer ->
               ws = load_workspace(state.workspace_id)
 
-              case adapter_for(state, ws, :reviewer, revision) do
+              case gated_adapter(state, ws, :reviewer, revision) do
                 {:ok, {adapter, _}} -> adapter.provider()
                 {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
               end
@@ -6161,7 +6271,7 @@ defmodule Arbiter.Worker.ReviewGate do
     {:ok, base ++ [provider: prov_str]}
   end
 
-  defp build_session_opts(state, pid, role, prompt, nil, revision) do
+  def build_session_opts(state, pid, role, prompt, nil, revision) do
     base = [owner: pid, worktree_path: session_cwd(state, role)]
 
     case load_workspace(state.workspace_id) do
@@ -6186,7 +6296,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # `:strict` scope no configured provider for this role can keep must
         # refuse HERE, before argv is ever built, same as
         # `Dispatch.build_agent_session_opts/4`'s gate.
-        case adapter_for(state, ws, role, revision) do
+        case gated_adapter(state, ws, role, revision) do
           {:error, reason} ->
             {:error, reason}
 
@@ -6255,7 +6365,8 @@ defmodule Arbiter.Worker.ReviewGate do
     git_plan =
       GitCredential.plan(ws, Map.get(state, :repo),
         role: role,
-        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+        host_pushes?: fix_round_host_pushes?(ws, Map.get(state, :repo), policy, role)
       )
 
     git_credential =
@@ -6320,7 +6431,7 @@ defmodule Arbiter.Worker.ReviewGate do
            model: session_model,
            projection: projection,
            git_credential: git_credential
-         ] ++ sandbox_session_opts(policy, ws, role, state)}
+         ] ++ sandbox_session_opts(policy, ws, role, state, agent_opts)}
     else
       {:error, reason} -> {:error, reason}
     end
@@ -6328,17 +6439,55 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # bd-7ays3v: a reviewer that runs in the container hands its argv to
   # `ClaudeSession` as a wrapped spawn (`sandbox_wrap: true`), and carries the
-  # policy there so it is wrapped. Only the reviewer: a fix round's implementer
-  # stays on `sandbox.review_backend`, and no other policy changes at all.
-  defp sandbox_wrap_opts(policy, :reviewer),
+  # policy there so it is wrapped. bd-49l0eo: so does a fix round's implementer
+  # that kept podman (`session_security_policy/4`). For a policy that is not
+  # podman, which is every other spawn, nothing changes at all.
+  defp sandbox_wrap_opts(policy, _role),
     do: if(ContainerSpawn.podman?(policy), do: [sandbox_wrap: true], else: [])
 
-  defp sandbox_wrap_opts(_policy, _role), do: []
+  # The container's `arb` needs the implementer's worker token as ARB_TOKEN
+  # (`ContainerSpawn.prepare/1`); a reviewer has none.
+  defp sandbox_session_opts(policy, ws, role, state, agent_opts) do
+    ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo)) ++
+      if(ContainerSpawn.podman?(policy) and role == :implementer,
+        do: Keyword.take(agent_opts, [:arb_token]),
+        else: []
+      )
+  end
 
-  defp sandbox_session_opts(policy, ws, :reviewer, state),
-    do: ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo))
+  defp gated_adapter(state, ws, role, revision) do
+    with {:ok, {adapter, _role_atom}} = resolved <- adapter_for(state, ws, role, revision),
+         :ok <- reviewer_guardrails(state, ws, role, adapter) do
+      resolved
+    end
+  end
 
-  defp sandbox_session_opts(_policy, _ws, _role, _state), do: []
+  # bd-atll60 (G13): a guardrail hold refuses the pass; otherwise the adapter the
+  # (unchanged) resolution below picked is gated as a reviewer subject. Routing
+  # filters its own candidates, but the print-timeout pin, the pre-routing
+  # reviewer and a workspace with cross-family review off name a provider without
+  # having asked it.
+  defp reviewer_guardrails(%{reviewer_hold: reason}, _ws, :reviewer, _adapter)
+       when is_binary(reason),
+       do: {:error, {:guardrail_ineligible, nil, Gate.phrase(reason)}}
+
+  defp reviewer_guardrails(state, %Workspace{} = ws, :reviewer, adapter) do
+    provider = adapter.provider()
+
+    Gate.check_and_notify(state.task_id, ws, provider, reviewer_model(state, ws, provider),
+      role: :reviewer,
+      repo: state.repo
+    )
+  end
+
+  defp reviewer_guardrails(_state, _ws, _role, _adapter), do: :ok
+
+  defp reviewer_model(%{reviewer_selection: %{model: model}}, _ws, _provider)
+       when is_binary(model),
+       do: model
+
+  defp reviewer_model(state, ws, provider),
+    do: ReviewerRouting.predicted_model(ws, provider, tier: round_reviewer_tier(state, ws.config))
 
   # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
   # rotation has pinned to a specific provider uses THAT adapter, bypassing
@@ -6417,7 +6566,7 @@ defmodule Arbiter.Worker.ReviewGate do
          :implementer,
          {provider, _fallback_reason, _decision}
        ) do
-    policy = session_security_policy(ws, state, :implementer)
+    policy = session_security_policy(ws, state, :implementer, provider)
 
     case Agents.strict_eligible_provider(provider, policy, [], explicit: true) do
       {:ok, _eligible} ->
@@ -7071,7 +7220,7 @@ defmodule Arbiter.Worker.ReviewGate do
     without a file change, and why — your reply here is forwarded back to the
     reviewer as your side of the record.
 
-    #{EvidenceIntegrity.worker_block()}
+    #{EvidenceIntegrity.worker_block()}#{revise_container_note(state)}
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
 
         git diff #{state.target_branch}...HEAD
@@ -7087,6 +7236,12 @@ defmodule Arbiter.Worker.ReviewGate do
 
         arb done
     """
+  end
+
+  # bd-49l0eo: a fix round in a container with no scoped credential commits; the
+  # push gate pushes for it.
+  defp revise_container_note(state) do
+    if host_pushed_fix_round?(state), do: "\n" <> PromptBuilder.no_push_access(), else: ""
   end
 
   defp ci_flake_guidance(%{ci_fix_pending: %{}}) do

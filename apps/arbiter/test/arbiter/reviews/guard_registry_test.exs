@@ -69,6 +69,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-57uzkl: the capability hard gate refuses a reviewer provider that lacks a " <>
        "capability the repo requires — a provider-selection refusal held like " <>
        "{:provider_paused, …}, not a review/merge guard; nothing is escalated or counted"},
+    {Arbiter.Worker.ReviewGate, :reviewer_guardrails, 4,
+     "bd-atll60 (G13): the guardrail eligibility gate refuses a reviewer provider its tier " <>
+       "may not review with (or a held same-family review) — a provider-selection refusal " <>
+       "held like {:provider_paused, …}, with a :no_eligible_model escalation per ticket " <>
+       "from Guardrails.Gate; not a review/merge guard, nothing is counted"},
     {Arbiter.Worker.ReviewGate, :guarded_spawn_worker, 5,
      "bd-7xtz6w: turns a spawn that raised into the same {:error, _} as " <>
        "start_worker_process/4 — infrastructure, surfaced through the spawn-failure " <>

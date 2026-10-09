@@ -79,6 +79,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.QueueOrder
   alias Arbiter.Board.ReadySince
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Guardrails.Alternatives
   alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
@@ -272,6 +273,7 @@ defmodule Arbiter.Board.Snapshot do
         card_quota: Map.get(input, :card_quota, %{}),
         card_constraint:
           Map.merge(Map.get(input, :card_constraint, %{}), Map.get(input, :dispatch_holds, %{})),
+        card_guardrail: Map.get(input, :card_guardrail, %{}),
         paused: paused?
       })
 
@@ -441,6 +443,10 @@ defmodule Arbiter.Board.Snapshot do
       card_constraint:
         Keyword.get_lazy(opts, :card_constraint, fn ->
           ticket_constraint_holds(workspace, issues, opts)
+        end),
+      card_guardrail:
+        Keyword.get_lazy(opts, :card_guardrail, fn ->
+          ticket_guardrail_holds(workspace, issues, opts)
         end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
@@ -1116,6 +1122,72 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp ticket_constraint_holds(_, _, _), do: %{}
+
+  # bd-atll60 (G13, design §5.7): a Ready ticket that no model its guardrails
+  # allow can take is held on the board by its own `{:guardrail, reason}` block,
+  # as is one with a declared permission still awaiting a grant. Waiting cannot
+  # fix either (an eligible subject that is merely busy is the quota hold's job
+  # and yields no entry here), so Autopilot plans past the card and the board
+  # says why. Only a guarded install evaluates anything.
+  defp ticket_guardrail_holds(%Arbiter.Tasks.Workspace{} = default, issues, opts) do
+    if Arbiter.Guardrails.guarded?() do
+      issues
+      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+      |> Enum.flat_map(&guardrail_hold(default, &1, opts))
+      |> Map.new()
+    else
+      %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp ticket_guardrail_holds(_, _, _), do: %{}
+
+  defp guardrail_hold(default, issue, opts) do
+    ws_id = Map.get(issue, :workspace_id)
+    workspace = if ws_id in [nil, default.id], do: default, else: safe_workspace(ws_id)
+
+    case {pending_grants(issue, workspace), workspace} do
+      {[_ | _] = pending, _} ->
+        [{issue.id, {:hold, pending_phrase(pending)}}]
+
+      {[], nil} ->
+        []
+
+      {[], workspace} ->
+        analysis =
+          Alternatives.analyse(issue, workspace,
+            routing_opts: Keyword.get(opts, :routing_opts, []),
+            repo: Map.get(issue, :repo)
+          )
+
+        case analysis do
+          {:none, nil} -> [{issue.id, {:hold, "no eligible model"}}]
+          {:none, detail} -> [{issue.id, {:hold, "no eligible model: " <> detail}}]
+          _ -> []
+        end
+    end
+  end
+
+  defp pending_grants(issue, workspace) do
+    block = Arbiter.Guardrails.Config.block(workspace)
+
+    issue
+    |> Arbiter.Tasks.Permissions.pending()
+    |> Enum.map(&{&1, Arbiter.Guardrails.Permissions.grant_by(&1, block)})
+  end
+
+  defp pending_phrase(pending) do
+    {operator, coordinator} = Enum.split_with(pending, &(elem(&1, 1) == :operator))
+
+    [
+      operator != [] && "awaiting operator grant: " <> Enum.map_join(operator, ", ", &elem(&1, 0)),
+      coordinator != [] && "awaiting grant: " <> Enum.map_join(coordinator, ", ", &elem(&1, 0))
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join("; ")
+  end
 
   defp pool_holds(default, ws_id, [sample | _] = tickets, opts) do
     workspace = if ws_id in [nil, default.id], do: default, else: safe_workspace(ws_id)

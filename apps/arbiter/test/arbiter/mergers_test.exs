@@ -200,6 +200,8 @@ defmodule Arbiter.MergersTest do
 
     test "all in-tree merger adapters implement prepare/2" do
       for {_type, adapter} <- Mergers.adapters() do
+        Code.ensure_loaded!(adapter)
+
         assert function_exported?(adapter, :prepare, 2),
                "Expected #{inspect(adapter)} to export prepare/2"
       end

@@ -328,6 +328,12 @@ defmodule ArbiterWeb.Api.WorkerController do
       {"#{phrase} — #{noun(verb)} refused; it never runs on an excluded provider",
        %{task_id: task_id, provider: provider && to_string(provider)}}
 
+  # bd-atll60 (G13): no model is eligible for the ticket under its guardrails.
+  defp refusal_text({:guardrail_ineligible, provider, phrase}, task_id, verb),
+    do:
+      {"#{phrase} — #{noun(verb)} refused; it never runs on a model its guardrails rule out",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
   # bd-57uzkl: the provider lacks a capability the role or repo requires.
   defp refusal_text({:capability_missing, provider, phrase}, task_id, verb),
     do:

@@ -162,6 +162,8 @@ defmodule Arbiter.TrackersTest do
 
     test "all in-tree tracker adapters implement prepare/2" do
       for {_type, adapter} <- Trackers.adapters() do
+        Code.ensure_loaded!(adapter)
+
         assert function_exported?(adapter, :prepare, 2),
                "Expected #{inspect(adapter)} to export prepare/2"
       end

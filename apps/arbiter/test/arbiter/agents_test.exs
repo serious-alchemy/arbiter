@@ -232,6 +232,8 @@ defmodule Arbiter.AgentsTest do
 
     test "all in-tree agent adapters implement prepare/2" do
       for {_type, adapter} <- Agents.adapters() do
+        Code.ensure_loaded!(adapter)
+
         assert function_exported?(adapter, :prepare, 2),
                "Expected #{inspect(adapter)} to export prepare/2"
       end
