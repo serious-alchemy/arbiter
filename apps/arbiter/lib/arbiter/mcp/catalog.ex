@@ -158,7 +158,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset workspace_standing_order_add workspace_standing_order_remove external_review_list repo_show)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list worker_runs ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset workspace_standing_order_add workspace_standing_order_remove external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
@@ -1436,10 +1436,23 @@ defmodule Arbiter.MCP.Catalog do
           "subordinate row (role is not null) — the merge queue owns those passes. The " <>
           "response always includes `workspace_id`: the workspace this call actually scoped " <>
           "to (the `workspace` arg if given, else the caller's bound workspace, else null " <>
-          "= ALL workspaces). An empty `workers: []` means no live workers in THAT " <>
+          "= ALL workspaces), and `count`. Each row is the same shape as a `GET /api/workers` row. An empty `workers: []` means no live workers in THAT " <>
           "scope — check `workspace_id` before reading a zero count as \"everything " <>
           "died\".",
-      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "fields" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Optional slim view: return only these top-level keys of the full payload " <>
+                "(the same payload the REST route returns). An unknown name is " <>
+                "an error, not a silent omission."
+          }
+        },
+        "additionalProperties" => false
+      },
       handler: &Tools.worker_list/2
     },
     %{
@@ -1463,6 +1476,14 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "integer",
             "description" =>
               "Optional: return only the last N output lines instead of the full history."
+          },
+          "fields" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Optional slim view: return only these top-level keys of the full payload " <>
+                "(the same payload the REST route returns). An unknown name is " <>
+                "an error, not a silent omission."
           }
         },
         "required" => ["task_id"],
@@ -1474,16 +1495,20 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_runs",
       tiers: @coordinator,
       description:
-        "List every historical run recorded for a ticket, newest first (`arb worker runs " <>
-          "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
-          "the transcript): id, task_id, task_title, repo, workspace_id, kind, state, outcome, " <>
-          "model, started_at, completed_at, exit_code, failure_reason, failure_summary " <>
-          "(a bounded human-readable ReviewGate VERDICT + top finding, when the run failed " <>
-          "via a ReviewGate rejection; nil otherwise), provider, provider_fallback, and — " <>
-          "under `routing.provider_selection: most_quota` — provider_account_id, " <>
-          "model_family and routing_decision (the chosen account, per-candidate quota " <>
-          "headroom, dropped candidates with reasons, any fallback or override). Optional `limit` " <>
-          "(default 20, max 200). `task_id` may be a ReviewGate synthetic id " <>
+        "Run history, newest first (`arb worker runs`) — the same query as `GET " <>
+          "/api/workers/history`. With `task_id` it lists every run recorded for that ticket; " <>
+          "with none it is FLEET-WIDE (\"which runs failed in the last hour\": `outcome: " <>
+          "failed`, `before`/`kind`/`state`/`workspace` narrow it). With `run_id` it returns " <>
+          "that one run including its output tail (`GET /api/workers/history/:id`). Each list " <>
+          "entry is a run summary (no output lines — use `worker_log` for the transcript): id, " <>
+          "task_id, task_title, repo, workspace_id, kind, state, outcome, model, started_at, " <>
+          "completed_at, exit_code, failure_reason, failure_summary (a bounded human-readable " <>
+          "ReviewGate VERDICT + top finding, when the run failed via a ReviewGate rejection; " <>
+          "nil otherwise), provider, provider_fallback, and — under `routing.provider_selection: " <>
+          "most_quota` — provider_account_id, model_family and routing_decision (the chosen " <>
+          "account, per-candidate quota headroom, dropped candidates with reasons, any fallback " <>
+          "or override). Optional `limit` (default 20, max #{Arbiter.Workers.Runs.history_cap()}; " <>
+          "the same cap on every surface). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`) — those aren't `issues` " <>
           "rows, but the run lookup still resolves (authorization checks the base ticket).",
       input_schema: %{
@@ -1492,15 +1517,41 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Ticket whose run history to list (required). Accepts a plain ticket id or a " <>
-                "ReviewGate synthetic id such as `<base>#review`."
+              "Ticket whose run history to list (optional: omit for a fleet-wide query). " <>
+                "Accepts a plain ticket id or a ReviewGate synthetic id such as " <>
+                "`<base>#review`. With `run_id`, the run must belong to this task."
+          },
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Read this one run (summary + output tail) instead of a list."
+          },
+          "kind" => %{
+            "type" => "string",
+            "enum" => Enum.map(Arbiter.Workers.Run.kinds(), &Atom.to_string/1),
+            "description" => "Only runs of this kind."
+          },
+          "state" => %{
+            "type" => "string",
+            "enum" => Enum.map(Arbiter.Workers.RunState.states(), &Atom.to_string/1),
+            "description" => "Only runs in this state."
+          },
+          "outcome" => %{
+            "type" => "string",
+            "enum" => Enum.map(Arbiter.Workers.RunState.outcomes(), &Atom.to_string/1),
+            "description" => "Only finished runs with this outcome."
+          },
+          "before" => %{
+            "type" => "string",
+            "description" =>
+              "ISO 8601 cursor: only runs that started strictly before it (page older with " <>
+                "the oldest `started_at` of the previous page)."
           },
           "limit" => %{
             "type" => "integer",
-            "description" => "Max runs to return (default 20, max 200)."
+            "description" =>
+              "Max runs to return (default 20, max #{Arbiter.Workers.Runs.history_cap()})."
           }
         },
-        "required" => ["task_id"],
         "additionalProperties" => false
       },
       handler: &Tools.worker_runs/2
@@ -1524,13 +1575,19 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Ticket whose latest run's transcript to read. Accepts a plain ticket id or a " <>
-                "ReviewGate synthetic id such as `<base>#review`. Ignored when `run_id` is given."
+                "ReviewGate synthetic id such as `<base>#review`. With `run_id`, the run must belong to this task."
           },
           "run_id" => %{
             "type" => "string",
             "description" =>
               "Exact run id whose transcript to read, independent of which run is latest " <>
-                "for its ticket. Takes precedence over `task_id`."
+                "for its ticket. Selects the run; a `task_id` given beside it must own it."
+          },
+          "tail" => %{
+            "type" => "integer",
+            "description" =>
+              "Return only the last N lines (`line_count` stays the true total and " <>
+                "`truncated` says whether `lines` is shorter). Default: the whole transcript."
           }
         },
         "additionalProperties" => false
@@ -1563,7 +1620,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Exact run id whose prompt to read, independent of which run is latest for its " <>
-                "ticket. Takes precedence over `task_id`."
+                "ticket. Selects the run; a `task_id` given beside it must own it."
           }
         },
         "additionalProperties" => false
@@ -1580,7 +1637,7 @@ defmodule Arbiter.MCP.Catalog do
           "(exact `task_id` match only), this also matches anything prefixed `<task_id>#`, " <>
           "surfacing the reviewer/re-prompt corpus alongside the author's own runs. Each " <>
           "entry: run_id, task_id, kind, state, outcome, model, started_at, " <>
-          "transcript_exists, line_count. Optional `limit` (default 200, max 1000).",
+          "transcript_exists, line_count. Optional `limit` (default 200, max #{Arbiter.Workers.Runs.corpus_cap()}).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1592,7 +1649,8 @@ defmodule Arbiter.MCP.Catalog do
           },
           "limit" => %{
             "type" => "integer",
-            "description" => "Max runs to return (default 200, max 1000)."
+            "description" =>
+              "Max runs to return (default 200, max #{Arbiter.Workers.Runs.corpus_cap()})."
           }
         },
         "required" => ["task_id"],
