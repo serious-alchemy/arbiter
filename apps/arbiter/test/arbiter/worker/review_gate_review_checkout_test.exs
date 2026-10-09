@@ -996,4 +996,251 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       refute podman.(ReviewGate.session_security_policy(ws, bare, :reviewer, :claude))
     end
   end
+
+  # ---- bd-49l0eo: the fix round follows sandbox.backend, like the main run ----------
+
+  describe "a ReviewGate fix round under the container backend (bd-49l0eo)" do
+    defp container_ws(sandbox, extra_config \\ %{}) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-fix-#{System.unique_integer([:positive])}",
+          prefix: "rf",
+          config:
+            Map.merge(
+              %{
+                "review" => %{"required" => true},
+                "agent" => %{
+                  "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
+                }
+              },
+              extra_config
+            )
+        })
+
+      ws
+    end
+
+    # The production shape: on a podman repo the implementer's worktree is a
+    # private clone of the main repo.
+    defp implementer_clone(repo, branch) do
+      :ok = seed_feature_branch(repo, branch)
+      git!(["push", "-q", "-u", "origin", branch], repo)
+      git!(["fetch", "-q", "origin"], repo)
+      {:ok, impl} = Worker.PrivateClone.attach(repo, branch, "main", false)
+      impl
+    end
+
+    defp fix_state(ws, wt, branch, task_id \\ "rf-unit") do
+      %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: task_id,
+        workspace_id: ws.id,
+        repo: "trib/repo",
+        target_branch: "main",
+        review_checkout: nil,
+        timeout_ms: 60_000,
+        round: 1
+      }
+    end
+
+    defp podman?(policy), do: SecurityPolicy.sandbox_backend(policy) == :podman
+
+    # Stands in for the round's `Worker`: answers the `Worker.report/3` calls.
+    defp report_sink, do: spawn_link(&report_loop/0)
+
+    defp report_loop do
+      receive do
+        {:"$gen_call", from, _msg} ->
+          GenServer.reply(from, :ok)
+          report_loop()
+      end
+    end
+
+    test "the implementer keeps podman for Claude and Codex in its private clone", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-1")
+      ws = container_ws(%{"backend" => "podman"})
+      state = fix_state(ws, impl, "feature/fix-1")
+
+      for provider <- [:claude, "claude", :codex, "codex"] do
+        policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+        assert podman?(policy), "#{inspect(provider)} fix round left the container"
+      end
+    end
+
+    test "a provider with no container wrap point, or none named, falls back to the review backend",
+         %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-2")
+      ws = container_ws(%{"backend" => "podman"})
+      state = fix_state(ws, impl, "feature/fix-2")
+
+      for provider <- [nil, :gemini, :grok] do
+        policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+        refute podman?(policy), "#{inspect(provider)} fix round got the container"
+        assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+      end
+    end
+
+    test "an implementer tree that is not a private clone is never handed to a container",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/fix-3"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = container_ws(%{"backend" => "podman"})
+
+      policy =
+        ReviewGate.session_security_policy(ws, fix_state(ws, wt, branch), :implementer, :claude)
+
+      refute podman?(policy)
+    end
+
+    test "bwrap and default workspaces are unchanged", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-4")
+
+      for sandbox <- [%{"backend" => "bwrap"}, %{}] do
+        ws = container_ws(sandbox)
+        state = fix_state(ws, impl, "feature/fix-4")
+
+        for provider <- [nil, :claude, :codex] do
+          policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+          assert policy == ReviewGate.session_security_policy(ws, state, :implementer)
+          assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+        end
+      end
+    end
+
+    test "sandbox.review_backend still governs the reviewer, bd-7ays3v aside", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-5")
+      ws = container_ws(%{"backend" => "podman", "review_backend" => "bwrap"})
+      state = fix_state(ws, impl, "feature/fix-5")
+
+      # No round checkout, so no private clone for the reviewer: the review backend.
+      reviewer = ReviewGate.session_security_policy(ws, state, :reviewer, :claude)
+      assert SecurityPolicy.sandbox_backend(reviewer) == :bwrap
+      assert podman?(ReviewGate.session_security_policy(ws, state, :implementer, :claude))
+    end
+
+    test "the spawn options wrap the Claude fix round in the container with the clone",
+         %{repo: repo} do
+      branch = "feature/fix-6"
+      impl = implementer_clone(repo, branch)
+      ws = container_ws(%{"backend" => "podman"})
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      # ClaudeSession wraps a spawn that carries a podman policy.
+      assert %SecurityPolicy{} = security = opts[:security]
+      assert podman?(security)
+      assert opts[:workspace].id == ws.id
+      assert opts[:repo] == "trib/repo"
+      assert opts[:worktree_path] == impl
+      # The ARB_TOKEN rides in for the container's `arb`.
+      assert is_binary(opts[:arb_token])
+      # No scoped credential is configured, so the host pushes after the round:
+      # the container holds no credential.
+      assert %Worker.GitCredential{mode: :not_needed} = opts[:git_credential]
+      # The argv runs the container's claude, not the host's.
+      assert Worker.ContainerSpawn.claude_path() in opts[:command]
+    end
+
+    test "a podman fix round with a scoped credential pushes itself with it", %{repo: repo} do
+      branch = "feature/fix-9"
+      impl = implementer_clone(repo, branch)
+
+      ws =
+        container_ws(%{"backend" => "podman"}, %{
+          "git_credentials" => %{
+            "repos" => %{
+              "trib/repo" => %{"kind" => "deploy_key", "key_secret" => "TRIB_DEPLOY_KEY"}
+            }
+          }
+        })
+
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      assert podman?(opts[:security])
+      assert opts[:worktree_path] == impl
+
+      # The G16 deploy key travels into the container (ContainerSpawn's podman
+      # secret path); the worker pushes, so the prompts do not forbid it.
+      assert %Worker.GitCredential{mode: :scoped, entry: %{kind: :deploy_key}} =
+               opts[:git_credential]
+
+      revise = ReviewGate.revise_prompt(state, "1. fix the thing")
+      nudge = ReviewGate.commit_nudge_prompt(state)
+      refute revise =~ "NO PUSH ACCESS"
+      refute nudge =~ "NO PUSH ACCESS"
+      assert nudge =~ "git push -u origin"
+    end
+
+    test "the spawn options of a bwrap fix round carry no container inputs",
+         %{repo: repo, tmp: tmp} do
+      # A bwrap round resolves the HOST's `claude`; CI has none installed, so
+      # shim one on PATH (the module is async: false, so PATH is ours).
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+      File.write!(stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      branch = "feature/fix-7"
+      impl = implementer_clone(repo, branch)
+      ws = container_ws(%{"backend" => "bwrap"})
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      refute Keyword.has_key?(opts, :security)
+      refute Keyword.has_key?(opts, :repo)
+      refute Keyword.has_key?(opts, :arb_token)
+    end
+
+    test "the fix-round prompts tell a containerised implementer with no credential not to push",
+         %{repo: repo} do
+      branch = "feature/fix-8"
+      impl = implementer_clone(repo, branch)
+
+      for {sandbox, container?} <- [{%{"backend" => "podman"}, true}, {%{}, false}] do
+        state = fix_state(container_ws(sandbox), impl, branch)
+        revise = ReviewGate.revise_prompt(state, "1. fix the thing")
+        nudge = ReviewGate.commit_nudge_prompt(state)
+
+        assert revise =~ "NO PUSH ACCESS" == container?
+        assert nudge =~ "git push -u origin" != container?
+        assert nudge =~ "NO PUSH ACCESS" == container?
+      end
+    end
+  end
 end
