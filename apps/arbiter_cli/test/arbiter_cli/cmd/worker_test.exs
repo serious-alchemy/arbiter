@@ -294,9 +294,12 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert {:ok, %{"data" => [%{"id" => "run-9"}]}} = Jason.decode(String.trim(out))
     end
 
-    test "missing task_id returns a friendly error" do
-      {_out, _err, exit_code} = capture(fn -> Worker.run(["runs"]) end)
-      assert exit_code != 0
+    test "no task id lists the fleet's runs (no task_id filter sent)" do
+      stub_get("/api/workers/history", %{"data" => []})
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs"]) end)
+      assert exit_code == 0
+      assert out =~ "no historical runs"
     end
   end
 
@@ -651,6 +654,177 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "no subcommand at all halts" do
       {_out, _err, exit_code} = capture(fn -> Worker.run([]) end)
       assert exit_code != 0
+    end
+  end
+end
+
+defmodule ArbiterCli.Cmd.WorkerReadSideTest do
+  @moduledoc """
+  The worker read verbs (parity audit P-11): synthetic `<task>#review` ids are
+  URL-encoded into the path, and `prompt` / `runs --run|--corpus` / `log
+  --run|--tail` reach their routes.
+  """
+  use ArbiterCli.CliCase, async: true
+
+  alias ArbiterCli.Cmd.Worker
+
+  # Answer the one request the verb makes with `body`, and tell the test what
+  # it was (`conn.request_path` is the raw, still-encoded path).
+  defp stub_capturing(body) do
+    parent = self()
+
+    Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+      send(parent, {:request, conn.method, conn.request_path, conn.query_string})
+      Req.Test.json(conn, body)
+    end)
+  end
+
+  @log %{
+    "data" => %{
+      "task_id" => "bd-x#review",
+      "run_id" => "run-1",
+      "path" => "/logs/run-1.log",
+      "exists" => true,
+      "line_count" => 2,
+      "lines" => ["a", "b"]
+    }
+  }
+
+  describe "synthetic ids" do
+    test "log encodes the # of <task>#review so the request reaches the log route" do
+      stub_capturing(@log)
+      {_out, _err, 0} = capture(fn -> Worker.run(["log", "bd-x#review"]) end)
+      assert_received {:request, "GET", "/api/workers/bd-x%23review/log", ""}
+    end
+
+    test "show and stop encode the id too" do
+      stub_capturing(%{"task_id" => "bd-x", "output_lines" => [], "stopped" => true})
+      capture(fn -> Worker.run(["show", "bd-x#r2"]) end)
+      assert_received {:request, "GET", "/api/workers/bd-x%23r2", ""}
+      capture(fn -> Worker.run(["stop", "bd-x#r2"]) end)
+      assert_received {:request, "POST", "/api/workers/bd-x%23r2/stop", _}
+    end
+  end
+
+  describe "worker log --run / --tail" do
+    test "--run and --tail ride the query string" do
+      stub_capturing(@log)
+
+      {_out, _err, 0} =
+        capture(fn -> Worker.run(["log", "bd-x", "--run", "run-1", "--tail", "5"]) end)
+
+      assert_received {:request, "GET", "/api/workers/bd-x/log", query}
+      assert URI.decode_query(query) == %{"run_id" => "run-1", "tail" => "5"}
+    end
+
+    test "a truncated tail says so" do
+      stub_capturing(put_in(@log, ["data", "truncated"], true))
+      {out, _err, 0} = capture(fn -> Worker.run(["log", "bd-x", "--tail", "2"]) end)
+      assert out =~ "last 2 of 2 lines" or out =~ "truncated"
+    end
+  end
+
+  describe "worker prompt" do
+    test "prints the composed prompt for the task's latest run" do
+      stub_capturing(%{
+        "data" => %{
+          "task_id" => "bd-x#review",
+          "run_id" => "run-9",
+          "path" => "/p/run-9.prompt",
+          "exists" => true,
+          "prompt" => "You are a reviewer.\nBe kind.",
+          "prompt_sha256" => "abc"
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["prompt", "bd-x#review"]) end)
+      assert_received {:request, "GET", "/api/workers/bd-x%23review/prompt", ""}
+      assert out =~ "run-9"
+      assert out =~ "You are a reviewer."
+    end
+
+    test "--run selects the exact run; a missing prompt is reported" do
+      stub_capturing(%{
+        "data" => %{"task_id" => "bd-x", "run_id" => "run-2", "exists" => false, "prompt" => nil}
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["prompt", "bd-x", "--run", "run-2"]) end)
+      assert_received {:request, "GET", "/api/workers/bd-x/prompt", "run_id=run-2"}
+      assert out =~ "no prompt"
+    end
+
+    test "requires a task id" do
+      {_out, _err, code} = capture(fn -> Worker.run(["prompt"]) end)
+      assert code != 0
+    end
+  end
+
+  describe "worker runs" do
+    test "--run reads one run by id from the history route" do
+      stub_capturing(%{
+        "data" => %{
+          "id" => "run-7",
+          "task_id" => "bd-x",
+          "kind" => "implement",
+          "state" => "finished",
+          "outcome" => "failed",
+          "started_at" => "2026-05-20T19:00:00Z",
+          "output_lines" => ["l1", "l2"]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["runs", "--run", "run-7"]) end)
+      assert_received {:request, "GET", "/api/workers/history/run-7", ""}
+      assert out =~ "run-7"
+      assert out =~ "l2"
+    end
+
+    test "fleet-wide: filters go on the query and no task id is needed" do
+      stub_capturing(%{"data" => []})
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Worker.run(
+            ~w(runs --kind review --state finished --outcome failed --before 2026-05-27T20:00:00Z --limit 5)
+          )
+        end)
+
+      assert_received {:request, "GET", "/api/workers/history", query}
+
+      assert URI.decode_query(query) == %{
+               "kind" => "review",
+               "state" => "finished",
+               "outcome" => "failed",
+               "before" => "2026-05-27T20:00:00Z",
+               "limit" => "5"
+             }
+    end
+
+    test "--corpus hits run_log_list for the task (synthetic children included)" do
+      stub_capturing(%{
+        "data" => [
+          %{
+            "run_id" => "run-1",
+            "task_id" => "bd-x#review",
+            "kind" => "review",
+            "state" => "finished",
+            "outcome" => "succeeded",
+            "started_at" => "2026-05-20T19:00:00Z",
+            "transcript_exists" => true,
+            "line_count" => 12
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["runs", "bd-x", "--corpus"]) end)
+      assert_received {:request, "GET", "/api/workers/bd-x/run_log_list", ""}
+      assert out =~ "bd-x#review"
+      assert out =~ "12 lines"
+    end
+
+    test "--corpus requires a task id" do
+      {_out, _err, code} = capture(fn -> Worker.run(["runs", "--corpus"]) end)
+      assert code != 0
     end
   end
 end

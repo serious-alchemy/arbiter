@@ -91,6 +91,15 @@ defmodule ArbiterCli.Client do
     System.get_env("ARB_TOKEN")
   end
 
+  @doc """
+  One id, encoded for use as a single URL path segment. A task id can be a
+  ReviewGate synthetic one (`bd-x#review`); raw, its `#` starts a URI fragment
+  and the request silently goes to a different route (`/api/workers/bd-x`).
+  Interpolate every caller-supplied id into a path through this.
+  """
+  @spec path_segment(String.t()) :: String.t()
+  def path_segment(id) when is_binary(id), do: URI.encode(id, &URI.char_unreserved?/1)
+
   @spec get(String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def get(path, params \\ []), do: request(:get, path, params: params)
 
