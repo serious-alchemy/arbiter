@@ -11,13 +11,22 @@ defmodule Arbiter.Worker.ContainerGitSecretTest do
 
   defp spec(extra) do
     Map.merge(
-      %{podman: "/usr/bin/podman", image: "localhost/x:1", name: "arb-run1", worktree: "/work/tree"},
+      %{
+        podman: "/usr/bin/podman",
+        image: "localhost/x:1",
+        name: "arb-run1",
+        worktree: "/work/tree"
+      },
       extra
     )
   end
 
   defp secrets(argv),
-    do: argv |> Enum.chunk_every(2, 1, :discard) |> Enum.filter(&(hd(&1) == "--secret")) |> Enum.map(&List.last/1)
+    do:
+      argv
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.filter(&(hd(&1) == "--secret"))
+      |> Enum.map(&List.last/1)
 
   test "no secrets, no --secret flag" do
     assert secrets(Container.argv(spec(%{}), ["claude"])) == []
@@ -53,7 +62,12 @@ defmodule Arbiter.Worker.ContainerGitSecretTest do
 
         case args do
           ["secret", "create", _name, file] ->
-            send(test_pid, {:file_during_create, File.read!(file), File.stat!(file).mode |> Bitwise.band(0o777)})
+            send(
+              test_pid,
+              {:file_during_create, File.read!(file),
+               File.stat!(file).mode |> Bitwise.band(0o777)}
+            )
+
             {"id\n", 0}
 
           _ ->
@@ -64,8 +78,17 @@ defmodule Arbiter.Worker.ContainerGitSecretTest do
       %{runner: runner}
     end
 
-    test "the value goes in through a 0600 file that is gone afterwards, never argv", %{runner: runner, tmp_dir: tmp} do
-      secret = %{name: "arb-run1-git-key", type: :mount, target: "arb_git_key", value: "PRIVATE\n"}
+    test "the value goes in through a 0600 file that is gone afterwards, never argv", %{
+      runner: runner,
+      tmp_dir: tmp
+    } do
+      secret = %{
+        name: "arb-run1-git-key",
+        type: :mount,
+        target: "arb_git_key",
+        value: "PRIVATE\n"
+      }
+
       assert :ok = Container.create_secret(secret, runner: runner, podman: "podman", dir: tmp)
 
       assert_received {:podman, "podman", ["secret", "rm", "--ignore", "arb-run1-git-key"], _}
@@ -80,8 +103,16 @@ defmodule Arbiter.Worker.ContainerGitSecretTest do
         if match?(["secret", "create" | _], args), do: {"boom", 125}, else: {"", 0}
       end
 
-      secret = %{name: "arb-run1-git-key", type: :mount, target: "arb_git_key", value: "PRIVATE\n"}
-      assert {:error, {:podman_secret_failed, 125, "boom"}} = Container.create_secret(secret, runner: runner, dir: tmp)
+      secret = %{
+        name: "arb-run1-git-key",
+        type: :mount,
+        target: "arb_git_key",
+        value: "PRIVATE\n"
+      }
+
+      assert {:error, {:podman_secret_failed, 125, "boom"}} =
+               Container.create_secret(secret, runner: runner, dir: tmp)
+
       assert File.ls!(tmp) == []
     end
 
@@ -105,7 +136,8 @@ defmodule Arbiter.Worker.ContainerGitSecretTest do
         end
       end
 
-      assert ["arb-dead-git-key", "arb-dead-git-token"] == Enum.sort(Container.reap_git_secrets(runner: runner))
+      assert ["arb-dead-git-key", "arb-dead-git-token"] ==
+               Enum.sort(Container.reap_git_secrets(runner: runner))
     end
   end
 end

@@ -241,7 +241,10 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
         %{
           "repo_paths" => %{"tonic" => "/r/tonic", "vstim" => "/r/vstim"},
           "git_credentials" => %{
-            "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}, "vstim" => %{"legacy_operator" => true}}
+            "repos" => %{
+              "tonic" => %{"kind" => "deploy_key", "key_secret" => "K"},
+              "vstim" => %{"legacy_operator" => true}
+            }
           }
         },
         %{"K" => "key"}
@@ -258,7 +261,12 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
         "git_credentials" => %{
           "repos" => %{
             "tonic" => %{"kind" => "deploy_key", "key_secret" => "NOPE"},
-            "vstim" => %{"kind" => "github_app", "app_id" => "1", "installation_id" => "2", "private_key_secret" => "ALSO_NOPE"}
+            "vstim" => %{
+              "kind" => "github_app",
+              "app_id" => "1",
+              "installation_id" => "2",
+              "private_key_secret" => "ALSO_NOPE"
+            }
           }
         }
       })

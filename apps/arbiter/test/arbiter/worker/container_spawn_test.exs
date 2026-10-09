@@ -776,13 +776,17 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       :ok
     end
 
-    test "a deploy key becomes a podman --secret mount; no host path, agent or value on argv", ctx do
+    test "a deploy key becomes a podman --secret mount; no host path, agent or value on argv",
+         ctx do
       material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
       assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
 
       assert_received {:secret_created, secret, "PRIVATE-KEY\n"}
       assert secret == request.name <> "-git-key"
-      assert [%{name: ^secret, type: :mount, target: "arb_git_key", uid: uid}] = request.git_secrets
+
+      assert [%{name: ^secret, type: :mount, target: "arb_git_key", uid: uid}] =
+               request.git_secrets
+
       assert is_integer(uid)
       refute Enum.any?(request.git_secrets, &Map.has_key?(&1, :value))
 
@@ -801,7 +805,13 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
 
     test "a token is a --secret env var, with only the helper config in the environment", ctx do
-      material = %Material{kind: :token, token: "tok-123", host: "github.com", remote: "acme/tonic"}
+      material = %Material{
+        kind: :token,
+        token: "tok-123",
+        host: "github.com",
+        remote: "acme/tonic"
+      }
+
       assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
 
       assert_received {:secret_created, secret, "tok-123"}

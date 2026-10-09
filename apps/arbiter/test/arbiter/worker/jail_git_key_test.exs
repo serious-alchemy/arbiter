@@ -44,7 +44,9 @@ defmodule Arbiter.Worker.JailGitKeyTest do
     refute Enum.any?(argv, &String.ends_with?(&1, "/key"))
   end
 
-  test "wrap/2 names the key in GIT_SSH_COMMAND and refuses a key that is missing", %{tmp_dir: tmp} do
+  test "wrap/2 names the key in GIT_SSH_COMMAND and refuses a key that is missing", %{
+    tmp_dir: tmp
+  } do
     wt = repo(tmp)
     key = Path.join(tmp, "key")
     File.write!(key, "K\n")
@@ -67,5 +69,4 @@ defmodule Arbiter.Worker.JailGitKeyTest do
     assert value =~ "ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128"
     _ = tmp
   end
-
 end

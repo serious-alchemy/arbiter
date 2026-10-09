@@ -55,8 +55,11 @@ defmodule Arbiter.Worker.TestServices.Reaper do
       _ = Arbiter.Worker.GitCredential.sweep(max_age_ms: 0)
 
       case Arbiter.Worker.Container.reap_git_secrets(Keyword.take(opts, [:runner, :podman])) do
-        [] -> :ok
-        removed -> Logger.info("TestServices.Reaper: removed #{length(removed)} orphaned git secret(s)")
+        [] ->
+          :ok
+
+        removed ->
+          Logger.info("TestServices.Reaper: removed #{length(removed)} orphaned git secret(s)")
       end
     rescue
       e -> Logger.warning("TestServices.Reaper: sweep failed: #{Exception.message(e)}")

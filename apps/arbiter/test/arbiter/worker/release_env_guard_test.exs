@@ -102,6 +102,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.
     "apps/arbiter/lib/arbiter/agents/codex.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/worktree.ex" => :scrubbed,
+    # bd-9cygoo (G16): `git config --get remote.origin.url` to pin a token to its repo.
+    "apps/arbiter/lib/arbiter/worker/git_credential.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/quota/cloud_code.ex" => :scrubbed,

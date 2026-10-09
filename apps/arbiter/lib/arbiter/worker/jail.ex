@@ -1045,7 +1045,9 @@ defmodule Arbiter.Worker.Jail do
   # the default stands (`nil` when it needs no `ssh` override at all).
   defp with_key(base, nil, nil), do: if(base == "ssh", do: nil, else: base)
   defp with_key(base, nil, _path), do: base
-  defp with_key(base, key, _path), do: base <> " " <> Arbiter.Worker.GitCredential.ssh_options(key)
+
+  defp with_key(base, key, _path),
+    do: base <> " " <> Arbiter.Worker.GitCredential.ssh_options(key)
 
   # In network mode there is no route to a git remote, so ssh goes through the
   # run's proxy (bd-cfktou): `ProxyCommand` hands `%h:%p` to the loopback

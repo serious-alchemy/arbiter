@@ -120,7 +120,8 @@ defmodule Arbiter.Worker.Jail.Hide do
       |> Enum.uniq()
 
     keep =
-      (ssh_keep(home, Keyword.get(opts, :scoped_git, false)) ++ gh_keep(home) ++ grok_keep(home) ++ unmask)
+      (ssh_keep(home, Keyword.get(opts, :scoped_git, false)) ++
+         gh_keep(home) ++ grok_keep(home) ++ unmask)
       |> existing(&File.exists?/1)
       |> Enum.filter(&under_any?(&1, dirs))
       |> Enum.uniq()
@@ -225,7 +226,11 @@ defmodule Arbiter.Worker.Jail.Hide do
   defp ssh_keep(nil, _scoped?), do: []
 
   defp ssh_keep(home, scoped?) do
-    names = if scoped?, do: @ssh_keep -- (@identities ++ Enum.map(@identities, &(&1 <> ".pub"))), else: @ssh_keep
+    names =
+      if scoped?,
+        do: @ssh_keep -- (@identities ++ Enum.map(@identities, &(&1 <> ".pub"))),
+        else: @ssh_keep
+
     Enum.map(names, &Path.join([home, ".ssh", &1]))
   end
 

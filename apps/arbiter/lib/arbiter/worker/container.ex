@@ -382,7 +382,9 @@ defmodule Arbiter.Worker.Container do
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
         |> Map.new()
         |> then(&if(secrets_file, do: Map.put(&1, :secrets_file, secrets_file), else: &1))
-        |> then(&if(podman_secrets == [], do: &1, else: Map.put(&1, :podman_secrets, podman_secrets)))
+        |> then(
+          &if(podman_secrets == [], do: &1, else: Map.put(&1, :podman_secrets, podman_secrets))
+        )
         |> then(&if(mount_map == %{}, do: &1, else: Map.put(&1, :mount_map, mount_map)))
 
       {:ok, extras}
@@ -620,7 +622,9 @@ defmodule Arbiter.Worker.Container do
   def create_secret(%{name: name, value: value}, opts) when is_binary(value) do
     podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
     dir = Keyword.get(opts, :dir) || System.tmp_dir!()
-    file = Path.join(dir, "secret-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false))
+
+    file =
+      Path.join(dir, "secret-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false))
 
     with :ok <- check_secret_name(name),
          :ok <- File.write(file, value, [:exclusive]),
@@ -641,7 +645,9 @@ defmodule Arbiter.Worker.Container do
   end
 
   defp check_secret_name(name) do
-    if is_binary(name) and Regex.match?(@name_re, name), do: :ok, else: {:error, {:bad_secret_name, name}}
+    if is_binary(name) and Regex.match?(@name_re, name),
+      do: :ok,
+      else: {:error, {:bad_secret_name, name}}
   end
 
   @doc "Removes the podman secret `name`. Idempotent; options as `create_secret/2`."
@@ -667,7 +673,9 @@ defmodule Arbiter.Worker.Container do
     podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
 
     with {secrets, 0} <-
-           exec(opts, podman, ["secret", "ls", "--format", "{{.Name}}"], timeout: @stop_timeout_ms),
+           exec(opts, podman, ["secret", "ls", "--format", "{{.Name}}"],
+             timeout: @stop_timeout_ms
+           ),
          {containers, 0} <-
            exec(opts, podman, ["ps", "-a", "--format", "{{.Names}}"], timeout: @stop_timeout_ms) do
       live = containers |> String.split("\n", trim: true) |> MapSet.new()

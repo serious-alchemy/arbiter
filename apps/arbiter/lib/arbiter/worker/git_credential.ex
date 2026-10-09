@@ -308,7 +308,10 @@ defmodule Arbiter.Worker.GitCredential do
   def parse_remote(url) when is_binary(url) do
     path =
       cond do
-        match?(%URI{scheme: scheme} when scheme in ["http", "https", "ssh", "git"], URI.parse(url)) ->
+        match?(
+          %URI{scheme: scheme} when scheme in ["http", "https", "ssh", "git"],
+          URI.parse(url)
+        ) ->
           URI.parse(url).path
 
         match?([_, _], Regex.run(~r/\A[^\/@]+@[^:\/]+:(.+)\z/, url)) ->
@@ -555,7 +558,8 @@ defmodule Arbiter.Worker.GitCredential do
 
   defp check_token_scope(_entry, _token, _opts), do: :ok
 
-  defp split_scopes(scopes), do: scopes |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  defp split_scopes(scopes),
+    do: scopes |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 
   @doc "The scopes no worker credential may carry."
   @spec forbidden_scopes() :: [String.t()]
@@ -677,7 +681,10 @@ defmodule Arbiter.Worker.GitCredential do
           entries
           |> Enum.map(&Path.join(root, &1))
           |> Enum.filter(fn dir ->
-            match?({:ok, %File.Stat{mtime: mtime}} when mtime < cutoff, File.stat(dir, time: :posix))
+            match?(
+              {:ok, %File.Stat{mtime: mtime}} when mtime < cutoff,
+              File.stat(dir, time: :posix)
+            )
           end)
 
         Enum.each(stale, &File.rm_rf/1)
@@ -767,7 +774,12 @@ defmodule Arbiter.Worker.GitCredential do
   @spec prepare(t() | nil, map() | nil, pid(), keyword()) :: {:ok, prepared()} | {:error, term()}
   def prepare(plan, workspace, owner, opts) do
     mode = if match?(%__MODULE__{}, plan), do: plan.mode, else: :unenforced
-    tracker? = match?(%{claims: [_ | _], tracker_env: var} when is_binary(var), Keyword.get(opts, :projection))
+
+    tracker? =
+      match?(
+        %{claims: [_ | _], tracker_env: var} when is_binary(var),
+        Keyword.get(opts, :projection)
+      )
 
     materialize_opts =
       [
@@ -841,7 +853,12 @@ defmodule Arbiter.Worker.GitCredential do
   """
   @spec verify_tracker_token(String.t(), keyword()) :: :ok | {:error, term()}
   def verify_tracker_token(token, opts \\ []) when is_binary(token),
-    do: check_token_scope(%{host: "github.com", api_url: nil, token_secret: "tracker_write binding"}, token, opts)
+    do:
+      check_token_scope(
+        %{host: "github.com", api_url: nil, token_secret: "tracker_write binding"},
+        token,
+        opts
+      )
 
   # ---- tracker & redaction ------------------------------------------------------------
 

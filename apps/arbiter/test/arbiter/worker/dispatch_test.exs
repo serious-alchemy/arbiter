@@ -2953,7 +2953,10 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(tmp, "never.txt"))
     end
 
-    test "G16: the legacy operator credential is an explicit workspace opt-in", %{ws: ws, tmp: tmp} do
+    test "G16: the legacy operator credential is an explicit workspace opt-in", %{
+      ws: ws,
+      tmp: tmp
+    } do
       guarded_claude_rules()
       ws = git_credential_workspace(ws, %{"legacy_operator" => true})
       env = dispatch_for_env(ws, tmp, [])
@@ -2981,7 +2984,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert env =~ "IdentityAgent=none"
       refute env =~ "SSH_AUTH_SOCK"
       assert File.read!(key_path) =~ "scoped"
-      assert (File.stat!(key_path).mode |> Bitwise.band(0o777)) == 0o600
+      assert File.stat!(key_path).mode |> Bitwise.band(0o777) == 0o600
     end
 
     # AC5: nothing configured, nothing changes. A workspace `guardrails` block

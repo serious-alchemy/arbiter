@@ -260,7 +260,6 @@ defmodule Arbiter.Worker.ClaudeSession do
              worker_env,
              []
            ) do
-
       # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any
       # ANTHROPIC_API_KEY) travel in via the caller-explicit `:env` opt
       # (`Claude.spawn_env/1`'s output), not the workspace's `worker_env`

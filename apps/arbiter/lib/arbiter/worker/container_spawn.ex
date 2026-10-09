@@ -342,9 +342,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
+  # The uid the container maps to itself (`--userns=keep-id`): this process's.
   defp host_uid do
-    case System.cmd("id", ["-u"]) do
-      {out, 0} -> out |> String.trim() |> String.to_integer()
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} -> uid
       _ -> 0
     end
   end

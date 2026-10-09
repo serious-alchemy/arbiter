@@ -86,7 +86,9 @@ defmodule Arbiter.Worker.GitCredentialPlanTest do
 
     test "a nil workspace is unenforced unless guarded" do
       assert {:ok, %GitCredential{mode: :unenforced}} = GitCredential.plan(nil, "tonic", [])
-      assert {:error, {:git_credential_missing, _, _}} = GitCredential.plan(nil, "tonic", guarded?: true)
+
+      assert {:error, {:git_credential_missing, _, _}} =
+               GitCredential.plan(nil, "tonic", guarded?: true)
     end
   end
 
@@ -111,7 +113,9 @@ defmodule Arbiter.Worker.GitCredentialPlanTest do
 
     test "refuses an unknown kind, a missing secret name and a bad remote" do
       assert {:error, _} = GitCredential.validate(%{"repos" => %{"a" => %{"kind" => "pat"}}})
-      assert {:error, _} = GitCredential.validate(%{"repos" => %{"a" => %{"kind" => "deploy_key"}}})
+
+      assert {:error, _} =
+               GitCredential.validate(%{"repos" => %{"a" => %{"kind" => "deploy_key"}}})
 
       assert {:error, _} =
                GitCredential.validate(%{
@@ -150,7 +154,12 @@ defmodule Arbiter.Worker.GitCredentialConfigTest do
   alias Arbiter.Tasks.Workspace
 
   defp create(config),
-    do: Ash.create(Workspace, %{name: "gcc-#{System.unique_integer([:positive])}", prefix: "gcc", config: config})
+    do:
+      Ash.create(Workspace, %{
+        name: "gcc-#{System.unique_integer([:positive])}",
+        prefix: "gcc",
+        config: config
+      })
 
   test "a valid git_credentials block is accepted" do
     assert {:ok, _} =

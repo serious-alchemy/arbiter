@@ -42,14 +42,18 @@ defmodule Arbiter.Worker.GitCredentialTest do
 
   describe "materialize/3 for a deploy key" do
     test "reads the key from the workspace secret" do
-      ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "PEMDATA"})
+      ws =
+        workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{
+          "K" => "PEMDATA"
+        })
 
       assert {:ok, %Material{kind: :deploy_key, key: "PEMDATA\n"}} =
                GitCredential.materialize(plan(ws, "tonic"), ws, [])
     end
 
     test "a missing secret is a refusal naming the secret, never a fallback" do
-      ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{})
+      ws =
+        workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{})
 
       assert {:error, {:git_credential_secret_missing, "K"}} =
                GitCredential.materialize(plan(ws, "tonic"), ws, [])
@@ -69,7 +73,11 @@ defmodule Arbiter.Worker.GitCredentialTest do
 
       assert File.read!(staged.key_path) == "PRIVATE\n"
       assert File.stat!(staged.key_path).mode |> Bitwise.band(0o777) == 0o600
-      assert Path.dirname(staged.key_path) |> File.stat!() |> Map.fetch!(:mode) |> Bitwise.band(0o777) == 0o700
+
+      assert Path.dirname(staged.key_path)
+             |> File.stat!()
+             |> Map.fetch!(:mode)
+             |> Bitwise.band(0o777) == 0o700
 
       env = Map.new(staged.env)
       assert env["GIT_SSH_COMMAND"] =~ "-i #{staged.key_path}"
@@ -119,7 +127,13 @@ defmodule Arbiter.Worker.GitCredentialTest do
       on_exit(fn -> File.rm(script) end)
 
       System.cmd("sh", [script, input],
-        env: env ++ [{"HOME", System.tmp_dir!()}, {"GIT_CONFIG_NOSYSTEM", "1"}, {"GIT_CONFIG_GLOBAL", global}],
+        env:
+          env ++
+            [
+              {"HOME", System.tmp_dir!()},
+              {"GIT_CONFIG_NOSYSTEM", "1"},
+              {"GIT_CONFIG_GLOBAL", global}
+            ],
         stderr_to_stdout: true
       )
     end
@@ -140,21 +154,49 @@ defmodule Arbiter.Worker.GitCredentialTest do
       refute status == 0
     end
 
-    test "a real push to another repo's url is refused before any network use", %{material: m, tmp_dir: tmp} do
+    test "a real push to another repo's url is refused before any network use", %{
+      material: m,
+      tmp_dir: tmp
+    } do
       repo = Path.join(tmp, "r")
       File.mkdir_p!(repo)
       {_, 0} = System.cmd("git", ["init", "-q", repo])
-      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "x"], env: [{"GIT_AUTHOR_NAME", "t"}, {"GIT_AUTHOR_EMAIL", "t@t"}, {"GIT_COMMITTER_NAME", "t"}, {"GIT_COMMITTER_EMAIL", "t@t"}])
+
+      {_, 0} =
+        System.cmd("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "x"],
+          env: [
+            {"GIT_AUTHOR_NAME", "t"},
+            {"GIT_AUTHOR_EMAIL", "t@t"},
+            {"GIT_COMMITTER_NAME", "t"},
+            {"GIT_COMMITTER_EMAIL", "t@t"}
+          ]
+        )
 
       # The remote does not resolve: git has to ask for a credential first and,
       # finding none for this path, must fail on authentication, not hand the token over.
-      env = Material.env(m, nil) ++ [{"HOME", tmp}, {"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}, {"GIT_TRACE_CURL", "0"}]
-      {out, status} = System.cmd("git", ["-C", repo, "ls-remote", "https://127.0.0.1:1/acme/other.git"], env: env, stderr_to_stdout: true)
+      env =
+        Material.env(m, nil) ++
+          [
+            {"HOME", tmp},
+            {"GIT_CONFIG_GLOBAL", "/dev/null"},
+            {"GIT_CONFIG_NOSYSTEM", "1"},
+            {"GIT_TRACE_CURL", "0"}
+          ]
+
+      {out, status} =
+        System.cmd("git", ["-C", repo, "ls-remote", "https://127.0.0.1:1/acme/other.git"],
+          env: env,
+          stderr_to_stdout: true
+        )
+
       refute status == 0
       refute out =~ "s3cr3t-token"
     end
 
-    test "the operator's own credential helper is reset, so it never answers", %{material: m, tmp_dir: tmp} do
+    test "the operator's own credential helper is reset, so it never answers", %{
+      material: m,
+      tmp_dir: tmp
+    } do
       global = Path.join(tmp, "gitconfig")
 
       File.write!(
@@ -173,9 +215,11 @@ defmodule Arbiter.Worker.GitCredentialTest do
 
     test "ssh remotes are rewritten to https so the helper applies", %{material: m} do
       env = Map.new(Material.env(m, nil))
+
       {out, 0} =
         System.cmd("git", ["ls-remote", "--get-url", "git@github.com:acme/tonic.git"],
-          env: Map.to_list(env) ++ [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
+          env:
+            Map.to_list(env) ++ [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
         )
 
       assert String.trim(out) == "https://github.com/acme/tonic.git"
@@ -217,32 +261,60 @@ defmodule Arbiter.Worker.GitCredentialTest do
       %{ws: ws, key: key}
     end
 
-    test "mints an installation token restricted to the one repo, with no gist or delete rights", %{ws: ws, key: key} do
+    test "mints an installation token restricted to the one repo, with no gist or delete rights",
+         %{ws: ws, key: key} do
       test_pid = self()
 
       Req.Test.stub(@http, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(test_pid, {:mint, conn.request_path, Plug.Conn.get_req_header(conn, "authorization"), Jason.decode!(body)})
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"token" => "ghs_scoped", "expires_at" => "2099-01-01T00:00:00Z"})
+
+        send(
+          test_pid,
+          {:mint, conn.request_path, Plug.Conn.get_req_header(conn, "authorization"),
+           Jason.decode!(body)}
+        )
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_scoped", "expires_at" => "2099-01-01T00:00:00Z"})
       end)
 
       assert {:ok, %Material{kind: :github_app, token: "ghs_scoped", remote: "acme/tonic"}} =
-               GitCredential.materialize(plan(ws, "tonic"), ws, [remote: "acme/tonic"] ++ req_options())
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
 
       assert_receive {:mint, "/app/installations/7/access_tokens", ["Bearer " <> jwt], body}
 
       assert body["repositories"] == ["tonic"]
-      assert body["permissions"] == %{"contents" => "write", "metadata" => "read", "pull_requests" => "read"}
+
+      assert body["permissions"] == %{
+               "contents" => "write",
+               "metadata" => "read",
+               "pull_requests" => "read"
+             }
+
       refute Map.has_key?(body["permissions"], "administration")
 
       # the JWT is an RS256 assertion by the App, verifiable with the App's public key
       [h, p, s] = String.split(jwt, ".")
       assert %{"alg" => "RS256"} = h |> Base.url_decode64!(padding: false) |> Jason.decode!()
-      assert %{"iss" => "42", "exp" => exp, "iat" => iat} = p |> Base.url_decode64!(padding: false) |> Jason.decode!()
+
+      assert %{"iss" => "42", "exp" => exp, "iat" => iat} =
+               p |> Base.url_decode64!(padding: false) |> Jason.decode!()
+
       assert exp - iat <= 600 + 60
       {:RSAPrivateKey, _, n, e, _, _, _, _, _, _, _} = key
       pub = {:RSAPublicKey, n, e}
-      assert :public_key.verify(h <> "." <> p, :sha256, Base.url_decode64!(s, padding: false), pub)
+
+      assert :public_key.verify(
+               h <> "." <> p,
+               :sha256,
+               Base.url_decode64!(s, padding: false),
+               pub
+             )
     end
 
     test "a tracker token is a second, narrower mint for the same repo", %{ws: ws} do
@@ -253,13 +325,25 @@ defmodule Arbiter.Worker.GitCredentialTest do
         body = Jason.decode!(body)
         send(test_pid, {:mint, body})
         token = if body["permissions"]["issues"], do: "ghs_tracker", else: "ghs_push"
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"token" => token, "expires_at" => "2099-01-01T00:00:00Z"})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => token, "expires_at" => "2099-01-01T00:00:00Z"})
       end)
 
       assert {:ok, %Material{token: "ghs_push", tracker_token: "ghs_tracker"}} =
-               GitCredential.materialize(plan(ws, "tonic"), ws, [remote: "acme/tonic", tracker?: true] ++ req_options())
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic", tracker?: true] ++ req_options()
+               )
 
-      assert_receive {:mint, %{"repositories" => ["tonic"], "permissions" => %{"issues" => "write"} = perms}}
+      assert_receive {:mint,
+                      %{
+                        "repositories" => ["tonic"],
+                        "permissions" => %{"issues" => "write"} = perms
+                      }}
+
       assert perms["pull_requests"] == "write"
       refute Map.has_key?(perms, "administration")
     end
@@ -270,7 +354,11 @@ defmodule Arbiter.Worker.GitCredentialTest do
       end)
 
       assert {:error, {:git_credential_mint_failed, 404, _}} =
-               GitCredential.materialize(plan(ws, "tonic"), ws, [remote: "acme/tonic"] ++ req_options())
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
     end
 
     test "without a pinned remote it refuses rather than mint an unscoped token", %{ws: ws} do
@@ -290,13 +378,20 @@ defmodule Arbiter.Worker.GitCredentialTest do
       %{ws: ws}
     end
 
-    test "a classic PAT (one that reports OAuth scopes) is refused: it cannot be limited to a repo", %{ws: ws} do
+    test "a classic PAT (one that reports OAuth scopes) is refused: it cannot be limited to a repo",
+         %{ws: ws} do
       Req.Test.stub(@http, fn conn ->
-        conn |> Plug.Conn.put_resp_header("x-oauth-scopes", "repo, gist") |> Req.Test.json(%{"login" => "x"})
+        conn
+        |> Plug.Conn.put_resp_header("x-oauth-scopes", "repo, gist")
+        |> Req.Test.json(%{"login" => "x"})
       end)
 
       assert {:error, {:git_credential_token_too_broad, scopes}} =
-               GitCredential.materialize(plan(ws, "tonic"), ws, [remote: "acme/tonic"] ++ req_options())
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
 
       assert "gist" in scopes
     end
@@ -304,14 +399,33 @@ defmodule Arbiter.Worker.GitCredentialTest do
     test "a fine-grained token (no OAuth scope header) is accepted", %{ws: ws} do
       Req.Test.stub(@http, fn conn -> Req.Test.json(conn, %{"login" => "x"}) end)
 
-      assert {:ok, %Material{kind: :token, token: "fine-grained", remote: "acme/tonic", tracker_token: "fine-grained"}} =
-               GitCredential.materialize(plan(ws, "tonic"), ws, [remote: "acme/tonic", tracker?: true] ++ req_options())
+      assert {:ok,
+              %Material{
+                kind: :token,
+                token: "fine-grained",
+                remote: "acme/tonic",
+                tracker_token: "fine-grained"
+              }} =
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic", tracker?: true] ++ req_options()
+               )
     end
 
     test "a host other than github.com is not probed (GitLab project tokens are repo-bound)" do
       ws =
         workspace(
-          %{"repos" => %{"tonic" => %{"kind" => "token", "token_secret" => "T", "host" => "gitlab.com", "username" => "oauth2"}}},
+          %{
+            "repos" => %{
+              "tonic" => %{
+                "kind" => "token",
+                "token_secret" => "T",
+                "host" => "gitlab.com",
+                "username" => "oauth2"
+              }
+            }
+          },
           %{"T" => "glpat"}
         )
 
@@ -322,7 +436,14 @@ defmodule Arbiter.Worker.GitCredentialTest do
 
   describe "tracker env" do
     test "the tracker var gets the repo-scoped token, not a binding's broader one" do
-      m = %Material{kind: :github_app, token: "push", tracker_token: "ghs_tracker", remote: "a/b", host: "github.com"}
+      m = %Material{
+        kind: :github_app,
+        token: "push",
+        tracker_token: "ghs_tracker",
+        remote: "a/b",
+        host: "github.com"
+      }
+
       assert GitCredential.tracker_token(m) == "ghs_tracker"
       assert GitCredential.tracker_token(%Material{kind: :deploy_key, key: "k"}) == nil
       assert GitCredential.tracker_token(nil) == nil
@@ -360,7 +481,15 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
   end
 
   defp token_ws,
-    do: workspace(%{"repos" => %{"tonic" => %{"kind" => "token", "token_secret" => "T", "host" => "gitlab.com"}}}, %{"T" => "scoped-tok"})
+    do:
+      workspace(
+        %{
+          "repos" => %{
+            "tonic" => %{"kind" => "token", "token_secret" => "T", "host" => "gitlab.com"}
+          }
+        },
+        %{"T" => "scoped-tok"}
+      )
 
   defp plan(ws, repo \\ "tonic") do
     {:ok, plan} = GitCredential.plan(ws, repo, role: :implementer, guarded?: true)
@@ -374,12 +503,18 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
     for mode <- [:legacy, :unenforced, :not_needed] do
       assert {:ok, git} = GitCredential.prepare(%GitCredential{mode: mode}, nil, self(), [])
       assert git.material == nil and git.env == [] and git.redact == []
-      assert {:ok, [{"A", "b"}]} = GitCredential.spawn_env(git, Projection.unguarded(), [{"A", "b"}], [])
+
+      assert {:ok, [{"A", "b"}]} =
+               GitCredential.spawn_env(git, Projection.unguarded(), [{"A", "b"}], [])
     end
   end
 
   test "a deploy key is staged on the host and named by GIT_SSH_COMMAND", %{tmp_dir: tmp} do
-    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+    ws =
+      workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{
+        "K" => "KEYDATA"
+      })
+
     assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp)
     assert File.read!(git.key_path) == "KEYDATA\n"
     assert {"GIT_SSH_COMMAND", cmd} = List.keyfind(git.env, "GIT_SSH_COMMAND", 0)
@@ -387,8 +522,14 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
     assert git.redact == ["KEYDATA"]
   end
 
-  test "a container spawn is not staged on the host: its key travels as a podman secret", %{tmp_dir: tmp} do
-    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+  test "a container spawn is not staged on the host: its key travels as a podman secret", %{
+    tmp_dir: tmp
+  } do
+    ws =
+      workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{
+        "K" => "KEYDATA"
+      })
+
     assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp, container?: true)
     assert git.material.key == "KEYDATA\n"
     assert git.key_path == nil and git.env == []
@@ -397,7 +538,9 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
 
   test "the origin remote of the worktree pins a token", %{tmp_dir: tmp} do
     {_, 0} = System.cmd("git", ["init", "-q", tmp])
-    {_, 0} = System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
+
+    {_, 0} =
+      System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
 
     ws = token_ws()
     assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: tmp)
@@ -407,33 +550,61 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
 
   test "a token with no derivable remote is refused" do
     ws = token_ws()
-    assert {:error, :git_credential_remote_unknown} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: "/nonexistent")
+
+    assert {:error, :git_credential_remote_unknown} =
+             GitCredential.prepare(plan(ws), ws, self(), worktree_path: "/nonexistent")
   end
 
-  test "the tracker var gets the repo-scoped token, replacing the binding's broader one", %{tmp_dir: tmp} do
+  test "the tracker var gets the repo-scoped token, replacing the binding's broader one", %{
+    tmp_dir: tmp
+  } do
     {_, 0} = System.cmd("git", ["init", "-q", tmp])
-    {_, 0} = System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
+
+    {_, 0} =
+      System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
+
     ws = token_ws()
 
-    {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: tmp, projection: projection("GITLAB_TOKEN"))
-    {:ok, env} = GitCredential.spawn_env(git, projection("GITLAB_TOKEN"), [{"GITLAB_TOKEN", "broad-binding-token"}, {"X", "1"}], [])
+    {:ok, git} =
+      GitCredential.prepare(plan(ws), ws, self(),
+        worktree_path: tmp,
+        projection: projection("GITLAB_TOKEN")
+      )
+
+    {:ok, env} =
+      GitCredential.spawn_env(
+        git,
+        projection("GITLAB_TOKEN"),
+        [{"GITLAB_TOKEN", "broad-binding-token"}, {"X", "1"}],
+        []
+      )
 
     assert {"GITLAB_TOKEN", "scoped-tok"} in env
     refute {"GITLAB_TOKEN", "broad-binding-token"} in env
     assert {"X", "1"} in env
   end
 
-  test "with a deploy key the binding's own tracker token is kept, but a classic PAT is refused", %{tmp_dir: tmp} do
-    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+  test "with a deploy key the binding's own tracker token is kept, but a classic PAT is refused",
+       %{tmp_dir: tmp} do
+    ws =
+      workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{
+        "K" => "KEYDATA"
+      })
+
     {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp)
 
     Req.Test.stub(@http, fn conn -> Req.Test.json(conn, %{"login" => "x"}) end)
     opts = [req_options: [plug: {Req.Test, @http}]]
-    assert {:ok, env} = GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "fine-grained"}], opts)
+
+    assert {:ok, env} =
+             GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "fine-grained"}], opts)
+
     assert {"GH_TOKEN", "fine-grained"} in env
 
     Req.Test.stub(@http, fn conn ->
-      conn |> Plug.Conn.put_resp_header("x-oauth-scopes", "repo, delete_repo") |> Req.Test.json(%{})
+      conn
+      |> Plug.Conn.put_resp_header("x-oauth-scopes", "repo, delete_repo")
+      |> Req.Test.json(%{})
     end)
 
     assert {:error, {:git_credential_token_too_broad, scopes}} =
@@ -444,6 +615,8 @@ defmodule Arbiter.Worker.GitCredentialSpawnTest do
 
   test "a legacy spawn's tracker token is left alone (no scope check, as before)" do
     {:ok, git} = GitCredential.prepare(%GitCredential{mode: :legacy}, nil, self(), [])
-    assert {:ok, [{"GH_TOKEN", "x"}]} = GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "x"}], [])
+
+    assert {:ok, [{"GH_TOKEN", "x"}]} =
+             GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "x"}], [])
   end
 end
