@@ -220,6 +220,7 @@ defmodule Arbiter.Guardrails.Gate do
           "min_mode" => Atom.to_string(profile.min_mode),
           "egress" => Atom.to_string(profile.egress),
           "max_difficulty" => profile.max_difficulty,
+          "spend" => spend_decision(profile.spend),
           "permissions" => permissions,
           "projection" => Projection.to_decision(projection),
           "permission_fallback" =>
@@ -233,6 +234,16 @@ defmodule Arbiter.Guardrails.Gate do
         |> Map.merge(%{"eligible" => false, "reason" => detail})
         |> then(&if(profile, do: Map.put(&1, "tier", Atom.to_string(profile.tier)), else: &1))
     end
+  end
+
+  # The spend caps in force, so `Arbiter.Guardrails.SpendPatrol` can enforce them
+  # off the live worker's meta without re-resolving the profile mid-run.
+  defp spend_decision(spend) do
+    %{
+      "action" => spend |> Map.get(:action, :page) |> Atom.to_string(),
+      "tokens" => Map.get(spend, :tokens),
+      "wall_clock_s" => Map.get(spend, :wall_clock_s)
+    }
   end
 
   # Twelve hex digits of the profile's hash: enough to tell two profiles apart

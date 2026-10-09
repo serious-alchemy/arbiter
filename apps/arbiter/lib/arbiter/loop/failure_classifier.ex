@@ -149,6 +149,9 @@ defmodule Arbiter.Loop.FailureClassifier do
     # conclusive on its own: the transcript is whatever the run was doing when
     # the kernel ended it.
     memory_cap_exceeded: {:operational, :memory_cap_exceeded},
+    # G19: a guardrail tier's spend cap parked the run. A policy stop, never a
+    # judgement of the agent's work quality.
+    spend_cap: {:operational, :spend_cap},
     # RW12: the node a run was placed on was lost. Infrastructure, never the agent.
     node_lost: {:operational, :node_lost},
     spawn_exec_failed: {:operational, :spawn_failure},

@@ -1025,6 +1025,46 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "spend_cap/1 (G19)" do
+    test "names the tripped cap, the figure and the tier" do
+      reason =
+        StopReason.spend_cap(%{
+          cap: :wall_clock_s,
+          limit: 1800,
+          measured: 3900,
+          tier: :quarantine
+        })
+
+      assert reason.category == :spend_cap
+      assert reason.summary =~ "quarantine"
+      assert reason.summary =~ "wall-clock"
+      assert reason.summary =~ "30m"
+      assert reason.summary =~ "65m"
+      assert reason.remediation =~ "cap"
+      assert StopReason.label(reason) =~ "spend cap"
+      assert StopReason.to_map(reason).category == :spend_cap
+    end
+
+    test "formats a token cap" do
+      reason =
+        StopReason.spend_cap(%{
+          cap: :tokens,
+          limit: 3_000_000,
+          measured: 7_700_000,
+          tier: :probation
+        })
+
+      assert reason.summary =~ "tokens"
+      assert reason.summary =~ "7.7M"
+      assert reason.summary =~ "3.0M"
+    end
+
+    test "is operational for the loop's failure classifier" do
+      assert {:operational, :spend_cap} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:spend_cap]
+    end
+  end
+
   describe "node_lost/1 (RW12)" do
     test "is its own category, names the node, and is not a signal or an agent failure" do
       reason = StopReason.node_lost("edge-1")

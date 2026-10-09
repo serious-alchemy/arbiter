@@ -17,7 +17,7 @@ defmodule Arbiter.Guardrails.Profile do
     * `data_classes` — data classes it may see, subject to an account agreement.
     * `review` — inputs to `ReviewerRouting` (§3.3), not a selector.
     * `spend` — the caps G19 enforces: `action` is `:park | :page`,
-      `tokens` / `wall_clock_s` are `nil` until calibrated.
+      `tokens` / `wall_clock_s` are `nil` for no cap.
     * `honour_safe_defaults_exclude` — whether `safe_defaults_exclude` is
       honoured; low tiers always get the full deny set.
     * `scope` — `nil` (any attached workspace) or `%{workspace => [repo]}`
