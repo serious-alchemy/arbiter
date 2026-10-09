@@ -3562,7 +3562,11 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:worktree_path, worktree_path)
               |> Keyword.put(:tracker_context, tracker_context)
               |> Keyword.put(:adapter, adapter)
+<<<<<<< HEAD
               |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
+=======
+              |> Keyword.put(:projection, projection)
+>>>>>>> e90071ce0 ([G14] PERMISSIONS prompt block; ReviewGate implementer projection)
               |> then(&prompt_for_task(task, &1))
 
             provider = Atom.to_string(choice.type)

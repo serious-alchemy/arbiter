@@ -28,6 +28,46 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     )
   end
 
+  describe "PERMISSIONS block (G14, bd-ld8qde)" do
+    alias Arbiter.Guardrails.Projection
+
+    test "a guarded spawn's work prompt carries it" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt",
+          projection: %{
+            Projection.sealed()
+            | granted: ["tracker_write"],
+              claims: ["tracker_write"]
+          }
+        )
+
+      assert prompt =~ "PERMISSIONS"
+      assert prompt =~ "tracker_write"
+    end
+
+    test "a task-type (no-PR) prompt carries it too" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :task}),
+          worktree_path: "/tmp/wt",
+          projection: Projection.sealed()
+        )
+
+      assert prompt =~ "PERMISSIONS"
+    end
+
+    test "an unguarded or absent projection leaves the prompt byte-identical" do
+      plain = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert PromptBuilder.prompt_for_task(task(%{}),
+               worktree_path: "/tmp/wt",
+               projection: Projection.unguarded()
+             ) == plain
+
+      refute plain =~ "PERMISSIONS"
+    end
+  end
+
   test "work prompt is byte-identical for fixed inputs" do
     prompt =
       PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")

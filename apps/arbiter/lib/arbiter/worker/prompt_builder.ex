@@ -16,6 +16,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.PermissionsBlock
   alias Arbiter.Worker.ReviewVerification
 
   @doc false
@@ -182,6 +183,10 @@ defmodule Arbiter.Worker.PromptBuilder do
     Arbiter.Skills.Materializer.prompt_section(resolved, materialized?)
   end
 
+  # bd-ld8qde (G14): what the ticket's declared permissions were projected into.
+  # Empty for an unguarded spawn, so the prompt is unchanged there.
+  defp permissions_section(opts), do: PermissionsBlock.render(Keyword.get(opts, :projection))
+
   # bd-8cn795: whole-file reads of large modules (or a large PR body / API
   # dump piped straight into context) refill the window faster than
   # autocompact can shed it, tripping the CLI's own thrash detector
@@ -312,7 +317,11 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
+<<<<<<< HEAD
     #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}
+=======
+    #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}#{permissions_section(opts)}
+>>>>>>> e90071ce0 ([G14] PERMISSIONS prompt block; ReviewGate implementer projection)
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 
@@ -416,7 +425,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{EvidenceIntegrity.worker_block()}
+    #{EvidenceIntegrity.worker_block()}#{permissions_section(opts)}
     #{no_pr_job(task, kind, mcp?)}
     #{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running
