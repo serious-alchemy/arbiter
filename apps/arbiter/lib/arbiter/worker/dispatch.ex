@@ -3570,6 +3570,10 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:worktree_path, worktree_path)
               |> Keyword.put(:tracker_context, tracker_context)
               |> Keyword.put(:adapter, adapter)
+              # bd-dh1gg1: a container holds no forge credential (the host's
+              # `~/.ssh` is not mounted), so the host pushes the branch when the
+              # run completes; the prompt must not send the worker to push.
+              |> Keyword.put(:host_pushes?, ContainerSpawn.podman?(policy))
               |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
               |> Keyword.put(:projection, projection)
               |> then(&prompt_for_task(task, &1))
@@ -3654,8 +3658,17 @@ defmodule Arbiter.Worker.Dispatch do
 
   # The inputs `ClaudeSession` needs to wrap a `sandbox.backend: podman` spawn;
   # none for any other backend, so a bwrap or unsandboxed spawn is unchanged.
+  #
+  # `:egress`, `:podman` and `:image` are the spawn's own injection points
+  # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
+  # resume against a stand-in egress run and `podman` (bd-dh1gg1).
   defp sandbox_session_opts(policy, workspace, opts),
-    do: ContainerSpawn.session_opts(policy, workspace, Keyword.take(opts, [:repo, :node]))
+    do:
+      ContainerSpawn.session_opts(
+        policy,
+        workspace,
+        Keyword.take(opts, [:repo, :node, :egress, :podman, :image])
+      )
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
     Keyword.get(opts, :agent_type) || revision_or_resume_provider(opts, task, id, workspace)

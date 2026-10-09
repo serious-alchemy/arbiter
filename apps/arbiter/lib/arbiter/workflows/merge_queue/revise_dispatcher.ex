@@ -159,8 +159,9 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
     #{render_items(feedback)}
 
     Then:
-      * commit your changes and push to the SAME branch (the PR updates in
-        place — do NOT open a new PR),
+      * commit your changes to the SAME branch and push (a sandboxed run with
+        no forge credential cannot push; Arbiter pushes for it) — the PR
+        updates in place, do NOT open a new PR,
       * keep the change scoped to what the feedback asks for,
       * print `arb done` when finished so the merge queue re-reviews.
 

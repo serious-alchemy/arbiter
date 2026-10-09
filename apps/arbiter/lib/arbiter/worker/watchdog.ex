@@ -4205,7 +4205,7 @@ defmodule Arbiter.Worker.Watchdog do
     approval the branch advanced to #{head} with new content (for example a CI fix pass),
     and no review has covered that content yet, so the merge was refused.
 
-    Your only job: confirm the branch is committed and pushed (`git status`, `git log
+    Your only job: confirm the branch is committed (Arbiter pushes it if your sandbox cannot) (`git status`, `git log
     --oneline -3`), make NO further changes, and print `arb done`. The ReviewGate then
     reviews just the commits since #{reviewed}.
 
@@ -4220,7 +4220,7 @@ defmodule Arbiter.Worker.Watchdog do
     not approve it, and a `send_back` resolution only means another review round follows
     — it does not authorise a merge.
 
-    Your only job: confirm the branch is committed and pushed (`git status`, `git log
+    Your only job: confirm the branch is committed (Arbiter pushes it if your sandbox cannot) (`git status`, `git log
     --oneline -3`), make NO further changes unless the unaddressed findings are still
     open, and print `arb done`. The ReviewGate then reviews the current head.
 

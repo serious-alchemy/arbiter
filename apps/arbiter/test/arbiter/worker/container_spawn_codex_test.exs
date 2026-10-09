@@ -103,7 +103,7 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     end
 
     proxy_port = free_port()
-    arb_port = free_port()
+    arb_port = Stream.repeatedly(&free_port/0) |> Enum.find(&(&1 != proxy_port))
     test_pid = self()
 
     egress = fn opts ->
