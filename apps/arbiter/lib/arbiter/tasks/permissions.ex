@@ -152,17 +152,21 @@ defmodule Arbiter.Tasks.Permissions do
          :ok <- decidable(issue, canonical) do
       # The permission change and its audit event commit together or not at all.
       Repo.transaction(fn ->
-        with {:ok, updated} <-
-               issue
-               |> Ash.Changeset.for_update(:set_permissions, %{
-                 permissions: update_fun.(issue.permissions, canonical)
-               })
-               |> Ash.update()
-               |> wrap_error() do
-          record!([%{permission: canonical, event: event}], issue.id, :system, opts)
-          updated
-        else
-          {:error, msg} -> Repo.rollback(msg)
+        result =
+          issue
+          |> Ash.Changeset.for_update(:set_permissions, %{
+            permissions: update_fun.(issue.permissions, canonical)
+          })
+          |> Ash.update()
+          |> wrap_error()
+
+        case result do
+          {:ok, updated} ->
+            record!([%{permission: canonical, event: event}], issue.id, :system, opts)
+            updated
+
+          {:error, msg} ->
+            Repo.rollback(msg)
         end
       end)
     end
