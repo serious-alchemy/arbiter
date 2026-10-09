@@ -18,10 +18,12 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.ConfigDir
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Worker.Withholding
 
   require Logger
 
@@ -617,7 +619,9 @@ defmodule Arbiter.Agents.Gemini do
        {:write_jail_unavailable,
         "the upstream gemini CLI keeps its state in the operator's $HOME and cannot be jailed"}}
 
-  defp maybe_jail(:gemini, command, _opts, _policy), do: {:ok, command}
+  defp maybe_jail(:gemini, command, opts, _policy) do
+    with :ok <- require_no_ssh_agent(opts), do: {:ok, command}
+  end
 
   # bd-btcdrf: a sandbox backend with no implementation is a refusal in every
   # mode, never the `jail_unavailable/3` fallback to running unjailed.
@@ -632,16 +636,47 @@ defmodule Arbiter.Agents.Gemini do
     # `xdg-dbus-proxy` (it masks the raw session bus), so a bus alone
     # is not enough.
     with :ok <- require_keyring(true, opts),
-         {:ok, network} <- egress_network(opts, policy) do
-      wrap_in_jail(command, opts, policy, mode, network)
+         {:ok, network} <- egress_network(opts, policy),
+         {:ok, ssh_agent} <- ssh_agent(opts) do
+      wrap_in_jail(command, opts, policy, mode, network, ssh_agent)
     end
   end
 
   # `:strict` refuses below; otherwise agy runs unjailed and finds the
   # raw session bus itself.
   defp jail_agy({:error, reason}, command, opts, _policy, mode) do
-    with :ok <- if(mode == :strict, do: :ok, else: require_keyring(false, opts)),
+    with :ok <- require_no_ssh_agent(opts),
+         :ok <- if(mode == :strict, do: :ok, else: require_keyring(false, opts)),
          do: jail_unavailable(mode, command, reason)
+  end
+
+  # bd-ld8qde (G14): a `prod_ssh` projection hands the worker a key through a
+  # per-worker agent socket bound into the jail. Without a jail there is nothing
+  # to bind it into, and the worker would find the operator's own agent instead:
+  # refuse, whatever the mode.
+  defp require_no_ssh_agent(opts) do
+    case projection(opts) do
+      %Projection{ssh: nil} -> :ok
+      %Projection{} -> {:error, {:ssh_agent_unavailable, :no_jail}}
+    end
+  end
+
+  defp ssh_agent(opts) do
+    case Withholding.ssh_agent(
+           projection(opts),
+           Keyword.get(opts, :workspace),
+           Keyword.get(opts, :owner)
+         ) do
+      {:ok, socket} -> {:ok, socket}
+      {:error, reason} -> {:error, {:ssh_agent_unavailable, reason}}
+    end
+  end
+
+  defp projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection -> projection
+      _ -> Projection.unguarded()
+    end
   end
 
   # bd-8btihu: agy 1.2.16 authenticates only through a freedesktop Secret
@@ -658,7 +693,7 @@ defmodule Arbiter.Agents.Gemini do
     if ok?, do: :ok, else: {:error, {:no_keyring, @no_keyring_message}}
   end
 
-  defp wrap_in_jail(command, opts, policy, mode, network) do
+  defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent) do
     jail_opts =
       [
         worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
@@ -669,7 +704,9 @@ defmodule Arbiter.Agents.Gemini do
         # bd-3q2djr (G3): credential dirs, the install DB, the log root and
         # other workspaces' worktrees/repos are hidden from an agy worker.
         hide_reads: true
-      ] ++ if(network, do: [network: network], else: [])
+      ] ++
+        if(network, do: [network: network], else: []) ++
+        if(ssh_agent, do: [ssh_agent: ssh_agent], else: [])
 
     case Sandbox.wrap(policy, command, jail_opts) do
       {:ok, argv} ->
@@ -733,8 +770,13 @@ defmodule Arbiter.Agents.Gemini do
            safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
            worktree: worktree,
            infra: @egress_infra,
+           # bd-ld8qde (G14): what the ticket's declared permissions project —
+           # `network:` and binding hosts as grants, `prod_read` tunnels as
+           # fixed-destination bridges. Nothing undeclared.
+           grants: Withholding.grants(Keyword.get(opts, :task_id), projection(opts)),
            tunnels:
-             SecurityPolicy.egress_tunnels(policy) ++ Keyword.get(opts, :egress_tunnels, [])
+             SecurityPolicy.egress_tunnels(policy) ++
+               Keyword.get(opts, :egress_tunnels, []) ++ projection(opts).tunnels
          ) do
       {:ok, network, _run_id} -> {:ok, network}
       {:error, reason} -> {:error, {:egress_unavailable, reason}}

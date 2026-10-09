@@ -78,7 +78,8 @@ defmodule Arbiter.MCP.Scope do
             session_id: nil,
             can_dispatch: false,
             operator: false,
-            depth: 0
+            depth: 0,
+            permissions: []
 
   @type tier :: :worker | :coordinator | :refine
 
@@ -91,7 +92,8 @@ defmodule Arbiter.MCP.Scope do
           session_id: String.t() | nil,
           can_dispatch: boolean(),
           operator: boolean(),
-          depth: non_neg_integer()
+          depth: non_neg_integer(),
+          permissions: [String.t()]
         }
 
   @doc "The valid tier atoms."
@@ -99,6 +101,18 @@ defmodule Arbiter.MCP.Scope do
   def tiers, do: [:worker, :coordinator, :refine]
 
   # ---- minting ------------------------------------------------------------
+
+  @doc """
+  Whether the token carries the ticket permission `name` (G14, design §5.5): the
+  dispatch-time projection of the ticket's declared permissions, e.g.
+  `"tracker_write"` for the MCP tracker-write tools. Only a worker token carries
+  any; everything else is `[]`, so an undeclared permission is simply absent.
+  """
+  @spec permission?(t(), String.t()) :: boolean()
+  def permission?(%__MODULE__{permissions: permissions}, name), do: name in permissions
+
+  defp permissions_claim(list) when is_list(list), do: Enum.filter(list, &is_binary/1)
+  defp permissions_claim(_), do: []
 
   @doc """
   Mint a `:worker`-tier scope token for a slung task. The task's id, workspace,
@@ -124,7 +138,8 @@ defmodule Arbiter.MCP.Scope do
       task_id: task_id,
       repo: repo,
       can_dispatch: false,
-      depth: Keyword.get(opts, :depth, 0)
+      depth: Keyword.get(opts, :depth, 0),
+      permissions: permissions_claim(Keyword.get(opts, :permissions))
     }
     |> MCP.mint(Keyword.put_new(opts, :max_age, MCP.worker_max_age()))
   end
@@ -269,7 +284,8 @@ defmodule Arbiter.MCP.Scope do
        repo: nilable_string(c[:repo]),
        session_id: nil,
        can_dispatch: false,
-       depth: depth(c[:depth])
+       depth: depth(c[:depth]),
+       permissions: permissions_claim(c[:permissions])
      }}
   end
 

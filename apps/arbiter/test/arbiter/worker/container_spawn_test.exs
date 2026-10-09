@@ -12,6 +12,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Test.GitFixture
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
@@ -120,6 +121,49 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   end
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
+
+  describe "prepare/1 with a guardrail projection (G14, bd-ld8qde)" do
+    defp capture_egress(ctx) do
+      test = self()
+      inner = Keyword.fetch!(ctx.opts, :egress)
+
+      fn opts ->
+        send(test, {:egress_opts, opts})
+        inner.(opts)
+      end
+    end
+
+    test "the projection's tunnels join the run's fixed bridges and its hosts become the grants",
+         ctx do
+      projection = %{
+        Projection.sealed()
+        | hosts: ["api.example.com:443"],
+          tunnels: [{5432, "replica.internal", 5432}]
+      }
+
+      opts = [egress: capture_egress(ctx), projection: projection] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+
+      assert_received {:egress_opts, egress_opts}
+      assert {5432, "replica.internal", 5432} in Keyword.fetch!(egress_opts, :tunnels)
+      assert Keyword.fetch!(egress_opts, :grants).("bd-p7test") == ["api.example.com:443"]
+    end
+
+    test "a spawn with no projection asks the ticket's live network: grants", ctx do
+      opts = [egress: capture_egress(ctx)] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+      assert_received {:egress_opts, egress_opts}
+      assert is_function(Keyword.fetch!(egress_opts, :grants), 1)
+    end
+
+    test "prod_ssh is refused under podman: no agent socket can reach the container", ctx do
+      projection = %{Projection.sealed() | ssh: %{key_secret: "k", hosts: ["prod.internal:22"]}}
+      opts = [projection: projection] ++ ctx.opts
+
+      assert {:error, {:prod_ssh_unsupported, :podman}} = ContainerSpawn.prepare(opts)
+      refute_received {:egress_opts, _}
+    end
+  end
 
   describe "prepare/1 with --resume (bd-atsde3)" do
     test "carries the resumed session's JSONL into the run's fresh config dir", ctx do

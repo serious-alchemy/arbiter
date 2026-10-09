@@ -451,6 +451,29 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert ReviewGate.implementer_mcp_opts(state, :reviewer, Arbiter.Agents.Claude) == []
     end
 
+    test "the revise-round implementer's token carries the permission claims its projection granted",
+         ctx do
+      rig = rig(ctx, "feature/ci-claims")
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ctx.ws.id,
+        worktree_path: rig.wt,
+        repo: "trib/repo"
+      }
+
+      opts =
+        ReviewGate.implementer_mcp_opts(state, :implementer, Arbiter.Agents.Claude, [
+          "tracker_write"
+        ])
+
+      assert {:ok, scope} = Arbiter.MCP.Scope.from_token(opts[:arb_token])
+      assert Arbiter.MCP.Scope.permission?(scope, "tracker_write")
+
+      plain = ReviewGate.implementer_mcp_opts(state, :implementer, Arbiter.Agents.Claude)
+      assert {:ok, %{permissions: []}} = Arbiter.MCP.Scope.from_token(plain[:arb_token])
+    end
+
     test "red CI at the round cap escalates instead of reviewing", ctx do
       rig = rig(ctx, "feature/ci-5")
       start_forge(ctx, rig, [:failed, :running, :failed])

@@ -39,6 +39,39 @@ defmodule Arbiter.Guardrails.ConfigTest do
     assert Config.validate(@valid) == []
   end
 
+  describe "bindings feed ticket grants (G14)" do
+    defp binding_errors(binding), do: Config.validate(%{"bindings" => %{"prod_read" => binding}})
+
+    test "a binding host is never a wildcard: ticket grants don't wildcard" do
+      assert [error] = binding_errors(%{"hosts" => ["*.internal.example.com:443"]})
+      assert error =~ "guardrails.bindings.prod_read.hosts"
+    end
+
+    test "a tunnel is HOST:PORT or LOCAL:HOST:PORT" do
+      assert binding_errors(%{
+               "tunnels" => ["replica.internal:5432", "15432:replica.internal:5432"]
+             }) ==
+               []
+
+      assert [_] = binding_errors(%{"tunnels" => ["replica.internal"]})
+      assert [_] = binding_errors(%{"tunnels" => ["x:replica.internal:5432"]})
+      assert [_] = binding_errors(%{"tunnels" => ["*.internal:5432"]})
+    end
+
+    test "token_env names the env var a tracker token lands in" do
+      assert Config.validate(%{
+               "bindings" => %{
+                 "tracker_write" => %{"token_secret" => "t", "token_env" => "GITLAB_TOKEN"}
+               }
+             }) == []
+
+      assert [_] =
+               Config.validate(%{
+                 "bindings" => %{"tracker_write" => %{"token_env" => "bad name"}}
+               })
+    end
+  end
+
   test "nil is valid (no block)" do
     assert Config.validate(nil) == []
   end
