@@ -1030,13 +1030,13 @@ defmodule Arbiter.Worker.StopReason do
     }
   end
 
-  @doc "`\"7.7M tokens against a cap of 3.0M tokens\"` — a tripped spend cap's figures, for pages."
+  @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
   @spec spend_cap_figures(%{cap: :tokens | :wall_clock_s, limit: number(), measured: number()}) ::
           String.t()
   def spend_cap_figures(%{cap: cap, limit: limit, measured: measured}),
     do: "#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}"
 
-  @doc "`\"token\"` / `\"wall-clock\"`."
+  @doc "The cap's name as it reads in a page: token or wall-clock."
   @spec spend_cap_label(:tokens | :wall_clock_s) :: String.t()
   def spend_cap_label(cap), do: cap_label(cap)
 
