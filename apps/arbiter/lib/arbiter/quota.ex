@@ -617,8 +617,7 @@ defmodule Arbiter.Quota do
   defp gating_workspaces(q, account, shown) do
     account.id
     |> Resolver.workspaces()
-    |> Enum.reject(&(shown && &1.id == shown.id))
-    |> Enum.reject(&Arbiter.Quota.continue_mode?/1)
+    |> Enum.reject(&((shown && &1.id == shown.id) || Arbiter.Quota.continue_mode?(&1)))
     |> Enum.map(&{&1, gating_for(q, account, &1)})
     |> Enum.reject(fn {_ws, gating} -> gating.gating_window == nil end)
     |> Enum.map(fn {ws, gating} ->
