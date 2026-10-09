@@ -179,7 +179,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:env) => [{String.t(), String.t()}],
           optional(:codex_auth) => {Path.t(), Path.t()} | nil,
           optional(:pod) => String.t() | nil,
-          optional(:deps_cache) => map() | nil
+          optional(:deps_cache) => map() | nil,
+          optional(:git_secrets) => [map()]
         }
 
   @doc "The path of the `claude` binary inside the container."
