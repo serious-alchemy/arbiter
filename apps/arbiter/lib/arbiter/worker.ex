@@ -4425,23 +4425,30 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # bd-2ujj2p: the PR's CHANGES_REQUESTED body is the review of record — a
-  # reviewer posts it via a tool call that never reaches `output_lines`, so the
-  # stdout text is at best narration. Prefer it; fall back to the
-  # stdout-recovered findings only when the PR holds none.
+  # bd-2ujj2p: pick the findings a fix round is briefed with. Findings the
+  # reviewer itself printed (severity tags or file:line) are this run's review;
+  # the PR holds every earlier round's reviews too, so it is only consulted when
+  # stdout carries no concrete findings (a review posted via a tool call leaves
+  # just narration there). Even then only the newest CHANGES_REQUESTED review is
+  # used. Last resort: whatever text `recover_findings` accepts.
   defp request_changes_findings(%State{} = state, output_lines, source, findings) do
-    case adapter_request_changes_findings(state) do
-      {:ok, _} = pr_findings ->
-        pr_findings
+    recovered =
+      Arbiter.Worker.ReviewGate.recover_findings(output_lines, state.run_id, source, findings)
 
-      :empty ->
-        Arbiter.Worker.ReviewGate.recover_findings(
-          output_lines,
-          state.run_id,
-          source,
-          findings
-        )
+    with {:ok, text} <- recovered,
+         true <- concrete_findings?(text) do
+      recovered
+    else
+      _ ->
+        case adapter_request_changes_findings(state) do
+          {:ok, _} = pr_findings -> pr_findings
+          :empty -> recovered
+        end
     end
+  end
+
+  defp concrete_findings?(text) do
+    Regex.match?(~r/\[(?:critical|high|medium|low)\]|[\w\/.-]+\.\w+:\d+/i, text)
   end
 
   # bd-1j5x6u: mirror ReviewGate's partial-verification guard (bd-4te55l) on the
@@ -4472,23 +4479,17 @@ defmodule Arbiter.Worker do
   # findings are clearly marked as possibly-stale before the coordinator/
   # implementer acts on them (bd-4te55l via bd-1j5x6u).
   defp route_request_changes_verdict(%State{} = state, :empty) do
-    case adapter_request_changes_findings(state) do
-      :empty ->
-        # bd-2ujj2p: nothing to hand an implementer. A fix round against an empty
-        # list changes nothing and burns a round plus a park, so park for the
-        # coordinator instead (a parked outcome schedules no fix round).
-        park_rejected(
-          state,
-          :no_verdict,
-          "Reviewer returned VERDICT: REQUEST_CHANGES but listed no findings — none in its " <>
-            "output and none in the PR review. No fix round was started; read the PR and " <>
-            "relay the findings, or re-run the review.",
-          :inconclusive
-        )
-
-      found ->
-        route_request_changes_verdict(state, found)
-    end
+    # bd-2ujj2p: nothing to hand an implementer. A fix round against an empty
+    # list changes nothing and burns a round plus a park, so park for the
+    # coordinator instead (a parked outcome schedules no fix round).
+    park_rejected(
+      state,
+      :no_verdict,
+      "Reviewer returned VERDICT: REQUEST_CHANGES but listed no findings — none in its " <>
+        "output and none in the PR review. No fix round was started; read the PR and " <>
+        "relay the findings, or re-run the review.",
+      :inconclusive
+    )
   end
 
   defp route_request_changes_verdict(%State{} = state, {:ok, findings}),
@@ -4519,10 +4520,16 @@ defmodule Arbiter.Worker do
           {:approve, ""}
 
         Map.get(feedback, :changes_requested) ->
+          # Reviews are chronological: only the newest CHANGES_REQUESTED one is
+          # the current round's; older ones were already addressed.
           body =
             reviews
             |> Enum.filter(&(&1[:state] == "CHANGES_REQUESTED"))
-            |> Enum.map_join("\n", &Map.get(&1, :body, ""))
+            |> List.last()
+            |> case do
+              nil -> ""
+              review -> Map.get(review, :body, "")
+            end
 
           {:request_changes, body}
 

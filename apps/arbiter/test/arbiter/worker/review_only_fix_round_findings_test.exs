@@ -117,6 +117,55 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
     refute args.findings =~ "post my review"
   end
 
+  test "only the newest CHANGES_REQUESTED review reaches the fix round" do
+    {_task, _ws, _pid} =
+      start_reviewer(
+        ["I'll post my review to the PR now.", "VERDICT: REQUEST_CHANGES", "arb done"],
+        pr_feedback: %{
+          changes_requested: true,
+          latest_review_id: 2,
+          feedback: [
+            %{
+              kind: :review,
+              state: "CHANGES_REQUESTED",
+              body: "[Medium] lib/old.ex:1 already fixed"
+            },
+            %{
+              kind: :review,
+              state: "CHANGES_REQUESTED",
+              body: "[Medium] lib/new.ex:9 current finding"
+            }
+          ]
+        }
+      )
+
+    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert args.findings =~ "lib/new.ex:9 current finding"
+    refute args.findings =~ "lib/old.ex"
+  end
+
+  test "reviewer's own concrete findings win over older PR reviews" do
+    {_task, _ws, _pid} =
+      start_reviewer(
+        ["reading the diff"] ++ @body ++ ["VERDICT: REQUEST_CHANGES", "VERIFICATION: FULL"],
+        pr_feedback: %{
+          changes_requested: true,
+          latest_review_id: 1,
+          feedback: [
+            %{
+              kind: :review,
+              state: "CHANGES_REQUESTED",
+              body: "[Medium] lib/old.ex:1 already fixed"
+            }
+          ]
+        }
+      )
+
+    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert args.findings =~ "lib/foo.ex:12 missing nil guard"
+    refute args.findings =~ "lib/old.ex"
+  end
+
   test "findings printed after the VERDICT line still reach the fix round" do
     {_task, _ws, _pid} = start_reviewer(["VERDICT: REQUEST_CHANGES"] ++ @body)
 
