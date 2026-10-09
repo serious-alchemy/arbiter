@@ -19,6 +19,7 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.Sandbox
@@ -637,8 +638,9 @@ defmodule Arbiter.Agents.Gemini do
     # is not enough.
     with :ok <- require_keyring(true, opts),
          {:ok, network} <- egress_network(opts, policy),
-         {:ok, ssh_agent} <- ssh_agent(opts) do
-      wrap_in_jail(command, opts, policy, mode, network, ssh_agent)
+         {:ok, ssh_agent} <- ssh_agent(opts),
+         {:ok, git_key} <- git_key(opts) do
+      wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key)
     end
   end
 
@@ -693,7 +695,28 @@ defmodule Arbiter.Agents.Gemini do
     if ok?, do: :ok, else: {:error, {:no_keyring, @no_keyring_message}}
   end
 
-  defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent) do
+  # bd-9cygoo (G16): a deploy key for the ticket's repo, staged on the host and
+  # bound into the jail as its only identity. Any other kind of scoped credential
+  # (a token) travels in the spawn env, which the jail passes through.
+  defp git_key(opts) do
+    case Keyword.get(opts, :git_credential) do
+      %GitCredential{mode: :scoped, entry: %{kind: :deploy_key}} = plan ->
+        case GitCredential.prepare(
+               plan,
+               Keyword.get(opts, :workspace),
+               Keyword.get(opts, :owner),
+               worktree_path: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
+             ) do
+          {:ok, %{key_path: path}} -> {:ok, path}
+          {:error, reason} -> {:error, {:git_credential_unavailable, reason}}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key) do
     jail_opts =
       [
         worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
@@ -706,7 +729,8 @@ defmodule Arbiter.Agents.Gemini do
         hide_reads: true
       ] ++
         if(network, do: [network: network], else: []) ++
-        if(ssh_agent, do: [ssh_agent: ssh_agent], else: [])
+        if(ssh_agent, do: [ssh_agent: ssh_agent], else: []) ++
+        if(git_key, do: [git_ssh_key: git_key], else: [])
 
     case Sandbox.wrap(policy, command, jail_opts) do
       {:ok, argv} ->

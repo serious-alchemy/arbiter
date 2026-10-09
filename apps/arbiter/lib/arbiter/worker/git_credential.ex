@@ -595,10 +595,27 @@ defmodule Arbiter.Worker.GitCredential do
   # ---- staging & delivery -----------------------------------------------------------
 
   @doc """
+  The directory deploy keys are staged in, under the scratch root. Every jail blanks
+  it (`Arbiter.Worker.Jail.mask_paths/0`) and binds back only its own key, so a
+  sibling worker's key is unreadable; it has to exist by then, because a read-only
+  bind of `/` shows a directory created after the jail started.
+  """
+  @spec default_dir() :: Path.t()
+  def default_dir, do: Path.join(Arbiter.Config.Paths.scratch_root(), "git-key")
+
+  @doc "Creates (`0700`) and returns `default_dir/0`."
+  @spec ensure_default_dir() :: Path.t()
+  def ensure_default_dir do
+    dir = default_dir()
+    _ = File.mkdir_p(dir)
+    _ = File.chmod(dir, 0o700)
+    dir
+  end
+
+  @doc """
   Writes the material's key (if it has one) for the worker `owner` and returns
   `%{dir:, key_path:, env:}`. The file is `0600` in a `0700` directory under the
-  worker temp root (`:root` overrides it) that is removed when `owner` exits
-  (`Arbiter.Worker.RunTmp.Reaper`). Idempotent per owner: a resume or a second
+  `default_dir/0` (`:root` overrides it); the directory is removed when `owner` exits. Idempotent per owner: a resume or a second
   caller (the agy jail, then the session) gets the same path.
   """
   @spec stage(Material.t() | nil, pid(), keyword()) ::
@@ -607,8 +624,7 @@ defmodule Arbiter.Worker.GitCredential do
   def stage(nil, _owner, _opts), do: {:ok, %{dir: nil, key_path: nil, env: []}}
 
   def stage(%Material{kind: :deploy_key, key: key} = material, owner, opts) do
-    custom_root? = Keyword.has_key?(opts, :root)
-    root = Keyword.get(opts, :root) || Arbiter.Config.Paths.worker_tmp_root()
+    root = Keyword.get(opts, :root) || ensure_default_dir()
     hash = :crypto.hash(:sha256, :erlang.term_to_binary(owner))
     name = "git-key-" <> Base.encode32(binary_part(hash, 0, 8), case: :lower, padding: false)
     dir = Path.join(root, name)
@@ -618,7 +634,7 @@ defmodule Arbiter.Worker.GitCredential do
          :ok <- File.chmod(dir, 0o700),
          :ok <- File.write(path, key),
          :ok <- File.chmod(path, 0o600) do
-      if not custom_root?, do: Arbiter.Worker.RunTmp.Reaper.track(owner, dir)
+      remove_when_down(owner, dir)
       {:ok, %{dir: dir, key_path: path, env: Material.env(material, path)}}
     else
       {:error, reason} -> {:error, {:git_credential_stage_failed, reason}}
@@ -628,15 +644,62 @@ defmodule Arbiter.Worker.GitCredential do
   def stage(%Material{} = material, _owner, _opts),
     do: {:ok, %{dir: nil, key_path: nil, env: Material.env(material, nil)}}
 
+  # A worker killed without cleaning up must not leave its key on disk: this
+  # outlives nothing but the server (leftovers of a dead server go at the next
+  # stage, `sweep/1`).
+  defp remove_when_down(owner, dir) when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> File.rm_rf(dir)
+        end
+      end)
+
+    :ok
+  end
+
+  defp remove_when_down(_owner, _dir), do: :ok
+
+  @doc """
+  Removes staged keys older than `:max_age_ms` (default a day): what a server that
+  died left behind. Run at boot.
+  """
+  @spec sweep(keyword()) :: [Path.t()]
+  def sweep(opts \\ []) do
+    root = Keyword.get(opts, :root) || default_dir()
+    cutoff = System.os_time(:second) - div(Keyword.get(opts, :max_age_ms, 86_400_000), 1000)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        stale =
+          entries
+          |> Enum.map(&Path.join(root, &1))
+          |> Enum.filter(fn dir ->
+            match?({:ok, %File.Stat{mtime: mtime}} when mtime < cutoff, File.stat(dir, time: :posix))
+          end)
+
+        Enum.each(stale, &File.rm_rf/1)
+        stale
+
+      _ ->
+        []
+    end
+  end
+
   @key_options "-o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes"
 
   @doc "The ssh options that offer exactly the key at `key_path` and no agent."
   @spec ssh_options(Path.t()) :: String.t()
   def ssh_options(key_path), do: "-i #{shell_quote(key_path)} #{@key_options}"
 
-  @doc "The `GIT_SSH_COMMAND` for a deploy key at `key_path`."
+  @doc """
+  The `GIT_SSH_COMMAND` for a deploy key at `key_path` where no jail composes it
+  (`-F /dev/null`: a `Host` block's `IdentityFile` cannot add the operator's key).
+  """
   @spec ssh_command(Path.t()) :: String.t()
-  def ssh_command(key_path), do: "ssh " <> ssh_options(key_path)
+  def ssh_command(key_path), do: "ssh -F /dev/null " <> ssh_options(key_path)
 
   defp shell_quote(path) do
     if path =~ ~r/\A[A-Za-z0-9_\/.@:+=,-]+\z/,

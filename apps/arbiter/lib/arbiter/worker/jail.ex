@@ -209,7 +209,8 @@ defmodule Arbiter.Worker.Jail do
           optional(:secret_files) => [String.t()],
           optional(:hide) => Hide.t() | nil,
           optional(:network) => network() | nil,
-          optional(:ssh_agent) => String.t() | nil
+          optional(:ssh_agent) => String.t() | nil,
+          optional(:git_ssh_key) => String.t() | nil
         }
 
   # bd-cfktou (G6): network mode. `proxy_socket` is the run's G5 proxy socket
@@ -237,6 +238,11 @@ defmodule Arbiter.Worker.Jail do
     * `:writable_paths` — extra writable paths (`sandbox.writable_paths`);
       normalized by `writable_paths/1`.
     * `:env` — extra `{name, value}` pairs set inside the jail.
+    * `:git_ssh_key` — the path of the worker's repo-scoped deploy key (G16, bd-9cygoo,
+      `Arbiter.Worker.GitCredential`). It is bound read-only at its own path over the
+      blanked key dir, `GIT_SSH_COMMAND` names it (`-i`, `IdentitiesOnly`, no agent,
+      composed with the egress `ProxyCommand`), and the hide set binds back none of
+      the operator's default identities. A missing file refuses the spawn.
     * `:hide_reads` — also hide the sensitive read paths of `Arbiter.Worker.Jail.Hide`
       (credential dirs, the install DB and `~/.arbiter`, the output-log root,
       every other worktree, other workspaces' repos) behind `--tmpfs` and
@@ -263,7 +269,8 @@ defmodule Arbiter.Worker.Jail do
          {:ok, git} <- git(worktree),
          {:ok, toolchain_env} <- prepare_toolchain(Keyword.get(opts, :home)),
          {:ok, network} <- network_spec(Keyword.get(opts, :network)),
-         {:ok, ssh_agent} <- ssh_agent_spec(Keyword.get(opts, :ssh_agent)) do
+         {:ok, ssh_agent} <- ssh_agent_spec(Keyword.get(opts, :ssh_agent)),
+         {:ok, git_ssh_key} <- git_ssh_key_spec(Keyword.get(opts, :git_ssh_key)) do
       spec = %{
         bwrap: bwrap_path(),
         worktree: worktree,
@@ -272,11 +279,15 @@ defmodule Arbiter.Worker.Jail do
         writable_paths: run_tmp_paths() ++ writable_paths(Keyword.get(opts, :writable_paths, [])),
         env:
           network_env(network) ++
-            ssh_env(network) ++ toolchain_env ++ Keyword.get(opts, :env, []),
+            ssh_env(network, git_ssh_key) ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
         network: network,
         ssh_agent: ssh_agent,
-        hide: if(Keyword.get(opts, :hide_reads, false), do: hide_spec(git, opts))
+        git_ssh_key: git_ssh_key,
+        hide:
+          if(Keyword.get(opts, :hide_reads, false),
+            do: hide_spec(git, [{:scoped_git, git_ssh_key != nil} | opts])
+          )
       }
 
       proxy = keyring_proxy(opts)
@@ -309,7 +320,7 @@ defmodule Arbiter.Worker.Jail do
       end
 
     repos = for {:hide_repos, repos} <- opts, do: {:repos, repos}
-    Hide.paths([own_repo: own_repo] ++ repos)
+    Hide.paths([own_repo: own_repo, scoped_git: Keyword.get(opts, :scoped_git, false)] ++ repos)
   end
 
   # bd-5ad4ch: every spawn's TMPDIR lives under the worker temp root, which sits
@@ -408,6 +419,20 @@ defmodule Arbiter.Worker.Jail do
 
   defp ssh_agent_args(nil), do: []
   defp ssh_agent_args(socket), do: ["--tmpfs", Path.dirname(socket)] ++ ro_bind(socket)
+
+  # G16 (bd-9cygoo): the worker's own deploy key. Every jail blanks the key dir
+  # (`mask_paths/0`); this one binds just its own file back, so no sibling's key is
+  # reachable.
+  @doc false
+  @spec git_ssh_key_spec(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def git_ssh_key_spec(nil), do: {:ok, nil}
+
+  def git_ssh_key_spec(key) when is_binary(key) do
+    if exists?(key), do: {:ok, key}, else: {:error, {:git_ssh_key_missing, key}}
+  end
+
+  defp git_key_args(nil), do: []
+  defp git_key_args(key), do: ro_bind(key)
 
   defp ssh_agent_env(nil), do: []
   defp ssh_agent_env(socket), do: ["--setenv", "SSH_AUTH_SOCK", socket]
@@ -535,6 +560,7 @@ defmodule Arbiter.Worker.Jail do
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       git_args(Map.get(spec, :git), worktree),
       ssh_agent_args(Map.get(spec, :ssh_agent)),
+      git_key_args(Map.get(spec, :git_ssh_key)),
       secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
       ssh_agent_env(Map.get(spec, :ssh_agent)),
@@ -652,7 +678,8 @@ defmodule Arbiter.Worker.Jail do
       "/run/dbus",
       "/run/systemd/resolve",
       Arbiter.MCP.OperatorProof.socket_dir(),
-      Arbiter.Worker.SshAgent.ensure_default_dir()
+      Arbiter.Worker.SshAgent.ensure_default_dir(),
+      Arbiter.Worker.GitCredential.ensure_default_dir()
     ]
     |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
     |> Enum.map(&Path.expand/1)
@@ -989,10 +1016,10 @@ defmodule Arbiter.Worker.Jail do
   # bd-5d5mrs: the default `GIT_SSH_COMMAND` for `wrap/2` — logged so a
   # jailed worker's transport is visible, not a surprise like agy's own
   # `ssh -F /dev/null` workaround.
-  defp ssh_env(network) do
+  defp ssh_env(network, git_ssh_key) do
     case ssh_shadow_config() do
       {:ok, nil} ->
-        ssh_command(nil, network)
+        ssh_command(with_key("ssh", git_ssh_key, nil), network)
 
       {:ok, path} ->
         Logger.info(
@@ -1001,7 +1028,7 @@ defmodule Arbiter.Worker.Jail do
             "#{ssh_config_path()}, bd-5d5mrs)"
         )
 
-        ssh_command("ssh -F #{path}", network)
+        ssh_command(with_key("ssh -F #{path}", git_ssh_key, path), network)
 
       {:error, reason} ->
         Logger.warning(
@@ -1010,9 +1037,15 @@ defmodule Arbiter.Worker.Jail do
             "ownership check (bd-5d5mrs)"
         )
 
-        ssh_command(nil, network)
+        ssh_command(with_key("ssh", git_ssh_key, nil), network)
     end
   end
+
+  # A deploy key is offered alone: `-i` plus `IdentitiesOnly`, no agent. With no key
+  # the default stands (`nil` when it needs no `ssh` override at all).
+  defp with_key(base, nil, nil), do: if(base == "ssh", do: nil, else: base)
+  defp with_key(base, nil, _path), do: base
+  defp with_key(base, key, _path), do: base <> " " <> Arbiter.Worker.GitCredential.ssh_options(key)
 
   # In network mode there is no route to a git remote, so ssh goes through the
   # run's proxy (bd-cfktou): `ProxyCommand` hands `%h:%p` to the loopback

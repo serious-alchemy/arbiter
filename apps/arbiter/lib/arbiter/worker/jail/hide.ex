@@ -88,7 +88,9 @@ defmodule Arbiter.Worker.Jail.Hide do
   tests): `:operator_home`, `:data_dir`, `:database`, `:accounts_root`,
   `:worktree_root`, `:log_root`, `:sessions_root`, `:agy_home_root`,
   `:grok_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
-  (the repo the worker's worktree belongs to, never hidden) and `:unmask`.
+  (the repo the worker's worktree belongs to, never hidden) and `:unmask`. `:scoped_git`
+  (G16: the worker has a repo-scoped git credential, so no operator identity
+  file is bound back).
   """
   @spec paths(keyword()) :: t()
   def paths(opts \\ []) do
@@ -118,7 +120,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       |> Enum.uniq()
 
     keep =
-      (ssh_keep(home) ++ gh_keep(home) ++ grok_keep(home) ++ unmask)
+      (ssh_keep(home, Keyword.get(opts, :scoped_git, false)) ++ gh_keep(home) ++ grok_keep(home) ++ unmask)
       |> existing(&File.exists?/1)
       |> Enum.filter(&under_any?(&1, dirs))
       |> Enum.uniq()
@@ -220,8 +222,12 @@ defmodule Arbiter.Worker.Jail.Hide do
   defp grok_keep(nil), do: []
   defp grok_keep(home), do: Enum.map(@grok_keep, &Path.join([home, ".grok", &1]))
 
-  defp ssh_keep(nil), do: []
-  defp ssh_keep(home), do: Enum.map(@ssh_keep, &Path.join([home, ".ssh", &1]))
+  defp ssh_keep(nil, _scoped?), do: []
+
+  defp ssh_keep(home, scoped?) do
+    names = if scoped?, do: @ssh_keep -- (@identities ++ Enum.map(@identities, &(&1 <> ".pub"))), else: @ssh_keep
+    Enum.map(names, &Path.join([home, ".ssh", &1]))
+  end
 
   # A keyring-backed gh login keeps no secret in `hosts.yml` (the token sits in
   # the Secret Service, which the jail reaches over the filtered dbus proxy), so
