@@ -230,6 +230,46 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert escalation.body =~ "feature/x"
   end
 
+  test "arb done on a podman-backed worker waits for the container before force-removing it",
+       %{repo: repo, ws: ws} do
+    # bd-9ss153 / #590: the done path must pass `grace_ms:` to the container stop,
+    # so `podman wait` runs ahead of `rm --force` and a clean exit is not
+    # recorded as 137.
+    {:ok, task} =
+      Ash.create(Issue, %{title: "podman done", workspace_id: ws.id, issue_type: :feature})
+
+    {_, 0} = git(["branch", "feature/podman"], repo)
+    test_pid = self()
+
+    put_app_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+      send(test_pid, {:podman, args})
+      {"", 0}
+    end)
+
+    name = "arb-#{task.id}-1234"
+
+    meta = %{
+      branch: "feature/podman",
+      repo_path: repo,
+      target_branch: "no-such-target",
+      merge_title: "Merge #{task.id}"
+    }
+
+    {:ok, pid} =
+      Worker.start(task_id: task.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+    :ok = Worker.report(pid, :claude_spawn, %{sandbox: %{name: name}})
+
+    send(pid, {:__claude_session_done__, "arb done"})
+
+    # Plain `receive` takes messages in mailbox order, so this pins the order.
+    assert_receive {:podman, first}, 5_000
+    assert first == ["wait", name]
+    assert_receive {:podman, ["rm", "--force" | _]}, 5_000
+  end
+
   test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the task",
        %{repo: repo, ws: ws} do
     # bd-1rhyla: a conflicted auto-merge once left main half-merged + uncompilable

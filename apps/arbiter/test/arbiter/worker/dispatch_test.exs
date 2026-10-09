@@ -4808,14 +4808,89 @@ defmodule Arbiter.Worker.DispatchTest do
       end
     end
 
-    # bd-atsde3 AC2: the Reconciler's post-restart auto-resume is a briefing
-    # resume (`Dispatch.resume/2`), never `claude --resume <sid>`, so it cannot
-    # hit "No conversation found" in a podman run's fresh config dir.
-    test "Reconciler.default_resume/1 respawns claude without --resume", %{ws: ws, tmp: tmp} do
-      argv_file = Path.join(tmp, "claude-reconciler-argv.txt")
+    # bd-33n9v4: the Reconciler's post-restart auto-resume continues the
+    # interrupted Claude session (`--resume <sid>`) when its JSONL is anywhere
+    # SessionHistory can find it (the interrupted run's live config dir here),
+    # and degrades to a briefing resume (no `--resume`) only when it is not.
+    for {label, with_history?} <- [{"present", true}, {"missing", false}] do
+      test "Reconciler.default_resume/1 with claude session history #{label}", %{ws: ws, tmp: tmp} do
+        argv_file = Path.join(tmp, "claude-reconciler-argv.txt")
+        :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
+        sid = "99999999-2222-3333-4444-#{:erlang.unique_integer([:positive])}"
+
+        {:ok, task} = Ash.create(Issue, %{title: "reconciler resume", workspace_id: ws.id})
+
+        {:ok, first} =
+          Dispatch.dispatch(task.id,
+            force: true,
+            repo: "rs/repo",
+            start_driver: false,
+            start_claude: true,
+            agent_type: :claude,
+            preflight: false
+          )
+
+        _ = wait_for_argv!(argv_file)
+        :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+        config_dir = Path.join(tmp, "interrupted-config")
+
+        if unquote(with_history?) do
+          File.mkdir_p!(Path.join([config_dir, "projects", "-some-slug"]))
+          File.write!(Path.join([config_dir, "projects", "-some-slug", sid <> ".jsonl"]), "{}\n")
+        end
+
+        {:ok, _run} =
+          Ash.create(Run, %{
+            task_id: task.id,
+            task_title: task.title,
+            repo: "rs/repo",
+            workspace_id: ws.id,
+            state: :finished,
+            outcome: :failed,
+            started_at: DateTime.utc_now(),
+            session_id: sid,
+            config_dir: config_dir,
+            provider: "claude"
+          })
+
+        {:ok, _event} =
+          Ash.create(UsageEvent, %{
+            task_id: task.id,
+            workspace_id: ws.id,
+            repo: "rs/repo",
+            step: :work,
+            provider: "claude",
+            session_id: sid,
+            occurred_at: DateTime.utc_now()
+          })
+
+        File.rm!(argv_file)
+        {:ok, issue} = Ash.get(Issue, task.id)
+
+        assert {:ok, _} =
+                 Arbiter.Workers.Reconciler.default_resume(issue,
+                   start_driver: false,
+                   preflight: false
+                 )
+
+        args = wait_for_argv!(argv_file)
+
+        if unquote(with_history?) do
+          assert "--resume" in args and sid in args
+        else
+          refute "--resume" in args
+          refute sid in args
+        end
+      end
+    end
+
+    test "Reconciler.default_resume/1 with no session at all falls back to a briefing resume",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "claude-reconciler-nosession-argv.txt")
       :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
 
-      {:ok, task} = Ash.create(Issue, %{title: "reconciler resume", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "reconciler no session", workspace_id: ws.id})
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
@@ -4829,18 +4904,6 @@ defmodule Arbiter.Worker.DispatchTest do
 
       _ = wait_for_argv!(argv_file)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
-
-      {:ok, _event} =
-        Ash.create(UsageEvent, %{
-          task_id: task.id,
-          workspace_id: ws.id,
-          repo: "rs/repo",
-          step: :work,
-          provider: "claude",
-          session_id: "99999999-2222-3333-4444-555555555555",
-          occurred_at: DateTime.utc_now()
-        })
-
       File.rm!(argv_file)
       {:ok, issue} = Ash.get(Issue, task.id)
 
@@ -4850,9 +4913,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      args = wait_for_argv!(argv_file)
-      refute "--resume" in args
-      refute "99999999-2222-3333-4444-555555555555" in args
+      refute "--resume" in wait_for_argv!(argv_file)
     end
 
     # bd-b7e33c post-merge finding (2026-09-19), corrected 2026-09-21 per
