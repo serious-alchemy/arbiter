@@ -3317,16 +3317,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # left real work uncommitted" (resume it once, then escalate if it's still
     # dirty) from "nothing changed at all" (escalate immediately; there is no
     # new diff to re-review).
-    {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha, response)
-
-    # bd-dun10t: a fix round that red CI launched and that changed nothing may
-    # simply have met a flake. Rerun CI (bounded) and re-read it before parking.
-    {outcome, commit_gate} = ci_noop_outcome({outcome, commit_gate}, state)
-
-    # bd-cbbgot: a no-diff round on a head no reviewer has read is not a stalled
-    # worker — the fix was already pushed. Review that head instead of parking.
-    {outcome, commit_gate} =
-      unreviewed_head_outcome({outcome, commit_gate}, state, new_head_sha)
+    {outcome, commit_gate} = no_change_outcome(state, new_head_sha, response)
 
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
@@ -3371,11 +3362,8 @@ defmodule Arbiter.Worker.ReviewGate do
       :escalate_uncommitted ->
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
-      :review_unreviewed_head ->
-        review_unreviewed_head(state, new_head_sha)
-
       :escalate_no_changes ->
-        escalate_or_rerun_ci(state, new_head_sha)
+        escalate_or_rerun_ci(state, new_head_sha, commit_gate)
 
       :escalate_no_changes_after_non_file_fix ->
         {:done,
@@ -3416,6 +3404,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
 
+  # The commit gate's verdict on this round, refined for the two ways a no-diff
+  # round is not a stall: red CI that may be a flake (bd-dun10t), and a head no
+  # reviewer has read yet (bd-cbbgot) — the latter reviews it rather than parks.
+  defp no_change_outcome(state, new_head_sha, response) do
+    state
+    |> commit_gate_outcome(new_head_sha, response)
+    |> ci_noop_outcome(state)
+    |> unreviewed_head_outcome(state, new_head_sha)
+  end
+
   defp ci_noop_outcome({:escalate_no_changes, _} = outcome, state) do
     if ci_noop_rerun_allowed?(state),
       do: {:escalate_no_changes, :reran_ci_after_no_changes},
@@ -3430,7 +3428,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # that rerun stays red. Not for an approval-gap round, which has its own rule.
   defp unreviewed_head_outcome({:escalate_no_changes, :escalated_no_changes}, state, new_head_sha) do
     if not approval_gap_pending?(state) and unreviewed_head?(state, new_head_sha),
-      do: {:review_unreviewed_head, :rereviewed_unreviewed_head},
+      do: {:escalate_no_changes, :rereviewed_unreviewed_head},
       else: {:escalate_no_changes, :escalated_no_changes}
   end
 
@@ -3475,7 +3473,10 @@ defmodule Arbiter.Worker.ReviewGate do
     _ -> true
   end
 
-  defp escalate_or_rerun_ci(state, new_head_sha) do
+  defp escalate_or_rerun_ci(state, new_head_sha, :rereviewed_unreviewed_head),
+    do: review_unreviewed_head(state, new_head_sha)
+
+  defp escalate_or_rerun_ci(state, new_head_sha, _commit_gate) do
     if ci_noop_rerun_allowed?(state),
       do: rerun_ci_after_no_changes(state, new_head_sha),
       else: {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
