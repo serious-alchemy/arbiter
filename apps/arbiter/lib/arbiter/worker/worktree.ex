@@ -943,6 +943,68 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  The sha of `refs/remotes/origin/<branch>` in `repo_path`, after fetching it from
+  `origin` — the forge's tip of `branch` as of now. `nil` when the fetch fails or
+  the ref does not resolve (callers that must not act on a stale tip treat that as
+  "cannot tell").
+  """
+  @spec fresh_origin_tip(path(), String.t()) :: String.t() | nil
+  def fresh_origin_tip(repo_path, branch) when is_binary(repo_path) and is_binary(branch) do
+    with :ok <- fetch_origin(repo_path, branch),
+         {:ok, out} <-
+           run_git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/" <> branch],
+             cd: repo_path
+           ) do
+      case String.trim(out) do
+        "" -> nil
+        sha -> sha
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Whether merging `head` into `target` (both revs resolvable from `path`) conflicts,
+  by `git merge-tree --write-tree`: `:clean`, `{:conflict, files}` naming the
+  conflicted paths, or `:unknown` when git could not say (an unreadable rev, no git).
+  Writes only merge objects; never touches the index or working tree.
+  """
+  @spec merge_conflict(path(), String.t(), String.t()) ::
+          :clean | {:conflict, [String.t()]} | :unknown
+  def merge_conflict(path, target, head)
+      when is_binary(path) and is_binary(target) and is_binary(head) do
+    args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", target, head]
+
+    cond do
+      not File.dir?(path) ->
+        :unknown
+
+      match?({:error, _}, PrivateClone.guard(path)) ->
+        :unknown
+
+      true ->
+        case System.cmd("git", args, stderr_to_stdout: true, cd: path) do
+          {_out, 0} -> :clean
+          {out, 1} -> {:conflict, conflicted_files(out)}
+          {_out, _other} -> :unknown
+        end
+    end
+  rescue
+    ErlangError -> :unknown
+  end
+
+  # `--name-only` output: the merged tree's sha, then one conflicted path per line
+  # up to the blank line that ends the list.
+  defp conflicted_files(output) do
+    output
+    |> String.split("\n")
+    |> Enum.drop(1)
+    |> Enum.take_while(&(&1 != ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
   The sha `branch` points at on `origin`, read live with `git ls-remote` from the
   checkout at `path` — `nil` when origin has no such branch or cannot be reached.
 
