@@ -813,4 +813,29 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     do: Enum.chunk_every(argv, 2, 1) |> Enum.any?(&(&1 == ["-e", name]))
 
   defp has_literal?(argv, pair), do: has_inherit?(argv, pair)
+
+  describe "stop/2 (bd-9ss153)" do
+    setup do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+        send(test_pid, {:podman, args})
+        {"0\n", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+    end
+
+    test "with a grace period waits for the clean exit before the force-remove" do
+      assert :ok = ContainerSpawn.stop(%{sandbox: %{name: "arb-t1"}}, grace_ms: 1_000)
+      assert_received {:podman, ["wait", "arb-t1"]}
+      assert_received {:podman, ["rm", "--force" | _]}
+    end
+
+    test "without one it force-removes at once" do
+      assert :ok = ContainerSpawn.stop(%{sandbox: %{name: "arb-t1"}})
+      assert_received {:podman, ["rm", "--force" | _]}
+      refute_received {:podman, ["wait" | _]}
+    end
+  end
 end

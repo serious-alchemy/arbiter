@@ -1251,10 +1251,23 @@ defmodule Arbiter.Worker.ContainerSpawn do
   Remove just the container of `port_args` (a spawn's args, or `nil`), so
   nothing of the worker's is left running in its clone. `teardown/1` is this
   plus the pod, the auth sync and the clone check.
+
+  `opts` takes `:grace_ms`: how long a container that is still finishing may
+  take to exit on its own before it is force-removed (see `Container.stop/2`).
   """
-  @spec stop(map() | nil) :: :ok
-  def stop(%{sandbox: %{name: name}}) when is_binary(name), do: Container.teardown(name)
-  def stop(_), do: :ok
+  @spec stop(map() | nil, keyword()) :: :ok
+  def stop(port_args, opts \\ [])
+
+  def stop(%{sandbox: %{name: name}}, opts) when is_binary(name) do
+    case Container.stop(name, opts) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("container stop of #{name} failed: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  def stop(_, _opts), do: :ok
 
   # With the container gone, whatever it left at the clone's `.git` is checked
   # before any host-side git runs there again (bd-6t7u81): the `.git` mount
