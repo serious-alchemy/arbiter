@@ -293,6 +293,11 @@ defmodule ArbiterWeb.Api.WorkerController do
       {"task is already awaiting review; the Watchdog will close it on MR merge",
        %{task_id: task_id}}
 
+  # bd-aw325c: the pause gate or the quota gate held it; the message names which
+  # and carries the window/used/threshold numbers.
+  defp refusal_text({:quota_held, _}, task_id, _verb),
+    do: {Dispatch.quota_held_message(task_id), %{task_id: task_id}}
+
   # bd-8suxac: the provider account the run would use has no free slot — the
   # request is fine, the fleet's state refuses it. `over_cap`
   # (`arb dispatch --over-cap`) overrides.
