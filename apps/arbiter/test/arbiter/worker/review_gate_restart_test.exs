@@ -200,6 +200,29 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
       refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
     end
 
+    test "an exit that lands just BEFORE the node sees itself stopping is still interrupted",
+         ctx do
+      rig = rig(ctx, "feature/rs-615c")
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 and pass_marker(rig) != nil end)
+
+      put_app_env(:arbiter, :worker_exit_grace_ms, 300)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+      gate_ref = Process.monitor(gate)
+      send(gate, {:worker_exited, rig.task.id <> "#review", 143})
+      _ = :sys.get_state(gate)
+      refute_received {:DOWN, ^gate_ref, _, _, _}
+
+      # The node flips to stopping inside the grace window.
+      put_app_env(:arbiter, :worker_node_stopping_override, true)
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+      assert %{"phase" => "reviewing", "round" => 1} = pass_marker(rig)
+      stop_workers(rig, :shutdown)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+    end
+
     test "a kill with the node NOT stopping still parks reviewer_failed", ctx do
       rig = rig(ctx, "feature/rs-615b")
       gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)

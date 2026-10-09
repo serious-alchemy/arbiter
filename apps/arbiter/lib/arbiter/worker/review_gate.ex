@@ -2554,14 +2554,13 @@ defmodule Arbiter.Worker.ReviewGate do
   def handle_info({:worker_exited, id, status}, %{current_id: id, phase: phase} = state)
       when phase in [:reviewing, :revising] and is_integer(status) and status != 0 do
     if Worker.node_stopping?() do
-      Logger.info(
-        "ReviewGate: #{phase} pass for task=#{state.task_id} was cut off by the node " <>
-          "stopping (exit #{status}); leaving it for the boot sweep to re-run"
-      )
-
-      {:stop, :shutdown, state}
+      pass_interrupted(status, state)
     else
-      pass_exited(status, state)
+      # Under systemd the pass's scope (`BindsTo=` the unit) is stopped before
+      # the service, so the exit can land while the node does not yet see itself
+      # stopping. Give it the Worker's own grace window before deciding.
+      Process.send_after(self(), {:__pass_exit_recheck__, id, status}, pass_exit_grace_ms())
+      {:noreply, state}
     end
   end
 
@@ -2570,6 +2569,18 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # A stale exit from an worker we've moved on from.
   def handle_info({:worker_exited, _other, _status}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:__pass_exit_recheck__, id, status},
+        %{current_id: id, phase: phase} = state
+      )
+      when phase in [:reviewing, :revising] do
+    if Worker.node_stopping?(),
+      do: pass_interrupted(status, state),
+      else: pass_exited(status, state)
+  end
+
+  def handle_info({:__pass_exit_recheck__, _other, _status}, state), do: {:noreply, state}
 
   # bd-cut6uv: a poll of the CI wait. The token says which wait armed it: a
   # poll for a wait that has since resolved (or been replaced) is ignored.
@@ -2683,6 +2694,17 @@ defmodule Arbiter.Worker.ReviewGate do
   defp server_shutdown?({:shutdown, :operator_stop}), do: false
   defp server_shutdown?({:shutdown, _}), do: true
   defp server_shutdown?(_), do: false
+
+  defp pass_interrupted(status, state) do
+    Logger.info(
+      "ReviewGate: #{state.phase} pass for task=#{state.task_id} was cut off by the node " <>
+        "stopping (exit #{status}); leaving it for the boot sweep to re-run"
+    )
+
+    {:stop, :shutdown, state}
+  end
+
+  defp pass_exit_grace_ms, do: Application.get_env(:arbiter, :worker_exit_grace_ms, 500)
 
   defp pass_exited(status, %{phase: :reviewing} = state) do
     case state |> clear_pass() |> attempt_finish(status) do
