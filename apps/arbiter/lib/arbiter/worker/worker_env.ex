@@ -35,6 +35,8 @@ defmodule Arbiter.Worker.WorkerEnv do
   alias Arbiter.Accounts.Census
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.MissingCredentialError
+  alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.ReviewGate
@@ -118,11 +120,64 @@ defmodule Arbiter.Worker.WorkerEnv do
         Workspace.worker_env_secret_values(ws)
       end
 
+    projection = effective_projection(opts)
+
     {pairs, secret_values} =
-      apply_provider_accounts(ws, workspace_pairs, workspace_secrets, opts)
+      apply_provider_accounts(
+        ws,
+        withhold_secrets(ws, workspace_pairs, projection),
+        workspace_secrets,
+        opts
+      )
+
+    {projected, projected_values} = projected_pairs(ws, projection)
+    pairs = pairs ++ projected
+    secret_values = secret_values ++ projected_values
 
     warn_if_degraded(label, ws, pairs)
     {pairs, secret_values}
+  end
+
+  # bd-ld8qde (G14): "undeclared means withheld". With guardrails on, a
+  # secret-flagged workspace var is only in the child's env when a declared
+  # permission projects it (`Projection.env`); plain vars stay. Provider
+  # credentials are never touched here (they come from accounts, below). The
+  # redaction list is deliberately NOT narrowed: a withheld value that leaks some
+  # other way is still scrubbed.
+  defp effective_projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection ->
+        projection
+
+      _ ->
+        if Guardrails.guarded?(), do: Projection.sealed(), else: Projection.unguarded()
+    end
+  end
+
+  defp withhold_secrets(_ws, pairs, %Projection{guarded?: false}), do: pairs
+
+  defp withhold_secrets(%Workspace{} = ws, pairs, %Projection{}) do
+    secret_names =
+      ws |> Workspace.worker_env_keys() |> Enum.filter(& &1.secret?) |> MapSet.new(& &1.name)
+
+    credential_keys = Census.credential_keys()
+
+    Enum.reject(pairs, fn {name, _value} ->
+      MapSet.member?(secret_names, name) and not Map.has_key?(credential_keys, name)
+    end)
+  end
+
+  # The projected `{env_var, secret_name}` pairs resolved to values: from the
+  # workspace's `secrets` store, else a worker_env var of that name. A name
+  # that resolves to nothing is skipped (the doctor's binding check names it).
+  defp projected_pairs(_ws, %Projection{env: []}), do: {[], []}
+
+  defp projected_pairs(%Workspace{} = ws, %Projection{env: env}) do
+    store = Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+
+    pairs = for {var, secret} <- env, is_binary(value = Map.get(store, secret)), do: {var, value}
+
+    {pairs, Enum.map(pairs, &elem(&1, 1))}
   end
 
   # Credential vars are swapped for the account's — the only source since the

@@ -189,9 +189,13 @@ defmodule Arbiter.Guardrails.Permissions do
 
   defp default_grant_by(_, _), do: :coordinator
 
-  # The binding for a permission: the exact key, then the key without the port
-  # (`network:host`), then the bare kind (`network`, `secrets`).
-  defp binding(block, %{kind: kind, canonical: canonical}) do
+  @doc """
+  The workspace binding for a parsed permission: the exact key, then the key
+  without the port (`network:host`), then the bare kind (`network`, `secrets`).
+  `nil` when the workspace binds none.
+  """
+  @spec binding(map(), parsed()) :: map() | nil
+  def binding(block, %{kind: kind, canonical: canonical}) do
     bindings =
       case block do
         %{"bindings" => %{} = b} -> b

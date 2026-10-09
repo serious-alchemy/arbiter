@@ -63,7 +63,7 @@ defmodule Arbiter.Worker.Egress.Connection do
   end
 
   defp decide_and_dial(client, host, port, rest, ctx) do
-    grants = GrantCache.fetch(ctx.task_id, ctx.grants_loader)
+    grants = GrantCache.fetch(ctx.task_id, ctx.run_id, ctx.grants_loader)
 
     policy_ctx = %{
       baseline: ctx.baseline,

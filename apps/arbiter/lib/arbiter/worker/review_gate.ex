@@ -216,6 +216,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.CapabilityMatrix
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
@@ -254,6 +255,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
 
@@ -6035,11 +6037,15 @@ defmodule Arbiter.Worker.ReviewGate do
   # so it gets the same narrow worker-tier token as its ARB_TOKEN — never a
   # coordinator one. The reviewer only reads the diff and prints a verdict; it
   # gets none. A missing signing secret never blocks the spawn.
-  defp arb_token_opts(%{task_id: task_id, workspace_id: ws_id} = state, :implementer)
+  defp arb_token_opts(state, role, claims \\ [])
+
+  defp arb_token_opts(%{task_id: task_id, workspace_id: ws_id} = state, :implementer, claims)
        when is_binary(task_id) and is_binary(ws_id) do
     [
       arb_token:
-        Arbiter.MCP.Scope.mint_worker(%{id: task_id, workspace_id: ws_id}, Map.get(state, :repo))
+        Arbiter.MCP.Scope.mint_worker(%{id: task_id, workspace_id: ws_id}, Map.get(state, :repo),
+          permissions: claims
+        )
     ]
   rescue
     e ->
@@ -6047,7 +6053,7 @@ defmodule Arbiter.Worker.ReviewGate do
       []
   end
 
-  defp arb_token_opts(_state, _role), do: []
+  defp arb_token_opts(_state, _role, _claims), do: []
 
   # bd-dun10t: a revise-round implementer needs the `arbiter` MCP tools
   # (`ci_rerun`, `flake_record`) like a fix_pass worker. Re-inject a fresh
@@ -6055,20 +6061,24 @@ defmodule Arbiter.Worker.ReviewGate do
   # expired 4h lease or be absent. Falls back to the bare token when the task
   # cannot be loaded.
   @doc false
-  def implementer_mcp_opts(state, :implementer, adapter) do
+  def implementer_mcp_opts(state, role, adapter, claims \\ [])
+
+  def implementer_mcp_opts(state, :implementer, adapter, claims) do
     case load_issue(state.task_id) do
       %Issue{} = task ->
         Dispatch.inject_mcp_config(task, state.worktree_path,
           repo: Map.get(state, :repo),
-          agent_adapter: adapter
+          agent_adapter: adapter,
+          # bd-ld8qde (G14): the permissions the projection granted this spawn.
+          permissions: claims
         )
 
       nil ->
-        arb_token_opts(state, :implementer)
+        arb_token_opts(state, :implementer, claims)
     end
   end
 
-  def implementer_mcp_opts(state, role, _adapter), do: arb_token_opts(state, role)
+  def implementer_mcp_opts(state, role, _adapter, _claims), do: arb_token_opts(state, role)
 
   defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
@@ -6167,19 +6177,43 @@ defmodule Arbiter.Worker.ReviewGate do
     # it.
     policy = session_security_policy(ws, state, role, adapter.provider())
 
+    role_opts =
+      ws
+      |> agent_opts_for_role(role_atom, state.task_id, adapter)
+      |> apply_conflict_tier(state, role)
+      |> apply_reviewer_selection(state, role)
+
+    # bd-ld8qde (G14): the same dispatch-time withholding as a first-round worker
+    # — a revise-round implementer is given what the ticket declared for this
+    # (provider, model) subject, a reviewer none of it.
+    projection =
+      Withholding.for_spawn(
+        state.task_id,
+        ws,
+        adapter.provider(),
+        Keyword.get(role_opts, :model) ||
+          ModelFamily.model_for_tier(
+            adapter.provider(),
+            Keyword.get(role_opts, :model_tier),
+            Keyword.get(role_opts, :config)
+          ),
+        repo: Map.get(state, :repo),
+        role: role
+      )
+
     agent_opts =
-      (ws
-       |> agent_opts_for_role(role_atom, state.task_id, adapter)
-       |> apply_conflict_tier(state, role)
-       |> apply_reviewer_selection(state, role)) ++
+      role_opts ++
         [
           security: policy,
           workspace: ws,
           worktree_path: session_cwd(state, role),
           timeout_ms: state.timeout_ms,
           owner: pid,
-          task_id: state.task_id
-        ] ++ implementer_mcp_opts(state, role, adapter) ++ sandbox_wrap_opts(policy, role)
+          task_id: state.task_id,
+          projection: projection
+        ] ++
+        implementer_mcp_opts(state, role, adapter, projection.claims) ++
+        sandbox_wrap_opts(policy, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 
@@ -6219,7 +6253,8 @@ defmodule Arbiter.Worker.ReviewGate do
              prompt: prompt,
              env: env,
              provider: adapter.provider(),
-             model: session_model
+             model: session_model,
+             projection: projection
            ] ++ sandbox_session_opts(policy, ws, role, state)}
 
       {:error, reason} ->
