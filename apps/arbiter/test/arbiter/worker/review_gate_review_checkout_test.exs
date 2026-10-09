@@ -1000,17 +1000,21 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
   # ---- bd-49l0eo: the fix round follows sandbox.backend, like the main run ----------
 
   describe "a ReviewGate fix round under the container backend (bd-49l0eo)" do
-    defp container_ws(sandbox) do
+    defp container_ws(sandbox, extra_config \\ %{}) do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "rg-fix-#{System.unique_integer([:positive])}",
           prefix: "rf",
-          config: %{
-            "review" => %{"required" => true},
-            "agent" => %{
-              "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
-            }
-          }
+          config:
+            Map.merge(
+              %{
+                "review" => %{"required" => true},
+                "agent" => %{
+                  "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
+                }
+              },
+              extra_config
+            )
         })
 
       ws
@@ -1141,10 +1145,52 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       assert opts[:worktree_path] == impl
       # The ARB_TOKEN rides in for the container's `arb`.
       assert is_binary(opts[:arb_token])
-      # The host pushes after the round: the container holds no credential.
+      # No scoped credential is configured, so the host pushes after the round:
+      # the container holds no credential.
       assert %Worker.GitCredential{mode: :not_needed} = opts[:git_credential]
       # The argv runs the container's claude, not the host's.
       assert Worker.ContainerSpawn.claude_path() in opts[:command]
+    end
+
+    test "a podman fix round with a scoped credential pushes itself with it", %{repo: repo} do
+      branch = "feature/fix-9"
+      impl = implementer_clone(repo, branch)
+
+      ws =
+        container_ws(%{"backend" => "podman"}, %{
+          "git_credentials" => %{
+            "repos" => %{
+              "trib/repo" => %{"kind" => "deploy_key", "key_secret" => "TRIB_DEPLOY_KEY"}
+            }
+          }
+        })
+
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      assert podman?(opts[:security])
+      assert opts[:worktree_path] == impl
+
+      # The G16 deploy key travels into the container (ContainerSpawn's podman
+      # secret path); the worker pushes, so the prompts do not forbid it.
+      assert %Worker.GitCredential{mode: :scoped, entry: %{kind: :deploy_key}} =
+               opts[:git_credential]
+
+      revise = ReviewGate.revise_prompt(state, "1. fix the thing")
+      nudge = ReviewGate.commit_nudge_prompt(state)
+      refute revise =~ "NO PUSH ACCESS"
+      refute nudge =~ "NO PUSH ACCESS"
+      assert nudge =~ "git push -u origin"
     end
 
     test "the spawn options of a bwrap fix round carry no container inputs",
@@ -1181,7 +1227,8 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       refute Keyword.has_key?(opts, :arb_token)
     end
 
-    test "the fix-round prompts tell a containerised implementer not to push", %{repo: repo} do
+    test "the fix-round prompts tell a containerised implementer with no credential not to push",
+         %{repo: repo} do
       branch = "feature/fix-8"
       impl = implementer_clone(repo, branch)
 

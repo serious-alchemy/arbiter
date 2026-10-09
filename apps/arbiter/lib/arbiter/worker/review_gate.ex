@@ -2415,6 +2415,20 @@ defmodule Arbiter.Worker.ReviewGate do
       match?({:ok, _}, Sandbox.module(policy, provider))
   end
 
+  # bd-49l0eo: whether the host pushes a fix round's branch. A container fix round
+  # whose repo has a scoped G16 credential (deploy key / token / App) pushes
+  # itself — `ContainerSpawn` hands that credential in as a podman secret, so
+  # neither the host's ssh-agent nor its gh token is involved. Without one the
+  # container holds no forge credential (and planning it as a pusher would only
+  # be refused), so the host `push_gate/1` pushes for it. Not podman: unchanged.
+  defp fix_round_host_pushes?(ws, repo, policy, role) do
+    ContainerSpawn.podman?(policy) and not (role == :implementer and scoped_credential?(ws, repo))
+  end
+
+  defp scoped_credential?(ws, repo) do
+    match?({:ok, %GitCredential{mode: :scoped}}, GitCredential.plan(ws, repo, role: :implementer))
+  end
+
   # The same question for the prompts, which are built before a provider is
   # resolved: does this round's implementer run in a container? An unsupported
   # provider on a podman repo is held before it ever spawns, so the answer
@@ -2424,6 +2438,12 @@ defmodule Arbiter.Worker.ReviewGate do
     policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
 
     ContainerSpawn.podman?(policy) and PrivateClone.clone?(Map.get(state, :worktree_path))
+  end
+
+  # A containerised fix round the host pushes for: no scoped credential to push with.
+  defp host_pushed_fix_round?(state) do
+    container_fix_round?(state) and
+      not scoped_credential?(load_workspace(Map.get(state, :workspace_id)), Map.get(state, :repo))
   end
 
   # The head an APPROVE stamps and records coverage for. With a round checkout
@@ -3909,10 +3929,11 @@ defmodule Arbiter.Worker.ReviewGate do
     """
   end
 
-  # bd-49l0eo: a containerised implementer cannot push; the push gate runs on the
-  # host before the re-review.
+  # bd-49l0eo: a containerised implementer with no scoped credential cannot push;
+  # the push gate runs on the host before the re-review. With a G16 credential it
+  # pushes like any other implementer.
   defp nudge_push_step(state) do
-    if container_fix_round?(state) do
+    if host_pushed_fix_round?(state) do
       "Do NOT push. " <> String.replace(PromptBuilder.no_push_access(), "\n", "\n         ")
     else
       """
@@ -6305,7 +6326,7 @@ defmodule Arbiter.Worker.ReviewGate do
       GitCredential.plan(ws, Map.get(state, :repo),
         role: role,
         guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
-        host_pushes?: ContainerSpawn.podman?(policy)
+        host_pushes?: fix_round_host_pushes?(ws, Map.get(state, :repo), policy, role)
       )
 
     git_credential =
@@ -7143,9 +7164,10 @@ defmodule Arbiter.Worker.ReviewGate do
     """
   end
 
-  # bd-49l0eo: a fix round in a container commits; the push gate pushes for it.
+  # bd-49l0eo: a fix round in a container with no scoped credential commits; the
+  # push gate pushes for it.
   defp revise_container_note(state) do
-    if container_fix_round?(state), do: "\n" <> PromptBuilder.no_push_access(), else: ""
+    if host_pushed_fix_round?(state), do: "\n" <> PromptBuilder.no_push_access(), else: ""
   end
 
   defp ci_flake_guidance(%{ci_fix_pending: %{}}) do
