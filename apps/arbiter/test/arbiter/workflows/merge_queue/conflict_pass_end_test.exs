@@ -51,7 +51,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassEndTest do
     issue = conflicting_ticket(ws, repo)
     inert_lane!(issue)
 
-    {:ok, ws: ws, repo: repo, issue: issue, branch: BranchNamer.derive(issue)}
+    {:ok, ws: ws, repo: repo, issue: issue, branch: BranchNamer.derive(issue), tmp: tmp}
   end
 
   test "a pass that signals done mid-rebase is failed, names the state, and is aborted", %{
@@ -149,6 +149,72 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassEndTest do
     assert is_pid(second)
     assert Worktree.in_progress_operation(wt) == nil
     assert {:ok, ^branch} = Worktree.current_branch(wt)
+  end
+
+  # bd-19skda: on a podman workspace the pass runs in a container that can
+  # neither fetch nor push. The host fetches the target before the pass, and
+  # force-with-lease pushes the rebased branch after `arb done`.
+  describe "on a podman workspace (bd-19skda)" do
+    setup %{ws: ws, repo: repo, issue: issue} do
+      config = %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+      ws = Ash.update!(ws, %{config: config}, action: :update)
+      {:ok, ws: ws, repo: repo, issue: issue}
+    end
+
+    test "the host fetches the target before the pass and pushes the rebased branch after done",
+         %{ws: ws, repo: repo, issue: issue, branch: branch, tmp: tmp} do
+      # main moves on the forge AFTER the repo's last fetch: only a host fetch
+      # at dispatch lets the pass see it.
+      other = Path.join(tmp, "other")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "remote.git"), other])
+      configure!(other)
+      :ok = commit!(other, "NEWER.md", "newer\n", "newer main")
+      {_, 0} = git(other, ["push", "-q", "origin", "main"])
+      {newer_main, 0} = git(other, ["rev-parse", "HEAD"])
+      newer_main = String.trim(newer_main)
+
+      %{worker_pid: pid, worktree_path: wt} = conflict_pass!(ws, repo, issue)
+      start_head = remote_head(repo, branch)
+
+      {origin_main, 0} = git(wt, ["rev-parse", "origin/main"])
+      assert String.trim(origin_main) == newer_main
+
+      # The agent's side: rebase onto the (host-fetched) origin/main, resolve,
+      # continue — and never push.
+      configure!(wt)
+      {_, status} = git(wt, ["rebase", "origin/main"])
+      assert status != 0
+      File.write!(Path.join(wt, "README.md"), "resolved\n")
+      {_, 0} = git(wt, ["add", "README.md"])
+      {_, 0} = git(wt, ["-c", "core.editor=true", "rebase", "--continue"])
+      assert remote_head(repo, branch) == start_head
+
+      ref = Process.monitor(pid)
+      signal_done(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+
+      assert conflict_run!(issue.id).outcome == :succeeded
+      refute remote_head(repo, branch) == start_head
+      {_, 0} = git(repo, ["fetch", "-q", "origin", branch])
+      {_, 0} = git(repo, ["merge-base", "--is-ancestor", newer_main, "origin/" <> branch])
+    end
+
+    test "a pass that ends mid-rebase is not pushed", %{
+      ws: ws,
+      repo: repo,
+      issue: issue,
+      branch: branch
+    } do
+      %{worker_pid: pid, worktree_path: wt} = conflict_pass!(ws, repo, issue)
+      start_head = remote_head(repo, branch)
+      :ok = start_rebase!(wt)
+
+      signal_done(pid)
+
+      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
+      assert conflict_run!(issue.id).failure_reason =~ "mid-rebase"
+      assert remote_head(repo, branch) == start_head
+    end
   end
 
   # ---- fixtures -------------------------------------------------------------

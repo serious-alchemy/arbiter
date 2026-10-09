@@ -39,6 +39,22 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolverAgentOptsTest do
     defp context(workspace),
       do: %{workspace: workspace, repo: "trib/repo", task: %{id: "bd-pass2"}}
 
+    test "the podman conflict-pass prompt says the host fetches and pushes" do
+      task = %Arbiter.Tasks.Issue{id: "bd-pass2", title: "t"}
+      ctx = %{task: task, branch: "feature/x", target_branch: "main"}
+
+      assert ConflictResolver.prompt_for(Map.put(ctx, :host_git, true)) =~
+               "NO FETCH OR PUSH ACCESS"
+
+      refute ConflictResolver.prompt_for(ctx) =~ "NO FETCH OR PUSH ACCESS"
+    end
+
+    test "only a podman Claude pass has the host do its git" do
+      assert ConflictResolver.host_git?(context(ws("podman")), :claude)
+      refute ConflictResolver.host_git?(context(ws("bwrap")), :claude)
+      refute ConflictResolver.host_git?(context(ws("podman")), :codex)
+    end
+
     test "a Claude pass on a podman workspace gets the policy and sandbox_wrap" do
       workspace = ws("podman")
       policy = ContainerSpawn.pass_policy(workspace, "trib/repo", :claude)

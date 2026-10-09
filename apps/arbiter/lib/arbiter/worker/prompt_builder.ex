@@ -54,18 +54,20 @@ defmodule Arbiter.Worker.PromptBuilder do
   adds the intent context and an explicit "run the tests, fix what the rebase
   broke" step the old mechanical-only prompt lacked.
   """
-  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t()) :: String.t()
-  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch)
+  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t(), keyword()) :: String.t()
+  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch, opts \\ [])
       when is_binary(branch) and is_binary(target_branch) do
+    host_git? = Keyword.get(opts, :host_git, false)
+
     """
     You are a conflict-resolution worker for task #{task.id}.
 
     Your branch (#{branch}) is APPROVED but CONFLICTS with the current head of
     #{target_branch}: it was mergeable in isolation, but the base has moved and
     it no longer applies cleanly. Your ONLY job is to rebase it onto the current
-    base, resolve the conflicts, and force-push — NOT to re-implement the change
+    base, resolve the conflicts, and #{if host_git?, do: "commit the result", else: "force-push"} — NOT to re-implement the change
     or open a new PR.
-
+    #{conflict_host_git_section(host_git?, target_branch)}
     ## Original intent — resolve conflicts so the result still satisfies THIS
 
     Title: #{task.title}
@@ -78,17 +80,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     ## Steps
 
-      1. Fetch the latest base: `git fetch origin #{target_branch}`
-      2. Rebase your branch onto it: `git rebase origin/#{target_branch}`
-      3. Resolve every conflict so the result still honors the intent above.
-         Most collisions are parallel edits to non-overlapping sections — keep
-         both sides. Where two changes touch the same logic, keep the behaviour
-         the acceptance criteria describe, then `git rebase --continue`.
-      4. Run the test suite and fix anything the rebase broke — a clean rebase
-         that fails tests is NOT done. Re-run until green.
-      5. Force-push with lease to update the existing PR in place:
-         `git push --force-with-lease origin #{branch}`
-      6. Print `arb done` on a line by itself.
+    #{conflict_steps(host_git?, branch, target_branch)}
 
     DO NOT:
       * re-implement the change set or open a new PR,
@@ -103,6 +95,66 @@ defmodule Arbiter.Worker.PromptBuilder do
     then print `arb done`. A loud escalation beats a silent miscompile in
     #{target_branch}.
     """
+  end
+
+  # bd-19skda: a podman conflict pass has no `git fetch`/`git push` (no forge
+  # credential or GitHub host key, by design). The host fetches the target into
+  # the clone before the pass starts and force-with-lease pushes the rebased
+  # branch after `arb done`, so the briefing says so instead of sending the
+  # worker at a fetch and push that dead-end in "Host key verification failed".
+  defp conflict_host_git_section(false, _target_branch), do: ""
+
+  defp conflict_host_git_section(true, target_branch) do
+    """
+
+    NO FETCH OR PUSH ACCESS — this container has no forge credential or GitHub
+    host key, by design. The Arbiter host has already fetched the current
+    #{target_branch} into your clone (`origin/#{target_branch}` is up to date)
+    and force-pushes your rebased branch after `arb done`. Do not run `git
+    fetch` or `git push`: a failure ("Host key verification failed", no
+    credentials) is expected and is not a reason to withhold `arb done`.
+    """
+    |> indent_block()
+    |> Kernel.<>("\n")
+  end
+
+  defp conflict_steps(true, _branch, target_branch) do
+    """
+      1. Rebase your branch onto the already-fetched base:
+         `git rebase origin/#{target_branch}`
+      2. Resolve every conflict so the result still honors the intent above.
+         Most collisions are parallel edits to non-overlapping sections — keep
+         both sides. Where two changes touch the same logic, keep the behaviour
+         the acceptance criteria describe, then `git rebase --continue`.
+      3. Run the test suite and fix anything the rebase broke — a clean rebase
+         that fails tests is NOT done. Re-run until green. Commit any fix.
+      4. Print `arb done` on a line by itself. The host pushes the branch.
+    """
+    |> indent_block()
+  end
+
+  defp conflict_steps(false, branch, target_branch) do
+    """
+      1. Fetch the latest base: `git fetch origin #{target_branch}`
+      2. Rebase your branch onto it: `git rebase origin/#{target_branch}`
+      3. Resolve every conflict so the result still honors the intent above.
+         Most collisions are parallel edits to non-overlapping sections — keep
+         both sides. Where two changes touch the same logic, keep the behaviour
+         the acceptance criteria describe, then `git rebase --continue`.
+      4. Run the test suite and fix anything the rebase broke — a clean rebase
+         that fails tests is NOT done. Re-run until green.
+      5. Force-push with lease to update the existing PR in place:
+         `git push --force-with-lease origin #{branch}`
+      6. Print `arb done` on a line by itself.
+    """
+    |> indent_block()
+  end
+
+  # Text interpolated into the briefing's heredoc is not re-indented past its
+  # first line: indent every later line by the heredoc's four spaces, and drop
+  # the trailing newline (the enclosing heredoc supplies its own).
+  defp indent_block(text) do
+    text |> String.trim_trailing() |> String.replace("\n", "\n    ")
   end
 
   # When resuming (bd-auma3z) the work prompt is prefixed with a git-derived
