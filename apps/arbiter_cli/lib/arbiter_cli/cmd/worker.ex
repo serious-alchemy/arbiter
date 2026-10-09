@@ -4,8 +4,13 @@ defmodule ArbiterCli.Cmd.Worker do
 
       arb worker list             — each ticket with a live run: its current run's kind + state
       arb worker show <task-id>   — the ticket's current run (incl. recent output) + its recent runs
-      arb worker runs <task-id>   — list every historical run for the task
-      arb worker log <task-id>    — full uncapped durable transcript (audit)
+      arb worker runs [<task-id>] [--kind K] [--state S] [--outcome O] [--before <iso8601>]
+                      [--limit N] — run history; with no task id, fleet-wide
+      arb worker runs --run <run-id> — one run by id (metadata + output tail)
+      arb worker runs <task-id> --corpus [--limit N] — every run of the task AND its
+                      ReviewGate synthetic children, with transcript presence
+      arb worker log <task-id> [--run <run-id>] [--tail N] — durable transcript (audit)
+      arb worker prompt <task-id> [--run <run-id>] — the composed prompt a run was spawned with
       arb worker stop <task-id>   — terminate a running worker cleanly
       arb worker resume <task-id> [<repo> | --repo <repo>] [--model <name>] [--force] [--force-quota
                       [--force-quota-reason <why>]] [--mode session|briefing] — resume the prior session
@@ -48,6 +53,14 @@ defmodule ArbiterCli.Cmd.Worker do
   on-disk store — the audit source of record, retaining every line however
   long the run.
 
+  A ReviewGate synthetic id (`<task>#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
+  `#t<N>`) is accepted wherever a task id is: the `#` is URL-encoded into the
+  request path. `log` and `prompt` read the task's latest run unless `--run`
+  names one (which must belong to the task); `log --tail N` returns only the
+  last N lines. Every list is capped server-side — `--limit` defaults to 20
+  and is clamped to 200 (`--corpus`: 200 and 1000), the same bounds MCP and
+  REST use.
+
   `review` spawns a worker specialized for review tasks, optionally overriding
   the repo and model. It is refused when the task's workspace resolves
   `review_automation` to `off` for the repo, unless `--force` is given;
@@ -67,7 +80,16 @@ defmodule ArbiterCli.Cmd.Worker do
     automation: :string,
     pr_author: :string,
     tracker_context_ref: :string,
-    tracker_context_type: :string
+    tracker_context_type: :string,
+    run: :string,
+    tail: :integer,
+    corpus: :boolean,
+    kind: :string,
+    state: :string,
+    outcome: :string,
+    before: :string,
+    limit: :integer,
+    lines: :integer
   ]
 
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
@@ -88,19 +110,22 @@ defmodule ArbiterCli.Cmd.Worker do
           list(mode)
 
         ["show", task_id | _] ->
-          show(task_id, mode)
+          show(task_id, flags, mode)
 
         ["show" | _] ->
           Output.die("worker show requires: <task-id>")
 
-        ["runs", task_id | _] ->
-          runs(task_id, mode)
+        ["runs" | positional] ->
+          runs(positional, flags, mode)
 
-        ["runs" | _] ->
-          Output.die("worker runs requires: <task-id>")
+        ["prompt", task_id | _] ->
+          prompt(task_id, flags, mode)
+
+        ["prompt" | _] ->
+          Output.die("worker prompt requires: <task-id>")
 
         ["log", task_id | _] ->
-          log(task_id, mode)
+          log(task_id, flags, mode)
 
         ["log" | _] ->
           Output.die("worker log requires: <task-id>")
@@ -125,7 +150,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
         [] ->
           Output.die(
-            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `stop`, `resume`, or `review`"
+            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `prompt`, `stop`, `resume`, or `review`"
           )
 
         [unknown | _] ->
@@ -148,19 +173,60 @@ defmodule ArbiterCli.Cmd.Worker do
     end
   end
 
-  defp show(task_id, mode) do
-    case Client.get("/api/workers/#{task_id}") do
+  defp show(task_id, flags, mode) do
+    params = take_params(flags, lines: :lines)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}", params) do
       {:ok, snap} -> emit_show(snap, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp runs(task_id, mode) do
+  # `runs` is three reads behind one verb: one run by id (`--run`), the
+  # task's whole transcript corpus (`--corpus`), and run history — scoped to a
+  # task when one is named, fleet-wide when not.
+  defp runs(positional, flags, mode) do
+    task_id = List.first(positional)
+
+    cond do
+      flags[:run] -> run_by_id(flags[:run], mode)
+      flags[:corpus] && is_nil(task_id) -> Output.die("worker runs --corpus requires: <task-id>")
+      flags[:corpus] -> corpus(task_id, flags, mode)
+      true -> history(task_id, flags, mode)
+    end
+  end
+
+  defp run_by_id(run_id, mode) do
+    case Client.get("/api/workers/history/#{Client.path_segment(run_id)}") do
+      {:ok, %{"data" => run}} -> emit_run(run, mode)
+      {:ok, run} -> emit_run(run, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp corpus(task_id, flags, mode) do
+    params = take_params(flags, limit: :limit)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/run_log_list", params) do
+      {:ok, %{"data" => list}} -> emit_corpus(task_id, list, mode)
+      {:ok, _} -> emit_corpus(task_id, [], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp history(task_id, flags, mode) do
     params =
-      case ArbiterCli.Workspace.selected_id() do
-        nil -> [task_id: task_id]
-        ws_id -> [task_id: task_id, workspace_id: ws_id]
-      end
+      [task_id: task_id, workspace_id: ArbiterCli.Workspace.selected_id()]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Kernel.++(
+        take_params(flags,
+          kind: :kind,
+          state: :state,
+          outcome: :outcome,
+          before: :before,
+          limit: :limit
+        )
+      )
 
     case Client.get("/api/workers/history", params) do
       {:ok, %{"data" => list}} -> emit_runs(task_id, list, mode)
@@ -169,16 +235,35 @@ defmodule ArbiterCli.Cmd.Worker do
     end
   end
 
-  defp log(task_id, mode) do
-    case Client.get("/api/workers/#{task_id}/log") do
+  # The durable transcript of the task's latest run, or of `--run <id>`.
+  defp log(task_id, flags, mode) do
+    params = take_params(flags, run_id: :run, tail: :tail)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/log", params) do
       {:ok, %{"data" => data}} -> emit_log(data, mode)
       {:ok, payload} -> emit_log(payload, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
+  # The composed prompt of the task's latest run, or of `--run <id>`.
+  defp prompt(task_id, flags, mode) do
+    params = take_params(flags, run_id: :run)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/prompt", params) do
+      {:ok, %{"data" => data}} -> emit_prompt(data, mode)
+      {:ok, payload} -> emit_prompt(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # `[query_key: flag_key]` -> the query params whose flag was given.
+  defp take_params(flags, mapping) do
+    for {param, flag} <- mapping, not is_nil(flags[flag]), do: {param, flags[flag]}
+  end
+
   defp stop(task_id, mode) do
-    case Client.post("/api/workers/#{task_id}/stop", %{}) do
+    case Client.post("/api/workers/#{Client.path_segment(task_id)}/stop", %{}) do
       {:ok, payload} -> emit_stop(payload, mode)
       {:error, err} -> Output.die(err)
     end
@@ -205,7 +290,7 @@ defmodule ArbiterCli.Cmd.Worker do
       |> maybe_put("force", if(flags[:force], do: true))
       |> maybe_put("mode", flags[:mode])
 
-    case Client.post("/api/workers/#{task_id}/resume", body) do
+    case Client.post("/api/workers/#{Client.path_segment(task_id)}/resume", body) do
       {:ok, payload} -> emit_resume(payload, mode)
       {:error, err} -> Output.die(err)
     end
@@ -315,7 +400,9 @@ defmodule ArbiterCli.Cmd.Worker do
   end
 
   defp emit_runs(task_id, list, :text) do
-    IO.puts("Historical runs for #{task_id} (#{length(list)}, newest first):")
+    IO.puts(
+      "Historical runs#{if task_id, do: " for #{task_id}"} (#{length(list)}, newest first):"
+    )
 
     Enum.each(list, fn r ->
       model_part = if r["model"], do: "  model=#{r["model"]}", else: ""
@@ -359,8 +446,71 @@ defmodule ArbiterCli.Cmd.Worker do
 
       true ->
         lines = data["lines"]
-        IO.puts("\nFull transcript (#{length(lines)} lines, oldest first):")
+
+        if data["truncated"] do
+          IO.puts(
+            "\nTranscript tail (last #{length(lines)} of #{data["line_count"]} lines, oldest first):"
+          )
+        else
+          IO.puts("\nFull transcript (#{length(lines)} lines, oldest first):")
+        end
+
         Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
+    end
+  end
+
+  defp emit_run(run, :json), do: IO.puts(Jason.encode!(%{"data" => run}))
+
+  defp emit_run(run, :text) do
+    IO.puts("Run:        #{run["id"]}  #{RunLabel.label(run)}#{RunLabel.node_suffix(run)}")
+    IO.puts("Ticket:      #{run["task_id"]}")
+    if run["repo"], do: IO.puts("Repo:        #{run["repo"]}")
+    if run["model"], do: IO.puts("Model:      #{run["model"]}")
+    IO.puts("Started:    #{run["started_at"]}")
+    if run["completed_at"], do: IO.puts("Completed:  #{run["completed_at"]}")
+    if run["failure_reason"], do: IO.puts("#{reason_label(run)}:    #{run["failure_reason"]}")
+    if run["failure_summary"], do: IO.puts("#{summary_label(run)}: #{run["failure_summary"]}")
+
+    case run["output_lines"] || [] do
+      [] ->
+        IO.puts("\n(no output lines captured)")
+
+      lines ->
+        IO.puts("\nOutput (#{length(lines)} lines, oldest first):")
+        Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
+    end
+  end
+
+  defp emit_corpus(_task_id, list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+
+  defp emit_corpus(task_id, [], :text),
+    do: IO.puts("(no runs recorded for #{task_id} or its synthetic children)")
+
+  defp emit_corpus(task_id, list, :text) do
+    IO.puts("Transcript corpus for #{task_id} (#{length(list)} runs, newest first):")
+
+    Enum.each(list, fn r ->
+      transcript =
+        if r["transcript_exists"], do: "#{r["line_count"]} lines", else: "no transcript"
+
+      IO.puts(
+        "  #{r["run_id"]}  #{r["task_id"]}  #{RunLabel.label(r)}  " <>
+          "started=#{r["started_at"]}  #{transcript}#{RunLabel.node_suffix(r)}"
+      )
+    end)
+  end
+
+  defp emit_prompt(data, :json), do: IO.puts(Jason.encode!(data))
+
+  defp emit_prompt(data, :text) do
+    IO.puts("Ticket:      #{data["task_id"]}")
+    IO.puts("Run:        #{data["run_id"]}")
+    if data["path"], do: IO.puts("Prompt:     #{data["path"]}")
+
+    if data["exists"] == false or is_nil(data["prompt"]) do
+      IO.puts("\n(no prompt was persisted for this run)")
+    else
+      IO.puts("\n" <> data["prompt"])
     end
   end
 

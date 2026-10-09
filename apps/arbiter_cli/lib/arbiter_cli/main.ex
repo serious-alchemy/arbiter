@@ -55,8 +55,10 @@ defmodule ArbiterCli.Main do
 
       arb worker list
       arb worker show     <task-id>
-      arb worker runs     <task-id>
-      arb worker log      <task-id>
+      arb worker runs     [<task-id>] [--kind K] [--state S] [--outcome O] [--before ISO] [--limit N]
+      arb worker runs     --run <run-id> | <task-id> --corpus
+      arb worker log      <task-id> [--run <run-id>] [--tail N]
+      arb worker prompt   <task-id> [--run <run-id>]
       arb worker stop     <task-id>
       arb worker resume   <task-id> [<repo> | --repo <repo>] [--model <name>] [--force]
                           [--force-quota [--force-quota-reason <why>]] [--mode session|briefing]

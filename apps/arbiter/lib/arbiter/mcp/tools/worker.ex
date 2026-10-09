@@ -19,10 +19,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   alias Arbiter.Worker.Dispatch.Params
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Current
-  alias Arbiter.Workers.RunNode
+  alias Arbiter.Workers.Runs
+  alias Arbiter.Workers.Serializer
 
   require Ash.Query
-  require Logger
 
   @corpus_start_date ~U[2026-06-20 00:00:00Z]
 
@@ -198,19 +198,39 @@ defmodule Arbiter.MCP.Tools.Worker do
   workspaces (`Arbiter.Tasks.Workspaces`, `:read` mode) — it is never silently
   narrowed to a guessed one (bd-45tkhq). The response always echoes the
   `workspace_id` it scoped to (`nil` for all) so the scope is never silent.
+
+  Each row is `Arbiter.Workers.Serializer.summary/2` — the row `GET
+  /api/workers` carries. `fields` keeps only the named keys of each row.
+  The collection key is `workers` here and `data` on REST (the MCP convention
+  names the noun); `count` and `workspace_id` ride beside it on both.
   """
   @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
-      runs = Current.list(workspace_id: ws_id)
+      views = Current.list(workspace_id: ws_id)
 
       # bd-8vnuy3: the task's settled + in-flight spend — the issue page's
       # figure, so a row never disagrees with the page for the same task.
-      costs = worker_costs(runs)
+      costs = Serializer.costs(views)
 
-      workers = Enum.map(runs, &serialize_worker_summary(&1, Map.get(costs, &1.task_id)))
+      rows = Enum.map(views, &Serializer.summary(&1, Map.get(costs, &1.task_id)))
 
-      {:ok, %{workers: workers, count: length(workers), workspace_id: ws_id}}
+      with {:ok, workers} <- project_all(rows, Map.get(args, "fields")) do
+        {:ok, %{workers: workers, count: length(workers), workspace_id: ws_id}}
+      end
+    end
+  end
+
+  defp project_all(rows, fields) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case Serializer.project(row, fields) do
+        {:ok, projected} -> {:cont, {:ok, [projected | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
     end
   end
 
@@ -223,6 +243,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   its recent runs, each labelled with its kind. A live run is read from its
   worker, a finished one from its `Arbiter.Workers.Run` row, in the same
   vocabulary. Not-found only when the ticket never had a run.
+
+  The payload is `Arbiter.Workers.Serializer.show/3`, the one `GET
+  /api/workers/:task_id` returns. `lines` bounds the output tail; `fields` is
+  the slim view — only the named top-level keys of that same payload.
   """
   @spec worker_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_show(%Scope{} = scope, args) do
@@ -232,10 +256,9 @@ defmodule Arbiter.MCP.Tools.Worker do
          {:ok, lines} <- validate_positive_integer(lines, "lines") do
       case Current.show(task_id) do
         %{current: current, runs: runs} ->
-          {:ok,
-           current
-           |> serialize_worker_snapshot(lines)
-           |> Map.put(:runs, Enum.map(runs, &serialize_recent_run/1))}
+          current
+          |> then(&Serializer.show(&1, runs, lines: lines, cost: Serializer.task_cost(task_id)))
+          |> Serializer.project(Map.get(args, "fields"))
 
         nil ->
           {:error, {:not_found, "no worker found for task #{task_id}"}}
@@ -243,178 +266,131 @@ defmodule Arbiter.MCP.Tools.Worker do
     end
   end
 
-  # Best-effort, like every cost read on these surfaces: a failed ledger read
-  # costs the row its cost fields, never the listing.
-  defp worker_costs(runs) do
-    Arbiter.Usage.LiveSpend.by_worker_task(runs)
-  rescue
-    e ->
-      Logger.warning("worker_list: live spend read failed: #{Exception.message(e)}")
-      %{}
-  end
-
-  defp task_cost_fields(task_id) do
-    task_id
-    |> Arbiter.Usage.Estimate.fold_task_id()
-    |> Arbiter.Usage.LiveSpend.for_task()
-    |> Arbiter.Usage.LiveSpend.cost_fields()
-  rescue
-    e ->
-      Logger.warning("worker_show: live spend read failed: #{Exception.message(e)}")
-      Arbiter.Usage.LiveSpend.cost_fields(nil)
-  end
-
-  defp latest_run(task_id) do
-    Arbiter.Workers.Run
-    |> Ash.Query.filter(task_id == ^task_id)
-    |> Ash.Query.sort(started_at: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read!()
-    |> List.first()
-  rescue
-    _ -> nil
-  end
-
   # ---- worker_runs ----------------------------------------------------------
 
   @doc """
-  List every historical `Arbiter.Workers.Run` recorded for a task, newest
-  first (`arb worker runs <task-id>`). Mirrors `GET /api/workers/history?task_id=`:
-  each entry is a run summary (no `output_lines` — fetch a single run's full
-  output via `worker_log` for the transcript). Optional `limit` (default 20,
-  max 200).
+  Run history (`arb worker runs`), newest first — `GET /api/workers/history`.
+  Each entry is `Arbiter.Workers.Serializer.run_summary/1` (no `output_lines` —
+  fetch a run's transcript via `worker_log`).
 
-  `task_id` may be a synthetic ReviewGate id (`<base>#review`, `#r<N>`,
-  `#impl<N>`, `#v<N>`, `#t<N>`) — those are not `issues` rows, so the
-  authorization check resolves to the base task while the run lookup keeps
-  the full synthetic id, surfacing the reviewer/re-prompt corpus.
+    * `run_id:` reads that one run, with its output tail (`GET
+      /api/workers/history/:id`); a `task_id` given beside it must own the run.
+    * otherwise a history list. `task_id` narrows it to one ticket (a ReviewGate
+      synthetic id works: authorization checks the base ticket, the lookup keeps
+      the full id); with none it is fleet-wide — "which runs failed in the last
+      hour" — over the scope's workspace (or all of them).
+      Filters: `kind`, `state`, `outcome` (the one run vocabulary), `before` (ISO
+      8601 `started_at` cursor, exclusive), `workspace`; `limit` per
+      `Arbiter.Workers.Runs.history_limit/1`.
   """
   @spec worker_runs(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_runs(%Scope{} = scope, args) do
-    with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- Tools.fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
-         {:ok, limit} <- Tools.parse_bounded_limit(args, "limit", 20, 200) do
-      runs =
-        Arbiter.Workers.Run
-        |> Ash.Query.filter(task_id == ^task_id)
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      {:ok, %{runs: Enum.map(runs, &serialize_worker_run_summary/1)}}
+    case Tools.fetch_string(args, "run_id") do
+      nil -> worker_run_history(scope, args)
+      run_id -> worker_run_by_id(scope, args, run_id)
     end
+  end
+
+  defp worker_run_by_id(scope, args, run_id) do
+    with {:ok, run} <- fetch_run(scope, args, run_id) do
+      {:ok, %{runs: [Serializer.run_detail(run)], count: 1}}
+    end
+  end
+
+  defp worker_run_history(scope, args) do
+    with {:ok, filters} <- Runs.parse_filters(args),
+         {:ok, limit} <- Runs.history_limit(Map.get(args, "limit")),
+         {:ok, ws_id} <- history_workspace(scope, args, filters.task_id) do
+      runs = Runs.history(filters, workspace_id: ws_id, limit: limit)
+
+      {:ok,
+       %{
+         runs: Enum.map(runs, &Serializer.run_summary/1),
+         count: length(runs),
+         workspace_id: ws_id
+       }}
+    end
+  end
+
+  # A named task is authorized as its base ticket and then queried by exact id
+  # in whatever workspace it lives; a fleet-wide query is confined to the
+  # workspace the caller resolves to (nil = all).
+  defp history_workspace(scope, args, nil), do: Tools.authorized_workspace(scope, args)
+
+  defp history_workspace(scope, args, task_id) do
+    with {:ok, _task} <- Tools.fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
+         do: {:ok, nil}
   end
 
   # ---- worker_log ------------------------------------------------------------
 
   @doc """
-  Full, uncapped durable transcript of one run — the audit source of record,
-  retaining every line however long the run. Two ways to select the run:
+  Durable transcript of one run — the audit source of record, retaining every
+  line however long the run. Two ways to select the run:
 
     * `run_id:` — that exact run, independent of which run is latest for its
       task. This is the only way to reach a superseded/failed attempt once a
-      later run exists for the same task.
+      later run exists for the same task. A `task_id` given beside it must own
+      the run (not-found otherwise).
     * `task_id:` (no `run_id`) — the task's most recent run (`arb worker log
       <task-id>`), unchanged from prior behaviour. `task_id` may be a
       synthetic ReviewGate id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
       `#t<N>`); the authorization check resolves it to the base task while
       the run lookup keeps the full synthetic id.
 
+  The whole transcript unless `tail: N` asks for the last N lines (`line_count`
+  stays the true length; `truncated` says whether `lines` is shorter).
   `exists` distinguishes "no file yet / never captured" (false, empty
   `lines`) from "captured but empty" (true, empty `lines`). Not-found when no
   matching run exists (or, for `run_id`, when it belongs to another workspace).
   """
   @spec worker_log(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_log(%Scope{} = scope, args) do
-    case Tools.fetch_string(args, "run_id") do
-      nil -> worker_log_by_task(scope, args)
-      run_id -> worker_log_by_run_id(scope, args, run_id)
+    with {:ok, tail} <- Tools.optional_integer(args, "tail"),
+         {:ok, tail} <- validate_positive_integer(tail, "tail"),
+         {:ok, run} <- select_run(scope, args) do
+      {:ok, Serializer.log(run, tail: tail)}
     end
   end
 
-  defp worker_log_by_task(scope, args) do
+  # The run `worker_log` / `worker_prompt` read: `run_id` if given (owned by
+  # `task_id` when that is given too), else the task's most recent.
+  defp select_run(scope, args) do
+    case Tools.fetch_string(args, "run_id") do
+      nil -> latest_run_of_task(scope, args)
+      run_id -> fetch_run(scope, args, run_id)
+    end
+  end
+
+  defp latest_run_of_task(scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
-      case latest_run(task_id) do
-        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_log(run)}
+      case Runs.latest(task_id) do
+        %Arbiter.Workers.Run{} = run -> {:ok, run}
         nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
       end
     end
   end
 
-  defp worker_log_by_run_id(scope, args, run_id) do
-    with {:ok, run} <- fetch_run(scope, args, run_id) do
-      {:ok, serialize_worker_log(run)}
-    end
-  end
-
-  defp serialize_worker_log(%Arbiter.Workers.Run{} = run) do
-    {exists, lines} =
-      case Arbiter.Worker.OutputLog.read_lines(run.id) do
-        {:ok, lines} -> {true, lines}
-        {:error, _} -> {false, []}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: Arbiter.Worker.OutputLog.path_for(run.id),
-      exists: exists,
-      line_count: length(lines),
-      lines: lines
-    }
-  end
-
   # Fetch a single `Arbiter.Workers.Run` by id, enforcing workspace isolation
-  # the same way `fetch_task/3` does for `issues` rows. Not-found (rather than
-  # unauthorized) on a cross-workspace hit so existence doesn't leak.
+  # the same way `fetch_task/3` does for `issues` rows, and — when the caller
+  # also named a `task_id` — that the run is an attempt at that task. Not-found
+  # (rather than unauthorized) on a cross-workspace or cross-task hit so
+  # existence doesn't leak.
   defp fetch_run(scope, args, run_id) do
     with {:ok, target_ws} <- Tools.authorized_workspace(scope, args) do
-      case Ash.get(Arbiter.Workers.Run, run_id) do
-        {:ok, %Arbiter.Workers.Run{} = run} ->
-          if Tools.workspace_match?(run.workspace_id, target_ws),
-            do: {:ok, run},
-            else: {:error, {:not_found, "run #{run_id} not found"}}
-
-        _ ->
-          {:error, {:not_found, "run #{run_id} not found"}}
+      with {:ok, run} <- Runs.get(run_id),
+           true <- Tools.workspace_match?(run.workspace_id, target_ws),
+           true <- run_of_named_task?(run, Tools.fetch_string(args, "task_id")) do
+        {:ok, run}
+      else
+        _ -> {:error, {:not_found, "run #{run_id} not found"}}
       end
     end
   end
 
-  defp serialize_worker_run_summary(%Arbiter.Workers.Run{} = run) do
-    RunNode.fields(run)
-    |> Map.merge(%{
-      id: run.id,
-      task_id: run.task_id,
-      task_title: run.task_title,
-      repo: run.repo,
-      workspace_id: run.workspace_id,
-      kind: Tools.to_str(run.kind),
-      state: Tools.to_str(run.state),
-      outcome: Tools.to_str(run.outcome),
-      model: run.model,
-      provider: run.provider,
-      provider_fallback: run.provider_fallback,
-      # bd-40pzpj: what provider routing chose and why (nil when not routed).
-      provider_account_id: run.provider_account_id,
-      model_family: run.model_family,
-      routing_decision: run.routing_decision,
-      session_id: run.session_id,
-      resumed_from_run_id: run.resumed_from_run_id,
-      started_at: Tools.iso(run.started_at),
-      completed_at: Tools.iso(run.completed_at),
-      exit_code: run.exit_code,
-      failure_reason: run.failure_reason,
-      failure_summary: run.failure_summary,
-      resolved_skills: run.resolved_skills || [],
-      standing_orders_digest: run.standing_orders_digest,
-      routing_policy: run.routing_policy,
-      model_tier: run.model_tier,
-      thinking: run.thinking,
-      difficulty_at_dispatch: run.difficulty_at_dispatch
-    })
-  end
+  defp run_of_named_task?(_run, nil), do: true
+  defp run_of_named_task?(run, task_id), do: Runs.belongs_to_task?(run, task_id)
 
   # ---- worker_prompt ----------------------------------------------------
 
@@ -430,43 +406,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   """
   @spec worker_prompt(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_prompt(%Scope{} = scope, args) do
-    case Tools.fetch_string(args, "run_id") do
-      nil -> worker_prompt_by_task(scope, args)
-      run_id -> worker_prompt_by_run_id(scope, args, run_id)
-    end
-  end
-
-  defp worker_prompt_by_task(scope, args) do
-    with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- Tools.fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
-      case latest_run(task_id) do
-        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_prompt(run)}
-        nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
-      end
-    end
-  end
-
-  defp worker_prompt_by_run_id(scope, args, run_id) do
-    with {:ok, run} <- fetch_run(scope, args, run_id) do
-      {:ok, serialize_worker_prompt(run)}
-    end
-  end
-
-  defp serialize_worker_prompt(%Arbiter.Workers.Run{} = run) do
-    {exists, prompt} =
-      case Arbiter.Worker.PromptLog.read(run.id) do
-        {:ok, content} -> {true, content}
-        {:error, _} -> {false, nil}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: Arbiter.Worker.PromptLog.path_for(run.id),
-      exists: exists,
-      prompt: prompt,
-      prompt_sha256: run.prompt_sha256
-    }
+    with {:ok, run} <- select_run(scope, args), do: {:ok, Serializer.prompt(run)}
   end
 
   # ---- run_log_list -----------------------------------------------------
@@ -482,43 +422,17 @@ defmodule Arbiter.MCP.Tools.Worker do
   Each entry reports `transcript_exists` so a missing durable log is
   distinguishable from an empty one without a separate `worker_log` call.
   `task_id` must be the base task (a plain `issues` id) — pass it
-  un-suffixed even to reach synthetic runs.
+  un-suffixed even to reach synthetic runs. `limit` per
+  `Arbiter.Workers.Runs.corpus_limit/1`.
   """
   @spec run_log_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def run_log_list(%Scope{} = scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
-         {:ok, limit} <- Tools.parse_bounded_limit(args, "limit", 200, 1000) do
-      prefix = task_id <> "#"
-
-      runs =
-        Arbiter.Workers.Run
-        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      {:ok, %{runs: Enum.map(runs, &serialize_run_log_entry/1)}}
+         {:ok, limit} <- Runs.corpus_limit(Map.get(args, "limit")) do
+      {:ok, %{runs: task_id |> Runs.corpus(limit) |> Enum.map(&Serializer.run_log_entry/1)}}
     end
   end
-
-  defp serialize_run_log_entry(%Arbiter.Workers.Run{} = run) do
-    RunNode.fields(run)
-    |> Map.merge(%{
-      run_id: run.id,
-      task_id: run.task_id,
-      kind: Tools.to_str(run.kind),
-      state: Tools.to_str(run.state),
-      outcome: Tools.to_str(run.outcome),
-      model: run.model,
-      started_at: Tools.iso(run.started_at),
-      transcript_exists: File.regular?(Arbiter.Worker.OutputLog.path_for(run.id)),
-      line_count: run.id |> Arbiter.Worker.OutputLog.read_lines() |> line_count_of()
-    })
-  end
-
-  defp line_count_of({:ok, lines}), do: length(lines)
-  defp line_count_of({:error, _}), do: 0
 
   # ---- transcript_capture_stats -------------------------------------------
 
@@ -781,177 +695,4 @@ defmodule Arbiter.MCP.Tools.Worker do
       depth: depth
     }
   end
-
-  # bd-1uu19b: one run, as `worker_list` and `worker_show` both report it, in
-  # the one run vocabulary. `task_id` is the ticket; `run_task_id` is the id
-  # the run itself runs under (a ReviewGate reviewer: `<ticket>#review`).
-  defp run_fields(view) do
-    view
-    |> RunNode.fields()
-    |> Map.merge(%{
-      task_id: view.ticket_id,
-      run_task_id: view.task_id,
-      run_id: Map.get(view, :run_id),
-      source: Tools.to_str(view.source),
-      kind: Tools.to_str(view.kind),
-      state: Tools.to_str(view.state),
-      outcome: Tools.to_str(view.outcome),
-      waiting_on: Tools.to_str(Map.get(view, :waiting_on)),
-      # bd-8lq2g7: without these two fields a merge-queue pass (role
-      # `fix_pass` / `conflict_resolver`, under the ticket id since bd-741sid)
-      # is indistinguishable from the task's own run.
-      registry_key: Map.get(view, :registry_key),
-      role: Tools.to_str(Map.get(view, :role)),
-      # bd-aw2cyt: what the work is actually doing, and whether a process
-      # actually exists behind this row.
-      phase: Tools.to_str(Map.get(view, :phase)),
-      phase_label: Arbiter.Worker.Phase.label(Map.get(view, :phase)),
-      # bd-6omte4: the dispatch the quota gate is holding for the ticket.
-      held: Arbiter.Workflows.DispatchQueue.serialize_held(Map.get(view, :held)),
-      agent_live: Map.get(view, :agent_live),
-      workspace_id: view.workspace_id,
-      repo: view.repo,
-      started_at: Tools.iso(view.started_at),
-      completed_at: Tools.iso(Map.get(view, :completed_at))
-    })
-  end
-
-  @doc """
-  A ticket's current run as the slim `current_run` object `GET /api/issues/:id`
-  and `ticket_show full:true` carry (kind / state / outcome / phase, no
-  transcript), from an `Arbiter.Workers.Current` view.
-  """
-  @spec current_run_payload(map()) :: map()
-  def current_run_payload(view) do
-    view
-    |> run_fields()
-    |> Map.take([
-      :run_id,
-      :run_task_id,
-      :source,
-      :kind,
-      :state,
-      :outcome,
-      :waiting_on,
-      :role,
-      :node_id,
-      :node_name,
-      :phase,
-      :phase_label,
-      :started_at,
-      :completed_at
-    ])
-    |> Map.put(:failure_reason, stringify_reason(Map.get(view, :failure_reason)))
-  end
-
-  defp serialize_worker_summary(view, spend) do
-    meta = Map.get(view, :meta, %{}) || %{}
-    routing = Map.get(meta, :routing_config) || %{}
-    model_id = Map.get(meta, :model) || Map.get(routing, :model)
-    {resumable, blocked_reason} = Dispatch.resumable_status(view.ticket_id)
-
-    view
-    |> run_fields()
-    |> Map.merge(%{
-      activity: Map.get(meta, :activity),
-      provider: Map.get(meta, :provider) || Map.get(routing, :provider),
-      model: Arbiter.Worker.Stats.short_model_name(model_id),
-      resumable: resumable,
-      blocked_reason: blocked_reason
-    })
-    |> Map.merge(Arbiter.Usage.LiveSpend.cost_fields(spend))
-  end
-
-  defp serialize_worker_snapshot(view, lines) do
-    meta = Map.get(view, :meta, %{}) || %{}
-    run = Map.get(view, :run)
-    {resumable, blocked_reason} = Dispatch.resumable_status(view.ticket_id)
-
-    output_lines = Map.get(meta, :output_lines, [])
-    output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
-
-    view
-    |> run_fields()
-    |> Map.merge(%{
-      task_title: task_title(run),
-      current_step: Map.get(view, :current_step),
-      claude_session: Map.get(meta, :claude_session, false),
-      activity: Map.get(meta, :activity),
-      step_started_at: Tools.iso(Map.get(view, :step_started_at)),
-      mr_ref: Map.get(view, :mr_ref),
-      merger_url: Map.get(view, :merger_url),
-      last_merger_status: Map.get(meta, :last_merger_status),
-      last_checked_at: Tools.iso(Map.get(meta, :last_checked_at)),
-      pid: view |> Map.get(:pid) |> inspect_pid(),
-      output_lines: output_lines,
-      exit_status: Map.get(meta, :exit_status),
-      exited_at: Tools.iso(Map.get(meta, :exited_at)),
-      result: Map.get(meta, :result),
-      failure_reason: stringify_reason(Map.get(view, :failure_reason)),
-      failure_summary: Map.get(meta, :failure_summary),
-      resumable: resumable,
-      blocked_reason: blocked_reason
-    })
-    |> Map.merge(routing_fields(run, meta))
-    |> Map.merge(task_cost_fields(view.ticket_id))
-  end
-
-  # bd-40pzpj: the model and provider, and what provider routing chose and
-  # why — off the run's row when the view was read from one, else the live
-  # worker's meta.
-  defp routing_fields(%Arbiter.Workers.Run{} = run, _meta) do
-    Map.take(run, [
-      :model,
-      :provider,
-      :provider_fallback,
-      :provider_account_id,
-      :model_family,
-      :routing_decision
-    ])
-  end
-
-  defp routing_fields(nil, meta) do
-    %{
-      model: Map.get(meta, :model),
-      provider: Arbiter.Worker.provider(meta),
-      provider_fallback: Map.get(meta, :provider_fallback),
-      provider_account_id: Map.get(meta, :provider_account_id),
-      model_family: Map.get(meta, :model_family),
-      routing_decision: Map.get(meta, :routing_decision)
-    }
-  end
-
-  # A recent run in `worker_show`'s `runs` list: the same vocabulary, no
-  # transcript.
-  defp serialize_recent_run(view) do
-    view
-    |> run_fields()
-    |> Map.take([
-      :run_id,
-      :run_task_id,
-      :source,
-      :kind,
-      :state,
-      :outcome,
-      :role,
-      :node_id,
-      :node_name,
-      :started_at,
-      :completed_at
-    ])
-    |> Map.merge(%{
-      failure_reason: stringify_reason(Map.get(view, :failure_reason)),
-      current: Map.get(view, :current, false)
-    })
-  end
-
-  defp task_title(%Arbiter.Workers.Run{task_title: title}), do: title
-  defp task_title(nil), do: nil
-
-  defp inspect_pid(nil), do: nil
-  defp inspect_pid(pid), do: inspect(pid)
-
-  defp stringify_reason(nil), do: nil
-  defp stringify_reason(v) when is_binary(v), do: v
-  defp stringify_reason(v), do: inspect(v)
 end

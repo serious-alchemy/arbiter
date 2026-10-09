@@ -37,7 +37,7 @@ defmodule Arbiter.MCP.CatalogTest do
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
   @workspace_resolving_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show
-                                quota_get ticket_create worker_list ticket_list usage_summarize notify_list
+                                quota_get ticket_create worker_list worker_runs ticket_list usage_summarize notify_list
                                 tracker_claim tracker_sync tracker_list_issues tracker_create_ticket worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 workspace_standing_order_add workspace_standing_order_remove

@@ -38,7 +38,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
     |> Map.merge(Map.get(assigns, :priority_fields, %{}))
     |> Map.put(
       :current_run,
-      ArbiterWeb.Api.WorkerJSON.current_run(Map.get(assigns, :current_run))
+      Arbiter.Workers.Serializer.current_run(Map.get(assigns, :current_run))
     )
     |> put_history(Map.get(assigns, :history))
     |> Map.put(:pending_permissions, Map.get(assigns, :pending_permissions, []))
