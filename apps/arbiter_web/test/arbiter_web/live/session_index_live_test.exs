@@ -194,7 +194,17 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # processed the message (so the task exists) before awaiting it.
       send(view.pid, :refresh_session_usage)
       _ = :sys.get_state(view.pid)
-      render_async(view)
+
+      # Loading is two-stage (:sessions then a chained :usage task), so one
+      # render_async can return before the second task exists. Await each
+      # stage in turn, bounded.
+      Enum.reduce_while(1..5, nil, fn _, _ ->
+        render_async(view)
+
+        if has_element?(view, "#session-#{session.id}-usage", "$0.75"),
+          do: {:halt, nil},
+          else: {:cont, nil}
+      end)
 
       assert has_element?(view, "#session-#{session.id}-usage", "$0.75")
       refute has_element?(view, "#session-#{session.id}-usage-empty")
