@@ -296,7 +296,7 @@ defmodule Arbiter.Guardrails.Gate do
   @spec predicted_model(Issue.t() | map(), map() | nil, atom() | String.t()) :: String.t() | nil
   def predicted_model(issue, workspace, provider) when is_map(issue) do
     routed = Routing.decide(issue, workspace, [])
-    config = routed.config || %{}
+    config = routed.config
     agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
     pinned = config["model"]
 
