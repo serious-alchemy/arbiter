@@ -154,6 +154,33 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "wrap_port/1 with a --resume injected after prepare (bd-9qazat)" do
+    # `Worker` splices `--resume <sid>` into the argv at port open, long after
+    # `prepare/1` ran with the pristine argv, so the seed has to happen here.
+    test "seeds the resumed session into the config dir the container mounts", ctx do
+      sid = "bbf6ebc2-0d53-4838-99f7-381156aad1e9"
+      store = Arbiter.Worker.SessionHistory.store_path(sid)
+      File.mkdir_p!(Path.dirname(store))
+      File.write!(store, "{\"type\":\"user\"}\n")
+      on_exit(fn -> File.rm(store) end)
+
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      refute File.exists?(Path.join(request.config_dir, "projects"))
+
+      args = port_args(ctx, request)
+      resumed = %{args | argv: Enum.take(args.argv, 5) ++ ["--print", "--resume", sid, "go"]}
+
+      assert {:ok, _wrapped} = ContainerSpawn.wrap_port(resumed)
+
+      # The path claude computes for the container's cwd (the clone is mounted
+      # at the same path).
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.clone)
+
+      assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
+               "{\"type\":\"user\"}\n"
+    end
+  end
+
   describe "prepare/1" do
     test "describes a rootless container over the private clone, bridges and per-run dirs",
          ctx do

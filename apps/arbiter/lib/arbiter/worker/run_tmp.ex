@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.RunTmp do
 
   def remove(dir) when is_binary(dir) do
     if inside_root?(dir) do
+      _ = Arbiter.Worker.SessionHistory.preserve(dir)
       force_rm_rf(dir)
     end
 
@@ -100,6 +101,7 @@ defmodule Arbiter.Worker.RunTmp do
         for entry <- entries,
             path = Path.join(root, entry),
             stale?(path, cutoff) do
+          _ = Arbiter.Worker.SessionHistory.preserve(path)
           force_rm_rf(path)
           path
         end
