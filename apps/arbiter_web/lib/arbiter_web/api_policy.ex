@@ -26,6 +26,8 @@ defmodule ArbiterWeb.ApiPolicy do
       drain, revoke, remove — `docs/design/remote-workers.md` §5.3): a
       coordinator *session* (an LLM) is refused, so it cannot enrol machines
       that will receive provider tokens. Used by every `/api/nodes` route: the list, minting, edits, drain, revoke, remove, upgrade;
+      by every `/api/memory` route (P-25: the shared memory layer is operator authority,
+      reads included; a coordinator *session* is refused);
       by `POST /api/dashboard/login_tokens` (P-28: a dashboard login is an operator
       grant, so an LLM coordinator session must not mint one;
       `docs/design/tier-proof-boundaries.md`);
@@ -161,6 +163,15 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- providers / accounts (credential-bearing) -------------------------
     {:get, "/api/providers/paused"} => :coordinator,
+
+    # ---- memory (P-25): the shared layer every future session mounts ----------
+    {:get, "/api/memory/pending"} => :operator,
+    {:get, "/api/memory/pending/diff"} => :operator,
+    {:post, "/api/memory/pending/apply"} => :operator,
+    {:post, "/api/memory/pending/reject"} => :operator,
+    {:get, "/api/memory/quarantine"} => :operator,
+    {:post, "/api/memory/quarantine/restore"} => :operator,
+    {:post, "/api/memory/distill"} => :operator,
 
     # ---- nodes (RW4, RW7): operator-proof only, reads included ---------------
     {:post, "/api/nodes/join-tokens"} => :operator,
