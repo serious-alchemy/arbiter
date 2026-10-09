@@ -275,6 +275,10 @@ defmodule Arbiter.Worker do
   @shutdown_reason "server shutdown"
   @operator_stop :operator_stop
 
+  # How long a container may take to exit on its own after `arb done` before it
+  # is force-removed (bd-9ss153).
+  @container_exit_grace_ms 15_000
+
   # bd-4g0fsh: backoff before an auto-resume of a recoverable stop (transient
   # gateway 5xx, or a clean exit-0 without `arb done`). A recoverable stop is
   # re-spawned (bounded by `:resume_cap`) rather than failed — but NOT instantly:
@@ -4074,7 +4078,13 @@ defmodule Arbiter.Worker do
   # put its own in place has the original put back and the run fails: its tree
   # is never routed on to review or merge.
   defp on_claude_done_untampered(%State{} = state, meta) do
-    _ = Arbiter.Worker.ContainerSpawn.stop(meta && Map.get(meta, :claude_spawn))
+    # bd-9ss153: the agent was told `arb done` and is exiting; let the container
+    # finish so its real exit status (0) is what the port reports, not the 137
+    # of a `--time 0` SIGKILL. A container that outlives the grace is killed.
+    _ =
+      Arbiter.Worker.ContainerSpawn.stop(meta && Map.get(meta, :claude_spawn),
+        grace_ms: @container_exit_grace_ms
+      )
 
     case Arbiter.Worker.PrivateClone.settle(meta && Map.get(meta, :worktree_path)) do
       :ok -> on_claude_done_live_workspace(state, meta)
