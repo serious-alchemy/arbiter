@@ -1012,7 +1012,7 @@ defmodule Arbiter.Worker.StopReason do
       category: :spend_cap,
       summary:
         "spend cap reached: the #{tier}-tier run crossed its #{cap_label(cap)} cap " <>
-          "(#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}) and was " <>
+          "(#{spend_cap_figures(%{cap: cap, limit: limit, measured: measured})}) and was " <>
           "parked — the agent was stopped and its worktree kept",
       remediation:
         "Look at the transcript for what spent it (a busy-wait or a polling loop is the " <>
@@ -1024,6 +1024,16 @@ defmodule Arbiter.Worker.StopReason do
       signal: nil
     }
   end
+
+  @doc "`\"7.7M tokens against a cap of 3.0M tokens\"` — a tripped spend cap's figures, for pages."
+  @spec spend_cap_figures(%{cap: :tokens | :wall_clock_s, limit: number(), measured: number()}) ::
+          String.t()
+  def spend_cap_figures(%{cap: cap, limit: limit, measured: measured}),
+    do: "#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}"
+
+  @doc "`\"token\"` / `\"wall-clock\"`."
+  @spec spend_cap_label(:tokens | :wall_clock_s) :: String.t()
+  def spend_cap_label(cap), do: cap_label(cap)
 
   defp cap_label(:tokens), do: "token"
   defp cap_label(:wall_clock_s), do: "wall-clock"

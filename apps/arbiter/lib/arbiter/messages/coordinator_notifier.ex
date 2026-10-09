@@ -305,6 +305,34 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     do: escalate(:spawn_failed, snapshot, reason)
 
   @doc """
+  Page the coordinator that a live run on a `page`-action guardrail tier crossed an
+  operator-set spend cap (G19, design §3.3). Unlike `worker_stopped/2` for a
+  parked run, **nothing is stopped**: a trusted subject's overrun is a question for
+  the coordinator, as BudgetPatrol's p90 page is.
+
+  `info` is `%{cap: :tokens | :wall_clock_s, limit: n, measured: n, tier: tier}`.
+  Ticket-scoped, so while one is open a repeat refreshes it. Best-effort,
+  returns `:ok`.
+  """
+  @spec spend_cap_exceeded(snapshot(), map()) :: :ok
+  def spend_cap_exceeded(snapshot, %{tier: tier} = info) do
+    escalate_event(:spend_cap_exceeded, snapshot, fn task_id ->
+      subject = "#{task_id} worker passed its #{StopReason.spend_cap_label(info.cap)} spend cap"
+
+      body =
+        [
+          "#{title_for(task_id)} (#{task_id}): the #{tier}-tier run is at " <>
+            "#{StopReason.spend_cap_figures(info)}.",
+          "Nothing has been stopped: this tier pages rather than parks. Judge whether the " <>
+            "run is looping, and stop it (`arb worker stop #{task_id}`) or let it finish."
+        ]
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Raise a proactively-detected credential expiry as a system alert (bd-5wchp1,
   bd-7gt8rm).
 

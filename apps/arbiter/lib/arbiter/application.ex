@@ -161,6 +161,9 @@ defmodule Arbiter.Application do
         # bd-8j9i9p: pages the coordinator once when an open task's worker spend
         # crosses its estimate group's p90. Informational — it stops nothing.
         Arbiter.Usage.BudgetPatrol,
+        # G19: parks a live quarantine/probation run past its tier's token or wall-clock
+        # cap, and pages for an operator-set cap on a page tier.
+        Arbiter.Guardrails.SpendPatrol,
         # Polls GitHub for a newer published release and records "update available"
         # (check + notify only; never deploys). Off in dev/test. See
         # Arbiter.Release.UpdateCheck.

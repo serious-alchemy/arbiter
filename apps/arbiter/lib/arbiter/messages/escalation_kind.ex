@@ -72,6 +72,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :review_loop,
     :review_parked,
     :spawn_failed,
+    :spend_cap_exceeded,
     :ticket_stuck,
     :tracker_sync_failed,
     :transcript_capture_failed,
