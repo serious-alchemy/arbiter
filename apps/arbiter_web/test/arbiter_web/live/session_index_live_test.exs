@@ -190,7 +190,10 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
         raw: %{"arb_usage_source" => %{"cost_source" => "cost_state"}}
       })
 
+      # The tick handler starts the async read; make sure the LiveView has
+      # processed the message (so the task exists) before awaiting it.
       send(view.pid, :refresh_session_usage)
+      _ = :sys.get_state(view.pid)
       render_async(view)
 
       assert has_element?(view, "#session-#{session.id}-usage", "$0.75")
