@@ -600,8 +600,9 @@ defmodule Arbiter.Workers.Reconciler do
   @doc """
   Resume orphaned `:active` Issues that were mid-flight (a `:running` /
   revising worker killed by the restart) but have **no** open PR yet — via the
-  existing `bd-auma3z` resume path (`Arbiter.Worker.Dispatch.resume/2`), which
-  re-attaches a fresh agent to the task's *preserved* worktree.
+  existing resume path (bd-33n9v4: `Arbiter.Worker.Dispatch.resume_session/2`, continuing the
+  interrupted Claude session via `--resume`, else briefing mode), which
+  re-attaches an agent to the task's *preserved* worktree.
 
   Resume is delegated to `Dispatch.resume/2`, which already enforces the safety
   guards this sweep requires: it refuses a closed task, refuses when a worker is
@@ -922,11 +923,27 @@ defmodule Arbiter.Workers.Reconciler do
   # Public (`@doc false`) so the provider-routing tests (bd-40pzpj) can drive
   # the real resume this module performs; `opts` is merged over it.
   @doc false
+  #
+  # bd-33n9v4: continue the interrupted session (`--resume <sid>`) rather than
+  # starting a fresh agent from a git briefing. `Dispatch.resume_session/2`
+  # finds the JSONL in the interrupted run's live config dir, the session-history
+  # store or the run archive, seeds it into the new run (podman included), and
+  # itself degrades to a git-derived briefing when no history exists. Only a task
+  # with no recorded session at all goes through `Dispatch.resume/2` directly.
   def default_resume(%Issue{id: task_id}, opts \\ []) do
-    Dispatch.resume(
-      task_id,
-      Keyword.merge([resume_origin: :automatic, routing_role: :reconciler_resume], opts)
-    )
+    opts = Keyword.merge([resume_origin: :automatic, routing_role: :reconciler_resume], opts)
+
+    case Dispatch.resume_session(task_id, opts) do
+      {:error, :no_session} ->
+        Logger.info(
+          "Workers.Reconciler: #{task_id} has no recorded session; resuming in briefing mode"
+        )
+
+        Dispatch.resume(task_id, opts)
+
+      other ->
+        other
+    end
   end
 
   defp escalate_stuck_issue(%Issue{} = issue, reason) do
