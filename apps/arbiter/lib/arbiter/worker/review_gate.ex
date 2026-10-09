@@ -1195,7 +1195,7 @@ defmodule Arbiter.Worker.ReviewGate do
       reviewer_selection: nil,
       # bd-atll60 (G13): set (a reason) when `ReviewerRouting` found no reviewer
       # the guardrails allow for this pass, or the implementer's profile holds a
-      # same-family review. The pass is then not started: `adapter_for/4` refuses
+      # same-family review. The pass is then not started: `gated_adapter/4` refuses
       # it with the reason, which parks the round, instead of falling through to
       # the ordinary resolution (which knows nothing of tiers).
       reviewer_hold: nil,
@@ -5996,7 +5996,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-atll60 (G13): the guardrail hard gate on the implementer round's provider
   # (the pin, or the legacy resolution): it never asked `ProviderRouting`'s
   # candidates for this exact spawn, so a tier cannot be walked around by a
-  # revise round. Reviewers are gated in `adapter_for/4`.
+  # revise round. Reviewers are gated in `gated_adapter/4`.
   defp implementer_guardrails(state, provider) do
     Gate.check_and_notify(state.task_id, load_workspace(state.workspace_id), provider, :predicted,
       repo: state.repo
@@ -6025,7 +6025,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # meta names the workspace's intended reviewer type rather than an
     # adapter that will actually be refused a moment later.
     provider =
-      case adapter_for(state, ws, :reviewer, revision) do
+      case gated_adapter(state, ws, :reviewer, revision) do
         {:ok, {rev_adapter, _}} -> rev_adapter.provider()
         {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
       end
@@ -6191,7 +6191,7 @@ defmodule Arbiter.Worker.ReviewGate do
             :reviewer ->
               ws = load_workspace(state.workspace_id)
 
-              case adapter_for(state, ws, :reviewer, revision) do
+              case gated_adapter(state, ws, :reviewer, revision) do
                 {:ok, {adapter, _}} -> adapter.provider()
                 {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
               end
@@ -6226,7 +6226,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # `:strict` scope no configured provider for this role can keep must
         # refuse HERE, before argv is ever built, same as
         # `Dispatch.build_agent_session_opts/4`'s gate.
-        case adapter_for(state, ws, role, revision) do
+        case gated_adapter(state, ws, role, revision) do
           {:error, reason} ->
             {:error, reason}
 
@@ -6380,8 +6380,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp sandbox_session_opts(_policy, _ws, _role, _state), do: []
 
-  defp adapter_for(state, ws, role, revision) do
-    with {:ok, {adapter, _role_atom}} = resolved <- resolve_adapter(state, ws, role, revision),
+  defp gated_adapter(state, ws, role, revision) do
+    with {:ok, {adapter, _role_atom}} = resolved <- adapter_for(state, ws, role, revision),
          :ok <- reviewer_guardrails(state, ws, role, adapter) do
       resolved
     end
@@ -6425,7 +6425,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # this arm can fail. Every unpinned pass (`reviewer_provider: nil`, the
   # default and the only state a single-provider workspace ever reaches)
   # resolves exactly as before.
-  defp resolve_adapter(%{reviewer_provider: provider} = state, ws, :reviewer, _revision)
+  defp adapter_for(%{reviewer_provider: provider} = state, ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider) do
     with :ok <- reviewer_capability(state, ws, provider),
          do: {:ok, {Agents.for_type(provider), :review_agent}}
@@ -6435,7 +6435,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # Its candidates are already filtered for `:strict` write confinement, and
   # its pre-routing fallback goes through `Agents.strict_eligible_provider/4`
   # exactly like the clause below.
-  defp resolve_adapter(%{reviewer_selection: %{provider: provider}}, _ws, :reviewer, _revision)
+  defp adapter_for(%{reviewer_selection: %{provider: provider}}, _ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider),
        do: {:ok, {Agents.for_type(provider), :review_agent}}
 
@@ -6447,7 +6447,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # `:strict` scope where none of the workspace's configured reviewers can
   # confine writes, this refuses (the same fail-closed error Dispatch returns)
   # instead of silently substituting an unconfigured `:claude`.
-  defp resolve_adapter(state, %Workspace{} = ws, :reviewer, _revision) do
+  defp adapter_for(state, %Workspace{} = ws, :reviewer, _revision) do
     policy = session_security_policy(ws, state, :reviewer)
     configured = Agents.reviewer_type(ws)
 
@@ -6475,7 +6475,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp resolve_adapter(_state, nil, :reviewer, _revision),
+  defp adapter_for(_state, nil, :reviewer, _revision),
     do: {:ok, {Agents.for_type(:claude), :review_agent}}
 
   # bd-1abj7u finding 2: the revision implementer spawn goes through this same
@@ -6485,7 +6485,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # treated as an explicit pin, same as `arb dispatch --provider`, since there
   # is no pool to fall back into here (the implementer role isn't drawn from a
   # pool the way the reviewer role is).
-  defp resolve_adapter(
+  defp adapter_for(
          state,
          %Workspace{} = ws,
          :implementer,

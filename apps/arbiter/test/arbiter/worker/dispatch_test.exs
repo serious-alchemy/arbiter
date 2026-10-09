@@ -2737,7 +2737,10 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "floor gemini refusal", workspace_id: ws.id})
+      # D1: within the quarantine ceiling, so the eligibility gate (G13) passes and
+      # the floor is what refuses (D2 would be refused by the gate first).
+      {:ok, task} =
+        Ash.create(Issue, %{title: "floor gemini refusal", workspace_id: ws.id, difficulty: 1})
 
       assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, message}}} =
                Dispatch.dispatch(task.id,
@@ -2890,16 +2893,39 @@ defmodule Arbiter.Worker.DispatchTest do
       assert env =~ "WH_PLAIN=plain-value"
     end
 
-    test "guarded: a declared permission the subject's tier cannot hold is withheld", %{
-      ws: ws,
-      tmp: tmp
-    } do
+    # bd-atll60 (G13): withholding is the second fence. A *required* permission the
+    # subject's tier cannot hold makes the subject ineligible, so routing's hard
+    # gate refuses the dispatch before anything is spawned — it never reaches the
+    # projection that would have withheld it.
+    test "guarded: a declared permission the subject's tier cannot hold is refused before spawn",
+         %{ws: ws, tmp: tmp} do
       put_app_env(:arbiter, :guardrail_subject_rules, [
         %{match: %{provider: "claude"}, tier: :trusted}
       ])
 
-      env = dispatch_for_env(withholding_workspace(ws), tmp, ["prod_read"])
-      refute env =~ "RO_URL"
+      ws = withholding_workspace(ws)
+      repo = seed_repo!(tmp, "wh-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wh-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"wh/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(
+          Issue,
+          %{title: "too much reach", workspace_id: ws.id, permissions: ["prod_read"]},
+          context: %{guardrail_authority: :coordinator, permission_actor: "c"}
+        )
+
+      assert {:error, {:guardrail_ineligible, :claude, phrase}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "wh/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert phrase =~ "prod_read"
+      assert phrase =~ "privileged"
     end
 
     test "no guardrail rules: nothing is withheld, as before G14", %{ws: ws, tmp: tmp} do
