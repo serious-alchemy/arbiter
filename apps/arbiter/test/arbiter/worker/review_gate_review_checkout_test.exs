@@ -1147,7 +1147,19 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       assert Worker.ContainerSpawn.claude_path() in opts[:command]
     end
 
-    test "the spawn options of a bwrap fix round carry no container inputs", %{repo: repo} do
+    test "the spawn options of a bwrap fix round carry no container inputs",
+         %{repo: repo, tmp: tmp} do
+      # A bwrap round resolves the HOST's `claude`; CI has none installed, so
+      # shim one on PATH (the module is async: false, so PATH is ours).
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+      File.write!(stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
       branch = "feature/fix-7"
       impl = implementer_clone(repo, branch)
       ws = container_ws(%{"backend" => "bwrap"})
