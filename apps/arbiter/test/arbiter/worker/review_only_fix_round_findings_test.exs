@@ -81,9 +81,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
         ["reading the diff"] ++ @body ++ ["VERDICT: REQUEST_CHANGES", "VERIFICATION: FULL"]
       )
 
-    assert StubFixRoundDispatcher.dispatch_count() == 1
-
-    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert [args] = StubFixRoundDispatcher.await_dispatches()
     assert args.task_id == task.id
     assert args.findings =~ "lib/foo.ex:12 missing nil guard"
     assert args.findings =~ "lib/bar.ex:40 the retry loop never backs off"
@@ -108,9 +106,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
         }
       )
 
-    assert StubFixRoundDispatcher.dispatch_count() == 1
-
-    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert [args] = StubFixRoundDispatcher.await_dispatches()
     assert args.task_id == task.id
     assert args.findings =~ "VERDICT: REQUEST_CHANGES"
     assert args.findings =~ pr_body
@@ -139,7 +135,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
         }
       )
 
-    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert [args] = StubFixRoundDispatcher.await_dispatches()
     assert args.findings =~ "lib/new.ex:9 current finding"
     refute args.findings =~ "lib/old.ex"
   end
@@ -161,7 +157,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
         }
       )
 
-    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert [args] = StubFixRoundDispatcher.await_dispatches()
     assert args.findings =~ "lib/foo.ex:12 missing nil guard"
     refute args.findings =~ "lib/old.ex"
   end
@@ -169,8 +165,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
   test "findings printed after the VERDICT line still reach the fix round" do
     {_task, _ws, _pid} = start_reviewer(["VERDICT: REQUEST_CHANGES"] ++ @body)
 
-    assert StubFixRoundDispatcher.dispatch_count() == 1
-    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert [args] = StubFixRoundDispatcher.await_dispatches()
     assert args.findings =~ "lib/foo.ex:12 missing nil guard"
   end
 
