@@ -629,6 +629,28 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              Arbiter.Worker.Dispatch.conflict_resolve_briefing(t, "feature/x", "main")
   end
 
+  describe "conflict_resolve_briefing/4 host git (bd-19skda)" do
+    test "default briefing tells the worker to fetch and force-push itself" do
+      prompt = PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main")
+
+      assert prompt =~ "git fetch origin main"
+      assert prompt =~ "git push --force-with-lease origin feature/x"
+      refute prompt =~ "NO FETCH OR PUSH ACCESS"
+    end
+
+    test "a containerized pass is told the host fetches before and pushes after" do
+      prompt =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main", host_git: true)
+
+      assert prompt =~ "NO FETCH OR PUSH ACCESS"
+      assert prompt =~ "Host key verification failed"
+      assert prompt =~ "origin/main"
+      refute prompt =~ "git push --force-with-lease"
+      refute prompt =~ "git fetch origin main"
+      assert prompt =~ "arb done"
+    end
+  end
+
   # bd-9so315: the worker is the only party that can see its own diff, so the
   # work prompt has to tell it when to raise the flag.
   describe "post-merge verification doctrine" do
