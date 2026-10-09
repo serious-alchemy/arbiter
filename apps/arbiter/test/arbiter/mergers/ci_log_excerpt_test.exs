@@ -85,7 +85,8 @@ defmodule Arbiter.Mergers.CILogExcerptTest do
     warnings =
       for i <- 1..150, do: "warning: unused variable x#{i}\n  lib/arbiter/mod_#{i}.ex:#{i}"
 
-    slow = for i <- 1..40, do: "  * test slow #{i} (#{i}.0ms) [L#{i}] test/slow_#{i}_test.exs:#{i}"
+    slow =
+      for i <- 1..40, do: "  * test slow #{i} (#{i}.0ms) [L#{i}] test/slow_#{i}_test.exs:#{i}"
 
     block = [
       "",
