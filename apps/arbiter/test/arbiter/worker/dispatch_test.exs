@@ -2771,7 +2771,8 @@ defmodule Arbiter.Worker.DispatchTest do
             "agent" => %{
               "type" => "claude",
               "security" => %{"permissions" => %{"mode" => "bypass"}}
-            }
+            },
+            "git_credentials" => %{"legacy_operator" => true}
           }
         })
 
@@ -2956,7 +2957,7 @@ defmodule Arbiter.Worker.DispatchTest do
       guarded_claude_rules()
       ws = git_credential_workspace(ws, %{"legacy_operator" => true})
       env = dispatch_for_env(ws, tmp, [])
-      refute env =~ "GIT_SSH_COMMAND=ssh -i"
+      refute env =~ "GIT_SSH_COMMAND=ssh"
       refute env =~ "SSH_AUTH_SOCK"
     end
 
@@ -2975,7 +2976,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       env = dispatch_for_env(ws, tmp, [])
 
-      assert [_, key_path] = Regex.run(~r/GIT_SSH_COMMAND=ssh -i (\S+) /, env)
+      assert [_, key_path] = Regex.run(~r{GIT_SSH_COMMAND=ssh -F /dev/null -i (\S+) }, env)
       assert env =~ "IdentitiesOnly=yes"
       assert env =~ "IdentityAgent=none"
       refute env =~ "SSH_AUTH_SOCK"

@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.TargetBranch
@@ -623,26 +624,39 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         # bd-7ays3v: under podman, a Claude pass runs in the container, in the
         # private clone `create_worktree/1` gave it, under the policy the task
         # worker resolves; any other pass is spawned exactly as before.
-        session_opts =
-          ([
-             owner: worker_pid,
-             worktree_path: worktree_path
-           ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-          |> add_command_or_prompt(
-            Map.put(context, :host_git, host_git?(context, provider)),
-            args,
-            worktree_path,
-            provider,
-            mcp_opts
-          )
+        #
+        # bd-9cygoo (G16): a pass that force-pushes itself needs a repo-scoped git
+        # credential; a containerized pass is pushed for by the host (bd-19skda).
+        with {:ok, git_credential} <-
+               GitCredential.plan(context.workspace, context.repo,
+                 role: :implementer,
+                 guarded?: Arbiter.Guardrails.guarded?(),
+                 host_pushes?: host_git?(context, provider)
+               ) do
+          session_opts =
+            ([
+               owner: worker_pid,
+               worktree_path: worktree_path,
+               git_credential: git_credential
+             ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+            |> add_command_or_prompt(
+              Map.put(context, :host_git, host_git?(context, provider)),
+              args,
+              worktree_path,
+              provider,
+              mcp_opts
+            )
 
-        case ClaudeSession.start(session_opts) do
-          {:ok, port} ->
-            _ = Worker.advance(worker_pid, :resolve_conflict)
-            {:ok, port}
+          case ClaudeSession.start(session_opts) do
+            {:ok, port} ->
+              _ = Worker.advance(worker_pid, :resolve_conflict)
+              {:ok, port}
 
-          {:error, reason} ->
-            {:error, {:claude_start_failed, reason}}
+            {:error, reason} ->
+              {:error, {:claude_start_failed, reason}}
+          end
+        else
+          {:error, reason} -> {:error, {:claude_start_failed, reason}}
         end
     end
   end
@@ -666,7 +680,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       workspace: context.workspace,
       worktree_path: worktree_path,
       owner: Keyword.get(opts, :owner),
-      task_id: context.task.id
+      task_id: context.task.id,
+      git_credential: Keyword.get(opts, :git_credential)
     ] ++ mcp_opts ++ ContainerSpawn.pass_agent_opts(Keyword.get(opts, :security))
   end
 
