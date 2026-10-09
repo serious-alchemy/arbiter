@@ -225,6 +225,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
@@ -1194,6 +1195,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # whenever cross-family review is off, which leaves every path below
       # exactly as it was.
       reviewer_selection: nil,
+      # bd-atll60 (G13): set (a reason) when `ReviewerRouting` found no reviewer
+      # the guardrails allow for this pass, or the implementer's profile holds a
+      # same-family review. The pass is then not started: `gated_adapter/4` refuses
+      # it with the reason, which parks the round, instead of falling through to
+      # the ordinary resolution (which knows nothing of tiers).
+      reviewer_hold: nil,
       # bd-a22hib: the CURRENT review round's own detached checkout,
       # `%{path:, head_sha:}` — provisioned by `provision_review_checkout/1`
       # at the pushed head right before the round's first reviewer pass, shared
@@ -4259,8 +4266,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # nil, which is today's resolution exactly.
   defp route_reviewer_pass(%{reviewer_provider: nil} = state, :reviewer, nil) do
     case select_reviewer(state, []) do
-      {:ok, selection} -> %{state | reviewer_selection: selection}
-      _ -> %{state | reviewer_selection: nil}
+      {:ok, selection} ->
+        %{state | reviewer_selection: selection, reviewer_hold: nil}
+
+      {:none, %{"guardrail_hold" => reason}} ->
+        %{state | reviewer_selection: nil, reviewer_hold: reason}
+
+      _ ->
+        %{state | reviewer_selection: nil, reviewer_hold: nil}
     end
   end
 
@@ -4268,7 +4281,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp select_reviewer(state, exclude) do
     with %Workspace{} = ws <- load_workspace(state.workspace_id),
-         true <- ReviewerRouting.enabled?(ws) do
+         true <- ReviewerRouting.applies?(ws, state.task_id) do
       ReviewerRouting.select(ws, state.task_id,
         tier: round_reviewer_tier(state, ws.config),
         exclude: exclude,
@@ -6037,7 +6050,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # constrained.
   defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
     with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id),
-         :ok <- ProviderConstraint.check(state.task_id, provider) do
+         :ok <- ProviderConstraint.check(state.task_id, provider),
+         :ok <- implementer_guardrails(state, provider) do
       ProviderRouting.ensure_sandbox_backend(
         provider,
         state.task_id,
@@ -6047,6 +6061,16 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp ensure_revision_unpaused(_state, _), do: :ok
+
+  # bd-atll60 (G13): the guardrail hard gate on the implementer round's provider
+  # (the pin, or the legacy resolution): it never asked `ProviderRouting`'s
+  # candidates for this exact spawn, so a tier cannot be walked around by a
+  # revise round. Reviewers are gated in `gated_adapter/4`.
+  defp implementer_guardrails(state, provider) do
+    Gate.check_and_notify(state.task_id, load_workspace(state.workspace_id), provider, :predicted,
+      repo: state.repo
+    )
+  end
 
   defp start_worker_process(state, id, role, revision) do
     case Worker.start(
@@ -6070,7 +6094,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # meta names the workspace's intended reviewer type rather than an
     # adapter that will actually be refused a moment later.
     provider =
-      case adapter_for(state, ws, :reviewer, revision) do
+      case gated_adapter(state, ws, :reviewer, revision) do
         {:ok, {rev_adapter, _}} -> rev_adapter.provider()
         {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
       end
@@ -6081,6 +6105,7 @@ defmodule Arbiter.Worker.ReviewGate do
       difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
       provider: provider
     }
+    |> put_guardrail_decision(state, ws, provider, :reviewer)
   end
 
   defp worker_meta(state, :implementer, {provider, fallback_reason, decision}) do
@@ -6092,6 +6117,21 @@ defmodule Arbiter.Worker.ReviewGate do
       provider_fallback: fallback_reason
     }
     |> Map.merge(ProviderRouting.run_meta(decision))
+    |> put_guardrail_decision(state, load_workspace(state.workspace_id), provider, :implementer)
+  end
+
+  # bd-atll60 (G13): the guardrail decision the round's run records, as the
+  # dispatcher's does. Best-effort: the gate refused what it must; this records.
+  defp put_guardrail_decision(meta, state, ws, provider, role) do
+    model =
+      if role == :reviewer, do: reviewer_model(state, ws, to_string(provider)), else: :predicted
+
+    case Gate.decision(state.task_id, ws, provider, model, role: role, repo: state.repo) do
+      %{} = decision -> Map.put(meta, :guardrail_decision, decision)
+      _ -> meta
+    end
+  rescue
+    _ -> meta
   end
 
   # bd-3xultf: `state.task_id` is the BASE task id (not a synthetic ReviewGate
@@ -6221,7 +6261,7 @@ defmodule Arbiter.Worker.ReviewGate do
             :reviewer ->
               ws = load_workspace(state.workspace_id)
 
-              case adapter_for(state, ws, :reviewer, revision) do
+              case gated_adapter(state, ws, :reviewer, revision) do
                 {:ok, {adapter, _}} -> adapter.provider()
                 {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
               end
@@ -6256,7 +6296,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # `:strict` scope no configured provider for this role can keep must
         # refuse HERE, before argv is ever built, same as
         # `Dispatch.build_agent_session_opts/4`'s gate.
-        case adapter_for(state, ws, role, revision) do
+        case gated_adapter(state, ws, role, revision) do
           {:error, reason} ->
             {:error, reason}
 
@@ -6414,6 +6454,40 @@ defmodule Arbiter.Worker.ReviewGate do
         else: []
       )
   end
+
+  defp gated_adapter(state, ws, role, revision) do
+    with {:ok, {adapter, _role_atom}} = resolved <- adapter_for(state, ws, role, revision),
+         :ok <- reviewer_guardrails(state, ws, role, adapter) do
+      resolved
+    end
+  end
+
+  # bd-atll60 (G13): a guardrail hold refuses the pass; otherwise the adapter the
+  # (unchanged) resolution below picked is gated as a reviewer subject. Routing
+  # filters its own candidates, but the print-timeout pin, the pre-routing
+  # reviewer and a workspace with cross-family review off name a provider without
+  # having asked it.
+  defp reviewer_guardrails(%{reviewer_hold: reason}, _ws, :reviewer, _adapter)
+       when is_binary(reason),
+       do: {:error, {:guardrail_ineligible, nil, Gate.phrase(reason)}}
+
+  defp reviewer_guardrails(state, %Workspace{} = ws, :reviewer, adapter) do
+    provider = adapter.provider()
+
+    Gate.check_and_notify(state.task_id, ws, provider, reviewer_model(state, ws, provider),
+      role: :reviewer,
+      repo: state.repo
+    )
+  end
+
+  defp reviewer_guardrails(_state, _ws, _role, _adapter), do: :ok
+
+  defp reviewer_model(%{reviewer_selection: %{model: model}}, _ws, _provider)
+       when is_binary(model),
+       do: model
+
+  defp reviewer_model(state, ws, provider),
+    do: ReviewerRouting.predicted_model(ws, provider, tier: round_reviewer_tier(state, ws.config))
 
   # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
   # rotation has pinned to a specific provider uses THAT adapter, bypassing

@@ -261,6 +261,33 @@ defmodule Arbiter.Worker.PrivateCloneTest do
     end
   end
 
+  describe "attach/4 on a clone that already exists (bd-cccm1k)" do
+    test "copies the main repo's current origin/<base> into the reused clone", ctx do
+      {:ok, path} = PrivateClone.create(ctx.checkout, @branch, "main")
+      stale = git!(path, ["rev-parse", "refs/remotes/origin/main"])
+
+      # The target moves on the forge; the host fetches it into the main repo.
+      moved = commit!(ctx.seed, %{"lib/b.ex" => "b\n"}, "main moves on")
+      git!(ctx.seed, ["push", "-q", "origin", "main"])
+      :ok = Worktree.fetch_origin(ctx.checkout, "main")
+      assert git!(ctx.checkout, ["rev-parse", "refs/remotes/origin/main"]) == moved
+      assert git!(path, ["rev-parse", "refs/remotes/origin/main"]) == stale
+
+      assert {:ok, ^path} = PrivateClone.attach(ctx.checkout, @branch, "main")
+
+      assert git!(path, ["rev-parse", "refs/remotes/origin/main"]) == moved
+    end
+
+    test "a base the main repo has no origin ref for leaves the reused clone as it was", ctx do
+      {:ok, path} = PrivateClone.create(ctx.checkout, @branch, "main")
+      stale = git!(path, ["rev-parse", "refs/remotes/origin/main"])
+
+      assert {:ok, ^path} = PrivateClone.attach(ctx.checkout, @branch, "no-such-base")
+
+      assert git!(path, ["rev-parse", "refs/remotes/origin/main"]) == stale
+    end
+  end
+
   describe "refresh_base/2" do
     test "copies in (and pins) the main repo's current origin/<base> for the base asked about",
          ctx do

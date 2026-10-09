@@ -80,6 +80,16 @@ state moves on.
 | one ticket | `arb ticket show <id>` — State (column), Step, Attention, Close reason, PR + merge status, Current run |
 | a filtered list | MCP `ticket_list` with `state` or `column` |
 
+**CLI ↔ MCP parity.** Every coordinator-facing `arb` verb has an MCP twin; the
+ones to know: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔
+`worker_list`, `arb ticket show` ↔ `ticket_show`, `arb attention` ↔
+`coordinator_inbox`, `arb prime` (the session-start briefing; CLI only — it
+composes several reads and has no single MCP tool). Host-local verbs never call
+the server over HTTP and so have no MCP twin: `install`, `session`, `where`,
+`init`, `version`, `self-update`, `upgrade`, `help`. `ArbiterCli.Verbs` is the
+registry; `Arbiter.MCP.Catalog.all/0` is the tool list (its moduledoc table is
+test-checked against it).
+
 ## 2. Operating Pitfalls — Quick Reference
 
 The six most-burned-by operating pitfalls. Check these first:

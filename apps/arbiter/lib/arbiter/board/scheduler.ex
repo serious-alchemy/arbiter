@@ -121,6 +121,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:quota) => quota(),
           optional(:card_quota) => %{optional(String.t()) => quota()},
           optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},
+          optional(:card_guardrail) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:paused) => boolean()
         }
 
@@ -174,6 +175,9 @@ defmodule Arbiter.Board.Scheduler do
       # constraint leaves no eligible account is held on its own, which never
       # advances the queue.
       card_constraint: Map.get(input, :card_constraint) || %{},
+      # bd-atll60 (G13): per-ticket guardrail verdicts — no eligible model, or a
+      # permission awaiting the operator. A card's own block, like the above.
+      card_guardrail: Map.get(input, :card_guardrail) || %{},
       slots_free: Map.get(input, :slots_free, 0),
       slot_note: Map.get(input, :slot_note)
     }
@@ -281,6 +285,7 @@ defmodule Arbiter.Board.Scheduler do
       conflicts_with: Map.get(card, :conflicts_with),
       claimed: acc.mutex,
       provider_constraint: Map.get(board.card_constraint, card.id),
+      guardrail: Map.get(board.card_guardrail, card.id),
       scope: scope_of(card),
       in_flight: claims(acc)
     })
@@ -335,6 +340,10 @@ defmodule Arbiter.Board.Scheduler do
 
   # bd-13pqcp: a provider-constraint hold reads `held — provider constraint (…)`.
   defp phrase({:provider_constraint, _detail} = hold, _mutex),
+    do: "held — " <> Lifecycle.describe_hold(hold)
+
+  # bd-atll60 (G13): `held — guardrail (…)`.
+  defp phrase({:guardrail, _detail} = hold, _mutex),
     do: "held — " <> Lifecycle.describe_hold(hold)
 
   defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)

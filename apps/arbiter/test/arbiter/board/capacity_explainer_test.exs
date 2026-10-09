@@ -476,4 +476,25 @@ defmodule Arbiter.Board.CapacityExplainerTest do
                CapacityExplainer.hold(:paused, %{})
     end
   end
+
+  describe "a guardrail hold (bd-atll60, G13)" do
+    test "no eligible model says so, and what to do" do
+      hold =
+        CapacityExplainer.hold({:guardrail, "no eligible model: codex: D3 exceeds D1"}, %{},
+          raw: "held — guardrail (…)"
+        )
+
+      assert hold.kind == :guardrail
+      assert hold.badge == "No eligible model"
+      assert hold.summary =~ "D3 exceeds D1"
+    end
+
+    test "a permission awaiting a grant has its own badge" do
+      hold = CapacityExplainer.hold({:guardrail, "awaiting operator grant: prod_ssh"}, %{})
+
+      assert hold.kind == :guardrail
+      assert hold.badge == "Awaiting grant"
+      assert hold.summary =~ "prod_ssh"
+    end
+  end
 end

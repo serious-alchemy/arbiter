@@ -213,10 +213,16 @@ defmodule Arbiter.Guardrails do
   @doc """
   The subject for a `provider` and `model` (either may be `nil` for the model).
   `family` comes from `ModelFamily.classify/2`.
+
+  `provider` is the harness, as the rules name it. The `gemini` *adapter* runs
+  agy when that is the CLI installed here (`Arbiter.Quota.provider_code/1`), and
+  agy's rules say `antigravity`: a dispatch that only knows the adapter type
+  must be judged as the harness it actually spawns, not fall through to the
+  `quarantine` default (G13 asks this question on every dispatch path).
   """
   @spec subject(atom() | String.t(), String.t() | nil) :: subject()
   def subject(provider, model) do
-    provider = to_string(provider)
+    provider = provider |> to_string() |> harness()
     family = ModelFamily.classify(provider, model).family
 
     %{
@@ -225,6 +231,9 @@ defmodule Arbiter.Guardrails do
       family: if(family, do: Atom.to_string(family))
     }
   end
+
+  defp harness("gemini"), do: Arbiter.Quota.provider_code("gemini") || "gemini"
+  defp harness(provider), do: provider
 
   @doc """
   The effective profile for `subject` in `workspace` (and `repo`):
@@ -532,23 +541,47 @@ defmodule Arbiter.Guardrails do
     * `:egress_unenforceable` — the (floored) egress is not `:open` and the
       adapter has no egress confinement here.
 
-  Pass the already-floored `policy`. A `nil` profile is always `:ok`.
+  Pass the already-floored `policy`. A `nil` profile is always `:ok`. Options
+  `:write_confinement` / `:egress_confinement` (`(adapter, policy -> atom)`)
+  are the routing layers' test seams over `Arbiter.Agents`.
   """
-  @spec enforceable(module(), SecurityPolicy.t(), Profile.t() | nil) ::
+  @spec enforceable(module(), SecurityPolicy.t(), Profile.t() | nil, keyword()) ::
           :ok | {:error, :write_confinement_none | :egress_unenforceable}
-  def enforceable(_adapter, _policy, nil), do: :ok
+  def enforceable(adapter, policy, profile, opts \\ [])
+  def enforceable(_adapter, _policy, nil, _opts), do: :ok
 
-  def enforceable(adapter, %SecurityPolicy{} = policy, %Profile{}) do
+  def enforceable(adapter, %SecurityPolicy{} = policy, %Profile{}, opts) do
+    write = Keyword.get(opts, :write_confinement, &Agents.write_confinement/2)
+    egress = Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2)
+
     cond do
-      policy.permissions.mode == :strict and Agents.write_confinement(adapter, policy) == :none ->
+      policy.permissions.mode == :strict and write.(adapter, policy) == :none ->
         {:error, :write_confinement_none}
 
-      SecurityPolicy.egress(policy) != :open and
-          Agents.egress_confinement(adapter, policy) == :none ->
+      SecurityPolicy.egress(policy) != :open and egress.(adapter, policy) == :none ->
         {:error, :egress_unenforceable}
 
       true ->
         :ok
     end
   end
+
+  @doc """
+  The routing drop detail for an `enforceable/4` failure: names the tier and the
+  floor, so `Arbiter.Agents.ProviderRouting.guardrail_drop?/1` can tell it from
+  the ordinary `:strict`-scope drop.
+  """
+  @spec unmet_detail(
+          :write_confinement_none | :egress_unenforceable,
+          Profile.t(),
+          SecurityPolicy.t()
+        ) ::
+          String.t()
+  def unmet_detail(:write_confinement_none, %Profile{tier: tier}, _policy),
+    do: "the #{tier} guardrail floor needs :strict, which this adapter cannot confine"
+
+  def unmet_detail(:egress_unenforceable, %Profile{tier: tier}, %SecurityPolicy{} = policy),
+    do:
+      "the #{tier} guardrail floor needs egress #{SecurityPolicy.egress(policy)}, " <>
+        "which this adapter cannot enforce here"
 end

@@ -808,7 +808,10 @@ worktree registration, because the D4 estimate rests on that.
    open question 5)?~~ **Answered (bd-6dpjw7): No.** agy 1.2.16 ignores legacy
    file copies and copying refresh tokens risks token-rotation divergence.
    Retiring bwrap for agy requires a proven headless credential (dedicated
-   worker identity volume or `GEMINI_API_KEY`).
+   worker identity volume or `GEMINI_API_KEY`). **Designed (bd-1u6cqe):** a
+   per-identity volume holding a container-local keyring, one run at a time per
+   identity; see [agy-podman-backend](agy-podman-backend.md). Blocked on an
+   operator-supplied Google account and a first spike (A1).
 3. ~~How large is P5 really? The estimate is D4; it should be re-estimated after
    the reading day.~~ **Answered (bd-4wy1w1): D3.** ReviewGate and the
    MergeQueue read the worker's checkout, not the main repo, so only five

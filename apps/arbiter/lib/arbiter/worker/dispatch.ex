@@ -80,6 +80,8 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Alternatives
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
   alias Arbiter.Mergers.Github.RepoResolver
@@ -231,6 +233,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
+         :ok <- ensure_guardrails(task, opts),
          :ok <- ensure_sandbox_backend(task, opts),
          :ok <- ensure_capability(task, opts),
          :ok <- ensure_floor(task, opts),
@@ -1217,6 +1220,7 @@ defmodule Arbiter.Worker.Dispatch do
              :quota_held,
              :no_node_capacity,
              :provider_constraint,
+             :guardrail_ineligible,
              :sandbox_backend,
              :capability_missing,
              :below_floor,
@@ -1256,6 +1260,12 @@ defmodule Arbiter.Worker.Dispatch do
     "#{task_id} was refused by the pause gate: #{Map.get(reason, :phrase)}. " <>
       "`force`/`force_quota` does not lift a pause; resume the provider or account " <>
       "(`arb provider resume`) and retry"
+  end
+
+  def quota_held_message(task_id, %{gate: :guardrail} = reason) do
+    "#{task_id} was held by the guardrails: #{Map.get(reason, :phrase)}. It is queued and " <>
+      "starts when an eligible account is available; `force`/`force_quota` does not lift a " <>
+      "guardrail, only a change to the ticket, the bindings or the subject's tier does"
   end
 
   def quota_held_message(task_id, reason) do
@@ -1499,7 +1509,9 @@ defmodule Arbiter.Worker.Dispatch do
         route_by_provider(task, workspace, opts)
 
       true ->
-        constrain_unrouted(task, workspace, opts)
+        task
+        |> constrain_unrouted(workspace, opts)
+        |> then(&guardrail_unrouted(task, workspace, &1))
     end
   end
 
@@ -1538,6 +1550,7 @@ defmodule Arbiter.Worker.Dispatch do
         opts
         |> Keyword.put(:routing_decision, decision)
         |> then(&constrain_unrouted(task, workspace, &1))
+        |> then(&routed_guardrail_unrouted(task, workspace, decision, &1))
         |> then(&backend_unrouted(task, workspace, &1))
     end
   end
@@ -1639,6 +1652,219 @@ defmodule Arbiter.Worker.Dispatch do
         ProviderConstraint.check(task, quota_gate_provider(task, workspace, opts))
     end
   end
+
+  # ---- guardrails (G13, bd-atll60) ------------------------------------------------
+  #
+  # Guardrail eligibility (`docs/design/guardrail-profiles.md` §5.4, §5.7) is a
+  # hard gate on the provider this dispatch will actually run on, whichever path
+  # picked it: routing's own pick (already filtered, `ProviderRouting.check_guardrails`),
+  # its `no_candidate` fall-through to the pre-routing provider, the `agent.type`
+  # pool of an unrouted workspace, a resume's resolution, or a caller's explicit
+  # provider. Off (no subject rule configured) nothing here reads the ticket.
+
+  # The unrouted pool pick, made guardrail-aware: when the provider the pool would
+  # run is ineligible, take the first eligible one the ticket's constraint allows
+  # (recorded like routing's own choice, so a held replay re-picks). With none
+  # eligible the pick stands and `ensure_guardrails/2` refuses it. A caller's
+  # explicit provider is never swapped: that is refused, not rerouted.
+  # A routed workspace whose attached candidates were all dropped keeps the
+  # pre-routing pick when some of them were dropped by a guardrail: the hold
+  # analysis in `ensure_guardrails/2` then names both sides (eligible-but-held
+  # and ineligible, design §5.7) instead of quietly swapping providers. With no
+  # attached candidate at all there is nothing to weigh, so the pool pick is
+  # guardrail-filtered exactly as in an unrouted workspace.
+  defp routed_guardrail_unrouted(task, workspace, decision, opts) do
+    if decision["dropped"] in [nil, []],
+      do: guardrail_unrouted(task, workspace, opts),
+      else: opts
+  end
+
+  defp guardrail_unrouted(task, workspace, opts) do
+    with true <- Guardrails.guarded?(),
+         nil <- caller_override(opts),
+         false <- Keyword.get(opts, :review, false) == true,
+         true <- Arbiter.Worker.ReviewGate.base_task_id(task.id) == task.id,
+         provider = quota_gate_provider(task, workspace, opts),
+         {:error, _} <- guardrail_check(task, workspace, provider, opts),
+         pool =
+           ProviderConstraint.filter(ProviderConstraint.from(task), Agents.agent_pool(workspace)),
+         {[_ | _] = eligible, _} <-
+           Gate.partition(
+             task,
+             workspace,
+             pool,
+             &guardrail_model(task, workspace, &1, opts),
+             repo: guardrail_repo(task, opts)
+           ),
+         alt when not is_nil(alt) <- ProviderPool.pick(eligible) do
+      opts
+      |> Keyword.put(:agent_type, alt)
+      |> Keyword.put(:routed_agent_type, alt)
+      |> put_opt_if_present(
+        :provider_fallback,
+        "fell back from #{provider}: not eligible under its guardrails"
+      )
+    else
+      _ -> opts
+    end
+  end
+
+  defp guardrail_repo(task, opts), do: Keyword.get(opts, :repo) || task.repo
+
+  defp guardrail_role(opts),
+    do: if(Keyword.get(opts, :review, false) == true, do: :reviewer, else: :implementer)
+
+  defp guardrail_check(task, workspace, provider, opts) do
+    Gate.check(task, workspace, provider, guardrail_model(task, workspace, provider, opts),
+      role: guardrail_role(opts),
+      repo: guardrail_repo(task, opts)
+    )
+  end
+
+  # The model the spawn would run on `provider`: an explicit `:model`, routing's
+  # recorded pick when it is for this provider, else the tier through the
+  # provider's own map (what `floor_model/3` mirrors).
+  defp guardrail_model(task, workspace, provider, opts) do
+    cond do
+      explicit_model?(opts) -> Keyword.get(opts, :model)
+      model = routed_decision_model(opts, provider) -> model
+      true -> tier_model(task, workspace, provider, opts)
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp routed_decision_model(opts, provider) do
+    decision = Keyword.get(opts, :routing_decision) || %{}
+
+    if is_binary(decision["model"]) and decision["model"] != "" and
+         decision["agent_type"] == to_string(provider),
+       do: decision["model"]
+  end
+
+  defp tier_model(task, workspace, provider, opts) do
+    routed = Routing.decide(task, workspace, opts)
+    agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
+    floor_model(routed, provider, agent_config)
+  end
+
+  # The run's `guardrail_decision` (design §5.2). `nil` — recorded as nothing —
+  # when no subject rule is configured; best-effort, since the gate in
+  # `ensure_guardrails/2` is what decides and this only records.
+  defp guardrail_decision(task, opts) do
+    if Guardrails.guarded?() do
+      workspace = load_workspace(task)
+      provider = quota_gate_provider(task, workspace, opts)
+
+      Gate.decision(task, workspace, provider, guardrail_model(task, workspace, provider, opts),
+        role: guardrail_role(opts),
+        repo: guardrail_repo(task, opts)
+      )
+    end
+  rescue
+    _ -> nil
+  end
+
+  # The final gate (design §9 G13: "a hard gate on explicit and legacy dispatch
+  # paths"). Reviews run under the `:reviewer` role (data classes bind them, action
+  # permissions do not); a ReviewGate synthetic id is gated at its own spawn site.
+  # Fails CLOSED: this is a security gate, so a check that cannot run refuses.
+  defp ensure_guardrails(%Issue{} = task, opts) do
+    cond do
+      not Guardrails.guarded?() -> :ok
+      Arbiter.Worker.ReviewGate.base_task_id(task.id) != task.id -> :ok
+      true -> guardrail_verdict(task, opts)
+    end
+  end
+
+  defp guardrail_verdict(task, opts) do
+    workspace = load_workspace(task)
+    provider = quota_gate_provider(task, workspace, opts)
+
+    case guardrail_check(task, workspace, provider, opts) do
+      :ok ->
+        :ok
+
+      {:error, {:guardrail_ineligible, _, phrase}} ->
+        guardrail_refusal(task, workspace, provider, phrase, opts)
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.error("Dispatch: guardrail check crashed for #{task.id}: #{Exception.message(e)}")
+      {:error, {:guardrail_ineligible, nil, Gate.phrase("the guardrail check failed; refusing")}}
+  end
+
+  # §5.7. What the refusal is depends on whether waiting can fix it:
+  #
+  #   * an eligible subject exists but is unavailable (quota, capacity, auth, a
+  #     pause): the dispatch is HELD in the DispatchQueue, which drains when it
+  #     frees — never given to the ineligible one;
+  #   * no subject is eligible at all: not a quota problem, so it is refused and
+  #     the coordinator is told (`:no_eligible_model`);
+  #   * the caller named the provider, or an eligible one is still free (a stale
+  #     pick): a plain refusal.
+  defp guardrail_refusal(task, workspace, provider, phrase, opts) do
+    refusal = {:error, {:guardrail_ineligible, provider, phrase}}
+
+    explicit? =
+      caller_override(opts) != nil and
+        Keyword.get(opts, :routed_agent_type) != caller_override(opts)
+
+    if explicit? or guardrail_role(opts) == :reviewer do
+      refusal
+    else
+      case guardrail_alternatives(task, workspace, opts) do
+        {:held, hold_provider, hold_phrase} ->
+          hold_for_guardrail(task, opts, hold_provider, hold_phrase, refusal)
+
+        {:none, detail} ->
+          detail = detail || phrase
+
+          CoordinatorNotifier.no_eligible_model(
+            %{task_id: task.id, workspace_id: task.workspace_id},
+            detail
+          )
+
+          {:error, {:guardrail_ineligible, provider, Gate.phrase(detail)}}
+
+        :stale ->
+          refusal
+      end
+    end
+  end
+
+  defp guardrail_alternatives(task, workspace, opts) do
+    Alternatives.analyse(task, workspace,
+      routing_opts: [
+        security: routing_security(workspace, opts),
+        routing_choice: Keyword.get(opts, :routing_choice),
+        repo: Keyword.get(opts, :repo)
+      ],
+      repo: guardrail_repo(task, opts),
+      model_fun: &guardrail_model(task, workspace, &1, opts)
+    )
+  end
+
+  defp hold_for_guardrail(task, opts, provider, phrase, refusal) do
+    reason = %{gate: :guardrail, phrase: phrase}
+
+    case safe_guardrail_hold(task, opts, reason, provider) do
+      :ok -> {:error, {:quota_held, task.id}}
+      _ -> refusal
+    end
+  end
+
+  defp safe_guardrail_hold(%Issue{workspace_id: ws_id, id: id}, opts, reason, provider)
+       when is_binary(ws_id) do
+    DispatchQueue.hold(ws_id, id, unroute(opts), reason, provider)
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp safe_guardrail_hold(_task, _opts, _reason, _provider), do: :error
 
   # bd-57uzkl (design §6.2, E17): the capability hard gate on the provider this
   # dispatch will actually run on. The routers already drop a candidate that
@@ -2362,6 +2588,8 @@ defmodule Arbiter.Worker.Dispatch do
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
       # bd-40pzpj: the routing decision, account and family the run records.
       |> Map.merge(ProviderRouting.run_meta(Keyword.get(opts, :routing_decision)))
+      # bd-atll60 (G13): the guardrail decision the run was spawned under.
+      |> put_if_present(:guardrail_decision, guardrail_decision(task, opts))
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))

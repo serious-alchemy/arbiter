@@ -196,7 +196,8 @@ defmodule Arbiter.Workers.Serializer do
       :provider_fallback,
       :provider_account_id,
       :model_family,
-      :routing_decision
+      :routing_decision,
+      :guardrail_decision
     ])
     |> Map.put(:model, Stats.short_model_name(run.model))
   end
@@ -210,7 +211,8 @@ defmodule Arbiter.Workers.Serializer do
       provider_fallback: Map.get(meta, :provider_fallback),
       provider_account_id: Map.get(meta, :provider_account_id),
       model_family: Map.get(meta, :model_family),
-      routing_decision: Map.get(meta, :routing_decision)
+      routing_decision: Map.get(meta, :routing_decision),
+      guardrail_decision: Map.get(meta, :guardrail_decision)
     }
   end
 
@@ -255,6 +257,7 @@ defmodule Arbiter.Workers.Serializer do
       provider_account_id: r.provider_account_id,
       model_family: r.model_family,
       routing_decision: r.routing_decision,
+      guardrail_decision: r.guardrail_decision,
       session_id: r.session_id,
       resumed_from_run_id: r.resumed_from_run_id
     })
