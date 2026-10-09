@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Create do
                        [--tracker-context-type T] [--tracker-context-ref REF]
                        [--no-tracker] [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
-                       [--require-provider P | --exclude-provider P]
+                       [--require-provider P | --exclude-provider P] [--permission P]
                        [--force] [--ticket-only] [--json]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
@@ -174,6 +174,7 @@ defmodule ArbiterCli.Cmd.Create do
     ArgParser,
     Client,
     Output,
+    PermissionFlags,
     ProviderConstraintFlags,
     Workspace
   }
@@ -209,7 +210,8 @@ defmodule ArbiterCli.Cmd.Create do
 
   # bd-13pqcp: `--require-provider` / `--exclude-provider` (repeatable).
   @all_switches @switches ++
-                  AcceptanceFlags.switches() ++ ProviderConstraintFlags.switches()
+                  AcceptanceFlags.switches() ++
+                  ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -259,6 +261,7 @@ defmodule ArbiterCli.Cmd.Create do
         {"--difficulty", opts[:difficulty]},
         {"--require-provider", opts[:require_provider]},
         {"--exclude-provider", opts[:exclude_provider]},
+        {"--permission", opts[:permission]},
         {"--deps", opts[:deps]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
@@ -334,6 +337,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
       |> maybe_put_flag("force", force?)
       |> Map.merge(constraint)
+      |> Map.merge(PermissionFlags.create_payload(opts))
 
     if opts[:labels] && mode == :text do
       IO.puts(

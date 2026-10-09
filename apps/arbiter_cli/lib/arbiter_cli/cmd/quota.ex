@@ -335,6 +335,7 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("  captured at:           #{captured_at_str}#{age_suffix(q)}#{stale_indicator}")
     IO.puts("  source:                #{capture_source_label(q["capture_source"])}")
     IO.puts("  gating dispatch:       #{gating_line(q)}")
+    emit_gating_workspaces(q["gating_workspaces"])
     IO.puts("")
 
     IO.puts(
@@ -424,14 +425,34 @@ defmodule ArbiterCli.Cmd.Quota do
       "#{capture_source_label(q["capture_source"])} at #{captured_at_str})"
   end
 
+  # bd-aw325c: other workspaces on the account whose own ceiling is already
+  # crossed — dispatch reads the task's workspace, not the one shown above.
+  defp emit_gating_workspaces([_ | _] = rows) do
+    Enum.each(rows, fn r ->
+      IO.puts(
+        "                         #{r["workspace"]}: #{r["window"]} — #{r["reason"] || "held"}"
+      )
+    end)
+  end
+
+  defp emit_gating_workspaces(_), do: :ok
+
   # Which window, if any, is currently holding dispatch (bd-1tuxv8). Both the 5h
   # and the 7d figures are printed above; this line says which one the gate is
   # actually acting on, so "7d is at 76%" can no longer be misread as the reason
   # Autopilot is idle when the gate is not looking at it.
   defp gating_line(q) do
-    case q["gating_window"] do
-      nil -> "none — dispatch is not quota-held"
-      window -> "#{window} — #{q["gating_reason"] || "held"}"
+    others = List.wrap(q["gating_workspaces"])
+
+    case {q["gating_window"], others} do
+      {nil, []} ->
+        "none — dispatch is not quota-held"
+
+      {nil, rows} ->
+        "none for this workspace; held in #{length(rows)} other workspace(s):"
+
+      {window, _} ->
+        "#{window} — #{q["gating_reason"] || "held"}"
     end
   end
 

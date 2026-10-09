@@ -1208,6 +1208,7 @@ defmodule Arbiter.Worker.Dispatch do
              :no_outpost,
              :no_session,
              :account_at_capacity,
+             :quota_held,
              :no_node_capacity,
              :provider_constraint,
              :sandbox_backend,
@@ -1218,6 +1219,66 @@ defmodule Arbiter.Worker.Dispatch do
       do: :conflict
 
   def refusal_kind(_reason), do: :internal
+
+  @doc """
+  `quota_held_message/2` with the hold read from the task's workspace queue —
+  what the MCP tool and the REST API render for `{:quota_held, task_id}`.
+  """
+  @spec quota_held_message(String.t()) :: String.t()
+  def quota_held_message(task_id) do
+    reason =
+      with {:ok, %Issue{workspace_id: ws_id}} <- load_task(task_id),
+           %{reason: reason} <- DispatchQueue.held_item(ws_id, task_id) do
+        reason
+      else
+        _ -> nil
+      end
+
+    quota_held_message(task_id, reason)
+  end
+
+  @doc """
+  The operator-facing refusal for `{:error, {:quota_held, task_id}}`
+  (bd-aw325c). Two gates answer `:quota_held` — the provider/account **pause**
+  gate (`reason.gate == :pause`) and the **quota** gate — and the bare
+  `{:quota_held, id}` named neither. `reason` is the hold recorded in the
+  workspace's `DispatchQueue` (`nil` when it could not be read); the quota
+  gate's reason carries its window and numbers.
+  """
+  @spec quota_held_message(String.t(), term()) :: String.t()
+  def quota_held_message(task_id, %{gate: :pause} = reason) do
+    "#{task_id} was refused by the pause gate: #{Map.get(reason, :phrase)}. " <>
+      "`force`/`force_quota` does not lift a pause; resume the provider or account " <>
+      "(`arb provider resume`) and retry"
+  end
+
+  def quota_held_message(task_id, reason) do
+    "#{task_id} was held by the quota gate" <>
+      quota_hold_detail(reason) <>
+      ". It is queued and starts when the window has headroom; to dispatch past the " <>
+      "gate now pass `force_quota: true` (`force` only bypasses the Ready check)"
+  end
+
+  defp quota_hold_detail(%{window: window} = reason) when is_binary(window) do
+    numbers =
+      [
+        reason[:utilization] && "used #{pct(reason.utilization)}",
+        reason[:threshold] && "threshold #{pct(reason.threshold)}",
+        reason[:status] && "status=#{reason.status}",
+        reason[:mode] && "mode=#{reason.mode}"
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join(", ")
+
+    phrase = if is_binary(reason[:phrase]), do: " (#{reason.phrase})", else: ""
+    ": #{window} window" <> if(numbers == "", do: "", else: " — #{numbers}") <> phrase
+  end
+
+  defp quota_hold_detail(%{phrase: phrase}) when is_binary(phrase), do: ": #{phrase}"
+  defp quota_hold_detail(_), do: " (hold details unavailable)"
+
+  defp pct(value) when is_number(value), do: "#{Float.round(value * 100, 1)}%"
+  defp pct(value), do: to_string(value)
 
   @doc """
   The operator-facing refusal for `{:error, {:not_dispatchable, task_id, hold}}`
@@ -1786,7 +1847,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp safe_pause_hold(ws_id, task_id, opts, phrase, provider) do
-    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{phrase: phrase}, provider)
+    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{gate: :pause, phrase: phrase}, provider)
   rescue
     _ -> :error
   catch

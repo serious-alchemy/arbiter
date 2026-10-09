@@ -190,7 +190,8 @@ defmodule Arbiter.Tasks.Issue do
         :last_verdict,
         :last_verdict_sha,
         :skills,
-        :provider_constraint
+        :provider_constraint,
+        :permissions
       ]
 
       # `review_count` / `review_cap_escalated` / `circuit_breaker_tripped` /
@@ -232,6 +233,11 @@ defmodule Arbiter.Tasks.Issue do
       # workspace's only repo, else its `default_repo`, else a validation
       # error naming the configured keys. Every creation path lands here.
       change {Arbiter.Tasks.Issue.Changes.ResolveRepo, []}
+
+      # bd-54m4vv (G12): canonicalise + authority-check the declared
+      # permissions, add the workspace/repo defaults, write permission_events.
+      # After ResolveRepo: the repo picks the per-repo defaults layer.
+      change {Arbiter.Tasks.Issue.Changes.ResolvePermissions, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:created, issue)
@@ -285,10 +291,15 @@ defmodule Arbiter.Tasks.Issue do
         :circuit_breaker_reason,
         :circuit_breaker_sha,
         :skills,
-        :provider_constraint
+        :provider_constraint,
+        :permissions
       ]
 
       require_atomic? false
+
+      # bd-54m4vv (G12): a change to `permissions` is authority-checked and
+      # audited in `permission_events`; an update that leaves it alone is not.
+      change {Arbiter.Tasks.Issue.Changes.ApplyPermissions, []}
 
       # Audit-only attribution (bd-9j2g3x). `Issue` has no `actor` column to
       # snapshot the way `Skill` / `Workspace` do, but `store_action_inputs?` in
@@ -377,6 +388,15 @@ defmodule Arbiter.Tasks.Issue do
     # verifying. A ticket still sitting in the queue has nothing merged to
     # verify; `Tasks.Verification.finalize_merged/2` walks a queued ticket
     # through `start` first.
+    # bd-54m4vv (G12): the internal write behind `Arbiter.Tasks.Permissions.grant/3`
+    # / `deny/3`. Unlike `:update` it plans no events — the caller records the
+    # `granted` / `denied` it implies, after checking the binding's `grant_by`.
+    # Not reachable from REST/MCP/CLI.
+    update :set_permissions do
+      accept [:permissions]
+      require_atomic? false
+    end
+
     update :await_verification do
       require_atomic? false
 
@@ -2053,6 +2073,24 @@ defmodule Arbiter.Tasks.Issue do
       later review pass — every round, a post-approval re-review, a
       print-timeout rotation — reviews in this family while it is available.
       `nil` when cross-family review never ran on the task.
+      """
+    end
+
+    attribute :permissions, {:array, :string} do
+      allow_nil? false
+      public? true
+      default []
+
+      description """
+      The permissions this ticket declares (bd-54m4vv, G12;
+      `docs/design/guardrail-profiles.md` §5): `network:<host>[:<port>]`,
+      `tracker_write`, `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`.
+      Canonical (lower-case host, explicit port), sorted, de-duplicated; a
+      trailing `?` after the kind marks one optional. Set at creation by
+      `ResolvePermissions` (declared + workspace/repo defaults) and changed only
+      by a coordinator or the operator. A permission whose latest
+      `permission_events` row is `requested` is pending — see
+      `Arbiter.Tasks.Permissions.in_force/1`. A worker never writes this.
       """
     end
 

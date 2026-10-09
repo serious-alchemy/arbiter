@@ -302,25 +302,71 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
-    test "a CI-red fix round with no diff parks, naming the jobs, when CI stays red", ctx do
+    # bd-cbbgot (bd-ckx0uf / PR #559): main's CI was red, so the branch's CI stayed
+    # red no matter what the worker did. No reviewer had ever read this head, and
+    # the fix round had nothing to change — parking "fix round produced no
+    # changes" there left a coordinator to hand-merge an unreviewed head. The head
+    # goes to a reviewer, who is told CI could not vouch for it and runs the tests.
+    test "a CI-red fix round with no diff, CI still red, and a head no reviewer has read: reviews it",
+         ctx do
       rig = rig(ctx, "feature/ci-noop-red")
 
       StubMerger.set_failing_checks(@pr, [
         %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
       ])
 
-      # red, rerun red -> one fix round (no diff) -> red, the gate's own rerun red -> park
+      # red, rerun red -> one fix round (no diff) -> red, the gate's own rerun red
       start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
 
-      gate = start_gate(rig, ctx, revise_command: [@echo_done], rounds: 3)
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 3, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      # The unchanged, never-reviewed head is what the reviewer read; nothing parked.
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "CI could not vouch for this head"
+      assert prompt =~ "unit tests"
+
+      stop_gate(gate)
+    end
+
+    # bd-651ine regression: routing an unreviewed head to a reviewer is not an
+    # approval. The reviewer's REQUEST_CHANGES is on the gate's record, so the
+    # merge chokepoints refuse the head until a round approves it.
+    test "the unreviewed head sent to a reviewer is not mergeable until a round approves it",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-rc")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
+
+      # Round 1 (CI-red, no diff) -> review of the same head: REQUEST_CHANGES.
+      # The head was reviewed now, so the fix round that follows parks.
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@echo_done],
+          rounds: 4,
+          command: [@probe, "RC_OTHER"]
+        )
+
       ref = Process.monitor(gate)
       assert_receive {:DOWN, ^ref, :process, ^gate, _}, 30_000
 
-      assert passes(rig) == 0
+      # (RC_OTHER discloses a partial verification, which earns a re-prompt pass.)
+      assert passes(rig) >= 1
       assert Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      assert Ash.get!(Issue, rig.task.id).last_reviewed_sha in [nil, ""]
 
-      bodies = gate_messages(ctx, rig) |> Enum.map_join("\n", &"#{&1.subject}\n#{&1.body}")
-      assert bodies =~ "Failing jobs: unit tests"
+      assert {:error, {:review_not_approved, %{verdict: :request_changes}}} =
+               Arbiter.ReviewGate.MergeAuthorization.check(rig.task.id, rig.head)
     end
 
     test "the fix-round prompt for red CI names ci_rerun and flake_record", ctx do

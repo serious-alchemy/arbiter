@@ -26,7 +26,9 @@ defmodule Arbiter.Tasks.IssueFieldsTest do
       end
 
       assert IssueFields.create_fields() -- governed.(:create) == []
-      assert IssueFields.update_fields() -- governed.(:update) == []
+      # `add_permissions` / `remove_permissions` are folded into `permissions`
+      # before the action runs (bd-54m4vv), so they are not action inputs.
+      assert IssueFields.update_fields() -- governed.(:update) == IssueFields.permission_edits()
     end
 
     test "no internal review / breaker / audit field is allowed on either action" do

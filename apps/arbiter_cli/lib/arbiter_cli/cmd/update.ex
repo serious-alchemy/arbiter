@@ -55,6 +55,7 @@ defmodule ArbiterCli.Cmd.Update do
                       [--verify-after-deploy | --no-verify-after-deploy]
                       [--require-provider P | --exclude-provider P |
                        --clear-provider-constraint]
+                      [--permission P] [--remove-permission P]
                       [--resume-review] [--json]
 
   Every flag maps one-to-one onto a field MCP `ticket_update` and
@@ -122,6 +123,14 @@ defmodule ArbiterCli.Cmd.Update do
   conflict passes); with no allowed provider free the ticket is held, never run
   on an excluded one. The reviewer is not constrained. Coordinator/operator only.
 
+  `--permission <p>` / `--remove-permission <p>` (bd-54m4vv) add or drop one of
+  the permissions the ticket declares (`network:<host>[:<port>]`, `tracker_write`,
+  `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`; repeatable, comma lists).
+  The server folds them into the stored list. A permission whose workspace
+  binding says `grant_by: operator` (default `prod_ssh`) is only `requested`
+  until the operator grants it; removing `phi_data` is operator-only.
+  Coordinator/operator only.
+
   `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
   breaker (bd-1atwts), letting the engagement post again after a coordinator
   has adjudicated a review loop. It calls the typed
@@ -152,7 +161,7 @@ defmodule ArbiterCli.Cmd.Update do
   alias ArbiterCli.{AcceptanceFlags, ArgParser}
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
-  alias ArbiterCli.ProviderConstraintFlags
+  alias ArbiterCli.{PermissionFlags, ProviderConstraintFlags}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.
@@ -190,7 +199,8 @@ defmodule ArbiterCli.Cmd.Update do
 
   # bd-13pqcp: `--require-provider` / `--exclude-provider` / `--clear-provider-constraint`.
   @all_edit_switches @edit_switches ++
-                       AcceptanceFlags.switches() ++ ProviderConstraintFlags.switches()
+                       AcceptanceFlags.switches() ++
+                       ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -387,6 +397,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_bool_if("auto_close", opts[:auto_close])
       |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
       |> Map.merge(ProviderConstraintFlags.payload(opts))
+      |> Map.merge(PermissionFlags.update_payload(opts))
 
     resume? = opts[:resume_review] == true
 

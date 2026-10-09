@@ -153,6 +153,11 @@ defmodule Arbiter.ReviewGate.Round do
                           `:reran_ci_after_no_changes` — bd-dun10t: a fix round
                           launched by red CI left HEAD unchanged; the gate reran
                           CI itself (bounded) and re-reads it before any park.
+                          `:rereviewed_unreviewed_head` — bd-cbbgot: HEAD
+                          unchanged and the worktree clean, but no reviewer had
+                          read that head (the fix was already pushed, or CI red
+                          on main kept the branch red); the head went to a
+                          reviewer instead of parking.
                           Nil for a round whose HEAD advanced normally, for a
                           round with no worktree to check, and for every
                           `:review` row.
@@ -178,7 +183,7 @@ defmodule Arbiter.ReviewGate.Round do
   @verdicts ~w(approve request_changes timed_out)a
   @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes
                    advanced_non_file_fix escalated_no_changes_after_non_file_fix
-                   reran_ci_after_no_changes)a
+                   reran_ci_after_no_changes rereviewed_unreviewed_head)a
 
   sqlite do
     table "review_gate_rounds"
