@@ -1038,6 +1038,7 @@ defmodule Arbiter.Worker.StopReason do
         :quota_exhausted -> "5h usage limit reached"
         :credit_exhausted -> "credits exhausted"
         :rate_limited -> "rate-limited"
+        :session_not_found -> "session not found — resume in briefing mode (--mode briefing)"
         :gateway_error -> "gateway error (proxy/upstream)"
         :context_thrash -> "context window thrashed (autocompact loop)"
         :killed -> "killed by signal #{reason.signal}"
