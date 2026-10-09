@@ -335,3 +335,115 @@ defmodule Arbiter.Worker.GitCredentialTest do
     end
   end
 end
+
+defmodule Arbiter.Worker.GitCredentialSpawnTest do
+  @moduledoc "G16: `prepare/4` and `spawn_env/4`, the seam the session start uses."
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Guardrails.Projection
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.GitCredential
+
+  @moduletag :tmp_dir
+  @http Arbiter.Worker.GitCredential.HTTP
+
+  defp workspace(git_credentials, secrets) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gs-#{System.unique_integer([:positive])}",
+        prefix: "gs",
+        config: %{"git_credentials" => git_credentials},
+        secrets: secrets
+      })
+
+    ws
+  end
+
+  defp token_ws,
+    do: workspace(%{"repos" => %{"tonic" => %{"kind" => "token", "token_secret" => "T", "host" => "gitlab.com"}}}, %{"T" => "scoped-tok"})
+
+  defp plan(ws, repo \\ "tonic") do
+    {:ok, plan} = GitCredential.plan(ws, repo, role: :implementer, guarded?: true)
+    plan
+  end
+
+  defp projection(env_var \\ "GH_TOKEN"),
+    do: %Projection{guarded?: true, claims: ["tracker_write"], tracker_env: env_var}
+
+  test "a legacy or unenforced plan delivers nothing and changes nothing" do
+    for mode <- [:legacy, :unenforced, :not_needed] do
+      assert {:ok, git} = GitCredential.prepare(%GitCredential{mode: mode}, nil, self(), [])
+      assert git.material == nil and git.env == [] and git.redact == []
+      assert {:ok, [{"A", "b"}]} = GitCredential.spawn_env(git, Projection.unguarded(), [{"A", "b"}], [])
+    end
+  end
+
+  test "a deploy key is staged on the host and named by GIT_SSH_COMMAND", %{tmp_dir: tmp} do
+    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+    assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp)
+    assert File.read!(git.key_path) == "KEYDATA\n"
+    assert {"GIT_SSH_COMMAND", cmd} = List.keyfind(git.env, "GIT_SSH_COMMAND", 0)
+    assert cmd =~ git.key_path
+    assert git.redact == ["KEYDATA"]
+  end
+
+  test "a container spawn is not staged on the host: its key travels as a podman secret", %{tmp_dir: tmp} do
+    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+    assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp, container?: true)
+    assert git.material.key == "KEYDATA\n"
+    assert git.key_path == nil and git.env == []
+    assert File.ls!(tmp) == []
+  end
+
+  test "the origin remote of the worktree pins a token", %{tmp_dir: tmp} do
+    {_, 0} = System.cmd("git", ["init", "-q", tmp])
+    {_, 0} = System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
+
+    ws = token_ws()
+    assert {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: tmp)
+    assert git.material.remote == "acme/tonic"
+    assert Map.new(git.env)["ARB_GIT_TOKEN"] == "scoped-tok"
+  end
+
+  test "a token with no derivable remote is refused" do
+    ws = token_ws()
+    assert {:error, :git_credential_remote_unknown} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: "/nonexistent")
+  end
+
+  test "the tracker var gets the repo-scoped token, replacing the binding's broader one", %{tmp_dir: tmp} do
+    {_, 0} = System.cmd("git", ["init", "-q", tmp])
+    {_, 0} = System.cmd("git", ["-C", tmp, "remote", "add", "origin", "git@gitlab.com:acme/tonic.git"])
+    ws = token_ws()
+
+    {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), worktree_path: tmp, projection: projection("GITLAB_TOKEN"))
+    {:ok, env} = GitCredential.spawn_env(git, projection("GITLAB_TOKEN"), [{"GITLAB_TOKEN", "broad-binding-token"}, {"X", "1"}], [])
+
+    assert {"GITLAB_TOKEN", "scoped-tok"} in env
+    refute {"GITLAB_TOKEN", "broad-binding-token"} in env
+    assert {"X", "1"} in env
+  end
+
+  test "with a deploy key the binding's own tracker token is kept, but a classic PAT is refused", %{tmp_dir: tmp} do
+    ws = workspace(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}}, %{"K" => "KEYDATA"})
+    {:ok, git} = GitCredential.prepare(plan(ws), ws, self(), root: tmp)
+
+    Req.Test.stub(@http, fn conn -> Req.Test.json(conn, %{"login" => "x"}) end)
+    opts = [req_options: [plug: {Req.Test, @http}]]
+    assert {:ok, env} = GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "fine-grained"}], opts)
+    assert {"GH_TOKEN", "fine-grained"} in env
+
+    Req.Test.stub(@http, fn conn ->
+      conn |> Plug.Conn.put_resp_header("x-oauth-scopes", "repo, delete_repo") |> Req.Test.json(%{})
+    end)
+
+    assert {:error, {:git_credential_token_too_broad, scopes}} =
+             GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "classic"}], opts)
+
+    assert "delete_repo" in scopes
+  end
+
+  test "a legacy spawn's tracker token is left alone (no scope check, as before)" do
+    {:ok, git} = GitCredential.prepare(%GitCredential{mode: :legacy}, nil, self(), [])
+    assert {:ok, [{"GH_TOKEN", "x"}]} = GitCredential.spawn_env(git, projection(), [{"GH_TOKEN", "x"}], [])
+  end
+end

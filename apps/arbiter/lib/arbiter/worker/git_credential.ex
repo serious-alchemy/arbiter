@@ -670,16 +670,115 @@ defmodule Arbiter.Worker.GitCredential do
   @doc """
   The env a container carries for `material` alongside its `--secret`s: the
   token's value is *not* in it (it arrives as a secret), only the git config
-  that makes use of it, and a deploy key's `GIT_SSH_COMMAND`.
+  that makes use of it. A deploy key adds nothing here: its `GIT_SSH_COMMAND`
+  (`ssh_command/1` of `podman_key_path/0`) is composed with the container's proxy
+  `ProxyCommand` by `Arbiter.Worker.ContainerSpawn`.
   """
   @spec container_env(Material.t() | nil) :: [{String.t(), String.t()}]
   def container_env(nil), do: []
 
-  def container_env(%Material{kind: :deploy_key} = material),
-    do: Material.env(material, podman_key_path())
+  def container_env(%Material{kind: :deploy_key}), do: []
 
   def container_env(%Material{} = material),
     do: material |> Material.env(nil) |> Enum.reject(fn {name, _} -> name == "ARB_GIT_TOKEN" end)
+
+  # ---- the spawn seam -------------------------------------------------------------------
+
+  @type prepared :: %{
+          mode: atom(),
+          material: Material.t() | nil,
+          key_path: Path.t() | nil,
+          env: [{String.t(), String.t()}],
+          redact: [String.t()]
+        }
+
+  @doc """
+  Everything a spawn needs of its credential: `material/3`'s secrets, a deploy
+  key staged on the host (`stage/3`) unless the spawn is a container (`:container?`;
+  its key is a `podman_secrets/2` secret), and the env that delivers them.
+
+  Options: `:worktree_path` (whose `origin` pins a token), `:projection` (a
+  `tracker_write` grant also asks for a tracker token), `:container?`, `:root`,
+  `:req_options`, `:remote`.
+  """
+  @spec prepare(t() | nil, map() | nil, pid(), keyword()) :: {:ok, prepared()} | {:error, term()}
+  def prepare(plan, workspace, owner, opts) do
+    mode = if match?(%__MODULE__{}, plan), do: plan.mode, else: :unenforced
+    tracker? = match?(%{claims: [_ | _], tracker_env: var} when is_binary(var), Keyword.get(opts, :projection))
+
+    materialize_opts =
+      [
+        remote: Keyword.get(opts, :remote) || origin_remote(Keyword.get(opts, :worktree_path)),
+        tracker?: tracker?
+      ] ++ Keyword.take(opts, [:req_options])
+
+    with {:ok, material} <- materialize(plan || %__MODULE__{}, workspace, materialize_opts),
+         {:ok, staged} <- stage_unless_container(material, owner, opts) do
+      {:ok,
+       %{
+         mode: mode,
+         material: material,
+         key_path: staged.key_path,
+         env: staged.env,
+         redact: redact_values(material)
+       }}
+    end
+  end
+
+  defp stage_unless_container(material, owner, opts) do
+    if Keyword.get(opts, :container?, false),
+      do: {:ok, %{dir: nil, key_path: nil, env: []}},
+      else: stage(material, owner, Keyword.take(opts, [:root]))
+  end
+
+  @doc """
+  The worker env pairs with the credential applied: the tracker var (the
+  projection's `tracker_env`) carries the repo-scoped tracker token instead of
+  whatever a binding named, and the delivery env is appended.
+
+  Where the credential has no tracker token of its own (a deploy key), the
+  binding's token stays, but under a scoped plan it is checked first
+  (`verify_tracker_token/2`): a classic PAT reaches every repo its owner does and
+  is refused. A legacy or unenforced spawn is left exactly as it was.
+  """
+  @spec spawn_env(prepared(), map(), [{String.t(), String.t()}], keyword()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def spawn_env(%{mode: mode} = git, projection, pairs, opts) when mode in [:scoped] do
+    var = Map.get(projection, :tracker_env)
+
+    with {:ok, pairs} <- scope_tracker(git, var, pairs, opts) do
+      {:ok, pairs ++ git.env}
+    end
+  end
+
+  def spawn_env(git, _projection, pairs, _opts), do: {:ok, pairs ++ Map.get(git, :env, [])}
+
+  defp scope_tracker(_git, nil, pairs, _opts), do: {:ok, pairs}
+
+  defp scope_tracker(git, var, pairs, opts) do
+    case tracker_token(git.material) do
+      token when is_binary(token) ->
+        {:ok, List.keystore(Enum.reject(pairs, &(elem(&1, 0) == var)), var, 0, {var, token})}
+
+      nil ->
+        case List.keyfind(pairs, var, 0) do
+          {^var, token} ->
+            with :ok <- verify_tracker_token(token, opts), do: {:ok, pairs}
+
+          nil ->
+            {:ok, pairs}
+        end
+    end
+  end
+
+  @doc """
+  Refuses a tracker token that is a classic GitHub PAT (`X-OAuth-Scopes` is
+  reported): it cannot be limited to one repo and may carry `gist` or
+  `delete_repo`. A fine-grained token or an App installation token passes.
+  """
+  @spec verify_tracker_token(String.t(), keyword()) :: :ok | {:error, term()}
+  def verify_tracker_token(token, opts \\ []) when is_binary(token),
+    do: check_token_scope(%{host: "github.com", api_url: nil, token_secret: "tracker_write binding"}, token, opts)
 
   # ---- tracker & redaction ------------------------------------------------------------
 

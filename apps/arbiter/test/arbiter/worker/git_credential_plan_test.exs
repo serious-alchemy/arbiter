@@ -143,3 +143,30 @@ defmodule Arbiter.Worker.GitCredentialPlanTest do
     end
   end
 end
+
+defmodule Arbiter.Worker.GitCredentialConfigTest do
+  use Arbiter.DataCase, async: true
+
+  alias Arbiter.Tasks.Workspace
+
+  defp create(config),
+    do: Ash.create(Workspace, %{name: "gcc-#{System.unique_integer([:positive])}", prefix: "gcc", config: config})
+
+  test "a valid git_credentials block is accepted" do
+    assert {:ok, _} =
+             create(%{
+               "git_credentials" => %{
+                 "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}
+               }
+             })
+  end
+
+  test "an invalid block is refused on write, so a typo cannot read as configured" do
+    assert {:error, error} =
+             create(%{"git_credentials" => %{"repos" => %{"tonic" => %{"kind" => "pat"}}}})
+
+    assert Exception.message(error) =~ "git_credentials.repos.tonic.kind"
+
+    assert {:error, _} = create(%{"git_credentials" => %{"legacy_operater" => true}})
+  end
+end

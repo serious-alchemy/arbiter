@@ -18,6 +18,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.PrivateClone
 
   @branch "feature/bd-p7-claude"
@@ -750,6 +751,94 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       assert {:error, {:not_a_private_clone, _, {:tampered, _}}} =
                ContainerSpawn.prepare(ctx.opts)
+    end
+  end
+
+  describe "a scoped git credential (G16, bd-9cygoo)" do
+    alias Arbiter.Worker.GitCredential.Material
+
+    setup do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :worker_container_runner, fn cmd, args, _opts ->
+        case args do
+          ["secret", "create", name, file] ->
+            send(test_pid, {:secret_created, name, File.read!(file)})
+
+          _ ->
+            send(test_pid, {:ran, cmd, args})
+        end
+
+        {"", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+      :ok
+    end
+
+    test "a deploy key becomes a podman --secret mount; no host path, agent or value on argv", ctx do
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+      assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+
+      assert_received {:secret_created, secret, "PRIVATE-KEY\n"}
+      assert secret == request.name <> "-git-key"
+      assert [%{name: ^secret, type: :mount, target: "arb_git_key", uid: uid}] = request.git_secrets
+      assert is_integer(uid)
+      refute Enum.any?(request.git_secrets, &Map.has_key?(&1, :value))
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      argv = wrapped.argv
+      assert "--secret" in argv
+      assert Enum.any?(argv, &(&1 =~ "#{secret},type=mount,target=arb_git_key"))
+      refute Enum.any?(argv, &(&1 =~ "PRIVATE-KEY"))
+      refute Enum.any?(argv, &(&1 =~ "SSH_AUTH_SOCK"))
+
+      assert {"GIT_SSH_COMMAND", ssh} = List.keyfind(wrapped.env, "GIT_SSH_COMMAND", 0)
+      assert ssh =~ "-i /run/secrets/arb_git_key"
+      assert ssh =~ "IdentityAgent=none"
+      # the egress proxy stays the only way out
+      assert ssh =~ "ProxyCommand"
+    end
+
+    test "a token is a --secret env var, with only the helper config in the environment", ctx do
+      material = %Material{kind: :token, token: "tok-123", host: "github.com", remote: "acme/tonic"}
+      assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+
+      assert_received {:secret_created, secret, "tok-123"}
+      assert secret == request.name <> "-git-token"
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert Enum.any?(wrapped.argv, &(&1 == "#{secret},type=env,target=ARB_GIT_TOKEN"))
+      refute Enum.any?(wrapped.argv, &(&1 =~ "tok-123"))
+      refute Enum.any?(wrapped.env, fn {_, v} -> to_string(v) =~ "tok-123" end)
+      assert Enum.any?(wrapped.argv, &(&1 =~ "GIT_CONFIG_PARAMETERS"))
+    end
+
+    test "teardown removes the secrets with the container", ctx do
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+      {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+      secret = request.name <> "-git-key"
+
+      assert :ok = ContainerSpawn.teardown(%{sandbox: request})
+      assert_received {:ran, _, ["secret", "rm", "--ignore", ^secret]}
+    end
+
+    test "a secret that cannot be created refuses the spawn and leaves nothing behind", ctx do
+      Application.put_env(:arbiter, :worker_container_runner, fn _cmd, args, _opts ->
+        if match?(["secret", "create" | _], args), do: {"no space", 125}, else: {"", 0}
+      end)
+
+      material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
+
+      assert {:error, {:git_credential_secret_failed, {:podman_secret_failed, 125, "no space"}}} =
+               ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+    end
+
+    test "no material: no secrets, as before", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert request.git_secrets == []
+      {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      refute "--secret" in wrapped.argv
     end
   end
 

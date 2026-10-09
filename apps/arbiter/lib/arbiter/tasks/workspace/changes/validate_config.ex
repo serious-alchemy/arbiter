@@ -27,6 +27,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       (bd-a1ke2c).
     * If `"guardrails"` is present it must pass
       `Arbiter.Guardrails.Config.validate/1` (bd-anwb0u, G11).
+    * If `"git_credentials"` is present it must pass
+      `Arbiter.Worker.GitCredential.validate/1` (bd-9cygoo, G16).
     * If `"agent.security.sandbox.egress"` (or a per-repo
       `"agent.security.repos.<repo>.sandbox.egress"`) is present, it must be one
       of `Arbiter.Agents.SecurityPolicy.valid_egress_levels/0` (`"open"`,
@@ -148,6 +150,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_security(Map.get(config, "agent"))
     |> validate_guardrails(Map.get(config, "guardrails"))
+    |> validate_git_credentials(Map.get(config, "git_credentials"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
@@ -281,6 +284,17 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       field: :config,
       message: "#{label}.seed_paths must be a list of strings"
     )
+  end
+
+  # bd-9cygoo (G16): the `git_credentials` block — per-repo scoped push credentials
+  # (`Arbiter.Worker.GitCredential`). Unknown keys are refused for the same reason.
+  defp validate_git_credentials(changeset, nil), do: changeset
+
+  defp validate_git_credentials(changeset, block) do
+    case Arbiter.Worker.GitCredential.validate(block) do
+      :ok -> changeset
+      {:error, message} -> Changeset.add_error(changeset, field: :config, message: message)
+    end
   end
 
   # bd-anwb0u (G11): the `guardrails` block — bindings, ticket defaults and
