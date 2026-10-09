@@ -49,8 +49,8 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
   defp live_sessions!(conn) do
     {:ok, view, _html} = live(conn, ~p"/sessions")
     # Two-stage load: :sessions, then a chained :usage task. Await both.
-    _ = render_async(view)
-    html = render_async(view)
+    _ = render_async(view, 2_000)
+    html = render_async(view, 2_000)
     {:ok, view, html}
   end
 
@@ -201,7 +201,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # render_async can return before the second task exists. Await each
       # stage in turn, bounded.
       Enum.reduce_while(1..5, nil, fn _, _ ->
-        render_async(view)
+        render_async(view, 2_000)
 
         if has_element?(view, "#session-#{session.id}-usage", "$0.75"),
           do: {:halt, nil},
@@ -1032,7 +1032,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       view |> element("#kill-session-#{session.id}") |> render_click()
       view |> element("#confirm-kill") |> render_click()
-      html = render_async(view)
+      html = render_async(view, 2_000)
 
       assert {:ok, %{status: :ended}} = Sessions.get(session.id)
       refute has_element?(view, "#kill-session-modal")
