@@ -1031,7 +1031,12 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
-  @spec spend_cap_figures(%{cap: :tokens | :wall_clock_s, limit: number(), measured: number()}) ::
+  @spec spend_cap_figures(%{
+          :cap => :tokens | :wall_clock_s,
+          :limit => number(),
+          :measured => number(),
+          optional(atom()) => term()
+        }) ::
           String.t()
   def spend_cap_figures(%{cap: cap, limit: limit, measured: measured}),
     do: "#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}"

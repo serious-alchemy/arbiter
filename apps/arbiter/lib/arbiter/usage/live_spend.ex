@@ -438,7 +438,7 @@ defmodule Arbiter.Usage.LiveSpend do
 
   # What a token spend cap counts (G19): input + output. Cache buckets are
   # bookkeeping on a re-read prompt, not new spend.
-  defp tokens(%{tokens_in: i, tokens_out: o}), do: (i || 0) + (o || 0)
+  defp tokens(%{tokens_in: i, tokens_out: o}), do: i + o
 
   defp max_time(times) do
     times

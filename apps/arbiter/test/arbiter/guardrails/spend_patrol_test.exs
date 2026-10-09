@@ -159,6 +159,20 @@ defmodule Arbiter.Guardrails.SpendPatrolTest do
     end
   end
 
+  describe "the ticker" do
+    test "a tick sweeps: a run over its token cap is parked", %{ws: ws} do
+      {pid, task_id} = live_worker(ws, decision())
+      ledger!(ws, task_id, %{provider: "antigravity", tokens_in: 8_000_000})
+
+      patrol = start_supervised!({SpendPatrol, name: nil, enabled: false})
+      send(patrol, :tick)
+      _ = :sys.get_state(patrol)
+
+      assert %{state: :finished, meta: %{stop_reason: %{category: :spend_cap}}} =
+               Worker.state(pid)
+    end
+  end
+
   describe "sweep/1 — what it leaves alone" do
     test "a run with no guardrail decision", %{ws: ws} do
       {pid, _} = live_worker(ws, nil)
