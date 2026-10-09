@@ -122,6 +122,26 @@ defmodule Arbiter.Worker.WithholdingTest do
     end
   end
 
+  describe "check_spawn/2" do
+    test "no ssh projection: any provider" do
+      for provider <- ["claude", "codex", "gemini", nil] do
+        assert :ok = Withholding.check_spawn(Projection.sealed(), provider)
+      end
+
+      assert :ok = Withholding.check_spawn(nil, "claude")
+    end
+
+    test "prod_ssh needs the jail's agent: only agy has one" do
+      projection = %{Projection.sealed() | ssh: %{key_secret: "k", hosts: []}}
+      assert :ok = Withholding.check_spawn(projection, "gemini")
+
+      for provider <- ["claude", "codex", nil] do
+        assert {:error, {:prod_ssh_unsupported, _}} =
+                 Withholding.check_spawn(projection, provider)
+      end
+    end
+  end
+
   describe "grants/2" do
     test "a guarded spawn gets exactly what was projected, not a live DB read" do
       {_ws, issue} = setup_ticket(["network:later.example.com"], coordinator())

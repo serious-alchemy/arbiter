@@ -1122,6 +1122,52 @@ a cap that matches nothing, an unknown repo or an unreachable binding. The REST
 the ReviewGate's reviewer spawn path are G13; ticket permissions are G12. G11 wires
 the floor into the implementer dispatch spawn.
 
+## Dispatch-time withholding: undeclared means withheld (bd-ld8qde, G14)
+
+A ticket's declared permissions (`issues.permissions`, G12) are turned into
+exactly the reach a spawn gets, and nothing else
+(`Arbiter.Guardrails.Projection`, pure; `Arbiter.Worker.Withholding`, the DB
+half). It applies **only to a guarded install**: with no subject rule configured
+(`Arbiter.Guardrails.guarded?/0` is false) a spawn is exactly what it was before.
+Once rules exist, a spawn whose projection was not computed is **sealed** (given
+nothing), never unguarded.
+
+| Surface | What a declared, in-force permission projects | Where |
+|---|---|---|
+| Env | `secrets:<n>` / `prod_read`: the binding's `env_from_secret` pairs; `tracker_write`: `GH_TOKEN` (the binding's `token_env`) from `token_secret`. A secret-flagged workspace `worker_env` var is **withheld** unless projected; plain vars stay; provider credentials are untouched | `WorkerEnv.resolve/2` |
+| Jail | `prod_ssh`: a per-worker `ssh-agent` (`Arbiter.Worker.SshAgent`) holding only the binding's `ssh_key_secret`, its socket bound into the jail at its own path over a blanked dir, `SSH_AUTH_SOCK` pointing at it. The key is never a file or env var the worker can read | `Jail.wrap/2` `:ssh_agent`, `Gemini` |
+| Egress | `network:` and binding `hosts` become proxy grants (never a wildcard); `prod_read` `tunnels` become fixed-destination bridges | `JailRun` (agy jail, podman spawn) |
+| MCP | the worker scope token carries a `permissions` claim (`tracker_write`) | `Scope.mint_worker/3`, `Scope.permission?/2` |
+| Prompt | a PERMISSIONS block: granted, withheld and why, what a `403` means, how to ask | `PermissionsBlock` |
+
+A permission is withheld although declared when the role is a reviewer (no action
+permissions), the profile is out of scope, the tier is below the binding's
+`min_tier` (or the §5.1 default), the profile does not list the kind, or the
+workspace has no usable binding. A `requested` permission still awaiting an
+operator's grant is not in force and projects nothing.
+
+**Refusals, never fallbacks.** A `prod_ssh` spawn is refused if the key secret is
+missing, if agy cannot be jailed, or under `sandbox.backend: podman` (a confined
+container cannot reach a host socket): it never runs on the operator's agent.
+
+**Honest limits.**
+
+  * The egress proxy is still in **learn mode** (the agy infra host set is not
+    recorded, see `Arbiter.Agents.Gemini`), so a withheld host is logged in
+    `egress_events` as `not_granted` rather than denied until enforcement is
+    turned on (G4, G20). Env, mount, claim and prompt withholding are real now.
+  * Claude workers are not under the bwrap jail yet (G7), so `prod_ssh` is
+    available to agy only: a `prod_ssh` spawn of any other provider is refused
+    (`ClaudeSession.start/1`, `Withholding.check_spawn/2`) rather than run on the
+    operator's agent.
+  * Merge-queue passes (CI fix, conflict) and the doctor canary compute no
+    projection: on a guarded install they run sealed.
+  * `permission_request` and live grants are G15; `guardrail_decision` on runs
+    is G13.
+
+`arb server doctor` (guardrails report) flags a binding that names a secret the
+workspace does not have (`binding_secret_missing`).
+
 ## Operator proof for token minting (bd-8381tk)
 
 ### The problem

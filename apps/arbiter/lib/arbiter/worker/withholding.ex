@@ -85,6 +85,24 @@ defmodule Arbiter.Worker.Withholding do
   defp load_issue(_), do: nil
 
   @doc """
+  Whether a spawn of `provider` can honour `projection`. Today only a `prod_ssh`
+  projection can be unhonourable: its key reaches the worker as a per-worker agent
+  socket bound into a jail, which only agy's jail provides (G7 brings Claude under
+  the same jail). Anything else is refused rather than run without the agent it was
+  promised, on the operator's own.
+  """
+  @spec check_spawn(Projection.t() | nil, String.t() | atom() | nil) ::
+          :ok | {:error, {:prod_ssh_unsupported, String.t() | nil}}
+  def check_spawn(%Projection{ssh: ssh}, provider) when not is_nil(ssh) do
+    case provider && to_string(provider) do
+      "gemini" -> :ok
+      other -> {:error, {:prod_ssh_unsupported, other}}
+    end
+  end
+
+  def check_spawn(_projection, _provider), do: :ok
+
+  @doc """
   The `Arbiter.Worker.Egress` grants loader (`fn task_id -> [\"host:port\"]`)
   for a run of `task_id`.
 

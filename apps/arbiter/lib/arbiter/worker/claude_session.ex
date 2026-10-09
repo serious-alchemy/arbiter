@@ -232,6 +232,12 @@ defmodule Arbiter.Worker.ClaudeSession do
   def start(opts) when is_list(opts) do
     with {:ok, owner} <- fetch_owner(opts),
          {:ok, worktree_path} <- fetch_worktree(opts),
+         # bd-ld8qde (G14): never run a `prod_ssh` spawn without its agent.
+         :ok <-
+           Arbiter.Worker.Withholding.check_spawn(
+             Keyword.get(opts, :projection),
+             Keyword.get(opts, :provider)
+           ),
          {:ok, argv} <- resolve_argv(opts),
          {:ok, exec} <- resolve_executable(argv) do
       task_id = task_id_for(owner)
