@@ -1646,12 +1646,24 @@ defmodule Arbiter.Worker.ReviewGate do
         {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
 
       {:error, why} ->
-        Logger.warning(
-          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
-            "re-run (#{why}); treating it as a real failure"
-        )
+        if run_in_flight?(why) and wait.polls < wait.max_polls do
+          # bd-9m6wl0: the forge only reruns a FINISHED run, and a sibling job (e.g.
+          # `mix audit`) is still going. The failure is not yet judged real: poll
+          # again and rerun once the run has finished.
+          Logger.info(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
+              "still in progress; waiting to re-run the failed jobs"
+          )
 
-        ci_act(state, wait, :fix, nil)
+          {:wait, ci_schedule(state, wait)}
+        else
+          Logger.warning(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
+              "re-run (#{why}); treating it as a real failure"
+          )
+
+          ci_act(state, wait, :fix, nil)
+        end
     end
   end
 
@@ -1710,6 +1722,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  defp run_in_flight?(why) when is_binary(why),
+    do: String.contains?(why, "a run is still running")
+
+  defp run_in_flight?(_why), do: false
 
   defp ci_review_unreviewed_red_head(state, sha) do
     jobs =
