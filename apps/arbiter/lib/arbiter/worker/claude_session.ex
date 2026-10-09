@@ -94,6 +94,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.Gemini.RereadDetector
+  alias Arbiter.Guardrails.Events, as: GuardrailEvents
+  alias Arbiter.Guardrails.Scan
   alias Arbiter.Worker
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.GitCredential
@@ -642,6 +644,7 @@ defmodule Arbiter.Worker.ClaudeSession do
           |> absorb_usage(event)
           |> check_mcp_connection(event)
           |> capture_steps(event)
+          |> capture_guardrail_events(event)
           |> track_async_tasks(event)
           |> track_agy_denials(event)
           |> track_agy_rereads(event)
@@ -1614,6 +1617,144 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp record_tool_result(_block, session), do: session
+
+  # ---- guardrail event capture (G17) ---------------------------------------
+  # `docs/design/guardrail-profiles.md` §6.1. One place, so the session's other
+  # pipeline steps stay as they were:
+  #
+  #   * Claude's `result` event lists `permission_denials` (`tool_name`,
+  #     `tool_use_id`, `tool_input`); each is classified by `Scan.denial/2`.
+  #   * agy's tool step that ends `ERROR` with "permission check failed" (an
+  #     explicit deny or a `:strict` auto-denial) is the same event.
+  #   * Every tool call the worker made is scanned (`Scan.tool_input/2`) for
+  #     hidden-channel attempts and credential reads: Claude/grok `tool_use`
+  #     blocks, codex `item.completed` items, and agy's ACTIVE step (its DONE
+  #     half would double count). A denied call is still an attempt.
+  #
+  # Best-effort and never changes the session: `GuardrailEvents.record/1`
+  # swallows failures. A session with no `run_id` (test echo scripts) captures
+  # nothing.
+  defp capture_guardrail_events(%{run_id: run_id} = session, event) when is_binary(run_id) do
+    do_capture_guardrail(session, event)
+    session
+  end
+
+  defp capture_guardrail_events(session, _event), do: session
+
+  defp do_capture_guardrail(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "ACTIVE"} = step
+       }) do
+    scan_tool_call(session, step["tool_name"], agy_step_input(step))
+  end
+
+  defp do_capture_guardrail(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "ERROR"} = step
+       }) do
+    if permission_denial?(Arbiter.Agents.Gemini.Stream.tool_step_error_reason(step)) do
+      record_denial(
+        session,
+        :agy_permission_check,
+        step["tool_name"],
+        agy_step_input(step),
+        "agy-step-#{step["step_index"]}"
+      )
+    end
+  end
+
+  defp do_capture_guardrail(%{provider: "gemini"}, _event), do: :ok
+
+  defp do_capture_guardrail(
+         %{provider: "codex"} = session,
+         %{"type" => "item.completed", "item" => %{"type" => type} = item}
+       )
+       when type in @codex_tool_types do
+    {name, input, _output, _error?} = codex_item_parts(item)
+    scan_tool_call(session, name, input)
+  end
+
+  defp do_capture_guardrail(%{provider: "codex"}, _event), do: :ok
+
+  defp do_capture_guardrail(session, %{
+         "type" => "assistant",
+         "message" => %{"content" => content}
+       })
+       when is_list(content) do
+    for %{"type" => "tool_use", "name" => name, "input" => input} <- content,
+        do: scan_tool_call(session, name, input)
+
+    :ok
+  end
+
+  defp do_capture_guardrail(session, %{
+         "type" => "result",
+         "permission_denials" => [_ | _] = denials
+       }) do
+    for %{"tool_name" => name} = denial <- denials do
+      record_denial(
+        session,
+        :claude_permission_denials,
+        name,
+        denial["tool_input"],
+        denial["tool_use_id"] || System.unique_integer([:positive])
+      )
+    end
+
+    :ok
+  end
+
+  defp do_capture_guardrail(_session, _event), do: :ok
+
+  defp agy_step_input(step) do
+    Arbiter.Agents.Gemini.Stream.agy_tool_params(
+      step["tool_name"],
+      get_in(step, ["tool_info", "parameters"])
+    )
+  end
+
+  defp scan_tool_call(session, name, input) do
+    for finding <- Scan.tool_input(name, input) do
+      GuardrailEvents.record(
+        guardrail_attrs(session, %{
+          kind: finding.kind,
+          severity: finding.severity,
+          source: :transcript_scan,
+          tool: name,
+          detail: finding.match
+        })
+      )
+    end
+  end
+
+  defp record_denial(session, source, name, input, ref) do
+    denial = Scan.denial(name, input)
+
+    detail =
+      denial.category || StepSummary.input_summary(input, redact_values(session)) || name
+
+    GuardrailEvents.record(
+      guardrail_attrs(session, %{
+        kind: denial.kind,
+        severity: denial.severity,
+        source: source,
+        tool: name,
+        detail: detail,
+        fingerprint: "denial:#{ref}"
+      })
+    )
+  end
+
+  defp guardrail_attrs(session, attrs) do
+    usage = Map.get(session, :usage) || %{}
+
+    Map.merge(attrs, %{
+      run_id: session.run_id,
+      task_id: Map.get(session, :task_id),
+      provider: Map.get(session, :provider) || "claude",
+      model: Map.get(session, :model) || usage[:model]
+    })
+  end
 
   # Best-effort, like `record_usage_event/3` in `Arbiter.Worker`: a DB hiccup
   # logs a warning and never fails the run. Written from inside the emit path
