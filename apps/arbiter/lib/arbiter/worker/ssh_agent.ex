@@ -174,6 +174,7 @@ defmodule Arbiter.Worker.SshAgent do
       case ready(socket, port) |> add_key(add, key, dir, socket) do
         :ok ->
           ref = Process.monitor(owner)
+
           {:ok,
            %{
              owner_ref: ref,
@@ -250,7 +251,10 @@ defmodule Arbiter.Worker.SshAgent do
         %{add: add, dir: dir, socket: socket} = state
 
         with {_, 0} <-
-               ReleaseEnv.cmd(add, ["-D"], env: [{"SSH_AUTH_SOCK", socket}], stderr_to_stdout: true),
+               ReleaseEnv.cmd(add, ["-D"],
+                 env: [{"SSH_AUTH_SOCK", socket}],
+                 stderr_to_stdout: true
+               ),
              :ok <- add_key(:ok, add, key, dir, socket) do
           {:reply, :ok, %{state | fingerprint: new_fp}}
         else
