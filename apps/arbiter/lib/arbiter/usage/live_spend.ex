@@ -436,9 +436,14 @@ defmodule Arbiter.Usage.LiveSpend do
   defp absorb(acc, :degraded), do: %{acc | degraded?: true}
   defp absorb(acc, :empty), do: acc
 
-  # What a token spend cap counts (G19): input + output. Cache buckets are
-  # bookkeeping on a re-read prompt, not new spend.
-  defp tokens(%{tokens_in: i, tokens_out: o}), do: i + o
+  # What a token spend cap counts (G19): input + output + thinking. Cache
+  # buckets are bookkeeping on a re-read prompt, not new spend. The session
+  # file's totals may not carry `:thinking_tokens` (it counts 0 then), but the
+  # meter reads it so the cap tracks the ledger figure once they do.
+  defp tokens(totals) do
+    Map.get(totals, :tokens_in, 0) + Map.get(totals, :tokens_out, 0) +
+      Map.get(totals, :thinking_tokens, 0)
+  end
 
   defp max_time(times) do
     times
