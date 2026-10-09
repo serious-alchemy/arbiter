@@ -372,6 +372,84 @@ defmodule Arbiter.Agents.GeminiTest do
       assert File.exists?(sock)
     end
 
+    # bd-9cygoo (G16): agy pushes with its repo's deploy key, never the operator's
+    # keys or agent.
+    defp without_network_mode do
+      previous = Application.get_env(:arbiter, :worker_jail_network)
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      on_exit(fn ->
+        if previous == nil,
+          do: Application.delete_env(:arbiter, :worker_jail_network),
+          else: Application.put_env(:arbiter, :worker_jail_network, previous)
+      end)
+    end
+
+    test "a deploy key is the jail's only git identity, bound at its own path", %{
+      worktree: worktree
+    } do
+      without_network_mode()
+
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gem-dk-#{System.unique_integer([:positive])}",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{"r" => %{"kind" => "deploy_key", "key_secret" => "R_KEY"}}
+            }
+          },
+          secrets: %{"R_KEY" => "-----KEY-----"}
+        })
+
+      {:ok, plan} = Arbiter.Worker.GitCredential.plan(ws, "r", role: :implementer)
+
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 workspace: ws,
+                 owner: self(),
+                 git_credential: plan
+               )
+
+      jail = jail_argv_only(argv)
+      chunks = Enum.chunk_every(jail, 3, 1, :discard)
+
+      assert [["--setenv", "GIT_SSH_COMMAND", cmd]] =
+               Enum.filter(chunks, &match?(["--setenv", "GIT_SSH_COMMAND", _], &1))
+
+      assert [_, key] = Regex.run(~r/ -i (\S+) /, cmd)
+      assert cmd =~ "IdentitiesOnly=yes"
+      assert ["--ro-bind", key, key] in chunks
+      assert File.read!(key) =~ "-----KEY-----"
+      refute Enum.any?(chunks, &match?(["--setenv", "SSH_AUTH_SOCK", _], &1))
+    end
+
+    test "a deploy key whose secret is missing refuses the spawn", %{worktree: worktree} do
+      without_network_mode()
+
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gem-dk2-#{System.unique_integer([:positive])}",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{"r" => %{"kind" => "deploy_key", "key_secret" => "ABSENT"}}
+            }
+          }
+        })
+
+      {:ok, plan} = Arbiter.Worker.GitCredential.plan(ws, "r", role: :implementer)
+
+      assert {:error, {:git_credential_unavailable, {:git_credential_secret_missing, "ABSENT"}}} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 workspace: ws,
+                 owner: self(),
+                 git_credential: plan
+               )
+    end
+
     test "prod_ssh without its key secret refuses the spawn: never another agent", %{
       worktree: worktree
     } do

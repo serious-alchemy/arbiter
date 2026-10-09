@@ -136,7 +136,8 @@ defmodule Arbiter.Worker.Container do
           optional(:labels) => [{String.t(), String.t()}],
           optional(:keep) => boolean(),
           optional(:mount_map) => %{optional(String.t()) => String.t()},
-          optional(:secrets_file) => String.t() | nil
+          optional(:secrets_file) => String.t() | nil,
+          optional(:podman_secrets) => [map()]
         }
 
   # -- naming ----------------------------------------------------------------
@@ -177,6 +178,7 @@ defmodule Arbiter.Worker.Container do
       Enum.flat_map(["/tmp", "/dev/shm"] ++ Map.get(spec, :tmpfs, []), &tmpfs_args/1),
       mounts(spec, label_disabled?),
       env_args(spec, home && mapped(spec, home)),
+      secret_args(Map.get(spec, :podman_secrets, [])),
       limit_args(spec),
       Enum.flat_map(Map.get(spec, :labels, []), fn {k, v} -> ["--label", "#{k}=#{v}"] end),
       if(Map.get(spec, :interactive, false), do: ["-i"], else: []),
@@ -231,6 +233,20 @@ defmodule Arbiter.Worker.Container do
         ["-v", "#{host}:#{dest}:ro"]
       end) ++ secrets_mount(Map.get(spec, :secrets_file))
   end
+
+  # bd-9cygoo (G16): `podman run --secret`. A mounted secret appears under
+  # `/run/secrets/<target>` owned by `:uid` and unreadable to anyone else; an env
+  # secret is set in the container's environment from the secret store, so the
+  # value is never in this argv or in `podman inspect`.
+  defp secret_args(secrets) do
+    Enum.flat_map(secrets, fn secret -> ["--secret", secret_spec(secret)] end)
+  end
+
+  defp secret_spec(%{name: name, type: :mount, target: target, uid: uid}),
+    do: "#{name},type=mount,target=#{target},uid=#{uid},mode=0400"
+
+  defp secret_spec(%{name: name, type: :env, target: target}),
+    do: "#{name},type=env,target=#{target}"
 
   # `:Z` gives the file a private label; harmless where SELinux is off.
   defp secrets_mount(nil), do: []
@@ -303,6 +319,7 @@ defmodule Arbiter.Worker.Container do
   `:tmpfs`, `:env`,
   `:inherit_env`, `:network` (`:none` | `:pasta`), `:pod` (join a test-services
   pod, bd-dmcbos; the pod fixes the network, so `:pasta` is refused),
+  `:podman_secrets` (`--secret`s: `%{name:, type: :mount | :env, target:, uid:}`, bd-9cygoo),
   `:interactive`, `:podman`
   (path; default the host's `podman`) and `:find_executable` (for tests).
   """
@@ -357,6 +374,7 @@ defmodule Arbiter.Worker.Container do
          :ok <- check_limit(opts, :cpus, @cpus_re),
          :ok <- check_labels(Keyword.get(opts, :labels, [])),
          {:ok, secrets_file} <- check_secrets_file(Keyword.get(opts, :secrets_file)),
+         {:ok, podman_secrets} <- check_podman_secrets(Keyword.get(opts, :podman_secrets, [])),
          {:ok, mount_map} <- check_mount_map(Keyword.get(opts, :mount_map, %{})) do
       extras =
         opts
@@ -364,6 +382,9 @@ defmodule Arbiter.Worker.Container do
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
         |> Map.new()
         |> then(&if(secrets_file, do: Map.put(&1, :secrets_file, secrets_file), else: &1))
+        |> then(
+          &if(podman_secrets == [], do: &1, else: Map.put(&1, :podman_secrets, podman_secrets))
+        )
         |> then(&if(mount_map == %{}, do: &1, else: Map.put(&1, :mount_map, mount_map)))
 
       {:ok, extras}
@@ -401,6 +422,21 @@ defmodule Arbiter.Worker.Container do
          :ok <- check_all_exist([file]),
          do: {:ok, file}
   end
+
+  defp check_podman_secrets(secrets) when is_list(secrets) do
+    case Enum.find(secrets, &(not valid_podman_secret?(&1))) do
+      nil -> {:ok, secrets}
+      bad -> {:error, {:bad_secret, Map.take(bad || %{}, [:name, :type, :target])}}
+    end
+  end
+
+  defp valid_podman_secret?(%{name: name, type: type, target: target} = secret)
+       when type in [:mount, :env] and is_binary(name) and is_binary(target) do
+    Regex.match?(@name_re, name) and Regex.match?(~r/\A[A-Za-z0-9_.-]+\z/, target) and
+      (type == :env or is_integer(Map.get(secret, :uid)))
+  end
+
+  defp valid_podman_secret?(_), do: false
 
   defp check_mount_map(map) when is_map(map) do
     case Enum.find(map, fn {host, dest} -> not (valid_path?(host) and valid_path?(dest)) end) do
@@ -573,6 +609,86 @@ defmodule Arbiter.Worker.Container do
   end
 
   def teardown(_), do: :ok
+
+  @git_secret_re ~r/\A(arb-[a-zA-Z0-9_.-]+)-git-(?:key|token)\z/
+
+  @doc """
+  Creates the podman secret `secret` (`%{name:, value:, ...}`; bd-9cygoo). The
+  value reaches `podman secret create` through a `0600` file in `:dir` that is
+  deleted at once, never argv. An existing secret of the name is replaced.
+  Options: `:dir` (default the system temp dir), `:podman`, `:runner`.
+  """
+  @spec create_secret(map(), keyword()) :: :ok | {:error, term()}
+  def create_secret(%{name: name, value: value}, opts) when is_binary(value) do
+    podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
+    dir = Keyword.get(opts, :dir) || System.tmp_dir!()
+
+    file =
+      Path.join(dir, "secret-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false))
+
+    with :ok <- check_secret_name(name),
+         :ok <- File.write(file, value, [:exclusive]),
+         :ok <- File.chmod(file, 0o600) do
+      try do
+        _ = exec(opts, podman, ["secret", "rm", "--ignore", name], timeout: @stop_timeout_ms)
+
+        case exec(opts, podman, ["secret", "create", name, file], timeout: @stop_timeout_ms) do
+          {_out, 0} -> :ok
+          {out, status} -> {:error, {:podman_secret_failed, status, String.trim(out)}}
+        end
+      after
+        File.rm(file)
+      end
+    else
+      {:error, reason} -> {:error, {:podman_secret_failed, reason}}
+    end
+  end
+
+  defp check_secret_name(name) do
+    if is_binary(name) and Regex.match?(@name_re, name),
+      do: :ok,
+      else: {:error, {:bad_secret_name, name}}
+  end
+
+  @doc "Removes the podman secret `name`. Idempotent; options as `create_secret/2`."
+  @spec remove_secret(String.t(), keyword()) :: :ok | {:error, term()}
+  def remove_secret(name, opts \\ []) do
+    podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
+
+    with :ok <- check_secret_name(name) do
+      case exec(opts, podman, ["secret", "rm", "--ignore", name], timeout: @stop_timeout_ms) do
+        {_out, 0} -> :ok
+        {out, status} -> {:error, {:podman_secret_failed, status, String.trim(out)}}
+      end
+    end
+  end
+
+  @doc """
+  Removes the git-credential secrets (`<container>-git-key`, `<container>-git-token`)
+  whose container no longer exists: what a crashed server leaves behind. Returns
+  the names removed.
+  """
+  @spec reap_git_secrets(keyword()) :: [String.t()]
+  def reap_git_secrets(opts \\ []) do
+    podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
+
+    with {secrets, 0} <-
+           exec(opts, podman, ["secret", "ls", "--format", "{{.Name}}"],
+             timeout: @stop_timeout_ms
+           ),
+         {containers, 0} <-
+           exec(opts, podman, ["ps", "-a", "--format", "{{.Names}}"], timeout: @stop_timeout_ms) do
+      live = containers |> String.split("\n", trim: true) |> MapSet.new()
+
+      for name <- String.split(secrets, "\n", trim: true),
+          [_, container] <- [Regex.run(@git_secret_re, name)],
+          not MapSet.member?(live, container),
+          remove_secret(name, opts) == :ok,
+          do: name
+    else
+      _ -> []
+    end
+  end
 
   @doc """
   `podman rm --force --ignore --time 0 <name>`: stops and removes the

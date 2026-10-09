@@ -58,7 +58,8 @@ defmodule Arbiter.Guardrails.Projection do
             hosts: [],
             tunnels: [],
             ssh: nil,
-            claims: []
+            claims: [],
+            tracker_env: nil
 
   @type tunnel :: {:inet.port_number(), String.t(), :inet.port_number()}
   @type t :: %__MODULE__{
@@ -70,7 +71,8 @@ defmodule Arbiter.Guardrails.Projection do
           hosts: [String.t()],
           tunnels: [tunnel()],
           ssh: nil | %{key_secret: String.t(), hosts: [String.t()]},
-          claims: [String.t()]
+          claims: [String.t()],
+          tracker_env: String.t() | nil
         }
 
   @github_api "api.github.com:443"
@@ -199,7 +201,15 @@ defmodule Arbiter.Guardrails.Projection do
           []
       end
 
-    {:ok, %{env: token, hosts: [@github_api | hosts(binding, 443)], claims: ["tracker_write"]}}
+    var = (binding && Map.get(binding, "token_env")) || @default_token_env
+
+    {:ok,
+     %{
+       env: token,
+       hosts: [@github_api | hosts(binding, 443)],
+       claims: ["tracker_write"],
+       tracker_env: var
+     }}
   end
 
   defp reach(%{kind: kind, canonical: canonical}, nil)
@@ -284,7 +294,8 @@ defmodule Arbiter.Guardrails.Projection do
         hosts: acc.hosts ++ Map.get(reach, :hosts, []),
         tunnels: acc.tunnels ++ Map.get(reach, :tunnels, []),
         ssh: Map.get(reach, :ssh) || acc.ssh,
-        claims: acc.claims ++ Map.get(reach, :claims, [])
+        claims: acc.claims ++ Map.get(reach, :claims, []),
+        tracker_env: Map.get(reach, :tracker_env) || acc.tracker_env
     }
   end
 
