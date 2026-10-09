@@ -26,20 +26,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
     :ok
   end
 
-  defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
-    Stream.repeatedly(fn ->
-      fun.() || (System.monotonic_time(:millisecond) < deadline && (Process.sleep(10) && false))
-    end)
-    |> Enum.find(&(&1 != false || System.monotonic_time(:millisecond) >= deadline))
-    |> case do
-      true -> :ok
-      _ -> flunk("condition not met within timeout")
-    end
-  end
-
-  defp start_reviewer(output_lines) do
+  defp start_reviewer(output_lines, opts \\ []) do
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "ro-fr-ws-#{System.unique_integer([:positive])}",
@@ -49,6 +36,17 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
 
     {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ws.id})
     task = put_state!(task, :active)
+
+    task =
+      case Keyword.get(opts, :pr_feedback) do
+        nil ->
+          task
+
+        feedback ->
+          {:ok, task} = Ash.update(task, %{pr_ref: "rv/repo#605"}, action: :update)
+          StubMerger.set_review_feedback("rv/repo#605", feedback)
+          task
+      end
 
     {:ok, pid} =
       Worker.start(
@@ -64,9 +62,10 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
       )
 
     :ok = Worker.advance(pid, :claude)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> Worker.state(pid).outcome == :failed end)
+    # Synchronise on the worker having handled the completion message.
+    _ = :sys.get_state(pid)
+    assert Worker.state(pid).outcome == :failed
     {task, ws, pid}
   end
 
@@ -82,7 +81,7 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
         ["reading the diff"] ++ @body ++ ["VERDICT: REQUEST_CHANGES", "VERIFICATION: FULL"]
       )
 
-    wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+    assert StubFixRoundDispatcher.dispatch_count() == 1
 
     assert [args] = StubFixRoundDispatcher.dispatches()
     assert args.task_id == task.id
@@ -91,10 +90,37 @@ defmodule Arbiter.Worker.ReviewOnlyFixRoundFindingsTest do
     assert args.findings =~ "VERDICT: REQUEST_CHANGES"
   end
 
+  test "PR review body reaches the fix round even when stdout holds only narration" do
+    pr_body = "[Medium] lib/foo.ex:12 missing nil guard on the lookup"
+
+    {task, _ws, _pid} =
+      start_reviewer(
+        [
+          "I'll post my review to the PR now.",
+          "VERDICT: REQUEST_CHANGES",
+          "VERIFICATION: FULL",
+          "arb done"
+        ],
+        pr_feedback: %{
+          changes_requested: true,
+          latest_review_id: 1,
+          feedback: [%{kind: :review, state: "CHANGES_REQUESTED", body: pr_body}]
+        }
+      )
+
+    assert StubFixRoundDispatcher.dispatch_count() == 1
+
+    assert [args] = StubFixRoundDispatcher.dispatches()
+    assert args.task_id == task.id
+    assert args.findings =~ "VERDICT: REQUEST_CHANGES"
+    assert args.findings =~ pr_body
+    refute args.findings =~ "post my review"
+  end
+
   test "findings printed after the VERDICT line still reach the fix round" do
     {_task, _ws, _pid} = start_reviewer(["VERDICT: REQUEST_CHANGES"] ++ @body)
 
-    wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+    assert StubFixRoundDispatcher.dispatch_count() == 1
     assert [args] = StubFixRoundDispatcher.dispatches()
     assert args.findings =~ "lib/foo.ex:12 missing nil guard"
   end
