@@ -259,8 +259,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     before reviewing it and the merge hit conflicts (typically a sibling ticket
     merged into the same files). Nothing was reviewed, so there are no code
     findings: integrate the target branch into YOUR branch, resolve the
-    conflicts keeping both sides' intent, run the tests, commit and push to the
-    SAME branch (do not open a new PR), then finish as usual so the gate can
+    conflicts keeping both sides' intent, run the tests, commit to the
+    SAME branch and push it (a sandboxed run with no forge credential cannot
+    push; Arbiter pushes for it), do not open a new PR, then finish as usual so the gate can
     review.
 
     ### What the gate reported

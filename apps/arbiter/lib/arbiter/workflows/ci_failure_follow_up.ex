@@ -39,7 +39,8 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
              plus an escalation to the coordinator mailbox) rather than
              trying to fix it here.
            - REAL REGRESSION caused by this diff → make the minimal fix and
-             push it.
+             commit + push it (a sandboxed run with no forge credential
+             cannot push; Arbiter pushes for it).
 
       2. Never fabricate a green: do not skip/disable the check, do not claim
          a fix worked without observing the actual re-run result, and do not
