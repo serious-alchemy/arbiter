@@ -2953,6 +2953,40 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(tmp, "never.txt"))
     end
 
+    # bd-7rxy1c: a podman run holds no credential by design and the host pushes
+    # its branch after `arb done`, so it is never refused for lacking one. The
+    # unavailable container proves dispatch got past the credential gate.
+    test "G16: a podman workspace with no git_credentials block is not refused for a credential",
+         %{ws: ws, tmp: tmp} do
+      guarded_claude_rules()
+      repo = seed_repo!(tmp, "gc-podman-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gc-podman-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gc/repo" => repo})
+      put_app_env(:arbiter, :worker_container_available, false)
+      :ok = stub_claude_dumping_env(tmp, Path.join(tmp, "never.txt"))
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman no creds", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:podman_unavailable, _}}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "gc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+    end
+
     test "G16: the legacy operator credential is an explicit workspace opt-in", %{
       ws: ws,
       tmp: tmp

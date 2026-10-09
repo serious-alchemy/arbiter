@@ -511,7 +511,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         # credential (or an explicit legacy opt-in) like any other implementer.
         case GitCredential.plan(context.workspace, context.repo,
                role: :implementer,
-               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+               host_pushes?: container_pass?(context, provider)
              ) do
           {:ok, git_credential} ->
             session_opts =
@@ -547,6 +548,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       role: :implementer
     )
   end
+
+  # bd-7rxy1c: a pass in a podman container holds no credential; the host
+  # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
+  defp container_pass?(context, provider),
+    do: not is_nil(ContainerSpawn.pass_policy(context.workspace, context.repo, provider))
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
