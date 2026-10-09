@@ -5,6 +5,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Worker.Jail
 
   # A jailed spawn needs the worker pid its egress run is bound to (bd-cfktou);
@@ -302,6 +303,107 @@ defmodule Arbiter.Agents.GeminiTest do
       # proxy, arb, then the tunnel: <local port> <host-side socket>
       assert ["3128", _proxy, _arb_port, _arb_sock, "5432", tunnel_sock | _] = listeners
       assert tunnel_sock =~ ".t1.sock"
+    end
+
+    # bd-ld8qde (G14): what the ticket's permissions project into agy's jail.
+    test "a projected tunnel becomes a fixed-destination bridge", %{worktree: worktree} do
+      projection = %{Projection.sealed() | tunnels: [{15_432, "replica.internal", 5432}]}
+
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 projection: projection
+               )
+
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+
+      {_, ["--", "sh", "-c", _script, "sh", _socat | listeners]} =
+        Enum.split_while(rest, &(&1 != "--"))
+
+      assert ["3128", _proxy, _arb_port, _arb_sock, "15432", tunnel_sock | _] = listeners
+      assert tunnel_sock =~ ".t1.sock"
+    end
+
+    @tag :tmp_dir
+    test "prod_ssh: the jail holds the worker's own agent socket as SSH_AUTH_SOCK", %{
+      worktree: worktree,
+      bin: bin,
+      tmp_dir: tmp
+    } do
+      # PATH is the stub dir only; the agent needs the real tools.
+      for name <- ~w(sh ssh-agent ssh-add) do
+        real = Enum.find(["/usr/bin/#{name}", "/bin/#{name}"], &File.exists?/1)
+        File.ln_s!(real, Path.join(bin, name))
+      end
+
+      key_path = Path.join(tmp, "k")
+
+      {_, 0} =
+        System.cmd("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key_path])
+
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gem-ssh-#{System.unique_integer([:positive])}",
+          secrets: %{"prod_ssh_key" => File.read!(key_path)}
+        })
+
+      projection = %{
+        Projection.sealed()
+        | ssh: %{key_secret: "prod_ssh_key", hosts: ["prod.internal:22"]},
+          hosts: ["prod.internal:22"]
+      }
+
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 workspace: ws,
+                 projection: projection
+               )
+
+      jail = jail_argv_only(argv)
+      chunks = Enum.chunk_every(jail, 3, 1, :discard)
+
+      assert [["--setenv", "SSH_AUTH_SOCK", sock]] =
+               Enum.filter(chunks, &match?(["--setenv", "SSH_AUTH_SOCK", _], &1))
+
+      assert ["--ro-bind", sock, sock] in chunks
+      assert File.exists?(sock)
+    end
+
+    test "prod_ssh without its key secret refuses the spawn: never another agent", %{
+      worktree: worktree
+    } do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gem-nokey-#{System.unique_integer([:positive])}"
+        })
+
+      projection = %{Projection.sealed() | ssh: %{key_secret: "absent", hosts: []}}
+
+      assert {:error, {:ssh_agent_unavailable, {:ssh_key_missing, "absent"}}} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 workspace: ws,
+                 projection: projection
+               )
+    end
+
+    test "prod_ssh on an agy that cannot be jailed is refused, not run on the operator's agent",
+         %{
+           worktree: worktree
+         } do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+      projection = %{Projection.sealed() | ssh: %{key_secret: "k", hosts: []}}
+
+      assert {:error, {:ssh_agent_unavailable, :no_jail}} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 projection: projection
+               )
     end
 
     test "the spawn's task id keys the egress events its proxy records", %{worktree: worktree} do

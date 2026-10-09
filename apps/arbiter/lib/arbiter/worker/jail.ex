@@ -208,7 +208,8 @@ defmodule Arbiter.Worker.Jail do
           optional(:mask_paths) => [String.t()],
           optional(:secret_files) => [String.t()],
           optional(:hide) => Hide.t() | nil,
-          optional(:network) => network() | nil
+          optional(:network) => network() | nil,
+          optional(:ssh_agent) => String.t() | nil
         }
 
   # bd-cfktou (G6): network mode. `proxy_socket` is the run's G5 proxy socket
@@ -261,7 +262,8 @@ defmodule Arbiter.Worker.Jail do
     with {:ok, worktree} <- fetch_worktree(opts),
          {:ok, git} <- git(worktree),
          {:ok, toolchain_env} <- prepare_toolchain(Keyword.get(opts, :home)),
-         {:ok, network} <- network_spec(Keyword.get(opts, :network)) do
+         {:ok, network} <- network_spec(Keyword.get(opts, :network)),
+         {:ok, ssh_agent} <- ssh_agent_spec(Keyword.get(opts, :ssh_agent)) do
       spec = %{
         bwrap: bwrap_path(),
         worktree: worktree,
@@ -273,6 +275,7 @@ defmodule Arbiter.Worker.Jail do
             ssh_env(network) ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
         network: network,
+        ssh_agent: ssh_agent,
         hide: if(Keyword.get(opts, :hide_reads, false), do: hide_spec(git, opts))
       }
 
@@ -385,6 +388,29 @@ defmodule Arbiter.Worker.Jail do
       {var, url}
     end ++ [{"NO_PROXY", @no_proxy}, {"no_proxy", @no_proxy}]
   end
+
+  # ---- per-worker ssh-agent (G14, bd-ld8qde) ------------------------------
+
+  # `:ssh_agent` is the socket of the worker's own `Arbiter.Worker.SshAgent`
+  # (`prod_ssh`). The operator's agent lives under the masked runtime dir; this
+  # one is bound back at its own path, over a blanked parent so a sibling
+  # worker's agent socket in the same dir is not visible. Every other jail
+  # blanks the whole dir via `mask_paths/0`. A missing socket
+  # refuses the spawn: a `prod_ssh` worker never runs without its agent, and
+  # never falls back to another one.
+  @doc false
+  @spec ssh_agent_spec(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def ssh_agent_spec(nil), do: {:ok, nil}
+
+  def ssh_agent_spec(socket) when is_binary(socket) do
+    if exists?(socket), do: {:ok, socket}, else: {:error, {:ssh_agent_socket_missing, socket}}
+  end
+
+  defp ssh_agent_args(nil), do: []
+  defp ssh_agent_args(socket), do: ["--tmpfs", Path.dirname(socket)] ++ ro_bind(socket)
+
+  defp ssh_agent_env(nil), do: []
+  defp ssh_agent_env(socket), do: ["--setenv", "SSH_AUTH_SOCK", socket]
 
   # ---- filtered keyring bus (bd-7o08mj) ----------------------------------
 
@@ -508,8 +534,10 @@ defmodule Arbiter.Worker.Jail do
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       git_args(Map.get(spec, :git), worktree),
+      ssh_agent_args(Map.get(spec, :ssh_agent)),
       secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
+      ssh_agent_env(Map.get(spec, :ssh_agent)),
       ["--unshare-pid", "--die-with-parent", "--new-session", "--chdir", worktree, "--"],
       network_command(Map.get(spec, :network), command)
     ])
@@ -604,6 +632,13 @@ defmodule Arbiter.Worker.Jail do
   socket on a read-only bind is still connectable. A path under another mask
   is dropped, because the parent's tmpfs already hides it.
 
+  Also masked: the per-worker ssh-agent dir
+  (`Arbiter.Worker.SshAgent.default_dir/0`, bd-ld8qde). Every worker runs as
+  the same uid, so without this one could `connect()` to a `prod_ssh`
+  worker's agent socket and use a key it was never granted. The worker that
+  owns an agent gets its own socket bound back over the blanked dir
+  (`ssh_agent_args/1`).
+
   Only paths that exist on the host are listed: bwrap cannot create a mount
   point under the read-only root, and a path that is absent is no vector.
   `spec.mask_paths` overrides the detection (tests).
@@ -616,7 +651,8 @@ defmodule Arbiter.Worker.Jail do
       bus_dir(),
       "/run/dbus",
       "/run/systemd/resolve",
-      Arbiter.MCP.OperatorProof.socket_dir()
+      Arbiter.MCP.OperatorProof.socket_dir(),
+      Arbiter.Worker.SshAgent.ensure_default_dir()
     ]
     |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
     |> Enum.map(&Path.expand/1)

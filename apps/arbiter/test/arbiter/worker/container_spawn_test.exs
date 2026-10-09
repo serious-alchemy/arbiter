@@ -12,6 +12,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Test.GitFixture
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
@@ -121,6 +122,49 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "prepare/1 with a guardrail projection (G14, bd-ld8qde)" do
+    defp capture_egress(ctx) do
+      test = self()
+      inner = Keyword.fetch!(ctx.opts, :egress)
+
+      fn opts ->
+        send(test, {:egress_opts, opts})
+        inner.(opts)
+      end
+    end
+
+    test "the projection's tunnels join the run's fixed bridges and its hosts become the grants",
+         ctx do
+      projection = %{
+        Projection.sealed()
+        | hosts: ["api.example.com:443"],
+          tunnels: [{5432, "replica.internal", 5432}]
+      }
+
+      opts = [egress: capture_egress(ctx), projection: projection] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+
+      assert_received {:egress_opts, egress_opts}
+      assert {5432, "replica.internal", 5432} in Keyword.fetch!(egress_opts, :tunnels)
+      assert Keyword.fetch!(egress_opts, :grants).("bd-p7test") == ["api.example.com:443"]
+    end
+
+    test "a spawn with no projection asks the ticket's live network: grants", ctx do
+      opts = [egress: capture_egress(ctx)] ++ ctx.opts
+      assert {:ok, _request} = ContainerSpawn.prepare(opts)
+      assert_received {:egress_opts, egress_opts}
+      assert is_function(Keyword.fetch!(egress_opts, :grants), 1)
+    end
+
+    test "prod_ssh is refused under podman: no agent socket can reach the container", ctx do
+      projection = %{Projection.sealed() | ssh: %{key_secret: "k", hosts: ["prod.internal:22"]}}
+      opts = [projection: projection] ++ ctx.opts
+
+      assert {:error, {:prod_ssh_unsupported, :podman}} = ContainerSpawn.prepare(opts)
+      refute_received {:egress_opts, _}
+    end
+  end
+
   describe "prepare/1 with --resume (bd-atsde3)" do
     test "carries the resumed session's JSONL into the run's fresh config dir", ctx do
       owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
@@ -178,6 +222,43 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
                "{\"type\":\"user\"}\n"
+    end
+  end
+
+  describe "resume after the prior run's tmp dir is gone (bd-jrzq4q)" do
+    test "preserved session is available, seeded into the new config dir and resumed", ctx do
+      sid = "c1d2e3f4-0d53-4838-99f7-381156aad1e9"
+      store = Arbiter.Worker.SessionHistory.store_path(sid)
+      on_exit(fn -> File.rm(store) end)
+
+      # Prior run: a session JSONL in its config dir, then preserved and removed.
+      prior_tmp = Path.join(ctx.dir, "prior-run-tmp")
+      prior_jsonl = Path.join([prior_tmp, "claude-config", "projects", "-old", sid <> ".jsonl"])
+      File.mkdir_p!(Path.dirname(prior_jsonl))
+      File.write!(prior_jsonl, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
+
+      assert [^sid] = Arbiter.Worker.SessionHistory.preserve(prior_tmp)
+      File.rm_rf!(prior_tmp)
+      refute File.exists?(prior_tmp)
+
+      # What Dispatch.resume_session gates on.
+      assert Arbiter.Worker.SessionHistory.available?(sid)
+
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      args = port_args(ctx, request)
+      resumed = %{args | argv: Enum.take(args.argv, 5) ++ ["--print", "--resume", sid, "go"]}
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(resumed)
+
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(ctx.clone)
+
+      assert File.read!(Path.join([request.config_dir, "projects", slug, sid <> ".jsonl"])) ==
+               "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n"
+
+      assert Arbiter.Worker.SessionHistory.resume_session_id(wrapped.argv) == sid
+
+      assert ["--resume", sid] ==
+               Enum.slice(wrapped.argv, Enum.find_index(wrapped.argv, &(&1 == "--resume")), 2)
     end
   end
 

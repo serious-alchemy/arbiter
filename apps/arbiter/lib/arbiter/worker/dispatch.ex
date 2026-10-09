@@ -112,6 +112,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
@@ -3145,7 +3146,10 @@ defmodule Arbiter.Worker.Dispatch do
             # bd-7e8ezw: the returned `mcp_config:` path is threaded to the
             # adapter so Claude is handed the file explicitly (`--mcp-config`)
             # rather than trusting cwd auto-load — see `inject_mcp_config/3`.
-            opts = Keyword.merge(opts, inject_mcp_config(task, worktree_path, opts))
+            opts =
+              opts
+              |> Keyword.merge(inject_mcp_config(task, worktree_path, opts))
+              |> Keyword.put(:mcp_worktree, worktree_path)
 
             # Resolve the layered effective skill set and materialize ONLY it
             # into the isolated worktree (bd-d5hy7y), under a provider-aware
@@ -3520,6 +3524,13 @@ defmodule Arbiter.Worker.Dispatch do
             policy = guardrail_floor(base_policy, workspace, choice, opts)
             adapter = Agents.for_type(choice.type)
 
+            # bd-ld8qde (G14): what this (provider, model) subject is given of the
+            # ticket's declared permissions, and nothing else. A `tracker_write`
+            # projection re-mints the worker token with that claim (the first one,
+            # minted before routing, carries none).
+            projection = guardrail_projection(task, workspace, choice, opts)
+            opts = reinject_permission_claims(task, projection, opts)
+
             # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
             # the worker OAuth token from this workspace's `worker_env` before
             # falling back to the server env (bd-bw3466).
@@ -3537,6 +3548,7 @@ defmodule Arbiter.Worker.Dispatch do
                   worktree_path: worktree_path,
                   owner: worker_pid,
                   task_id: task.id,
+                  projection: projection,
                   # bd-d2o3xb: this dispatch hands the spawn to `ClaudeSession`
                   # with `policy`, which is what wraps it under `podman`.
                   sandbox_wrap: true
@@ -3551,6 +3563,7 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:tracker_context, tracker_context)
               |> Keyword.put(:adapter, adapter)
               |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
+              |> Keyword.put(:projection, projection)
               |> then(&prompt_for_task(task, &1))
 
             provider = Atom.to_string(choice.type)
@@ -3621,6 +3634,7 @@ defmodule Arbiter.Worker.Dispatch do
                    [command: argv, prompt: prompt, env: env] ++
                    session_meta ++
                    sandbox_session_opts(policy, workspace, opts) ++
+                   [projection: projection] ++
                    Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
@@ -3801,14 +3815,45 @@ defmodule Arbiter.Worker.Dispatch do
   # resolved `policy`, for the (provider, model) this `choice` will run. A no-op
   # unless subject rules are configured (`Arbiter.Guardrails.effective/4`).
   defp guardrail_floor(%SecurityPolicy{} = policy, workspace, choice, opts) do
-    provider = choice.type
-    config = choice.config || %{}
+    Guardrails.apply_to_policy(
+      policy,
+      workspace,
+      choice.type,
+      choice_model(choice),
+      repo: Keyword.get(opts, :repo)
+    )
+  end
 
-    model =
-      Map.get(config, "model") ||
-        ModelFamily.model_for_tier(provider, Map.get(config, "model_tier"), config)
+  defp choice_model(%{type: provider, config: config}) do
+    config = config || %{}
 
-    Guardrails.apply_to_policy(policy, workspace, provider, model, repo: Keyword.get(opts, :repo))
+    Map.get(config, "model") ||
+      ModelFamily.model_for_tier(provider, Map.get(config, "model_tier"), config)
+  end
+
+  # bd-ld8qde (G14): the projection of the ticket's in-force permissions for the
+  # subject `choice` will run as. A review dispatch is a reviewer, which is given
+  # no action permissions (design §5.4).
+  defp guardrail_projection(%Issue{id: id}, workspace, choice, opts) do
+    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+
+    Withholding.for_spawn(id, workspace, choice.type, choice_model(choice),
+      repo: Keyword.get(opts, :repo),
+      role: role
+    )
+  end
+
+  defp reinject_permission_claims(_task, %{claims: []}, opts), do: opts
+
+  defp reinject_permission_claims(%Issue{} = task, %{claims: claims}, opts) do
+    Keyword.merge(
+      opts,
+      inject_mcp_config(
+        task,
+        Keyword.get(opts, :mcp_worktree),
+        Keyword.put(opts, :permissions, claims)
+      )
+    )
   end
 
   # A guardrail profile states what must hold and the adapter says whether it
@@ -4007,7 +4052,8 @@ defmodule Arbiter.Worker.Dispatch do
   # A missing signing secret is logged and swallowed: never blocks a spawn.
   defp mint_worker_token(%Issue{} = task, opts) do
     Arbiter.MCP.Scope.mint_worker(task, Keyword.get(opts, :repo),
-      depth: Keyword.get(opts, :depth, 0)
+      depth: Keyword.get(opts, :depth, 0),
+      permissions: Keyword.get(opts, :permissions, [])
     )
   rescue
     e ->
