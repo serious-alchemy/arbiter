@@ -262,6 +262,18 @@ defmodule ArbiterWeb.Router do
     post("/loop/pending/:id/apply", LoopController, :pending_apply)
     post("/loop/pending/:id/reject", LoopController, :pending_reject)
 
+    # Shared-memory promotion queue, quarantine and transcript distillation
+    # (P-25). Operator-proof only, reads included: `ArbiterWeb.ApiPolicy`.
+    # Candidate ids are `<session-id>/<file>.md`, so they travel as `id`
+    # query/body params rather than path segments.
+    get("/memory/pending", MemoryController, :pending_index)
+    get("/memory/pending/diff", MemoryController, :pending_diff)
+    post("/memory/pending/apply", MemoryController, :pending_apply)
+    post("/memory/pending/reject", MemoryController, :pending_reject)
+    get("/memory/quarantine", MemoryController, :quarantine_index)
+    post("/memory/quarantine/restore", MemoryController, :quarantine_restore)
+    post("/memory/distill", MemoryController, :distill)
+
     # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)
     get("/repos/:name", RepoController, :show)
