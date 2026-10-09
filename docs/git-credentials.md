@@ -84,7 +84,7 @@ the workspace does not have (`git_credential_secret_missing`).
 | Backend | Deploy key | Token |
 |---|---|---|
 | Unsandboxed Claude / Codex | `0600` file in a per-worker dir under `~/.cache/arbiter/scratch/git-key`, named by `GIT_SSH_COMMAND` (`ssh -F /dev/null -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none`) | `ARB_GIT_TOKEN` in the env, served by a git credential helper (below) |
-| bwrap jail (agy) | The same file, bound read-only at its own path over a blanked key dir (a sibling's key is unreachable); `~/.ssh` identities are **not** bound back; the egress `ProxyCommand` is composed onto the command | env, as above |
+| bwrap jail (agy) | The same file, bound read-only at its own path over a blanked key dir (a sibling's key is unreachable); with any scoped credential (deploy key, token or App) no `~/.ssh` identity and no `~/.config/gh` login is bound back; the egress `ProxyCommand` is composed onto the command | env, as above |
 | podman | A podman **secret** (`podman run --secret NAME,type=mount,target=arb_git_key,uid=…,mode=0400`), created from a `0600` file that is deleted at once, removed with the container, by an owner-exit reaper and at server boot | A podman secret of `type=env` (`ARB_GIT_TOKEN`); the value is never on argv or in `podman inspect` |
 
 Never an agent socket: `SSH_AUTH_SOCK` is not set (and `IdentityAgent=none`).
@@ -107,7 +107,8 @@ A ticket's `tracker_write` permission projects a token env var (the binding's
 * `deploy_key` (or the binding's `token_secret` alone): the binding's token is
   used, but a **classic PAT is refused** (checked with `GET /user`: a classic PAT
   reports `X-OAuth-Scopes`, a fine-grained or App token does not). Give the
-  binding a fine-grained token scoped to the one repo.
+  binding a fine-grained token scoped to the one repo. The check fails closed: if
+  GitHub cannot be reached, or answers anything but 2xx, the dispatch is refused.
 
 ## Limits, said plainly
 
