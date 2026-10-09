@@ -838,6 +838,54 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  @doc """
+  The findings for a coordinator-dispatched review's REQUEST_CHANGES verdict
+  (bd-2ujj2p).
+
+  `parse_verdict/1` keeps only the text from the `VERDICT:` line onward, but a
+  reviewer that posts its review to the PR and then prints the sentinel puts the
+  findings BEFORE it — leaving the verdict, `VERIFICATION:` and `arb done` as the
+  whole "findings" and the implementer's fix round with nothing to fix. When
+  `findings` carries nothing actionable, the output before the verdict line is
+  spliced in right after it (keeping `VERDICT:` first, as every consumer
+  expects). `source` is `parse_verdict/3`'s: for `:transcript` the in-memory
+  `lines` are the truncated tail, so the durable log is re-read.
+
+  Returns `{:ok, findings}`, or `:empty` when there is no findings text anywhere.
+  """
+  @spec recover_findings([String.t()], String.t() | nil, verdict_source(), String.t()) ::
+          {:ok, String.t()} | :empty
+  def recover_findings(lines, run_id, source, findings) when is_binary(findings) do
+    if findings_present?(findings) do
+      {:ok, findings}
+    else
+      lines = if source == :transcript, do: durable_or(run_id, lines), else: lines
+
+      preamble =
+        lines
+        |> Enum.join("\n")
+        |> String.split("\n")
+        |> Enum.take_while(
+          &(not Regex.match?(@verdict_request_changes, normalize_verdict_line(&1)))
+        )
+        |> Enum.reject(&Regex.match?(~r/\barb done\b|^\s*⚙/, &1))
+        |> Enum.join("\n")
+        |> String.trim()
+
+      [verdict_line | rest] = String.split(findings, "\n", parts: 2) ++ [""]
+      candidate = [verdict_line, preamble, rest] |> Enum.join("\n") |> String.trim()
+
+      if preamble != "" and findings_present?(candidate), do: {:ok, candidate}, else: :empty
+    end
+  end
+
+  defp durable_or(run_id, lines) do
+    case durable_lines(run_id) do
+      {:ok, durable} -> durable
+      _ -> lines
+    end
+  end
+
   defp durable_lines(run_id) when is_binary(run_id) and run_id != "" do
     Arbiter.Worker.OutputLog.read_lines(run_id)
   rescue
@@ -2921,7 +2969,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # primary defense against flourishes.
   @min_findings_chars 16
 
-  defp findings_present?(findings) when is_binary(findings) do
+  @doc false
+  @spec findings_present?(String.t()) :: boolean()
+  def findings_present?(findings) when is_binary(findings) do
     body =
       findings
       |> String.split("\n")
@@ -2937,6 +2987,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # (bd-4yhv4x).
         String.trim(line) == "" or
           Regex.match?(~r/\barb done\b/, line) or
+          Regex.match?(~r/^\s*VERIFICATION:\s*FULL\b/i, line) or
           Regex.match?(~r/^\s*⚙/, line) or
           ReviewVerification.criteria_line?(line)
       end)
