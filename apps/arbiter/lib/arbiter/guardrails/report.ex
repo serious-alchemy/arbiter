@@ -33,6 +33,7 @@ defmodule Arbiter.Guardrails.Report do
   alias Arbiter.Guardrails
   alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Rules
+  alias Arbiter.Tasks.Workspace
 
   @tier_ladder ~w(economy standard premium flagship)
 
@@ -106,7 +107,7 @@ defmodule Arbiter.Guardrails.Report do
       issues:
         Enum.flat_map(entries, & &1.issues) ++
           cap_issues(ws, block, Enum.map(subjects, &elem(&1, 1))) ++
-          binding_issues(name, block, resolved)
+          binding_issues(name, block, resolved) ++ secret_issues(ws, name, block)
     }
   end
 
@@ -218,6 +219,32 @@ defmodule Arbiter.Guardrails.Report do
 
     dead ++ unknown
   end
+
+  # G14: every secret a binding names must exist in the workspace's secrets (or
+  # as a worker_env var), or dispatch quietly projects nothing for it.
+  defp secret_issues(ws, name, block) do
+    known = known_secret_names(ws)
+
+    for {perm, binding} <- block |> Map.get("bindings", %{}) |> map_or_empty(),
+        secret <- binding_secrets(map_or_empty(binding)),
+        secret not in known do
+      issue(
+        :binding_secret_missing,
+        name,
+        "binding #{perm} names secret #{secret}, which this workspace does not have"
+      )
+    end
+  end
+
+  defp binding_secrets(binding) do
+    env = binding |> Map.get("env_from_secret") |> map_or_empty() |> Map.values()
+    Enum.filter(env ++ [binding["ssh_key_secret"], binding["token_secret"]], &is_binary/1)
+  end
+
+  defp known_secret_names(%Workspace{} = ws),
+    do: Workspace.secret_key_names(ws) ++ Enum.map(Workspace.worker_env_keys(ws), & &1.name)
+
+  defp known_secret_names(_), do: []
 
   defp binding_issues(name, block, resolved) do
     top =

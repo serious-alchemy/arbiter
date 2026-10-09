@@ -129,6 +129,64 @@ defmodule Arbiter.Guardrails.ReportTest do
     assert :unreachable_binding in kinds(report)
   end
 
+  describe "binding secrets exist (G14, bd-ld8qde)" do
+    defp with_secrets(guardrails, secrets) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rep-#{System.unique_integer([:positive])}",
+          prefix: "rp#{:rand.uniform(99_999)}",
+          config: %{"guardrails" => guardrails},
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    @bindings %{
+      "bindings" => %{
+        "prod_read" => %{"env_from_secret" => %{"RO_URL" => "prod_ro_url"}},
+        "prod_ssh" => %{"ssh_key_secret" => "prod_ssh_key", "hosts" => ["prod.internal:22"]},
+        "tracker_write" => %{"token_secret" => "gh_token"}
+      }
+    }
+
+    test "a binding naming a secret the workspace lacks is flagged, once per secret" do
+      ws = with_secrets(@bindings, %{"prod_ro_url" => "x"})
+      report = Report.build([ws], rules: [])
+
+      missing =
+        for %{kind: :binding_secret_missing, message: m} <- report.issues, do: m
+
+      assert length(missing) == 2
+      assert Enum.any?(missing, &(&1 =~ "prod_ssh_key" and &1 =~ "prod_ssh"))
+      assert Enum.any?(missing, &(&1 =~ "gh_token" and &1 =~ "tracker_write"))
+      refute Enum.any?(missing, &(&1 =~ "prod_ro_url"))
+    end
+
+    test "nothing to flag when every named secret exists" do
+      ws =
+        with_secrets(@bindings, %{"prod_ro_url" => "x", "prod_ssh_key" => "y", "gh_token" => "z"})
+
+      refute :binding_secret_missing in kinds(Report.build([ws], rules: []))
+    end
+
+    test "a worker_env var of that name also satisfies it" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rep-#{System.unique_integer([:positive])}",
+          prefix: "rp#{:rand.uniform(99_999)}",
+          config: %{
+            "guardrails" => %{
+              "bindings" => %{"prod_read" => %{"env_from_secret" => %{"X" => "ro_tok"}}}
+            }
+          },
+          worker_env: %{"ro_tok" => %{"value" => "v", "secret" => true}}
+        })
+
+      refute :binding_secret_missing in kinds(Report.build([ws], rules: []))
+    end
+  end
+
   test "posture/1 is string-keyed for the REST and MCP workspace surfaces" do
     ws = workspace!(%{})
     posture = Report.posture(ws, rules: [%{match: %{provider: "claude"}, tier: :trusted}])
