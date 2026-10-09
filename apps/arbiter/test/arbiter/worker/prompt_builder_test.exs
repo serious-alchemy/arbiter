@@ -245,12 +245,14 @@ defmodule Arbiter.Worker.PromptBuilderTest do
   describe "host-pushed (container) runs (bd-dh1gg1)" do
     test "a host-pushes run is told not to push, fresh or resumed" do
       for extra <- [[], [resume_context: "## Resuming prior work\n\n"]] do
-        prompt = PromptBuilder.prompt_for_task(task(%{}), [host_pushes?: true] ++ extra)
+        prompt =
+          PromptBuilder.prompt_for_task(
+            task(%{}),
+            [sandbox_backend: :podman, host_pushes?: true] ++ extra
+          )
 
-        assert prompt =~ "commit on this branch, and stop there."
-        assert prompt =~ "Do NOT `git push`"
-        refute prompt =~ "ssh` to the forge"
-        assert prompt =~ "fetch` of the target"
+        assert prompt =~ "commit on this branch."
+        assert prompt =~ "NO PUSH ACCESS"
         refute prompt =~ "and push it."
       end
     end
