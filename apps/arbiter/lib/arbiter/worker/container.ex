@@ -167,7 +167,7 @@ defmodule Arbiter.Worker.Container do
     home = Map.get(spec, :home)
 
     Enum.concat([
-      [podman, "run", "--name", name, "--init"],
+      [podman, "run", "--name", name, "--init", "--log-driver=none"],
       if(Map.get(spec, :keep, false), do: [], else: ["--rm"]),
       ["--pull=never"],
       placement(spec),
