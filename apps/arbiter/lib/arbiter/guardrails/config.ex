@@ -243,11 +243,12 @@ defmodule Arbiter.Guardrails.Config do
         "#{label}.min_tier"
       ) ++
       bool_error(Map.get(binding, "enforced_read_only"), "#{label}.enforced_read_only") ++
-      hosts_error(Map.get(binding, "tunnels"), "#{label}.tunnels") ++
-      hosts_error(Map.get(binding, "hosts"), "#{label}.hosts") ++
+      tunnels_error(Map.get(binding, "tunnels"), "#{label}.tunnels") ++
+      grant_hosts_error(Map.get(binding, "hosts"), "#{label}.hosts") ++
       env_map_error(Map.get(binding, "env_from_secret"), "#{label}.env_from_secret") ++
       string_error(Map.get(binding, "ssh_key_secret"), "#{label}.ssh_key_secret") ++
       string_error(Map.get(binding, "token_secret"), "#{label}.token_secret") ++
+      env_name_error(Map.get(binding, "token_env"), "#{label}.token_env") ++
       tags_error(Map.get(binding, "tags"), "#{label}.tags")
   end
 
@@ -416,18 +417,54 @@ defmodule Arbiter.Guardrails.Config do
   defp string_error(v, _) when is_binary(v) and v != "", do: []
   defp string_error(_, label), do: ["#{label} must be a non-empty string"]
 
-  defp hosts_error(nil, _), do: []
+  # A binding's `hosts` become ticket grants (G14), which never wildcard
+  # (`Egress.Policy.normalize_grant/1`): a `*.` entry is a config error here
+  # rather than a host that silently matches nothing.
+  defp grant_hosts_error(nil, _), do: []
 
-  defp hosts_error(list, label) when is_list(list) do
-    for h <- list, not valid_host?(h), do: "#{label}: #{inspect(h)} is not a valid host:port"
+  defp grant_hosts_error(list, label) when is_list(list) do
+    for h <- list,
+        not (is_binary(h) and match?({:ok, _}, EgressPolicy.normalize_grant(h))),
+        do: "#{label}: #{inspect(h)} is not a valid host:port (wildcards are not allowed)"
   end
 
-  defp hosts_error(_, label), do: ["#{label} must be a list of host:port strings"]
+  defp grant_hosts_error(_, label), do: ["#{label} must be a list of host:port strings"]
 
-  defp valid_host?(h) when is_binary(h),
-    do: match?({:ok, _}, EgressPolicy.normalize_baseline([h]))
+  # `HOST:PORT` bridges 127.0.0.1:PORT in the jail; `LOCAL:HOST:PORT` picks the
+  # local port (the same shape as `sandbox.egress_tunnels`).
+  defp tunnels_error(nil, _), do: []
 
-  defp valid_host?(_), do: false
+  defp tunnels_error(list, label) when is_list(list) do
+    for t <- list,
+        not valid_tunnel?(t),
+        do: "#{label}: #{inspect(t)} is not HOST:PORT or LOCAL:HOST:PORT"
+  end
+
+  defp tunnels_error(_, label), do: ["#{label} must be a list of tunnel strings"]
+
+  defp valid_tunnel?(t) when is_binary(t) do
+    case String.split(t, ":") do
+      [host, port] ->
+        match?({:ok, _}, EgressPolicy.normalize_grant(host <> ":" <> port))
+
+      [local, host, port] ->
+        match?({n, ""} when n in 1..65_535, Integer.parse(local)) and
+          match?({:ok, _}, EgressPolicy.normalize_grant(host <> ":" <> port))
+
+      _ ->
+        false
+    end
+  end
+
+  defp valid_tunnel?(_), do: false
+
+  defp env_name_error(nil, _), do: []
+
+  defp env_name_error(name, label) do
+    if is_binary(name) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, name),
+      do: [],
+      else: ["#{label} must be a valid environment variable name"]
+  end
 
   defp env_map_error(nil, _), do: []
 

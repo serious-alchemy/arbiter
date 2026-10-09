@@ -48,6 +48,7 @@ defmodule Arbiter.Guardrails.Projection do
   alias Arbiter.Guardrails
   alias Arbiter.Guardrails.Permissions
   alias Arbiter.Guardrails.Profile
+  alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
 
   defstruct guarded?: false,
             role: :implementer,
@@ -238,11 +239,12 @@ defmodule Arbiter.Guardrails.Projection do
   defp hosts(nil, _port), do: []
 
   defp hosts(binding, default_port) do
-    for entry <- List.wrap(Map.get(binding, "hosts")), is_binary(entry), entry != "" do
-      if String.contains?(entry, ":"),
-        do: String.downcase(entry),
-        else: String.downcase(entry) <> ":#{default_port}"
-    end
+    # Ticket grants never wildcard (`Egress.Policy.normalize_grant/1` refuses one).
+    for entry <- List.wrap(Map.get(binding, "hosts")),
+        is_binary(entry),
+        authority = if(String.contains?(entry, ":"), do: entry, else: "#{entry}:#{default_port}"),
+        {:ok, canonical} <- [EgressPolicy.normalize_grant(authority)],
+        do: canonical
   end
 
   # "HOST:PORT" bridges 127.0.0.1:PORT; "LOCAL:HOST:PORT" picks the local port.

@@ -178,6 +178,14 @@ defmodule Arbiter.Guardrails.ProjectionTest do
     end
   end
 
+  test "a wildcard binding host never becomes a grant" do
+    block =
+      put_in(@block, ["bindings", "prod_read", "hosts"], ["*.internal:443", "db.internal:5432"])
+
+    p = Projection.build(["prod_read"], profile: profile(:privileged), block: block)
+    assert p.hosts == ["db.internal:5432"]
+  end
+
   describe "data classes and roles" do
     test "phi_data projects no reach and is neither granted nor withheld" do
       p = build(["phi_data"], :privileged)

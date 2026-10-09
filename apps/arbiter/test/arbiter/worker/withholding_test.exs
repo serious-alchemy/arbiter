@@ -1,0 +1,139 @@
+defmodule Arbiter.Worker.WithholdingTest do
+  @moduledoc """
+  G14 (bd-ld8qde): the DB-facing half of dispatch-time withholding — in-force
+  permissions of a real ticket, projected under a profile, plus the egress
+  grants and the per-worker ssh-agent that projection asks for.
+  """
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Guardrails.Profile
+  alias Arbiter.Guardrails.Projection
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Withholding
+
+  @guardrails %{
+    "bindings" => %{
+      "prod_ssh" => %{"hosts" => ["prod.internal:22"], "ssh_key_secret" => "prod_ssh_key"},
+      "prod_read" => %{
+        "enforced_read_only" => true,
+        "env_from_secret" => %{"RO_URL" => "prod_ro_url"}
+      }
+    }
+  }
+
+  defp privileged,
+    do: %Profile{
+      tier: :privileged,
+      permissions: ["network:", "tracker_write", "secrets:", "prod_read", "prod_ssh"]
+    }
+
+  defp setup_ticket(perms, context) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "wh-#{System.unique_integer([:positive])}",
+        prefix: "wh",
+        config: %{"guardrails" => @guardrails},
+        secrets: %{"prod_ro_url" => "postgres://ro"}
+      })
+
+    {:ok, issue} =
+      Ash.create(Issue, %{title: "t", workspace_id: ws.id, permissions: perms}, context: context)
+
+    {ws, issue}
+  end
+
+  defp coordinator, do: %{guardrail_authority: :coordinator, permission_actor: "c"}
+  defp operator, do: %{guardrail_authority: :operator, permission_actor: "o"}
+
+  describe "projection/4" do
+    test "projects the ticket's in-force permissions under the profile" do
+      {ws, issue} = setup_ticket(["network:api.example.com", "prod_read"], coordinator())
+      p = Withholding.projection(issue, ws, privileged(), :implementer)
+
+      assert p.guarded?
+      assert p.hosts == ["api.example.com:443"]
+      assert p.env == [{"RO_URL", "prod_ro_url"}]
+    end
+
+    test "a pending (operator-grant) permission is not projected until granted" do
+      {ws, issue} = setup_ticket(["prod_ssh"], coordinator())
+      p = Withholding.projection(issue, ws, privileged(), :implementer)
+      assert p.ssh == nil and p.hosts == []
+    end
+
+    test "an operator-declared prod_ssh is projected" do
+      {ws, issue} = setup_ticket(["prod_ssh"], operator())
+      p = Withholding.projection(issue, ws, privileged(), :implementer)
+      assert p.ssh == %{key_secret: "prod_ssh_key", hosts: ["prod.internal:22"]}
+    end
+
+    test "no profile: unguarded, legacy" do
+      {ws, issue} = setup_ticket(["prod_read"], coordinator())
+      refute Withholding.projection(issue, ws, nil, :implementer).guarded?
+    end
+
+    test "a synthetic review task id resolves to the base ticket but projects nothing" do
+      {ws, issue} = setup_ticket(["network:api.example.com"], coordinator())
+      p = Withholding.projection(issue, ws, privileged(), :reviewer)
+      assert p.hosts == []
+      assert [%{reason: reason}] = p.withheld
+      assert reason =~ "reviewer"
+    end
+  end
+
+  describe "grants/2" do
+    test "a guarded spawn gets exactly what was projected, not a live DB read" do
+      {_ws, issue} = setup_ticket(["network:later.example.com"], coordinator())
+      projection = %{Projection.sealed() | hosts: ["api.example.com:443"]}
+      assert Withholding.grants(issue.id, projection).(issue.id) == ["api.example.com:443"]
+    end
+
+    test "an unguarded spawn reads the ticket's in-force network: grants live" do
+      {_ws, issue} =
+        setup_ticket(["network:api.example.com", "network?:opt.example.com"], coordinator())
+
+      loader = Withholding.grants(issue.id, Projection.unguarded())
+      assert Enum.sort(loader.(issue.id)) == ["api.example.com:443", "opt.example.com:443"]
+    end
+
+    test "a synthetic task id reads the base ticket" do
+      {_ws, issue} = setup_ticket(["network:api.example.com"], coordinator())
+      loader = Withholding.grants(issue.id <> "#r1", Projection.unguarded())
+      assert loader.(issue.id <> "#r1") == ["api.example.com:443"]
+    end
+  end
+
+  describe "ssh_agent/3" do
+    test "nothing to start without a prod_ssh projection" do
+      {ws, _} = setup_ticket([], coordinator())
+      assert {:ok, nil} = Withholding.ssh_agent(Projection.sealed(), ws, self())
+    end
+
+    test "a missing key secret is an error, not a silent no-agent spawn" do
+      {ws, _} = setup_ticket([], coordinator())
+      projection = %{Projection.sealed() | ssh: %{key_secret: "nope", hosts: []}}
+      assert {:error, {:ssh_key_missing, "nope"}} = Withholding.ssh_agent(projection, ws, self())
+    end
+
+    @tag :tmp_dir
+    test "starts an agent holding the workspace secret's key", %{tmp_dir: tmp} do
+      key_path = Path.join(tmp, "k")
+      {_, 0} = System.cmd("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key_path])
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wh-#{System.unique_integer([:positive])}",
+          secrets: %{"prod_ssh_key" => File.read!(key_path)}
+        })
+
+      dir = Path.join(System.tmp_dir!(), "wsa#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(dir) end)
+      projection = %{Projection.sealed() | ssh: %{key_secret: "prod_ssh_key", hosts: []}}
+
+      assert {:ok, socket} = Withholding.ssh_agent(projection, ws, self(), dir: dir)
+      assert {out, 0} = System.cmd("ssh-add", ["-l"], env: [{"SSH_AUTH_SOCK", socket}])
+      assert out =~ "ED25519"
+    end
+  end
+end
