@@ -29,6 +29,9 @@ defmodule ArbiterCli.Main do
                                   ("" clears a field; `arb ticket update --help` lists all)
       arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>
+      arb attention       [--owner coordinator|operator] [--workspace <id|name>]
+                                  the open attention queue (tickets needing someone)
+      arb verify          <id> --observed "<evidence>" | --failed "<evidence>"   (== arb ticket verify)
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
                                   for a ticket in state verifying

@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Create do
                        [--no-tracker] [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
                        [--require-provider P | --exclude-provider P] [--permission P]
-                       [--force] [--ticket-only] [--json]`
+                       [--force] [--ticket-only|--no-task|--unclaimed] [--local-only] [--json]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
@@ -158,6 +158,9 @@ defmodule ArbiterCli.Cmd.Create do
   one. The reviewer is not constrained. Coordinator/operator only — a worker
   token is refused.
 
+  `--clear-provider-constraint` and `--remove-permission` are parsed (they are
+  shared with `arb ticket update`) but are no-ops on a new ticket.
+
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
   unless `--json` is set. The `labels` field is not yet part of the Issue resource.
@@ -213,7 +216,11 @@ defmodule ArbiterCli.Cmd.Create do
                   AcceptanceFlags.switches() ++
                   ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
+<<<<<<< HEAD
   @doc "Every switch `arb ticket create` takes (read by the field-exposure guard test)."
+=======
+  @doc "Every switch `arb ticket create` accepts (what `--help` must document)."
+>>>>>>> origin/main
   @spec switches() :: keyword()
   def switches, do: @all_switches
 

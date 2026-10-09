@@ -99,6 +99,46 @@ defmodule Arbiter.Worker.ConflictPassOutcomeTest do
       assert reason =~ "mid-rebase"
     end
 
+    test "a push that still conflicts with the target's current tip is unresolved", %{
+      tmp: tmp,
+      remote: remote,
+      wt: wt,
+      meta: meta
+    } do
+      # The target moves on, and the pass pushes without ever having seen it
+      # (a rebase onto a stale `origin/main`): the head moves, the PR still conflicts.
+      :ok = advance_main!(tmp, remote, "README.md", "main side\n")
+      :ok = commit!(wt, "RESOLVED.md", "done\n", "resolve")
+      {_, 0} = git(wt, ["push", "-q", "origin", @branch])
+      pushed = Worktree.remote_head(wt, @branch)
+
+      assert {:unresolved, reason} = ConflictPassOutcome.verdict(with_target(meta, wt))
+      assert reason =~ "still conflicts"
+      assert reason =~ "main"
+      assert reason =~ String.slice(pushed, 0, 8)
+    end
+
+    test "a push that merges cleanly with the target's current tip is resolved", %{
+      tmp: tmp,
+      remote: remote,
+      wt: wt,
+      meta: meta
+    } do
+      :ok = advance_main!(tmp, remote, "OTHER.md", "main side\n")
+      :ok = commit!(wt, "RESOLVED.md", "done\n", "resolve")
+      {_, 0} = git(wt, ["push", "-q", "origin", @branch])
+
+      assert ConflictPassOutcome.verdict(with_target(meta, wt)) == :resolved
+    end
+
+    test "fails open when the target cannot be fetched", %{wt: wt, meta: meta} do
+      :ok = commit!(wt, "RESOLVED.md", "done\n", "resolve")
+      {_, 0} = git(wt, ["push", "-q", "origin", @branch])
+
+      meta = meta |> with_target(wt) |> Map.put(:target_branch, "no-such-target")
+      assert ConflictPassOutcome.verdict(meta) == :resolved
+    end
+
     test "fails open when the pass never recorded where it started", %{meta: meta} do
       assert ConflictPassOutcome.verdict(Map.delete(meta, :conflict_start_head)) == :resolved
       assert ConflictPassOutcome.verdict(%{role: :conflict_resolver}) == :resolved
@@ -136,6 +176,10 @@ defmodule Arbiter.Worker.ConflictPassOutcomeTest do
       assert ConflictPassOutcome.settle_worktree(%{}) == {:ok, nil}
     end
   end
+
+  # The pass's meta as `ConflictResolver` records it: the target and the main repo
+  # (here the same checkout) the host refreshes `origin/<target>` in.
+  defp with_target(meta, repo), do: Map.merge(meta, %{target_branch: "main", repo_path: repo})
 
   defp git(path, args), do: System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
 
