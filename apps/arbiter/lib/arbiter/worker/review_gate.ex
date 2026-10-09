@@ -6036,6 +6036,7 @@ defmodule Arbiter.Worker.ReviewGate do
       difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
       provider: provider
     }
+    |> put_guardrail_decision(state, ws, provider, :reviewer)
   end
 
   defp worker_meta(state, :implementer, {provider, fallback_reason, decision}) do
@@ -6047,6 +6048,21 @@ defmodule Arbiter.Worker.ReviewGate do
       provider_fallback: fallback_reason
     }
     |> Map.merge(ProviderRouting.run_meta(decision))
+    |> put_guardrail_decision(state, load_workspace(state.workspace_id), provider, :implementer)
+  end
+
+  # bd-atll60 (G13): the guardrail decision the round's run records, as the
+  # dispatcher's does. Best-effort: the gate refused what it must; this records.
+  defp put_guardrail_decision(meta, state, ws, provider, role) do
+    model =
+      if role == :reviewer, do: reviewer_model(state, ws, to_string(provider)), else: :predicted
+
+    case Gate.decision(state.task_id, ws, provider, model, role: role, repo: state.repo) do
+      %{} = decision -> Map.put(meta, :guardrail_decision, decision)
+      _ -> meta
+    end
+  rescue
+    _ -> meta
   end
 
   # bd-3xultf: `state.task_id` is the BASE task id (not a synthetic ReviewGate

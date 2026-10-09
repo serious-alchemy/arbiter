@@ -255,4 +255,54 @@ defmodule Arbiter.Worker.GuardrailDispatchTest do
       refute Worker.state(result.worker_pid).meta[:provider] == "claude"
     end
   end
+
+  describe "guardrail_decision on the run (design §5.2)" do
+    test "a guarded run records its subject, tier and projection" do
+      ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
+      task = task!(ws, %{difficulty: 3})
+
+      {:ok, _} = dispatch(task)
+
+      assert %{
+               "eligible" => true,
+               "tier" => "privileged",
+               "role" => "implementer",
+               "subject" => %{"provider" => "claude"},
+               "permission_fallback" => []
+             } = latest_run(task.id).guardrail_decision
+    end
+
+    test "an optional permission the subject cannot hold is dropped to dispatch, and recorded" do
+      ws = workspace!(%{"agent" => %{"type" => ["codex"]}})
+
+      task =
+        Ash.create!(
+          Issue,
+          %{
+            title: "optional network",
+            workspace_id: ws.id,
+            difficulty: 1,
+            permissions: ["network?:status.example.com:443"]
+          },
+          context: %{guardrail_authority: :coordinator, permission_actor: "t"}
+        )
+
+      {:ok, _} = dispatch(task)
+
+      assert %{"eligible" => true, "permission_fallback" => [fallback]} =
+               latest_run(task.id).guardrail_decision
+
+      assert fallback["permission"] == "network?:status.example.com:443"
+      assert fallback["reason"] =~ "quarantine"
+    end
+
+    test "an unguarded run records nothing" do
+      put_app_env(:arbiter, :guardrail_subject_rules, [])
+      ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
+      task = task!(ws, %{difficulty: 3})
+
+      {:ok, _} = dispatch(task)
+      assert latest_run(task.id).guardrail_decision == nil
+    end
+  end
 end

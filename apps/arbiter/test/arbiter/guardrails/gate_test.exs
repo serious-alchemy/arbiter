@@ -85,4 +85,55 @@ defmodule Arbiter.Guardrails.GateTest do
 
     assert detail =~ "D3"
   end
+
+  describe "decision/5 (the run's guardrail_decision)" do
+    test "is nil when unguarded", %{ws: ws} do
+      assert Gate.decision(task!(ws, %{difficulty: 3}), ws, :codex, "gpt-5") == nil
+    end
+
+    test "records the subject, tier, profile digest and projection of an eligible spawn", %{
+      ws: ws
+    } do
+      guard!()
+      task = task!(ws, %{difficulty: 3})
+
+      assert %{"eligible" => true, "tier" => "privileged", "role" => "implementer"} =
+               d =
+               Gate.decision(task, ws, :claude, "claude-opus-4-6")
+
+      assert d["subject"] == %{
+               "provider" => "claude",
+               "model" => "claude-opus-4-6",
+               "family" => "anthropic"
+             }
+
+      assert d["profile_digest"] =~ ~r/\A[0-9a-f]{12}\z/
+      assert d["max_difficulty"] == 5
+      assert %{"granted" => [], "withheld" => []} = d["projection"]
+      assert d["permission_fallback"] == []
+      assert Jason.encode!(d)
+    end
+
+    test "records why an ineligible subject was refused", %{ws: ws} do
+      guard!()
+      task = task!(ws, %{difficulty: 3})
+
+      assert %{"eligible" => false, "tier" => "quarantine", "reason" => reason} =
+               Gate.decision(task, ws, :codex, "gpt-5")
+
+      assert reason =~ "D3"
+    end
+
+    test "the digest changes with the profile", %{ws: ws} do
+      guard!()
+      task = task!(ws, %{difficulty: 1})
+      a = Gate.decision(task, ws, :claude, nil)["profile_digest"]
+
+      Application.put_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :trusted}
+      ])
+
+      assert Gate.decision(task, ws, :claude, nil)["profile_digest"] != a
+    end
+  end
 end

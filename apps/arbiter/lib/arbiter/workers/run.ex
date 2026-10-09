@@ -121,7 +121,8 @@ defmodule Arbiter.Workers.Run do
         :provider_account_id,
         :node_id,
         :model_family,
-        :routing_decision
+        :routing_decision,
+        :guardrail_decision
       ]
     end
 
@@ -162,7 +163,8 @@ defmodule Arbiter.Workers.Run do
         :provider_account_id,
         :node_id,
         :model_family,
-        :routing_decision
+        :routing_decision,
+        :guardrail_decision
       ]
     end
   end
@@ -274,6 +276,15 @@ defmodule Arbiter.Workers.Run do
       description "The provider routing decision this run was spawned under (bd-40pzpj): " <>
                     "the chosen account, per-candidate headroom, dropped candidates with " <>
                     "their reasons, and any fallback or override. nil when not routed."
+    end
+
+    attribute :guardrail_decision, :map do
+      public? true
+
+      description "The guardrail decision this run was spawned under (bd-atll60, G13): the " <>
+                    "subject, its tier, a digest of the effective profile, the permissions " <>
+                    "projected or withheld and any optional permission dropped to dispatch. " <>
+                    "nil when no subject rule is configured."
     end
 
     attribute :started_at, :utc_datetime_usec do

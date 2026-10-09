@@ -31,7 +31,10 @@ defmodule Arbiter.Guardrails.Gate do
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.Routing
+  alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Eligibility
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Permissions
@@ -152,6 +155,93 @@ defmodule Arbiter.Guardrails.Gate do
              "#{provider || "provider"}: the ticket could not be read to check its guardrails"}
         end
     end
+  end
+
+  @doc """
+  The run's `guardrail_decision` (design §5.2): a JSON-safe map recording the
+  subject the spawn ran as, its tier and a digest of the effective profile, the
+  permissions in force and what they projected (or why they were withheld), and
+  any optional permission dropped to dispatch (`permission_fallback`). `nil` when
+  no subject rule is configured — an unguarded run records nothing.
+
+  A refused subject is recorded too (`"eligible" => false`, with the `"reason"`),
+  so a spawn that got past a gate it should not have is visible on the run.
+  Takes `check/5`'s arguments.
+  """
+  @spec decision(
+          Issue.t() | String.t() | nil,
+          map() | nil,
+          atom() | String.t() | nil,
+          model(),
+          keyword()
+        ) ::
+          map() | nil
+  def decision(task, workspace, provider, model, opts \\ []) do
+    case Keyword.get_lazy(opts, :rules, &Rules.all/0) do
+      [] -> nil
+      rules -> decide(load(task), workspace, provider, model, rules, opts)
+    end
+  end
+
+  defp decide(nil, _workspace, provider, _model, _rules, _opts) do
+    %{"eligible" => false, "reason" => "#{provider}: the ticket could not be read"}
+  end
+
+  defp decide(issue, workspace, provider, model, rules, opts) do
+    model = model(model, issue, workspace, provider)
+    role = Keyword.get(opts, :role, :implementer)
+    subject = Guardrails.subject(provider, model)
+
+    base = %{
+      "subject" => %{
+        "provider" => subject.provider,
+        "model" => model,
+        "family" => subject.family
+      },
+      "role" => Atom.to_string(role)
+    }
+
+    case judge(issue, workspace, provider, model, rules, opts) do
+      {:ok, %{profile: profile, permission_fallback: fallback}} ->
+        permissions = Permissions.in_force(Map.put_new(issue, :permissions, []))
+
+        projection =
+          Projection.build(permissions,
+            profile: profile,
+            block: Config.block(workspace),
+            role: role
+          )
+
+        base
+        |> Map.merge(%{
+          "eligible" => true,
+          "tier" => Atom.to_string(profile.tier),
+          "profile_digest" => digest(profile),
+          "min_mode" => Atom.to_string(profile.min_mode),
+          "egress" => Atom.to_string(profile.egress),
+          "max_difficulty" => profile.max_difficulty,
+          "permissions" => permissions,
+          "projection" => Projection.to_decision(projection),
+          "permission_fallback" =>
+            Enum.map(fallback, &%{"permission" => &1.permission, "reason" => &1.reason})
+        })
+
+      {:error, detail} ->
+        profile = Guardrails.effective(subject, workspace, Keyword.get(opts, :repo), rules: rules)
+
+        base
+        |> Map.merge(%{"eligible" => false, "reason" => detail})
+        |> then(&if(profile, do: Map.put(&1, "tier", Atom.to_string(profile.tier)), else: &1))
+    end
+  end
+
+  # Twelve hex digits of the profile's hash: enough to tell two profiles apart
+  # on a run row, short enough to read.
+  defp digest(profile) do
+    :sha256
+    |> :crypto.hash(:erlang.term_to_binary(profile))
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 12)
   end
 
   defp judge(issue, workspace, provider, model, rules, opts) do

@@ -1744,6 +1744,23 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> nil
   end
 
+  # The run's `guardrail_decision` (design §5.2). `nil` — recorded as nothing —
+  # when no subject rule is configured; best-effort, since the gate in
+  # `ensure_guardrails/2` is what decides and this only records.
+  defp guardrail_decision(task, opts) do
+    if Guardrails.guarded?() do
+      workspace = load_workspace(task)
+      provider = quota_gate_provider(task, workspace, opts)
+
+      Gate.decision(task, workspace, provider, guardrail_model(task, workspace, provider, opts),
+        role: guardrail_role(opts),
+        repo: guardrail_repo(task, opts)
+      )
+    end
+  rescue
+    _ -> nil
+  end
+
   # The final gate (design §9 G13: "a hard gate on explicit and legacy dispatch
   # paths"). Reviews run under the `:reviewer` role (data classes bind them, action
   # permissions do not); a ReviewGate synthetic id is gated at its own spawn site.
@@ -2569,6 +2586,8 @@ defmodule Arbiter.Worker.Dispatch do
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
       # bd-40pzpj: the routing decision, account and family the run records.
       |> Map.merge(ProviderRouting.run_meta(Keyword.get(opts, :routing_decision)))
+      # bd-atll60 (G13): the guardrail decision the run was spawned under.
+      |> put_if_present(:guardrail_decision, guardrail_decision(task, opts))
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
