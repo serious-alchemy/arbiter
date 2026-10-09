@@ -3363,7 +3363,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
       :escalate_no_changes ->
-        escalate_or_rerun_ci(state, new_head_sha, commit_gate)
+        finish_no_change(state, new_head_sha, commit_gate)
 
       :escalate_no_changes_after_non_file_fix ->
         {:done,
@@ -3473,10 +3473,13 @@ defmodule Arbiter.Worker.ReviewGate do
     _ -> true
   end
 
-  defp escalate_or_rerun_ci(state, new_head_sha, :rereviewed_unreviewed_head),
+  defp finish_no_change(state, new_head_sha, :rereviewed_unreviewed_head),
     do: review_unreviewed_head(state, new_head_sha)
 
-  defp escalate_or_rerun_ci(state, new_head_sha, _commit_gate) do
+  defp finish_no_change(state, new_head_sha, _commit_gate),
+    do: escalate_or_rerun_ci(state, new_head_sha)
+
+  defp escalate_or_rerun_ci(state, new_head_sha) do
     if ci_noop_rerun_allowed?(state),
       do: rerun_ci_after_no_changes(state, new_head_sha),
       else: {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
