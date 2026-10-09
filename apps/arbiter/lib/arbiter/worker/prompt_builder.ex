@@ -265,6 +265,32 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # bd-capkj9: a podman container has no forge credential or host key by design;
+  # the host pushes after `arb done`. Without this a worker that tries
+  # `git push`, fails, and treats the push as required never prints `arb done`.
+  # Only the authoring work prompt gets it. The ReviewGate fix-round, conflict
+  # and rebase briefings are host-spawned on bwrap today (bd-49l0eo), so they
+  # keep their push instructions until G16 moves them to podman.
+  defp podman_push_section(opts) do
+    if Keyword.get(opts, :sandbox_backend) == :podman do
+      """
+
+      NO PUSH ACCESS — this container has no forge credential or GitHub host key,
+      by design. Commit on your branch, but do not push: the Arbiter host pushes
+      the branch and opens the PR after `arb done`. A failed `git push` or `gh`
+      call ("Host key verification failed", no credentials) is expected and is
+      not a reason to withhold `arb done`.
+
+      """
+    else
+      ""
+    end
+  end
+
+  defp push_clause(opts) do
+    if Keyword.get(opts, :sandbox_backend) == :podman, do: "", else: ", and push it"
+  end
+
   defp base_work_prompt(%Issue{} = task, opts) do
     mcp? = mcp_tools?(opts)
     worktree_path = Keyword.get(opts, :worktree_path)
@@ -286,9 +312,9 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}
+    #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
-    commit on this branch, and push it.
+    commit on this branch#{push_clause(opts)}.
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
     create`). The MergeQueue opens the single canonical PR for this task, on
