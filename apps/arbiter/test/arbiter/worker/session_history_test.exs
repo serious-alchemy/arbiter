@@ -126,6 +126,23 @@ defmodule Arbiter.Worker.SessionHistoryTest do
       assert File.read!(SessionHistory.store_path(@sid)) =~ ~s({"n":3})
     end
 
+    test "a stale session does not stop other sessions in the same run tmp", %{base: base} do
+      newer = run_tmp_with_session(base, "{\"n\":1}\n{\"n\":2}\n")
+      assert [@sid] = SessionHistory.preserve(newer)
+
+      tmp = run_tmp_with_session(base, "{\"n\":1}\n")
+      other = "bbbbbbbb-0000-4000-8000-000000000002"
+
+      File.write!(
+        Path.join([tmp, "claude-config", "projects", "-slug", other <> ".jsonl"]),
+        "{\"o\":1}\n"
+      )
+
+      assert [^other] = SessionHistory.preserve(tmp)
+      assert File.read!(SessionHistory.store_path(@sid)) == "{\"n\":1}\n{\"n\":2}\n"
+      assert File.read!(SessionHistory.store_path(other)) == "{\"o\":1}\n"
+    end
+
     test "RunTmp.remove/1 preserves before deleting" do
       root = Arbiter.Config.Paths.worker_tmp_root()
       File.mkdir_p!(root)

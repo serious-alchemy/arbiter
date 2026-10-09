@@ -113,6 +113,9 @@ defmodule Arbiter.Worker.SessionHistory do
          :ok <- File.rename(tmp, dest) do
       [sid]
     else
+      :stale ->
+        []
+
       {:error, reason} ->
         File.rm(tmp)
         Logger.warning("SessionHistory: cannot preserve #{path}: #{inspect(reason)}")
