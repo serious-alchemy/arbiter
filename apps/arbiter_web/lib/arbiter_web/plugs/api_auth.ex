@@ -43,6 +43,8 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   import Plug.Conn
 
+  alias Arbiter.Guardrails.Events
+  alias Arbiter.Guardrails.SelfGrant
   alias Arbiter.MCP.Scope
   alias ArbiterWeb.ApiPolicy
   alias ArbiterWeb.ErrorResponse
@@ -63,6 +65,7 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
          # The REST/CLI edge: who the token says is acting (attribution only —
          # the policy check right below is unchanged).
          :ok <- Arbiter.Actor.put(Arbiter.Actor.from_scope(scope)),
+         :ok <- audit_self_grant(conn, scope),
          :ok <- ApiPolicy.authorize(route_policy(conn), scope, conn.params) do
       conn
     else
@@ -70,6 +73,26 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
       {:error, :forbidden, message} -> halt_with(conn, :forbidden, message)
     end
   end
+
+  # G17 (design §6.1): a worker reaching for a token mint, a permission grant
+  # or a `guardrails.*` / `permissions` write is a critical guardrail event,
+  # whether or not the policy below refuses it. Recording never fails the
+  # request. Through a bridge the run is the one the connection is pinned to.
+  defp audit_self_grant(%Plug.Conn{} = conn, %Scope{tier: :worker} = scope) do
+    if SelfGrant.rest?(conn.method, conn.path_info, conn.params) do
+      run_id =
+        case WorkerBridge.identity(conn) do
+          {run_id, _resolution} -> run_id
+          nil -> nil
+        end
+
+      Events.record_self_grant(scope, "#{conn.method} #{conn.request_path}", run_id: run_id)
+    end
+
+    :ok
+  end
+
+  defp audit_self_grant(_conn, _scope), do: :ok
 
   defp authenticate(%Plug.Conn{remote_ip: remote_ip} = conn) do
     case WorkerBridge.identity(conn) do

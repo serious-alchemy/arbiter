@@ -2968,6 +2968,7 @@ defmodule Arbiter.Worker do
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
         record_usage_event(new_state, updated, status)
+        link_guardrail_egress(new_state, updated)
         new_state = sync_session_meta(new_state, port)
 
         # bd-awi4nw: the port closing is the PRIMARY stop signal. If the worker
@@ -7573,6 +7574,7 @@ defmodule Arbiter.Worker do
       # on the reviewer's own findings, and the cap payload it sends
       # otherwise carries the implementer's replies and the whole diff.
       EvidenceIntegrity.escalation?(findings) ->
+        record_fabricated_evidence_event(state)
         give_up_fix_round(dispatcher, state, attempts, :fabricated_evidence)
 
       # bd-6d3h8m: every `[NOT MET]` criterion in this round is one the
@@ -7720,6 +7722,39 @@ defmodule Arbiter.Worker do
         }
     end
   end
+
+  # G17 (design §6.1): fabricated or falsified evidence is a critical guardrail
+  # event on the author's run. The run that made the evidence up is this one;
+  # the reviewer's is not the subject.
+  defp record_fabricated_evidence_event(%State{run_id: run_id} = state) when is_binary(run_id) do
+    {provider, model} = respawn_routing(state)
+
+    Arbiter.Guardrails.Events.record(%{
+      run_id: run_id,
+      task_id: state.task_id,
+      provider: provider,
+      model: model,
+      kind: :fabricated_evidence,
+      severity: :critical,
+      source: :evidence_integrity,
+      detail: "reviewer flagged fabricated or falsified evidence"
+    })
+  end
+
+  defp record_fabricated_evidence_event(%State{}), do: :ok
+
+  # G17: fold this run's `egress_events` into guardrail events when a session
+  # exits (idempotent, so a resumed run just adds what is new).
+  defp link_guardrail_egress(%State{run_id: run_id}, %{} = session) when is_binary(run_id) do
+    usage = Arbiter.Worker.ClaudeSession.usage_summary(session)
+
+    Arbiter.Guardrails.Events.link_egress(run_id,
+      provider: Map.get(session, :provider) || "claude",
+      model: Map.get(usage, :model) || Map.get(session, :model)
+    )
+  end
+
+  defp link_guardrail_egress(%State{}, _session), do: :ok
 
   defp give_up_fix_round(dispatcher, %State{} = state, attempts, reason) do
     Logger.info(

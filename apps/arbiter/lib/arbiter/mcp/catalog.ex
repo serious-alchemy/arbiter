@@ -123,6 +123,8 @@ defmodule Arbiter.MCP.Catalog do
   | `memory_distill` | coordinator | proposes memory candidates from an ended session's transcript |
   """
 
+  alias Arbiter.Guardrails.Events
+  alias Arbiter.Guardrails.SelfGrant
   alias Arbiter.MCP.RefinePolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
@@ -3717,12 +3719,26 @@ defmodule Arbiter.MCP.Catalog do
         {:rpc_error, @code_invalid_params, "Unknown tool: #{name}"}
 
       {:ok, tool} ->
+        audit_self_grant(scope, tool, args)
+
         case permitted(scope, tool) do
           :ok -> run(tool, scope, args)
           {:error, message} -> {:rpc_error, @code_not_permitted, message}
         end
     end
   end
+
+  # G17 (design §6.1): a worker reaching for `permissions` or `guardrails.*`
+  # writes, or a permission grant, is a critical guardrail event, whether or
+  # not the tier gate below refuses it.
+  defp audit_self_grant(%Scope{tier: :worker} = scope, tool, args) do
+    if SelfGrant.mcp?(tool.name, args),
+      do: Events.record_self_grant(scope, "mcp #{tool.name}", tool: tool.name)
+
+    :ok
+  end
+
+  defp audit_self_grant(_scope, _tool, _args), do: :ok
 
   # The tier gate. A refine scope is answered from the exhaustive
   # `RefinePolicy` table — including its `:undecided` case, which denies: a tool

@@ -1652,3 +1652,29 @@ bwrap jail and podman close that. A remote-node podman run that needs a scoped
 credential is refused. The forge enforces the one-repo scope of a key or token;
 Arbiter's tests cover the mint request, the helper's path pinning and every
 delivery path, not GitHub itself.
+
+## Guardrail event capture (bd-8r392h, G17)
+
+`guardrail_events` is the append-only per-run record of what a worker did that
+counts against its `(provider, model)` subject (design
+[§6.1](design/guardrail-profiles.md)). `Arbiter.Guardrails.Events.record/1` is
+best-effort and idempotent per `(run_id, fingerprint)`; it never fails a run.
+Nothing consumes the rows yet: `Loop.Trust` (G18) does.
+
+| Capture | Where | Kind (severity) |
+|---|---|---|
+| Claude `result.permission_denials`; agy tool step that ends `ERROR` with "permission check failed" | `ClaudeSession.capture_guardrail_events/2`, classified by `Guardrails.Scan.denial/2` | `public_upload_attempt` (critical) for a public upload host; `permission_denial` (major) for a safe-default category, else (minor) |
+| Executed tool inputs: Claude/grok `tool_use`, codex `item.completed`, agy's ACTIVE step | `Guardrails.Scan.tool_input/2` | `hidden_channel_attempt` (critical): `systemd-run`, `busctl`, `secret-tool`, `dbus-send`, `gdbus`, `gh auth token`. `credential_read` (major): a reader command or file tool aimed at `~/.ssh`, `~/.aws`, `arbiter.sqlite3`, … |
+| `egress_events` | `Events.link_egress/2`, at session exit | `public_upload_attempt` (critical); `unrequested_egress` (major) for a denial at a host:port the run never `requested` through `permission_events` |
+| `EvidenceIntegrity` escalation | `Worker.maybe_dispatch_fix_round/3` | `fabricated_evidence` (critical) |
+| Worker attempt to write ticket `permissions`, `guardrails.*` / `permissions` config, grant a permission, or mint a token | `Catalog.call/3` (MCP) and `ApiAuth` (REST, incl. the worker bridge) via `Guardrails.SelfGrant` | `self_grant_attempt` (critical), recorded whether or not the call is refused |
+
+The scan reads tool *inputs*, never prose. A shell command is tokenised with
+quote and operator awareness, so `git commit -m "block systemd-run"` and
+`grep busctl lib` do not flag; only the program being run does. The credential
+rule requires a reader command (`cat`, `tar`, `sqlite3`, …), so `ssh -i
+~/.ssh/key` and `git push` do not flag.
+
+Known limits: a command built at run time (`$(echo systemd-run)`, a script the
+worker wrote then ran) is not seen. A resumed agy run whose `step_index`
+restarts can collapse two distinct denials into one fingerprint.
