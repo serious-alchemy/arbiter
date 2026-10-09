@@ -45,6 +45,8 @@ pattern match hit the worker's own session tree, or another worker's processes.
 - **Before every commit and push** (including fix-pass rounds), run `mix precommit && mix audit`, fix any issues, and re-run if you make further edits. Format failures can occur after precommit if code changes are made after running it.
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
+- **CLI ↔ MCP parity.** Every coordinator-facing `arb` verb has an MCP twin: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔ `worker_list`, `arb ticket show` ↔ `ticket_show`, `arb attention` ↔ `coordinator_inbox`. `arb prime` (session-start briefing) is CLI only. Host-local verbs never call the server over HTTP and have no MCP twin: `install`, `session`, `where`, `init`, `version`, `self-update`, `upgrade`, `help`. `ArbiterCli.Verbs` is the verb registry; `Arbiter.MCP.Catalog.all/0` is the tool list (its moduledoc table is test-checked).
+
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content
