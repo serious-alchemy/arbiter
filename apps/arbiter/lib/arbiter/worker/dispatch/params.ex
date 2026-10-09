@@ -230,9 +230,14 @@ defmodule Arbiter.Worker.Dispatch.Params do
 
   # ---- shared pieces ----------------------------------------------------------
 
-  defp ensure_known_keys(params, verb, surface) do
-    allowed =
+  @doc "The argument names `verb` accepts from `surface` (`:rest` or `:mcp`)."
+  @spec accepted_keys(verb(), :rest | :mcp) :: [String.t()]
+  def accepted_keys(verb, surface),
+    do:
       @common ++ Map.fetch!(@verb_keys, verb) ++ if(surface == :mcp, do: ["workspace"], else: [])
+
+  defp ensure_known_keys(params, verb, surface) do
+    allowed = accepted_keys(verb, surface)
 
     case params |> Map.keys() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) do
       [] ->

@@ -216,7 +216,7 @@ defmodule ArbiterCli.Cmd.Create do
                   AcceptanceFlags.switches() ++
                   ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
-  @doc "Every switch `arb ticket create` accepts (what `--help` must document)."
+  @doc "Every switch `arb ticket create` accepts (what `--help` must document, and read by the field-exposure guard test)."
   @spec switches() :: keyword()
   def switches, do: @all_switches
 
