@@ -200,6 +200,14 @@ defmodule Arbiter.Guardrails do
   defp bool(b) when is_boolean(b), do: b
   defp bool(_), do: nil
 
+  @doc """
+  True when any subject rule is configured: guardrails are on for this install
+  (`effective/4` is non-`nil` for every subject). Dispatch-time withholding
+  (G14, `Arbiter.Guardrails.Projection`) only applies to a guarded install.
+  """
+  @spec guarded?() :: boolean()
+  def guarded?, do: Rules.all() != []
+
   # ---- subjects and effective profile --------------------------------------
 
   @doc """

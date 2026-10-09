@@ -26,7 +26,7 @@ defmodule Arbiter.Guardrails.Config do
   @repo_keys ~w(defaults subjects)
   @match_keys ~w(provider family model)
   @cap_keys ~w(match max_tier min_mode egress max_difficulty spend review)
-  @binding_keys ~w(grant_by min_tier enforced_read_only tunnels hosts env_from_secret
+  @binding_keys ~w(grant_by min_tier enforced_read_only tunnels hosts env_from_secret token_env
                    ssh_key_secret token_secret tags)
   @grant_by ~w(operator coordinator)
   @cross_family ~w(required workspace)
