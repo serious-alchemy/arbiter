@@ -27,6 +27,31 @@ defmodule Arbiter.MCP.ScopeTest do
     end
   end
 
+  describe "worker permissions claim (G14)" do
+    test "a worker token carries the permissions dispatch projected" do
+      token =
+        Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"}, nil,
+          permissions: ["tracker_write"]
+        )
+
+      assert {:ok, scope} = Scope.from_token(token)
+      assert scope.permissions == ["tracker_write"]
+      assert Scope.permission?(scope, "tracker_write")
+      refute Scope.permission?(scope, "prod_ssh")
+    end
+
+    test "no claim means no permissions: undeclared is withheld" do
+      token = Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"})
+      assert {:ok, %Scope{permissions: []} = scope} = Scope.from_token(token)
+      refute Scope.permission?(scope, "tracker_write")
+    end
+
+    test "only a worker token can carry the claim" do
+      token = Scope.mint_coordinator(nil, permissions: ["tracker_write"])
+      assert {:ok, %Scope{permissions: []}} = Scope.from_token(token)
+    end
+  end
+
   describe "mint_coordinator/2 + from_token/1" do
     test "mints a workspace-agnostic token (nil workspace) by default" do
       token = Scope.mint_coordinator()
