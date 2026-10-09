@@ -111,6 +111,17 @@ defmodule Arbiter.MCP.MemoryToolsTest do
       end
     end
 
+    test "an operator-socket token (operator proof, no session) may write" do
+      operator = %Scope{tier: :coordinator, operator: true}
+      candidate!("sess-1", "habit.md", "feedback", "Prefer small PRs.")
+
+      assert {:ok, %{rejected: true}} =
+               Catalog.call(operator, "memory_pending_reject", %{
+                 "id" => "sess-1/habit.md",
+                 "reason" => "vague"
+               })
+    end
+
     test "a session token may still read the queue and the quarantine" do
       candidate!("sess-1", "habit.md", "feedback", "Prefer small PRs.")
 

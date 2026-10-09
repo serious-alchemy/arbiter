@@ -29,8 +29,7 @@
 
 %{
   children: %{
-    "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
-    "P-25" => "Memory operator surface (REST + CLI)"
+    "P-13" => "Ticket read-side parity and one \"Ready\" implementation"
   },
   operations: [
     # ---- tickets ----
@@ -1357,85 +1356,57 @@
       id: "workspace/memory_list_pending_candidates",
       title: "Memory: list pending candidates",
       mcp: ["memory_pending_list"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No `arb memory pending` / `GET /api/memory/pending` (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No `arb memory pending` / `GET /api/memory/pending` (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory pending"],
+      rest: ["GET /api/memory/pending"],
+      status: :full
     },
     %{
       id: "workspace/memory_show_pending_diff",
       title: "Memory: show pending diff",
       mcp: ["memory_pending_diff"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST show of a pending memory diff (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST show of a pending memory diff (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory diff"],
+      rest: ["GET /api/memory/pending/diff"],
+      status: :full
     },
     %{
       id: "workspace/memory_promote_apply",
       title: "Memory: promote (apply)",
       mcp: ["memory_pending_apply"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST promote of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST promote of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory apply"],
+      rest: ["POST /api/memory/pending/apply"],
+      status: :full
     },
     %{
       id: "workspace/memory_reject_candidate",
       title: "Memory: reject candidate",
       mcp: ["memory_pending_reject"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST reject of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST reject of a pending memory candidate (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory reject"],
+      rest: ["POST /api/memory/pending/reject"],
+      status: :full
     },
     %{
       id: "workspace/memory_list_quarantine",
       title: "Memory: list quarantine",
       mcp: ["memory_quarantine_list"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST list of quarantined memory (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST list of quarantined memory (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory quarantine"],
+      rest: ["GET /api/memory/quarantine"],
+      status: :full
     },
     %{
       id: "workspace/memory_restore_from_quarantine",
       title: "Memory: restore from quarantine",
       mcp: ["memory_quarantine_restore"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST restore from quarantine (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST restore from quarantine (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory restore"],
+      rest: ["POST /api/memory/quarantine/restore"],
+      status: :full
     },
     %{
       id: "workspace/memory_distill_a_session_transcript",
       title: "Memory: distill a session transcript",
       mcp: ["memory_distill"],
-      cli: nil,
-      rest: nil,
-      status: {:gap, "P-25"},
-      absent: %{
-        cli: {:gap, "P-25", "No CLI/REST distill of a session transcript (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."},
-        rest: {:gap, "P-25", "No CLI/REST distill of a session transcript (MCP-only; the write side needs a plain coordinator token, so REST policy must be :operator and session tokens stay refused)."}
-      }
+      cli: ["arb memory distill"],
+      rest: ["POST /api/memory/distill"],
+      status: :full
     },
     %{
       id: "workspace/list_repos",

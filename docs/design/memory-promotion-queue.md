@@ -297,3 +297,18 @@ caps, never raise them.
 | A5 | apply/reject/restore coordinator/operator only; provenance | `MemoryPending.authorize_write/1`, `RefinePolicy`, `Promotion.stamp/3` | `memory_tools_test.exs` "who may write the shared layer", `promotion_test.exs` provenance and author model |
 | A6 | Reject marks, never deletes | `Promotion.reject/3` | `promotion_test.exs` "reject/3 (amendment 6)" |
 | A7 | user/feedback exempt from decay, citations still checked | `Staleness` type table, `Checker` decay | `staleness_test.exs` "user and feedback memories", `checker_test.exs` decay |
+
+## Operator CLI and REST (P-25)
+
+The seven `memory_*` MCP operations are also reachable from the operator's shell:
+`arb memory pending|diff|apply|reject|quarantine|restore|distill`, over
+`GET /api/memory/pending`, `GET /api/memory/pending/diff?id=`,
+`POST /api/memory/pending/apply|reject`, `GET /api/memory/quarantine`,
+`POST /api/memory/quarantine/restore` and `POST /api/memory/distill`. The REST
+controller is a thin adapter over the same `Arbiter.MCP.Tools.MemoryPending`
+handlers, so the two surfaces share validation and error text.
+
+Every route is `:operator` in `ArbiterWeb.ApiPolicy` (operator proof, reads
+included): a coordinator *session* token is refused with 403, as it already is
+for the write tools over MCP. Candidate ids (`<session-id>/<file>.md`) travel as
+`id` params rather than path segments.
