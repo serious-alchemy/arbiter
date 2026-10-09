@@ -67,7 +67,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `workspace_config_schema` | worker, coordinator | `Workspace.ConfigSchema.describe/0` |
-  | `workspace_standing_order_add` / `_remove` | coordinator | `Workspace.Operations` (atomic append/remove) |
+  | `workspace_standing_order_add` | coordinator | `Workspace.Operations` (atomic append) |
+  | `workspace_standing_order_remove` | coordinator | `Workspace.Operations` (atomic remove by index or text) |
   | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog + quota-provider visibility) |
   | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility + output-offload sweeper switch) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
@@ -106,6 +107,20 @@ defmodule Arbiter.MCP.Catalog do
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
   | `repo_show` | coordinator | single repo from `list_repos()` |
+  | `quota_get` | worker, coordinator | `Arbiter.Quota` snapshot per provider (or one account) |
+  | `flake_record` | worker, coordinator | structured flake event for `arb loop analyze` (bd-6vullc) |
+  | `external_review_list` | coordinator | `ExternalReview` audit records for a workspace (bd-31fh9e) |
+  | `external_review_show` | coordinator | one `ExternalReview` record with its proposed comments |
+  | `review_greenlight` | coordinator (`can_dispatch`) | posts the approved subset of a report-only review (bd-36qzgx) |
+  | `review_gate_rounds_list` | coordinator | ReviewGate round outcomes for a ticket (bd-aqyjuc) |
+  | `review_gate_resolve` | coordinator | records the answer to a gate escalation (bd-4qjl0q) |
+  | `memory_pending_list` | coordinator | memory promotion queue / rejected audit trail |
+  | `memory_pending_diff` | coordinator | one memory candidate with its diff and citation check |
+  | `memory_pending_apply` | coordinator | promotes a candidate into the shared memory layer |
+  | `memory_pending_reject` | coordinator | rejects a candidate (kept for audit) |
+  | `memory_quarantine_list` | coordinator | shared memories quarantined as stale |
+  | `memory_quarantine_restore` | coordinator | re-verifies and restores a quarantined memory |
+  | `memory_distill` | coordinator | proposes memory candidates from an ended session's transcript |
   """
 
   alias Arbiter.MCP.RefinePolicy
@@ -563,13 +578,6 @@ defmodule Arbiter.MCP.Catalog do
                 "Withheld at dispatch unless declared. Coordinator only — a worker or refine " <>
                 "session never sets them (a refine session may only suggest)."
           },
-          "assignee" => %{
-            "type" => "string",
-            "description" =>
-              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
-                "single-user app and no longer tracks an assignee locally; the response " <>
-                "carries a `warnings` entry when this is passed."
-          },
           "tracker_type" => %{
             "type" => "string",
             "description" => "none | jira | shortcut | linear | github | gitlab."
@@ -702,13 +710,6 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Permissions to remove from the current list. Removing an action tightens (any " <>
                 "coordinator); removing `phi_data` is operator-only."
-          },
-          "assignee" => %{
-            "type" => "string",
-            "description" =>
-              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
-                "single-user app and no longer tracks an assignee locally; the response " <>
-                "carries a `warnings` entry when this is passed."
           },
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
@@ -3637,6 +3638,17 @@ defmodule Arbiter.MCP.Catalog do
   @spec all() :: [tool()]
   def all, do: @tools
 
+  # `worker_dispatch.provider` enumerates the registered agent types, which are
+  # only known at runtime (extensions), so `fetch/1` and `visible/1` fill it in;
+  # `all/0` stays static because `Arbiter.Extensions` boots through it.
+  defp live_schema(%{name: "worker_dispatch"} = tool) do
+    update_in(tool, [:input_schema, "properties", "provider"], fn prop ->
+      Map.put(prop, "enum", Arbiter.Agents.valid_agent_types())
+    end)
+  end
+
+  defp live_schema(tool), do: tool
+
   @doc """
   The deprecated `task_*` tool names, each mapped to the `ticket_*` tool it now
   calls (bd-4jojpw). Kept for one release.
@@ -3661,6 +3673,7 @@ defmodule Arbiter.MCP.Catalog do
   def visible(%Scope{} = scope),
     do:
       Enum.filter(@tools ++ @alias_tools ++ Arbiter.Extensions.mcp_tools(), &visible?(scope, &1))
+      |> Enum.map(&live_schema/1)
 
   # A deprecated alias is visible exactly where its `ticket_*` target is: it
   # carries the target's `:tiers`, and the refine table is keyed by the target.
@@ -3678,7 +3691,7 @@ defmodule Arbiter.MCP.Catalog do
     case Enum.find(@tools, &(&1.name == canonical)) ||
            Enum.find(Arbiter.Extensions.mcp_tools(), &(&1.name == canonical)) do
       nil -> :error
-      tool -> {:ok, tool}
+      tool -> {:ok, live_schema(tool)}
     end
   end
 
