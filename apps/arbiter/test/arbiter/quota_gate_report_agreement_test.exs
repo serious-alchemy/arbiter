@@ -12,7 +12,8 @@ defmodule Arbiter.QuotaGateReportAgreementTest do
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Quota
   alias Arbiter.Quota.AnthropicQuota
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.TestSandbox
   alias Arbiter.Worker.Dispatch
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -86,6 +87,38 @@ defmodule Arbiter.QuotaGateReportAgreementTest do
       assert serialized.gating_window == "paused"
       assert serialized.gating_reason =~ "paused"
       assert serialized.gating_reason =~ "jail escape"
+    end
+  end
+
+  describe "real dispatch refusal" do
+    setup do
+      claude_credential_env!()
+      sandbox = TestSandbox.provision!("gate-agreement")
+      put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
+      put_app_env(:arbiter, :repo_paths, %{"ga/repo" => sandbox.repo})
+      on_exit(fn -> TestSandbox.own_live_workers!(sandbox) end)
+      :ok
+    end
+
+    test "the refusal text carries the window and numbers and the report names the workspace" do
+      account = account!()
+      _loose = link!(account, "aaa-loose", %{})
+      tight = link!(account, "zzz-tight", %{"quota" => %{"weekly_threshold" => 0.3}})
+      task = Ash.create!(Issue, %{title: "held", workspace_id: tight.id, priority: 2})
+
+      assert {:error, {:quota_held, id}} =
+               Dispatch.dispatch(task.id, force: true, repo: "ga/repo", start_driver: false)
+
+      assert id == task.id
+
+      msg = Dispatch.quota_held_message(task.id)
+      assert msg =~ "quota gate"
+      assert msg =~ "7d"
+      assert msg =~ "37"
+      assert msg =~ "30"
+
+      assert [%{workspace_id: ws_id}] = Quota.serialize(account.id).gating_workspaces
+      assert ws_id == tight.id
     end
   end
 

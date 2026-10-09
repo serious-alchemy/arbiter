@@ -202,6 +202,29 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "gating dispatch:       7d — 7d quota 91% ≥ 90%"
     end
 
+    # bd-aw325c: the shown workspace isn't gated but another one on the account
+    # is — the headline must not claim dispatch is not quota-held.
+    test "does not claim nothing is held when another workspace is gated" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "gating_window" => nil,
+              "gating_workspaces" => [
+                %{"workspace" => "zzz-tight", "window" => "7d", "reason" => "7d quota 37% ≥ 30%"}
+              ]
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "dispatch is not quota-held"
+      assert out =~ "held in 1 other workspace(s)"
+      assert out =~ "zzz-tight: 7d — 7d quota 37% ≥ 30%"
+    end
+
     # bd-b7umwj: the STALE label used to read "dispatches may be incorrectly
     # held", which is backwards — staleness makes the gate fail OPEN. It is now
     # per-window, because the two windows behave differently: the 5h window
