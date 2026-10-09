@@ -239,7 +239,11 @@ defmodule Arbiter.Worker.ClaudeSession do
       # One workspace load serves both halves (bd-62d3jh): the pairs go into the
       # child's env, the secret values into the session's redaction list.
       {worker_env, redact_values} =
-        Arbiter.Worker.WorkerEnv.resolve(task_id, provider: Keyword.get(opts, :provider))
+        Arbiter.Worker.WorkerEnv.resolve(task_id,
+          provider: Keyword.get(opts, :provider),
+          # bd-ld8qde (G14): what this spawn is given of the ticket's permissions.
+          projection: Keyword.get(opts, :projection)
+        )
 
       # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any
       # ANTHROPIC_API_KEY) travel in via the caller-explicit `:env` opt
@@ -331,6 +335,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                :image,
                :podman,
                :egress,
+               :projection,
                :codex_path,
                :codex_source_home
              ]) ++

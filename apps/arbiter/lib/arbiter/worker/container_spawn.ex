@@ -128,6 +128,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Agents.Codex.AuthSync
   alias Arbiter.Agents.Codex.ConfigDir, as: CodexConfigDir
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Mergers
   alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
@@ -140,6 +141,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -259,6 +261,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
     with :ok <- container_backend(policy, provider),
          :ok <- host_ready(),
+         :ok <- no_ssh_agent(Keyword.get(opts, :projection)),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
@@ -588,6 +591,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # The in-container `socat` is `Jail`'s own listener script.
   defp start_egress(provider, opts, policy, worktree) do
     start = Keyword.get(opts, :egress, &JailRun.start/1)
+    projection = projection(opts)
 
     start_opts = [
       owner: Keyword.get(opts, :owner),
@@ -596,7 +600,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
       safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
       worktree: worktree,
       infra: Map.fetch!(@egress_infra, provider),
-      tunnels: SecurityPolicy.egress_tunnels(policy)
+      tunnels: SecurityPolicy.egress_tunnels(policy) ++ projection.tunnels,
+      grants: Withholding.grants(Keyword.get(opts, :task_id), projection)
     ]
 
     with {:ok, network, _run_id} <- start.(start_opts),
@@ -606,6 +611,25 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:error, reason} -> {:error, {:egress_unavailable, reason}}
     end
   end
+
+  # bd-ld8qde (G14): what the ticket's declared permissions project into this
+  # run's proxy (grants) and fixed bridges (tunnels). No projection (a caller
+  # that predates it) is an unguarded one.
+  defp projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection -> projection
+      _ -> Projection.unguarded()
+    end
+  end
+
+  # `prod_ssh` hands the worker a key through a per-worker ssh-agent socket bound
+  # into a jail. A confined container cannot connect() to a host socket (only the
+  # egress bridges are made reachable), so under podman the spawn is refused
+  # rather than run without the agent it was promised.
+  defp no_ssh_agent(%Projection{ssh: ssh}) when not is_nil(ssh),
+    do: {:error, {:prod_ssh_unsupported, :podman}}
+
+  defp no_ssh_agent(_), do: :ok
 
   defp container_env(spec),
     do: Jail.network_env(spec) ++ Jail.ssh_command(nil, spec) ++ arb_host()
