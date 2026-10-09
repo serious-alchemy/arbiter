@@ -125,6 +125,37 @@ defmodule Arbiter.Worker.GitCredentialTest do
     end
   end
 
+  describe "plan/3 default" do
+    setup do
+      previous = Application.get_env(:arbiter, :git_credential_unenforced)
+      Application.put_env(:arbiter, :git_credential_unenforced, false)
+
+      on_exit(fn ->
+        if previous == nil,
+          do: Application.delete_env(:arbiter, :git_credential_unenforced),
+          else: Application.put_env(:arbiter, :git_credential_unenforced, previous)
+      end)
+    end
+
+    test "a pushing worker with no credential and no opt-in is refused, even unguarded" do
+      assert {:error, {:git_credential_missing, "tonic", message}} =
+               GitCredential.plan(nil, "tonic", role: :implementer, guarded?: false)
+
+      assert message =~ "legacy_operator: true"
+    end
+
+    test "a reviewer, a host push and an explicit legacy opt-in are not refused" do
+      assert {:ok, %GitCredential{mode: :not_needed}} =
+               GitCredential.plan(nil, "tonic", role: :reviewer)
+
+      assert {:ok, %GitCredential{mode: :not_needed}} =
+               GitCredential.plan(nil, "tonic", host_pushes?: true)
+
+      ws = workspace(%{"legacy_operator" => true}, %{})
+      assert {:ok, %GitCredential{mode: :legacy}} = GitCredential.plan(ws, "tonic")
+    end
+  end
+
   describe "token delivery is pinned to the repo" do
     setup do
       %{
@@ -412,6 +443,26 @@ defmodule Arbiter.Worker.GitCredentialTest do
                )
 
       assert "gist" in scopes
+    end
+
+    test "a token whose scope cannot be verified is refused (fails closed)", %{ws: ws} do
+      Req.Test.stub(@http, fn conn -> Plug.Conn.send_resp(conn, 401, "bad credentials") end)
+
+      assert {:error, {:git_credential_token_unverifiable, "HTTP 401"}} =
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
+
+      Req.Test.stub(@http, fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+
+      assert {:error, {:git_credential_token_unverifiable, _}} =
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
     end
 
     test "a fine-grained token (no OAuth scope header) is accepted", %{ws: ws} do

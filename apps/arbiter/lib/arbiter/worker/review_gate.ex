@@ -6156,7 +6156,7 @@ defmodule Arbiter.Worker.ReviewGate do
     git_plan =
       GitCredential.plan(ws, Map.get(state, :repo),
         role: role,
-        guarded?: projection.guarded?
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
       )
 
     git_credential =

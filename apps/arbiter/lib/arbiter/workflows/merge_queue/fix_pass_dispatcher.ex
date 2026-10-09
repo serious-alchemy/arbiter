@@ -511,7 +511,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         # credential (or an explicit legacy opt-in) like any other implementer.
         case GitCredential.plan(context.workspace, context.repo,
                role: :implementer,
-               guarded?: projection.guarded?
+               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
              ) do
           {:ok, git_credential} ->
             session_opts =

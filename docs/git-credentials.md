@@ -65,10 +65,12 @@ scoped credential, with:
 > git_credentials.repos.tonic (docs/git-credentials.md), or opt in to the
 > operator's credential with git_credentials.legacy_operator: true
 
-This applies on a **guarded install** (guardrail subject rules are configured,
-G11) and to any workspace that has a `git_credentials` block. An install with
-neither is unchanged (`mode: :unenforced`): upgrading does not stop dispatching.
-Reviewers never need push and are never refused.
+This applies to **every** workspace, with or without a `git_credentials` block and
+on a guarded or unguarded install: there is no implicit fallback to the operator's
+credential. **Upgrading therefore stops dispatching pushing workers** for any
+workspace that has not registered a credential or set `legacy_operator: true`;
+`arb server doctor` lists them first. Reviewers never need push and are never
+refused.
 
 `legacy_operator: true` (workspace-wide, or on one repo, where `false` overrides
 the workspace) is the explicit opt-in to the old behaviour: the worker runs as it

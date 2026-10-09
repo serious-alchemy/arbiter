@@ -35,11 +35,12 @@ defmodule Arbiter.Worker.GitCredential do
   `plan/3` decides, per spawn. A spawn that needs push (an implementer; a
   reviewer does not, and neither does a spawn the host pushes for) is **refused**
   when no scoped credential is configured for its repo, unless the workspace (or
-  that repo) sets `legacy_operator: true`. This is enforced on a *guarded*
-  install (guardrail subject rules exist, `Arbiter.Guardrails.guarded?/0`) and on
-  any workspace that has a `git_credentials` block; an install with neither
-  behaves exactly as before (`mode: :unenforced`), so upgrading does not
-  silently stop every dispatch.
+  that repo) sets `legacy_operator: true`. There is no implicit fallback: a
+  workspace with no `git_credentials` block is refused too, and the refusal names
+  the opt-in. (`config :arbiter, :git_credential_unenforced, true` is a
+  test/development knob that restores the pre-G16 behaviour, `mode: :unenforced`,
+  for a workspace that is neither guarded nor configured; it is not set in a
+  release.)
 
   ## Delivery
 
@@ -108,11 +109,15 @@ defmodule Arbiter.Worker.GitCredential do
   def configured?(workspace), do: block(workspace) != %{}
 
   @doc """
-  Whether a scoped credential is *required* for a spawn: the install is guarded,
-  or the workspace has a `git_credentials` block.
+  Whether a scoped credential is *required* for a spawn: always, except under the
+  `:git_credential_unenforced` test/development knob, where only a guarded install
+  or a workspace with a `git_credentials` block requires one.
   """
   @spec enforced?(map() | nil, boolean()) :: boolean()
-  def enforced?(workspace, guarded?), do: guarded? or configured?(workspace)
+  def enforced?(workspace, guarded?) do
+    not Application.get_env(:arbiter, :git_credential_unenforced, false) or guarded? or
+      configured?(workspace)
+  end
 
   @doc """
   The credential decision for a spawn of `repo` in `workspace`.
@@ -519,7 +524,8 @@ defmodule Arbiter.Worker.GitCredential do
   # A classic PAT answers `GET /user` with an `X-OAuth-Scopes` header; a
   # fine-grained token or an App installation token has none. Classic PATs reach
   # every repo their owner does (and may carry `gist` / `delete_repo`), so they
-  # are refused. An unreachable API only warns.
+  # are refused. A token whose scope cannot be verified (the API is unreachable, or
+  # answers anything but 2xx) is refused too: the check fails closed.
   defp check_token_scope(%{host: "github.com"} = entry, token, opts) do
     request =
       Keyword.merge(
@@ -536,11 +542,14 @@ defmodule Arbiter.Worker.GitCredential do
       )
 
     case Req.get(request) do
-      {:ok, %Req.Response{} = response} ->
+      {:ok, %Req.Response{status: status} = response} when status in 200..299 ->
         case Req.Response.get_header(response, "x-oauth-scopes") do
           [] -> :ok
           [scopes | _] -> {:error, {:git_credential_token_too_broad, split_scopes(scopes)}}
         end
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_token_unverifiable, "HTTP #{status}"}}
 
       {:error, exception} ->
         Logger.warning(
@@ -548,7 +557,7 @@ defmodule Arbiter.Worker.GitCredential do
             Exception.message(exception)
         )
 
-        :ok
+        {:error, {:git_credential_token_unverifiable, Exception.message(exception)}}
     end
   end
 
@@ -583,6 +592,11 @@ defmodule Arbiter.Worker.GitCredential do
       "the configured token is a classic personal access token (scopes: " <>
         "#{Enum.join(scopes, ", ")}) and cannot be limited to one repo; use a fine-grained " <>
         "token, a GitHub App or a deploy key"
+
+  def format_error({:git_credential_token_unverifiable, why}),
+    do:
+      "the configured token's scope could not be verified (#{why}); refusing to fall back to " <>
+        "an unchecked token or the operator's credential"
 
   def format_error({:git_credential_bad_key, why}),
     do: "the GitHub App private key could not be read (#{why})"
