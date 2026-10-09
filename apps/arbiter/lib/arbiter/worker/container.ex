@@ -587,10 +587,24 @@ defmodule Arbiter.Worker.Container do
       podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
       args = ["rm", "--force", "--ignore", "--time", "0", name]
 
+      await_exit(opts, podman, name)
+
       case exec(opts, podman, args, timeout: @stop_timeout_ms) do
         {_out, 0} -> :ok
         {out, status} -> {:error, {:podman_rm_failed, status, String.trim(out)}}
       end
+    end
+  end
+
+  # bd-9ss153: `rm --force --time 0` SIGKILLs a container that is still
+  # finishing, so a clean `arb done` was recorded as exit 137. With `:grace_ms`
+  # set, give the container that long to exit on its own (`podman wait` returns
+  # at once if it already has, or errors because `--rm` removed it) before the
+  # force-remove, which then only kills what really would not stop.
+  defp await_exit(opts, podman, name) do
+    case Keyword.get(opts, :grace_ms) do
+      ms when is_integer(ms) and ms > 0 -> exec(opts, podman, ["wait", name], timeout: ms)
+      _ -> :ok
     end
   end
 
