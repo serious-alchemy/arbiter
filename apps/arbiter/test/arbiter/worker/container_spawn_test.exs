@@ -18,7 +18,6 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.ContainerSpawn
-  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.PrivateClone
 
   @branch "feature/bd-p7-claude"
