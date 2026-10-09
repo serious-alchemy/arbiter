@@ -128,7 +128,7 @@ defmodule ArbiterCli.Cmd.Queue do
   end
 
   defp retry_auto_resolve(task_id, mode) do
-    case Client.post("/api/queue/#{task_id}/retry_auto_resolve", %{}) do
+    case Client.post("/api/queue/#{Client.path_segment(task_id)}/retry_auto_resolve", %{}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -171,7 +171,7 @@ defmodule ArbiterCli.Cmd.Queue do
   end
 
   defp restart_watchdog(task_id, mode) do
-    case Client.post("/api/queue/#{task_id}/restart_watchdog", %{}) do
+    case Client.post("/api/queue/#{Client.path_segment(task_id)}/restart_watchdog", %{}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -199,7 +199,7 @@ defmodule ArbiterCli.Cmd.Queue do
     extra != [] &&
       Output.die("queue rerun-ci: unrecognised argument(s): #{Enum.join(extra, " ")}")
 
-    case Client.post("/api/queue/#{task_id}/rerun_ci", rerun_body(opts)) do
+    case Client.post("/api/queue/#{Client.path_segment(task_id)}/rerun_ci", rerun_body(opts)) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -277,7 +277,9 @@ defmodule ArbiterCli.Cmd.Queue do
   end
 
   defp mark_ci_external(task_id, note, mode) do
-    case Client.post("/api/queue/#{task_id}/mark_ci_external", %{"note" => note}) do
+    case Client.post("/api/queue/#{Client.path_segment(task_id)}/mark_ci_external", %{
+           "note" => note
+         }) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))

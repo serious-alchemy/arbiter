@@ -17,6 +17,18 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert out =~ "Re-armed"
     end
 
+    test "a synthetic id's # is encoded, so the request reaches the queue route (D-W-4)" do
+      stub_routes([
+        {{"post", "/api/queue/bd-1%23review/retry_auto_resolve"},
+         {%{"retried" => true, "task_id" => "bd-1#review"}, 200}}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn -> Queue.run(["retry-auto-resolve", "bd-1#review"]) end)
+
+      assert exit_code == 0
+    end
+
     test "requires a task id" do
       {_out, err, exit_code} = capture(fn -> Queue.run(["retry-auto-resolve"]) end)
 

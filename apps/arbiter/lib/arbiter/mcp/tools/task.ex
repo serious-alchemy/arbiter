@@ -10,7 +10,6 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Guardrails.Authority
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
-  alias Arbiter.MCP.Tools.Worker
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
@@ -150,7 +149,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp current_run(id) do
     case Arbiter.Workers.Current.show(id, limit: 1) do
-      %{current: current} -> Worker.current_run_payload(current)
+      %{current: current} -> Arbiter.Workers.Serializer.current_run(current)
       nil -> nil
     end
   end

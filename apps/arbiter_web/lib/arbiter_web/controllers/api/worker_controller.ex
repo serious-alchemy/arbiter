@@ -30,7 +30,8 @@ defmodule ArbiterWeb.Api.WorkerController do
       (full detail inc. recent output) plus its recent runs, each labelled with
       its kind (`Arbiter.Workers.Current.show/2`). The current run is read by
       the same function `:index` reads, in the same vocabulary — kind / state /
-      outcome (`Arbiter.Workers.RunState`) — live or not.
+      outcome (`Arbiter.Workers.RunState`) — live or not. `?lines=N` bounds the
+      output tail. Both render through `Arbiter.Workers.Serializer`, as MCP does.
     * `POST /api/workers/:task_id/resume` — :resume (bd-1z7624, #472).
       Session-level resume: re-spawns the worker continuing the task's PRIOR
       Claude session (`claude --print --resume <session_id>`) in the SAME
@@ -41,7 +42,8 @@ defmodule ArbiterWeb.Api.WorkerController do
     * `GET  /api/workers/:task_id/log`    — :log (full, uncapped durable
       transcript of the task's most recent run; the audit source of record).
       `task_id` may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`,
-      `#impl<N>`, `#v<N>`, `#t<N>`, percent-encoded in the path). Pass
+      `#impl<N>`, `#v<N>`, `#t<N>`, percent-encoded in the path). `?tail=N` keeps
+      only the last N lines. Pass
       `?run_id=` to read that exact run instead of the task's latest.
     * `GET  /api/workers/:task_id/prompt`  — :prompt (bd-9rdwe4). The composed
       prompt the run's most recent (or `?run_id=`-selected) session was spawned
@@ -61,12 +63,12 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Dispatch.Params, as: DispatchParams
-  alias Arbiter.Worker.OutputLog
-  alias Arbiter.Worker.PromptLog
+
   alias Arbiter.Workers.Current
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.Runs
+  alias Arbiter.Workers.Serializer
   alias ArbiterWeb.Api.WorkspaceParam
-  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -406,185 +408,148 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   defp refusal_text(_reason, _task_id, _verb), do: nil
 
+  # ---- read side ---------------------------------------------------------
+  #
+  # Payloads are `Arbiter.Workers.Serializer`'s, the module MCP renders with;
+  # run queries and caps are `Arbiter.Workers.Runs`. A token bound to one
+  # workspace reads only that workspace's tasks and runs (D-W-25): another's is
+  # a 404, never a 403, so existence does not leak.
+
   def index(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read) do
       runs = Current.list(workspace_id: ws_id)
       # bd-8vnuy3: settled + in-flight spend, per task — the issue page's figure.
-      render(conn, :index, runs: runs, costs: worker_costs(runs), workspace_id: ws_id)
+      render(conn, :index, runs: runs, costs: Serializer.costs(runs), workspace_id: ws_id)
     end
   end
 
-  def show(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case Current.show(task_id) do
-      %{current: current, runs: runs} ->
-        render(conn, :show, current: current, runs: runs, cost: task_cost(task_id))
+  def show(conn, %{"task_id" => task_id} = params) when is_binary(task_id) and task_id != "" do
+    with {:ok, lines} <- positive(params["lines"], "lines"),
+         :ok <- authorize_task(conn, task_id) do
+      case Current.show(task_id) do
+        %{current: current, runs: runs} ->
+          render(conn, :show,
+            current: current,
+            runs: runs,
+            lines: lines,
+            cost: Serializer.task_cost(task_id)
+          )
 
-      nil ->
-        {:error, :not_found}
+        nil ->
+          {:error, :not_found}
+      end
     end
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  # Best-effort, like the ledger read it replaced: a failed cost read costs the
-  # listing its cost fields, not the listing.
-  defp worker_costs(children) do
-    Arbiter.Usage.LiveSpend.by_worker_task(children)
-  rescue
-    _ -> %{}
-  end
-
-  defp task_cost(task_id) do
-    task_id |> Arbiter.Usage.Estimate.fold_task_id() |> Arbiter.Usage.LiveSpend.for_task()
-  rescue
-    _ -> nil
-  end
-
-  defp latest_run(task_id) do
-    Run
-    |> Ash.Query.filter(task_id == ^task_id)
-    |> Ash.Query.sort(started_at: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read!()
-    |> List.first()
-  rescue
-    _ -> nil
-  end
-
   def stop(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case Worker.operator_stop(task_id) do
-      :ok ->
-        conn
-        |> put_status(:ok)
-        |> json(%{task_id: task_id, stopped: true})
+    with :ok <- authorize_task(conn, task_id) do
+      case Worker.operator_stop(task_id) do
+        :ok ->
+          conn
+          |> put_status(:ok)
+          |> json(%{task_id: task_id, stopped: true})
 
-      {:error, :not_found} ->
-        {:error, :not_found}
+        {:error, :not_found} ->
+          {:error, :not_found}
+      end
     end
   end
 
   def stop(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  # Full, uncapped durable transcript of one run. With a `run_id` query param,
-  # reads that exact run — independent of which run is latest for its task,
-  # the only way to reach a superseded/failed attempt once a later run
-  # exists. Without it, resolves the task's most recent `Run` row (unchanged
-  # behaviour). `exists` distinguishes "no file yet / never captured" (false,
-  # lines []) from "captured but empty" (true, lines []). 404 when no
-  # matching run exists.
-  def log(conn, %{"task_id" => task_id, "run_id" => run_id})
-      when is_binary(task_id) and task_id != "" and is_binary(run_id) and run_id != "" do
-    case Ash.get(Run, run_id) do
-      {:ok, %Run{} = run} -> json(conn, %{data: render_log(run)})
-      _ -> {:error, :not_found}
-    end
-  end
-
-  def log(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case latest_run(task_id) do
-      %Run{} = run -> json(conn, %{data: render_log(run)})
-      nil -> {:error, :not_found}
+  # Durable transcript of one run (the audit source of record): the task's most
+  # recent run, or — with `?run_id=` — that exact run, the only way to reach a
+  # superseded/failed attempt once a later run exists. A `run_id` that is not an
+  # attempt at the path task is a 404 (D-W-12). The whole transcript unless
+  # `?tail=N` asks for the last N lines (`line_count` is the true total,
+  # `truncated` says whether `lines` is shorter). `exists` distinguishes "no file
+  # yet / never captured" (false, lines []) from "captured but empty" (true,
+  # lines []). 404 when no matching run exists.
+  def log(conn, %{"task_id" => task_id} = params) when is_binary(task_id) and task_id != "" do
+    with {:ok, tail} <- positive(params["tail"], "tail"),
+         {:ok, run} <- select_run(conn, task_id, params["run_id"]) do
+      json(conn, %{data: Serializer.log(run, tail: tail)})
     end
   end
 
   def log(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
-
-  defp render_log(%Run{} = run) do
-    {exists, lines} =
-      case OutputLog.read_lines(run.id) do
-        {:ok, lines} -> {true, lines}
-        {:error, _} -> {false, []}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: OutputLog.path_for(run.id),
-      exists: exists,
-      line_count: length(lines),
-      lines: lines
-    }
-  end
 
   # The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5),
   # redacted through the same choke-point as transcript lines. Sibling of
   # `:log` — identical `run_id`/`task_id` selection rule. `exists`
   # distinguishes "no prompt was ever persisted for this run" (false, `prompt`
   # nil) from a captured one. 404 when no matching run exists.
-  def prompt(conn, %{"task_id" => task_id, "run_id" => run_id})
-      when is_binary(task_id) and task_id != "" and is_binary(run_id) and run_id != "" do
-    case Ash.get(Run, run_id) do
-      {:ok, %Run{} = run} -> json(conn, %{data: render_prompt(run)})
-      _ -> {:error, :not_found}
-    end
-  end
-
-  def prompt(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case latest_run(task_id) do
-      %Run{} = run -> json(conn, %{data: render_prompt(run)})
-      nil -> {:error, :not_found}
+  def prompt(conn, %{"task_id" => task_id} = params) when is_binary(task_id) and task_id != "" do
+    with {:ok, run} <- select_run(conn, task_id, params["run_id"]) do
+      json(conn, %{data: Serializer.prompt(run)})
     end
   end
 
   def prompt(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  defp render_prompt(%Run{} = run) do
-    {exists, text} =
-      case PromptLog.read(run.id) do
-        {:ok, content} -> {true, content}
-        {:error, _} -> {false, nil}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: PromptLog.path_for(run.id),
-      exists: exists,
-      prompt: text,
-      prompt_sha256: run.prompt_sha256
-    }
-  end
-
   # Every run recorded for `task_id` AND its ReviewGate synthetic children
   # (`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`), newest first
-  # — the whole retrievable transcript corpus for a task in one call. Unlike
-  # `:index`'s `task_id` filter (exact match only), this also matches
-  # anything prefixed `<task_id>#`. `transcript_exists` distinguishes a
-  # missing durable log from an empty one without a separate `:log` call.
+  # — the whole retrievable transcript corpus for a task in one call.
+  # `transcript_exists` distinguishes a missing durable log from an empty one
+  # without a separate `:log` call.
   def run_log_list(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
-    prefix = task_id <> "#"
-
-    with {:ok, limit} <- params["limit"] |> Params.limit(200, 1000) |> Params.to_rest() do
-      runs =
-        Run
-        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+    with {:ok, limit} <- params["limit"] |> Runs.corpus_limit() |> Params.to_rest(),
+         :ok <- authorize_task(conn, task_id) do
+      json(conn, %{data: task_id |> Runs.corpus(limit) |> Enum.map(&Serializer.run_log_entry/1)})
     end
   end
 
   def run_log_list(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  defp render_run_log_entry(%Run{} = run) do
-    %{
-      run_id: run.id,
-      task_id: run.task_id,
-      kind: to_string(run.kind),
-      state: to_string(run.state),
-      outcome: run.outcome && to_string(run.outcome),
-      model: run.model,
-      started_at: run.started_at && DateTime.to_iso8601(run.started_at),
-      transcript_exists: File.regular?(OutputLog.path_for(run.id)),
-      line_count:
-        case OutputLog.read_lines(run.id) do
-          {:ok, lines} -> length(lines)
-          {:error, _} -> 0
-        end
-    }
+  # The run `log` / `prompt` serve: the task's latest, or `run_id` when it is an
+  # attempt at the path task and lives where the caller may read.
+  defp select_run(conn, task_id, run_id) when run_id in [nil, ""] do
+    with :ok <- authorize_task(conn, task_id) do
+      case Runs.latest(task_id) do
+        %Run{} = run -> {:ok, run}
+        nil -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp select_run(conn, task_id, run_id) do
+    with {:ok, %Run{} = run} <- Runs.get(run_id),
+         true <- Runs.belongs_to_task?(run, task_id),
+         :ok <- authorize_workspace(conn, run.workspace_id) do
+      {:ok, run}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  # D-W-25: confine a workspace-bound token to its own workspace. An unbound
+  # coordinator (`{:ok, nil}`) reads everywhere.
+  defp authorize_task(conn, task_id) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, %{}, :read) do
+      if is_nil(ws_id) or Runs.task_workspace_id(task_id) == ws_id,
+        do: :ok,
+        else: {:error, :not_found}
+    end
+  end
+
+  defp authorize_workspace(conn, run_workspace_id) do
+    case WorkspaceParam.resolve(conn, %{}, :read) do
+      {:ok, nil} -> :ok
+      {:ok, ^run_workspace_id} -> :ok
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp positive(raw, _name) when raw in [nil, ""], do: {:ok, nil}
+
+  defp positive(raw, name) do
+    case Params.integer(raw) do
+      {:ok, n} when n > 0 -> {:ok, n}
+      _ -> {:error, {:invalid_request, "#{name} must be a positive integer"}}
+    end
   end
 
   # The one dispatch/resume/review param normaliser, shared with the MCP tools
