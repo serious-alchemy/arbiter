@@ -4384,25 +4384,10 @@ defmodule Arbiter.Worker do
         route_approve_verdict(state, findings)
 
       {:request_changes, findings} ->
-        # bd-2ujj2p: the PR's CHANGES_REQUESTED body is the review of record — a
-        # reviewer posts it via a tool call that never reaches `output_lines`, so
-        # the stdout text is at best narration. Prefer it; fall back to the
-        # stdout-recovered findings only when the PR holds none.
-        recovered =
-          case adapter_request_changes_findings(state) do
-            {:ok, _} = pr_findings ->
-              pr_findings
-
-            :empty ->
-              Arbiter.Worker.ReviewGate.recover_findings(
-                output_lines,
-                state.run_id,
-                source,
-                findings
-              )
-          end
-
-        route_request_changes_verdict(state, recovered)
+        route_request_changes_verdict(
+          state,
+          request_changes_findings(state, output_lines, source, findings)
+        )
 
       :no_verdict ->
         case derive_verdict_from_adapter(state) do
@@ -4437,6 +4422,25 @@ defmodule Arbiter.Worker do
               :inconclusive
             )
         end
+    end
+  end
+
+  # bd-2ujj2p: the PR's CHANGES_REQUESTED body is the review of record — a
+  # reviewer posts it via a tool call that never reaches `output_lines`, so the
+  # stdout text is at best narration. Prefer it; fall back to the
+  # stdout-recovered findings only when the PR holds none.
+  defp request_changes_findings(%State{} = state, output_lines, source, findings) do
+    case adapter_request_changes_findings(state) do
+      {:ok, _} = pr_findings ->
+        pr_findings
+
+      :empty ->
+        Arbiter.Worker.ReviewGate.recover_findings(
+          output_lines,
+          state.run_id,
+          source,
+          findings
+        )
     end
   end
 
