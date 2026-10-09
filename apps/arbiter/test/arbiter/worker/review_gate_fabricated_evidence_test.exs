@@ -14,6 +14,8 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
 
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Messages.Message
@@ -229,6 +231,30 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
   end
 
   describe "the author's automatic fix round" do
+
+    # G17: the same escalation is a critical guardrail event on the author's run.
+    test "records a critical fabricated_evidence guardrail event on the author's run",
+         %{repo: repo, ws: ws} do
+      findings = EvidenceIntegrity.escalation_findings(@aro53b_round2, "FULL TRANSCRIPT")
+      task = park_on(ws, repo, "feature/evidence-event", {:request_changes, findings})
+      wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+
+      [run] =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert [
+               %{
+                 kind: :fabricated_evidence,
+                 severity: :critical,
+                 source: :evidence_integrity,
+                 task_id: task_id
+               }
+             ] = Arbiter.Guardrails.Events.for_run(run.id)
+
+      assert task_id == task.id
+    end
     test "is not dispatched when the gate stopped on fabricated evidence",
          %{repo: repo, ws: ws} do
       findings = EvidenceIntegrity.escalation_findings(@aro53b_round2, "FULL TRANSCRIPT")
