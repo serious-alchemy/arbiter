@@ -137,7 +137,7 @@ defmodule Arbiter.Guardrails.Gate do
 
       rules ->
         case load(task) do
-          %Issue{} = issue ->
+          issue when is_map(issue) ->
             judge(
               issue,
               workspace,
@@ -161,10 +161,10 @@ defmodule Arbiter.Guardrails.Gate do
         model: model,
         role: Keyword.get(opts, :role, :implementer),
         account: Keyword.get_lazy(opts, :account, fn -> account(workspace, provider) end),
-        difficulty: issue.difficulty,
-        permissions: Permissions.in_force(issue),
+        difficulty: Map.get(issue, :difficulty),
+        permissions: Permissions.in_force(Map.put_new(issue, :permissions, [])),
         workspace: workspace,
-        repo: Keyword.get(opts, :repo) || issue.repo
+        repo: Keyword.get(opts, :repo) || Map.get(issue, :repo)
       },
       rules: rules
     )
@@ -203,8 +203,8 @@ defmodule Arbiter.Guardrails.Gate do
   the provider's own map — the same read `Arbiter.Worker.Dispatch` makes for the
   floor gate. `nil` when it cannot be worked out.
   """
-  @spec predicted_model(Issue.t(), map() | nil, atom() | String.t()) :: String.t() | nil
-  def predicted_model(%Issue{} = issue, workspace, provider) do
+  @spec predicted_model(Issue.t() | map(), map() | nil, atom() | String.t()) :: String.t() | nil
+  def predicted_model(issue, workspace, provider) when is_map(issue) do
     routed = Routing.decide(issue, workspace, [])
     config = routed.config || %{}
     agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
@@ -218,6 +218,8 @@ defmodule Arbiter.Guardrails.Gate do
   end
 
   defp load(%Issue{} = issue), do: issue
+  # A board card / issue map (the Snapshot works on plain maps).
+  defp load(%{id: id} = card) when is_binary(id) and not is_struct(card), do: card
 
   defp load(id) when is_binary(id) do
     case Ash.get(Issue, ReviewGate.base_task_id(id)) do

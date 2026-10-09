@@ -327,6 +327,31 @@ defmodule Arbiter.Board.CapacityExplainer do
     end
   end
 
+  # bd-atll60 (G13): no model the guardrail profiles allow can take the ticket, or
+  # a declared permission still awaits a grant. Waiting does not fix it.
+  def hold({:guardrail, detail}, _board, opts) do
+    if String.starts_with?(detail, "awaiting") do
+      %{
+        kind: :guardrail,
+        badge: "Awaiting grant",
+        summary:
+          "A permission this ticket declares has not been granted yet (#{detail}). It " <>
+            "starts once the coordinator or the operator grants it, or the declaration is removed.",
+        details: opts[:raw] || detail
+      }
+    else
+      %{
+        kind: :guardrail,
+        badge: "No eligible model",
+        summary:
+          "No attached model is allowed to take this ticket under its guardrail profile " <>
+            "(#{detail}). Lower its difficulty or declared permissions, attach an eligible " <>
+            "account, or ask the operator to change the subject's tier.",
+        details: opts[:raw] || detail
+      }
+    end
+  end
+
   def hold({:quota, reason}, _board, opts) do
     if String.contains?(reason, "auth hold") do
       %{

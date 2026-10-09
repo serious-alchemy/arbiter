@@ -80,6 +80,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Alternatives
   alias Arbiter.Guardrails.Gate
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
@@ -1814,61 +1815,16 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  @guardrail_transient ~w(quota_held at_capacity auth_expired circuit_broken paused)
-
   defp guardrail_alternatives(task, workspace, opts) do
-    if ProviderRouting.enabled?(workspace),
-      do: routed_alternatives(task, workspace, opts),
-      else: pool_alternatives(task, workspace, opts)
-  end
-
-  defp routed_alternatives(task, workspace, opts) do
-    routing_opts = [
-      security: routing_security(workspace, opts),
-      routing_choice: Keyword.get(opts, :routing_choice),
-      repo: Keyword.get(opts, :repo)
-    ]
-
-    %{available: available, dropped: dropped} =
-      ProviderRouting.availability(workspace, task, routing_opts)
-
-    {ineligible, rest} = Enum.split_with(dropped, &ProviderRouting.guardrail_drop?/1)
-    {waiting, _static} = Enum.split_with(rest, &(&1.reason in @guardrail_transient))
-
-    cond do
-      available != [] ->
-        :stale
-
-      dropped == [] ->
-        pool_alternatives(task, workspace, opts)
-
-      waiting != [] ->
-        entry = hd(waiting)
-
-        hold =
-          "eligible: #{Enum.map_join(waiting, ", ", &ProviderRouting.describe_drop/1)}; " <>
-            "ineligible: #{Enum.map_join(ineligible, ", ", &ProviderRouting.describe_drop/1)}"
-
-        {:held, String.to_existing_atom(entry.agent_type), Gate.phrase(hold)}
-
-      true ->
-        {:none, Enum.map_join(ineligible ++ rest, "; ", &ProviderRouting.describe_drop/1)}
-    end
-  end
-
-  defp pool_alternatives(task, workspace, opts) do
-    pool = ProviderConstraint.filter(ProviderConstraint.from(task), Agents.agent_pool(workspace))
-
-    {eligible, ineligible} =
-      Gate.partition(task, workspace, pool, &guardrail_model(task, workspace, &1, opts),
-        repo: guardrail_repo(task, opts)
-      )
-
-    cond do
-      eligible != [] -> :stale
-      ineligible == [] -> {:none, nil}
-      true -> {:none, Enum.map_join(ineligible, "; ", fn {p, detail} -> "#{p}: #{detail}" end)}
-    end
+    Alternatives.analyse(task, workspace,
+      routing_opts: [
+        security: routing_security(workspace, opts),
+        routing_choice: Keyword.get(opts, :routing_choice),
+        repo: Keyword.get(opts, :repo)
+      ],
+      repo: guardrail_repo(task, opts),
+      model_fun: &guardrail_model(task, workspace, &1, opts)
+    )
   end
 
   defp hold_for_guardrail(task, opts, provider, phrase, refusal) do

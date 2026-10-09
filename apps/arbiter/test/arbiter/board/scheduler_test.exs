@@ -430,4 +430,38 @@ defmodule Arbiter.Board.SchedulerTest do
       assert plan.promote == "bd-1"
     end
   end
+
+  describe "a guardrail hold (bd-atll60, G13)" do
+    test "a card no eligible model can take is held by its own guardrail and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_guardrail: %{"bd-1" => {:hold, "no eligible model: codex: D3 exceeds D1"}}
+        )
+
+      assert %{state: :blocked, reason: "held — guardrail (no eligible model" <> _} =
+               reason(plan, "bd-1")
+
+      # A card's own block never advances the queue.
+      assert plan.promote == "bd-2"
+    end
+
+    test "a permission awaiting the operator's grant holds the card the same way" do
+      plan =
+        plan(
+          ready: [card("bd-1")],
+          card_guardrail: %{"bd-1" => {:hold, "awaiting operator grant: prod_ssh"}}
+        )
+
+      assert %{state: :blocked, reason: "held — guardrail (awaiting operator grant: prod_ssh)"} =
+               reason(plan, "bd-1")
+
+      assert plan.promote == nil
+    end
+
+    test ":ok, or no entry, does not hold" do
+      assert plan(ready: [card("bd-1")], card_guardrail: %{"bd-1" => :ok}).promote == "bd-1"
+      assert plan(ready: [card("bd-1")]).promote == "bd-1"
+    end
+  end
 end
