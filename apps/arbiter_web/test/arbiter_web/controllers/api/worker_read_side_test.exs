@@ -101,6 +101,22 @@ defmodule ArbiterWeb.Api.WorkerReadSideTest do
     end
   end
 
+  describe "the path the CLI sends for a synthetic id (D-W-4)" do
+    test "a literal %23 reaches the log and prompt routes as <task>#review", %{conn: conn, ws: ws} do
+      base = tid()
+      review = run!(ws, base <> "#review", %{kind: :review})
+      transcript!(review, ["verdict"])
+      :ok = PromptLog.write(review.id, "review prompt")
+
+      log = conn |> get("/api/workers/" <> base <> "%23review/log") |> json_response(200)
+      assert log["data"]["task_id"] == base <> "#review"
+      assert log["data"]["lines"] == ["verdict"]
+
+      prompt = conn |> get("/api/workers/" <> base <> "%23review/prompt") |> json_response(200)
+      assert prompt["data"]["prompt"] == "review prompt"
+    end
+  end
+
   describe "log tail (D-W-16)" do
     test "tail returns the last N lines, the true total and truncated: true",
          %{conn: conn, ws: ws} do
