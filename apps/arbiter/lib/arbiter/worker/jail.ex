@@ -394,7 +394,8 @@ defmodule Arbiter.Worker.Jail do
   # `:ssh_agent` is the socket of the worker's own `Arbiter.Worker.SshAgent`
   # (`prod_ssh`). The operator's agent lives under the masked runtime dir; this
   # one is bound back at its own path, over a blanked parent so a sibling
-  # worker's agent socket in the same dir is not visible. A missing socket
+  # worker's agent socket in the same dir is not visible. Every other jail
+  # blanks the whole dir via `mask_paths/0`. A missing socket
   # refuses the spawn: a `prod_ssh` worker never runs without its agent, and
   # never falls back to another one.
   @doc false
@@ -631,6 +632,13 @@ defmodule Arbiter.Worker.Jail do
   socket on a read-only bind is still connectable. A path under another mask
   is dropped, because the parent's tmpfs already hides it.
 
+  Also masked: the per-worker ssh-agent dir
+  (`Arbiter.Worker.SshAgent.default_dir/0`, bd-ld8qde). Every worker runs as
+  the same uid, so without this one could `connect()` to a `prod_ssh`
+  worker's agent socket and use a key it was never granted. The worker that
+  owns an agent gets its own socket bound back over the blanked dir
+  (`ssh_agent_args/1`).
+
   Only paths that exist on the host are listed: bwrap cannot create a mount
   point under the read-only root, and a path that is absent is no vector.
   `spec.mask_paths` overrides the detection (tests).
@@ -643,7 +651,8 @@ defmodule Arbiter.Worker.Jail do
       bus_dir(),
       "/run/dbus",
       "/run/systemd/resolve",
-      Arbiter.MCP.OperatorProof.socket_dir()
+      Arbiter.MCP.OperatorProof.socket_dir(),
+      Arbiter.Worker.SshAgent.ensure_default_dir()
     ]
     |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
     |> Enum.map(&Path.expand/1)

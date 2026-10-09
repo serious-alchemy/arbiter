@@ -25,6 +25,20 @@ defmodule Arbiter.Worker.JailSshAgentTest do
     refute @sock in argv
   end
 
+  test "a jail with no agent still blanks the agent dir (siblings' sockets unreachable)" do
+    dir = Arbiter.Worker.SshAgent.default_dir()
+    assert dir in Jail.mask_paths()
+
+    argv = Jail.argv(%{bwrap: "/usr/bin/bwrap", worktree: "/w/wt"}, ["agy"])
+
+    tmpfs =
+      argv
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.filter(&(&1 == ["--tmpfs", dir]))
+
+    assert tmpfs != []
+  end
+
   test "binds only the agent's own socket over a blanked agent dir, after the root bind" do
     argv = Jail.argv(spec(%{ssh_agent: @sock}), ["agy"])
 

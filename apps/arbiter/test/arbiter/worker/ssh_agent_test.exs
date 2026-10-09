@@ -45,6 +45,22 @@ defmodule Arbiter.Worker.SshAgentTest do
     assert {_, 0} = keys(b.socket)
   end
 
+  test "a second start for the same owner with a different key replaces the old key",
+       %{key: key, dir: dir, tmp_dir: tmp} do
+    {:ok, a} = SshAgent.start(owner: self(), key: key, dir: dir)
+    {old, 0} = keys(a.socket)
+
+    other = Path.join(tmp, "id_other")
+    {_, 0} = System.cmd("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", other])
+
+    {:ok, b} = SshAgent.start(owner: self(), key: File.read!(other), dir: dir)
+    assert b.socket == a.socket
+    assert b.pid == a.pid
+    {new, 0} = keys(b.socket)
+    assert length(String.split(new, "\n", trim: true)) == 1
+    refute new == old
+  end
+
   test "stop/1 removes the socket and the agent stops answering", %{key: key, dir: dir} do
     {:ok, agent} = SshAgent.start(owner: self(), key: key, dir: dir)
     ref = Process.monitor(agent.pid)

@@ -47,6 +47,19 @@ defmodule Arbiter.Worker.SshAgent do
   def default_dir, do: Path.join(Paths.scratch_root(), "ssh-agent")
 
   @doc """
+  Creates (`0700`) and returns the default agent dir. The jail masks this dir
+  for every worker (`Arbiter.Worker.Jail.mask_paths/0`); it has to exist by
+  then, because a read-only bind of `/` shows a directory created after the
+  jail started.
+  """
+  @spec ensure_default_dir() :: Path.t()
+  def ensure_default_dir do
+    dir = default_dir()
+    _ = ensure_dir(dir)
+    dir
+  end
+
+  @doc """
   Starts (or finds) the agent for `:owner` holding `:key` (the private key text).
   Options: `:owner` (required pid), `:key` (required), `:dir`.
   Returns `{:ok, %{socket:, pid:}}`.
@@ -102,7 +115,12 @@ defmodule Arbiter.Worker.SshAgent do
   defp start_or_reuse(owner, key, dir, socket) do
     case live_agent(socket) do
       {:ok, pid} ->
-        {:ok, %{socket: socket, pid: pid}}
+        # Same owner, possibly a different key (a revise round after the
+        # binding's `ssh_key_secret` changed): never hand back the old key.
+        case ensure_key(pid, key) do
+          :ok -> {:ok, %{socket: socket, pid: pid}}
+          {:error, reason} -> {:error, reason}
+        end
 
       :none ->
         case GenServer.start(__MODULE__, {owner, key, dir, socket}, name: name(socket)) do
@@ -111,6 +129,14 @@ defmodule Arbiter.Worker.SshAgent do
         end
     end
   end
+
+  defp ensure_key(pid, key) do
+    GenServer.call(pid, {:ensure_key, key}, 15_000)
+  catch
+    :exit, reason -> {:error, {:ssh_agent_unavailable, reason}}
+  end
+
+  defp fingerprint(key), do: :crypto.hash(:sha256, key)
 
   # The owner's agent process, when it is still serving. The owner-derived
   # socket name is the whole identity, so look for the GenServer by name.
@@ -148,7 +174,15 @@ defmodule Arbiter.Worker.SshAgent do
       case ready(socket, port) |> add_key(add, key, dir, socket) do
         :ok ->
           ref = Process.monitor(owner)
-          {:ok, %{owner_ref: ref, port: port, socket: socket}}
+          {:ok,
+           %{
+             owner_ref: ref,
+             port: port,
+             socket: socket,
+             dir: dir,
+             add: add,
+             fingerprint: fingerprint(key)
+           }}
 
         {:error, reason} ->
           close(port, socket)
@@ -205,6 +239,31 @@ defmodule Arbiter.Worker.SshAgent do
   end
 
   defp ensure_newline(key), do: if(String.ends_with?(key, "\n"), do: key, else: key <> "\n")
+
+  @impl true
+  def handle_call({:ensure_key, key}, _from, %{fingerprint: fp} = state) do
+    case fingerprint(key) do
+      ^fp ->
+        {:reply, :ok, state}
+
+      new_fp ->
+        %{add: add, dir: dir, socket: socket} = state
+
+        with {_, 0} <-
+               ReleaseEnv.cmd(add, ["-D"], env: [{"SSH_AUTH_SOCK", socket}], stderr_to_stdout: true),
+             :ok <- add_key(:ok, add, key, dir, socket) do
+          {:reply, :ok, %{state | fingerprint: new_fp}}
+        else
+          {out, _} when is_binary(out) ->
+            {:reply, {:error, {:ssh_add_failed, String.trim(out)}}, state}
+
+          {:error, _} = error ->
+            # The agent may now hold no key or a half-replaced set: stop it
+            # rather than serve something other than what was asked for.
+            {:stop, :normal, error, state}
+        end
+    end
+  end
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{owner_ref: ref} = state),

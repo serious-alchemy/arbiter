@@ -46,7 +46,7 @@ defmodule Arbiter.Worker.PermissionsBlock do
     lines =
       [
         list("Granted", p.granted),
-        list("Environment variables set for you", Enum.map(p.env, &elem(&1, 0))),
+        list("Environment variables granted (set only if the workspace holds the secret)", Enum.map(p.env, &elem(&1, 0))),
         list("Hosts reachable through the egress proxy (host:port)", p.hosts),
         list(
           "Local ports forwarded to fixed services",
