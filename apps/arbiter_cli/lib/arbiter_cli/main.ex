@@ -168,6 +168,15 @@ defmodule ArbiterCli.Main do
                                   §6.3's coverage-shadow rollout gate: may
                                   `merge.coverage_enabled` be flipped?
 
+      arb memory pending  [--state pending|rejected] [--json]   shared-memory promotion queue (operator only)
+      arb memory diff     <id>
+      arb memory apply    <id> [--overwrite]
+      arb memory reject   <id> --reason "..."
+      arb memory quarantine
+      arb memory restore  <name> [--reanchor]
+      arb memory distill  <session-id> [--max-bytes N] [--from-turn N] [--max-candidates N]
+                                  [--max-cost-usd X]
+
       arb alert list      [--workspace <id|name>] [--kind <k>] [--json]
       arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
       arb breaker reset   <signature> | --all [--kind <k>] [--json]

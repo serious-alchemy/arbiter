@@ -165,6 +165,19 @@ defmodule ArbiterCli.Verbs do
     {"provider", Module.concat(@cmd, Provider),
      [workspace: :none, probes: [["pause", "p"], ["resume", "p"], ["list"]]]},
     {"alert", Module.concat(@cmd, Alert), [workspace: :resolve, probes: [["list"]]]},
+    {"memory", Module.concat(@cmd, Memory),
+     [
+       workspace: :none,
+       probes: [
+         ["pending"],
+         ["diff", "s/f.md"],
+         ["apply", "s/f.md"],
+         ["reject", "s/f.md"],
+         ["quarantine"],
+         ["restore", "f.md"],
+         ["distill", "s"]
+       ]
+     ]},
     {"breaker", Module.concat(@cmd, Breaker),
      [workspace: :resolve, probes: [["list"], ["reset", "sig"]]]},
     {"image", Module.concat(@cmd, Image),
