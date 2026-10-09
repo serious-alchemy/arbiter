@@ -109,6 +109,7 @@ defmodule Arbiter.Guardrails.GateTest do
 
       assert d["profile_digest"] =~ ~r/\A[0-9a-f]{12}\z/
       assert d["max_difficulty"] == 5
+      assert d["spend"] == %{"action" => "page", "tokens" => nil, "wall_clock_s" => nil}
       assert %{"granted" => [], "withheld" => []} = d["projection"]
       assert d["permission_fallback"] == []
       assert Jason.encode!(d)

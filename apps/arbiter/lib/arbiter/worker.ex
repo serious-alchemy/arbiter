@@ -1009,6 +1009,18 @@ defmodule Arbiter.Worker do
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
+  Park a live run on a guardrail spend cap (G19, design §3.3).
+
+  `reason` is a `StopReason.spend_cap/1`. The agent is stopped, the run finishes
+  `:failed` with the typed `:spend_cap` cause (its worktree is kept), and the
+  coordinator is paged with the addressed `worker_stopped` escalation. Valid in the
+  states `fail/2` is: a finished or review-gated run has no agent to park.
+  """
+  @spec park_spend_cap(ref(), Arbiter.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def park_spend_cap(ref, %Arbiter.Worker.StopReason{category: :spend_cap} = reason),
+    do: call(ref, {:park_spend_cap, reason})
+
+  @doc """
   Deliver a ReviewGate (review-gate) verdict. Only valid from `:waiting` on
   `:review_gate` — where the worker waits after its `arb done` when review is
   required. Called by `Arbiter.Worker.ReviewGate` once the reviewer worker
@@ -2570,6 +2582,19 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call(
+        {:park_spend_cap, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    {:reply, :ok, park_spend_cap_now(state, reason)}
+  end
+
+  def handle_call({:park_spend_cap, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :park_spend_cap}}, state}
+  end
+
+  def handle_call(
         {:review_gate_verdict, verdict},
         _from,
         %State{state: :waiting, waiting_on: :review_gate} = state
@@ -3584,6 +3609,32 @@ defmodule Arbiter.Worker do
     notify_auth_hold_success(new_state)
     broadcast_done(new_state)
     new_state
+  end
+
+  # G19: `fail_now/2` for a spend-cap park. Same teardown (kill the agent before the
+  # run is marked terminal, keep the worktree), but the page is the addressed
+  # `worker_stopped` escalation naming the cap rather than the generic `failed`.
+  defp park_spend_cap_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
+    state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
+
+    Logger.warning(
+      "Worker: #{subordinate_label(state) || "worker"} for task=#{state.task_id} parked — " <>
+        Arbiter.Worker.StopReason.label(reason)
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
+    announce_phase(new_state)
   end
 
   # bd-bi5pn0: `Dispatch.dispatch/2` fails a just-registered `:starting` worker

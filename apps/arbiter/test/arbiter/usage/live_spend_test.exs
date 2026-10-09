@@ -113,6 +113,8 @@ defmodule Arbiter.Usage.LiveSpendTest do
 
       assert spend.settled_usd == 2.0
       assert spend.live_usd == 1.5
+      # G19: the same turns, as tokens (input + output) — what a token spend cap reads.
+      assert spend.live_tokens == 150_000
       assert spend.total_usd == 3.5
       assert spend.total_usd > spend.settled_usd
       assert spend.live?
@@ -141,6 +143,7 @@ defmodule Arbiter.Usage.LiveSpendTest do
 
       assert spend.total_usd == 2.0
       assert spend.live_usd == 0.0
+      assert spend.live_tokens == 0
       refute spend.live?
     end
 

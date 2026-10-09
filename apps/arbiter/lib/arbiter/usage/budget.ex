@@ -148,14 +148,48 @@ defmodule Arbiter.Usage.Budget do
     end)
   end
 
+  @doc """
+  Settled **tokens** per base task and provider (G19, the spend-cap meter):
+  `%{task_id => %{provider => tokens}}`, where tokens are `tokens_in + tokens_out +
+  thinking_tokens` of the task's ledger rows (nil buckets count 0, cache buckets
+  are left out) and `provider` is the row's provider string (`nil` for a row
+  with none). Reads the same rows `settled_by_task/2` does.
+  """
+  @spec settled_tokens_by_task([String.t()], keyword()) :: %{
+          String.t() => %{(String.t() | nil) => non_neg_integer()}
+        }
+  def settled_tokens_by_task(task_ids, opts \\ []) when is_list(task_ids) do
+    ids = task_ids |> Enum.reject(&(is_nil(&1) or &1 == "")) |> Enum.uniq()
+    wanted = MapSet.new(ids)
+    select = [:task_id, :base_task_id, :provider, :tokens_in, :tokens_out, :thinking_tokens]
+
+    ids
+    |> Enum.chunk_every(Keyword.get(opts, :id_chunk, @id_chunk))
+    |> Enum.flat_map(&read_chunk(&1, select))
+    |> Enum.group_by(&fold_event_id/1)
+    |> Enum.filter(fn {task_id, _events} -> MapSet.member?(wanted, task_id) end)
+    |> Map.new(fn {task_id, events} ->
+      by_provider =
+        events
+        |> Enum.group_by(& &1.provider)
+        |> Map.new(fn {provider, rows} -> {provider, Enum.sum(Enum.map(rows, &row_tokens/1))} end)
+
+      {task_id, by_provider}
+    end)
+  end
+
+  defp row_tokens(row),
+    do: (row.tokens_in || 0) + (row.tokens_out || 0) + (row.thinking_tokens || 0)
+
   # One query per chunk. `base_task_id` is the indexed, authoritative link;
   # `task_id` catches the base row itself; the `<id>#%` prefix catches the
   # pre-migration synthetic rows that have neither. `fold_event_id/1` above
   # then decides what each row really belongs to, so a prefix match that folds
   # elsewhere is dropped rather than trusted.
-  defp read_chunk([]), do: []
+  defp read_chunk(ids, select \\ [:task_id, :base_task_id, :cost_usd])
+  defp read_chunk([], _select), do: []
 
-  defp read_chunk(ids) do
+  defp read_chunk(ids, select) do
     task_source = :task
 
     Event
@@ -163,7 +197,7 @@ defmodule Arbiter.Usage.Budget do
     |> Ash.Query.filter(^ids_filter(ids))
     # Never `raw`: it holds the agent CLI's whole result payload and decoding
     # one per row is most of the cost of this read.
-    |> Ash.Query.select([:task_id, :base_task_id, :cost_usd])
+    |> Ash.Query.select(select)
     |> Ash.read!()
   end
 

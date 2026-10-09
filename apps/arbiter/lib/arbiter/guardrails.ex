@@ -66,6 +66,13 @@ defmodule Arbiter.Guardrails do
   @type tier :: Profile.tier()
   @type subject :: Rules.subject()
 
+  # G19 spend caps (guardrail-profiles §3.3). `tokens` is `tokens_in + tokens_out +
+  # thinking_tokens` (cache reads are not spend a runaway is measured by);
+  # `wall_clock_s` is the live agent session. Calibrated against the one run the
+  # design names, bd-bxwsvo (7.7M tokens, 65 min on a D1, 84% of a Gemini 5h
+  # window), which must trip quarantine on both axes; `Arbiter.Guardrails.SpendCalibration`
+  # re-derives them from the ledger. The page tiers carry no cap: BudgetPatrol's
+  # p90 page is their guard, and an operator may add a page cap via `:guardrail_tiers`.
   @bundles %{
     quarantine: %Profile{
       tier: :quarantine,
@@ -80,7 +87,7 @@ defmodule Arbiter.Guardrails do
         same_family_fallback: :hold,
         min_reviewer_tier: :premium
       },
-      spend: %{action: :park, tokens: nil, wall_clock_s: nil},
+      spend: %{action: :park, tokens: 3_000_000, wall_clock_s: 1_800},
       honour_safe_defaults_exclude: false
     },
     probation: %Profile{
@@ -96,7 +103,7 @@ defmodule Arbiter.Guardrails do
         same_family_fallback: :record,
         min_reviewer_tier: :economy
       },
-      spend: %{action: :park, tokens: nil, wall_clock_s: nil},
+      spend: %{action: :park, tokens: 6_000_000, wall_clock_s: 3_600},
       honour_safe_defaults_exclude: false
     },
     trusted: %Profile{

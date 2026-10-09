@@ -63,6 +63,11 @@ defmodule Arbiter.Worker.StopReason do
       runaway process tree *inside* the run (almost always a `mix test`), so a
       re-dispatch reproduces it; the remediation is a smaller workload or a
       larger `ARBITER_WORKER_MEMORY_MAX`, not a retry. Not resumable.
+    * `:spend_cap` — a `park`-action guardrail tier (`quarantine`, `probation`)
+      crossed its token or wall-clock spend cap and
+      `Arbiter.Guardrails.SpendPatrol` stopped the run (G19). Built by
+      `spend_cap/1`, never by `classify/3`. A policy stop, not an agent failure; not
+      resumable, since the cap is per ticket and would trip again.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
@@ -198,6 +203,7 @@ defmodule Arbiter.Worker.StopReason do
           | :context_thrash
           | :killed
           | :memory_cap_exceeded
+          | :spend_cap
           | :spawn_exec_failed
           | :crashed
           | :stream_schema_drift
@@ -994,6 +1000,60 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:spend_cap` reason (G19, guardrail-profiles §3.3): a run of a
+  `park`-action tier (`quarantine` / `probation`) crossed the tier's token or
+  wall-clock cap and was stopped by `Arbiter.Guardrails.SpendPatrol`.
+
+  `info` is `%{cap: :tokens | :wall_clock_s, limit: n, measured: n, tier: tier}`.
+  """
+  @spec spend_cap(%{
+          cap: :tokens | :wall_clock_s,
+          limit: number(),
+          measured: number(),
+          tier: atom()
+        }) :: t()
+  def spend_cap(%{cap: cap, limit: limit, measured: measured, tier: tier}) do
+    %__MODULE__{
+      category: :spend_cap,
+      summary:
+        "spend cap reached: the #{tier}-tier run crossed its #{cap_label(cap)} cap " <>
+          "(#{spend_cap_figures(%{cap: cap, limit: limit, measured: measured})}) and was " <>
+          "parked — the agent was stopped and its worktree kept",
+      remediation:
+        "Look at the transcript for what spent it (a busy-wait or a polling loop is the " <>
+          "usual cause). If the work is legitimate, raise the tier's spend cap " <>
+          "(`config :arbiter, :guardrail_tiers`, or a subject-rule `spend` override), or " <>
+          "re-route the ticket to a more trusted subject. Resuming the same subject on the " <>
+          "same ticket will trip the cap again.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
+  @spec spend_cap_figures(%{
+          :cap => :tokens | :wall_clock_s,
+          :limit => number(),
+          :measured => number(),
+          optional(atom()) => term()
+        }) ::
+          String.t()
+  def spend_cap_figures(%{cap: cap, limit: limit, measured: measured}),
+    do: "#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}"
+
+  @doc "The cap's name as it reads in a page: token or wall-clock."
+  @spec spend_cap_label(:tokens | :wall_clock_s) :: String.t()
+  def spend_cap_label(cap), do: cap_label(cap)
+
+  defp cap_label(:tokens), do: "token"
+  defp cap_label(:wall_clock_s), do: "wall-clock"
+
+  defp format_cap(:tokens, n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M tokens"
+  defp format_cap(:tokens, n) when n >= 1_000, do: "#{Float.round(n / 1_000, 1)}k tokens"
+  defp format_cap(:tokens, n), do: "#{n} tokens"
+  defp format_cap(:wall_clock_s, s), do: "#{div(round(s), 60)}m"
+
+  @doc """
   Build a `:node_lost` reason (RW12, `docs/design/remote-workers.md` §10.3): the node
   a run was placed on stopped answering for `lost_after` seconds (or never came back
   after a primary restart), so the run is **interrupted, not failed**, and no
@@ -1043,6 +1103,7 @@ defmodule Arbiter.Worker.StopReason do
         :context_thrash -> "context window thrashed (autocompact loop)"
         :killed -> "killed by signal #{reason.signal}"
         :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
+        :spend_cap -> "spend cap reached (parked by the guardrail tier)"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"

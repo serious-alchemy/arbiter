@@ -359,6 +359,8 @@ defmodule Arbiter.Worker.ReviewGate do
     # bd-6zuoo6: a re-prompted reviewer re-runs the same workload into the
     # same memory cap.
     :memory_cap_exceeded,
+    # G19: a re-prompt re-runs into the same tier spend cap.
+    :spend_cap,
     # bd-2s755v: a re-prompt sends the same rejected `-m` model.
     :model_unavailable
   ]

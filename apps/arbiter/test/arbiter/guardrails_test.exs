@@ -52,6 +52,23 @@ defmodule Arbiter.GuardrailsTest do
                Guardrails.bundle(:quarantine)
     end
 
+    test "the park tiers carry calibrated caps, looser down the ladder; the page tiers none (G19)" do
+      q = Guardrails.bundle(:quarantine).spend
+      p = Guardrails.bundle(:probation).spend
+
+      assert q.action == :park and p.action == :park
+      assert is_integer(q.tokens) and is_integer(q.wall_clock_s)
+      assert p.tokens > q.tokens and p.wall_clock_s > q.wall_clock_s
+
+      # bd-bxwsvo: 7.7M tokens in 65 minutes on a D1 must trip quarantine on both axes.
+      assert 7_700_000 > q.tokens
+      assert 65 * 60 > q.wall_clock_s
+
+      for tier <- [:trusted, :privileged] do
+        assert %{action: :page, tokens: nil, wall_clock_s: nil} = Guardrails.bundle(tier).spend
+      end
+    end
+
     test "app env overrides a bundle field" do
       Application.put_env(:arbiter, :guardrail_tiers, %{probation: %{max_difficulty: 3}})
       on_exit(fn -> Application.delete_env(:arbiter, :guardrail_tiers) end)

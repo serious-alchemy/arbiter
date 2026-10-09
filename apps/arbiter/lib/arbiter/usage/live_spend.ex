@@ -101,6 +101,7 @@ defmodule Arbiter.Usage.LiveSpend do
           task_id: String.t(),
           settled_usd: float(),
           live_usd: float(),
+          live_tokens: non_neg_integer(),
           total_usd: float() | nil,
           live?: boolean(),
           degraded?: boolean(),
@@ -108,7 +109,14 @@ defmodule Arbiter.Usage.LiveSpend do
         }
 
   @no_settled %{spend: 0.0, priced_rows: 0, unpriced_rows: 0}
-  @no_live %{usd: 0.0, priced?: false, live?: false, degraded?: false, unpriced?: false}
+  @no_live %{
+    usd: 0.0,
+    tokens: 0,
+    priced?: false,
+    live?: false,
+    degraded?: false,
+    unpriced?: false
+  }
 
   @doc "`for_tasks/2` for one (base) task id."
   @spec for_task(String.t(), keyword()) :: t()
@@ -216,6 +224,7 @@ defmodule Arbiter.Usage.LiveSpend do
       task_id: task_id,
       settled_usd: settled.spend,
       live_usd: money(live.usd),
+      live_tokens: live.tokens,
       total_usd: total,
       live?: live.live?,
       degraded?: live.degraded?,
@@ -410,8 +419,8 @@ defmodule Arbiter.Usage.LiveSpend do
     case ClaudeSessionFile.read_totals(file.path, since: since, session_id: file.sid) do
       {:ok, %{malformed_lines: n}} when n > 0 -> :degraded
       {:ok, %{message_count: 0}} -> :empty
-      {:ok, %{cost_usd: cost}} when is_number(cost) -> {:priced, cost}
-      {:ok, _unpriced} -> :unpriced
+      {:ok, %{cost_usd: cost} = totals} when is_number(cost) -> {:priced, cost, tokens(totals)}
+      {:ok, unpriced} -> {:unpriced, tokens(unpriced)}
       {:error, _reason} -> :degraded
     end
   rescue
@@ -420,10 +429,21 @@ defmodule Arbiter.Usage.LiveSpend do
       :degraded
   end
 
-  defp absorb(acc, {:priced, cost}), do: %{acc | usd: acc.usd + cost, priced?: true}
-  defp absorb(acc, :unpriced), do: %{acc | unpriced?: true}
+  defp absorb(acc, {:priced, cost, tokens}),
+    do: %{acc | usd: acc.usd + cost, tokens: acc.tokens + tokens, priced?: true}
+
+  defp absorb(acc, {:unpriced, tokens}), do: %{acc | tokens: acc.tokens + tokens, unpriced?: true}
   defp absorb(acc, :degraded), do: %{acc | degraded?: true}
   defp absorb(acc, :empty), do: acc
+
+  # What a token spend cap counts (G19): input + output + thinking. Cache
+  # buckets are bookkeeping on a re-read prompt, not new spend. The session
+  # file's totals may not carry `:thinking_tokens` (it counts 0 then), but the
+  # meter reads it so the cap tracks the ledger figure once they do.
+  defp tokens(totals) do
+    Map.get(totals, :tokens_in, 0) + Map.get(totals, :tokens_out, 0) +
+      Map.get(totals, :thinking_tokens, 0)
+  end
 
   defp max_time(times) do
     times

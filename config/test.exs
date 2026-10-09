@@ -276,6 +276,7 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # every issue a test creates on a timer, off the sandbox connection. Tests
 # drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
 config :arbiter, :budget_patrol, enabled: false
+config :arbiter, :spend_patrol, enabled: false
 
 # bd-b1b3mp: tests call `Arbiter.Tasks.BacklogTailDigest.sweep/1` directly.
 config :arbiter, :backlog_tail_digest, enabled: false
