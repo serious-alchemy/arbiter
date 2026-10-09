@@ -509,31 +509,32 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         #
         # bd-9cygoo (G16): the pass pushes, so it needs a repo-scoped git
         # credential (or an explicit legacy opt-in) like any other implementer.
-        with {:ok, git_credential} <-
-               GitCredential.plan(context.workspace, context.repo,
-                 role: :implementer,
-                 guarded?: projection.guarded?
-               ) do
-          session_opts =
-            ([
-               owner: worker_pid,
-               worktree_path: worktree_path,
-               projection: projection,
-               git_credential: git_credential
-             ] ++
-               Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-            |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
+        case GitCredential.plan(context.workspace, context.repo,
+               role: :implementer,
+               guarded?: projection.guarded?
+             ) do
+          {:ok, git_credential} ->
+            session_opts =
+              ([
+                 owner: worker_pid,
+                 worktree_path: worktree_path,
+                 projection: projection,
+                 git_credential: git_credential
+               ] ++
+                 Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+              |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
-          case ClaudeSession.start(session_opts) do
-            {:ok, port} ->
-              _ = Worker.advance(worker_pid, :fix_ci)
-              {:ok, port}
+            case ClaudeSession.start(session_opts) do
+              {:ok, port} ->
+                _ = Worker.advance(worker_pid, :fix_ci)
+                {:ok, port}
 
-            {:error, reason} ->
-              {:error, {:claude_start_failed, reason}}
-          end
-        else
-          {:error, reason} -> {:error, {:claude_start_failed, reason}}
+              {:error, reason} ->
+                {:error, {:claude_start_failed, reason}}
+            end
+
+          {:error, reason} ->
+            {:error, {:claude_start_failed, reason}}
         end
     end
   end

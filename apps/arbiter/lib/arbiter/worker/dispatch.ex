@@ -100,8 +100,8 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
-  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Driver
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder

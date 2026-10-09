@@ -19,8 +19,8 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
-  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Egress.JailRun
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.StopReason

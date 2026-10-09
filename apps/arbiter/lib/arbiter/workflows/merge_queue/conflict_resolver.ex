@@ -627,36 +627,37 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         #
         # bd-9cygoo (G16): a pass that force-pushes itself needs a repo-scoped git
         # credential; a containerized pass is pushed for by the host (bd-19skda).
-        with {:ok, git_credential} <-
-               GitCredential.plan(context.workspace, context.repo,
-                 role: :implementer,
-                 guarded?: Arbiter.Guardrails.guarded?(),
-                 host_pushes?: host_git?(context, provider)
-               ) do
-          session_opts =
-            ([
-               owner: worker_pid,
-               worktree_path: worktree_path,
-               git_credential: git_credential
-             ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-            |> add_command_or_prompt(
-              Map.put(context, :host_git, host_git?(context, provider)),
-              args,
-              worktree_path,
-              provider,
-              mcp_opts
-            )
+        case GitCredential.plan(context.workspace, context.repo,
+               role: :implementer,
+               guarded?: Arbiter.Guardrails.guarded?(),
+               host_pushes?: host_git?(context, provider)
+             ) do
+          {:ok, git_credential} ->
+            session_opts =
+              ([
+                 owner: worker_pid,
+                 worktree_path: worktree_path,
+                 git_credential: git_credential
+               ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+              |> add_command_or_prompt(
+                Map.put(context, :host_git, host_git?(context, provider)),
+                args,
+                worktree_path,
+                provider,
+                mcp_opts
+              )
 
-          case ClaudeSession.start(session_opts) do
-            {:ok, port} ->
-              _ = Worker.advance(worker_pid, :resolve_conflict)
-              {:ok, port}
+            case ClaudeSession.start(session_opts) do
+              {:ok, port} ->
+                _ = Worker.advance(worker_pid, :resolve_conflict)
+                {:ok, port}
 
-            {:error, reason} ->
-              {:error, {:claude_start_failed, reason}}
-          end
-        else
-          {:error, reason} -> {:error, {:claude_start_failed, reason}}
+              {:error, reason} ->
+                {:error, {:claude_start_failed, reason}}
+            end
+
+          {:error, reason} ->
+            {:error, {:claude_start_failed, reason}}
         end
     end
   end

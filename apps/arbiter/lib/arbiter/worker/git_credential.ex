@@ -207,9 +207,7 @@ defmodule Arbiter.Worker.GitCredential do
 
     with :ok <- unknown_keys(block, @block_keys, "git_credentials"),
          :ok <- boolean(block, "legacy_operator", "git_credentials"),
-         :ok <- validate_repos(Map.get(block, "repos")) do
-      :ok
-    end
+         do: validate_repos(Map.get(block, "repos"))
   end
 
   def validate(_), do: {:error, "git_credentials must be a map"}
@@ -236,9 +234,7 @@ defmodule Arbiter.Worker.GitCredential do
          :ok <- validate_kind(entry, where),
          :ok <- optional_match(entry, "host", @host_re, where),
          :ok <- optional_match(entry, "remote", @remote_re, where),
-         :ok <- optional_match(entry, "username", @name_re, where) do
-      :ok
-    end
+         do: optional_match(entry, "username", @name_re, where)
   end
 
   defp validate_entry(repo, _), do: {:error, "git_credentials.repos.#{repo} must be a map"}
