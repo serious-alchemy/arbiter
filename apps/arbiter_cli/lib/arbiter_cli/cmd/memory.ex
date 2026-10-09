@@ -55,18 +55,18 @@ defmodule ArbiterCli.Cmd.Memory do
       {opts, rest, mode} = ArgParser.parse(argv, command: "arb memory", switches: @switches)
       Workspace.reject_flag!("arb memory (the memory layer is installation-wide)")
 
-      case rest do
-        ["pending"] -> pending(opts, mode)
-        ["diff" | args] -> diff(args, mode)
-        ["apply" | args] -> apply_candidate(args, opts, mode)
-        ["reject" | args] -> reject(args, opts, mode)
-        ["quarantine"] -> quarantine(mode)
-        ["restore" | args] -> restore(args, opts, mode)
-        ["distill" | args] -> distill(args, opts, mode)
-        _ -> unknown()
-      end
+      dispatch(rest, opts, mode)
     end
   end
+
+  defp dispatch(["pending"], opts, mode), do: pending(opts, mode)
+  defp dispatch(["diff" | args], _opts, mode), do: diff(args, mode)
+  defp dispatch(["apply" | args], opts, mode), do: apply_candidate(args, opts, mode)
+  defp dispatch(["reject" | args], opts, mode), do: reject(args, opts, mode)
+  defp dispatch(["quarantine"], _opts, mode), do: quarantine(mode)
+  defp dispatch(["restore" | args], opts, mode), do: restore(args, opts, mode)
+  defp dispatch(["distill" | args], opts, mode), do: distill(args, opts, mode)
+  defp dispatch(_rest, _opts, _mode), do: unknown()
 
   @spec unknown() :: no_return()
   defp unknown do
