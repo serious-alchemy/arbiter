@@ -2790,6 +2790,122 @@ defmodule Arbiter.Worker.DispatchTest do
       assert "--dangerously-skip-permissions" in argv
     end
 
+    # bd-ld8qde (G14): undeclared means withheld. The spawned child's real env,
+    # captured by a stand-in `claude`.
+    defp stub_claude_dumping_env(tmp, env_file) do
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      env > #{env_file}
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+      :ok
+    end
+
+    defp withholding_workspace(ws) do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "guardrails" => %{
+              "bindings" => %{
+                "prod_read" => %{
+                  "enforced_read_only" => true,
+                  "env_from_secret" => %{"RO_URL" => "prod_ro_url"}
+                }
+              }
+            }
+          },
+          secrets: %{"prod_ro_url" => "postgres://ro-secret-value"},
+          worker_env: %{
+            "WH_SECRET_TOK" => %{"value" => "tok-secret-value", "secret" => true},
+            "WH_PLAIN" => %{"value" => "plain-value", "secret" => false}
+          }
+        })
+
+      ws
+    end
+
+    defp dispatch_for_env(ws, tmp, permissions) do
+      env_file = Path.join(tmp, "claude-env.txt")
+      :ok = stub_claude_dumping_env(tmp, env_file)
+      repo = seed_repo!(tmp, "wh-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wh-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"wh/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "withholding", workspace_id: ws.id, permissions: permissions},
+          context: %{guardrail_authority: :coordinator, permission_actor: "c"}
+        )
+
+      {:ok, _} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "wh/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      wait_until(fn -> File.exists?(env_file) end, 5_000)
+      _ = wait_for_argv!(env_file)
+      File.read!(env_file)
+    end
+
+    test "guarded: only the declared permission's secret reaches the worker's env", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, ["prod_read"])
+
+      assert env =~ "RO_URL=postgres://ro-secret-value"
+      assert env =~ "WH_PLAIN=plain-value"
+      refute env =~ "WH_SECRET_TOK"
+    end
+
+    test "guarded: a ticket that declares nothing gets none of the secrets", %{ws: ws, tmp: tmp} do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, [])
+
+      refute env =~ "RO_URL"
+      refute env =~ "WH_SECRET_TOK"
+      refute env =~ "postgres://ro-secret-value"
+      assert env =~ "WH_PLAIN=plain-value"
+    end
+
+    test "guarded: a declared permission the subject's tier cannot hold is withheld", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :trusted}
+      ])
+
+      env = dispatch_for_env(withholding_workspace(ws), tmp, ["prod_read"])
+      refute env =~ "RO_URL"
+    end
+
+    test "no guardrail rules: nothing is withheld, as before G14", %{ws: ws, tmp: tmp} do
+      env = dispatch_for_env(withholding_workspace(ws), tmp, [])
+      assert env =~ "WH_SECRET_TOK=tok-secret-value"
+      refute env =~ "RO_URL"
+    end
+
     # AC5: nothing configured, nothing changes. A workspace `guardrails` block
     # with no subject rules behind it is inert, so this dispatch is the same
     # `:bypass` gemini dispatch as the test below.
