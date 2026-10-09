@@ -63,6 +63,11 @@ defmodule Arbiter.Worker.StopReason do
       runaway process tree *inside* the run (almost always a `mix test`), so a
       re-dispatch reproduces it; the remediation is a smaller workload or a
       larger `ARBITER_WORKER_MEMORY_MAX`, not a retry. Not resumable.
+    * `:spend_cap` — a `park`-action guardrail tier (`quarantine`, `probation`)
+      crossed its token or wall-clock spend cap and
+      `Arbiter.Guardrails.SpendPatrol` stopped the run (G19). Built by
+      `spend_cap/1`, never by `classify/3`. A policy stop, not an agent failure; not
+      resumable, since the cap is per ticket and would trip again.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at

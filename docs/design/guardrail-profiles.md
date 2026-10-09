@@ -968,7 +968,7 @@ before it. Each ticket's type is one of:
 | **Phase 3: earned trust** | | | | |
 | G17 | Guardrail event capture: parse Claude `permission_denials`, turn agy's in-session permission-check failures into per-run events, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
 | G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (bd-8381tk's operator proof, with TTY confirmation as the fallback; refused over MCP), and a dashboard view | 3 | G11, G17, bd-8381tk | loop |
-| G19 | Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
+| G19 | **Implemented (bd-c5kggd); see [worker-security](../worker-security.md#per-tier-spend-caps-bd-c5kggd-g19).** Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
 | G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the vstim bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the emricare tonic `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod vstim tickets | — | G13, G14, G10 | operator |
 

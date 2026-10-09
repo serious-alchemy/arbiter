@@ -1255,6 +1255,50 @@ install.
   * Waiting for a permission grant (§5.6 mid-run requests, `ticket_permission_grant`)
     is G15; this ticket reads the grant state (`Permissions.in_force/1`/`pending/1`).
 
+## Per-tier spend caps (bd-c5kggd, G19)
+
+A guardrail tier's `spend` knob is enforced on live runs by
+`Arbiter.Guardrails.SpendPatrol` (a one-minute ticker, `config :arbiter,
+:spend_patrol`). The caps a run was spawned under are recorded on its
+`guardrail_decision` (`"spend"`), so the patrol reads them off the live worker's
+meta.
+
+| Tier | Action | Default caps |
+|---|---|---|
+| `quarantine` | **park** | 3,000,000 tokens, 30 min wall-clock |
+| `probation` | **park** | 6,000,000 tokens, 60 min wall-clock |
+| `trusted`, `privileged` | **page** | none: BudgetPatrol's p90 page is the guard, unchanged |
+
+  * **Park.** `Worker.park_spend_cap/2` kills the agent, keeps the worktree, finishes
+    the run `:failed` with the typed `:spend_cap` stop reason (never auto-resumed, a
+    re-prompt would re-run into the same cap) and sends the addressed
+    `worker_stopped` escalation. The operator re-tiers the subject, raises the cap
+    (`config :arbiter, :guardrail_tiers`, or a subject-rule `spend` override) or
+    re-routes the ticket.
+  * **Page.** A cap an operator sets on a `page` tier raises a ticket-scoped
+    `:spend_cap_exceeded` escalation (a repeat refreshes the open one) and stops
+    nothing.
+  * **Measured.** Wall-clock is the live worker's age, looked at only while its agent
+    port is open (time parked at the review gate never counts). Tokens are
+    `tokens_in + tokens_out + thinking_tokens` the subject's *provider* spent on the
+    ticket: the settled ledger plus, for Claude, the in-flight session read
+    (`LiveSpend`). Implementer runs only.
+  * **Calibration.** The defaults are set so the bd-bxwsvo run (7.7M tokens, 65 min
+    on a D1) trips quarantine on both axes. They are **not** fitted to a ledger
+    distribution: no production ledger was available when they were set.
+    `Arbiter.Guardrails.SpendCalibration.report/1` prints per-provider p50/p90/p99
+    of per-task tokens and wall-clock from the ledger, to re-fit them.
+
+**Honest limits.**
+
+  * agy reports its tokens only when a session ends, so mid-session its only guard
+    is the wall-clock cap; the token cap catches it at the next sweep after a pass
+    settles (a resume or nudge loop), and a single runaway session after the
+    fact.
+  * A tripped cap is a major event for trust (§6.1) but `guardrail_events` is G17,
+    so nothing is recorded there yet; the `:spend_cap` stop category on the run is
+    the record.
+
 ## Operator proof for token minting (bd-8381tk)
 
 ### The problem
