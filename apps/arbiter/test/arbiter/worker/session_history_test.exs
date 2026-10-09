@@ -112,6 +112,20 @@ defmodule Arbiter.Worker.SessionHistoryTest do
       assert File.read!(dest) == "{\"c\":3}\n"
     end
 
+    test "a stale, shorter copy never replaces a longer stored entry", %{base: base} do
+      newer = run_tmp_with_session(base, "{\"n\":1}\n{\"n\":2}\n")
+      stale = run_tmp_with_session(base, "{\"n\":1}\n")
+
+      assert [@sid] = SessionHistory.preserve(newer)
+      assert [] = SessionHistory.preserve(stale)
+      assert File.read!(SessionHistory.store_path(@sid)) == "{\"n\":1}\n{\"n\":2}\n"
+      assert File.ls!(SessionHistory.store_dir()) == [@sid <> ".jsonl"]
+
+      longer = run_tmp_with_session(base, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
+      assert [@sid] = SessionHistory.preserve(longer)
+      assert File.read!(SessionHistory.store_path(@sid)) =~ ~s({"n":3})
+    end
+
     test "RunTmp.remove/1 preserves before deleting" do
       root = Arbiter.Config.Paths.worker_tmp_root()
       File.mkdir_p!(root)

@@ -106,7 +106,9 @@ defmodule Arbiter.Worker.SessionHistory do
 
     with :ok <- File.mkdir_p(store_dir()),
          {:ok, raw} <- File.read(path),
-         :ok <- File.write(tmp, Redaction.redact(raw, secret_values(sid, run_tmp))),
+         redacted = Redaction.redact(raw, secret_values(sid, run_tmp)),
+         :ok <- check_not_stale(dest, redacted),
+         :ok <- File.write(tmp, redacted),
          _ = File.chmod(tmp, 0o600),
          :ok <- File.rename(tmp, dest) do
       [sid]
@@ -115,6 +117,16 @@ defmodule Arbiter.Worker.SessionHistory do
         File.rm(tmp)
         Logger.warning("SessionHistory: cannot preserve #{path}: #{inspect(reason)}")
         []
+    end
+  end
+
+  # The store is keyed by session id alone, and the boot sweep can reap an older
+  # run tmp of the same session after a newer run was preserved. A transcript only
+  # grows, so a shorter copy is the stale one: keep the stored entry.
+  defp check_not_stale(dest, redacted) do
+    case File.stat(dest) do
+      {:ok, %File.Stat{size: size}} when size > byte_size(redacted) -> :stale
+      _ -> :ok
     end
   end
 
@@ -190,6 +202,9 @@ defmodule Arbiter.Worker.SessionHistory do
              dest = destination(config_dir, cwd, session_id),
              :ok <- File.mkdir_p(Path.dirname(dest)),
              :ok <- File.write(dest, bytes) do
+          # Only a store-sourced seed discards the entry. When the live file is
+          # read instead and the reaper preserves it afterwards, the entry stays
+          # until the 14-day `prune/0`.
           if source == {:file, store_path(session_id)}, do: discard(session_id)
           Logger.info("SessionHistory: seeded session #{session_id} into #{config_dir}")
           :ok
