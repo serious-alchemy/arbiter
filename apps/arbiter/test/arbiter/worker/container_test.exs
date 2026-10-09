@@ -73,6 +73,7 @@ defmodule Arbiter.Worker.ContainerTest do
       flags = flags(argv())
       assert "--init" in flags
       assert "--rm" in flags
+      assert "--log-driver=none" in flags
     end
   end
 
