@@ -48,7 +48,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
   | `worker_list` | coordinator | `Arbiter.Workers.Current.list/1` |
   | `worker_show` | coordinator | `Arbiter.Workers.Current.show/2` (the same current-run read as `worker_list`) |
-  | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first (accepts synthetic ids) |
+  | `worker_runs` | coordinator | `Arbiter.Workers.Runs.history/2` (task optional → fleet-wide; `run_id` → one run), newest first (accepts synthetic ids) |
   | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
   | `worker_prompt` | coordinator | `Arbiter.Worker.PromptLog.read/1` for one run (by `run_id` or the task's most recent) |
   | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |

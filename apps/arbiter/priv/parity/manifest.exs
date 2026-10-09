@@ -29,7 +29,6 @@
 
 %{
   children: %{
-    "P-11" => "Worker read-side parity (show, list, runs, log, prompt, run_log_list)",
     "P-13" => "Ticket read-side parity and one \"Ready\" implementation",
     "P-25" => "Memory operator surface (REST + CLI)"
   },
@@ -406,7 +405,7 @@
       cli: ["arb worker stop"],
       rest: ["POST /api/workers/:task_id/stop"],
       status: :full,
-      divergences: ["D-W-4", "D-W-25"]
+      note: "Synthetic ids are URL-encoded by the CLI client; REST confines a workspace-bound token to its workspace (404 elsewhere)."
     },
     %{
       id: "workers/list_live_workers_current_run_per_ticket",
@@ -415,7 +414,8 @@
       cli: ["arb worker list"],
       rest: ["GET /api/workers"],
       status: :partial,
-      divergences: ["D-W-3", "D-W-14", "D-W-23"]
+      divergences: ["D-W-3", "D-W-23"],
+      note: "Rows are `Arbiter.Workers.Serializer.summary/2` on both; the collection key is `workers` (MCP) vs `data` (REST) by convention, with `count` and `workspace_id` beside it on both."
     },
     %{
       id: "workers/show_one_worker_current_run_recent_runs",
@@ -423,8 +423,8 @@
       mcp: ["worker_show"],
       cli: ["arb worker show"],
       rest: ["GET /api/workers/:task_id"],
-      status: :partial,
-      divergences: ["D-W-13"]
+      status: :full,
+      note: "One payload (`Arbiter.Workers.Serializer.show/3`); `lines` bounds the output tail on every surface, MCP's slim view is its `fields` option."
     },
     %{
       id: "workers/run_history_for_a_task_and_fleet_wide",
@@ -432,20 +432,17 @@
       mcp: ["worker_runs"],
       cli: ["arb worker runs"],
       rest: ["GET /api/workers/history"],
-      status: :partial,
-      divergences: ["D-W-15"]
+      status: :full,
+      note: "`Arbiter.Workers.Runs` is the one query and cap (default 20, max 200); task_id is optional, so `kind`/`state`/`outcome`/`before`/`workspace` make it fleet-wide on every surface."
     },
     %{
       id: "workers/get_one_run_by_id_metadata_output_tail",
       title: "Get one run by id (metadata + output tail)",
-      mcp: nil,
-      cli: nil,
+      mcp: ["worker_runs"],
+      cli: ["arb worker runs"],
       rest: ["GET /api/workers/history/:id"],
-      status: {:gap, "P-11"},
-      absent: %{
-        mcp: {:gap, "P-11", "No MCP read of one run by id; extend `worker_runs` with `run_id`."},
-        cli: {:gap, "P-11", "No `arb worker runs --run <id>`."}
-      }
+      status: :full,
+      note: "MCP `worker_runs run_id:`; CLI `arb worker runs --run <id>`."
     },
     %{
       id: "workers/full_durable_transcript_of_a_run",
@@ -453,32 +450,25 @@
       mcp: ["worker_log"],
       cli: ["arb worker log"],
       rest: ["GET /api/workers/:task_id/log"],
-      status: :partial,
-      divergences: ["D-W-4", "D-W-12", "D-W-16"]
+      status: :full,
+      note: "`run_id` must belong to the path task (404 otherwise) on REST and MCP; `tail` on every surface (`arb worker log --run/--tail`)."
     },
     %{
       id: "workers/composed_prompt_a_run_was_spawned_with",
       title: "Composed prompt a run was spawned with",
       mcp: ["worker_prompt"],
-      cli: nil,
+      cli: ["arb worker prompt"],
       rest: ["GET /api/workers/:task_id/prompt"],
-      status: {:gap, "P-11"},
-      divergences: ["D-W-12"],
-      absent: %{
-        cli: {:gap, "P-11", "No `arb worker prompt <id> [--run R]` (the REST route exists)."}
-      }
+      status: :full
     },
     %{
       id: "workers/enumerate_all_runs_incl_reviewgate",
       title: "Enumerate all runs incl. ReviewGate synthetic children + transcript presence",
       mcp: ["run_log_list"],
-      cli: nil,
+      cli: ["arb worker runs"],
       rest: ["GET /api/workers/:task_id/run_log_list"],
-      status: {:gap, "P-11"},
-      divergences: ["D-W-15"],
-      absent: %{
-        cli: {:gap, "P-11", "No `arb worker runs --corpus` (the REST route exists)."}
-      }
+      status: :full,
+      note: "CLI: `arb worker runs <id> --corpus`; one cap (default 200, max 1000) from `Arbiter.Workers.Runs`."
     },
     %{
       id: "workers/transcript_capture_rate_diagnostics",
