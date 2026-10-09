@@ -3078,6 +3078,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                       decision={r.routing_decision}
                     />
 
+                    <.guardrail_decision
+                      :if={is_map(r.guardrail_decision)}
+                      id={"run-guardrail-#{r.id}"}
+                      decision={r.guardrail_decision}
+                    />
+
                     <ArbiterWeb.CoreComponents.Feedback.empty_state :if={lines == []} icon={nil}>
                       {if r.state == :working,
                         do: "Waiting for the first line of output…",
@@ -4937,6 +4943,59 @@ defmodule ArbiterWeb.TaskDetailLive do
       <ul :if={(@decision["dropped"] || []) != []} class="flex flex-col">
         <li :for={d <- @decision["dropped"]} data-role="dropped" class="opacity-75">
           ✕ {routing_account(d)} — {d["reason"]}<span :if={d["detail"]}>: {d["detail"]}</span>
+        </li>
+      </ul>
+    </div>
+    """
+  end
+
+  # bd-atll60 (G13): the guardrail decision a run was spawned under — the
+  # subject and its tier, a digest of the effective profile, what the ticket's
+  # permissions projected or had withheld, and any optional permission dropped
+  # to dispatch (design §5.2).
+  attr :id, :string, required: true
+  attr :decision, :map, required: true
+
+  defp guardrail_decision(assigns) do
+    projection = assigns.decision["projection"] || %{}
+
+    assigns =
+      assign(assigns,
+        granted: projection["granted"] || [],
+        withheld: projection["withheld"] || [],
+        permission_fallback: assigns.decision["permission_fallback"] || []
+      )
+
+    ~H"""
+    <div
+      id={@id}
+      class="px-3 py-2 border-b border-[var(--border-default)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)] flex flex-col gap-1"
+    >
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span class="uppercase tracking-wide text-[var(--text-secondary)]">guardrail</span>
+        <span class="px-1.5 rounded-[var(--radius-field)] border border-[var(--border-default)] text-[var(--text-title)]">
+          {@decision["tier"] || "unguarded"}
+        </span>
+        <span :if={@decision["eligible"] == false} class="text-[var(--text-secondary)]">
+          refused: {@decision["reason"]}
+        </span>
+        <span :if={@decision["role"]}>{@decision["role"]}</span>
+        <span :if={is_map(@decision["subject"])}>
+          · {@decision["subject"]["provider"]}/{@decision["subject"]["model"] || "default"}
+        </span>
+        <span :if={@decision["profile_digest"]}>
+          · profile <code class="text-[var(--text-secondary)]">{@decision["profile_digest"]}</code>
+        </span>
+      </div>
+      <div :if={@granted != []} data-role="granted">granted: {Enum.join(@granted, ", ")}</div>
+      <ul :if={@withheld != []} class="flex flex-col">
+        <li :for={w <- @withheld} data-role="withheld" class="opacity-75">
+          ✕ {w["permission"]} — {w["reason"]}
+        </li>
+      </ul>
+      <ul :if={@permission_fallback != []} class="flex flex-col">
+        <li :for={f <- @permission_fallback} data-role="permission-fallback">
+          dispatched without {f["permission"]} — {f["reason"]}
         </li>
       </ul>
     </div>
