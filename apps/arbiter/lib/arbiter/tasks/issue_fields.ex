@@ -30,7 +30,7 @@ defmodule Arbiter.Tasks.IssueFields do
     * `change_origin` — `Arbiter.Loop.Apply` only, internally;
     * ReviewPatrol / PRPatrol / `pr_opened_*` — their own internal `Ash.update`
       calls and the named transition actions;
-    * `permissions` (bd-54m4vv) — writable here, but only a coordinator or the
+    * `permissions` (bd-54m4vv; `add_permissions` / `remove_permissions` edit it) — writable here, but only a coordinator or the
       operator gets anywhere: the controller / MCP tool hand the caller's
       authority to the `Issue` changes, which refuse a worker or refine token
       (`Arbiter.Guardrails.Permissions.plan/4`). Granting an operator-grant
@@ -49,13 +49,24 @@ defmodule Arbiter.Tasks.IssueFields do
   @create @shared ++
             ~w(workspace_id source_pr skip_upstream_create parent_id tracker_child_policy)
 
-  @update @shared ++ ~w(pr_ref pr_body append_notes)
+  # Not Ash inputs: `Arbiter.Tasks.Permissions.resolve_edits/2` folds them into
+  # `permissions` before the update runs.
+  @permission_edits ~w(add_permissions remove_permissions)
+
+  @update @shared ++ ~w(pr_ref pr_body append_notes) ++ @permission_edits
 
   @always_denied ~w(change_origin)
 
   @doc "Fields a coordinator may set on `POST /api/issues`."
   @spec create_fields() :: [String.t()]
   def create_fields, do: @create
+
+  @doc """
+  The update-only keys that are edits to a field rather than inputs of the
+  `Issue` action (`add_permissions`, `remove_permissions`).
+  """
+  @spec permission_edits() :: [String.t()]
+  def permission_edits, do: @permission_edits
 
   @doc "Fields a coordinator may set on `PATCH /api/issues/:id`."
   @spec update_fields() :: [String.t()]
