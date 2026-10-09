@@ -247,6 +247,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
@@ -254,6 +255,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.Withholding
@@ -366,7 +368,7 @@ defmodule Arbiter.Worker.ReviewGate do
   NOTE: the server restarted while an earlier attempt at this round was running.
   That attempt was cut off, and this worktree may hold its uncommitted work. Run
   `git status` and `git diff` first, keep what is right, finish the rest, then
-  commit and push as usual.
+  commit and push as usual, unless the instructions below say you cannot push.
 
   """
 
@@ -2353,9 +2355,17 @@ defmodule Arbiter.Worker.ReviewGate do
   Both roles spawn under `sandbox.review_backend`, not `sandbox.backend`
   (`SecurityPolicy.for_review_spawn/1`, bd-4rvf98): a podman repo still gets a
   jailed, un-parked review, and a `review_backend` that cannot run is refused.
-  The one exception (bd-7ays3v) is a Claude `:reviewer` whose `provider` is
-  given and whose checkout is a private clone: on a `sandbox.backend: podman`
-  repo it keeps podman and runs in the container.
+  There are two exceptions, each keeping a `sandbox.backend: podman` repo's
+  podman:
+
+    * (bd-7ays3v) a Claude `:reviewer` whose `provider` is given and whose
+      checkout is a private clone runs in the container;
+    * (bd-49l0eo) the `:implementer` — a fix round, its commit-gate resume —
+      runs in the container when its `provider` is given and has a container
+      wrap point (`Sandbox.module/2`) and its worktree is a private clone. It
+      writes in the very tree the main run wrote in, under the backend the
+      operator chose for it, not the weaker host-level one the review backend
+      is. Any other fix round still takes the review backend.
   """
   @spec session_security_policy(
           Workspace.t() | map() | nil,
@@ -2384,11 +2394,36 @@ defmodule Arbiter.Worker.ReviewGate do
         )
 
       # The revise pass writes in the implementer's tree, so it keeps the plain
-      # posture, but not the implement backend: `sandbox.backend: podman` wraps
-      # the task worker only, so a gate pass under it was refused (bd-4rvf98).
+      # posture. Its backend is the implement backend when it can run in the
+      # implementer's private clone (bd-49l0eo); otherwise the review backend,
+      # as `sandbox.backend: podman` wraps a private clone only and a gate pass
+      # under it elsewhere was refused (bd-4rvf98).
       :implementer ->
-        SecurityPolicy.for_review_spawn(policy)
+        if fix_round_container?(policy, state, provider),
+          do: policy,
+          else: SecurityPolicy.for_review_spawn(policy)
     end
+  end
+
+  # bd-49l0eo: whether a fix round keeps the workspace's podman backend: `policy`
+  # is podman, the implementer's worktree is the private clone a container is
+  # handed (`ContainerSpawn.prepare/1` refuses anything else), and the provider
+  # has a container wrap point.
+  defp fix_round_container?(policy, state, provider) do
+    ContainerSpawn.podman?(policy) and not is_nil(provider) and
+      PrivateClone.clone?(Map.get(state, :worktree_path)) and
+      match?({:ok, _}, Sandbox.module(policy, provider))
+  end
+
+  # The same question for the prompts, which are built before a provider is
+  # resolved: does this round's implementer run in a container? An unsupported
+  # provider on a podman repo is held before it ever spawns, so the answer
+  # does not depend on it.
+  defp container_fix_round?(state) do
+    ws = load_workspace(Map.get(state, :workspace_id))
+    policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
+
+    ContainerSpawn.podman?(policy) and PrivateClone.clone?(Map.get(state, :worktree_path))
   end
 
   # The head an APPROVE stamps and records coverage for. With a round checkout
@@ -3808,7 +3843,8 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp commit_nudge_prompt(state) do
+  @doc false
+  def commit_nudge_prompt(state) do
     """
     bd-2eyf9y commit gate: your round #{state.round} revise pass for task #{state.task_id} \
     ended with the worktree on branch `#{state.branch}` left DIRTY (`git status --porcelain` \
@@ -3820,13 +3856,25 @@ defmodule Arbiter.Worker.ReviewGate do
       1. `git status` to see what is uncommitted.
       2. `git add -A`
       3. `git commit -m "<a short message describing the work>"`
-      4. `git push -u origin #{state.branch}` — REQUIRED. The re-review and the
-         merge request both read the PUSHED head; a commit that stays local is
-         reviewed but never merged (bd-2jkrqu).
+      4. #{nudge_push_step(state)}
 
     Do not redo the work — just commit what is already on disk. If a hunk looks
     half-finished or wrong, finish it first, then commit it.
     """
+  end
+
+  # bd-49l0eo: a containerised implementer cannot push; the push gate runs on the
+  # host before the re-review.
+  defp nudge_push_step(state) do
+    if container_fix_round?(state) do
+      "Do NOT push. " <> String.replace(PromptBuilder.no_push_access(), "\n", "\n         ")
+    else
+      ~S"""
+      `git push -u origin #{state.branch}` — REQUIRED. The re-review and the
+         merge request both read the PUSHED head; a commit that stays local is
+         reviewed but never merged (bd-2jkrqu).
+      """
+    end
   end
 
   # bd-2eyf9y: all three escalations report the same shape as
@@ -6081,7 +6129,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def implementer_mcp_opts(state, role, _adapter, _claims), do: arb_token_opts(state, role)
 
-  defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
+  @doc false
+  def build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
     # (`ClaudeSession.start/1` forwards it as `:composed_prompt` →
@@ -6113,7 +6162,7 @@ defmodule Arbiter.Worker.ReviewGate do
     {:ok, base ++ [provider: prov_str]}
   end
 
-  defp build_session_opts(state, pid, role, prompt, nil, revision) do
+  def build_session_opts(state, pid, role, prompt, nil, revision) do
     base = [owner: pid, worktree_path: session_cwd(state, role)]
 
     case load_workspace(state.workspace_id) do
@@ -6207,7 +6256,8 @@ defmodule Arbiter.Worker.ReviewGate do
     git_plan =
       GitCredential.plan(ws, Map.get(state, :repo),
         role: role,
-        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+        host_pushes?: ContainerSpawn.podman?(policy)
       )
 
     git_credential =
@@ -6272,7 +6322,7 @@ defmodule Arbiter.Worker.ReviewGate do
            model: session_model,
            projection: projection,
            git_credential: git_credential
-         ] ++ sandbox_session_opts(policy, ws, role, state)}
+         ] ++ sandbox_session_opts(policy, ws, role, state, agent_opts)}
     else
       {:error, reason} -> {:error, reason}
     end
@@ -6280,17 +6330,21 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # bd-7ays3v: a reviewer that runs in the container hands its argv to
   # `ClaudeSession` as a wrapped spawn (`sandbox_wrap: true`), and carries the
-  # policy there so it is wrapped. Only the reviewer: a fix round's implementer
-  # stays on `sandbox.review_backend`, and no other policy changes at all.
-  defp sandbox_wrap_opts(policy, :reviewer),
+  # policy there so it is wrapped. bd-49l0eo: so does a fix round's implementer
+  # that kept podman (`session_security_policy/4`). For a policy that is not
+  # podman, which is every other spawn, nothing changes at all.
+  defp sandbox_wrap_opts(policy, _role),
     do: if(ContainerSpawn.podman?(policy), do: [sandbox_wrap: true], else: [])
 
-  defp sandbox_wrap_opts(_policy, _role), do: []
-
-  defp sandbox_session_opts(policy, ws, :reviewer, state),
-    do: ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo))
-
-  defp sandbox_session_opts(_policy, _ws, _role, _state), do: []
+  # The container's `arb` needs the implementer's worker token as ARB_TOKEN
+  # (`ContainerSpawn.prepare/1`); a reviewer has none.
+  defp sandbox_session_opts(policy, ws, role, state, agent_opts) do
+    ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo)) ++
+      if(ContainerSpawn.podman?(policy) and role == :implementer,
+        do: Keyword.take(agent_opts, [:arb_token]),
+        else: []
+      )
+  end
 
   # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
   # rotation has pinned to a specific provider uses THAT adapter, bypassing
@@ -6369,7 +6423,7 @@ defmodule Arbiter.Worker.ReviewGate do
          :implementer,
          {provider, _fallback_reason, _decision}
        ) do
-    policy = session_security_policy(ws, state, :implementer)
+    policy = session_security_policy(ws, state, :implementer, provider)
 
     case Agents.strict_eligible_provider(provider, policy, [], explicit: true) do
       {:ok, _eligible} ->
@@ -7023,7 +7077,7 @@ defmodule Arbiter.Worker.ReviewGate do
     without a file change, and why — your reply here is forwarded back to the
     reviewer as your side of the record.
 
-    #{EvidenceIntegrity.worker_block()}
+    #{EvidenceIntegrity.worker_block()}#{revise_container_note(state)}
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
 
         git diff #{state.target_branch}...HEAD
@@ -7039,6 +7093,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
         arb done
     """
+  end
+
+  # bd-49l0eo: a fix round in a container commits; the push gate pushes for it.
+  defp revise_container_note(state) do
+    if container_fix_round?(state), do: "\n" <> PromptBuilder.no_push_access(), else: ""
   end
 
   defp ci_flake_guidance(%{ci_fix_pending: %{}}) do
