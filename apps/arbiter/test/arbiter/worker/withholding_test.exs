@@ -82,6 +82,46 @@ defmodule Arbiter.Worker.WithholdingTest do
     end
   end
 
+  describe "for_spawn/5" do
+    setup do
+      Application.put_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged},
+        %{match: %{provider: "antigravity"}, tier: :probation}
+      ])
+
+      on_exit(fn -> Application.delete_env(:arbiter, :guardrail_subject_rules) end)
+    end
+
+    test "resolves the subject's tier: a privileged subject gets prod_read, a probation one does not" do
+      {ws, issue} = setup_ticket(["prod_read", "network:api.example.com"], coordinator())
+
+      claude = Withholding.for_spawn(issue.id, ws, :claude, "claude-opus-4", role: :implementer)
+      assert claude.env == [{"RO_URL", "prod_ro_url"}]
+
+      agy = Withholding.for_spawn(issue.id, ws, :gemini, "gemini-3", role: :implementer)
+      # no rule matches "gemini" -> quarantine: nothing at all
+      assert agy.env == [] and agy.hosts == []
+    end
+
+    test "a synthetic id resolves the base ticket; a reviewer gets nothing" do
+      {ws, issue} = setup_ticket(["network:api.example.com"], coordinator())
+      p = Withholding.for_spawn(issue.id <> "#review", ws, :claude, nil, role: :reviewer)
+      assert p.guarded? and p.hosts == []
+    end
+
+    test "a ticket that cannot be loaded fails closed when guarded" do
+      {ws, _} = setup_ticket([], coordinator())
+      p = Withholding.for_spawn("no-such-ticket", ws, :claude, nil, role: :implementer)
+      assert p.guarded? and p.hosts == [] and p.env == []
+    end
+
+    test "with no rules configured it is unguarded" do
+      Application.delete_env(:arbiter, :guardrail_subject_rules)
+      {ws, issue} = setup_ticket(["prod_read"], coordinator())
+      refute Withholding.for_spawn(issue.id, ws, :claude, nil, role: :implementer).guarded?
+    end
+  end
+
   describe "grants/2" do
     test "a guarded spawn gets exactly what was projected, not a live DB read" do
       {_ws, issue} = setup_ticket(["network:later.example.com"], coordinator())

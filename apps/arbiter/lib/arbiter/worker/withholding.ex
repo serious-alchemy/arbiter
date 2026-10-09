@@ -19,6 +19,7 @@ defmodule Arbiter.Worker.Withholding do
   prompt's PERMISSIONS block (`Arbiter.Worker.PromptBuilder`).
   """
 
+  alias Arbiter.Guardrails
   alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Permissions, as: Vocabulary
   alias Arbiter.Guardrails.Profile
@@ -43,6 +44,45 @@ defmodule Arbiter.Worker.Withholding do
       role: role
     )
   end
+
+  @doc """
+  The projection for a spawn of `task_id` (a real or ReviewGate-synthetic id)
+  running `provider`/`model` in `workspace`: resolves the subject's effective
+  profile (`Arbiter.Guardrails.effective/4`) and projects the ticket's in-force
+  permissions under it. Options: `:repo`, `:role` (default `:implementer`).
+
+  Fails **closed**: with guardrails on, a ticket that cannot be loaded gets
+  `Projection.sealed/1`, never an unguarded spawn. With no subject rule
+  configured (`profile == nil`) it is `Projection.unguarded/0` and the spawn is
+  exactly what it was before G14.
+  """
+  @spec for_spawn(String.t() | nil, map() | nil, atom() | String.t(), String.t() | nil, keyword()) ::
+          Projection.t()
+  def for_spawn(task_id, workspace, provider, model, opts \\ []) do
+    role = Keyword.get(opts, :role, :implementer)
+
+    profile =
+      Guardrails.effective(
+        Guardrails.subject(provider, model),
+        workspace,
+        Keyword.get(opts, :repo)
+      )
+
+    case {profile, load_issue(task_id)} do
+      {nil, _} -> Projection.unguarded()
+      {%Profile{}, %Issue{} = issue} -> projection(issue, workspace, profile, role)
+      {%Profile{}, nil} -> Projection.sealed(role: role)
+    end
+  end
+
+  defp load_issue(task_id) when is_binary(task_id) and task_id != "" do
+    case Ash.get(Issue, ReviewGate.base_task_id(task_id)) do
+      {:ok, %Issue{} = issue} -> issue
+      _ -> nil
+    end
+  end
+
+  defp load_issue(_), do: nil
 
   @doc """
   The `Arbiter.Worker.Egress` grants loader (`fn task_id -> [\"host:port\"]`)
