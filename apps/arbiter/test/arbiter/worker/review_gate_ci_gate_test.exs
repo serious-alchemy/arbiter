@@ -302,6 +302,50 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # bd-9m6wl0 (bd-54m4vv / PR #579): the gate's own rerun after a no-diff fix round
+    # was refused because the head's run was still in progress (`mix audit`
+    # pending). That refusal was taken as "cannot rerun -> real failure" and parked
+    # the ticket. It now waits for the run to finish and reruns then.
+    test "a rerun refused while the run is still in progress waits and retries instead of parking",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-inflight")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      in_flight =
+        {:error,
+         %Arbiter.Mergers.Github.Error{
+           kind: :not_found,
+           status: nil,
+           message:
+             "cannot re-run CI: no failed workflow run on head SHA #{rig.head} (a run is still running)",
+           raw: nil
+         }}
+
+      # 1st rerun ok, 2nd (the gate's own after the no-diff round) refused while
+      # in flight, 3rd ok.
+      StubMerger.queue_rerun_results([
+        {:ok, %{mode: :auto, run_id: 1, workflow: "CI"}},
+        in_flight,
+        {:ok, %{mode: :auto, run_id: 2, workflow: "CI"}}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :failed, :running, :success])
+
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 4, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      assert length(StubMerger.ci_reruns()) == 3
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      stop_gate(gate)
+    end
+
     # bd-cbbgot (bd-ckx0uf / PR #559): main's CI was red, so the branch's CI stayed
     # red no matter what the worker did. No reviewer had ever read this head, and
     # the fix round had nothing to change — parking "fix round produced no

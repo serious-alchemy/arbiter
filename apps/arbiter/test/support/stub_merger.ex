@@ -263,14 +263,28 @@ defmodule Arbiter.Test.StubMerger do
     Agent.get_and_update(@name, fn s ->
       s = Map.update(s, :ci_reruns, [{ref, opts}], &[{ref, opts} | &1])
 
-      result =
-        case Map.get(s, :rerun_result, :default) do
-          :default -> {:ok, %{mode: Map.get(opts, :mode) || :auto, run_id: 1, workflow: "CI"}}
-          other -> other
+      {result, s} =
+        case Map.get(s, :rerun_queue, []) do
+          [next | rest] -> {next, Map.put(s, :rerun_queue, rest)}
+          [] -> {default_rerun_result(s, opts), s}
         end
 
       {result, s}
     end)
+  end
+
+  defp default_rerun_result(s, opts) do
+    case Map.get(s, :rerun_result, :default) do
+      :default -> {:ok, %{mode: Map.get(opts, :mode) || :auto, run_id: 1, workflow: "CI"}}
+      other -> other
+    end
+  end
+
+  @doc "Queue one-shot `rerun_ci/2` results, consumed in order before `set_rerun_result/1`."
+  def queue_rerun_results(results) when is_list(results) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :rerun_queue, results) end)
+    :ok
   end
 
   @impl true
