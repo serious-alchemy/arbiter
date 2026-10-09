@@ -575,6 +575,10 @@ defmodule Arbiter.Worker.Dispatch do
       # briefing it claimed to fall back to).
       resume_opts =
         if provider == session_provider and session_history_present?(provider, session_id) do
+          Logger.info(
+            "Dispatch.resume_session: resuming #{task.id} in session mode (--resume #{session_id})"
+          )
+
           Keyword.put(base_opts, :resume_session_id, session_id)
         else
           require Logger
@@ -586,7 +590,7 @@ defmodule Arbiter.Worker.Dispatch do
               Logger.info(
                 "Dispatch.resume_session: dropping session_id for #{task.id} — " <>
                   "#{no_resume_reason(provider, session_provider, session_id)}; " <>
-                  "degrading to a git-derived resume briefing instead"
+                  "resuming #{task.id} in briefing mode (git-derived resume briefing)"
               )
 
               Keyword.put(base_opts, :resume_context, context)
