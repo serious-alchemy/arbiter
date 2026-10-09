@@ -202,6 +202,10 @@ defmodule ArbiterCli.Cmd.Update do
                        AcceptanceFlags.switches() ++
                        ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
+  @doc "Every edit switch `arb ticket update` takes (read by the field-exposure guard test)."
+  @spec edit_switches() :: keyword()
+  def edit_switches, do: @all_edit_switches
+
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
   def run(argv) do

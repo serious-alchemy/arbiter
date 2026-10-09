@@ -213,6 +213,10 @@ defmodule ArbiterCli.Cmd.Create do
                   AcceptanceFlags.switches() ++
                   ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
 
+  @doc "Every switch `arb ticket create` takes (read by the field-exposure guard test)."
+  @spec switches() :: keyword()
+  def switches, do: @all_switches
+
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
