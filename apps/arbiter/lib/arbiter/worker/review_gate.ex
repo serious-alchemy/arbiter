@@ -1037,6 +1037,11 @@ defmodule Arbiter.Worker.ReviewGate do
       #   1. prove which commit the reviewer saw (surfaces in the prompt and thread)
       #   2. detect whether the revise implementer actually committed new changes
       head_sha: nil,
+      # bd-cbbgot: the `head_sha` a reviewer pass was last LAUNCHED on in this
+      # gate. nil until the first reviewer starts. A fix round that changes
+      # nothing parks only when it left the head a reviewer already read;
+      # anything else is a head no reviewer has judged (`unreviewed_head?/2`).
+      reviewed_sha: nil,
       # bd-ased52: the merge-base (fork point) between the branch and its target,
       # resolved once at reviewer spawn time after the branch is brought current.
       # The reviewer (and the escalation diff) diff `base_sha..HEAD` so commits
@@ -1689,7 +1694,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # burn the round budget on a head already judged a no-op.
       state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
       state = %{state | ci_fix_pending: %{state.ci_fix_pending | checks: checks}}
-      {:done, escalate_no_changes(state)}
+
+      if unreviewed_head?(state, state.head_sha) do
+        # bd-cbbgot: CI stays red on a head no reviewer has read (main's own CI
+        # may be what is red). Parking leaves a coordinator to hand-merge an
+        # unreviewed head, so a reviewer reads it, told CI cannot vouch for it.
+        {:proceed, ci_review_unreviewed_red_head(state, wait.sha)}
+      else
+        {:done, escalate_no_changes(state)}
+      end
     else
       ci_fix(state, wait, checks, not is_nil(wait.rerun))
     end
@@ -1697,6 +1710,21 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_act(state, _wait, {:fallback, reason}, _result),
     do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  defp ci_review_unreviewed_red_head(state, sha) do
+    jobs =
+      state.ci_fix_pending.checks
+      |> Enum.map(&(&1 |> Map.get(:name) |> to_string()))
+      |> Enum.uniq()
+      |> Enum.join(", ")
+
+    state
+    |> ci_fall_back(
+      "CI stayed red on #{sha} after a fix round made no change and the gate reran it" <>
+        if(jobs == "", do: ".", else: " (failing jobs: #{jobs}).")
+    )
+    |> Map.merge(%{ci_fix_pending: nil, ci_noop_reruns: 0})
+  end
 
   defp post_noop_rerun?(%{ci_fix_pending: %{}, ci_noop_reruns: n}) when n > 0, do: true
   defp post_noop_rerun?(_state), do: false
@@ -3295,6 +3323,11 @@ defmodule Arbiter.Worker.ReviewGate do
     # simply have met a flake. Rerun CI (bounded) and re-read it before parking.
     {outcome, commit_gate} = ci_noop_outcome({outcome, commit_gate}, state)
 
+    # bd-cbbgot: a no-diff round on a head no reviewer has read is not a stalled
+    # worker — the fix was already pushed. Review that head instead of parking.
+    {outcome, commit_gate} =
+      unreviewed_head_outcome({outcome, commit_gate}, state, new_head_sha)
+
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
     # real re-review that entry is wrong AND actively harmful — the implementer
@@ -3337,6 +3370,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
       :escalate_uncommitted ->
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
+
+      :review_unreviewed_head ->
+        review_unreviewed_head(state, new_head_sha)
 
       :escalate_no_changes ->
         escalate_or_rerun_ci(state, new_head_sha)
@@ -3387,6 +3423,57 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp ci_noop_outcome(outcome, _state), do: outcome
+
+  # bd-cbbgot (bd-ckx0uf / PR #559): the plain "nothing changed" park, unless the
+  # head the round left was never read by a reviewer. The CI-triggered shape is
+  # left to `ci_noop_outcome/2` (rerun first); `ci_act/4` makes the same call once
+  # that rerun stays red. Not for an approval-gap round, which has its own rule.
+  defp unreviewed_head_outcome({:escalate_no_changes, :escalated_no_changes}, state, new_head_sha) do
+    if not approval_gap_pending?(state) and unreviewed_head?(state, new_head_sha),
+      do: {:review_unreviewed_head, :rereviewed_unreviewed_head},
+      else: {:escalate_no_changes, :escalated_no_changes}
+  end
+
+  defp unreviewed_head_outcome(outcome, _state, _new_head_sha), do: outcome
+
+  defp review_unreviewed_head(state, new_head_sha) do
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round}: no diff, head not yet reviewed",
+        "The fix round changed nothing, but #{new_head_sha} has not been read by any " <>
+          "reviewer, so there is no verdict on it to stand on. It goes to a reviewer " <>
+          "now. If that review requests changes and the next fix round again changes " <>
+          "nothing, the ticket parks."
+      )
+
+    dispatch_next_review(%{
+      state
+      | head_sha: new_head_sha,
+        ci_fix_pending: nil,
+        ci_noop_reruns: 0
+    })
+  end
+
+  # True when `head` is known and no reviewer pass was launched on it in this
+  # gate, nor did a past APPROVE stamp it on the ticket (`last_reviewed_sha`,
+  # full SHA; `head` may be abbreviated). An unknowable head keeps the old park.
+  defp unreviewed_head?(_state, head) when not is_binary(head) or head == "", do: false
+
+  defp unreviewed_head?(%{reviewed_sha: head}, head), do: false
+
+  defp unreviewed_head?(state, head) do
+    case Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      {:ok, %{last_reviewed_sha: sha}} when is_binary(sha) and sha != "" ->
+        not String.starts_with?(sha, head)
+
+      _ ->
+        true
+    end
+  rescue
+    _ -> true
+  end
 
   defp escalate_or_rerun_ci(state, new_head_sha) do
     if ci_noop_rerun_allowed?(state),
@@ -5666,7 +5753,8 @@ defmodule Arbiter.Worker.ReviewGate do
             lines: [],
             denial_pending: false,
             current_prompt: prompt,
-            timeout_ms: timeout_ms
+            timeout_ms: timeout_ms,
+            reviewed_sha: if(role == :reviewer, do: state.head_sha, else: state.reviewed_sha)
         }
 
         {:ok, mark_pass(launched, role, id)}
