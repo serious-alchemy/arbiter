@@ -1725,23 +1725,27 @@ defmodule Arbiter.Worker.Dispatch do
   # recorded pick when it is for this provider, else the tier through the
   # provider's own map (what `floor_model/3` mirrors).
   defp guardrail_model(task, workspace, provider, opts) do
-    decision = Keyword.get(opts, :routing_decision) || %{}
-
     cond do
-      explicit_model?(opts) ->
-        Keyword.get(opts, :model)
-
-      is_binary(decision["model"]) and decision["model"] != "" and
-          decision["agent_type"] == to_string(provider) ->
-        decision["model"]
-
-      true ->
-        routed = Routing.decide(task, workspace, opts)
-        agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
-        floor_model(routed, provider, agent_config)
+      explicit_model?(opts) -> Keyword.get(opts, :model)
+      model = routed_decision_model(opts, provider) -> model
+      true -> tier_model(task, workspace, provider, opts)
     end
   rescue
     _ -> nil
+  end
+
+  defp routed_decision_model(opts, provider) do
+    decision = Keyword.get(opts, :routing_decision) || %{}
+
+    if is_binary(decision["model"]) and decision["model"] != "" and
+         decision["agent_type"] == to_string(provider),
+       do: decision["model"]
+  end
+
+  defp tier_model(task, workspace, provider, opts) do
+    routed = Routing.decide(task, workspace, opts)
+    agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
+    floor_model(routed, provider, agent_config)
   end
 
   # The run's `guardrail_decision` (design §5.2). `nil` — recorded as nothing —
@@ -1807,28 +1811,26 @@ defmodule Arbiter.Worker.Dispatch do
       caller_override(opts) != nil and
         Keyword.get(opts, :routed_agent_type) != caller_override(opts)
 
-    cond do
-      explicit? or guardrail_role(opts) == :reviewer ->
-        refusal
+    if explicit? or guardrail_role(opts) == :reviewer do
+      refusal
+    else
+      case guardrail_alternatives(task, workspace, opts) do
+        {:held, hold_provider, hold_phrase} ->
+          hold_for_guardrail(task, opts, hold_provider, hold_phrase, refusal)
 
-      true ->
-        case guardrail_alternatives(task, workspace, opts) do
-          {:held, hold_provider, hold_phrase} ->
-            hold_for_guardrail(task, opts, hold_provider, hold_phrase, refusal)
+        {:none, detail} ->
+          detail = detail || phrase
 
-          {:none, detail} ->
-            detail = detail || phrase
+          CoordinatorNotifier.no_eligible_model(
+            %{task_id: task.id, workspace_id: task.workspace_id},
+            detail
+          )
 
-            CoordinatorNotifier.no_eligible_model(
-              %{task_id: task.id, workspace_id: task.workspace_id},
-              detail
-            )
+          {:error, {:guardrail_ineligible, provider, Gate.phrase(detail)}}
 
-            {:error, {:guardrail_ineligible, provider, Gate.phrase(detail)}}
-
-          :stale ->
-            refusal
-        end
+        :stale ->
+          refusal
+      end
     end
   end
 

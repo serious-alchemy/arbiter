@@ -221,11 +221,11 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.ReviewerRouting
-  alias Arbiter.Guardrails.Gate
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
