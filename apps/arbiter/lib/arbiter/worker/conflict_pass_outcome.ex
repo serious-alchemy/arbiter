@@ -18,13 +18,19 @@ defmodule Arbiter.Worker.ConflictPassOutcome do
     * the PR branch's remote head (`Worktree.remote_head/2`) still where it was
       when the pass started (`meta[:conflict_start_head]`) → unresolved: nothing
       was pushed;
+    * the PR head moved, but the pushed head still conflicts with the target
+      branch's CURRENT tip (`merge-tree` against `origin/<target>` freshly fetched
+      by the host, bd-cccm1k) → unresolved: a pass that rebased onto a stale base
+      moves the head and still leaves the PR `CONFLICTING`;
     * otherwise → resolved.
 
   It fails open — `:resolved`, the pre-bd-4olwyg behaviour — when it lacks the
   facts to judge: no worktree or branch in the pass's meta, no recorded start
   head, or a remote it cannot read. A false "unresolved" costs a bounded retry
   and a page; a false "resolved" costs what bd-4olwyg cost, so only a verdict
-  git can actually back is allowed to fail a run.
+  git can actually back is allowed to fail a run. That includes the target check:
+  no `target_branch`/`repo_path` in the meta, a target that cannot be fetched, or a
+  merge git cannot evaluate all read as resolved.
 
   `settle_worktree/1` aborts whatever operation the pass left stopped, so the
   worktree is back on its branch at its pre-pass tip — the state the next
@@ -47,7 +53,7 @@ defmodule Arbiter.Worker.ConflictPassOutcome do
 
     if is_binary(path) and is_binary(branch) do
       start_head = Map.get(meta, :conflict_start_head)
-      judge(Worktree.in_progress_operation(path), path, branch, start_head)
+      judge(Worktree.in_progress_operation(path), path, branch, start_head, meta)
     else
       :resolved
     end
@@ -70,7 +76,7 @@ defmodule Arbiter.Worker.ConflictPassOutcome do
 
   def settle_worktree(_meta), do: {:ok, nil}
 
-  defp judge(op, path, branch, start_head) when op in [:rebase, :merge] do
+  defp judge(op, path, branch, start_head, _meta) when op in [:rebase, :merge] do
     files = Worktree.unmerged_files(path)
 
     {:unresolved,
@@ -78,19 +84,41 @@ defmodule Arbiter.Worker.ConflictPassOutcome do
        unmerged_clause(files) <> "; " <> pushed_clause(path, branch, start_head)}
   end
 
-  defp judge(nil, path, branch, start_head) when is_binary(start_head) do
+  defp judge(nil, path, branch, start_head, meta) when is_binary(start_head) do
     case Worktree.remote_head(path, branch) do
       ^start_head ->
         {:unresolved,
          "conflict pass ended without pushing: the PR head of #{branch} is still " <>
            short(start_head) <> ", so the conflict is unresolved"}
 
-      _moved_or_unreadable ->
+      nil ->
         :resolved
+
+      pushed ->
+        merges_with_target(path, branch, pushed, meta)
     end
   end
 
-  defp judge(nil, _path, _branch, _start_head), do: :resolved
+  defp judge(nil, _path, _branch, _start_head, _meta), do: :resolved
+
+  # bd-cccm1k: the head moved, so something was pushed — but a push is not a
+  # resolution unless the result merges with where the target is NOW. The target
+  # tip is the forge's, fetched by the host into the main repo (`repo_path`); the
+  # pass's own `origin/<target>` is exactly the ref that can be stale.
+  defp merges_with_target(path, branch, pushed, meta) do
+    target = Map.get(meta, :target_branch)
+    repo_path = Map.get(meta, :repo_path)
+
+    with true <- is_binary(target) and is_binary(repo_path),
+         tip when is_binary(tip) <- Worktree.fresh_origin_tip(repo_path, target),
+         {:conflict, files} <- Worktree.merge_conflict(path, tip, pushed) do
+      {:unresolved,
+       "conflict pass pushed #{short(pushed)} to #{branch} but it still conflicts with " <>
+         "#{target} at #{short(tip)}" <> unmerged_clause(files)}
+    else
+      _clean_or_unjudgeable -> :resolved
+    end
+  end
 
   defp unmerged_clause([]), do: ""
 

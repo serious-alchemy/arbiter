@@ -160,7 +160,8 @@ defmodule Arbiter.Worker.PrivateClone do
   `git worktree add <path> <branch>` does). Never cuts a new branch; a name
   the main repo does not know is an error. With `base_branch`, the main
   repo's current `origin/<base_branch>` is copied in as well (no fetch, as
-  `Worktree.attach/2` does none).
+  `Worktree.attach/2` does none). A clone that already exists gets the same refresh,
+  so a reused one never keeps the `origin/<base_branch>` it was cut with (bd-cccm1k).
   """
   @spec attach(path(), String.t() | nil, String.t() | nil, [String.t()] | nil | false) ::
           {:ok, path()} | {:error, term()}
@@ -171,9 +172,28 @@ defmodule Arbiter.Worker.PrivateClone do
 
   def attach(repo_path, branch, base_branch, seed_paths)
       when is_binary(repo_path) and is_binary(branch) do
-    open(branch, fn path ->
-      provision_attached(repo_path, path, branch, base_branch, seed_paths)
-    end)
+    with {:ok, path} <-
+           open(branch, fn path ->
+             provision_attached(repo_path, path, branch, base_branch, seed_paths)
+           end),
+         :ok <- refresh_reused_base(repo_path, path, base_branch) do
+      {:ok, path}
+    end
+  end
+
+  # bd-cccm1k: a clone that already existed (the implementer's, synced back from a
+  # remote node, or an earlier pass's) keeps the `origin/<base>` it was cut with,
+  # however far the target has moved since, so a pass rebasing onto it lands on a
+  # stale base and pushes a branch that still conflicts. A fresh clone is cut with
+  # the main repo's current one (`provision_attached/5`); copy it into a reused one
+  # the same way. A main repo with no `origin/<base>` leaves the clone as it was,
+  # as it does for a fresh one.
+  defp refresh_reused_base(_repo, _path, nil), do: :ok
+
+  defp refresh_reused_base(repo, path, base) do
+    if rev(repo, "refs/remotes/origin/" <> base),
+      do: refresh_base(path, base),
+      else: :ok
   end
 
   @review_branch "arbiter/review"
