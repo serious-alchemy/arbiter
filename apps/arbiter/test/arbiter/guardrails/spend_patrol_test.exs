@@ -173,6 +173,32 @@ defmodule Arbiter.Guardrails.SpendPatrolTest do
     end
   end
 
+  describe "the production decision" do
+    setup do
+      Application.put_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged},
+        %{match: %{provider: "codex"}, tier: :quarantine}
+      ])
+
+      on_exit(fn -> Application.delete_env(:arbiter, :guardrail_subject_rules) end)
+    end
+
+    test "a quarantine decision built by Gate.decision/5 is enforced as built", %{ws: ws} do
+      issue = Ash.create!(Arbiter.Tasks.Issue, %{title: "d1", workspace_id: ws.id, difficulty: 1})
+      decision = Arbiter.Guardrails.Gate.decision(issue, ws, :codex, "gpt-5")
+      assert decision["tier"] == "quarantine"
+
+      {pid, task_id} = live_worker(ws, decision)
+      ledger!(ws, task_id, %{provider: "codex", tokens_in: 7_000_000, tokens_out: 700_000})
+
+      assert [%{action: :parked, cap: :tokens, tier: :quarantine}] =
+               SpendPatrol.sweep(now: later(60))
+
+      assert %{state: :finished, meta: %{stop_reason: %{category: :spend_cap}}} =
+               Worker.state(pid)
+    end
+  end
+
   describe "sweep/1 — what it leaves alone" do
     test "a run with no guardrail decision", %{ws: ws} do
       {pid, _} = live_worker(ws, nil)
