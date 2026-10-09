@@ -5,9 +5,9 @@ defmodule Arbiter.Tasks.Permissions do
   `Arbiter.Guardrails.Permissions`.
 
   `issues.permissions` is what the ticket *carries*. Whether each entry is **in
-  force** is read off `permission_events`: a permission whose latest event is
-  `requested` is **pending** — a coordinator declared something whose `grant_by`
-  is `operator` (§5.3 (2)), or a worker asked for it (§5.6) — and gives no
+  force** is read off `permission_events`: a permission whose latest event
+  (`suggested` doesn't count) is `requested` is **pending** — a coordinator
+  declared something whose `grant_by` is `operator` (§5.3 (2)), or a worker asked for it (§5.6) — and gives no
   reach until it is granted. `in_force/1` is what dispatch and routing (G13,
   G14) read; `pending/1` is what the card hold `{:guardrail, "awaiting
   operator grant: …"}` names.
@@ -29,6 +29,7 @@ defmodule Arbiter.Tasks.Permissions do
   alias Arbiter.Guardrails.Authority
   alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Permissions, as: Vocabulary
+  alias Arbiter.Repo
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.PermissionEvent
   alias Arbiter.Tasks.Workspace
@@ -53,20 +54,27 @@ defmodule Arbiter.Tasks.Permissions do
     |> Ash.read!()
   end
 
-  @doc "Permissions whose latest event is `requested`: carried, but not yet granted."
+  @doc """
+  Permissions that were `requested` and have no later `granted` / `denied` /
+  `revoked`: carried, but not yet granted. `suggested` events are ignored — a
+  suggestion changes nothing (§5.3 (3)).
+  """
   @spec pending(Issue.t()) :: [String.t()]
-  def pending(%Issue{} = issue), do: for({p, :requested} <- latest(issue), do: p) |> Enum.sort()
+  def pending(%Issue{} = issue), do: issue |> events() |> pending_from() |> Enum.sort()
+
+  defp pending_from(events) do
+    events
+    |> Enum.reject(&(&1.event == :suggested))
+    |> Enum.reduce(%{}, fn e, acc -> Map.put(acc, e.permission, e.event) end)
+    |> Enum.flat_map(fn
+      {p, :requested} -> [p]
+      _ -> []
+    end)
+  end
 
   @doc "The ticket's permissions that are in force: carried and not pending."
   @spec in_force(Issue.t()) :: [String.t()]
   def in_force(%Issue{permissions: permissions} = issue), do: permissions -- pending(issue)
-
-  defp latest(issue) do
-    issue
-    |> events()
-    |> Enum.reduce(%{}, fn e, acc -> Map.put(acc, e.permission, e.event) end)
-    |> Map.to_list()
-  end
 
   # ---- writing events ------------------------------------------------------------
 
@@ -95,13 +103,23 @@ defmodule Arbiter.Tasks.Permissions do
 
   @doc """
   Record that `permission` is suggested for `issue` (source `refine`). Changes
-  nothing else: it is not carried by the ticket and gives no reach.
+  nothing else: it is not carried by the ticket and gives no reach. Refused
+  when the ticket already carries the permission or has it pending.
   """
   @spec suggest(Issue.t(), String.t(), keyword()) :: {:ok, Issue.t()} | {:error, String.t()}
   def suggest(%Issue{} = issue, permission, opts) do
-    with {:ok, %{canonical: canonical}} <- Vocabulary.parse(permission) do
+    with {:ok, %{canonical: canonical}} <- Vocabulary.parse(permission),
+         :ok <- suggestible(issue, canonical) do
       record!([%{permission: canonical, event: :suggested}], issue.id, :refine, opts)
       {:ok, issue}
+    end
+  end
+
+  defp suggestible(issue, canonical) do
+    if canonical in (issue.permissions || []) or canonical in pending(issue) do
+      {:error, "#{canonical} is already carried or pending on #{issue.id}: nothing to suggest"}
+    else
+      :ok
     end
   end
 
@@ -131,26 +149,34 @@ defmodule Arbiter.Tasks.Permissions do
 
     with {:ok, %{canonical: canonical}} <- Vocabulary.parse(permission),
          :ok <- Vocabulary.authorize_decision(canonical, authority, block),
-         :ok <- decidable(issue, canonical),
-         {:ok, updated} <-
-           issue
-           |> Ash.Changeset.for_update(:set_permissions, %{
-             permissions: update_fun.(issue.permissions, canonical)
-           })
-           |> Ash.update()
-           |> wrap_error() do
-      record!([%{permission: canonical, event: event}], issue.id, :system, opts)
-      {:ok, updated}
+         :ok <- decidable(issue, canonical) do
+      # The permission change and its audit event commit together or not at all.
+      Repo.transaction(fn ->
+        with {:ok, updated} <-
+               issue
+               |> Ash.Changeset.for_update(:set_permissions, %{
+                 permissions: update_fun.(issue.permissions, canonical)
+               })
+               |> Ash.update()
+               |> wrap_error() do
+          record!([%{permission: canonical, event: event}], issue.id, :system, opts)
+          updated
+        else
+          {:error, msg} -> Repo.rollback(msg)
+        end
+      end)
     end
   end
 
+  # Decidable: pending (a `requested` nothing has settled since — suggestions
+  # don't count), or suggested and not settled since.
   defp decidable(issue, canonical) do
-    case List.keyfind(latest(issue), canonical, 0) do
-      {_, event} when event in [:requested, :suggested] ->
-        :ok
+    events = issue |> events() |> Enum.filter(&(&1.permission == canonical))
 
-      _ ->
-        {:error, "#{canonical} is not requested or suggested on #{issue.id}: nothing to decide"}
+    if canonical in pending_from(events) or match?(%{event: :suggested}, List.last(events)) do
+      :ok
+    else
+      {:error, "#{canonical} is not requested or suggested on #{issue.id}: nothing to decide"}
     end
   end
 

@@ -312,6 +312,43 @@ defmodule Arbiter.Tasks.PermissionsTest do
       assert events(issue) == [{"prod_read", :suggested, :refine}]
     end
 
+    test "a suggestion after a request leaves it pending and not in force" do
+      {:ok, issue} = create(ws!(), %{permissions: ["prod_ssh"]}, coordinator())
+      assert Permissions.pending(issue) == ["prod_ssh"]
+
+      assert {:error, msg} = Permissions.suggest(issue, "prod_ssh", actor: "refine:abc")
+      assert msg =~ "already"
+
+      issue = Ash.get!(Issue, issue.id)
+      assert Permissions.pending(issue) == ["prod_ssh"]
+      assert Permissions.in_force(issue) == []
+      refute Enum.any?(events(issue), &match?({"prod_ssh", :suggested, _}, &1))
+    end
+
+    test "a stray suggested event after a request is ignored by pending and in_force" do
+      {:ok, issue} = create(ws!(), %{permissions: ["prod_ssh"]}, coordinator())
+
+      Permissions.record!([%{permission: "prod_ssh", event: :suggested}], issue.id, :refine)
+
+      issue = Ash.get!(Issue, issue.id)
+      assert Permissions.pending(issue) == ["prod_ssh"]
+      assert Permissions.in_force(issue) == []
+
+      assert {:error, _} =
+               Permissions.grant(issue, "prod_ssh", authority: :coordinator, actor: "c")
+
+      assert {:ok, issue} =
+               Permissions.grant(issue, "prod_ssh", authority: :operator, actor: "o")
+
+      assert Permissions.in_force(issue) == ["prod_ssh"]
+    end
+
+    test "a carried permission cannot be suggested" do
+      {:ok, issue} = create(ws!(), %{permissions: ["tracker_write"]}, coordinator())
+      assert {:error, msg} = Permissions.suggest(issue, "tracker_write", actor: "refine:abc")
+      assert msg =~ "already"
+    end
+
     test "an unparsable suggestion is refused" do
       {:ok, issue} = create(ws!())
       assert {:error, _} = Permissions.suggest(issue, "root", actor: "refine:abc")
