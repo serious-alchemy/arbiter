@@ -66,6 +66,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
   @port_open_allowlist %{
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => 1,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => 1,
+    # bd-ld8qde (G14): the per-worker `ssh-agent` wrapper (`sh -c`), scrubbed via
+    # `ReleaseEnv.port_env/1`.
+    "apps/arbiter/lib/arbiter/worker/ssh_agent.ex" => 1,
     # bd-3qkbch: `arb session attach`'s full-terminal handoff to tmux. Not a
     # BEAM/agent child, but every Port.open/2 site is scrubbed regardless of
     # what it spawns (rule 2's own text).
@@ -87,6 +90,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     @release_env_source => :helper,
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
+    # bd-ld8qde (G14): `ssh-agent` under an `sh` wrapper (Port, scrubbed) and `ssh-add`
+    # via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/worker/ssh_agent.ex" => :scrubbed,
     # bd-6umf7z: `systemd-run --user` launching `arb server deploy` in its own
     # transient unit (and `systemctl` to see whether one is running), via
     # `ReleaseEnv.cmd/3`.

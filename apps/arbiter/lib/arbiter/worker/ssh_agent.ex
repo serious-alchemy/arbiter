@@ -26,6 +26,7 @@ defmodule Arbiter.Worker.SshAgent do
   use GenServer
 
   alias Arbiter.Config.Paths
+  alias Arbiter.Worker.ReleaseEnv
 
   # sockaddr_un.sun_path is 108 bytes including the NUL.
   @max_socket_bytes 107
@@ -139,7 +140,9 @@ defmodule Arbiter.Worker.SshAgent do
           :binary,
           :use_stdio,
           :exit_status,
-          args: ["-c", @wrapper, "sh", socket]
+          args: ["-c", @wrapper, "sh", socket],
+          # Release-env scrub (bd-4hkzn3): the agent must not inherit ROOTDIR & co.
+          env: port_env()
         ])
 
       case ready(socket, port) |> add_key(add, key, dir, socket) do
@@ -154,6 +157,12 @@ defmodule Arbiter.Worker.SshAgent do
     else
       _ -> {:stop, :ssh_agent_not_found}
     end
+  end
+
+  defp port_env do
+    Enum.map(ReleaseEnv.port_env([]), fn {name, value} ->
+      {String.to_charlist(name), if(value, do: String.to_charlist(value), else: false)}
+    end)
   end
 
   defp ready(socket, port, attempt \\ 0) do
@@ -179,7 +188,7 @@ defmodule Arbiter.Worker.SshAgent do
     try do
       with :ok <- File.write(file, ensure_newline(key), [:binary]),
            :ok <- File.chmod(file, 0o600) do
-        case System.cmd(add, [file], env: [{"SSH_AUTH_SOCK", socket}], stderr_to_stdout: true) do
+        case ReleaseEnv.cmd(add, [file], env: [{"SSH_AUTH_SOCK", socket}], stderr_to_stdout: true) do
           {_, 0} -> :ok
           {out, _} -> {:error, {:ssh_add_failed, String.trim(out)}}
         end
