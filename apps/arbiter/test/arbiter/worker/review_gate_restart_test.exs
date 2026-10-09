@@ -169,6 +169,74 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
     end
   end
 
+  describe "a reviewer killed by the server stopping (bd-cqppxr / #615)" do
+    test "is interrupted, not parked reviewer_failed, and the round is re-dispatched", ctx do
+      rig = rig(ctx, "feature/rs-615")
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 and pass_marker(rig) != nil end)
+
+      # The node is stopping: the reviewer's subprocess is SIGKILLed (137) and
+      # that exit reaches the gate before the gate itself is stopped.
+      put_app_env(:arbiter, :worker_node_stopping_override, true)
+      gate_ref = Process.monitor(gate)
+      send(gate, {:worker_exited, rig.task.id <> "#review", 137})
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      # No park, no escalation, and the marker survives for the boot sweep.
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+      assert %{"phase" => "reviewing", "round" => 1} = pass_marker(rig)
+
+      :ok = GenServer.stop(rig.author, :shutdown)
+      stop_workers(rig, :shutdown)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+
+      assert {:ok, %{rearmed: 1, restarted: [%{phase: :reviewing, round: 1}]}} =
+               Reconciler.reconcile_review_passes(rearm_fun: rearm_fun(rig, command: [@probe]))
+
+      assert_received {:rearmed, {:ok, regate}}
+      assert_gate_reports(regate)
+
+      assert [%{verdict: :approve, round: 1}] = review_rounds(rig)
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+    end
+
+    test "an exit that lands just BEFORE the node sees itself stopping is still interrupted",
+         ctx do
+      rig = rig(ctx, "feature/rs-615c")
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 and pass_marker(rig) != nil end)
+
+      put_app_env(:arbiter, :worker_exit_grace_ms, 300)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+      gate_ref = Process.monitor(gate)
+      send(gate, {:worker_exited, rig.task.id <> "#review", 143})
+      _ = :sys.get_state(gate)
+      refute_received {:DOWN, ^gate_ref, _, _, _}
+
+      # The node flips to stopping inside the grace window.
+      put_app_env(:arbiter, :worker_node_stopping_override, true)
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+      assert %{"phase" => "reviewing", "round" => 1} = pass_marker(rig)
+      stop_workers(rig, :shutdown)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+    end
+
+    test "a kill with the node NOT stopping still parks reviewer_failed", ctx do
+      rig = rig(ctx, "feature/rs-615b")
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 and pass_marker(rig) != nil end)
+
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+      gate_ref = Process.monitor(gate)
+      send(gate, {:worker_exited, rig.task.id <> "#review", 137})
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :normal}, 5_000
+
+      assert Arbiter.Tasks.ReviewPark.reason(Ash.get!(Issue, rig.task.id)) == :reviewer_failed
+    end
+  end
+
   describe "an implementer fix round (#review#impl) running when the node stops" do
     test "restarts the round on the same head and the gate reaches a verdict", ctx do
       rig = rig(ctx, "feature/rs-4")
