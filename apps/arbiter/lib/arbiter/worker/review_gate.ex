@@ -244,6 +244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
@@ -6201,6 +6202,20 @@ defmodule Arbiter.Worker.ReviewGate do
         role: role
       )
 
+    # bd-9cygoo (G16): a revise-round implementer pushes, so it needs a repo-scoped
+    # git credential (or the workspace's explicit legacy opt-in); a reviewer does not.
+    git_plan =
+      GitCredential.plan(ws, Map.get(state, :repo),
+        role: role,
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+      )
+
+    git_credential =
+      case git_plan do
+        {:ok, plan} -> plan
+        {:error, _} -> nil
+      end
+
     agent_opts =
       role_opts ++
         [
@@ -6210,7 +6225,8 @@ defmodule Arbiter.Worker.ReviewGate do
           timeout_ms: state.timeout_ms,
           owner: pid,
           task_id: state.task_id,
-          projection: projection
+          projection: projection,
+          git_credential: git_credential
         ] ++
         implementer_mcp_opts(state, role, adapter, projection.claims) ++
         sandbox_wrap_opts(policy, role)
@@ -6239,26 +6255,26 @@ defmodule Arbiter.Worker.ReviewGate do
       })
     end
 
-    case adapter.default_argv(prompt, agent_opts) do
-      {:ok, argv} ->
-        env = safe_spawn_env(adapter, agent_opts)
+    with {:ok, _plan} <- git_plan,
+         {:ok, argv} <- adapter.default_argv(prompt, agent_opts) do
+      env = safe_spawn_env(adapter, agent_opts)
 
-        # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
-        # resolution — it's carried purely so `Arbiter.Worker` can persist
-        # what this reviewer/implementer was actually told.
-        {:ok,
-         base ++
-           [
-             command: argv,
-             prompt: prompt,
-             env: env,
-             provider: adapter.provider(),
-             model: session_model,
-             projection: projection
-           ] ++ sandbox_session_opts(policy, ws, role, state)}
-
-      {:error, reason} ->
-        {:error, reason}
+      # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+      # resolution — it's carried purely so `Arbiter.Worker` can persist
+      # what this reviewer/implementer was actually told.
+      {:ok,
+       base ++
+         [
+           command: argv,
+           prompt: prompt,
+           env: env,
+           provider: adapter.provider(),
+           model: session_model,
+           projection: projection,
+           git_credential: git_credential
+         ] ++ sandbox_session_opts(policy, ws, role, state)}
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 

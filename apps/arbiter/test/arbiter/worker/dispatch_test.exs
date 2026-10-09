@@ -2771,7 +2771,8 @@ defmodule Arbiter.Worker.DispatchTest do
             "agent" => %{
               "type" => "claude",
               "security" => %{"permissions" => %{"mode" => "bypass"}}
-            }
+            },
+            "git_credentials" => %{"legacy_operator" => true}
           }
         })
 
@@ -2822,7 +2823,8 @@ defmodule Arbiter.Worker.DispatchTest do
                   "env_from_secret" => %{"RO_URL" => "prod_ro_url"}
                 }
               }
-            }
+            },
+            "git_credentials" => %{"legacy_operator" => true}
           },
           secrets: %{"prod_ro_url" => "postgres://ro-secret-value"},
           worker_env: %{
@@ -2904,6 +2906,119 @@ defmodule Arbiter.Worker.DispatchTest do
       env = dispatch_for_env(withholding_workspace(ws), tmp, [])
       assert env =~ "WH_SECRET_TOK=tok-secret-value"
       refute env =~ "RO_URL"
+    end
+
+    # bd-9cygoo (G16): a worker that pushes gets a repo-scoped credential, or the
+    # dispatch is refused — never the operator's keys by default.
+    defp guarded_claude_rules do
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+    end
+
+    defp git_credential_workspace(ws, git_credentials, secrets \\ %{}) do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => "claude"}, "git_credentials" => git_credentials},
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    test "G16: a guarded dispatch with no scoped git credential for its repo is refused", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+      repo = seed_repo!(tmp, "gc-refuse-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gc-refuse-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gc/repo" => repo})
+      :ok = stub_claude_dumping_env(tmp, Path.join(tmp, "never.txt"))
+
+      {:ok, ws} = Ash.update(ws, %{config: %{"agent" => %{"type" => "claude"}}})
+      {:ok, task} = Ash.create(Issue, %{title: "no creds", workspace_id: ws.id})
+
+      assert {:error, reason} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "gc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert {:claude_start_failed, {:git_credential_missing, "gc/repo", message}} = reason
+      assert message =~ "legacy_operator"
+      refute File.exists?(Path.join(tmp, "never.txt"))
+    end
+
+    # bd-7rxy1c: a podman run holds no credential by design and the host pushes
+    # its branch after `arb done`, so it is never refused for lacking one. The
+    # unavailable container proves dispatch got past the credential gate.
+    test "G16: a podman workspace with no git_credentials block is not refused for a credential",
+         %{ws: ws, tmp: tmp} do
+      guarded_claude_rules()
+      repo = seed_repo!(tmp, "gc-podman-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gc-podman-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gc/repo" => repo})
+      put_app_env(:arbiter, :worker_container_available, false)
+      :ok = stub_claude_dumping_env(tmp, Path.join(tmp, "never.txt"))
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman no creds", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:podman_unavailable, _}}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "gc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+    end
+
+    test "G16: the legacy operator credential is an explicit workspace opt-in", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+      ws = git_credential_workspace(ws, %{"legacy_operator" => true})
+      env = dispatch_for_env(ws, tmp, [])
+      refute env =~ "GIT_SSH_COMMAND=ssh"
+      refute env =~ "SSH_AUTH_SOCK"
+    end
+
+    test "G16: a deploy key reaches the worker as its only identity, never an agent", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      guarded_claude_rules()
+
+      ws =
+        git_credential_workspace(
+          ws,
+          %{"repos" => %{"wh/repo" => %{"kind" => "deploy_key", "key_secret" => "WH_KEY"}}},
+          %{"WH_KEY" => "-----BEGIN KEY-----\nscoped\n-----END KEY-----"}
+        )
+
+      env = dispatch_for_env(ws, tmp, [])
+
+      assert [_, key_path] = Regex.run(~r{GIT_SSH_COMMAND=ssh -F /dev/null -i (\S+) }, env)
+      assert env =~ "IdentitiesOnly=yes"
+      assert env =~ "IdentityAgent=none"
+      refute env =~ "SSH_AUTH_SOCK"
+      assert File.read!(key_path) =~ "scoped"
+      assert File.stat!(key_path).mode |> Bitwise.band(0o777) == 0o600
     end
 
     # AC5: nothing configured, nothing changes. A workspace `guardrails` block

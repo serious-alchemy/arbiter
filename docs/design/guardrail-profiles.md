@@ -654,7 +654,7 @@ but simply not there.
 | Env | An allowlist: `PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TERM`, `TZ`, rewritten `XDG_*`, toolchain vars the workspace marks visible; the **spawned adapter's own** credential only; workspace `worker_env` plain vars marked visible | `secrets:<name>`, and a tracker token for `tracker_write`. Nothing else from the BEAM is inherited (G2) |
 | Files and sockets | The worktree, the git common dir, the agent's HOME, toolchains. **Hidden:**<br>- `/run/user/$UID`, `/run/dbus`, `/run/systemd/resolve`<br>- `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.netrc`, `~/.pgpass`, `~/.git-credentials`<br>- the install DB and the durable log root<br>- other workspaces' repo paths and worktree roots (G1, G3) | A per-worker `ssh-agent` socket holding only the binding's key (`prod_ssh`) |
 | Egress | The infra and toolchain classes (§4.4) | `network:` hosts and binding hosts |
-| git push | Until G16: the operator's agent, re-exposed through the jail with egress limited to the remote host:22. After G16: a per-repo deploy key, or a repo-scoped GitHub App token through a credential helper | — |
+| git push | A per-repo scoped credential (G16, `docs/git-credentials.md`): a deploy key, or a repo-scoped GitHub App / fine-grained token through a credential helper. Never the operator's agent. A dispatch with none is refused unless the workspace opts into `legacy_operator` | — |
 | MCP and tracker | Worker scope, own task only (as today) | The `tracker_write` claim for MCP tracker tools |
 
 Reviewers get the "always present" column with egress at infra only. Their

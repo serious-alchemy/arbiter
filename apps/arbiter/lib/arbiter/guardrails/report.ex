@@ -34,6 +34,7 @@ defmodule Arbiter.Guardrails.Report do
   alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.GitCredential
 
   @tier_ladder ~w(economy standard premium flagship)
 
@@ -107,7 +108,8 @@ defmodule Arbiter.Guardrails.Report do
       issues:
         Enum.flat_map(entries, & &1.issues) ++
           cap_issues(ws, block, Enum.map(subjects, &elem(&1, 1))) ++
-          binding_issues(name, block, resolved) ++ secret_issues(ws, name, block)
+          binding_issues(name, block, resolved) ++
+          secret_issues(ws, name, block) ++ git_credential_issues(ws, name, rules != [])
     }
   end
 
@@ -234,6 +236,49 @@ defmodule Arbiter.Guardrails.Report do
         "binding #{perm} names secret #{secret}, which this workspace does not have"
       )
     end
+  end
+
+  # G16 (bd-9cygoo): dispatch refuses a worker that pushes when its repo has no
+  # scoped git credential (on a guarded install, or once a `git_credentials` block
+  # exists), and refuses one whose credential names a secret that is not there.
+  defp git_credential_issues(ws, name, guarded?) do
+    block = GitCredential.block(ws)
+    known = known_secret_names(ws)
+
+    unconfigured =
+      for repo <- repo_names(ws),
+          GitCredential.enforced?(ws, guarded?),
+          match?(
+            {:error, _},
+            GitCredential.plan(ws, repo, role: :implementer, guarded?: guarded?)
+          ) do
+        issue(
+          :git_credential_unconfigured,
+          name,
+          "repo #{repo} has no scoped git credential, so a worker that pushes to it is refused " <>
+            "(add git_credentials.repos.#{repo}, or git_credentials.legacy_operator: true)"
+        )
+      end
+
+    missing =
+      for {repo, entry} <- block |> Map.get("repos", %{}) |> map_or_empty(),
+          secret <- git_credential_secrets(map_or_empty(entry)),
+          secret not in known do
+        issue(
+          :git_credential_secret_missing,
+          name,
+          "git_credentials.repos.#{repo} names secret #{secret}, which this workspace does not have"
+        )
+      end
+
+    unconfigured ++ missing
+  end
+
+  defp git_credential_secrets(entry) do
+    Enum.filter(
+      [entry["key_secret"], entry["token_secret"], entry["private_key_secret"]],
+      &is_binary/1
+    )
   end
 
   defp binding_secrets(binding) do

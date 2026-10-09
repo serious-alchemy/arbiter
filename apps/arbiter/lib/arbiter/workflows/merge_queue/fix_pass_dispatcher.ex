@@ -58,6 +58,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Withholding
@@ -505,15 +506,33 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         # bd-7ays3v: under podman, a Claude pass runs in the container, in the
         # private clone `create_worktree/1` gave it, under the policy the task
         # worker resolves; any other pass is spawned exactly as before.
-        session_opts =
-          ([owner: worker_pid, worktree_path: worktree_path, projection: projection] ++
-             Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
-          |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
+        #
+        # bd-9cygoo (G16): the pass pushes, so it needs a repo-scoped git
+        # credential (or an explicit legacy opt-in) like any other implementer.
+        case GitCredential.plan(context.workspace, context.repo,
+               role: :implementer,
+               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+               host_pushes?: container_pass?(context, provider)
+             ) do
+          {:ok, git_credential} ->
+            session_opts =
+              ([
+                 owner: worker_pid,
+                 worktree_path: worktree_path,
+                 projection: projection,
+                 git_credential: git_credential
+               ] ++
+                 Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+              |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
-        case ClaudeSession.start(session_opts) do
-          {:ok, port} ->
-            _ = Worker.advance(worker_pid, :fix_ci)
-            {:ok, port}
+            case ClaudeSession.start(session_opts) do
+              {:ok, port} ->
+                _ = Worker.advance(worker_pid, :fix_ci)
+                {:ok, port}
+
+              {:error, reason} ->
+                {:error, {:claude_start_failed, reason}}
+            end
 
           {:error, reason} ->
             {:error, {:claude_start_failed, reason}}
@@ -529,6 +548,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       role: :implementer
     )
   end
+
+  # bd-7rxy1c: a pass in a podman container holds no credential; the host
+  # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
+  defp container_pass?(context, provider),
+    do: not is_nil(ContainerSpawn.pass_policy(context.workspace, context.repo, provider))
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
@@ -550,7 +574,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       worktree_path: worktree_path,
       owner: Keyword.get(opts, :owner),
       task_id: context.task.id,
-      projection: Keyword.get(opts, :projection)
+      projection: Keyword.get(opts, :projection),
+      git_credential: Keyword.get(opts, :git_credential)
     ] ++ mcp_opts ++ ContainerSpawn.pass_agent_opts(Keyword.get(opts, :security))
   end
 

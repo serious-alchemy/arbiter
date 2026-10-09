@@ -1508,3 +1508,28 @@ on ingest through `Arbiter.Redaction`, but that only covers secrets a human
 marked; a key printed by a subprocess is not covered. The root is therefore
 also protected by filesystem permissions (`0700` root, `0600` archives) and
 must be treated as secret-bearing storage. See `docs/session-archive.md`.
+
+## Scoped git and tracker credentials (bd-9cygoo, G16)
+
+A worker pushes with a credential that reaches **one repo** — a deploy key, a
+repo-restricted GitHub App installation token, or a repo-scoped fine-grained /
+project token — instead of the operator's ssh-agent or keys, and the tracker token
+it is given is scoped the same way. No worker is given a token with `gist` or
+`delete_repo`. Operator setup and the full mechanism: `docs/git-credentials.md`.
+
+| Surface | What changes | Where |
+|---|---|---|
+| Config | `git_credentials.repos.<repo>` (`deploy_key` / `github_app` / `token`) and `legacy_operator`; validated on write | `GitCredential.validate/1`, `ValidateConfig` |
+| Dispatch | An implementer spawn (task dispatch, revise round, CI fix pass, conflict pass the host does not push for) is **refused** with a clear message when its repo has no scoped credential and the workspace has not opted into `legacy_operator`. Enforced on a guarded install or once a `git_credentials` block exists; otherwise unchanged | `GitCredential.plan/3`, `Dispatch`, `ReviewGate`, `FixPassDispatcher`, `ConflictResolver` |
+| Env | Unsandboxed: key file + `GIT_SSH_COMMAND` (`IdentitiesOnly`, `IdentityAgent=none`), or `ARB_GIT_TOKEN` + a credential helper that answers only for the repo's path; the tracker var carries the repo-scoped token. `SSH_AUTH_SOCK` is never set | `ClaudeSession`, `GitCredential.spawn_env/4` |
+| Jail | agy: the key is bound at its own path over a blanked key dir; the operator's default `~/.ssh` identities are no longer bound back | `Jail` `:git_ssh_key`, `Jail.Hide` `:scoped_git` |
+| Podman | The key / token is a `podman run --secret`, never a flag value, a host-file mount or an env literal; removed with the container, on owner death and at boot | `Container`, `ContainerSpawn` |
+| Doctor | `git_credential_unconfigured` (a repo whose pushes would be refused) and `git_credential_secret_missing` | `Guardrails.Report` |
+
+**Honest limits.** Unsandboxed Claude/Codex still run as the operator's uid, so
+scoping stops Arbiter *handing over* the operator's credential but cannot stop
+a same-uid process from reading `~/.ssh` (see "Residual risk: same UID"); the
+bwrap jail and podman close that. A remote-node podman run that needs a scoped
+credential is refused. The forge enforces the one-repo scope of a key or token;
+Arbiter's tests cover the mint request, the helper's path pinning and every
+delivery path, not GitHub itself.

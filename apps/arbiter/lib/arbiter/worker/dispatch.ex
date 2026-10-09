@@ -101,6 +101,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Driver
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
@@ -3518,6 +3519,7 @@ defmodule Arbiter.Worker.Dispatch do
           choice.type
           |> sandbox_checked_provider(policy, swap_pool, explicit: not is_nil(agent_type))
           |> guardrail_checked(base_policy, workspace, choice, opts)
+          |> git_credential_checked(workspace, policy, opts)
 
         case checked do
           {:error, reason} ->
@@ -3533,6 +3535,7 @@ defmodule Arbiter.Worker.Dispatch do
             # projection re-mints the worker token with that claim (the first one,
             # minted before routing, carries none).
             projection = guardrail_projection(task, workspace, choice, opts)
+            {:ok, git_credential} = git_credential_plan(workspace, policy, opts)
             opts = reinject_permission_claims(task, projection, opts)
 
             # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
@@ -3553,6 +3556,7 @@ defmodule Arbiter.Worker.Dispatch do
                   owner: worker_pid,
                   task_id: task.id,
                   projection: projection,
+                  git_credential: git_credential,
                   # bd-d2o3xb: this dispatch hands the spawn to `ClaudeSession`
                   # with `policy`, which is what wraps it under `podman`.
                   sandbox_wrap: true
@@ -3638,7 +3642,7 @@ defmodule Arbiter.Worker.Dispatch do
                    [command: argv, prompt: prompt, env: env] ++
                    session_meta ++
                    sandbox_session_opts(policy, workspace, opts) ++
-                   [projection: projection] ++
+                   [projection: projection, git_credential: git_credential] ++
                    Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
@@ -3847,6 +3851,30 @@ defmodule Arbiter.Worker.Dispatch do
     )
   end
 
+  # bd-9cygoo (G16): a spawn that pushes needs a repo-scoped git credential. A
+  # reviewer does not push. Pure, so it can be asked again once the provider is
+  # settled; the refusal comes out here so no worktree session is built for it.
+  # A podman run holds no credential by design: the host pushes its branch after
+  # `arb done` (bd-capkj9), so it plans as `host_pushes?` (bd-7rxy1c).
+  defp git_credential_plan(workspace, policy, opts) do
+    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+
+    GitCredential.plan(workspace, Keyword.get(opts, :repo),
+      role: role,
+      guarded?: Guardrails.guarded?(),
+      host_pushes?: ContainerSpawn.podman?(policy)
+    )
+  end
+
+  defp git_credential_checked({:ok, _type} = ok, workspace, policy, opts) do
+    case git_credential_plan(workspace, policy, opts) do
+      {:ok, _plan} -> ok
+      {:error, _} = refusal -> refusal
+    end
+  end
+
+  defp git_credential_checked(other, _workspace, _policy, _opts), do: other
+
   defp reinject_permission_claims(_task, %{claims: []}, opts), do: opts
 
   defp reinject_permission_claims(%Issue{} = task, %{claims: claims}, opts) do
@@ -3926,6 +3954,9 @@ defmodule Arbiter.Worker.Dispatch do
     do: ineligible_provider_error(provider_type, policy, workspace, opts)
 
   defp provider_refusal({:guardrail_unenforceable, _} = refusal, _type, _policy, _ws, _opts),
+    do: refusal
+
+  defp provider_refusal({:git_credential_missing, _, _} = refusal, _type, _policy, _ws, _opts),
     do: refusal
 
   # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
