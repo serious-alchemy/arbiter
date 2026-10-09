@@ -244,6 +244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
@@ -837,6 +838,54 @@ defmodule Arbiter.Worker.ReviewGate do
         )
 
         {:no_verdict, :none}
+    end
+  end
+
+  @doc """
+  The findings for a coordinator-dispatched review's REQUEST_CHANGES verdict
+  (bd-2ujj2p).
+
+  `parse_verdict/1` keeps only the text from the `VERDICT:` line onward, but a
+  reviewer that posts its review to the PR and then prints the sentinel puts the
+  findings BEFORE it — leaving the verdict, `VERIFICATION:` and `arb done` as the
+  whole "findings" and the implementer's fix round with nothing to fix. When
+  `findings` carries nothing actionable, the output before the verdict line is
+  spliced in right after it (keeping `VERDICT:` first, as every consumer
+  expects). `source` is `parse_verdict/3`'s: for `:transcript` the in-memory
+  `lines` are the truncated tail, so the durable log is re-read.
+
+  Returns `{:ok, findings}`, or `:empty` when there is no findings text anywhere.
+  """
+  @spec recover_findings([String.t()], String.t() | nil, verdict_source(), String.t()) ::
+          {:ok, String.t()} | :empty
+  def recover_findings(lines, run_id, source, findings) when is_binary(findings) do
+    if findings_present?(findings) do
+      {:ok, findings}
+    else
+      lines = if source == :transcript, do: durable_or(run_id, lines), else: lines
+
+      preamble =
+        lines
+        |> Enum.join("\n")
+        |> String.split("\n")
+        |> Enum.take_while(
+          &(not Regex.match?(@verdict_request_changes, normalize_verdict_line(&1)))
+        )
+        |> Enum.reject(&Regex.match?(~r/\barb done\b|^\s*⚙/, &1))
+        |> Enum.join("\n")
+        |> String.trim()
+
+      [verdict_line | rest] = String.split(findings, "\n", parts: 2) ++ [""]
+      candidate = [verdict_line, preamble, rest] |> Enum.join("\n") |> String.trim()
+
+      if preamble != "" and findings_present?(candidate), do: {:ok, candidate}, else: :empty
+    end
+  end
+
+  defp durable_or(run_id, lines) do
+    case durable_lines(run_id) do
+      {:ok, durable} -> durable
+      _ -> lines
     end
   end
 
@@ -2947,7 +2996,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # primary defense against flourishes.
   @min_findings_chars 16
 
-  defp findings_present?(findings) when is_binary(findings) do
+  @doc false
+  @spec findings_present?(String.t()) :: boolean()
+  def findings_present?(findings) when is_binary(findings) do
     body =
       findings
       |> String.split("\n")
@@ -2963,6 +3014,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # (bd-4yhv4x).
         String.trim(line) == "" or
           Regex.match?(~r/\barb done\b/, line) or
+          Regex.match?(~r/^\s*VERIFICATION:\s*FULL\b/i, line) or
           Regex.match?(~r/^\s*⚙/, line) or
           ReviewVerification.criteria_line?(line)
       end)
@@ -6174,6 +6226,20 @@ defmodule Arbiter.Worker.ReviewGate do
         role: role
       )
 
+    # bd-9cygoo (G16): a revise-round implementer pushes, so it needs a repo-scoped
+    # git credential (or the workspace's explicit legacy opt-in); a reviewer does not.
+    git_plan =
+      GitCredential.plan(ws, Map.get(state, :repo),
+        role: role,
+        guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?
+      )
+
+    git_credential =
+      case git_plan do
+        {:ok, plan} -> plan
+        {:error, _} -> nil
+      end
+
     agent_opts =
       role_opts ++
         [
@@ -6183,7 +6249,8 @@ defmodule Arbiter.Worker.ReviewGate do
           timeout_ms: state.timeout_ms,
           owner: pid,
           task_id: state.task_id,
-          projection: projection
+          projection: projection,
+          git_credential: git_credential
         ] ++
         implementer_mcp_opts(state, role, adapter, projection.claims) ++
         sandbox_wrap_opts(policy, role)
@@ -6212,26 +6279,26 @@ defmodule Arbiter.Worker.ReviewGate do
       })
     end
 
-    case adapter.default_argv(prompt, agent_opts) do
-      {:ok, argv} ->
-        env = safe_spawn_env(adapter, agent_opts)
+    with {:ok, _plan} <- git_plan,
+         {:ok, argv} <- adapter.default_argv(prompt, agent_opts) do
+      env = safe_spawn_env(adapter, agent_opts)
 
-        # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
-        # resolution — it's carried purely so `Arbiter.Worker` can persist
-        # what this reviewer/implementer was actually told.
-        {:ok,
-         base ++
-           [
-             command: argv,
-             prompt: prompt,
-             env: env,
-             provider: adapter.provider(),
-             model: session_model,
-             projection: projection
-           ] ++ sandbox_session_opts(policy, ws, role, state)}
-
-      {:error, reason} ->
-        {:error, reason}
+      # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+      # resolution — it's carried purely so `Arbiter.Worker` can persist
+      # what this reviewer/implementer was actually told.
+      {:ok,
+       base ++
+         [
+           command: argv,
+           prompt: prompt,
+           env: env,
+           provider: adapter.provider(),
+           model: session_model,
+           projection: projection,
+           git_credential: git_credential
+         ] ++ sandbox_session_opts(policy, ws, role, state)}
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 

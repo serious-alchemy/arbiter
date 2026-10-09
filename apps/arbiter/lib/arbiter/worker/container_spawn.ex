@@ -135,6 +135,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
+  alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
@@ -178,7 +179,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:env) => [{String.t(), String.t()}],
           optional(:codex_auth) => {Path.t(), Path.t()} | nil,
           optional(:pod) => String.t() | nil,
-          optional(:deps_cache) => map() | nil
+          optional(:deps_cache) => map() | nil,
+          optional(:git_secrets) => [map()]
         }
 
   @doc "The path of the `claude` binary inside the container."
@@ -272,7 +274,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          deps_cache = seed_deps(opts, worktree, image, home),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
          name = container_name(opts),
-         {:ok, services} <- start_services(opts, name) do
+         {:ok, services} <- start_services(opts, name),
+         {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services) do
       track_codex_auth(opts, codex_auth)
 
       {:ok,
@@ -288,13 +291,83 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli_mounts: cli_mounts,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec) ++ if(services, do: services.env, else: []),
+         env:
+           container_env(spec, Keyword.get(opts, :git_material)) ++
+             GitCredential.container_env(Keyword.get(opts, :git_material)) ++
+             if(services, do: services.env, else: []),
+         git_secrets: git_secrets,
          pod: services && services.pod,
          deps_cache: deps_cache,
          codex_auth: codex_auth
        }}
     end
   end
+
+  # bd-9cygoo (G16): the scoped git credential travels as `podman run --secret`s,
+  # created here on the host (value through a 0600 file, never argv) and removed
+  # at `teardown/1`, when the owning worker exits, and by `Container.reap_git_secrets/1`
+  # at boot. The request keeps the names and targets only, never a value.
+  defp create_git_secrets(opts, name, tmp_dir, services) do
+    secrets = GitCredential.podman_secrets(Keyword.get(opts, :git_material), name)
+
+    if secrets == [] do
+      {:ok, []}
+    else
+      container_opts = Keyword.take(opts, [:podman, :runner])
+      uid = host_uid()
+
+      result =
+        Enum.reduce_while(secrets, :ok, fn secret, :ok ->
+          case Container.create_secret(secret, [dir: tmp_dir] ++ container_opts) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, {:git_credential_secret_failed, reason}}}
+          end
+        end)
+
+      names = Enum.map(secrets, & &1.name)
+
+      case result do
+        :ok ->
+          track_git_secrets(Keyword.get(opts, :owner), names, container_opts)
+
+          {:ok,
+           Enum.map(secrets, fn secret ->
+             secret |> Map.delete(:value) |> Map.put(:uid, uid)
+           end)}
+
+        {:error, _} = error ->
+          Enum.each(names, &Container.remove_secret(&1, container_opts))
+          if services, do: TestServices.teardown(services.pod)
+          error
+      end
+    end
+  end
+
+  # The uid the container maps to itself (`--userns=keep-id`): this process's.
+  defp host_uid do
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} -> uid
+      _ -> 0
+    end
+  end
+
+  # A worker killed without its `teardown/1` must not leave a deploy key in
+  # podman's secret store.
+  defp track_git_secrets(owner, names, container_opts) when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} ->
+            Enum.each(names, &Container.remove_secret(&1, container_opts))
+        end
+      end)
+
+    :ok
+  end
+
+  defp track_git_secrets(_owner, _names, _container_opts), do: :ok
 
   defp container_backend(policy, provider) do
     case Sandbox.module(policy, provider) do
@@ -631,8 +704,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   defp no_ssh_agent(_), do: :ok
 
-  defp container_env(spec),
-    do: Jail.network_env(spec) ++ Jail.ssh_command(nil, spec) ++ arb_host()
+  # A deploy key is named by `GIT_SSH_COMMAND` too, so the proxy `ProxyCommand` is
+  # composed onto it (`Jail.ssh_command/2`) and `GitCredential.container_env/1` leaves
+  # that variable alone.
+  defp container_env(spec, material),
+    do: Jail.network_env(spec) ++ Jail.ssh_command(ssh_base(material), spec) ++ arb_host()
+
+  defp ssh_base(%GitCredential.Material{kind: :deploy_key}),
+    do: GitCredential.ssh_command(GitCredential.podman_key_path())
+
+  defp ssh_base(_), do: nil
 
   # `arb` reads `ARB_HOST` (a base URL); the bridge listens on the same loopback
   # port the server does, so the default `http://127.0.0.1:4848` is only right
@@ -810,7 +891,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec) ++ services.env,
+         env: container_env(spec, nil) ++ services.env,
          services: services.presets,
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
@@ -1232,6 +1313,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       ],
       cli_mounts: request.cli_mounts,
       env: literal,
+      podman_secrets: Map.get(request, :git_secrets, []),
       inherit_env: Enum.map(inherit, &elem(&1, 0))
     ]
 
@@ -1273,12 +1355,20 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec teardown(map() | nil) :: :ok
   def teardown(%{sandbox: %{name: name} = request}) when is_binary(name) do
     Container.teardown(name)
+    remove_git_secrets(request)
     reclaim_clone(request)
     sync_codex_auth(request, :final)
     TestServices.teardown(request[:pod])
   end
 
   def teardown(_), do: :ok
+
+  defp remove_git_secrets(request) do
+    for %{name: secret} <- Map.get(request, :git_secrets, []),
+        do: Container.remove_secret(secret, podman: request.podman)
+
+    :ok
+  end
 
   @doc """
   Remove just the container of `port_args` (a spawn's args, or `nil`), so

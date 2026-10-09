@@ -90,6 +90,15 @@ defmodule Arbiter.Guardrails.ProjectionTest do
       assert p.claims == ["tracker_write"]
     end
 
+    test "names the env var the tracker token lands in, even with no binding token" do
+      assert build(["tracker_write"], :trusted).tracker_env == "GH_TOKEN"
+      assert build(["prod_read"], :privileged).tracker_env == nil
+
+      block = %{"bindings" => %{"tracker_write" => %{"token_env" => "GITLAB_TOKEN"}}}
+      p = Projection.build(["tracker_write"], profile: profile(:trusted), block: block)
+      assert p.tracker_env == "GITLAB_TOKEN"
+    end
+
     test "probation is below the default min_tier" do
       p = build(["tracker_write"], :probation)
       assert p.env == [] and p.claims == [] and p.hosts == []
