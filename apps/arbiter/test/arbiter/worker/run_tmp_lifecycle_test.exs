@@ -49,6 +49,21 @@ defmodule Arbiter.Worker.RunTmpLifecycleTest do
         )
   end
 
+  # Cleanup runs asynchronously after the owner exits; poll with a bounded deadline.
+  defp assert_removed(path, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
+    cond do
+      not File.exists?(path) ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("#{path} still exists after 5s")
+
+      true ->
+        Process.sleep(10)
+        assert_removed(path, deadline)
+    end
+  end
+
   test "the child's TMPDIR is a per-run dir under the worker tmp root, and it is removed on exit",
        %{root: root, cwd: cwd} do
     out = Path.join(root, "seen")
@@ -71,7 +86,7 @@ defmodule Arbiter.Worker.RunTmpLifecycleTest do
     GenServer.stop(owner, :normal)
     assert_receive {:DOWN, ^ref, :process, ^owner, _}
     _ = :sys.get_state(RunTmp.Reaper)
-    refute File.exists?(tmpdir)
+    assert_removed(tmpdir)
   end
 
   test "a killed owner (no terminate/2) still has its dir removed", %{root: root, cwd: cwd} do
@@ -85,7 +100,7 @@ defmodule Arbiter.Worker.RunTmpLifecycleTest do
     Process.exit(owner, :kill)
     assert_receive {:DOWN, ^ref, :process, ^owner, :killed}
     _ = :sys.get_state(RunTmp.Reaper)
-    refute File.exists?(tmpdir)
+    assert_removed(tmpdir)
   end
 
   test "the agent prompt tells the agent to use $TMPDIR" do
