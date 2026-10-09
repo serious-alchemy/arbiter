@@ -568,26 +568,72 @@ defmodule Arbiter.Quota do
   # that only the 5h one was ever consulted — the coordinator read the 7d row as
   # the thing holding Autopilot back when the gate never looked at it.
   defp gating_fields(%AnthropicQuota{} = q, account, workspace) do
-    if Arbiter.Quota.continue_mode?(workspace) do
-      # `:continue` workspaces dispatch past the cap by design, so no window
-      # gates them — mirroring `Board.Snapshot.quota_hold/1`'s short-circuit.
-      %{gating_window: nil, gating_reason: nil}
-    else
-      # P7 (§4.2): thresholds resolve `min(account, workspace)`, so the
-      # rendered reason has to be computed against the same pair the gate
-      # itself uses — otherwise `arb quota` reports headroom that dispatch
-      # has already closed.
-      policy = {account, workspace}
+    case account_pause(account) do
+      # bd-aw325c: a paused provider/account is refused at dispatch (the pause
+      # gate answers `{:quota_held, id}` too, and `force_quota` does not lift
+      # it), so the report has to say so rather than "none".
+      %{} = pause ->
+        %{
+          gating_window: "paused",
+          gating_reason:
+            "held — #{account.provider} paused: #{pause.reason || "no reason given"}",
+          gating_workspaces: []
+        }
 
-      case Arbiter.Quota.Gate.gating_window(q, policy) do
-        nil ->
-          %{gating_window: nil, gating_reason: nil}
+      nil ->
+        base =
+          if Arbiter.Quota.continue_mode?(workspace),
+            # `:continue` workspaces dispatch past the cap by design, so no
+            # window gates them — mirroring `Board.Snapshot.quota_hold/1`.
+            do: %{gating_window: nil, gating_reason: nil},
+            else: gating_for(q, account, workspace)
 
-        %{window: w} ->
-          %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, policy)}
-      end
+        Map.put(base, :gating_workspaces, gating_workspaces(q, account, workspace))
     end
   end
+
+  # P7 (§4.2): thresholds resolve `min(account, workspace)`, so the rendered
+  # reason has to be computed against the same pair the gate itself uses —
+  # otherwise `arb quota` reports headroom that dispatch has already closed.
+  defp gating_for(q, account, workspace) do
+    policy = {account, workspace}
+
+    case Arbiter.Quota.Gate.gating_window(q, policy) do
+      nil ->
+        %{gating_window: nil, gating_reason: nil}
+
+      %{window: w} ->
+        %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, policy)}
+    end
+  end
+
+  # bd-aw325c: the headline reads ONE workspace's ceiling (the account's
+  # alphabetically-first, or `--workspace`), but dispatch reads the task's own.
+  # Any other workspace on the account whose `min(account, workspace)` ceiling
+  # is already crossed is listed, so "gating dispatch: none" can't hide a
+  # workspace that is being held.
+  defp gating_workspaces(_q, nil, _workspace), do: []
+
+  defp gating_workspaces(q, account, shown) do
+    account.id
+    |> Resolver.workspaces()
+    |> Enum.reject(&(shown && &1.id == shown.id))
+    |> Enum.reject(&Arbiter.Quota.continue_mode?/1)
+    |> Enum.flat_map(fn ws ->
+      case gating_for(q, account, ws) do
+        %{gating_window: nil} ->
+          []
+
+        %{gating_window: w, gating_reason: r} ->
+          [%{workspace_id: ws.id, workspace: ws.name, window: w, reason: r}]
+      end
+    end)
+  end
+
+  defp account_pause(%Arbiter.Accounts.ProviderAccount{} = account),
+    do: Arbiter.Providers.Pause.for_account(account)
+
+  defp account_pause(_), do: nil
 
   defp safe_workspace(workspace_id) do
     case Ash.get(Workspace, workspace_id) do
