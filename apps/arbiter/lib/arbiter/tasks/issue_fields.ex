@@ -30,6 +30,11 @@ defmodule Arbiter.Tasks.IssueFields do
     * `change_origin` — `Arbiter.Loop.Apply` only, internally;
     * ReviewPatrol / PRPatrol / `pr_opened_*` — their own internal `Ash.update`
       calls and the named transition actions;
+    * `permissions` (bd-54m4vv) — writable here, but only a coordinator or the
+      operator gets anywhere: the controller / MCP tool hand the caller's
+      authority to the `Issue` changes, which refuse a worker or refine token
+      (`Arbiter.Guardrails.Permissions.plan/4`). Granting an operator-grant
+      permission is `Arbiter.Tasks.Permissions.grant/3`, not a field write.
     * `skills` — not writable over REST/MCP/CLI. It is read only at dispatch
       (`Arbiter.Skills.Selection`); the resource attribute stays for internal
       seeding.
@@ -38,7 +43,7 @@ defmodule Arbiter.Tasks.IssueFields do
   alias Arbiter.Tasks.Issue
 
   @shared ~w(title description acceptance notes qa_notes deployment_notes priority difficulty
-             issue_type auto_close verify_after_deploy provider_constraint tracker_type
+             issue_type auto_close verify_after_deploy provider_constraint permissions tracker_type
              tracker_ref tracker_context_type tracker_context_ref target_branch repo)
 
   @create @shared ++

@@ -43,6 +43,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Create
@@ -53,6 +54,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.IssueFields
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias Arbiter.Tasks.Permissions
   alias Arbiter.Tasks.ReadyHolds
   alias Arbiter.Tasks.Verification
   alias Arbiter.Usage.Estimate
@@ -155,7 +157,10 @@ defmodule ArbiterWeb.Api.IssueController do
           priority_fields: EffectivePriority.fields(issue),
           current_run: current_run(id, live),
           # bd-6i7yzq: the recent audit history, each write with its actor.
-          history: History.recent(id)
+          history: History.recent(id),
+          # bd-54m4vv: carried but not yet granted (an operator-grant permission
+          # a coordinator declared), so `arb ticket show` can say so.
+          pending_permissions: Permissions.pending(issue)
         )
 
       {:error, _} = err ->
@@ -202,7 +207,8 @@ defmodule ArbiterWeb.Api.IssueController do
         opts = [
           force: force?,
           deps: deps,
-          created_by: Params.actor_label(conn.assigns[:mcp_scope])
+          created_by: Params.actor_label(conn.assigns[:mcp_scope]),
+          context: permission_context(conn)
         ]
 
         respond_to_create(conn, Create.run(attrs, opts), assignee_warnings)
@@ -324,18 +330,41 @@ defmodule ArbiterWeb.Api.IssueController do
   defp tracker_type_str(t) when is_atom(t), do: to_string(t)
   defp tracker_type_str(t), do: t
 
+  # bd-54m4vv (G12): who is declaring permissions, for the `Issue` changes. The
+  # authority is derived from the bearer token, never asserted by the caller
+  # (`Arbiter.Guardrails.Authority`): operator proof is `:operator`, another
+  # coordinator token `:coordinator`, anything else `:restricted`.
+  defp permission_context(conn) do
+    scope = conn.assigns[:mcp_scope]
+
+    %{
+      guardrail_authority: Authority.from_scope(scope),
+      permission_actor: Params.actor_label(scope)
+    }
+  end
+
+  # `add_permissions` / `remove_permissions` (what `arb ticket update
+  # --permission` sends) fold into one `permissions` list server-side.
+  defp resolve_permission_edits(issue, params) do
+    case Permissions.resolve_edits(issue, params) do
+      {:ok, _} = ok -> ok
+      {:error, message} -> {:error, {:invalid_request, message}}
+    end
+  end
+
   def update(conn, %{"id" => id} = params) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
-    with :ok <- IssueFields.check(params, :update) do
+    with :ok <- IssueFields.check(params, :update),
+         {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, params} <- resolve_permission_edits(issue, params) do
       attrs =
         params
         |> Params.strip_attribution()
         |> Map.drop(["id", "workspace_id", "assignee"])
         |> coerce_atoms(@atom_fields)
 
-      with {:ok, issue} <- Ash.get(Issue, id),
-           {:ok, updated} <- Ash.update(issue, attrs) do
+      with {:ok, updated} <- Ash.update(issue, attrs, context: permission_context(conn)) do
         render(conn, :show, issue: updated, warnings: assignee_warnings)
       end
     end

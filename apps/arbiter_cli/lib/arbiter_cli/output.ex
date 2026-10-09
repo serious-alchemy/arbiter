@@ -221,6 +221,7 @@ defmodule ArbiterCli.Output do
         {"Scheduled as", scheduled_as_label(issue)},
         {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Providers", provider_constraint_label(issue["provider_constraint"])},
+        {"Permissions", permissions_label(issue)},
         {"Estimate", estimate_label(issue["estimate"])},
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
@@ -354,6 +355,18 @@ defmodule ArbiterCli.Output do
     do: "exclude " <> Enum.join(list, ", ")
 
   defp provider_constraint_label(_), do: nil
+
+  # bd-54m4vv: the permissions a ticket declares; an operator-grant one the
+  # coordinator only requested is marked, since it gives no reach yet.
+  defp permissions_label(%{"permissions" => [_ | _] = list} = issue) do
+    pending = List.wrap(issue["pending_permissions"])
+
+    Enum.map_join(list, ", ", fn p ->
+      if p in pending, do: p <> " (requested, awaiting operator)", else: p
+    end)
+  end
+
+  defp permissions_label(_), do: nil
 
   # ES4: only a ticket an epic floor touches gets the line, so a board with no
   # floors prints exactly what it did before.

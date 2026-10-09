@@ -46,12 +46,14 @@ defmodule Arbiter.Tasks.PermissionsTest do
   end
 
   defp coordinator(extra \\ %{}),
-    do: Map.merge(%{guardrail_authority: :coordinator, permission_actor: "coordinator:test"}, extra)
+    do:
+      Map.merge(%{guardrail_authority: :coordinator, permission_actor: "coordinator:test"}, extra)
 
   defp operator, do: %{guardrail_authority: :operator, permission_actor: "operator:cli"}
   defp restricted, do: %{guardrail_authority: :restricted, permission_actor: "worker:x"}
 
-  defp events(issue), do: issue |> Permissions.events() |> Enum.map(&{&1.permission, &1.event, &1.source})
+  defp events(issue),
+    do: issue |> Permissions.events() |> Enum.map(&{&1.permission, &1.event, &1.source})
 
   describe "the field" do
     test "defaults to [] and records no events" do
@@ -64,7 +66,13 @@ defmodule Arbiter.Tasks.PermissionsTest do
       {:ok, issue} =
         create(
           ws!(),
-          %{permissions: ["tracker_write", "network:API.example.com", "network:api.example.com:443"]},
+          %{
+            permissions: [
+              "tracker_write",
+              "network:API.example.com",
+              "network:api.example.com:443"
+            ]
+          },
           coordinator()
         )
 
@@ -188,7 +196,8 @@ defmodule Arbiter.Tasks.PermissionsTest do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.update(issue, %{permissions: []}, context: coordinator())
 
-      assert {:ok, %{permissions: []}} = Ash.update(issue, %{permissions: []}, context: operator())
+      assert {:ok, %{permissions: []}} =
+               Ash.update(issue, %{permissions: []}, context: operator())
     end
 
     test "a restricted caller cannot touch permissions, but other fields update fine" do
@@ -216,7 +225,10 @@ defmodule Arbiter.Tasks.PermissionsTest do
 
     test "a coordinator cannot grant an operator-grant permission", %{issue: issue} do
       assert {:error, msg} =
-               Permissions.grant(issue, "prod_ssh", authority: :coordinator, actor: "coordinator:test")
+               Permissions.grant(issue, "prod_ssh",
+                 authority: :coordinator,
+                 actor: "coordinator:test"
+               )
 
       assert msg =~ "operator"
       assert Permissions.pending(Ash.get!(Issue, issue.id)) == ["prod_ssh"]
@@ -253,23 +265,34 @@ defmodule Arbiter.Tasks.PermissionsTest do
 
     test "a coordinator decides a coordinator-grant permission" do
       {:ok, issue} = create(ws!(), %{}, coordinator())
-      {:ok, issue} = Permissions.suggest(issue, "tracker_write", reason: "mentions the tracker", actor: "refine:x")
+
+      {:ok, issue} =
+        Permissions.suggest(issue, "tracker_write",
+          reason: "mentions the tracker",
+          actor: "refine:x"
+        )
 
       assert Permissions.pending(issue) == []
       assert issue.permissions == []
 
-      assert {:ok, issue} = Permissions.grant(issue, "tracker_write", authority: :coordinator, actor: "c")
+      assert {:ok, issue} =
+               Permissions.grant(issue, "tracker_write", authority: :coordinator, actor: "c")
+
       assert issue.permissions == ["tracker_write"]
       assert Permissions.in_force(issue) == ["tracker_write"]
     end
 
     test "a restricted caller decides nothing", %{issue: issue} do
-      assert {:error, _} = Permissions.grant(issue, "prod_ssh", authority: :restricted, actor: "w")
+      assert {:error, _} =
+               Permissions.grant(issue, "prod_ssh", authority: :restricted, actor: "w")
+
       assert {:error, _} = Permissions.deny(issue, "prod_ssh", authority: :restricted, actor: "w")
     end
 
     test "only a requested or suggested permission can be decided", %{issue: issue} do
-      assert {:error, msg} = Permissions.grant(issue, "tracker_write", authority: :operator, actor: "o")
+      assert {:error, msg} =
+               Permissions.grant(issue, "tracker_write", authority: :operator, actor: "o")
+
       assert msg =~ "nothing to decide"
     end
   end
@@ -292,6 +315,59 @@ defmodule Arbiter.Tasks.PermissionsTest do
     test "an unparsable suggestion is refused" do
       {:ok, issue} = create(ws!())
       assert {:error, _} = Permissions.suggest(issue, "root", actor: "refine:abc")
+    end
+  end
+
+  describe "resolve_edits/2 — add / remove without a full replacement" do
+    setup do
+      {:ok, issue} =
+        create(ws!(), %{permissions: ["tracker_write", "network:a.example.com"]}, coordinator())
+
+      %{issue: issue}
+    end
+
+    test "no edit keys leaves the params alone", %{issue: issue} do
+      assert {:ok, %{"notes" => "n"}} = Permissions.resolve_edits(issue, %{"notes" => "n"})
+    end
+
+    test "add_permissions and remove_permissions edit the current list, canonically", %{
+      issue: issue
+    } do
+      assert {:ok, %{"permissions" => perms} = params} =
+               Permissions.resolve_edits(issue, %{
+                 "add_permissions" => ["prod_read", "network:B.example.com"],
+                 "remove_permissions" => ["network:A.example.com"]
+               })
+
+      assert perms == ["network:b.example.com:443", "prod_read", "tracker_write"]
+      refute Map.has_key?(params, "add_permissions")
+      refute Map.has_key?(params, "remove_permissions")
+    end
+
+    test "removing matches the optional variant too; adding the other variant replaces it", %{
+      issue: issue
+    } do
+      assert {:ok, %{"permissions" => ["network:a.example.com:443", "tracker_write"]}} =
+               Permissions.resolve_edits(issue, %{"add_permissions" => ["network:a.example.com"]})
+
+      {:ok, issue} =
+        Ash.update(issue, %{permissions: ["network?:a.example.com", "tracker_write"]},
+          context: coordinator()
+        )
+
+      assert {:ok, %{"permissions" => ["tracker_write"]}} =
+               Permissions.resolve_edits(issue, %{
+                 "remove_permissions" => ["network:a.example.com"]
+               })
+
+      assert {:ok, %{"permissions" => ["network:a.example.com:443", "tracker_write"]}} =
+               Permissions.resolve_edits(issue, %{"add_permissions" => ["network:a.example.com"]})
+    end
+
+    test "bad shapes and bad names are refused", %{issue: issue} do
+      assert {:error, _} = Permissions.resolve_edits(issue, %{"add_permissions" => "prod_read"})
+      assert {:error, msg} = Permissions.resolve_edits(issue, %{"remove_permissions" => ["root"]})
+      assert msg =~ "root"
     end
   end
 

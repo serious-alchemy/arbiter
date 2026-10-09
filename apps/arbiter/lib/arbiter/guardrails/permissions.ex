@@ -273,10 +273,17 @@ defmodule Arbiter.Guardrails.Permissions do
   @spec authorize_decision(String.t(), authority(), map()) :: :ok | {:error, String.t()}
   def authorize_decision(canonical, authority, block) do
     case {authority, grant_by(canonical, block)} do
-      {:operator, _} -> :ok
-      {:coordinator, :coordinator} -> :ok
-      {:restricted, _} -> {:error, restricted("grant or deny #{canonical}")}
-      {_, :operator} -> {:error, "#{canonical} is grant_by: operator; only the operator may decide it"}
+      {:operator, _} ->
+        :ok
+
+      {:coordinator, :coordinator} ->
+        :ok
+
+      {:restricted, _} ->
+        {:error, restricted("grant or deny #{canonical}")}
+
+      {_, :operator} ->
+        {:error, "#{canonical} is grant_by: operator; only the operator may decide it"}
     end
   end
 

@@ -19,6 +19,7 @@ defmodule Arbiter.Guardrails.Config do
   """
 
   alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Permissions
   alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
 
   @block_keys ~w(bindings defaults repos subjects)
@@ -26,13 +27,14 @@ defmodule Arbiter.Guardrails.Config do
   @match_keys ~w(provider family model)
   @cap_keys ~w(match max_tier min_mode egress max_difficulty spend review)
   @binding_keys ~w(grant_by min_tier enforced_read_only tunnels hosts env_from_secret
-                   ssh_key_secret token_secret)
+                   ssh_key_secret token_secret tags)
   @grant_by ~w(operator coordinator)
   @cross_family ~w(required workspace)
   @fallbacks ~w(hold record workspace)
   @reviewer_tiers ~w(economy standard premium)
-  # `prod_read`, `network:<host>`, `secrets:<name>`, ... — the vocabulary is
-  # G12's; this only keeps a key from being free text.
+  # A binding key: `prod_read`, `network:<host>`, `secrets:<name>`, ... Only keeps
+  # a key from being free text; the vocabulary itself is
+  # `Arbiter.Guardrails.Permissions`'s, which `defaults` are checked against.
   @permission_re ~r/^[a-z][a-z0-9_]*(:[^\s:][^\s]*)?$/
 
   @doc "The workspace's `guardrails` block (string keys), or `%{}`."
@@ -245,8 +247,20 @@ defmodule Arbiter.Guardrails.Config do
       hosts_error(Map.get(binding, "hosts"), "#{label}.hosts") ++
       env_map_error(Map.get(binding, "env_from_secret"), "#{label}.env_from_secret") ++
       string_error(Map.get(binding, "ssh_key_secret"), "#{label}.ssh_key_secret") ++
-      string_error(Map.get(binding, "token_secret"), "#{label}.token_secret")
+      string_error(Map.get(binding, "token_secret"), "#{label}.token_secret") ++
+      tags_error(Map.get(binding, "tags"), "#{label}.tags")
   end
+
+  # `tags: ["prod"]` makes a `secrets:` binding operator-grant (§5.1).
+  defp tags_error(nil, _), do: []
+
+  defp tags_error(list, label) when is_list(list) do
+    if Enum.all?(list, &(is_binary(&1) and &1 != "")),
+      do: [],
+      else: ["#{label} must be a list of non-empty strings"]
+  end
+
+  defp tags_error(_, label), do: ["#{label} must be a list of non-empty strings"]
 
   defp validate_defaults(nil, _label), do: []
 
@@ -259,9 +273,11 @@ defmodule Arbiter.Guardrails.Config do
           []
 
         list when is_list(list) ->
+          # The ticket permission vocabulary (G12), not just a well-formed name:
+          # a default that `ResolvePermissions` would drop is refused here.
           for p <- list,
-              not (is_binary(p) and permission_name?(p)),
-              do: "#{label}.permissions: #{inspect(p)} is not a valid permission name"
+              {:error, why} <- [Permissions.parse(p)],
+              do: "#{label}.permissions: #{why}"
 
         _ ->
           ["#{label}.permissions must be a list of permission names"]

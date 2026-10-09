@@ -547,6 +547,19 @@ defmodule Arbiter.MCP.Catalog do
             },
             "additionalProperties" => false
           },
+          "permissions" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "The permissions this ticket declares (G12, docs/design/guardrail-profiles.md " <>
+                "§5): `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, `prod_read`, " <>
+                "`prod_ssh`, `phi_data`; a `?` after the kind (`network?:host`) marks an action " <>
+                "optional. On update this REPLACES the list. A permission whose binding says " <>
+                "`grant_by: operator` (default: `prod_ssh`) is recorded as `requested` and gives " <>
+                "no reach until the operator grants it; removing `phi_data` is operator-only. " <>
+                "Withheld at dispatch unless declared. Coordinator only — a worker or refine " <>
+                "session never sets them (a refine session may only suggest)."
+          },
           "assignee" => %{
             "type" => "string",
             "description" =>
@@ -659,6 +672,33 @@ defmodule Arbiter.MCP.Catalog do
               "exclude" => %{"type" => "array", "items" => %{"type" => "string"}}
             },
             "additionalProperties" => false
+          },
+          "permissions" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "The permissions this ticket declares (G12, docs/design/guardrail-profiles.md " <>
+                "§5): `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, `prod_read`, " <>
+                "`prod_ssh`, `phi_data`; a `?` after the kind (`network?:host`) marks an action " <>
+                "optional. On update this REPLACES the list. A permission whose binding says " <>
+                "`grant_by: operator` (default: `prod_ssh`) is recorded as `requested` and gives " <>
+                "no reach until the operator grants it; removing `phi_data` is operator-only. " <>
+                "Withheld at dispatch unless declared. Coordinator only — a worker or refine " <>
+                "session never sets them (a refine session may only suggest)."
+          },
+          "add_permissions" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Permissions to add to the ticket's current list (same authority rules as " <>
+                "`permissions`). Applied against the stored list, so concurrent edits don't clobber."
+          },
+          "remove_permissions" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Permissions to remove from the current list. Removing an action tightens (any " <>
+                "coordinator); removing `phi_data` is operator-only."
           },
           "assignee" => %{
             "type" => "string",

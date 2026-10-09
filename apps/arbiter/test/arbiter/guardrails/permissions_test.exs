@@ -13,7 +13,8 @@ defmodule Arbiter.Guardrails.PermissionsTest do
     end
 
     test "a trailing ? after the kind marks the permission optional (§5.2)" do
-      assert {:ok, %{kind: :network, optional?: true, canonical: "network?:status.example.com:443"}} =
+      assert {:ok,
+              %{kind: :network, optional?: true, canonical: "network?:status.example.com:443"}} =
                Permissions.parse("network?:status.example.com")
 
       assert {:ok, %{kind: :tracker_write, optional?: true, canonical: "tracker_write?"}} =
@@ -111,7 +112,9 @@ defmodule Arbiter.Guardrails.PermissionsTest do
     end
 
     test "phi_data is fixed: anyone may add it, only the operator may remove it" do
-      assert Permissions.grant_by("phi_data", %{"bindings" => %{"phi_data" => %{"grant_by" => "operator"}}}) ==
+      assert Permissions.grant_by("phi_data", %{
+               "bindings" => %{"phi_data" => %{"grant_by" => "operator"}}
+             }) ==
                :coordinator
     end
   end
@@ -190,7 +193,10 @@ defmodule Arbiter.Guardrails.PermissionsTest do
                {"phi_data", :repo_default}
              ]
 
-      assert Permissions.defaults(block, "other") == [{"network:repo.hex.pm:443", :workspace_default}]
+      assert Permissions.defaults(block, "other") == [
+               {"network:repo.hex.pm:443", :workspace_default}
+             ]
+
       assert Permissions.defaults(%{}, "tonic") == []
     end
 

@@ -157,6 +157,52 @@ defmodule Arbiter.Tasks.Permissions do
   defp wrap_error({:ok, _} = ok), do: ok
   defp wrap_error({:error, err}), do: {:error, Exception.message(err)}
 
+  # ---- add / remove edits -----------------------------------------------------------
+
+  @doc """
+  Fold `add_permissions` / `remove_permissions` (string-keyed `params`) into a
+  full `permissions` list against `issue`'s current one, and drop the two edit
+  keys. The CLI sends edits so two coordinators don't clobber each other with
+  whole-list writes and so the server, not the client, canonicalises. Removing
+  matches the optional variant too (`network:h` removes `network?:h:443`);
+  adding replaces the other variant of the same permission. Params without
+  either key are returned as they are.
+  """
+  @spec resolve_edits(Issue.t(), map()) :: {:ok, map()} | {:error, String.t()}
+  def resolve_edits(%Issue{} = issue, params) when is_map(params) do
+    edits? = Map.has_key?(params, "add_permissions") or Map.has_key?(params, "remove_permissions")
+
+    with true <- edits?,
+         {:ok, base} <- base_list(issue, params),
+         {:ok, add} <- edit_list(params, "add_permissions"),
+         {:ok, remove} <- edit_list(params, "remove_permissions") do
+      removing = MapSet.new(remove ++ add, &Vocabulary.required_form/1)
+
+      kept = Enum.reject(base, &(Vocabulary.required_form(&1) in removing))
+
+      {:ok,
+       params
+       |> Map.drop(["add_permissions", "remove_permissions"])
+       |> Map.put("permissions", Enum.sort(Enum.uniq(kept ++ add)))}
+    else
+      false -> {:ok, params}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp base_list(_issue, %{"permissions" => list}) when not is_nil(list),
+    do: Vocabulary.normalize(list)
+
+  defp base_list(issue, _params), do: {:ok, issue.permissions || []}
+
+  defp edit_list(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, []}
+      list when is_list(list) -> Vocabulary.normalize(list)
+      _ -> {:error, "#{key} must be a list of permission names"}
+    end
+  end
+
   # ---- shared with the Issue changes ----------------------------------------------
 
   @doc "The workspace's string-keyed `guardrails` block (`%{}` when it has none)."

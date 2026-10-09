@@ -92,6 +92,25 @@ defmodule Arbiter.Guardrails.ConfigTest do
     assert Enum.any?(Config.validate(%{"subjects" => [%{"match" => %{}}]}), &(&1 =~ "match"))
   end
 
+  test "defaults must be in the ticket permission vocabulary (G12)" do
+    errors =
+      Config.validate(%{"defaults" => %{"permissions" => ["network:API.example.com", "root"]}})
+
+    assert [msg] = errors
+    assert msg =~ "root"
+
+    assert Config.validate(%{
+             "defaults" => %{"permissions" => ["phi_data", "network?:h.io:8080"]}
+           }) == []
+  end
+
+  test "binding tags must be a list of strings" do
+    assert Config.validate(%{"bindings" => %{"secrets:db" => %{"tags" => ["prod"]}}}) == []
+
+    assert [msg] = Config.validate(%{"bindings" => %{"secrets:db" => %{"tags" => "prod"}}})
+    assert msg =~ "tags"
+  end
+
   test "binding names, hosts and secret maps are checked" do
     errors =
       Config.validate(%{
@@ -99,7 +118,7 @@ defmodule Arbiter.Guardrails.ConfigTest do
           "Not Valid" => %{},
           "prod_ssh" => %{"hosts" => ["not a host"], "env_from_secret" => %{"X" => ""}}
         },
-        "defaults" => %{"permissions" => ["ok_perm", "bad perm"]}
+        "defaults" => %{"permissions" => ["prod_read", "bad perm"]}
       })
 
     assert Enum.any?(errors, &(&1 =~ "Not Valid"))
