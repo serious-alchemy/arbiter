@@ -619,14 +619,15 @@ defmodule Arbiter.Quota do
     |> Resolver.workspaces()
     |> Enum.reject(&(shown && &1.id == shown.id))
     |> Enum.reject(&Arbiter.Quota.continue_mode?/1)
-    |> Enum.flat_map(fn ws ->
-      case gating_for(q, account, ws) do
-        %{gating_window: nil} ->
-          []
-
-        %{gating_window: w, gating_reason: r} ->
-          [%{workspace_id: ws.id, workspace: ws.name, window: w, reason: r}]
-      end
+    |> Enum.map(&{&1, gating_for(q, account, &1)})
+    |> Enum.reject(fn {_ws, gating} -> gating.gating_window == nil end)
+    |> Enum.map(fn {ws, gating} ->
+      %{
+        workspace_id: ws.id,
+        workspace: ws.name,
+        window: gating.gating_window,
+        reason: gating.gating_reason
+      }
     end)
   end
 
