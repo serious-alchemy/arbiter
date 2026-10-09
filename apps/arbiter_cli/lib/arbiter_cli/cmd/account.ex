@@ -198,6 +198,10 @@ defmodule ArbiterCli.Cmd.Account do
                 disable: :boolean
               ]
 
+  @doc "Every switch `arb account` takes (read by the field-exposure guard test)."
+  @spec switches() :: keyword()
+  def switches, do: @switches
+
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do

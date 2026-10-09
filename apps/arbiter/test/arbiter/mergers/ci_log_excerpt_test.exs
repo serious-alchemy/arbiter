@@ -81,6 +81,35 @@ defmodule Arbiter.Mergers.CILogExcerptTest do
     assert out =~ "100 tests, 100 failures"
   end
 
+  test "failure blocks survive a flood of earlier and later file:line noise" do
+    warnings =
+      for i <- 1..150, do: "warning: unused variable x#{i}\n  lib/arbiter/mod_#{i}.ex:#{i}"
+
+    slow =
+      for i <- 1..40, do: "  * test slow #{i} (#{i}.0ms) [L#{i}] test/slow_#{i}_test.exs:#{i}"
+
+    block = [
+      "",
+      "  1) test one serializer, one cap (Arbiter.MCP.WorkerReadSideTest)",
+      "     test/arbiter/mcp/worker_read_side_test.exs:219",
+      "     Expected truthy, got false",
+      "     code: assert function_exported?(Serializer, :show, 3)",
+      "     stacktrace:",
+      "       test/arbiter/mcp/worker_read_side_test.exs:220: (test)",
+      ""
+    ]
+
+    log = gh_log(warnings ++ block ++ ["Top 10 slowest (1s)"] ++ slow ++ ["10 tests, 1 failure"])
+
+    out = CILogExcerpt.extract(log, 4_000)
+
+    assert out =~ "1) test one serializer, one cap (Arbiter.MCP.WorkerReadSideTest)"
+    assert out =~ "worker_read_side_test.exs:219"
+    assert out =~ "code: assert function_exported?(Serializer, :show, 3)"
+    assert out =~ "10 tests, 1 failure"
+    assert String.length(out) <= 4_100
+  end
+
   test "empty and non-binary input yield an empty string" do
     assert CILogExcerpt.extract("", 100) == ""
     assert CILogExcerpt.extract(nil, 100) == ""
