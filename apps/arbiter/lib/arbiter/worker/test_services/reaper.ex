@@ -50,9 +50,10 @@ defmodule Arbiter.Worker.TestServices.Reaper do
         removed -> Logger.info("TestServices.Reaper: removed #{length(removed)} orphaned pod(s)")
       end
 
-      # bd-9cygoo (G16): deploy keys a dead server left staged on disk, and any in
-      # podman's secret store.
-      _ = Arbiter.Worker.GitCredential.sweep(max_age_ms: 0)
+      # bd-9cygoo (G16): deploy keys a dead server left staged on disk (never a
+      # live server's: this also runs when the reaper is restarted under live
+      # workers), and any in podman's secret store.
+      _ = Arbiter.Worker.GitCredential.sweep_orphans()
 
       case Arbiter.Worker.Container.reap_git_secrets(Keyword.take(opts, [:runner, :podman])) do
         [] ->

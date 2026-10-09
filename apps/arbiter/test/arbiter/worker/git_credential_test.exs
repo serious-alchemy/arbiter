@@ -93,6 +93,24 @@ defmodule Arbiter.Worker.GitCredentialTest do
       assert a.key_path == b.key_path
     end
 
+    test "sweep_orphans removes a dead server's key dir and leaves a live server's", %{
+      tmp_dir: tmp
+    } do
+      material = %Material{kind: :deploy_key, key: "PRIVATE\n"}
+      {:ok, live} = GitCredential.stage(material, self(), root: tmp)
+
+      dead = Path.join(tmp, "git-key-dead")
+      File.mkdir_p!(dead)
+      File.write!(Path.join(dead, "key"), "OLD\n")
+      File.write!(Path.join(dead, ".server"), "999999999")
+
+      # A server whose OS pid is gone is swept; this server's own staged key is not.
+      alive? = fn pid -> pid == System.pid() end
+      assert GitCredential.sweep_orphans(root: tmp, alive?: alive?) == [dead]
+      refute File.exists?(dead)
+      assert File.exists?(live.key_path)
+    end
+
     test "podman gets the key as a --secret mount, the token as a --secret env" do
       key = %Material{kind: :deploy_key, key: "PRIVATE\n"}
       tok = %Material{kind: :token, token: "tok", remote: "acme/tonic", host: "github.com"}

@@ -623,6 +623,10 @@ defmodule Arbiter.Worker.GitCredential do
           | {:error, term()}
   def stage(nil, _owner, _opts), do: {:ok, %{dir: nil, key_path: nil, env: []}}
 
+  # The OS pid of the server that staged the key, so `sweep_orphans/1` can tell a
+  # dead server's leftovers from a live worker's key.
+  @server_marker ".server"
+
   def stage(%Material{kind: :deploy_key, key: key} = material, owner, opts) do
     root = Keyword.get(opts, :root) || ensure_default_dir()
     hash = :crypto.hash(:sha256, :erlang.term_to_binary(owner))
@@ -633,7 +637,8 @@ defmodule Arbiter.Worker.GitCredential do
     with :ok <- File.mkdir_p(dir),
          :ok <- File.chmod(dir, 0o700),
          :ok <- File.write(path, key),
-         :ok <- File.chmod(path, 0o600) do
+         :ok <- File.chmod(path, 0o600),
+         :ok <- File.write(Path.join(dir, @server_marker), System.pid()) do
       remove_when_down(owner, dir)
       {:ok, %{dir: dir, key_path: path, env: Material.env(material, path)}}
     else
@@ -688,6 +693,52 @@ defmodule Arbiter.Worker.GitCredential do
 
       _ ->
         []
+    end
+  end
+
+  @doc """
+  Removes the staged key directories whose server is gone: those whose `.server`
+  marker names an OS pid that is no longer running. Safe to run while workers are
+  live (a supervisor restart of the reaper): a live server's keys are never touched.
+  A directory with no marker falls back to the `sweep/1` age cutoff (`:max_age_ms`,
+  default a day). Where `/proc` is not available a marker's pid is assumed alive.
+  """
+  @spec sweep_orphans(keyword()) :: [Path.t()]
+  def sweep_orphans(opts \\ []) do
+    root = Keyword.get(opts, :root) || default_dir()
+    cutoff = System.os_time(:second) - div(Keyword.get(opts, :max_age_ms, 86_400_000), 1000)
+    alive? = Keyword.get(opts, :alive?, &os_pid_alive?/1)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        orphans =
+          entries
+          |> Enum.map(&Path.join(root, &1))
+          |> Enum.filter(&orphan_dir?(&1, cutoff, alive?))
+
+        Enum.each(orphans, &File.rm_rf/1)
+        orphans
+
+      _ ->
+        []
+    end
+  end
+
+  defp orphan_dir?(dir, cutoff, alive?) do
+    case File.read(Path.join(dir, @server_marker)) do
+      {:ok, pid} ->
+        not alive?.(String.trim(pid))
+
+      {:error, _} ->
+        match?({:ok, %File.Stat{mtime: m}} when m < cutoff, File.stat(dir, time: :posix))
+    end
+  end
+
+  defp os_pid_alive?(pid) do
+    cond do
+      pid == System.pid() -> true
+      not File.dir?("/proc") -> true
+      true -> File.dir?(Path.join("/proc", pid))
     end
   end
 
