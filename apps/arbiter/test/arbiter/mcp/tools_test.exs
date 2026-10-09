@@ -3496,6 +3496,7 @@ defmodule Arbiter.MCP.ToolsTest do
   # below, which are the surviving dispatching tools.
   describe "queue_resume/2 (removed, bd-a14qd1)" do
     test "the tool is no longer exported or in the catalog" do
+      Code.ensure_loaded!(Tools)
       refute function_exported?(Tools, :queue_resume, 2)
       refute "queue_resume" in Enum.map(Arbiter.MCP.Catalog.all(), & &1.name)
     end

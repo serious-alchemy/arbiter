@@ -708,6 +708,7 @@ defmodule Arbiter.Worker.ContainerTest do
                          |> List.flatten())
 
       for {fun, arity} <- Sandbox.behaviour_info(:callbacks) do
+        Code.ensure_loaded!(Container)
         assert function_exported?(Container, fun, arity), "Container.#{fun}/#{arity} missing"
       end
     end

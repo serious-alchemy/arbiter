@@ -32,6 +32,7 @@ defmodule Arbiter.Worker.SandboxTest do
                          |> List.flatten())
 
       for {fun, arity} <- Sandbox.behaviour_info(:callbacks) do
+        Code.ensure_loaded!(Jail)
         assert function_exported?(Jail, fun, arity), "Jail.#{fun}/#{arity} missing"
       end
     end

@@ -239,6 +239,7 @@ defmodule Arbiter.MCP.WorkerReadSideTest do
       refute source("apps/arbiter_web/lib/arbiter_web/controllers/api/run_json.ex") =~
                ~r/defp (summary|detail)\(/
 
+      Code.ensure_loaded!(Serializer)
       assert function_exported?(Serializer, :show, 3)
     end
 
