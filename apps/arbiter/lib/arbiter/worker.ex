@@ -4009,7 +4009,51 @@ defmodule Arbiter.Worker do
         {:started, new_state} -> new_state
       end
     else
-      deliver_pass(state)
+      if host_pushes_conflict_pass?(state),
+        do: push_and_deliver_conflict_pass(state),
+        else: deliver_pass(state)
+    end
+  end
+
+  defp host_pushes_conflict_pass?(%State{meta: meta}),
+    do: role_from_meta(meta) == :conflict_resolver and Map.get(meta, :conflict_host_push) == true
+
+  # bd-19skda: a conflict pass in a podman container cannot push (no forge
+  # credential or host key), so the host force-with-lease pushes the rebased
+  # branch after `arb done`, from the clone, expecting the PR head the pass
+  # started from. A pass that ended mid-rebase is not pushed — the verdict fails
+  # it with the unmerged state named. Once G16 gives the container real
+  # credentials the pass pushes itself and this step is a harmless no-op.
+  defp push_and_deliver_conflict_pass(%State{meta: meta, task_id: task_id} = state) do
+    worktree = Map.get(meta, :worktree_path)
+    branch = Map.get(meta, :conflict_resolver_branch)
+    start_head = Map.get(meta, :conflict_start_head)
+
+    cond do
+      not (is_binary(worktree) and File.dir?(worktree) and is_binary(branch)) ->
+        deliver_pass(state)
+
+      Arbiter.Worker.Worktree.in_progress_operation(worktree) != nil ->
+        deliver_pass(state)
+
+      true ->
+        sync_back_after_run(state)
+
+        push_opts =
+          [branch: branch] ++
+            if(is_binary(start_head), do: [force_with_lease: start_head], else: [])
+
+        case Arbiter.Worker.Worktree.push(worktree, push_opts) do
+          {:ok, _} ->
+            deliver_pass(state)
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: host push for conflict pass failed on task=#{task_id}: #{inspect(reason)}"
+            )
+
+            fail_now(state, {:push_failed, reason})
+        end
     end
   end
 

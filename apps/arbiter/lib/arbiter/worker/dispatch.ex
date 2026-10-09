@@ -4250,10 +4250,10 @@ defmodule Arbiter.Worker.Dispatch do
   Briefing for a **conflict-resolve** worker (#354, Phase 2b). See
   `Arbiter.Worker.PromptBuilder.conflict_resolve_briefing/3`.
   """
-  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t()) :: String.t()
-  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch)
+  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t(), keyword()) :: String.t()
+  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch, opts \\ [])
       when is_binary(branch) and is_binary(target_branch) do
-    PromptBuilder.conflict_resolve_briefing(task, branch, target_branch)
+    PromptBuilder.conflict_resolve_briefing(task, branch, target_branch, opts)
   end
 
   # Fetch acceptance-criteria context from a tracker issue referenced by
