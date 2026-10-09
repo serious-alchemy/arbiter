@@ -716,6 +716,12 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
+  # Any scoped plan (deploy key, token, GitHub App), not only a staged deploy
+  # key: the jail then binds back no operator ssh identity or gh login.
+  defp scoped_git?(opts) do
+    match?(%GitCredential{mode: :scoped}, Keyword.get(opts, :git_credential))
+  end
+
   defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key) do
     jail_opts =
       [
@@ -730,7 +736,8 @@ defmodule Arbiter.Agents.Gemini do
       ] ++
         if(network, do: [network: network], else: []) ++
         if(ssh_agent, do: [ssh_agent: ssh_agent], else: []) ++
-        if(git_key, do: [git_ssh_key: git_key], else: [])
+        if(git_key, do: [git_ssh_key: git_key], else: []) ++
+        if(scoped_git?(opts), do: [scoped_git: true], else: [])
 
     case Sandbox.wrap(policy, command, jail_opts) do
       {:ok, argv} ->

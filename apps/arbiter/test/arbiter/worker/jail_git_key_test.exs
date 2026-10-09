@@ -62,6 +62,18 @@ defmodule Arbiter.Worker.JailGitKeyTest do
              Jail.wrap(["true"], worktree: wt, git_ssh_key: Path.join(tmp, "nope"))
   end
 
+  test "a scoped token credential (no deploy key) binds back no operator ssh identity or gh login",
+       %{tmp_dir: tmp} do
+    wt = repo(tmp)
+
+    assert {:ok, argv} =
+             Jail.wrap(["true"], worktree: wt, hide_reads: true, hide_repos: [], scoped_git: true)
+
+    refute Enum.any?(argv, &Regex.match?(~r{/\.ssh/(id_[^/]*|[^/]*\.id_[^/]*)$}, &1))
+    refute Enum.any?(argv, &String.ends_with?(&1, "/.config/gh/hosts.yml"))
+    refute Enum.any?(pairs(argv, "--setenv"), &(elem(&1, 0) == "SSH_AUTH_SOCK"))
+  end
+
   test "in network mode the proxy ProxyCommand is composed onto the key command", %{tmp_dir: tmp} do
     cmd = Jail.ssh_command("ssh " <> GitCredential.ssh_options("/k/key"), %{proxy_port: 3128})
     assert [{"GIT_SSH_COMMAND", value}] = cmd

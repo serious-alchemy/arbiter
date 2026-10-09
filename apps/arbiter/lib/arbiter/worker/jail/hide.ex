@@ -90,7 +90,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   `:grok_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
   (the repo the worker's worktree belongs to, never hidden) and `:unmask`. `:scoped_git`
   (G16: the worker has a repo-scoped git credential, so no operator identity
-  file is bound back).
+  file — ssh key or gh login — is bound back).
   """
   @spec paths(keyword()) :: t()
   def paths(opts \\ []) do
@@ -119,9 +119,11 @@ defmodule Arbiter.Worker.Jail.Hide do
       |> Enum.reject(&(&1 in unmask or under_any?(&1, dirs)))
       |> Enum.uniq()
 
+    scoped? = Keyword.get(opts, :scoped_git, false)
+
     keep =
-      (ssh_keep(home, Keyword.get(opts, :scoped_git, false)) ++
-         gh_keep(home) ++ grok_keep(home) ++ unmask)
+      (ssh_keep(home, scoped?) ++
+         gh_keep(home, scoped?) ++ grok_keep(home) ++ unmask)
       |> existing(&File.exists?/1)
       |> Enum.filter(&under_any?(&1, dirs))
       |> Enum.uniq()
@@ -239,9 +241,15 @@ defmodule Arbiter.Worker.Jail.Hide do
   # `hosts.yml` and `config.yml` come back and `gh` still knows the account. A
   # `hosts.yml` holding a plaintext `oauth_token` (or one we cannot read) keeps
   # the whole dir hidden.
-  defp gh_keep(nil), do: []
+  #
+  # G16: under a scoped git credential the operator's gh account is not bound
+  # back at all: without `hosts.yml`, `gh` does not know the account, so it cannot
+  # look up the operator's full-scope keyring token and write to another repo.
+  # The scoped token (`GH_TOKEN`) is the only tracker identity.
+  defp gh_keep(nil, _scoped?), do: []
+  defp gh_keep(_home, true), do: []
 
-  defp gh_keep(home) do
+  defp gh_keep(home, false) do
     hosts = Path.join([home, ".config", "gh", "hosts.yml"])
 
     case File.read(hosts) do

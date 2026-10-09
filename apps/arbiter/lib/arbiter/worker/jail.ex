@@ -243,6 +243,9 @@ defmodule Arbiter.Worker.Jail do
       blanked key dir, `GIT_SSH_COMMAND` names it (`-i`, `IdentitiesOnly`, no agent,
       composed with the egress `ProxyCommand`), and the hide set binds back none of
       the operator's default identities. A missing file refuses the spawn.
+    * `:scoped_git` — the worker has a repo-scoped git credential of any kind (token,
+      GitHub App, deploy key), so the hide set binds back no operator ssh identity and
+      no `gh` login. Implied by `:git_ssh_key`.
     * `:hide_reads` — also hide the sensitive read paths of `Arbiter.Worker.Jail.Hide`
       (credential dirs, the install DB and `~/.arbiter`, the output-log root,
       every other worktree, other workspaces' repos) behind `--tmpfs` and
@@ -286,7 +289,10 @@ defmodule Arbiter.Worker.Jail do
         git_ssh_key: git_ssh_key,
         hide:
           if(Keyword.get(opts, :hide_reads, false),
-            do: hide_spec(git, [{:scoped_git, git_ssh_key != nil} | opts])
+            do:
+              hide_spec(git, [
+                {:scoped_git, git_ssh_key != nil or Keyword.get(opts, :scoped_git, false)} | opts
+              ])
           )
       }
 

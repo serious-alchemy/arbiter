@@ -201,6 +201,19 @@ defmodule Arbiter.Worker.JailHideTest do
       refute Path.join(ssh, "ci.id_ed25519") in keep
     end
 
+    test "G16: a scoped git credential binds back no gh login either", %{fx: fx} do
+      gh = Path.join(fx.home, ".config/gh")
+      File.write!(Path.join(gh, "hosts.yml"), keyring_hosts())
+
+      %{keep: unscoped} = Hide.paths(fx.opts)
+      assert Path.join(gh, "hosts.yml") in unscoped
+
+      %{dirs: dirs, keep: keep} = Hide.paths([scoped_git: true] ++ fx.opts)
+      assert gh in dirs
+      refute Path.join(gh, "hosts.yml") in keep
+      refute Path.join(gh, "config.yml") in keep
+    end
+
     test "ssh keeps only known_hosts, config and the default identity", %{fx: fx} do
       %{keep: keep} = Hide.paths(fx.opts)
       ssh = Path.join(fx.home, ".ssh")
