@@ -51,7 +51,7 @@ defmodule Arbiter.Guardrails.Scan do
     {"~/.git-credentials", ~r{(?:^|/)\.git-credentials$}},
     {"~/.config/gh", ~r{\.config/gh(?:/|$)}},
     {"~/.config/gcloud", ~r{\.config/gcloud(?:/|$)}},
-    {"arbiter.sqlite3", ~r{arbiter\.sqlite3}}
+    {"arbiter.sqlite3", ~r{(?:^|/)arbiter\.sqlite3(?:$|[-.])}}
   ]
 
   # ---- the transcript scan -------------------------------------------------
@@ -106,9 +106,49 @@ defmodule Arbiter.Guardrails.Scan do
   end
 
   defp exe_findings(exe, args) when exe in @readers,
-    do: Enum.flat_map(args, &credential_match/1)
+    do: exe |> read_targets(args) |> Enum.flat_map(&credential_match/1)
 
   defp exe_findings(_exe, _args), do: []
+
+  # The arguments of a reader that name something read. A search tool's pattern
+  # and a `find` name test are search terms, not paths.
+  defp read_targets(exe, args) when exe in ~w(grep rg sed awk), do: strip_pattern(args)
+  defp read_targets("find", args), do: strip_find_tests(args)
+  defp read_targets(_exe, args), do: args
+
+  defp strip_pattern(args) do
+    {kept, explicit?} = strip_explicit_patterns(args, [], false)
+
+    if explicit? do
+      kept
+    else
+      case Enum.split_while(kept, &String.starts_with?(&1, "-")) do
+        {opts, [_pattern | rest]} -> opts ++ rest
+        {opts, []} -> opts
+      end
+    end
+  end
+
+  defp strip_explicit_patterns([], acc, explicit?), do: {Enum.reverse(acc), explicit?}
+
+  defp strip_explicit_patterns([f, _ | rest], acc, _explicit?)
+       when f in ["-e", "--regexp", "--expression"],
+       do: strip_explicit_patterns(rest, acc, true)
+
+  defp strip_explicit_patterns(["--regexp=" <> _ | rest], acc, _explicit?),
+    do: strip_explicit_patterns(rest, acc, true)
+
+  defp strip_explicit_patterns(["--expression=" <> _ | rest], acc, _explicit?),
+    do: strip_explicit_patterns(rest, acc, true)
+
+  defp strip_explicit_patterns([a | rest], acc, explicit?),
+    do: strip_explicit_patterns(rest, [a | acc], explicit?)
+
+  @find_tests ~w(-name -iname -path -ipath -wholename -iwholename -regex -iregex -lname -ilname)
+
+  defp strip_find_tests([]), do: []
+  defp strip_find_tests([t, _ | rest]) when t in @find_tests, do: strip_find_tests(rest)
+  defp strip_find_tests([a | rest]), do: [a | strip_find_tests(rest)]
 
   defp show_token?(args), do: Enum.any?(args, &(&1 in ["--show-token", "-t"]))
 
@@ -212,12 +252,10 @@ defmodule Arbiter.Guardrails.Scan do
 
   # `cmd` split into simple-command segments, each a list of words. Quotes
   # protect operators and spaces; `; & | ( ) \n` and backticks outside quotes
-  # end a segment.
+  # end a segment. A heredoc (`<<DELIM`, `<<-DELIM`, quoted or not) is data, not
+  # commands: its body lines, up to the delimiter line, are dropped.
   defp segments(cmd) do
-    {segs, word, cur, _q} =
-      cmd
-      |> String.to_charlist()
-      |> Enum.reduce({[], [], [], nil}, &step/2)
+    {segs, word, cur, _q} = scan(String.to_charlist(cmd), {[], [], [], nil}, [])
 
     [finish_word(cur, word) | segs]
     |> Enum.map(&Enum.reverse/1)
@@ -225,9 +263,62 @@ defmodule Arbiter.Guardrails.Scan do
     |> Enum.reject(&(&1 == []))
   end
 
-  defp step(c, {segs, word, cur, nil}) when c in [?', ?"], do: {segs, word, cur, c} |> mark_word()
-  defp step(q, {segs, word, cur, q}), do: {segs, word, cur, nil} |> mark_word()
-  defp step(c, {segs, word, cur, q}) when q != nil, do: {segs, word, [c | cur], q} |> mark_word()
+  defp scan([], state, _pending), do: state
+
+  # `<<<` is a here-string, not a heredoc.
+  defp scan([?<, ?<, ?< | rest], {segs, word, cur, nil}, pending),
+    do: scan(rest, {segs, word, [?<, ?<, ?< | cur], nil}, pending)
+
+  defp scan([?<, ?< | rest], {segs, word, cur, nil}, pending) do
+    {heredoc, rest} = read_heredoc_delimiter(rest)
+    scan(rest, {segs, finish_word(cur, word), [], nil}, pending ++ [heredoc])
+  end
+
+  defp scan([?\n | rest], {segs, word, cur, nil}, [_ | _] = pending) do
+    rest = rest |> List.to_string() |> skip_heredoc_bodies(pending) |> String.to_charlist()
+    scan(rest, {[finish_word(cur, word) | segs], [], [], nil}, [])
+  end
+
+  defp scan([c | rest], state, pending), do: scan(rest, step(c, state), pending)
+
+  # After `<<`: optional `-` (strip leading tabs from the delimiter line), then
+  # the delimiter word, which may be quoted.
+  defp read_heredoc_delimiter(chars) do
+    {tabs?, chars} =
+      case chars do
+        [?- | rest] -> {true, rest}
+        _ -> {false, chars}
+      end
+
+    chars = Enum.drop_while(chars, &(&1 in [?\s, ?\t]))
+
+    {delim, rest} =
+      case chars do
+        [q | rest] when q in [?', ?"] -> Enum.split_while(rest, &(&1 != q))
+        _ -> Enum.split_while(chars, &(&1 not in [?\s, ?\t, ?\n, ?;, ?&, ?|, ?(, ?), ?<, ?>]))
+      end
+
+    rest = if match?([q | _] when q in [?', ?"], rest), do: tl(rest), else: rest
+    delim = delim |> List.delete(?\\) |> List.to_string()
+    {{delim, tabs?}, rest}
+  end
+
+  defp skip_heredoc_bodies(text, pending) do
+    Enum.reduce(pending, text, fn {delim, tabs?}, text ->
+      lines = String.split(text, "\n")
+
+      lines
+      |> Enum.drop_while(fn line ->
+        if(tabs?, do: String.trim_leading(line, "\t"), else: line) != delim
+      end)
+      |> Enum.drop(1)
+      |> Enum.join("\n")
+    end)
+  end
+
+  defp step(c, {segs, word, cur, nil}) when c in [?', ?"], do: {segs, word, cur, c}
+  defp step(q, {segs, word, cur, q}), do: {segs, word, cur, nil}
+  defp step(c, {segs, word, cur, q}) when q != nil, do: {segs, word, [c | cur], q}
 
   defp step(c, {segs, word, cur, nil}) when c in [?\s, ?\t] do
     {segs, finish_word(cur, word), [], nil}
@@ -238,10 +329,6 @@ defmodule Arbiter.Guardrails.Scan do
   end
 
   defp step(c, {segs, word, cur, nil}), do: {segs, word, [c | cur], nil}
-
-  # A quoted empty string still ends up as a (empty) word boundary; we only need
-  # `word` to be the list of finished words of the current segment.
-  defp mark_word(state), do: state
 
   defp finish_word([], word), do: word
   defp finish_word(cur, word), do: [cur |> Enum.reverse() |> List.to_string() | word]
