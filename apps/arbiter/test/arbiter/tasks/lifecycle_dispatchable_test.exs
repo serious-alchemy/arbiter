@@ -121,4 +121,26 @@ defmodule Arbiter.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.dispatchable(ticket(:queued), %{}) == :ok
     end
   end
+
+  describe "a guardrail hold (bd-atll60, G13)" do
+    test "is the ticket's own hold, after the provider constraint and ahead of the board-wide ones" do
+      ctx = %{guardrail: {:hold, "no eligible model"}, paused: true}
+
+      assert Lifecycle.dispatchable(ticket(:queued), ctx) ==
+               {:held, {:guardrail, "no eligible model"}}
+
+      both = Map.put(ctx, :provider_constraint, {:hold, "require claude"})
+
+      assert Lifecycle.dispatchable(ticket(:queued), both) ==
+               {:held, {:provider_constraint, "require claude"}}
+
+      assert Lifecycle.describe_hold({:guardrail, "no eligible model"}) ==
+               "guardrail (no eligible model)"
+    end
+
+    test ":ok, or a ctx that does not ask, is not held" do
+      assert Lifecycle.dispatchable(ticket(:queued), %{guardrail: :ok}) == :ok
+      assert Lifecycle.dispatchable(ticket(:queued), %{}) == :ok
+    end
+  end
 end

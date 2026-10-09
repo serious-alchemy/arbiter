@@ -33,6 +33,9 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     * `:quota` — `:ok`, or `{:hold, reason}`;
     * `:provider_constraint` — `:ok`, or `{:hold, detail}`: the ticket's own
       provider constraint (bd-13pqcp) leaves no eligible account with capacity;
+    * `:guardrail` — `:ok`, or `{:hold, detail}`: no model the guardrail profiles
+      allow can take the ticket, or a declared permission awaits the operator's
+      grant (bd-atll60, G13);
     * `:slots_free` — free slots; absent means "not asked".
 
   ## Holds, in precedence order
@@ -49,6 +52,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   | `{:conflicts_with, id}` | a `:conflicts_with` counterpart is in flight |
   | `{:file_overlap, files, id}` | these declared files are in flight on `id` |
   | `{:provider_constraint, detail}` | the ticket's provider constraint leaves no eligible account |
+  | `{:guardrail, detail}` | no model its guardrails allow can take it, or a permission awaits the operator's grant |
   | `:paused` | the scheduler is paused |
   | `{:quota, reason}` | a quota or auth hold |
   | `:no_slot` | no free worker slot |
@@ -64,6 +68,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
           | {:conflicts_with, String.t()}
           | {:file_overlap, [String.t()], String.t()}
           | {:provider_constraint, String.t()}
+          | {:guardrail, String.t()}
           | :paused
           | {:quota, String.t()}
           | :no_slot
@@ -84,7 +89,8 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     with :ok <- column_hold(View.view(ticket, Map.take(ctx, [:blocked_by, :runs, :held]))),
          :ok <- mutex_hold(ctx),
          :ok <- overlap_hold(ctx),
-         :ok <- provider_constraint_hold(ctx) do
+         :ok <- provider_constraint_hold(ctx),
+         :ok <- guardrail_hold(ctx) do
       board_hold(ctx)
     end
   end
@@ -103,6 +109,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     do: "#{name_files(files)} in flight on #{task_id}"
 
   def describe_hold({:provider_constraint, detail}), do: "provider constraint (#{detail})"
+  def describe_hold({:guardrail, detail}), do: "guardrail (#{detail})"
   def describe_hold(:paused), do: "scheduler paused"
   def describe_hold({:quota, reason}), do: reason
   def describe_hold(:no_slot), do: "no free worker slot"
@@ -148,6 +155,13 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     do: {:held, {:provider_constraint, detail}}
 
   defp provider_constraint_hold(_ctx), do: :ok
+
+  # bd-atll60 (G13): the same kind of block — the ticket's own, which survives the
+  # board-wide holds clearing and does not hold the queue behind it. Waiting does
+  # not fix it (a quota hold is the board's, not this one): no model its
+  # guardrails allow exists for it, or an operator has yet to grant a permission.
+  defp guardrail_hold(%{guardrail: {:hold, detail}}), do: {:held, {:guardrail, detail}}
+  defp guardrail_hold(_ctx), do: :ok
 
   defp board_hold(%{paused: true}), do: {:held, :paused}
   defp board_hold(%{quota: {:hold, reason}}), do: {:held, {:quota, reason}}

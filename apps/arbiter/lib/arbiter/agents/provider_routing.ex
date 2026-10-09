@@ -136,6 +136,9 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Agents.Routing.Score
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Eligibility
+  alias Arbiter.Guardrails.Rules
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
@@ -514,6 +517,36 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
+  @doc """
+  Whether a dropped availability entry was dropped by the guardrails (G13) —
+  ineligible by tier, scope, difficulty, permissions or data class, or because
+  the adapter cannot meet the profile's floor here — as opposed to being
+  eligible but unavailable (quota, capacity, auth, a pause). The line
+  `Arbiter.Worker.Dispatch` draws between "hold" and "no eligible model".
+  """
+  @spec guardrail_drop?(map()) :: boolean()
+  def guardrail_drop?(%{reason: "guardrail_ineligible"}), do: true
+  def guardrail_drop?(%{reason: "egress_unenforceable"}), do: true
+
+  def guardrail_drop?(%{reason: "write_confinement_none", detail: detail}) when is_binary(detail),
+    do: String.contains?(detail, "guardrail floor")
+
+  def guardrail_drop?(_entry), do: false
+
+  @doc "A dropped (or available) entry as `provider:slug (reason: detail)`, for a hold phrase."
+  @spec describe_drop(map()) :: String.t()
+  def describe_drop(%{account: account} = entry) do
+    reason = entry |> Map.get(:reason, "available") |> to_string() |> String.replace("_", " ")
+
+    case Map.get(entry, :detail) do
+      detail when is_binary(detail) and detail != "" ->
+        "#{label(account)} (#{reason}: #{detail})"
+
+      _ ->
+        "#{label(account)} (#{reason})"
+    end
+  end
+
   defp drop_text(%{reason: reason, detail: nil}), do: reason
   defp drop_text(%{reason: reason, detail: detail}), do: "#{reason}: #{detail}"
 
@@ -739,12 +772,40 @@ defmodule Arbiter.Agents.ProviderRouting do
       gemini_code:
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
       confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
+      egress_confinement: Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2),
       capability: capability_gate(ws, task, opts),
       scoring: scoring_config(ws, task, opts),
       floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
+      guardrails: guardrail_gate(task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws)
     }
   end
+
+  # G13 (bd-atll60): `nil` — no subject rule configured — is the whole off path:
+  # no check runs, nothing is recorded. Otherwise the ticket's side of the
+  # eligibility question is read once per evaluation, not once per candidate:
+  # its difficulty, its in-force permissions (`Arbiter.Tasks.Permissions`: a
+  # permission pending an operator grant gives no reach) and the repo.
+  defp guardrail_gate(task, opts) do
+    case Keyword.get_lazy(opts, :guardrail_rules, &Rules.all/0) do
+      [] ->
+        nil
+
+      rules ->
+        %{
+          rules: rules,
+          difficulty: task_difficulty_or_nil(task),
+          permissions: in_force_permissions(task),
+          repo: repo_opt(opts) || task_repo(task)
+        }
+    end
+  end
+
+  defp task_difficulty_or_nil(%Issue{difficulty: difficulty}), do: difficulty
+  defp task_difficulty_or_nil(_task), do: nil
+
+  defp in_force_permissions(%Issue{} = task), do: Arbiter.Tasks.Permissions.in_force(task)
+  defp in_force_permissions(_task), do: []
 
   # bd-adtnto: `nil` (anything but `provider_selection: scored`) is the whole
   # off path — no window list, no score, no extra record key.
@@ -858,10 +919,12 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp check(entry, ctx) do
     checks = [
+      &check_guardrails/2,
       &check_constraint/2,
       &check_sandbox_backend/2,
       &check_account/2,
       &check_adapter/2,
+      &check_guardrail_floor/2,
       &check_cli/2,
       &check_auth/2,
       &check_circuit/2,
@@ -881,6 +944,60 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp drop(entry, reason, detail), do: Map.merge(entry, %{reason: reason, detail: detail})
+
+  # G13 (bd-atll60, design §5.4, §8): the guardrail eligibility of the
+  # (provider, model) subject this candidate would run as — first, so that a
+  # dropped candidate is `guardrail_ineligible` rather than whatever else would
+  # also have dropped it, and so every other drop reason is, by construction, a
+  # candidate that *is* eligible (§5.7's hold names both sides from this). A
+  # hard filter before any optimisation: it never looks at quota.
+  defp check_guardrails(entry, %{guardrails: nil}), do: {:ok, entry}
+
+  defp check_guardrails(%{account: account} = entry, %{guardrails: gate} = ctx) do
+    attrs = %{
+      provider: account.provider,
+      model: entry.model,
+      role: :implementer,
+      account: account,
+      difficulty: gate.difficulty,
+      permissions: gate.permissions,
+      workspace: ctx.ws,
+      repo: gate.repo
+    }
+
+    case Eligibility.evaluate(attrs, rules: gate.rules) do
+      {:ok, %{profile: profile, permission_fallback: fallback}} ->
+        {:ok, Map.put(entry, :guardrail, %{profile: profile, permission_fallback: fallback})}
+
+      {:error, detail} ->
+        {:drop, "guardrail_ineligible", detail}
+    end
+  end
+
+  # §3.4: capability is not trust. A tier states what must hold (the floored
+  # mode, the egress ceiling); the adapter says whether it *can* hold here. A
+  # candidate that cannot is dropped with the existing reason — never run under
+  # a weaker posture (bd-1abj7u, generalised). Asked of the policy **after** the
+  # floor, because the floor is what the spawn will actually run under.
+  defp check_guardrail_floor(
+         %{guardrail: %{profile: %Guardrails.Profile{} = profile}, adapter: adapter} = entry,
+         %{security: %SecurityPolicy{} = policy} = ctx
+       ) do
+    floored = Guardrails.floor(policy, profile)
+
+    case Guardrails.enforceable(adapter, floored, profile,
+           write_confinement: ctx.confinement,
+           egress_confinement: ctx.egress_confinement
+         ) do
+      :ok ->
+        {:ok, entry}
+
+      {:error, reason} ->
+        {:drop, Atom.to_string(reason), Guardrails.unmet_detail(reason, profile, floored)}
+    end
+  end
+
+  defp check_guardrail_floor(entry, _ctx), do: {:ok, entry}
 
   # bd-13pqcp: the ticket's own provider constraint — first, so the drop names
   # it rather than whatever else would have dropped the account.

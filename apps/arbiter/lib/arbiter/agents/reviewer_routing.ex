@@ -99,6 +99,10 @@ defmodule Arbiter.Agents.ReviewerRouting do
   alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails
+  alias Arbiter.Guardrails.Eligibility
+  alias Arbiter.Guardrails.Profile
+  alias Arbiter.Guardrails.Rules
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -111,7 +115,9 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # `timed_out` is deliberately absent — see the moduledoc.
   @fallback_triggers ~w(unconfigured write_confinement_none disabled merged
                         auth_expired circuit_broken quota_held paused capability_missing
-                        sandbox_backend)
+                        sandbox_backend guardrail_ineligible egress_unenforceable)
+
+  @tier_ladder ~w(economy standard premium)
 
   @type selection :: %{
           provider: atom(),
@@ -160,14 +166,58 @@ defmodule Arbiter.Agents.ReviewerRouting do
   def select(workspace, task, opts \\ [])
 
   def select(%Workspace{} = ws, task_id, opts) when is_binary(task_id) do
-    if enabled?(ws), do: select(ws, load_issue(task_id), opts), else: :off
+    if enabled?(ws) or Guardrails.guarded?(),
+      do: select(ws, load_issue(task_id), opts),
+      else: :off
   end
 
   def select(%Workspace{} = ws, task, opts) do
-    if enabled?(ws), do: do_select(ws, task, opts), else: :off
+    if enabled?(ws) or required?(ws, task, opts), do: do_select(ws, task, opts), else: :off
   end
 
   def select(_ws, _task, _opts), do: :off
+
+  @doc """
+  Whether cross-family review applies to `task` in `workspace`: the workspace
+  opted in (`enabled?/1`), **or** the implementer's guardrail profile requires it
+  (`review.cross_family: :required`, design §3.3 — a low tier forces the rule
+  even where `review_agent.cross_family` is off). The ReviewGate asks this, not
+  `enabled?/1`, whether to route a pass through `select/3`.
+  """
+  @spec applies?(Workspace.t() | nil, Issue.t() | String.t() | nil) :: boolean()
+  def applies?(%Workspace{} = ws, task) do
+    enabled?(ws) or required?(ws, task_of(task), [])
+  end
+
+  def applies?(_ws, _task), do: false
+
+  @doc """
+  The model a reviewer pass on `agent_type` would run in `workspace` — the same
+  read `select/3` makes for a candidate (the workspace's reviewer config, else
+  the family's reviewer tier for `:tier`). The guardrail gate needs it for a
+  reviewer that was named rather than selected: a `nil` model would match only
+  the provider-level rule. `nil` when it cannot be worked out.
+  """
+  @spec predicted_model(Workspace.t(), atom() | String.t(), keyword()) :: String.t() | nil
+  def predicted_model(%Workspace{} = ws, agent_type, opts \\ []) do
+    opts = opts |> Keyword.take([:tier, :gemini_code]) |> Keyword.put(:guardrail_rules, [])
+    ctx = context(ws, nil, opts)
+    entry(%{agent_type: to_string(agent_type), account: nil}, 0, ctx).model
+  rescue
+    _ -> nil
+  end
+
+  defp task_of(task_id) when is_binary(task_id), do: load_issue(task_id)
+  defp task_of(task), do: task
+
+  defp required?(ws, %Issue{} = task, opts) do
+    case guardrail_gate(ws, task, opts) do
+      %{implementer: %Profile{review: %{cross_family: :required}}} -> true
+      _ -> false
+    end
+  end
+
+  defp required?(_ws, _task, _opts), do: false
 
   @doc """
   The reviewer `ReviewerRouting` would pick for `implementer_family`, without
@@ -258,6 +308,13 @@ defmodule Arbiter.Agents.ReviewerRouting do
            "no eligible reviewer family left for this pass: " <> drop_list(blocked)
          )}
 
+      same != [] and same_family_hold?(ctx) ->
+        hold(
+          ctx,
+          "no other model family is eligible, and the implementer's guardrail profile does " <>
+            "not allow a same-family review: " <> drop_list(others_dropped)
+        )
+
       same != [] ->
         [best | _] = same
 
@@ -267,6 +324,18 @@ defmodule Arbiter.Agents.ReviewerRouting do
       true ->
         no_candidate(ctx)
     end
+  end
+
+  # The implementer's profile says a same-family review waits (`review.
+  # same_family_fallback: :hold`, the quarantine default). `:record` and
+  # `:workspace` keep bd-a1ke2c's recorded fallback.
+  defp same_family_hold?(ctx), do: review_knob(ctx.guardrails, :same_family_fallback) == :hold
+
+  # A guardrail hold: no reviewer is started for this pass. The `"guardrail_hold"`
+  # key is what tells the ReviewGate to wait rather than fall through to its
+  # ordinary reviewer resolution (which knows nothing of tiers).
+  defp hold(ctx, reason) do
+    {:none, ctx |> record() |> Map.merge(%{"reason" => reason, "guardrail_hold" => reason})}
   end
 
   # Nothing can review at all: run at once on the workspace's pre-routing
@@ -283,15 +352,33 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
         # bd-57uzkl (E17): the pre-routing reviewer meets the same hard gate,
         # or the gate is only advisory.
-        case check_capability(entry, ctx) do
-          {:ok, entry} ->
-            same? = not eligible?(entry, ctx.implementer) and not is_nil(ctx.implementer)
+        # G13: and the same guardrail gate — the pre-routing reviewer is a
+        # subject like any other, and "nothing else is available" must not mean
+        # "so run the one the tiers rule out".
+        with {:ok, entry} <- check_capability(entry, ctx),
+             {:ok, entry} <- check_guardrails(entry, ctx) do
+          same? = not eligible?(entry, ctx.implementer) and not is_nil(ctx.implementer)
 
-            reason =
-              "no reviewer available (#{drop_list(ctx.dropped)}); dispatching on the " <>
-                "pre-routing reviewer #{type}"
+          reason =
+            "no reviewer available (#{drop_list(ctx.dropped)}); dispatching on the " <>
+              "pre-routing reviewer #{type}"
 
+          if same? and same_family_hold?(ctx) do
+            hold(
+              ctx,
+              "no reviewer from another family is available, and the implementer's guardrail " <>
+                "profile does not allow a same-family review: " <> drop_list(ctx.dropped)
+            )
+          else
             {:ok, selection(entry, ctx, "no_candidate", same?, reason)}
+          end
+        else
+          {:drop, "guardrail_ineligible", detail} ->
+            hold(
+              ctx,
+              "no reviewer is eligible under the guardrails (the pre-routing reviewer #{type}: " <>
+                "#{detail}; others: #{drop_list(ctx.dropped)})"
+            )
 
           {:drop, reason, detail} ->
             {:none,
@@ -425,13 +512,18 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # ---- evaluation -------------------------------------------------------------
 
   defp context(ws, task, opts) do
+    guardrails = guardrail_gate(ws, task, opts)
+
     %{
       ws: ws,
       task: task,
       opts: opts,
       implementer: Keyword.get(opts, :implementer_family) || implementer_family(task),
       authoring: authoring_record(task),
-      tier: Keyword.get(opts, :tier),
+      guardrails: guardrails,
+      tier: bump_tier(Keyword.get(opts, :tier), review_knob(guardrails, :min_reviewer_tier)),
+      confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
+      egress_confinement: Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2),
       exclude: Keyword.get(opts, :exclude, []),
       block: reviewer_block(ws),
       now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0),
@@ -448,6 +540,83 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp task_repo(%Issue{repo: repo}), do: repo
   defp task_repo(_task), do: nil
+
+  # ---- guardrails (G13, bd-atll60) ------------------------------------------------
+
+  # `nil` — no subject rule configured — is the whole off path. Otherwise the
+  # ticket's side of the question is read once per selection (its difficulty, its
+  # in-force permissions) together with the **implementer's** effective profile,
+  # whose `review` knobs (cross-family required, same-family fallback hold, minimum
+  # reviewer tier) shape this pass (design §3.3).
+  defp guardrail_gate(ws, task, opts) do
+    case Keyword.get_lazy(opts, :guardrail_rules, &Rules.all/0) do
+      [] ->
+        nil
+
+      rules ->
+        %{
+          rules: rules,
+          difficulty: gate_difficulty(task),
+          permissions: gate_permissions(task),
+          repo: task_repo(task),
+          implementer: implementer_profile(ws, task, rules)
+        }
+    end
+  end
+
+  defp gate_difficulty(%Issue{difficulty: difficulty}), do: difficulty
+  defp gate_difficulty(_task), do: nil
+
+  defp gate_permissions(%Issue{} = task), do: Arbiter.Tasks.Permissions.in_force(task)
+  defp gate_permissions(_task), do: []
+
+  defp implementer_profile(ws, %Issue{} = task, rules) do
+    case implementer_subject(task) do
+      {provider, model} ->
+        Guardrails.effective(Guardrails.subject(provider, model), ws, task.repo, rules: rules)
+
+      nil ->
+        nil
+    end
+  end
+
+  defp implementer_profile(_ws, _task, _rules), do: nil
+
+  # The (provider, model) that wrote the code under review: the latest authoring
+  # run, else the account the task is pinned to (bd-40pzpj).
+  defp implementer_subject(%Issue{id: id, implementer_account_id: account_id}) do
+    run =
+      Run
+      |> Ash.Query.filter(
+        (task_id == ^id or base_task_id == ^id) and kind in [:implement, :fix_pass, :conflict] and
+          not is_nil(provider)
+      )
+      |> Ash.Query.sort(started_at: :desc)
+      |> Ash.Query.limit(1)
+      |> Ash.read!()
+      |> List.first()
+
+    case {run, account_id && Arbiter.Accounts.Resolver.get(account_id)} do
+      {%Run{provider: provider, model: model}, _} -> {provider, model}
+      {nil, %ProviderAccount{provider: provider}} -> {provider, nil}
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp review_knob(%{implementer: %Profile{review: review}}, key), do: Map.get(review, key)
+  defp review_knob(_guardrails, _key), do: nil
+
+  # A profile's `min_reviewer_tier` raises the tier the reviewer runs at; it never
+  # lowers one the ReviewGate already asked for.
+  defp bump_tier(tier, nil), do: tier
+
+  defp bump_tier(tier, min) do
+    min = Atom.to_string(min)
+    rank = fn t -> Enum.find_index(@tier_ladder, &(&1 == t)) || -1 end
+    if rank.(min) > rank.(tier), do: min, else: tier
+  end
 
   # Oldest-first families that authored on the branch; only recorded when more
   # than one did, so the audit shows a mixed-family branch.
@@ -536,6 +705,8 @@ defmodule Arbiter.Agents.ReviewerRouting do
     [
       &check_excluded/2,
       &check_adapter/2,
+      &check_guardrails/2,
+      &check_guardrail_floor/2,
       &check_confinement/2,
       &check_sandbox_backend/2,
       &check_account/2,
@@ -565,6 +736,61 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp check_adapter(entry, _ctx),
     do: {:ok, Map.put(entry, :adapter, Agents.for_type(entry.type))}
+
+  # G13 (design §5.4): may this reviewer subject review this ticket? A reviewer
+  # needs the right to review at the ticket's difficulty, and a data class
+  # (`phi_data`) binds it exactly as it binds the implementer. Reviewers get no
+  # action permissions. The drop is a same-family-fallback trigger, like
+  # `quota_held`: an ineligible other family leaves only the implementer's own.
+  defp check_guardrails(entry, %{guardrails: nil}), do: {:ok, entry}
+
+  defp check_guardrails(%{type: type} = entry, %{guardrails: gate} = ctx) do
+    attrs = %{
+      provider: classify_provider(type, entry.account, ctx.gemini_code),
+      model: entry.model,
+      role: :reviewer,
+      account: entry.account || workspace_account(ctx.ws, type),
+      difficulty: gate.difficulty,
+      permissions: gate.permissions,
+      workspace: ctx.ws,
+      repo: gate.repo
+    }
+
+    case Eligibility.evaluate(attrs, rules: gate.rules) do
+      {:ok, %{profile: profile}} -> {:ok, Map.put(entry, :guardrail, %{profile: profile})}
+      {:error, detail} -> {:drop, "guardrail_ineligible", detail}
+    end
+  end
+
+  defp workspace_account(%Workspace{id: ws_id}, type) when is_atom(type) and not is_nil(type) do
+    Arbiter.Accounts.Resolver.account(ws_id, type)
+  rescue
+    _ -> nil
+  end
+
+  defp workspace_account(_ws, _type), do: nil
+
+  # §3.4: the tier's floor, asked of the adapter after the floor is applied to the
+  # review spawn's policy — never a weaker posture than the tier states.
+  defp check_guardrail_floor(
+         %{guardrail: %{profile: %Profile{} = profile}, adapter: adapter} = entry,
+         ctx
+       ) do
+    floored = ctx.security |> SecurityPolicy.for_review_spawn() |> Guardrails.floor(profile)
+
+    case Guardrails.enforceable(adapter, floored, profile,
+           write_confinement: ctx.confinement,
+           egress_confinement: ctx.egress_confinement
+         ) do
+      :ok ->
+        {:ok, entry}
+
+      {:error, reason} ->
+        {:drop, Atom.to_string(reason), Guardrails.unmet_detail(reason, profile, floored)}
+    end
+  end
+
+  defp check_guardrail_floor(entry, _ctx), do: {:ok, entry}
 
   defp check_confinement(%{type: type} = entry, ctx) do
     case Agents.strict_eligible_provider(type, ctx.security, [], explicit: true) do
