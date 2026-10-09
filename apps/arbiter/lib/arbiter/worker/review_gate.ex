@@ -2522,23 +2522,6 @@ defmodule Arbiter.Worker.ReviewGate do
   # A stale exit from an worker we've moved on from.
   def handle_info({:worker_exited, _other, _status}, state), do: {:noreply, state}
 
-  defp pass_exited(status, %{phase: :reviewing} = state) do
-    case state |> clear_pass() |> attempt_finish(status) do
-      {:done, state} -> {:stop, :normal, state}
-      {:reprompt, state} -> {:noreply, state}
-      {:revise, state} -> {:noreply, state}
-    end
-  end
-
-  defp pass_exited(_status, %{phase: :revising} = state) do
-    case state |> clear_pass() |> finish_revise() do
-      {:done, state} -> {:stop, :normal, state}
-      {:continue, state} -> {:noreply, state}
-    end
-  end
-
-  defp pass_exited(_status, state), do: {:noreply, state}
-
   # bd-cut6uv: a poll of the CI wait. The token says which wait armed it: a
   # poll for a wait that has since resolved (or been replaced) is ignored.
   def handle_info(
@@ -2651,6 +2634,23 @@ defmodule Arbiter.Worker.ReviewGate do
   defp server_shutdown?({:shutdown, :operator_stop}), do: false
   defp server_shutdown?({:shutdown, _}), do: true
   defp server_shutdown?(_), do: false
+
+  defp pass_exited(status, %{phase: :reviewing} = state) do
+    case state |> clear_pass() |> attempt_finish(status) do
+      {:done, state} -> {:stop, :normal, state}
+      {:reprompt, state} -> {:noreply, state}
+      {:revise, state} -> {:noreply, state}
+    end
+  end
+
+  defp pass_exited(_status, %{phase: :revising} = state) do
+    case state |> clear_pass() |> finish_revise() do
+      {:done, state} -> {:stop, :normal, state}
+      {:continue, state} -> {:noreply, state}
+    end
+  end
+
+  defp pass_exited(_status, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do
