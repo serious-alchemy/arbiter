@@ -317,11 +317,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-<<<<<<< HEAD
-    #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}
-=======
-    #{EvidenceIntegrity.worker_block()}#{skills_section(opts)}#{permissions_section(opts)}
->>>>>>> e90071ce0 ([G14] PERMISSIONS prompt block; ReviewGate implementer projection)
+    #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 
