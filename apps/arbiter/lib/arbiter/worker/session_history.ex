@@ -18,9 +18,13 @@ defmodule Arbiter.Worker.SessionHistory do
   require Logger
   require Ash.Query
 
+  alias Arbiter.Redaction
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Worker.SessionArchive
+  alias Arbiter.Worker.WorkerEnv
   alias Arbiter.Workers.Run
+
+  @max_age_seconds 14 * 86_400
 
   @type source :: {:file, String.t()} | {:archive, String.t()}
 
@@ -43,28 +47,66 @@ defmodule Arbiter.Worker.SessionHistory do
 
   @doc """
   Copy every session JSONL under `<run_tmp>/claude-config/projects/*/` into
-  `store_dir/0` (`0600`, atomically). Returns the session ids kept. Best-effort:
-  never raises, and a dir with no Claude config is a no-op.
+  `store_dir/0` (`0600`, atomically), **redacted** with the run's workspace
+  secret values exactly as `Arbiter.Worker.SessionArchive` does — this is a
+  second persistence path, and a secret must not escape redaction on it. The
+  task is resolved from the `Run` row carrying the session id, else from the
+  run tmp dir's label (`RunTmp.create/1`). Returns the session ids kept, and
+  prunes entries older than 14 days. Best-effort: never raises, and a dir
+  with no Claude config is a no-op.
   """
   @spec preserve(String.t() | nil) :: [String.t()]
   def preserve(run_tmp) when is_binary(run_tmp) do
-    run_tmp
-    |> Path.join("claude-config/projects/*/*.jsonl")
-    |> Path.wildcard()
-    |> Enum.flat_map(&preserve_file/1)
+    kept =
+      run_tmp
+      |> Path.join("claude-config/projects/*/*.jsonl")
+      |> Path.wildcard()
+      |> Enum.flat_map(&preserve_file(&1, run_tmp))
+
+    if kept != [], do: prune()
+    kept
   rescue
     _ -> []
   end
 
   def preserve(_), do: []
 
-  defp preserve_file(path) do
+  @doc "Remove the stored copy of `session_id` (it has been seeded into a new run)."
+  @spec discard(String.t()) :: :ok
+  def discard(session_id) when is_binary(session_id) and session_id != "" do
+    _ = File.rm(store_path(session_id))
+    :ok
+  end
+
+  @doc "Delete store entries older than the retention window. Returns the count."
+  @spec prune() :: non_neg_integer()
+  def prune do
+    cutoff = System.os_time(:second) - @max_age_seconds
+
+    case File.ls(store_dir()) do
+      {:ok, entries} ->
+        entries
+        |> Enum.map(&Path.join(store_dir(), &1))
+        |> Enum.count(fn path ->
+          case File.stat(path, time: :posix) do
+            {:ok, %File.Stat{mtime: mtime}} when mtime < cutoff -> File.rm(path) == :ok
+            _ -> false
+          end
+        end)
+
+      _ ->
+        0
+    end
+  end
+
+  defp preserve_file(path, run_tmp) do
     sid = Path.basename(path, ".jsonl")
     dest = store_path(sid)
     tmp = dest <> ".#{System.unique_integer([:positive])}.tmp"
 
     with :ok <- File.mkdir_p(store_dir()),
-         :ok <- File.cp(path, tmp),
+         {:ok, raw} <- File.read(path),
+         :ok <- File.write(tmp, Redaction.redact(raw, secret_values(sid, run_tmp))),
          _ = File.chmod(tmp, 0o600),
          :ok <- File.rename(tmp, dest) do
       [sid]
@@ -73,6 +115,24 @@ defmodule Arbiter.Worker.SessionHistory do
         File.rm(tmp)
         Logger.warning("SessionHistory: cannot preserve #{path}: #{inspect(reason)}")
         []
+    end
+  end
+
+  defp secret_values(sid, run_tmp) do
+    task_id =
+      case runs_for(sid) do
+        [%{task_id: task_id} | _] -> task_id
+        [] -> label_task_id(run_tmp)
+      end
+
+    WorkerEnv.secret_values(task_id)
+  end
+
+  # `RunTmp.create/1` names dirs `<slug>-<unix seconds>-<unique int>`.
+  defp label_task_id(run_tmp) do
+    case Regex.run(~r/^(.+)-\d+-\d+$/, Path.basename(run_tmp)) do
+      [_, slug] -> slug
+      _ -> nil
     end
   end
 
@@ -130,6 +190,7 @@ defmodule Arbiter.Worker.SessionHistory do
              dest = destination(config_dir, cwd, session_id),
              :ok <- File.mkdir_p(Path.dirname(dest)),
              :ok <- File.write(dest, bytes) do
+          if source == {:file, store_path(session_id)}, do: discard(session_id)
           Logger.info("SessionHistory: seeded session #{session_id} into #{config_dir}")
           :ok
         else

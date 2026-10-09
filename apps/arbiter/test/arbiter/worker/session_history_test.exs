@@ -25,10 +25,10 @@ defmodule Arbiter.Worker.SessionHistoryTest do
     %{base: base, new_config: Path.join(base, "new-config")}
   end
 
-  defp create_run(config_dir) do
+  defp create_run(config_dir, task_id \\ nil) do
     {:ok, run} =
       Ash.create(Run, %{
-        task_id: "bd-hist#{System.unique_integer([:positive])}",
+        task_id: task_id || "bd-hist#{System.unique_integer([:positive])}",
         task_title: "t",
         repo: "r/r",
         state: :finished,
@@ -120,6 +120,81 @@ defmodule Arbiter.Worker.SessionHistoryTest do
       assert :ok = Arbiter.Worker.RunTmp.remove(inside)
       refute File.exists?(inside)
       assert File.read!(SessionHistory.store_path(@sid)) == "{\"d\":4}\n"
+    end
+
+    test "redacts workspace secret values before they reach the store", %{base: base} do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "sh-#{System.unique_integer([:positive])}",
+          worker_env: %{"API_TOKEN" => %{"value" => "tok_SUPERSECRET", "secret" => true}}
+        })
+
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
+      create_run(Path.join(base, "gone"), task.id)
+
+      tmp = run_tmp_with_session(base, "{\"echo\":\"KEY=tok_SUPERSECRET\"}\n")
+      assert [@sid] = SessionHistory.preserve(tmp)
+
+      stored = File.read!(SessionHistory.store_path(@sid))
+      refute stored =~ "tok_SUPERSECRET"
+      assert stored =~ "KEY="
+    end
+
+    test "RunTmp.sweep/1 preserves a stale run tmp's session before deleting it", %{base: base} do
+      root = Path.join(base, "sweep-root")
+      stale = run_tmp_with_session(root, "{\"e\":5}\n")
+      File.touch!(stale, {{2020, 1, 1}, {0, 0, 0}})
+
+      assert [^stale] = Arbiter.Worker.RunTmp.sweep(root: root, max_age_ms: 1000)
+      refute File.exists?(stale)
+      assert File.read!(SessionHistory.store_path(@sid)) == "{\"e\":5}\n"
+    end
+
+    test "seed/3 falls back to the store when the live file vanishes after lookup", %{
+      base: base,
+      new_config: new
+    } do
+      prior = Path.join(base, "prior-config")
+      File.mkdir_p!(Path.dirname(jsonl_path(prior, "-old")))
+      File.write!(jsonl_path(prior, "-old"), "{\"f\":6}\n")
+      create_run(prior)
+
+      # What the reaper does: preserve, then delete the live file.
+      tmp = Path.dirname(prior)
+      File.mkdir_p!(Path.join(tmp, "claude-config/projects/-old"))
+
+      File.cp!(
+        jsonl_path(prior, "-old"),
+        Path.join(tmp, "claude-config/projects/-old/#{@sid}.jsonl")
+      )
+
+      assert [@sid] = SessionHistory.preserve(tmp)
+
+      assert {:ok, {:file, live}} = SessionHistory.find(@sid)
+      File.rm!(live)
+
+      assert :ok = SessionHistory.seed(new, @cwd, @sid)
+      dest = jsonl_path(new, Arbiter.Usage.ClaudeSessionFile.project_slug(@cwd))
+      assert File.read!(dest) == "{\"f\":6}\n"
+    end
+
+    test "seeding from the store discards it; prune/0 drops aged entries", %{
+      base: base,
+      new_config: new
+    } do
+      tmp = run_tmp_with_session(base, "{\"g\":7}\n")
+      assert [@sid] = SessionHistory.preserve(tmp)
+      File.rm_rf!(tmp)
+
+      assert :ok = SessionHistory.seed(new, @cwd, @sid)
+      refute File.exists?(SessionHistory.store_path(@sid))
+
+      File.mkdir_p!(SessionHistory.store_dir())
+      old = SessionHistory.store_path("old-sid")
+      File.write!(old, "x")
+      File.touch!(old, {{2020, 1, 1}, {0, 0, 0}})
+      assert SessionHistory.prune() == 1
+      refute File.exists?(old)
     end
 
     test "a dir with no session is a no-op", %{base: base} do
