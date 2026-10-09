@@ -1324,6 +1324,38 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Tell the coordinator that no attached model is eligible for a ticket under the
+  guardrail profiles (G13, bd-atll60; `docs/design/guardrail-profiles.md` §5.7).
+
+  This is **not** a quota problem — waiting cannot fix it — so it is its own
+  kind, `:no_eligible_model`, rather than a `dispatch_stuck` page after N
+  retries or a quiet hold. `detail` is the dispatch's guardrail phrase, naming
+  each subject and what rules it out. Deduplicated per ticket by
+  `Arbiter.Messages.Escalation`, so a ticket retried every tick is one open
+  item. Best-effort, returns `:ok`.
+  """
+  @spec no_eligible_model(map(), String.t()) :: :ok
+  def no_eligible_model(snapshot, detail) do
+    escalate_event(:no_eligible_model, snapshot, fn task_id ->
+      subject = "#{task_id} has no eligible model under its guardrails"
+
+      body =
+        [
+          "No model attached to this workspace may take #{title_for(task_id)} under the " <>
+            "guardrail profiles, so it cannot start. This is not a quota condition and " <>
+            "waiting will not fix it.",
+          "Why: #{detail}",
+          "Either change the ticket (a lower difficulty, fewer declared permissions), " <>
+            "attach an account on a subject whose tier allows it, or have the operator " <>
+            "change the subject's tier or the workspace's bindings."
+        ]
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Raise a system alert for an open task whose **worker spend** has passed its
   estimate group's p90 (bd-8j9i9p AC5; operator decision 2026-09-15;
   bd-7gt8rm).

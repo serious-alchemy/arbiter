@@ -1307,6 +1307,20 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           provider_fallback:
             "pinned account codex:work unavailable (quota_held); fell back to claude:main",
           model_family: "anthropic",
+          guardrail_decision: %{
+            "eligible" => true,
+            "tier" => "privileged",
+            "profile_digest" => "0a1b2c3d4e5f",
+            "subject" => %{"provider" => "claude", "model" => "opus", "family" => "anthropic"},
+            "role" => "implementer",
+            "permission_fallback" => [
+              %{"permission" => "network?:status.example.com:443", "reason" => "tier too low"}
+            ],
+            "projection" => %{
+              "granted" => ["tracker_write"],
+              "withheld" => [%{"permission" => "prod_read", "reason" => "no binding"}]
+            }
+          },
           routing_decision: %{
             "outcome" => "fallback",
             "role" => "fix_pass",
@@ -1356,6 +1370,33 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert has_element?(view, "#task-implementer-pin", account.slug)
       assert has_element?(view, "#task-implementer-pin", "openai")
+    end
+
+    test "an expanded guarded run shows its guardrail decision: tier, digest, grants and fallbacks",
+         %{conn: conn, task: task, routed: routed, plain: plain} do
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      view |> element(~s([phx-value-run="#{routed.id}"])) |> render_click()
+
+      assert has_element?(view, "#run-guardrail-#{routed.id}", "privileged")
+      assert has_element?(view, "#run-guardrail-#{routed.id}", "0a1b2c3d4e5f")
+
+      assert has_element?(
+               view,
+               "#run-guardrail-#{routed.id} [data-role=granted]",
+               "tracker_write"
+             )
+
+      assert has_element?(view, "#run-guardrail-#{routed.id} [data-role=withheld]", "prod_read")
+
+      assert has_element?(
+               view,
+               "#run-guardrail-#{routed.id} [data-role=permission-fallback]",
+               "network?:status.example.com:443"
+             )
+
+      view |> element(~s([phx-value-run="#{plain.id}"])) |> render_click()
+      refute has_element?(view, "#run-guardrail-#{plain.id}")
     end
 
     test "an expanded routed run shows the decision: chosen account, headroom, drops and fallback",

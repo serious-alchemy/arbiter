@@ -56,6 +56,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Agents
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.Mergers
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
@@ -208,6 +209,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
          :ok <- ProviderConstraint.check(task, provider),
+         :ok <- guardrail_gate(task, context, provider),
          :ok <-
            ProviderRouting.ensure_sandbox_backend(
              provider,
@@ -281,6 +283,16 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
         :ok
     end
+  end
+
+  # bd-atll60 (G13): the guardrail hard gate on the provider this pass will run
+  # as. A follow-up pass names its provider without asking `ProviderRouting`'s
+  # candidates (the pin, or the legacy resolution), so it is gated here too, and
+  # the coordinator is told (`:no_eligible_model`) — a refusal here would
+  # otherwise be a log line and a ticket that never progresses.
+  defp guardrail_gate(task, context, provider) do
+    workspace = context.workspace || maybe_load_workspace(task.workspace_id)
+    Gate.check_and_notify(task, workspace, provider, :predicted)
   end
 
   defp start_agent(worker_pid, worktree_path, context, args, provider) do
