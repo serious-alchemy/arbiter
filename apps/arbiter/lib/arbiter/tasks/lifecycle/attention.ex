@@ -39,6 +39,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   | `:run_asked_question` | | coordinator | `:answer` |
   | `:awaiting_verification` | | coordinator | `:verification` |
   | `:tracker_sync_failed` | | coordinator | `:tracker_sync` |
+  | `:no_eligible_model` | | coordinator | `:guardrail` |
 
   ## Where the cause comes from
 
@@ -132,7 +133,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
           {:awaiting_verification, nil, :coordinator, :verification,
            "merged — waiting on a restart-and-observe"},
           {:tracker_sync_failed, nil, :coordinator, :tracker_sync,
-           "its external tracker could not be synced"}
+           "its external tracker could not be synced"},
+          {:no_eligible_model, nil, :coordinator, :guardrail,
+           "no attached model is eligible for it under the guardrail profiles"}
         ] ++
           for(
             reason <- ReviewPark.park_reasons(),

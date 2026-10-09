@@ -253,7 +253,9 @@ defmodule Arbiter.Board.Autopilot do
   # `dispatch_stuck` page on top would be a second page for one cause.
   # `:setup_token_missing` is the bd-80ecol setup-token hold (one page per
   # workspace, naming the fix).
-  @dispatch_escalated_errors [:setup_token_missing]
+  # `:guardrail_ineligible` (bd-atll60, G13) is the same: Dispatch posts its own
+  # `:no_eligible_model` escalation when no subject is eligible at all.
+  @dispatch_escalated_errors [:setup_token_missing, :guardrail_ineligible]
 
   # Dispatch error shapes that clear on their own and so never page.
   # `:account_at_capacity` (bd-8suxac): `Arbiter.Accounts.Admission` refused
@@ -1117,6 +1119,7 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail({:quota_held, _}), do: "quota held"
   defp failure_detail({:provider_paused, provider, _}), do: "#{provider} paused"
   defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
+  defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
   defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
@@ -1187,6 +1190,9 @@ defmodule Arbiter.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:guardrail_ineligible, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:capability_missing, _provider, _phrase}, _count, now),

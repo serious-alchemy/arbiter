@@ -517,6 +517,36 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
+  @doc """
+  Whether a dropped availability entry was dropped by the guardrails (G13) —
+  ineligible by tier, scope, difficulty, permissions or data class, or because
+  the adapter cannot meet the profile's floor here — as opposed to being
+  eligible but unavailable (quota, capacity, auth, a pause). The line
+  `Arbiter.Worker.Dispatch` draws between "hold" and "no eligible model".
+  """
+  @spec guardrail_drop?(map()) :: boolean()
+  def guardrail_drop?(%{reason: "guardrail_ineligible"}), do: true
+  def guardrail_drop?(%{reason: "egress_unenforceable"}), do: true
+
+  def guardrail_drop?(%{reason: "write_confinement_none", detail: detail}) when is_binary(detail),
+    do: String.contains?(detail, "guardrail floor")
+
+  def guardrail_drop?(_entry), do: false
+
+  @doc "A dropped (or available) entry as `provider:slug (reason: detail)`, for a hold phrase."
+  @spec describe_drop(map()) :: String.t()
+  def describe_drop(%{account: account} = entry) do
+    reason = entry |> Map.get(:reason, "available") |> to_string() |> String.replace("_", " ")
+
+    case Map.get(entry, :detail) do
+      detail when is_binary(detail) and detail != "" ->
+        "#{label(account)} (#{reason}: #{detail})"
+
+      _ ->
+        "#{label(account)} (#{reason})"
+    end
+  end
+
   defp drop_text(%{reason: reason, detail: nil}), do: reason
   defp drop_text(%{reason: reason, detail: detail}), do: "#{reason}: #{detail}"
 
