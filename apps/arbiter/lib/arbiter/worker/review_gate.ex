@@ -1193,6 +1193,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # whenever cross-family review is off, which leaves every path below
       # exactly as it was.
       reviewer_selection: nil,
+      # bd-atll60 (G13): set (a reason) when `ReviewerRouting` found no reviewer
+      # the guardrails allow for this pass, or the implementer's profile holds a
+      # same-family review. The pass is then not started: `adapter_for/4` refuses
+      # it with the reason, which parks the round, instead of falling through to
+      # the ordinary resolution (which knows nothing of tiers).
+      reviewer_hold: nil,
       # bd-a22hib: the CURRENT review round's own detached checkout,
       # `%{path:, head_sha:}` — provisioned by `provision_review_checkout/1`
       # at the pushed head right before the round's first reviewer pass, shared
@@ -4191,8 +4197,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # nil, which is today's resolution exactly.
   defp route_reviewer_pass(%{reviewer_provider: nil} = state, :reviewer, nil) do
     case select_reviewer(state, []) do
-      {:ok, selection} -> %{state | reviewer_selection: selection}
-      _ -> %{state | reviewer_selection: nil}
+      {:ok, selection} ->
+        %{state | reviewer_selection: selection, reviewer_hold: nil}
+
+      {:none, %{"guardrail_hold" => reason}} ->
+        %{state | reviewer_selection: nil, reviewer_hold: reason}
+
+      _ ->
+        %{state | reviewer_selection: nil, reviewer_hold: nil}
     end
   end
 
@@ -4200,7 +4212,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp select_reviewer(state, exclude) do
     with %Workspace{} = ws <- load_workspace(state.workspace_id),
-         true <- ReviewerRouting.enabled?(ws) do
+         true <- ReviewerRouting.applies?(ws, state.task_id) do
       ReviewerRouting.select(ws, state.task_id,
         tier: round_reviewer_tier(state, ws.config),
         exclude: exclude,
@@ -6352,6 +6364,40 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp sandbox_session_opts(_policy, _ws, _role, _state), do: []
 
+  defp adapter_for(state, ws, role, revision) do
+    with {:ok, {adapter, _role_atom}} = resolved <- resolve_adapter(state, ws, role, revision),
+         :ok <- reviewer_guardrails(state, ws, role, adapter) do
+      resolved
+    end
+  end
+
+  # bd-atll60 (G13): a guardrail hold refuses the pass; otherwise the adapter the
+  # (unchanged) resolution below picked is gated as a reviewer subject. Routing
+  # filters its own candidates, but the print-timeout pin, the pre-routing
+  # reviewer and a workspace with cross-family review off name a provider without
+  # having asked it.
+  defp reviewer_guardrails(%{reviewer_hold: reason}, _ws, :reviewer, _adapter)
+       when is_binary(reason),
+       do: {:error, {:guardrail_ineligible, nil, Gate.phrase(reason)}}
+
+  defp reviewer_guardrails(state, %Workspace{} = ws, :reviewer, adapter) do
+    provider = adapter.provider()
+
+    Gate.check_and_notify(state.task_id, ws, provider, reviewer_model(state, ws, provider),
+      role: :reviewer,
+      repo: state.repo
+    )
+  end
+
+  defp reviewer_guardrails(_state, _ws, _role, _adapter), do: :ok
+
+  defp reviewer_model(%{reviewer_selection: %{model: model}}, _ws, _provider)
+       when is_binary(model),
+       do: model
+
+  defp reviewer_model(state, ws, provider),
+    do: ReviewerRouting.predicted_model(ws, provider, tier: round_reviewer_tier(state, ws.config))
+
   # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
   # rotation has pinned to a specific provider uses THAT adapter, bypassing
   # the workspace's own first-choice resolution — which would hand back the
@@ -6363,7 +6409,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # this arm can fail. Every unpinned pass (`reviewer_provider: nil`, the
   # default and the only state a single-provider workspace ever reaches)
   # resolves exactly as before.
-  defp adapter_for(%{reviewer_provider: provider} = state, ws, :reviewer, _revision)
+  defp resolve_adapter(%{reviewer_provider: provider} = state, ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider) do
     with :ok <- reviewer_capability(state, ws, provider),
          do: {:ok, {Agents.for_type(provider), :review_agent}}
@@ -6373,7 +6419,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # Its candidates are already filtered for `:strict` write confinement, and
   # its pre-routing fallback goes through `Agents.strict_eligible_provider/4`
   # exactly like the clause below.
-  defp adapter_for(%{reviewer_selection: %{provider: provider}}, _ws, :reviewer, _revision)
+  defp resolve_adapter(%{reviewer_selection: %{provider: provider}}, _ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider),
        do: {:ok, {Agents.for_type(provider), :review_agent}}
 
@@ -6385,7 +6431,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # `:strict` scope where none of the workspace's configured reviewers can
   # confine writes, this refuses (the same fail-closed error Dispatch returns)
   # instead of silently substituting an unconfigured `:claude`.
-  defp adapter_for(state, %Workspace{} = ws, :reviewer, _revision) do
+  defp resolve_adapter(state, %Workspace{} = ws, :reviewer, _revision) do
     policy = session_security_policy(ws, state, :reviewer)
     configured = Agents.reviewer_type(ws)
 
@@ -6413,7 +6459,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp adapter_for(_state, nil, :reviewer, _revision),
+  defp resolve_adapter(_state, nil, :reviewer, _revision),
     do: {:ok, {Agents.for_type(:claude), :review_agent}}
 
   # bd-1abj7u finding 2: the revision implementer spawn goes through this same
@@ -6423,7 +6469,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # treated as an explicit pin, same as `arb dispatch --provider`, since there
   # is no pool to fall back into here (the implementer role isn't drawn from a
   # pool the way the reviewer role is).
-  defp adapter_for(
+  defp resolve_adapter(
          state,
          %Workspace{} = ws,
          :implementer,
