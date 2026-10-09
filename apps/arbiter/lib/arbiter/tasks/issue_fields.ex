@@ -30,6 +30,11 @@ defmodule Arbiter.Tasks.IssueFields do
     * `change_origin` — `Arbiter.Loop.Apply` only, internally;
     * ReviewPatrol / PRPatrol / `pr_opened_*` — their own internal `Ash.update`
       calls and the named transition actions;
+    * `permissions` (bd-54m4vv; `add_permissions` / `remove_permissions` edit it) — writable here, but only a coordinator or the
+      operator gets anywhere: the controller / MCP tool hand the caller's
+      authority to the `Issue` changes, which refuse a worker or refine token
+      (`Arbiter.Guardrails.Permissions.plan/4`). Granting an operator-grant
+      permission is `Arbiter.Tasks.Permissions.grant/3`, not a field write.
     * `skills` — not writable over REST/MCP/CLI. It is read only at dispatch
       (`Arbiter.Skills.Selection`); the resource attribute stays for internal
       seeding.
@@ -38,19 +43,30 @@ defmodule Arbiter.Tasks.IssueFields do
   alias Arbiter.Tasks.Issue
 
   @shared ~w(title description acceptance notes qa_notes deployment_notes priority difficulty
-             issue_type auto_close verify_after_deploy provider_constraint tracker_type
+             issue_type auto_close verify_after_deploy provider_constraint permissions tracker_type
              tracker_ref tracker_context_type tracker_context_ref target_branch repo)
 
   @create @shared ++
             ~w(workspace_id source_pr skip_upstream_create parent_id tracker_child_policy)
 
-  @update @shared ++ ~w(pr_ref pr_body append_notes)
+  # Not Ash inputs: `Arbiter.Tasks.Permissions.resolve_edits/2` folds them into
+  # `permissions` before the update runs.
+  @permission_edits ~w(add_permissions remove_permissions)
+
+  @update @shared ++ ~w(pr_ref pr_body append_notes) ++ @permission_edits
 
   @always_denied ~w(change_origin)
 
   @doc "Fields a coordinator may set on `POST /api/issues`."
   @spec create_fields() :: [String.t()]
   def create_fields, do: @create
+
+  @doc """
+  The update-only keys that are edits to a field rather than inputs of the
+  `Issue` action (`add_permissions`, `remove_permissions`).
+  """
+  @spec permission_edits() :: [String.t()]
+  def permission_edits, do: @permission_edits
 
   @doc "Fields a coordinator may set on `PATCH /api/issues/:id`."
   @spec update_fields() :: [String.t()]

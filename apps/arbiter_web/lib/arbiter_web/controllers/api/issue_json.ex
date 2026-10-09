@@ -41,6 +41,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       ArbiterWeb.Api.WorkerJSON.current_run(Map.get(assigns, :current_run))
     )
     |> put_history(Map.get(assigns, :history))
+    |> Map.put(:pending_permissions, Map.get(assigns, :pending_permissions, []))
   end
 
   def show(%{issue: issue}), do: data(issue)

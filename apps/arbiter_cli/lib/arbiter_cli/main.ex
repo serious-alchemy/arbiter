@@ -25,6 +25,7 @@ defmodule ArbiterCli.Main do
                                   [--auto-close | --no-auto-close]
                                   [--require-provider p | --exclude-provider p |
                                    --clear-provider-constraint]
+                                  [--permission p] [--remove-permission p]
                                   ("" clears a field; `arb ticket update --help` lists all)
       arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>

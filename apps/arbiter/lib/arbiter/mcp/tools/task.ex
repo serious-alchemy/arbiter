@@ -7,6 +7,7 @@ defmodule Arbiter.MCP.Tools.Task do
   back into for the generic arg/serialization helpers it still owns.
   """
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.MCP.Tools.Worker
@@ -21,6 +22,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.IssueSerializer
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias Arbiter.Tasks.Permissions
   alias Arbiter.Tasks.Rank
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.WorkerFiling
@@ -119,11 +121,30 @@ defmodule Arbiter.MCP.Tools.Task do
           |> Map.put(:dependencies, dependency_rows(id))
           |> Map.put(:history, id |> History.recent() |> IssueSerializer.history())
           |> Map.put(:current_run, current_run(id))
+          |> Map.put(:pending_permissions, Permissions.pending(loaded))
+          |> Map.put(
+            :permission_events,
+            loaded |> Permissions.events() |> permission_events_json()
+          )
         else
           result
         end
 
       {:ok, result}
+    end
+  end
+
+  defp permission_events_json(events) do
+    for e <- events do
+      %{
+        permission: e.permission,
+        event: Tools.to_str(e.event),
+        source: Tools.to_str(e.source),
+        actor: e.actor,
+        reason: e.reason,
+        run_id: e.run_id,
+        at: Tools.iso(e.inserted_at)
+      }
     end
   end
 
@@ -232,7 +253,8 @@ defmodule Arbiter.MCP.Tools.Task do
 
       opts = [
         force: force?,
-        created_by: Arbiter.PaperTrail.actor_label(scope)
+        created_by: Arbiter.PaperTrail.actor_label(scope),
+        context: permission_context(scope)
       ]
 
       case Create.run(attrs, opts) do
@@ -424,6 +446,7 @@ defmodule Arbiter.MCP.Tools.Task do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id),
+         {:ok, args} <- edit_permissions(issue, args),
          {:ok, attrs} <- Tools.collect_attrs(args, task_update_spec()),
          {:ok, attrs} <- refine_field_gate(scope, attrs) do
       case {map_size(attrs), assignee_warnings} do
@@ -436,7 +459,7 @@ defmodule Arbiter.MCP.Tools.Task do
           {:ok, issue |> Tools.serialize_ticket(args) |> with_deprecation_warnings(warnings)}
 
         {_, warnings} ->
-          case Ash.update(issue, attrs, action: :update) do
+          case Ash.update(issue, attrs, action: :update, context: permission_context(scope)) do
             {:ok, updated} ->
               {:ok,
                updated |> Tools.serialize_ticket(args) |> with_deprecation_warnings(warnings)}
@@ -446,6 +469,26 @@ defmodule Arbiter.MCP.Tools.Task do
           end
       end
     end
+  end
+
+  # `add_permissions` / `remove_permissions` fold into one `permissions` list
+  # against the ticket's current one (bd-54m4vv).
+  defp edit_permissions(issue, args) do
+    case Permissions.resolve_edits(issue, args) do
+      {:ok, args} -> {:ok, args}
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
+  # bd-54m4vv (G12): who is declaring permissions. The `Issue` changes read these
+  # two keys: a coordinator-tier token without operator proof is `:coordinator`
+  # (an operator-grant permission it declares is only `requested`), operator
+  # proof is `:operator`, anything else is `:restricted` and may set nothing.
+  defp permission_context(%Scope{} = scope) do
+    %{
+      guardrail_authority: Authority.from_scope(scope),
+      permission_actor: Arbiter.PaperTrail.actor_label(scope)
+    }
   end
 
   # ---- task_close ---------------------------------------------------------
@@ -968,6 +1011,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"provider_constraint", :map},
+      {"permissions", :string_list},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
@@ -992,6 +1036,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"provider_constraint", :map},
+      {"permissions", :string_list},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
@@ -1014,7 +1059,10 @@ defmodule Arbiter.MCP.Tools.Task do
       state: Tools.to_str(i.state),
       priority: i.priority,
       difficulty: i.difficulty,
-      issue_type: Tools.to_str(i.issue_type)
+      issue_type: Tools.to_str(i.issue_type),
+      # bd-54m4vv: what the ticket declares (§5.2). The worker's view of what
+      # was actually granted comes with dispatch-time projection (G14).
+      permissions: i.permissions || []
     }
     |> Tools.put_progress(i)
   end

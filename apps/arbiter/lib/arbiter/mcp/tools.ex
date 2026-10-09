@@ -1387,6 +1387,18 @@ defmodule Arbiter.MCP.Tools do
   def coerce_field(:map, v) when is_map(v), do: {:ok, v}
   def coerce_field(:map, _), do: {:error, "must be an object"}
 
+  # bd-54m4vv: a JSON array of strings (`permissions`). The Issue change
+  # canonicalises and vets each entry; `null` is the empty list.
+  def coerce_field(:string_list, nil), do: {:ok, []}
+
+  def coerce_field(:string_list, v) when is_list(v) do
+    if Enum.all?(v, &is_binary/1),
+      do: {:ok, v},
+      else: {:error, "must be an array of strings"}
+  end
+
+  def coerce_field(:string_list, _), do: {:error, "must be an array of strings"}
+
   def coerce_field({:enum, allowed}, v) do
     case to_allowed_atom(v, allowed) do
       {:ok, atom} -> {:ok, atom}

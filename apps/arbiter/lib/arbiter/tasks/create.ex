@@ -41,6 +41,9 @@ defmodule Arbiter.Tasks.Create do
     * `:force` — skip dedup (default `false`).
     * `:deps` — ticket ids that block the new ticket (`blocks` edges).
     * `:created_by` — the attribution label stamped on the edges.
+    * `:context` — the Ash context for the create. REST and MCP pass
+      `:guardrail_authority` / `:permission_actor` here so the ticket's declared
+      `permissions` are authority-checked and attributed (bd-54m4vv).
     * `:edge_writer` — `(from, to, type, opts -> result)`, default
       `Arbiter.Tasks.Dependencies.add/4`. A seam for the race tests.
 
@@ -147,7 +150,7 @@ defmodule Arbiter.Tasks.Create do
   # ---- create ---------------------------------------------------------------
 
   defp create(attrs, parent_id, deps, opts) do
-    case Ash.create(Issue, attrs) do
+    case Ash.create(Issue, attrs, context: Keyword.get(opts, :context, %{})) do
       {:ok, issue} ->
         upstream = CreateUpstream.last_error()
         edge_failures = attach_edges(issue, parent_id, deps, opts)
