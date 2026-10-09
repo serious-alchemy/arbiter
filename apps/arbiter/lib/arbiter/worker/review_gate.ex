@@ -3646,7 +3646,8 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp commit_nudge_prompt(state) do
+  @doc false
+  def commit_nudge_prompt(state) do
     """
     bd-2eyf9y commit gate: your round #{state.round} revise pass for task #{state.task_id} \
     ended with the worktree on branch `#{state.branch}` left DIRTY (`git status --porcelain` \
@@ -3658,9 +3659,10 @@ defmodule Arbiter.Worker.ReviewGate do
       1. `git status` to see what is uncommitted.
       2. `git add -A`
       3. `git commit -m "<a short message describing the work>"`
-      4. `git push -u origin #{state.branch}` — REQUIRED. The re-review and the
-         merge request both read the PUSHED head; a commit that stays local is
-         reviewed but never merged (bd-2jkrqu).
+      4. `git push -u origin #{state.branch}` — the re-review and the merge
+         request both read the PUSHED head (bd-2jkrqu). If the push fails
+         because this sandbox has no forge credential, do NOT retry: Arbiter
+         pushes the committed branch itself, so the commit is all you owe.
 
     Do not redo the work — just commit what is already on disk. If a hunk looks
     half-finished or wrong, finish it first, then commit it.

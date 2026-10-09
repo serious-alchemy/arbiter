@@ -208,7 +208,9 @@ defmodule Arbiter.Worker.PromptBuilderTest do
         prompt = PromptBuilder.prompt_for_task(task(%{}), [host_pushes?: true] ++ extra)
 
         assert prompt =~ "commit on this branch, and stop there."
-        assert prompt =~ "Do NOT push"
+        assert prompt =~ "Do NOT `git push`"
+        refute prompt =~ "ssh` to the forge"
+        assert prompt =~ "fetch` of the target"
         refute prompt =~ "and push it."
       end
     end

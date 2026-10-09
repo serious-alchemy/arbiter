@@ -336,8 +336,10 @@ defmodule Arbiter.Worker.PromptBuilder do
   # gives up without printing the completion sentinel.
   defp push_instruction(opts) do
     if Keyword.get(opts, :host_pushes?, false) do
-      "and stop there.\n\n    Do NOT push (`git push`, `git fetch`, `ssh` to the forge): this " <>
-        "sandbox has no\n    forge credentials and the push cannot succeed. Arbiter pushes your " <>
+      "and stop there.\n\n    Do NOT `git push`: this " <>
+        "sandbox has no\n    forge credentials and the push cannot succeed (a `git fetch` of the " <>
+        "target\n    branch may fail too; work from the refs already in the worktree). " <>
+        "Arbiter pushes your " <>
         "committed\n    branch itself when you print the completion line below."
     else
       "and push it."
