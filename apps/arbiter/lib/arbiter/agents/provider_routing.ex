@@ -985,19 +985,15 @@ defmodule Arbiter.Agents.ProviderRouting do
        ) do
     floored = Guardrails.floor(policy, profile)
 
-    cond do
-      floored.permissions.mode == :strict and ctx.confinement.(adapter, floored) == :none ->
-        {:drop, "write_confinement_none",
-         "the #{profile.tier} guardrail floor needs :strict, which this adapter cannot confine"}
-
-      SecurityPolicy.egress(floored) != :open and
-          ctx.egress_confinement.(adapter, floored) == :none ->
-        {:drop, "egress_unenforceable",
-         "the #{profile.tier} guardrail floor needs egress #{SecurityPolicy.egress(floored)}, " <>
-           "which this adapter cannot enforce here"}
-
-      true ->
+    case Guardrails.enforceable(adapter, floored, profile,
+           write_confinement: ctx.confinement,
+           egress_confinement: ctx.egress_confinement
+         ) do
+      :ok ->
         {:ok, entry}
+
+      {:error, reason} ->
+        {:drop, Atom.to_string(reason), Guardrails.unmet_detail(reason, profile, floored)}
     end
   end
 

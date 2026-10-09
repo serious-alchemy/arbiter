@@ -29,6 +29,8 @@ defmodule Arbiter.Guardrails.Gate do
   """
 
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.Routing
   alias Arbiter.Guardrails.Eligibility
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Tasks.Issue
@@ -36,6 +38,7 @@ defmodule Arbiter.Guardrails.Gate do
   alias Arbiter.Worker.ReviewGate
 
   @type role :: Eligibility.role()
+  @type model :: String.t() | :predicted | nil
   @type refusal :: {:guardrail_ineligible, atom() | String.t() | nil, String.t()}
 
   @doc "The card / refusal phrase: `held — guardrail (<detail>)`."
@@ -48,12 +51,17 @@ defmodule Arbiter.Guardrails.Gate do
   the default, or `:reviewer`), `:repo` (default: the ticket's), `:rules`
   (default: the installation's) and `:account` (default: the workspace's account
   for the provider, which is what holds the data agreement).
+
+  `model` is the model the spawn will run, or `:predicted` to have it worked out
+  from the ticket's routing choice (`predicted_model/3`). It must not be left
+  `nil` when the rules distinguish models (agy's flash tier is `quarantine`,
+  its pro tier is not): a `nil` model matches only the provider-level rule.
   """
   @spec check(
           Issue.t() | String.t() | nil,
           map() | nil,
           atom() | String.t() | nil,
-          String.t() | nil,
+          model(),
           keyword()
         ) ::
           :ok | {:error, refusal()}
@@ -65,6 +73,52 @@ defmodule Arbiter.Guardrails.Gate do
   end
 
   @doc """
+  `check/5`, and on a refusal tell the coordinator (`:no_eligible_model`, one
+  open item per ticket). For the follow-up spawn sites that name a provider
+  without routing — the fix pass, the conflict resolver, the ReviewGate's
+  rounds — where a refusal otherwise only reaches a log line.
+  """
+  @spec check_and_notify(
+          Issue.t() | String.t() | nil,
+          map() | nil,
+          atom() | String.t() | nil,
+          model(),
+          keyword()
+        ) ::
+          :ok | {:error, refusal()}
+  def check_and_notify(task, workspace, provider, model, opts \\ []) do
+    case check(task, workspace, provider, model, opts) do
+      :ok ->
+        :ok
+
+      {:error, {:guardrail_ineligible, _provider, phrase}} = refusal ->
+        notify(task, workspace, phrase)
+        refusal
+    end
+  end
+
+  defp notify(task, workspace, phrase) do
+    task_id = task_id(task)
+    ws_id = (workspace && Map.get(workspace, :id)) || workspace_id(task)
+
+    if is_binary(task_id) and is_binary(ws_id) do
+      Arbiter.Messages.CoordinatorNotifier.no_eligible_model(
+        %{task_id: ReviewGate.base_task_id(task_id), workspace_id: ws_id},
+        phrase
+      )
+    end
+
+    :ok
+  end
+
+  defp task_id(%Issue{id: id}), do: id
+  defp task_id(id) when is_binary(id), do: id
+  defp task_id(_), do: nil
+
+  defp workspace_id(%Issue{workspace_id: id}), do: id
+  defp workspace_id(_), do: nil
+
+  @doc """
   `check/5`'s verdict with what it learned: `{:ok, %{profile:, permission_fallback:}}`
   (`profile` is `nil` when unguarded) or `{:error, detail}`.
   """
@@ -72,7 +126,7 @@ defmodule Arbiter.Guardrails.Gate do
           Issue.t() | String.t() | nil,
           map() | nil,
           atom() | String.t() | nil,
-          String.t() | nil,
+          model(),
           keyword()
         ) ::
           Eligibility.verdict()
@@ -84,7 +138,14 @@ defmodule Arbiter.Guardrails.Gate do
       rules ->
         case load(task) do
           %Issue{} = issue ->
-            judge(issue, workspace, provider, model, rules, opts)
+            judge(
+              issue,
+              workspace,
+              provider,
+              model(model, issue, workspace, provider),
+              rules,
+              opts
+            )
 
           nil ->
             {:error,
@@ -129,6 +190,31 @@ defmodule Arbiter.Guardrails.Gate do
       end)
 
     {for({p, {:ok, _}} <- results, do: p), for({p, {:error, detail}} <- results, do: {p, detail})}
+  end
+
+  defp model(:predicted, issue, workspace, provider),
+    do: predicted_model(issue, workspace, provider)
+
+  defp model(model, _issue, _workspace, _provider), do: model
+
+  @doc """
+  The model an implementer spawn of `provider` for `issue` would run: the routed
+  choice's explicit `"model"` when it is for this provider, else its tier through
+  the provider's own map — the same read `Arbiter.Worker.Dispatch` makes for the
+  floor gate. `nil` when it cannot be worked out.
+  """
+  @spec predicted_model(Issue.t(), map() | nil, atom() | String.t()) :: String.t() | nil
+  def predicted_model(%Issue{} = issue, workspace, provider) do
+    routed = Routing.decide(issue, workspace, [])
+    config = routed.config || %{}
+    agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
+    pinned = config["model"]
+
+    if is_binary(pinned) and pinned != "" and to_string(routed.type) == to_string(provider),
+      do: pinned,
+      else: ModelFamily.model_for_tier(provider, config["model_tier"], agent_config)
+  rescue
+    _ -> nil
   end
 
   defp load(%Issue{} = issue), do: issue

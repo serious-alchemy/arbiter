@@ -541,23 +541,47 @@ defmodule Arbiter.Guardrails do
     * `:egress_unenforceable` — the (floored) egress is not `:open` and the
       adapter has no egress confinement here.
 
-  Pass the already-floored `policy`. A `nil` profile is always `:ok`.
+  Pass the already-floored `policy`. A `nil` profile is always `:ok`. Options
+  `:write_confinement` / `:egress_confinement` (`(adapter, policy -> atom)`)
+  are the routing layers' test seams over `Arbiter.Agents`.
   """
-  @spec enforceable(module(), SecurityPolicy.t(), Profile.t() | nil) ::
+  @spec enforceable(module(), SecurityPolicy.t(), Profile.t() | nil, keyword()) ::
           :ok | {:error, :write_confinement_none | :egress_unenforceable}
-  def enforceable(_adapter, _policy, nil), do: :ok
+  def enforceable(adapter, policy, profile, opts \\ [])
+  def enforceable(_adapter, _policy, nil, _opts), do: :ok
 
-  def enforceable(adapter, %SecurityPolicy{} = policy, %Profile{}) do
+  def enforceable(adapter, %SecurityPolicy{} = policy, %Profile{}, opts) do
+    write = Keyword.get(opts, :write_confinement, &Agents.write_confinement/2)
+    egress = Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2)
+
     cond do
-      policy.permissions.mode == :strict and Agents.write_confinement(adapter, policy) == :none ->
+      policy.permissions.mode == :strict and write.(adapter, policy) == :none ->
         {:error, :write_confinement_none}
 
-      SecurityPolicy.egress(policy) != :open and
-          Agents.egress_confinement(adapter, policy) == :none ->
+      SecurityPolicy.egress(policy) != :open and egress.(adapter, policy) == :none ->
         {:error, :egress_unenforceable}
 
       true ->
         :ok
     end
   end
+
+  @doc """
+  The routing drop detail for an `enforceable/4` failure: names the tier and the
+  floor, so `Arbiter.Agents.ProviderRouting.guardrail_drop?/1` can tell it from
+  the ordinary `:strict`-scope drop.
+  """
+  @spec unmet_detail(
+          :write_confinement_none | :egress_unenforceable,
+          Profile.t(),
+          SecurityPolicy.t()
+        ) ::
+          String.t()
+  def unmet_detail(:write_confinement_none, %Profile{tier: tier}, _policy),
+    do: "the #{tier} guardrail floor needs :strict, which this adapter cannot confine"
+
+  def unmet_detail(:egress_unenforceable, %Profile{tier: tier}, %SecurityPolicy{} = policy),
+    do:
+      "the #{tier} guardrail floor needs egress #{SecurityPolicy.egress(policy)}, " <>
+        "which this adapter cannot enforce here"
 end

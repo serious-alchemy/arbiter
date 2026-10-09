@@ -221,6 +221,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.ReviewerRouting
+  alias Arbiter.Guardrails.Gate
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
@@ -5968,7 +5969,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # constrained.
   defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
     with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id),
-         :ok <- ProviderConstraint.check(state.task_id, provider) do
+         :ok <- ProviderConstraint.check(state.task_id, provider),
+         :ok <- implementer_guardrails(state, provider) do
       ProviderRouting.ensure_sandbox_backend(
         provider,
         state.task_id,
@@ -5978,6 +5980,16 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp ensure_revision_unpaused(_state, _), do: :ok
+
+  # bd-atll60 (G13): the guardrail hard gate on the implementer round's provider
+  # (the pin, or the legacy resolution): it never asked `ProviderRouting`'s
+  # candidates for this exact spawn, so a tier cannot be walked around by a
+  # revise round. Reviewers are gated in `adapter_for/4`.
+  defp implementer_guardrails(state, provider) do
+    Gate.check_and_notify(state.task_id, load_workspace(state.workspace_id), provider, :predicted,
+      repo: state.repo
+    )
+  end
 
   defp start_worker_process(state, id, role, revision) do
     case Worker.start(
