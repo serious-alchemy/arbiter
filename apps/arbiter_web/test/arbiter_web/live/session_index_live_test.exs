@@ -48,6 +48,8 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
   # goes through this helper so it isn't racing either stage.
   defp live_sessions!(conn) do
     {:ok, view, _html} = live(conn, ~p"/sessions")
+    # Two-stage load: :sessions, then a chained :usage task. Await both.
+    _ = render_async(view)
     html = render_async(view)
     {:ok, view, html}
   end
