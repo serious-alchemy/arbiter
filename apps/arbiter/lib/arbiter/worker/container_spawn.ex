@@ -673,9 +673,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # bd-atsde3: a `--resume <sid>` argv needs that session's JSONL in THIS run's
   # config dir, which starts empty. Copy in that one session's history; when it
   # is gone the CLI says so and the stop is classified `:session_not_found`.
-  defp seed_session(config_dir, opts) do
-    with sid when is_binary(sid) <- SessionHistory.resume_session_id(Keyword.get(opts, :argv)),
-         cwd when is_binary(cwd) <- Keyword.get(opts, :worktree_path),
+  defp seed_session(config_dir, opts),
+    do: seed_resume(config_dir, Keyword.get(opts, :argv), Keyword.get(opts, :worktree_path))
+
+  # `Worker` splices `--resume <sid>` into the argv when the port opens, after
+  # `prepare/1` ran with the pristine argv (bd-9qazat), so `wrap_port/1` seeds
+  # again with the final one. Seeding is idempotent.
+  defp seed_resume(config_dir, argv, cwd) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(argv),
+         cwd when is_binary(cwd) <- cwd,
          {:error, reason} <- SessionHistory.seed(config_dir, cwd, sid) do
       Logger.warning("ContainerSpawn: cannot carry session #{sid} over: #{inspect(reason)}")
     end
@@ -1170,6 +1176,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec wrap_port(map()) :: {:ok, map()} | {:error, term()}
   def wrap_port(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
     sync_codex_auth(request, :reopen)
+
+    if request.provider == "claude",
+      do: seed_resume(request.config_dir, argv, request.mounts[:worktree])
 
     with {:ok, spec} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, [podman | args]} <-
