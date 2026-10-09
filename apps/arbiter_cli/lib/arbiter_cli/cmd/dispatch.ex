@@ -69,6 +69,10 @@ defmodule ArbiterCli.Cmd.Dispatch do
     force_quota_reason: :string
   ]
 
+  @doc "Every switch `arb dispatch` takes (read by the field-exposure guard test)."
+  @spec switches() :: keyword()
+  def switches, do: @switches
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.

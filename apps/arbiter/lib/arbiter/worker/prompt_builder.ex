@@ -325,23 +325,28 @@ defmodule Arbiter.Worker.PromptBuilder do
   # bd-capkj9: a podman container has no forge credential or host key by design;
   # the host pushes after `arb done`. Without this a worker that tries
   # `git push`, fails, and treats the push as required never prints `arb done`.
-  # Only the authoring work prompt gets it. The ReviewGate fix-round, conflict
-  # and rebase briefings are host-spawned on bwrap today (bd-49l0eo), so they
-  # keep their push instructions until G16 moves them to podman.
+  # The authoring work prompt gets it, and so does a ReviewGate fix round that
+  # runs in a container (bd-49l0eo; `ReviewGate` pushes it at the next round's
+  # push gate).
   defp podman_push_section(opts) do
-    if Keyword.get(opts, :sandbox_backend) == :podman do
-      """
+    if Keyword.get(opts, :sandbox_backend) == :podman,
+      do: "\n" <> no_push_access() <> "\n",
+      else: ""
+  end
 
-      NO PUSH ACCESS — this container has no forge credential or GitHub host key,
-      by design. Commit on your branch, but do not push: the Arbiter host pushes
-      the branch and opens the PR after `arb done`. A failed `git push` or `gh`
-      call ("Host key verification failed", no credentials) is expected and is
-      not a reason to withhold `arb done`.
-
-      """
-    else
-      ""
-    end
+  @doc """
+  The briefing paragraph for a worker in a podman container: it holds no forge
+  credential, so it commits and the host pushes.
+  """
+  @spec no_push_access() :: String.t()
+  def no_push_access do
+    """
+    NO PUSH ACCESS — this container has no forge credential or GitHub host key,
+    by design. Commit on your branch, but do not push: the Arbiter host pushes
+    the branch and opens the PR after `arb done`. A failed `git push` or `gh`
+    call ("Host key verification failed", no credentials) is expected and is
+    not a reason to withhold `arb done`.
+    """
   end
 
   defp push_clause(opts) do
