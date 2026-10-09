@@ -213,10 +213,16 @@ defmodule Arbiter.Guardrails do
   @doc """
   The subject for a `provider` and `model` (either may be `nil` for the model).
   `family` comes from `ModelFamily.classify/2`.
+
+  `provider` is the harness, as the rules name it. The `gemini` *adapter* runs
+  agy when that is the CLI installed here (`Arbiter.Quota.provider_code/1`), and
+  agy's rules say `antigravity`: a dispatch that only knows the adapter type
+  must be judged as the harness it actually spawns, not fall through to the
+  `quarantine` default (G13 asks this question on every dispatch path).
   """
   @spec subject(atom() | String.t(), String.t() | nil) :: subject()
   def subject(provider, model) do
-    provider = to_string(provider)
+    provider = provider |> to_string() |> harness()
     family = ModelFamily.classify(provider, model).family
 
     %{
@@ -225,6 +231,9 @@ defmodule Arbiter.Guardrails do
       family: if(family, do: Atom.to_string(family))
     }
   end
+
+  defp harness("gemini"), do: Arbiter.Quota.provider_code("gemini") || "gemini"
+  defp harness(provider), do: provider
 
   @doc """
   The effective profile for `subject` in `workspace` (and `repo`):
