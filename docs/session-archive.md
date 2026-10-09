@@ -83,6 +83,11 @@ It is **not** an archive and not a stable contract: every byte goes through
 archive), the entry is deleted once a resume has seeded it, and entries older
 than 14 days are pruned on the next preserve.
 
+The seed happens in `ContainerSpawn.wrap_port/1` (every port open), not only in
+`prepare/1`: `Worker` splices `--resume <sid>` into the argv at port open, after
+`prepare/1` has run with the pristine argv, so a seed at prepare time never saw
+it (the v0.2.31 live failure, "No conversation found").
+
 ## Redaction: the decision, and why
 
 The raw JSONL is unredacted. `Arbiter.Worker.StepSummary` warns that a second
