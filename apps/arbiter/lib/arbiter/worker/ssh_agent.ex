@@ -221,9 +221,11 @@ defmodule Arbiter.Worker.SshAgent do
   # the socket. Removing it here too covers a wrapper that was already gone.
   defp close(port, socket) do
     Port.close(port)
-    File.rm(socket)
+    _ = File.rm(socket)
     :ok
   catch
-    _, _ -> File.rm(socket) && :ok
+    _, _ ->
+      _ = File.rm(socket)
+      :ok
   end
 end

@@ -241,10 +241,8 @@ defmodule Arbiter.Guardrails.Report do
     Enum.filter(env ++ [binding["ssh_key_secret"], binding["token_secret"]], &is_binary/1)
   end
 
-  defp known_secret_names(%Workspace{} = ws),
+  defp known_secret_names(ws),
     do: Workspace.secret_key_names(ws) ++ Enum.map(Workspace.worker_env_keys(ws), & &1.name)
-
-  defp known_secret_names(_), do: []
 
   defp binding_issues(name, block, resolved) do
     top =

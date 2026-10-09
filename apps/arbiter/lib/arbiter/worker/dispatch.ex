@@ -111,8 +111,8 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
-  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
