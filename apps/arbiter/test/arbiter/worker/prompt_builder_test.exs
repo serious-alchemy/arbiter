@@ -683,6 +683,22 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
+  describe "podman push-access block (bd-capkj9)" do
+    test "a podman work prompt says the host pushes and a failed push is not a reason to withhold arb done" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman)
+
+      assert prompt =~ "NO PUSH ACCESS"
+      assert prompt =~ "host pushes"
+      assert prompt =~ "not a reason to withhold `arb done`"
+    end
+
+    test "bwrap and default work prompts carry no such block" do
+      for opts <- [[sandbox_backend: :bwrap], []] do
+        refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "NO PUSH ACCESS"
+      end
+    end
+  end
+
   describe "agy file-reading rule (bd-buefg4)" do
     test "the gemini work prompt tells agy not to re-read, to use line ranges and to search first" do
       prompt =
