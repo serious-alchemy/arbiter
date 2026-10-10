@@ -259,17 +259,34 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
    whose run is on a node does **not** cancel it and does **not** write the run row off
    as `interrupted` / "server shutdown" (that is only for local runs): the row stays
    `working` and names its node (`worker_runs.node_id`), which is what `Nodes.Recovery`
-   looks runs up by. The node's run id is the row's id.
-1. The sockets drop; the agent stays quiet and reconnects with backoff (1 s → 30 s).
-2. Under `fence_after` (default 60 s, 30–90) the container is left alone, output is
-   replayed from the last acked offset and nothing is lost: that is a *blip*. After a
-   restart the primary's `Worker` is gone, so on `hello_ok` the agent is told it does not
-   know the run, **quiesces** it (stops the container, bundles the shadow clone and the
-   transcripts, retains them under `~/.arbiter-node/runs/<run>/retained/`).
-3. At boot the primary's sweep runs `Nodes.Recovery.await/1` before anything else: it
-   waits (60 s per node, 90 s in all) for each node to reconnect, pulls the retained
-   work through the quarantine into the home clone, and only then does the normal
-   reconcile resume the run from it.
+   looks runs up by. The node's run id is the row's id. The Worker also records how much
+   of the run's output it had processed (`worker_runs.stdout_offset`).
+1. The sockets drop; the agent stays quiet and reconnects with backoff (1 s → 30 s). With
+   no socket it keeps its containers running for `restart_grace` (180 s after its last
+   ack, told in `hello_ok`); past that it stops them, as it does when an open socket goes
+   unanswered for `fence_after` (default 60 s, 30–90).
+2. A short drop with the primary still up is a *blip*: the container is left alone, output
+   is replayed from the last acked offset and nothing is lost. After a restart the agent's
+   `hello` lists the run, and the new primary answers `hold`: the container keeps running,
+   unattached, for up to 150 s (`hold_ms`) while the boot sweep decides.
+3. At boot the primary's sweep runs `Nodes.Recovery.await/1` before anything else. It
+   waits (60 s per node, 90 s in all) for each node to reconnect, then, run by run:
+   * **adopts** the run (bd-4p1vui): a new Worker for the ticket takes the run over on the
+     node. It keeps the same run id and the same container, with no quiesce, no
+     `interrupted` row and no local duplicate. The output carries on from where the old
+     Worker left it, and the run's bridges reach the new primary's egress. This applies
+     to a ticket's own implement run on Claude whose container is still running, on an
+     agent that advertises `caps.run_adopt`;
+   * otherwise **collects** it, as before: the agent **quiesces** it (stops the container,
+     bundles the shadow clone and the transcripts, and retains them under
+     `~/.arbiter-node/runs/<run>/retained/`), the primary pulls that work through the
+     quarantine into the home clone, and only then does the normal reconcile resume the
+     run from it.
+
+   A run is adopted or collected, never both. An adoption that fails at any step leaves
+   the run running and uncancelled for the collect. To turn adoption off, set
+   `config :arbiter, :node_run_adoption, false` before the restart: every run is then
+   collected.
 4. A node that never comes back has its runs stamped `interrupted` / `node_lost`
    (no resume attempt consumed) and auto-resumed through placement, once. A run
    `Recovery` could not account for at all (it crashed) is left alone by the sweep, row
@@ -280,8 +297,14 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
    removed once it is **24 h** old, so at most ~24 h 10 min after the run was last
    touched. Until then it takes disk but no slot.
 
-What good looks like: `arb node events <name>` shows `disconnected` then `connected`; the
-run's history shows the resume, and the commits made before the restart are present.
+What good looks like:
+* `arb node events <name>` shows `disconnected` then `connected`.
+* An adopted run: the primary log has `Nodes.Recovery: run <id> (<task>) adopted by a new
+  Worker` and `Boot: node recovery: 1 adopted`; `arb worker show <task>` names the same run
+  id as before the restart; the node shows no `retained` event for it; and its output
+  goes on.
+* A collected run: the run's history shows the resume, and the commits made before the
+  restart are present.
 
 ## 6. Verifying an install: the `:node_agent` suite
 
@@ -290,7 +313,8 @@ nothing stubbed: a real `ARB_ROLE=agent` OS process configured by the `agent.env
 join script wrote, a Bandit-served endpoint, real rootless podman containers, the real
 egress proxy and `arb` bridge, a real git bundle through the quarantine, and a primary
 restart. It covers join → hello → placement → run → bridged egress → bundle ingest →
-restart → recovery, plus drain and revoke.
+restart → recovery (adoption of a live run by a new Worker, and the collect fallback), plus
+drain and revoke.
 
 It is tagged `:node_agent` and **excluded from the default `mix test` and CI** (it needs a
 rootless podman, a local image with `sh` and `socat`, and boots a second BEAM). Run it
@@ -330,6 +354,7 @@ Start with `arb node list`, `arb node events <name>`, `arb doctor`, and on the n
 | Run dies about a second in with `MCP config file not found: <primary worktree>/.mcp.json` | fixed in the release after v0.2.24 (bd-8y8ztm): the injected `.mcp.json` and `.claude/skills/` are untracked, so the git bundle never carried them. They now ride in the spec (`worktree` mount `files`), written into the shadow clone; the scope token travels as the secret `ARBITER_MCP_TOKEN`, never in the file on the node |
 | Container cannot reach anything | by design it is network-less; egress goes through the bridge. If the bridge is down, `arb node events` shows `disconnected`; policy denials show in the run's egress events |
 | After a restart a run did not recover | the node did not reconnect within 60 s, or the home clone was missing; the run is resumed from whatever the home clone holds ("server restarted") or stamped `node_lost` |
+| After a restart a run was collected, not adopted | the primary log says why: `Nodes.Recovery: adopting run … failed (…); collecting it instead`, or a debug line for a run that was never a candidate. Common causes: the restart outlasted `restart_grace` (180 s), so the container was stopped; the container had exited; the agent predates `caps.run_adopt` (upgrade it); the run was a reviewer or a CI or conflict pass (only a ticket's own implement run is adopted); or `:node_run_adoption` is `false`. Nothing is lost: the collect lands the work in the home clone |
 | Leftover `arb-…` containers or `~/.arbiter-node/runs/*` | the primary sends the live set on every `hello` and every 10 min; containers outside it are removed, run directories after 24 h. The agent never reaps on its own |
 | `arb node add` refuses to print the token | stdout is not a terminal; use `--token-file` |
 
@@ -347,5 +372,7 @@ After a release carrying the remote-workers work is deployed, on a real second n
 4. Dispatch one small ticket. Confirm it was placed on the node (`worker_runs.node_id`),
    that `egress_events` exist for the run, that its commits land on the primary, and that
    the PR/review flow completes.
-5. During a remote run, `systemctl --user restart arbiter` on the primary; the run is
-   recovered, or ends `interrupted` (*node lost*) and resumes. Record which.
+5. During a remote run, `systemctl --user restart arbiter` on the primary. The run should
+   be **adopted** (bd-4p1vui): the same run id and container go on, with `adopted` in the
+   boot log. Otherwise it is collected and resumed, or ends `interrupted` (*node lost*) and
+   resumes. Record which, with the reason the log gives.
