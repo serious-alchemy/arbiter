@@ -99,12 +99,12 @@ defmodule Arbiter.Agents.HarnessVersion do
 
   # `path` is the adapter's own executable (`executable/1`: `System.find_executable/1`
   # or the agy resolver), never request input, and the only argument is the literal
-  # `--version`.
-  # sobelow_skip ["CI.System"]
+  # `--version`. An agent CLI, so it runs through `ReleaseEnv.cmd/3`: a child that
+  # inherits the release's ROOTDIR/BINDIR/RELEASE_* can fail to boot (bd-2oelme).
   defp probe(path, timeout_ms) do
     task =
       Task.async(fn ->
-        System.cmd(path, ["--version"], stderr_to_stdout: true)
+        Arbiter.Worker.ReleaseEnv.cmd(path, ["--version"], stderr_to_stdout: true)
       end)
 
     case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
