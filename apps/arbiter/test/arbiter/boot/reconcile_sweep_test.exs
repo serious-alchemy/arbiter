@@ -13,8 +13,6 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workers.{Reconciler, Run}
 
-  require Logger
-
   import Arbiter.LifecycleFixtures, only: [put_state!: 3]
 
   defmodule RecordingReconciler do
