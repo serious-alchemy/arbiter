@@ -9,11 +9,10 @@ defmodule Arbiter.Nodes.Placement do
 
   `eligible/1` is pure and runs before any node is looked at. Only a
   **podman-backed Claude run** with a private clone is ever a candidate for a
-<<<<<<< HEAD
   node (bd-aowisc §5): the implementer and a resume of it, a merge-queue fix or
   conflict pass, a ReviewGate fix round, and the two reviewers, a ReviewGate
   reviewer and a `review: true` dispatch (bd-7ays3v, bd-cgdhlu, bd-bg87oz,
-  bd-4ic681). A resume (briefing or session, manual or the Reconciler's and
+  bd-4ic681), and a `task`/`research` ticket (bd-6ypj2y). A resume (briefing or session, manual or the Reconciler's and
   `Arbiter.Nodes.LostResume`'s automatic one) is a fresh spawn of the
   implementer: the node is seeded from the home clone, uncommitted work included
   (`Arbiter.Nodes.Checkout.seed_bundle/2`), and a session resume also gets the
@@ -21,23 +20,13 @@ defmodule Arbiter.Nodes.Placement do
   (`Arbiter.Worker.ContainerSpawn.remote_spec/3`). A reviewer reads the
   head it is handed and writes nothing back but its verdict and transcript, so
   its checkout is a read-only clone seeded through the bundle path and never
-  collected. A fix round and a fix or conflict pass write commits: the node is
+  collected; a task or research ticket's is the same. A fix round and a fix or conflict pass write commits: the node is
   seeded from the ticket's branch at its **current** `origin` head and
   `origin/<target>` at the forge tip (`Arbiter.Worker.PassPlacement`), the
   checkout comes back through the same quarantine as an implementer's, and the
   host pushes it with `--force-with-lease` pinned to the remote head seeded
   from. Everything else stays on the primary, and `Arbiter.Nodes.LocalCapacity`
   is the cap that governs it:
-=======
-  node (bd-aowisc §5): the implementer, a merge-queue fix or conflict pass, and
-  the two reviewers, a ReviewGate reviewer and a `review: true` dispatch
-  (bd-7ays3v, bd-cgdhlu), and a `task`/`research` ticket (bd-6ypj2y). A reviewer
-  reads the head it is handed and writes nothing back but its verdict and
-  transcript, so its checkout is a read-only clone seeded through the bundle path
-  and never collected; a task or research ticket's is the same. Everything else
-  stays on the primary, and `Arbiter.Nodes.LocalCapacity` is the cap that
-  governs it:
->>>>>>> 472c77fa7 (Task/research tickets: podman Claude runs are node candidates with a read-only inspect checkout (bd-6ypj2y))
 
     * the spawn kind bound to the primary (`:follow_up`: a re-dispatch of a
       ticket already under way);
