@@ -86,7 +86,9 @@ defmodule Arbiter.Nodes.SessionClusterTest do
     end
 
     test "degraded may be a list; an absent one is empty", %{node: node} do
-      {:ok, %{pid: pid}} = attach(node, cluster_hello(%{"degraded" => ["netpol_unenforced", "x"]}))
+      {:ok, %{pid: pid}} =
+        attach(node, cluster_hello(%{"degraded" => ["netpol_unenforced", "x"]}))
+
       assert %{degraded: ["netpol_unenforced", "x"]} = Session.snapshot(pid)
 
       {:ok, %{pid: pid}} = attach(node, cluster_hello())
@@ -104,14 +106,17 @@ defmodule Arbiter.Nodes.SessionClusterTest do
       refute Map.has_key?(ok, "limits")
     end
 
-    test "a heartbeat can raise or clear degraded", %{node: node} do
+    test "a heartbeat can raise or clear degraded; one that is silent on it changes nothing", %{
+      node: node
+    } do
       {:ok, %{pid: pid}} = attach(node, cluster_hello())
       {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "degraded" => ["netpol_unenforced"]})
       assert %{degraded: ["netpol_unenforced"]} = Session.snapshot(pid)
       {:ok, _} = Session.heartbeat(pid, %{"seq" => 2, "degraded" => []})
       assert %{degraded: []} = Session.snapshot(pid)
-      {:ok, _} = Session.heartbeat(pid, %{"seq" => 3})
-      assert %{degraded: []} = Session.snapshot(pid)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 3, "degraded" => "netpol_unenforced"})
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 4})
+      assert %{degraded: ["netpol_unenforced"]} = Session.snapshot(pid)
     end
   end
 
@@ -216,7 +221,9 @@ defmodule Arbiter.Nodes.SessionClusterTest do
         Session.heartbeat(pid, %{"seq" => 1, "runs" => %{"r1" => %{"state" => "pending"}}})
 
       assert {:error, :prepare_timeout} = Task.await(task)
-      assert_receive {:node_session, {:push, "cancel", %{"run" => "r1", "reason" => "prepare_timeout"}}}
+
+      assert_receive {:node_session,
+                      {:push, "cancel", %{"run" => "r1", "reason" => "prepare_timeout"}}}
     end
 
     test "once running, the prepare watchdog no longer touches the run", %{node: node} do

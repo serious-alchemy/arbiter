@@ -208,7 +208,8 @@ defmodule Arbiter.Nodes.Session do
 
   @doc "Whether `run` has reached `running`: a run counts as started only then (A3)."
   @spec run_started?(pid(), String.t()) :: boolean()
-  def run_started?(pid, run), do: GenServer.call(pid, {:run_stage, run}) in [:running, :terminating]
+  def run_started?(pid, run),
+    do: GenServer.call(pid, {:run_stage, run}) in [:running, :terminating]
 
   @doc """
   The checkout context the primary placed `run` with (`assign/5`'s `:checkout`:
@@ -1018,9 +1019,10 @@ defmodule Arbiter.Nodes.Session do
   defp heartbeat_runs(runs, _old) when is_list(runs), do: hello_runs(runs)
   defp heartbeat_runs(_none, old), do: old
 
-  # A cluster node's hb is authoritative for `degraded` (a missing key clears it).
-  defp heartbeat_degraded(%{kind: "cluster"} = state, payload),
-    do: %{state | degraded: degraded(payload["degraded"])}
+  # A cluster node's hb replaces `degraded` when it names it (`[]` clears); a heartbeat that
+  # says nothing leaves a raised flag standing, so omitting the key can never un-degrade it.
+  defp heartbeat_degraded(%{kind: "cluster"} = state, %{"degraded" => word}),
+    do: %{state | degraded: degraded(word)}
 
   defp heartbeat_degraded(state, _payload), do: state
 

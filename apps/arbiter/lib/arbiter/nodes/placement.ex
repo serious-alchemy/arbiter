@@ -265,8 +265,12 @@ defmodule Arbiter.Nodes.Placement do
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, []))
   end
 
-  # A7: `degraded: netpol_unenforced` excludes the node unless the operator allowed it.
-  defp network_enforced?(row) do
+  @doc """
+  A7: false for a row reporting `degraded: netpol_unenforced` whose operator has not set
+  `allow_unenforced_network`. Every other row (machine nodes, healthy clusters) is true.
+  """
+  @spec network_enforced?(map()) :: boolean()
+  def network_enforced?(row) do
     "netpol_unenforced" not in List.wrap(Map.get(row, :degraded)) or
       Map.get(row, :allow_unenforced_network) == true
   end

@@ -6,7 +6,7 @@ defmodule Arbiter.Nodes.Overview do
 
   A row is a plain map:
 
-    * `:id`, `:name`, `:kind` (`:local | :machine`), `:labels`, `:status`
+    * `:id`, `:name`, `:kind` (`:local | :machine | :cluster`), `:labels`, `:status`
     * `:state` — `:online | :suspect | :offline | :draining | :revoked`
       (online is a property of the live `Arbiter.Nodes.Session`, not stored)
     * `:health`, `:agent_version`, `:server_version`, `:last_heartbeat_at`
@@ -114,7 +114,12 @@ defmodule Arbiter.Nodes.Overview do
     %{
       id: node.id,
       name: node.name,
-      kind: :machine,
+      kind: kind(snapshot),
+      k8s_version: snapshot && snapshot.k8s_version,
+      degraded: (snapshot && snapshot.degraded) || [],
+      constrained?: constrained?(snapshot),
+      pending: pending(snapshot),
+      allow_unenforced_network: node.allow_unenforced_network,
       labels: node.labels,
       status: node.status,
       state: state(node, snapshot),
@@ -136,6 +141,16 @@ defmodule Arbiter.Nodes.Overview do
       draining?: node.status == :draining
     }
   end
+
+  defp kind(%{kind: "cluster"}), do: :cluster
+  defp kind(_snapshot), do: :machine
+
+  # A3: `hb.capacity.constrained` / `.pending` (cluster nodes only; machines never send it).
+  defp constrained?(%{node_capacity: %{"constrained" => true}}), do: true
+  defp constrained?(_snapshot), do: false
+
+  defp pending(%{node_capacity: %{"pending" => n}}) when is_integer(n) and n >= 0, do: n
+  defp pending(_snapshot), do: 0
 
   defp local_row(remote_run_ids) do
     suggested = Board.system_max_concurrent()
