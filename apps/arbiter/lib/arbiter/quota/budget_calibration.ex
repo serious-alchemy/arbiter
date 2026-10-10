@@ -46,7 +46,8 @@ defmodule Arbiter.Quota.BudgetCalibration do
 
   Read-only, and nothing on an admission, gate or board path calls it
   (`Arbiter.Quota.BudgetCalibrationShadowTest` pins that). Its callers are
-  `mix arbiter.budget_calibration` and `Arbiter.Release.budget_calibration/0`.
+  `mix arbiter.budget_calibration`, `Arbiter.Release.budget_calibration/0` and
+  the admission shadow report (`Arbiter.Board.AdmissionShadowReport`, DC7).
   DC3's `Budget` is the first consumer.
   """
 
@@ -95,6 +96,7 @@ defmodule Arbiter.Quota.BudgetCalibration do
           required(:pool) => String.t(),
           required(:window) => String.t(),
           required(:fit) => Calibration.fit(),
+          required(:observations) => [Calibration.observation()],
           required(:prior) => float() | nil,
           required(:floor) => float() | nil,
           required(:horizon_hours) => float(),
@@ -317,8 +319,9 @@ defmodule Arbiter.Quota.BudgetCalibration do
   Calibrate every (account, pool, window) the history holds. Options:
   `:since` / `:until` bound the history read (default the last 30 days to now).
 
-  One `t:result/0` per (account, provider, pool, window): the fit, and the
-  rung, `ρ`, prior, floor and `H` the ladder lands on. Read-only.
+  One `t:result/0` per (account, provider, pool, window): the fit and the
+  observations it was fitted on, and the rung, `ρ`, prior, floor and `H` the
+  ladder lands on. Read-only.
   """
   @spec calibrate(keyword()) :: [result()]
   def calibrate(opts \\ []) do
@@ -348,6 +351,7 @@ defmodule Arbiter.Quota.BudgetCalibration do
           provider: provider,
           pool: pool,
           window: window,
+          observations: obs,
           fit:
             Calibration.fit(obs,
               min_observations: @min_observations,
