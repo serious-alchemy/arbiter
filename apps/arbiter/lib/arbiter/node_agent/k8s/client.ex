@@ -116,7 +116,7 @@ defmodule Arbiter.NodeAgent.K8s.Client do
 
   defp format_host(host), do: if(String.contains?(host, ":"), do: "[#{host}]", else: host)
 
-  @doc "`%{\"a\" => \"b\"}` to the `a=b` selector string (keys sorted)."
+  @doc "A labels map to the `a=b,c=d` selector string (keys sorted)."
   @spec label_selector(%{optional(String.t()) => String.t()}) :: String.t()
   def label_selector(labels) do
     labels |> Enum.sort() |> Enum.map_join(",", fn {k, v} -> "#{k}=#{v}" end)

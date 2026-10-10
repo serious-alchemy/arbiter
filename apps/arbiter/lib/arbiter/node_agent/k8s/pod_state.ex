@@ -65,6 +65,14 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
     status = pod["status"] || %{}
     worker = container_state(status["containerStatuses"], @worker)
 
+    with nil <- outcome(status, worker),
+         nil <- live(pod, worker) do
+      pre_start(pod, status, opts)
+    end
+  end
+
+  # The rows that end the run (or interrupt it), in precedence order.
+  defp outcome(status, worker) do
     cond do
       status["phase"] == "Failed" and status["reason"] == "DeadlineExceeded" ->
         {:exit, exit_info(worker, :deadline)}
@@ -91,14 +99,17 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
            oom?: false
          }}
 
-      get_in(pod, ["metadata", "deletionTimestamp"]) != nil ->
-        {:terminating, %{}}
-
-      match?({:running, _}, worker) ->
-        {:running, %{}}
-
       true ->
-        pre_start(pod, status, opts)
+        nil
+    end
+  end
+
+  # No outcome yet: being deleted, or running.
+  defp live(pod, worker) do
+    cond do
+      get_in(pod, ["metadata", "deletionTimestamp"]) != nil -> {:terminating, %{}}
+      match?({:running, _}, worker) -> {:running, %{}}
+      true -> nil
     end
   end
 
