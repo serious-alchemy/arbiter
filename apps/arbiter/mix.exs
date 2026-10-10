@@ -107,6 +107,12 @@ defmodule Arbiter.MixProject do
       # HTTP client (used by Tracker.Jira, Tracker.GitHub adapters in later tasks)
       {:req, "~> 0.7.3"},
 
+      # The k8s pod channel's HTTPS listener (`:9444`, Arbiter.NodeAgent.PodChannel.PodServer):
+      # the same Bandit/Plug the web app serves with, so the controller does not hand-roll
+      # an HTTP parser on a port strangers can reach.
+      {:bandit, "~> 1.5"},
+      {:plug, "~> 1.15"},
+
       # The node agent's WebSocket client (RW5, docs/design/remote-workers.md
       # U2): Arbiter.NodeAgent.WsClient speaks Phoenix's V2 serializer over it.
       # Only depends on mint, which finch already brings in.

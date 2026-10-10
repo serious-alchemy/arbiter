@@ -39,7 +39,12 @@ defmodule Arbiter.NodeAgent.WsClient do
 
   @doc """
   Connect. Options: `:url` (`ws://` / `wss://`), `:owner` (default: the
-  caller), `:headers`, `:connect_timeout_ms`, `:phoenix_heartbeat_ms`.
+  caller), `:headers`, `:connect_timeout_ms`, `:phoenix_heartbeat_ms`,
+  `:transport_opts` (merged into the *target's* transport options, e.g. a CA
+  bundle), and `:proxy` — an HTTP proxy to CONNECT through, `{:http, host, port, []}`
+  or a `http://host:port` URL (tailscale's userspace proxy is `127.0.0.1:1055`,
+  §2.3). Plain `ws://` is accepted only to a loopback host; anything else is
+  `{:error, {:insecure_url, url}}`, with or without a proxy.
   """
   @spec start(keyword()) :: {:ok, t()} | {:error, term()}
   def start(opts) do
@@ -80,7 +85,51 @@ defmodule Arbiter.NodeAgent.WsClient do
 
   @impl true
   def init(opts) do
-    uri = URI.parse(Keyword.fetch!(opts, :url))
+    url = Keyword.fetch!(opts, :url)
+    uri = URI.parse(url)
+
+    with :ok <- secure(uri, url),
+         {:ok, proxy} <- parse_proxy(Keyword.get(opts, :proxy)) do
+      connect(uri, Keyword.put(opts, :proxy, proxy))
+    else
+      {:error, reason} -> {:stop, {:connect_failed, reason}}
+    end
+  end
+
+  defp secure(%URI{scheme: "wss"}, _url), do: :ok
+
+  defp secure(%URI{scheme: "ws", host: host}, url) when is_binary(host) do
+    if Arbiter.NodeAgent.Config.loopback_host?(host),
+      do: :ok,
+      else: {:error, {:insecure_url, url}}
+  end
+
+  defp secure(_uri, url), do: {:error, {:insecure_url, url}}
+
+  defp parse_proxy(nil), do: {:ok, nil}
+
+  defp parse_proxy({:http, host, port, _opts} = proxy) when is_binary(host) and is_integer(port),
+    do: {:ok, proxy}
+
+  defp parse_proxy(url) when is_binary(url) do
+    # `HTTPS_PROXY=host:port` without a scheme is common; treat it as http.
+    full = if String.contains?(url, "://"), do: url, else: "http://" <> url
+
+    case URI.parse(full) do
+      %URI{scheme: "http", host: host, port: port} when is_binary(host) and host != "" ->
+        {:ok, {:http, host, port || 80, []}}
+
+      _ ->
+        {:error, {:bad_proxy, url}}
+    end
+  end
+
+  defp parse_proxy(other), do: {:error, {:bad_proxy, other}}
+
+  defp proxy_opt(nil), do: []
+  defp proxy_opt(proxy), do: [proxy: proxy]
+
+  defp connect(uri, opts) do
     {scheme, http_scheme} = if uri.scheme == "wss", do: {:wss, :https}, else: {:ws, :http}
     port = uri.port || if(scheme == :wss, do: 443, else: 80)
     path = (uri.path || "/") <> if(uri.query, do: "?" <> uri.query, else: "")
@@ -88,9 +137,18 @@ defmodule Arbiter.NodeAgent.WsClient do
     owner = Keyword.fetch!(opts, :owner)
 
     with {:ok, conn} <-
-           Mint.HTTP.connect(http_scheme, uri.host, port,
-             protocols: [:http1],
-             transport_opts: [nodelay: true, timeout: timeout]
+           Mint.HTTP.connect(
+             http_scheme,
+             uri.host,
+             port,
+             [
+               protocols: [:http1],
+               transport_opts:
+                 Keyword.merge(
+                   [nodelay: true, timeout: timeout],
+                   Keyword.get(opts, :transport_opts, [])
+                 )
+             ] ++ proxy_opt(Keyword.get(opts, :proxy))
            ),
          {:ok, conn, ref} <-
            Mint.WebSocket.upgrade(scheme, conn, path, Keyword.get(opts, :headers, [])) do

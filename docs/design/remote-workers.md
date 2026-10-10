@@ -1227,6 +1227,33 @@ Numbering is this ticket's; "bw#N" means bd-bw8a0m's child N (its §18). The spi
 
 Order: K0 → K1 → {K2, K11} → {K3, K4} → {K5, K6, K7, K8} → {K9, K10, K12} → K13. The spike's verdict on K2/K6 (NetworkPolicy and sidecar SIGTERM) decides whether the later children are worth starting at all on any given cluster.
 
+#### K6 as built (bd-br4c8p): the pod channel
+
+`Arbiter.NodeAgent.PodChannel` (a supervisor the K5 controller starts; K6 does not start it by itself) and its parts, all under `lib/arbiter/node_agent/pod_channel/`:
+
+| Module | Role |
+|---|---|
+| `Cert` | OTP `:public_key` minting (K1-A5): CA, server certificate, leaves. UTCTime to 2049, GeneralizedTime after |
+| `CA`, `CAStore` (+ `CAStore.Dir`) | the CA is created on first boot, kept through a store behaviour (K5 supplies the Secret + ConfigMap one), read back on every later boot. A stored CA that is expired, damaged or mismatched is an **error**, never silently replaced |
+| `BootNonce` | pure value: 256 bits, single-use, expires at `boot_s`, bound to the pod IP and run; only its SHA-256 is kept |
+| `Runs` | the in-memory run table: `register/3` (mint leaves, issue the nonce), `bind_pod_ip/3`, `redeem/3`, `authorize/4`, `release/2`, the command mailbox |
+| `BootBundle` (+ `BootBundle.Tar`) | the `/boot` response, built in memory (a hand-written ustar writer, so a secret never touches the controller's disk) |
+| `BridgeListener` | `:9443`, mTLS, hands authorized sockets to `Arbiter.NodeAgent.Bridge.adopt/5`, the process the machine agent's unix listeners feed |
+| `PodServer`, `PodPlug`, `Upstream` | `:9444` on Bandit: `/boot`, `/seed.bundle`, `/checkpoint`, `/transcripts`, `/commands`; bytes are moved to and from the primary, never parsed |
+| `Listeners` | mints the server certificate and re-mints it (restarting both listeners) every `rotate_after_ms`, a quarter of its 30-day life |
+
+Decisions the design left open, and what the tests pin:
+
+* **"A live run this controller assigned" is the run table, not the CA.** A handshake proves only "signed by the install CA". `Runs.authorize/4` additionally requires the registered, unexpired run; the presented certificate to be **byte-identical to the leaf minted** for that run and name; the name to be one of the spec's bridges on `:9443`; and the peer address to be the pod's bound IP. `release/2` revokes a run's leaves at once, whatever their expiry.
+* **A `control` leaf for `:9444`.** K§9.3 says the `:9444` routes need "a client cert"; a per-bridge leaf would let the worker's own bridge key upload checkpoints. So `/boot` also delivers a leaf with `OU = control`; `:9444` accepts only it, `:9443` never does, and a spec bridge named `control` is refused. The run is always the certificate's `CN`, never anything in the URL or body.
+* **Nonce edge cases.** Not redeemable until the informer has bound the pod IP (`409` + `Retry-After: 1`; the `seed` script retries, nothing is spent); redeemed from another address it is **spent** (`403`), so a nonce read off `kubectl get pod` and replayed makes the real pod fail closed rather than race a thief.
+* **`/boot` tar layout** (for K7's seed script): `tls/<bridge>.crt|.key`, `tls/control.crt|.key`, `secrets.env` (the agent's `export NAME='…'` format, `0600`), `worktree/<path>`, `config_dir/<name>`, `prompt/<n>`, `manifest.json` (run, checkout, bridge names, prompt destinations; **no secret**).
+* **`/commands`** is a long poll (`?wait=` seconds, at most 30); the controller queues e.g. `%{"op" => "checkpoint"}` with `PodChannel.push_command/2`.
+* **Upload completion** is announced as `{:pod_channel_upload, run, :checkpoint | :transcripts, result}` to the `:notify` pid, which is what lets K5 hold `exit` until the final snapshot has been forwarded (K§10.3).
+* **Assertions are on the listener's verdict** (`{:pod_channel_verdict, :bridge, …}`), never on the client's connect result (K1-A4: under TLS 1.3 a rejected leaf is an EOF, not a failed handshake).
+* **Per-run secrets are not Kubernetes objects.** Only the CA goes to a store (`CAStore`); leaves, keys, tokens and seed files exist only in `Runs`' memory and the `/boot` response. `PodChannelTest` checks that nothing but `ca.crt`/`ca.key` is written and that no secret or leaf key appears in either.
+* `bandit` and `plug` are now direct dependencies of `apps/arbiter` (already in the lock; the web app serves with the same).
+
 ### 17. How names in this document were checked
 
 Read at `9b5fb0733`: `Arbiter.Worker.Container` (`argv/2` :145, `placement/1`, `mounts/2`, `mount_opts/2`, moduledoc label policy), `Container.wrap/2` option set, `PrivateClone.mounts/1` and `@readonly_in_git_dir ~w(config hooks commondir objects/info/alternates)`, `ContainerSpawn.prepare/1` (request map: `name`, `image`, `mounts`, `home`, `config_dir`, `writable_paths`, `cli_mounts`, `prompt_paths`, `network`, `env`, `pod`, `deps_cache`), `ContainerSpawn.run_dirs/2`, `Jail.network_command/2` and its `@network_script` (per-listener `TCP-LISTEN:…,bind=127.0.0.1,fork` → `UNIX-CONNECT`), `Jail.network_env/1`, `TestServices` service shape (`name`, `image`, `env`, `command`, `tmpfs`, `ready`, `worker_env`; `postgres/1` and `s3/1` presets; `service_run_argv/4` with `--read-only --cap-drop=all no-new-privileges`), `DepsCache` moduledoc (key `<lock12>-<image12>`, seed job, never mounted), `SeedPaths` (`resolve/2`, `effective/2`), `Worktree.seed_compiled_deps/3`, `Image` base Containerfile (`debian:trixie-slim`, `bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 openssh-client procps socat sqlite3`; no `tini`, no named user), `ClaudeSession` stdin handling (`exec "$@" < /dev/null`). Measured on this host: `deps` 51 MB, `_build` 293 MB (main checkout), toolchain image 843 MB / base 464 MB (`podman images`); bundle sizes from bd-bw8a0m. Cluster facts: the three admiral memory files named at the top, **not re-verified**. Names that do not exist yet are marked **new**: `Arbiter.NodeAgent.Backend`/`Backend.K8s`, `Arbiter.NodeAgent.K8s.PodSpec`, `Image.Publisher`, settings `nodes.registry.*`, `allow_unenforced_network`, the `arbiter.dev/*` labels, routes `/nodes/join/k8s.yaml`, the controller's `:9443`/`:9444` endpoints, `ARB_AGENT_BACKEND`, `ARB_BRIDGE_ADDR`, `ARB_BOOT_NONCE`.

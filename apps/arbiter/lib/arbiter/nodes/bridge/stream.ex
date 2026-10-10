@@ -12,7 +12,10 @@ defmodule Arbiter.Nodes.Bridge.Stream do
     * `dial: path`: connect to a listening unix socket (the primary dials its own
       `Egress` listener), then read it;
     * `socket: sock`: an accepted connection (the agent's per-run listener). The
-      owner makes this process the socket's controller and sends `:go`.
+      owner makes this process the socket's controller and sends `:go`. With
+      `transport: :ssl` the socket is a TLS one (the k8s pod channel's `:9443`
+      listener, `Arbiter.NodeAgent.PodChannel`); its send timeout is then the
+      listener's option, not this process's.
 
   To the owner it sends `{:bridge_stream, id, event}`:
 
@@ -51,6 +54,16 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   @spec stop(pid()) :: :ok
   def stop(pid), do: GenServer.cast(pid, :stop)
 
+  @doc "Hand an accepted socket (of `transport`) to `pid`."
+  @spec controlling_process(:tcp | :ssl, term(), pid()) :: :ok | {:error, term()}
+  def controlling_process(:tcp, sock, pid), do: :gen_tcp.controlling_process(sock, pid)
+  def controlling_process(:ssl, sock, pid), do: :ssl.controlling_process(sock, pid)
+
+  @doc "Close an accepted socket of `transport`."
+  @spec close(:tcp | :ssl, term()) :: :ok
+  def close(:tcp, sock), do: :gen_tcp.close(sock)
+  def close(:ssl, sock), do: :ssl.close(sock)
+
   @doc "The socket options a bridged connection uses."
   @spec socket_opts(keyword()) :: keyword()
   def socket_opts(opts \\ []) do
@@ -70,6 +83,7 @@ defmodule Arbiter.Nodes.Bridge.Stream do
       owner: Keyword.fetch!(opts, :owner),
       id: Keyword.fetch!(opts, :id),
       sock: nil,
+      transport: Keyword.get(opts, :transport, :tcp),
       send_timeout_ms: Keyword.get(opts, :send_timeout_ms, @send_timeout_ms),
       eof_in?: false,
       eof_out?: false
@@ -81,7 +95,7 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   defp start(state, opts) do
     case Keyword.fetch(opts, :socket) do
       {:ok, sock} ->
-        :ok = :inet.setopts(sock, socket_opts(opts))
+        if state.transport == :tcp, do: :ok = :inet.setopts(sock, socket_opts(opts))
         {:ok, %{state | sock: sock}}
 
       :error ->
@@ -104,20 +118,20 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   end
 
   @impl true
-  def handle_cast(:go, %{sock: sock} = state) do
-    :inet.setopts(sock, active: :once)
+  def handle_cast(:go, state) do
+    activate(state)
     {:noreply, state}
   end
 
   def handle_cast(:rearm, %{sock: sock, eof_in?: false} = state) when not is_nil(sock) do
-    _ = :inet.setopts(sock, active: :once)
+    _ = activate(state)
     {:noreply, state}
   end
 
   def handle_cast(:rearm, state), do: {:noreply, state}
 
   def handle_cast({:write, bytes}, %{sock: sock} = state) when not is_nil(sock) do
-    case :gen_tcp.send(sock, bytes) do
+    case send_bytes(state, bytes) do
       :ok ->
         notify(state, {:wrote, byte_size(bytes)})
         {:noreply, state}
@@ -128,7 +142,7 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   end
 
   def handle_cast(:shutdown_write, %{sock: sock} = state) when not is_nil(sock) do
-    _ = :gen_tcp.shutdown(sock, :write)
+    _ = half_close(state)
     state = %{state | eof_out?: true}
     if state.eof_in?, do: {:stop, :normal, state}, else: {:noreply, state}
   end
@@ -137,25 +151,37 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   def handle_cast(_other, state), do: {:noreply, state}
 
   @impl true
-  def handle_info({:tcp, sock, bytes}, %{sock: sock} = state) do
+  def handle_info({tag, sock, bytes}, %{sock: sock} = state) when tag in [:tcp, :ssl] do
     notify(state, {:data, bytes})
     {:noreply, state}
   end
 
-  def handle_info({:tcp_closed, sock}, %{sock: sock} = state) do
+  def handle_info({tag, sock}, %{sock: sock} = state) when tag in [:tcp_closed, :ssl_closed] do
     notify(state, :eof)
     state = %{state | eof_in?: true}
     if state.eof_out?, do: {:stop, :normal, state}, else: {:noreply, state}
   end
 
-  def handle_info({:tcp_error, sock, reason}, %{sock: sock} = state),
-    do: fail(state, {:read, reason})
+  def handle_info({tag, sock, reason}, %{sock: sock} = state)
+      when tag in [:tcp_error, :ssl_error],
+      do: fail(state, {:read, reason})
 
   def handle_info(_other, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{sock: sock}) when not is_nil(sock), do: :gen_tcp.close(sock)
+  def terminate(_reason, %{sock: sock, transport: transport}) when not is_nil(sock),
+    do: close(transport, sock)
+
   def terminate(_reason, _state), do: :ok
+
+  defp activate(%{transport: :tcp, sock: sock}), do: :inet.setopts(sock, active: :once)
+  defp activate(%{transport: :ssl, sock: sock}), do: :ssl.setopts(sock, active: :once)
+
+  defp send_bytes(%{transport: :tcp, sock: sock}, bytes), do: :gen_tcp.send(sock, bytes)
+  defp send_bytes(%{transport: :ssl, sock: sock}, bytes), do: :ssl.send(sock, bytes)
+
+  defp half_close(%{transport: :tcp, sock: sock}), do: :gen_tcp.shutdown(sock, :write)
+  defp half_close(%{transport: :ssl, sock: sock}), do: :ssl.shutdown(sock, :write)
 
   defp notify(%{owner: owner, id: id}, event), do: send(owner, {:bridge_stream, id, event})
 
