@@ -109,6 +109,12 @@ defmodule Arbiter.Test.FakeK8sApi do
   @doc "Pre-creates (or replaces) a Lease; the server owns its resourceVersion."
   def put_lease(api, lease), do: GenServer.call(api, {:put_lease, lease})
 
+  @doc "Pre-creates (or replaces) a Deployment by `metadata.name` (K9 self-upgrade)."
+  def put_deployment(api, deployment), do: GenServer.call(api, {:put_deployment, deployment})
+
+  @doc "The Deployment `name` as the server holds it, or nil."
+  def deployment(api, name), do: GenServer.call(api, {:get_deployment, name})
+
   @doc "The Lease `name` as the server holds it, or nil."
   def lease(api, name), do: GenServer.call(api, {:get_lease, name})
 
@@ -150,6 +156,7 @@ defmodule Arbiter.Test.FakeK8sApi do
        logs: %{},
        quotas: %{},
        leases: %{},
+       deployments: %{},
        followers: %{},
        finished: MapSet.new()
      }}
@@ -306,6 +313,27 @@ defmodule Arbiter.Test.FakeK8sApi do
 
   def handle_call({:get_lease, name}, _from, state), do: {:reply, state.leases[name], state}
 
+  def handle_call({:put_deployment, dep}, _from, state),
+    do:
+      {:reply, dep,
+       %{state | deployments: Map.put(state.deployments, dep["metadata"]["name"], dep)}}
+
+  def handle_call({:get_deployment, name}, _from, state),
+    do: {:reply, state.deployments[name], state}
+
+  # A strategic merge patch, as far as the self-upgrade needs: maps merge, and the
+  # `containers` list merges by `name`.
+  def handle_call({:patch_deployment, name, patch}, _from, state) do
+    case state.deployments[name] do
+      nil ->
+        {:reply, :not_found, state}
+
+      dep ->
+        merged = strategic_merge(dep, patch)
+        {:reply, {:ok, merged}, %{state | deployments: Map.put(state.deployments, name, merged)}}
+    end
+  end
+
   def handle_call({:update_lease, name, lease}, _from, state) do
     case state.leases[name] do
       nil ->
@@ -376,6 +404,24 @@ defmodule Arbiter.Test.FakeK8sApi do
 
   defp take(items, nil), do: items
   defp take(items, limit), do: Enum.take(items, limit)
+
+  defp strategic_merge(%{} = base, %{} = patch) do
+    Map.merge(base, patch, fn
+      "containers", old, new when is_list(old) and is_list(new) -> merge_named(old, new)
+      _key, old, new -> strategic_merge(old, new)
+    end)
+  end
+
+  defp strategic_merge(_base, patch), do: patch
+
+  defp merge_named(old, new) do
+    Enum.map(old, fn container ->
+      case Enum.find(new, &(&1["name"] == container["name"])) do
+        nil -> container
+        change -> strategic_merge(container, change)
+      end
+    end)
+  end
 
   @doc false
   def matches?(pod, selector) do
@@ -539,6 +585,49 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
         {:ok, lease} -> json(conn, 200, lease)
         :conflict -> status(conn, 409, "Conflict", "the object has been modified")
         :not_found -> status(conn, 404, "NotFound", "leases \"#{name}\" not found")
+      end
+    end
+  end
+
+  defp route(
+         %{
+           method: "GET",
+           path_info: ["apis", "apps", "v1", "namespaces", ns, "deployments", name]
+         } = conn,
+         api,
+         ns,
+         _body
+       ) do
+    with :ok <- check_fail(conn, api, :deployment_get) do
+      case FakeK8sApi.handle(api, {:get_deployment, name}) do
+        nil -> status(conn, 404, "NotFound", "deployments.apps \"#{name}\" not found")
+        deployment -> json(conn, 200, deployment)
+      end
+    end
+  end
+
+  defp route(
+         %{
+           method: "PATCH",
+           path_info: ["apis", "apps", "v1", "namespaces", ns, "deployments", name]
+         } = conn,
+         api,
+         ns,
+         body
+       ) do
+    with :ok <- check_fail(conn, api, :deployment_patch) do
+      if get_req_header(conn, "content-type") == ["application/strategic-merge-patch+json"] do
+        case FakeK8sApi.handle(api, {:patch_deployment, name, Jason.decode!(body)}) do
+          {:ok, deployment} -> json(conn, 200, deployment)
+          :not_found -> status(conn, 404, "NotFound", "deployments.apps \"#{name}\" not found")
+        end
+      else
+        status(
+          conn,
+          415,
+          "UnsupportedMediaType",
+          "the body of the request was in an unknown format"
+        )
       end
     end
   end
