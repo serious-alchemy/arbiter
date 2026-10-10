@@ -173,6 +173,15 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
     end
   end
 
+  @doc """
+  The worker pod exactly as the builder emits it (same options as `pod/2`), unshaped:
+  what `Arbiter.NodeAgent.K8s.Readiness` sends in its server-side dry runs.
+  """
+  @spec dry_run_pod(map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
+  def dry_run_pod(config, opts) do
+    PodSpec.build(spec(Keyword.get_lazy(opts, :id, &new_id/0), opts), config)
+  end
+
   defp new_id, do: :crypto.strong_rand_bytes(5) |> Base.encode16(case: :lower)
 
   defp spec(id, opts) do
@@ -205,7 +214,10 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       spec
       |> Map.put("activeDeadlineSeconds", @deadline_s)
       |> Map.put("initContainers", gate_only(spec["initContainers"]))
-      |> Map.put("containers", Enum.map(spec["containers"], &probe_container(&1, targets, bridge)))
+      |> Map.put(
+        "containers",
+        Enum.map(spec["containers"], &probe_container(&1, targets, bridge))
+      )
     end)
   end
 
@@ -234,7 +246,10 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       "limits" => %{"memory" => "64Mi"}
     })
     |> Map.update!("volumeMounts", fn mounts ->
-      Enum.filter(mounts, &(&1["name"] in ["tmp", "run", "ca"] and not Map.has_key?(&1, "subPath")))
+      Enum.filter(
+        mounts,
+        &(&1["name"] in ["tmp", "run", "ca"] and not Map.has_key?(&1, "subPath"))
+      )
     end)
     |> Map.delete("workingDir")
   end
@@ -366,7 +381,10 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
     do: result(:inconclusive, reason: :image_pull, pull: {:failed, message})
 
   defp judge({:timeout, state}, _client, _name),
-    do: result(:inconclusive, reason: if(match?({:api_error, _}, state), do: elem(state, 1), else: :timeout))
+    do:
+      result(:inconclusive,
+        reason: if(match?({:api_error, _}, state), do: elem(state, 1), else: :timeout)
+      )
 
   defp judge({:finished, outcome, status}, client, name) do
     cond do

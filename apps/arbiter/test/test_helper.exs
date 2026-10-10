@@ -58,6 +58,12 @@ systemd_user_reason =
 # exact name. Opt-in (needs a ready podman and that image):
 #
 #     mix test --include podman test/arbiter/worker/container_podman_test.exs
+# bd-cbgmcs (K13): `:k8s` is the end-to-end suite against a DISPOSABLE kind/k3d cluster
+# (`apps/arbiter/test/k8s/`, runbook in `docs/remote-workers-k8s-runbook.md`). Opt-in,
+# excluded from the default run and CI; it needs a kubeconfig that points at a throwaway
+# cluster and refuses anything else:
+#
+#     ARB_K8S_E2E=1 mix test --include k8s test/k8s
 # bd-90vo7y: ARB_TEST_MAX_CASES / worker-default cap on async cases.
 max_cases_opts =
   "../../../scripts/test_max_cases.exs"
@@ -69,7 +75,7 @@ max_cases_opts =
 ExUnit.start(
   [
     exclude:
-      [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman, :spike_rw] ++
+      [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman, :spike_rw, :k8s] ++
         tmux_exclude
   ] ++
     max_cases_opts

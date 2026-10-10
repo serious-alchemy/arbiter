@@ -130,7 +130,12 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
 
     for probe <- ~w(api controller_port foreign internet node) do
       test "an open #{probe} probe is unenforced" do
-        log = String.replace(@all_closed, "probe #{unquote(probe)} closed", "probe #{unquote(probe)} open")
+        log =
+          String.replace(
+            @all_closed,
+            "probe #{unquote(probe)} closed",
+            "probe #{unquote(probe)} open"
+          )
 
         assert {:unenforced, [unquote(probe)]} = log |> Canary.parse() |> Canary.verdict()
       end
@@ -249,7 +254,9 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
       client: client,
       api: api
     } do
-      FakeK8sApi.on_create(api, fn pod -> {Map.put(pod, "status", %{"phase" => "Running"}), []} end)
+      FakeK8sApi.on_create(api, fn pod ->
+        {Map.put(pod, "status", %{"phase" => "Running"}), []}
+      end)
 
       assert %{outcome: :inconclusive, reason: :timeout} =
                Canary.run(client, Fx.config(), opts(timeout_ms: 50))

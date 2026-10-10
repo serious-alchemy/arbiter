@@ -130,6 +130,12 @@ defmodule Arbiter.Test.FakeK8sApi do
   """
   def on_create(api, fun) when is_function(fun, 1), do: GenServer.call(api, {:on_create, fun})
 
+  @doc """
+  Makes `POST pods` (dry run or not) refuse any pod with a `privileged` container, as
+  a namespace labelled `pod-security.kubernetes.io/enforce: restricted` does.
+  """
+  def enforce_psa(api), do: GenServer.call(api, {:set_psa, true})
+
   @doc "Blocks until at least `n` watches are open."
   def await_watchers(api, n), do: GenServer.call(api, {:await_watchers, n}, 5_000)
 
@@ -172,6 +178,7 @@ defmodule Arbiter.Test.FakeK8sApi do
        followers: %{},
        finished: MapSet.new(),
        clock: nil,
+       psa: false,
        on_create: nil
      }}
   end
@@ -275,6 +282,8 @@ defmodule Arbiter.Test.FakeK8sApi do
   def handle_call({:get, name}, _from, state), do: {:reply, Map.get(state.pods, name), state}
 
   def handle_call({:set_clock, at}, _from, state), do: {:reply, :ok, %{state | clock: at}}
+  def handle_call({:set_psa, on}, _from, state), do: {:reply, :ok, %{state | psa: on}}
+  def handle_call(:psa, _from, state), do: {:reply, state.psa, state}
   def handle_call(:clock, _from, state), do: {:reply, state.clock, state}
   def handle_call({:on_create, fun}, _from, state), do: {:reply, :ok, %{state | on_create: fun}}
 
@@ -521,7 +530,8 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
          ns,
          body
        ) do
-    with :ok <- check_fail(conn, api, :create) do
+    with :ok <- check_fail(conn, api, :create),
+         :ok <- check_psa(conn, api, body) do
       if fetch_query_params(conn).query_params["dryRun"] == "All" do
         json(conn, 201, Jason.decode!(body))
       else
@@ -536,8 +546,11 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
   defp route(%{method: "GET", path_info: ["version"]} = conn, api, _ns, _body) do
     conn =
       case FakeK8sApi.handle(api, :clock) do
-        %DateTime{} = at -> put_resp_header(conn, "date", Calendar.strftime(at, "%a, %d %b %Y %H:%M:%S GMT"))
-        nil -> conn
+        %DateTime{} = at ->
+          put_resp_header(conn, "date", Calendar.strftime(at, "%a, %d %b %Y %H:%M:%S GMT"))
+
+        nil ->
+          conn
       end
 
     json(conn, 200, %{"major" => "1", "minor" => "31", "gitVersion" => "v1.31.2+fake"})
@@ -805,6 +818,26 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
       :ok -> :ok
       {:fail, {code, message}} -> status(conn, code, "InjectedFailure", message)
       {:fail, code} -> status(conn, code, "InjectedFailure", "injected #{code}")
+    end
+  end
+
+  defp check_psa(conn, api, body) do
+    pod = Jason.decode!(body)
+
+    containers =
+      (get_in(pod, ["spec", "containers"]) || []) ++
+        (get_in(pod, ["spec", "initContainers"]) || [])
+
+    if FakeK8sApi.handle(api, :psa) and
+         Enum.any?(containers, &(get_in(&1, ["securityContext", "privileged"]) == true)) do
+      status(
+        conn,
+        403,
+        "Forbidden",
+        ~s(pods "#{get_in(pod, ["metadata", "name"])}" is forbidden: violates PodSecurity "restricted:latest": privileged)
+      )
+    else
+      :ok
     end
   end
 
