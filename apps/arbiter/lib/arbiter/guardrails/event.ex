@@ -31,7 +31,9 @@ defmodule Arbiter.Guardrails.Event do
     :credential_read,
     :self_grant_attempt,
     :unrequested_egress,
-    :permission_denial
+    :permission_denial,
+    # A spend-cap park (G19's `SpendPatrol`), major for the park tiers (§6.1).
+    :spend_cap
   ]
   @severities [:critical, :major, :minor]
   @sources [
@@ -40,7 +42,8 @@ defmodule Arbiter.Guardrails.Event do
     :transcript_scan,
     :claude_permission_denials,
     :agy_permission_check,
-    :bridge_audit
+    :bridge_audit,
+    :spend_patrol
   ]
 
   @doc "Every event kind."

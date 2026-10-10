@@ -27,12 +27,13 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
       assert Enum.sort(Placement.kinds()) == @pinned_kinds
     end
 
-    test "every kind is capped one of three documented ways" do
+    test "every kind is capped one of two documented ways" do
       assert LocalCapacity.kinds() |> Map.values() |> Enum.uniq() |> Enum.sort() ==
-               [:at_cap, :never, :zero_only]
+               [:at_cap, :zero_only]
 
       assert LocalCapacity.kinds()[:implementer] == :at_cap
-      assert LocalCapacity.kinds()[:resume] == :never
+      assert LocalCapacity.kinds()[:redispatch] == :at_cap
+      assert LocalCapacity.kinds()[:resume] == :at_cap
     end
 
     test "the design doc lists every kind in its RW8 section" do

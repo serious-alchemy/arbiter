@@ -672,14 +672,18 @@ defmodule Arbiter.Workers.Reconciler do
       # be an implementer parked on its PR before bd-741sid, its work done.
       |> Enum.reject(&(skip_resume?(&1) or &1.id in skip_ids))
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
+      # bd-b2iigy: the primary's cap (`LocalCapacity`) lets only so many back at
+      # once and defers the rest, so the most important tickets go first. The
+      # sort is stable: equal priorities keep the order they were read in.
+      |> Enum.sort_by(& &1.priority)
 
     report =
       Enum.reduce(stuck, resume_report(), fn issue, report ->
         case resume_fun.(issue) do
-          {:ok, %{deferred: true}} ->
+          {:ok, %{deferred: true} = result} ->
             Logger.info(
-              "Workers.Reconciler: task #{issue.id} is not In progress, so holds no slot; " <>
-                "its resume is deferred until a worker slot frees"
+              "Workers.Reconciler: task #{issue.id}'s resume is deferred until a slot frees " <>
+                "(#{deferred_reason(result)})"
             )
 
             not_resumed(%{report | deferred: report.deferred + 1}, issue.id, :deferred)
@@ -721,6 +725,10 @@ defmodule Arbiter.Workers.Reconciler do
 
       {:error, e}
   end
+
+  # Why a resume was parked: the primary's own cap, or the board's slot cap.
+  defp deferred_reason(%{held_for: :local_capacity, phrase: phrase}), do: phrase
+  defp deferred_reason(_), do: "not In progress, so it holds no slot"
 
   defp resume_report,
     do: %{resumed: 0, deferred: 0, escalated: 0, restarted: [], not_restarted: []}

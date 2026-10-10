@@ -27,18 +27,29 @@ defmodule Arbiter.Nodes.LocalCapacity do
   occupancy read, minus runs placed on a node) or an admission reserved but not
   yet registered. Of the kinds:
 
-    * `:at_cap` — a **fresh implementer** (`Worker.Dispatch.dispatch/2` of a
-      ticket not yet In progress): refused when the primary is at its cap, and
-      at 0;
-    * `:zero_only` — **follow-up roles of work already in flight**: a
-      re-dispatch of a ticket already In progress (`:redispatch`), a review
-      dispatch, ReviewGate reviewers and fix rounds, merge-queue fix and
-      conflict passes. They are counted, but held only when the cap is 0, never
-      for merely being at it: a ticket's follow-up replaces the ticket's own
-      slot, and holding it for other tickets could deadlock a ticket waiting
-      for its own review (`Arbiter.Worker.ResumeSlot`'s no-deadlock rule);
-    * `:never` — a **resume** of a ticket already In progress: counted, never
-      held (stranding work is worse than overshooting).
+    * `:at_cap` — a run of **a ticket's own implementer**: a fresh implementer
+      (`Worker.Dispatch.dispatch/2` of a ticket not yet In progress), a
+      re-dispatch of a ticket already In progress (`:redispatch`) and a resume
+      of one (`:resume`: briefing or session, the boot Reconciler's sweep, a
+      Watchdog or `LostResume` auto-resume, `arb worker resume`). Refused when
+      *other* tickets' runs fill the primary's cap, and at 0. A ticket's own
+      workers are left out of the count (it replaces its own run), so a resume
+      of the one live ticket is never held by itself (bd-b2iigy: these used to
+      be uncapped, and a restart's resume sweep put 5 runs on a cap of 2 —
+      the laptop hit 100 °C);
+    * `:zero_only` — **review-side follow-up roles of work already in flight**:
+      a review dispatch, ReviewGate reviewers and fix rounds, merge-queue fix
+      and conflict passes. They are counted, but held only when the cap is 0,
+      never for merely being at it: holding them for other tickets could
+      deadlock a ticket waiting for its own review
+      (`Arbiter.Worker.ResumeSlot`'s no-deadlock rule).
+
+  A held **automatic** resume is deferred, not failed: `Worker.Dispatch` hands
+  it to `Arbiter.Board.Autopilot.defer_resume/4` marked `held_for:
+  :local_capacity`, and the Autopilot replays it, highest ticket priority
+  first, the moment `check/3` says the primary has room — the board and `arb
+  scheduler status` list it as `held: local capacity`. A human resume is
+  refused with the hold (`--force` goes over; recorded).
 
   Not counted, because they are not workers: preflight and usage probes,
   coordinator PTY sessions, external PR reviews and ReviewPatrol re-reviews.
@@ -69,8 +80,8 @@ defmodule Arbiter.Nodes.LocalCapacity do
   # `Arbiter.Nodes.Placement.kinds/0`; the guard test checks both.
   @kinds %{
     implementer: :at_cap,
-    redispatch: :zero_only,
-    resume: :never,
+    redispatch: :at_cap,
+    resume: :at_cap,
     review: :zero_only,
     reviewer: :zero_only,
     fix_pass: :zero_only,
@@ -91,7 +102,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
         }
 
   @doc "Every spawn kind that counts against the primary's cap, and how it is capped."
-  @spec kinds() :: %{atom() => :at_cap | :zero_only | :never}
+  @spec kinds() :: %{atom() => :at_cap | :zero_only}
   def kinds, do: @kinds
 
   @doc """
@@ -184,11 +195,24 @@ defmodule Arbiter.Nodes.LocalCapacity do
     end
   end
 
+  @doc """
+  `admit/3` that takes nothing: would `kind` for `task_id` be admitted right
+  now? `:ok`, or the same `{:error, {:no_node_capacity, info}}`. For a caller
+  that must decide *before* it changes anything (a resume stops the prior
+  worker; a scheduler waits for room before replaying a deferred resume) —
+  `Worker.Dispatch` still admits for real at its own gate, so a slot taken in
+  between holds the run there instead.
+  """
+  @spec check(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
+  def check(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
+    case cap() do
+      %{enforced?: false} -> :ok
+      %{cap: cap} -> admit_enforced(task_id, kind, cap, Keyword.put(opts, :reserve?, false))
+    end
+  end
+
   defp admit_enforced(task_id, kind, cap, opts) do
     case Map.fetch!(@kinds, kind) do
-      :never ->
-        :ok
-
       :zero_only ->
         if cap > 0 or forced?(opts),
           do: :ok,
@@ -208,12 +232,12 @@ defmodule Arbiter.Nodes.LocalCapacity do
 
     cond do
       length(holders) < cap ->
-        Placement.reserve(task_id, @local)
+        reserve(task_id, opts)
         :ok
 
       forced?(opts) ->
-        Placement.reserve(task_id, @local)
-        record_override(task_id, cap, holders, opts)
+        reserve(task_id, opts)
+        if reserve?(opts), do: record_override(task_id, cap, holders, opts)
         :ok
 
       true ->
@@ -222,6 +246,14 @@ defmodule Arbiter.Nodes.LocalCapacity do
   end
 
   defp forced?(opts), do: Keyword.get(opts, :force) == true
+
+  # `check/3` asks without taking the slot.
+  defp reserve?(opts), do: Keyword.get(opts, :reserve?, true)
+
+  defp reserve(task_id, opts) do
+    if reserve?(opts), do: Placement.reserve(task_id, @local)
+    :ok
+  end
 
   defp refuse(task_id, kind, cap, holders, opts) do
     phrase = phrase(cap, holders, Keyword.get(opts, :reason), Keyword.get(opts, :provider), kind)

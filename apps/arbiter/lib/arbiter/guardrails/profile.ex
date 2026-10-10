@@ -24,7 +24,12 @@ defmodule Arbiter.Guardrails.Profile do
       (an empty repo list means every repo of that workspace).
     * `in_scope?` — whether the workspace and repo this profile was resolved
       for are inside `scope`.
-    * `capped_by` — which layers lowered it (`:rule`, `:workspace`, `:repo`).
+    * `capped_by` — which layers lowered it (`:rule`, `:workspace`, `:repo`,
+      `:suspension`).
+    * `suspended` — `nil`, or the subject's automatic suspension after a
+      critical guardrail event (G18, `Arbiter.Loop.Trust`): the profile is then
+      the quarantine bundle and `Arbiter.Guardrails.Eligibility` refuses every
+      role until the coordinator confirms or dismisses it.
   """
 
   @enforce_keys [:tier]
@@ -44,7 +49,8 @@ defmodule Arbiter.Guardrails.Profile do
             honour_safe_defaults_exclude: false,
             scope: nil,
             in_scope?: true,
-            capped_by: []
+            capped_by: [],
+            suspended: nil
 
   @type tier :: :quarantine | :probation | :trusted | :privileged
 
@@ -61,6 +67,7 @@ defmodule Arbiter.Guardrails.Profile do
           honour_safe_defaults_exclude: boolean(),
           scope: nil | %{String.t() => [String.t()]},
           in_scope?: boolean(),
-          capped_by: [atom()]
+          capped_by: [atom()],
+          suspended: map() | nil
         }
 end

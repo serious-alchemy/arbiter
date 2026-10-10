@@ -81,6 +81,14 @@ defmodule Arbiter.Board.Autopilot do
   already resumed, closed or gone is dropped quietly; any other failure is
   escalated once and dropped — the queue never retries it on its own.
 
+  A resume can also be deferred for the *primary's own* worker cap
+  (`held_for: :local_capacity`, `Arbiter.Nodes.LocalCapacity`, bd-b2iigy): a
+  restart's resume sweep brings back at most the cap's worth and queues the
+  rest here. Those wait on local room instead of a board slot (their ticket is
+  already In progress), replay highest ticket priority first, and show as
+  `held: local capacity` in `status/2` (`held_local_capacity`), the board and
+  `arb scheduler status`.
+
   The queue is in memory. A restart loses it, which is the same thing the
   restart does to everything else in flight: the boot reconciler re-resumes
   mid-flight tasks, and the patrols re-watch open PRs.
@@ -297,6 +305,7 @@ defmodule Arbiter.Board.Autopilot do
           | {:busy, String.t()}
           | {:held, String.t(), DateTime.t()}
           | {:resumed, String.t()}
+          | {:deferred, String.t()}
 
   @doc """
   The PubSub topic carrying `{:board_dispatched, task_id}` and
@@ -557,6 +566,8 @@ defmodule Arbiter.Board.Autopilot do
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
       resume: Keyword.get(opts, :resume, &default_resume/3),
+      local_room: Keyword.get(opts, :local_room, &default_local_room?/1),
+      priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
@@ -611,6 +622,7 @@ defmodule Arbiter.Board.Autopilot do
         opts
         |> Keyword.put_new(:dispatch_holds, dispatch_holds(state))
         |> Keyword.put_new(:resume_queued, queued_resume_ids(state))
+        |> Keyword.put_new(:local_held, local_held_ids(state))
       )
 
     {:reply, snapshot, state}
@@ -627,12 +639,15 @@ defmodule Arbiter.Board.Autopilot do
        dispatching: dispatching_id(state),
        holds: state.holds,
        deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id),
+       held_local_capacity: local_held_ids(state),
        deferred_fix_passes: for(%{kind: :fix_pass, task_id: id} <- state.deferred_resumes, do: id)
      }, state}
   end
 
   def handle_call({:defer_resume, task_id, kind, opts}, _from, state) do
-    entry = %{task_id: task_id, kind: kind, opts: opts}
+    {held_for, opts} = Keyword.pop(opts, :held_for)
+    wait = if held_for == :local_capacity, do: :local_capacity, else: :slot
+    entry = %{task_id: task_id, kind: kind, opts: opts, wait: wait}
 
     deferred =
       if Enum.any?(state.deferred_resumes, &(&1.task_id == task_id)),
@@ -887,7 +902,8 @@ defmodule Arbiter.Board.Autopilot do
     {read_status, snapshot} =
       read_board(state,
         dispatch_holds: dispatch_holds(state),
-        resume_queued: queued_resume_ids(state)
+        resume_queued: queued_resume_ids(state),
+        local_held: local_held_ids(state)
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
@@ -934,15 +950,64 @@ defmodule Arbiter.Board.Autopilot do
   # bd-92mx1m: the oldest deferred resume takes the first free slot. Until one
   # frees, nothing Ready is promoted either — the resumed task is already in
   # progress and goes first. An unreadable board is not a free slot.
-  defp resume_or_wait(%{deferred_resumes: [next | rest]} = state, :ok, snapshot) do
-    if Map.get(snapshot, :slots_free, 0) > 0 do
-      {:started, start_resume(%{state | deferred_resumes: rest}, next)}
-    else
-      waiting(state)
+  #
+  # bd-b2iigy: a resume can also be waiting on the primary's own cap
+  # (`wait: :local_capacity`, `Arbiter.Nodes.LocalCapacity`). Its ticket is
+  # already In progress, so a free board slot is neither needed nor enough: it
+  # replays when the primary has room, whatever the board says, and a resume
+  # waiting for a board slot does not queue it. Slot waiters keep their arrival
+  # order; local waiters go highest ticket priority first (then arrival), so a
+  # restart's backlog comes back P0 first, one per free local slot.
+  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, snapshot) do
+    case next_resume(state, queue, Map.get(snapshot, :slots_free, 0)) do
+      nil ->
+        waiting(state)
+
+      next ->
+        rest = Enum.reject(queue, &(&1.task_id == next.task_id))
+        {:started, start_resume(%{state | deferred_resumes: rest}, next)}
     end
   end
 
   defp resume_or_wait(state, _read_status, _snapshot), do: waiting(state)
+
+  defp next_resume(state, queue, slots_free) do
+    slot_waiter = if slots_free > 0, do: Enum.find(queue, &(&1.wait == :slot))
+
+    slot_waiter || next_local_resume(state, queue)
+  end
+
+  defp next_local_resume(state, queue) do
+    queue
+    |> Enum.filter(&(&1.wait == :local_capacity and state.local_room.(&1.task_id)))
+    |> Enum.with_index()
+    |> Enum.min_by(fn {entry, index} -> {state.priority.(entry.task_id), index} end, fn -> nil end)
+    |> case do
+      {entry, _index} -> entry
+      nil -> nil
+    end
+  end
+
+  defp local_held_ids(%{deferred_resumes: queue}),
+    do: for(%{wait: :local_capacity, task_id: id} <- queue, do: id)
+
+  # Whether the primary has room for this ticket's resume right now
+  # (`LocalCapacity.check/3` reserves nothing; `Dispatch` admits for real).
+  defp default_local_room?(task_id) do
+    Arbiter.Nodes.LocalCapacity.check(task_id, :resume, []) == :ok
+  rescue
+    _ -> true
+  end
+
+  # 0 = P0, the highest. An unreadable ticket sorts as the default P2.
+  defp default_priority(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{priority: priority}} when is_integer(priority) -> priority
+      _ -> 2
+    end
+  rescue
+    _ -> 2
+  end
 
   defp waiting(%{paused?: true} = state), do: {:paused, state}
   defp waiting(state), do: {:idle, state}
@@ -1048,6 +1113,11 @@ defmodule Arbiter.Board.Autopilot do
     :task_worker_live,
     :pulled
   ]
+
+  # bd-b2iigy: the primary filled up between the room check and the replay, and
+  # `Dispatch` deferred it again (it is back in the queue, keeping no place of
+  # its own). Not a resume, not a failure.
+  defp finish_resume(state, id, {:ok, %{deferred: true}}), do: {{:deferred, id}, state}
 
   defp finish_resume(state, id, {:ok, _}) do
     announce({:board_resumed, id})

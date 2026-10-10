@@ -216,6 +216,7 @@ defmodule Arbiter.NodeAgent.Connection do
     case WsClient.start(
            url: Config.socket_url(config),
            owner: self(),
+           proxy: config.proxy,
            connect_timeout_ms: config.connect_timeout_ms
          ) do
       {:ok, client} ->

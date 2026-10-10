@@ -11,7 +11,8 @@ defmodule ArbiterWeb.Api.NodeController do
       primary. The list also carries the `local` row, the `total` of
       `local + Σ remote caps` against the `ceiling` (`conductor.max_concurrent`),
       `warnings`, and the `nodes.public_url` with its `exposure`
-      (`private | public | unset`) for `arb server doctor`.
+      (`private | public | unset`) and the image `registry` status (K8: reachability,
+      published images, last error; never the password) for `arb server doctor`.
     * `GET /api/nodes/pairings`, `POST /api/nodes/pairings/:ref/{approve,deny}` —
       **operator**: the pending device-code pairing requests (code, hostname,
       source address) and the decision on one. `:ref` is the typed code or the
@@ -32,6 +33,7 @@ defmodule ArbiterWeb.Api.NodeController do
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
+  alias Arbiter.Worker.Image.Publisher
   alias ArbiterWeb.Api.NodeJSON
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -116,6 +118,7 @@ defmodule ArbiterWeb.Api.NodeController do
       warnings: overview.warnings,
       public_url: url,
       exposure: Overview.exposure(url),
+      registry: Publisher.status(),
       allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
     })
   end
@@ -157,6 +160,9 @@ defmodule ArbiterWeb.Api.NodeController do
 
       {:error, :invalid_max_workers} ->
         {:error, {:invalid, "max_workers must be 1 or more, or null"}}
+
+      {:error, :invalid_allow_unenforced_network} ->
+        {:error, {:invalid, "allow_unenforced_network must be true or false"}}
 
       {:error, :name_taken} ->
         {:error, {:conflict, "a node with that name already exists"}}
@@ -256,9 +262,9 @@ defmodule ArbiterWeb.Api.NodeController do
   # Well-typed `name` / `labels` / `max_workers`, or a 422. `max_workers: null`
   # clears the cap; an invalid number is left to the resource's constraint.
   defp changes(params) do
-    Enum.reduce_while(["name", "labels", "max_workers", "workspace_ids"], {:ok, %{}}, fn key,
-                                                                                         {:ok,
-                                                                                          acc} ->
+    keys = ["name", "labels", "max_workers", "workspace_ids", "allow_unenforced_network"]
+
+    Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, acc} ->
       case Map.fetch(params, key) do
         :error -> {:cont, {:ok, acc}}
         {:ok, value} -> check(key, value, acc)
@@ -285,6 +291,9 @@ defmodule ArbiterWeb.Api.NodeController do
       do: {:cont, {:ok, Map.put(acc, :workspace_ids, v)}},
       else: {:halt, {:error, {:invalid, "workspace_ids must be a list of workspace ids"}}}
   end
+
+  defp check("allow_unenforced_network", v, acc) when is_boolean(v),
+    do: {:cont, {:ok, Map.put(acc, :allow_unenforced_network, v)}}
 
   defp check("max_workers", v, acc) when is_nil(v) or is_integer(v),
     do: {:cont, {:ok, Map.put(acc, :max_workers, v)}}

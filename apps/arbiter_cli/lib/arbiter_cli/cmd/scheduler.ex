@@ -101,6 +101,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
           IO.puts("Board scheduler is #{SchedulerState.headline(body)}.")
           emit_changed(body)
           emit_slots(body)
+          emit_held(body)
           emit_entries(body)
         end
 
@@ -205,6 +206,16 @@ defmodule ArbiterCli.Cmd.Scheduler do
   end
 
   defp emit_slots(_body), do: :ok
+
+  # bd-b2iigy: automatic resumes waiting on the primary's own worker cap — held,
+  # not lost; they start in ticket-priority order as local slots free.
+  defp emit_held(%{"held_local_capacity" => [_ | _] = held}) do
+    ids = Enum.map(held, &(&1["task_id"] || "?"))
+    IO.puts("Held: local capacity — #{length(ids)} resume(s) waiting for a local slot")
+    Enum.each(ids, &IO.puts("  #{&1}  held: local capacity"))
+  end
+
+  defp emit_held(_body), do: :ok
 
   defp emit_entries(body) do
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("  " <> &1))

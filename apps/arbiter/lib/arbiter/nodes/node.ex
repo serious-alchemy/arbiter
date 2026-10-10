@@ -77,7 +77,7 @@ defmodule Arbiter.Nodes.Node do
     # The operator's edit surface (`arb node set`): what the node is called and
     # how much it may run. Never credentials or status.
     update :set do
-      accept [:name, :labels, :max_workers, :workspace_ids]
+      accept [:name, :labels, :max_workers, :workspace_ids, :allow_unenforced_network]
     end
 
     # Drain: no new assignments, live runs untouched (§13). Revoked stays revoked,
@@ -126,6 +126,16 @@ defmodule Arbiter.Nodes.Node do
 
       description "Node-to-workspace pin (RW8): empty means any workspace may be placed here, " <>
                     "otherwise only runs of the listed workspaces."
+    end
+
+    attribute :allow_unenforced_network, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description "A7: the operator's per-node override that lets Placement use a cluster " <>
+                    "node reporting `degraded: netpol_unenforced` (its NetworkPolicy is not " <>
+                    "enforced, so the pod's deny-all is not real). Audited."
     end
 
     attribute :max_workers, :integer do

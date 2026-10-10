@@ -145,6 +145,12 @@ defmodule ArbiterCli.Main do
       arb loop apply      <id> | all [--state proposed]
       arb loop reject     <id> [--reason "..."]
 
+      arb trust show      [<provider/model>] [--json]   tiers, records, recent events, proposals
+      arb trust promote   <provider/model> --to <tier> --reason "..."
+                                  operator only: mints proof over the operator socket
+      arb trust confirm   <provider/model>              let an automatic suspension stand
+      arb trust dismiss   <provider/model> --reason "..."   a false positive: the tier returns
+
       arb settings get    [key] [--json]          install-wide settings (not workspace config)
       arb settings set    <key> <value>
       arb settings unset  <key>
@@ -157,6 +163,7 @@ defmodule ArbiterCli.Main do
                        separately, the token (terminal or --token-file only)
       arb node list|show <name|id>|events <name|id>
       arb node set <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+                   [--workspace ID ...] [--allow-unenforced-network | --no-allow-unenforced-network]
 
       arb provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
       arb provider resume <provider|account-ref>

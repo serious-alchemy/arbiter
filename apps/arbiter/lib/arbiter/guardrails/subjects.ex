@@ -22,6 +22,7 @@ defmodule Arbiter.Guardrails.Subjects do
 
   resources do
     resource Subject
+    resource Arbiter.Guardrails.TrustRecord
   end
 
   @doc "Every row, in position order. `[]` on any DB error."
@@ -34,6 +35,26 @@ defmodule Arbiter.Guardrails.Subjects do
     _ -> []
   catch
     _, _ -> []
+  end
+
+  @doc """
+  The subjects suspended after a critical guardrail event (G18,
+  `Arbiter.Loop.Trust`), as `%{{provider, model} => suspension}`. `%{}` on any DB
+  error, like `list/0`.
+  """
+  @spec suspensions() :: %{{String.t(), String.t()} => map()}
+  def suspensions do
+    Arbiter.Guardrails.TrustRecord
+    |> Ash.Query.filter(not is_nil(suspended_at))
+    |> Ash.read!()
+    |> Map.new(fn r ->
+      {{r.provider, r.model},
+       Map.put(r.suspension || %{}, "at", DateTime.to_iso8601(r.suspended_at))}
+    end)
+  rescue
+    _ -> %{}
+  catch
+    _, _ -> %{}
   end
 
   @doc "The rows as `Arbiter.Guardrails.Rules` rule maps."

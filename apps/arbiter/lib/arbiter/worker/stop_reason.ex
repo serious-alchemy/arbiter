@@ -68,6 +68,10 @@ defmodule Arbiter.Worker.StopReason do
       `Arbiter.Guardrails.SpendPatrol` stopped the run (G19). Built by
       `spend_cap/1`, never by `classify/3`. A policy stop, not an agent failure; not
       resumable, since the cap is per ticket and would trip again.
+    * `:trust_suspended` — the run's subject was suspended after a critical
+      guardrail event and `Arbiter.Loop.Trust` parked every run of it in flight
+      (G18). Built by `trust_suspended/1`, never by `classify/3`. A policy stop;
+      not resumable until the coordinator dismisses the suspension.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
@@ -204,6 +208,7 @@ defmodule Arbiter.Worker.StopReason do
           | :killed
           | :memory_cap_exceeded
           | :spend_cap
+          | :trust_suspended
           | :spawn_exec_failed
           | :crashed
           | :stream_schema_drift
@@ -219,6 +224,8 @@ defmodule Arbiter.Worker.StopReason do
           | :spawn_failed
           | :model_unavailable
           | :node_lost
+          | :pod_disrupted
+          | :placement_refused
 
   @type t :: %__MODULE__{
           category: category(),
@@ -1030,6 +1037,33 @@ defmodule Arbiter.Worker.StopReason do
     }
   end
 
+  @doc """
+  Build a `:trust_suspended` reason (G18, guardrail-profiles §6.3): the run's
+  subject was suspended after a critical guardrail event, and every run of it in
+  flight is parked until the coordinator decides.
+
+  `info` is `%{subject: "provider/model", kind: event_kind, run_id: run}`, the
+  run being the one the event was recorded on.
+  """
+  @spec trust_suspended(%{subject: String.t(), kind: String.t(), run_id: String.t() | nil}) ::
+          t()
+  def trust_suspended(%{subject: subject, kind: kind} = info) do
+    %__MODULE__{
+      category: :trust_suspended,
+      summary:
+        "subject #{subject} was suspended after a critical guardrail event " <>
+          "(#{kind} on run #{info[:run_id] || "?"}) and this run was parked — the agent " <>
+          "was stopped and its worktree kept",
+      remediation:
+        "The coordinator confirms the suspension (`arb trust confirm #{subject}`: the " <>
+          "subject drops to quarantine) or dismisses it as a false positive " <>
+          "(`arb trust dismiss #{subject} --reason …`: its tier returns). Re-dispatch " <>
+          "the ticket after that; a suspended subject is not eligible for any work.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
   @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
   @spec spend_cap_figures(%{
           :cap => :tokens | :wall_clock_s,
@@ -1077,6 +1111,53 @@ defmodule Arbiter.Worker.StopReason do
     }
   end
 
+  @doc """
+  Build a `:pod_disrupted` reason (K12, `docs/design/remote-workers.md` §16 amendment A5): the
+  pod a run was placed on was evicted, preempted or deleted from outside the run. The
+  cluster took the run away; nothing the agent did. It carries the `node_lost` policy:
+  **interrupted, not failed, no resume attempt consumed**, re-dispatched through placement.
+  """
+  @spec pod_disrupted(String.t()) :: t()
+  def pod_disrupted(node_name) when is_binary(node_name) do
+    %__MODULE__{
+      category: :pod_disrupted,
+      summary:
+        "pod disrupted: the pod this run was placed on at #{node_name} was evicted, " <>
+          "preempted or deleted from outside; the run was interrupted (not failed) and any " <>
+          "work since its last checkpoint is only recoverable from that checkpoint",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If pods " <>
+          "keep being disrupted, look at the cluster's node pressure and priority classes " <>
+          "(`arb node show #{node_name}`).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:placement_refused` reason (K12, amendment A3): the node answered the assign with
+  `refuse{reason}` (`no_capacity`, `unschedulable`, `image_unavailable`, `bad_spec`), so the
+  run never started. It is a **hold**, not a failure: interrupted, no resume attempt consumed.
+  """
+  @spec placement_refused(String.t(), String.t(), String.t() | nil) :: t()
+  def placement_refused(node_name, reason, detail) when is_binary(node_name) do
+    %__MODULE__{
+      category: :placement_refused,
+      summary:
+        "node #{node_name} refused the run (#{reason}#{detail_suffix(detail)}); it never " <>
+          "started and the task is held for another attempt, not failed",
+      remediation:
+        "Nothing to fix in the task. It is queued again and starts when a node (or the " <>
+          "primary, per `worker.placement`) can take it; see `arb node show #{node_name}`.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  defp detail_suffix(detail) when is_binary(detail) and detail != "", do: ": " <> detail
+  defp detail_suffix(_), do: ""
+
   defp format_bytes(bytes) do
     gib = bytes / 1_073_741_824
     "#{:erlang.float_to_binary(gib, decimals: 1)} GiB"
@@ -1104,6 +1185,7 @@ defmodule Arbiter.Worker.StopReason do
         :killed -> "killed by signal #{reason.signal}"
         :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
         :spend_cap -> "spend cap reached (parked by the guardrail tier)"
+        :trust_suspended -> "subject suspended after a critical guardrail event (parked)"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
@@ -1119,6 +1201,8 @@ defmodule Arbiter.Worker.StopReason do
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
         :model_unavailable -> "model unavailable for this account"
         :node_lost -> "node lost (run interrupted)"
+        :pod_disrupted -> "pod disrupted (run interrupted)"
+        :placement_refused -> "node refused the run (held)"
       end
 
     case reason.exit_status do

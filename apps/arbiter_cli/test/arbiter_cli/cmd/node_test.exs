@@ -388,6 +388,22 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert Jason.decode!(raw) == %{"workspace_ids" => []}
     end
 
+    test "--allow-unenforced-network / --no-allow-unenforced-network set the A7 override" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {_out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--allow-unenforced-network"]) end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"allow_unenforced_network" => true}
+
+      {_out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--no-allow-unenforced-network"]) end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"allow_unenforced_network" => false}
+    end
+
     test "--json prints the raw response instead of the text summary" do
       capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
 

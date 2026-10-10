@@ -76,6 +76,72 @@ defmodule Arbiter.Nodes.OverviewTest do
 
   defp row(overview, name), do: Enum.find(overview.nodes, &(&1.name == name))
 
+  describe "build/0 cluster node rows (A3, A7)" do
+    defp cluster_hello(overrides) do
+      hello(
+        Map.merge(
+          %{
+            "kind" => "cluster",
+            "k8s_version" => "v1.31.2+k3s1",
+            "caps" => %{"backend" => "k8s"},
+            "capacity" => %{"ceiling" => 3}
+          },
+          overrides
+        )
+      )
+    end
+
+    test "a machine row is a machine with nothing degraded or constrained" do
+      connect!(enroll!("box"))
+
+      assert %{
+               kind: :machine,
+               k8s_version: nil,
+               degraded: [],
+               constrained?: false,
+               pending: 0,
+               allow_unenforced_network: false
+             } = row(Overview.build(), "box")
+    end
+
+    test "a cluster row carries kind, k8s_version, degraded, and hb.capacity" do
+      node = enroll!("kube")
+      connect!(node, cluster_hello(%{"degraded" => "netpol_unenforced"}))
+      pid = Registry.lookup(node.id)
+
+      {:ok, _} =
+        Arbiter.Nodes.Session.heartbeat(pid, %{
+          "seq" => 1,
+          "capacity" => %{"ceiling" => 3, "running" => 1, "pending" => 2, "constrained" => true}
+        })
+
+      assert %{
+               kind: :cluster,
+               k8s_version: "v1.31.2+k3s1",
+               degraded: ["netpol_unenforced"],
+               constrained?: true,
+               pending: 2
+             } = row(Overview.build(), "kube")
+    end
+
+    test "a netpol_unenforced node adds nothing to capacity until the override is set" do
+      node = enroll!("kube")
+      connect!(node, cluster_hello(%{"degraded" => ["netpol_unenforced"]}))
+
+      overview = Overview.build()
+      assert %{contributes: 0} = row(overview, "kube")
+
+      assert [%{reason: :netpol_unenforced}] =
+               Arbiter.Nodes.Capacity.breakdown(nodes: [row(overview, "kube")], local_cap: 0).nodes
+
+      assert {:ok, _} =
+               Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+
+      overview = Overview.build()
+      assert %{contributes: 3, allow_unenforced_network: true} = row(overview, "kube")
+    end
+  end
+
   describe "build/0 node rows" do
     test "an enrolled node that never connected is offline with no live capacity" do
       enroll!("cold", max_workers: 3)

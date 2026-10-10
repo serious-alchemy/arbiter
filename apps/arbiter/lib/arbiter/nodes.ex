@@ -79,6 +79,10 @@ defmodule Arbiter.Nodes do
     do: is_binary(name) and name != @local_name and Regex.match?(@name_pattern, name)
 
   # A node cap is `nil` (uncapped) or a positive integer; 0 is "drain the node".
+  # A7: the override is a strict boolean; `nil` or a string is a mistake, not "off".
+  defp network_flag_ok?(%{allow_unenforced_network: value}), do: is_boolean(value)
+  defp network_flag_ok?(_wanted), do: true
+
   defp max_workers_ok?(nil), do: true
   defp max_workers_ok?(n), do: is_integer(n) and n >= 1
 
@@ -464,11 +468,12 @@ defmodule Arbiter.Nodes do
     end
   end
 
-  @settable [:name, :labels, :max_workers, :workspace_ids]
+  @settable [:name, :labels, :max_workers, :workspace_ids, :allow_unenforced_network]
 
   @doc """
-  Edit a node's `name`, `labels`, `max_workers` and `workspace_ids` (the
-  workspace pin, RW8; `[]` is "any workspace") (anything else in `changes`
+  Edit a node's `name`, `labels`, `max_workers`, `workspace_ids` (the
+  workspace pin, RW8; `[]` is "any workspace") and `allow_unenforced_network` (A7, a
+  boolean; a change also writes a `network_override` event) (anything else in `changes`
   is ignored: credentials and status have their own verbs). A revoked node is
   `{:error, :revoked}`, a name another node holds `{:error, :name_taken}`.
   Writes an `updated` event naming the fields that actually changed.
@@ -494,6 +499,7 @@ defmodule Arbiter.Nodes do
         cond do
           not name_ok?(Map.get(delta, :name)) -> {:error, :invalid_name}
           not max_workers_ok?(Map.get(delta, :max_workers)) -> {:error, :invalid_max_workers}
+          not network_flag_ok?(wanted) -> {:error, :invalid_allow_unenforced_network}
           delta == %{} -> {:ok, node}
           true -> apply_set(node, delta, actor)
         end
@@ -516,6 +522,15 @@ defmodule Arbiter.Nodes do
 
         if Map.has_key?(delta, :max_workers),
           do: Registry.notify(node.id, {:operator_max, updated.max_workers})
+
+        # A7: letting Placement use a node whose NetworkPolicy is not enforced is a
+        # security-relevant switch, so it gets an event of its own (who, what, when).
+        if Map.has_key?(delta, :allow_unenforced_network) do
+          record(:network_override, node.id, Actor.resolve_label(actor), %{
+            "allow_unenforced_network" => updated.allow_unenforced_network,
+            "name" => updated.name
+          })
+        end
 
         {:ok, updated}
 
