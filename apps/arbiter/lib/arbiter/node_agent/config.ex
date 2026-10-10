@@ -153,7 +153,7 @@ defmodule Arbiter.NodeAgent.Config do
 
   defp backend(opts, env) do
     case setting(opts, env, :backend, "ARB_AGENT_BACKEND") do
-      mod when is_atom(mod) -> {:ok, mod}
+      mod when is_atom(mod) and not is_nil(mod) -> {:ok, mod}
       name -> Arbiter.NodeAgent.Backend.resolve(name)
     end
   end
