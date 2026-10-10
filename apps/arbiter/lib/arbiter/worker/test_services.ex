@@ -91,6 +91,7 @@ defmodule Arbiter.Worker.TestServices do
           optional(:command) => [String.t()],
           optional(:tmpfs) => [String.t()],
           optional(:ready) => [String.t()],
+          optional(:uid) => 1..65_535,
           optional(:worker_env) => [{String.t(), String.t()}]
         }
 
@@ -172,6 +173,8 @@ defmodule Arbiter.Worker.TestServices do
         {"POSTGRES_DB", database},
         {"PGDATA", "/var/lib/postgresql/data/pgdata"}
       ],
+      # The image's postgres user; the K8s native-sidecar translation runs as it.
+      uid: 70,
       command: ["postgres", "-c", "fsync=off", "-c", "listen_addresses=127.0.0.1"],
       tmpfs: [
         "/var/lib/postgresql/data:" <> @flat_tmpfs,

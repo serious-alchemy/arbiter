@@ -40,6 +40,7 @@ defmodule Arbiter.Nodes.NodeEvent do
     :retained,
     :recovered,
     :reaped,
+    :network_override,
     :pairing_requested,
     :pairing_approved,
     :pairing_denied,

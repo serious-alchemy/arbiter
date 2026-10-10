@@ -41,7 +41,15 @@ defmodule Arbiter.Nodes.Placement do
   draining or revoked, healthy (`ready`), has a known cap, `live + reserved <
   cap`, its workspace pin (an allowlist; empty means any workspace) admits the
   run's workspace, and it carries every label the request asks for. They are
-  ranked by lowest `live/cap`, then name. The cap is `Hello.effective_max_workers/2`:
+  ranked by lowest `live/cap`, then name, **constrained nodes last** (A3: a cluster node
+  reporting `hb.capacity.constrained`, i.e. runs already `pending` on it, would only queue
+  this one behind them). Under `prefer_remote` a run whose only candidates are constrained
+  goes local instead (the primary's own cap still gates it); `remote_only` has no local and
+  takes the constrained node as a last resort. A node reporting `degraded:
+  netpol_unenforced` (A7: the cluster does not enforce NetworkPolicy, so the pod's
+  deny-all is not real) is **not a candidate** unless the operator set that node's
+  `allow_unenforced_network` override (`Arbiter.Nodes.update_node/3`, audited). The cap is
+  `Hello.effective_max_workers/2`:
   the operator's override or the node's own suggestion, bounded by a ceiling the
   node's owner set.
 
@@ -211,6 +219,9 @@ defmodule Arbiter.Nodes.Placement do
         candidates = Enum.filter(rows, &candidate?(&1, request, reserved))
 
         case rank(candidates, reserved) do
+          [%{constrained?: true} | _] when request.mode == :prefer_remote ->
+            none(request, length(rows))
+
           [row | _] ->
             reserve(request.task_id, row.id)
             {:ok, {:node, row}}
@@ -249,8 +260,19 @@ defmodule Arbiter.Nodes.Placement do
       row.health == :ready and
       is_integer(row.max) and row.max > 0 and
       row.live + Map.get(reserved, row.id, 0) < row.max and
+      network_enforced?(row) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, []))
+  end
+
+  @doc """
+  A7: false for a row reporting `degraded: netpol_unenforced` whose operator has not set
+  `allow_unenforced_network`. Every other row (machine nodes, healthy clusters) is true.
+  """
+  @spec network_enforced?(map()) :: boolean()
+  def network_enforced?(row) do
+    "netpol_unenforced" not in List.wrap(Map.get(row, :degraded)) or
+      Map.get(row, :allow_unenforced_network) == true
   end
 
   defp pin_allows?([], _workspace_id), do: true
@@ -260,7 +282,8 @@ defmodule Arbiter.Nodes.Placement do
 
   defp rank(candidates, reserved) do
     Enum.sort_by(candidates, fn row ->
-      {(row.live + Map.get(reserved, row.id, 0)) / row.max, row.name}
+      {Map.get(row, :constrained?, false), (row.live + Map.get(reserved, row.id, 0)) / row.max,
+       row.name}
     end)
   end
 

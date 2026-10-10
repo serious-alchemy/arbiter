@@ -89,6 +89,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Refusal
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
@@ -333,8 +334,24 @@ defmodule Arbiter.Worker.Dispatch do
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.
       {:error, reason} = err ->
-        fail_spawned_worker(worker_pid, reason)
-        err
+        # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
+        # image_unavailable | bad_spec}`) has started nothing and failed nothing. The card is
+        # held and its slot freed, as for any other capacity refusal, instead of failed.
+        case Refusal.from_start_error(reason) do
+          {:ok, refusal} ->
+            Refusal.hold(task, worker_pid, refused_node_name(opts), refusal)
+
+          :error ->
+            fail_spawned_worker(worker_pid, reason)
+            err
+        end
+    end
+  end
+
+  defp refused_node_name(opts) do
+    case Keyword.get(opts, :node) do
+      %{name: name} when is_binary(name) -> name
+      _ -> "the node"
     end
   end
 
@@ -2655,6 +2672,13 @@ defmodule Arbiter.Worker.Dispatch do
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
   # (repo unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain task close.
+  defp placed_node_id(opts) do
+    case Keyword.get(opts, :node) do
+      %{id: id} when is_binary(id) -> id
+      _ -> nil
+    end
+  end
+
   defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =
       case Keyword.get(opts, :review, false) do
@@ -2687,6 +2711,10 @@ defmodule Arbiter.Worker.Dispatch do
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
+      # bd-8ikgoc: the node placement chose, so the worker's registry entry is
+      # stamped from init and a run still starting up on a remote node never
+      # counts against the primary's cap.
+      |> put_if_present(:placed_node_id, placed_node_id(opts))
 
     base = maybe_put_resume_meta(base, opts)
 
@@ -3506,7 +3534,9 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
-                 {:ok, port} <- ClaudeSession.start(session_opts) do
+                 # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
+                 # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
+                 {:ok, port} <- start_agent_session(opts, session_opts) do
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3520,6 +3550,11 @@ defmodule Arbiter.Worker.Dispatch do
             end
         end
     end
+  end
+
+  defp start_agent_session(opts, session_opts) do
+    start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
+    start.(session_opts)
   end
 
   # Resolve the agent's cwd.

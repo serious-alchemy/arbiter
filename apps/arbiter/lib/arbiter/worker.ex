@@ -1009,6 +1009,14 @@ defmodule Arbiter.Worker do
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
+  End a live run `:interrupted` with a typed `Arbiter.Worker.StopReason`, consuming no resume
+  attempt and asking for no automatic resume (K12, A3: a node's `refuse{...}` — the run never
+  started, so there is nothing to resume; `Arbiter.Nodes.Refusal` holds the ticket).
+  """
+  @spec interrupt(ref(), Arbiter.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def interrupt(ref, %Arbiter.Worker.StopReason{} = reason), do: call(ref, {:interrupt, reason})
+
+  @doc """
   Park a live run on a guardrail spend cap (G19, design §3.3).
 
   `reason` is a `StopReason.spend_cap/1`. The agent is stopped, the run finishes
@@ -1217,7 +1225,8 @@ defmodule Arbiter.Worker do
     PRegistry.put_dispatch(
       state.registry_key,
       effective_workspace_id(state),
-      provider(meta)
+      provider(meta),
+      node_id: placed_node_id(meta)
     )
 
     broadcast_lifecycle(:started, state)
@@ -2625,6 +2634,29 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call(
+        {:interrupt, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state =
+      %State{state | state: :finished, outcome: :interrupted, waiting_on: nil, meta: meta}
+
+    record_run_finished(new_state)
+    broadcast_lifecycle(:updated, new_state)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:interrupt, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :interrupted}}, state}
+  end
+
+  def handle_call(
         {:park, reason},
         _from,
         %State{state: run_state, waiting_on: waiting_on} = state
@@ -2782,6 +2814,10 @@ defmodule Arbiter.Worker do
     )
 
     stamp_run_node(new_state.run_id, new_state.task_id, port)
+
+    # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
+    # node stops counting against the primary's cap.
+    PRegistry.put_node(new_state.registry_key, node_id)
 
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
@@ -3145,21 +3181,37 @@ defmodule Arbiter.Worker do
   # The ReviewGate (review gate) exited before delivering a verdict. Do NOT strand
   # the author waiting on the review gate — treat it as an inconclusive review and
   # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
+  #
+  # bd-2lfzs8 / #650: unless the node is stopping. A gate that stops itself for
+  # the shutdown (a reviewer or fix-round pass cut off by the same SIGTERM) leaves
+  # its `pass` marker for the boot sweep to re-run; the author, still alive for
+  # the moment, must not read that as "no verdict" and park the ticket `review
+  # inconclusive` / fail its run. Stay waiting: `terminate/2` is on its way and
+  # records the run `:interrupted`.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
         %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_ref: ref}} = state
       ) do
-    Logger.warning(
-      "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
-        "(#{inspect(reason)}); escalating as no_verdict"
-    )
+    if node_stopping?() do
+      Logger.info(
+        "Worker: ReviewGate for task=#{state.task_id} went down with the node " <>
+          "(#{inspect(reason)}); leaving its pass for the boot sweep"
+      )
 
-    {:noreply,
-     apply_review_gate_verdict(
-       state,
-       {:no_verdict,
-        "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
-     )}
+      {:noreply, state}
+    else
+      Logger.warning(
+        "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
+          "(#{inspect(reason)}); escalating as no_verdict"
+      )
+
+      {:noreply,
+       apply_review_gate_verdict(
+         state,
+         {:no_verdict,
+          "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
+       )}
+    end
   end
 
   # bd-7xtz6w: the author's own check that its ReviewGate is still judging.
@@ -3272,8 +3324,10 @@ defmodule Arbiter.Worker do
       # not failed, and no resume attempt is consumed. Ahead of run_signalled_done?/1
       # for the same reason as a node shutdown: whatever the agent printed last, its
       # worktree on the node is not here to commit from.
-      node_lost?(session) ->
-        interrupt_node_lost(state, port, session)
+      # K12 (A5): so is a pod evicted, preempted or deleted from outside, with the same
+      # policy: interrupted, no resume attempt consumed, re-dispatched through Placement.
+      node_interrupted?(session) ->
+        interrupt_node_run(state, port, session)
 
       run_signalled_done?(state) ->
         on_claude_done(state)
@@ -3304,7 +3358,10 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp node_lost?(session), do: match?(%{remote_outcome: %{node_lost?: true}}, session)
+  defp node_interrupted?(session),
+    do:
+      match?(%{remote_outcome: %{node_lost?: true}}, session) or
+        match?(%{remote_outcome: %{pod_disrupted?: true}}, session)
 
   # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
   # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
@@ -3312,18 +3369,37 @@ defmodule Arbiter.Worker do
   # agent that stopped on its own, and this one did not. The worker stays registered
   # in its finished state (as a failed one does) until the automatic resume replaces
   # it; the run row, not this process, is what the Driver's reap reads.
-  defp interrupt_node_lost(%State{} = state, handle, _session) do
+  defp interrupt_node_run(%State{} = state, handle, session) do
     name = node_name(handle)
-    reason = Arbiter.Worker.StopReason.node_lost(name)
 
+    case session do
+      %{remote_outcome: %{node_lost?: true}} ->
+        interrupt_for_node(
+          state,
+          Arbiter.Worker.StopReason.node_lost(name),
+          "node lost: #{name}",
+          "node #{name} lost"
+        )
+
+      _pod_disrupted ->
+        interrupt_for_node(
+          state,
+          Arbiter.Worker.StopReason.pod_disrupted(name),
+          "pod disrupted: #{name}",
+          "pod disrupted on node #{name}"
+        )
+    end
+  end
+
+  defp interrupt_for_node(%State{} = state, reason, failure_reason, log_cause) do
     Logger.warning(
-      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — node #{name} lost; " <>
+      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — #{log_cause}; " <>
         "no resume attempt consumed"
     )
 
     meta =
       state.meta
-      |> Map.put(:failure_reason, "node lost: #{name}")
+      |> Map.put(:failure_reason, failure_reason)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
     new_state =
@@ -3336,6 +3412,10 @@ defmodule Arbiter.Worker do
   end
 
   # The node a session handle executes on; nil for a local port.
+  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
+  defp placed_node_id(_meta), do: nil
+
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
 
@@ -7261,23 +7341,30 @@ defmodule Arbiter.Worker do
   end
 
   defp check_review_gate(%State{} = state, gate) do
-    if Process.alive?(gate) do
-      probe_review_gate(state, gate)
-      state
-    else
-      Logger.warning(
-        "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
-          "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
-      )
+    cond do
+      Process.alive?(gate) ->
+        probe_review_gate(state, gate)
+        state
 
-      state
-      |> forget_review_gate()
-      |> apply_review_gate_verdict(
-        {:no_verdict,
-         "The ReviewGate process exited before delivering a verdict; the author's " <>
-           "liveness check found it gone. Nothing was merged. Re-run the review with " <>
-           "`arb worker resume #{state.task_id}`."}
-      )
+      # bd-2lfzs8: a gate gone because the node is stopping is the boot sweep's
+      # to re-arm, not a lost verdict (see the `:DOWN` handler).
+      node_stopping?() ->
+        state
+
+      true ->
+        Logger.warning(
+          "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
+            "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
+        )
+
+        state
+        |> forget_review_gate()
+        |> apply_review_gate_verdict(
+          {:no_verdict,
+           "The ReviewGate process exited before delivering a verdict; the author's " <>
+             "liveness check found it gone. Nothing was merged. Re-run the review with " <>
+             "`arb worker resume #{state.task_id}`."}
+        )
     end
   end
 

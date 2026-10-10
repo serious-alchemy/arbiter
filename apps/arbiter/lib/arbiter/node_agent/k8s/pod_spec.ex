@@ -525,7 +525,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp service_uids(services) do
     Enum.reduce_while(services, {:ok, []}, fn service, {:ok, acc} ->
-      uid = Map.get(service, :uid) || Map.get(@preset_uids, service.name)
+      uid = Map.get(service, :uid)
 
       cond do
         uid == nil ->

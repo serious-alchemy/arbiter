@@ -166,7 +166,8 @@ defmodule Arbiter.Nodes.Capacity do
   end
 
   defp available?(row) do
-    row[:state] == :online and row[:health] == :ready and is_integer(row[:max]) and row[:max] > 0
+    row[:state] == :online and row[:health] == :ready and is_integer(row[:max]) and row[:max] > 0 and
+      Placement.network_enforced?(row)
   end
 
   defp unavailable_reason(_row, false), do: :remote_execution_off
@@ -176,6 +177,7 @@ defmodule Arbiter.Nodes.Capacity do
       available?(row) -> nil
       row[:state] != :online -> row[:state]
       row[:health] != :ready -> :unhealthy
+      not Placement.network_enforced?(row) -> :netpol_unenforced
       true -> :no_cap
     end
   end
