@@ -7634,20 +7634,8 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   # bd-57nhsi: the authoring prompt steers to `run_tests` only when the session
-  # has the arbiter MCP server (`mcp_tools?`); so does the revise prompt. The
-  # server is absent when injection is off, or for agy with no isolated `$HOME`
-  # (`MCP.AgentConfig.Gemini` refuses, as `Dispatch.inject_mcp_config/3` sees).
-  defp test_tool_section(adapter) do
-    if Arbiter.MCP.inject_config?() and mcp_config_writable?(adapter),
-      do: PromptBuilder.test_tool_section(),
-      else: ""
-  end
-
-  defp mcp_config_writable?(adapter) do
-    adapter.provider() != "gemini" or
-      Arbiter.MCP.AgentConfig.Gemini.cli_flavour() != :agy or
-      Arbiter.Agents.Gemini.ConfigDir.enabled?()
-  end
+  # has the arbiter MCP server (`mcp_tools?`); so does the revise prompt.
+  defp test_tool_section(adapter), do: PromptBuilder.test_tool_section_for(adapter)
 
   # bd-49l0eo: a fix round in a container with no scoped credential commits; the
   # push gate pushes for it.

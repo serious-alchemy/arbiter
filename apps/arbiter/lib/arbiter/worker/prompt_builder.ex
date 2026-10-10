@@ -12,6 +12,9 @@ defmodule Arbiter.Worker.PromptBuilder do
 
   require Ash.Query
 
+  alias Arbiter.Agents.Gemini.ConfigDir, as: GeminiConfigDir
+  alias Arbiter.MCP
+  alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiConfig
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
@@ -343,6 +346,25 @@ defmodule Arbiter.Worker.PromptBuilder do
     lacks, and then pipe it through `tail` or `grep` rather than letting the
     whole run into context.
     """
+  end
+
+  @doc """
+  `test_tool_section/0` for a review-gate fix round whose adapter is known, or
+  `""` when the session has no arbiter MCP server: injection is off, or agy has
+  no isolated `$HOME` (`GeminiConfig` refuses, as `Dispatch.inject_mcp_config/3`
+  sees).
+  """
+  @spec test_tool_section_for(module()) :: String.t()
+  def test_tool_section_for(adapter) do
+    if MCP.inject_config?() and mcp_config_writable?(adapter),
+      do: test_tool_section(),
+      else: ""
+  end
+
+  defp mcp_config_writable?(adapter) do
+    adapter.provider() != "gemini" or
+      GeminiConfig.cli_flavour() != :agy or
+      GeminiConfigDir.enabled?()
   end
 
   defp test_tool_section(opts),
