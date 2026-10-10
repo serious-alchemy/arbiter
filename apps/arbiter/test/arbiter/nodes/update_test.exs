@@ -12,6 +12,67 @@ defmodule Arbiter.Nodes.UpdateTest do
     node
   end
 
+  describe "allow_unenforced_network (A7)" do
+    test "defaults to false" do
+      assert enroll!().allow_unenforced_network == false
+    end
+
+    test "setting it writes an updated event and a dedicated, attributable audit event" do
+      node = enroll!()
+
+      assert {:ok, updated} =
+               Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+
+      assert updated.allow_unenforced_network == true
+      assert Nodes.get_node(node.id).allow_unenforced_network == true
+
+      assert [event] = Nodes.events(node_id: node.id, kind: :network_override)
+      assert event.actor == "operator:cli"
+      assert event.detail == %{"allow_unenforced_network" => true, "name" => node.name}
+
+      assert [updated_event] = Nodes.events(node_id: node.id, kind: :updated)
+      assert updated_event.detail["changes"] == %{"allow_unenforced_network" => true}
+    end
+
+    test "clearing it is audited too" do
+      node = enroll!()
+      {:ok, node} = Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+
+      assert {:ok, %{allow_unenforced_network: false}} =
+               Nodes.update_node(node, %{allow_unenforced_network: false}, @operator)
+
+      events = Nodes.events(node_id: node.id, kind: :network_override)
+
+      assert events |> Enum.map(& &1.detail["allow_unenforced_network"]) |> Enum.sort() ==
+               [false, true]
+    end
+
+    test "an unchanged value writes nothing" do
+      node = enroll!()
+      assert {:ok, _} = Nodes.update_node(node, %{allow_unenforced_network: false}, @operator)
+      assert [] = Nodes.events(node_id: node.id, kind: :network_override)
+      assert [] = Nodes.events(node_id: node.id, kind: :updated)
+    end
+
+    test "only a boolean is accepted" do
+      node = enroll!()
+
+      assert {:error, :invalid_allow_unenforced_network} =
+               Nodes.update_node(node, %{allow_unenforced_network: "yes"}, @operator)
+
+      assert {:error, :invalid_allow_unenforced_network} =
+               Nodes.update_node(node, %{allow_unenforced_network: nil}, @operator)
+    end
+
+    test "editing other fields leaves the override alone and does not audit it" do
+      node = enroll!()
+      {:ok, node} = Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+      {:ok, node} = Nodes.update_node(node, %{labels: ["a"]}, @operator)
+      assert node.allow_unenforced_network == true
+      assert [_only_the_set] = Nodes.events(node_id: node.id, kind: :network_override)
+    end
+  end
+
   describe "update_node/3" do
     test "sets labels and max_workers and records an `updated` event" do
       node = enroll!()

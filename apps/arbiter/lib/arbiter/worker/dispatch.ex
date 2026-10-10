@@ -89,6 +89,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Refusal
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
@@ -333,8 +334,24 @@ defmodule Arbiter.Worker.Dispatch do
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.
       {:error, reason} = err ->
-        fail_spawned_worker(worker_pid, reason)
-        err
+        # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
+        # image_unavailable | bad_spec}`) has started nothing and failed nothing. The card is
+        # held and its slot freed, as for any other capacity refusal, instead of failed.
+        case Refusal.from_start_error(reason) do
+          {:ok, refusal} ->
+            Refusal.hold(task, worker_pid, refused_node_name(opts), refusal)
+
+          :error ->
+            fail_spawned_worker(worker_pid, reason)
+            err
+        end
+    end
+  end
+
+  defp refused_node_name(opts) do
+    case Keyword.get(opts, :node) do
+      %{name: name} when is_binary(name) -> name
+      _ -> "the node"
     end
   end
 
@@ -3506,7 +3523,9 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
-                 {:ok, port} <- ClaudeSession.start(session_opts) do
+                 # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
+                 # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
+                 {:ok, port} <- start_agent_session(opts, session_opts) do
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3520,6 +3539,11 @@ defmodule Arbiter.Worker.Dispatch do
             end
         end
     end
+  end
+
+  defp start_agent_session(opts, session_opts) do
+    start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
+    start.(session_opts)
   end
 
   # Resolve the agent's cwd.
