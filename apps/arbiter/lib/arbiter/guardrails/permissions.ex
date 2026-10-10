@@ -4,7 +4,10 @@ defmodule Arbiter.Guardrails.Permissions do
   (`docs/design/guardrail-profiles.md` §5.1–5.3). Pure: no DB, no config reads.
 
   A permission is an **action** (`network:<host>[:<port>]`, `tracker_write`,
-  `secrets:<name>`, `prod_read`, `prod_ssh`) or a **data class** (`phi_data`).
+  `secrets:<name>`, `prod_read`, `prod_ssh`, `research_read`) or a **data class**
+  (`phi_data`). `research_read` (bd-6ircwr) opens Arbiter's own read-only run, usage and
+  review data to a `task`/`research` ticket's run (`Arbiter.Worker.ResearchGrant`); the
+  workspace must bind it (`guardrails.bindings.research_read`) or it projects nothing.
   A trailing `?` after the kind marks an action optional (§5.7), e.g.
   `network?:status.example.com`; prod permissions and data classes are never
   optional.
@@ -29,7 +32,8 @@ defmodule Arbiter.Guardrails.Permissions do
   """
 
   @type authority :: Arbiter.Guardrails.Authority.authority()
-  @type kind :: :network | :tracker_write | :secrets | :prod_read | :prod_ssh | :phi_data
+  @type kind ::
+          :network | :tracker_write | :secrets | :prod_read | :prod_ssh | :phi_data | :research_read
   @type parsed :: %{
           kind: kind(),
           optional?: boolean(),
@@ -38,13 +42,15 @@ defmodule Arbiter.Guardrails.Permissions do
   @type planned :: %{permission: String.t(), event: :declared | :requested | :revoked}
 
   @data_classes [:phi_data]
-  @never_optional [:prod_read, :prod_ssh, :phi_data]
+  @never_optional [:prod_read, :prod_ssh, :phi_data, :research_read]
+  @research_issue_types [:task, :research]
   @host_re ~r/\A[a-z0-9]([a-z0-9.-]*[a-z0-9])?\z/
   @name_re ~r/\A[A-Za-z0-9_.-]+\z/
 
   @doc "The kinds in the vocabulary."
   @spec kinds() :: [kind()]
-  def kinds, do: [:network, :tracker_write, :secrets, :prod_read, :prod_ssh, :phi_data]
+  def kinds,
+    do: [:network, :tracker_write, :secrets, :prod_read, :prod_ssh, :phi_data, :research_read]
 
   @doc "Parse one permission string into its canonical form, or an error message."
   @spec parse(term()) :: {:ok, parsed()} | {:error, String.t()}
@@ -116,7 +122,7 @@ defmodule Arbiter.Guardrails.Permissions do
 
   defp unknown(raw) do
     "unknown permission #{inspect(raw)}; expected network:<host>[:<port>], tracker_write, " <>
-      "secrets:<name>, prod_read, prod_ssh or phi_data"
+      "secrets:<name>, prod_read, prod_ssh, phi_data or research_read"
   end
 
   @doc "Canonical, sorted, de-duplicated; `nil` is `[]`."
@@ -138,6 +144,22 @@ defmodule Arbiter.Guardrails.Permissions do
   end
 
   def normalize(_), do: {:error, "permissions must be a list of permission names"}
+
+  @doc """
+  `:ok`, or the refusal, for declaring `permissions` on a ticket of `issue_type`.
+  `research_read` reads Arbiter's own data, so it is only for the no-PR `task` and
+  `research` types: a PR-producing ticket gets no such window (bd-6ircwr).
+  """
+  @spec check_issue_type([String.t()], atom() | nil) :: :ok | {:error, String.t()}
+  def check_issue_type(permissions, issue_type) when is_list(permissions) do
+    if "research_read" in permissions and issue_type not in @research_issue_types do
+      {:error,
+       "research_read is only for task and research tickets (this one is #{inspect(issue_type)}): " <>
+         "it opens Arbiter's own run, usage and review data to the run"}
+    else
+      :ok
+    end
+  end
 
   @doc "True for a data class (`phi_data`): a restriction on who may see the worktree."
   @spec data_class?(String.t()) :: boolean()

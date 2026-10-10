@@ -40,6 +40,7 @@ defmodule Arbiter.Tasks.Issue.Changes.ApplyPermissions do
     block = Permissions.workspace_block(changeset.data.workspace_id)
 
     with {:ok, new} <- Vocabulary.normalize(Changeset.get_attribute(changeset, :permissions)),
+         :ok <- Vocabulary.check_issue_type(new, Changeset.get_attribute(changeset, :issue_type)),
          {:ok, planned} <- Vocabulary.plan(old, new, authority, block) do
       actor = Map.get(context, :permission_actor)
 

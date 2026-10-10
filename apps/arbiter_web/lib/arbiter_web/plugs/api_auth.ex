@@ -43,6 +43,8 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   import Plug.Conn
 
+  require Logger
+
   alias Arbiter.Guardrails.Events
   alias Arbiter.Guardrails.SelfGrant
   alias Arbiter.MCP.Scope
@@ -66,7 +68,9 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
          # the policy check right below is unchanged).
          :ok <- Arbiter.Actor.put(Arbiter.Actor.from_scope(scope)),
          :ok <- audit_self_grant(conn, scope),
-         :ok <- ApiPolicy.authorize(route_policy(conn), scope, conn.params) do
+         policy = route_policy(conn),
+         :ok <- ApiPolicy.authorize(policy, scope, conn.params) do
+      audit_research_read(conn, policy, scope)
       conn
     else
       {:error, :unauthenticated, message} -> halt_with(conn, :unauthenticated, message)
@@ -93,6 +97,19 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   end
 
   defp audit_self_grant(_conn, _scope), do: :ok
+
+  # bd-6ircwr: a worker reading Arbiter's own data under a `research_read` grant
+  # leaves a line per request, next to the `granted` permission event the
+  # dispatch recorded (`Arbiter.Worker.ResearchGrant.audit/3`). A coordinator
+  # reading the same route is routine and not logged.
+  defp audit_research_read(conn, :research_read, %Scope{tier: :worker} = scope) do
+    Logger.info(
+      "research_read: #{scope.task_id} (workspace #{scope.workspace_id}) " <>
+        "#{conn.method} #{conn.request_path}"
+    )
+  end
+
+  defp audit_research_read(_conn, _policy, _scope), do: :ok
 
   defp authenticate(%Plug.Conn{remote_ip: remote_ip} = conn) do
     case WorkerBridge.identity(conn) do
