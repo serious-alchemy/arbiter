@@ -253,17 +253,12 @@ defmodule Arbiter.Board.Drain do
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
-<<<<<<< HEAD
-      held_local_capacity: Map.get(autopilot, :held_local_capacity, []),
-      capacity: capacity(Keyword.get(opts, :capacity)),
-=======
       held_local_capacity: held_local_capacity(autopilot, tickets),
->>>>>>> a3f31b1a1 (Re-queue a resume held for local capacity after a restart; list held fix rounds in scheduler status (bd-3fbj83))
+      capacity: capacity(Keyword.get(opts, :capacity)),
       checked_at: DateTime.utc_now()
     }
   end
 
-<<<<<<< HEAD
   # DC5: the budgets, machines and admission mode (`Arbiter.Board.CapacityView`).
   # A view that cannot be read is `nil`: the drain verdict does not depend on it.
   defp capacity(%{} = view), do: view
@@ -274,7 +269,8 @@ defmodule Arbiter.Board.Drain do
     _ -> nil
   catch
     :exit, _ -> nil
-=======
+  end
+
   # bd-3fbj83: the resumes the autopilot holds for local capacity, plus the fix
   # rounds a ReviewGate holds (`ReviewPass`'s `held` marker, which is also what a
   # restart re-arms them from).
@@ -283,7 +279,6 @@ defmodule Arbiter.Board.Drain do
       for ticket <- tickets, match?(%{"held" => true}, ReviewPass.stored(ticket)), do: ticket.id
 
     Enum.uniq(Map.get(autopilot, :held_local_capacity, []) ++ gate_held)
->>>>>>> a3f31b1a1 (Re-queue a resume held for local capacity after a restart; list held fix rounds in scheduler status (bd-3fbj83))
   end
 
   # The board-wide quota/auth hold in the account-qualified wording the board
