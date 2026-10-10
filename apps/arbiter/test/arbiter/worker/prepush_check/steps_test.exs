@@ -5,7 +5,9 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
   results `run_steps/3` returns for the run's step rows.
   """
 
-  use ExUnit.Case, async: true
+  # async: false: it points the global :worker_tmp_root at a per-test dir, which races
+  # with the same dance in PrepushCheckTest if both run concurrently.
+  use ExUnit.Case, async: false
 
   alias Arbiter.Worker.PrepushCheck
 
