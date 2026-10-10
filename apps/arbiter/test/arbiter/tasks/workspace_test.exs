@@ -814,6 +814,66 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "worker.pre_push_checks validation (bd-8wdrql)" do
+    test "accepts the preset, a step list, budget and attempts — workspace-wide and per repo" do
+      step = %{"name" => "fmt", "cmd" => "mix format --check-formatted", "timeout_s" => 60}
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "ppc-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "pre_push_checks" => [Map.put(step, "scope", "touched")],
+                     "pre_push_budget_seconds" => 120,
+                     "pre_push_max_attempts" => 3,
+                     "repos" => %{
+                       "arbiter" => %{"pre_push_checks" => "arbiter"},
+                       "other" => %{"pre_push_checks" => [step]}
+                     }
+                   }
+                 }
+               })
+    end
+
+    test "rejects malformed recipes, naming the key" do
+      for {label, block} <- [
+            {~s(worker.pre_push_checks must be "arbiter" or a list of steps),
+             %{"pre_push_checks" => "mix test"}},
+            {~s(worker.pre_push_checks must be "arbiter" or a list of steps),
+             %{"pre_push_checks" => %{"cmd" => "true"}}},
+            {"worker.pre_push_checks[0] must be a map with a non-empty cmd",
+             %{"pre_push_checks" => ["true"]}},
+            {"worker.pre_push_checks[1] must be a map with a non-empty cmd",
+             %{"pre_push_checks" => [%{"cmd" => "true"}, %{"cmd" => " "}]}},
+            {"worker.pre_push_checks[0].timeout_s must be a positive integer",
+             %{"pre_push_checks" => [%{"cmd" => "true", "timeout_s" => 0}]}},
+            {~s(worker.pre_push_checks[0].scope must be "all" or "touched"),
+             %{"pre_push_checks" => [%{"cmd" => "true", "scope" => "some"}]}},
+            {"worker.pre_push_budget_seconds must be a positive integer",
+             %{"pre_push_budget_seconds" => 0}},
+            {"worker.pre_push_max_attempts must be a non-negative integer",
+             %{"pre_push_max_attempts" => -1}}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "ppc-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => block}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "ppc-bad-repo",
+                 config: %{"worker" => %{"repos" => %{"arbiter" => %{"pre_push_checks" => 5}}}}
+               })
+
+      assert Exception.message(err) =~
+               ~s(worker.repos.arbiter.pre_push_checks must be "arbiter" or a list of steps)
+    end
+  end
+
   describe "review.require_ci_green validation (bd-cut6uv)" do
     test "accepts booleans and their JSON strings, workspace-wide and per repo" do
       for value <- [true, false, "true", "false"] do

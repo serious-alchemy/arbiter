@@ -1469,7 +1469,8 @@ defmodule Arbiter.MCP.Catalog do
         "The ticket's current run (`arb worker show <task-id>`) — the same read `worker_list` " <>
           "makes — with its kind, state, outcome, activity and recent output lines, plus " <>
           "`runs`: its recent runs newest first, each labelled with its kind, state and " <>
-          "outcome (`current: true` on the current one). A live run is read from its worker " <>
+          "outcome (`current: true` on the current one), and `pre_push_checks`: the steps of " <>
+          "the pre-push recipe the commit gate ran for the run, per attempt. A live run is read from its worker " <>
           ~s[(`source: "live"`), a finished one from its run row (`source: "history"`), ] <>
           "in the same vocabulary. Not-found only when the ticket never had a run.",
       input_schema: %{

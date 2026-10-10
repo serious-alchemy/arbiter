@@ -201,6 +201,43 @@ defmodule Arbiter.MCP.WorkerReadSideTest do
     end
   end
 
+  describe "pre_push_checks (bd-8wdrql)" do
+    test "worker_show lists the run's recorded pre-push steps, oldest attempt first",
+         %{coordinator: c, ws: ws} do
+      task = issue!(ws)
+      run = run!(ws, task)
+
+      step = fn name, status ->
+        %{
+          name: name,
+          cmd: "cmd #{name}",
+          scope: :all,
+          status: status,
+          exit_status: if(status == :passed, do: 0, else: 1),
+          duration_ms: 5,
+          output: if(status == :failed, do: "boom", else: ""),
+          reason: nil
+        }
+      end
+
+      :ok = Arbiter.Workers.PrepushSteps.record(run.id, task, 1, [step.("format", :failed)])
+      :ok = Arbiter.Workers.PrepushSteps.record(run.id, task, 2, [step.("format", :passed)])
+
+      assert {:ok, shown} = Tools.worker_show(c, %{"task_id" => task})
+
+      assert [
+               %{name: "format", status: "failed", attempt: 1, exit_status: 1, output: "boom"},
+               %{name: "format", status: "passed", attempt: 2}
+             ] = shown.pre_push_checks
+    end
+
+    test "a run that never ran the gate has an empty list", %{coordinator: c, ws: ws} do
+      task = issue!(ws)
+      run!(ws, task)
+      assert {:ok, %{pre_push_checks: []}} = Tools.worker_show(c, %{"task_id" => task})
+    end
+  end
+
   describe "list envelope" do
     test "workers + count + workspace_id", %{coordinator: c, ws: ws} do
       assert {:ok, %{workers: workers, count: n, workspace_id: id}} =

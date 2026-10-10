@@ -508,4 +508,207 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
       refute refs =~ "bd-gate/#{task.id}"
     end
   end
+
+  describe "the pre_push_checks recipe (bd-8wdrql)" do
+    alias Arbiter.Workers.PrepushSteps
+
+    defp recipe(steps, extra \\ %{}),
+      do: workspace(Map.merge(%{"pre_push_checks" => steps}, extra))
+
+    defp step(name, cmd, extra \\ %{}), do: Map.merge(%{"name" => name, "cmd" => cmd}, extra)
+
+    defp steps_of(pid), do: pid |> Worker.state() |> Map.fetch!(:run_id) |> PrepushSteps.list()
+
+    test "a red step is caught before the push, every step's result is recorded on the run",
+         %{repo: repo, remote: remote} do
+      ws =
+        recipe([
+          step("format", "echo 'mix format: 2 files need formatting'; exit 1"),
+          step("compile", "true"),
+          step("credo", "echo 'credo: unused alias'; exit 2")
+        ])
+
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{prepush_nudge_cap: 0})
+      done(pid)
+      wait_until(fn -> failed?(pid) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.commit_gate_reason == :prepush_failed
+
+      # Both failing steps are in the escalation, not just the first.
+      esc = escalation(ws, task)
+      assert esc.body =~ "2 files need formatting"
+      assert esc.body =~ "credo: unused alias"
+
+      assert [
+               %{name: "format", status: :failed, exit_status: 1, attempt: 1},
+               %{name: "compile", status: :passed, attempt: 1},
+               %{name: "credo", status: :failed, exit_status: 2, attempt: 1}
+             ] = steps_of(pid)
+
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      refute refs =~ "bd-gate/#{task.id}"
+    end
+
+    test "a green recipe routes on to the review gate and records passed steps", %{repo: repo} do
+      ws = recipe([step("format", "true"), step("compile", "true")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      assert [%{status: :passed, name: "format"}, %{status: :passed, name: "compile"}] =
+               steps_of(pid)
+    end
+
+    test "the failure goes back to the SAME session; the push waits for the fix", %{
+      repo: repo,
+      remote: remote,
+      tmp: tmp
+    } do
+      marker = Path.join(tmp, "first-run-marker")
+      ws = recipe([step("format", "echo needs-format; test -f fixed.txt"), step("ok", "true")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{})
+
+      # First run: leaves a marker, prints done. The send-back relaunches this
+      # same command, which now "fixes" the tree. (`git` ignores untracked
+      # files for the gate: the fixed file is committed by the script.)
+      script =
+        "if [ -f #{marker} ]; then touch fixed.txt; git add -A; git -c user.email=a@b -c user.name=n commit -q -m fix; " <>
+          "else touch #{marker}; fi; printf 'arb %s\\n' done"
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", script]
+        )
+
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.prepush_nudge_attempts == 1
+
+      steps = steps_of(pid)
+
+      assert [
+               {1, "format", :failed},
+               {1, "ok", :passed},
+               {2, "format", :passed},
+               {2, "ok", :passed}
+             ] =
+               Enum.map(steps, &{&1.attempt, &1.name, &1.status})
+
+      # Nothing was pushed by the gate itself; the review gate pushes.
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      refute refs =~ "never-pushed"
+    end
+
+    test "pre_push_max_attempts bounds the send-backs, then it escalates", %{repo: repo} do
+      ws = recipe([step("format", "echo red; exit 1")], %{"pre_push_max_attempts" => 1})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{})
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "printf 'arb %s\\n' done"]
+        )
+
+      wait_until(fn -> failed?(pid) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.prepush_nudge_attempts == 1
+      assert snap.meta.commit_gate_detail == :cap_exhausted
+      assert escalation(ws, task)
+      # Two gate passes: the first red, the post-send-back one red again.
+      assert steps_of(pid) |> Enum.map(& &1.attempt) |> Enum.uniq() == [1, 2]
+    end
+
+    test "touched steps see the files the branch changed against the target", %{
+      repo: repo,
+      tmp: tmp
+    } do
+      marker = Path.join(tmp, "touched.txt")
+
+      ws =
+        recipe([step("touched", "echo {files} > #{marker}", %{"scope" => "touched"})])
+
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      assert File.read!(marker) == "real_work.txt\n"
+    end
+
+    test "an infra error (the sandbox refusing) fails open and is recorded", %{repo: repo} do
+      ws = recipe([step("format", "true")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      exec = fn _command, _timeout_s -> {:error, :podman_gone} end
+      pid = start_worker(task, repo, path, %{prepush_exec: exec})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      assert [%{name: "format", status: :error}] = steps_of(pid)
+    end
+
+    test "a sandboxed run's steps go through the exec hook, not the host", %{repo: repo, tmp: tmp} do
+      host_marker = Path.join(tmp, "ran-on-host")
+      ws = recipe([step("format", "touch #{host_marker}")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      test_pid = self()
+
+      exec = fn command, timeout_s ->
+        send(test_pid, {:exec, command, timeout_s})
+        {"", 0}
+      end
+
+      pid = start_worker(task, repo, path, %{prepush_exec: exec})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      assert_received {:exec, command, timeout_s}
+      assert command =~ host_marker
+      assert timeout_s <= 120
+      refute File.exists?(host_marker)
+    end
+
+    test "a ReviewGate fix round is held to the same recipe", %{repo: repo} do
+      ws = recipe([step("format", "echo fix-round-red; exit 1")], %{"pre_push_max_attempts" => 1})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid =
+        start_worker(task, repo, path, %{role: :implementer, review_gate_fix_round_attempts: 1})
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "printf 'arb %s\\n' done"]
+        )
+
+      wait_until(fn -> failed?(pid) end)
+      assert Worker.state(pid).meta.commit_gate_reason == :prepush_failed
+      assert [%{name: "format", status: :failed} | _] = steps_of(pid)
+    end
+  end
 end

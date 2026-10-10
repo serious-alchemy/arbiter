@@ -32,6 +32,7 @@ defmodule Arbiter.Workers.Serializer do
   alias Arbiter.Worker.PromptLog
   alias Arbiter.Worker.Stats
   alias Arbiter.Workers.OutputOffload
+  alias Arbiter.Workers.PrepushSteps
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunNode
   alias Arbiter.Workflows.DispatchQueue
@@ -82,10 +83,15 @@ defmodule Arbiter.Workers.Serializer do
       exit_status: Map.get(meta, :exit_status),
       exited_at: iso(Map.get(meta, :exited_at)),
       result: Map.get(meta, :result),
+      # bd-8wdrql: what the pre-push recipe ran for this run, per attempt.
+      pre_push_checks: pre_push_checks(Map.get(current, :run_id)),
       runs: Enum.map(runs, &recent_run/1)
     })
     |> Map.merge(LiveSpend.cost_fields(opts[:cost]))
   end
+
+  defp pre_push_checks(run_id),
+    do: run_id |> PrepushSteps.list() |> Enum.map(&PrepushSteps.to_map/1)
 
   @doc """
   The slim current-run object a ticket payload carries (`GET /api/issues/:id`,
