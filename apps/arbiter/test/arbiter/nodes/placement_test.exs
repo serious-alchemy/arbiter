@@ -128,7 +128,7 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{inspect_request | mode: :local_only})
 
-      assert {:local_only, :follow_up} = Placement.eligible(%{inspect_request | kind: :resume})
+      assert {:local_only, :follow_up} = Placement.eligible(%{inspect_request | kind: :follow_up})
     end
 
     test "a request with no checkout at all stays local even beside an inspect flag" do
