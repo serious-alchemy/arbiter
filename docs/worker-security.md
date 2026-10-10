@@ -1224,8 +1224,13 @@ worker token's `permissions` claim.
 | Transcripts | Under `sandbox.backend: podman` the run's tmp dir gets `research-transcripts/`: a **copy** (mode `0444`) of the most recent transcripts of its workspace, plus an `index.tsv` (run id, task id, kind, start), bound read-only and announced as `ARBITER_TRANSCRIPTS_DIR`. It is a copy because the archive is keyed by run id with no workspace in the path (mounting it would expose every workspace), and a hard link would let a write reach the original. It lives and dies with the run. Other backends keep `arb worker log` as the way in | `ResearchGrant.stage_transcripts/3`, `ContainerSpawn.prepare/1` |
 | Audit | Each dispatch that grants it appends a `granted` `permission_events` row (source `system`); each request a granted token makes is logged (`research_read: <task> (workspace <id>) GET <path>`). A grant that is declared but withheld is logged with its reason | `ResearchGrant.audit/3`, `ApiAuth` |
 
-Not covered: a run placed on a remote node gets the claim but no transcript mount, and
-a mid-run grant takes effect at the next dispatch or resume (the claim is minted at spawn).
+A run placed on a remote node is **refused** (`{:research_transcripts_unsupported,
+:remote_node}`) rather than started without its transcript mount. The snapshot is capped
+at 200 transcripts and 256 MiB in total (newest first). The audit row is per dispatch
+(`run_id` is empty: it is written before the run exists).
+
+Not covered: a mid-run grant takes effect at the next dispatch or resume (the claim is
+minted at spawn).
 
 ## Routing eligibility from guardrails (bd-atll60, G13)
 

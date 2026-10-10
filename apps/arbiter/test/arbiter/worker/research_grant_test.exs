@@ -204,6 +204,17 @@ defmodule Arbiter.Worker.ResearchGrantTest do
                ResearchGrant.stage_transcripts(ws.id, dest, root: root, limit: 1)
     end
 
+    test "stops staging once :max_bytes is reached", %{root: root, dest: dest} do
+      ws = workspace!(@bound)
+      runs = for n <- 1..3, do: run!(ws, "bd-cap-#{n}")
+      Enum.each(runs, &log!(root, &1, String.duplicate("x", 10)))
+
+      assert {:ok, %{count: 2}} =
+               ResearchGrant.stage_transcripts(ws.id, dest, root: root, max_bytes: 25)
+
+      assert length(File.ls!(dest) -- ["index.tsv"]) == 2
+    end
+
     test "an absent archive root stages an empty snapshot", %{dest: dest} do
       ws = workspace!(@bound)
 
@@ -215,7 +226,7 @@ defmodule Arbiter.Worker.ResearchGrantTest do
   end
 
   describe "audit/3" do
-    test "records a granted permission_event naming the run" do
+    test "records a granted permission_event, with the run id when one is given" do
       ws = workspace!(@bound)
       issue = ticket!(ws, :task, ["research_read"])
 

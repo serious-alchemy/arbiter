@@ -420,6 +420,13 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp no_remote_git_credential(nil), do: :ok
   defp no_remote_git_credential(_), do: {:error, {:git_credential_unsupported, :remote_node}}
 
+  # bd-6ircwr: the transcript snapshot is staged in this host's tmp dir and
+  # bind-mounted by the local podman backend; a node cannot see it. A run promised
+  # one is refused rather than run studying nothing (the rule `ContainerSpawn.prepare/1`
+  # applies locally).
+  defp no_remote_research(nil), do: :ok
+  defp no_remote_research(_), do: {:error, {:research_transcripts_unsupported, :remote_node}}
+
   # RW9: a run placed on a node (`opts[:node]`, from `Worker.Dispatch`'s
   # `ensure_node_capacity/2`). The primary half runs here (egress, image plan,
   # published CLI files), then the run is *assigned* to the node and this waits
@@ -430,6 +437,7 @@ defmodule Arbiter.Worker.ClaudeSession do
     provider = Keyword.get(opts, :provider) || "claude"
 
     with :ok <- no_remote_git_credential(Keyword.get(opts, :git_material)),
+         :ok <- no_remote_research(Keyword.get(opts, :research_transcripts)),
          {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            ContainerSpawn.prepare_remote(

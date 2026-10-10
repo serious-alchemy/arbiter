@@ -2458,4 +2458,18 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assistant([%{"type" => "tool_use", "name" => name, "input" => input}])
     end
   end
+
+  describe "port_args/6 on a remote node (bd-6ircwr)" do
+    alias Arbiter.Agents.SecurityPolicy
+
+    test "a run promised research transcripts is refused, not started without them" do
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      opts = [security: policy, node: "node-1", research_transcripts: "ws-1"]
+
+      assert {:error, {:research_transcripts_unsupported, :remote_node}} =
+               ClaudeSession.port_args(opts, "claude", [], "/tmp/wt", [], [])
+    end
+  end
 end

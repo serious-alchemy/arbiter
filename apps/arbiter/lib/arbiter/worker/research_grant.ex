@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.ResearchGrant do
 
   @permission "research_read"
   @default_limit 200
+  @default_max_bytes 256 * 1024 * 1024
   @scan_cap 5_000
   @index "index.tsv"
 
@@ -111,7 +112,9 @@ defmodule Arbiter.Worker.ResearchGrant do
   and how many transcripts it holds.
 
   Options: `:root` (the archive, default `Arbiter.Worker.OutputLog.root/0`) and
-  `:limit` (default #{@default_limit}). A run with no transcript on disk is
+  `:limit` (default #{@default_limit}) and `:max_bytes` (default #{@default_max_bytes}, the
+  total size of the copies: staging stops at the first transcript that would exceed
+  it, so the newest runs win). A run with no transcript on disk is
   skipped and does not count against the limit; an absent archive stages an empty
   snapshot.
   """
@@ -121,6 +124,7 @@ defmodule Arbiter.Worker.ResearchGrant do
       when is_binary(workspace_id) and is_binary(dest) do
     root = Keyword.get_lazy(opts, :root, &OutputLog.root/0)
     limit = Keyword.get(opts, :limit, @default_limit)
+    max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
 
     with :ok <- File.mkdir_p(dest) do
       staged =
@@ -128,12 +132,34 @@ defmodule Arbiter.Worker.ResearchGrant do
         |> recent_runs()
         |> Stream.map(&{&1, Path.join(root, &1.id <> ".log")})
         |> Stream.filter(fn {_run, src} -> File.regular?(src) end)
-        |> Stream.map(fn {run, src} -> stage(run, src, dest) end)
-        |> Stream.reject(&is_nil/1)
-        |> Enum.take(limit)
+        |> Enum.reduce_while({[], 0}, fn {run, src}, state ->
+          stage_within(run, src, dest, state, limit, max_bytes)
+        end)
+        |> elem(0)
+        |> Enum.reverse()
 
       write_index(dest, staged)
       {:ok, %{dir: dest, count: length(staged)}}
+    end
+  end
+
+  defp stage_within(_run, _src, _dest, {acc, _bytes} = state, limit, _max_bytes)
+       when length(acc) >= limit,
+       do: {:halt, state}
+
+  defp stage_within(run, src, dest, {acc, bytes} = state, _limit, max_bytes) do
+    case File.stat(src) do
+      {:ok, %File.Stat{size: size}} when bytes + size > max_bytes ->
+        {:halt, state}
+
+      {:ok, %File.Stat{size: size}} ->
+        case stage(run, src, dest) do
+          nil -> {:cont, state}
+          staged -> {:cont, {[staged | acc], bytes + size}}
+        end
+
+      {:error, _} ->
+        {:cont, state}
     end
   end
 
@@ -175,8 +201,10 @@ defmodule Arbiter.Worker.ResearchGrant do
 
   @doc """
   Audit the grant: one `granted` `permission_events` row (source `system`) saying
-  the run was given research access and what it was given. Append-only, like every
-  permission event. `opts`: `:transcripts` (the snapshot size).
+  the ticket's dispatch was given research access and what it was given. The row is
+  per dispatch: `Worker.Dispatch` writes it before the run exists, so `run_id` is
+  `nil` there. Append-only, like every permission event. `opts`: `:transcripts`
+  (the snapshot size).
   """
   @spec audit(Issue.t(), String.t() | nil, keyword()) :: :ok | :error
   def audit(%Issue{id: id}, run_id, opts \\ []) do
