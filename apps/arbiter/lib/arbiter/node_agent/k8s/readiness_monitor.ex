@@ -39,12 +39,15 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
   (the digest-pinned worker image), `:targets` (`Canary.targets_from_env/1`),
   `:interval_ms` (default 600 000; `nil` for none), `:stale_after_ms`, `:poll_ms` /
   `:timeout_ms` (the canary's), `:listen_port`, `:notify` (a pid, also `subscribe/2`),
+  `:config_loader` (a `ConfigLoader`: the monitor subscribes itself at start, so a
+  restarted monitor re-subscribes and a config change re-runs the canary),
   `:now_ms_fun` (monotonic ms), `:autostart` (default true: run at start), `:name`.
   """
 
   use GenServer
 
   alias Arbiter.NodeAgent.K8s.Canary
+  alias Arbiter.NodeAgent.K8s.ConfigLoader
   alias Arbiter.NodeAgent.K8s.Readiness
 
   require Logger
@@ -97,6 +100,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
     state = %{
       client: Keyword.fetch!(opts, :client),
+      loader: opts[:config_loader],
       config_fun: Keyword.fetch!(opts, :config_fun),
       image: opts[:image],
       targets: Keyword.get(opts, :targets, %{}),
@@ -118,7 +122,15 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
     state = open_listener(state, opts[:listen_port])
     if Keyword.get(opts, :autostart, true), do: send(self(), :run)
-    {:ok, state}
+    {:ok, state, {:continue, :subscribe}}
+  end
+
+  @impl true
+  def handle_continue(:subscribe, %{loader: nil} = state), do: {:noreply, state}
+
+  def handle_continue(:subscribe, %{loader: loader} = state) do
+    :ok = ConfigLoader.subscribe(loader, self())
+    {:noreply, state}
   end
 
   @impl true
@@ -182,6 +194,10 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
           end
         rescue
           error -> {:inconclusive_run, {:raised, Exception.message(error)}}
+        catch
+          # An exit or throw (a GenServer.call timeout, Req exiting) is as inconclusive as a
+          # raise; the task is linked, so uncaught it would take the monitor down with it.
+          kind, reason -> {:inconclusive_run, {kind, reason}}
         end
       end)
 

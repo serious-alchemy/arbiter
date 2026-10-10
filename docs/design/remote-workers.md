@@ -1539,7 +1539,9 @@ Operator procedure and the k3s test-bed checklist: [`docs/remote-workers-k8s-run
 | `ArbiterCli.Cmd.Doctor.Checks` | the nodes section prints `cluster <node>: <check>` rows for a cluster node, a `placement` row while it is `netpol_unenforced`, and one "no readiness report yet" row for a controller that sends none; all `[warn]`, never blocking |
 | `test/k8s/`, `Arbiter.Test.K8sE2E`, `scripts/k8s-e2e.sh` | the `:k8s` suite: a real kind/k3d API server, guarded to `kind-*`/`k3d-*` contexts on loopback and an explicit kubeconfig (`e2e_guard_test.exs` runs in the default suite); excluded by tag from `mix test` and CI |
 
-**Not in K13 (named so nobody assumes it):** the agent boot that starts `ReadinessMonitor` and `Controller` under the node supervisor and maps `Controller.report/1` onto the cluster `hello`/`hb` (`Backend.K8s`, see K5's list). The primary side and the doctor are ready for it. The `:k8s` suite was written without a container runtime on the authoring host; it is compile-checked and its helpers are unit-tested against a fake API, but a run against a real kind/k3d cluster is outstanding.
+`ControllerSupervisor` is the controller boot: `rest_for_one` over `ReadinessMonitor` then `Controller` (`readiness:` the monitor), the monitor subscribed to the `ConfigLoader` itself (so a restart re-subscribes and a config change re-runs the canary); `test/arbiter/node_agent/k8s/controller_supervisor_test.exs` boots it against the fake API.
+
+**Not in K13 (named so nobody assumes it):** the agent boot that starts `ControllerSupervisor` under the node supervisor (`Backend.K8s`) and maps `Controller.report/1` onto the cluster `hello`/`hb` (`Backend.K8s`, see K5's list). The primary side and the doctor are ready for it. The `:k8s` suite was written without a container runtime on the authoring host; it is compile-checked and its helpers are unit-tested against a fake API, but a run against a real kind/k3d cluster is outstanding.
 
 ### 17. How names in this document were checked
 

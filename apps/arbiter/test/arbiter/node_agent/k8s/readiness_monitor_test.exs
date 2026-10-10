@@ -149,6 +149,22 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitorTest do
     assert check(report, "netpol")["detail"] =~ "no_config"
   end
 
+  test "an exit or throw inside a run is inconclusive, not a crash of the monitor", ctx do
+    server = start!(ctx, config_fun: fn -> exit(:call_timeout) end)
+
+    assert_receive {:k8s_readiness, ^server, report}, 5_000
+    assert report.degraded == ["netpol_unenforced"]
+    assert check(report, "netpol")["detail"] =~ "call_timeout"
+    assert %{degraded: ["netpol_unenforced"]} = ReadinessMonitor.report(server)
+  end
+
+  test "a throw inside a run is inconclusive too", ctx do
+    server = start!(ctx, config_fun: fn -> throw(:oops) end)
+
+    assert_receive {:k8s_readiness, ^server, %{degraded: ["netpol_unenforced"]}}, 5_000
+    assert %{degraded: ["netpol_unenforced"]} = ReadinessMonitor.report(server)
+  end
+
   test "a config change re-runs the canary", ctx do
     script(ctx.api, @all_closed)
     server = start!(ctx)

@@ -263,15 +263,17 @@ connection.
 ## 6. What is and is not wired (as of K13)
 
 In the tree: the canary, the readiness checks, `ReadinessMonitor`, the controller
+boot (`Arbiter.NodeAgent.K8s.ControllerSupervisor`: the monitor, then the controller,
+`rest_for_one`, the monitor subscribed to the config loader), the controller
 carrying the monitor's `degraded` and readiness block in `Controller.report/1` (and
 pushing `"readiness"` after each run), the primary storing a cluster node's readiness
 from `hello` and `hb`, `GET /api/nodes` serving it, and the doctor section.
 
-Not in the tree: the agent boot that starts `ReadinessMonitor` and `Controller` under
-the node supervisor and maps `Controller.report/1` onto the cluster `hello`/`hb`
+Not in the tree: `Backend.K8s`, which starts `ControllerSupervisor` under the node
+supervisor and maps `Controller.report/1` onto the cluster `hello`/`hb`
 (`readiness`, `degraded`). The controller manifest already gives the controller what
 the canary needs (`ARB_POD_IP`, `ARB_NODE_IP` from the downward API;
-`Canary.targets_from_env/1`). Until that boot exists a real cluster node reports no
+`Canary.targets_from_env/1`). Until that backend exists a real cluster node reports no
 readiness block, and the doctor prints `cluster <name>: readiness … no readiness
 report yet`.
 
