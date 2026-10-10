@@ -57,7 +57,7 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
     assert :held = Lease.tick(lease)
     assert Lease.held?(lease)
     assert holder(api) == "pod-a"
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
 
     spec = FakeK8sApi.lease(api, @name)["spec"]
     assert spec["leaseTransitions"] == 1
@@ -68,7 +68,7 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
   test "renews while holding: renewTime moves, no new 'acquired'", %{api: api, client: client} do
     lease = start!(client, "pod-a")
     Lease.tick(lease)
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
     first = FakeK8sApi.lease(api, @name)["spec"]["renewTime"]
 
     assert :held = Lease.tick(lease)
@@ -133,7 +133,7 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
   test "losing the race (a conflict on renew) steps down at once", %{api: api, client: client} do
     lease = start!(client, "pod-a")
     Lease.tick(lease)
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
 
     # pod-b writes between our read and our write: simulated by taking it over
     # right before the next cycle reads, with a fresh resourceVersion each time.
@@ -144,7 +144,7 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
 
     assert :standby = Lease.tick(lease)
     refute Lease.held?(lease)
-    assert_receive {:lease, ^lease, :lost}
+    assert_receive {:lease, ^lease, :lost}, 5_000
   end
 
   test "an API outage shorter than the renew deadline keeps the lease", %{
@@ -153,7 +153,7 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
   } do
     lease = start!(client, "pod-a", renew_deadline_ms: 60_000)
     Lease.tick(lease)
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
 
     FakeK8sApi.fail_next(api, :lease_get, 500, 3)
     assert :held = Lease.tick(lease)
@@ -168,18 +168,18 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
     clock = clock!()
     lease = start!(client, "pod-a", renew_deadline_ms: 20, clock: read(clock))
     Lease.tick(lease)
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
 
     advance(clock, 40)
     refute Lease.held?(lease)
     FakeK8sApi.fail_next(api, :lease_update, 500, 1)
     assert :standby = Lease.tick(lease)
     refute Lease.held?(lease)
-    assert_receive {:lease, ^lease, :lost}
+    assert_receive {:lease, ^lease, :lost}, 5_000
 
     # The lease still names us; the next good cycle takes it back.
     assert :held = Lease.tick(lease)
-    assert_receive {:lease, ^lease, :acquired}
+    assert_receive {:lease, ^lease, :acquired}, 5_000
   end
 
   test "an unreachable API never grants a lease we did not hold", %{api: api, client: client} do

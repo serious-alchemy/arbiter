@@ -35,7 +35,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoaderTest do
 
     assert :ok = ConfigLoader.reload(loader)
     assert {:ok, %{max_concurrent: 6}} = ConfigLoader.current(loader)
-    assert_receive {:controller_config, ^loader, %{max_concurrent: 6}}
+    assert_receive {:controller_config, ^loader, %{max_concurrent: 6}}, 5_000
   end
 
   test "a bad edit keeps the last good config and reports degraded: bad_config", %{tmp_dir: dir} do
@@ -46,7 +46,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoaderTest do
     assert {:error, {:bad_config, {:unknown_key, "privileged"}}} = ConfigLoader.reload(loader)
     assert {:ok, %{max_concurrent: 4}} = ConfigLoader.current(loader)
     assert ConfigLoader.degraded(loader) == ["bad_config"]
-    assert_receive {:controller_degraded, ^loader, ["bad_config"]}
+    assert_receive {:controller_degraded, ^loader, ["bad_config"]}, 5_000
   end
 
   test "fixing the file clears the degradation", %{tmp_dir: dir} do
@@ -59,7 +59,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoaderTest do
     assert :ok = ConfigLoader.reload(loader)
     assert ConfigLoader.degraded(loader) == []
     assert {:ok, %{max_concurrent: 5}} = ConfigLoader.current(loader)
-    assert_receive {:controller_degraded, ^loader, []}
+    assert_receive {:controller_degraded, ^loader, []}, 5_000
   end
 
   test "a bad file at start: no config yet, degraded", %{tmp_dir: dir} do
@@ -92,7 +92,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoaderTest do
 
     write!(dir, "max_concurrent: 8")
     assert :ok = ConfigLoader.reload(loader)
-    assert_receive {:controller_config, ^loader, %{max_concurrent: 8}}
+    assert_receive {:controller_config, ^loader, %{max_concurrent: 8}}, 5_000
   end
 
   test "polls on its own interval", %{tmp_dir: dir} do

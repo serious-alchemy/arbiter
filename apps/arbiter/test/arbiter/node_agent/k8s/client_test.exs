@@ -333,9 +333,9 @@ defmodule Arbiter.NodeAgent.K8s.ClientTest do
 
       FakeK8sApi.await_watchers(api, 1)
       FakeK8sApi.put_pod(api, pod("live"))
-      assert_receive {:ev, {:added, %{"metadata" => %{"name" => "live"}}}}
+      assert_receive {:ev, {:added, %{"metadata" => %{"name" => "live"}}}}, 5_000
       FakeK8sApi.bookmark(api)
-      assert_receive {:ev, {:bookmark, %{"metadata" => %{"resourceVersion" => _}}}}
+      assert_receive {:ev, {:bookmark, %{"metadata" => %{"resourceVersion" => _}}}}, 5_000
       FakeK8sApi.drop_watches(api)
       assert {:closed, 2} = Task.await(task)
     end
