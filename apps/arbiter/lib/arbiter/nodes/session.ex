@@ -329,7 +329,9 @@ defmodule Arbiter.Nodes.Session do
   attaches the run (`{:ok, handle}`), or `{:error, reason}`: an `adoptable/2` reason,
   `{:adopt_refused, why}`, `:adopt_timeout`, `:owner_down` or `:node_lost`. On any error
   the run is held again and nothing was cancelled. Options: `:checkout` (the context the
-  upload endpoints authorize against, as for `assign/5`) and `:adopt_timeout_ms`.
+  upload endpoints authorize against, as for `assign/5`), `:stdout_offset` (the stdout
+  bytes the old Worker processed, persisted at its graceful stop: the stream starts at
+  the larger of it and the node's acked offset) and `:adopt_timeout_ms`.
   """
   @spec adopt(pid(), String.t(), map(), pid(), keyword()) :: {:ok, term()} | {:error, term()}
   def adopt(pid, run, spec, owner, opts \\ []),
@@ -973,7 +975,7 @@ defmodule Arbiter.Nodes.Session do
     ref = make_ref()
     ms = Keyword.get(opts, :adopt_timeout_ms, state.adopt_timeout_ms)
     timeout = Process.send_after(self(), {:adopt_timeout, run, ref}, ms)
-    next = acked_offset(state.runs[run])
+    next = max(acked_offset(state.runs[run]), processed_offset(opts))
 
     state = %{
       state
@@ -1000,6 +1002,15 @@ defmodule Arbiter.Nodes.Session do
 
   defp acked_offset(%{"acked" => acked}) when is_integer(acked) and acked >= 0, do: acked
   defp acked_offset(_report), do: 0
+
+  # What the old Worker had processed when it left the run to the node (`stdout_offset`,
+  # persisted at a graceful stop): never delivered again.
+  defp processed_offset(opts) do
+    case Keyword.get(opts, :stdout_offset) do
+      offset when is_integer(offset) and offset >= 0 -> offset
+      _ -> 0
+    end
+  end
 
   # The agent attached the adopted run: its handshake timer is no longer needed.
   defp adoption_done(state, run) do

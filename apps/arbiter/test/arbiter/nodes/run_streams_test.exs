@@ -119,6 +119,16 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert {:push, "ack", %{"run" => "r1", "offset" => 125}} in e
     end
 
+    test "an offset the old owner had already processed past the node's ack is not delivered again" do
+      # the old Worker processed up to 130 (persisted at its graceful stop); the node's
+      # last ack is 120, so its resend starts there
+      t = S.adopt(%S{}, "r1", @handle, self(), nil, %{}, 130)
+      {t, _} = S.ready(t, "r1", %{"acked" => 120})
+      {_t, e} = S.data(t, "r1", 120, "processed\nnew\n")
+      assert data_msgs(e) == [{:eol, "new"}]
+      assert {:push, "ack", %{"run" => "r1", "offset" => 134}} in e
+    end
+
     test "run.ready's acked offset wins over the one the run was adopted at" do
       t = S.adopt(%S{}, "r1", @handle, self(), nil, %{}, 100)
       {t, _} = S.ready(t, "r1", %{"acked" => 140})

@@ -930,6 +930,27 @@ defmodule Arbiter.Nodes.SessionTest do
       assert {:error, :not_held} = Session.adoptable(pid, id)
     end
 
+    test "the stream starts where the old Worker's persisted stdout_offset says, past the node's ack",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c, %{"acked" => 42})
+      owner = self()
+
+      task =
+        Task.async(fn ->
+          Session.adopt(pid, id, adopt_spec(id), owner, checkout: @actx, stdout_offset: 50)
+        end)
+
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      assert {:ok, handle} = Task.await(task)
+
+      # bytes 42..49 ("seven..\n") were processed by the old Worker before it stopped
+      frame = Arbiter.Nodes.StdoutFrame.encode(id, 42, "seven..\nafter\n")
+      Session.node_event(pid, "stdout", {:binary, frame})
+      assert_receive {^handle, {:data, {:eol, "after"}}}
+      refute_received {^handle, {:data, {:eol, "seven.."}}}
+    end
+
     test "the hold timer is cancelled by the adoption: the adopted run is never quiesced",
          %{node: node, clock: c} do
       {pid, id} = held!(node, c, %{}, hold_ms: 80)

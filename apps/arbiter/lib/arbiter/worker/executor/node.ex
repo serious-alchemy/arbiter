@@ -15,7 +15,9 @@ defmodule Arbiter.Worker.Executor.Node do
   checkpoint of a live run; `recover/2` and `reap/2` (RW12) are the restart path:
   `recover/2` takes a quiesced run's work from the node that retained it, and
   `reap/2` asks the node's reaper to remove what the primary's live set does not
-  hold (`docs/design/remote-workers.md` §10.4–10.6).
+  hold (`docs/design/remote-workers.md` §10.4–10.6). Outside the behaviour,
+  `adopt/3` and `unadopt/2` (bd-4p1vui, §10.4.3) hand a run the node held across a
+  primary restart to a new Worker instead of starting one, and undo that.
 
   `prepare/3` takes `checkout: %{home, branch, base, seeded_paths}` (RW11): the
   primary's context for the run, which authorizes the seed and checkout
@@ -50,6 +52,50 @@ defmodule Arbiter.Worker.Executor.Node do
            ) do
       {:ok, %{handle: handle, node_id: node_id, run: run, session: pid}}
     end
+  end
+
+  @doc """
+  The held-run twin of `prepare/3` (bd-4p1vui, `docs/design/remote-workers.md` §10.4.3):
+  hand the run `run_spec["run"]`, which `node` kept running across a primary restart, to
+  `opts[:owner]` instead of starting a container. Only the spec's `bridges` are used (the
+  node keeps the container it has). Options: `:owner`, `:checkout`, `:stdout_offset` (the
+  bytes the old Worker processed) and `:adopt_timeout_ms`. Returns what `prepare/3` does,
+  or `{:error, reason}` (see `Arbiter.Nodes.Session.adopt/5`), after which the run is
+  held again and nothing was cancelled.
+  """
+  @spec adopt(term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def adopt(node, run_spec, opts \\ []) when is_map(run_spec) do
+    with {:ok, node_id} <- node_id(node),
+         run when is_binary(run) <- run_spec["run"] || {:error, :no_run_id},
+         {:ok, pid} <- session(node_id),
+         owner = Keyword.get(opts, :owner, self()),
+         {:ok, handle} <-
+           Session.adopt(
+             pid,
+             run,
+             run_spec,
+             owner,
+             Keyword.take(opts, [:checkout, :stdout_offset, :adopt_timeout_ms])
+           ) do
+      {:ok, %{handle: handle, node_id: node_id, run: run, session: pid}}
+    end
+  end
+
+  @doc """
+  Give an adopted run back to the node's hold without a cancel (bd-4p1vui, §10.4.6 F7),
+  by node and run id, so it works before the owner has the handle. `:ok` when there is
+  nothing to undo.
+  """
+  @spec unadopt(term(), String.t()) :: :ok
+  def unadopt(node, run) when is_binary(run) do
+    with {:ok, node_id} <- node_id(node),
+         {:ok, pid} <- session(node_id) do
+      Session.unadopt(pid, run)
+    else
+      _ -> :ok
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   @impl true

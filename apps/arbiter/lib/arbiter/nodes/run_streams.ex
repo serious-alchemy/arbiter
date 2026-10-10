@@ -26,8 +26,9 @@ defmodule Arbiter.Nodes.RunStreams do
   ## Adoption (bd-4p1vui)
 
   `adopt/7` registers a run the node kept running across a primary restart for a
-  new owner, starting at the node's acked offset; the owner is answered when the
-  node says `run.ready` (whose `acked`, when present, is the authoritative start).
+  new owner, starting at the larger of the node's acked offset and the bytes the
+  old owner had already processed; the owner is answered when the node says
+  `run.ready` (whose `acked`, when larger, moves the start up to it).
 
   ## The end
 
@@ -146,9 +147,11 @@ defmodule Arbiter.Nodes.RunStreams do
     end)
   end
 
+  # The node resends from `acked`; an offset the adopter was given beyond it (what the old
+  # owner had already processed) is kept, so those bytes are trimmed as a replay.
   defp adopted_start(%{adopting?: true} = s, %{"acked" => acked})
        when is_integer(acked) and acked >= 0,
-       do: %{s | next: acked, adopting?: false}
+       do: %{s | next: max(acked, s.next), adopting?: false}
 
   defp adopted_start(s, _payload), do: %{s | adopting?: false}
 
