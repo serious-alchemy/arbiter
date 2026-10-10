@@ -252,6 +252,38 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     end
   end
 
+  describe "the node's final checkout of a fix round did not come back" do
+    test "the stale clone is not pushed: the round runs again on the primary", ctx do
+      rig = rig(ctx, "feature/rf-9")
+      before_push = forge_head(ctx, rig.branch)
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      wait_until(fn -> :sys.get_state(gate).fix_node != nil end)
+      %{current_id: failed_id} = :sys.get_state(gate)
+
+      # A node with room is still there; the re-run must not go back to it. The
+      # re-run answers at once, with a commit.
+      :sys.replace_state(gate, fn s -> %{s | revise_command: [@revise_commit]} end)
+
+      # What `ClaudeSession` broadcasts for a node that reported `"checkout": "failed…"`.
+      topic = "worker:" <> failed_id
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:worker_checkout_failed, failed_id})
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:worker_exited, failed_id, 0})
+
+      wait_until(fn -> :sys.get_state(gate).current_id != failed_id end)
+      state = :sys.get_state(gate)
+      assert state.fix_node == nil
+      assert state.fix_round_local? == true
+      assert state.round == 1
+
+      # The failed pass was not finished: nothing was pushed for it, and the re-run's
+      # work is what gets reviewed.
+      assert forge_head(ctx, rig.branch) == before_push
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+    end
+  end
+
   # ---- helpers -----------------------------------------------------------------
 
   defp stop_gate(gate) do

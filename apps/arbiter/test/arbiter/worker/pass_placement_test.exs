@@ -8,7 +8,9 @@ defmodule Arbiter.Worker.PassPlacementTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Test.GitFixture
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.PrivateClone
 
@@ -99,6 +101,43 @@ defmodule Arbiter.Worker.PassPlacementTest do
       git!(ctx.forge, ["update-ref", "-d", "refs/heads/" <> @branch])
 
       assert {:error, {:seed_fetch_failed, _}} = PassPlacement.seed(ctx.clone, @branch, "main")
+    end
+  end
+
+  describe "a target that is not the workspace's merge base" do
+    test "is what the node is seeded with as origin/<target>, at the forge's tip", ctx do
+      target = "integration/x"
+
+      # The pass merges into an integration branch of its own; a third party moves
+      # it on after the clone was cut.
+      git!(ctx.seed, ["checkout", "-q", "-b", target])
+      commit!(ctx.seed, %{"int.txt" => "v1\n"}, "integration v1")
+      git!(ctx.seed, ["push", "-q", "origin", target])
+      {:ok, clone} = PrivateClone.attach(ctx.checkout, @branch, "main")
+      tip = commit!(ctx.seed, %{"int.txt" => "v2\n"}, "integration v2")
+      git!(ctx.seed, ["push", "-q", "origin", target])
+
+      assert {:ok, %{target_tip: ^tip}} = PassPlacement.seed(clone, @branch, target)
+
+      # What the production handoff (`ConflictResolver`/`FixPassDispatcher`/the gate ->
+      # `ClaudeSession` -> `ContainerSpawn`) builds the node's checkout from: the
+      # pass's target, not `merge.base` (unset here, so "main").
+      assert {:ok, %{base: ^target} = checkout} =
+               ContainerSpawn.remote_checkout([base_branch: target], clone, ctx.root)
+
+      assert {:ok, %{base: "main"}} = ContainerSpawn.remote_checkout([], clone, ctx.root)
+
+      dest = Path.join(ctx.root, "seed.bundle")
+
+      assert {:ok, %{refs: refs}} =
+               NodeCheckout.seed_bundle(clone,
+                 run: "run-1",
+                 branch: @branch,
+                 base: checkout.base,
+                 dest: dest
+               )
+
+      assert refs["refs/remotes/origin/" <> target] == tip
     end
   end
 end

@@ -436,6 +436,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                :arb_token,
                :workspace,
                :repo,
+               :base_branch,
                :image,
                :podman,
                :egress,
@@ -2264,6 +2265,11 @@ defmodule Arbiter.Worker.ClaudeSession do
           session,
           {:worker_denied, session.task_id, Map.get(session, :denied_command_line)}
         )
+
+    # bd-bg87oz: a pass on a node whose last checkout upload failed says so ahead of
+    # its exit, so a ReviewGate fix round does not push the stale clone.
+    if match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome)),
+      do: broadcast(session, {:worker_checkout_failed, session.task_id})
 
     # bd-cgdhlu: a run whose node was lost did not finish and did not fail; its
     # owner re-dispatches the pass, so it is told that, not an exit status it

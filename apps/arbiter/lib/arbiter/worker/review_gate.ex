@@ -2658,6 +2658,14 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def handle_info({:worker_denied, _other, _command}, state), do: {:noreply, state}
 
+  # bd-bg87oz: a fix round on a node whose final checkout upload failed. Sent just
+  # ahead of that pass's `:worker_exited`; `pass_exited/2` re-runs the round instead
+  # of pushing the home clone as of the node's last snapshot.
+  def handle_info({:worker_checkout_failed, id}, %{current_id: id} = state),
+    do: {:noreply, Map.put(state, :fix_checkout_failed?, true)}
+
+  def handle_info({:worker_checkout_failed, _other}, state), do: {:noreply, state}
+
   # The reviewer Worker could not resume the denied conversation: stop waiting
   # for it and score what the pass produced.
   def handle_info({:worker_resume_abandoned, id}, %{current_id: id, phase: :reviewing} = state) do
@@ -2940,6 +2948,28 @@ defmodule Arbiter.Worker.ReviewGate do
       {:reprompt, state} -> {:noreply, state}
       {:revise, state} -> {:noreply, state}
     end
+  end
+
+  # bd-bg87oz: the node could not upload the round's final checkout, so the home
+  # clone lacks the round's last work. Pushing it would silently drop that work and
+  # spend a review round on stale code: the round runs again, on the primary (a node
+  # that failed its upload once is not trusted with the rest of the gate's rounds,
+  # which also bounds the retry).
+  defp pass_exited(
+         _status,
+         %{phase: :revising, fix_checkout_failed?: true, reported?: false} = state
+       )
+       when is_binary(state.current_prompt) do
+    Logger.warning(
+      "ReviewGate: the node's final checkout of task=#{state.task_id} round #{state.round}'s " <>
+        "fix round did not come back; running the round again on the primary"
+    )
+
+    stop_worker(state)
+
+    state
+    |> Map.merge(%{fix_checkout_failed?: false, fix_round_local?: true, fix_node: nil})
+    |> redispatch_implementer(state.current_prompt)
   end
 
   defp pass_exited(_status, %{phase: :revising} = state) do
@@ -6192,7 +6222,9 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp fix_round_remote_possible(state, ws) do
-    if scoped_credential?(ws, Map.get(state, :repo)), do: :local, else: :remote_possible
+    if Map.get(state, :fix_round_local?, false) or scoped_credential?(ws, Map.get(state, :repo)),
+      do: :local,
+      else: :remote_possible
   end
 
   defp fix_round_node(state, ws) do
@@ -6811,7 +6843,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-cgdhlu: a reviewer placed on a node runs there (`ClaudeSession` hands the
   # run to `Executor.Node` when the session opts name a `:node`).
   defp node_opts(%{review_node: %{id: _} = node}, :reviewer), do: [node: node]
-  defp node_opts(%{fix_node: %{id: _} = node}, :implementer), do: [node: node]
+
+  defp node_opts(%{fix_node: %{id: _} = node} = state, :implementer),
+    do: [node: node, base_branch: Map.get(state, :target_branch) || "main"]
+
   defp node_opts(_state, _role), do: []
 
   defp gated_adapter(state, ws, role, revision) do

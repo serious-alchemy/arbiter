@@ -910,11 +910,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # back as bundles. The placement veto runs here, so a repo with submodules or LFS
   # is refused as a placement error rather than by the agent mid-seed. A worktree
   # that is not a private clone has nothing to sync and is placed as before.
-  defp remote_checkout(opts, worktree, config_dir) do
+  @doc false
+  @spec remote_checkout(keyword(), Path.t(), Path.t()) :: {:ok, map() | nil} | {:error, term()}
+  def remote_checkout(opts, worktree, config_dir) do
     case PrivateClone.branch(worktree) do
       branch when is_binary(branch) ->
-        base =
-          Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+        base = checkout_base(opts)
 
         case NodeCheckout.veto(worktree, branch) do
           :ok ->
@@ -934,6 +935,20 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
       _ ->
         {:ok, nil}
+    end
+  end
+
+  # The ref the node is seeded with as `origin/<base>` and the ingest allows back.
+  # A pass that merges into a target of its own (a per-task or per-repo
+  # `target_branch`, bd-bg87oz) names it as `:base_branch`: seeding the workspace's
+  # `merge.base` instead would hand the node a target it never rebases onto.
+  defp checkout_base(opts) do
+    case Keyword.get(opts, :base_branch) do
+      base when is_binary(base) and base != "" ->
+        base
+
+      _ ->
+        Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
     end
   end
 

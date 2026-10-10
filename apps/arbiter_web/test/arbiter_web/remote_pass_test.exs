@@ -29,7 +29,7 @@ defmodule ArbiterWeb.RemotePassTest do
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
-  alias Arbiter.Worker.{BranchNamer, Watchdog, Worktree}
+  alias Arbiter.Worker.{BranchNamer, ContainerSpawn, Watchdog, Worktree}
   alias Arbiter.Worker.Executor.Node, as: Executor
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueue.ConflictResolver
@@ -258,6 +258,19 @@ defmodule ArbiterWeb.RemotePassTest do
   # What `ClaudeSession` does for a pass given a `:node`: place the run with the home
   # clone as its checkout; here with the agent's work scripted into the stub podman.
   defp run_on_node!(ctx, _pid, wt, run) do
+    # The checkout the production handoff builds (`ClaudeSession` ->
+    # `ContainerSpawn.prepare_remote/1`) from the opts `ConflictResolver` gives the
+    # session: the pass's target rides in as `:base_branch`.
+    assert {:ok, checkout} =
+             ContainerSpawn.remote_checkout(
+               [workspace: ctx.ws, repo: "test/repo", base_branch: "main"],
+               wt,
+               Path.join(ctx.root, "primary-config-#{run}")
+             )
+
+    assert %{home: ^wt, branch: branch, base: "main"} = checkout
+    assert branch == ctx.branch
+
     spec = %{
       "version" => 1,
       "run" => run,
@@ -275,15 +288,7 @@ defmodule ArbiterWeb.RemotePassTest do
       "secrets" => %{},
       "limits" => %{"memory" => "1g"},
       "command" => ["claude", "--print"],
-      "checkout" => %{"branch" => ctx.branch, "base" => "main"}
-    }
-
-    checkout = %{
-      home: wt,
-      branch: ctx.branch,
-      base: "main",
-      seeded_paths: [],
-      config_dir: Path.join(ctx.root, "primary-config-#{run}")
+      "checkout" => %{"branch" => ctx.branch, "base" => checkout.base}
     }
 
     assert {:ok, prepared} =

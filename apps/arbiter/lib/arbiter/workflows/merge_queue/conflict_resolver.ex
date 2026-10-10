@@ -715,7 +715,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
                  git_credential: git_credential
                ] ++
                  Keyword.take(mcp_opts, [:arb_token]) ++
-                 container_opts(context, provider) ++ node_opts(node))
+                 container_opts(context, provider) ++ node_opts(node, context))
               |> add_command_or_prompt(
                 Map.put(context, :host_git, host_git?(context, provider)),
                 args,
@@ -740,8 +740,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   end
 
   # bd-bg87oz: `ClaudeSession` hands the run to `Executor.Node` when the opts name a `:node`.
-  defp node_opts(nil), do: []
-  defp node_opts(node), do: [node: node]
+  # The pass's resolved target rides along: the node is seeded with `origin/<target>`.
+  defp node_opts(nil, _context), do: []
+  defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
