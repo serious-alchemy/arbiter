@@ -50,7 +50,7 @@ defmodule Arbiter.Worker.Egress.JailRunTest do
   describe "start/1" do
     setup do
       dir =
-        Path.join(Arbiter.Config.Paths.scratch_root(), "jr#{System.unique_integer([:positive])}")
+        Path.join(Arbiter.Config.Paths.socket_root(), "jr#{System.unique_integer([:positive])}")
 
       on_exit(fn -> File.rm_rf(dir) end)
       owner = spawn(fn -> Process.sleep(:infinity) end)

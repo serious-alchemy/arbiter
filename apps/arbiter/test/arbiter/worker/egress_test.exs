@@ -7,7 +7,12 @@ defmodule Arbiter.Worker.EgressTest do
   alias Arbiter.Worker.Egress.Event
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "egt#{Base.encode16(:crypto.strong_rand_bytes(4))}")
+    dir =
+      Path.join(
+        Arbiter.Config.Paths.socket_root(),
+        "egt#{Base.encode16(:crypto.strong_rand_bytes(4))}"
+      )
+
     on_exit(fn -> File.rm_rf(dir) end)
 
     {:ok, upstream, port} = start_echo_server()
