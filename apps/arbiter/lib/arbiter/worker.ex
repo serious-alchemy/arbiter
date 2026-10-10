@@ -960,6 +960,27 @@ defmodule Arbiter.Worker do
   def resume(ref), do: call(ref, :resume)
 
   @doc """
+  Give up an adoption that did not complete (bd-4p1vui,
+  `docs/design/remote-workers.md` §10.4.6 F5/F7): the run goes back to its node's
+  hold without a cancel (`Executor.Node.unadopt/2`), the Worker forgets its
+  sessions and stops, and nothing is written to the run's row, so `Nodes.Recovery`
+  collects the run as if no adoption had been tried.
+  """
+  @spec abandon_adoption(ref()) :: :ok | {:error, term()}
+  def abandon_adoption(ref), do: call(ref, :abandon_adoption)
+
+  @doc """
+  `abandon_adoption/1`, but only while this Worker is still adopting `run_id` (bd-4p1vui,
+  §10.4.6 F12): its `meta[:adopt]` names the run and no session has attached it. A Worker
+  whose session attached the run owns it and answers `{:error, :attached}`; any other,
+  `{:error, :not_adopting}`. One call, so it cannot race the session open: this is how an
+  adoption whose caller was cut off is undone.
+  """
+  @spec abandon_adoption(ref(), String.t()) :: :ok | {:error, :attached | :not_adopting}
+  def abandon_adoption(ref, run_id) when is_binary(run_id),
+    do: call(ref, {:abandon_adoption, run_id})
+
+  @doc """
   Open a merge request for `branch`, hand it to the ticket, and end the run.
 
   Resolves the workspace's merger adapter, calls `open/4`, records the
@@ -1215,6 +1236,7 @@ defmodule Arbiter.Worker do
     state = %State{state | last_phase: Arbiter.Worker.Phase.of(snapshot(state))}
 
     state = record_run_started(state)
+    watch_adopter(meta)
 
     # P8 (`docs/provider-account-design.md` §4.2): stamp this worker's dispatch
     # context onto its own registry entry so the account concurrency ceiling
@@ -1478,6 +1500,13 @@ defmodule Arbiter.Worker do
   # state, with :run_id populated on success. On failure (DB down, validation
   # error, no sandbox checkout in a test) we log a warning and leave run_id
   # nil — subsequent terminal updates will no-op cleanly.
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): a Worker adopting a run another
+  # Worker left to its node takes that run's row over — no new row, nothing handed off.
+  # `run_id` stays nil until the adopted session attaches (`:__claude_session_open__`), so
+  # an adoption that does not complete never writes the row.
+  defp record_run_started(%State{meta: %{adopt: %{} = adopt}} = state),
+    do: %State{state | started_at: Map.get(adopt, :started_at) || state.started_at}
+
   defp record_run_started(%State{} = state) do
     role_tag = role_tag_from_meta(state.meta)
     provider = provider(state.meta) || default_run_provider(state, role_tag)
@@ -1530,6 +1559,12 @@ defmodule Arbiter.Worker do
       log_run_warning("create", state.task_id, e)
       state
   end
+
+  # bd-4p1vui (§10.4.6 F12): the process adopting the run for this Worker
+  # (`meta[:adopt][:adopter]`, `Dispatch.adopt/2`'s caller), watched until a session
+  # attaches the run. One already gone is reported at once.
+  defp watch_adopter(%{adopt: %{adopter: pid}}) when is_pid(pid), do: Process.monitor(pid)
+  defp watch_adopter(_meta), do: nil
 
   @doc """
   Resolves the provider (e.g. `"claude"`, `"codex"`, `"gemini"`) a worker's
@@ -2096,6 +2131,14 @@ defmodule Arbiter.Worker do
       base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
       role: role_to_usage_step(role)
     }
+
+    account_plan =
+      case AccountResolver.get(provider_account_id) do
+        %{plan: plan} -> plan
+        _ -> nil
+      end
+
+    attrs = Arbiter.Agents.Grok.Stream.mark_notional_cost(attrs, account_plan)
 
     case existing_session_event(attrs) do
       nil ->
@@ -2707,6 +2750,24 @@ defmodule Arbiter.Worker do
     {:reply, {:error, {:invalid_transition, run_state, :review_gate_verdict}}, state}
   end
 
+  def handle_call(:abandon_adoption, _from, %State{} = state),
+    do: {:stop, :normal, :ok, give_up_adoption(state)}
+
+  # Only an adoption no session has attached yet: `meta[:adopt]` goes, and `run_id` comes,
+  # in the session open, which this process serializes with this call.
+  def handle_call(
+        {:abandon_adoption, run_id},
+        from,
+        %State{meta: %{adopt: %{run_id: run_id}}} = state
+      ),
+      do: handle_call(:abandon_adoption, from, state)
+
+  def handle_call({:abandon_adoption, run_id}, _from, %State{run_id: run_id} = state),
+    do: {:reply, {:error, :attached}, state}
+
+  def handle_call({:abandon_adoption, _run_id}, _from, state),
+    do: {:reply, {:error, :not_adopting}, state}
+
   def handle_call({:report, key, value}, _from, %State{} = state) do
     state = %State{state | meta: Map.put(state.meta, key, value)}
     backfill_report(state.run_id, state.task_id, key, value)
@@ -2718,6 +2779,12 @@ defmodule Arbiter.Worker do
   # by the port itself so multiple concurrent sessions (future) wouldn't
   # collide.
   def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
+    # bd-4p1vui (docs/design/remote-workers.md §10.4.3): the session of a run this Worker is
+    # adopting. From here the Worker owns the run's row (its id is the node's run id); the
+    # row already says where it runs, on which session, and what it was told.
+    adopted = adopted_session(state, port_args)
+    state = take_adopted_run(state, adopted)
+
     # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
     # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
     # prompt) into THIS spawn so it continues the prior Claude session, but
@@ -2741,7 +2808,9 @@ defmodule Arbiter.Worker do
     # `session_config` (threaded in by `ClaudeSession.start/1` /
     # `ClaudeSession.build_session_config/3`), so persistence never depends
     # on reading it back off a temp file that might already be gone.
-    persist_composed_prompt(state, session_config)
+    # An adopted session was told its prompt before the restart; the one built for the
+    # adoption was never sent, so it is not recorded as what the run was told.
+    persist_prompt_unless_adopted(state, session_config, adopted)
 
     cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
@@ -2766,6 +2835,8 @@ defmodule Arbiter.Worker do
       |> Map.put(:activity_at, now)
       |> Map.put(:output_log, open_output_log(state))
       |> Map.put(:run_id, state.run_id)
+      |> put_stdout_start(port, spawn_args)
+      |> seed_adopted_usage(adopted)
 
     sessions = Map.put(state.claude_sessions, port, session)
 
@@ -2787,7 +2858,8 @@ defmodule Arbiter.Worker do
     # `<config_dir>/projects/<slug>/<session_id>.jsonl` (Claude) or
     # `<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`
     # (agy) — see `Arbiter.Worker.SessionArchive`.
-    config_dir = effective_config_dir(port_args, provider)
+    # An adopted run keeps the config dir it ran under: its transcripts land there.
+    config_dir = session_config_dir(adopted, port_args, provider)
 
     meta =
       (state.meta || %{})
@@ -2798,37 +2870,112 @@ defmodule Arbiter.Worker do
       |> Map.put(:cwd, Map.get(port_args, :cd))
       |> maybe_put(:provider, provider && to_string(provider))
       |> maybe_put(:node_id, handle_node_id(port))
+      |> note_adopted(adopted)
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
-
-    # The run's row records where it executes (nil = the primary).
-    node_id = handle_node_id(port)
-
-    if node_id && new_state.run_id do
-      backfill_run_fields(new_state.run_id, %{node_id: node_id}, new_state.task_id)
-    end
-
-    backfill_session_dispatch(
-      new_state.run_id,
-      new_state.task_id,
-      provider,
-      config_dir,
-      session_config
-    )
-
-    stamp_run_node(new_state.run_id, new_state.task_id, port)
+    record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
 
     # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
     # node stops counting against the primary's cap.
-    PRegistry.put_node(new_state.registry_key, node_id)
+    PRegistry.put_node(new_state.registry_key, handle_node_id(port))
 
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
     {:reply, {:ok, port}, announce_phase(new_state)}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  # bd-4p1vui: the adoption this session completes, if any: this Worker was started to adopt
+  # a run (`meta[:adopt]`, from `Dispatch.adopt/2`) and the session is that run's (its
+  # handle names the same run id). A later re-open is an ordinary placement.
+  defp adopted_session(%State{meta: %{adopt: %{run_id: run_id} = adopt}}, %{
+         remote: %{prepared: {:remote, {_node, run_id, _ref}}}
+       }),
+       do: adopt
+
+  defp adopted_session(_state, _port_args), do: nil
+
+  # From the adopted session on, the Worker owns the run's row.
+  defp take_adopted_run(%State{} = state, nil), do: state
+  defp take_adopted_run(%State{} = state, %{run_id: run_id}), do: %State{state | run_id: run_id}
+
+  # bd-4p1vui: unadopt first, by node and run id, so the run is back on hold before this
+  # Worker's death reaches the node's session (owner-down would cancel a run it owned).
+  # The caller stops: with no `run_id` and no sessions, nothing is written to the row.
+  defp give_up_adoption(%State{meta: meta} = state) do
+    case Map.get(meta || %{}, :adopt) || Map.get(meta || %{}, :adopted) do
+      %{run_id: run_id, node_id: node_id} when is_binary(run_id) ->
+        Arbiter.Worker.Executor.Node.unadopt(node_id, run_id)
+
+      _ ->
+        :ok
+    end
+
+    Logger.warning("Worker: task=#{state.task_id} gave up adopting its run; its node holds it")
+    %State{state | run_id: nil, claude_sessions: %{}, state: :finished}
+  end
+
+  defp persist_prompt_unless_adopted(state, session_config, nil),
+    do: persist_composed_prompt(state, session_config)
+
+  defp persist_prompt_unless_adopted(_state, _session_config, _adopted), do: :ok
+
+  defp session_config_dir(%{config_dir: dir}, _port_args, _provider) when is_binary(dir), do: dir
+
+  defp session_config_dir(_adopted, port_args, provider),
+    do: effective_config_dir(port_args, provider)
+
+  # The run's row records where it executes (nil = the primary). An adopted row already
+  # records all of it, so nothing is written over it.
+  defp record_session_opened(%State{} = state, port, adopted, spawn) do
+    node_id = handle_node_id(port)
+    unless adopted, do: backfill_session_opened(state, port, node_id, spawn)
+    :ok
+  end
+
+  defp backfill_session_opened(%State{run_id: run_id, task_id: task_id}, port, node_id, spawn) do
+    {provider, config_dir, session_config} = spawn
+    if node_id && run_id, do: backfill_run_fields(run_id, %{node_id: node_id}, task_id)
+    backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config)
+    stamp_run_node(run_id, task_id, port)
+  end
+
+  # A remote session counts its stdout from where its stream started: 0 for a placement,
+  # what the session resumed at for an adoption (`remote.stdout_start`).
+  defp put_stdout_start(session, {:remote, _}, spawn_args),
+    do: Map.put(session, :stdout_offset, get_in(spawn_args, [:remote, :stdout_start]) || 0)
+
+  defp put_stdout_start(session, _port, _spawn_args), do: session
+
+  # The stream will not repeat its `init` event: what it said then comes from the row, so
+  # usage stays on the same session id (the ledger upserts per session) and model.
+  defp seed_adopted_usage(session, nil), do: session
+
+  defp seed_adopted_usage(session, adopted) do
+    seed =
+      for key <- [:session_id, :model, :harness_version],
+          value = adopted[key],
+          not is_nil(value),
+          into: %{},
+          do: {key, value}
+
+    Map.update(session, :usage, seed, &Map.merge(seed, &1 || %{}))
+  end
+
+  defp note_adopted(meta, nil), do: meta
+
+  defp note_adopted(meta, adopted) do
+    meta
+    |> Map.delete(:adopt)
+    |> Map.put(:adopted, %{
+      run_id: adopted.run_id,
+      node_id: adopted[:node_id],
+      at: DateTime.utc_now()
+    })
+    |> maybe_put(:session_id, adopted[:session_id])
   end
 
   # bd-6zuoo6: every agent spawn runs in its own memory-capped systemd scope
@@ -3277,6 +3424,17 @@ defmodule Arbiter.Worker do
     {:noreply, state}
   end
 
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.6 F12): the process adopting the run for
+  # this Worker went down before any session attached the run, so none ever will (only it
+  # opens that session): give the adoption up. That also stops a Worker whose start request
+  # outlived its adopter. Once a session attached the run `meta[:adopt]` is gone, and the
+  # adopter's DOWN is the one below.
+  def handle_info(
+        {:DOWN, _ref, :process, pid, _reason},
+        %State{meta: %{adopt: %{adopter: pid}}} = state
+      ),
+      do: {:stop, :normal, give_up_adoption(state)}
+
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
   # unrelated monitor) — nothing to do.
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
@@ -3436,8 +3594,10 @@ defmodule Arbiter.Worker do
       else: :ok
   end
 
-  # The node a session handle executes on; nil for a local port.
   # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.10): an adopting Worker's run is
+  # already on the node that held it.
+  defp placed_node_id(%{adopt: %{node_id: id}}) when is_binary(id), do: id
   defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
   defp placed_node_id(_meta), do: nil
 
@@ -3469,6 +3629,7 @@ defmodule Arbiter.Worker do
     :exit, _ -> []
   end
 
+  # The node a session handle executes on; nil for a local port.
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
 
@@ -3484,7 +3645,11 @@ defmodule Arbiter.Worker do
   defp on_port_data(%State{} = state, port, fragment, eol?) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
-        updated = Arbiter.Worker.ClaudeSession.handle_data(session, fragment, eol?)
+        updated =
+          session
+          |> Arbiter.Worker.ClaudeSession.handle_data(fragment, eol?)
+          |> count_stdout(fragment, eol?)
+
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
         sync_session_meta(new_state, port)
@@ -3493,6 +3658,15 @@ defmodule Arbiter.Worker do
         state
     end
   end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.5): the stdout bytes a remote session has
+  # processed, counted the way the node's stream is cut (`{:eol, l}` is `l` plus its newline,
+  # `{:noeol, c}` is `c`), from where the stream started. Persisted when the Worker leaves the
+  # run to the node, so a Worker that adopts it delivers nothing twice. Local ports have none.
+  defp count_stdout(%{stdout_offset: offset} = session, fragment, eol?) when is_integer(offset),
+    do: %{session | stdout_offset: offset + byte_size(fragment) + if(eol?, do: 1, else: 0)}
+
+  defp count_stdout(session, _fragment, _eol?), do: session
 
   # Mirror the most useful session fields (output_lines, exit_status) into the
   # top-level meta so callers reading `Worker.state(pid).meta` see them
@@ -3928,8 +4102,11 @@ defmodule Arbiter.Worker do
 
         # The node session monitors this Worker too and would read its death as
         # "owner down: cancel the run". Say first that the run is left alone.
+        # bd-4p1vui: and record how far its stdout was processed, so a Worker
+        # adopting it after the restart delivers none of it twice (§10.4.5).
         leave_to_node? and remote_handle?(port) ->
           Arbiter.Worker.Executor.Node.abandon(port)
+          record_stdout_offset(state, session)
 
         true ->
           terminate_session_port(state, port)
@@ -3952,6 +4129,12 @@ defmodule Arbiter.Worker do
 
   defp remote_handle?({:remote, _}), do: true
   defp remote_handle?(_port), do: false
+
+  defp record_stdout_offset(%State{run_id: run_id, task_id: task_id}, %{stdout_offset: offset})
+       when is_binary(run_id) and is_integer(offset),
+       do: backfill_run_fields(run_id, %{stdout_offset: offset}, task_id)
+
+  defp record_stdout_offset(_state, _session), do: :ok
 
   # RW12 (docs/design/remote-workers.md §10.4): a run on a node does not stop with the
   # primary. When the application is stopping, the supervisor shutting this Worker down

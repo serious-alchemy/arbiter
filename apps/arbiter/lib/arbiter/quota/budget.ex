@@ -87,6 +87,7 @@ defmodule Arbiter.Quota.Budget do
           | :unavailable
           | :no_reading
           | :unmetered
+          | :error
 
   @type hysteresis :: %{
           budget: non_neg_integer() | nil,
@@ -379,7 +380,10 @@ defmodule Arbiter.Quota.Budget do
       expiring: nil
     }
 
-    reset_passed? = w.reset_at && DateTime.compare(w.reset_at, ctx.now) != :gt
+    # `and`, not `&&`: a window with no `reset_at` (an Antigravity bucket, Codex's
+    # `session`) must give `false`, never `nil` — the `cond` below applies `and`.
+    reset_passed? =
+      match?(%DateTime{}, w.reset_at) and DateTime.compare(w.reset_at, ctx.now) != :gt
 
     cond do
       not is_number(w.used) -> %{entry | status: :no_reading}

@@ -229,8 +229,7 @@ defmodule ArbiterWeb.RemoteRestartTest do
   # the production path: the Run row, the handle's run id and the container all come from
   # it. The worktree is `ctx.repo` made a private clone (the markers `PrivateClone` reads),
   # so the run is placed with a checkout.
-  defp start_remote_worker!(ctx) do
-    alias Arbiter.Agents.SecurityPolicy
+  defp start_remote_worker!(ctx, mode \\ "hang") do
     alias Arbiter.Worker
     alias Arbiter.Worker.ClaudeSession
 
@@ -244,6 +243,23 @@ defmodule ArbiterWeb.RemoteRestartTest do
       put_env_restoring(:arbiter, key, value)
     end
 
+    task_id = "bd-rw12-#{System.unique_integer([:positive])}"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter")
+
+    StubPodman.write_mode(ctx.stub, mode)
+    File.write!(Path.join(ctx.stub, "edit_at"), ctx.repo)
+
+    assert {:ok, {:remote, _} = handle} =
+             ClaudeSession.start([owner: pid] ++ remote_session_opts(ctx, task_id))
+
+    {pid, handle, task_id}
+  end
+
+  # What `ClaudeSession.start/1` is given for a run on the node (the egress run, image and
+  # CLI files stood in for), less the owner.
+  defp remote_session_opts(ctx, task_id) do
+    alias Arbiter.Agents.SecurityPolicy
+
     sockets = Path.join(ctx.root, "sockets")
     File.mkdir_p!(sockets)
     proxy = Path.join(sockets, "proxy.sock")
@@ -255,32 +271,20 @@ defmodule ArbiterWeb.RemoteRestartTest do
       {:ok, [proxy_socket: proxy, proxy_port: 38_001, bridges: [{38_002, bridge}]], "rtest"}
     end
 
-    task_id = "bd-rw12-#{System.unique_integer([:positive])}"
-    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter")
-
-    policy =
-      SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
-
-    StubPodman.write_mode(ctx.stub, "hang")
-    File.write!(Path.join(ctx.stub, "edit_at"), ctx.repo)
-
-    assert {:ok, {:remote, _} = handle} =
-             ClaudeSession.start(
-               owner: pid,
-               worktree_path: ctx.repo,
-               command: ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", "/opt/arbiter/cli/claude"],
-               env: [{"CLAUDE_CODE_OAUTH_TOKEN", "tok"}, {"ARB_WORKER_BEAD_ID", task_id}],
-               security: policy,
-               provider: "claude",
-               image: "localhost/arbiter-dev/beam:abc123",
-               claude_path: ctx.cli,
-               arb_path: ctx.cli,
-               egress: egress,
-               arb_token: "arb-tok",
-               node: %{id: ctx.node.id, capacity: %{}}
-             )
-
-    {pid, handle, task_id}
+    [
+      worktree_path: ctx.repo,
+      command: ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", "/opt/arbiter/cli/claude"],
+      env: [{"CLAUDE_CODE_OAUTH_TOKEN", "tok"}, {"ARB_WORKER_BEAD_ID", task_id}],
+      security:
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
+      provider: "claude",
+      image: "localhost/arbiter-dev/beam:abc123",
+      claude_path: ctx.cli,
+      arb_path: ctx.cli,
+      egress: egress,
+      arb_token: "arb-tok",
+      node: %{id: ctx.node.id, capacity: %{}}
+    ]
   end
 
   describe "a primary restart with a live Worker" do
@@ -332,6 +336,219 @@ defmodule ArbiterWeb.RemoteRestartTest do
 
       assert File.read!(Path.join(ctx.repo, "edited.txt")) == "edited by the run\n"
       assert Ash.get!(Run, run_id).state == :working
+    end
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3, §10.4.6, §10.4.11): a new Worker adopts
+  # the run the node held across the restart; when it cannot, the run is collected, once.
+  describe "adoption across a primary restart" do
+    alias Arbiter.Nodes.Adoption
+    alias Arbiter.Worker
+    alias Arbiter.Worker.ClaudeSession
+
+    # The application stops: the supervisor shuts the Worker down while the VM is going
+    # down, so it leaves its run to the node. The flag is dropped again once it is gone:
+    # the adopting Worker belongs to the primary that came back.
+    defp leave_to_node!(pid) do
+      previous = Application.fetch_env(:arbiter, :worker_node_stopping_override)
+      Application.put_env(:arbiter, :worker_node_stopping_override, true)
+      ref = Process.monitor(pid)
+      :ok = GenServer.stop(pid, :shutdown)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :worker_node_stopping_override, v)
+        :error -> Application.delete_env(:arbiter, :worker_node_stopping_override)
+      end
+    end
+
+    defp started_run!(ctx, mode) do
+      {pid, _handle, task_id} = start_remote_worker!(ctx, mode)
+      _ = Worker.advance(pid, :claude)
+      %{run_id: run_id} = Worker.state(pid)
+      assert_eventually(fn -> "line-1" in (Worker.state(pid).meta[:output_lines] || []) end)
+      {pid, run_id, task_id}
+    end
+
+    # The Worker side of `Dispatch.adopt/2`, minus the ticket: a Worker started to adopt the
+    # run, whose spawn (`ClaudeSession.start/1` with `adopt:`) asks the node to hand it over.
+    # `after_adopt` runs once it has; an error there is a step failing after the adoption.
+    defp adopt_fun(ctx, after_adopt \\ fn _w -> :ok end) do
+      fn %Run{} = run, opts ->
+        info = Adoption.adopt_info(run)
+        {:ok, w} = Worker.start(task_id: run.task_id, repo: "arbiter", meta: %{adopt: info})
+        adopt = Map.put(info, :timeout_ms, Keyword.get(opts, :adopt_timeout_ms))
+
+        with {:ok, {:remote, _}} <-
+               ClaudeSession.start(
+                 [owner: w, adopt: adopt] ++ remote_session_opts(ctx, run.task_id)
+               ),
+             _ = Worker.advance(w, :claude),
+             :ok <- after_adopt.(w) do
+          {:ok, %{worker_pid: w}}
+        else
+          {:error, reason} ->
+            :ok = Worker.abandon_adoption(w)
+            {:error, reason}
+        end
+      end
+    end
+
+    defp recover!(ctx, run_id, extra) do
+      run_ctx = context(ctx)
+
+      Recovery.await(
+        [
+          primary?: true,
+          node_timeout_ms: 20_000,
+          total_timeout_ms: 30_000,
+          context_fun: fn %Run{id: ^run_id} -> {:ok, run_ctx} end
+        ] ++ extra
+      )
+    end
+
+    defp rows_for(task_id) do
+      require Ash.Query
+      Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!() |> Enum.map(& &1.id)
+    end
+
+    defp retained_count(node_id, run_id) do
+      [node_id: node_id, kind: :retained]
+      |> Nodes.events()
+      |> Enum.count(&(&1.detail["run"] == run_id))
+    end
+
+    # collected exactly once: one retained report, its work in the home clone, the row left
+    # live for the Reconciler, and no Worker owning it
+    defp assert_collected_once!(ctx, report, run_id, task_id) do
+      assert report == %{run_id => :collected}
+      assert retained_count(ctx.node.id, run_id) == 1
+      assert File.read!(Path.join(ctx.repo, "edited.txt")) == "edited by the run\n"
+      assert %{state: :working, outcome: nil} = Ash.get!(Run, run_id)
+      assert Worker.whereis(task_id) == nil
+      assert rows_for(task_id) == [run_id]
+    end
+
+    test "a new Worker adopts the run: the same run in the same container, nothing quiesced, output carries on",
+         ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "tick")
+      leave_to_node!(pid)
+
+      # not written off, not stopped, and the row says how far its stdout was processed
+      assert %{state: :working, outcome: nil, stdout_offset: 7} = Ash.get!(Run, run_id)
+      refute calls(ctx.stub) =~ "rm --force"
+
+      restart_primary!()
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+
+      assert {:ok, report} = recover!(ctx, run_id, adopt_fun: adopt_fun(ctx))
+      assert report == %{run_id => :adopted}
+
+      adopter = Worker.whereis(task_id)
+      assert is_pid(adopter) and adopter != pid
+      assert %{run_id: ^run_id, state: :working} = Worker.state(adopter)
+
+      # the same run, in the same container: nothing stopped it, nothing quiesced it, no
+      # second row
+      refute calls(ctx.stub) =~ "rm --force"
+      assert retained_count(ctx.node.id, run_id) == 0
+      assert Arbiter.NodeAgent.Run.info(run_id)["state"] == "running"
+      assert rows_for(task_id) == [run_id]
+      assert %{state: :working, outcome: nil} = Ash.get!(Run, run_id)
+
+      # its registry entry names the node: it holds no slot on the primary
+      node_id = ctx.node.id
+
+      assert %{node_id: ^node_id} =
+               Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.registry_key == task_id))
+
+      # the container prints after the adoption: it reaches the new Worker, and the line the
+      # old one had already taken is not delivered again
+      File.write!(Path.join(ctx.stub, "go"), "")
+      assert_receive {:worker_output, ^task_id, "line-2"}, 10_000
+      refute_received {:worker_output, ^task_id, "line-1"}
+
+      :ok = Worker.stop(adopter, :normal)
+    end
+
+    test "a container that exited while the primary was away is not adopted: collected once (F3)",
+         ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "slow")
+      leave_to_node!(pid)
+
+      # the primary is away (no endpoint at all) while the container finishes
+      port = NodeTestEndpoint.port()
+      stop_supervised!(NodeTestEndpoint)
+      restart_primary!()
+      File.write!(Path.join(ctx.stub, "go"), "")
+      assert_eventually(fn -> Arbiter.NodeAgent.Run.info(run_id)["state"] == "exited" end)
+      NodeTestEndpoint.configure(port: port)
+      start_supervised!(NodeTestEndpoint)
+
+      test = self()
+
+      fun = fn run, opts ->
+        send(test, :adopt_called)
+        adopt_fun(ctx).(run, opts)
+      end
+
+      assert {:ok, report} = recover!(ctx, run_id, adopt_fun: fun)
+      refute_received :adopt_called
+      assert_collected_once!(ctx, report, run_id, task_id)
+    end
+
+    test "an adopt function that fails before the node handed anything over: collected once (F5)",
+         ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "hang")
+      leave_to_node!(pid)
+      restart_primary!()
+
+      assert {:ok, report} =
+               recover!(ctx, run_id, adopt_fun: fn _run, _opts -> {:error, :boom} end)
+
+      assert_collected_once!(ctx, report, run_id, task_id)
+    end
+
+    test "a node that does not answer the adoption in time: collected once (F6)", ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "hang")
+      leave_to_node!(pid)
+      restart_primary!()
+
+      # the agent cannot answer while its connection process is suspended; it gets to the
+      # `adopt` after the primary gave up on it (and that late answer changes nothing)
+      impatient = fn run, opts ->
+        :sys.suspend(Arbiter.NodeAgent.Connection)
+
+        try do
+          adopt_fun(ctx).(run, Keyword.put(opts, :adopt_timeout_ms, 300))
+        after
+          :sys.resume(Arbiter.NodeAgent.Connection)
+        end
+      end
+
+      assert {:ok, report} = recover!(ctx, run_id, adopt_fun: impatient)
+      assert_collected_once!(ctx, report, run_id, task_id)
+    end
+
+    test "a step failing after the node handed the run over undoes the adoption: collected once (F7)",
+         ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "hang")
+      leave_to_node!(pid)
+      restart_primary!()
+
+      fun = adopt_fun(ctx, fn _w -> {:error, :machine_start_failed} end)
+      assert {:ok, report} = recover!(ctx, run_id, adopt_fun: fun)
+      assert_collected_once!(ctx, report, run_id, task_id)
+    end
+
+    test "with adoption switched off, the run is collected as in v1", ctx do
+      {pid, run_id, task_id} = started_run!(ctx, "hang")
+      leave_to_node!(pid)
+      restart_primary!()
+
+      never = fn _run, _opts -> flunk("adoption is off") end
+      assert {:ok, report} = recover!(ctx, run_id, adopt_fun: never, adopt?: false)
+      assert_collected_once!(ctx, report, run_id, task_id)
     end
   end
 

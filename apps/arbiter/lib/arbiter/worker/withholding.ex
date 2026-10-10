@@ -106,18 +106,38 @@ defmodule Arbiter.Worker.Withholding do
   The `Arbiter.Worker.Egress` grants loader (`fn task_id -> [\"host:port\"]`)
   for a run of `task_id`.
 
-  A **guarded** spawn gets exactly what its projection granted: the proxy never
-  widens past the dispatch-time decision (a mid-run `network:` grant applies live
-  with G15). An unguarded spawn reads the ticket's in-force `network:` entries on
-  each cache miss, so a declared host works wherever `sandbox.egress: allowlist`
-  is on without any guardrail rule.
+  A **guarded** spawn gets what its projection grants, and nothing outside the
+  dispatch-time decision: its `profile` and `role` are fixed, so a mid-run
+  `network:` grant (G15b, `Arbiter.Tasks.PermissionDecision`) widens the proxy
+  only by being projected again under that same profile — a reviewer, or a tier
+  that does not list `network:`, gains nothing. A projection with no profile (the
+  sealed fail-closed value) keeps its static hosts. An unguarded spawn reads the
+  ticket's in-force `network:` entries on each cache miss, so a declared host
+  works wherever `sandbox.egress: allowlist` is on without any guardrail rule.
   """
   @spec grants(String.t() | nil, Projection.t()) :: (String.t() | nil -> [String.t()])
+  def grants(_task_id, %Projection{guarded?: true, profile: %Profile{} = profile} = static) do
+    fn task_id -> live_projected_hosts(task_id, profile, static) end
+  end
+
   def grants(_task_id, %Projection{guarded?: true, hosts: hosts}), do: fn _ -> hosts end
 
   def grants(_task_id, %Projection{}) do
     fn task_id -> live_network_grants(task_id) end
   end
+
+  # The hosts a guarded run's projection has now. A ticket that cannot be read
+  # keeps the dispatch-time hosts rather than gaining or losing reach.
+  defp live_projected_hosts(task_id, profile, static) when is_binary(task_id) do
+    with {:ok, %Issue{} = issue} <- Ash.get(Issue, ReviewGate.base_task_id(task_id)),
+         {:ok, workspace} <- Ash.get(Workspace, issue.workspace_id) do
+      issue |> projection(workspace, profile, static.role) |> Map.fetch!(:hosts)
+    else
+      _ -> static.hosts
+    end
+  end
+
+  defp live_projected_hosts(_task_id, _profile, static), do: static.hosts
 
   defp live_network_grants(task_id) when is_binary(task_id) do
     case Ash.get(Issue, ReviewGate.base_task_id(task_id)) do

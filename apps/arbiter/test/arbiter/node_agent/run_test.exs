@@ -118,7 +118,7 @@ defmodule Arbiter.NodeAgent.RunTest do
     wait_until(fn -> run not in Runs.run_ids() end, 5_000)
   end
 
-  defp wait_until(fun, timeout) do
+  defp wait_until(fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline)
   end
@@ -459,6 +459,73 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert %{"reason" => "unschedulable", "detail" => detail} = wait_event("g1", "run.refused")
       assert detail =~ "bridges_unavailable"
       assert_gone("g1")
+    end
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): a primary that restarted adopts the
+  # run it held instead of collecting it.
+  describe "adopt" do
+    test "a running, detached run is attached: run.ready carries the acked offset and stdout resends from it",
+         %{opts: opts, stub: stub} do
+      StubPodman.write_mode(stub, "tick")
+      assert {:ok, "a1"} = Runs.assign(spec("a1"), opts)
+      wait_event("a1", "run.ready")
+      assert_receive {:run_push, "a1", "stdout", {:binary, frame}}, 5_000
+      assert {:ok, "a1", 0, "line-1\n"} = StdoutFrame.decode(frame)
+
+      # the old primary acked the first line, then went away; the run carried on
+      Run.ack("a1", 7)
+      Runs.detach_all()
+      File.write!(Path.join(stub, "go"), "")
+      wait_until(fn -> Run.info("a1")["stdout_offset"] == 14 end)
+      refute_received {:run_push, "a1", "stdout", _}
+
+      assert :ok = Run.adopt("a1")
+
+      assert %{"run" => "a1", "container" => "arb-a1", "adopted" => true, "acked" => 7} =
+               wait_event("a1", "run.ready")
+
+      assert_receive {:run_push, "a1", "stdout", {:binary, frame}}, 5_000
+      assert {:ok, "a1", 7, "line-2\n"} = StdoutFrame.decode(frame)
+
+      # nothing was stopped: it is the same container, still running
+      refute File.read!(Path.join(stub, "calls")) =~ "rm "
+      assert %{"state" => "running", "exited" => false} = Run.info("a1")
+
+      Run.cancel("a1", "test")
+      wait_event("a1", "exit")
+    end
+
+    test "a run that exited while it was held is refused, even detached, and quiesce still retains it",
+         %{opts: opts} do
+      assert {:ok, "a2"} = Runs.assign(spec("a2"), opts)
+      wait_event("a2", "exit")
+      Runs.detach_all()
+
+      assert :ok = Run.adopt("a2")
+      assert %{"run" => "a2", "reason" => "exited"} = wait_event("a2", "adopt.refused")
+
+      assert :ok = Run.quiesce("a2")
+      assert %{"run" => "a2"} = wait_event("a2", "retained")
+      assert_gone("a2")
+    end
+
+    test "a run that is being stopped (the fence fired) is refused", %{opts: opts, stub: stub} do
+      StubPodman.write_mode(stub, "hang")
+      assert {:ok, "a3"} = Runs.assign(spec("a3"), opts)
+      wait_event("a3", "run.ready")
+      Runs.detach_all()
+
+      Runs.fence_all()
+      assert :ok = Run.adopt("a3")
+      assert %{"run" => "a3", "reason" => "cancelling"} = wait_event("a3", "adopt.refused")
+
+      # the stop finishes before the test does (the stub writes into the test's dir until then)
+      wait_until(fn -> Run.info("a3")["state"] == "exited" end)
+    end
+
+    test "an unknown run is not found" do
+      assert {:error, :not_found} = Run.adopt("nope")
     end
   end
 

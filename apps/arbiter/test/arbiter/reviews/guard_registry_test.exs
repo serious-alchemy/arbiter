@@ -204,6 +204,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker, :fail_tampered_clone, 2,
      "the worker replaced its clone's .git: a security refusal of the tree, not a review " <>
        "guard — there is nothing to review or retry (bd-6t7u81)"},
+    {Arbiter.Worker, :give_up_adoption, 1,
+     "bd-4p1vui: undoes an adoption of a held remote run that did not complete " <>
+       "(remote-workers.md §10.4.6 F5/F7/F12): the run goes back to its node's hold, " <>
+       "uncancelled, and the Worker stops without writing the run's row, so " <>
+       "Nodes.Recovery collects it. Infrastructure; nothing is refused, escalated or failed"},
     {Arbiter.Worker, :broadcast_done, 1, "completion notification"},
     {Arbiter.Worker, :handle_call, 3, "awaiting-review status notification"},
     {Arbiter.Worker, :escalate_output_log_failure, 2,

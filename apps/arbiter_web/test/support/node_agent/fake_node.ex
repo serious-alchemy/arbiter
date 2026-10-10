@@ -13,6 +13,9 @@ defmodule ArbiterWeb.FakeNode do
     * `:fake_node_ack?` — `false` makes it swallow heartbeats unanswered.
     * `:fake_node_tarball` — `{path, expected_version}` served at
       `GET /nodes/agent/<version>.tar.gz` (Bearer credential required).
+
+  The channel reports its pid on join (`{:fake_node, :channel, pid}`); sending it
+  `{:push, event, payload}` pushes that event to the agent (bd-4p1vui).
   """
 
   defmodule Socket do
@@ -47,7 +50,15 @@ defmodule ArbiterWeb.FakeNode do
     @impl true
     def join("node:" <> _ = topic, _params, socket) do
       notify(:joined, topic)
+      # bd-4p1vui: the test may push primary->node events through this channel
+      notify(:channel, self())
       {:ok, socket}
+    end
+
+    @impl true
+    def handle_info({:push, event, payload}, socket) do
+      push(socket, event, payload)
+      {:noreply, socket}
     end
 
     @impl true

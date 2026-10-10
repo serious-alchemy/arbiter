@@ -10,11 +10,12 @@ defmodule ArbiterWeb.NodeChannel do
   | `hello`        | attaches this channel to the node's session; pushes `hello_ok` (`boot_epoch`, thresholds, effective `max_workers`, per-run verdicts, health, optional `upgrade`) |
   | `hb`           | pushes `hb_ack` `{seq, boot_epoch}`; a heartbeat before `hello` is replied `error: hello_required` |
   | `run.ready`, `run.refused`, `exit`, binary `stdout` | forwarded to the session's run table (`Arbiter.Nodes.RunStreams`) |
+  | `adopt.refused` (bd-4p1vui) | forwarded to the session: the node would not hand a held run to a new Worker |
   | `capacity` (K12, A3) | forwarded to the session (`capacity{ceiling, running, pending, headroom, constrained}`) |
   | `bridge.open`, `bridge.data` (binary), `bridge.credit`, `bridge.recv`, `bridge.close`, `bridge.reset` | forwarded to this connection's `Arbiter.Nodes.Bridge` (RW10), started on the first one; its pushes come back as `{:node_bridge, {:push, event, payload}}` |
 
   Pushed by the primary: the run protocol (`assign`, `cancel`, `signal`, `ack`,
-  `exit_ack`; RW9), `drain` `{on: true | false}`, and `upgrade`
+  `exit_ack`; RW9; `adopt`, bd-4p1vui), `drain` `{on: true | false}`, and `upgrade`
   `{version, sha256}` when the operator asks for it (`Arbiter.Nodes.upgrade/2`). A node can only join its
   own topic.
 
@@ -79,7 +80,7 @@ defmodule ArbiterWeb.NodeChannel do
 
   # The run protocol (RW9): the node's events go to the session, which owns the
   # run table. A run event before `hello` has no session to go to and is dropped.
-  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity exec.result)
+  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity exec.result adopt.refused)
 
   def handle_in(event, payload, %{assigns: %{session: session}} = socket)
       when event in @run_events and is_map(payload) do

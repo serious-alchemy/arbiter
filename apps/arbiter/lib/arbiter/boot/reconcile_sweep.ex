@@ -4,8 +4,9 @@ defmodule Arbiter.Boot.ReconcileSweep do
   one order, under `Arbiter.Boot.ResumeGate`:
 
     1. **`Arbiter.Nodes.Recovery.await/1`** (RW12, `docs/design/remote-workers.md`
-       §10.5): pull what nodes retained across the restart into the home clones,
-       bounded (60 s per node, 90 s in all). It is first because everything below
+       §10.5): hand each run a node kept across the restart to a new Worker when it
+       can (adoption, bd-4p1vui, §10.4.3), else pull what the node retained into the
+       home clone, bounded (60 s per node, 90 s in all). It is first because everything below
        decides about runs from their rows: `Workers.Reconciler` marks a live row with
        no Worker `interrupted`, and `reconcile_resumable_tasks/1` resumes the task
        from its home clone. A resume that provisioned before the work was recovered
@@ -102,6 +103,7 @@ defmodule Arbiter.Boot.ReconcileSweep do
     Enum.map_join(counts, ", ", fn {k, n} -> "#{n} #{k}" end)
   end
 
+  defp outcome(:adopted), do: "adopted"
   defp outcome(:collected), do: "collected"
   defp outcome({:unreachable, reason}), do: "unreachable (#{inspect(reason)})"
 end

@@ -20,6 +20,15 @@ defmodule Arbiter.Nodes.LivenessTest do
       assert t.fence_after_s < t.lost_after_s
       assert {:ok, ^t} = Liveness.validate(t)
     end
+
+    # bd-4p1vui (§10.4.8): how long an agent keeps its runs with no socket (a primary
+    # restart closes it): twice the measured 91 s deploy, above the 90 s fence ceiling.
+    test "an agent with no socket keeps its runs for 180 s" do
+      t = Liveness.current()
+      assert t.restart_grace_s == 180
+      assert t.restart_grace_s > t.lost_after_s
+      assert Liveness.restart_grace_s() == 180
+    end
   end
 
   describe "validate/1" do
