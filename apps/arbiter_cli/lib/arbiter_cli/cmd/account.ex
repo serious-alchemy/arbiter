@@ -328,6 +328,7 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts("Max concurrent: #{account["max_concurrent"] || "(none)"}")
 
     emit_merged_into(account["merged_into_id"])
+    emit_spend_cap(account["spend_cap"])
 
     IO.puts("")
     IO.puts("Credentials:")
@@ -337,6 +338,33 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts("Workspaces:")
     emit_show_section(account["workspaces"], &emit_link_line/1)
   end
+
+  # bd-a6grlr: the dollar spend cap and the metered spend so far in its window.
+  defp emit_spend_cap(nil), do: :ok
+
+  defp emit_spend_cap(%{"metered" => false} = cap) do
+    IO.puts(
+      "Spend cap:    #{usd(cap["cap_usd"])}/#{cap["window"]} (#{cap["mode"]}) — no metered spend"
+    )
+
+    IO.puts("              (subscription / free-tier costs are notional and never count)")
+  end
+
+  defp emit_spend_cap(cap) do
+    IO.puts("Spend cap:    #{usd(cap["cap_usd"])}/#{cap["window"]} (#{cap["mode"]})")
+
+    IO.puts(
+      "              #{usd(cap["spent_usd"])} metered spend + #{usd(cap["in_flight_usd"])} in flight " <>
+        "= #{usd(cap["used_usd"])}; #{usd(cap["allowed_usd"])} allowed by now; resets #{cap["resets_at"]}"
+    )
+
+    if cap["holding"] || cap["state"] == "holding" do
+      IO.puts("              HOLDING fresh dispatches: #{cap["reason"]}")
+    end
+  end
+
+  defp usd(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n * 1.0, decimals: 2)
+  defp usd(_), do: "$0.00"
 
   defp emit_merged_into(nil), do: :ok
   defp emit_merged_into(id), do: IO.puts("Merged into: #{id}")
@@ -548,8 +576,13 @@ defmodule ArbiterCli.Cmd.Account do
 
   defp parse_usd!(value) do
     case Float.parse(String.trim_leading(value, "$")) do
-      {f, ""} when f > 0 -> f
-      _ -> Output.die("--spend-cap must be a positive dollar amount or `none` (got #{inspect(value)})")
+      {f, ""} when f > 0 ->
+        f
+
+      _ ->
+        Output.die(
+          "--spend-cap must be a positive dollar amount or `none` (got #{inspect(value)})"
+        )
     end
   end
 
