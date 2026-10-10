@@ -307,17 +307,21 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   defp tolerations(list) when is_list(list) do
     normal = Enum.map(list, &if(is_map(&1), do: stringify(&1), else: &1))
 
-    if Enum.all?(normal, fn t ->
-         is_map(t) and Map.keys(t) -- @toleration_keys == [] and
-           Enum.all?(t, fn {k, v} ->
-             if k == "tolerationSeconds", do: is_integer(v), else: is_binary(v)
-           end)
-       end),
-       do: {:ok, normal},
-       else: {:error, {:bad_value, :tolerations}}
+    if Enum.all?(normal, &toleration?/1),
+      do: {:ok, normal},
+      else: {:error, {:bad_value, :tolerations}}
   end
 
   defp tolerations(_), do: {:error, {:bad_value, :tolerations}}
+
+  defp toleration?(%{} = t) do
+    Map.keys(t) -- @toleration_keys == [] and Enum.all?(t, &toleration_field?/1)
+  end
+
+  defp toleration?(_), do: false
+
+  defp toleration_field?({"tolerationSeconds", v}), do: is_integer(v)
+  defp toleration_field?({_k, v}), do: is_binary(v)
 
   defp name_or_empty(""), do: {:ok, ""}
   defp name_or_empty(value), do: matching(value, @subdomain_re)
