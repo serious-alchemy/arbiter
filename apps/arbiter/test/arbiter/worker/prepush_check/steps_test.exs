@@ -171,6 +171,61 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
       resolved
     end
 
+    test "a missing-deps failure is infra: the step is skipped, never a code failure", %{
+      repo: repo
+    } do
+      script =
+        "echo 'Unchecked dependencies for environment test:' 1>&2; " <>
+          "echo '* ash (Hex package)' 1>&2; " <>
+          "echo '  the dependency is not available, run \"mix deps.get\"' 1>&2; exit 1"
+
+      spec = spec([step("compile", script), step("fmt", "true")])
+
+      assert %{result: {:error, {:infra, "compile", _}}, steps: [compile, fmt]} =
+               PrepushCheck.run_steps(spec, repo)
+
+      assert compile.status == :skipped
+      assert compile.reason == :infra
+      assert compile.exit_status == nil
+      assert compile.output =~ "skipped: infra"
+      assert compile.output =~ "the dependency is not available"
+      assert fmt.status == :passed
+    end
+
+    test "other infra signatures: unknown import_deps dep, missing tool, container errors",
+         %{repo: repo} do
+      for output <- [
+            "** (Mix) Unknown dependency :ash_phoenix given to :import_deps in the formatter configuration",
+            "sh: 1: mix: not found",
+            "Error: crun: executable file `mix` not found in $PATH: No such file or directory",
+            "Error: creating container storage: the image is not known",
+            "Cannot connect to Podman. Please verify your connection to the Linux system"
+          ] do
+        spec = spec([step("s", "printf '%s\\n' '#{output}'; exit 1")])
+
+        assert %{result: {:error, {:infra, "s", _}}, steps: [%{status: :skipped, reason: :infra}]} =
+                 PrepushCheck.run_steps(spec, repo),
+               "expected infra for: #{output}"
+      end
+    end
+
+    test "a real failure that merely mentions a path is still a code failure", %{repo: repo} do
+      spec = spec([step("fmt", "echo 'lib/a.ex is not formatted'; exit 1")])
+
+      assert %{result: {:failed, 1, _}, steps: [%{status: :failed}]} =
+               PrepushCheck.run_steps(spec, repo)
+    end
+
+    test "an infra step does not hide a real failure in another step", %{repo: repo} do
+      spec =
+        spec([
+          step("deps", "echo 'run mix deps.get' 1>&2; exit 1"),
+          step("credo", "echo real-red; exit 2")
+        ])
+
+      assert %{result: {:failed, 2, "real-red"}} = PrepushCheck.run_steps(spec, repo)
+    end
+
     test "all green: :ok, one passed result per step with timing", %{repo: repo} do
       spec = spec([step("one", "true"), step("two", "echo hi")])
 

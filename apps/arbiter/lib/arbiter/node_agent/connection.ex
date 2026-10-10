@@ -321,7 +321,36 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # bd-9rrrgk: the primary wants a command run in a run's container (the pre-push
+  # recipe). It can take minutes, so it runs off this process and answers with an
+  # `exec.result`: `status` + `output`, or an `error` when it could not be started.
+  @max_exec_seconds 3600
+  defp push(state, "exec", %{"run" => run, "id" => id, "command" => command, "timeout_s" => secs})
+       when is_binary(run) and is_binary(id) and is_binary(command) and is_integer(secs) and
+              secs > 0 do
+    me = self()
+    backend = backend(state)
+    opts = run_opts(state)
+    secs = min(secs, @max_exec_seconds)
+
+    Task.Supervisor.start_child(state.task_supervisor, fn ->
+      result =
+        case exec(backend, run, command, secs, opts) do
+          {output, status} when is_binary(output) and is_integer(status) ->
+            %{"status" => status, "output" => output}
+
+          {:error, reason} ->
+            %{"error" => inspect(reason, limit: 10, printable_limit: 300)}
+        end
+
+      send(me, {:run_push, run, "exec.result", Map.merge(result, %{"run" => run, "id" => id})})
+    end)
+
+    state
+  end
+
   # RW11: the primary wants a checkpoint now.
+
   defp push(state, "collect", %{"run" => run, "kind" => "checkout"}) do
     backend(state).collect(run, kind: "checkout")
     state
@@ -506,6 +535,16 @@ defmodule Arbiter.NodeAgent.Connection do
   end
 
   defp backend(state), do: state.config.backend
+
+  defp exec(backend, run, command, secs, opts) do
+    Code.ensure_loaded(backend)
+
+    if function_exported?(backend, :exec, 4),
+      do: backend.exec(run, command, secs, opts),
+      else: {:error, :unsupported}
+  rescue
+    e -> {:error, {:exec_crashed, Exception.message(e)}}
+  end
 
   defp bridge(state), do: Keyword.get(state.config.run_opts, :bridge, Bridge)
 

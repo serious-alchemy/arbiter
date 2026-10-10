@@ -1017,6 +1017,74 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  Fetch each of `branches` from `origin` into the checkout at `path` and return
+  `%{branch => sha}` of the `refs/remotes/origin/<branch>` they now resolve to: the
+  forge's tips as of this call (bd-bg87oz). `{:error, {:fetch_failed, msg}}` when
+  the fetch fails or a ref does not resolve after it (a branch the forge lacks).
+  """
+  @spec fetch_origin_tips(path(), [String.t()]) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:fetch_failed, String.t()}}
+  def fetch_origin_tips(path, branches) when is_binary(path) and is_list(branches) do
+    case run_git(["fetch", "--no-tags", "origin" | branches], cd: path) do
+      {:ok, _} -> origin_tips(path, branches)
+      {:error, {:git_failed, msg}} -> {:error, {:fetch_failed, msg}}
+    end
+  end
+
+  defp origin_tips(path, branches) do
+    Enum.reduce_while(branches, {:ok, %{}}, fn branch, {:ok, acc} ->
+      case run_git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/" <> branch],
+             cd: path
+           ) do
+        {:ok, out} -> {:cont, {:ok, Map.put(acc, branch, String.trim(out))}}
+        {:error, _} -> {:halt, {:error, {:fetch_failed, "origin/#{branch} does not resolve"}}}
+      end
+    end)
+  end
+
+  @doc """
+  Bring the local `branch` of the checkout at `path` to `remote_sha` when it is
+  behind it, never discarding a commit (bd-bg87oz):
+
+    * `{:ok, :equal}` — already there;
+    * `{:ok, :fast_forwarded}` — behind: moved (a `merge --ff-only` when the branch
+      is checked out, else the ref);
+    * `{:ok, :ahead}` — `remote_sha` is an ancestor of the branch: left alone;
+    * `{:error, {:diverged, local, remote}}` — neither contains the other.
+  """
+  @spec align_branch(path(), String.t(), String.t()) ::
+          {:ok, :equal | :fast_forwarded | :ahead}
+          | {:error, {:diverged, String.t(), String.t()} | error_reason()}
+  def align_branch(path, branch, remote_sha)
+      when is_binary(path) and is_binary(branch) and is_binary(remote_sha) do
+    ref = "refs/heads/" <> branch
+
+    with {:ok, out} <- run_git(["rev-parse", "--verify", "--quiet", ref], cd: path) do
+      local = String.trim(out)
+
+      cond do
+        local == remote_sha -> {:ok, :equal}
+        commit_ancestor?(path, local, remote_sha) -> fast_forward(path, branch, remote_sha)
+        commit_ancestor?(path, remote_sha, local) -> {:ok, :ahead}
+        true -> {:error, {:diverged, local, remote_sha}}
+      end
+    end
+  end
+
+  defp commit_ancestor?(path, ancestor, descendant),
+    do: match?({:ok, _}, run_git(["merge-base", "--is-ancestor", ancestor, descendant], cd: path))
+
+  defp fast_forward(path, branch, remote_sha) do
+    result =
+      case current_branch(path) do
+        {:ok, ^branch} -> run_git(["merge", "--ff-only", "--quiet", remote_sha], cd: path)
+        _ -> run_git(["update-ref", "refs/heads/" <> branch, remote_sha], cd: path)
+      end
+
+    with {:ok, _} <- result, do: {:ok, :fast_forwarded}
+  end
+
+  @doc """
   Whether merging `head` into `target` (both revs resolvable from `path`) conflicts,
   by `git merge-tree --write-tree`: `:clean`, `{:conflict, files}` naming the
   conflicted paths, or `:unknown` when git could not say (an unreadable rev, no git).

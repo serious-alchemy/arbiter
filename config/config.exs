@@ -136,6 +136,12 @@ config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
 # (bd-2wnkoq).
 config :arbiter, :quota_staleness_watch, enabled: true, interval_ms: 60_000
 
+# The provider concurrency budget (bd-6c8g4t, DC3 of
+# docs/design/provider-dynamic-concurrency.md): recomputed every `interval_ms`,
+# on each quota capture and at each window reset. Read by nothing on an
+# admission path until DC8, so it changes no dispatch decision.
+config :arbiter, :quota_budget_server, enabled: true, interval_ms: 60_000
+
 # Append-only quota history (`quota_snapshots`) retention window in days
 # (bd-3qfc81, R2).
 config :arbiter, :quota_history, retention_days: 90

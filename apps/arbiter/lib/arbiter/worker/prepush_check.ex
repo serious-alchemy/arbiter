@@ -38,8 +38,15 @@ defmodule Arbiter.Worker.PrepushCheck do
       backstop. `on_timeout: :fail` treats it as a failure instead.
     * the checks could not be run at all (no worktree on disk, no `timeout`
       binary, a command `sh` could not exec → 126/127, the sandbox refused,
-      spawn raised) → `{:error, reason}`; always fails open. A broken check
-      must not strand work.
+      the node could not be asked, spawn raised) → `{:error, reason}`; always
+      fails open. A broken check must not strand work.
+    * a step exited non-zero but its output says the *environment* is broken, not
+      the code (the deps were never fetched, the tool is not in the image, the
+      container did not start; `infra_signature/1`) → the step is `:skipped` with
+      reason `:infra` and an output starting `skipped: infra (…)`, and the result
+      is `{:error, {:infra, step_name, label}}`: it fails open like any other
+      error, is never sent to the worker as a code failure, and so never uses one
+      of its attempts (bd-9rrrgk). A real failure in another step still wins.
 
   `steps` is the per-step record (`t:step_result/0`) the worker writes to the
   run (`Arbiter.Workers.RunStep` rows) and `arb worker show` renders.
@@ -52,7 +59,11 @@ defmodule Arbiter.Worker.PrepushCheck do
   secrets, no inherited `MIX_ENV`) and a private per-run `TMPDIR`
   (`Arbiter.Worker.RunTmp`). A podman-sandboxed run passes `:exec` instead
   (`Arbiter.Worker.ContainerSpawn.run_command/3`): the same steps then run in
-  the run's own container, with its mounts, home and no network.
+  the run's own container, with its mounts, home and no network. A run placed on a
+  node passes the node's `:exec` (`Arbiter.Worker.Executor.Node.exec/4`): the
+  steps then run in a container the node's agent builds from the run's spec
+  (`Arbiter.NodeAgent.Exec`), where its image and deps are; the primary's copy of
+  the worktree has neither (bd-9rrrgk).
   """
 
   alias Arbiter.Worker.PrepushCheck.Recipe
@@ -261,20 +272,51 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   # coreutils `timeout`: 124 = the command timed out, 137 = it needed the
   # SIGKILL; 126/127 = `sh` could not exec the command itself.
-  defp classify({:error, reason}), do: {:error, reason, ""}
+  defp classify({:error, reason}),
+    do: {:error, reason, "the check could not be run: " <> inspect(reason, limit: 10)}
+
   defp classify({_output, 0}), do: {:passed, 0, ""}
   defp classify({output, status}) when status in [124, 137], do: {:timeout, status, tail(output)}
 
   defp classify({output, status}) when status in [126, 127],
     do: {:error, {:not_runnable, status, tail(output)}, tail(output)}
 
-  defp classify({output, status}), do: {:failed, status, tail(output)}
+  defp classify({output, status}) do
+    case infra_signature(output) do
+      nil -> {:failed, status, tail(output)}
+      label -> {:infra, label, tail(output)}
+    end
+  end
+
+  # A non-zero exit whose output says the *environment* is broken, not the code:
+  # the deps were never fetched (the run's checkout is not the worker's seeded
+  # one), a tool is missing from the image, or the container did not start. It
+  # must never be sent to the worker as a code failure, so it is recorded as
+  # `skipped: infra` and the gate fails open (bd-9rrrgk). Matched on the output
+  # of a failing step only, and on phrases a code failure does not print.
+  @infra_signatures [
+    {"dependencies are not available (mix deps.get)",
+     ~r/the dependency is not available|Unchecked dependencies for environment|Can't continue due to errors on dependencies|dependency [\w:]+ is not available|run [`"']?mix deps\.get/i},
+    {"deps missing for the formatter's import_deps",
+     ~r/Unknown dependency :\w+ given to :import_deps/},
+    {"tool not found in the image",
+     ~r/(^|\n)(sh: (\d+: )?)?(mix|elixir|erl|node|npm|cargo|git|make): (command )?not found|executable file `[^`]+` not found in \$PATH/},
+    {"container could not start",
+     ~r/Cannot connect to Podman|(^|\n)Error: (crun|runc|creating container|.*image (is )?not known|.*no such image|.*unable to (start|find) |.*OCI runtime)|podman: command not found/i}
+  ]
+
+  defp infra_signature(output) when is_binary(output) do
+    Enum.find_value(@infra_signatures, fn {label, re} ->
+      if Regex.match?(re, output), do: label
+    end)
+  end
 
   defp record(step, outcome, duration_ms, limit) do
     {status, exit_status, reason, output} =
       case outcome do
         {:skipped, why, note} -> {:skipped, nil, why, note}
         {:error, why, out} -> {:error, nil, why, out}
+        {:infra, label, out} -> {:skipped, nil, :infra, infra_output(label, out)}
         {status, code, out} -> {status, code, nil, out}
       end
 
@@ -299,6 +341,9 @@ defmodule Arbiter.Worker.PrepushCheck do
       timed_out = Enum.find(results, &(&1.status == :timeout or budget_skip?(&1))) ->
         {:timeout, timed_out.output}
 
+      infra = Enum.find(results, &infra_skip?/1) ->
+        {:error, {:infra, infra.name, infra_label(infra.output)}}
+
       errored = Enum.find(results, &(&1.status == :error)) ->
         {:error, errored.reason}
 
@@ -309,6 +354,18 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp budget_skip?(%{status: :skipped, reason: :budget}), do: true
   defp budget_skip?(_), do: false
+
+  defp infra_skip?(%{status: :skipped, reason: :infra}), do: true
+  defp infra_skip?(_), do: false
+
+  defp infra_output(label, out), do: "skipped: infra (#{label})\n" <> out
+
+  defp infra_label(output) do
+    case Regex.run(~r/\Askipped: infra \((.*)\)/, output) do
+      [_, label] -> label
+      _ -> "infrastructure"
+    end
+  end
 
   @doc """
   The last `max` bytes of `text`, cut on a line boundary and prefixed with a

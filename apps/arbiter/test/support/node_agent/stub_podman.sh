@@ -38,7 +38,10 @@ case "$sub" in
               # what the shadow was seeded at (RW11), before the "run" edits it
               git -C "$h" rev-parse HEAD > "$D/seeded.head" 2>/dev/null
               echo "edited by the run" > "$h/edited.txt"
-              echo '{}' > "$h/.mcp.json" ;;
+              echo '{}' > "$h/.mcp.json"
+              # bd-bg87oz: a pass that writes commits. `shadow_script` is run with the shadow
+              # clone's path, as the agent's work in it (a rebase, a fix commit).
+              if [ -e "$D/shadow_script" ]; then sh "$D/shadow_script" "$h" > "$D/shadow_script.out" 2>&1; fi ;;
             *:/work/config|*:/work/config:*)
               h="${a%%:*}"
               mkdir -p "$h/projects/-work-tree"

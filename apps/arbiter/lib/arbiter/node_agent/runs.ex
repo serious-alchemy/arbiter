@@ -19,6 +19,7 @@ defmodule Arbiter.NodeAgent.Runs do
   def child_specs do
     [
       {Registry, keys: :unique, name: @registry},
+      Arbiter.NodeAgent.Exec,
       {DynamicSupervisor, name: @supervisor, strategy: :one_for_one}
     ]
   end

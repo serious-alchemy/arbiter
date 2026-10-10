@@ -334,6 +334,7 @@ defmodule Arbiter.Nodes.RunStreams do
         node_lost?: false
       }
       |> put_pod_disrupted(exit)
+      |> put_checkout_failed(exit)
 
     flushed =
       for frame <- LineSplitter.flush(s.partial),
@@ -344,6 +345,14 @@ defmodule Arbiter.Nodes.RunStreams do
     {put_in(table.streams[run], s),
      effects ++ flushed ++ ended(s, outcome, status) ++ [{:push, "exit_ack", %{"run" => run}}]}
   end
+
+  # bd-bg87oz: the agent's last upload of the run's checkout failed (its exit report says
+  # `"checkout": "failed: ..."`), so the home clone does not hold the run's final work. Only
+  # set when true, like `pod_disrupted?`.
+  defp put_checkout_failed(outcome, %{"checkout" => "failed" <> _}),
+    do: Map.put(outcome, :checkout_failed?, true)
+
+  defp put_checkout_failed(outcome, _exit), do: outcome
 
   # A5: the pod was evicted, preempted or deleted from outside. Only set when true, so a
   # machine node's outcome map is exactly what it was.

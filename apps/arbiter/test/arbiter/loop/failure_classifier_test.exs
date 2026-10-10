@@ -146,6 +146,26 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       assert r.corroborated
     end
 
+    test "a grok session line corroborates exactly like a claude one" do
+      r =
+        FC.classify(
+          "agent was rate-limited / the API was overloaded",
+          [@autocompact, "⚙ grok session error · 72.9s · $0.6276"]
+        )
+
+      assert r.class == :agent_quality
+      assert r.subcategory == :context_exhaustion
+      assert r.reclassified
+
+      bare =
+        FC.classify("agent was rate-limited / the API was overloaded", [
+          "⚙ grok session error · 72.9s · $0.6276"
+        ])
+
+      assert bare.class == :operational
+      refute bare.reclassified
+    end
+
     test "a BARE claude session error (no autocompact) does NOT reclassify — it is non-discriminating" do
       # On the real corpus a bare `claude session error` ends nearly every
       # failed session regardless of cause. Keying context-exhaustion on it

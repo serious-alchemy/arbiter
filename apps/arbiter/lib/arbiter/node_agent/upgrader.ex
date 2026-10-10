@@ -38,7 +38,7 @@ defmodule Arbiter.NodeAgent.Upgrader do
   def handle_call({:request, %{"version" => version} = spec}, _from, state)
       when is_binary(version) do
     cond do
-      version == state.config.version -> {:reply, :ignored, state}
+      Upgrade.same_version?(version, state.config.version) -> {:reply, :ignored, state}
       state.in_flight -> {:reply, :ignored, state}
       true -> {:reply, :started, start(state, version, spec)}
     end

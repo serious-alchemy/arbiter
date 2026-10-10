@@ -17,6 +17,8 @@ defmodule Arbiter.NodeAgent.BackendTest do
     capacity: 0,
     readiness: 0
   ]
+  # bd-9rrrgk: optional; a backend without it answers `{:error, :unsupported}`.
+  @optional [exec: 4]
 
   defp load(extra_env \\ %{}) do
     Config.load(
@@ -27,14 +29,15 @@ defmodule Arbiter.NodeAgent.BackendTest do
     )
   end
 
-  test "the behaviour declares the ten callbacks" do
-    assert Enum.sort(Backend.behaviour_info(:callbacks)) == Enum.sort(@callbacks)
+  test "the behaviour declares the ten callbacks, plus the optional exec" do
+    assert Enum.sort(Backend.behaviour_info(:callbacks)) == Enum.sort(@callbacks ++ @optional)
+    assert Backend.behaviour_info(:optional_callbacks) == @optional
   end
 
   test "the podman backend implements every callback" do
     Code.ensure_loaded!(Backend.Podman)
 
-    for {fun, arity} <- @callbacks do
+    for {fun, arity} <- @callbacks ++ @optional do
       assert function_exported?(Backend.Podman, fun, arity), "#{fun}/#{arity} missing"
     end
 
