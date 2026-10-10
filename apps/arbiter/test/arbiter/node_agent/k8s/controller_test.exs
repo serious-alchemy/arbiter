@@ -957,6 +957,29 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assign!(controller, 2)
     end
 
+    test "the readiness monitor's verdict rides in report/1 and is pushed when it changes", env do
+      monitor =
+        start_supervised!(
+          {Arbiter.NodeAgent.K8s.ReadinessMonitor,
+           client: env.client,
+           config_fun: fn -> {:error, :no_config} end,
+           autostart: false,
+           interval_ms: nil}
+        )
+
+      controller = start_controller(env, readiness: monitor)
+
+      # Fail closed: no canary has proven enforcement yet.
+      report = Controller.report(controller)
+      assert report.degraded == ["netpol_unenforced"]
+      assert %{"ready" => false, "checks" => [%{"id" => "netpol"} | _]} = report.readiness
+
+      send(controller, {:k8s_readiness, monitor, %{degraded: [], checks: []}})
+
+      assert_receive {:run_push, nil, "readiness",
+                      %{"degraded" => [], "readiness" => %{"ready" => true}}}
+    end
+
     test "a good edit changes the ceiling and pushes a capacity event", env do
       loader =
         start_supervised!({ConfigLoader, path: env.config_path, interval_ms: nil, notify: nil},
