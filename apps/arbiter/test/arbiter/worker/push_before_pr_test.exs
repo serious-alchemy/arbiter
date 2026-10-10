@@ -242,6 +242,72 @@ defmodule Arbiter.Worker.PushBeforePRTest do
     end
   end
 
+  # bd-4axlg0: a podman run rebases its own branch onto current main and cannot
+  # push, so the host's push meets a branch that has "diverged" from the one it
+  # pushed earlier. A rebase must be delivered (force-with-lease), a third
+  # party's push must not be overwritten.
+  describe "a rebased own branch (bd-4axlg0)" do
+    @open_opts %{
+      adapter: StubMerger,
+      workspace: nil,
+      strategy: :github,
+      interval_ms: 1_000_000,
+      initial_delay_ms: 1_000_000
+    }
+
+    defp rebased_onto_new_main(repo) do
+      {_, 0} = git(["push", "-q", "-u", "origin", "feature/abc"], repo.worktree)
+      {pushed, 0} = git(["rev-parse", "HEAD"], repo.worktree)
+
+      other = Path.join(Path.dirname(repo.worktree), "other-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", repo.bare, other])
+      {_, 0} = git(["config", "user.email", "o@example.com"], other)
+      {_, 0} = git(["config", "user.name", "O"], other)
+      {_, 0} = git(["config", "commit.gpgsign", "false"], other)
+      File.write!(Path.join(other, "main-moved.txt"), "moved\n")
+      {_, 0} = git(["add", "main-moved.txt"], other)
+      {_, 0} = git(["commit", "-q", "-m", "main moved"], other)
+      {_, 0} = git(["push", "-q", "origin", "main"], other)
+
+      {_, 0} = git(["fetch", "-q", "origin"], repo.worktree)
+      {_, 0} = git(["rebase", "-q", "origin/main"], repo.worktree)
+      {local, 0} = git(["rev-parse", "HEAD"], repo.worktree)
+      refute local == pushed
+
+      {String.trim(pushed), String.trim(local), other}
+    end
+
+    defp origin_sha(repo, ref) do
+      {out, 0} = git(["rev-parse", ref], repo.bare)
+      String.trim(out)
+    end
+
+    test "is delivered with a lease instead of failing as diverged", %{pid: pid, repo: repo} do
+      {_pushed, local, _other} = rebased_onto_new_main(repo)
+
+      assert {:ok, _ref} = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+      assert origin_sha(repo, "feature/abc") == local
+      assert StubMerger.last_open() != nil
+    end
+
+    test "is refused, and origin left alone, when a third party pushed to the branch",
+         %{pid: pid, repo: repo} do
+      {_pushed, _local, other} = rebased_onto_new_main(repo)
+      {_, 0} = git(["checkout", "-q", "feature/abc"], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      {_, 0} = git(["add", "theirs.txt"], other)
+      {_, 0} = git(["commit", "-q", "-m", "theirs"], other)
+      {_, 0} = git(["push", "-q", "origin", "feature/abc"], other)
+      theirs = origin_sha(repo, "feature/abc")
+
+      # The ordinary path (rebase onto theirs, plain push) still applies; what
+      # must never happen is the rewrite overwriting their commit.
+      _ = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+
+      {_, 0} = git(["merge-base", "--is-ancestor", theirs, "feature/abc"], repo.bare)
+    end
+  end
+
   describe "no worktree on disk (coordinator / ad-hoc path)" do
     test "worker proceeds without push when worktree_path is absent", %{} do
       task_id = "test-#{System.unique_integer([:positive])}"

@@ -318,6 +318,148 @@ defmodule Arbiter.Reviews.PushStateTest do
     end
   end
 
+  # ---- ensure_pushed/3: a rebased own branch (bd-4axlg0) --------------------
+  #
+  # A podman fix round rebases its branch onto current main and commits; the
+  # host (which holds the forge credential) must deliver that rewrite. The
+  # rewrite is a lease-pinned push, allowed only when the remote branch holds
+  # nothing Arbiter has not got: its head is the one Arbiter last pushed
+  # (`:expected_remote`), or every remote-only commit is patch-equivalent to a
+  # commit the rewritten history still carries.
+
+  describe "ensure_pushed/3 delivering a rebase of the ticket's own branch" do
+    test "pushes the rebase when the remote head is the one Arbiter last pushed", %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+      local = sha(repo, "HEAD")
+      assert local != pushed
+
+      assert {:ok, :pushed, state} = PushState.ensure_pushed(repo, b, expected_remote: pushed)
+      assert state.status == :in_sync
+      assert remote_sha(tmp, b) == local
+    end
+
+    test "pushes a clean rebase whose commits are patch-equivalent, with no recorded head",
+         %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp)
+      local = sha(repo, "HEAD")
+      assert local != pushed
+
+      assert {:ok, :pushed, _state} = PushState.ensure_pushed(repo, b)
+      assert remote_sha(tmp, b) == local
+    end
+
+    test "refuses when a third party pushed a commit Arbiter did not, even with a recorded head",
+         %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp)
+      theirs = third_party_push(tmp, b)
+
+      assert {:error, :diverged, state} =
+               PushState.ensure_pushed(repo, b, expected_remote: pushed)
+
+      assert state.status == :diverged
+      assert remote_sha(tmp, b) == theirs
+    end
+
+    test "refuses an unrecorded rebase when the remote carries a unique commit", %{tmp: tmp} do
+      {repo, b, _pushed} = rebased_branch(tmp, amend: true)
+      theirs = third_party_push(tmp, b)
+
+      assert {:error, :diverged, _state} = PushState.ensure_pushed(repo, b)
+      assert remote_sha(tmp, b) == theirs
+    end
+
+    test "the lease holds if the remote moves between the check and the push", %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+
+      # A third party lands a commit after our check, just as the push starts.
+      other = clone_other(tmp)
+      git!(["checkout", "-q", b], other)
+      theirs = commit(other, "theirs.txt")
+      hook = Path.join([repo, ".git", "hooks", "pre-push"])
+
+      File.write!(hook, """
+      #!/bin/sh
+      unset GIT_DIR
+      git -C #{other} push -q origin #{b}
+      exit 0
+      """)
+
+      File.chmod!(hook, 0o755)
+
+      assert {:error, :push_failed, _state} =
+               PushState.ensure_pushed(repo, b, expected_remote: pushed)
+
+      assert remote_sha(tmp, b) == theirs
+    end
+
+    test "rewrites only the ticket's own branch", %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+      main_before = remote_sha(tmp, "main")
+
+      assert {:ok, :pushed, _} = PushState.ensure_pushed(repo, b, expected_remote: pushed)
+      assert remote_sha(tmp, "main") == main_before
+    end
+
+    test "a worktree on another branch still pushes nothing", %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+      git!(["checkout", "-q", "main"], repo)
+
+      assert {:ok, :unknown, _} = PushState.ensure_pushed(repo, b, expected_remote: pushed)
+      assert remote_sha(tmp, b) == pushed
+    end
+  end
+
+  # origin/main moves on; the feature branch (already pushed) is rebased onto it.
+  # `amend: true` also rewrites a commit's content, so its patch-id changes.
+  defp rebased_branch(tmp, opts \\ []) do
+    repo = init_repo(tmp)
+    b = branch(repo, "feature/x")
+    commit(repo, "a.txt")
+    commit(repo, "b.txt")
+    git!(["push", "-q", "-u", "origin", b], repo)
+    pushed = sha(repo, "HEAD")
+
+    other = clone_other(tmp)
+    git!(["checkout", "-q", "main"], other)
+    commit(other, "main-moved.txt")
+    git!(["push", "-q", "origin", "main"], other)
+
+    git!(["fetch", "-q", "origin"], repo)
+    git!(["rebase", "-q", "origin/main"], repo)
+
+    if Keyword.get(opts, :amend, false) do
+      File.write!(Path.join(repo, "b.txt"), "amended while resolving\n")
+      git!(["commit", "-q", "-a", "--amend", "--no-edit"], repo)
+    end
+
+    {repo, b, pushed}
+  end
+
+  defp clone_other(tmp) do
+    other = Path.join(tmp, "other")
+
+    unless File.dir?(other) do
+      git!(["clone", "-q", Path.join(tmp, "origin.git"), other], tmp)
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+    end
+
+    other
+  end
+
+  defp third_party_push(tmp, b) do
+    other = clone_other(tmp)
+    git!(["checkout", "-q", b], other)
+    theirs = commit(other, "theirs.txt")
+    git!(["push", "-q", "origin", b], other)
+    theirs
+  end
+
+  defp remote_sha(tmp, b) do
+    git!(["rev-parse", "refs/heads/" <> b], Path.join(tmp, "origin.git")) |> String.trim()
+  end
+
   # ---- reviewable_head/3 ---------------------------------------------------
 
   describe "reviewable_head/3" do

@@ -589,8 +589,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
         "the head a round reviews (and the head a stamp/coverage row names) must be on the remote branch",
       policy_note:
         "bd-2jkrqu. One push attempt per round, then the terminal: a diverged or " <>
-          "rejected push PARKS `:head_not_pushed` rather than force-pushing or " <>
-          "reviewing a head the MR does not carry. Undeterminable push state (no " <>
+          "rejected push PARKS `:head_not_pushed` rather than reviewing a head the " <>
+          "MR does not carry. The one divergence it delivers is a rebase of the " <>
+          "ticket's own branch (bd-4axlg0): `--force-with-lease` pinned to the " <>
+          "remote head, cleared only when that head is what the gate last saw or " <>
+          "every remote-only commit is patch-equivalent to a local one; never a " <>
+          "bare `--force`. Undeterminable push state (no " <>
           "`origin`, no worktree, git unavailable) fails OPEN — class B's posture, " <>
           "and the reason an ad-hoc checkout is not an incident. " <>
           "bd-bq8c8a added the pre-fix-round half: one fetch before the implementer " <>
