@@ -56,6 +56,8 @@ defmodule Arbiter.Quota.Budget.Server do
   @board_topic "board"
   @default_tick_ms 60_000
   @initial_delay_ms 5_000
+  # DC5: the popup's "recent changes", newest first, per pool.
+  @change_ring 5
   @calibration_every_ms 24 * 3_600_000
   @reset_margin_ms 60_000
 
@@ -79,7 +81,21 @@ defmodule Arbiter.Quota.Budget.Server do
   @doc "Every published budget."
   @spec all(atom()) :: [Budget.t()]
   def all(table \\ @table) do
-    table |> :ets.tab2list() |> Enum.map(&elem(&1, 1))
+    for {_key, %Budget{} = budget} <- :ets.tab2list(table), do: budget
+  rescue
+    ArgumentError -> []
+  end
+
+  @doc """
+  The last few published changes of one pool, newest first (DC5, §9): `%{at:, from:,
+  to:, reason:}`, `from` being `nil` for the pool's first budget.
+  """
+  @spec changes(String.t(), String.t(), String.t() | nil, atom()) :: [map()]
+  def changes(account_id, pool, policy_workspace \\ nil, table \\ @table) do
+    case :ets.lookup(table, {:changes, {account_id, pool, policy_workspace}}) do
+      [{_key, ring}] -> ring
+      [] -> []
+    end
   rescue
     ArgumentError -> []
   end
@@ -243,9 +259,12 @@ defmodule Arbiter.Quota.Budget.Server do
   # unpublished.
   defp drop_missing(state, keys) do
     gone =
-      for {key, _budget} <- :ets.tab2list(state.table), not MapSet.member?(keys, key), do: key
+      for {key, %Budget{}} <- :ets.tab2list(state.table), not MapSet.member?(keys, key), do: key
 
-    Enum.each(gone, &:ets.delete(state.table, &1))
+    Enum.each(gone, fn key ->
+      :ets.delete(state.table, key)
+      :ets.delete(state.table, {:changes, key})
+    end)
 
     %{
       state
@@ -288,7 +307,7 @@ defmodule Arbiter.Quota.Budget.Server do
     }
 
     :ets.insert(state.table, {key, errored})
-    if old == nil or old.binding != :error, do: announce(key, old, errored)
+    if old == nil or old.binding != :error, do: announce(state.table, key, old, errored)
 
     {key, state}
   end
@@ -308,7 +327,8 @@ defmodule Arbiter.Quota.Budget.Server do
 
     :ets.insert(state.table, {key, published})
 
-    if old == nil or old.budget != published.budget, do: announce(key, old, published)
+    if old == nil or old.budget != published.budget,
+      do: announce(state.table, key, old, published)
 
     trusted =
       if published.binding in [
@@ -330,13 +350,32 @@ defmodule Arbiter.Quota.Budget.Server do
     {key, %{state | hysteresis: Map.put(state.hysteresis, key, hyst), trusted: trusted}}
   end
 
-  defp announce({account, pool, policy_workspace}, old, %Budget{} = published) do
+  defp announce(table, {account, pool, policy_workspace} = key, old, %Budget{} = published) do
+    remember(table, key, old, published)
+
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       @board_topic,
       {:budget_changed, %{account: account, pool: pool, policy_workspace: policy_workspace},
        old && old.budget, published.budget, published.reason}
     )
+  end
+
+  defp remember(table, key, old, %Budget{} = published) do
+    change = %{
+      at: published.published_at || published.computed_at || DateTime.utc_now(),
+      from: old && old.budget,
+      to: published.budget,
+      reason: published.reason
+    }
+
+    ring =
+      case :ets.lookup(table, {:changes, key}) do
+        [{_key, ring}] -> ring
+        [] -> []
+      end
+
+    :ets.insert(table, {{:changes, key}, Enum.take([change | ring], @change_ring)})
   end
 
   # ---- timers ----------------------------------------------------------------

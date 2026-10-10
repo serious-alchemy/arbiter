@@ -134,6 +134,54 @@ defmodule Arbiter.Quota.Budget do
             published_at: nil,
             pending_rise: nil
 
+  # ---- JSON (DC5) -------------------------------------------------------------
+
+  @doc """
+  A JSON-safe rendering of a published budget (DC5, bd-2c2a4g; §9): the one
+  shape `arb scheduler status`, `scheduler_status`, `quota_get` and the board's
+  popups share, so the surfaces cannot drift. The integer and `reason` come
+  first; `windows` carries every number behind them.
+
+  `binding` is a string: a hard zero or `ceiling` by its name, a quota window
+  as `window:<label>`. `:unlimited` is the string `"unlimited"`.
+  """
+  @spec to_json(t()) :: map()
+  def to_json(%__MODULE__{} = b) do
+    %{
+      account: b.account,
+      pool: b.pool,
+      policy_workspace: b.policy_workspace,
+      budget: json_value(b.budget),
+      raw: b.raw,
+      exempt_budget: b.exempt_budget,
+      seats: b.seats,
+      free: json_value(b.free),
+      binding: binding_text(b.binding),
+      quota_binding: b.quota_binding,
+      reason: b.reason,
+      windows: Enum.map(b.windows, &json_value/1),
+      ceiling: b.ceiling,
+      horizon_h: b.horizon,
+      computed_at: b.computed_at,
+      published_at: b.published_at,
+      pending_rise: b.pending_rise
+    }
+  end
+
+  @doc "A binding as the text every surface shows: `ceiling`, `paused`, `window:5h`."
+  @spec binding_text(binding()) :: String.t()
+  def binding_text({:window, label}), do: "window:#{label}"
+  def binding_text(binding) when is_atom(binding), do: Atom.to_string(binding)
+  def binding_text(other), do: inspect(other)
+
+  defp json_value(value) when value in [nil, true, false], do: value
+  defp json_value(value) when is_atom(value), do: Atom.to_string(value)
+  defp json_value(%DateTime{} = value), do: value
+  defp json_value(%{} = map), do: Map.new(map, fn {k, v} -> {k, json_value(v)} end)
+  defp json_value(list) when is_list(list), do: Enum.map(list, &json_value/1)
+  defp json_value(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_value()
+  defp json_value(value), do: value
+
   # ---- compute (pure) -------------------------------------------------------
 
   @doc """
