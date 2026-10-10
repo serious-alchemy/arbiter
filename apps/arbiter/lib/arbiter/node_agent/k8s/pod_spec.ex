@@ -115,7 +115,6 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     "/run/arbiter"
   ]
   @reserved_env ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_BRIDGES ARB_GATE_ADDR ARB_GATE_TIMEOUT_S ARB_SNAPSHOT_INTERVAL_S ARB_RUN ARB_WORKTREE ARB_WORK_LIMIT_BYTES ARB_CONFIG_DIR)
-  @preset_uids %{"postgres" => 70}
   # Fields whose *contents* are data (a prompt may discuss `spc_t`); their keys are still not scanned.
   @data_keys ~w(env secrets command worker_env files content ready)
 
