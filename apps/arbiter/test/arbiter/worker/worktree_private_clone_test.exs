@@ -34,6 +34,53 @@ defmodule Arbiter.Worker.WorktreePrivateCloneTest do
     ])
   end
 
+  # bd-8nu4g6: a task-type ticket's inspect checkout on a podman workspace must be
+  # a (read-only) private clone, or the container spawn refuses it.
+  describe "create_detached/4 with layout: :private_clone" do
+    test "provisions a read-only private clone at origin/<base>, with no push path", ctx do
+      assert {:ok, path} =
+               Worktree.create_detached(ctx.checkout, "feature/bd-inspect-pc", "main",
+                 layout: :private_clone
+               )
+
+      assert path == Worktree.worktree_path("feature/bd-inspect-pc")
+      assert PrivateClone.clone?(path)
+      assert PrivateClone.read_only?(path)
+      assert PrivateClone.verify(path) == :ok
+      assert File.read!(Path.join(path, "README.md")) == "readme\n"
+      assert git!(path, ["rev-parse", "HEAD"]) == git!(ctx.checkout, ["rev-parse", "origin/main"])
+      assert {:error, :read_only_clone} = PrivateClone.sync_back(path)
+    end
+
+    test "re-provisioning replaces the clone and cleanup removes it", ctx do
+      {:ok, path} =
+        Worktree.create_detached(ctx.checkout, "feature/bd-inspect-pc2", "main",
+          layout: :private_clone
+        )
+
+      assert {:ok, ^path} =
+               Worktree.create_detached(ctx.checkout, "feature/bd-inspect-pc2", "main",
+                 layout: :private_clone
+               )
+
+      assert PrivateClone.read_only?(path)
+      assert :ok = Worktree.cleanup(path)
+      refute File.exists?(path)
+    end
+
+    test "replaces a linked inspect worktree left by a pre-podman run", ctx do
+      {:ok, path} = Worktree.create_detached(ctx.checkout, "feature/bd-inspect-pc3", "main")
+      refute PrivateClone.clone?(path)
+
+      assert {:ok, ^path} =
+               Worktree.create_detached(ctx.checkout, "feature/bd-inspect-pc3", "main",
+                 layout: :private_clone
+               )
+
+      assert PrivateClone.read_only?(path)
+    end
+  end
+
   describe "create/4" do
     test "layout: :private_clone provisions a private clone at the usual leaf", ctx do
       assert {:ok, path} = Worktree.create(ctx.checkout, @branch, "main", layout: :private_clone)

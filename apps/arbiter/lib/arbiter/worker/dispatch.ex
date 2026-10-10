@@ -3879,6 +3879,7 @@ defmodule Arbiter.Worker.Dispatch do
     base_branch = resolve_target_branch(task, opts)
 
     case Worktree.create_detached(repo_path, name, base_branch,
+           layout: git_layout(task, opts),
            seed_paths: seed_paths(task, Keyword.get(opts, :repo))
          ) do
       {:ok, path} ->
