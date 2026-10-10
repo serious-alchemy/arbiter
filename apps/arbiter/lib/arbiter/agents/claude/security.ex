@@ -229,6 +229,14 @@ defmodule Arbiter.Agents.Claude.Security do
     ["Bash(gh gist create:*)", "Bash(gh gist edit:*)", "Bash(gh issue comment:*)"]
   end
 
+  defp expand_category(:no_ci_watch) do
+    [
+      "Bash(gh run watch:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh pr checks:*)"
+    ]
+  end
+
   defp expand_category(_unknown), do: []
 
   # bd-9zi4ok: the operator-home credential list shared with Jail.Hide. A

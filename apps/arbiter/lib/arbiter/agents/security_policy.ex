@@ -176,6 +176,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
       review-thread follow-up protocol uses it. Workers only:
       `interactive_session_base/0` leaves it out, since an operator or
       coordinator session commenting on an issue is ordinary work.
+    * `:no_ci_watch`        — `gh run watch`/`gh run view` and every `gh pr checks` form.
+      Arbiter re-runs and watches CI after the push; a worker that polls it burns
+      turns and tokens on a result it is handed (bd-d0q7s4). The prefix rule covers
+      `gh pr checks 12 --watch` too. Reviewers get CI status in their briefing. Workers only.
 
   Enforced in **every** mode including `:bypass`: `Arbiter.Agents.Claude.Security`
   expands them into the deny document, and `--settings` carries that document
@@ -329,7 +333,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
     :no_pr_create,
     :no_async_wait,
     :no_public_upload,
-    :no_gh_publish
+    :no_gh_publish,
+    :no_ci_watch
   ]
 
   # bd-80talz: public, anonymous upload and paste hosts. Each entry is a bare
@@ -495,7 +500,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec interactive_session_base() :: t()
   def interactive_session_base do
     base = base()
-    excluded = [:no_async_wait, :no_gh_publish]
+    excluded = [:no_async_wait, :no_gh_publish, :no_ci_watch]
 
     %{
       base
