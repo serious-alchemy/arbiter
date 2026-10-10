@@ -33,8 +33,6 @@ defmodule Arbiter.Board.AutopilotAccountOccupancyTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
-    # The scheduler cap is for machine load; the account cap is under test.
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 5)
 
     {:ok, ws} =
       Ash.create(Workspace, %{

@@ -18,7 +18,7 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
 
   setup do
     on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)
-    put_app_env(:arbiter, :conductor_system_max_concurrent, 3)
+    put_local_cap(3)
     :ok
   end
 

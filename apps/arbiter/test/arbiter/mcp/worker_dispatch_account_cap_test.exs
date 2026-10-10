@@ -20,7 +20,6 @@ defmodule Arbiter.MCP.WorkerDispatchAccountCapTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 10)
 
     {:ok, ws} =
       Ash.create(Workspace, %{

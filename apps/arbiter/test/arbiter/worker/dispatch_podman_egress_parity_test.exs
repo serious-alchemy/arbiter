@@ -25,7 +25,6 @@ defmodule Arbiter.Worker.DispatchPodmanEgressParityTest do
 
   setup do
     sandbox = ResumeSlotFixture.setup_repo!()
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 10)
 
     for {key, value} <- [
           worker_container_available: true,

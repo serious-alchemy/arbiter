@@ -69,7 +69,7 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     end
 
     test "the suggestion has a floor of one worker" do
-      put_hardware(1, @gib div 2)
+      put_hardware(1, div(@gib, 2))
       assert %{cap: 1, source: :suggestion} = LocalCapacity.cap()
     end
 

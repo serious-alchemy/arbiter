@@ -75,21 +75,11 @@ defmodule Arbiter.Workflows.GraphRemovalTest do
   end
 
   describe "settings and workspace config" do
-    # The names stay (a column + a workspace-config key), but they belong to
-    # the board scheduler's slot gate now, not the Conductor.
-    test "conductor_system_max_concurrent still round-trips" do
-      assert is_function(&Arbiter.Settings.conductor_system_max_concurrent/0, 0)
-      assert is_function(&Arbiter.Settings.set_conductor_system_max_concurrent/1, 1)
-    end
-
-    test "the installation setting's description no longer says Conductor" do
-      attr =
-        Ash.Resource.Info.attribute(
-          Arbiter.Settings.Installation,
-          :conductor_system_max_concurrent
-        )
-
-      refute attr.description =~ "Conductor"
+    # DC1 deleted the install-wide cap and the workspace key outright.
+    test "conductor_system_max_concurrent is gone" do
+      refute function_exported?(Arbiter.Settings, :conductor_system_max_concurrent, 0)
+      refute function_exported?(Arbiter.Settings, :set_conductor_system_max_concurrent, 1)
+      assert Ash.Resource.Info.attribute(Arbiter.Settings.Installation, :conductor_system_max_concurrent) == nil
     end
   end
 end

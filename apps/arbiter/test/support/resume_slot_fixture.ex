@@ -1,7 +1,7 @@
 defmodule Arbiter.Test.ResumeSlotFixture do
   @moduledoc """
   A full cap as a fixture (bd-92mx1m), shared by every surface that resumes a
-  task: a real git repo, `conductor_system_max_concurrent = 1`, task A
+  task: a real git repo, the primary's cap pinned to 1, task A
   dispatched, parked (its worker lingers `:failed`) and then moved out of In
   progress — its PR opened, so it is `:merging` and holds no slot
   (bd-asxw4e) — and task B admitted into the slot A freed, `:active`.
@@ -61,7 +61,7 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     put_env_restoring(:worktree_root, sandbox.worktree_root)
     put_env_restoring(:repo_paths, %{@repo => sandbox.repo})
     # The 2026-09-23 incident's cap.
-    put_env_restoring(:conductor_system_max_concurrent, 1)
+    put_local_cap_restoring(1)
     # bd-80ecol: a resume reaches the real-agent dispatch guard, which refuses
     # a Claude spawn with no credential of its own. The stub needs none, but
     # the guard can't know that.
@@ -128,7 +128,15 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     end)
   end
 
+  # The primary's worker cap (`nodes.local_max_workers`) for the rest of the test.
+  defp put_local_cap_restoring(n) do
+    prior = Arbiter.Settings.nodes_local_max_workers()
+    {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(n)
+    on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(prior) end)
+  end
+
   defp put_env_restoring(key, value) do
+
     prior = Application.fetch_env(:arbiter, key)
     Application.put_env(:arbiter, key, value)
 

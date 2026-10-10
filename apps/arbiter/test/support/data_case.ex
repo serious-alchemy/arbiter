@@ -296,6 +296,19 @@ defmodule Arbiter.DataCase do
   end
 
   @doc """
+  Pin the primary's worker cap (`nodes.local_max_workers`, DC1) for the rest of
+  the current test, restoring the prior override on exit. It stands in for the
+  install-wide `conductor_system_max_concurrent` tests used to pin: the board
+  plans to it and dispatch enforces it.
+  """
+  def put_local_cap(n) when is_integer(n) and n >= 0 do
+    prior = Arbiter.Settings.nodes_local_max_workers()
+    {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(n)
+    ExUnit.Callbacks.on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(prior) end)
+    :ok
+  end
+
+  @doc """
   Set an OS env var for the rest of the current test, restoring the prior
   value (or unsetting it) on exit. `async: false` tests only — the process
   environment is global.

@@ -16,7 +16,6 @@ defmodule ArbiterWeb.Api.WorkerDispatchProviderConstraintTest do
 
   setup %{conn: conn} do
     ResumeSlotFixture.setup_repo!()
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 10)
 
     {:ok, ws} =
       Ash.create(Workspace, %{

@@ -19,7 +19,6 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 10)
     on_exit(fn -> Settings.set_nodes_local_max_workers(nil) end)
     %{ws: workspace!()}
   end
@@ -42,23 +41,28 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     Dispatch.dispatch(issue.id, [repo: @repo, start_driver: false] ++ opts)
   end
 
-  describe "worker.placement unset (local_only) and no override: dispatch is unchanged" do
-    test "a dispatch starts a worker and reads no node state", %{ws: ws} do
-      issue = ready!(ws, "unchanged")
+  describe "worker.placement unset (local_only) and no override: the hardware suggestion applies" do
+    test "a dispatch under the suggestion starts a worker and keeps no reservation", %{ws: ws} do
+      issue = ready!(ws, "under the suggestion")
 
       assert {:ok, %{worker_pid: pid}} = dispatch(issue)
       assert is_pid(pid)
       assert Ash.get!(Issue, issue.id).state == :active
-      # Nothing was reserved: the gate had nothing to decide.
+      # The slot reserved at the gate is released once the worker is registered.
       assert Placement.reservations() == []
     end
 
-    test "many fresh dispatches are not capped by the (unenforced) local default", %{ws: ws} do
-      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
+    test "fresh dispatches are held at the enforced default cap, DC1 (§5.1)", %{ws: ws} do
+      # 2 CPUs suggest one worker.
+      put_app_env(:arbiter, :local_hardware, %{cpus: 2, mem_total: 64 * 1024 * 1024 * 1024})
+      assert %{cap: 1, source: :suggestion} = Arbiter.Nodes.LocalCapacity.cap()
 
-      for n <- 1..3 do
-        assert {:ok, _} = dispatch(ready!(ws, "burst #{n}"))
-      end
+      assert {:ok, %{worker_pid: pid}} = dispatch(ready!(ws, "first"))
+      assert is_pid(pid)
+
+      held = ready!(ws, "second")
+      assert {:error, {:no_node_capacity, %{node: "local", cap: 1}}} = dispatch(held)
+      assert Ash.get!(Issue, held.id).state == :queued
     end
 
     test "prefer_remote with no node available runs locally, as before", %{ws: _ws} do
