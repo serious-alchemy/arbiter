@@ -15,6 +15,8 @@ defmodule Arbiter.Quota.Broadcast do
 
   require Logger
 
+  @capture_topic "quota:captures"
+
   alias Arbiter.Accounts.Resolver
 
   @doc """
@@ -24,6 +26,9 @@ defmodule Arbiter.Quota.Broadcast do
   """
   @spec quota_updated(String.t() | nil, map()) :: :ok | :error
   def quota_updated(account_id, view) do
+    # The budget server (bd-6c8g4t) recomputes on any capture, linked or not.
+    announce_capture(account_id)
+
     account_id
     |> Resolver.workspace_ids()
     |> Enum.each(&broadcast(&1, view))
@@ -31,6 +36,18 @@ defmodule Arbiter.Quota.Broadcast do
     e ->
       Logger.debug("quota pubsub broadcast failed: #{inspect(e)}")
       :error
+  end
+
+  @doc "The topic every capture is announced on, as `{:quota_captured, account_id}`."
+  @spec capture_topic() :: String.t()
+  def capture_topic, do: @capture_topic
+
+  defp announce_capture(account_id) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      @capture_topic,
+      {:quota_captured, account_id}
+    )
   end
 
   defp broadcast(workspace_id, view) do

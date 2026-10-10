@@ -641,8 +641,9 @@ defmodule Arbiter.Quota.Gate do
   rises with the clock from there. A window with no known length cannot be
   advanced, and falls back to its flat side exactly as `pace/6` does.
 
-  Options as for `pace/6`. This is `Arbiter.Quota.Budget`'s only route to the
-  fresh window's line, so there is still one definition of pace.
+  Options as for `pace/6`. This is the provider budget's only route to the fresh
+  window's line (design `provider-dynamic-concurrency.md` E1), so there is still
+  one definition of pace.
   """
   @spec fresh_pace(
           policy(),
