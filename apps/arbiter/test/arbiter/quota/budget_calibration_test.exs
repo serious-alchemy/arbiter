@@ -50,7 +50,7 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
       assert fit.models["seat"].reason == :non_positive
       assert_in_delta fit.background_share_per_hour, 0.2, 1.0e-9
 
-      assert %{rung: 2, rho: rho, passed_over: [{0, :non_positive}]} =
+      assert %{rung: 2, rho: rho, passed_over: [{0, :non_positive}, {1, :no_peer_fit}]} =
                BudgetCalibration.resolve(fit, @prior, [])
 
       assert_in_delta rho, @prior, 1.0e-12
@@ -66,7 +66,11 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
         assert entry.share_per_weighted_token < @prior / 2
         assert entry.share_per_weighted_token / entry.std_error < Calibration.t_critical(fit.dof)
 
-        assert %{rung: 2, rho: rho, passed_over: [{0, {:not_distinguishable_from_zero, t}}]} =
+        assert %{
+                 rung: 2,
+                 rho: rho,
+                 passed_over: [{0, {:not_distinguishable_from_zero, t}}, {1, :no_peer_fit}]
+               } =
                  BudgetCalibration.resolve(fit, @prior, [])
 
         assert_in_delta rho, @prior, 1.0e-12
@@ -257,6 +261,7 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
         Ash.create!(Run, %{
           task_id: "bd-seat#{i}",
           workspace_id: "ws",
+          repo: "arbiter",
           provider: "claude",
           provider_account_id: account,
           started_at: at(i * 40),
