@@ -263,4 +263,24 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert outcome |> Map.keys() |> Enum.sort() == [:cancelled?, :exit_code, :node_lost?, :oom?]
     end
   end
+  describe "bd-bg87oz: checkout_failed" do
+    test "an exit whose final checkout upload failed carries the flag in the outcome" do
+      {t, _} = S.ready(table(), "r1")
+
+      {t, _} =
+        S.exit(t, "r1", %{"status" => 0, "size" => 0, "checkout" => "failed: {:error, :timeout}"})
+
+      assert {:ok, %{checkout_failed?: true}} = S.outcome(t, "r1")
+    end
+
+    test "an exit whose checkout landed (or that had none) has no such key" do
+      for checkout <- ["ok", nil] do
+        {t, _} = S.ready(table(), "r1")
+        exit = %{"status" => 0, "size" => 0} |> Map.put("checkout", checkout)
+        {t, _} = S.exit(t, "r1", exit)
+        assert {:ok, outcome} = S.outcome(t, "r1")
+        refute Map.has_key?(outcome, :checkout_failed?)
+      end
+    end
+  end
 end
