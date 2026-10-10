@@ -296,6 +296,15 @@ defmodule Arbiter.Nodes.Session do
   @spec recover_abort(pid(), String.t()) :: :ok
   def recover_abort(pid, run), do: GenServer.cast(pid, {:recover_abort, run})
 
+  @doc """
+  The runs this node still has that no Worker here holds (bd-4ic681), as
+  `run => :running | :held | :retained | :recovering`: what the agent reported
+  running, the runs told `hold`, what it quiesced and retained, and the recoveries
+  in flight. A resume of their ticket waits until they are collected.
+  """
+  @spec claims(pid()) :: %{String.t() => :running | :held | :retained | :recovering}
+  def claims(pid), do: GenServer.call(pid, :claims)
+
   @doc "Tell the agent it may delete what it retained of `run` (and forget it here)."
   @spec drop_retained(pid(), String.t()) :: :ok
   def drop_retained(pid, run), do: GenServer.call(pid, {:drop_retained, run})
@@ -561,6 +570,25 @@ defmodule Arbiter.Nodes.Session do
     do: {:reply, run in RunStreams.live(state.streams), state}
 
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot_of(state), state}
+
+  # The later kinds win for a run listed twice (a held run is also in the agent's run
+  # list); a run whose stream a Worker here owns is that Worker's, not a claim.
+  def handle_call(:claims, _from, state) do
+    claims =
+      for {runs, kind} <- [
+            {state.runs, :running},
+            {state.held, :held},
+            {state.retained, :retained},
+            {state.recoveries, :recovering}
+          ],
+          run <- Map.keys(runs),
+          RunStreams.fetch(state.streams, run) == :error,
+          into: %{},
+          do: {run, kind}
+
+    {:reply, claims, state}
+  end
+
   def handle_call(:assignable?, _from, state), do: {:reply, assignable_state?(state), state}
 
   def handle_call(:tick, _from, state) do

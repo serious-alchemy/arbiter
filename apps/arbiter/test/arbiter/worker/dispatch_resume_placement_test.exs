@@ -291,6 +291,124 @@ defmodule Arbiter.Worker.DispatchResumePlacementTest do
     end
   end
 
+  # AC3 (§10.5): a resume must not provision from a home clone that lacks a node's
+  # work, nor race a container that may still be running. While a node holds (the
+  # `hold` verdict after a primary restart), lists, retains or is handing back a live
+  # run of the ticket, the resume waits for Recovery to collect it.
+  describe "a run a node still has" do
+    alias Arbiter.Nodes
+    alias Arbiter.Nodes.Recovery
+    alias Arbiter.Workers.Run
+
+    setup do
+      {:ok, %{token: token}} = Nodes.mint_join_token([name: "held-node"], "operator:test")
+      {:ok, %{node: node}} = Nodes.redeem_join_token(token)
+
+      on_exit(fn ->
+        for {pid, _} <- Nodes.Registry.list(),
+            do: Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
+      end)
+
+      ws = workspace!("prefer_remote")
+      %{task: task, first: first} = parked!(ws)
+      %{node: Nodes.get_node(node.id), task: task, first: first}
+    end
+
+    # What a primary restart leaves behind: the row of the run that was live on the node.
+    defp live_row!(task, node) do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: "cut off on a node",
+          repo: @repo,
+          state: :working,
+          started_at: DateTime.utc_now(),
+          node_id: node.id
+        })
+
+      run
+    end
+
+    defp connect!(node, hello) do
+      base = %{"agent_version" => "1.0.0", "proto" => 1, "caps" => %{"run_hold" => true}}
+      {:ok, %{pid: pid}} = Nodes.Registry.attach(node, self(), Map.merge(base, hello))
+      pid
+    end
+
+    test "while the node holds it, a human resume is held and nothing is stopped", c do
+      run = live_row!(c.task, c.node)
+      connect!(c.node, %{"runs" => [%{"id" => run.id, "state" => "running"}]})
+
+      assert {:error, {:no_node_capacity, info}} = Dispatch.resume(c.task.id, resume_opts([]))
+
+      assert info.reason == :awaiting_collect
+      assert [%{run: run_id, state: :held, node: "held-node"}] = info.runs
+      assert run_id == run.id
+      assert info.message =~ "collected"
+      refute_received {:spawned, _}
+      assert Worker.whereis(c.task.id) == c.first.worker_pid
+    end
+
+    test "an automatic resume is deferred until it is collected", c do
+      run = live_row!(c.task, c.node)
+      connect!(c.node, %{"runs" => [%{"id" => run.id, "state" => "running"}]})
+      task_id = c.task.id
+
+      assert {:ok, %{deferred: true}} =
+               Dispatch.resume_session(task_id, resume_opts(resume_origin: :automatic))
+
+      assert [{^task_id, :resume_session, _}] = StubResumeDeferrer.deferrals()
+      refute Dispatch.resume_room?(task_id, Keyword.merge(@podman, nodes: [row()]))
+    end
+
+    test "a run the node quiesced and retained holds the resume the same way", c do
+      run = live_row!(c.task, c.node)
+
+      connect!(c.node, %{
+        "inventory" => %{"retained" => [%{"run" => run.id, "task" => c.task.id}]}
+      })
+
+      assert {:error,
+              {:no_node_capacity, %{reason: :awaiting_collect, runs: [%{state: :retained}]}}} =
+               Dispatch.resume_session(c.task.id, resume_opts([]))
+    end
+
+    test "once the run is collected and settled, the resume goes ahead", c do
+      run = live_row!(c.task, c.node)
+      connect!(c.node, %{"runs" => [%{"id" => run.id, "state" => "running"}]})
+      assert {:error, {:no_node_capacity, _}} = Dispatch.resume(c.task.id, resume_opts([]))
+
+      # Recovery took its work; the Reconciler marked the row interrupted.
+      Ash.update!(run, %{state: :finished, outcome: :interrupted}, action: :update)
+
+      assert {:ok, %{worker_pid: pid}} = Dispatch.resume(c.task.id, resume_opts([]))
+      assert_receive {:spawned, %{id: "n-resume"}}
+      assert is_pid(pid)
+    end
+
+    test "another ticket's run on the node holds nothing back", c do
+      {:ok, other} =
+        Ash.create(Issue, %{title: "someone else's", workspace_id: c.task.workspace_id})
+
+      run = live_row!(other, c.node)
+      connect!(c.node, %{"runs" => [%{"id" => run.id, "state" => "running"}]})
+
+      assert {:ok, _} = Dispatch.resume(c.task.id, resume_opts([]))
+    end
+
+    # The boot sweep holds the scheduler closed while Recovery waits for nodes to come
+    # back; a live remote row is Recovery's until then, connected node or not.
+    test "pending_collect/2: while the boot sweep runs, a live remote row is Recovery's", c do
+      run = live_row!(c.task, c.node)
+
+      assert [%{run: run_id, state: :awaiting_recovery}] =
+               Recovery.pending_collect(c.task.id, gate_open?: false)
+
+      assert run_id == run.id
+      assert Recovery.pending_collect(c.task.id, gate_open?: true) == []
+    end
+  end
+
   # The scheduler's own replay check, not a seam: a resume deferred while the primary
   # was full and no node had room is replayed once a node does, primary still full.
   describe "the board scheduler's deferred-resume replay" do

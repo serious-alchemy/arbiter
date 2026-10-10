@@ -89,6 +89,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Recovery
   alias Arbiter.Nodes.Refusal
   alias Arbiter.Quota.SpendCap
   alias Arbiter.Reviews.Checkout
@@ -472,6 +473,7 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, worktree_path} <- resume_worktree(task, repo),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
+         {:ok, opts} <- ensure_collected(task, :resume, opts),
          {:ok, opts} <- resume_slot(task, :resume, opts),
          {:ok, opts} <- resume_capacity(task, :resume, opts, caller_override(opts)) do
       prior_run_id = latest_run_id(task_id)
@@ -591,6 +593,7 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
          {:ok, session_id, session_provider} <- latest_session_id(task_id),
+         {:ok, opts} <- ensure_collected(task, :resume_session, opts),
          {:ok, opts} <- resume_slot(task, :resume_session, opts),
          {:ok, opts} <-
            resume_capacity(
@@ -746,6 +749,42 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # bd-4ic681 (`docs/design/remote-workers.md` §10.5): a resume never starts while a
+  # node still has a live run of this ticket (`Nodes.Recovery.pending_collect/2`:
+  # running, told `hold` after a primary restart, retained, being recovered, or the
+  # boot sweep not done with it). Started now it would provision, here or on another
+  # node, from a home clone that lacks that run's work, and race its container. It
+  # waits for the collect: held for a human (409, nothing stopped), deferred for an
+  # automatic origin and replayed once `resume_room?/2` sees it collected.
+  defp ensure_collected(%Issue{} = task, kind, opts) do
+    case Recovery.pending_collect(task.id) do
+      [] ->
+        {:ok, opts}
+
+      runs ->
+        hold_resume({:error, {:no_node_capacity, awaiting_collect(task, runs)}}, task, kind, opts)
+    end
+  end
+
+  defp awaiting_collect(%Issue{id: task_id}, [first | _] = runs) do
+    phrase =
+      "held — run #{first.run} of #{task_id} is still on node #{first.node} " <>
+        "(#{first.state}); it is collected first"
+
+    %{
+      task_id: task_id,
+      node: first.node,
+      kind: :resume,
+      reason: :awaiting_collect,
+      runs: runs,
+      phrase: phrase,
+      message:
+        phrase <>
+          ". The resume starts from the home clone once that run's work is in it " <>
+          "(Recovery collects it after a restart); resume again once it is."
+    }
+  end
+
   defp hold_resume(:ok, _task, _kind, opts), do: {:ok, opts}
 
   defp hold_resume({:error, {:no_node_capacity, info}} = held, task, kind, opts) do
@@ -797,33 +836,35 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   @doc """
-  Whether a deferred automatic resume of `task_id` could start now (bd-4ic681): a
-  node has room for it, or it would run on the primary and the primary's cap
+  Whether a deferred automatic resume of `task_id` could start now (bd-4ic681): no
+  node still has a live run of it (`ensure_collected/3`), and a node has room for
+  it or it would run on the primary and the primary's cap
   (`Arbiter.Nodes.LocalCapacity.check/3`) has room. Reserves nothing. The board
   scheduler asks this before it replays a resume deferred `held_for:
   :local_capacity` (`Arbiter.Board.Autopilot`), so a resume a node can take is not
   left waiting on the primary (whose cap may be 0). `opts` are the resume's own
-  (the `:nodes` and `:security` seams).
+  (the `:nodes` and `:security` seams). A ticket that cannot be read is room: the
+  replay decides.
   """
   @spec resume_room?(String.t(), keyword()) :: boolean()
   def resume_room?(task_id, opts \\ []) when is_binary(task_id) do
-    case load_task(task_id) do
-      {:ok, task} ->
-        provider = caller_override(opts) || Run.latest_authoring_provider(task_id)
+    with {:ok, task} <- load_task(task_id),
+         [] <- Recovery.pending_collect(task_id) do
+      provider = caller_override(opts) || Run.latest_authoring_provider(task_id)
 
-        case probe_resume_placement(task, opts, provider) do
-          :node_possible ->
-            true
+      case probe_resume_placement(task, opts, provider) do
+        :node_possible ->
+          true
 
-          {:local, reason} ->
-            LocalCapacity.check(task_id, :resume, reason: reason, provider: provider) == :ok
+        {:local, reason} ->
+          LocalCapacity.check(task_id, :resume, reason: reason, provider: provider) == :ok
 
-          {:error, _} ->
-            false
-        end
-
-      _ ->
-        true
+        {:error, _} ->
+          false
+      end
+    else
+      [_ | _] -> false
+      _ -> true
     end
   end
 
