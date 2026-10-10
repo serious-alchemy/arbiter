@@ -3564,14 +3564,8 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
-<<<<<<< HEAD
-                 # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
-                 # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
-                 {:ok, port} <- start_agent_session(opts, session_opts) do
-=======
                  {:ok, port, opts} <-
                    start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
->>>>>>> f8ddfce73 (Remote placement: keep dirty local checkouts on the primary, fall back to local on node refusal, always seed the branch ref (bd-373tce))
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3591,13 +3585,11 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-<<<<<<< HEAD
   defp start_agent_session(opts, session_opts) do
     start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
     start.(session_opts)
   end
 
-=======
   # bd-373tce: a run `ensure_node_capacity/2` placed on a node that the node then
   # cannot take (it refuses the seed as `unschedulable`, is unreachable, ...) runs
   # on the primary instead: by here the ticket is already In progress with a worker
@@ -3605,7 +3597,7 @@ defmodule Arbiter.Worker.Dispatch do
   # `remote_only` never runs local, so its failure stands. The home clone was cut
   # thin for the node (no deps), so it is seeded the way a local run's is first.
   defp start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
-    case ClaudeSession.start(session_opts) do
+    case start_agent_session(opts, session_opts) do
       {:ok, port} ->
         {:ok, port, opts}
 
@@ -3629,7 +3621,7 @@ defmodule Arbiter.Worker.Dispatch do
     with :ok <- admit_local_fallback(task, opts),
          :ok <- seed_for_local_run(task, worktree_path, opts),
          {:ok, session_opts} <- build_agent_session_opts(task, worker_pid, path, opts),
-         {:ok, port} <- ClaudeSession.start(session_opts) do
+         {:ok, port} <- start_agent_session(opts, session_opts) do
       {:ok, port, opts}
     end
   end
@@ -3664,7 +3656,6 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp seed_for_local_run(_task, _worktree_path, _opts), do: :ok
 
->>>>>>> f8ddfce73 (Remote placement: keep dirty local checkouts on the primary, fall back to local on node refusal, always seed the branch ref (bd-373tce))
   # Resolve the agent's cwd.
   #
   # A provisioned worktree is already cut from `origin/<target>` by
