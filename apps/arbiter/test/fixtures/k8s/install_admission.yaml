@@ -426,6 +426,14 @@ spec:
               value: mesaana-k3s
             - name: ARB_K8S_SELF_UPGRADE
               value: 'false'
+            - name: ARB_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ARB_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           image: registry.example.test/arbiter/controller:0.2.43
           name: controller
           resources:

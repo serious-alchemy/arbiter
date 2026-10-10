@@ -101,7 +101,10 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
         %{"name" => "ARB_AGENT_BACKEND", "value" => "k8s"},
         %{"name" => "ARB_PRIMARY_URL", "value" => primary_url},
         %{"name" => "ARB_NODE_NAME", "value" => node_name},
-        %{"name" => "ARB_K8S_SELF_UPGRADE", "value" => to_string(self_upgrade)}
+        %{"name" => "ARB_K8S_SELF_UPGRADE", "value" => to_string(self_upgrade)},
+        # K13: the addresses the readiness canary probes (`K8s.Canary.targets_from_env/1`).
+        field_ref("ARB_POD_IP", "status.podIP"),
+        field_ref("ARB_NODE_IP", "status.hostIP")
       ] ++ proxy_env(reach)
 
     %{
@@ -120,6 +123,9 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       ]
     }
   end
+
+  defp field_ref(name, path),
+    do: %{"name" => name, "valueFrom" => %{"fieldRef" => %{"fieldPath" => path}}}
 
   defp proxy_env(:tailscale),
     do: [%{"name" => "ARB_NODE_PROXY", "value" => "http://" <> @proxy_addr}]

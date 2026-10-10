@@ -112,6 +112,37 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
     end
   end
 
+  describe "targets_from_env/1" do
+    @describetag :tmp_dir
+
+    test "reads the controller's own addresses and the cluster DNS Service", %{tmp_dir: dir} do
+      resolv = Path.join(dir, "resolv.conf")
+      File.write!(resolv, "search arbiter-workers.svc.cluster.local\nnameserver 10.43.0.10\n")
+
+      env = %{
+        "KUBERNETES_SERVICE_HOST" => "10.43.0.1",
+        "KUBERNETES_SERVICE_PORT" => "443",
+        "ARB_POD_IP" => "10.42.1.9",
+        "ARB_NODE_IP" => "192.168.1.169"
+      }
+
+      assert Canary.targets_from_env(env: env, resolv_conf: resolv, canary_port: 9445) == %{
+               api: "10.43.0.1:443",
+               controller_port: "10.42.1.9:9445",
+               foreign: "10.43.0.10:53",
+               node: "192.168.1.169:10250"
+             }
+    end
+
+    test "leaves out what the cluster did not tell it", %{tmp_dir: dir} do
+      resolv = Path.join(dir, "resolv.conf")
+      File.write!(resolv, "nameserver 2001:db8::1\n")
+
+      assert Canary.targets_from_env(env: %{}, resolv_conf: resolv) == %{}
+      assert Canary.targets_from_env(env: %{}, resolv_conf: Path.join(dir, "missing")) == %{}
+    end
+  end
+
   describe "parse/1 and verdict/1" do
     @all_closed """
     probe api closed
