@@ -37,6 +37,10 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--pace-exempt-priority 0..4|none]
                                      [--pace-exempt-threshold F]
                                      [--weekly-pace-exempt-threshold F]
+                                     [--spend-cap USD|none]
+                                     [--spend-window day|week|month]
+                                     [--spend-mode flat|paced]
+                                     [--spend-metered true|false]
                                      [--unset QUOTA_KEY]
                                      `--max-concurrent`: the account
                                      concurrency ceiling (P8, §4.2): at most N
@@ -53,6 +57,21 @@ defmodule ArbiterCli.Cmd.Account do
                                      gate reads from an account has a flag;
                                      only the given keys change. F is a
                                      fraction in (0, 1].
+                                     `--spend-cap USD` caps METERED dollar spend
+                                     on this account per `--spend-window` (fixed
+                                     UTC windows: day from 00:00, week from
+                                     Monday 00:00, month from the 1st; default
+                                     week). `--spend-mode paced` allows cap x
+                                     elapsed fraction by now (the same line as
+                                     the % quota pace); flat (default) allows
+                                     the whole cap at any time. Once reached,
+                                     FRESH dispatches are held; tickets already
+                                     started finish. Subscription and free-tier
+                                     costs are notional and never count:
+                                     `--spend-metered true|false` overrides
+                                     the default (metered only with an active
+                                     api_key credential). `--spend-cap none`
+                                     clears the cap.
                                      `--window-seconds` replaces the account's
                                      whole window-length table (repeat the
                                      flag or comma-separate: 5h=18000,7d=604800).
@@ -160,7 +179,11 @@ defmodule ArbiterCli.Cmd.Account do
     window_seconds: [:string, :keep],
     pace_exempt_priority: :string,
     pace_exempt_threshold: :string,
-    weekly_pace_exempt_threshold: :string
+    weekly_pace_exempt_threshold: :string,
+    spend_cap: :string,
+    spend_window: :string,
+    spend_mode: :string,
+    spend_metered: :string
   ]
 
   @quota_keys Enum.map(@quota_switches, fn {key, _} -> Atom.to_string(key) end)
@@ -483,6 +506,26 @@ defmodule ArbiterCli.Cmd.Account do
   end
 
   defp quota_value!("window_seconds", values), do: parse_window_seconds!(values)
+  defp quota_value!("spend_cap", value) when value in ~w(none off), do: :clear
+  defp quota_value!("spend_cap", value), do: parse_usd!(value)
+
+  defp quota_value!("spend_window", value) do
+    if value in ~w(day week month),
+      do: value,
+      else: Output.die("--spend-window must be day, week or month (got #{inspect(value)})")
+  end
+
+  defp quota_value!("spend_mode", value) do
+    if value in ~w(flat paced),
+      do: value,
+      else: Output.die("--spend-mode must be flat or paced (got #{inspect(value)})")
+  end
+
+  defp quota_value!("spend_metered", value) when value in ~w(true false), do: value == "true"
+
+  defp quota_value!("spend_metered", value),
+    do: Output.die("--spend-metered must be true or false (got #{inspect(value)})")
+
   defp quota_value!(key, value), do: parse_fraction!(value, flag_name(key))
 
   defp parse_window_seconds!(values) do
@@ -501,6 +544,13 @@ defmodule ArbiterCli.Cmd.Account do
           )
       end
     end)
+  end
+
+  defp parse_usd!(value) do
+    case Float.parse(String.trim_leading(value, "$")) do
+      {f, ""} when f > 0 -> f
+      _ -> Output.die("--spend-cap must be a positive dollar amount or `none` (got #{inspect(value)})")
+    end
   end
 
   defp parse_fraction!(value, flag) do

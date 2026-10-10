@@ -295,6 +295,50 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert exit_code == 0
   end
 
+  test "--spend-cap / --spend-window / --spend-mode / --spend-metered send the spend cap" do
+    stub_routes([
+      patch_body_route(%{
+        "quota_config" => %{
+          "spend_cap" => 20.0,
+          "spend_window" => "week",
+          "spend_mode" => "paced",
+          "spend_metered" => true
+        }
+      })
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Account.run(~w(set personal-max --spend-cap 20 --spend-window week --spend-mode paced
+          --spend-metered true))
+      end)
+
+    assert exit_code == 0
+  end
+
+  test "--spend-cap none clears the cap" do
+    stub_routes([patch_body_route(%{"quota_config" => %{"spend_cap" => nil}})])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(~w(set personal-max --spend-cap none)) end)
+
+    assert exit_code == 0
+  end
+
+  test "bad spend flags die client-side naming the flag" do
+    for {args, flag} <- [
+          {~w(--spend-cap 0), "--spend-cap"},
+          {~w(--spend-cap abc), "--spend-cap"},
+          {~w(--spend-window fortnight), "--spend-window"},
+          {~w(--spend-mode strict), "--spend-mode"},
+          {~w(--spend-metered maybe), "--spend-metered"}
+        ] do
+      {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max" | args]) end)
+      assert exit_code != 0, "#{flag} should have failed"
+      assert err =~ flag
+    end
+  end
+
   test "--window-seconds also takes a comma list" do
     stub_routes([
       patch_body_route(%{"quota_config" => %{"window_seconds" => %{"5h" => 1, "7d" => 2}}})
