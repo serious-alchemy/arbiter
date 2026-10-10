@@ -138,10 +138,10 @@ defmodule Arbiter.Nodes.Adoption do
     end
   end
 
-  # An adopter whose Worker's session attached the run is past the point of no return: what
-  # is left (the machine and the driver) is quick, so it finishes. Any other is undone first
-  # and stopped after, so it cannot start a Worker the undo missed; a Worker it started in
-  # between is undone once it is stopped.
+  # An adopter whose Worker's session attached the run is past the point of no return: it is
+  # let finish (what is left, the machine and the driver, is quick). Any other's Worker is
+  # given up before the adopter is stopped, and once more after, for a Worker the adopter
+  # started in between.
   defp cut_off(task, run) do
     case abandon_unattached(run) do
       {:error, :attached} ->

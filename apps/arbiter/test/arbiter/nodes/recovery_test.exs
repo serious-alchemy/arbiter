@@ -380,8 +380,11 @@ defmodule Arbiter.Nodes.RecoveryTest do
         run = run!(node)
         start_holding_agent(node, [run], %{run.id => unquote(mode)})
 
-        fun = worker_adopt(node, unquote(then_fail?))
-        assert {:ok, report} = Recovery.await(adopt_opts(adopt_fun: fun, adopt_timeout_ms: 200))
+        adopt = worker_adopt(node, unquote(then_fail?))
+        # the node's answer gets 200 ms, well inside the adoption's own deadline (F6 is the
+        # session's timer, not that deadline)
+        fun = fn run, o -> adopt.(run, Keyword.put(o, :adopt_timeout_ms, 200)) end
+        assert {:ok, report} = Recovery.await(adopt_opts(adopt_fun: fun))
         assert report == %{run.id => :collected}
 
         assert saw("adopt", run.id)
