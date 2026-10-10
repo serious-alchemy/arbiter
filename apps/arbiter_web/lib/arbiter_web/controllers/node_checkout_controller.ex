@@ -94,7 +94,13 @@ defmodule ArbiterWeb.NodeCheckoutController do
 
   defp upload(conn, run, kind) do
     case authorize(conn, run) do
-      {:ok, pid, ctx} -> checked_upload(conn, pid, run, ctx, kind)
+      # A reviewer's clone is read-only (bd-cgdhlu): it has no work to hand back.
+      {:ok, _pid, %{read_only?: true}} when kind == :checkout ->
+        error(conn, 403, "This run's checkout is read-only")
+
+      {:ok, pid, ctx} ->
+        checked_upload(conn, pid, run, ctx, kind)
+
       :error -> error(conn, 404, "Not found")
     end
   end

@@ -460,13 +460,22 @@ defmodule Arbiter.Nodes.Session do
   def handle_call({:collect, _run, _kind}, _from, %{channel: nil} = state),
     do: {:reply, {:error, :not_connected}, state}
 
+  # A read-only checkout (a reviewer's clone, bd-cgdhlu) uploads no bundle, so there is
+  # no ingest to wait for: nothing to collect.
   def handle_call({:collect, run, kind}, from, state) do
-    if Map.has_key?(state.checkouts, run) and
-         match?({:ok, _}, RunStreams.fetch(state.streams, run)) do
-      notify_channel(state, {:push, "collect", %{"run" => run, "kind" => Atom.to_string(kind)}})
-      {:noreply, %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
-    else
-      {:reply, {:error, :unknown_run}, state}
+    cond do
+      not (Map.has_key?(state.checkouts, run) and
+               match?({:ok, _}, RunStreams.fetch(state.streams, run))) ->
+        {:reply, {:error, :unknown_run}, state}
+
+      Map.get(state.checkouts[run], :read_only?, false) ->
+        {:reply, {:ok, :read_only}, state}
+
+      true ->
+        notify_channel(state, {:push, "collect", %{"run" => run, "kind" => Atom.to_string(kind)}})
+
+        {:noreply,
+         %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
     end
   end
 
