@@ -13,6 +13,8 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workers.{Reconciler, Run}
 
+  require Logger
+
   import Arbiter.LifecycleFixtures, only: [put_state!: 3]
 
   defmodule RecordingReconciler do
@@ -237,6 +239,39 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
 
       assert %{state: :finished, outcome: :interrupted, failure_reason: "server restarted"} =
                Ash.get!(Run, run.id)
+    end
+
+    # bd-4p1vui (docs/design/remote-workers.md §10.4.7): an adopted run is its new Worker's.
+    test "once Recovery has adopted it, the run is neither interrupted nor its ticket resumed" do
+      issue = active_ticket!()
+      run = node_run!(enroll!("adopted"), issue.id)
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: issue.id,
+          repo: "trib/repo",
+          meta: %{adopt: Nodes.Adoption.adopt_info(run)}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: Arbiter.Worker.abandon_adoption(pid) end)
+
+      # the summary is an info line; the test config logs warnings and up
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          ReconcileSweep.steps(
+            primary?: true,
+            reconciler: ResumeCountingReconciler,
+            recovery: fn _opts -> {:ok, %{run.id => :adopted}} end
+          )
+        end)
+
+      assert log =~ "node recovery: 1 adopted"
+      refute_received {:resumed, _}
+      assert %{state: :working, outcome: nil} = Ash.get!(Run, run.id)
     end
 
     test "a run on a node is not mistaken for a local one by the orphan sweep alone" do

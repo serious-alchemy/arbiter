@@ -909,7 +909,8 @@ defmodule Arbiter.Nodes.SessionTest do
 
       assert_receive {:node_session, {:push, "adopt", %{"run" => ^id}}}
       Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
-      assert {:ok, {:remote, {^node_id, ^id, _}} = handle} = Task.await(task)
+      # the owner learns where its stream starts: the node's acked offset
+      assert {:ok, {:remote, {^node_id, ^id, _}} = handle, 42} = Task.await(task)
 
       assert Session.run_live?(pid, id)
       assert Session.bridge_target(pid, id, "arb") == {:ok, "/new/arb.sock"}
@@ -942,7 +943,7 @@ defmodule Arbiter.Nodes.SessionTest do
 
       assert_receive {:node_session, {:push, "adopt", _}}
       Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
-      assert {:ok, handle} = Task.await(task)
+      assert {:ok, handle, 50} = Task.await(task)
 
       # bytes 42..49 ("seven..\n") were processed by the old Worker before it stopped
       frame = Arbiter.Nodes.StdoutFrame.encode(id, 42, "seven..\nafter\n")
@@ -957,7 +958,7 @@ defmodule Arbiter.Nodes.SessionTest do
       task = adopt_async(pid, id)
       assert_receive {:node_session, {:push, "adopt", _}}
       Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
-      assert {:ok, _} = Task.await(task)
+      assert {:ok, _handle, 42} = Task.await(task)
       refute_receive {:node_session, {:push, "quiesce", _}}, 250
     end
 
@@ -1014,7 +1015,7 @@ defmodule Arbiter.Nodes.SessionTest do
       task = adopt_async(pid, id, owner)
       assert_receive {:node_session, {:push, "adopt", _}}
       Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
-      assert {:ok, _} = Task.await(task)
+      assert {:ok, _handle, 42} = Task.await(task)
 
       assert :ok = Session.unadopt(pid, id)
       refute Session.run_live?(pid, id)
@@ -1050,7 +1051,7 @@ defmodule Arbiter.Nodes.SessionTest do
       task = adopt_async(pid, id)
       assert_receive {:node_session, {:push, "adopt", _}}
       Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
-      assert {:ok, _} = Task.await(task)
+      assert {:ok, _handle, 42} = Task.await(task)
 
       assert {:error, :attached} = Session.recover(pid, id, @actx, 1_000)
       refute_received {:node_session, {:push, "quiesce", _}}

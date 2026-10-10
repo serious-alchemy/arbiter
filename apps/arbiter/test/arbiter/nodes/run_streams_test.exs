@@ -110,7 +110,8 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       refute S.started?(t, "r1")
 
       {t, effects} = S.ready(t, "r1", %{"adopted" => true, "acked" => 120})
-      assert effects == [{:reply, waiter, {:ok, @handle}}]
+      # an adopted run's owner also learns where its stream starts
+      assert effects == [{:reply, waiter, {:ok, @handle, 120}}]
       refute S.adopting?(t, "r1")
       assert S.started?(t, "r1")
 

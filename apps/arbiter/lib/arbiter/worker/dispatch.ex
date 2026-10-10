@@ -584,6 +584,141 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  @doc """
+  Adopt `run`, a live `worker_runs` row a node kept running across a primary restart
+  (bd-4p1vui, `docs/design/remote-workers.md` §10.4.3), with a new Worker for its ticket.
+
+  It is a resume in everything but its last step: the Worker is built as a resume builds
+  one (meta, security policy, a fresh worker token, MCP config and skills in the home
+  clone, the spawn args later re-opens use, the workflow machine and the driver), but its
+  spawn is told the run to adopt (`ClaudeSession.start/1`'s `:adopt`), so the node hands
+  over the container it holds instead of starting one. The Worker takes the run's row
+  over: no new row, nothing handed off (`Arbiter.Worker` `meta[:adopt]`).
+
+  None of the "may new work start" gates is asked (board slot, the primary's cap, quota,
+  pause, account admission, placement, image publication): nothing new starts, and the run
+  already holds its slot on the node.
+
+  Returns `{:ok, %{worker_pid, run_id, ...}}`, or `{:error, reason}` with no Worker left
+  behind and the row untouched: the run is back on its node's hold, uncancelled, for
+  `Arbiter.Nodes.Recovery` to collect. `:adopt_timeout_ms` bounds the node's answer; the
+  dispatch seams (`:claude_start`, `:start_driver`, `:workflow_module`, `:egress`,
+  `:podman`, `:image`) work as for `dispatch/2`.
+  """
+  @spec adopt(Run.t(), dispatch_opts()) :: {:ok, map()} | {:error, term()}
+  def adopt(%Run{} = run, opts \\ []) do
+    Drain.track(:dispatch_pending, %{task_id: run.task_id}, fn -> do_adopt(run, opts) end)
+  end
+
+  defp do_adopt(%Run{} = run, opts) do
+    with :ok <- Arbiter.Nodes.Adoption.eligible(run),
+         {:ok, task} <- load_task(run.task_id),
+         :ok <- adoptable_ticket(task),
+         :ok <- no_worker(task.id),
+         {:ok, repo} <- resolve_resume_repo(task, Keyword.put_new(opts, :repo, run.repo)),
+         {:ok, worktree_path} <- resume_worktree(task, repo),
+         {:ok, node} <- adoption_node(run.node_id),
+         opts = adopt_opts(task, run, repo, node, opts),
+         :ok <- podman_policy(opts),
+         {:ok, worker_pid} <- start_worker(task, worktree_path, opts) do
+      finish_adoption(task, worker_pid, worktree_path, run, opts)
+    end
+  end
+
+  defp adopt_opts(%Issue{} = task, %Run{} = run, repo, node, opts) do
+    adopt = Map.put(Arbiter.Nodes.Adoption.adopt_info(run), :timeout_ms, opts[:adopt_timeout_ms])
+
+    opts =
+      opts
+      |> normalize_opts()
+      |> Keyword.put(:repo, repo)
+      |> Keyword.put(:agent_type, :claude)
+      |> Keyword.put(:start_claude, true)
+      |> Keyword.put(:resume, true)
+      |> Keyword.put(:existing_pr_ref, task.pr_ref)
+      |> Keyword.put(:node, node)
+      |> Keyword.put(:adopt, adopt)
+
+    put_security_policy(task, opts)
+  end
+
+  # Only the ticket's own run, on a ticket still being worked, with nobody working it.
+  defp adoptable_ticket(%Issue{state: :active, review_only: review_only})
+       when review_only != true,
+       do: :ok
+
+  defp adoptable_ticket(%Issue{state: state}), do: {:error, {:ticket_not_adoptable, state}}
+
+  defp no_worker(task_id),
+    do: if(Worker.whereis(task_id), do: {:error, :worker_present}, else: :ok)
+
+  defp adoption_node(node_id) do
+    case node_id && Arbiter.Nodes.Overview.get(node_id) do
+      %{id: _} = node -> {:ok, node}
+      _ -> {:error, :unknown_node}
+    end
+  end
+
+  # The run was placed under podman; a policy that no longer says so cannot re-open it.
+  defp podman_policy(opts) do
+    case Keyword.get(opts, :resolved_policy) do
+      {_repo, %SecurityPolicy{} = policy} ->
+        if ContainerSpawn.podman?(policy), do: :ok, else: {:error, :not_podman}
+
+      _ ->
+        {:error, :no_policy}
+    end
+  end
+
+  # The spawn adopts (the node answers inside `maybe_start_claude/4`), then the Worker must
+  # own the run before the machine and driver start. Any failure from here undoes it all:
+  # the run goes back to the hold and nothing is written to its row.
+  defp finish_adoption(%Issue{} = task, worker_pid, worktree_path, %Run{} = run, opts) do
+    result =
+      with {:ok, port, opts} <- maybe_start_claude(task, worker_pid, worktree_path, opts),
+           :ok <- owns_run(worker_pid, run),
+           {:ok, machine_id, machine_pid} <- attach_and_start_machine(task, worktree_path, opts),
+           {:ok, driver_pid} <-
+             maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts) do
+        {:ok,
+         %{
+           task: task,
+           worker_pid: worker_pid,
+           run_id: run.id,
+           machine_id: machine_id,
+           machine_pid: machine_pid,
+           driver_pid: driver_pid,
+           worktree_path: worktree_path,
+           claude_port: port
+         }}
+      end
+
+    case result do
+      {:ok, _} = ok ->
+        Logger.info("Dispatch: #{task.id} adopted its run #{run.id} on node #{run.node_id}")
+        ok
+
+      {:error, reason} ->
+        give_up_adoption(worker_pid)
+        {:error, {:adoption_failed, reason}}
+    end
+  end
+
+  defp owns_run(worker_pid, %Run{id: id}) do
+    case Worker.state(worker_pid) do
+      %{run_id: ^id} -> :ok
+      _ -> {:error, :run_not_adopted}
+    end
+  catch
+    :exit, _ -> {:error, :run_not_adopted}
+  end
+
+  defp give_up_adoption(worker_pid) do
+    Worker.abandon_adoption(worker_pid)
+  catch
+    :exit, _ -> :ok
+  end
+
   defp do_resume_session(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_dispatchable(task, resume: true),
@@ -2787,6 +2922,10 @@ defmodule Arbiter.Worker.Dispatch do
 
     base = maybe_put_resume_meta(base, opts)
 
+    # bd-4p1vui: a Worker built to adopt a run a node kept across a restart
+    # (`adopt/2`) takes that run's row over instead of creating one.
+    base = put_if_present(base, :adopt, Keyword.get(opts, :adopt))
+
     case worktree_path && resolve_repo_path(task, Keyword.get(opts, :repo)) do
       repo_path when is_binary(repo_path) ->
         Map.merge(base, %{
@@ -4175,13 +4314,14 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # `:egress`, `:podman` and `:image` are the spawn's own injection points
   # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
-  # resume against a stand-in egress run and `podman` (bd-dh1gg1).
+  # resume against a stand-in egress run and `podman` (bd-dh1gg1). `:adopt`
+  # (bd-4p1vui) tells the spawn the run to adopt instead of a container to start.
   defp sandbox_session_opts(policy, workspace, opts),
     do:
       ContainerSpawn.session_opts(
         policy,
         workspace,
-        Keyword.take(opts, [:repo, :node, :egress, :podman, :image])
+        Keyword.take(opts, [:repo, :node, :egress, :podman, :image, :adopt])
       )
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do

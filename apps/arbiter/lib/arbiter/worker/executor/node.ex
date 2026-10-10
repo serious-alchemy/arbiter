@@ -59,8 +59,8 @@ defmodule Arbiter.Worker.Executor.Node do
   hand the run `run_spec["run"]`, which `node` kept running across a primary restart, to
   `opts[:owner]` instead of starting a container. Only the spec's `bridges` are used (the
   node keeps the container it has). Options: `:owner`, `:checkout`, `:stdout_offset` (the
-  bytes the old Worker processed) and `:adopt_timeout_ms`. Returns what `prepare/3` does,
-  or `{:error, reason}` (see `Arbiter.Nodes.Session.adopt/5`), after which the run is
+  bytes the old Worker processed) and `:adopt_timeout_ms`. Returns what `prepare/3` does
+  plus `stdout_start` (the offset the run's stream resumed at), or `{:error, reason}` (see `Arbiter.Nodes.Session.adopt/5`), after which the run is
   held again and nothing was cancelled.
   """
   @spec adopt(term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -69,7 +69,7 @@ defmodule Arbiter.Worker.Executor.Node do
          run when is_binary(run) <- run_spec["run"] || {:error, :no_run_id},
          {:ok, pid} <- session(node_id),
          owner = Keyword.get(opts, :owner, self()),
-         {:ok, handle} <-
+         {:ok, handle, stdout_start} <-
            Session.adopt(
              pid,
              run,
@@ -77,7 +77,8 @@ defmodule Arbiter.Worker.Executor.Node do
              owner,
              Keyword.take(opts, [:checkout, :stdout_offset, :adopt_timeout_ms])
            ) do
-      {:ok, %{handle: handle, node_id: node_id, run: run, session: pid}}
+      {:ok,
+       %{handle: handle, node_id: node_id, run: run, session: pid, stdout_start: stdout_start}}
     end
   end
 

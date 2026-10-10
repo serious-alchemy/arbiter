@@ -73,8 +73,9 @@ defmodule Arbiter.Worker.Executor.NodeTest do
     assert_receive {:node_session, {:push, "adopt", %{"run" => ^run}}}
     Session.node_event(pid, "run.ready", %{"run" => run, "adopted" => true, "acked" => 0})
 
-    assert {:ok, %{handle: {:remote, {_, ^run, _}} = handle, run: ^run, session: ^pid} = prepared} =
-             Task.await(task)
+    assert {:ok,
+            %{handle: {:remote, {_, ^run, _}} = handle, run: ^run, session: ^pid, stdout_start: 0} =
+              prepared} = Task.await(task)
 
     assert {:ok, ^handle} = Executor.open(prepared)
     assert Executor.live?(handle)

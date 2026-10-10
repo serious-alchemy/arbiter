@@ -326,14 +326,16 @@ defmodule Arbiter.Nodes.Session do
   Hand run `run`, which the node held across a primary restart, to `owner` (bd-4p1vui):
   the held-run twin of `assign/5`. `spec` is the run spec the owner's spawn built (only
   its `bridges` are used: the node keeps the container it has). Blocks until the node
-  attaches the run (`{:ok, handle}`), or `{:error, reason}`: an `adoptable/2` reason,
+  attaches the run (`{:ok, handle, stdout_start}`: where its stream resumed), or
+  `{:error, reason}`: an `adoptable/2` reason,
   `{:adopt_refused, why}`, `:adopt_timeout`, `:owner_down` or `:node_lost`. On any error
   the run is held again and nothing was cancelled. Options: `:checkout` (the context the
   upload endpoints authorize against, as for `assign/5`), `:stdout_offset` (the stdout
   bytes the old Worker processed, persisted at its graceful stop: the stream starts at
   the larger of it and the node's acked offset) and `:adopt_timeout_ms`.
   """
-  @spec adopt(pid(), String.t(), map(), pid(), keyword()) :: {:ok, term()} | {:error, term()}
+  @spec adopt(pid(), String.t(), map(), pid(), keyword()) ::
+          {:ok, term(), non_neg_integer()} | {:error, term()}
   def adopt(pid, run, spec, owner, opts \\ []),
     do: GenServer.call(pid, {:adopt, run, spec, owner, opts}, :infinity)
 

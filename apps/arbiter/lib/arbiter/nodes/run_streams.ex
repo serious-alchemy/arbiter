@@ -131,16 +131,18 @@ defmodule Arbiter.Nodes.RunStreams do
     do: for({run, %{state: state}} <- streams, state != :done, do: run) |> Enum.sort()
 
   @doc """
-  The node says the run is up (`run.ready`): the waiter gets the handle. For an
-  adopted run, the payload's `acked` (where the node's resend starts) sets the next
-  offset expected; a plain `run.ready` (a reattach) keeps the adopted one.
+  The node says the run is up (`run.ready`): the waiter gets `{:ok, handle}`. For an
+  adopted run, the payload's `acked` (where the node's resend starts) can move the
+  next offset expected up (a plain `run.ready`, a reattach, keeps the adopted one), and
+  the waiter gets `{:ok, handle, stdout_start}`: where its stream starts.
   """
   @spec ready(t(), String.t(), map()) :: {t(), [effect()]}
   def ready(table, run, payload \\ %{}) do
     update(table, run, fn
-      %{state: :assigned, waiter: waiter, handle: handle} = s ->
+      %{state: :assigned, waiter: waiter, handle: handle, adopting?: adopting?} = s ->
         s = %{s | state: :ready, stage: :running, waiter: nil} |> adopted_start(payload)
-        {s, reply(waiter, {:ok, handle})}
+        answer = if adopting?, do: {:ok, handle, s.next}, else: {:ok, handle}
+        {s, reply(waiter, answer)}
 
       s ->
         {s, []}
