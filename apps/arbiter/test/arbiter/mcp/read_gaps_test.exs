@@ -118,7 +118,7 @@ defmodule Arbiter.MCP.ReadGapsTest do
 
       assert {:ok, shown} = Catalog.call(@coordinator, "account_show", %{"ref" => "rg-show"})
 
-      assert keys(shown) == sorted([:credentials, :workspaces | @account_keys])
+      assert keys(shown) == sorted([:credentials, :workspaces, :spend_cap | @account_keys])
       assert [credential] = shown.credentials
       assert keys(credential) == sorted(@credential_keys)
       assert credential.kind == :oauth_token

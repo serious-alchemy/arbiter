@@ -2265,10 +2265,19 @@ defmodule Arbiter.Worker.ClaudeSession do
           {:worker_denied, session.task_id, Map.get(session, :denied_command_line)}
         )
 
-    broadcast(session, {:worker_exited, session.task_id, status})
+    # bd-cgdhlu: a run whose node was lost did not finish and did not fail; its
+    # owner re-dispatches the pass, so it is told that, not an exit status it
+    # would score as "no verdict".
+    if Map.get(session, :remote_outcome) |> node_lost_outcome?(),
+      do: broadcast(session, {:worker_node_lost, session.task_id}),
+      else: broadcast(session, {:worker_exited, session.task_id, status})
+
     close_durable(session)
     %{session | exit_status: status, exited_at: DateTime.utc_now()}
   end
+
+  defp node_lost_outcome?(%{node_lost?: true}), do: true
+  defp node_lost_outcome?(_), do: false
 
   # Close the durable transcript handle (if any) once the child has exited.
   # The handle is also linked to the worker, so an unclean death still flushes

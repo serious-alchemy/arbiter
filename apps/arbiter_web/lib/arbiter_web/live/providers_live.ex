@@ -50,6 +50,7 @@ defmodule ArbiterWeb.ProvidersLive do
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Accounts.Logins
   alias Arbiter.Accounts.Overview
+  alias Arbiter.Quota.SpendCap
   alias ArbiterWeb.ProvidersLive.AccountEditForm
 
   @refresh_ms 15_000
@@ -663,6 +664,19 @@ defmodule ArbiterWeb.ProvidersLive do
     Enum.join([used, pace, ceiling], " · ")
   end
 
+  # bd-a6grlr: the dollar spend cap line under an account's pools.
+  defp spend_cap_text(%{metered?: false} = cap),
+    do: "spend cap $#{SpendCap.money(cap.cap)}/#{cap.window} (#{cap.mode}) · no metered spend"
+
+  defp spend_cap_text(cap) do
+    "spend cap $#{SpendCap.money(cap.cap)}/#{cap.window} (#{cap.mode}) · " <>
+      "$#{SpendCap.money(cap.used)} used · $#{SpendCap.money(cap.allowed)} allowed by now"
+  end
+
+  defp spend_class(:holding), do: "text-[var(--arb-fail-text)]"
+  defp spend_class(:warning), do: "text-[var(--arb-attention)]"
+  defp spend_class(_), do: "text-[var(--arb-text-muted)]"
+
   defp verdict_class(:holding), do: "text-[var(--arb-fail-text)]"
   defp verdict_class(:approaching), do: "text-[var(--arb-attention)]"
   defp verdict_class(_), do: "text-[var(--arb-text-muted)]"
@@ -1086,6 +1100,22 @@ defmodule ArbiterWeb.ProvidersLive do
                         </span>
                       </span>
                     </div>
+                  </div>
+                  <div
+                    :if={row.spend_cap}
+                    id={"account-#{row.account.id}-spend-cap"}
+                    data-spend-state={row.spend_cap.state}
+                    class="flex flex-col gap-0.5"
+                  >
+                    <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]">
+                      {spend_cap_text(row.spend_cap)}
+                    </span>
+                    <span
+                      :if={row.spend_cap.phrase}
+                      class={["text-[11px]", spend_class(row.spend_cap.state)]}
+                    >
+                      {row.spend_cap.phrase}
+                    </span>
                   </div>
                 </section>
 

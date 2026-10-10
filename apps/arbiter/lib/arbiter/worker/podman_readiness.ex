@@ -368,7 +368,7 @@ defmodule Arbiter.Worker.PodmanReadiness do
   end
 
   defp bridge_probe(opts, image) do
-    dir = Path.join(System.tmp_dir!(), "arb-podman-probe-#{System.unique_integer([:positive])}")
+    dir = Path.join(Arbiter.Config.Paths.socket_root(), "pp#{System.unique_integer([:positive])}")
     sock = Path.join(dir, "bridge.sock")
 
     try do

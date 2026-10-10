@@ -44,7 +44,7 @@ defmodule Arbiter.Worker.SshAgent do
 
   @doc "The default directory agent sockets live in."
   @spec default_dir() :: Path.t()
-  def default_dir, do: Path.join(Paths.scratch_root(), "ssh-agent")
+  def default_dir, do: Path.join(Paths.socket_root(), "ssh-agent")
 
   @doc """
   Creates (`0700`) and returns the default agent dir. The jail masks this dir

@@ -90,6 +90,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
   alias Arbiter.Nodes.Refusal
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
@@ -333,6 +334,13 @@ defmodule Arbiter.Worker.Dispatch do
       # `maybe_start_claude/4` is the frame that provisioned the checkout and
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.
+      # bd-373tce: the node refused the run and the primary has no room for it
+      # either. Nothing ran, so this is a hold, not a crash: the worker is stopped
+      # without a failed run and the ticket goes back to the Ready queue.
+      {:error, {:no_node_capacity, _info}} = held ->
+        hold_spawned_worker(task, worker_pid)
+        held
+
       {:error, reason} = err ->
         # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
         # image_unavailable | bad_spec}`) has started nothing and failed nothing. The card is
@@ -353,6 +361,21 @@ defmodule Arbiter.Worker.Dispatch do
       %{name: name} when is_binary(name) -> name
       _ -> "the node"
     end
+  end
+
+  defp hold_spawned_worker(%Issue{id: task_id}, worker_pid) do
+    if is_pid(worker_pid), do: Worker.stop(worker_pid, :normal, 5_000)
+
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id) do
+      Ash.update(task, %{}, action: :requeue)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp review_checkout_path(opts) do
@@ -2309,10 +2332,32 @@ defmodule Arbiter.Worker.Dispatch do
 
       case Admission.admit(task, provider, admission_opts(opts)) do
         {:ok, _admitted} -> :ok
+        {:error, {:spend_cap, reason}} -> hold_for_spend(task, provider, opts, reason)
         {:error, _} = refused -> refused
       end
     else
       :ok
+    end
+  end
+
+  # bd-a6grlr: the account's dollar spend cap is reached (or past its paced
+  # line). A fresh dispatch is held in the workspace's `DispatchQueue` like a
+  # quota hold - the same `{:quota_held, id}` answer every caller already
+  # handles - and drained once `SpendCap` says the window has room again. If
+  # the queue is unreachable it fails open, as the quota gate does: dropping
+  # the work is worse than overshooting.
+  defp hold_for_spend(%Issue{workspace_id: ws_id} = task, provider, opts, reason) do
+    case DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
+      :ok ->
+        {:error, {:quota_held, task.id}}
+
+      {:error, hold_err} ->
+        Logger.warning(
+          "Dispatch: spend cap held #{task.id} but enqueue failed (#{inspect(hold_err)}); " <>
+            "allowing dispatch to avoid dropping work"
+        )
+
+        :ok
     end
   end
 
@@ -2388,10 +2433,39 @@ defmodule Arbiter.Worker.Dispatch do
       workspace_id: task.workspace_id,
       kind: node_kind(task, opts),
       provider: quota_gate_provider(task, workspace, opts),
-      layout: git_layout(task, opts),
-      no_pr?: no_private_clone?(task, opts),
+      layout: node_layout(task, workspace, opts),
+      no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
+      local_work?: local_work?(task, opts, Placement.mode(workspace)),
       mode: Placement.mode(workspace)
     }
+  end
+
+  # The layout the run's checkout would get. A `review: true` dispatch has no
+  # worktree of its own (`provision_worktree: false`); its checkout is the
+  # reviewer's, a private clone whenever the review may run in a container
+  # (bd-cgdhlu), so that is the layout placement asks about.
+  defp node_layout(%Issue{} = task, workspace, opts) do
+    if Keyword.get(opts, :review) == true,
+      do: workspace |> dispatch_policy(opts) |> GitLayout.for_review_policy(),
+      else: git_layout(task, opts)
+  end
+
+  # bd-373tce: does the checkout this dispatch would reuse already hold uncommitted
+  # work? Only the primary has it: the seed bundle carries commits, and the
+  # snapshot of a remote run would replace the work tree on its way back. A
+  # `local_only` workspace is never placed, so nothing is read for it. A checkout
+  # git cannot read counts as holding work — the safe answer is to keep it here.
+  defp local_work?(_task, _opts, :local_only), do: false
+
+  defp local_work?(%Issue{} = task, opts, _mode) do
+    if no_private_clone?(task, opts) do
+      false
+    else
+      path = task |> BranchNamer.derive() |> Worktree.worktree_path()
+      File.dir?(path) and Worktree.has_uncommitted?(path) != {:ok, false}
+    end
+  rescue
+    _ -> true
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
@@ -2430,6 +2504,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp admission_opts(opts) do
     admission = [
       force: Keyword.get(opts, :force_slot) == true,
+      skip_spend: SpendCap.bypassed?(opts),
       actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
     ]
 
@@ -3534,9 +3609,8 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
-                 # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
-                 # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
-                 {:ok, port} <- start_agent_session(opts, session_opts) do
+                 {:ok, port, opts} <-
+                   start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3544,6 +3618,10 @@ defmodule Arbiter.Worker.Dispatch do
               _ = Worker.advance(worker_pid, :claude)
               {:ok, port, opts}
             else
+              {:error, {:no_node_capacity, _info}} = held ->
+                Checkout.teardown(review_checkout_path(opts))
+                held
+
               {:error, reason} ->
                 Checkout.teardown(review_checkout_path(opts))
                 {:error, {:claude_start_failed, reason}}
@@ -3556,6 +3634,72 @@ defmodule Arbiter.Worker.Dispatch do
     start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
     start.(session_opts)
   end
+
+  # bd-373tce: a run `ensure_node_capacity/2` placed on a node that the node then
+  # cannot take (it refuses the seed as `unschedulable`, is unreachable, ...) runs
+  # on the primary instead: by here the ticket is already In progress with a worker
+  # registered, so failing the spawn would crash a run that nothing was wrong with.
+  # `remote_only` never runs local, so its failure stands. The home clone was cut
+  # thin for the node (no deps), so it is seeded the way a local run's is first.
+  defp start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
+    case start_agent_session(opts, session_opts) do
+      {:ok, port} ->
+        {:ok, port, opts}
+
+      {:error, reason} = error ->
+        if Keyword.get(opts, :node) && Placement.mode(load_workspace(task)) != :remote_only do
+          start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
+        else
+          error
+        end
+    end
+  end
+
+  defp start_session_locally(task, worker_pid, path, worktree_path, opts, reason) do
+    Logger.warning(
+      "Dispatch: node placement failed for #{task.id} (#{inspect(reason, limit: 10)}); " <>
+        "falling back to the primary"
+    )
+
+    opts = Keyword.delete(opts, :node)
+
+    with :ok <- admit_local_fallback(task, opts),
+         :ok <- seed_for_local_run(task, worktree_path, opts),
+         {:ok, session_opts} <- build_agent_session_opts(task, worker_pid, path, opts),
+         {:ok, port} <- start_agent_session(opts, session_opts) do
+      {:ok, port, opts}
+    end
+  end
+
+  # The fallback run is a local spawn like any other, so it passes the primary's
+  # own cap (`LocalCapacity`): `{:error, {:no_node_capacity, info}}` holds it.
+  defp admit_local_fallback(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+
+    admit_opts =
+      node_gate_opts(opts) ++
+        [
+          reason: :no_node,
+          provider: quota_gate_provider(task, workspace, opts),
+          workspace_id: task.workspace_id
+        ]
+
+    LocalCapacity.admit(task.id, node_kind(task, opts), admit_opts)
+  end
+
+  defp seed_for_local_run(%Issue{} = task, worktree_path, opts) when is_binary(worktree_path) do
+    repo = Keyword.get(opts, :repo)
+
+    case resolve_repo_path(task, repo) do
+      repo_path when is_binary(repo_path) ->
+        Worktree.seed_worktree(repo_path, worktree_path, seed_paths(task, repo))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp seed_for_local_run(_task, _worktree_path, _opts), do: :ok
 
   # Resolve the agent's cwd.
   #
@@ -3631,8 +3775,10 @@ defmodule Arbiter.Worker.Dispatch do
         %{path: path} = checkout ->
           {:ok, path, Keyword.put(opts, :review_checkout, checkout)}
 
+        # A diff-only review reads the primary's own repo, which a node cannot
+        # be handed: it runs here instead (bd-cgdhlu).
         nil ->
-          {:ok, repo_path, opts}
+          {:ok, repo_path, Keyword.delete(opts, :node)}
       end
     else
       _ -> {:error, :missing_worktree}
@@ -3668,7 +3814,7 @@ defmodule Arbiter.Worker.Dispatch do
         # only through a sync-back.
         _ = Worktree.sync_branch(repo_path, branch)
 
-        case Checkout.provision_branch(repo_path, branch, prefix: "review") do
+        case Checkout.provision_branch(repo_path, branch, review_checkout_opts(opts, target)) do
           {:ok, %{path: path, head_sha: sha}} ->
             seed_review_checkout(task, repo_path, branch, path, opts)
             %{path: path, branch: branch, head_sha: sha, base_branch: target}
@@ -3682,6 +3828,15 @@ defmodule Arbiter.Worker.Dispatch do
             nil
         end
     end
+  end
+
+  # A review placed on a node (`opts[:node]`, bd-cgdhlu) is handed a read-only
+  # private clone of the head — the only layout a container gets, and what the
+  # node is seeded from. Every other review keeps the detached linked worktree.
+  defp review_checkout_opts(opts, target) do
+    if Keyword.get(opts, :node),
+      do: [prefix: "review", layout: :private_clone, base: target],
+      else: [prefix: "review"]
   end
 
   # The reviewer runs tests here, so it gets the same seeded deps/_build (and
@@ -3702,6 +3857,15 @@ defmodule Arbiter.Worker.Dispatch do
     BranchNamer.derive(task)
   rescue
     _ -> nil
+  end
+
+  # A review placed on a node names its provider, which is what keeps a podman
+  # `sandbox.backend` for a Claude reviewer in a private clone
+  # (`SecurityPolicy.for_review_spawn/2`, bd-cgdhlu). Any other review is unchanged.
+  defp review_policy_opts(opts, choice) do
+    if Keyword.get(opts, :node),
+      do: Keyword.put_new(opts, :provider, choice.type),
+      else: opts
   end
 
   # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
@@ -3851,7 +4015,7 @@ defmodule Arbiter.Worker.Dispatch do
         base_policy =
           workspace
           |> dispatch_policy(opts)
-          |> review_security_policy(opts)
+          |> review_security_policy(review_policy_opts(opts, choice))
 
         policy = guardrail_floor(base_policy, workspace, choice, opts)
 

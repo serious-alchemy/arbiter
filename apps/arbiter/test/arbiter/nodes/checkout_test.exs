@@ -192,6 +192,29 @@ defmodule Arbiter.Nodes.CheckoutTest do
       refute fallback.seed.thin?
     end
 
+    # bd-373tce: a re-dispatched branch with no commits of its own, cut from a base
+    # that has since moved on. The node holds the newer base from an earlier run, so
+    # the branch tip is an ancestor of what it has: a thin bundle leaves the branch
+    # ref out, and the seed failed with :no_branch_in_seed.
+    test "carries the branch ref when its tip is an ancestor of what the node holds", c do
+      advance_main = fn name ->
+        git!(c.home, ["checkout", "-q", "main"])
+        File.write!(Path.join(c.home, "lib/#{name}.txt"), "#{name}\n")
+        sha = commit_all!(c.home, name)
+        git!(c.home, ["checkout", "-q", @branch])
+        sha
+      end
+
+      # An earlier run left the node holding a newer main than the branch was cut from.
+      held = advance_main.("newer")
+      _ = seed!(c)
+      advance_main.("newest")
+
+      assert %{seed: %{thin?: false, refs: refs}, info: %{head: head}} = seed!(c, [held])
+      assert refs["refs/heads/#{@branch}"] == c.base
+      assert head == c.base
+    end
+
     test "when the node already has every tip it still gets a usable bundle", c do
       assert %{seed: %{thin?: false, refs: refs}} = seed!(c, [c.base])
       assert refs["refs/heads/#{@branch}"] == c.base

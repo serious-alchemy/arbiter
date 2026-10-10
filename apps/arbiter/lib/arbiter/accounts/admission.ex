@@ -63,6 +63,7 @@ defmodule Arbiter.Accounts.Admission do
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Agents.ProviderConstraint
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Tasks.Issue
 
   require Logger
@@ -80,6 +81,7 @@ defmodule Arbiter.Accounts.Admission do
   @type result ::
           {:ok, :unlimited | :admitted | :forced}
           | {:error, {:account_at_capacity, info()}}
+          | {:error, {:spend_cap, map()}}
           | {:error, {:provider_constraint, atom() | String.t() | nil, String.t()}}
 
   @doc """
@@ -89,6 +91,15 @@ defmodule Arbiter.Accounts.Admission do
     * `{:ok, :admitted}` — headroom was left; the slot is now reserved.
     * `{:ok, :forced}` — no headroom, but `force: true`; reserved and recorded.
     * `{:error, {:account_at_capacity, info}}` — no headroom; nothing reserved.
+    * `{:error, {:spend_cap, reason}}` — the account's dollar spend cap
+      (`Arbiter.Quota.SpendCap`, bd-a6grlr) is reached or past its paced line,
+      counting the settled ledger plus the estimated remaining cost of every
+      slot holder; nothing reserved. `reason` is the dispatch queue's hold
+      reason (`gate: :spend`, a `phrase`). Checked under the same per-account
+      lock as the slot, and before it, so a burst of fresh dispatches each sees
+      the earlier ones. An account with no cap, or with no *metered* spend,
+      never answers this. `:skip_spend` (an operator's `force_quota`) skips it;
+      `:spend_opts` are `SpendCap.status/2`'s.
 
   Options: `:force`, `:actor` (named in the override event), and `:account` —
   a `ProviderAccount` (or `nil`) the caller already resolved, e.g. the one a
@@ -181,8 +192,28 @@ defmodule Arbiter.Accounts.Admission do
   end
 
   defp decide(%Issue{} = task, account, provider, opts) do
+    with :ok <- spend_check(task, account, opts) do
+      decide_slot(task, account, provider, opts)
+    end
+  end
+
+  # A capped account reserves even with no slot ceiling, so the next admission
+  # in a burst counts this one's estimated cost.
+  defp spend_check(%Issue{} = task, account, opts) do
+    if Keyword.get(opts, :skip_spend) == true do
+      :ok
+    else
+      case SpendCap.check(account, task, Keyword.get(opts, :spend_opts, [])) do
+        :ok -> :ok
+        {:hold, reason} -> {:error, {:spend_cap, reason}}
+      end
+    end
+  end
+
+  defp decide_slot(%Issue{} = task, account, provider, opts) do
     case Concurrency.limit(account, task.workspace_id) do
       nil ->
+        if SpendCap.config(account), do: reserve(task, provider)
         {:ok, :unlimited}
 
       cap ->

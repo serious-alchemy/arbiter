@@ -3322,7 +3322,9 @@ defmodule Arbiter.MCP.Catalog do
           "`plan`, `enabled` (false parks it), `max_concurrent` (the account concurrency " <>
           "ceiling; null clears it) and a `quota_config` patch — the gate settings " <>
           "(thresholds, paced floors, weekly warning policy, window lengths, pace " <>
-          "exemption). A null `quota_config` value clears that key; keys not named are " <>
+          "exemption) and the dollar spend cap (`spend_cap`, `spend_window` day|week|month, " <>
+          "`spend_mode` flat|paced, `spend_metered`: fresh dispatches are held once metered " <>
+          "spend reaches the cap; started tickets finish). A null `quota_config` value clears that key; keys not named are " <>
           "left alone, and a bad value rejects the whole edit. `ref` is an account id, " <>
           "`provider:slug` or a bare slug. Credentials, secrets, login, create, attach, " <>
           "merge and delete are operator actions and are not available here. " <>
@@ -3340,7 +3342,8 @@ defmodule Arbiter.MCP.Catalog do
           "tied to a ticket — `credential_expired` (per adapter and detection source), " <>
           "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
           "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
-          "and provider) and `budget_exceeded` (per ticket). Each carries `kind`, `key`, `subject`, " <>
+          "and provider), `budget_exceeded` (per ticket) and `spend_cap` (per account: " <>
+          "80% of its dollar spend cap, or the cap reached). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

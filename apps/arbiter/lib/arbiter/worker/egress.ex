@@ -186,7 +186,7 @@ defmodule Arbiter.Worker.Egress do
 
   @doc "The default directory for proxy sockets."
   @spec socket_dir() :: Path.t()
-  def socket_dir, do: Path.join(Paths.scratch_root(), "egress")
+  def socket_dir, do: Path.join(Paths.socket_root(), "egress")
 
   @doc """
   Drops the cached grants for `task_id` so the next `CONNECT` re-reads them.

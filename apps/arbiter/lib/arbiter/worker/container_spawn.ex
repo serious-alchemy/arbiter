@@ -924,7 +924,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
                branch: branch,
                base: base,
                seeded_paths: Worktree.seeded_paths(worktree),
-               config_dir: config_dir
+               config_dir: config_dir,
+               read_only?: PrivateClone.read_only?(worktree)
              }}
 
           {:error, reason} ->
@@ -1308,8 +1309,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   defp put_checkout(spec, nil), do: spec
 
-  defp put_checkout(spec, %{branch: branch, base: base}),
-    do: Map.put(spec, "checkout", %{"branch" => branch, "base" => base})
+  # A reviewer's read-only clone (bd-cgdhlu) is seeded like any checkout but never
+  # collected: it writes nothing back, so the agent mirrors only the transcripts.
+  defp put_checkout(spec, %{branch: branch, base: base} = checkout) do
+    body = %{"branch" => branch, "base" => base}
+
+    body =
+      if Map.get(checkout, :read_only?, false), do: Map.put(body, "read_only", true), else: body
+
+    Map.put(spec, "checkout", body)
+  end
 
   defp prompt_mounts(paths) do
     Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->

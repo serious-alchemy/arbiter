@@ -7,20 +7,28 @@ defmodule Arbiter.Nodes.Placement do
 
   ## Eligibility first
 
-  `eligible/1` is pure and runs before any node is looked at. Only **the
-  podman-backed Claude implementer** with a private clone is ever a candidate
-  for a node (bd-aowisc §5, unchanged). Everything else stays on the primary,
-  and `Arbiter.Nodes.LocalCapacity` is the cap that governs it:
+  `eligible/1` is pure and runs before any node is looked at. Only a
+  **podman-backed Claude run** with a private clone is ever a candidate for a
+  node (bd-aowisc §5): the implementer, a merge-queue fix or conflict pass, and
+  the two reviewers, a ReviewGate reviewer and a `review: true` dispatch
+  (bd-7ays3v, bd-cgdhlu). A reviewer reads the head it is handed and writes
+  nothing back but its verdict and transcript, so its checkout is a read-only
+  clone seeded through the bundle path and never collected. Everything else
+  stays on the primary, and `Arbiter.Nodes.LocalCapacity` is the cap that
+  governs it:
 
-    * every spawn kind but a fresh implementer (`:follow_up`: resumes, review
-      dispatches, ReviewGate reviewers and fix rounds, merge-queue fix and
-      conflict passes);
+    * the spawn kinds bound to the primary (`:follow_up`: resumes, re-dispatches
+      of work already under way, ReviewGate fix rounds);
     * every non-Claude provider (`:non_claude_provider`; the podman backend is
       wired for Claude only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
       unsandboxed; the jail needs the primary's filesystem and keyring);
     * a dispatch with no private clone (`:no_private_clone`: task and research
       types);
+    * a dispatch whose home clone already holds uncommitted work
+      (`:local_work`: a re-dispatch of a ticket an earlier local run left
+      dirty; the seed carries commits, not the work tree, and the run's snapshot
+      would replace it on the way back);
     * a workspace whose `worker.placement` is `local_only`
       (`:placement_local_only`).
 
@@ -86,7 +94,9 @@ defmodule Arbiter.Nodes.Placement do
 
   # The kinds that run in a container on a private clone (bd-7ays3v), and so
   # may run on a node once RW9 places them. The rest are bound to the primary.
-  @remote_kinds [:implementer, :reviewer, :fix_pass, :conflict_pass]
+  # `:review` is a `review: true` dispatch (bd-cgdhlu): placed on a node, its
+  # checkout is a read-only private clone like a ReviewGate reviewer's.
+  @remote_kinds [:implementer, :review, :reviewer, :fix_pass, :conflict_pass]
 
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::
@@ -94,6 +104,7 @@ defmodule Arbiter.Nodes.Placement do
           | :non_claude_provider
           | :not_podman
           | :no_private_clone
+          | :local_work
           | :placement_local_only
   @type request :: %{
           required(:task_id) => String.t(),
@@ -103,6 +114,7 @@ defmodule Arbiter.Nodes.Placement do
           required(:mode) => mode(),
           optional(:workspace_id) => String.t() | nil,
           optional(:no_pr?) => boolean(),
+          optional(:local_work?) => boolean(),
           optional(:labels) => [String.t()]
         }
   @type info :: %{
@@ -152,6 +164,7 @@ defmodule Arbiter.Nodes.Placement do
       not claude?(request.provider) -> {:local_only, :non_claude_provider}
       request.layout != :private_clone -> {:local_only, :not_podman}
       Map.get(request, :no_pr?, false) -> {:local_only, :no_private_clone}
+      Map.get(request, :local_work?, false) -> {:local_only, :local_work}
       request.mode == :local_only -> {:local_only, :placement_local_only}
       true -> :ok
     end
@@ -175,6 +188,10 @@ defmodule Arbiter.Nodes.Placement do
     do: "sandbox is not podman (bwrap-jailed or unsandboxed)"
 
   def reason_phrase(:no_private_clone, _), do: "no private clone (task or research dispatch)"
+
+  def reason_phrase(:local_work, _),
+    do: "its checkout already holds uncommitted work on the primary"
+
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
   @doc """

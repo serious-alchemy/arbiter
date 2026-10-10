@@ -127,7 +127,11 @@ defmodule ArbiterWeb.ProvidersEditTest do
           weekly_paced_floor: "0.25",
           pace_exempt_priority: "1",
           pace_exempt_threshold: "0.95",
-          weekly_pace_exempt_threshold: "0.9"
+          weekly_pace_exempt_threshold: "0.9",
+          spend_cap: "20",
+          spend_window: "month",
+          spend_mode: "paced",
+          spend_metered: "true"
         }
       )
       |> render_submit()
@@ -148,7 +152,11 @@ defmodule ArbiterWeb.ProvidersEditTest do
                "weekly_paced_floor" => 0.25,
                "pace_exempt_priority" => 1,
                "pace_exempt_threshold" => 0.95,
-               "weekly_pace_exempt_threshold" => 0.9
+               "weekly_pace_exempt_threshold" => 0.9,
+               "spend_cap" => 20.0,
+               "spend_window" => "month",
+               "spend_mode" => "paced",
+               "spend_metered" => true
              } = saved.quota_config
 
       # A fresh page load shows the saved values in the form.

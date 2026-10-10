@@ -50,6 +50,8 @@ defmodule Arbiter.MCP.Catalog.AccountSchema do
 
   # Every quota value may be null (a clear) and numbers may arrive as strings.
   defp quota_type(:fraction), do: ["number", "string", "null"]
+  defp quota_type(:usd), do: ["number", "string", "null"]
+  defp quota_type(:boolean), do: ["boolean", "string", "null"]
   defp quota_type(:priority), do: ["integer", "string", "null"]
   defp quota_type(:window_map), do: ["object", "null"]
   defp quota_type(_), do: ["string", "null"]
