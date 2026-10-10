@@ -79,6 +79,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.QueueOrder
   alias Arbiter.Board.ReadySince
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Board.WalkInputs
   alias Arbiter.Guardrails.Alternatives
   alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.EdgeGate
@@ -93,6 +94,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Workers.RunNode
 
   require Ash.Query
+  require Logger
 
   # Run states whose worktree is still in use: a run that is not over. What
   # `in_flight/3` counts as holding files for the scheduler's overlap check.
@@ -443,7 +445,7 @@ defmodule Arbiter.Board.Snapshot do
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
 
-    derive(%{
+    %{
       issues: issues,
       workers: workers,
       blocked_by:
@@ -484,7 +486,34 @@ defmodule Arbiter.Board.Snapshot do
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
-    })
+    }
+    |> put_walk_inputs(Keyword.get(opts, :admission, :legacy), workspace, issues, opts)
+    |> derive()
+  end
+
+  # DC6: under `scheduler_admission: shadow` or `enforce` the board also plans
+  # the scheduler walk, so it gathers the walk's capacity sets here. Under
+  # `legacy` nothing is gathered — no budget, seat or walk read runs (I1). A
+  # walk whose inputs cannot be read is left out; today's plan never waits on
+  # it. `:walk_opts` are `Arbiter.Board.WalkInputs.gather/3`'s seams.
+  defp put_walk_inputs(input, mode, workspace, issues, opts) when mode in [:shadow, :enforce] do
+    case Keyword.fetch(opts, :walk) do
+      {:ok, walk} -> Map.put(input, :walk, walk)
+      :error -> gather_walk(input, workspace, issues, Keyword.get(opts, :walk_opts, []))
+    end
+  end
+
+  defp put_walk_inputs(input, _mode, _workspace, _issues, _opts), do: input
+
+  defp gather_walk(input, workspace, issues, walk_opts) do
+    Map.put(input, :walk, WalkInputs.gather(workspace, issues, walk_opts))
+  rescue
+    e ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk's inputs failed: #{Exception.message(e)}"
+      )
+
+      input
   end
 
   # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
