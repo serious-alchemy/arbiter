@@ -644,8 +644,12 @@ defmodule Arbiter.Worker.Driver do
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
-      [%{outcome: :interrupted, stop_category: "node_lost"}] -> true
-      _ -> false
+      [%{outcome: :interrupted, stop_category: category}]
+      when category in ["node_lost", "pod_disrupted"] ->
+        true
+
+      _ ->
+        false
     end
   rescue
     _ -> false

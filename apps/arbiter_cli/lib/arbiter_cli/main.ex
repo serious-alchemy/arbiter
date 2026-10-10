@@ -163,6 +163,7 @@ defmodule ArbiterCli.Main do
                        separately, the token (terminal or --token-file only)
       arb node list|show <name|id>|events <name|id>
       arb node set <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+                   [--workspace ID ...] [--allow-unenforced-network | --no-allow-unenforced-network]
 
       arb provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
       arb provider resume <provider|account-ref>

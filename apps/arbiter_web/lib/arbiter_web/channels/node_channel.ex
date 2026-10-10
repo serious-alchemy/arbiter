@@ -10,6 +10,7 @@ defmodule ArbiterWeb.NodeChannel do
   | `hello`        | attaches this channel to the node's session; pushes `hello_ok` (`boot_epoch`, thresholds, effective `max_workers`, per-run verdicts, health, optional `upgrade`) |
   | `hb`           | pushes `hb_ack` `{seq, boot_epoch}`; a heartbeat before `hello` is replied `error: hello_required` |
   | `run.ready`, `run.refused`, `exit`, binary `stdout` | forwarded to the session's run table (`Arbiter.Nodes.RunStreams`) |
+  | `capacity` (K12, A3) | forwarded to the session (`capacity{ceiling, running, pending, headroom, constrained}`) |
   | `bridge.open`, `bridge.data` (binary), `bridge.credit`, `bridge.recv`, `bridge.close`, `bridge.reset` | forwarded to this connection's `Arbiter.Nodes.Bridge` (RW10), started on the first one; its pushes come back as `{:node_bridge, {:push, event, payload}}` |
 
   Pushed by the primary: the run protocol (`assign`, `cancel`, `signal`, `ack`,
@@ -78,7 +79,7 @@ defmodule ArbiterWeb.NodeChannel do
 
   # The run protocol (RW9): the node's events go to the session, which owns the
   # run table. A run event before `hello` has no session to go to and is dropped.
-  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped)
+  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity)
 
   def handle_in(event, payload, %{assigns: %{session: session}} = socket)
       when event in @run_events and is_map(payload) do
