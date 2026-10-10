@@ -584,8 +584,6 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     end)
   end
 
-  defp validate_scoped_tier_models(changeset, _label, _config), do: changeset
-
   defp validate_tier_model_entries(changeset, path, tier_models) do
     Enum.reduce(Enum.sort(tier_models), changeset, fn {tier, model}, cs ->
       cond do
