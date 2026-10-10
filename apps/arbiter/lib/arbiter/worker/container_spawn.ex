@@ -1515,6 +1515,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
     if request.provider == "claude",
       do: seed_resume(request.config_dir, argv, request.mounts[:worktree])
 
+    wrap_argv(port_args)
+  end
+
+  def wrap_port(%{sandbox: _}), do: {:error, :empty_command}
+  def wrap_port(port_args), do: {:ok, port_args}
+
+  # The `podman run` invocation alone, without the session-only side effects of
+  # `wrap_port/1` (codex auth reopen, resume seeding).
+  defp wrap_argv(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
     with {:ok, spec} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, [podman | args]} <-
            Container.wrap(Jail.network_command(spec, argv), opts(request, port_args)) do
@@ -1522,9 +1531,6 @@ defmodule Arbiter.Worker.ContainerSpawn do
        %{port_args | exec: podman, argv: [podman | args], env: inherit_pairs(port_args, request)}}
     end
   end
-
-  def wrap_port(%{sandbox: _}), do: {:error, :empty_command}
-  def wrap_port(port_args), do: {:ok, port_args}
 
   @doc """
   Run `command` (`sh -c`) to completion in the run's own container: the spawn's
@@ -1554,6 +1560,40 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   def run_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
+
+  @doc """
+  Like `run_command/3`, for a command run *while the session's container is
+  still up* (the `run_tests` tool, bd-57nhsi): the container gets a name of its
+  own (`<session name>-x<hex>`), so it neither collides with the live agent
+  container nor is the one removed afterwards, and the session-only side effects
+  of `wrap_port/1` (codex auth reopen, resume seeding) are skipped.
+  """
+  @spec run_side_command(map(), String.t(), pos_integer()) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def run_side_command(%{sandbox: %{name: name} = request} = port_args, command, timeout_s)
+      when is_binary(name) and is_binary(command) and is_integer(timeout_s) do
+    side_name = side_name(name)
+    inner = %{port_args | argv: ["sh", "-c", command], sandbox: %{request | name: side_name}}
+
+    with {:ok, %{argv: [podman | args], env: env}} <- wrap_argv(inner) do
+      try do
+        Container.cmd([], podman, args,
+          env: env,
+          stderr_to_stdout: true,
+          timeout: (timeout_s + @run_command_grace_s) * 1000
+        )
+      after
+        Container.teardown(side_name)
+      end
+    end
+  end
+
+  def run_side_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
+
+  defp side_name(base) do
+    suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+    String.slice(base, 0, 64 - 11) <> "-x" <> suffix
+  end
 
   defp opts(request, port_args) do
     {inherit, literal} = split_env(env_pairs(port_args, request))

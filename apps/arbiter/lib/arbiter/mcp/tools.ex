@@ -1850,6 +1850,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate trust_dismiss(scope, args), to: Arbiter.MCP.Tools.Trust
 
   defdelegate permission_request(scope, args), to: Arbiter.MCP.Tools.PermissionRequest
+  defdelegate run_tests(scope, args), to: Arbiter.MCP.Tools.RunTests
   defdelegate ticket_permission_grant(scope, args), to: Arbiter.MCP.Tools.PermissionGrant
 
   defdelegate worker_dispatch(scope, args), to: Arbiter.MCP.Tools.Worker

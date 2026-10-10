@@ -128,6 +128,18 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
            retrying the CLI.
 
+           RUNNING TESTS — use the `run_tests` MCP tool instead of `mix test` in the
+           shell. It runs your tests in this run's own environment (same container,
+           deps and `_build`) and returns only the pass/fail counts plus each failing
+           test's header, assertion and a few stacktrace frames, so compile output and
+           passing-test noise do not ride in your context for the rest of the session.
+           Pass `paths` (test files, optionally `file.exs:LINE`, or directories) or
+           `changed: true` for the tests mapped from what you changed. The result
+           carries `full_log`, the path of the complete output; read that only if the
+           summary is not enough. Fall back to a raw `mix test` only for a flag the tool
+           lacks, and then pipe it through `tail` or `grep` rather than letting the
+           whole run into context.
+
            EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
            artifacts. A screenshot must be a real capture of the real app, a source
            or licence citation must name where the thing actually came from, and a
@@ -1112,6 +1124,27 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       m = send_to("bd-golden1", %{})
       _ = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
       assert Ash.get!(Message, m.id).read_at == nil
+    end
+  end
+
+  describe "RUNNING TESTS steering (bd-57nhsi)" do
+    test "an authoring prompt steers the worker to run_tests over raw mix test" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert prompt =~ "RUNNING TESTS"
+      assert prompt =~ "`run_tests`"
+      assert prompt =~ "full_log"
+    end
+
+    test "a session without the MCP server is not pointed at a tool it lacks" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", mcp_tools?: false)
+
+      refute prompt =~ "RUNNING TESTS"
+    end
+
+    test "the section is exposed for the other authoring prompts" do
+      assert PromptBuilder.test_tool_section() =~ "`run_tests`"
     end
   end
 end

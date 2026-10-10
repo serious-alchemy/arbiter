@@ -12,6 +12,9 @@ defmodule Arbiter.Worker.PromptBuilder do
 
   require Ash.Query
 
+  alias Arbiter.Agents.Gemini.ConfigDir, as: GeminiConfigDir
+  alias Arbiter.MCP
+  alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiConfig
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
@@ -322,6 +325,51 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # bd-57nhsi: raw `mix test` output (compile chatter, passing dots, warnings)
+  # is re-read on every later turn of the session; the `run_tests` MCP tool runs
+  # the same tests in the run's own environment and returns only the counts and
+  # each failure. Authoring prompts steer to it; a session with no MCP server
+  # (`mcp_tools?: false`) is not told about a tool it lacks.
+  @doc "The paragraph that steers an authoring worker to the `run_tests` tool."
+  @spec test_tool_section() :: String.t()
+  def test_tool_section do
+    """
+    RUNNING TESTS — use the `run_tests` MCP tool instead of `mix test` in the
+    shell. It runs your tests in this run's own environment (same container,
+    deps and `_build`) and returns only the pass/fail counts plus each failing
+    test's header, assertion and a few stacktrace frames, so compile output and
+    passing-test noise do not ride in your context for the rest of the session.
+    Pass `paths` (test files, optionally `file.exs:LINE`, or directories) or
+    `changed: true` for the tests mapped from what you changed. The result
+    carries `full_log`, the path of the complete output; read that only if the
+    summary is not enough. Fall back to a raw `mix test` only for a flag the tool
+    lacks, and then pipe it through `tail` or `grep` rather than letting the
+    whole run into context.
+    """
+  end
+
+  @doc """
+  `test_tool_section/0` for a review-gate fix round whose adapter is known, or
+  `""` when the session has no arbiter MCP server: injection is off, or agy has
+  no isolated `$HOME` (`GeminiConfig` refuses, as `Dispatch.inject_mcp_config/3`
+  sees).
+  """
+  @spec test_tool_section_for(module()) :: String.t()
+  def test_tool_section_for(adapter) do
+    if MCP.inject_config?() and mcp_config_writable?(adapter),
+      do: test_tool_section(),
+      else: ""
+  end
+
+  defp mcp_config_writable?(adapter) do
+    adapter.provider() != "gemini" or
+      GeminiConfig.cli_flavour() != :agy or
+      GeminiConfigDir.enabled?()
+  end
+
+  defp test_tool_section(opts),
+    do: if(mcp_tools?(opts), do: test_tool_section() <> "\n", else: "")
+
   # bd-capkj9: a podman container has no forge credential or host key by design;
   # the host pushes after `arb done`. Without this a worker that tries
   # `git push`, fails, and treats the push as required never prints `arb done`.
@@ -374,7 +422,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 

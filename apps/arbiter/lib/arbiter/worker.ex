@@ -912,6 +912,26 @@ defmodule Arbiter.Worker do
     do: Arbiter.Worker.Watchdog.restart(task_id)
 
   @doc """
+  Where the `run_tests` MCP tool runs `mix test` for task `task_id`'s run
+  (bd-57nhsi): `{:ok, %{exec:, worktree:, target:}}`, the run's own environment —
+  its podman container, or its node's agent — through the same `exec` the
+  pre-push check uses, or the worktree on the host for an unsandboxed run.
+  `exec` is a plain function, so the caller runs it in its own process and the
+  worker is never blocked for the minutes a test run takes.
+  """
+  @spec test_runner(String.t()) ::
+          {:ok, %{exec: function(), worktree: String.t(), target: String.t() | nil}}
+          | {:error, :no_worker | :no_worktree}
+  def test_runner(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :no_worker}
+      pid -> GenServer.call(pid, :test_runner)
+    end
+  catch
+    :exit, _ -> {:error, :no_worker}
+  end
+
+  @doc """
   Does this worker currently own an agent subprocess that has not exited?
 
   bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
@@ -2578,6 +2598,21 @@ defmodule Arbiter.Worker do
   def handle_call({:snapshot, {notify, ref}}, _from, state) do
     send(notify, {:worker_snapshot_cut, ref})
     {:reply, snapshot(state), state}
+  end
+
+  def handle_call(:test_runner, _from, %State{meta: meta} = state) do
+    meta = meta || %{}
+    worktree = Map.get(meta, :worktree_path)
+
+    reply =
+      if is_binary(worktree) and File.dir?(worktree) do
+        exec = test_exec(meta) || test_host_exec(meta, worktree)
+        {:ok, %{exec: exec, worktree: worktree, target: Map.get(meta, :target_branch)}}
+      else
+        {:error, :no_worktree}
+      end
+
+    {:reply, reply, state}
   end
 
   # bd-2aslx6: see `agent_session_live?/1`.
@@ -5378,6 +5413,37 @@ defmodule Arbiter.Worker do
   end
 
   defp remote_exec(_port_args), do: fn _command, _seconds -> {:error, :remote_run_unknown} end
+
+  # bd-57nhsi: the `run_tests` tool runs while the session's container is up, so a
+  # sandboxed local run gets a container of its own name (`run_command/3` reuses
+  # the session's and removes it afterwards, which would kill the session).
+  defp test_exec(meta) do
+    case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
+      {fun, _} when is_function(fun, 2) ->
+        fun
+
+      {_, %{remote: %{}}} ->
+        prepush_exec(meta)
+
+      {_, %{sandbox: %{}} = port_args} ->
+        fn command, seconds ->
+          Arbiter.Worker.ContainerSpawn.run_side_command(port_args, command, seconds)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp test_host_exec(meta, worktree) do
+    env =
+      case Map.get(meta, :claude_spawn) do
+        %{env: env} when is_list(env) -> env
+        _ -> []
+      end
+
+    Arbiter.Worker.TestRun.host_exec(worktree, env)
+  end
 
   defp sandbox_exec(port_args) do
     fn command, seconds ->

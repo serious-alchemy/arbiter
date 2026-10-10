@@ -88,6 +88,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
       """
       [mcp_servers.#{name}]
       url = #{inspect(url)}
+      tool_timeout_sec = #{Arbiter.MCP.tool_timeout_sec()}
       bearer_token_env_var = #{inspect(env_var)}
       """
     else
@@ -97,6 +98,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
       """
       [mcp_servers.#{name}]
       url = #{inspect(url)}
+      tool_timeout_sec = #{Arbiter.MCP.tool_timeout_sec()}
 
       [mcp_servers.#{name}.http_headers]
       Authorization = #{inspect("Bearer " <> token)}

@@ -758,7 +758,9 @@ defmodule Arbiter.Agents.Codex do
             "-c",
             "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}",
             "-c",
-            "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\""
+            "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"",
+            "-c",
+            "mcp_servers.#{name}.tool_timeout_sec=#{Arbiter.MCP.tool_timeout_sec()}"
           ]
         else
           []

@@ -205,7 +205,7 @@ as well.
   are unrestricted, so any worker can open `~/.arbiter/arbiter.sqlite3` and
   decrypt every workspace secret and provider credential.
 - **Token forgery.** `SECRET_KEY_BASE` is the default MCP token-signing key
-  (`apps/arbiter/lib/arbiter/mcp.ex:194-207`: `secret/0` falls back to the
+  (`apps/arbiter/lib/arbiter/mcp.ex:203-216`: `secret/0` falls back to the
   endpoint's `secret_key_base`, which `config/runtime.exs:28` reads from the
   env). With it, a worker can forge any scope token.
 
