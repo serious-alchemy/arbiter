@@ -32,6 +32,9 @@ defmodule ArbiterCli.Main do
       arb attention       [--owner coordinator|operator] [--workspace <id|name>]
                                   the open attention queue (tickets needing someone)
       arb verify          <id> --observed "<evidence>" | --failed "<evidence>"   (== arb ticket verify)
+      arb ticket permit   <id> <permission> [--deny] [--reason "<why>"]
+                                  grant or deny a permission a worker asked for (operator-only
+                                  bindings need operator proof; a network: grant is live)
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
                                   for a ticket in state verifying

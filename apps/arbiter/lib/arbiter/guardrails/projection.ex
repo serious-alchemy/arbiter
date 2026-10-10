@@ -51,6 +51,7 @@ defmodule Arbiter.Guardrails.Projection do
   alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
 
   defstruct guarded?: false,
+            profile: nil,
             role: :implementer,
             granted: [],
             withheld: [],
@@ -64,6 +65,7 @@ defmodule Arbiter.Guardrails.Projection do
   @type tunnel :: {:inet.port_number(), String.t(), :inet.port_number()}
   @type t :: %__MODULE__{
           guarded?: boolean(),
+          profile: Profile.t() | nil,
           role: :implementer | :reviewer,
           granted: [String.t()],
           withheld: [%{permission: String.t(), reason: String.t()}],
@@ -125,7 +127,7 @@ defmodule Arbiter.Guardrails.Projection do
         permissions
         |> Enum.flat_map(&parse/1)
         |> Enum.reject(&(&1.kind == :phi_data))
-        |> Enum.reduce(sealed(role: role), &project(&1, &2, profile, block))
+        |> Enum.reduce(%{sealed(role: role) | profile: profile}, &project(&1, &2, profile, block))
         |> finish()
     end
   end
