@@ -1,0 +1,472 @@
+# Arbiter cluster node mesaana-k3s -- rendered by the primary. This file contains no
+# secret: no join token, no node credential, no CA key. Create the join Secret
+# separately (the token is read from your terminal):
+#   read -rs T && printf %s "$T" | kubectl -n ci-workers create secret generic arbiter-join --from-file=token=/dev/stdin
+# bootstrap (cluster-admin, once) comes first, then node.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+  name: ci-workers
+
+---
+apiVersion: scheduling.k8s.io/v1
+description: 'Arbiter worker pods: every other workload wins a contention.'
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: arbiter-worker
+preemptionPolicy: Never
+value: -100
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: arbiter-workers
+  namespace: ci-workers
+spec:
+  hard:
+    limits.cpu: 4500m
+    limits.memory: 9984Mi
+    pods: '5'
+    requests.cpu: 2100m
+    requests.ephemeral-storage: 16Gi
+    requests.memory: 4352Mi
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: arbiter-workers
+  namespace: ci-workers
+spec:
+  limits:
+    - default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        ephemeral-storage: 128Mi
+        memory: 128Mi
+      type: Container
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ci-workers
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-to-controller
+  namespace: ci-workers
+spec:
+  egress:
+    - ports:
+        - port: 9443
+          protocol: TCP
+        - port: 9444
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: controller
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-ingress-from-workers
+  namespace: ci-workers
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - port: 9443
+          protocol: TCP
+        - port: 9444
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-egress
+  namespace: ci-workers
+spec:
+  egress:
+    - ports:
+        - port: 6443
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 41641
+          protocol: UDP
+        - port: 3478
+          protocol: UDP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Egress
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: arbiter-worker-pods
+spec:
+  failurePolicy: Fail
+  matchConditions:
+    - expression: "request.userInfo.username == 'system:serviceaccount:ci-workers:arbiter-controller'"
+      name: from-controller
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+  validations:
+    - expression: "object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false"
+      message: pods run as arbiter-worker with no token
+    - expression: '!has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)'
+      message: no host namespaces
+    - expression: "object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))"
+      message: 'only emptyDir and the arbiter-ca ConfigMap: no Secret, hostPath or PVC'
+    - expression: "(object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)"
+      message: every container is hardened
+    - expression: "(object.spec.containers + object.spec.initContainers).all(c, c.image.startsWith('registry.example.test/arbiter/') || c.image.startsWith('docker.io/library/'))"
+      message: images come from the registry or docker.io/library
+    - expression: has(object.spec.hostUsers) && object.spec.hostUsers == false
+      message: hostUsers must be false
+    - expression: has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot && (!has(object.spec.securityContext.runAsUser) || object.spec.securityContext.runAsUser != 0) && variables.all.all(c, !has(c.securityContext) || ((!has(c.securityContext.runAsUser) || c.securityContext.runAsUser != 0) && (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot)))
+      message: 'K1-A1: non-root is ours to enforce once hostUsers is false'
+  variables:
+    - expression: 'object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])'
+      name: all
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: arbiter-worker-pods
+spec:
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ci-workers
+  policyName: arbiter-worker-pods
+  validationActions:
+    - Deny
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: arbiter-worker
+  namespace: ci-workers
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - resourcequotas
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resourceNames:
+      - arbiter-controller
+    resources:
+      - services
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resourceNames:
+      - arbiter-node-credential
+      - arbiter-controller-ca
+    resources:
+      - secrets
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resourceNames:
+      - arbiter-ca
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - coordination.k8s.io
+    resourceNames:
+      - arbiter-controller
+    resources:
+      - leases
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - apps
+    resourceNames:
+      - arbiter-controller
+    resources:
+      - deployments
+    verbs:
+      - get
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: arbiter-controller
+subjects:
+  - kind: ServiceAccount
+    name: arbiter-controller
+    namespace: ci-workers
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arbiter-node-credential
+  namespace: ci-workers
+type: Opaque
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arbiter-controller-ca
+  namespace: ci-workers
+type: Opaque
+
+---
+apiVersion: v1
+data:
+  controller.yaml: |
+    image_pull_secrets:
+      - gitlab-registry
+    max_concurrent: 3
+    namespace: ci-workers
+    placement:
+      node_selector:
+        kubernetes.io/hostname: mesanna
+    worker:
+      limits:
+        cpu: '1'
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        ephemeral-storage: 4Gi
+        memory: 1Gi
+kind: ConfigMap
+metadata:
+  name: arbiter-controller-config
+  namespace: ci-workers
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbiter-ca
+  namespace: ci-workers
+
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+spec: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+spec:
+  ports:
+    - name: bridge
+      port: 9443
+      protocol: TCP
+      targetPort: 9443
+    - name: boot
+      port: 9444
+      protocol: TCP
+      targetPort: 9444
+  selector:
+    app.kubernetes.io/name: arbiter-controller
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbiter-controller
+  namespace: ci-workers
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: arbiter-controller
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/name: arbiter-controller
+    spec:
+      containers:
+        - env:
+            - name: ARB_ROLE
+              value: agent
+            - name: ARB_AGENT_BACKEND
+              value: k8s
+            - name: ARB_PRIMARY_URL
+              value: https://arbiter.tail1234.ts.net
+            - name: ARB_NODE_NAME
+              value: mesaana-k3s
+            - name: ARB_K8S_SELF_UPGRADE
+              value: 'false'
+          image: registry.example.test/arbiter/controller:0.2.43
+          name: controller
+          resources:
+            limits:
+              cpu: '1'
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - mountPath: /etc/arb/join
+              name: join
+              readOnly: true
+            - mountPath: /etc/arb/config
+              name: config
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+      priorityClassName: arbiter-worker
+      securityContext:
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: arbiter-controller
+      volumes:
+        - name: join
+          secret:
+            optional: true
+            secretName: arbiter-join
+        - configMap:
+            name: arbiter-controller-config
+          name: config
+        - emptyDir:
+            sizeLimit: 512Mi
+          name: tmp

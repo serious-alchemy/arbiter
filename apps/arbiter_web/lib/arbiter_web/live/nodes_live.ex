@@ -42,7 +42,7 @@ defmodule ArbiterWeb.NodesLive do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Credentials, JoinScript, Overview, Pairing, RateLimit}
+  alias Arbiter.Nodes.{ClusterInstall, Credentials, JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Domain
@@ -79,6 +79,7 @@ defmodule ArbiterWeb.NodesLive do
      |> assign(:events, [])
      |> assign(:overview, nil)
      |> assign(:public_url, nil)
+     |> assign(:registry_set?, false)
      |> assign(:pairings, [])
      |> stream_configure(:nodes, dom_id: &"node-#{&1.id}")
      |> stream(:nodes, [])}
@@ -108,6 +109,7 @@ defmodule ArbiterWeb.NodesLive do
     socket
     |> assign(:overview, overview)
     |> assign(:public_url, Settings.nodes_public_url())
+    |> assign(:registry_set?, not is_nil(Settings.nodes_registry()))
     |> assign(:pairings, Pairing.list_pending())
     |> assign(:node, node)
     |> assign(:node_row, node && Enum.find(overview.nodes, &(&1.id == node.id)))
@@ -130,8 +132,8 @@ defmodule ArbiterWeb.NodesLive do
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, refresh(socket)}
 
-  def handle_info({:node_enrolled, _id, join_token_id}, socket) do
-    {:noreply, socket |> enrolled(join_token_id) |> refresh()}
+  def handle_info({:node_enrolled, id, join_token_id}, socket) do
+    {:noreply, socket |> enrolled(id, join_token_id) |> refresh()}
   end
 
   def handle_info(:tick, %{assigns: %{add: %{minted: %{}} = add}} = socket) do
@@ -149,10 +151,10 @@ defmodule ArbiterWeb.NodesLive do
   # The coordinator-inbox broadcasts every live_session LiveView receives.
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  defp enrolled(%{assigns: %{add: %{minted: %{join_token_id: id}} = add}} = socket, id),
-    do: assign(socket, :add, %{add | status: :connected})
+  defp enrolled(%{assigns: %{add: %{minted: %{join_token_id: id}} = add}} = socket, node_id, id),
+    do: assign(socket, :add, %{add | status: :connected, node_id: node_id})
 
-  defp enrolled(socket, _join_token_id), do: socket
+  defp enrolled(socket, _node_id, _join_token_id), do: socket
 
   # ---- events ----------------------------------------------------------------
 
@@ -163,18 +165,23 @@ defmodule ArbiterWeb.NodesLive do
 
   def handle_event("close_add", _params, socket), do: {:noreply, assign(socket, :add, nil)}
 
-  def handle_event("mint", params, %{assigns: %{add: %{} = add}} = socket) do
-    form = to_form(Map.take(params, ~w(name labels max_workers ttl_minutes)), as: :add)
+  # The kind selector and every keystroke: keep what was typed, show the right fields.
+  def handle_event("add_change", params, %{assigns: %{add: %{} = add}} = socket) do
+    {:noreply, assign(socket, :add, %{add | form: add_form(params), kind: add_kind(params)})}
+  end
 
-    case mint(params) do
+  def handle_event("add_change", _params, socket), do: {:noreply, socket}
+
+  def handle_event("mint", params, %{assigns: %{add: %{} = add}} = socket) do
+    add = %{add | form: add_form(params), kind: add_kind(params)}
+
+    case mint(add.kind, params) do
       {:ok, minted} ->
         Process.send_after(self(), :tick, @tick_ms)
-
-        {:noreply,
-         assign(socket, :add, %{add | form: form, error: nil, minted: minted, status: :waiting})}
+        {:noreply, assign(socket, :add, %{add | error: nil, minted: minted, status: :waiting})}
 
       {:error, message} ->
-        {:noreply, assign(socket, :add, %{add | form: form, error: message})}
+        {:noreply, assign(socket, :add, %{add | error: message})}
     end
   end
 
@@ -306,24 +313,97 @@ defmodule ArbiterWeb.NodesLive do
 
   # ---- add node --------------------------------------------------------------
 
+  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade)
+
   defp new_add do
     %{
       form:
-        to_form(
-          %{
-            "name" => "",
-            "labels" => "",
-            "max_workers" => "",
-            "ttl_minutes" => Integer.to_string(Settings.nodes_join_token_ttl_minutes())
-          },
-          as: :add
-        ),
+        add_form(%{
+          "name" => "",
+          "labels" => "",
+          "max_workers" => "",
+          "ttl_minutes" => Integer.to_string(Settings.nodes_join_token_ttl_minutes())
+        }),
+      kind: "machine",
       error: nil,
       minted: nil,
+      node_id: nil,
       status: :form,
       now: DateTime.utc_now()
     }
   end
+
+  defp add_form(params), do: to_form(Map.take(params, @add_keys), as: :add)
+
+  defp add_kind(%{"kind" => "cluster"}), do: "cluster"
+  defp add_kind(_params), do: "machine"
+
+  # K9 (K§2.1): a cluster is added from manifests the primary renders and a join Secret the
+  # operator creates with the token read from the terminal. It cannot take a run without an
+  # image it can pull, so the form refuses to continue until `nodes.registry` is set.
+  defp mint("cluster", params) do
+    with {:ok, _url} <- public_url(),
+         {:ok, opts} <- mint_opts(params),
+         {:ok, name} <- cluster_name(opts),
+         {:ok, plan} <- cluster_plan(params, name),
+         :ok <- mint_limit(),
+         {:ok, %{token: token, join_token: row}} <-
+           Nodes.mint_join_token([{:kind, "cluster"} | opts], actor()) do
+      {:ok,
+       %{
+         kind: "cluster",
+         token: token,
+         cluster: plan,
+         expires_at: row.expires_at,
+         join_token_id: row.id,
+         name: row.name
+       }}
+    else
+      {:error, message} when is_binary(message) -> {:error, message}
+      {:error, :invalid_name} -> {:error, name_message()}
+      {:error, :invalid_ttl} -> {:error, "The lifetime must be between 1 minute and 24 hours."}
+      {:error, {:rate_limited, s}} -> {:error, "Too many tokens minted; try again in #{s}s."}
+      {:error, _} -> {:error, "Could not mint a join token."}
+    end
+  end
+
+  defp mint(_machine, params), do: mint(params)
+
+  defp cluster_name(opts) do
+    case Keyword.get(opts, :name) do
+      nil -> {:error, "A cluster node needs a name: the manifests are bound to it."}
+      name -> {:ok, name}
+    end
+  end
+
+  defp cluster_plan(params, name) do
+    form =
+      params
+      |> Map.take(ClusterInstall.form_keys())
+      |> Map.put("name", name)
+      |> Map.put("max", params["max_workers"] || "")
+
+    case ClusterInstall.plan(form) do
+      {:ok, plan} ->
+        {:ok, plan}
+
+      {:error, errors} when is_list(errors) ->
+        {:error, Enum.join(errors, "; ") <> "."}
+
+      {:error, :no_registry} ->
+        {:error, registry_message()}
+
+      {:error, :no_release} ->
+        {:error, "The primary has no deployed release to name an image for."}
+
+      {:error, :no_public_url} ->
+        {:error, "nodes.public_url is not set."}
+    end
+  end
+
+  defp registry_message,
+    do:
+      "nodes.registry is not set: a cluster node needs an image it can pull (see arb server doctor)."
 
   defp mint(params) do
     with {:ok, url} <- public_url(),
@@ -333,6 +413,7 @@ defmodule ArbiterWeb.NodesLive do
       {:ok,
        %{
          token: token,
+         kind: "machine",
          one_liner: JoinScript.one_liner(url),
          expires_at: row.expires_at,
          join_token_id: row.id,
@@ -520,7 +601,7 @@ defmodule ArbiterWeb.NodesLive do
           />
         <% end %>
 
-        <.add_modal :if={@add} add={@add} />
+        <.add_modal :if={@add} add={@add} registry_set?={@registry_set?} nodes={@overview.nodes} />
       </div>
     </Layouts.app>
     """
@@ -740,6 +821,14 @@ defmodule ArbiterWeb.NodesLive do
         <span :if={@row.kind != :local} data-role="health" class={health_class(@row.health)}>
           {@row.health || "—"}
         </span>
+        <.link
+          :if={@row[:upgrade_command]}
+          id={"upgrade-help-#{@row.id}"}
+          navigate={~p"/nodes/#{@row.id}"}
+          class="block text-[10.5px] text-[var(--text-link)] hover:text-[var(--text-title)]"
+        >
+          upgrade command
+        </.link>
       </td>
       <td class="px-3 py-2 font-[family-name:var(--font-mono)] text-[11.5px]" data-role="version">
         {@row.agent_version || "—"}
@@ -888,6 +977,8 @@ defmodule ArbiterWeb.NodesLive do
   # ---- add node modal --------------------------------------------------------
 
   attr :add, :map, required: true
+  attr :registry_set?, :boolean, default: false
+  attr :nodes, :list, default: []
 
   defp add_modal(assigns) do
     ~H"""
@@ -908,119 +999,366 @@ defmodule ArbiterWeb.NodesLive do
           </Core.button>
         </div>
 
-        <%= if @add.minted do %>
-          <div class="space-y-4">
-            <div>
-              <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-                1. On the new machine, as the user that will own the node (not root), run this.
-                It contains no secret:
-              </p>
-              <div class="flex items-start gap-2">
-                <code
-                  id="join-command"
-                  class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
-                >
-                  {@add.minted.one_liner}
-                </code>
-                <Core.copy_id
-                  id={@add.minted.one_liner}
-                  dom_id="copy-join-command"
-                  label="Copy the join command"
-                />
-              </div>
-            </div>
-            <div>
-              <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-                2. When the script asks, enter this token. It works once and is shown only here:
-              </p>
-              <div class="flex items-start gap-2">
-                <code
-                  id="join-token"
-                  class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
-                >
-                  {@add.minted.token}
-                </code>
-                <Core.copy_id
-                  id={@add.minted.token}
-                  dom_id="copy-join-token"
-                  label="Copy the join token"
-                />
-              </div>
-            </div>
-            <div class="flex items-center justify-between gap-3 text-[12px]">
-              <span id="join-status" class="text-[var(--text-secondary)]">
-                <%= cond do %>
-                  <% @add.status == :connected -> %>
-                    <span class="text-[var(--arb-live)] font-medium">Connected</span>
-                    — the node enrolled.
-                  <% expired?(@add) -> %>
-                    Expired. Close this and add the node again.
-                  <% true -> %>
-                    Waiting for node…
-                <% end %>
-              </span>
-              <span
-                :if={@add.status != :connected}
-                id="join-countdown"
-                class="tabular-nums font-[family-name:var(--font-mono)] text-[var(--text-label)]"
-              >
-                {countdown(@add.minted.expires_at, @add.now)}
-              </span>
-            </div>
-          </div>
-        <% else %>
-          <.form for={@add.form} id="add-node-form" phx-submit="mint" class="space-y-3">
-            <Forms.input
-              name="name"
-              id="add-node-name"
-              label="Name"
-              hint="optional"
-              value={@add.form["name"].value}
-              placeholder="gpu-box-1"
-            />
-            <Forms.input
-              name="labels"
-              id="add-node-labels"
-              label="Labels"
-              hint="comma separated"
-              value={@add.form["labels"].value}
-              placeholder="zone=a, gpu"
-            />
-            <div class="grid grid-cols-2 gap-3">
-              <Forms.input
-                name="max_workers"
-                id="add-node-max-workers"
-                label="Max workers"
-                hint="optional"
-                value={@add.form["max_workers"].value}
-                inputmode="numeric"
-              />
-              <Forms.input
-                name="ttl_minutes"
-                id="add-node-ttl"
-                label="Token lifetime"
-                hint="minutes"
-                value={@add.form["ttl_minutes"].value}
-                inputmode="numeric"
-              />
-            </div>
-            <p
-              :if={@add.error}
-              id="add-node-error"
-              role="alert"
-              class="m-0 text-[12px] text-[var(--arb-fail-text)]"
-            >
-              {@add.error}
-            </p>
-            <div class="flex justify-end">
-              <Core.button id="add-node-submit" type="submit" variant="primary">
-                Issue token
-              </Core.button>
-            </div>
-          </.form>
+        <%= cond do %>
+          <% @add.minted && @add.minted.kind == "cluster" -> %>
+            <.minted_cluster add={@add} nodes={@nodes} />
+          <% @add.minted -> %>
+            <.minted_machine add={@add} />
+          <% true -> %>
+            <.add_node_form add={@add} registry_set?={@registry_set?} />
         <% end %>
       </div>
     </div>
+    """
+  end
+
+  attr :add, :map, required: true
+
+  defp minted_machine(assigns) do
+    ~H"""
+    <div class="space-y-4">
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          1. On the new machine, as the user that will own the node (not root), run this.
+          It contains no secret:
+        </p>
+        <div class="flex items-start gap-2">
+          <code
+            id="join-command"
+            class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+          >
+            {@add.minted.one_liner}
+          </code>
+          <Core.copy_id
+            id={@add.minted.one_liner}
+            dom_id="copy-join-command"
+            label="Copy the join command"
+          />
+        </div>
+      </div>
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          2. When the script asks, enter this token. It works once and is shown only here:
+        </p>
+        <.token_box token={@add.minted.token} />
+      </div>
+      <.join_status add={@add} />
+    </div>
+    """
+  end
+
+  attr :add, :map, required: true
+  attr :nodes, :list, default: []
+
+  defp minted_cluster(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :row,
+        assigns.add.node_id && Enum.find(assigns.nodes, &(&1.id == assigns.add.node_id))
+      )
+
+    ~H"""
+    <div class="space-y-4">
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          1. Apply the manifests with a kubeconfig that is cluster-admin (once). They contain
+          no secret, so they can be saved, diffed and committed:
+        </p>
+        <div class="flex items-start gap-2">
+          <code
+            id="cluster-apply-command"
+            class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+          >
+            {@add.minted.cluster.apply_command}
+          </code>
+          <Core.copy_id
+            id={@add.minted.cluster.apply_command}
+            dom_id="copy-cluster-apply-command"
+            label="Copy the apply command"
+          />
+        </div>
+        <p class="m-0 mt-1.5 text-[11.5px] text-[var(--text-label)]">
+          The machine running kubectl may not reach the primary:
+          <a
+            id="cluster-manifests-download"
+            href={@add.minted.cluster.manifest_url}
+            download={"arbiter-#{@add.minted.cluster.node_name}.yaml"}
+            class="text-[var(--text-link)] hover:text-[var(--text-title)]"
+          >
+            download the manifests
+          </a>
+          from here and apply the file.
+        </p>
+      </div>
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          2. Create the join Secret. The command asks for the token without echoing it, so it
+          never reaches your shell history or a process list:
+        </p>
+        <div class="flex items-start gap-2">
+          <code
+            id="cluster-secret-command"
+            class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+          >
+            {@add.minted.cluster.secret_command}
+          </code>
+          <Core.copy_id
+            id={@add.minted.cluster.secret_command}
+            dom_id="copy-cluster-secret-command"
+            label="Copy the Secret command"
+          />
+        </div>
+      </div>
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          3. When it asks, paste this token. It works once and is shown only here:
+        </p>
+        <.token_box token={@add.minted.token} />
+      </div>
+      <.join_status add={@add} />
+      <p
+        :if={@add.status == :connected}
+        id="cluster-readiness"
+        class="m-0 text-[12px] text-[var(--text-secondary)]"
+      >
+        <%= cond do %>
+          <% is_nil(@row) or is_nil(@row.health) -> %>
+            Enrolled. Waiting for the controller's first hello.
+          <% @row.degraded != [] -> %>
+            Controller connected on Kubernetes {@row.k8s_version || "?"}, degraded: <span class="text-[var(--arb-attention)]">{Enum.join(@row.degraded, ", ")}</span>.
+          <% true -> %>
+            Controller connected on Kubernetes {@row.k8s_version || "?"}.
+        <% end %>
+        Delete the join Secret now; it is spent.
+      </p>
+    </div>
+    """
+  end
+
+  attr :token, :string, required: true
+
+  defp token_box(assigns) do
+    ~H"""
+    <div class="flex items-start gap-2">
+      <code
+        id="join-token"
+        class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+      >
+        {@token}
+      </code>
+      <Core.copy_id id={@token} dom_id="copy-join-token" label="Copy the join token" />
+    </div>
+    """
+  end
+
+  attr :add, :map, required: true
+
+  defp join_status(assigns) do
+    ~H"""
+    <div class="flex items-center justify-between gap-3 text-[12px]">
+      <span id="join-status" class="text-[var(--text-secondary)]">
+        <%= cond do %>
+          <% @add.status == :connected -> %>
+            <span class="text-[var(--arb-live)] font-medium">Connected</span> — the node enrolled.
+          <% expired?(@add) -> %>
+            Expired. Close this and add the node again.
+          <% true -> %>
+            Waiting for node…
+        <% end %>
+      </span>
+      <span
+        :if={@add.status != :connected}
+        id="join-countdown"
+        class="tabular-nums font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+      >
+        {countdown(@add.minted.expires_at, @add.now)}
+      </span>
+    </div>
+    """
+  end
+
+  attr :add, :map, required: true
+  attr :registry_set?, :boolean, default: false
+
+  defp add_node_form(assigns) do
+    assigns =
+      assign(assigns, :blocked?, assigns.add.kind == "cluster" and not assigns.registry_set?)
+
+    ~H"""
+    <.form
+      for={@add.form}
+      id="add-node-form"
+      phx-change="add_change"
+      phx-submit="mint"
+      class="space-y-3"
+    >
+      <fieldset id="add-node-kind" class="m-0 flex gap-2 border-0 p-0">
+        <legend class="mb-1.5 p-0 text-[11.5px] font-medium text-[var(--arb-text-body)]">
+          What are you adding?
+        </legend>
+        <label
+          :for={{value, label} <- [{"machine", "Machine"}, {"cluster", "Kubernetes cluster"}]}
+          for={"add-node-kind-#{value}"}
+          class={[
+            "flex flex-1 cursor-pointer items-center gap-2 rounded-[var(--radius-field)] border border-solid px-3 py-2 text-[12.5px] transition-colors",
+            if(@add.kind == value,
+              do: "border-[var(--text-link)] bg-[var(--surface-field)] text-[var(--text-title)]",
+              else:
+                "border-[var(--border-strong)] text-[var(--text-secondary)] hover:border-[var(--text-link)]"
+            )
+          ]}
+        >
+          <input
+            type="radio"
+            name="kind"
+            id={"add-node-kind-#{value}"}
+            value={value}
+            checked={@add.kind == value}
+          />
+          {label}
+        </label>
+      </fieldset>
+
+      <Forms.input
+        name="name"
+        id="add-node-name"
+        label="Name"
+        hint={if(@add.kind == "cluster", do: "required", else: "optional")}
+        value={@add.form["name"].value}
+        placeholder={if(@add.kind == "cluster", do: "mesaana-k3s", else: "gpu-box-1")}
+      />
+
+      <%= if @add.kind == "cluster" do %>
+        <div
+          :if={not @registry_set?}
+          id="add-node-registry-missing"
+          role="alert"
+          class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
+        >
+          <strong class="text-[var(--arb-attention)]">nodes.registry is not set.</strong>
+          A cluster node cannot take a run without an image it can pull. Set it
+          (<code class="font-[family-name:var(--font-mono)]">arb settings set nodes.registry host/path</code>),
+          then come back; <code class="font-[family-name:var(--font-mono)]">arb server doctor</code>
+          reports what is missing.
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <Forms.input
+            name="namespace"
+            id="add-node-namespace"
+            label="Namespace"
+            hint="default arbiter-workers"
+            value={@add.form["namespace"].value}
+            placeholder="arbiter-workers"
+          />
+          <Forms.input
+            name="max_workers"
+            id="add-node-max-workers"
+            label="Max concurrent pods"
+            hint="default 2"
+            value={@add.form["max_workers"].value}
+            inputmode="numeric"
+          />
+          <Forms.input
+            name="cpu"
+            id="add-node-cpu"
+            label="CPU per pod"
+            hint="default 1"
+            value={@add.form["cpu"].value}
+            placeholder="1"
+          />
+          <Forms.input
+            name="memory"
+            id="add-node-memory"
+            label="Memory per pod"
+            hint="default 2Gi"
+            value={@add.form["memory"].value}
+            placeholder="2Gi"
+          />
+        </div>
+        <Forms.input
+          name="node_selector"
+          id="add-node-node-selector"
+          label="Node selector"
+          hint="optional, key=value,key=value"
+          value={@add.form["node_selector"].value}
+          placeholder="kubernetes.io/hostname=mesanna"
+        />
+        <Forms.input
+          name="pull_secret"
+          id="add-node-pull-secret"
+          label="imagePullSecret"
+          hint="optional, the name of a Secret in that namespace"
+          value={@add.form["pull_secret"].value}
+          placeholder="gitlab-registry"
+        />
+        <div class="grid grid-cols-3 gap-3">
+          <Forms.select
+            name="reach"
+            id="add-node-reach"
+            label="Reach the primary"
+            value={@add.form["reach"].value || "direct"}
+            options={[{"HTTPS endpoint", "direct"}, {"Tailscale sidecar", "tailscale"}]}
+          />
+          <Forms.select
+            name="admission"
+            id="add-node-admission"
+            label="Admission policy"
+            value={@add.form["admission"].value || "none"}
+            options={[{"No", "none"}, {"Yes (Kubernetes 1.30+)", "policy"}]}
+          />
+          <Forms.select
+            name="self_upgrade"
+            id="add-node-self-upgrade"
+            label="Self-upgrade"
+            value={@add.form["self_upgrade"].value || "on"}
+            options={[{"On", "on"}, {"Off", "off"}]}
+          />
+        </div>
+      <% else %>
+        <Forms.input
+          name="labels"
+          id="add-node-labels"
+          label="Labels"
+          hint="comma separated"
+          value={@add.form["labels"].value}
+          placeholder="zone=a, gpu"
+        />
+      <% end %>
+
+      <div class="grid grid-cols-2 gap-3">
+        <Forms.input
+          :if={@add.kind == "machine"}
+          name="max_workers"
+          id="add-node-max-workers"
+          label="Max workers"
+          hint="optional"
+          value={@add.form["max_workers"].value}
+          inputmode="numeric"
+        />
+        <Forms.input
+          name="ttl_minutes"
+          id="add-node-ttl"
+          label="Token lifetime"
+          hint="minutes"
+          value={@add.form["ttl_minutes"].value}
+          inputmode="numeric"
+        />
+      </div>
+      <p
+        :if={@add.error}
+        id="add-node-error"
+        role="alert"
+        class="m-0 text-[12px] text-[var(--arb-fail-text)]"
+      >
+        {@add.error}
+      </p>
+      <div class="flex justify-end">
+        <Core.button id="add-node-submit" type="submit" variant="primary" disabled={@blocked?}>
+          Issue token
+        </Core.button>
+      </div>
+    </.form>
     """
   end
 
@@ -1093,6 +1431,40 @@ defmodule ArbiterWeb.NodesLive do
           />
         </section>
       </div>
+
+      <section
+        :if={@row && @row[:kind] == :cluster && @row[:image] && @row.health in [:outdated, :ahead]}
+        id="node-upgrade"
+        class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] p-4 space-y-2 text-[12.5px]"
+      >
+        <h2 class="m-0 text-[13px] font-semibold text-[var(--text-title)]">
+          This controller is {@row.health}
+        </h2>
+        <%= if @row.upgrade_command do %>
+          <p class="m-0 text-[var(--text-secondary)]">
+            Its Role cannot patch its own Deployment (<code>rbac.selfUpgrade</code> is off), so no
+            work is placed on it until it runs this server's version. Move it with:
+          </p>
+          <div class="flex items-start gap-2">
+            <code
+              id="upgrade-command"
+              class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+            >
+              {@row.upgrade_command}
+            </code>
+            <Core.copy_id
+              id={@row.upgrade_command}
+              dom_id="copy-upgrade-command"
+              label="Copy the upgrade command"
+            />
+          </div>
+        <% else %>
+          <p id="upgrade-self" class="m-0 text-[var(--text-secondary)]">
+            It patches its own Deployment to <code class="break-all">{@row.image}</code> when
+            it is idle; no work is placed on it until then.
+          </p>
+        <% end %>
+      </section>
 
       <section
         id="node-live-runs"

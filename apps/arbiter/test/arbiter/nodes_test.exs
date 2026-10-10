@@ -190,6 +190,65 @@ defmodule Arbiter.NodesTest do
     end
   end
 
+  describe "kind (K9: machine | cluster)" do
+    test "a token is a machine token unless minted for a cluster, and the node inherits it" do
+      {token, %{join_token: row}} = mint!()
+      assert row.kind == "machine"
+      assert {:ok, %{node: node}} = Nodes.redeem_join_token(token, %{name: "m"})
+      assert node.kind == "machine"
+
+      {token, %{join_token: row}} = mint!(kind: "cluster", name: "k3s")
+      assert row.kind == "cluster"
+      assert {:ok, %{node: node}} = Nodes.redeem_join_token(token, %{kind: "cluster"})
+      assert node.kind == "cluster"
+      assert node.name == "k3s"
+    end
+
+    test "enroll accepts `kind: cluster` from a string-keyed body too" do
+      {token, _} = mint!(kind: "cluster")
+
+      assert {:ok, %{node: node}} =
+               Nodes.redeem_join_token(token, %{"kind" => "cluster", "name" => "c"})
+
+      assert node.kind == "cluster"
+    end
+
+    test "a kind that does not match the token is refused without spending it" do
+      {token, _} = mint!(kind: "cluster")
+      assert {:error, :kind_mismatch} = Nodes.redeem_join_token(token, %{name: "x"})
+      assert {:error, :kind_mismatch} = Nodes.redeem_join_token(token, %{kind: "machine"})
+      assert {:ok, _} = Nodes.redeem_join_token(token, %{kind: "cluster", name: "x"})
+
+      {token, _} = mint!()
+
+      assert {:error, :kind_mismatch} =
+               Nodes.redeem_join_token(token, %{kind: "cluster", name: "y"})
+
+      assert {:ok, _} = Nodes.redeem_join_token(token, %{kind: "machine", name: "y"})
+    end
+
+    test "an unknown kind is refused at mint and at enroll" do
+      assert {:error, :invalid_kind} = Nodes.mint_join_token([kind: "mainframe"], @operator)
+      {token, _} = mint!()
+      assert {:error, :kind_mismatch} = Nodes.redeem_join_token(token, %{kind: "mainframe"})
+    end
+
+    test "the enrolled event records the kind and the cluster's own facts" do
+      {token, _} = mint!(kind: "cluster", name: "evt")
+
+      assert {:ok, %{node: node}} =
+               Nodes.redeem_join_token(token, %{
+                 kind: "cluster",
+                 k8s_version: "v1.36.5+k3s1",
+                 agent_version: "0.2.43"
+               })
+
+      [event] = events(:enrolled) |> Enum.filter(&(&1.node_id == node.id))
+      assert event.detail["kind"] == "cluster"
+      assert event.detail["k8s_version"] == "v1.36.5+k3s1"
+    end
+  end
+
   describe "authenticate/1" do
     test "accepts the issued credential and refuses a wrong secret or id" do
       %{node: node, credential: credential} = enroll!()

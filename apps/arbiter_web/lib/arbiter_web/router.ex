@@ -78,6 +78,7 @@ defmodule ArbiterWeb.Router do
   # audited in `ArbiterWeb.NodeController`.
   scope "/nodes", ArbiterWeb do
     get("/join", NodeController, :join)
+    get("/join/k8s.yaml", NodeController, :k8s)
     get("/ping", NodeController, :ping)
     post("/enroll", NodeController, :enroll)
     # Device-code pairing (design §5.7): the node asks, the operator approves.

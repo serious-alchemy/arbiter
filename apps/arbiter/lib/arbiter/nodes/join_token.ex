@@ -24,7 +24,7 @@ defmodule Arbiter.Nodes.JoinToken do
 
     create :mint do
       primary? true
-      accept [:id, :token_hash, :expires_at, :name, :labels, :max_workers, :created_by]
+      accept [:id, :token_hash, :expires_at, :name, :labels, :max_workers, :kind, :created_by]
     end
   end
 
@@ -54,6 +54,15 @@ defmodule Arbiter.Nodes.JoinToken do
     attribute :max_workers, :integer do
       public? true
       constraints min: 1
+    end
+
+    # K9: what the token enrols. The enrolling controller must say the same
+    # (`kind: cluster` in the enroll body); a machine's script says nothing.
+    attribute :kind, :string do
+      allow_nil? false
+      public? true
+      default "machine"
+      constraints match: ~r/\A(machine|cluster)\z/
     end
 
     attribute :created_by, :string, public?: true

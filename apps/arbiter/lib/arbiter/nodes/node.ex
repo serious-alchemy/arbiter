@@ -43,6 +43,7 @@ defmodule Arbiter.Nodes.Node do
         :labels,
         :max_workers,
         :workspace_ids,
+        :kind,
         :credential_hash,
         :credential_prefix,
         :join_token_id,
@@ -111,6 +112,16 @@ defmodule Arbiter.Nodes.Node do
       public? true
       default :active
       constraints one_of: @statuses
+    end
+
+    attribute :kind, :string do
+      allow_nil? false
+      public? true
+      default "machine"
+      constraints match: ~r/\A(machine|cluster)\z/
+
+      description "K9: `machine` or `cluster`, inherited from the join token at enrolment. " <>
+                    "What the node says in `hello` (`kind`) still wins for a live row."
     end
 
     attribute :labels, {:array, :string} do

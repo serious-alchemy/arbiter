@@ -33,6 +33,7 @@ defmodule Arbiter.Nodes do
 
   alias Arbiter.Nodes.{
     Agent,
+    ClusterInstall,
     Credentials,
     JoinToken,
     Node,
@@ -52,6 +53,7 @@ defmodule Arbiter.Nodes do
   end
 
   @max_ttl_seconds 24 * 3600
+  @kinds ["machine", "cluster"]
   @rotation_overlap_seconds 10 * 60
   @touch_every_seconds 60
 
@@ -94,7 +96,8 @@ defmodule Arbiter.Nodes do
   @doc """
   Mint a join token. Options: `:ttl_seconds` (default `nodes.join_token_ttl_minutes`
   — 15 minutes — and at most 24 hours), and the pre-bound `:name`, `:labels`,
-  `:max_workers` the enrolling node inherits.
+  `:max_workers` the enrolling node inherits. `:kind` (`"machine"`, the default, or
+  `"cluster"`, K9) is what the token enrols: the enrolling node must say the same.
 
   Returns the secret **once**; only its hash is stored. Writes a
   `token_minted` event attributed to `actor`.
@@ -105,6 +108,9 @@ defmodule Arbiter.Nodes do
     ttl = Keyword.get(opts, :ttl_seconds, default_ttl_seconds())
 
     cond do
+      Keyword.get(opts, :kind, "machine") not in @kinds ->
+        {:error, :invalid_kind}
+
       not name_ok?(Keyword.get(opts, :name)) ->
         {:error, :invalid_name}
 
@@ -127,6 +133,7 @@ defmodule Arbiter.Nodes do
       name: Keyword.get(opts, :name),
       labels: Keyword.get(opts, :labels, []),
       max_workers: Keyword.get(opts, :max_workers),
+      kind: Keyword.get(opts, :kind, "machine"),
       created_by: label
     }
 
@@ -173,6 +180,7 @@ defmodule Arbiter.Nodes do
            find_join_token(Credentials.hash(secret)) || {:error, :invalid_token},
          node_id = Ash.UUIDv7.generate(),
          name = bound_name(token, attrs, node_id),
+         :ok <- ensure_kind(token, attrs),
          :ok <- ensure_name_valid(name),
          :ok <- ensure_name_free(name),
          :ok <- claim(token, node_id, now) do
@@ -226,8 +234,9 @@ defmodule Arbiter.Nodes do
       name: name,
       labels: bound_labels(token, attrs),
       max_workers: token.max_workers || attr(attrs, :max_workers),
+      kind: token.kind,
       join_token_id: token.id,
-      detail: %{"join_token_id" => token.id}
+      detail: enroll_detail(token, attrs)
     }
 
     case insert_node(binding, now, hint) do
@@ -258,6 +267,7 @@ defmodule Arbiter.Nodes do
       name: binding.name,
       labels: binding.labels,
       max_workers: binding.max_workers,
+      kind: Map.get(binding, :kind, "machine"),
       credential_hash: cred.hash,
       credential_prefix: cred.prefix,
       join_token_id: binding[:join_token_id],
@@ -273,6 +283,36 @@ defmodule Arbiter.Nodes do
         {:error, :name_taken}
     end
   end
+
+  # K9: a machine's script says nothing about its kind; a cluster controller says
+  # `cluster`. The token decides what it enrols, so a mismatch is refused before the
+  # token is spent.
+  defp ensure_kind(%JoinToken{kind: kind}, attrs) do
+    case attr(attrs, :kind) || "machine" do
+      ^kind -> :ok
+      _ -> {:error, :kind_mismatch}
+    end
+  end
+
+  # The audit record of an enrolment: the token, and for a cluster the facts its
+  # controller reported (bounded strings only).
+  defp enroll_detail(%JoinToken{kind: "cluster"} = token, attrs) do
+    Enum.reduce(
+      [:k8s_version, :agent_version],
+      %{"join_token_id" => token.id, "kind" => "cluster"},
+      fn key, acc ->
+        case attr(attrs, key) do
+          value when is_binary(value) and byte_size(value) <= 64 ->
+            Map.put(acc, Atom.to_string(key), value)
+
+          _ ->
+            acc
+        end
+      end
+    )
+  end
+
+  defp enroll_detail(token, _attrs), do: %{"join_token_id" => token.id, "kind" => token.kind}
 
   defp bound_name(token, attrs, node_id) do
     case token.name || attr(attrs, :name) do
@@ -583,6 +623,7 @@ defmodule Arbiter.Nodes do
   """
   @spec upgrade(Node.t(), Actor.t() | String.t() | nil) ::
           {:ok, %{version: String.t(), sha256: String.t()}}
+          | {:ok, %{version: String.t(), image: String.t()}}
           | {:error, :offline | :revoked | :unavailable | :not_found}
   def upgrade(%Node{id: id}, actor) do
     case get_node(id) do
@@ -594,19 +635,42 @@ defmodule Arbiter.Nodes do
 
       %Node{} = node ->
         with pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline},
-             {:ok, %{version: version, sha256: sha}} <-
-               Agent.artifact() |> unavailable() do
-          Registry.notify(node.id, {:upgrade, %{"version" => version, "sha256" => sha}})
+             {:ok, upgrade} <- upgrade_spec(node) do
+          Registry.notify(node.id, {:upgrade, upgrade_payload(upgrade)})
 
-          record(:upgraded, node.id, Actor.resolve_label(actor), %{
-            "version" => version,
-            "requested" => true
-          })
+          record(
+            :upgraded,
+            node.id,
+            Actor.resolve_label(actor),
+            Map.merge(%{"requested" => true}, upgrade_detail(upgrade))
+          )
 
-          {:ok, %{version: version, sha256: sha}}
+          {:ok, upgrade}
         end
     end
   end
+
+  # A machine moves to the tarball the primary serves; a cluster node (K9) to the
+  # controller image of the same release.
+  defp upgrade_spec(%Node{kind: "cluster"}) do
+    with {:ok, image} <- ClusterInstall.controller_image(),
+         tag when is_binary(tag) <- Agent.release_tag() do
+      {:ok, %{version: tag, image: image}}
+    else
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  defp upgrade_spec(%Node{}) do
+    with {:ok, %{version: version, sha256: sha}} <- unavailable(Agent.artifact()),
+         do: {:ok, %{version: version, sha256: sha}}
+  end
+
+  defp upgrade_payload(%{version: v, image: image}), do: %{"version" => v, "image" => image}
+  defp upgrade_payload(%{version: v, sha256: sha}), do: %{"version" => v, "sha256" => sha}
+
+  defp upgrade_detail(%{version: v, image: image}), do: %{"version" => v, "image" => image}
+  defp upgrade_detail(%{version: v}), do: %{"version" => v}
 
   defp unavailable({:ok, _} = ok), do: ok
   defp unavailable(_), do: {:error, :unavailable}

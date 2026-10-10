@@ -31,7 +31,7 @@ defmodule ArbiterWeb.Api.NodeController do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{JoinScript, Overview, Pairing, RateLimit}
+  alias Arbiter.Nodes.{ClusterInstall, JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
   alias Arbiter.Worker.Image.Publisher
   alias ArbiterWeb.Api.NodeJSON
@@ -40,28 +40,98 @@ defmodule ArbiterWeb.Api.NodeController do
 
   @local_cap_message "local takes max_workers only: a whole number, 0 or more, or null to clear"
   @name_message "name may only contain A-Za-z0-9._=:/@- and be 1-128 characters"
+  @kind_message "kind must be machine or cluster"
 
   def create_join_token(conn, params) do
     with {:ok, url} <- public_url(),
+         {:ok, kind} <- kind(params),
          {:ok, opts} <- mint_opts(params),
+         {:ok, cluster} <- cluster_plan(kind, params, opts),
          :ok <- mint_limit(),
-         {:ok, %{token: token, join_token: row}} <- Nodes.mint_join_token(opts, nil) do
+         {:ok, %{token: token, join_token: row}} <-
+           Nodes.mint_join_token([{:kind, kind} | opts], nil) do
       conn
       |> put_status(:created)
       |> put_resp_header("cache-control", "no-store")
-      |> json(%{
-        token: token,
-        join_token: NodeJSON.join_token(row),
-        one_liner: JoinScript.one_liner(url),
-        public_url: url
-      })
+      |> json(
+        %{
+          token: token,
+          join_token: NodeJSON.join_token(row),
+          one_liner: JoinScript.one_liner(url),
+          public_url: url
+        }
+        |> put_cluster(cluster)
+      )
     else
       {:error, :invalid_ttl} -> {:error, {:invalid, "ttl_seconds must be between 1 and 86400"}}
       {:error, :invalid_name} -> {:error, {:invalid, @name_message}}
+      {:error, :invalid_kind} -> {:error, {:invalid, @kind_message}}
       {:error, {:rate_limited, seconds}} -> rate_limited(conn, seconds)
       {:error, other} -> {:error, other}
     end
   end
+
+  defp kind(params) do
+    case params["kind"] do
+      kind when kind in [nil, "machine"] -> {:ok, "machine"}
+      "cluster" -> {:ok, "cluster"}
+      _ -> {:error, {:invalid, @kind_message}}
+    end
+  end
+
+  # K9: the manifest URL, apply command and join-Secret command for a cluster node.
+  # Planned before the token is minted, so a request that cannot be rendered (no
+  # `nodes.registry`, a bad value) spends nothing. The manifests and the token agree
+  # on the node's name, so a cluster node needs one.
+  defp cluster_plan("machine", _params, _opts), do: {:ok, nil}
+
+  defp cluster_plan("cluster", params, opts) do
+    case Keyword.get(opts, :name) do
+      nil ->
+        {:error, {:invalid, "name is required for a cluster node: the manifests are bound to it"}}
+
+      name ->
+        form =
+          params
+          |> Map.take(ClusterInstall.form_keys())
+          |> Map.new(fn {k, v} -> {k, form_value(k, v)} end)
+          |> Map.put("name", name)
+          |> put_max(Keyword.get(opts, :max_workers))
+
+        case ClusterInstall.plan(form) do
+          {:ok, plan} -> {:ok, plan}
+          {:error, errors} when is_list(errors) -> {:error, {:invalid, Enum.join(errors, "; ")}}
+          {:error, reason} -> {:error, {:invalid, cluster_unavailable(reason)}}
+        end
+    end
+  end
+
+  defp put_max(form, nil), do: form
+  defp put_max(form, max), do: Map.put(form, "max", Integer.to_string(max))
+
+  # JSON gives numbers and booleans; the renderer's vocabulary is the query string's.
+  defp form_value("admission", true), do: "policy"
+  defp form_value("admission", false), do: "none"
+  defp form_value(key, true) when key in ["self_upgrade"], do: "on"
+  defp form_value(key, false) when key in ["self_upgrade"], do: "off"
+
+  defp form_value("node_selector", %{} = map),
+    do: Enum.map_join(map, ",", fn {k, v} -> "#{k}=#{v}" end)
+
+  defp form_value(_key, value) when is_integer(value), do: Integer.to_string(value)
+  defp form_value(_key, value), do: value
+
+  defp cluster_unavailable(:no_registry),
+    do:
+      "nodes.registry is not set; a cluster node needs an image it can pull (see arb server doctor)"
+
+  defp cluster_unavailable(:no_public_url), do: "nodes.public_url is not set"
+
+  defp cluster_unavailable(:no_release),
+    do: "the primary has no deployed release to name an image for"
+
+  defp put_cluster(body, nil), do: body
+  defp put_cluster(body, plan), do: body |> Map.delete(:one_liner) |> Map.put(:cluster, plan)
 
   # ---- device-code pairing (design §5.7) --------------------------------------
 

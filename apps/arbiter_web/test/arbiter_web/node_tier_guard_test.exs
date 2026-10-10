@@ -23,6 +23,7 @@ defmodule ArbiterWeb.NodeTierGuardTest do
   # reachability ping). `NodeJoinTest` covers what each of them does.
   @anonymous_node_routes [
     "get /nodes/join",
+    "get /nodes/join/k8s.yaml",
     "get /nodes/ping",
     "post /nodes/enroll",
     "post /nodes/pair",

@@ -8,6 +8,16 @@ defmodule ArbiterCli.Cmd.Node do
                       on the new node (it carries no secret) and, separately,
                       the token: to a terminal, or to --token-file (mode 0600).
                       It never prints the token to a pipe or a log.
+      arb node add    --kind cluster --name N [--namespace NS] [--max-workers N]
+                      [--cpu Q] [--memory Q] [--node-selector k=v,k=v]
+                      [--pull-secret NAME] [--reach direct|tailscale]
+                      [--admission policy] [--self-upgrade on|off] [--ttl 15m]
+                      [-o manifests.yaml] [--token-file PATH] [--json]
+                      add a Kubernetes cluster as a node. Prints the `kubectl
+                      apply` for the install manifests (they carry no secret; -o
+                      saves them to a file instead) and the command that creates
+                      the join Secret with the token read from the terminal
+                      (`read -rs`), so it is never in shell history or argv.
       arb node pending [--json]                         (device-code pairing requests waiting)
       arb node approve <code> [--name N] [--max-workers N] [--yes] [--json]
                       approve the pairing request showing <code> (XXXX-XXXX) on
@@ -55,8 +65,19 @@ defmodule ArbiterCli.Cmd.Node do
     label: [:string, :keep],
     max_workers: :integer,
     ttl: :string,
-    token_file: :string
+    token_file: :string,
+    kind: :string,
+    namespace: :string,
+    cpu: :string,
+    memory: :string,
+    node_selector: :string,
+    pull_secret: :string,
+    reach: :string,
+    admission: :string,
+    self_upgrade: :string,
+    output: :string
   ]
+  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach admission self_upgrade output)a
   @set_switches [
     name: :string,
     label: [:string, :keep],
@@ -117,7 +138,20 @@ defmodule ArbiterCli.Cmd.Node do
   # ---- add -------------------------------------------------------------------
 
   defp add(argv, mode) do
-    {opts, _rest, _} = ArgParser.parse_strict!(argv, "arb node add", strict: @add_switches)
+    {opts, _rest, _} =
+      ArgParser.parse_strict!(argv, "arb node add", strict: @add_switches, aliases: [o: :output])
+
+    case opts[:kind] || "machine" do
+      "machine" -> add_machine(opts, mode)
+      "cluster" -> add_cluster(opts, mode)
+      other -> Output.die("--kind must be machine or cluster, not #{inspect(other)}")
+    end
+  end
+
+  defp add_machine(opts, mode) do
+    for flag <- @cluster_only, opts[flag] != nil do
+      Output.die("--#{flag |> to_string() |> String.replace("_", "-")} needs --kind cluster")
+    end
 
     body =
       %{}
@@ -134,6 +168,137 @@ defmodule ArbiterCli.Cmd.Node do
       {:ok, resp} -> deliver(resp, sink, mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  # ---- add --kind cluster (K9) ----------------------------------------------------
+
+  defp add_cluster(opts, mode) do
+    name =
+      opts[:name] ||
+        Output.die(
+          "--name is required with --kind cluster",
+          "the install manifests and the join token are bound to the node's name"
+        )
+
+    # Decide where the token and the manifests go before minting anything.
+    output = manifests_sink!(opts[:output])
+    sink = token_sink!(opts[:token_file])
+
+    body =
+      %{kind: "cluster", name: name}
+      |> put(:namespace, opts[:namespace])
+      |> put(:max_workers, opts[:max_workers])
+      |> put(:cpu, opts[:cpu])
+      |> put(:memory, opts[:memory])
+      |> put(:node_selector, opts[:node_selector])
+      |> put(:pull_secret, opts[:pull_secret])
+      |> put(:reach, opts[:reach])
+      |> put(:admission, opts[:admission])
+      |> put(:self_upgrade, opts[:self_upgrade])
+      |> put(:ttl_seconds, ttl(opts[:ttl]))
+
+    case Client.post("/api/nodes/join-tokens", stringify(body)) do
+      {:ok, resp} -> deliver_cluster(resp, sink, output, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp manifests_sink!(nil), do: nil
+
+  defp manifests_sink!(path) do
+    if File.exists?(path), do: Output.die("-o #{path} already exists; not overwriting")
+    path
+  end
+
+  defp deliver_cluster(resp, sink, output, mode) do
+    cluster = resp["cluster"] || %{}
+    token = resp["token"]
+    expires = get_in(resp, ["join_token", "expires_at"])
+
+    token_file =
+      case sink do
+        {:file, path} -> write_token!(path, token)
+        :tty -> nil
+      end
+
+    manifests = save_manifests(cluster, output)
+
+    if mode == :json do
+      out =
+        %{"expires_at" => expires, "join_token" => resp["join_token"], "cluster" => cluster}
+        |> put_json("manifests_file", manifests)
+
+      Output.emit_json(
+        if token_file,
+          do: Map.put(out, "token_file", token_file),
+          else: Map.put(out, "token", token)
+      )
+    else
+      print_cluster(cluster, expires, token, token_file, manifests)
+    end
+  end
+
+  # The manifests hold no secret, so they are fetched from the primary like `kubectl apply -f
+  # <(curl ...)` would. A failed fetch does not waste the token: the apply command still works.
+  defp save_manifests(_cluster, nil), do: nil
+
+  defp save_manifests(cluster, path) do
+    with url when is_binary(url) <- cluster["manifest_url"],
+         {:ok, yaml} when is_binary(yaml) <- Client.probe_url(url, decode_body: false),
+         :ok <- File.write(path, yaml, [:exclusive]) do
+      path
+    else
+      other ->
+        IO.puts(
+          :stderr,
+          "arb: could not save the manifests to #{path} (#{inspect(other)}); " <>
+            "use the apply command below instead"
+        )
+
+        nil
+    end
+  end
+
+  defp put_json(map, _key, nil), do: map
+  defp put_json(map, key, value), do: Map.put(map, key, value)
+
+  defp print_cluster(cluster, expires, token, token_file, manifests) do
+    IO.puts("Join token minted (expires #{expires || "soon"}). It works once.")
+    IO.puts("")
+    IO.puts("1. Install the manifests (cluster-admin, once). They contain no secret:")
+    IO.puts("")
+
+    IO.puts(
+      "  #{if manifests, do: "kubectl apply -f #{manifests}", else: cluster["apply_command"]}"
+    )
+
+    IO.puts("")
+
+    if token_file do
+      IO.puts("2. Create the join Secret from the token file (#{token_file}, mode 0600):")
+      IO.puts("")
+
+      IO.puts(
+        "  kubectl -n #{cluster["namespace"]} create secret generic arbiter-join " <>
+          "--from-file=token=#{token_file}"
+      )
+    else
+      IO.puts("2. Create the join Secret. The command asks for the token without echoing it,")
+      IO.puts("   so it is never in your shell history or a process list:")
+      IO.puts("")
+      IO.puts("  #{cluster["secret_command"]}")
+      IO.puts("")
+      IO.puts("3. When it asks, enter this token (shown once):")
+      IO.puts("")
+      IO.puts("  #{token}")
+    end
+
+    IO.puts("")
+    IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
+
+    IO.puts(
+      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret arbiter-join`."
+    )
   end
 
   defp token_sink!(path) when is_binary(path) do
@@ -518,7 +683,34 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("  enrolled:      #{n["enrolled_at"]}")
     IO.puts("  last seen:     #{n["last_seen_at"] || "never"}")
     if n["revoked_at"], do: IO.puts("  revoked:       #{n["revoked_at"]}")
+    print_cluster(n)
   end
+
+  # K9: a cluster node's kind and Kubernetes version, and, when it is behind, how it moves: by
+  # itself (it can patch its own Deployment) or by this exact command.
+  defp print_cluster(%{"kind" => "cluster"} = n) do
+    IO.puts("  kind:          cluster")
+    if n["k8s_version"], do: IO.puts("  Kubernetes:    #{n["k8s_version"]}")
+
+    cond do
+      n["upgrade_command"] ->
+        IO.puts("")
+        IO.puts("  This controller is #{n["health"]}: it cannot patch its own Deployment, so no")
+        IO.puts("  work is placed on it until it runs this server's version. Run:")
+        IO.puts("")
+        IO.puts("  #{n["upgrade_command"]}")
+
+      n["self_upgrade"] == true and n["health"] in ["outdated", "ahead"] ->
+        IO.puts(
+          "  upgrade:       this controller upgrades itself (to #{n["image"] || "this server's image"})"
+        )
+
+      true ->
+        :ok
+    end
+  end
+
+  defp print_cluster(_n), do: :ok
 
   defp events(argv, mode) do
     ref = ref!(argv, "events")

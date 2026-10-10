@@ -33,7 +33,18 @@ defmodule Arbiter.Nodes.Overview do
   require Ash.Query
 
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Capacity, Hello, LocalCapacity, Node, Registry, Session, Skew}
+
+  alias Arbiter.Nodes.{
+    Capacity,
+    ClusterInstall,
+    Hello,
+    LocalCapacity,
+    Node,
+    Registry,
+    Session,
+    Skew
+  }
+
   alias Arbiter.Settings
   alias Arbiter.Workers.{Run, RunState}
 
@@ -128,25 +139,56 @@ defmodule Arbiter.Nodes.Overview do
       draining?: node.status == :draining,
       allow_unenforced_network: node.allow_unenforced_network
     }
-    |> Map.merge(cluster_fields(snapshot))
+    |> Map.merge(cluster_fields(node, snapshot))
   end
 
   # A3/A7: what a cluster node adds to its row. A node that never connected, and every
   # machine, is a machine with nothing degraded, constrained or pending.
-  defp cluster_fields(nil), do: cluster_fields(%{})
+  defp cluster_fields(node, nil), do: cluster_fields(node, %{})
 
-  defp cluster_fields(snapshot) do
+  defp cluster_fields(node, snapshot) do
     %{
-      kind: kind(snapshot),
+      kind: kind(node, snapshot),
       k8s_version: Map.get(snapshot, :k8s_version),
       degraded: Map.get(snapshot, :degraded, []),
       constrained?: constrained?(snapshot),
       pending: pending(snapshot)
     }
+    |> Map.merge(upgrade_fields(node, snapshot))
   end
 
-  defp kind(%{kind: "cluster"}), do: :cluster
-  defp kind(_snapshot), do: :machine
+  # What the node says it is wins; a node that never connected is what its join token made it.
+  defp kind(_node, %{kind: "cluster"}), do: :cluster
+  defp kind(%Node{kind: "cluster"}, %{kind: nil}), do: :cluster
+  defp kind(%Node{kind: "cluster"}, snapshot) when not is_map_key(snapshot, :kind), do: :cluster
+  defp kind(_node, _snapshot), do: :machine
+
+  # K9 (K§2.4): an `outdated` cluster node that cannot patch its own Deployment is shown the
+  # exact `kubectl set image` for the controller image of this server's version. One that
+  # reports `caps.self_upgrade` is on its way and gets none; a machine, a current node and a
+  # primary with no `nodes.registry` have no command to give.
+  defp upgrade_fields(node, snapshot) do
+    caps = Map.get(snapshot, :caps) || %{}
+    self_upgrade? = caps["self_upgrade"] == true
+
+    base = %{image: nil, upgrade_command: nil, self_upgrade?: self_upgrade?}
+
+    with :cluster <- kind(node, snapshot),
+         health when health in [:outdated, :ahead] <- Map.get(snapshot, :health),
+         {:ok, image} <- ClusterInstall.controller_image() do
+      command =
+        if self_upgrade?,
+          do: nil,
+          else: ClusterInstall.set_image_command(namespace(caps), image)
+
+      %{base | image: image, upgrade_command: command}
+    else
+      _ -> base
+    end
+  end
+
+  defp namespace(%{"namespace" => ns}) when is_binary(ns) and ns != "", do: ns
+  defp namespace(_caps), do: ClusterInstall.default_namespace()
 
   # A3: `hb.capacity.constrained` / `.pending` (cluster nodes only; machines never send it).
   defp constrained?(%{node_capacity: %{"constrained" => true}}), do: true
