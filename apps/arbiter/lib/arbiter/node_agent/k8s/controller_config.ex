@@ -136,8 +136,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
         do: {atom, Map.fetch!(map, key)}
   end
 
-  defp yaml_reason(%{__exception__: true} = error), do: Exception.message(error)
-  defp yaml_reason(other), do: inspect(other, limit: 5)
+  defp yaml_reason(error), do: Exception.message(error)
 
   defp bad(reason), do: {:error, {:bad_config, reason}}
 end
