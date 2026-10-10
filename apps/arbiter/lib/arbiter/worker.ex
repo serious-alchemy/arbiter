@@ -4449,7 +4449,8 @@ defmodule Arbiter.Worker do
         state,
         "bd-8r2iat: research task #{task_id} signalled `arb done` but its notes say the " <>
           "work was not performed: #{reason}\n\nThe ticket is parked, not completed. " <>
-          "Re-dispatch it with the tools it needs (or do the work directly)."
+          "Re-dispatch it with the tools it needs (or do the work directly).",
+        "Work not performed on research directive (#{task_id})"
       )
 
       fail_now(state, "work not performed: #{reason}")
@@ -7123,14 +7124,16 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary)
+  defp escalate_notes_gate(state, summary, subject \\ nil)
+
+  defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary, subject)
        when is_binary(ws_id) do
     Arbiter.Messages.Escalation.post(%{
       kind: :notes_gate,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
-      subject: "Notes gate: blank findings on research-type directive (#{task_id})",
+      subject: subject || "Notes gate: blank findings on research-type directive (#{task_id})",
       body: Resolutions.append_footer(summary, task_id, :notes_gate)
     })
 
@@ -7141,7 +7144,7 @@ defmodule Arbiter.Worker do
     :exit, _ -> :ok
   end
 
-  defp escalate_notes_gate(_state, _summary), do: :ok
+  defp escalate_notes_gate(_state, _summary, _subject), do: :ok
 
   # The shared "integrate this branch" path: open the MR / run the merge, or fail
   # the worker (not silently complete it) if the adapter rejects.

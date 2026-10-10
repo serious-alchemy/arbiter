@@ -343,6 +343,21 @@ defmodule Arbiter.Worker.NotesGateTest do
       assert escalation.body =~ "NOT performed"
     end
 
+    test "analytical prose mentioning 'not performed' / 'redispatch' still completes", %{ws: ws} do
+      task =
+        new_task(
+          ws,
+          "Root cause: validation is not performed for nil inputs, so the job needs redispatch " <>
+            "after a crash. The old report said \"Triage NOT performed\" but that was a quote."
+        )
+
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+    end
+
     test "real findings still complete", %{ws: ws} do
       task = new_task(ws, "Root cause: flaky timeout in foo_test; re-ran green.")
       pid = start_worker(task, %{notes_nudge_cap: 0})

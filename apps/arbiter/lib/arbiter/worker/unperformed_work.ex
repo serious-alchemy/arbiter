@@ -15,12 +15,14 @@ defmodule Arbiter.Worker.UnperformedWork do
   with the reason rather than closing completed.
   """
 
+  # Anchored to the start of a line (after optional markdown markers) so
+  # analytical prose that merely mentions "not performed" or "needs redispatch"
+  # mid-sentence is not a declaration; a worker states it as the line's opening.
   @patterns [
-    ~r/\bnot\s+performed\b/i,
-    ~r/\bcould\s+not\s+be\s+(?:performed|completed|done)\b/i,
-    ~r/\bblocked\s*:\s*missing\b/i,
-    ~r/\bneeds?\s+re-?dispatch/i,
-    ~r/\b(?:unable\s+to|could\s+not|couldn't|cannot|can't)\s+(?:perform|complete|do)\s+(?:the\s+|this\s+)?(?:work|task|triage|investigation)\b/i
+    ~r/^[ \t]*(?:[#>*_\-]+[ \t]*)?(?:triage|work|task|investigation|research)\s+(?:was\s+|is\s+)?(?:not\s+performed|could\s+not\s+be\s+(?:performed|completed|done))\b/im,
+    ~r/^[ \t]*(?:[#>*_\-]+[ \t]*)?blocked\s*:\s*missing\b/im,
+    ~r/^[ \t]*(?:[#>*_\-]+[ \t]*)?(?:work\s+)?needs?\s+re-?dispatch/im,
+    ~r/^[ \t]*(?:[#>*_\-]+[ \t]*)?(?:unable\s+to|could\s+not|couldn't|cannot|can't)\s+(?:perform|complete|do)\s+(?:the\s+|this\s+)?(?:work|task|triage|investigation)\b/im
   ]
 
   @doc "True when `notes` declares the work was not (or could not be) done."
