@@ -70,7 +70,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @spec entry() :: String.t()
   def entry, do: @entry
 
-  @doc "The programs the base image carries under `/opt/arbiter/bin`: `%{\"seed\" => text, \"snapshotter\" => text}`."
+  @doc "The programs the base image carries under `/opt/arbiter/bin`, by file name."
   @spec bin() :: %{String.t() => String.t()}
   def bin, do: @bin
 
