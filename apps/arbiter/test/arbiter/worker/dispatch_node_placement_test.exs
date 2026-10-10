@@ -66,6 +66,30 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert Ash.get!(Issue, held.id).state == :queued
     end
 
+    # DC1 (§5.1): the registry entry names the node a run was placed on, so the
+    # primary's cap stops counting it.
+    test "a run placed on a node carries its node_id on the registry entry", %{ws: ws} do
+      issue = ready!(ws, "placed on a node")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, node: %{id: "n-placed", name: "placed"})
+
+      assert %{node_id: "n-placed"} =
+               Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))
+
+      refute issue.id in Arbiter.Nodes.LocalCapacity.holders()
+    end
+
+    test "a run that stays on the primary has no node_id", %{ws: ws} do
+      issue = ready!(ws, "stays local")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue)
+
+      assert %{node_id: nil} =
+               Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))
+
+      assert issue.id in Arbiter.Nodes.LocalCapacity.holders()
+    end
+
     test "prefer_remote with no node available runs locally, as before", %{ws: _ws} do
       ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
       issue = ready!(ws, "prefer remote")

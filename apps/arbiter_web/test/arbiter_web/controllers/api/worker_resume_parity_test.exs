@@ -28,6 +28,8 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
           ~s|d="$(dirname "$0")"\nprintf '%s\\n' "$@" > "$d/.spawn.$$" && mv "$d/.spawn.$$" "$d/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$d/.token.$$" && mv "$d/.token.$$" "$d/token"\nexec sleep 30\n|
       )
 
+    ResumeSlotFixture.put_local_cap(10)
+
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "resume-parity-#{System.unique_integer([:positive])}",
