@@ -23,7 +23,7 @@ defmodule Arbiter.Quota.Budget.ServerTest do
     Phoenix.PubSub.subscribe(Arbiter.PubSub, "board")
     test = self()
 
-    inputs = fn _calibration ->
+    inputs = fn calibration ->
       send(test, :inputs_read)
       state = Agent.get(agent, & &1)
 
@@ -36,6 +36,7 @@ defmodule Arbiter.Quota.Budget.ServerTest do
             quota_config: %{"threshold_mode" => "paced"}
           },
           pool: pool,
+          rates: for({{@account, ^pool, w}, r} <- calibration.rates, into: %{}, do: {w, r}),
           quota: snapshot(state.used, state.now),
           now: state.now,
           seats: 0,
@@ -188,6 +189,65 @@ defmodule Arbiter.Quota.Budget.ServerTest do
   test "reads are safe before the table exists" do
     assert Server.get("x", "claude", nil, :no_such_budget_table) == nil
     assert Server.all(:no_such_budget_table) == []
+  end
+
+  describe "calibration (§3.6)" do
+    @rung0 %{
+      account_id: @account,
+      pool: "claude",
+      window: "5h",
+      horizon_hours: 2.0,
+      rung: 0,
+      rho: 0.2,
+      raw_rho: 0.2,
+      floored?: false,
+      passed_over: [],
+      fit: %{background_share_per_hour: 0.0}
+    }
+
+    test "a calibration result reaches the published window's rho", ctx do
+      {server, table} = start(ctx, calibration: fn -> [@rung0] end)
+      await_calibration(server)
+
+      assert %{rho_source: :fit, rho: 0.2} = window(table, "5h")
+    end
+
+    test "a calibration that raises is survived: the server stays up and priors stand", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {server, table} = start(ctx, calibration: fn -> raise "calibration boom" end)
+          pid = GenServer.whereis(server)
+          ref = Process.monitor(pid)
+          await_calibration(server)
+
+          refute_received {:DOWN, ^ref, :process, ^pid, _}
+          :ok = Server.recompute(server)
+          assert %{rho_source: :prior} = window(table, "5h")
+        end)
+
+      assert log =~ "calibration failed"
+    end
+  end
+
+  # init queues :calibrate ahead of any call, so once :sys.get_state returns the
+  # task is running (or done); poll until its result or crash has been handled.
+  defp await_calibration(server, tries \\ 200) do
+    case :sys.get_state(server) do
+      %{calibration_task: nil} ->
+        :ok
+
+      _ when tries == 0 ->
+        flunk("calibration never finished")
+
+      _ ->
+        Process.sleep(10)
+        await_calibration(server, tries - 1)
+    end
+  end
+
+  defp window(table, label) do
+    budget = Server.get(@account, "claude", nil, table)
+    Enum.find(budget.windows, &(&1.window == label))
   end
 
   describe "triggers (§3.6)" do

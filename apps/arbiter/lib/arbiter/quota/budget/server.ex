@@ -176,7 +176,10 @@ defmodule Arbiter.Quota.Budget.Server do
 
   def handle_info(:calibrate, %{calibration_task: nil} = state) do
     fun = state.calibration_fun
-    task = Task.async(fn -> fun.() end)
+    # Not linked: a calibration that raises (DB timeout at boot, bad edge data)
+    # must reach the :DOWN clause below, not take this server and its ETS table
+    # down with it.
+    task = Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn -> fun.() end)
     Process.send_after(self(), :calibrate, @calibration_every_ms)
     {:noreply, %{state | calibration_task: task.ref}}
   end
