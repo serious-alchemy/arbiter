@@ -183,9 +183,10 @@ defmodule Arbiter.Board.WalkInputs do
     end
   end
 
-  defp pool_label(nil, pool), do: pool
+  @doc false
+  def pool_label(nil, pool), do: pool
 
-  defp pool_label(%ProviderAccount{provider: provider, slug: slug}, pool) do
+  def pool_label(%ProviderAccount{provider: provider, slug: slug}, pool) do
     base = "#{provider}:#{slug}"
 
     case Map.get(@pool_suffixes, pool) do

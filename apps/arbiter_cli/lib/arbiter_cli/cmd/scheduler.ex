@@ -100,6 +100,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
         else
           IO.puts("Board scheduler is #{SchedulerState.headline(body)}.")
           emit_changed(body)
+          emit_capacity(body)
           emit_slots(body)
           emit_held(body)
           emit_entries(body)
@@ -196,6 +197,86 @@ defmodule ArbiterCli.Cmd.Scheduler do
        do: IO.puts("Last changed: #{at || "unknown time"} by #{by || "unknown"}")
 
   defp emit_changed(_body), do: IO.puts("Last changed: unknown (no pause or resume recorded)")
+
+  # DC5 (design §9): the admission mode, then one line per provider pool with its
+  # budget and reason, the machines and the repo caps. A server that predates the
+  # budgets sends none of these keys and prints none of it.
+  defp emit_capacity(body) do
+    emit_admission(body["admission"])
+    emit_table("Providers", ~w(budget seats free why), body["budgets"], &pool_row/1)
+    emit_table("Machines", ~w(cap live free), body["machines"], &machine_row/1)
+    emit_table("Repos", ~w(cap runs), body["repos"], &repo_row/1)
+  end
+
+  defp emit_admission(%{"label" => label} = admission) do
+    IO.puts("Admission: #{label}#{admission_note(admission)}")
+  end
+
+  defp emit_admission(_none), do: :ok
+
+  defp admission_note(
+         %{"agreement" => %{"agrees" => agrees, "comparable" => comparable} = a} = adm
+       ) do
+    since = if is_binary(a["since"]), do: " since #{String.slice(a["since"], 0, 10)}", else: ""
+
+    " (the new walk agrees on #{agrees} of #{comparable} comparable decisions#{since}#{decides_note(adm)})"
+  end
+
+  defp admission_note(adm) do
+    case decides_note(adm) do
+      "" -> ""
+      note -> " (" <> String.trim_leading(note, "; ") <> ")"
+    end
+  end
+
+  defp decides_note(%{"decides" => false}), do: "; today's gate and caps still decide"
+  defp decides_note(_), do: ""
+
+  defp pool_row(pool) do
+    {pool["label"] || pool["pool"],
+     [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"])], pool["reason"]}
+  end
+
+  defp machine_row(m),
+    do: {m["name"] || m["id"], [cell(m["cap"]), cell(m["live"]), cell(m["free"])], nil}
+
+  defp repo_row(r),
+    do: {r["label"] || to_string(r["repo"]), [cell(r["cap"]), cell(r["used"])], nil}
+
+  defp cell(nil), do: "-"
+  defp cell(value), do: to_string(value)
+
+  defp emit_table(_title, _columns, rows, _row) when rows in [nil, []], do: :ok
+
+  defp emit_table(title, columns, rows, row) do
+    rows = Enum.map(rows, row)
+
+    name_width =
+      rows
+      |> Enum.map(fn {name, _, _} -> String.length(name) end)
+      |> Enum.max()
+      |> max(String.length(title) - 2)
+
+    header =
+      Enum.map_join(columns, "", fn column -> String.pad_leading(column, widths(column)) end)
+
+    IO.puts(String.pad_trailing(title, name_width + 2) <> header)
+
+    Enum.each(rows, fn {name, cells, why} ->
+      cells =
+        columns
+        |> Enum.zip(cells)
+        |> Enum.map_join("", fn {column, cell} -> String.pad_leading(cell, widths(column)) end)
+
+      IO.puts(
+        "  " <>
+          String.pad_trailing(name, name_width) <> cells <> if(why, do: "  " <> why, else: "")
+      )
+    end)
+  end
+
+  defp widths("why"), do: 5
+  defp widths(_column), do: 10
 
   # bd-asxw4e: the dispatch cap's count, the same one the board header shows.
   defp emit_slots(%{"slots_used" => used} = body) when is_integer(used) do

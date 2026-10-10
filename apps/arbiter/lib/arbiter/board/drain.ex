@@ -242,8 +242,21 @@ defmodule Arbiter.Board.Drain do
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
       held_local_capacity: Map.get(autopilot, :held_local_capacity, []),
+      capacity: capacity(Keyword.get(opts, :capacity)),
       checked_at: DateTime.utc_now()
     }
+  end
+
+  # DC5: the budgets, machines and admission mode (`Arbiter.Board.CapacityView`).
+  # A view that cannot be read is `nil`: the drain verdict does not depend on it.
+  defp capacity(%{} = view), do: view
+
+  defp capacity(read) do
+    if is_function(read, 0), do: read.(), else: Arbiter.Board.CapacityView.status()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # The board-wide quota/auth hold in the account-qualified wording the board
@@ -290,7 +303,24 @@ defmodule Arbiter.Board.Drain do
       checked_at: status.checked_at,
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
+    |> Map.merge(capacity_json(Map.get(status, :capacity)))
   end
+
+  # DC5 (design §9): `admission` (the mode, labelled shadow until enforce), `budgets`
+  # (one per pool), `machines`, `repos` and `fair_share`. The REST body and the
+  # MCP `scheduler_status` share this, so they cannot drift.
+  defp capacity_json(%{} = view) do
+    %{
+      admission: view.admission,
+      budgets: view.pools,
+      machines: view.machines,
+      repos: view.repos,
+      fair_share: view.fair_share
+    }
+  end
+
+  defp capacity_json(_none),
+    do: %{admission: nil, budgets: [], machines: [], repos: [], fair_share: []}
 
   # bd-b2iigy: an automatic resume waiting on the primary's own worker cap
   # (`Arbiter.Nodes.LocalCapacity`). Queued work, not in flight: no agent runs.

@@ -218,6 +218,65 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
     end
   end
 
+  # DC5 (bd-2c2a4g, design §9): the per-pool budgets, machines and the admission
+  # mode ride `scheduler_status`, the same body `GET /api/scheduler/status` gives.
+  describe "scheduler_status/2 budgets (DC5)" do
+    setup do
+      :ok = :meck.new(Arbiter.Board.CapacityView, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Board.CapacityView) end)
+
+      view = %{
+        admission: %{
+          mode: "shadow",
+          label: "shadow",
+          decides: false,
+          agreement: %{comparable: 52, agrees: 47, since: ~U[2026-10-12 00:00:00Z]}
+        },
+        pools: [
+          %{
+            account: "acct-1",
+            account_name: "claude:default",
+            pool: "claude",
+            budget: 3,
+            seats: 3,
+            free: 0,
+            binding: "ceiling",
+            reason: "ceiling max_concurrent 3 (quota allows 4: 5h binds)",
+            state: "full"
+          }
+        ],
+        machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
+        repos: [],
+        fair_share: []
+      }
+
+      :meck.expect(Arbiter.Board.CapacityView, :status, fn -> view end)
+      %{view: view}
+    end
+
+    test "carries admission, one budget per pool, machines, repos and fair_share", ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.admission.label == "shadow"
+      assert data.admission.decides == false
+      assert data.admission.agreement.agrees == 47
+      assert [%{pool: "claude", budget: 3, reason: reason}] = data.budgets
+      assert reason =~ "ceiling max_concurrent 3"
+      assert [%{id: "local", cap: 6, live: 3, free: 3}] = data.machines
+      assert data.repos == []
+      assert data.fair_share == []
+    end
+
+    test "is byte-for-byte the body the REST endpoint renders", ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+      rest = Arbiter.Board.Drain.status() |> Arbiter.Board.Drain.to_json()
+
+      for key <- [:admission, :budgets, :machines, :repos, :fair_share] do
+        assert Map.fetch!(data, key) == Map.fetch!(rest, key)
+      end
+    end
+  end
+
   describe "internal failures are not :invalid (P-19)" do
     setup do
       :ok = :meck.new(Arbiter.Board.Drain, [:passthrough, :no_link])
