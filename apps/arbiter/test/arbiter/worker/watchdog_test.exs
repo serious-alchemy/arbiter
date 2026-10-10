@@ -786,7 +786,8 @@ defmodule Arbiter.Worker.WatchdogTest do
 
     defp flake_watchdog(ref, opts \\ []) do
       task_id = new_task_id()
-      StubMerger.set_diff(ref, nil, @docs_diff)
+      {diff, opts} = Keyword.pop(opts, :diff, @docs_diff)
+      StubMerger.set_diff(ref, nil, diff)
 
       wpid =
         start_watchdog(
@@ -852,6 +853,60 @@ defmodule Arbiter.Worker.WatchdogTest do
       Process.sleep(100)
       assert StubFixPassDispatcher.call_count() == 0
       assert length(reruns("!flk3")) == 1
+    end
+
+    # bd-4qj7io: a failure confined to tests in `KnownFlakes` is re-run once,
+    # whether or not the PR touches them; failing again, or failing anything
+    # else, is a real failure.
+    @flaky_diff "diff --git a/apps/arbiter/test/arbiter/worker/ticket_watchdog_test.exs b/apps/arbiter/test/arbiter/worker/ticket_watchdog_test.exs\n--- a/apps/arbiter/test/arbiter/worker/ticket_watchdog_test.exs\n+++ b/apps/arbiter/test/arbiter/worker/ticket_watchdog_test.exs\n@@ -1 +1 @@\n-a\n+b\n"
+    @direct {"the Direct strategy (acceptance 9) a Direct merge takes the ticket through :merging to :closed",
+             "Arbiter.Worker.TicketWatchdogTest"}
+
+    defp flaky_check(failures) do
+      body =
+        failures
+        |> Enum.with_index(1)
+        |> Enum.map_join(fn {{name, module}, n} ->
+          "  #{n}) test #{name} (#{module})\n     test/arbiter/worker/ticket_watchdog_test.exs:#{n}\n     boom\n"
+        end)
+
+      [%{name: "mix test", summary: body <> "\n9 tests, #{length(failures)} failures\n"}]
+    end
+
+    test "a failure confined to registered flaky tests re-runs CI once, even in a file the PR touches" do
+      StubMerger.set_failing_checks("!kf1", flaky_check([@direct]))
+      StubMerger.queue_get("!kf1", [red("h1"), pending("h1")])
+
+      flake_watchdog("!kf1", diff: @flaky_diff)
+
+      wait_until(fn -> length(reruns("!kf1")) == 1 end)
+      Process.sleep(100)
+      assert length(reruns("!kf1")) == 1
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "a registered flaky test failing again on the re-run dispatches a fix pass" do
+      StubMerger.set_failing_checks("!kf2", flaky_check([@direct]))
+      StubMerger.queue_get("!kf2", [red("h1"), pending("h1")])
+
+      flake_watchdog("!kf2", diff: @flaky_diff)
+      wait_until(fn -> length(reruns("!kf2")) == 1 end)
+
+      StubMerger.queue_get("!kf2", [red("h1")])
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert length(reruns("!kf2")) == 1
+    end
+
+    test "a registered flaky test failing alongside an unregistered one dispatches a fix pass, no re-run" do
+      failures = [@direct, {"a real regression", "Arbiter.Worker.TicketWatchdogTest"}]
+      StubMerger.set_failing_checks("!kf3", flaky_check(failures))
+      StubMerger.queue_get("!kf3", [red("h1")])
+
+      flake_watchdog("!kf3", diff: @flaky_diff)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!kf3") == []
     end
 
     # #360: a cancelled pipeline is infrastructure — re-run it with backoff, never
