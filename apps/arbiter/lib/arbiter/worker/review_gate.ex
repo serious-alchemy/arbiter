@@ -6192,10 +6192,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp fix_round_remote_possible(state, ws) do
-    cond do
-      scoped_credential?(ws, Map.get(state, :repo)) -> :local
-      true -> :remote_possible
-    end
+    if scoped_credential?(ws, Map.get(state, :repo)), do: :local, else: :remote_possible
   end
 
   defp fix_round_node(state, ws) do
