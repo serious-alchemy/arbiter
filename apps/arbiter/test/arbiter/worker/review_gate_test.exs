@@ -5955,6 +5955,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   # ---- adapter-specific async-tool instruction (bd-1mlr56) -----------------
 
+  describe "findings_present?/1 session-stats footer (any provider)" do
+    for provider <- ["claude", "grok"] do
+      test "a bare APPROVE + #{provider} session footer reads as no findings" do
+        findings = "VERDICT: APPROVE\n⚙ #{unquote(provider)} session success · 94.7s · $0.59\n"
+        refute Arbiter.Worker.ReviewGate.findings_present?(findings)
+      end
+    end
+  end
+
   describe "commit_nudge_prompt/1 (bd-dh1gg1)" do
     test "tells a credential-less sandbox not to retry the push" do
       prompt = ReviewGate.commit_nudge_prompt(%{round: 1, task_id: "bd-x", branch: "b/x"})

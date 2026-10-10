@@ -169,6 +169,31 @@ defmodule Arbiter.Quota.GrokLedgerTest do
       assert s.utilization == 0.0
     end
 
+    test "the free Grok Build usage-limit wording (no counts) classifies and opens the hold" do
+      text =
+        "grok error: You've reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build"
+
+      reason = Arbiter.Worker.StopReason.classify(1, [text], "grok")
+      assert reason.category == :quota_exhausted
+
+      Ash.create!(Run, %{
+        task_id: "bd-grok-build-limit",
+        kind: :implement,
+        repo: "arbiter",
+        provider: "grok",
+        state: :finished,
+        outcome: :failed,
+        stop_category: "quota_exhausted",
+        failure_reason: reason.summary,
+        started_at: DateTime.add(@now, -35 * 60, :second),
+        completed_at: DateTime.add(@now, -30 * 60, :second)
+      })
+
+      s = GrokLedger.snapshot(now: @now)
+      assert s.status == "limit_reached"
+      assert s.reset_at == DateTime.add(@now, -30 * 60 + 24 * 3600 + 1, :second)
+    end
+
     test "a run that stopped for another reason is not a marker" do
       Ash.create!(Run, %{
         task_id: "bd-grok-other",

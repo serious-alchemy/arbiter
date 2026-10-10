@@ -3189,7 +3189,7 @@ defmodule Arbiter.Worker.ReviewGate do
       |> Enum.drop(1)
       |> Enum.reject(fn line ->
         # Strip synthesized session-stats footers appended by the harness
-        # (e.g. "⚙ claude session success · 183.5s · $1.1489") — both the
+        # (e.g. "⚙ claude session success · 183.5s · $1.1489", or "⚙ grok session …") — both the
         # Claude and Gemini agent variants use the ⚙ glyph as a prefix.
         # Also strip CRITERIA breakdown lines (`- [MET]` / `- [NOT MET]` /
         # `- [N/A]`): they are verdict payload, not enumerated findings, and
