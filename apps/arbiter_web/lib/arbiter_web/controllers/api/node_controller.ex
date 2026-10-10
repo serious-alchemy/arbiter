@@ -116,6 +116,7 @@ defmodule ArbiterWeb.Api.NodeController do
       warnings: overview.warnings,
       public_url: url,
       exposure: Overview.exposure(url),
+      registry: Arbiter.Worker.Image.Publisher.status(),
       allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
     })
   end

@@ -178,6 +178,30 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert [%{"name" => "alpha", "state" => "offline", "live" => 0}] = body["nodes"]
     end
 
+    test "the list reports the image registry: unset by default, never the password (K8)" do
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+      assert body["registry"] == %{"configured" => false}
+
+      previous = Application.get_env(:arbiter, :image_publisher, [])
+      Application.put_env(:arbiter, :image_publisher, Keyword.put(previous, :probe, fn _ -> :ok end))
+      on_exit(fn -> Application.put_env(:arbiter, :image_publisher, previous) end)
+
+      {:ok, _} = Arbiter.Settings.Registry.put("nodes.registry", "registry.example.com/arb")
+      {:ok, _} = Arbiter.Settings.Registry.put("nodes.registry_username", "bot")
+      {:ok, _} = Arbiter.Settings.Registry.put("nodes.registry_password", "pw-NEVER-RENDERED")
+
+      raw = response(get(operator_conn(), "/api/nodes"), 200)
+      refute raw =~ "pw-NEVER-RENDERED"
+
+      assert %{
+               "configured" => true,
+               "registry" => "registry.example.com/arb",
+               "username" => "bot",
+               "password_set" => true,
+               "reachable" => true
+             } = Jason.decode!(raw)["registry"]
+    end
+
     test "a public endpoint is reported as such" do
       {:ok, _} = Arbiter.Settings.set_nodes_public_url("https://arbiter.example.com")
       assert json_response(get(operator_conn(), "/api/nodes"), 200)["exposure"] == "public"

@@ -9,6 +9,9 @@ defmodule ArbiterCli.Cmd.Settings do
       arb settings unset <key>
       arb settings schema [--json]
 
+  Secrets (`nodes.registry_password`) are write-only and always strings; prefer
+  `arb settings set nodes.registry_password -` (stdin) or `--file <path>` to argv.
+
   `get` shows, per key, the value in force, whether it comes from an
   `override` or the `default`, and what the default is. `unset` (and
   `set <key> null`) clears the override.
@@ -35,7 +38,7 @@ defmodule ArbiterCli.Cmd.Settings do
   `arb scheduler pause|resume|status|wait` (`/api/scheduler/*`).
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Client, Output, SecretInput}
   alias ArbiterCli.Cmd.Config.Value
 
   @path "/api/installation/config"
@@ -44,11 +47,12 @@ defmodule ArbiterCli.Cmd.Settings do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb settings", switches: [])
+      {opts, rest, mode} =
+        ArgParser.parse(argv, command: "arb settings", switches: [file: :string])
 
       case rest do
         ["get" | args] -> get(args, mode)
-        ["set" | args] -> set(args, mode)
+        ["set" | args] -> set(args, opts, mode)
         ["unset" | args] -> unset(args, mode)
         ["schema" | _] -> schema(mode)
         [] -> Output.die("settings requires a subcommand: get, set, unset, or schema")
@@ -75,13 +79,40 @@ defmodule ArbiterCli.Cmd.Settings do
 
   defp get(_, _), do: Output.die("settings get takes at most one argument: the key")
 
-  defp set([key, raw], mode), do: patch(key, parse(raw), mode)
-  defp set([key | rest], mode) when rest != [], do: patch(key, parse(Enum.join(rest, " ")), mode)
+  # A secret key (`Registry`'s "secret" type) is always a string — "12345" must
+  # not become an integer — and has a stdin / file form so it need not ride argv
+  # (visible to `ps` and shell history).
+  @secret_keys ["nodes.registry_password"]
 
-  defp set([_], _),
+  defp set([key | rest], opts, mode) when key in @secret_keys do
+    value =
+      case {rest, opts[:file]} do
+        {[], file} when is_binary(file) ->
+          SecretInput.from_file!(file, "--file")
+
+        {["-"], nil} ->
+          SecretInput.from_stdin!()
+
+        {[raw], nil} ->
+          SecretInput.warn_argv("`arb settings set #{key} -` (stdin) or `--file <path>`")
+          raw
+
+        _ ->
+          Output.die("settings set #{key} takes one value: <value>, - (stdin), or --file <path>")
+      end
+
+    patch(key, value, mode)
+  end
+
+  defp set([key, raw], _opts, mode), do: patch(key, parse(raw), mode)
+
+  defp set([key | rest], _opts, mode) when rest != [],
+    do: patch(key, parse(Enum.join(rest, " ")), mode)
+
+  defp set([_], _opts, _mode),
     do: Output.die("settings set requires a value: arb settings set <key> <value>")
 
-  defp set([], _), do: Output.die("settings set requires <key> <value>")
+  defp set([], _opts, _mode), do: Output.die("settings set requires <key> <value>")
 
   defp unset([key], mode), do: patch(key, nil, mode)
   defp unset(_, _), do: Output.die("settings unset takes exactly one argument: the key")

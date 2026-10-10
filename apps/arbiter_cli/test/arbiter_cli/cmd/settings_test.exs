@@ -194,3 +194,73 @@ defmodule ArbiterCli.Cmd.SettingsTest do
     end
   end
 end
+
+defmodule ArbiterCli.Cmd.SettingsSecretTest do
+  @moduledoc "K8: `nodes.registry_password` is a secret, so it does not have to ride argv."
+  use ArbiterCli.CliCase, async: true
+
+  alias ArbiterCli.Cmd.Settings
+
+  @moduletag :tmp_dir
+
+  defp stub_patch do
+    test_pid = self()
+
+    stub_routes([
+      {{"patch", "/api/installation/config"},
+       fn conn ->
+         {:ok, raw, conn} = Plug.Conn.read_body(conn)
+         body = Jason.decode!(raw)
+         send(test_pid, {:patched, body})
+
+         Req.Test.json(conn, %{
+           "data" => %{
+             "key" => body["key"],
+             "value" => "********",
+             "default" => nil,
+             "overridden" => true
+           }
+         })
+       end}
+    ])
+  end
+
+  test "--file reads the secret as a string, even when it looks like a number", %{tmp_dir: dir} do
+    stub_patch()
+    path = Path.join(dir, "pw")
+    File.write!(path, "12345\n")
+
+    {out, err, 0} =
+      capture(fn -> Settings.run(["set", "nodes.registry_password", "--file", path]) end)
+
+    assert_received {:patched, %{"key" => "nodes.registry_password", "value" => "12345"}}
+    refute out <> err =~ "12345"
+  end
+
+  test "a secret on argv is sent as a string, warns, and the value is never echoed" do
+    stub_patch()
+
+    {out, err, 0} = capture(fn -> Settings.run(["set", "nodes.registry_password", "98765"]) end)
+
+    assert_received {:patched, %{"key" => "nodes.registry_password", "value" => "98765"}}
+    assert err =~ "visible to other processes"
+    refute out <> err =~ "98765"
+  end
+
+  test "stdin (-) is read as the secret" do
+    stub_patch()
+
+    {_out, _err, 0} =
+      capture(fn -> Settings.run(["set", "nodes.registry_password", "-"]) end,
+        input: "from-stdin\n"
+      )
+
+    assert_received {:patched, %{"value" => "from-stdin"}}
+  end
+
+  test "an ordinary key still parses JSON" do
+    stub_patch()
+    {_out, _err, 0} = capture(fn -> Settings.run(["set", "nodes.registry_insecure", "true"]) end)
+    assert_received {:patched, %{"key" => "nodes.registry_insecure", "value" => true}}
+  end
+end

@@ -155,7 +155,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   end
 
   defp probe(cfg, opts) do
-    probe = Keyword.get(opts, :probe, &default_probe/1)
+    probe = Keyword.get_lazy(opts, :probe, fn -> config(:probe, &default_probe/1) end)
 
     case probe.(cfg) do
       :ok -> {true, nil}
