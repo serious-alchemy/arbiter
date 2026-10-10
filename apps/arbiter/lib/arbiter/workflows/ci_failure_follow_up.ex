@@ -20,13 +20,13 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
   `check_names` is the list of failing required check names, folded into the
   instructions so the dispatched worker knows exactly which job(s) to triage.
   """
-  @spec instructions([String.t()]) :: String.t()
-  def instructions(check_names) when is_list(check_names) do
+  @spec instructions([String.t()], [map()]) :: String.t()
+  def instructions(check_names, failing_checks \\ []) when is_list(check_names) do
     """
     ## Required-check failure triage protocol (bd-ayetel)
 
     Failing required check(s): #{Enum.join(check_names, ", ")}.
-
+    #{render_logs(failing_checks)}
     A CI failure needs triage BEFORE a fix — do not blindly push a change to
     make it green. For each failing check:
 
@@ -51,5 +51,24 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
     If triage is inconclusive, escalate to the coordinator mailbox naming the
     PR and the failing check(s) rather than guessing.
     """
+  end
+
+  @log_limit 4_000
+
+  # The host-fetched failing jobs and their log excerpts (bd-8r2iat), so a
+  # worker with no forge CLI or CI tools can still triage.
+  defp render_logs([]), do: ""
+
+  defp render_logs(checks) do
+    body =
+      Enum.map_join(checks, "\n\n", fn check ->
+        url = Map.get(check, :url)
+        summary = check |> Map.get(:summary, "") |> to_string() |> String.slice(0, @log_limit)
+        header = "### #{Map.get(check, :name)}" <> if(url, do: " (#{url})", else: "")
+        header <> "\n```\n" <> summary <> "\n```"
+      end)
+
+    "\nFailing job logs (fetched by Arbiter; a sandboxed run has no CI tools):\n\n" <>
+      body <> "\n"
   end
 end

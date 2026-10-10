@@ -295,6 +295,57 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
     assert follow_up.description =~ "unresolved review thread"
   end
 
+  # bd-8r2iat: a ticket in Merging is the merge Watchdog's (it handles a red CI
+  # at fixing_ci), so patrol files no CI follow-up beside it.
+  test "no CI follow-up is filed for a PR whose ticket is in Merging", %{ws: ws} do
+    task = authored_task(ws)
+    _ = put_state!(task, :merging, pr_ref: "owner/repo#424")
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+  end
+
+  test "a filed CI follow-up carries the failing job and its log excerpt", %{ws: ws} do
+    _task = authored_task(ws)
+    base = ci_failing_stub()
+
+    Req.Test.stub(@stub_name, fn conn ->
+      cond do
+        conn.request_path == "/repos/owner/repo/pulls/424" ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"head" => %{"sha" => "abc123"}})
+
+        conn.request_path == "/repos/owner/repo/commits/abc123/check-runs" ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "check_runs" => [
+              %{
+                "id" => 1,
+                "name" => "mix test",
+                "conclusion" => "failure",
+                "output" => %{"title" => "failed", "summary" => "UNIQUE-LOG-EXCERPT-77"}
+              }
+            ]
+          })
+
+        true ->
+          base.(conn)
+      end
+    end)
+
+    StubResumeDeferrer.reset()
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Issue{} = follow_up] = follow_ups()
+    assert follow_up.description =~ "mix test"
+    assert follow_up.description =~ "UNIQUE-LOG-EXCERPT-77"
+  end
+
   defp threads_stub do
     node = %{
       "reviews" => %{"nodes" => []},
