@@ -97,6 +97,15 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :no_private_clone} = Placement.eligible(%{@eligible | no_pr?: true})
     end
 
+    # bd-373tce: uncommitted work in the home clone is not in the seed, and the
+    # run's snapshot would replace it on the way back.
+    test "a run whose home clone holds uncommitted work stays local" do
+      assert {:local_only, :local_work} =
+               Placement.eligible(Map.put(@eligible, :local_work?, true))
+
+      assert Placement.eligible(Map.put(@eligible, :local_work?, false)) == :ok
+    end
+
     test "a local_only workspace keeps even an eligible run local" do
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{@eligible | mode: :local_only})
@@ -108,7 +117,8 @@ defmodule Arbiter.Nodes.PlacementTest do
             :non_claude_provider,
             :not_podman,
             :no_private_clone,
-            :placement_local_only
+            :placement_local_only,
+            :local_work
           ] do
         assert is_binary(Placement.reason_phrase(reason, %{kind: :reviewer, provider: :codex}))
       end
