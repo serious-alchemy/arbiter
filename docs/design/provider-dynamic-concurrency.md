@@ -1009,6 +1009,16 @@ Autopilot pass.
   today's pick (`capacity:provider`, `capacity:node`, `capacity:repo`,
   `queued`, `own_hold`, `paused`), or `legacy_hold` when today holds the card
   the walk places.
+- **Each machine is its own capacity set.** Seen live on v0.2.43: the primary
+  held 4 runs on a local cap of 2, because `LocalCapacity` counts review-side
+  runs but never holds them at its cap. With the node's one run, that filled
+  today's install-wide slot total (2 + 3), so Ready cards read `no free worker
+  slot` while the node sat at 1 of 3. The walk counts each machine against its
+  own cap, so it places the cards that may run remotely on the node; a
+  local-only card waits on the node layer, naming `local 4 of 2`. The shadow's
+  event row records today's `no_slot` hold beside the walk's node pair, with
+  cause `legacy_hold`. `SchedulerWalkTest`, `SnapshotWalkTest` and
+  `WalkInputsTest` pin this case.
 - **Deferred to DC8.**
   - E8's `budget_changed` subscription. In shadow the walk decides nothing, and
     the 60 s tick and today's triggers record a budget-driven change within a
