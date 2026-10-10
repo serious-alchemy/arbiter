@@ -225,6 +225,7 @@ defmodule Arbiter.Board.Drain do
     in_flight = promotions ++ tracked ++ workers
 
     tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
+
     idle_ids =
       Keyword.get_lazy(opts, :idle_ids, fn ->
         IdleTickets.ids(tickets,

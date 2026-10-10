@@ -637,9 +637,7 @@ defmodule Arbiter.Board.Snapshot do
       placement_note(workspace) ||
         workspace
         |> Arbiter.Accounts.SlotLimit.binding(used)
-        |> Arbiter.Accounts.SlotLimit.describe(
-          SlotGate.slot_holders(issues, idle_ids: idle_ids)
-        )
+        |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues, idle_ids: idle_ids))
     end
   end
 
