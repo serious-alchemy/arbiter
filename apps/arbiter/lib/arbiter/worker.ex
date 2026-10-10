@@ -4220,7 +4220,8 @@ defmodule Arbiter.Worker do
   # trustworthy to push or judge.
   defp remote_checkout_failed?(%State{claude_sessions: sessions}) do
     Enum.any?(sessions, fn {handle, session} ->
-      remote_handle?(handle) and match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome))
+      remote_handle?(handle) and
+        match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome))
     end)
   end
 

@@ -266,7 +266,8 @@ defmodule Arbiter.Worker.PassPlacement do
     with {:ok, tips} <- fetch_tips(path, branch, target),
          remote_head = Map.fetch!(tips, branch),
          {:ok, alignment} <- align(path, branch, remote_head) do
-      {:ok, %{remote_head: remote_head, target_tip: Map.fetch!(tips, target), alignment: alignment}}
+      {:ok,
+       %{remote_head: remote_head, target_tip: Map.fetch!(tips, target), alignment: alignment}}
     end
   end
 

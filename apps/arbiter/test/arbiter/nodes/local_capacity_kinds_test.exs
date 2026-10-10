@@ -125,7 +125,14 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
       assert Enum.sort(eligible) ==
                for(
                  kind <-
-                   [:conflict_pass, :fix_pass, :implementer, :review, :review_fix_round, :reviewer],
+                   [
+                     :conflict_pass,
+                     :fix_pass,
+                     :implementer,
+                     :review,
+                     :review_fix_round,
+                     :reviewer
+                   ],
                  mode <- [:prefer_remote, :remote_only],
                  do: {kind, :claude, :private_clone, false, mode}
                )

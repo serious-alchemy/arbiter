@@ -286,7 +286,9 @@ defmodule ArbiterWeb.RemotePassTest do
       config_dir: Path.join(ctx.root, "primary-config-#{run}")
     }
 
-    assert {:ok, prepared} = Executor.prepare(ctx.node.id, spec, owner: self(), checkout: checkout)
+    assert {:ok, prepared} =
+             Executor.prepare(ctx.node.id, spec, owner: self(), checkout: checkout)
+
     assert {:ok, handle} = Executor.open(prepared)
     assert 0 = await_exit(handle)
   end

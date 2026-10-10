@@ -2906,7 +2906,8 @@ defmodule Arbiter.Worker.ReviewGate do
     retry_id = timeout_retry_id(state.current_id, state.attempt)
 
     with {:ok, placed} <- place_fix_round(state),
-         {:ok, launched} <- launch_worker(placed, retry_id, :implementer, prompt, state.revise_command) do
+         {:ok, launched} <-
+           launch_worker(placed, retry_id, :implementer, prompt, state.revise_command) do
       {:noreply, launched}
     else
       {:error, {:placement_held, info}} ->
@@ -3496,14 +3497,14 @@ defmodule Arbiter.Worker.ReviewGate do
              prompt_prefix <> revise_prompt(state, findings),
              state.revise_command
            ) do
-        Logger.info(
-          "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
-        )
+      Logger.info(
+        "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
+      )
 
-        # The round is genuinely under way now, so the guard provenance has done
-        # its job: only the terminal arms read it, and from here the next
-        # terminal belongs to the round that follows, not to this reject.
-        {:revise, %{state | guard_rejected: nil}}
+      # The round is genuinely under way now, so the guard provenance has done
+      # its job: only the terminal arms read it, and from here the next
+      # terminal belongs to the round that follows, not to this reject.
+      {:revise, %{state | guard_rejected: nil}}
     else
       # bd-bg87oz: a `remote_only` workspace with no node free holds the fix round
       # the way a cap of 0 does: nothing is spawned and no round is consumed. The

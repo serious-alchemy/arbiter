@@ -973,18 +973,21 @@ defmodule Arbiter.Worker.Worktree do
   @spec fetch_origin_tips(path(), [String.t()]) ::
           {:ok, %{String.t() => String.t()}} | {:error, {:fetch_failed, String.t()}}
   def fetch_origin_tips(path, branches) when is_binary(path) and is_list(branches) do
-    with {:ok, _} <- run_git(["fetch", "--no-tags", "origin" | branches], cd: path) do
-      Enum.reduce_while(branches, {:ok, %{}}, fn branch, {:ok, acc} ->
-        case run_git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/" <> branch],
-               cd: path
-             ) do
-          {:ok, out} -> {:cont, {:ok, Map.put(acc, branch, String.trim(out))}}
-          {:error, _} -> {:halt, {:error, {:fetch_failed, "origin/#{branch} does not resolve"}}}
-        end
-      end)
-    else
+    case run_git(["fetch", "--no-tags", "origin" | branches], cd: path) do
+      {:ok, _} -> origin_tips(path, branches)
       {:error, {:git_failed, msg}} -> {:error, {:fetch_failed, msg}}
     end
+  end
+
+  defp origin_tips(path, branches) do
+    Enum.reduce_while(branches, {:ok, %{}}, fn branch, {:ok, acc} ->
+      case run_git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/" <> branch],
+             cd: path
+           ) do
+        {:ok, out} -> {:cont, {:ok, Map.put(acc, branch, String.trim(out))}}
+        {:error, _} -> {:halt, {:error, {:fetch_failed, "origin/#{branch} does not resolve"}}}
+      end
+    end)
   end
 
   @doc """
