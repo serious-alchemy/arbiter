@@ -71,6 +71,9 @@ defmodule Arbiter.Reviews.Checkout do
     * `:prefix` — names the throwaway worktree leaf (default `"ext-review"`).
       Lets a second caller (the internal reviewer, bd-199giy) leave a
       distinguishable breadcrumb under the worktree root.
+    * `:path` — the exact directory to provision at, instead of a fresh leaf under
+      the worktree root (bd-6ypj2y: a task/research ticket's inspect checkout
+      has a leaf of its own, which close reclaims). It must not exist.
   """
   @spec provision(String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, String.t()} | {:error, reason()}
@@ -224,7 +227,10 @@ defmodule Arbiter.Reviews.Checkout do
   # ---- internals -------------------------------------------------------
 
   defp add_detached(repo_path, head_sha, opts) do
-    path = worktree_path(head_sha, Keyword.get(opts, :prefix, @default_prefix))
+    path =
+      Keyword.get_lazy(opts, :path, fn ->
+        worktree_path(head_sha, Keyword.get(opts, :prefix, @default_prefix))
+      end)
 
     with :ok <- File.mkdir_p(Path.dirname(path)) do
       case Keyword.get(opts, :layout, :linked_worktree) do

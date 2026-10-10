@@ -112,6 +112,30 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :no_private_clone} = Placement.eligible(%{@eligible | no_pr?: true})
     end
 
+    # bd-6ypj2y: a task/research ticket has no branch, but a podman Claude run of
+    # one gets a read-only seeded checkout of the target tip (`inspect?`), which a
+    # node can be handed. `no_pr?` (nothing to seed at all) stays the guard.
+    test "a task/research run with a read-only inspect checkout is eligible on podman Claude" do
+      inspect_request = Map.merge(@eligible, %{no_pr?: true, inspect?: true})
+      assert Placement.eligible(inspect_request) == :ok
+
+      assert {:local_only, :not_podman} =
+               Placement.eligible(%{inspect_request | layout: :linked_worktree})
+
+      assert {:local_only, :non_claude_provider} =
+               Placement.eligible(%{inspect_request | provider: :codex})
+
+      assert {:local_only, :placement_local_only} =
+               Placement.eligible(%{inspect_request | mode: :local_only})
+
+      assert {:local_only, :follow_up} = Placement.eligible(%{inspect_request | kind: :resume})
+    end
+
+    test "a request with no checkout at all stays local even beside an inspect flag" do
+      assert {:local_only, :no_private_clone} =
+               Placement.eligible(Map.merge(@eligible, %{no_pr?: true, inspect?: false}))
+    end
+
     # bd-373tce: uncommitted work in the home clone is not in the seed, and the
     # run's snapshot would replace it on the way back.
     test "a run whose home clone holds uncommitted work stays local" do
