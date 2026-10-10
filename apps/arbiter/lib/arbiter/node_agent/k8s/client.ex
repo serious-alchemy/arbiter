@@ -238,6 +238,33 @@ defmodule Arbiter.NodeAgent.K8s.Client do
       "/apis/coordination.k8s.io/v1/namespaces/#{client.namespace}/leases/" <>
         URI.encode(name, &URI.char_unreserved?/1)
 
+  # --- the controller's own Deployment (K9 self-upgrade) -------------------------------
+
+  @doc """
+  An `apps/v1` Deployment by name. The Role grants `get` on `deployments/arbiter-controller`
+  only (the owner-reference UID, and the image `Arbiter.NodeAgent.K8s.SelfUpgrade` compares).
+  """
+  @spec get_deployment(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_deployment(client, name), do: request(client, :get, deployment_path(client, name), [])
+
+  @doc """
+  A strategic merge patch (`patch` is the decoded body) of a Deployment. The Role grants
+  `patch` on `deployments/arbiter-controller` only, and only when `rbac.selfUpgrade` is on:
+  anything else is `{:error, {:forbidden, message}}`.
+  """
+  @spec patch_deployment(t(), String.t(), map()) :: {:ok, map()} | {:error, error()}
+  def patch_deployment(client, name, patch) do
+    request(client, :patch, deployment_path(client, name),
+      body: Jason.encode!(patch),
+      headers: [{"content-type", "application/strategic-merge-patch+json"}]
+    )
+  end
+
+  defp deployment_path(client, name),
+    do:
+      "/apis/apps/v1/namespaces/#{client.namespace}/deployments/" <>
+        URI.encode(name, &URI.char_unreserved?/1)
+
   # --- logs -------------------------------------------------------------------
 
   @doc """

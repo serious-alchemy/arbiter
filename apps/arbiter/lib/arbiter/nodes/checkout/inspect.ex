@@ -57,15 +57,23 @@ defmodule Arbiter.Nodes.Checkout.Inspect do
   """
   @spec denied(entries(), entries(), [String.t()]) :: [String.t()]
   def denied(entries, trusted, extra \\ []) do
-    prefixes = Enum.map(extra, &String.trim(&1, "/"))
-
     entries
     |> Enum.filter(fn {path, entry} ->
-      (Worktree.excluded_checkout_path?(path) or under_any?(path, prefixes)) and
-        not same?(trusted[path], entry)
+      denied_path?(path, extra) and not same?(trusted[path], entry)
     end)
     |> Enum.map(&elem(&1, 0))
     |> Enum.sort()
+  end
+
+  @doc """
+  Whether `path` is one the primary never moves between itself and a node: the
+  `Worktree` exclude set (injected config, deps, build output) or under one of
+  `extra` (a run's seeded paths).
+  """
+  @spec denied_path?(String.t(), [String.t()]) :: boolean()
+  def denied_path?(path, extra \\ []) do
+    Worktree.excluded_checkout_path?(path) or
+      under_any?(path, Enum.map(extra, &String.trim(&1, "/")))
   end
 
   defp under_any?(path, prefixes),

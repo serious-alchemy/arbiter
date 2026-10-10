@@ -13,8 +13,12 @@ defmodule ArbiterWeb.NodeCheckoutController do
     * `PUT /nodes/runs/:run/transcripts` — a tar of the run's session JSONL, extracted
       into the run's config dir by the sanitising extractor
       (`Arbiter.Nodes.Transcripts`, §7.6).
+    * `GET /nodes/runs/:run/session` — the other direction (bd-4ic681): the
+      transcript of the session a `--resume` run continues, which
+      `Arbiter.Worker.ContainerSpawn.remote_spec/3` seeded, redacted, into the run's
+      config dir and named in its checkout context (`:session`).
 
-  Both are authorized the same way: the run must be one **this node's session
+  All are authorized the same way: the run must be one **this node's session
   holds** (`Arbiter.Nodes.Session.checkout_context/2`), so a node can neither read
   nor write another node's run, and the path it names is a run id, never a path.
   Every other answer is a `404`.
@@ -54,6 +58,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
         branch: ctx.branch,
         base: ctx.base,
         have: have,
+        seeded_paths: Map.get(ctx, :seeded_paths) || [],
         dest: dest
       )
 
@@ -86,6 +91,38 @@ defmodule ArbiterWeb.NodeCheckoutController do
   end
 
   defp have(_params), do: []
+
+  # ---- session (bd-4ic681) ------------------------------------------------------------
+
+  # The transcript of the session a `--resume` run continues: seeded, redacted, into
+  # the run's config dir by `ContainerSpawn.remote_spec/3`, and named by the run's
+  # checkout context. The request names a run, never a path.
+  def session(conn, %{"run" => run}) do
+    case authorize(conn, run) do
+      {:ok, _pid, %{config_dir: dir, session: rel}} when is_binary(dir) and is_binary(rel) ->
+        send_session(conn, Path.join(dir, rel))
+
+      {:ok, _pid, _ctx} ->
+        error(conn, 404, "This run resumes no session")
+
+      :error ->
+        error(conn, 404, "Not found")
+    end
+  end
+
+  # `path` is the run's config dir and the session path its own spawn chose. A link
+  # there is not followed: only a regular file is served.
+  # sobelow_skip ["Traversal.SendFile", "Traversal.FileModule"]
+  defp send_session(conn, path) do
+    if match?({:ok, %File.Stat{type: :regular}}, File.lstat(path)) do
+      conn
+      |> put_resp_content_type("application/x-ndjson")
+      |> put_resp_header("cache-control", "no-store")
+      |> send_file(200, path)
+    else
+      error(conn, 404, "This run's session transcript is gone")
+    end
+  end
 
   # ---- checkout --------------------------------------------------------------------
 

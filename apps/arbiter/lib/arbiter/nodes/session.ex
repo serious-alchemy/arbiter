@@ -88,7 +88,7 @@ defmodule Arbiter.Nodes.Session do
 
   alias Arbiter.Actor
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Hello, Liveness, Node, Reaping, RunStreams, Skew}
+  alias Arbiter.Nodes.{ClusterInstall, Hello, Liveness, Node, Reaping, RunStreams, Skew}
 
   @default_tick_ms 5_000
   @default_reap_interval_ms 10 * 60_000
@@ -351,6 +351,15 @@ defmodule Arbiter.Nodes.Session do
   @doc "Withdraw a recovery (its budget ran out): the upload endpoints stop accepting `run`."
   @spec recover_abort(pid(), String.t()) :: :ok
   def recover_abort(pid, run), do: GenServer.cast(pid, {:recover_abort, run})
+
+  @doc """
+  The runs this node still has that no Worker here holds (bd-4ic681), as
+  `run => :running | :held | :retained | :recovering`: what the agent reported
+  running, the runs told `hold`, what it quiesced and retained, and the recoveries
+  in flight. A resume of their ticket waits until they are collected.
+  """
+  @spec claims(pid()) :: %{String.t() => :running | :held | :retained | :recovering}
+  def claims(pid), do: GenServer.call(pid, :claims)
 
   @doc "Tell the agent it may delete what it retained of `run` (and forget it here)."
   @spec drop_retained(pid(), String.t()) :: :ok
@@ -641,6 +650,25 @@ defmodule Arbiter.Nodes.Session do
     do: {:reply, run in RunStreams.live(state.streams), state}
 
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot_of(state), state}
+
+  # The later kinds win for a run listed twice (a held run is also in the agent's run
+  # list); a run whose stream a Worker here owns is that Worker's, not a claim.
+  def handle_call(:claims, _from, state) do
+    claims =
+      for {runs, kind} <- [
+            {state.runs, :running},
+            {state.held, :held},
+            {state.retained, :retained},
+            {state.recoveries, :recovering}
+          ],
+          run <- Map.keys(runs),
+          RunStreams.fetch(state.streams, run) == :error,
+          into: %{},
+          do: {run, kind}
+
+    {:reply, claims, state}
+  end
+
   def handle_call(:assignable?, _from, state), do: {:reply, assignable_state?(state), state}
 
   def handle_call(:tick, _from, state) do
@@ -1258,7 +1286,7 @@ defmodule Arbiter.Nodes.Session do
       "runs" => verdicts
     }
     |> put_limits(state)
-    |> put_upgrade(state.health)
+    |> put_upgrade(state)
   end
 
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
@@ -1278,9 +1306,19 @@ defmodule Arbiter.Nodes.Session do
   end
 
   # §6: an outdated or ahead agent is told the version to move to (a downgrade
-  # after a rollback is the same message). Cluster nodes upgrade by image and
-  # ignore it.
-  defp put_upgrade(ok, health) when health in [:outdated, :ahead] do
+  # after a rollback is the same message). A machine gets the tarball's sha256; a
+  # cluster node gets the controller image of that version (K9).
+  defp put_upgrade(ok, %{health: health, info: %{kind: kind}})
+       when health in [:outdated, :ahead] do
+    case kind do
+      "cluster" -> put_image_upgrade(ok)
+      _ -> put_tarball_upgrade(ok)
+    end
+  end
+
+  defp put_upgrade(ok, _state), do: ok
+
+  defp put_tarball_upgrade(ok) do
     case Nodes.Agent.artifact() do
       {:ok, %{version: version, sha256: sha}} ->
         Map.put(ok, "upgrade", %{"version" => version, "sha256" => sha})
@@ -1290,7 +1328,16 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
-  defp put_upgrade(ok, _health), do: ok
+  # K9 (K§2.4): a cluster node's agent is an image. With no `nodes.registry` there is none
+  # to name, and the node stays `outdated` for the operator to see.
+  defp put_image_upgrade(ok) do
+    with {:ok, image} <- ClusterInstall.controller_image(),
+         tag when is_binary(tag) <- Nodes.Agent.release_tag() do
+      Map.put(ok, "upgrade", %{"version" => tag, "image" => image})
+    else
+      _ -> ok
+    end
+  end
 
   # ---- heartbeat -----------------------------------------------------------
 

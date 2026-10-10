@@ -352,6 +352,253 @@ defmodule ArbiterWeb.NodesLiveTest do
     end
   end
 
+  # A registry and a deployed release: what a cluster install needs to name an image.
+  defp install_cluster_env!(home) do
+    previous = Application.fetch_env(:arbiter, :data_dir)
+    Application.put_env(:arbiter, :data_dir, home)
+    {:ok, _} = Settings.set_nodes_registry("registry.example.test/arbiter")
+
+    tree = Path.join([home, "releases", "v9.9.9"])
+    File.mkdir_p!(Path.join(tree, "bin"))
+    File.write!(Path.join(tree, "bin/arbiter"), "#!/bin/sh\n")
+    File.ln_s!(tree, Path.join(home, "current"))
+
+    on_exit(fn ->
+      Settings.set_nodes_registry(nil)
+
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :data_dir, v)
+        :error -> Application.delete_env(:arbiter, :data_dir)
+      end
+    end)
+  end
+
+  describe "Add node: Kubernetes cluster (K9)" do
+    @registry "registry.example.test/arbiter"
+
+    @cluster_form %{
+      kind: "cluster",
+      name: "mesaana-k3s",
+      namespace: "ci-workers",
+      max_workers: "3",
+      ttl_minutes: "30"
+    }
+
+    @moduletag :tmp_dir
+
+    setup %{conn: conn, tmp_dir: home} do
+      install_cluster_env!(home)
+      %{conn: conn}
+    end
+
+    defp open_add(conn) do
+      {:ok, view, _} = live(conn, ~p"/nodes")
+      view |> element("#add-node-button") |> render_click()
+      view
+    end
+
+    defp pick_cluster(view),
+      do: view |> form("#add-node-form", %{kind: "cluster"}) |> render_change()
+
+    defp text_of(view, selector) do
+      view
+      |> element(selector)
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.text()
+      |> String.trim()
+    end
+
+    test "the modal offers Machine and Kubernetes cluster, Machine first", %{conn: conn} do
+      view = open_add(conn)
+
+      assert has_element?(view, "#add-node-kind-machine[checked]")
+      assert has_element?(view, "#add-node-kind-cluster")
+      refute has_element?(view, "#add-node-kind-cluster[checked]")
+      refute has_element?(view, "#add-node-namespace")
+    end
+
+    test "choosing a cluster shows its fields and keeps what was typed", %{conn: conn} do
+      view = open_add(conn)
+      view |> form("#add-node-form", %{name: "typed-already"}) |> render_change()
+      pick_cluster(view)
+
+      assert has_element?(view, "#add-node-kind-cluster[checked]")
+
+      for id <-
+            ~w(namespace max-workers cpu memory node-selector pull-secret reach admission self-upgrade ttl) do
+        assert has_element?(view, "#add-node-#{id}"), "no #add-node-#{id}"
+      end
+
+      assert has_element?(view, ~s|#add-node-name[value="typed-already"]|)
+      refute has_element?(view, "#add-node-registry-missing")
+    end
+
+    test "it refuses to continue without nodes.registry and says why", %{conn: conn} do
+      {:ok, _} = Settings.set_nodes_registry(nil)
+      view = open_add(conn)
+      pick_cluster(view)
+
+      assert has_element?(view, "#add-node-registry-missing")
+      assert has_element?(view, "#add-node-submit[disabled]")
+
+      view |> form("#add-node-form", @cluster_form) |> render_submit()
+      refute has_element?(view, "#join-token")
+      assert Nodes.events(kind: :token_minted) == []
+    end
+
+    test "issues a cluster token and shows the apply command, the join-Secret command and the token",
+         %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+
+      view
+      |> form(
+        "#add-node-form",
+        Map.merge(@cluster_form, %{reach: "tailscale", admission: "policy"})
+      )
+      |> render_submit()
+
+      apply_command = text_of(view, "#cluster-apply-command")
+      secret_command = text_of(view, "#cluster-secret-command")
+      token = text_of(view, "#join-token")
+
+      assert apply_command =~ ~s|kubectl apply -f <(curl -fsSL "#{@url}/nodes/join/k8s.yaml?|
+      assert apply_command =~ "name=mesaana-k3s"
+      assert apply_command =~ "namespace=ci-workers"
+      assert apply_command =~ "max=3"
+      assert apply_command =~ "reach=tailscale"
+      assert apply_command =~ "admission=policy"
+
+      assert secret_command ==
+               "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic " <>
+                 "arbiter-join --from-file=token=/dev/stdin"
+
+      assert token =~ ~r/\Aarbj_/
+      refute apply_command =~ token
+      refute secret_command =~ token
+
+      assert has_element?(
+               view,
+               "#cluster-manifests-download[href*='/nodes/join/k8s.yaml?name=mesaana-k3s']"
+             )
+
+      assert has_element?(view, "#copy-cluster-apply-command")
+      assert has_element?(view, "#copy-cluster-secret-command")
+      assert has_element?(view, "#copy-join-token")
+      assert has_element?(view, "#join-countdown")
+      assert has_element?(view, "#join-status", "Waiting")
+      refute has_element?(view, "#join-command")
+
+      assert [%{kind: :token_minted}] = Nodes.events(kind: :token_minted)
+    end
+
+    test "the token it mints enrols a cluster node, and the modal flips to Connected",
+         %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+      view |> form("#add-node-form", @cluster_form) |> render_submit()
+      token = text_of(view, "#join-token")
+
+      assert {:error, :kind_mismatch} = Nodes.redeem_join_token(token, %{})
+      {:ok, %{node: node}} = Nodes.redeem_join_token(token, %{kind: "cluster"})
+      assert node.kind == "cluster"
+      assert node.name == "mesaana-k3s"
+      assert node.max_workers == 3
+
+      render(view)
+      assert has_element?(view, "#join-status", "Connected")
+      assert has_element?(view, "#cluster-readiness")
+    end
+
+    test "a cluster needs a name, and a bad value mints nothing", %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+
+      view |> form("#add-node-form", %{@cluster_form | name: ""}) |> render_submit()
+      assert has_element?(view, "#add-node-error", "name")
+
+      view |> form("#add-node-form", %{@cluster_form | max_workers: "0"}) |> render_submit()
+      assert has_element?(view, "#add-node-error")
+
+      view
+      |> form("#add-node-form", Map.put(@cluster_form, :namespace, "Bad_NS"))
+      |> render_submit()
+
+      assert has_element?(view, "#add-node-error", "namespace")
+      assert Nodes.events(kind: :token_minted) == []
+    end
+
+    test "closing the modal discards the token and the commands", %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+      view |> form("#add-node-form", @cluster_form) |> render_submit()
+      assert has_element?(view, "#cluster-apply-command")
+
+      view |> element("#add-node-close") |> render_click()
+      refute has_element?(view, "#add-node-modal")
+      refute render(view) =~ "arbj_"
+    end
+
+    test "the machine flow is untouched by the selector", %{conn: conn} do
+      view = open_add(conn)
+      view |> form("#add-node-form", %{name: "gpu-1"}) |> render_submit()
+
+      assert has_element?(view, "#join-command", "#{@url}/nodes/join")
+      refute has_element?(view, "#cluster-apply-command")
+    end
+  end
+
+  describe "an outdated cluster node (K9 self-upgrade)" do
+    @registry "registry.example.test/arbiter"
+
+    @moduletag :tmp_dir
+
+    setup %{tmp_dir: home} do
+      install_cluster_env!(home)
+      :ok
+    end
+
+    defp cluster_node!(name, caps) do
+      {:ok, %{token: t}} = Nodes.mint_join_token([name: name, kind: "cluster"], @operator)
+      {:ok, %{node: node}} = Nodes.redeem_join_token(t, %{kind: "cluster"})
+
+      connect!(node, %{
+        "kind" => "cluster",
+        "agent_version" => "1.0.0",
+        "caps" => Map.merge(%{"backend" => "k8s", "upgrade" => "image"}, caps)
+      })
+
+      node
+    end
+
+    test "without the RBAC the page says outdated and gives the exact command", %{conn: conn} do
+      node = cluster_node!("k3s", %{"self_upgrade" => false, "namespace" => "ci-workers"})
+      {:ok, view, _} = live(conn, ~p"/nodes/#{node.id}")
+
+      assert render(view) =~ "outdated"
+
+      assert text_of(view, "#upgrade-command") ==
+               "kubectl -n ci-workers set image deployment/arbiter-controller " <>
+                 "controller=#{@registry}/controller:v9.9.9"
+
+      assert has_element?(view, "#copy-upgrade-command")
+    end
+
+    test "the list points at it", %{conn: conn} do
+      node = cluster_node!("k3s", %{"self_upgrade" => false})
+      {:ok, view, _} = live(conn, ~p"/nodes")
+      assert has_element?(view, "#upgrade-help-#{node.id}")
+    end
+
+    test "a node that patches itself is not given a command to run", %{conn: conn} do
+      node = cluster_node!("auto", %{"self_upgrade" => true})
+      {:ok, view, _} = live(conn, ~p"/nodes/#{node.id}")
+      refute has_element?(view, "#upgrade-command")
+      assert has_element?(view, "#upgrade-self")
+    end
+  end
+
   describe "detail" do
     test "shows the event timeline, live runs and the capacity breakdown", %{conn: conn} do
       node = enroll!("alpha", max_workers: 2)

@@ -78,6 +78,7 @@ defmodule ArbiterWeb.Router do
   # audited in `ArbiterWeb.NodeController`.
   scope "/nodes", ArbiterWeb do
     get("/join", NodeController, :join)
+    get("/join/k8s.yaml", NodeController, :k8s)
     get("/ping", NodeController, :ping)
     post("/enroll", NodeController, :enroll)
     # Device-code pairing (design §5.7): the node asks, the operator approves.
@@ -100,6 +101,8 @@ defmodule ArbiterWeb.Router do
     get("/runs/:run/seed.bundle", NodeCheckoutController, :seed)
     put("/runs/:run/checkout", NodeCheckoutController, :checkout)
     put("/runs/:run/transcripts", NodeCheckoutController, :transcripts)
+    # bd-4ic681: the session transcript a resumed run continues.
+    get("/runs/:run/session", NodeCheckoutController, :session)
   end
 
   scope "/", ArbiterWeb do

@@ -13,7 +13,9 @@ defmodule Arbiter.NodeAgent.Run do
   `prepare` (in a task, so a long image build never blocks a `cancel`): the
   run's directories under `<node_home>/runs/<run>/`, the image (built from the
   plan the spec carries when the node lacks it), the CLI files
-  (`Arbiter.NodeAgent.Files`), prompt and config-dir seeds, the secrets file on
+  (`Arbiter.NodeAgent.Files`), prompt and config-dir seeds (with, for a session
+  resume, the transcript it continues: `Arbiter.NodeAgent.Transcripts.fetch_session/4`,
+  bd-4ic681), the secrets file on
   tmpfs (`Arbiter.NodeAgent.Secrets`), the bridge sockets, the cgroup limits for
   the controllers the user manager delegated (`Arbiter.NodeAgent.Cgroups`) and the
   test-services pod. Then `Arbiter.Worker.Container.wrap/2` builds the argv
@@ -423,6 +425,7 @@ defmodule Arbiter.NodeAgent.Run do
          {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
          :ok <- seed_config(spec, dirs),
+         :ok <- seed_session(spec, config, dirs, opts),
          {:ok, limit_opts} <- limits(spec, opts),
          {:ok, bridge_paths} <- bridges(spec, opts),
          {:ok, secrets_file} <- secrets(spec, opts),
@@ -711,6 +714,60 @@ defmodule Arbiter.NodeAgent.Run do
       end)
     else
       _ -> :ok
+    end
+  end
+
+  # bd-4ic681: the transcript of the session a `--resume` command continues, fetched
+  # from the primary to the path the spec names under the run's config dir (the slug
+  # of the run's cwd, so `claude --resume` finds it). A config dir that already holds
+  # it (a re-open of this run on this node) keeps its own, newer copy. A run whose
+  # session cannot be had is refused rather than started to fail.
+  #
+  # The config dir outlives a container of the run and that container could write
+  # it, so nothing on the way to the file may be a link: the agent never writes
+  # through one.
+  defp seed_session(spec, config, dirs, opts) do
+    with %{session: %{path: path} = session} <-
+           Enum.find(spec.mounts, &(&1.kind == "config_dir")),
+         %{host: host} <- dirs["config_dir"] do
+      case session_target(host, path) do
+        :present -> :ok
+        :absent -> fetch_session(spec, config, session, Path.join(host, path), opts)
+        {:error, reason} -> {:error, {:unschedulable, {:session_seed_failed, reason}}}
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp session_target(host, path) do
+    parents = path |> Path.dirname() |> Path.split() |> Enum.scan(&Path.join(&2, &1))
+
+    if Enum.all?(parents, &real_dir_or_absent?(Path.join(host, &1))) do
+      case File.lstat(Path.join(host, path)) do
+        {:ok, %File.Stat{type: :regular}} -> :present
+        {:error, :enoent} -> :absent
+        _ -> {:error, :not_a_regular_file}
+      end
+    else
+      {:error, :link_in_path}
+    end
+  end
+
+  defp real_dir_or_absent?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} -> true
+      {:error, :enoent} -> true
+      _ -> false
+    end
+  end
+
+  defp fetch_session(spec, config, session, dest, opts) do
+    fetch = Keyword.get(opts, :session_fun, &Transcripts.fetch_session/4)
+
+    case fetch.(config, spec.run, session, dest) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:unschedulable, {:session_seed_failed, reason}}}
     end
   end
 

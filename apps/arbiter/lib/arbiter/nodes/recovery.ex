@@ -128,6 +128,69 @@ defmodule Arbiter.Nodes.Recovery do
   end
 
   @doc """
+  The runs of `task_id` a node still has and the primary has not taken back
+  (bd-4ic681): live `worker_runs` rows with a `node_id` that a connected node's
+  session claims (`Arbiter.Nodes.Session.claims/1`: running, told `hold`, retained,
+  being recovered), and, while the boot sweep is still running (`Boot.ResumeGate`
+  closed, `:gate_open?` overrides), every such row, connected node or not: until
+  `await/1` has settled it, it is Recovery's. A session that does not answer is
+  taken to still have every live row on its node.
+
+  A resume of the ticket waits for these to be collected (`Arbiter.Worker.Dispatch`):
+  started now, it would provision from a home clone that lacks their work and could
+  race a container that is still running (§10.5). Each is `%{run, node_id, node,
+  state}`, `state` one of `:running | :held | :retained | :recovering |
+  :unanswered | :awaiting_recovery`.
+  """
+  @spec pending_collect(String.t(), keyword()) :: [map()]
+  def pending_collect(task_id, opts \\ []) when is_binary(task_id) do
+    case live_remote_rows(task_id) do
+      [] ->
+        []
+
+      rows ->
+        claims = session_claims(rows)
+        gate_open? = Keyword.get_lazy(opts, :gate_open?, &Arbiter.Boot.ResumeGate.open?/0)
+
+        for row <- rows,
+            {node_id, state} = claim(claims, row, gate_open?),
+            state != nil do
+          %{run: row.id, node_id: node_id, node: node_name(node_id), state: state}
+        end
+    end
+  end
+
+  defp claim(claims, row, gate_open?) do
+    case Map.fetch(claims, row.id) do
+      {:ok, claim} -> claim
+      :error when gate_open? -> {row.node_id, nil}
+      :error -> {row.node_id, :awaiting_recovery}
+    end
+  end
+
+  defp live_remote_rows(task_id) do
+    live = Enum.filter(RunState.states(), &RunState.live?/1)
+
+    Run
+    |> Ash.Query.filter(task_id == ^task_id and state in ^live and not is_nil(node_id))
+    |> Ash.read!()
+  end
+
+  # `run => {node_id, state}` across every connected node.
+  defp session_claims(rows) do
+    Enum.reduce(Registry.list(), %{}, fn {pid, node_id}, acc ->
+      claims =
+        try do
+          Session.claims(pid)
+        catch
+          :exit, _ -> for %{node_id: ^node_id, id: id} <- rows, into: %{}, do: {id, :unanswered}
+        end
+
+      Map.merge(acc, Map.new(claims, fn {run, state} -> {run, {node_id, state}} end))
+    end)
+  end
+
+  @doc """
   The runs on a node that `report` (what `await/1` returned) did not account for:
   still live, still without a Worker, and with no outcome here. They belong to
   Recovery, so the Reconciler leaves them (and their tickets) alone and the next

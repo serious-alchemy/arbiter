@@ -467,7 +467,8 @@ defmodule Arbiter.Worker.ClaudeSession do
 
       case adopt do
         nil ->
-          with {:ok, handle} <- place_remote(remote, port_args, owner) do
+          with {:ok, spawn_args} <- first_open_args(owner, port_args),
+               {:ok, handle} <- place_remote(remote, spawn_args, owner) do
             {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
           end
 
@@ -479,6 +480,22 @@ defmodule Arbiter.Worker.ClaudeSession do
       end
     end
   end
+
+  # bd-4ic681: the node runs what the session's first open runs: for a session resume
+  # the Worker splices `--resume <sid>` and its continue prompt in when the session
+  # opens, and by then the run is already placed. The args stashed for later opens
+  # stay pristine (`Worker` keeps them so). An owner that cannot say is a placement
+  # failure, never the pristine args: those would start a fresh agent where a session
+  # was to be continued. An owner that is this process has nothing to splice. An
+  # adoption opens nothing on the node (its container is already running), so it
+  # never asks.
+  defp first_open_args(owner, port_args) when is_pid(owner) and owner != self() do
+    {:ok, Arbiter.Worker.first_spawn_args(owner, port_args)}
+  catch
+    :exit, reason -> {:error, {:remote_placement_failed, {:owner_unreachable, reason}}}
+  end
+
+  defp first_open_args(_owner, port_args), do: {:ok, port_args}
 
   # bd-4p1vui (docs/design/remote-workers.md §10.4.3): `opts[:adopt]` (from
   # `Arbiter.Worker.Dispatch.adopt/2`) names a run the node kept across a primary restart.
@@ -531,7 +548,7 @@ defmodule Arbiter.Worker.ClaudeSession do
          {:ok, prepared} <-
            Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
              owner: owner,
-             checkout: remote.request.checkout
+             checkout: ContainerSpawn.checkout_context(remote.request, spec)
            ),
          {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
       {:ok, handle}

@@ -188,6 +188,29 @@ tailnet through `tailscale serve`, agent 0.2.23, health `ready`, `max_workers` 1
 (enrolled 2026-10-07, per the coordinator's notes on bd-afcoop; it does not run real
 work until placement is turned on).
 
+### Join a Kubernetes cluster
+
+Needs `nodes.public_url` and `nodes.registry` (the controller image is
+`<registry>/controller:<server version>`, pushed by the primary after each start). Either
+click **Add node → Kubernetes cluster** on the Nodes page, or:
+
+```sh
+arb node add --kind cluster --name mesaana-k3s --namespace arbiter-workers --max-workers 2 \
+  [--reach tailscale] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
+```
+
+Both print the same three steps: apply the manifests with a cluster-admin kubeconfig
+(`kubectl apply -f manifests.yaml`; they contain no token, credential or key, so keep or
+diff them freely), create the join Secret with the token read from the terminal
+(`read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join
+--from-file=token=/dev/stdin`), and wait for the node to connect. With `--reach tailscale` also
+create the `arbiter-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:arbiter-node`).
+The join Secret is spent after first boot: delete it.
+
+A cluster node that is `outdated` after a server deploy upgrades itself when its Role allows it
+(`--self-upgrade on`, the default). Otherwise `arb node show <name>` and the node's page print
+the exact `kubectl -n NS set image deployment/arbiter-controller controller=IMAGE` to run.
+
 ### Pin and size the node
 
 ```sh
@@ -281,7 +304,10 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
      bundles the shadow clone and the transcripts, and retains them under
      `~/.arbiter-node/runs/<run>/retained/`), the primary pulls that work through the
      quarantine into the home clone, and only then does the normal reconcile resume the
-     run from it.
+     run from it. The resume is placed like a dispatch (bd-4ic681): under
+     `prefer_remote` or `remote_only` it may run on a node, seeded with the collected
+     work, uncommitted files included, and a session resume continues its transcript
+     there.
 
    A run is adopted or collected, never both. An adoption that fails at any step leaves
    the run running and uncancelled for the collect. An adoption gets at most half of
@@ -306,7 +332,13 @@ What good looks like:
   id as before the restart; the node shows no `retained` event for it; and its output
   goes on.
 * A collected run: the run's history shows the resume, and the commits made before the
-  restart are present.
+  restart are present. `arb worker show <task>` names the node the resume was placed on,
+  if any.
+* `arb worker resume <task>` asked while a node still has the ticket's run (the first
+  minute or so after a restart) answers 409 `held — run <run> of <task> is still on node
+  <name> (held); it is adopted or collected first`. Nothing is stopped; once the run is
+  collected the resume can be asked again. If the run was adopted, a resume is refused
+  because the ticket's Worker is live.
 
 ## 6. Verifying an install: the `:node_agent` suite
 

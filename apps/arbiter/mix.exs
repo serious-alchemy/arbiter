@@ -117,6 +117,9 @@ defmodule Arbiter.MixProject do
       # Arbiter.NodeAgent.K8s.ControllerConfig): YAML, parsed into a closed schema.
       # Already in the lock through ash's reactor.
       {:yaml_elixir, "~> 2.11"},
+      # The cluster install manifests (Arbiter.NodeAgent.K8s.InstallManifest, K9) are
+      # emitted as YAML. Already in the lock through ash's reactor.
+      {:ymlr, "~> 5.0"},
 
       # The node agent's WebSocket client (RW5, docs/design/remote-workers.md
       # U2): Arbiter.NodeAgent.WsClient speaks Phoenix's V2 serializer over it.

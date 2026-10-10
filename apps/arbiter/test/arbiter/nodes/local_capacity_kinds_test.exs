@@ -120,8 +120,8 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
         end
 
       # Exactly the Claude runs that have a container backend and a private clone
-      # (bd-7ays3v; the `review: true` dispatch and the reviewer, bd-cgdhlu), in
-      # the two modes that allow a node.
+      # (bd-7ays3v; the `review: true` dispatch and the reviewer, bd-cgdhlu; a
+      # resume, bd-4ic681), in the two modes that allow a node.
       assert Enum.sort(eligible) ==
                for(
                  kind <-
@@ -129,6 +129,7 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
                      :conflict_pass,
                      :fix_pass,
                      :implementer,
+                     :resume,
                      :review,
                      :review_fix_round,
                      :reviewer
