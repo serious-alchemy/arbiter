@@ -190,6 +190,8 @@ defmodule Arbiter.Mergers.Merger do
           required(:name) => String.t(),
           required(:summary) => String.t(),
           optional(:url) => String.t() | nil,
+          optional(:conclusion) => String.t() | nil,
+          optional(:log_path) => String.t() | nil,
           optional(:files) => [String.t()]
         }
 

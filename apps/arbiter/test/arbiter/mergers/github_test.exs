@@ -2452,6 +2452,11 @@ defmodule Arbiter.Mergers.GithubTest do
       assert check.summary =~ "1) test boom (Widget.FooTest)"
       assert check.summary =~ "test/foo_test.exs:12"
       refute check.summary =~ "compiling 3\n"
+      assert check.conclusion == "failure"
+
+      # The whole log is saved for a worker that wants more than the excerpt.
+      assert File.read!(check.log_path) == log
+      File.rm(check.log_path)
     end
 
     test "returns an empty list when there is no head sha" do

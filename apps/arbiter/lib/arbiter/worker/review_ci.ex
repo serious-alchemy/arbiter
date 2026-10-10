@@ -485,9 +485,19 @@ defmodule Arbiter.Worker.ReviewCi do
       #{rerun_line}
       Reproduce each failing check locally, fix the root cause in this branch, commit and
       push. Do not weaken or delete a test to make it pass.
+      Do NOT poll CI (`gh run watch`, `gh run view`, `gh pr checks`): Arbiter re-runs and
+      watches CI after your push, and the failing output is below.
+
+    #{status_line(sha, checks)}
 
     #{render_checks(checks)}
     """
+  end
+
+  defp status_line(sha, checks) do
+    names = Enum.map_join(checks, ", ", &(&1 |> Map.get(:name) |> to_string()))
+    jobs = if names == "", do: "none named", else: names
+    "CI status for #{sha}: FAILED (failing jobs: #{jobs})"
   end
 
   defp render_checks([]), do: "Failing checks: (the forge named none — read the PR's checks)\n"
@@ -499,7 +509,12 @@ defmodule Arbiter.Worker.ReviewCi do
         url = Map.get(check, :url)
         summary = check |> Map.get(:summary) |> to_string() |> String.trim()
         head = "- #{name}" <> if(is_binary(url) and url != "", do: " (#{url})", else: "")
-        if summary == "", do: head, else: head <> "\n" <> indent(summary)
+        head = if summary == "", do: head, else: head <> "\n" <> indent(summary)
+        log_path = Map.get(check, :log_path)
+
+        if is_binary(log_path),
+          do: head <> "\n" <> indent("full log: #{log_path}"),
+          else: head
       end) <> "\n"
   end
 

@@ -744,6 +744,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
          and updates the PR (do NOT open a new PR).
       4. Exit by printing `arb done` on a line by itself.
 
+    #{status_line(Map.get(context, :checks) || [])}
+
     Failing checks:
     #{render_checks(Map.get(context, :checks) || [])}
     #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
@@ -752,6 +754,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       * open a new PR,
       * touch files unrelated to the failure,
       * disable or skip the check to make it "pass".
+
+    Do NOT poll CI. Arbiter re-runs and watches CI after it pushes your commit, so
+    do not run `gh run watch`, `gh run view`, `gh pr checks` or any other command
+    that waits on or re-reads CI status: the status and the failing output are
+    above, and a saved full log (where listed) is on disk to read or grep.
 
     If the check failed for a reason that is NOT in your diff — a stale build
     artifact, a review app an EARLIER job in the same run deployed, a flaky
@@ -834,6 +841,15 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     |> Enum.map_join("\n\n", &render_check/1)
   end
 
+  @doc false
+  @spec status_line([failing_check()]) :: String.t()
+  def status_line([]), do: "Final CI status: FAILED (no failing job was named)."
+
+  def status_line(checks) do
+    names = Enum.map_join(checks, ", ", &(Map.get(&1, :name) || Map.get(&1, "name") || "check"))
+    "Final CI status: FAILED (failing jobs: #{names})."
+  end
+
   defp render_check(%{} = check) do
     name = Map.get(check, :name) || Map.get(check, "name") || "check"
     summary = Map.get(check, :summary) || Map.get(check, "summary") || ""
@@ -841,10 +857,18 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     [
       "  * #{name}" <> if(url, do: " (#{url})", else: ""),
-      summary != "" && indent(summary)
+      summary != "" && indent(summary),
+      render_log_path(check)
     ]
     |> Enum.reject(&(&1 in [nil, false, ""]))
     |> Enum.join("\n")
+  end
+
+  defp render_log_path(check) do
+    case Map.get(check, :log_path) || Map.get(check, "log_path") do
+      path when is_binary(path) -> indent("full log: #{path}")
+      _ -> nil
+    end
   end
 
   defp indent(text) do
