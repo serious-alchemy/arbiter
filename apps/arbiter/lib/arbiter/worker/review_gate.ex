@@ -249,6 +249,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -1250,6 +1251,10 @@ defmodule Arbiter.Worker.ReviewGate do
       # pass clears it so the re-dispatch is placed afresh. `placement_opts` is
       # the seam over `Placement.place/2` (`:nodes`, `:remote_available?`).
       review_node: nil,
+      # bd-bg87oz: where the round's fix-round implementer runs, decided afresh for every
+      # fix round (`place_fix_round/1`): nil on the primary, else the node row it was
+      # placed on.
+      fix_node: nil,
       placement_opts: Keyword.get(opts, :placement_opts, []),
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
@@ -1552,15 +1557,27 @@ defmodule Arbiter.Worker.ReviewGate do
   # verdict and consumes no round: a timer asks again, and the gate carries on
   # the moment the cap rises. A fix round's implementer is held the same way
   # (`launch_implementer/3`).
+  #
+  # bd-bg87oz: unless a node could take the pass (`PassPlacement.probe/3`): the
+  # primary's cap is then not the gate, placement decides when the pass launches.
+  # A `remote_only` workspace with no node free holds it here, the same way.
   defp hold_for_local_capacity(state, kind, resume) do
-    opts = [reason: {:local_only, :follow_up}, workspace_id: state.workspace_id]
+    task = %{id: state.task_id, workspace_id: state.workspace_id}
 
-    case LocalCapacity.admit(state.task_id, kind, opts) do
-      :ok ->
+    case PassPlacement.probe(task, kind, placement_opts: state.placement_opts) do
+      :node_possible ->
         :ok
 
       {:error, {:no_node_capacity, info}} ->
         {:held, arm_hold(state, kind, info, resume)}
+
+      :local ->
+        opts = [reason: {:local_only, :follow_up}, workspace_id: state.workspace_id]
+
+        case LocalCapacity.admit(state.task_id, kind, opts) do
+          :ok -> :ok
+          {:error, {:no_node_capacity, info}} -> {:held, arm_hold(state, kind, info, resume)}
+        end
     end
   end
 
@@ -2641,6 +2658,14 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def handle_info({:worker_denied, _other, _command}, state), do: {:noreply, state}
 
+  # bd-bg87oz: a fix round on a node whose final checkout upload failed. Sent just
+  # ahead of that pass's `:worker_exited`; `pass_exited/2` re-runs the round instead
+  # of pushing the home clone as of the node's last snapshot.
+  def handle_info({:worker_checkout_failed, id}, %{current_id: id} = state),
+    do: {:noreply, Map.put(state, :fix_checkout_failed?, true)}
+
+  def handle_info({:worker_checkout_failed, _other}, state), do: {:noreply, state}
+
   # The reviewer Worker could not resume the denied conversation: stop waiting
   # for it and score what the pass produced.
   def handle_info({:worker_resume_abandoned, id}, %{current_id: id, phase: :reviewing} = state) do
@@ -2718,6 +2743,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
       {:redispatch, prompt} ->
         redispatch_reviewer(state, prompt)
+
+      {:redispatch_implementer, prompt} ->
+        redispatch_implementer(state, prompt)
 
       {:implementer, findings, prefix} ->
         case launch_implementer(state, findings, prefix) do
@@ -2808,6 +2836,23 @@ defmodule Arbiter.Worker.ReviewGate do
     redispatch_reviewer(%{state | review_node: nil}, state.current_prompt)
   end
 
+  # bd-bg87oz: the same for a fix round on a node. Its commits were not collected, so
+  # the round is dispatched again from the branch as the primary holds it, placed
+  # afresh; the findings it was given are in its prompt.
+  def handle_info(
+        {:worker_node_lost, id},
+        %{current_id: id, phase: :revising, reported?: false} = state
+      )
+      when is_binary(state.current_prompt) do
+    Logger.warning(
+      "ReviewGate: the node under task=#{state.task_id} round #{state.round}'s fix round was " <>
+        "lost; dispatching the round again"
+    )
+
+    stop_worker(state)
+    redispatch_implementer(%{state | fix_node: nil}, state.current_prompt)
+  end
+
   def handle_info({:worker_node_lost, _other}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
@@ -2865,6 +2910,36 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  defp redispatch_implementer(state, prompt) do
+    retry_id = timeout_retry_id(state.current_id, state.attempt)
+
+    with {:ok, placed} <- place_fix_round(state),
+         {:ok, launched} <-
+           launch_worker(placed, retry_id, :implementer, prompt, state.revise_command) do
+      {:noreply, launched}
+    else
+      {:error, {:placement_held, info}} ->
+        {:noreply, arm_hold(state, :review_fix_round, info, {:redispatch_implementer, prompt})}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: re-dispatching the fix round for task=#{state.task_id} failed: " <>
+            inspect(reason)
+        )
+
+        state =
+          record_thread(
+            state,
+            :system,
+            "Round #{state.round} revise could not restart",
+            "The implementer worker could not be re-dispatched after its node was lost: " <>
+              inspect(reason)
+          )
+
+        {:stop, :normal, finish(state, terminal_reject_verdict(state))}
+    end
+  end
+
   defp pass_exit_grace_ms, do: Application.get_env(:arbiter, :worker_exit_grace_ms, 500)
 
   defp pass_exited(status, %{phase: :reviewing} = state) do
@@ -2873,6 +2948,28 @@ defmodule Arbiter.Worker.ReviewGate do
       {:reprompt, state} -> {:noreply, state}
       {:revise, state} -> {:noreply, state}
     end
+  end
+
+  # bd-bg87oz: the node could not upload the round's final checkout, so the home
+  # clone lacks the round's last work. Pushing it would silently drop that work and
+  # spend a review round on stale code: the round runs again, on the primary (a node
+  # that failed its upload once is not trusted with the rest of the gate's rounds,
+  # which also bounds the retry).
+  defp pass_exited(
+         _status,
+         %{phase: :revising, fix_checkout_failed?: true, reported?: false} = state
+       )
+       when is_binary(state.current_prompt) do
+    Logger.warning(
+      "ReviewGate: the node's final checkout of task=#{state.task_id} round #{state.round}'s " <>
+        "fix round did not come back; running the round again on the primary"
+    )
+
+    stop_worker(state)
+
+    state
+    |> Map.merge(%{fix_checkout_failed?: false, fix_round_local?: true, fix_node: nil})
+    |> redispatch_implementer(state.current_prompt)
   end
 
   defp pass_exited(_status, %{phase: :revising} = state) do
@@ -3189,7 +3286,7 @@ defmodule Arbiter.Worker.ReviewGate do
       |> Enum.drop(1)
       |> Enum.reject(fn line ->
         # Strip synthesized session-stats footers appended by the harness
-        # (e.g. "⚙ claude session success · 183.5s · $1.1489") — both the
+        # (e.g. "⚙ claude session success · 183.5s · $1.1489", or "⚙ grok session …") — both the
         # Claude and Gemini agent variants use the ⚙ glyph as a prefix.
         # Also strip CRITERIA breakdown lines (`- [MET]` / `- [NOT MET]` /
         # `- [N/A]`): they are verdict payload, not enumerated findings, and
@@ -3421,22 +3518,31 @@ defmodule Arbiter.Worker.ReviewGate do
   defp launch_implementer_now(state, findings, prompt_prefix) do
     impl_id = implementer_task_id(state.review_id, state.round)
 
-    case launch_worker(
-           %{state | phase: :revising},
-           impl_id,
-           :implementer,
-           prompt_prefix <> revise_prompt(state, findings),
-           state.revise_command
-         ) do
-      {:ok, state} ->
-        Logger.info(
-          "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
-        )
+    with {:ok, placed} <- place_fix_round(%{state | phase: :revising}),
+         {:ok, state} <-
+           launch_worker(
+             placed,
+             impl_id,
+             :implementer,
+             prompt_prefix <> revise_prompt(state, findings),
+             state.revise_command
+           ) do
+      Logger.info(
+        "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
+      )
 
-        # The round is genuinely under way now, so the guard provenance has done
-        # its job: only the terminal arms read it, and from here the next
-        # terminal belongs to the round that follows, not to this reject.
-        {:revise, %{state | guard_rejected: nil}}
+      # The round is genuinely under way now, so the guard provenance has done
+      # its job: only the terminal arms read it, and from here the next
+      # terminal belongs to the round that follows, not to this reject.
+      {:revise, %{state | guard_rejected: nil}}
+    else
+      # bd-bg87oz: a `remote_only` workspace with no node free holds the fix round
+      # the way a cap of 0 does: nothing is spawned and no round is consumed. The
+      # reviewer pass that returned these findings armed a timer that is still live,
+      # so `attempt` is bumped to make it stale (see `launch_implementer/3`).
+      {:error, {:placement_held, info}} ->
+        held = arm_hold(state, :review_fix_round, info, {:implementer, findings, prompt_prefix})
+        {:revise, %{held | phase: :revising, current_id: nil, attempt: state.attempt + 1}}
 
       {:error, reason} ->
         state =
@@ -4002,7 +4108,16 @@ defmodule Arbiter.Worker.ReviewGate do
     state = %{state | commit_nudge_used: true}
     id = commit_nudge_task_id(state.review_id, state.round)
 
-    case launch_worker(state, id, :implementer, commit_nudge_prompt(state), state.revise_command) do
+    # The tree is dirty by definition and a seed carries commits only: the primary.
+    nudge_state = %{state | fix_node: nil}
+
+    case launch_worker(
+           nudge_state,
+           id,
+           :implementer,
+           commit_nudge_prompt(state),
+           state.revise_command
+         ) do
       {:ok, state} ->
         {:continue, state}
 
@@ -6029,7 +6144,7 @@ defmodule Arbiter.Worker.ReviewGate do
       after
         # The slot reserved on a node is the pass's only until its worker is
         # registered, where it is counted in the slot's place.
-        if role == :reviewer, do: Placement.release(state.task_id)
+        if role in [:reviewer, :implementer], do: Placement.release(state.task_id)
       end
     end
   end
@@ -6067,6 +6182,111 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp place_reviewer_pass(state, _role), do: {:ok, state}
+
+  # bd-bg87oz: where a fix round's implementer runs. Decided for every fix round (it is a
+  # pass of its own, not the round's reviewer): a node with headroom when the
+  # workspace allows it, else the primary; a `remote_only` workspace with no node
+  # free is `{:error, {:placement_held, info}}`.
+  #
+  # The round writes in the author's private clone, so the node is seeded from it:
+  # `PassPlacement.seed/3` first brings the clone to the forge's current head of the
+  # branch and `origin/<target>` at the forge tip, and the head seeded from becomes
+  # the one the gate's own push at the end of the round is leased to
+  # (`pushed_remote_head`, `push_gate/1`): the rewrite a rebase makes lands, and a
+  # push by anyone else in between makes the lease refuse.
+  #
+  # A round stays on the primary when the repo has a scoped G16 git credential (the
+  # container pushes itself with it; it must not leave the primary), when the clone
+  # holds uncommitted work (the seed carries commits only) and when the clone
+  # cannot be reconciled with the forge. With `worker.placement` unset and the
+  # primary's cap not enforced nothing is read.
+  defp place_fix_round(state) do
+    ws = load_workspace(Map.get(state, :workspace_id))
+
+    with :remote_possible <- fix_round_remote_possible(state, ws),
+         {:ok, node} <- fix_round_node(state, ws),
+         {:ok, node, seed} <- seed_fix_round(node, state, ws) do
+      {:ok, put_fix_node(state, node, seed)}
+    else
+      :local -> {:ok, %{state | fix_node: nil}}
+      {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
+      {:error, {:remote_seed_failed, _}} = failed -> failed
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: fix round placement crashed for #{state.task_id}: #{Exception.message(e)}"
+      )
+
+      {:ok, %{state | fix_node: nil}}
+  end
+
+  defp fix_round_remote_possible(state, ws) do
+    if Map.get(state, :fix_round_local?, false) or scoped_credential?(ws, Map.get(state, :repo)),
+      do: :local,
+      else: :remote_possible
+  end
+
+  defp fix_round_node(state, ws) do
+    provider = fix_round_provider(state, ws)
+
+    attrs = %{
+      task_id: state.task_id,
+      kind: :review_fix_round,
+      provider: provider,
+      layout: fix_round_layout(state, ws, provider),
+      workspace: ws,
+      workspace_id: Map.get(state, :workspace_id),
+      clone_path: Map.get(state, :worktree_path)
+    }
+
+    case PassPlacement.place(attrs, placement_opts: state.placement_opts) do
+      {:ok, :local} -> :local
+      {:ok, {:node, node}} -> {:ok, node}
+      {:error, _} = held -> held
+    end
+  end
+
+  defp seed_fix_round(node, state, ws) do
+    PassPlacement.seed_or_local(node, %{
+      task_id: state.task_id,
+      path: state.worktree_path,
+      branch: state.branch,
+      target: Map.get(state, :target_branch) || "main",
+      mode: Placement.mode(ws),
+      repo_path: nil,
+      seed_paths: nil
+    })
+  end
+
+  defp put_fix_node(state, nil, _seed), do: %{state | fix_node: nil}
+
+  defp put_fix_node(state, node, seed),
+    do: %{state | fix_node: node} |> Map.put(:pushed_remote_head, seed.remote_head)
+
+  # The provider the round's implementer will spawn as, for placement only: the same
+  # resolution `resolve_revision/2` makes, without its coordinator notice (that is
+  # sent once, when the pass spawns). A fixture `command:` names its own.
+  defp fix_round_provider(state, ws) do
+    case Map.get(state, :command_provider) do
+      provider when is_binary(provider) ->
+        provider
+
+      _ ->
+        {provider, _fallback, _decision} =
+          ProviderRouting.implementer_provider(state.task_id, ws, :review_gate_implementer)
+
+        Atom.to_string(provider)
+    end
+  end
+
+  defp fix_round_layout(state, ws, provider) do
+    policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
+
+    if fix_round_container?(policy, state, provider),
+      do: GitLayout.for_policy(policy),
+      else: :linked_worktree
+  end
 
   defp placement_provider(state, ws) do
     case Map.get(state, :command_provider) do
@@ -6270,9 +6490,16 @@ defmodule Arbiter.Worker.ReviewGate do
       provider: Atom.to_string(provider),
       provider_fallback: fallback_reason
     }
+    |> put_placed_node(state)
     |> Map.merge(ProviderRouting.run_meta(decision))
     |> put_guardrail_decision(state, load_workspace(state.workspace_id), provider, :implementer)
   end
+
+  # bd-bg87oz (bd-8ikgoc): a fix round placed on a node is counted there from init.
+  defp put_placed_node(meta, %{fix_node: %{id: id}}) when is_binary(id),
+    do: Map.put(meta, :placed_node_id, id)
+
+  defp put_placed_node(meta, _state), do: meta
 
   # bd-atll60 (G13): the guardrail decision the round's run records, as the
   # dispatcher's does. Best-effort: the gate refused what it must; this records.
@@ -6616,6 +6843,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-cgdhlu: a reviewer placed on a node runs there (`ClaudeSession` hands the
   # run to `Executor.Node` when the session opts name a `:node`).
   defp node_opts(%{review_node: %{id: _} = node}, :reviewer), do: [node: node]
+
+  defp node_opts(%{fix_node: %{id: _} = node} = state, :implementer),
+    do: [node: node, base_branch: Map.get(state, :target_branch) || "main"]
+
   defp node_opts(_state, _role), do: []
 
   defp gated_adapter(state, ws, role, revision) do

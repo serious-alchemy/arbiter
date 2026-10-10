@@ -19,9 +19,13 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
   (`with_slot/2`), not from the moment its agent is up. A ticket pulled out
   of the merge queue (`Arbiter.Tasks.PullRequest.pull/1`) gets no pass.
 
-  A pass runs on the primary, so with the primary's worker cap at 0
-  (`Arbiter.Nodes.LocalCapacity`) it is held with `{:error, {:no_node_capacity,
-  info}}` before any slot is taken; the ticket stays in Merging.
+  A pass runs on the primary unless its workspace's `worker.placement` allows a
+  node (bd-bg87oz, `Arbiter.Worker.PassPlacement`). With the primary's worker cap
+  at 0 (`Arbiter.Nodes.LocalCapacity`) a pass that can only run there is held with
+  `{:error, {:no_node_capacity, info}}` before any slot is taken; the ticket stays
+  in Merging. A pass a node could take is let through (the dispatcher places it once
+  its provider is known), and a `remote_only` pass is held the same way while no node
+  has room.
 
   The replay carries `slot_admitted: true` and is not re-checked. Like every
   deferral, the queue is in memory: a restart loses it, and the ticket's
@@ -33,6 +37,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker
+  alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.StopReason
 
@@ -60,7 +65,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
 
       {:error, :pulled}
     else
-      with :ok <- local_capacity(task, kind), do: admit_slot(task, kind, args)
+      with :ok <- local_capacity(task, kind, args), do: admit_slot(task, kind, args)
     end
   end
 
@@ -69,14 +74,30 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
   # its own ticket's slot, so it is never held for merely being at the cap — and
   # the hold is `{:error, {:no_node_capacity, info}}`: the Watchdog counts no
   # attempt for it and asks again on its next poll.
-  defp local_capacity(%Issue{id: id, workspace_id: ws_id}, kind) do
+  #
+  # bd-bg87oz: unless a node could take it. The provider is not known yet, so this
+  # only asks whether placement will decide (`PassPlacement.probe/3`); the
+  # dispatcher places the pass for real once it is, and a pass that turns out to be
+  # primary-only is admitted against the cap there.
+  defp local_capacity(%Issue{id: id, workspace_id: ws_id} = task, kind, args) do
     local_kind = if kind == :conflict, do: :conflict_pass, else: :fix_pass
 
-    LocalCapacity.admit(id, local_kind,
-      reason: {:local_only, :follow_up},
-      workspace_id: ws_id
-    )
+    case PassPlacement.probe(task, local_kind, placement_opts: placement_opts(args)) do
+      :node_possible ->
+        :ok
+
+      :local ->
+        LocalCapacity.admit(id, local_kind,
+          reason: {:local_only, :follow_up},
+          workspace_id: ws_id
+        )
+
+      {:error, _} = held ->
+        held
+    end
   end
+
+  defp placement_opts(args), do: Map.get(args, :placement_opts, [])
 
   defp admit_slot(task, kind, args) do
     case ResumeSlot.admit(task,

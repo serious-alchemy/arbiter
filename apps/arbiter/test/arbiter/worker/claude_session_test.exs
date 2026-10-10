@@ -655,6 +655,40 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
   end
 
   describe "stream-json parsing" do
+    test "a grok session's init/result summary lines say grok, not claude" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-grok-label")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{"type" => "system", "subtype" => "init", "model" => "grok-4.7"},
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "duration_ms" => 1500,
+          "total_cost_usd" => 0.12
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          topic: topic,
+          provider: "grok"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "⚙ grok session started (model grok-4.7)" in lines
+      assert Enum.any?(lines, &String.starts_with?(&1, "⚙ grok session success · 1.5s"))
+      refute Enum.any?(lines, &String.contains?(&1, "claude session"))
+    end
+
     test "assistant text is split into display lines (system/result events summarized)" do
       {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-text")
