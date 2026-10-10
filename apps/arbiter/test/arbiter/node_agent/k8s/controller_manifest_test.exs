@@ -40,7 +40,6 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
   end
 
   describe "deployment/1 reach: :tailscale" do
-
     setup do
       {:ok, d} = ControllerManifest.deployment([reach: :tailscale] ++ @opts)
       %{d: d, ts: container(d, "tailscale"), spec: d["spec"]["template"]["spec"]}

@@ -275,7 +275,6 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
     end
 
     test "a cluster node enrolled by its token is a cluster before it ever connects (K9)" do
-
       {:ok, %{token: t}} = Nodes.mint_join_token([name: "k3s", kind: "cluster"], @operator)
       {:ok, _} = Nodes.redeem_join_token(t, %{kind: "cluster"})
 
