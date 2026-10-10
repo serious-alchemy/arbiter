@@ -976,6 +976,53 @@ Autopilot pass.
   every budget. It's throttled by change, not by tick.
 - **On every capture:** `quota_snapshots` gets `seats` and `budget` (DC2).
 
+**As built (DC6, bd-9ycsk4).**
+- **The key.** `scheduler_admission` is an installation setting
+  (`Settings.Registry`, so `arb settings`, `installation_config_*` and
+  `/api/installation/config` carry it). Null means `legacy`. A coordinator may
+  set `legacy` or `shadow`; `enforce` is operator-only (the registry's
+  `operator_only_values`). Until DC8 wires it, `enforce` dispatches and records
+  exactly as `shadow`: nothing may change a dispatch decision before DC8.
+- **The walk** is `Scheduler.plan/1` handed a `:walk`. It takes the capacity
+  sets (pools from `Budget.Server` with live `Quota.Seats`, the primary and
+  every available node, and an optional `repos` set for DC9) and asks each
+  card's candidates lazily from `Arbiter.Board.WalkInputs`. A routed workspace
+  asks `ProviderRouting.availability/3` with `admission: :walk`, which answers
+  eligibility only: no capacity drop and no paced drop, but the spend cap
+  still drops. Any other workspace walks its agent pool in failover order.
+  Entries carry `wait_cause`: `:queued`, `{:capacity, :provider | :node |
+  :repo}`, `:own_hold`, and `:paused` for a paused scheduler. Placed entries
+  carry their `pair`, and the plan carries `placements`.
+- **Where it runs.** `Snapshot.load(admission: mode)` gathers the walk's
+  inputs only under `shadow` or `enforce` and puts the plan at `board.walk`,
+  beside today's plan. Today's fields are identical with or without it. Under
+  `legacy` nothing in the budget path is called: `AdmissionLegacyTest` traces
+  a board read and a whole Autopilot pass to pin I1 at runtime. I2 is a
+  property at the board (`SnapshotWalkTest`) and at Autopilot
+  (`AutopilotAdmissionTest`).
+- **The records.** The dispatch record is
+  `{policy, dispatched, pick, account_id, pool, pool_label, node, agrees,
+  comparable, cause, reason, placements}`. An `AdmissionShadowEvent` row is
+  written when `AdmissionShadow.signature/1` changes. The signature covers
+  today's pick or the head it holds, the walk's first placement or the head it
+  skips, and the pools below today's cap. `cause` is the walk's wait cause for
+  today's pick (`capacity:provider`, `capacity:node`, `capacity:repo`,
+  `queued`, `own_hold`, `paused`), or `legacy_hold` when today holds the card
+  the walk places.
+- **Deferred to DC8.**
+  - E8's `budget_changed` subscription. In shadow the walk decides nothing, and
+    the 60 s tick and today's triggers record a budget-driven change within a
+    minute.
+  - E21's plan-time lift cap. In shadow the walk keeps today's order, so I4
+    holds and the report compares admission, not ordering.
+  - The primary's at-cap rule for a resume (bd-b2iigy), which also covers a
+    ReviewGate fix round re-dispatched through `Dispatch.resume/2`. I9 holds for
+    every follow-up on the provider layer, and for the review-side passes on
+    the node layer (`AdmissionFollowUpTest`). A resume on a full but non-zero
+    primary is still deferred, as it is today. §2.2 says it shouldn't be;
+    changing that would change a legacy decision (I1), so it waits for DC8's
+    `ResumeSlot` seat check.
+
 ### 10.3 The report
 
 `Arbiter.Release.admission_shadow_report/0` and `mix

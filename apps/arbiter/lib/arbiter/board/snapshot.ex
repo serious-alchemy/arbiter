@@ -169,6 +169,13 @@ defmodule Arbiter.Board.Snapshot do
   The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — effective
   priority first, then the tiebreaks down to `rank` and age (bd-asxw4e) — the
   same order Autopilot dispatches in.
+
+  `:walk` (DC6) is the scheduler walk's capacity sets and candidates
+  (`Arbiter.Board.Scheduler`'s `t:Arbiter.Board.Scheduler.walk/0`) with
+  `:dispatch_holds` read as the walk's 15 s retry window. With it the board
+  also carries `:walk`, the walk planned over the same queue plus the pools
+  and machines it ran against; nothing on the board reads it, and every other
+  field is what it is without it.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -406,6 +413,12 @@ defmodule Arbiter.Board.Snapshot do
   leaves review engagements (`Arbiter.Tasks.Issue.engagement?`) off the read;
   the operator's board sets it, the Autopilot does not. Every read is
   best-effort — a board that renders seven columns beats one that raises.
+
+  `:admission` (DC6, default `:legacy`) is the `scheduler_admission` mode the
+  caller plans under. `:shadow` and `:enforce` also gather the scheduler walk's
+  inputs (`Arbiter.Board.WalkInputs`, its seams in `:walk_opts`, or a ready
+  `:walk`) and derive the board with them; `:legacy` gathers nothing, so no
+  budget or seat is read. A walk whose inputs fail to read is left out.
 
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
   specified workspace (defaulting to the default workspace if not given).

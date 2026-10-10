@@ -134,7 +134,7 @@ defmodule Arbiter.Board.Autopilot do
   now only ever produces `:auth_expired` on this path, so the `retry_not_before`
   branch below is currently unreachable from a real dispatch. It is kept
   because the autopilot tests still feed a `:quota_exhausted` shape in by hand
-  to exercise `record_failure/3` and `promote_or_hold/2` directly, and because
+  to exercise `record_failure/3` and `promote_or_hold/3` directly, and because
   `Arbiter.Workflows.DispatchQueue` may still produce that shape via its own
   path (see its moduledoc). If some other producer of `:quota_exhausted`
   reappears here, this hold still applies to it unchanged:
@@ -201,7 +201,7 @@ defmodule Arbiter.Board.Autopilot do
   now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
   and the board-level hold takes over — instead of one attempt per 15s/60s
   tick. The number of such attempts stays bounded by the number of free
-  slots, not unbounded, and `AuthHold`/`promote_or_hold/2` still cuts it off
+  slots, not unbounded, and `AuthHold`/`promote_or_hold/3` still cuts it off
   as soon as the threshold trips; only the attempts *before* that point land
   closer together. Suites that assert an exact tick-by-tick attempt count or
   outcome sequence against dead credentials should start Autopilot with
@@ -212,7 +212,23 @@ defmodule Arbiter.Board.Autopilot do
   events — nothing broadcasts when a clock crosses a deadline — so those
   stay on the fallback tick, which is why 60s is a compromise and not a
   formality: a hold that clears right after a pass can wait up to a minute
-  before the tick notices. `promote_or_hold/2`'s hold logic is unchanged.
+  before the tick notices. `promote_or_hold/3`'s hold logic is unchanged.
+
+  ## The admission shadow (DC6, bd-9ycsk4)
+
+  Every pass reads `scheduler_admission` (`docs/design/provider-dynamic-concurrency.md`
+  §10.1). Under `legacy`, the default, the pass is exactly as above: the board
+  is asked for nothing new and the dispatch gets today's options. Under
+  `shadow` (and `enforce`, until DC8 wires it) the board also plans the
+  scheduler walk (`Arbiter.Board.Scheduler`'s `:walk`, at `board.walk`), and
+  this process records it beside today's decision and never in its place:
+
+    * the card it dispatches is today's `promote`, as under `legacy` (I2), with
+      the walk's decision riding along as `admission_shadow`, which the run
+      stores on its `routing_decision`;
+    * one `Arbiter.Board.AdmissionShadowEvent` row is written each time either
+      side's outcome changes (`Arbiter.Board.AdmissionShadow.signature/1`),
+      never once per pass.
   """
 
   use GenServer
@@ -351,7 +367,15 @@ defmodule Arbiter.Board.Autopilot do
       `false`, so each `tick/2` call runs exactly one pass — matching the
       pre-bd-axgpec behaviour it is asserting against.
     * `:snapshot` / `:dispatch` — seams for tests; default to
-      `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
+      `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/2`. A
+      two-argument `:dispatch` also gets the extra dispatch options (the
+      admission shadow's record); a one-argument one gets the id alone.
+    * `:admission` — seam for tests; a 0-arity function returning the
+      `scheduler_admission` mode, read on every pass. Defaults to
+      `Arbiter.Board.AdmissionShadow.mode/0`.
+    * `:record_shadow` — seam for tests; a 1-arity function that writes an
+      admission hold-change event. Defaults to
+      `Arbiter.Board.AdmissionShadow.record_event/1`.
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
