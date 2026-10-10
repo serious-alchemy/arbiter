@@ -31,9 +31,20 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
 
   @type level :: :baseline | :restricted | :arbiter
   @type violation :: %{rule: atom(), level: level(), path: String.t()}
-  @type rule :: %{id: atom(), level: level(), description: String.t(), check: (map(), keyword() -> [String.t()])}
+  @type rule :: %{
+          id: atom(),
+          level: level(),
+          description: String.t(),
+          check: (map(), keyword() -> [String.t()])
+        }
 
-  @allowed_selinux_types ["", "container_t", "container_init_t", "container_kvm_t", "container_engine_t"]
+  @allowed_selinux_types [
+    "",
+    "container_t",
+    "container_init_t",
+    "container_kvm_t",
+    "container_engine_t"
+  ]
   @baseline_caps ~w(AUDIT_WRITE CHOWN DAC_OVERRIDE FOWNER FSETID KILL MKNOD NET_BIND_SERVICE SETFCAP SETGID SETPCAP SETUID SYS_CHROOT)
   @safe_sysctls ~w(kernel.shm_rmid_forced net.ipv4.ip_local_port_range net.ipv4.ip_unprivileged_port_start
                    net.ipv4.tcp_syncookies net.ipv4.ping_group_range net.ipv4.ip_local_reserved_ports
@@ -51,36 +62,96 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
     [
       # -- Pod Security Standards: baseline ---------------------------------------------
       rule(:host_process, :baseline, "no Windows HostProcess containers", &host_process/2),
-      rule(:host_namespaces, :baseline, "hostNetwork, hostPID, hostIPC are not true", &host_namespaces/2),
+      rule(
+        :host_namespaces,
+        :baseline,
+        "hostNetwork, hostPID, hostIPC are not true",
+        &host_namespaces/2
+      ),
       rule(:privileged, :baseline, "no privileged container", &privileged/2),
-      rule(:baseline_capabilities, :baseline, "capabilities.add stays inside the baseline list", &baseline_capabilities/2),
+      rule(
+        :baseline_capabilities,
+        :baseline,
+        "capabilities.add stays inside the baseline list",
+        &baseline_capabilities/2
+      ),
       rule(:host_path_volumes, :baseline, "no hostPath volume", &host_path_volumes/2),
       rule(:host_ports, :baseline, "no hostPort", &host_ports/2),
       rule(:host_probes, :baseline, "probes and hooks name no host", &host_probes/2),
-      rule(:apparmor, :baseline, "AppArmor is RuntimeDefault or Localhost, when set", &apparmor/2),
+      rule(
+        :apparmor,
+        :baseline,
+        "AppArmor is RuntimeDefault or Localhost, when set",
+        &apparmor/2
+      ),
       rule(:selinux, :baseline, "SELinux type is a container type; no user or role", &selinux/2),
       rule(:proc_mount, :baseline, "procMount is Default", &proc_mount/2),
       rule(:seccomp_baseline, :baseline, "seccomp is not Unconfined", &seccomp_baseline/2),
       rule(:sysctls, :baseline, "only safe sysctls", &sysctls/2),
       # -- restricted -----------------------------------------------------------------------
       rule(:volume_types, :restricted, "only the restricted volume types", &volume_types/2),
-      rule(:privilege_escalation, :restricted, "allowPrivilegeEscalation is false on every container", &privilege_escalation/2),
+      rule(
+        :privilege_escalation,
+        :restricted,
+        "allowPrivilegeEscalation is false on every container",
+        &privilege_escalation/2
+      ),
       rule(:run_as_non_root, :restricted, "every container is runAsNonRoot", &run_as_non_root/2),
       rule(:run_as_user, :restricted, "no uid 0", &run_as_user/2),
-      rule(:seccomp_restricted, :restricted, "RuntimeDefault or Localhost seccomp on every container", &seccomp_restricted/2),
-      rule(:capabilities_restricted, :restricted, "drop ALL, add at most NET_BIND_SERVICE", &capabilities_restricted/2),
+      rule(
+        :seccomp_restricted,
+        :restricted,
+        "RuntimeDefault or Localhost seccomp on every container",
+        &seccomp_restricted/2
+      ),
+      rule(
+        :capabilities_restricted,
+        :restricted,
+        "drop ALL, add at most NET_BIND_SERVICE",
+        &capabilities_restricted/2
+      ),
       # -- what the builder promises beyond the label ---------------------------------------------
-      rule(:non_root, :arbiter, "K1-A1: non-root asserted here, PSA relaxes it under hostUsers: false", &non_root/2),
+      rule(
+        :non_root,
+        :arbiter,
+        "K1-A1: non-root asserted here, PSA relaxes it under hostUsers: false",
+        &non_root/2
+      ),
       rule(:host_users, :arbiter, "hostUsers is false", &host_users/2),
-      rule(:read_only_root, :arbiter, "read-only root filesystem on every container", &read_only_root/2),
-      rule(:no_apparmor, :arbiter, "K1-A2: no appArmorProfile or annotation anywhere", &no_apparmor/2),
+      rule(
+        :read_only_root,
+        :arbiter,
+        "read-only root filesystem on every container",
+        &read_only_root/2
+      ),
+      rule(
+        :no_apparmor,
+        :arbiter,
+        "K1-A2: no appArmorProfile or annotation anywhere",
+        &no_apparmor/2
+      ),
       rule(:no_selinux, :arbiter, "§8.1: no seLinuxOptions anywhere", &no_selinux/2),
-      rule(:strict_capabilities, :arbiter, "drop is exactly [ALL], no add, privileged false, procMount Default", &strict_capabilities/2),
+      rule(
+        :strict_capabilities,
+        :arbiter,
+        "drop is exactly [ALL], no add, privileged false, procMount Default",
+        &strict_capabilities/2
+      ),
       rule(:service_account, :arbiter, "arbiter-worker with no token", &service_account/2),
       rule(:volumes, :arbiter, "only emptyDir and the arbiter-ca ConfigMap", &volumes/2),
-      rule(:network, :arbiter, "DNS None, no service links, no ports, no shared process namespace", &network/2),
+      rule(
+        :network,
+        :arbiter,
+        "DNS None, no service links, no ports, no shared process namespace",
+        &network/2
+      ),
       rule(:seccomp, :arbiter, "the pod's seccomp profile is RuntimeDefault", &seccomp/2),
-      rule(:image, :arbiter, "IfNotPresent; digest-pinned under the registry; services on an allowed prefix", &image/2)
+      rule(
+        :image,
+        :arbiter,
+        "IfNotPresent; digest-pinned under the registry; services on an allowed prefix",
+        &image/2
+      )
     ]
   end
 
@@ -110,7 +181,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
     end
   end
 
-  defp rule(id, level, description, check), do: %{id: id, level: level, description: description, check: check}
+  defp rule(id, level, description, check),
+    do: %{id: id, level: level, description: description, check: check}
 
   defp safe_check(rule, pod, opts) do
     rule.check.(pod, opts)
@@ -146,24 +218,47 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
   # -- baseline ---------------------------------------------------------------------------------
 
   defp host_process(pod, _) do
-    pod_paths = if dig(pod_sc(pod), ["windowsOptions", "hostProcess"]) == true, do: ["spec.securityContext.windowsOptions.hostProcess"], else: []
+    pod_paths =
+      if dig(pod_sc(pod), ["windowsOptions", "hostProcess"]) == true,
+        do: ["spec.securityContext.windowsOptions.hostProcess"],
+        else: []
 
     pod_paths ++
-      for {path, c} <- containers(pod), dig(sc(c), ["windowsOptions", "hostProcess"]) == true,
+      for {path, c} <- containers(pod),
+          dig(sc(c), ["windowsOptions", "hostProcess"]) == true,
           do: path <> ".securityContext.windowsOptions.hostProcess"
   end
 
   defp host_namespaces(pod, _),
-    do: for(key <- ~w(hostNetwork hostPID hostIPC), dig(spec(pod), [key]) == true, do: "spec." <> key)
+    do:
+      for(
+        key <- ~w(hostNetwork hostPID hostIPC),
+        dig(spec(pod), [key]) == true,
+        do: "spec." <> key
+      )
 
   defp privileged(pod, _),
-    do: for({path, c} <- containers(pod), sc(c)["privileged"] == true, do: path <> ".securityContext.privileged")
+    do:
+      for(
+        {path, c} <- containers(pod),
+        sc(c)["privileged"] == true,
+        do: path <> ".securityContext.privileged"
+      )
 
   defp baseline_capabilities(pod, _),
-    do: for({path, c} <- containers(pod), Enum.any?(caps(c, "add"), &(&1 not in @baseline_caps)), do: path <> ".securityContext.capabilities.add")
+    do:
+      for(
+        {path, c} <- containers(pod),
+        Enum.any?(caps(c, "add"), &(&1 not in @baseline_caps)),
+        do: path <> ".securityContext.capabilities.add"
+      )
 
   defp host_path_volumes(pod, _),
-    do: for(%{"hostPath" => _} = v <- list(dig(pod, ["spec", "volumes"])), do: "spec.volumes[#{v["name"]}].hostPath")
+    do:
+      for(
+        %{"hostPath" => _} = v <- list(dig(pod, ["spec", "volumes"])),
+        do: "spec.volumes[#{v["name"]}].hostPath"
+      )
 
   defp host_ports(pod, _) do
     for {path, c} <- containers(pod),
@@ -181,16 +276,25 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
 
   defp probe_handlers(c) do
     probes = for k <- ~w(livenessProbe readinessProbe startupProbe), is_map(c[k]), do: {k, c[k]}
-    hooks = for k <- ~w(postStart preStop), is_map(dig(c, ["lifecycle", k])), do: {"lifecycle." <> k, dig(c, ["lifecycle", k])}
+
+    hooks =
+      for k <- ~w(postStart preStop),
+          is_map(dig(c, ["lifecycle", k])),
+          do: {"lifecycle." <> k, dig(c, ["lifecycle", k])}
+
     probes ++ hooks
   end
 
-  defp host?(handler), do: Enum.any?(["httpGet", "tcpSocket"], &(dig(handler, [&1, "host"]) not in [nil, ""]))
+  defp host?(handler),
+    do: Enum.any?(["httpGet", "tcpSocket"], &(dig(handler, [&1, "host"]) not in [nil, ""]))
 
   defp apparmor(pod, _) do
     profiles =
       [{"spec.securityContext.appArmorProfile", dig(pod_sc(pod), ["appArmorProfile", "type"])}] ++
-        for {path, c} <- containers(pod), do: {path <> ".securityContext.appArmorProfile", dig(sc(c), ["appArmorProfile", "type"])}
+        for {path, c} <- containers(pod),
+            do:
+              {path <> ".securityContext.appArmorProfile",
+               dig(sc(c), ["appArmorProfile", "type"])}
 
     annotations =
       for {key, value} <- dig(pod, ["metadata", "annotations"]) |> as_map(),
@@ -198,32 +302,49 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
           value != "runtime/default" and not String.starts_with?(to_string(value), "localhost/"),
           do: "metadata.annotations[#{key}]"
 
-    for({path, type} <- profiles, type not in [nil, "RuntimeDefault", "Localhost"], do: path) ++ annotations
+    for({path, type} <- profiles, type not in [nil, "RuntimeDefault", "Localhost"], do: path) ++
+      annotations
   end
 
   defp as_map(%{} = m), do: m
   defp as_map(_), do: %{}
 
   defp selinux(pod, _) do
-    levels = [{"spec.securityContext.seLinuxOptions", pod_sc(pod)["seLinuxOptions"]}] ++ for {path, c} <- containers(pod), do: {path <> ".securityContext.seLinuxOptions", sc(c)["seLinuxOptions"]}
+    levels =
+      [{"spec.securityContext.seLinuxOptions", pod_sc(pod)["seLinuxOptions"]}] ++
+        for {path, c} <- containers(pod),
+            do: {path <> ".securityContext.seLinuxOptions", sc(c)["seLinuxOptions"]}
 
     for {path, %{} = options} <- levels,
-        options["type"] not in @allowed_selinux_types or options["user"] not in [nil, ""] or options["role"] not in [nil, ""],
+        options["type"] not in @allowed_selinux_types or options["user"] not in [nil, ""] or
+          options["role"] not in [nil, ""],
         do: path
   end
 
   defp proc_mount(pod, _),
-    do: for({path, c} <- containers(pod), sc(c)["procMount"] not in [nil, "Default"], do: path <> ".securityContext.procMount")
+    do:
+      for(
+        {path, c} <- containers(pod),
+        sc(c)["procMount"] not in [nil, "Default"],
+        do: path <> ".securityContext.procMount"
+      )
 
   defp seccomp_baseline(pod, _) do
-    pod_level = if dig(pod_sc(pod), ["seccompProfile", "type"]) == "Unconfined", do: ["spec.securityContext.seccompProfile"], else: []
+    pod_level =
+      if dig(pod_sc(pod), ["seccompProfile", "type"]) == "Unconfined",
+        do: ["spec.securityContext.seccompProfile"],
+        else: []
 
     pod_level ++
-      for {path, c} <- containers(pod), dig(sc(c), ["seccompProfile", "type"]) == "Unconfined", do: path <> ".securityContext.seccompProfile"
+      for {path, c} <- containers(pod),
+          dig(sc(c), ["seccompProfile", "type"]) == "Unconfined",
+          do: path <> ".securityContext.seccompProfile"
   end
 
   defp sysctls(pod, _) do
-    for %{} = s <- list(pod_sc(pod)["sysctls"]), s["name"] not in @safe_sysctls, do: "spec.securityContext.sysctls[#{s["name"]}]"
+    for %{} = s <- list(pod_sc(pod)["sysctls"]),
+        s["name"] not in @safe_sysctls,
+        do: "spec.securityContext.sysctls[#{s["name"]}]"
   end
 
   # -- restricted ---------------------------------------------------------------------------------
@@ -235,7 +356,12 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
   end
 
   defp privilege_escalation(pod, _),
-    do: for({path, c} <- containers(pod), sc(c)["allowPrivilegeEscalation"] != false, do: path <> ".securityContext.allowPrivilegeEscalation")
+    do:
+      for(
+        {path, c} <- containers(pod),
+        sc(c)["allowPrivilegeEscalation"] != false,
+        do: path <> ".securityContext.allowPrivilegeEscalation"
+      )
 
   # A container is non-root if it says so, or says nothing and the pod does.
   defp run_as_non_root(pod, _) do
@@ -250,14 +376,21 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
 
   defp run_as_user(pod, _) do
     pod_paths = if pod_sc(pod)["runAsUser"] == 0, do: ["spec.securityContext.runAsUser"], else: []
-    pod_paths ++ for {path, c} <- containers(pod), sc(c)["runAsUser"] == 0, do: path <> ".securityContext.runAsUser"
+
+    pod_paths ++
+      for {path, c} <- containers(pod),
+          sc(c)["runAsUser"] == 0,
+          do: path <> ".securityContext.runAsUser"
   end
 
   defp seccomp_restricted(pod, _) do
     pod_type = dig(pod_sc(pod), ["seccompProfile", "type"])
 
     for {path, c} <- containers(pod),
-        (dig(sc(c), ["seccompProfile", "type"]) || pod_type) not in ["RuntimeDefault", "Localhost"],
+        (dig(sc(c), ["seccompProfile", "type"]) || pod_type) not in [
+          "RuntimeDefault",
+          "Localhost"
+        ],
         do: path <> ".securityContext.seccompProfile"
   end
 
@@ -280,35 +413,59 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
           do: path <> ".securityContext"
   end
 
-  defp host_users(pod, _), do: if(dig(spec(pod), ["hostUsers"]) == false, do: [], else: ["spec.hostUsers"])
+  defp host_users(pod, _),
+    do: if(dig(spec(pod), ["hostUsers"]) == false, do: [], else: ["spec.hostUsers"])
 
   defp read_only_root(pod, _),
-    do: for({path, c} <- containers(pod), sc(c)["readOnlyRootFilesystem"] != true, do: path <> ".securityContext.readOnlyRootFilesystem")
+    do:
+      for(
+        {path, c} <- containers(pod),
+        sc(c)["readOnlyRootFilesystem"] != true,
+        do: path <> ".securityContext.readOnlyRootFilesystem"
+      )
 
   defp no_apparmor(pod, _) do
-    pod_paths = if Map.has_key?(pod_sc(pod), "appArmorProfile"), do: ["spec.securityContext.appArmorProfile"], else: []
+    pod_paths =
+      if Map.has_key?(pod_sc(pod), "appArmorProfile"),
+        do: ["spec.securityContext.appArmorProfile"],
+        else: []
 
     annotations =
       for {key, _} <- as_map(dig(pod, ["metadata", "annotations"])),
           String.starts_with?(to_string(key), @apparmor_annotation),
           do: "metadata.annotations[#{key}]"
 
-    pod_paths ++ annotations ++ for {path, c} <- containers(pod), Map.has_key?(sc(c), "appArmorProfile"), do: path <> ".securityContext.appArmorProfile"
+    pod_paths ++
+      annotations ++
+      for {path, c} <- containers(pod),
+          Map.has_key?(sc(c), "appArmorProfile"),
+          do: path <> ".securityContext.appArmorProfile"
   end
 
   defp no_selinux(pod, _) do
-    pod_paths = if Map.has_key?(pod_sc(pod), "seLinuxOptions"), do: ["spec.securityContext.seLinuxOptions"], else: []
-    pod_paths ++ for {path, c} <- containers(pod), Map.has_key?(sc(c), "seLinuxOptions"), do: path <> ".securityContext.seLinuxOptions"
+    pod_paths =
+      if Map.has_key?(pod_sc(pod), "seLinuxOptions"),
+        do: ["spec.securityContext.seLinuxOptions"],
+        else: []
+
+    pod_paths ++
+      for {path, c} <- containers(pod),
+          Map.has_key?(sc(c), "seLinuxOptions"),
+          do: path <> ".securityContext.seLinuxOptions"
   end
 
   defp strict_capabilities(pod, _) do
     for {path, c} <- containers(pod),
-        caps(c, "drop") != ["ALL"] or caps(c, "add") != [] or sc(c)["privileged"] != false or sc(c)["procMount"] != "Default",
+        caps(c, "drop") != ["ALL"] or caps(c, "add") != [] or sc(c)["privileged"] != false or
+          sc(c)["procMount"] != "Default",
         do: path <> ".securityContext"
   end
 
   defp service_account(pod, _) do
-    for {key, want} <- [{"serviceAccountName", @service_account}, {"automountServiceAccountToken", false}],
+    for {key, want} <- [
+          {"serviceAccountName", @service_account},
+          {"automountServiceAccountToken", false}
+        ],
         dig(spec(pod), [key]) != want,
         do: "spec." <> key
   end
@@ -333,12 +490,19 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
   end
 
   defp seccomp(pod, _),
-    do: if(dig(pod_sc(pod), ["seccompProfile", "type"]) == "RuntimeDefault", do: [], else: ["spec.securityContext.seccompProfile"])
+    do:
+      if(dig(pod_sc(pod), ["seccompProfile", "type"]) == "RuntimeDefault",
+        do: [],
+        else: ["spec.securityContext.seccompProfile"]
+      )
 
   defp image(pod, opts) do
     case Keyword.get(opts, :registry) do
-      nil -> []
-      registry -> image_paths(pod, registry, ["docker.io/library/" | Keyword.get(opts, :image_prefixes, [])])
+      nil ->
+        []
+
+      registry ->
+        image_paths(pod, registry, ["docker.io/library/" | Keyword.get(opts, :image_prefixes, [])])
     end
   end
 
@@ -348,9 +512,11 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
         do: path <> ".image"
   end
 
-  defp image_ok?(%{"name" => name, "image" => image}, registry, service_prefixes) when is_binary(image) do
+  defp image_ok?(%{"name" => name, "image" => image}, registry, service_prefixes)
+       when is_binary(image) do
     if name in @own_images do
-      String.starts_with?(image, registry <> "/") and Regex.match?(~r/@sha256:[0-9a-f]{64}\z/, image)
+      String.starts_with?(image, registry <> "/") and
+        Regex.match?(~r/@sha256:[0-9a-f]{64}\z/, image)
     else
       Enum.any?([registry <> "/" | service_prefixes], &String.starts_with?(image, &1))
     end

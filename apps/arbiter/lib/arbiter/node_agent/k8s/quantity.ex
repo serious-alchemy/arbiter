@@ -55,7 +55,8 @@ defmodule Arbiter.NodeAgent.K8s.Quantity do
 
   @doc "Whether `value` is a positive Kubernetes quantity (any resource, `ephemeral-storage` included)."
   @spec valid?(String.t()) :: boolean()
-  def valid?(value), do: is_binary(value) and Regex.match?(@k8s_re, value) and positive_k8s?(value)
+  def valid?(value),
+    do: is_binary(value) and Regex.match?(@k8s_re, value) and positive_k8s?(value)
 
   defp positive_k8s?(value) do
     [_, n | _] = Regex.run(@k8s_re, value)

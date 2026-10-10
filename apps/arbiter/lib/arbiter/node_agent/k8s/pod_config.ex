@@ -160,7 +160,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
 
   # Nested maps are merged over the defaults, so a ConfigMap that sets only
   # `worker.limits.memory` keeps the rest.
-  defp merge_default(key, validate) when key in [:worker, :services_resources, :placement, :timeouts] do
+  defp merge_default(key, validate)
+       when key in [:worker, :services_resources, :placement, :timeouts] do
     fn value ->
       with {:ok, normal} <- validate.(value),
            do: {:ok, deep_merge(Map.fetch!(@defaults, key), normal)}
@@ -193,7 +194,9 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
 
   defp matching(_, _), do: :error
 
-  defp int(value, range) when is_integer(value), do: if(value in range, do: {:ok, value}, else: :error)
+  defp int(value, range) when is_integer(value),
+    do: if(value in range, do: {:ok, value}, else: :error)
+
   defp int(_, _), do: :error
 
   defp names(list) when is_list(list) do
@@ -229,8 +232,13 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
 
   defp size(map, key) do
     case Map.fetch(map, key) do
-      :error -> {:ok, %{}}
-      {:ok, value} -> if Quantity.valid?(value), do: {:ok, %{key => value}}, else: {:error, {:bad_quantity, value}}
+      :error ->
+        {:ok, %{}}
+
+      {:ok, value} ->
+        if Quantity.valid?(value),
+          do: {:ok, %{key => value}},
+          else: {:error, {:bad_quantity, value}}
     end
   end
 
@@ -240,7 +248,9 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
     with :ok <- only_keys(map, ~w(requests limits), :resources),
          {:ok, requests} <- quantities(Map.get(map, "requests", %{})),
          {:ok, limits} <- quantities(Map.get(map, "limits", %{})) do
-      {:ok, Enum.reject(%{"requests" => requests, "limits" => limits}, fn {_, v} -> v == %{} end) |> Map.new()}
+      {:ok,
+       Enum.reject(%{"requests" => requests, "limits" => limits}, fn {_, v} -> v == %{} end)
+       |> Map.new()}
     end
   end
 
@@ -262,7 +272,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   defp placement(%{} = map) do
     map = stringify(map)
 
-    with :ok <- only_keys(map, ~w(node_selector tolerations priority_class runtime_class), :placement),
+    with :ok <-
+           only_keys(map, ~w(node_selector tolerations priority_class runtime_class), :placement),
          {:ok, selector} <- node_selector(Map.get(map, "node_selector", %{})),
          {:ok, tolerations} <- tolerations(Map.get(map, "tolerations", [])),
          {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "arbiter-worker")),
@@ -283,7 +294,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
     map = stringify(map)
 
     if Enum.all?(map, fn {k, v} ->
-         is_binary(v) and Regex.match?(~r/\A([a-z0-9.-]+\/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?\z/, k) and
+         is_binary(v) and
+           Regex.match?(~r/\A([a-z0-9.-]+\/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?\z/, k) and
            Regex.match?(@label_re, v)
        end),
        do: {:ok, map},
@@ -297,7 +309,9 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
 
     if Enum.all?(normal, fn t ->
          is_map(t) and Map.keys(t) -- @toleration_keys == [] and
-           Enum.all?(t, fn {k, v} -> if k == "tolerationSeconds", do: is_integer(v), else: is_binary(v) end)
+           Enum.all?(t, fn {k, v} ->
+             if k == "tolerationSeconds", do: is_integer(v), else: is_binary(v)
+           end)
        end),
        do: {:ok, normal},
        else: {:error, {:bad_value, :tolerations}}

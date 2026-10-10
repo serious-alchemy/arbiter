@@ -114,4 +114,18 @@ defmodule Arbiter.Test.K8sPodFixtures do
 
   def golden_path(name),
     do: Path.join([__DIR__, "..", "fixtures", "k8s", name <> ".yaml"]) |> Path.expand()
+
+  def assert_golden(name, yaml) do
+    path = golden_path(name)
+
+    if System.get_env("ARB_UPDATE_GOLDEN") == "1" do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, yaml)
+    end
+
+    ExUnit.Assertions.assert(
+      File.read!(path) == yaml,
+      "golden #{name}.yaml differs; ARB_UPDATE_GOLDEN=1 rewrites it, and the diff is the review"
+    )
+  end
 end

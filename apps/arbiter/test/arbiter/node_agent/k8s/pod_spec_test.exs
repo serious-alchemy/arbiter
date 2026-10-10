@@ -21,7 +21,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
   defp all_containers(pod), do: containers(pod)
 
   defp mounts(pod, name \\ "worker"), do: container(pod, name)["volumeMounts"]
-  defp mount_at(pod, path, name \\ "worker"), do: Enum.find(mounts(pod, name), &(&1["mountPath"] == path))
+
+  defp mount_at(pod, path, name \\ "worker"),
+    do: Enum.find(mounts(pod, name), &(&1["mountPath"] == path))
 
   defp podman_argv(extra \\ %{}) do
     spec =
@@ -34,7 +36,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
           home: @home,
           objects: "/repo/.git/objects",
           git_dir: @wt <> "/.git",
-          readonly_paths: Enum.map(~w(config hooks commondir objects/info/alternates), &(@wt <> "/.git/" <> &1))
+          readonly_paths:
+            Enum.map(~w(config hooks commondir objects/info/alternates), &(@wt <> "/.git/" <> &1))
         },
         extra
       )
@@ -70,7 +73,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
   describe "§8 row 3: --security-opt no-new-privileges" do
     test "allowPrivilegeEscalation false, privileged false, procMount Default" do
       pod = build!(run_spec(%{"services" => [%{"preset" => "postgres"}]}))
-      assert Enum.chunk_every(podman_argv(), 2, 1) |> Enum.member?(["--security-opt", "no-new-privileges"])
+
+      assert Enum.chunk_every(podman_argv(), 2, 1)
+             |> Enum.member?(["--security-opt", "no-new-privileges"])
 
       for c <- all_containers(pod) do
         sc = c["securityContext"]
@@ -150,7 +155,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     test "the wire spec with network pasta validates upstream but the builder still refuses it" do
       {:ok, spec} = Arbiter.NodeAgent.RunSpec.validate(wire_spec(%{"network" => "pasta"}))
       assert spec.network == :pasta
-      assert {:error, {:bad_spec, {:network_not_supported, :pasta}}} = PodSpec.build(put_ref(spec), config())
+
+      assert {:error, {:bad_spec, {:network_not_supported, :pasta}}} =
+               PodSpec.build(put_ref(spec), config())
     end
 
     test "any other network value is refused" do
@@ -164,6 +171,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
   describe "§8 row 7: the worktree at the primary's own absolute path" do
     test "emptyDir work (sizeLimit) mounted at that path via subPath wt, working dir the same" do
       pod = build!()
+
       assert Enum.find(pod["spec"]["volumes"], &(&1["name"] == "work")) ==
                %{"name" => "work", "emptyDir" => %{"sizeLimit" => "8Gi"}}
 
@@ -195,7 +203,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       end
 
       # the same set the podman layout binds read-only
-      assert Enum.all?(@guards, fn g -> Enum.any?(podman_argv(), &String.starts_with?(&1, "#{@wt}/.git/#{g}:")) end)
+      assert Enum.all?(@guards, fn g ->
+               Enum.any?(podman_argv(), &String.starts_with?(&1, "#{@wt}/.git/#{g}:"))
+             end)
     end
 
     test "K1-A8: .git itself is a subPath mount, listed before the guards, writable" do
@@ -233,14 +243,24 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!()
       assert Enum.any?(podman_argv(), &String.ends_with?(&1, ":O"))
       refute Enum.any?(pod["spec"]["volumes"], &Map.has_key?(&1, "hostPath"))
-      refute Enum.any?(mounts(pod), &String.contains?(&1["mountPath"], "objects") and not String.ends_with?(&1["mountPath"], "alternates"))
+
+      refute Enum.any?(
+               mounts(pod),
+               &(String.contains?(&1["mountPath"], "objects") and
+                   not String.ends_with?(&1["mountPath"], "alternates"))
+             )
     end
   end
 
   describe "§8 row 10: per-run HOME and CLAUDE_CONFIG_DIR" do
     test "emptyDir paths at the primary's paths, and HOME in the env" do
       pod = build!()
-      assert mount_at(pod, @home) == %{"name" => "work", "mountPath" => @home, "subPath" => "home"}
+
+      assert mount_at(pod, @home) == %{
+               "name" => "work",
+               "mountPath" => @home,
+               "subPath" => "home"
+             }
 
       assert mount_at(pod, @config_dir) ==
                %{"name" => "work", "mountPath" => @config_dir, "subPath" => "claude-config"}
@@ -289,9 +309,21 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
         build!(
           run_spec(%{
             "mounts" => [
-              %{"kind" => "worktree", "path" => @wt, "files" => %{".mcp.json" => Base.encode64("MCP-BEARER-BODY")}},
-              %{"kind" => "config_dir", "path" => @config_dir, "files" => %{"CLAUDE.md" => Base.encode64("MEMORY-BODY")}},
-              %{"kind" => "prompt", "path" => "/var/lib/arb/run/prompt.md", "content" => Base.encode64("PROMPT-BODY")}
+              %{
+                "kind" => "worktree",
+                "path" => @wt,
+                "files" => %{".mcp.json" => Base.encode64("MCP-BEARER-BODY")}
+              },
+              %{
+                "kind" => "config_dir",
+                "path" => @config_dir,
+                "files" => %{"CLAUDE.md" => Base.encode64("MEMORY-BODY")}
+              },
+              %{
+                "kind" => "prompt",
+                "path" => "/var/lib/arb/run/prompt.md",
+                "content" => Base.encode64("PROMPT-BODY")
+              }
             ]
           })
         )
@@ -301,13 +333,20 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       end
 
       assert mount_at(pod, "/var/lib/arb/run/prompt.md") ==
-               %{"name" => "run", "mountPath" => "/var/lib/arb/run/prompt.md", "subPath" => "prompt-0", "readOnly" => true}
+               %{
+                 "name" => "run",
+                 "mountPath" => "/var/lib/arb/run/prompt.md",
+                 "subPath" => "prompt-0",
+                 "readOnly" => true
+               }
     end
   end
 
   describe "§8 row 13: -e NAME=value (literals)" do
     test "non-secret env entries become env:, sorted, with the service worker_env merged in" do
-      pod = build!(run_spec(%{"services" => [%{"preset" => "postgres", "database" => "vstim_test"}]}))
+      pod =
+        build!(run_spec(%{"services" => [%{"preset" => "postgres", "database" => "vstim_test"}]}))
+
       env = env_pairs(worker(pod))
 
       assert {"ARB_WORKER_BEAD_ID", "bd-1nfuq5"} in env
@@ -320,7 +359,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     test "a spec env var cannot shadow the controller-owned boot variables" do
       for name <- ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_GATE_ADDR) do
         {:ok, spec} = Arbiter.NodeAgent.RunSpec.validate(wire_spec(%{"env" => %{name => "x"}}))
-        assert {:error, {:bad_spec, {:reserved_env, ^name}}} = PodSpec.build(put_ref(spec), config())
+
+        assert {:error, {:bad_spec, {:reserved_env, ^name}}} =
+                 PodSpec.build(put_ref(spec), config())
       end
     end
   end
@@ -330,7 +371,11 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!()
       refute Enum.any?(mounts(pod), &String.starts_with?(&1["mountPath"], "/opt/arbiter"))
       assert worker(pod)["securityContext"]["readOnlyRootFilesystem"] == true
-      assert Enum.any?(podman_argv(extra_cli()), &String.ends_with?(&1, "/opt/arbiter/cli/claude:ro"))
+
+      assert Enum.any?(
+               podman_argv(extra_cli()),
+               &String.ends_with?(&1, "/opt/arbiter/cli/claude:ro")
+             )
     end
 
     defp extra_cli, do: %{cli_mounts: [{"/host/claude", "/opt/arbiter/cli/claude"}]}
@@ -384,7 +429,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
             "evil.example/beam@sha256:#{digest()}",
             "-#{registry()}/beam@sha256:#{digest()}"
           ] do
-        assert {:error, {:bad_spec, {:bad_image, _}}} = PodSpec.build(put_ref(run_spec(), ref), config())
+        assert {:error, {:bad_spec, {:bad_image, _}}} =
+                 PodSpec.build(put_ref(run_spec(), ref), config())
       end
     end
 
@@ -399,7 +445,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!()
       assert "--init" in podman_argv()
       assert ["tini", "--", "sh", "-c", _script, "sh", "claude" | _] = worker(pod)["command"]
-      assert ["tini", "--", "/opt/arbiter/bin/snapshotter"] = container(pod, "snapshotter")["command"]
+
+      assert ["tini", "--", "/opt/arbiter/bin/snapshotter"] =
+               container(pod, "snapshotter")["command"]
     end
 
     test "the spec command is passed as separate argv words, never interpolated into the script" do
@@ -417,7 +465,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       [_, _, _, _, _, "sh" | argv] = worker(pod)["command"]
 
       assert Enum.map(argv, &kubelet_expand/1) == cmd
-      assert Enum.find(worker(pod)["env"], &(&1["name"] == "PS1"))["value"] |> kubelet_expand() == "$(date) $$"
+
+      assert Enum.find(worker(pod)["env"], &(&1["name"] == "PS1"))["value"] |> kubelet_expand() ==
+               "$(date) $$"
     end
   end
 
@@ -439,28 +489,51 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
             Map.put(Map.from_struct(base), "seLinuxOptions", %{"type" => "spc_t"}),
             Map.put(Map.from_struct(base), :selinux, "spc_t"),
             Map.put(Map.from_struct(base), :labels, %{"seLinuxOptions" => "x"}),
-            %{base | mounts: base.mounts ++ [%{kind: "tmp", path: "/x", seLinuxOptions: %{type: "spc_t"}}]},
+            %{
+              base
+              | mounts:
+                  base.mounts ++ [%{kind: "tmp", path: "/x", seLinuxOptions: %{type: "spc_t"}}]
+            },
             %{base | mounts: [%{kind: "worktree", path: @wt, selinux_type: "spc_t"}]}
           ] do
-        assert {:error, {:bad_spec, {:selinux_not_allowed, _}}} = PodSpec.build(bad, config()), inspect(bad)
+        assert {:error, {:bad_spec, {:selinux_not_allowed, _}}} = PodSpec.build(bad, config()),
+               inspect(bad)
       end
     end
 
     test "spc_t as a value of a structural field is refused; as text in the command it is data" do
       base = run_spec()
+
       assert {:error, {:bad_spec, {:selinux_not_allowed, _}}} =
                PodSpec.build(%{base | labels: %{"type" => "spc_t"}}, config())
 
-      assert {:ok, _} = PodSpec.build(%{base | command: ["claude", "explain spc_t and seLinuxOptions"]}, config())
+      assert {:ok, _} =
+               PodSpec.build(
+                 %{base | command: ["claude", "explain spc_t and seLinuxOptions"]},
+                 config()
+               )
     end
 
     test "a service asking for a security context of its own is bad_spec" do
       base = run_spec()
-      svc = %{name: "evil", image: "docker.io/library/postgres:16", seLinuxOptions: %{type: "spc_t"}}
-      assert {:error, {:bad_spec, {:selinux_not_allowed, _}}} = PodSpec.build(%{base | services: [svc]}, config())
 
-      svc = %{name: "evil", image: "docker.io/library/postgres:16", security_context: %{privileged: true}}
-      assert {:error, {:bad_spec, {:unknown_service_field, _}}} = PodSpec.build(%{base | services: [svc]}, config())
+      svc = %{
+        name: "evil",
+        image: "docker.io/library/postgres:16",
+        seLinuxOptions: %{type: "spc_t"}
+      }
+
+      assert {:error, {:bad_spec, {:selinux_not_allowed, _}}} =
+               PodSpec.build(%{base | services: [svc]}, config())
+
+      svc = %{
+        name: "evil",
+        image: "docker.io/library/postgres:16",
+        security_context: %{privileged: true}
+      }
+
+      assert {:error, {:bad_spec, {:unknown_service_field, _}}} =
+               PodSpec.build(%{base | services: [svc]}, config())
     end
   end
 
@@ -485,7 +558,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!(run_spec(%{"services" => [%{"preset" => "postgres"}]}))
 
       for v <- pod["spec"]["volumes"] do
-        assert Map.has_key?(v, "emptyDir") or v["configMap"] == %{"name" => "arbiter-ca"}, v["name"]
+        assert Map.has_key?(v, "emptyDir") or v["configMap"] == %{"name" => "arbiter-ca"},
+               v["name"]
       end
     end
 
@@ -513,7 +587,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
                "arbiter.dev/task" => "bd-1nfuq5"
              }
 
-      assert [%{"apiVersion" => "apps/v1", "kind" => "Deployment", "name" => "arbiter-controller", "uid" => uid}] =
+      assert [
+               %{
+                 "apiVersion" => "apps/v1",
+                 "kind" => "Deployment",
+                 "name" => "arbiter-controller",
+                 "uid" => uid
+               }
+             ] =
                meta["ownerReferences"]
 
       assert uid == config().owner_uid
@@ -522,7 +603,11 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     test "an unsafe name or label value is bad_spec" do
       base = run_spec()
 
-      for bad <- [%{base | name: "arb-UPPER"}, %{base | name: "arb-" <> String.duplicate("a", 60)}, %{base | name: "arb_x"}] do
+      for bad <- [
+            %{base | name: "arb-UPPER"},
+            %{base | name: "arb-" <> String.duplicate("a", 60)},
+            %{base | name: "arb_x"}
+          ] do
         assert {:error, {:bad_spec, {:bad_name, _}}} = PodSpec.build(bad, config())
       end
 
@@ -540,7 +625,15 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     test "an unknown mount kind is bad_spec" do
       base = run_spec()
 
-      for kind <- ["hostPath", "secret", "device", "objects_overlay", "bridge:proxy", nil, :worktree2] do
+      for kind <- [
+            "hostPath",
+            "secret",
+            "device",
+            "objects_overlay",
+            "bridge:proxy",
+            nil,
+            :worktree2
+          ] do
         bad = %{base | mounts: base.mounts ++ [%{kind: kind, path: "/x/y"}]}
         assert {:error, {:bad_spec, {:unknown_mount_kind, ^kind}}} = PodSpec.build(bad, config())
       end
@@ -550,7 +643,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       base = run_spec()
 
       bad = %{base | mounts: base.mounts ++ [%{kind: "tmp", path: "/x/y", host_path: "/etc"}]}
-      assert {:error, {:bad_spec, {:unknown_mount_field, :host_path}}} = PodSpec.build(bad, config())
+
+      assert {:error, {:bad_spec, {:unknown_mount_field, :host_path}}} =
+               PodSpec.build(bad, config())
     end
 
     test "the worktree mount is required" do
@@ -573,7 +668,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
 
     test "a tmp mount at another path is a subPath of the memory tmp volume" do
       base = run_spec()
-      pod = build!(%{base | mounts: base.mounts ++ [%{kind: "tmp", path: "/var/lib/arb/scratch"}]})
+
+      pod =
+        build!(%{base | mounts: base.mounts ++ [%{kind: "tmp", path: "/var/lib/arb/scratch"}]})
 
       assert mount_at(pod, "/var/lib/arb/scratch") ==
                %{"name" => "tmp", "mountPath" => "/var/lib/arb/scratch", "subPath" => "tmp-0"}
@@ -594,7 +691,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       paths = Enum.map(mounts(pod), & &1["mountPath"])
 
       for p <- paths, parent <- paths, parent != p, String.starts_with?(p, parent <> "/") do
-        assert Enum.find_index(paths, &(&1 == parent)) < Enum.find_index(paths, &(&1 == p)), "#{parent} before #{p}"
+        assert Enum.find_index(paths, &(&1 == parent)) < Enum.find_index(paths, &(&1 == p)),
+               "#{parent} before #{p}"
       end
     end
   end
@@ -653,8 +751,11 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     end
 
     test "init containers run seed, then services, then the snapshotter" do
-      pod = build!(run_spec(%{"services" => [%{"preset" => "postgres"}, %{"preset" => "s3"}]}),
-        %{service_image_allowlist: ["docker.io/pgsty/"]})
+      pod =
+        build!(
+          run_spec(%{"services" => [%{"preset" => "postgres"}, %{"preset" => "s3"}]}),
+          %{service_image_allowlist: ["docker.io/pgsty/"]}
+        )
 
       assert Enum.map(pod["spec"]["initContainers"], & &1["name"]) ==
                ["seed", "svc-postgres", "svc-s3", "snapshotter"]
@@ -671,7 +772,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     end
 
     test "a service is a native sidecar with a startupProbe from ready" do
-      pod = build!(run_spec(%{"services" => [%{"preset" => "postgres", "database" => "app_test"}]}))
+      pod =
+        build!(run_spec(%{"services" => [%{"preset" => "postgres", "database" => "app_test"}]}))
+
       svc = container(pod, "svc-postgres")
 
       assert svc["restartPolicy"] == "Always"
@@ -679,7 +782,19 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert svc["imagePullPolicy"] == "IfNotPresent"
 
       assert svc["startupProbe"] == %{
-               "exec" => %{"command" => ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres", "-d", "app_test"]},
+               "exec" => %{
+                 "command" => [
+                   "pg_isready",
+                   "-h",
+                   "127.0.0.1",
+                   "-p",
+                   "5432",
+                   "-U",
+                   "postgres",
+                   "-d",
+                   "app_test"
+                 ]
+               },
                "periodSeconds" => 1,
                "failureThreshold" => 120
              }
@@ -687,7 +802,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
 
     test "K1-A9: Postgres runs as uid 70 with the full hardening; the default uid applies elsewhere" do
       pod =
-        build!(run_spec(%{"services" => [%{"preset" => "postgres"}, %{"preset" => "s3"}]}),
+        build!(
+          run_spec(%{"services" => [%{"preset" => "postgres"}, %{"preset" => "s3"}]}),
           %{service_image_allowlist: ["docker.io/pgsty/"]}
         )
 
@@ -709,7 +825,10 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!(run_spec(%{"services" => [%{"preset" => "postgres"}]}))
       mounts = mounts(pod, "svc-postgres")
 
-      assert Enum.map(mounts, & &1["mountPath"]) == ["/var/lib/postgresql/data", "/var/run/postgresql"]
+      assert Enum.map(mounts, & &1["mountPath"]) == [
+               "/var/lib/postgresql/data",
+               "/var/run/postgresql"
+             ]
 
       for m <- mounts do
         vol = Enum.find(pod["spec"]["volumes"], &(&1["name"] == m["name"]))
@@ -722,13 +841,21 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       svc = container(pod, "svc-postgres")
 
       assert {"POSTGRES_PASSWORD", "postgres"} in env_pairs(svc)
-      assert svc["resources"] == %{"requests" => %{"cpu" => "100m", "memory" => "256Mi"}, "limits" => %{"memory" => "512Mi"}}
+
+      assert svc["resources"] == %{
+               "requests" => %{"cpu" => "100m", "memory" => "256Mi"},
+               "limits" => %{"memory" => "512Mi"}
+             }
     end
 
     test "an image outside docker.io/library/ and the registry needs an allowlist entry" do
       spec = run_spec(%{"services" => [%{"preset" => "s3"}]})
-      assert {:error, {:bad_spec, {:service_image_not_allowed, "docker.io/pgsty/silo"}}} = PodSpec.build(spec, config())
-      assert {:ok, _} = PodSpec.build(spec, config(%{service_image_allowlist: ["docker.io/pgsty/"]}))
+
+      assert {:error, {:bad_spec, {:service_image_not_allowed, "docker.io/pgsty/silo"}}} =
+               PodSpec.build(spec, config())
+
+      assert {:ok, _} =
+               PodSpec.build(spec, config(%{service_image_allowlist: ["docker.io/pgsty/"]}))
     end
 
     test "a service uid of 0 or out of range is bad_spec" do
@@ -736,7 +863,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
 
       for uid <- [0, -1, 65_536, "70"] do
         svc = %{name: "pg", image: "docker.io/library/postgres:16", uid: uid}
-        assert {:error, {:bad_spec, {:bad_service_uid, ^uid}}} = PodSpec.build(%{base | services: [svc]}, config())
+
+        assert {:error, {:bad_spec, {:bad_service_uid, ^uid}}} =
+                 PodSpec.build(%{base | services: [svc]}, config())
       end
     end
 
@@ -753,7 +882,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
         build!(nil, %{
           placement: %{
             node_selector: %{"kubernetes.io/hostname" => "mesanna"},
-            tolerations: [%{key: "dedicated", operator: "Equal", value: "arbiter", effect: "NoSchedule"}],
+            tolerations: [
+              %{key: "dedicated", operator: "Equal", value: "arbiter", effect: "NoSchedule"}
+            ],
             priority_class: "arbiter-worker",
             runtime_class: "gvisor"
           },
@@ -764,16 +895,35 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert spec["nodeSelector"] == %{"kubernetes.io/hostname" => "mesanna"}
       assert spec["runtimeClassName"] == "gvisor"
       assert spec["imagePullSecrets"] == [%{"name" => "gitlab-registry"}]
-      assert [%{"key" => "dedicated", "operator" => "Equal", "value" => "arbiter", "effect" => "NoSchedule"}] = spec["tolerations"]
+
+      assert [
+               %{
+                 "key" => "dedicated",
+                 "operator" => "Equal",
+                 "value" => "arbiter",
+                 "effect" => "NoSchedule"
+               }
+             ] = spec["tolerations"]
     end
 
     test "an empty runtime class and empty selectors emit no field" do
       spec = build!()["spec"]
-      for k <- ~w(runtimeClassName nodeSelector tolerations imagePullSecrets), do: refute(Map.has_key?(spec, k), k)
+
+      for k <- ~w(runtimeClassName nodeSelector tolerations imagePullSecrets),
+          do: refute(Map.has_key?(spec, k), k)
     end
 
     test "config is a closed schema: security fields are not settable, ever" do
-      for key <- [:security_context, :volumes, :service_account, :host_network, :image, :network, :se_linux_options, :host_path] do
+      for key <- [
+            :security_context,
+            :volumes,
+            :service_account,
+            :host_network,
+            :image,
+            :network,
+            :se_linux_options,
+            :host_path
+          ] do
         assert {:error, {:bad_config, {:unknown_key, ^key}}} =
                  PodSpec.build(run_spec(), Map.put(config(), key, "x")),
                inspect(key)
@@ -781,8 +931,19 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     end
 
     test "required context is checked" do
-      for key <- [:registry, :install_id, :node_id, :owner_uid, :bridge_addr, :gate_addr, :boot_nonce, :max_wall_s] do
-        assert {:error, {:bad_config, {:missing, ^key}}} = PodSpec.build(run_spec(), Map.delete(config(), key)), inspect(key)
+      for key <- [
+            :registry,
+            :install_id,
+            :node_id,
+            :owner_uid,
+            :bridge_addr,
+            :gate_addr,
+            :boot_nonce,
+            :max_wall_s
+          ] do
+        assert {:error, {:bad_config, {:missing, ^key}}} =
+                 PodSpec.build(run_spec(), Map.delete(config(), key)),
+               inspect(key)
       end
     end
 
@@ -790,12 +951,16 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert {:error, {:bad_config, {:bad_quantity, _}}} =
                PodSpec.build(run_spec(), config(%{worker: %{limits: %{memory: "lots"}}}))
 
-      assert {:error, {:bad_config, {:bad_value, :max_wall_s}}} = PodSpec.build(run_spec(), config(%{max_wall_s: 0}))
+      assert {:error, {:bad_config, {:bad_value, :max_wall_s}}} =
+               PodSpec.build(run_spec(), config(%{max_wall_s: 0}))
     end
 
     test "a boot nonce or bridge address that is not what the controller mints is bad_config" do
-      assert {:error, {:bad_config, {:bad_value, :boot_nonce}}} = PodSpec.build(run_spec(), config(%{boot_nonce: ""}))
-      assert {:error, {:bad_config, {:bad_value, :bridge_addr}}} = PodSpec.build(run_spec(), config(%{bridge_addr: "evil host"}))
+      assert {:error, {:bad_config, {:bad_value, :boot_nonce}}} =
+               PodSpec.build(run_spec(), config(%{boot_nonce: ""}))
+
+      assert {:error, {:bad_config, {:bad_value, :bridge_addr}}} =
+               PodSpec.build(run_spec(), config(%{bridge_addr: "evil host"}))
     end
   end
 

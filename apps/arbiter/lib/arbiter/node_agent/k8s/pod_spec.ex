@@ -103,7 +103,17 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   @guards ~w(config hooks commondir objects/info/alternates)
 
   # Paths the pod owns, and the container-side roots RunSpec already forbids.
-  @reserved ["/run/arb", "/etc/arb", "/arb", "/opt/arbiter", "/proc", "/sys", "/dev", "/etc", "/run/arbiter"]
+  @reserved [
+    "/run/arb",
+    "/etc/arb",
+    "/arb",
+    "/opt/arbiter",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/etc",
+    "/run/arbiter"
+  ]
   @reserved_env ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_BRIDGES ARB_GATE_ADDR ARB_GATE_TIMEOUT_S ARB_SNAPSHOT_INTERVAL_S ARB_RUN ARB_WORKTREE)
   @preset_uids %{"postgres" => 70}
   # Fields whose *contents* are data (a prompt may discuss `spc_t`); their keys are still not scanned.
@@ -336,7 +346,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   # The image's own CLI directory is not something a mount can land on.
   defp reserved("cli", mount), do: {:ok, mount}
-  defp reserved(_kind, %{path: path} = mount), do: if(reserved?(path), do: bad_spec({:reserved_path, path}), else: {:ok, mount})
+
+  defp reserved(_kind, %{path: path} = mount),
+    do: if(reserved?(path), do: bad_spec({:reserved_path, path}), else: {:ok, mount})
 
   defp check_mounts(mounts) do
     worktrees = for %{kind: "worktree"} = m <- mounts, do: m.path
@@ -355,12 +367,17 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp one(_many, kind), do: bad_spec({:duplicate_mount, kind})
 
   defp at_most_one(mounts, kind) do
-    if Enum.count(mounts, &(&1.kind == kind)) <= 1, do: :ok, else: bad_spec({:duplicate_mount, kind})
+    if Enum.count(mounts, &(&1.kind == kind)) <= 1,
+      do: :ok,
+      else: bad_spec({:duplicate_mount, kind})
   end
 
   # Nothing else may be mounted at or below `<worktree>/.git`: the builder owns that tree.
   defp clear_of_git(mounts, wt) do
-    case Enum.find(mounts, &(&1.kind != "worktree" and &1.kind != "cli" and under?(&1.path, wt <> "/.git"))) do
+    case Enum.find(
+           mounts,
+           &(&1.kind != "worktree" and &1.kind != "cli" and under?(&1.path, wt <> "/.git"))
+         ) do
       nil -> :ok
       %{path: path} -> bad_spec({:reserved_path, path})
     end
@@ -417,7 +434,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp env(env) when is_map(env) do
     Enum.reduce_while(env, {:ok, %{}}, fn {k, v}, {:ok, acc} ->
       cond do
-        not (is_binary(k) and Regex.match?(@env_re, k) and is_binary(v) and not String.contains?(v, "\0")) ->
+        not (is_binary(k) and Regex.match?(@env_re, k) and is_binary(v) and
+                 not String.contains?(v, "\0")) ->
           {:halt, bad_spec({:bad_env, k})}
 
         k in @reserved_env ->
@@ -445,21 +463,31 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp limits(_), do: bad_spec({:bad_value, :limits})
 
-  defp valid_limit?(:cpus, value), do: Regex.match?(@cpus_re, value) and match?({:ok, _}, Quantity.cpu(value, :podman))
+  defp valid_limit?(:cpus, value),
+    do: Regex.match?(@cpus_re, value) and match?({:ok, _}, Quantity.cpu(value, :podman))
+
   defp valid_limit?(_memory, value), do: Regex.match?(@memory_re, value)
 
   defp command([exe | _] = argv) when is_binary(exe) do
     cond do
-      not Enum.all?(argv, &(is_binary(&1) and not String.contains?(&1, "\0"))) -> bad_spec({:bad_value, :command})
-      argv |> Enum.map(&byte_size/1) |> Enum.sum() > @max_command_bytes -> bad_spec({:too_large, :command})
-      true -> {:ok, argv}
+      not Enum.all?(argv, &(is_binary(&1) and not String.contains?(&1, "\0"))) ->
+        bad_spec({:bad_value, :command})
+
+      argv |> Enum.map(&byte_size/1) |> Enum.sum() > @max_command_bytes ->
+        bad_spec({:too_large, :command})
+
+      true ->
+        {:ok, argv}
     end
   end
 
   defp command(_), do: bad_spec({:missing, "command"})
 
   defp interval(nil, cfg), do: {:ok, cfg.snapshot_interval_s}
-  defp interval(%{interval_ms: ms}, _cfg) when is_integer(ms) and ms >= 10_000, do: {:ok, div(ms, 1000)}
+
+  defp interval(%{interval_ms: ms}, _cfg) when is_integer(ms) and ms >= 10_000,
+    do: {:ok, div(ms, 1000)}
+
   defp interval(_, _cfg), do: bad_spec({:bad_value, "checkout.interval_s"})
 
   defp services([], _cfg), do: {:ok, []}
@@ -500,9 +528,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
       uid = Map.get(service, :uid) || Map.get(@preset_uids, service.name)
 
       cond do
-        uid == nil -> {:cont, {:ok, acc ++ [Map.put(service, :uid, nil)]}}
-        is_integer(uid) and uid in 1..65_535 -> {:cont, {:ok, acc ++ [Map.put(service, :uid, uid)]}}
-        true -> {:halt, bad_spec({:bad_service_uid, uid})}
+        uid == nil ->
+          {:cont, {:ok, acc ++ [Map.put(service, :uid, nil)]}}
+
+        is_integer(uid) and uid in 1..65_535 ->
+          {:cont, {:ok, acc ++ [Map.put(service, :uid, uid)]}}
+
+        true ->
+          {:halt, bad_spec({:bad_service_uid, uid})}
       end
     end)
   end
@@ -510,7 +543,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp service_images(services, cfg) do
     prefixes = ["docker.io/library/", cfg.registry <> "/" | cfg.service_image_allowlist]
 
-    case Enum.find(services, fn s -> not Enum.any?(prefixes, &String.starts_with?(s.image, &1)) end) do
+    case Enum.find(services, fn s ->
+           not Enum.any?(prefixes, &String.starts_with?(s.image, &1))
+         end) do
       nil -> :ok
       service -> bad_spec({:service_image_not_allowed, service.image})
     end
@@ -527,7 +562,12 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
         "namespace" => cfg.namespace,
         "labels" => run.labels,
         "ownerReferences" => [
-          %{"apiVersion" => "apps/v1", "kind" => "Deployment", "name" => @owner_name, "uid" => cfg.owner_uid}
+          %{
+            "apiVersion" => "apps/v1",
+            "kind" => "Deployment",
+            "name" => @owner_name,
+            "uid" => cfg.owner_uid
+          }
         ]
       },
       "spec" =>
@@ -554,7 +594,10 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
           "containers" => [worker(run, cfg)],
           "volumes" => volumes(run, cfg)
         }
-        |> put_unless_empty("imagePullSecrets", Enum.map(cfg.image_pull_secrets, &%{"name" => &1}))
+        |> put_unless_empty(
+          "imagePullSecrets",
+          Enum.map(cfg.image_pull_secrets, &%{"name" => &1})
+        )
         |> put_unless_empty("nodeSelector", cfg.placement["node_selector"])
         |> put_unless_empty("tolerations", cfg.placement["tolerations"])
         |> put_unless_empty("runtimeClassName", cfg.placement["runtime_class"])
@@ -597,8 +640,15 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
             "ARB_WORKTREE" => worktree(run),
             "HOME" => "/tmp"
           }
-          |> then(&if(path = mount_path(run, "home"), do: Map.put(&1, "ARB_HOME", path), else: &1))
-          |> then(&if(path = mount_path(run, "config_dir"), do: Map.put(&1, "ARB_CONFIG_DIR", path), else: &1))
+          |> then(
+            &if(path = mount_path(run, "home"), do: Map.put(&1, "ARB_HOME", path), else: &1)
+          )
+          |> then(
+            &if(path = mount_path(run, "config_dir"),
+              do: Map.put(&1, "ARB_CONFIG_DIR", path),
+              else: &1
+            )
+          )
           |> Map.put("ARB_WORK_ROOT", @seed_root)
         ),
       "securityContext" => hardening(),
@@ -702,22 +752,35 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
         %{"name" => "work", "mountPath" => wt <> "/.git", "subPath" => "wt/.git"}
       ] ++
         for guard <- @guards do
-          %{"name" => "work", "mountPath" => "#{wt}/.git/#{guard}", "subPath" => "wt/.git/#{guard}", "readOnly" => true}
+          %{
+            "name" => "work",
+            "mountPath" => "#{wt}/.git/#{guard}",
+            "subPath" => "wt/.git/#{guard}",
+            "readOnly" => true
+          }
         end
 
     dirs =
       for %{kind: kind, path: path} <- run.mounts, kind in ["home", "config_dir"] do
-        %{"name" => "work", "mountPath" => path, "subPath" => if(kind == "home", do: "home", else: "claude-config")}
+        %{
+          "name" => "work",
+          "mountPath" => path,
+          "subPath" => if(kind == "home", do: "home", else: "claude-config")
+        }
       end
 
     extra_tmp =
-      for {%{path: path}, i} <- run.mounts |> Enum.filter(&(&1.kind == "tmp" and &1.path != "/tmp")) |> Enum.with_index() do
+      for {%{path: path}, i} <-
+            run.mounts
+            |> Enum.filter(&(&1.kind == "tmp" and &1.path != "/tmp"))
+            |> Enum.with_index() do
         %{"name" => "tmp", "mountPath" => path, "subPath" => "tmp-#{i}"}
       end
 
     prompt =
       if prompts? do
-        for {%{path: path}, i} <- run.mounts |> Enum.filter(&(&1.kind == "prompt")) |> Enum.with_index() do
+        for {%{path: path}, i} <-
+              run.mounts |> Enum.filter(&(&1.kind == "prompt")) |> Enum.with_index() do
           %{"name" => "run", "mountPath" => path, "subPath" => "prompt-#{i}", "readOnly" => true}
         end
       else
@@ -741,7 +804,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     limits = cfg.worker["limits"]
     requests = cfg.worker["requests"]
 
-    memory = min_quantity(limits["memory"], run.limits[:memory], &Quantity.memory/2, &Quantity.format_memory/1)
+    memory =
+      min_quantity(
+        limits["memory"],
+        run.limits[:memory],
+        &Quantity.memory/2,
+        &Quantity.format_memory/1
+      )
+
     cpu = min_quantity(limits["cpu"], run.limits[:cpus], &Quantity.cpu/2, &Quantity.format_cpu/1)
 
     limits = limits |> put_unless_nil("memory", memory) |> put_unless_nil("cpu", cpu)
@@ -805,9 +875,15 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     # K1-A9: a preset's `command` is what podman appends to the image's entrypoint,
     # so it is Kubernetes `args`; `command:` would replace the entrypoint.
     |> put_unless_empty("args", escape(service.command))
-    |> put_unless_empty("env", Enum.map(service.env, fn {k, v} -> %{"name" => k, "value" => escape(v)} end))
+    |> put_unless_empty(
+      "env",
+      Enum.map(service.env, fn {k, v} -> %{"name" => k, "value" => escape(v)} end)
+    )
     |> put_unless_empty("startupProbe", startup_probe(service.ready))
-    |> put_unless_empty("volumeMounts", Enum.map(mounts, fn {vol, path} -> %{"name" => vol, "mountPath" => path} end))
+    |> put_unless_empty(
+      "volumeMounts",
+      Enum.map(mounts, fn {vol, path} -> %{"name" => vol, "mountPath" => path} end)
+    )
   end
 
   defp startup_probe(nil), do: nil
@@ -834,13 +910,19 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp volumes(run, cfg) do
     [
       %{"name" => "work", "emptyDir" => %{"sizeLimit" => cfg.worker["work_size_limit"]}},
-      %{"name" => "tmp", "emptyDir" => %{"medium" => "Memory", "sizeLimit" => cfg.worker["tmp_size_limit"]}},
+      %{
+        "name" => "tmp",
+        "emptyDir" => %{"medium" => "Memory", "sizeLimit" => cfg.worker["tmp_size_limit"]}
+      },
       %{"name" => "run", "emptyDir" => %{"medium" => "Memory", "sizeLimit" => @run_size}},
       %{"name" => "ca", "configMap" => %{"name" => @ca_configmap}}
     ] ++
       for service <- run.services,
           {{volume, _path}, _i} <- Enum.with_index(service_mounts(service)) do
-        %{"name" => volume, "emptyDir" => %{"medium" => "Memory", "sizeLimit" => @service_tmpfs_size}}
+        %{
+          "name" => volume,
+          "emptyDir" => %{"medium" => "Memory", "sizeLimit" => @service_tmpfs_size}
+        }
       end
   end
 
