@@ -393,6 +393,16 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
 
   defp lines(events), do: for({:line, line} <- events, do: line)
 
+  # A Worker's output lines (its `worker:<task>` topic), in order, up to and including `target`.
+  defp lines_until(task_id, target, acc \\ []) do
+    receive do
+      {:worker_output, ^task_id, ^target} -> Enum.reverse([target | acc])
+      {:worker_output, ^task_id, line} -> lines_until(task_id, target, [line | acc])
+    after
+      60_000 -> flunk("never saw #{target}; got #{inspect(Enum.reverse(acc))}")
+    end
+  end
+
   defp container_exists?(ctx, name) do
     match?(
       {_, 0},
@@ -1216,6 +1226,159 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
       assert Ash.get!(Run, id).state == :working
       refute container_exists?(ctx, "arb-#{id}")
       assert RealAgent.alive?(ctx.agent)
+    end
+
+    # bd-4p1vui (AC2; docs/design/remote-workers.md §10.4.3, §10.4.11): the same run carries
+    # on on the node after the primary restarts. A real Worker places it through the
+    # production spawn (`ClaudeSession.start/1`, a real egress run), the application stops
+    # the Worker, the primary restarts, and `Recovery.await/1` adopts the run with a new
+    # Worker whose spawn asks the real agent to hand the real container over.
+    test "a primary restart with a live run: a new Worker adopts it and the same run carries on on the node",
+         ctx do
+      alias Arbiter.Nodes.Adoption
+      alias Arbiter.Worker
+      alias Arbiter.Worker.ClaudeSession
+
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true
+          ],
+          do: put_env_restoring(:arbiter, key, value)
+
+      git!(ctx.repo, ["config", "arbiter.mainRepo", ctx.repo])
+      git!(ctx.repo, ["config", "arbiter.branch", @branch])
+      cli = Path.join(ctx.root, "cli-stub")
+      File.write!(cli, "#!/bin/sh\nexit 0\n")
+      File.chmod!(cli, 0o755)
+      task_id = ctx.task.id
+
+      # `split-` is half a line when the primary goes away; the rest comes after the
+      # adoption, and a request through the `arb` bridge then has to reach the new egress run
+      script = """
+      echo up
+      printf 'split-'
+      while [ ! -e go ]; do sleep 0.2; done
+      echo line
+      printf 'GET /api/issues/#{task_id} HTTP/1.1\\r\\nhost: x\\r\\nconnection: close\\r\\n\\r\\n' \
+        | socat -t3 - TCP:127.0.0.1:#{ctx.api_port} | head -1 | tr -d '\\r' | sed 's/^/ARB: /'
+      echo after-adoption
+      while [ ! -e stop ]; do sleep 0.2; done
+      """
+
+      session_opts = fn ->
+        [
+          worktree_path: ctx.repo,
+          command: ["sh", "-c", script],
+          env: [{"CLAUDE_CODE_OAUTH_TOKEN", "not-a-real-token"}, {"ARB_WORKER_BEAD_ID", task_id}],
+          security:
+            SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
+          provider: "claude",
+          image: ctx.image,
+          claude_path: cli,
+          arb_path: cli,
+          egress: fn opts ->
+            JailRun.start(
+              Keyword.merge(opts,
+                dir: ctx.egress_dir,
+                arbiter_url: "http://127.0.0.1:#{ctx.api_port}/mcp",
+                allow_local_dial: true
+              )
+            )
+          end,
+          arb_token: Scope.mint_worker(ctx.task),
+          node: %{id: ctx.node.id, capacity: %{"mem_total" => 4 * 1024 * 1024 * 1024}}
+        ]
+      end
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+      {:ok, old} = Worker.start(task_id: task_id, repo: "arbiter")
+
+      assert {:ok, {:remote, _}} = ClaudeSession.start([owner: old] ++ session_opts.()),
+             "placement failed; agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      _ = Worker.advance(old, :claude)
+      assert_receive {:worker_output, ^task_id, "up"}, 60_000
+
+      %{run_id: id, meta: %{claude_spawn: %{remote: %{request: %{name: name} = old_request}}}} =
+        Worker.state(old)
+
+      container = inspect_container(ctx, name, "{{.Id}}")
+      shadow = Path.join([ctx.join.agent_env["ARB_NODE_HOME"], "runs", id, "worktree"])
+
+      # the application stops: the Worker supervisor shuts the Worker down
+      put_env_restoring(:arbiter, :worker_node_stopping_override, true)
+      :ok = DynamicSupervisor.terminate_child(Arbiter.Worker.Supervisor, old)
+      Application.put_env(:arbiter, :worker_node_stopping_override, false)
+
+      node_id = ctx.node.id
+      # left to the node, not written off, and how far its stdout was processed recorded
+      assert %{state: :working, outcome: nil, node_id: ^node_id, stdout_offset: offset} =
+               Ash.get!(Run, id)
+
+      assert is_integer(offset) and offset >= byte_size("up\n")
+
+      restart_primary!(ctx)
+
+      adopt_fun = fn %Run{} = run, opts ->
+        info = Adoption.adopt_info(run)
+        {:ok, w} = Worker.start(task_id: run.task_id, repo: "arbiter", meta: %{adopt: info})
+        adopt = Map.put(info, :timeout_ms, Keyword.get(opts, :adopt_timeout_ms))
+
+        case ClaudeSession.start([owner: w, adopt: adopt] ++ session_opts.()) do
+          {:ok, {:remote, _}} ->
+            _ = Worker.advance(w, :claude)
+            {:ok, %{worker_pid: w}}
+
+          {:error, reason} ->
+            :ok = Worker.abandon_adoption(w)
+            {:error, reason}
+        end
+      end
+
+      run_ctx = checkout_context(ctx)
+
+      assert {:ok, report} =
+               Recovery.await(
+                 primary?: true,
+                 node_timeout_ms: 90_000,
+                 total_timeout_ms: 120_000,
+                 context_fun: fn %Run{id: ^id} -> {:ok, run_ctx} end,
+                 adopt_fun: adopt_fun
+               ),
+             "recovery failed; agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      assert report == %{id => :adopted}, "agent log:\n" <> RealAgent.log_tail(ctx.agent)
+
+      # the same run id, owned by a new Worker; the same container, never stopped
+      adopter = Worker.whereis(task_id)
+      assert is_pid(adopter) and adopter != old
+      assert %{run_id: ^id} = Worker.state(adopter)
+      assert inspect_container(ctx, name, "{{.Id}}") == container
+      assert inspect_container(ctx, name, "{{.State.Running}}") == "true"
+
+      # no quiesce, no interrupted row, no local duplicate
+      refute RealAgent.log_tail(ctx.agent, 2_000) =~ "run #{id} quiesced"
+      assert Nodes.events(node_id: node_id, kind: :retained) == []
+      assert %{state: :working, outcome: nil, failure_reason: nil} = Ash.get!(Run, id)
+      assert [%Run{id: ^id}] = Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+
+      assert %{node_id: ^node_id} =
+               Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.registry_key == task_id))
+
+      # the adopter has its own egress run: new primary-side listeners, same names
+      %{meta: %{claude_spawn: %{remote: %{request: new_request}}}} = Worker.state(adopter)
+      refute new_request.network[:proxy_socket] == old_request.network[:proxy_socket]
+
+      # the run carries on: the half line comes out whole, the arb bridge answers through
+      # the new egress run, and what the old Worker had already taken is not repeated
+      File.write!(Path.join(shadow, "go"), "")
+      after_adoption = lines_until(task_id, "after-adoption")
+      assert hd(after_adoption) == "split-line", "got #{inspect(after_adoption)}"
+      assert "ARB: HTTP/1.1 200 OK" in after_adoption, "got #{inspect(after_adoption)}"
+      refute_received {:worker_output, ^task_id, "up"}
+
+      :ok = Worker.stop(adopter, :normal)
+      assert_eventually(fn -> not container_exists?(ctx, name) end)
     end
 
     test "a run the primary still holds survives a socket blip: the container is untouched and no output is lost",
