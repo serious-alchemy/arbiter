@@ -74,6 +74,67 @@ defmodule Arbiter.Worker.ImageTest do
   RUN echo default-branch-toolchain
   """
 
+  describe "plan/3: the base layer carries the k8s pod runtime (K7, bd-dzyclc)" do
+    setup do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      {:ok, plan} = Image.plan(repo, "main", opts())
+      %{base: plan.base.containerfile}
+    end
+
+    test "tini is installed and the arbiter user is uid/gid 10001 with a passwd entry", %{
+      base: base
+    } do
+      assert base =~ ~r/openssh-client procps socat sqlite3 tini/
+      assert base =~ "groupadd --gid 10001 arbiter"
+      assert base =~ ~r/useradd --uid 10001 --gid 10001 --no-log-init --create-home/
+      assert base =~ "--home-dir /home/arbiter"
+      # the base never switches user: a local podman worker keeps `--userns=keep-id`
+      refute base =~ ~r/^USER\b/m
+    end
+
+    test "seed and snapshotter are baked into /opt/arbiter/bin, byte for byte, root-owned", %{
+      base: base
+    } do
+      for {name, text} <- Arbiter.NodeAgent.K8s.PodScripts.bin() do
+        [_, b64] =
+          Regex.run(~r/printf '%s' '([^']*)' \| base64 -d > \/opt\/arbiter\/bin\/#{name}\b/, base)
+
+        assert Base.decode64!(String.replace(b64, "\\\n", "")) == text
+        assert base =~ "chmod 0755 /opt/arbiter/bin/#{name}"
+      end
+
+      # `PATH` still starts with the CLI dir, and nothing after it changes ownership
+      assert base =~ "ENV PATH=/opt/arbiter/cli:$PATH"
+      refute base =~ "chown"
+    end
+
+    test "the install RUN, run by a shell as the Containerfile parser hands it over, writes them",
+         %{base: base} do
+      [run] = Regex.run(~r/^RUN mkdir -p \/opt\/arbiter\/bin.*?(?=\nENV |\z)/ms, base)
+      command = run |> String.replace_prefix("RUN ", "") |> String.replace("\\\n", "")
+      # a plain path: the test's own tmp_dir name has parentheses in it
+      out = Path.join(System.tmp_dir!(), "k7-bin-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(out) end)
+      command = String.replace(command, "/opt/arbiter/bin", out)
+
+      assert {"", 0} = System.cmd("sh", ["-c", command], stderr_to_stdout: true)
+
+      for {name, text} <- Arbiter.NodeAgent.K8s.PodScripts.bin() do
+        assert File.read!(Path.join(out, name)) == text
+        assert File.stat!(Path.join(out, name)).mode |> Bitwise.band(0o777) == 0o755
+      end
+    end
+
+    test "the base is repo-independent: any repo gets the same base tag" do
+      assert Image.plan(repo_with(%{"a" => "1"}), "main", opts())
+             |> elem(1)
+             |> then(& &1.base.hash) ==
+               Image.plan(repo_with(%{"a" => "2"}), "main", opts())
+               |> elem(1)
+               |> then(& &1.base.hash)
+    end
+  end
+
   describe "plan/3: the Containerfile comes from the default branch only" do
     test "a Containerfile committed on a worker branch is never read" do
       repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})

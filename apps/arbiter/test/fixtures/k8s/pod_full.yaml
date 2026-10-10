@@ -28,6 +28,7 @@ spec:
         - |
           set -eu
           set -a
+          # shellcheck source=/dev/null
           . /run/arb/env
           set +a
           rm -f /run/arb/env

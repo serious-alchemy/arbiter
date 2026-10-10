@@ -55,6 +55,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @entry ~S"""
   set -eu
   set -a
+  # shellcheck source=/dev/null
   . /run/arb/env
   set +a
   rm -f /run/arb/env
@@ -77,7 +78,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   The `RUN` instruction that installs `bin/0` as `/opt/arbiter/bin/<name>` (mode
   0755, owned by root, so the uid-10001 worker cannot rewrite them).
 
-  The files travel inside the Containerfile text, base64 in 76-column pieces,
+  The files travel inside the Containerfile text, base64 in 76-column pieces joined by backslash-newline (which the Containerfile parser removes),
   because a base build runs from an empty context (a repo cannot `COPY` anything
   into the base) and the plan a node agent builds from carries only text. No
   heredoc syntax, so it builds on any buildah.
@@ -91,7 +92,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
           |> Base.encode64()
           |> String.graphemes()
           |> Enum.chunk_every(76)
-          |> Enum.map_join(" \\\n", &Enum.join/1)
+          |> Enum.map_join("\\\n", &Enum.join/1)
 
         "printf '%s' '#{b64}' | base64 -d > /opt/arbiter/bin/#{name}" <>
           " && chmod 0755 /opt/arbiter/bin/#{name}"
