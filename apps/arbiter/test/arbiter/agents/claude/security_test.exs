@@ -169,8 +169,7 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
 
       assert "Bash(gh run watch:*)" in rules
       assert "Bash(gh run view:*)" in rules
-      assert "Bash(gh pr checks --watch:*)" in rules
-      refute "Bash(gh pr checks:*)" in rules
+      assert "Bash(gh pr checks:*)" in rules
     end
 
     test "is carried by the --settings document even under bypass" do

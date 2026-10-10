@@ -176,10 +176,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
       review-thread follow-up protocol uses it. Workers only:
       `interactive_session_base/0` leaves it out, since an operator or
       coordinator session commenting on an issue is ordinary work.
-    * `:no_ci_watch`        — `gh run watch`/`gh run view` and `gh pr checks --watch`.
+    * `:no_ci_watch`        — `gh run watch`/`gh run view` and every `gh pr checks` form.
       Arbiter re-runs and watches CI after the push; a worker that polls it burns
-      turns and tokens on a result it is handed (bd-d0q7s4). `gh pr checks`
-      without `--watch` stays allowed: reviewers read it. Workers only.
+      turns and tokens on a result it is handed (bd-d0q7s4). The prefix rule covers
+      `gh pr checks 12 --watch` too. Reviewers get CI status in their briefing. Workers only.
 
   Enforced in **every** mode including `:bypass`: `Arbiter.Agents.Claude.Security`
   expands them into the deny document, and `--settings` carries that document

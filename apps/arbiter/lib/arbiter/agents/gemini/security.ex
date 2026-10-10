@@ -695,8 +695,7 @@ defmodule Arbiter.Agents.Gemini.Security do
     [
       "command(gh run watch)",
       "command(gh run view)",
-      "command(gh pr checks --watch)",
-      "command(gh pr checks -w)"
+      "command(gh pr checks)"
     ]
   end
 

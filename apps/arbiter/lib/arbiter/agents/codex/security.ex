@@ -144,8 +144,7 @@ defmodule Arbiter.Agents.Codex.Security do
   defp expand_category(:no_ci_watch) do
     [
       ["gh", "run", ["watch", "view"]],
-      ["gh", "pr", "checks", "--watch"],
-      ["gh", "pr", "checks", "-w"]
+      ["gh", "pr", "checks"]
     ]
   end
 

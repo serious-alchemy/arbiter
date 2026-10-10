@@ -247,8 +247,7 @@ defmodule Arbiter.Agents.Grok.Security do
       deny: [
         "Bash(gh run watch:*)",
         "Bash(gh run view:*)",
-        "Bash(gh pr checks --watch:*)",
-        "Bash(gh pr checks -w:*)"
+        "Bash(gh pr checks:*)"
       ]
     }
 

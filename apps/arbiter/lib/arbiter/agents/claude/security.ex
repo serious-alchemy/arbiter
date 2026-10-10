@@ -233,8 +233,7 @@ defmodule Arbiter.Agents.Claude.Security do
     [
       "Bash(gh run watch:*)",
       "Bash(gh run view:*)",
-      "Bash(gh pr checks --watch:*)",
-      "Bash(gh pr checks -w:*)"
+      "Bash(gh pr checks:*)"
     ]
   end
 

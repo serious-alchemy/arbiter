@@ -103,7 +103,7 @@ defaults. The categories:
 | `:no_async_wait`     | the `Monitor` / `ScheduleWakeup` tools (Claude; grok: its `monitor` and `scheduler_*` tools) |
 | `:no_public_upload`  | public upload/paste hosts                                  |
 | `:no_gh_publish`     | `gh gist create`/`edit`, `gh issue comment` (workers only) |
-| `:no_ci_watch`       | `gh run watch`/`view`, `gh pr checks --watch`/`-w` (workers only) |
+| `:no_ci_watch`       | `gh run watch`/`view`, every `gh pr checks` form (workers only) |
 
 ### Public upload and paste hosts (`:no_public_upload`, `:no_gh_publish`, bd-80talz)
 
