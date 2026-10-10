@@ -389,6 +389,147 @@ defmodule ArbiterWeb.RemoteRunTest do
       GenServer.stop(pid, :normal)
       _ = handle
     end
+
+    # bd-4ic681: a run placed on a node is assigned before its session opens, so the
+    # spec must already carry what the first open runs. For a session resume that is
+    # `--resume <sid>` and the terse continue prompt the Worker splices in, not the
+    # original work prompt.
+    test "a session resume's first open on the node runs --resume <sid>", ctx do
+      alias Arbiter.Agents.SecurityPolicy
+      alias Arbiter.Worker
+      alias Arbiter.Worker.ClaudeSession
+
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true
+          ] do
+        put_env_restoring(:arbiter, key, value)
+      end
+
+      sockets = Path.join(ctx.root, "sockets")
+      File.mkdir_p!(sockets)
+      proxy = Path.join(sockets, "proxy.sock")
+      bridge = Path.join(sockets, "arb.sock")
+      File.write!(proxy, "")
+      File.write!(bridge, "")
+
+      egress = fn _opts ->
+        {:ok, [proxy_socket: proxy, proxy_port: 38_011, bridges: [{38_012, bridge}]], "rtest"}
+      end
+
+      worktree = Path.join(ctx.root, "clone")
+      File.mkdir_p!(worktree)
+      sid = "0b5e7a4c-55d6-4c1f-9a51-6f3a1f2d9c01"
+
+      task_id = "bd-rw9resume-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Worker.start(task_id: task_id, repo: "arbiter", meta: %{resume_session_id: sid})
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      assert {:ok, {:remote, _}} =
+               ClaudeSession.start(
+                 owner: pid,
+                 worktree_path: worktree,
+                 command: [
+                   "sh",
+                   "-c",
+                   ~s(exec "$@" < /dev/null),
+                   "sh",
+                   "/opt/arbiter/cli/claude",
+                   "--print",
+                   "the original work prompt"
+                 ],
+                 env: [{"CLAUDE_CODE_OAUTH_TOKEN", @token}, {"ARB_WORKER_BEAD_ID", task_id}],
+                 security: policy,
+                 provider: "claude",
+                 image: "localhost/arbiter-dev/beam:abc123",
+                 claude_path: ctx.cli,
+                 arb_path: ctx.cli,
+                 egress: egress,
+                 arb_token: "arb-tok",
+                 node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
+               )
+
+      assert_receive {:worker_exited, ^task_id, 0}, 10_000
+
+      argv = ctx.stub |> Path.join("run.argv") |> File.read!() |> String.split("\n")
+      assert ["--resume", ^sid | _] = Enum.drop_while(argv, &(&1 != "--resume"))
+      refute "the original work prompt" in argv
+
+      # What is stashed for later opens is the pristine argv (they splice their own).
+      assert %{claude_spawn: %{argv: stashed}} = Worker.state(pid).meta
+      refute "--resume" in stashed
+
+      GenServer.stop(pid, :normal)
+    end
+
+    # An owner that cannot say what its first open runs is a placement failure, not a
+    # fresh agent started on the pristine argv where a session was to be continued.
+    test "an owner that cannot give the first open's args places nothing", ctx do
+      alias Arbiter.Agents.SecurityPolicy
+      alias Arbiter.Worker.ClaudeSession
+
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true
+          ] do
+        put_env_restoring(:arbiter, key, value)
+      end
+
+      sockets = Path.join(ctx.root, "sockets")
+      File.mkdir_p!(sockets)
+      proxy = Path.join(sockets, "proxy.sock")
+      File.write!(proxy, "")
+
+      egress = fn _opts ->
+        {:ok, [proxy_socket: proxy, proxy_port: 38_031, bridges: []], "rtest"}
+      end
+
+      worktree = Path.join(ctx.root, "clone")
+      File.mkdir_p!(worktree)
+
+      # Answers what `start/1` asks of a Worker before placing, and dies on the rest.
+      owner =
+        spawn(fn ->
+          receive_loop = fn loop ->
+            receive do
+              {:"$gen_call", from, :snapshot} ->
+                GenServer.reply(from, %{task_id: "bd-noowner", run_id: "r-noowner"})
+                loop.(loop)
+
+              {:"$gen_call", _from, {:first_spawn_args, _}} ->
+                exit(:gone)
+            end
+          end
+
+          receive_loop.(receive_loop)
+        end)
+
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      assert {:error, {:remote_placement_failed, {:owner_unreachable, _}}} =
+               ClaudeSession.start(
+                 owner: owner,
+                 worktree_path: worktree,
+                 command: ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", "/opt/arbiter/cli/claude"],
+                 env: [{"CLAUDE_CODE_OAUTH_TOKEN", @token}],
+                 security: policy,
+                 provider: "claude",
+                 image: "localhost/arbiter-dev/beam:abc123",
+                 claude_path: ctx.cli,
+                 arb_path: ctx.cli,
+                 egress: egress,
+                 node: %{id: ctx.node.id, capacity: %{}}
+               )
+
+      refute File.exists?(Path.join(ctx.stub, "run.argv"))
+    end
   end
 
   defp assert_eventually(fun, tries \\ 100) do

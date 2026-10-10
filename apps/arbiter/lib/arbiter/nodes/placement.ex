@@ -9,9 +9,15 @@ defmodule Arbiter.Nodes.Placement do
 
   `eligible/1` is pure and runs before any node is looked at. Only a
   **podman-backed Claude run** with a private clone is ever a candidate for a
-  node (bd-aowisc §5): the implementer, a merge-queue fix or conflict pass, a
-  ReviewGate fix round, and the two reviewers, a ReviewGate reviewer and a
-  `review: true` dispatch (bd-7ays3v, bd-cgdhlu, bd-bg87oz). A reviewer reads the
+  node (bd-aowisc §5): the implementer and a resume of it, a merge-queue fix or
+  conflict pass, a ReviewGate fix round, and the two reviewers, a ReviewGate
+  reviewer and a `review: true` dispatch (bd-7ays3v, bd-cgdhlu, bd-bg87oz,
+  bd-4ic681). A resume (briefing or session, manual or the Reconciler's and
+  `Arbiter.Nodes.LostResume`'s automatic one) is a fresh spawn of the
+  implementer: the node is seeded from the home clone, uncommitted work included
+  (`Arbiter.Nodes.Checkout.seed_bundle/2`), and a session resume also gets the
+  prior session's transcript, redacted, at the same cwd slug
+  (`Arbiter.Worker.ContainerSpawn.remote_spec/3`). A reviewer reads the
   head it is handed and writes nothing back but its verdict and transcript, so
   its checkout is a read-only clone seeded through the bundle path and never
   collected. A fix round and a fix or conflict pass write commits: the node is
@@ -22,8 +28,8 @@ defmodule Arbiter.Nodes.Placement do
   from. Everything else stays on the primary, and `Arbiter.Nodes.LocalCapacity`
   is the cap that governs it:
 
-    * the spawn kinds bound to the primary (`:follow_up`: resumes and
-      re-dispatches of work already under way);
+    * the spawn kind bound to the primary (`:follow_up`: a re-dispatch of a
+      ticket already under way);
     * every non-Claude provider (`:non_claude_provider`; the podman backend is
       wired for Claude only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
@@ -103,8 +109,10 @@ defmodule Arbiter.Nodes.Placement do
   # checkout is a read-only private clone like a ReviewGate reviewer's.
   # `:review_fix_round` (bd-bg87oz) is a ReviewGate implementer pass: it commits
   # in the author's private clone, which is seeded to the node like any other.
+  # `:resume` (bd-4ic681) re-spawns the implementer on its preserved home clone.
   @remote_kinds [
     :implementer,
+    :resume,
     :review,
     :reviewer,
     :fix_pass,

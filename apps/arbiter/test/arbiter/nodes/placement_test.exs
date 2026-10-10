@@ -75,10 +75,24 @@ defmodule Arbiter.Nodes.PlacementTest do
       end
     end
 
+    # bd-4ic681: a resume (briefing or session; `arb worker resume`, the Reconciler's
+    # boot sweep, `LostResume`) is a fresh spawn of the ticket's implementer, seeded
+    # from its home clone like the first one.
+    test "so is a briefing or session resume, and the automatic resume paths" do
+      assert Placement.eligible(%{@eligible | kind: :resume}) == :ok
+
+      assert {:local_only, :not_podman} =
+               Placement.eligible(%{@eligible | kind: :resume, layout: :worktree})
+
+      assert {:local_only, :non_claude_provider} =
+               Placement.eligible(%{@eligible | kind: :resume, provider: :codex})
+
+      assert {:local_only, :placement_local_only} =
+               Placement.eligible(%{@eligible | kind: :resume, mode: :local_only})
+    end
+
     test "every other spawn kind stays local" do
-      for kind <- [:redispatch, :resume] do
-        assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: kind})
-      end
+      assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: :redispatch})
     end
 
     test "a non-Claude provider stays local" do

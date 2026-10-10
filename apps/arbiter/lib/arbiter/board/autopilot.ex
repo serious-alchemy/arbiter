@@ -84,8 +84,10 @@ defmodule Arbiter.Board.Autopilot do
   A resume can also be deferred for the *primary's own* worker cap
   (`held_for: :local_capacity`, `Arbiter.Nodes.LocalCapacity`, bd-b2iigy): a
   restart's resume sweep brings back at most the cap's worth and queues the
-  rest here. Those wait on local room instead of a board slot (their ticket is
-  already In progress), replay highest ticket priority first, and show as
+  rest here. Those wait on room where they would run instead of a board slot
+  (their ticket is already In progress): the primary's cap, or a node with a
+  free slot for a resume placement may send there (`Dispatch.resume_room?/2`,
+  bd-4ic681). They replay highest ticket priority first, and show as
   `held: local capacity` in `status/2` (`held_local_capacity`), the board and
   `arb scheduler status`.
 
@@ -354,6 +356,10 @@ defmodule Arbiter.Board.Autopilot do
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
+    * `:local_room` — seam for tests; `(task_id)` or `(task_id, opts)`, whether
+      a resume deferred `held_for: :local_capacity` could start now. Defaults to
+      `Dispatch.resume_room?/2` with the resume's own options: a node with room,
+      or the primary's cap (bd-b2iigy, bd-4ic681).
     * `:registry_settled?` — seam for tests; a 0-arity function answering
       whether the worker registry is complete enough to plan against. Defaults
       to `ResumeGate.open?/0 and not Drain.dispatch_pending?/0`, both of which
@@ -570,7 +576,7 @@ defmodule Arbiter.Board.Autopilot do
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
       resume: Keyword.get(opts, :resume, &default_resume/3),
-      local_room: Keyword.get(opts, :local_room, &default_local_room?/1),
+      local_room: Keyword.get(opts, :local_room, &default_local_room?/2),
       priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
@@ -983,7 +989,7 @@ defmodule Arbiter.Board.Autopilot do
 
   defp next_local_resume(state, queue) do
     queue
-    |> Enum.filter(&(&1.wait == :local_capacity and state.local_room.(&1.task_id)))
+    |> Enum.filter(&(&1.wait == :local_capacity and local_room?(state, &1)))
     |> Enum.with_index()
     |> Enum.min_by(fn {entry, index} -> {state.priority.(entry.task_id), index} end, fn -> nil end)
     |> case do
@@ -995,10 +1001,20 @@ defmodule Arbiter.Board.Autopilot do
   defp local_held_ids(%{deferred_resumes: queue}),
     do: for(%{wait: :local_capacity, task_id: id} <- queue, do: id)
 
-  # Whether the primary has room for this ticket's resume right now
-  # (`LocalCapacity.check/3` reserves nothing; `Dispatch` admits for real).
-  defp default_local_room?(task_id) do
-    Arbiter.Nodes.LocalCapacity.check(task_id, :resume, []) == :ok
+  # A test's 1-arity seam answers by ticket; the default reads the resume's own
+  # options too.
+  defp local_room?(%{local_room: room}, entry) when is_function(room, 2),
+    do: room.(entry.task_id, entry.opts)
+
+  defp local_room?(%{local_room: room}, entry), do: room.(entry.task_id)
+
+  # Whether this ticket's resume could start right now (reserves nothing;
+  # `Dispatch` admits for real). bd-4ic681: wherever placement would put it — a
+  # node with room, or the primary with room under its own cap
+  # (`Dispatch.resume_room?/2`), so a resume a node can take is not left waiting
+  # on a primary whose cap may be 0.
+  defp default_local_room?(task_id, opts) do
+    Arbiter.Worker.Dispatch.resume_room?(task_id, opts)
   rescue
     _ -> true
   end

@@ -281,7 +281,10 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
      bundles the shadow clone and the transcripts, and retains them under
      `~/.arbiter-node/runs/<run>/retained/`), the primary pulls that work through the
      quarantine into the home clone, and only then does the normal reconcile resume the
-     run from it.
+     run from it. The resume is placed like a dispatch (bd-4ic681): under
+     `prefer_remote` or `remote_only` it may run on a node, seeded with the collected
+     work, uncommitted files included, and a session resume continues its transcript
+     there.
 
    A run is adopted or collected, never both. An adoption that fails at any step leaves
    the run running and uncancelled for the collect. An adoption gets at most half of
@@ -306,7 +309,13 @@ What good looks like:
   id as before the restart; the node shows no `retained` event for it; and its output
   goes on.
 * A collected run: the run's history shows the resume, and the commits made before the
-  restart are present.
+  restart are present. `arb worker show <task>` names the node the resume was placed on,
+  if any.
+* `arb worker resume <task>` asked while a node still has the ticket's run (the first
+  minute or so after a restart) answers 409 `held — run <run> of <task> is still on node
+  <name> (held); it is adopted or collected first`. Nothing is stopped; once the run is
+  collected the resume can be asked again. If the run was adopted, a resume is refused
+  because the ticket's Worker is live.
 
 ## 6. Verifying an install: the `:node_agent` suite
 

@@ -13,6 +13,10 @@ defmodule Arbiter.Worker.SessionHistory do
   of the prior config dir (credentials, other sessions) is touched.
   `Arbiter.Worker.Dispatch` uses `available?/1` to fall back to a briefing resume
   when the history is gone (pruned, never archived).
+
+  A resume placed on a node (bd-4ic681) gets `seed_redacted/4` instead: the same
+  one file, with every known secret and credential-shaped token taken out, since
+  that copy leaves the primary (`Arbiter.Worker.ContainerSpawn.remote_spec/3`).
   """
 
   require Logger
@@ -216,6 +220,97 @@ defmodule Arbiter.Worker.SessionHistory do
           {:error, _} = error -> error
         end
     end
+  end
+
+  @doc """
+  `seed/3` for a run on **another machine** (a node, bd-4ic681): the copy written
+  into `config_dir/projects/<slug of cwd>/<session_id>.jsonl` is redacted
+  (`redact_transcript/2` with `secret_values`), because unlike a local seed it
+  leaves the primary. A copy already there (an earlier seed of the same run, or
+  that run's own upload from its node) is used as it is.
+
+  `{:ok, %{path, bytes, sha256}}`, `path` relative to `config_dir`;
+  `{:error, :not_found}` when no source holds the session, `{:error,
+  :bad_session_id}` for an id that is not a plain token.
+  """
+  @spec seed_redacted(String.t(), String.t(), String.t(), [String.t() | nil]) ::
+          {:ok, %{path: String.t(), bytes: non_neg_integer(), sha256: String.t()}}
+          | {:error, term()}
+  def seed_redacted(config_dir, cwd, session_id, secret_values) do
+    rel = Path.join(["projects", ClaudeSessionFile.project_slug(cwd), session_id <> ".jsonl"])
+    dest = Path.join(config_dir, rel)
+
+    with :ok <- plain_session_id(session_id),
+         {:ok, bytes} <- seeded_copy(dest, session_id, secret_values) do
+      {:ok,
+       %{
+         path: rel,
+         bytes: byte_size(bytes),
+         sha256: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+       }}
+    end
+  end
+
+  defp plain_session_id(sid) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\z/, sid),
+      do: :ok,
+      else: {:error, :bad_session_id}
+  end
+
+  # Only a regular file counts as the copy already there: anything else at that path
+  # (a link above all) is never read, since what is read here goes to another machine.
+  defp seeded_copy(dest, session_id, secret_values) do
+    case File.lstat(dest) do
+      {:ok, %File.Stat{type: :regular}} ->
+        File.read(dest)
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:not_a_regular_file, type}}
+
+      {:error, :enoent} ->
+        with {:ok, source} <- find(session_id),
+             {:ok, raw} <- read(source),
+             bytes = redact_transcript(raw, secret_values),
+             :ok <- File.mkdir_p(Path.dirname(dest)),
+             :ok <- File.write(dest, bytes) do
+          _ = File.chmod(dest, 0o600)
+          Logger.info("SessionHistory: seeded session #{session_id}, redacted, into #{dest}")
+          {:ok, bytes}
+        else
+          :not_found -> {:error, :not_found}
+          {:error, _} = error -> error
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  A session JSONL with every secret taken out, for a copy that leaves the primary:
+  each of `secret_values` verbatim and JSON-escaped (as it appears inside a JSON
+  string) and then, line by line so a match cannot span two records, the
+  credential shapes `Arbiter.Redaction.redact_patterns/1` knows (a token nobody
+  registered). Each line stays one JSON record.
+  """
+  @spec redact_transcript(binary(), [String.t() | nil]) :: binary()
+  def redact_transcript(bytes, secret_values) when is_binary(bytes) do
+    values =
+      for value <- secret_values,
+          is_binary(value) and value != "",
+          form <- [value, json_escaped(value)],
+          uniq: true,
+          do: form
+
+    bytes
+    |> Redaction.redact(values)
+    |> String.split("\n")
+    |> Enum.map_join("\n", &Redaction.redact_patterns/1)
+  end
+
+  defp json_escaped(value) do
+    encoded = Jason.encode!(value)
+    binary_part(encoded, 1, byte_size(encoded) - 2)
   end
 
   @doc "The session id a claude argv resumes (`--resume <sid>`), if any."

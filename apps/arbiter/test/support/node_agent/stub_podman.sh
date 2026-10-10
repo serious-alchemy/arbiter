@@ -51,6 +51,25 @@ case "$sub" in
         prev="$a"
       done
     fi
+    # bd-4ic681: a fake agent. `agent_script` runs with the host side of the run's
+    # worktree (the shadow clone) and config dir mounts, found by the agent's own dir
+    # names, and the container's working directory (`-w`: the primary's worktree path).
+    if [ -e "$D/agent_script" ]; then
+      wt=""; cf=""; cwd=""; prev=""
+      for a in "$@"; do
+        case "$prev" in
+          -v)
+            h="${a%%:*}"
+            case "$h" in
+              */worktree) wt="$h" ;;
+              */config) cf="$h" ;;
+            esac ;;
+          -w) cwd="$a" ;;
+        esac
+        prev="$a"
+      done
+      sh "$D/agent_script" "$wt" "$cf" "$cwd" >> "$D/agent_script.out" 2>&1
+    fi
     mode=$(cat "$D/mode" 2>/dev/null || echo lines)
     echo $$ > "$D/run.pid"
     case "$mode" in

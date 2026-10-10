@@ -89,6 +89,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Recovery
   alias Arbiter.Nodes.Refusal
   alias Arbiter.Quota.SpendCap
   alias Arbiter.Reviews.Checkout
@@ -472,8 +473,15 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, worktree_path} <- resume_worktree(task, repo),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
+         {:ok, opts} <- ensure_collected(task, :resume, opts),
          {:ok, opts} <- resume_slot(task, :resume, opts),
-         {:ok, opts} <- resume_local_capacity(task, :resume, opts) do
+         {:ok, opts} <-
+           resume_capacity(
+             task,
+             :resume,
+             opts,
+             caller_override(opts) || Run.latest_authoring_provider(task_id)
+           ) do
       prior_run_id = latest_run_id(task_id)
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
@@ -732,8 +740,15 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
          {:ok, session_id, session_provider} <- latest_session_id(task_id),
+         {:ok, opts} <- ensure_collected(task, :resume_session, opts),
          {:ok, opts} <- resume_slot(task, :resume_session, opts),
-         {:ok, opts} <- resume_local_capacity(task, :resume_session, opts) do
+         {:ok, opts} <-
+           resume_capacity(
+             task,
+             :resume_session,
+             opts,
+             caller_override(opts) || session_provider
+           ) do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
@@ -848,35 +863,165 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # bd-b2iigy: may this resume run on the primary right now, given ITS cap
-  # (`Arbiter.Nodes.LocalCapacity`; the board's slot above is a different
-  # number)? A resume re-enters local work — a follow-up never goes to a node —
-  # so at the cap it waits. Asked at the same point as `resume_slot/3`, before
-  # the prior worker is stopped, so a hold leaves the task exactly as it was;
-  # `do_dispatch/2` admits for real at its own gate (and takes the slot).
+  # bd-b2iigy: may this resume run right now, given the cap of the place it would
+  # run (`Arbiter.Nodes.LocalCapacity` for the primary; the board's slot above is a
+  # different number)? Asked at the same point as `resume_slot/3`, before the prior
+  # worker is stopped, so a hold leaves the task exactly as it was; `do_dispatch/2`
+  # admits for real at its own gate (and takes the slot).
+  #
+  # bd-4ic681: a resume is a placement candidate (`Placement.eligible/1`), so the
+  # primary's cap is its gate only when it would stay there: a node with room lets
+  # it through (the real gate places it), and a `remote_only` workspace with no node
+  # free holds it. `provider` is the one the resume most likely runs on (the
+  # caller's, the session's, the last authoring run's); one resolved differently
+  # later is admitted at the real gate.
   #
   # Human origin: refused as the hold (`{:error, {:no_node_capacity, info}}`,
   # `force_slot` overrides, recorded). Automatic origin (the boot sweep, a
   # Watchdog or LostResume auto-resume, a MergeQueue revise): handed to the
   # scheduler as `held_for: :local_capacity`, which replays it, highest ticket
-  # priority first, the moment the primary has room. With no override of the
-  # cap nothing is read and nothing is held.
-  defp resume_local_capacity(%Issue{} = task, kind, opts) do
-    check_opts = [
-      force: Keyword.get(opts, :force_slot) == true,
-      actor: Keyword.get(opts, :slot_override_actor),
-      reason: {:local_only, :follow_up},
-      workspace_id: task.workspace_id
-    ]
-
-    case LocalCapacity.check(task.id, :resume, check_opts) do
-      :ok ->
+  # priority first, the moment `resume_room?/2` says it can start.
+  defp resume_capacity(%Issue{} = task, kind, opts, provider) do
+    case probe_resume_placement(task, opts, provider) do
+      :node_possible ->
         {:ok, opts}
 
-      {:error, {:no_node_capacity, info}} = held ->
-        if Keyword.get(opts, :resume_origin, :human) == :automatic,
-          do: defer_for_local_capacity(task, kind, opts, info),
-          else: held
+      {:local, reason} ->
+        task.id
+        |> LocalCapacity.check(:resume, resume_check_opts(task, opts, reason, provider))
+        |> hold_resume(task, kind, opts)
+
+      {:error, _} = held ->
+        hold_resume(held, task, kind, opts)
+    end
+  end
+
+  # bd-4ic681 (`docs/design/remote-workers.md` §10.5): a resume never starts while a
+  # node still has a live run of this ticket (`Nodes.Recovery.pending_collect/2`:
+  # running, told `hold` after a primary restart, retained, being recovered, or the
+  # boot sweep not done with it). Started now it would provision, here or on another
+  # node, from a home clone that lacks that run's work, and race its container. It
+  # waits for the collect: held for a human (409, nothing stopped), deferred for an
+  # automatic origin and replayed once `resume_room?/2` sees it collected.
+  #
+  # After a restart Recovery may instead hand a held run to a new Worker (bd-4p1vui,
+  # §10.4.3): the run carries on and the Worker refuses this resume as active work.
+  # Adoption never comes through here (`adopt/2` asks none of the resume's gates).
+  defp ensure_collected(%Issue{} = task, kind, opts) do
+    case Recovery.pending_collect(task.id) do
+      [] ->
+        {:ok, opts}
+
+      runs ->
+        hold_resume({:error, {:no_node_capacity, awaiting_collect(task, runs)}}, task, kind, opts)
+    end
+  end
+
+  defp awaiting_collect(%Issue{id: task_id}, [first | _] = runs) do
+    phrase =
+      "held — run #{first.run} of #{task_id} is still on node #{first.node} " <>
+        "(#{first.state}); #{settled_by(first.state)} first"
+
+    %{
+      task_id: task_id,
+      node: first.node,
+      kind: :resume,
+      reason: :awaiting_collect,
+      runs: runs,
+      phrase: phrase,
+      message:
+        phrase <>
+          ". The resume starts from the home clone once that run's work is in it " <>
+          "(Recovery collects it after a restart, unless a new Worker adopts the run and " <>
+          "carries it on); resume again once it is collected."
+    }
+  end
+
+  # A run the node quiesced, or is handing back, can only be collected; one it still
+  # runs or holds may be adopted instead.
+  defp settled_by(state) when state in [:retained, :recovering], do: "it is collected"
+  defp settled_by(_state), do: "it is adopted or collected"
+
+  defp hold_resume(:ok, _task, _kind, opts), do: {:ok, opts}
+
+  defp hold_resume({:error, {:no_node_capacity, info}} = held, task, kind, opts) do
+    if Keyword.get(opts, :resume_origin, :human) == :automatic,
+      do: defer_for_local_capacity(task, kind, opts, info),
+      else: held
+  end
+
+  defp resume_check_opts(%Issue{} = task, opts, reason, provider) do
+    [
+      force: Keyword.get(opts, :force_slot) == true,
+      actor: Keyword.get(opts, :slot_override_actor),
+      reason: reason,
+      provider: provider,
+      workspace_id: task.workspace_id
+    ]
+  end
+
+  # Where would placement put this resume right now? `:node_possible` (a node has
+  # room; the slot the probe took is given straight back), `{:local, reason}` or the
+  # `remote_only` hold. A probe that cannot decide says local: the primary's cap is
+  # then the gate, as it was for every resume before.
+  defp probe_resume_placement(%Issue{} = task, opts, provider) do
+    probe_opts =
+      opts
+      |> Keyword.put(:resume, true)
+      |> put_opt_if_present(:agent_type, provider)
+
+    request = node_request(task, load_workspace(task), probe_opts)
+
+    case Placement.place(request, Keyword.take(opts, [:nodes])) do
+      {:ok, {:node, _row}} ->
+        Placement.release(task.id)
+        :node_possible
+
+      {:ok, {:local, why}} ->
+        {:local, why}
+
+      {:error, _} = held ->
+        held
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Dispatch: resume placement probe crashed for #{task.id}: #{Exception.message(e)}"
+      )
+
+      {:local, nil}
+  end
+
+  @doc """
+  Whether a deferred automatic resume of `task_id` could start now (bd-4ic681): no
+  node still has a live run of it (`ensure_collected/3`), and a node has room for
+  it or it would run on the primary and the primary's cap
+  (`Arbiter.Nodes.LocalCapacity.check/3`) has room. Reserves nothing. The board
+  scheduler asks this before it replays a resume deferred `held_for:
+  :local_capacity` (`Arbiter.Board.Autopilot`), so a resume a node can take is not
+  left waiting on the primary (whose cap may be 0). `opts` are the resume's own
+  (the `:nodes` and `:security` seams). A ticket that cannot be read is room: the
+  replay decides.
+  """
+  @spec resume_room?(String.t(), keyword()) :: boolean()
+  def resume_room?(task_id, opts \\ []) when is_binary(task_id) do
+    with {:ok, task} <- load_task(task_id),
+         [] <- Recovery.pending_collect(task_id) do
+      provider = caller_override(opts) || Run.latest_authoring_provider(task_id)
+
+      case probe_resume_placement(task, opts, provider) do
+        :node_possible ->
+          true
+
+        {:local, reason} ->
+          LocalCapacity.check(task_id, :resume, reason: reason, provider: provider) == :ok
+
+        {:error, _} ->
+          false
+      end
+    else
+      [_ | _] -> false
+      _ -> true
     end
   end
 
@@ -885,15 +1030,16 @@ defmodule Arbiter.Worker.Dispatch do
 
     defer = Keyword.get_lazy(opts, :defer_resume, &configured_deferrer/0)
     replay_opts = opts |> Keyword.delete(:defer_resume) |> Keyword.put(:held_for, :local_capacity)
+    phrase = Map.get(info, :phrase) || Placement.refusal_message(info)
 
     case defer.(task_id, kind, replay_opts) do
       :ok ->
-        Logger.info("Dispatch: deferred #{kind} of #{task_id} — #{info.phrase}")
+        Logger.info("Dispatch: deferred #{kind} of #{task_id} — #{phrase}")
 
         {:deferred,
          info
-         |> Map.take([:task_id, :cap, :holders, :phrase])
-         |> Map.merge(%{deferred: true, held_for: :local_capacity})}
+         |> Map.take([:task_id, :cap, :holders])
+         |> Map.merge(%{phrase: phrase, deferred: true, held_for: :local_capacity})}
 
       other ->
         Logger.warning(
@@ -2590,10 +2736,15 @@ defmodule Arbiter.Worker.Dispatch do
   # snapshot of a remote run would replace the work tree on its way back. A
   # `local_only` workspace is never placed, so nothing is read for it. A checkout
   # git cannot read counts as holding work — the safe answer is to keep it here.
+  #
+  # bd-4ic681: a resume's checkout holds uncommitted work by nature (its run was cut
+  # off mid-task), and its seed carries the work tree: `Nodes.Checkout.seed_bundle/2`
+  # snapshots it as the run's first checkpoint, which the node restores uncommitted
+  # and the ingest's hand-off treats as what the home clone held.
   defp local_work?(_task, _opts, :local_only), do: false
 
   defp local_work?(%Issue{} = task, opts, _mode) do
-    if no_private_clone?(task, opts) do
+    if no_private_clone?(task, opts) or resuming?(opts) do
       false
     else
       path = task |> BranchNamer.derive() |> Worktree.worktree_path()
@@ -4329,14 +4480,25 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # `:egress`, `:podman` and `:image` are the spawn's own injection points
   # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
-  # resume against a stand-in egress run and `podman` (bd-dh1gg1). `:adopt`
-  # (bd-4p1vui) tells the spawn the run to adopt instead of a container to start.
+  # resume against a stand-in egress run and `podman` (bd-dh1gg1); `:claude_path`
+  # and `:arb_path` name the CLI files a run placed on a node is handed (bd-4ic681).
+  # `:adopt` (bd-4p1vui) tells the spawn the run to adopt instead of a container to
+  # start.
   defp sandbox_session_opts(policy, workspace, opts),
     do:
       ContainerSpawn.session_opts(
         policy,
         workspace,
-        Keyword.take(opts, [:repo, :node, :egress, :podman, :image, :adopt])
+        Keyword.take(opts, [
+          :repo,
+          :node,
+          :egress,
+          :podman,
+          :image,
+          :claude_path,
+          :arb_path,
+          :adopt
+        ])
       )
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do

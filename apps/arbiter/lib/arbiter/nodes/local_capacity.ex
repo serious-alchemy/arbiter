@@ -44,9 +44,11 @@ defmodule Arbiter.Nodes.LocalCapacity do
   A held **automatic** resume is deferred, not failed: `Worker.Dispatch` hands
   it to `Arbiter.Board.Autopilot.defer_resume/4` marked `held_for:
   :local_capacity`, and the Autopilot replays it, highest ticket priority
-  first, the moment `check/3` says the primary has room — the board and `arb
-  scheduler status` list it as `held: local capacity`. A human resume is
-  refused with the hold (`--force` goes over; recorded).
+  first, the moment `Worker.Dispatch.resume_room?/2` says it can start (the
+  primary has room by `check/3`, or, since a resume became a placement
+  candidate in bd-4ic681, a node has) — the board and `arb scheduler status`
+  list it as `held: local capacity`. A human resume is refused with the hold
+  (`--force` goes over; recorded). A resume placed on a node is not counted here.
 
   Not counted, because they are not workers: preflight and usage probes,
   coordinator PTY sessions, external PR reviews and ReviewPatrol re-reviews.
