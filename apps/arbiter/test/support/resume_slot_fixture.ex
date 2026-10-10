@@ -99,7 +99,7 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   def admit!(ws, %Issue{} = task, opts \\ []) do
     id = task.id
     {:ok, %Issue{state: :active}} = Issue.start_work(task)
-    meta = if node_id = opts[:node_id], do: %{node_id: node_id}, else: %{}
+    meta = if node_id = opts[:node_id], do: %{placed_node_id: node_id}, else: %{}
     {:ok, pid} = Worker.start(task_id: id, repo: @repo, workspace_id: ws.id, meta: meta)
     :ok = Worker.advance(pid, :implement)
     on_exit(fn -> stop_quietly(id) end)
