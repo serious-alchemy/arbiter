@@ -289,6 +289,47 @@ defmodule ArbiterWeb.BoardCapacityStripLiveTest do
     end
   end
 
+  describe "the cap popup's budget lines" do
+    test "lists each pool, machine, repo and fair-share line, labelled shadow", %{conn: conn} do
+      mode!("shadow")
+
+      stub_view(
+        view("shadow", [claude_pool(), agy_pool()])
+        |> Map.put(:repos, [%{label: "vstim", cap: 2, used: 1}])
+        |> Map.put(:fair_share, [%{text: "fair share: default holds 3 of claude's 4"}])
+      )
+
+      lv = mount_board(conn)
+
+      assert has_element?(lv, "#board-slot-cap-budgets", "Shadow")
+
+      assert has_element?(
+               lv,
+               "#board-slot-cap-budgets [data-budget-pool]",
+               "claude:default: 3 of 3 seats"
+             )
+
+      assert has_element?(
+               lv,
+               "#board-slot-cap-budgets [data-budget-pool]",
+               "antigravity:default gemini: 0 of 0 seats"
+             )
+
+      assert has_element?(lv, "#board-slot-cap-budgets [data-budget-machine]", "local: 3 of 6")
+      assert has_element?(lv, "#board-slot-cap-budgets [data-budget-repo]", "repo vstim: 1 of 2")
+      assert has_element?(lv, "#board-slot-cap-budgets [data-budget-fair-share]", "fair share")
+    end
+
+    test "has no budget section when there is nothing to show", %{conn: conn} do
+      :ok = :meck.new(Arbiter.Board.CapacityView, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Board.CapacityView) end)
+      :meck.expect(Arbiter.Board.CapacityView, :status, fn _opts -> raise "boom" end)
+
+      lv = mount_board(conn)
+      refute has_element?(lv, "#board-slot-cap-budgets")
+    end
+  end
+
   describe "per-card layer reasons" do
     test "a Ready card the walk would start beside the first reads starting, labelled shadow", %{
       conn: conn,

@@ -159,7 +159,7 @@ defmodule ArbiterWeb.CapacityComponents do
       >
         binds
       </span>
-      <span :if={@window.status != "ok"}> —  {@window.status}</span>
+      <span :if={@window.status != "ok"}> —   {@window.status}</span>
       <span :if={@window.status == "ok"}>
         {num(@window.used)} used ({num(@window.used_now)} now), line {num(@window.line_now)} now and {num(
           @window.line_at_h
@@ -222,6 +222,40 @@ defmodule ArbiterWeb.CapacityComponents do
     do: "#{name}: #{live} running; no cap reported"
 
   # ---- a Ready card's layer --------------------------------------------------------
+
+  attr :budget, :map, required: true, doc: "`CapacityExplainer.budget/2`"
+
+  @doc """
+  The cap popup's section for the other layers (DC5): a line per provider pool
+  with its reason, per machine, per repo and per fair-share row, from
+  `CapacityExplainer.budget/2`. `Shadow` leads it until the budgets decide.
+  """
+  def budget_lines(assigns) do
+    ~H"""
+    <div id="board-slot-cap-budgets" class="flex flex-col gap-[4px]" data-mode={@budget.label}>
+      <p class="m-0 font-medium text-[var(--text-title)]">
+        Provider budgets
+        <span
+          :if={@budget.shadow?}
+          class="ml-1 text-[10px] uppercase tracking-[0.06em] text-[var(--text-label)]"
+        >
+          Shadow: today's gate and caps still decide
+        </span>
+      </p>
+      <ul class="m-0 p-0 list-none flex flex-col gap-[4px]">
+        <li :for={line <- @budget.pools} data-budget-pool data-state={line.state}>
+          <span class="text-[var(--text-primary)]">{line.text}</span>
+          <span class="block text-[10.5px] text-[var(--text-label)]">{line.reason}</span>
+        </li>
+        <li :for={line <- @budget.machines} data-budget-machine data-state={line.state}>
+          {line.text}
+        </li>
+        <li :for={line <- @budget.repos} data-budget-repo>{line.text}</li>
+        <li :for={line <- @budget.fair_share} data-budget-fair-share>{line.text}</li>
+      </ul>
+    </div>
+    """
+  end
 
   attr :id, :string, required: true
   attr :layer, :map, required: true, doc: "`CapacityExplainer`'s layer for the card"

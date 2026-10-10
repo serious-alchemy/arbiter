@@ -1082,7 +1082,7 @@ defmodule ArbiterWeb.BoardLive do
                   agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of
                 </span>
                 <span class="sm:hidden">{slots_used(@board)}/</span>
-                <.slot_cap board={@board} cap={@explain.cap} />
+                <.slot_cap board={@board} cap={@explain.cap} budget={@explain.budget} />
                 <span class="hidden sm:inline">· {@board.slots_free} slots free</span>
               </span>
               <CapacityComponents.capacity_strip
@@ -1749,6 +1749,11 @@ defmodule ArbiterWeb.BoardLive do
     doc: "`CapacityExplainer.cap/1`, or nil when it could not be built"
   )
 
+  attr(:budget, :map,
+    default: nil,
+    doc: "`CapacityExplainer.budget/2`: the pool, machine, repo and fair-share lines (DC5)"
+  )
+
   # The toolbar's cap figure. With the explanation it is a button that opens a
   # popup on hover, focus or tap; without it, just the number.
   defp slot_cap(%{cap: nil} = assigns) do
@@ -1802,6 +1807,7 @@ defmodule ArbiterWeb.BoardLive do
           </span>
         </li>
       </ul>
+      <CapacityComponents.budget_lines :if={@budget} budget={@budget} />
       <div id="board-slot-cap-users" class="flex flex-col gap-[4px]">
         <p class="m-0 font-medium text-[var(--text-title)]">Using slots now</p>
         <p :if={@cap.users == []} class="m-0">Nothing holds a slot.</p>
