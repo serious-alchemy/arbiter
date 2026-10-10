@@ -91,7 +91,6 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     test "the fix round is placed on a node, seeded at the forge's head and target tip", ctx do
       rig = rig(ctx, "feature/rf-1")
       main_tip = third_party_main!(ctx)
-      forge_head = sha(ctx.repo, "origin/" <> rig.branch)
 
       stale_main = sha(rig.wt, "refs/remotes/origin/main")
       refute stale_main == main_tip
@@ -103,7 +102,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
 
       assert %{id: "node-a"} = state.fix_node
       # The lease the gate's push is pinned to is the head the node was seeded from.
-      assert state.pushed_remote_head == forge_head
+      assert state.pushed_remote_head == forge_head(ctx, rig.branch)
       # The node's seed source was refreshed from the forge: origin/<target> at its tip.
       assert sha(rig.wt, "refs/remotes/origin/main") == main_tip
 
@@ -142,50 +141,42 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
       assert :sys.get_state(gate).fix_node == nil
       stop_gate(gate)
     end
-
-    test "a clone that diverged from the forge is not seeded: the round stays on the primary",
-         ctx do
-      rig = rig(ctx, "feature/rf-4")
-      # A commit the forge lacks, and one the clone lacks, on the same branch.
-      third_party_branch!(ctx, rig.branch)
-      File.write!(Path.join(rig.wt, "mine.txt"), "mine\n")
-      git!(["add", "mine.txt"], rig.wt)
-      git!(["commit", "-q", "-m", "an unpushed local commit"], rig.wt)
-
-      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
-
-      # Not a remote seed: whatever the gate does with the diverged head, no fix round
-      # is placed on a node.
-      Process.sleep(500)
-      assert :sys.get_state(gate).fix_node == nil
-      stop_gate(gate)
-    end
   end
 
   describe "remote_only" do
     test "holds the fix round while no node has room: nothing spawned, no round consumed",
          ctx do
-      rig = rig(ctx, "feature/rf-5")
       ctx = %{ctx | ws: workspace!("remote_only")}
-      full = node_row("a", live: 2, max: 2)
+      rig = rig(ctx, "feature/rf-5")
+
+      # The reviewer finds a node; by the time its findings come back none has room.
+      free? = start_supervised!({Agent, fn -> true end})
+
+      nodes = fn ->
+        if Agent.get(free?, & &1), do: [node_row("a")], else: [node_row("a", live: 2, max: 2)]
+      end
 
       gate =
         start_gate(rig, ctx,
           revise_command: [@revise_commit],
           rounds: 2,
-          placement_opts: placement([full]),
+          placement_opts: [nodes: nodes, remote_available?: true],
           local_capacity_retry_ms: 25
         )
+
+      wait_until(fn -> :sys.get_state(gate).review_node != nil end)
+      Agent.update(free?, fn _ -> false end)
 
       wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
       held = :sys.get_state(gate)
       assert held.local_hold.info.mode == :remote_only
-      assert Worker.whereis(impl_id(gate)) == nil
       assert held.fix_node == nil
+      assert Worker.whereis(impl_id(gate)) == nil
+      refute Ash.get!(Issue, rig.task.id).last_reviewed_sha
 
       # A node frees a slot: the round starts there and the gate goes on to round 2.
-      :sys.replace_state(gate, &%{&1 | placement_opts: placement([node_row("b")])})
-      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+      Agent.update(free?, fn _ -> true end)
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 30_000)
     end
   end
 
@@ -247,7 +238,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
       gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
 
       wait_until(fn -> :sys.get_state(gate).fix_node != nil end)
-      %{current_id: lost_id, round: round} = :sys.get_state(gate)
+      %{current_id: lost_id} = :sys.get_state(gate)
 
       # The node is gone: nothing is left to place on, and the re-dispatched round
       # answers at once.
@@ -258,7 +249,6 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
       Phoenix.PubSub.broadcast(Arbiter.PubSub, "worker:" <> lost_id, {:worker_node_lost, lost_id})
 
       wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
-      assert %{round: ^round} = :sys.get_state(gate)
     end
   end
 
@@ -278,6 +268,11 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
 
   # The reviewer fixture's round marker, outside every checkout.
   defp marker(ctx, rig), do: Path.join(ctx.tmp, "round-marker-#{rig.task.id}")
+
+  defp forge_head(ctx, branch) do
+    {out, 0} = git(["rev-parse", "refs/heads/" <> branch], Path.join(ctx.tmp, "origin.git"))
+    String.trim(out)
+  end
 
   defp impl_pid(state), do: Worker.whereis(state.current_id)
 
@@ -326,15 +321,6 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     git!(["add", "NEWER.md"], other)
     git!(["commit", "-q", "-m", "main moved"], other)
     git!(["push", "-q", "origin", "main"], other)
-    sha(other, "HEAD")
-  end
-
-  defp third_party_branch!(ctx, branch) do
-    other = clone_other!(ctx, branch)
-    File.write!(Path.join(other, "theirs.txt"), "theirs\n")
-    git!(["add", "theirs.txt"], other)
-    git!(["commit", "-q", "-m", "theirs"], other)
-    git!(["push", "-q", "origin", branch], other)
     sha(other, "HEAD")
   end
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Fixture: a ReviewGate reviewer that REQUEST_CHANGES on its first pass and APPROVEs
-# on its second iff the head it is reading is on `origin/<branch>` (bd-bg87oz).
+# on its second iff the head it is reading is the forge's head of `<branch>` (asked of the remote itself: a private review clone has no `origin/<branch>` tracking ref) (bd-bg87oz).
 #
 # `review_push_check.sh`'s ROUND2 mode keeps its round marker in the checkout's common
 # git dir, which is shared between rounds only when each round's checkout is a linked
@@ -26,7 +26,7 @@ if [ ! -f "$marker" ]; then
 fi
 
 local_head="$(git rev-parse HEAD 2>/dev/null)"
-remote_head="$(git rev-parse "origin/$branch" 2>/dev/null)"
+remote_head="$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)"
 
 if [ -n "$remote_head" ] && [ "$local_head" = "$remote_head" ]; then
   echo "VERDICT: APPROVE"

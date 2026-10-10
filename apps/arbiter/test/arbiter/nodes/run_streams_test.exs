@@ -263,6 +263,7 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert outcome |> Map.keys() |> Enum.sort() == [:cancelled?, :exit_code, :node_lost?, :oom?]
     end
   end
+
   describe "bd-bg87oz: checkout_failed" do
     test "an exit whose final checkout upload failed carries the flag in the outcome" do
       {t, _} = S.ready(table(), "r1")
