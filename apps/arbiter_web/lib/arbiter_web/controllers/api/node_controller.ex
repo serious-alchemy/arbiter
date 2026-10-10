@@ -11,7 +11,8 @@ defmodule ArbiterWeb.Api.NodeController do
       primary. The list also carries the `local` row, the `total` of
       `local + Σ remote caps` against the `ceiling` (`conductor.max_concurrent`),
       `warnings`, and the `nodes.public_url` with its `exposure`
-      (`private | public | unset`) for `arb server doctor`.
+      (`private | public | unset`) and the image `registry` status (K8: reachability,
+      published images, last error; never the password) for `arb server doctor`.
     * `GET /api/nodes/pairings`, `POST /api/nodes/pairings/:ref/{approve,deny}` —
       **operator**: the pending device-code pairing requests (code, hostname,
       source address) and the decision on one. `:ref` is the typed code or the
@@ -32,6 +33,7 @@ defmodule ArbiterWeb.Api.NodeController do
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
+  alias Arbiter.Worker.Image.Publisher
   alias ArbiterWeb.Api.NodeJSON
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -116,6 +118,7 @@ defmodule ArbiterWeb.Api.NodeController do
       warnings: overview.warnings,
       public_url: url,
       exposure: Overview.exposure(url),
+      registry: Publisher.status(),
       allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
     })
   end

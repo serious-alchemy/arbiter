@@ -105,6 +105,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -2319,7 +2320,7 @@ defmodule Arbiter.Worker.Dispatch do
       request = node_request(task, workspace, opts)
 
       case LocalCapacity.gate(request, node_gate_opts(opts)) do
-        {:ok, {:node, node}} -> {:ok, Keyword.put(opts, :node, node)}
+        {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
         {:ok, :local} -> {:ok, opts}
         {:error, _} = held -> held
       end
@@ -2328,6 +2329,40 @@ defmodule Arbiter.Worker.Dispatch do
     e ->
       Logger.warning("Dispatch: node placement crashed for #{task.id}: #{Exception.message(e)}")
       {:ok, opts}
+  end
+
+  # K8 (A2): a node that pulls its image from the registry needs it published
+  # first. Do that here, before the run is committed to the node, so a publish
+  # that times out or fails is a placement decision (`Publisher.fallback/2`)
+  # rather than a spawn failure: `prefer_remote` runs on the primary,
+  # `remote_only` is held. A node that builds its own image skips this.
+  defp image_gate(%Issue{} = task, workspace, request, node, opts) do
+    repo = Keyword.get(opts, :repo)
+    image_opts = [workspace: workspace, repo: repo] ++ Keyword.take(opts, [:image, :publish])
+
+    case ContainerSpawn.preflight_image(resolve_repo_path(task, repo), node, image_opts) do
+      :ok ->
+        {:ok, Keyword.put(opts, :node, node)}
+
+      {:error, reason} ->
+        Placement.release(task.id)
+        image_fallback(Publisher.fallback(request.mode, reason), request, opts)
+    end
+  end
+
+  defp image_fallback({:hold, reason}, request, _opts),
+    do: {:error, {:no_node_capacity, Placement.image_hold(request, reason)}}
+
+  defp image_fallback({:local, reason}, request, opts) do
+    Logger.warning(
+      "Dispatch: no registry image for #{request.task_id} (#{inspect(reason)}); running on the primary"
+    )
+
+    admit_opts =
+      node_gate_opts(opts) ++
+        [reason: :no_node, provider: request.provider, workspace_id: request.workspace_id]
+
+    with :ok <- LocalCapacity.admit(request.task_id, request.kind, admit_opts), do: {:ok, opts}
   end
 
   defp node_request(%Issue{} = task, workspace, opts) do
@@ -2362,7 +2397,7 @@ defmodule Arbiter.Worker.Dispatch do
     [
       force: Keyword.get(opts, :force_slot) == true,
       actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
-    ]
+    ] ++ Keyword.take(opts, [:nodes])
   end
 
   # Not admissions: a ticket already In progress (a re-dispatch or resume of

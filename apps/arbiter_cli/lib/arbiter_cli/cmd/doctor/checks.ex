@@ -1878,7 +1878,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp nodes_results(resp, nodes) do
     url = resp["public_url"]
 
-    if nodes == [] and is_nil(url) and "local_cap_zero" not in (resp["warnings"] || []) do
+    registry = registry_results(resp["registry"])
+
+    if nodes == [] and is_nil(url) and registry == [] and
+         "local_cap_zero" not in (resp["warnings"] || []) do
       [nodes_result("nodes", :na, "no remote nodes enrolled")]
     else
       [
@@ -1886,6 +1889,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         exposure_result(url, resp)
       ] ++
         Enum.map(nodes, &node_result/1) ++
+        registry ++
         [local_cap_result(resp)] ++
         capacity_result(resp, nodes)
     end
@@ -1918,6 +1922,63 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         )
     end
   end
+
+  # K8 (`docs/design/remote-workers.md` §11): the image registry the primary
+  # publishes to. No row at all while `nodes.registry` is unset. Every problem
+  # is a `[warn]` like the rest of the section: a registry outage costs a
+  # remote placement, never the deploy.
+  defp registry_results(%{"configured" => true} = reg) do
+    [registry_result(reg)] ++ List.wrap(registry_seed_result(reg))
+  end
+
+  defp registry_results(_), do: []
+
+  defp registry_result(reg) do
+    name = reg["registry"]
+
+    problems =
+      Enum.reject(
+        [
+          unless(reg["reachable"] == true,
+            do: "not reachable (GET /v2/: #{reg["reachable_detail"] || "no answer"})"
+          ),
+          if(reg["username"] && reg["password_set"] != true,
+            do: "username set but no password: pushes are anonymous"
+          ),
+          if(reg["last_error"], do: "last publish failed: #{reg["last_error"]}")
+        ],
+        &is_nil/1
+      )
+
+    if problems == [] do
+      nodes_result("nodes.registry", :ok, "#{name}#{published_summary(reg["published"])}")
+    else
+      nodes_result(
+        "nodes.registry",
+        :warn,
+        "#{name}: #{Enum.join(problems, "; ")}",
+        "Check nodes.registry, nodes.registry_username and nodes.registry_password " <>
+          "(`arb settings get nodes.registry`); registry nodes cannot get an image until a push works."
+      )
+    end
+  end
+
+  defp published_summary([_ | _] = published),
+    do: "; published " <> Enum.map_join(published, ", ", &(&1["kind"] || "image"))
+
+  defp published_summary(_), do: "; nothing published since boot"
+
+  defp registry_seed_result(%{"seed_excluded" => [_ | _] = excluded}) do
+    nodes_result(
+      "nodes.registry seed_paths",
+      :warn,
+      "excluded from the seed layer: #{Enum.join(excluded, ", ")}",
+      "Only deps and _build ship (K26): other seed_paths entries may be toolchain-bound and " <>
+        "are left out of cluster images until a seed_commands mechanism exists."
+    )
+  end
+
+  defp registry_seed_result(_), do: nil
 
   defp probe_reason({:status, status}), do: "HTTP #{status}"
   defp probe_reason(reason), do: inspect(reason)

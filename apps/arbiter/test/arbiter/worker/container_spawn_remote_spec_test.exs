@@ -49,6 +49,23 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     assert spec["install"] == InstallId.get()
   end
 
+  test "a registry request puts the digest-pinned ref in the spec image (A2)", %{request: request} do
+    ref = "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("b", 64)
+    request = put_in(request.image, %{tag: "localhost/x:1", plan: nil, ref: ref})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil, "ref" => ref}
+  end
+
+  test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil}
+  end
+
   describe "worktree files and host paths (bd-8y8ztm)" do
     alias Arbiter.Agents.{Claude, SecurityPolicy}
     alias Arbiter.MCP.AgentConfig
@@ -184,5 +201,66 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
         end
       end
     end
+  end
+end
+
+defmodule Arbiter.Worker.ContainerSpawnRegistryImageTest do
+  @moduledoc """
+  K8/A2: a node that advertises `caps.image = "registry"` is given the
+  digest-pinned `ref` of a published image and no build plan; a build node, and
+  an install with no `nodes.registry`, are untouched.
+  """
+  use ExUnit.Case, async: true
+
+  alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.Image.Publisher
+
+  @ref "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("e", 64)
+  @plan %{tag: "localhost/arbiter-dev/x:abc", plan: :a_plan_map}
+  @ctx %{repo_path: "/repo", base: "main", seed_paths: nil}
+
+  defp registry_node, do: %{id: "n1", caps: %{"image" => "registry"}}
+  defp build_node, do: %{id: "n2", caps: %{"image" => "build"}}
+
+  defp publish_opts(result) do
+    server =
+      start_supervised!(%{
+        id: :pub,
+        start: {Agent, :start_link, [fn -> result end]}
+      })
+
+    [publish: [stub: fn _ctx -> Agent.get(server, & &1) end]]
+  end
+
+  test "a build node keeps the plan and nothing is published" do
+    assert {:ok, @plan} =
+             ContainerSpawn.registry_image(@plan, build_node(), @ctx,
+               publish: [stub: fn _ -> flunk("published") end]
+             )
+  end
+
+  test "a registry node gets the ref and no plan" do
+    opts = publish_opts({:ok, %{ref: @ref}})
+
+    assert {:ok, %{tag: "localhost/arbiter-dev/x:abc", plan: nil, ref: @ref}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "a registry node with nodes.registry unset is refused, not sent a plan it cannot build" do
+    opts = publish_opts(:disabled)
+
+    assert {:error, {:image_unavailable, :no_registry}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "a timeout or push failure surfaces as image_unavailable" do
+    opts = publish_opts({:error, {:timeout, 5}})
+
+    assert {:error, {:image_unavailable, {:timeout, 5}}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "Publisher is the default publisher" do
+    assert Code.ensure_loaded?(Publisher)
   end
 end

@@ -205,6 +205,42 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
     end
   end
 
+  describe "nodes.registry_password (K8)" do
+    test "is write-only over REST: the PATCH reply and every GET show a mask, never the secret",
+         %{conn: conn} do
+      on_exit(fn -> Arbiter.Settings.Registry.put("nodes.registry_password", nil) end)
+
+      conn =
+        put_req_header(
+          conn,
+          "authorization",
+          "Bearer " <> Scope.mint_coordinator(nil, operator: true)
+        )
+
+      patched =
+        conn
+        |> patch("/api/installation/config", %{
+          "key" => "nodes.registry_password",
+          "value" => "12345-NEVER-ECHOED"
+        })
+        |> response(200)
+
+      refute patched =~ "NEVER-ECHOED"
+
+      assert %{"data" => %{"overridden" => true, "override" => "********"}} =
+               Jason.decode!(patched)
+
+      assert Settings.nodes_registry_password() == "12345-NEVER-ECHOED"
+
+      for path <- [
+            "/api/installation/config",
+            "/api/installation/config?key=nodes.registry_password"
+          ] do
+        refute conn |> get(path) |> response(200) =~ "NEVER-ECHOED"
+      end
+    end
+  end
+
   describe "authorisation" do
     test "no token is 401, a worker token is 403 on read and write" do
       anon = Phoenix.ConnTest.build_conn() |> Map.put(:remote_ip, {127, 0, 0, 1})
