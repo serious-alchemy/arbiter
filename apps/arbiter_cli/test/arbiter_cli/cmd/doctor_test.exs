@@ -1175,7 +1175,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          {%{"available" => true, "ssh" => %{"available" => true}}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy ssh transport") == :ok
     end
@@ -1216,7 +1216,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy ssh transport") == :warn
     end
@@ -1235,7 +1235,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when no escape vector is reachable" do
       escape_routes(%{"available" => true, "escape" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail escape vectors") == :ok
       assert result_of("agy jail escape vectors").detail =~ "xdg-dbus-proxy not installed"
@@ -1259,7 +1259,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the escape key" do
       escape_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail escape vectors") == :warn
     end
   end
@@ -1277,7 +1277,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the jail cannot read the install DB or other workspaces" do
       reads_routes(%{"available" => true, "reads" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail hidden reads") == :ok
     end
@@ -1301,7 +1301,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the reads key" do
       reads_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail hidden reads") == :warn
     end
   end
@@ -1319,7 +1319,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the host can run the jail in a network namespace" do
       network_routes(%{"available" => true, "network" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail network") == :ok
     end
@@ -1344,7 +1344,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the network key" do
       network_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail network") == :warn
     end
   end
@@ -1352,7 +1352,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   describe "agy jail keyring proxy (bd-c9fqsk)" do
     test "ok when the proxy comes up under a per-run TMPDIR" do
       network_routes(%{"available" => true, "keyring" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail keyring proxy") == :ok
     end

@@ -65,7 +65,10 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
             # `after_dispatch/2`'s moduledoc note on this test knob).
             follow_up: false,
             snapshot: &Snapshot.load/1,
-            dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
           ],
           opts
         )
@@ -281,7 +284,10 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
             # a restart is exactly what these tests exercise, so read it for real.
             read_status: &Arbiter.Settings.read_board_autopilot_status/0,
             snapshot: &Snapshot.load/1,
-            dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
           ],
           opts
         )

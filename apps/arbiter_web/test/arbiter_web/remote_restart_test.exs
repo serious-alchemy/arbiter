@@ -570,7 +570,10 @@ defmodule ArbiterWeb.RemoteRestartTest do
 
       put_env_restoring(:arbiter, :node_lost_resume,
         enabled: true,
-        resume_fun: fn task_id -> send(test, {:resumed, task_id}) && {:ok, :stub} end
+        resume_fun: fn task_id ->
+          send(test, {:resumed, task_id})
+          {:ok, :stub}
+        end
       )
 
       put_env_restoring(:arbiter, :worker_exit_grace_ms, 20)

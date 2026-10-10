@@ -513,7 +513,8 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       :meck.new(Arbiter.Accounts.Overview, [:passthrough, :no_link])
 
       :meck.expect(Arbiter.Accounts.Overview, :list, fn opts ->
-        send(test, :overview_read) && :meck.passthrough([opts])
+        send(test, :overview_read)
+        :meck.passthrough([opts])
       end)
 
       on_exit(fn -> :meck.unload(Arbiter.Accounts.Overview) end)

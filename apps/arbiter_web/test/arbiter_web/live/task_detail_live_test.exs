@@ -3343,7 +3343,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           provider: "codex"
         })
 
-      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Check that panel-runs exists
       assert html =~ ~s(id="panel-runs")
@@ -3375,7 +3375,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           provider: "claude"
         })
 
-      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Click to expand the run's transcript
       html = render_click(view, "toggle_run", %{"run" => run.id})

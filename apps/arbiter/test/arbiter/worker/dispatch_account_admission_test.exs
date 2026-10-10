@@ -110,7 +110,10 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
         topics: [],
         follow_up: false,
         snapshot: &Snapshot.load/1,
-        dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+        dispatch: fn id ->
+          send(test, {:dispatched, id})
+          {:ok, %{task_id: id}}
+        end
       )
 
     pid

@@ -1,8 +1,6 @@
 defmodule Arbiter.Messages.CoordinatorNotifierTest do
   use Arbiter.DataCase, async: false
 
-  require Ash.Query
-
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
 

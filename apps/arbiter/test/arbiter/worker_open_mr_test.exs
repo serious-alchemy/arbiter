@@ -13,8 +13,6 @@ defmodule Arbiter.WorkerOpenMrTest do
 
   import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
-  require Ash.Query
-
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Test.StubMerger
   alias Arbiter.Worker

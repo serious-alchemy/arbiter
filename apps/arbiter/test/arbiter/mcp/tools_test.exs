@@ -2960,7 +2960,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert data.config["repo_paths"] == %{"my.repo" => "/srv/my.repo"}
 
-      assert {:ok, data} =
+      assert {:ok, _data} =
                Tools.workspace_config_set(ctx.coordinator, %{
                  "key" => "repo_paths.other",
                  "value" => "/srv/other"
@@ -7434,7 +7434,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "a message sent the way the CLI sends it (no workspace) reaches the recipient's inbox_check in a multi-workspace install",
-         ctx do
+         _ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-multi", prefix: "pmu"})
 
       {:ok, other_task} =
@@ -7477,7 +7477,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
     end
 
-    test "coordinator_inbox_clear task_id clears the thread in every workspace", ctx do
+    test "coordinator_inbox_clear task_id clears the thread in every workspace", _ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-clear-other", prefix: "pcl"})
 
       {:ok, other_task} =

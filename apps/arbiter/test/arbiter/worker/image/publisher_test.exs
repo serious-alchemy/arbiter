@@ -80,7 +80,10 @@ defmodule Arbiter.Worker.Image.PublisherTest do
     end
   end
 
-  defp fake(test, ["image", "exists" | _]), do: send(test, :exists) && {"", 0}
+  defp fake(test, ["image", "exists" | _]) do
+    send(test, :exists)
+    {"", 0}
+  end
 
   defp fake(test, ["build" | _] = args) do
     file = flag(args, "--file")
