@@ -1851,16 +1851,39 @@ defmodule Arbiter.Mergers.Github do
 
   # The whole log, kept so the fix pass can grep it instead of asking the forge
   # (bd-d0q7s4). Best-effort: a write that fails leaves the briefing without a path.
+  # Under the disk-backed, operator-owned scratch root (0700), NOT `/tmp`: a jailed
+  # worker's `/tmp` is a private tmpfs, while the scratch root is visible through the
+  # jail's read-only root bind. Podman and remote-node workers can't see it; the
+  # briefing only lists the path as "where listed" and the excerpt is inline.
   defp save_full_log(owner, repo, job_id, body) do
-    dir = Path.join(System.tmp_dir!(), "arbiter-ci-logs")
+    dir = Path.join(Arbiter.Config.Paths.scratch_root(), "ci-logs")
     path = Path.join(dir, "#{owner}-#{repo}-job-#{job_id}.log")
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(path, body) do
+         :ok <- File.chmod(dir, 0o700),
+         :ok <- File.write(path, body),
+         :ok <- File.chmod(path, 0o600) do
+      prune_old_logs(dir)
       path
     else
       _ -> nil
     end
+  end
+
+  # Retention: drop saved logs older than a week so the directory can't grow unbounded.
+  defp prune_old_logs(dir) do
+    cutoff = System.os_time(:second) - 7 * 86_400
+
+    for name <- File.ls!(dir),
+        path = Path.join(dir, name),
+        {:ok, %File.Stat{mtime: mtime}} <- [File.stat(path, time: :posix)],
+        mtime < cutoff do
+      File.rm(path)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp truncate(str, limit) when is_binary(str) do

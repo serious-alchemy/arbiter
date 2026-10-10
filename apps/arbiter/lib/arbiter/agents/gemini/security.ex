@@ -692,7 +692,12 @@ defmodule Arbiter.Agents.Gemini.Security do
   end
 
   defp expand_category(:no_ci_watch) do
-    ["command(gh run watch)", "command(gh run view)", "command(gh pr checks --watch)"]
+    [
+      "command(gh run watch)",
+      "command(gh run view)",
+      "command(gh pr checks --watch)",
+      "command(gh pr checks -w)"
+    ]
   end
 
   defp expand_category(_unknown), do: []

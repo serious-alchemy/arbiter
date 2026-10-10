@@ -30,8 +30,9 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
     A CI failure needs triage BEFORE a fix — do not blindly push a change to
     make it green. For each failing check:
 
-      1. Pull the failed job's logs (e.g. `gh run view --log-failed`, or the
-         check's own details URL) and determine which of these applies:
+      1. Pull the failed job's logs (`gh run view`, `gh run watch` and
+         `gh pr checks --watch` are denied; use the check's own details URL or
+         `gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs`) and determine which of these applies:
            - FLAKE: re-running the same job with no code change passes →
              re-run the failed job(s) and note in the PR that it was a flake.
            - PRE-EXISTING ON BASE: the failure also reproduces on the PR's
@@ -43,7 +44,8 @@ defmodule Arbiter.Workflows.CIFailureFollowUp do
              cannot push; Arbiter pushes for it).
 
       2. Never fabricate a green: do not skip/disable the check, do not claim
-         a fix worked without observing the actual re-run result, and do not
+         a fix worked without evidence (reproduce the failure locally and see it
+         pass; Arbiter re-runs and watches CI after the push, so do not poll), and do not
          report a check as resolved unless it is actually passing.
 
     If triage is inconclusive, escalate to the coordinator mailbox naming the

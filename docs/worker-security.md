@@ -103,6 +103,7 @@ defaults. The categories:
 | `:no_async_wait`     | the `Monitor` / `ScheduleWakeup` tools (Claude; grok: its `monitor` and `scheduler_*` tools) |
 | `:no_public_upload`  | public upload/paste hosts                                  |
 | `:no_gh_publish`     | `gh gist create`/`edit`, `gh issue comment` (workers only) |
+| `:no_ci_watch`       | `gh run watch`/`view`, `gh pr checks --watch`/`-w` (workers only) |
 
 ### Public upload and paste hosts (`:no_public_upload`, `:no_gh_publish`, bd-80talz)
 
@@ -202,7 +203,7 @@ cannot rewrite its own command line. It translates:
 
 | Policy | grok flag |
 |--------|-----------|
-| `:no_destructive_fs`, `:no_force_push`, `:no_pr_create`, `:no_gh_publish` | `--deny 'Bash(<prefix>:*)'` (grok checks every segment of a chain, peels `env`/`timeout`/`nice`, and looks inside a literal `bash -c`) |
+| `:no_destructive_fs`, `:no_force_push`, `:no_pr_create`, `:no_gh_publish`, `:no_ci_watch` | `--deny 'Bash(<prefix>:*)'` (grok checks every segment of a chain, peels `env`/`timeout`/`nice`, and looks inside a literal `bash -c`) |
 | `:no_secret_reads` | `--deny 'Read(**/.env)'` and the other secret globs; a Read deny also binds `grep` and the paths a shell command touches |
 | `:no_outside_writes` | `--deny 'Edit(/etc/**)'`, `/usr/**`, and `~/.ssh`, `~/.claude`, `~/.config`, `~/.grok` in both the literal `~/` and the absolute-home spelling (grok never expands a pattern's `~/`), plus the spawn's own `GROK_HOME` (its credential seam) |
 | `:no_public_upload` | `--deny 'WebFetch(domain:<host>)'` (covers subdomains; grok takes no wildcard there) and `Bash(curl\|wget\|http\|nc *<host>*)` |
