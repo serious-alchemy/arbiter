@@ -137,8 +137,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
+  alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
@@ -865,7 +867,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          :ok <- container_backend(policy, provider),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
-         {:ok, image} <- remote_image(opts, worktree),
+         {:ok, image} <- remote_image(opts, worktree, node),
          {:ok, cli} <- remote_cli(provider, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(tmp_dir),
@@ -934,10 +936,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp remote_provider("claude"), do: :ok
   defp remote_provider(provider), do: {:error, {:provider_not_remote, provider}}
 
-  defp remote_image(opts, worktree) do
+  defp remote_image(opts, worktree, node) do
     case Keyword.get(opts, :image) || Application.get_env(:arbiter, :worker_container_image) do
       tag when is_binary(tag) and tag != "" ->
-        {:ok, %{tag: tag, plan: nil}}
+        registry_image(%{tag: tag, plan: nil}, node, %{}, opts)
 
       _ ->
         repo_path = PrivateClone.main_repo(worktree)
@@ -947,12 +949,47 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
         with true <- is_binary(repo_path) or {:error, {:not_a_private_clone, worktree}},
              {:ok, plan} <- Image.plan(repo_path, base) do
-          {:ok, %{tag: plan.tag, plan: plan}}
+          ctx = %{
+            repo_path: repo_path,
+            base: base,
+            seed_paths: SeedPaths.resolve(Keyword.get(opts, :workspace), Keyword.get(opts, :repo))
+          }
+
+          registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
         else
           {:error, reason} -> {:error, {:image_unavailable, reason}}
         end
     end
   end
+
+  @doc false
+  # A2 (`docs/design/remote-workers.md` §11): a node that advertises
+  # `caps.image = "registry"` never receives a build plan. The primary publishes
+  # the image (`Image.Publisher.ensure_ready/2`: bounded wait, single flight) and
+  # the spec carries its digest-pinned `ref`. A publish that times out or fails
+  # is `image_unavailable`, the same refusal a node would give; `Publisher.fallback/2`
+  # is the placement policy for it. Any other node, and an install with no
+  # `nodes.registry`, keep the plan exactly as before.
+  def registry_image(image, node, ctx, opts) do
+    if registry_node?(node) do
+      case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
+        {:ok, %{ref: ref}} -> {:ok, image |> Map.put(:plan, nil) |> Map.put(:ref, ref)}
+        :disabled -> {:error, {:image_unavailable, :no_registry}}
+        {:error, reason} -> {:error, {:image_unavailable, reason}}
+      end
+    else
+      {:ok, image}
+    end
+  end
+
+  defp registry_node?(node), do: get_in(Map.get(node, :caps) || %{}, ["image"]) == "registry"
+
+  # `:stub` replaces the publisher in tests.
+  defp publish_image(_image, ctx, stub: stub), do: stub.(ctx)
+  defp publish_image(%{plan: nil}, _ctx, _opts), do: {:error, :no_plan_to_publish}
+
+  defp publish_image(%{plan: plan}, ctx, opts),
+    do: Publisher.ensure_ready(Map.put(ctx, :plan, plan), opts)
 
   # `[{sha256, name, container path}]`: the node fetches by hash.
   defp remote_cli(provider, opts) do
@@ -1190,7 +1227,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "task" => request.task_id && to_string(request.task_id),
          "name" => request.name,
          "install" => Arbiter.Nodes.InstallId.get(),
-         "image" => %{"tag" => request.image.tag, "plan" => plan_json(request.image.plan)},
+         "image" => image_json(request.image),
          "cwd" => request.worktree,
          "mounts" =>
            [
@@ -1248,6 +1285,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
     [%{"name" => "proxy", "path" => network[:proxy_socket]}] ++
       for {name, path} <- network[:bridges] || [],
           do: %{"name" => to_string(name), "path" => path}
+  end
+
+  # A2: a registry node gets the digest-pinned `ref` the primary pushed.
+  defp image_json(image) do
+    base = %{"tag" => image.tag, "plan" => plan_json(image.plan)}
+    if is_binary(Map.get(image, :ref)), do: Map.put(base, "ref", image.ref), else: base
   end
 
   defp plan_json(nil), do: nil
