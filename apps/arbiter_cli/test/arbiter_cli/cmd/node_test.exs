@@ -177,6 +177,189 @@ defmodule ArbiterCli.Cmd.NodeTest do
     end
   end
 
+  describe "add --kind cluster" do
+    @manifest_url "https://primary.ts.net/nodes/join/k8s.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
+    @apply ~s|kubectl apply -f <(curl -fsSL "#{@manifest_url}")|
+    @secret "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic arbiter-join --from-file=token=/dev/stdin"
+    @yaml "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ci-workers\n"
+
+    @cluster_minted %{
+      "token" => @token,
+      "public_url" => "https://primary.ts.net",
+      "join_token" => %{
+        "id" => "jt-2",
+        "name" => "mesaana-k3s",
+        "kind" => "cluster",
+        "expires_at" => "2026-10-06T12:15:00Z"
+      },
+      "cluster" => %{
+        "manifest_url" => @manifest_url,
+        "apply_command" => @apply,
+        "secret_command" => @secret,
+        "namespace" => "ci-workers",
+        "image" => "registry.example/arbiter/controller:0.2.43",
+        "node_name" => "mesaana-k3s"
+      }
+    }
+
+    @cluster_argv ~w(add --kind cluster --name mesaana-k3s --namespace ci-workers --max-workers 3)
+
+    test "sends the cluster form and prints the apply command, the join-Secret command and the token" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(
+            @cluster_argv ++
+              ~w(--cpu 500m --memory 1Gi --node-selector pool=arb --pull-secret regcred) ++
+              ~w(--reach tailscale --admission policy --self-upgrade off --ttl 30m)
+          )
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+
+      assert Jason.decode!(raw) == %{
+               "kind" => "cluster",
+               "name" => "mesaana-k3s",
+               "namespace" => "ci-workers",
+               "max_workers" => 3,
+               "cpu" => "500m",
+               "memory" => "1Gi",
+               "node_selector" => "pool=arb",
+               "pull_secret" => "regcred",
+               "reach" => "tailscale",
+               "admission" => "policy",
+               "self_upgrade" => "off",
+               "ttl_seconds" => 1800
+             }
+
+      lines = String.split(out, "\n")
+      assert ("  " <> @apply) in lines
+      assert ("  " <> @secret) in lines
+      assert ("  " <> @token) in lines
+      refute out =~ "ARB_JOIN"
+      refute @apply =~ @token
+      refute @secret =~ @token
+      assert out =~ "expires 2026-10-06T12:15:00Z"
+    end
+
+    test "-o fetches the manifests from the primary into the file, which holds no token" do
+      tty(true)
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        send(test, {:request, conn.method, conn.request_path})
+
+        case conn.request_path do
+          "/api/nodes/join-tokens" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(@cluster_minted)
+
+          "/nodes/join/k8s.yaml" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/yaml")
+            |> Plug.Conn.send_resp(200, @yaml)
+        end
+      end)
+
+      path =
+        Path.join(System.tmp_dir!(), "arb-manifests-#{System.unique_integer([:positive])}.yaml")
+
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["-o", path]) end)
+
+      assert File.read!(path) == @yaml
+      refute File.read!(path) =~ @token
+      assert out =~ "kubectl apply -f #{path}"
+      assert out =~ @secret
+      assert_receive {:request, "GET", "/nodes/join/k8s.yaml"}
+    end
+
+    test "-o refuses to overwrite a file, before minting a token" do
+      tty(true)
+
+      path =
+        Path.join(System.tmp_dir!(), "arb-manifests-#{System.unique_integer([:positive])}.yaml")
+
+      File.write!(path, "keep")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ["-o", path]) end)
+      assert code != 0
+      assert err =~ "already exists"
+      assert File.read!(path) == "keep"
+      refute_received {:request, _, _, _}
+    end
+
+    test "--token-file keeps the token off the screen and the Secret command reads that file" do
+      tty(false)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+      path = Path.join(System.tmp_dir!(), "arb-node-token-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["--token-file", path]) end)
+
+      assert File.read!(path) |> String.trim() == @token
+      refute out =~ @token
+
+      assert out =~
+               "kubectl -n ci-workers create secret generic arbiter-join --from-file=token=#{path}"
+
+      assert out =~ @apply
+    end
+
+    test "off a terminal it refuses to print the token, before minting one" do
+      tty(false)
+      {out, _err, code} = capture(fn -> Node.run(@cluster_argv) end)
+      assert code != 0
+      refute out =~ @token
+      refute_received {:request, _, _, _}
+    end
+
+    test "--json carries the cluster block and the token only to a terminal" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["--json"]) end)
+
+      decoded = Jason.decode!(out)
+      assert decoded["cluster"]["manifest_url"] == @manifest_url
+      assert decoded["cluster"]["secret_command"] == @secret
+      assert decoded["token"] == @token
+    end
+
+    test "a cluster node needs --name, and --kind must be machine or cluster, before anything is minted" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(~w(add --kind cluster)) end)
+      assert code != 0
+      assert err =~ "--name"
+
+      {_out, err, code} = capture(fn -> Node.run(~w(add --kind mainframe --name x)) end)
+      assert code != 0
+      assert err =~ "--kind"
+      refute_received {:request, _, _, _}
+    end
+
+    test "cluster-only flags are refused on a machine" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(~w(add --namespace foo)) end)
+      assert code != 0
+      assert err =~ "--kind cluster"
+    end
+
+    test "an API refusal (no registry) is reported" do
+      tty(true)
+
+      capture_request(:post, "/api/nodes/join-tokens", 422, %{
+        "error" => %{"type" => "validation_error", "message" => "nodes.registry is not set"}
+      })
+
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv) end)
+      assert code != 0
+      assert err =~ "nodes.registry"
+    end
+  end
+
   @local %{
     "id" => "local",
     "name" => "local",
