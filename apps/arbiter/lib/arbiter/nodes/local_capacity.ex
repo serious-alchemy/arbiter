@@ -168,8 +168,8 @@ defmodule Arbiter.Nodes.LocalCapacity do
   Decide where a dispatch runs and, if it is the primary, whether the primary
   has room: `Placement.place/2`, then `admit/3` for a run that stays local.
 
+    * `{:ok, {:node, row}}` — placed on a node (a slot is reserved);
     * `{:ok, :local}` — runs here (a slot of the primary's cap is reserved);
-      the cap is enforced);
     * `{:error, {:no_node_capacity, info}}` — held.
 
   `request` is a `t:Arbiter.Nodes.Placement.request/0`; `opts` are
