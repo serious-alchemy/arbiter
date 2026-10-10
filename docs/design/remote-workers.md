@@ -524,7 +524,7 @@ The container keeps what it was started with: its old worker-tier token (as `ARB
   * `Session`: `adoptable`, `adopt`, `adopt.refused`, the timeout, owner-down, `unadopt`, and `recover` refusing an attached run.
   * The agent's `Run.adopt/1` and `Connection`: `adopt` only for this connection's `hold` runs, and the no-socket fence at `restart_grace`.
   * `Recovery` and `Adoption`: adopt before collect, the outcomes, and the budget backstop.
-  * `Dispatch.adopt/2`: no new row, no hand-off, the gates skipped, and an F5 failure leaving no Worker and an untouched row.
+  * `Dispatch.adopt/2`: no new row, no hand-off, the gates skipped, an F5 failure leaving no Worker and an untouched row, and a failed adopting spawn never run on the primary instead (§10.4.7, the local fallback).
   * `Worker`: an adopted init, the seeded session open, `abandon_adoption/1`, `stdout_offset` persisted at a graceful stop, and `node_id` in the registry entry.
 
 #### 10.4.12 What a restart does when a run is not adopted (v1 behaviour, unchanged)
