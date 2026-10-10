@@ -259,7 +259,19 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
                node
 
       assert node["k8s_version"] == nil
+      assert node["readiness"] == []
       assert node["upgrade_command"] == nil
+    end
+
+    test "the node list rows carry readiness and the unenforced-network override (K13)" do
+      node = enroll!("alpha")
+      {:ok, _} = Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+      row = Enum.find(body["nodes"], &(&1["name"] == "alpha"))
+
+      assert row["readiness"] == []
+      assert row["allow_unenforced_network"] == true
     end
 
     test "a cluster node enrolled by its token is a cluster before it ever connects (K9)" do

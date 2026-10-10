@@ -121,6 +121,20 @@ defmodule Arbiter.Nodes.OverviewTest do
              } = row(Overview.build(), "kube")
     end
 
+    test "a cluster row carries the node's readiness checks" do
+      node = enroll!("kube")
+
+      checks = [%{"id" => "psa", "name" => "Pod Security", "status" => "ok", "detail" => "d"}]
+      connect!(node, cluster_hello(%{"readiness" => %{"checks" => checks}}))
+
+      assert %{readiness: [%{"id" => "psa"}]} = row(Overview.build(), "kube")
+    end
+
+    test "a machine row has no readiness checks" do
+      connect!(enroll!("box"))
+      assert %{readiness: []} = row(Overview.build(), "box")
+    end
+
     test "a netpol_unenforced node adds nothing to capacity until the override is set" do
       node = enroll!("kube")
       connect!(node, cluster_hello(%{"degraded" => ["netpol_unenforced"]}))

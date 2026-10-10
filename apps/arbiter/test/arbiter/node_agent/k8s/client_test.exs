@@ -151,6 +151,49 @@ defmodule Arbiter.NodeAgent.K8s.ClientTest do
     end
   end
 
+  describe "create_pod/3 with dry_run" do
+    test "sends dryRun=All and stores nothing", %{client: client, api: api} do
+      assert {:ok, %{"metadata" => %{"name" => "dry-1"}}} =
+               Client.create_pod(client, pod("dry-1"), dry_run: true)
+
+      assert %{params: %{"dryRun" => "All"}} =
+               api |> FakeK8sApi.requests() |> Enum.find(&(&1.method == "POST"))
+
+      assert {:ok, %{items: []}} = Client.list_pods(client)
+    end
+
+    test "a rejection comes back as the server's message", %{client: client, api: api} do
+      FakeK8sApi.fail_next(api, :create, {403, "violates PodSecurity \"restricted:latest\""})
+
+      assert {:error, {:forbidden, "violates PodSecurity" <> _}} =
+               Client.create_pod(client, pod("dry-2"), dry_run: true)
+    end
+  end
+
+  describe "get_pod/2 and server_time/1" do
+    test "get_pod reads one pod; a missing one is :not_found", %{client: client, api: api} do
+      FakeK8sApi.put_pod(api, pod("here"))
+      assert {:ok, %{"metadata" => %{"name" => "here"}}} = Client.get_pod(client, "here")
+      assert {:error, :not_found} = Client.get_pod(client, "gone")
+    end
+
+    test "server_time reads the API server's Date header", %{client: client, api: api} do
+      FakeK8sApi.set_clock(api, ~U[2026-10-10 12:00:00Z])
+      assert {:ok, ~U[2026-10-10 12:00:00Z]} = Client.server_time(client)
+    end
+
+    test "server_time without a Date header is an error" do
+      client =
+        Client.new(
+          base_url: "http://k8s.test",
+          namespace: "arb",
+          req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end]
+        )
+
+      assert {:error, :no_date_header} = Client.server_time(client)
+    end
+  end
+
   describe "delete_pod/3" do
     test "sends the grace period and reports :deleted", %{client: client, api: api} do
       FakeK8sApi.put_pod(api, pod("gone"))
