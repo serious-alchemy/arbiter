@@ -3073,9 +3073,17 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </div>
 
                     <.routing_decision
-                      :if={is_map(r.routing_decision)}
+                      :if={routed?(r.routing_decision)}
                       id={"run-routing-#{r.id}"}
                       decision={r.routing_decision}
+                    />
+
+                    <.admission_shadow
+                      :if={
+                        is_map(r.routing_decision) and is_map(r.routing_decision["admission_shadow"])
+                      }
+                      id={"run-admission-#{r.id}"}
+                      record={r.routing_decision["admission_shadow"]}
                     />
 
                     <.guardrail_decision
@@ -4945,6 +4953,49 @@ defmodule ArbiterWeb.TaskDetailLive do
           ✕ {routing_account(d)} — {d["reason"]}<span :if={d["detail"]}>: {d["detail"]}</span>
         </li>
       </ul>
+    </div>
+    """
+  end
+
+  # A decision provider routing made. Under `scheduler_admission: shadow` an
+  # unrouted run's decision may hold only the admission shadow's record (DC6),
+  # which is not a routing decision and gets its own line below.
+  defp routed?(%{"outcome" => outcome}) when is_binary(outcome), do: true
+  defp routed?(_decision), do: false
+
+  # DC6 (provider-dynamic-concurrency §10.2): what the scheduler walk would have
+  # dispatched instead, recorded beside this run under the admission shadow.
+  # A record only — the run was dispatched by today's plan.
+  attr :id, :string, required: true
+  attr :record, :map, required: true
+
+  defp admission_shadow(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class="px-3 py-2 border-b border-[var(--border-default)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)] flex flex-wrap items-center gap-x-2 gap-y-1"
+    >
+      <span class="uppercase tracking-wide text-[var(--text-secondary)]">
+        admission {@record["policy"]}
+      </span>
+      <span
+        :if={@record["agrees"] == true}
+        class="px-1.5 rounded-[var(--radius-field)] border border-[var(--border-default)] text-[var(--text-title)]"
+      >
+        agrees
+      </span>
+      <%= if @record["agrees"] != true do %>
+        <span :if={@record["pick"]}>
+          walk would pick <code class="text-[var(--text-secondary)]">{@record["pick"]}</code>
+          <span :if={@record["pool_label"]}>on {@record["pool_label"]}</span>
+          <span :if={@record["node"]}>/ {@record["node"]}</span>
+        </span>
+        <span :if={is_nil(@record["pick"])}>walk would place nothing</span>
+        <span :if={@record["cause"]} data-role="cause">· {@record["cause"]}</span>
+        <span :if={@record["reason"]} class="text-[var(--text-secondary)]">
+          — {@record["reason"]}
+        </span>
+      <% end %>
     </div>
     """
   end

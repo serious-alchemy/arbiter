@@ -9,6 +9,7 @@ defmodule Arbiter.Settings.RegistryTest do
            quota_providers_shown quota_providers_hidden output_offload_enabled
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
            scheduling_finish_first scheduling_finish_first_max_wait_hours
+           scheduler_admission
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
            nodes.registry_password nodes.registry_insecure)
@@ -190,6 +191,78 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:error, :invalid_value} = Settings.set_scheduling_finish_first_max_wait_hours(-3)
       assert {:error, :invalid_value} = Settings.set_scheduling_finish_first("yes")
       assert {:error, :invalid_value} = Settings.set_scheduling_epic_floors_enabled(0)
+    end
+  end
+
+  describe "scheduler_admission (DC6, provider-dynamic-concurrency §10.1)" do
+    setup do
+      on_exit(fn -> Settings.set_scheduler_admission(nil) end)
+    end
+
+    test "defaults to legacy, with the three modes allowed" do
+      assert %{
+               value: "legacy",
+               default: "legacy",
+               overridden: false,
+               allowed: ["legacy", "shadow", "enforce"],
+               operator_only: false
+             } = Registry.describe("scheduler_admission")
+
+      assert Settings.scheduler_admission() == :legacy
+    end
+
+    test "takes the three modes or null, and nothing else" do
+      for mode <- ~w(legacy shadow enforce) do
+        assert {:ok, ^mode} = Registry.cast("scheduler_admission", mode)
+      end
+
+      assert {:ok, nil} = Registry.cast("scheduler_admission", nil)
+
+      for bad <- ["on", "Shadow", 1, true, ["shadow"]] do
+        assert {:error, msg} = Registry.cast("scheduler_admission", bad)
+        assert msg =~ "legacy, shadow or enforce"
+      end
+    end
+
+    test "set, read back as the mode in force, and clear" do
+      assert {:ok, "shadow"} = Registry.put("scheduler_admission", "shadow")
+      assert Settings.scheduler_admission() == :shadow
+      assert %{value: "shadow", overridden: true} = Registry.describe("scheduler_admission")
+
+      assert {:ok, "enforce"} = Registry.put("scheduler_admission", "enforce")
+      assert Settings.scheduler_admission() == :enforce
+
+      assert {:ok, nil} = Registry.put("scheduler_admission", nil)
+      assert Settings.scheduler_admission() == :legacy
+    end
+
+    test "the coordinator may set legacy or shadow (the kill switch); enforce is the operator's" do
+      for authority <- [:coordinator, :restricted] do
+        assert {:ok, "shadow"} =
+                 Registry.put("scheduler_admission", "shadow", authority: authority)
+
+        assert {:ok, "legacy"} =
+                 Registry.put("scheduler_admission", "legacy", authority: authority)
+
+        assert {:ok, nil} = Registry.put("scheduler_admission", nil, authority: authority)
+
+        assert {:error, {:unauthorized, msg}} =
+                 Registry.put("scheduler_admission", "enforce", authority: authority)
+
+        assert msg =~ "enforce"
+        assert msg =~ "operator"
+        assert Settings.scheduler_admission() == :legacy
+      end
+
+      assert {:ok, "enforce"} =
+               Registry.put("scheduler_admission", "enforce", authority: :operator)
+    end
+
+    test "the Settings setter refuses anything but a mode or nil" do
+      assert {:error, :invalid_value} = Settings.set_scheduler_admission("on")
+      assert {:error, :invalid_value} = Settings.set_scheduler_admission(:sideways)
+      assert {:ok, "shadow"} = Settings.set_scheduler_admission(:shadow)
+      assert Settings.scheduler_admission() == :shadow
     end
   end
 

@@ -43,6 +43,9 @@ defmodule Arbiter.Tasks do
     resource Arbiter.Tasks.TicketTransition
     # bd-54m4vv: append-only trail of ticket-declared permissions (G12).
     resource Arbiter.Tasks.PermissionEvent
+    # bd-9ycsk4 (DC6): one row per admission hold change under the shadow,
+    # today's plan beside the scheduler walk; what the admission report reads.
+    resource Arbiter.Board.AdmissionShadowEvent
   end
 
   require Ash.Query

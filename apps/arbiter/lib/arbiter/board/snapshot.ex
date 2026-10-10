@@ -79,6 +79,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.QueueOrder
   alias Arbiter.Board.ReadySince
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Board.WalkInputs
   alias Arbiter.Guardrails.Alternatives
   alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.EdgeGate
@@ -93,6 +94,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Workers.RunNode
 
   require Ash.Query
+  require Logger
 
   # Run states whose worktree is still in use: a run that is not over. What
   # `in_flight/3` counts as holding files for the scheduler's overlap check.
@@ -128,6 +130,7 @@ defmodule Arbiter.Board.Snapshot do
   @orphan_grace_seconds Lifecycle.View.orphan_grace_seconds()
 
   @type t :: %{
+          optional(:walk) => Scheduler.t(),
           backlog: [map()],
           blocked: [map()],
           ready: [Scheduler.entry()],
@@ -166,6 +169,13 @@ defmodule Arbiter.Board.Snapshot do
   The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — effective
   priority first, then the tiebreaks down to `rank` and age (bd-asxw4e) — the
   same order Autopilot dispatches in.
+
+  `:walk` (DC6) is the scheduler walk's capacity sets and candidates
+  (`Arbiter.Board.Scheduler`'s `t:Arbiter.Board.Scheduler.walk/0`) with
+  `:dispatch_holds` read as the walk's 15 s retry window. With it the board
+  also carries `:walk`, the walk planned over the same queue plus the pools
+  and machines it ran against; nothing on the board reads it, and every other
+  field is what it is without it.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -260,11 +270,17 @@ defmodule Arbiter.Board.Snapshot do
 
     # Only the Ready column is the scheduler's queue: a Blocked ticket is held
     # by its dependencies, which `Scheduler.plan/1` would skip over anyway.
+    queue = %{
+      ready: ready_cards(issues, columns, conflicts, order_ctx),
+      running: in_flight(authors, issues_by_id, changed),
+      conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now)
+    }
+
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, columns, conflicts, order_ctx),
-        running: in_flight(authors, issues_by_id, changed),
-        conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
+        ready: queue.ready,
+        running: queue.running,
+        conflict_claims: queue.conflict_claims,
         slots_free: slots_free,
         slot_note: Map.get(input, :slot_note),
         quota: quota,
@@ -316,8 +332,48 @@ defmodule Arbiter.Board.Snapshot do
       now: now
     }
 
-    Map.put(board, :attention, attention_items(board))
+    board
+    |> Map.put(:attention, attention_items(board))
+    |> put_walk(Map.get(input, :walk), queue, input, paused?)
   end
+
+  # DC6: the scheduler walk, planned beside today's plan over the same queue,
+  # only when the input carries its capacity sets (`scheduler_admission`
+  # shadow or enforce). It reads nothing today's plan decides with and writes
+  # nothing back to it, so the board's own fields are the same with or without
+  # it (I1, I2). The capacity sets ride with the plan, for the shadow record.
+  # A walk that cannot be planned is left out: losing today's board to it would
+  # read as an unreadable board, and Autopilot would dispatch nothing (I2).
+  defp put_walk(board, %{} = walk, queue, input, paused?) do
+    plan =
+      Scheduler.plan(%{
+        ready: queue.ready,
+        running: queue.running,
+        conflict_claims: queue.conflict_claims,
+        card_guardrail: Map.get(input, :card_guardrail, %{}),
+        dispatch_holds: Map.get(input, :dispatch_holds, %{}),
+        paused: paused?,
+        walk: walk
+      })
+
+    Map.put(board, :walk, Map.merge(plan, Map.take(walk, [:pools, :nodes])))
+  rescue
+    e ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk was not planned: #{Exception.message(e)}"
+      )
+
+      board
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk was not planned: #{inspect({kind, reason})}"
+      )
+
+      board
+  end
+
+  defp put_walk(board, _walk, _queue, _input, _paused?), do: board
 
   @needed_issue_fields [
     :id,
@@ -374,6 +430,12 @@ defmodule Arbiter.Board.Snapshot do
   the operator's board sets it, the Autopilot does not. Every read is
   best-effort — a board that renders seven columns beats one that raises.
 
+  `:admission` (DC6, default `:legacy`) is the `scheduler_admission` mode the
+  caller plans under. `:shadow` and `:enforce` also gather the scheduler walk's
+  inputs (`Arbiter.Board.WalkInputs`, its seams in `:walk_opts`, or a ready
+  `:walk`) and derive the board with them; `:legacy` gathers nothing, so no
+  budget or seat is read. A walk whose inputs fail to read is left out.
+
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
   specified workspace (defaulting to the default workspace if not given).
   However, `:issues` and `:workers` span all workspaces. Per-workspace
@@ -412,7 +474,7 @@ defmodule Arbiter.Board.Snapshot do
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
 
-    derive(%{
+    %{
       issues: issues,
       workers: workers,
       blocked_by:
@@ -453,7 +515,41 @@ defmodule Arbiter.Board.Snapshot do
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
-    })
+    }
+    |> put_walk_inputs(Keyword.get(opts, :admission, :legacy), workspace, issues, opts)
+    |> derive()
+  end
+
+  # DC6: under `scheduler_admission: shadow` or `enforce` the board also plans
+  # the scheduler walk, so it gathers the walk's capacity sets here. Under
+  # `legacy` nothing is gathered — no budget, seat or walk read runs (I1). A
+  # walk whose inputs cannot be read is left out; today's plan never waits on
+  # it. `:walk_opts` are `Arbiter.Board.WalkInputs.gather/3`'s seams.
+  defp put_walk_inputs(input, mode, workspace, issues, opts) when mode in [:shadow, :enforce] do
+    case Keyword.fetch(opts, :walk) do
+      {:ok, walk} -> Map.put(input, :walk, walk)
+      :error -> gather_walk(input, workspace, issues, Keyword.get(opts, :walk_opts, []))
+    end
+  end
+
+  defp put_walk_inputs(input, _mode, _workspace, _issues, _opts), do: input
+
+  defp gather_walk(input, workspace, issues, walk_opts) do
+    Map.put(input, :walk, WalkInputs.gather(workspace, issues, walk_opts))
+  rescue
+    e ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk's inputs failed: #{Exception.message(e)}"
+      )
+
+      input
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk's inputs failed: #{inspect({kind, reason})}"
+      )
+
+      input
   end
 
   # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
