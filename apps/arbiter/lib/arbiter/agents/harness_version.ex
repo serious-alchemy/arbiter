@@ -97,6 +97,10 @@ defmodule Arbiter.Agents.HarnessVersion do
     end
   end
 
+  # `path` is the adapter's own executable (`executable/1`: `System.find_executable/1`
+  # or the agy resolver), never request input, and the only argument is the literal
+  # `--version`.
+  # sobelow_skip ["CI.System"]
   defp probe(path, timeout_ms) do
     task =
       Task.async(fn ->
