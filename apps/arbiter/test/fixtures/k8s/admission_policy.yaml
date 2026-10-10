@@ -1,0 +1,52 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: arbiter-worker-pods
+spec:
+  failurePolicy: Fail
+  matchConditions:
+    - expression: "request.userInfo.username == 'system:serviceaccount:arbiter-workers:arbiter-controller'"
+      name: from-controller
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+  validations:
+    - expression: "object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false"
+      message: pods run as arbiter-worker with no token
+    - expression: '!has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)'
+      message: no host namespaces
+    - expression: "object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))"
+      message: 'only emptyDir and the arbiter-ca ConfigMap: no Secret, hostPath or PVC'
+    - expression: "(object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)"
+      message: every container is hardened
+    - expression: "(object.spec.containers + object.spec.initContainers).all(c, c.image.startsWith('registry.example.test/arbiter/') || c.image.startsWith('docker.io/library/'))"
+      message: images come from the registry or docker.io/library
+    - expression: has(object.spec.hostUsers) && object.spec.hostUsers == false
+      message: hostUsers must be false
+    - expression: has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot && (!has(object.spec.securityContext.runAsUser) || object.spec.securityContext.runAsUser != 0) && variables.all.all(c, !has(c.securityContext) || ((!has(c.securityContext.runAsUser) || c.securityContext.runAsUser != 0) && (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot)))
+      message: 'K1-A1: non-root is ours to enforce once hostUsers is false'
+  variables:
+    - expression: 'object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])'
+      name: all
+---
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: arbiter-worker-pods
+spec:
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: arbiter-workers
+  policyName: arbiter-worker-pods
+  validationActions:
+    - Deny

@@ -174,9 +174,11 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert Ash.get!(Issue, third.id).state == :queued
     end
 
-    test "a re-dispatch of a ticket already In progress is not held for being at the cap", %{
-      ws: ws
-    } do
+    # bd-b2iigy: a re-dispatch of an In-progress ticket replaces its own run, so
+    # its own worker never holds it back; but other tickets filling the cap do
+    # (it used to go over, and a restart put 5 runs on a cap of 2).
+    test "a re-dispatch of a ticket already In progress is held while OTHER tickets fill the cap",
+         %{ws: ws} do
       {:ok, 1} = Nodes.set_local_max_workers(1, nil)
       issue = ready!(ws, "active")
       assert {:ok, %{worker_pid: pid}} = dispatch(issue)
@@ -185,7 +187,25 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
 
       other = ready!(ws, "fills the slot")
-      assert {:ok, _} = dispatch(other)
+      assert {:ok, %{worker_pid: other_pid}} = dispatch(other)
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(Ash.get!(Issue, issue.id))
+      assert info.kind == :redispatch
+      assert info.cap == 1
+      assert Ash.get!(Issue, issue.id).state == :active
+      assert Worker.whereis(issue.id) == nil
+
+      other_ref = Process.monitor(other_pid)
+      :ok = Worker.stop(other.id, :normal)
+      assert_receive {:DOWN, ^other_ref, :process, _, _}, 5_000
+
+      assert {:ok, _} = dispatch(Ash.get!(Issue, issue.id))
+    end
+
+    test "a re-dispatch is never held by the ticket's own previous run", %{ws: ws} do
+      {:ok, 1} = Nodes.set_local_max_workers(1, nil)
+      issue = ready!(ws, "active")
+      assert {:ok, _} = dispatch(issue)
 
       assert {:ok, _} = dispatch(Ash.get!(Issue, issue.id))
     end
