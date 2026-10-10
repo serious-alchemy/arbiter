@@ -160,7 +160,25 @@ defmodule Arbiter.NodeAgent.PodChannelTest do
     refute_received {:publish, _}
     refute cert =~ "PRIVATE"
     assert key =~ "PRIVATE"
-    refute_received {:save, %{cert: _, key: "s3cret"}}
+  end
+
+  test "a run's secrets and keys reach no file the channel writes", ctx do
+    _channel = ctx.start.([])
+    {:ok, nonce} = PodChannel.register(Kit.spec!(), DateTime.add(DateTime.utc_now(), 600))
+    :ok = PodChannel.bind_pod_ip("run-1", @loopback)
+    {:ok, "run-1", tar} = Runs.redeem(nonce, @loopback)
+    files = Kit.unpack(tar)
+    assert files["secrets.env"] =~ "s3cret"
+
+    # everything under the channel's only writable location: the CA directory
+    written = Path.wildcard(Path.join([ctx.tmp, "**", "*"])) |> Enum.filter(&File.regular?/1)
+    assert Enum.map(written, &Path.basename/1) |> Enum.sort() == ["ca.crt", "ca.key"]
+
+    contents = Enum.map_join(written, &File.read!/1)
+    refute contents =~ "s3cret"
+    refute contents =~ files["tls/proxy.key"]
+    refute contents =~ files["tls/control.key"]
+    refute contents =~ nonce
   end
 
   defp server_cert(ca) do
