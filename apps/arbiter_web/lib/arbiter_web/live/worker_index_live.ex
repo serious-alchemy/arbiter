@@ -19,7 +19,6 @@ defmodule ArbiterWeb.WorkerIndexLive do
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.Paging
-  require Ash.Query
 
   @workers_topic "workers"
 

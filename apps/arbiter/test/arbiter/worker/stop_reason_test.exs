@@ -920,7 +920,7 @@ defmodule Arbiter.Worker.StopReasonTest do
       reason = StopReason.preflight_timeout(timeout_ms: 30_000, elapsed_ms: 30_012, lines: [])
 
       assert reason.category == :preflight_timeout
-      refute reason.category == StopReason.classify(nil, []).category
+      assert length(Enum.uniq([reason.category, StopReason.classify(nil, []).category])) == 2
     end
 
     test "says the probe timed out and reports what was observed" do

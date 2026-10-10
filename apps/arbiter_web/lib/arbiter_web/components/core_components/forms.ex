@@ -89,9 +89,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
       class={[
         "inline-flex items-center gap-[8px] w-full rounded-[var(--radius-field)] border border-solid",
         "bg-[var(--surface-field)] transition-[border-color] duration-[var(--dur-hover)]",
-        @error && "border-[var(--arb-fail-edge)]",
-        !@error &&
-          "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
+        "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
         @size == "sm" && "h-[var(--control-sm)] px-[10px]",
         @size == "md" && "h-[var(--control-md)] px-[10px]",
         @class
@@ -308,8 +306,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         "w-full p-[8px_10px] resize-vertical rounded-[var(--radius-field)] border border-solid bg-[var(--surface-field)] text-[12.5px] leading-[1.6] text-[var(--arb-text-body)]",
         "outline-none transition-[border-color] duration-[var(--dur-hover)]",
         "focus:ring-2 focus:ring-[var(--focus-ring)] focus:border-[var(--accent-primary)]",
-        @error && "border-[var(--arb-fail-edge)]",
-        !@error && "border-[var(--border-strong)]",
+        "border-[var(--border-strong)]",
         @class
       ]}
       {@rest}

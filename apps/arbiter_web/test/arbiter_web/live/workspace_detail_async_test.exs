@@ -154,7 +154,8 @@ defmodule ArbiterWeb.WorkspaceDetailAsyncTest do
       # the workspace load's own task instead.
       :meck.expect(Ash, :get, fn
         Workspace, id ->
-          send(test, {:loading_workspace, self()}) && :meck.passthrough([Workspace, id])
+          send(test, {:loading_workspace, self()})
+          :meck.passthrough([Workspace, id])
 
         resource, id ->
           :meck.passthrough([resource, id])

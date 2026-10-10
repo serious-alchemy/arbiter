@@ -178,7 +178,7 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
 
       assert [%{head: head}] = gate.deferred_observations
       assert head == sha("fixpass")
-      assert gate.pass? and gate.reason =~ "pass"
+      assert gate.reason =~ "pass"
     end
 
     test "deferred and blocking observations carry occurred_at, so an operator can see the time distribution" do

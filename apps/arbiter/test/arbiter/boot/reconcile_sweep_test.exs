@@ -250,7 +250,11 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
 
   test "a non-primary instance skips recovery as it skips the Reconciler" do
     test = self()
-    recovery = fn opts -> send(test, {:recovery_opts, opts}) && {:ok, :skipped} end
+
+    recovery = fn opts ->
+      send(test, {:recovery_opts, opts})
+      {:ok, :skipped}
+    end
 
     ReconcileSweep.steps(Keyword.put(sweep_opts(recovery), :primary?, false))
     assert_received {:recovery_opts, [primary?: false]}

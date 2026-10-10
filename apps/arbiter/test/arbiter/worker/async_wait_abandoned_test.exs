@@ -428,7 +428,12 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedIntegrationTest do
 
     # Distinct from a plain early quit — the whole point is that the
     # coordinator can see this cause without reading a transcript.
-    refute Map.fetch!(map, :async_wait_abandoned) == Map.fetch!(map, :exited_without_done)
+    assert length(
+             Enum.uniq([
+               Map.fetch!(map, :async_wait_abandoned),
+               Map.fetch!(map, :exited_without_done)
+             ])
+           ) == 2
   end
 
   test "it is one of the resumable stop categories the worker acts on" do

@@ -543,8 +543,12 @@ defmodule Arbiter.Worker.ContainerTest do
       test_pid = self()
 
       runner = fn
-        _cmd, ["wait" | _], _ -> {"timed out", 124}
-        cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0}
+        _cmd, ["wait" | _], _ ->
+          {"timed out", 124}
+
+        cmd, args, _ ->
+          send(test_pid, {:ran, cmd, args})
+          {"", 0}
       end
 
       assert :ok = Container.stop("arb-run1", runner: runner, podman: "podman", grace_ms: 10)
@@ -553,7 +557,12 @@ defmodule Arbiter.Worker.ContainerTest do
 
     test "no grace option means no wait (stop, timeout and OOM paths kill at once)" do
       test_pid = self()
-      runner = fn _cmd, args, _ -> send(test_pid, {:args, args}) && {"", 0} end
+
+      runner = fn _cmd, args, _ ->
+        send(test_pid, {:args, args})
+        {"", 0}
+      end
+
       assert :ok = Container.stop("arb-run1", runner: runner, podman: "podman")
       assert_received {:args, ["rm" | _]}
       refute_received {:args, ["wait" | _]}
@@ -561,7 +570,12 @@ defmodule Arbiter.Worker.ContainerTest do
 
     test "teardown/1 takes the name, or the run map wrap callers keep" do
       test_pid = self()
-      runner = fn cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0} end
+
+      runner = fn cmd, args, _ ->
+        send(test_pid, {:ran, cmd, args})
+        {"", 0}
+      end
+
       Application.put_env(:arbiter, :worker_container_runner, runner)
       on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
 
@@ -575,7 +589,11 @@ defmodule Arbiter.Worker.ContainerTest do
 
     test "never removes a container Arbiter did not name" do
       test_pid = self()
-      runner = fn cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0} end
+
+      runner = fn cmd, args, _ ->
+        send(test_pid, {:ran, cmd, args})
+        {"", 0}
+      end
 
       assert {:error, {:bad_container_name, "postgres"}} =
                Container.stop("postgres", runner: runner)
@@ -670,7 +688,11 @@ defmodule Arbiter.Worker.ContainerTest do
 
     test "a refused wrap never starts anything, and removes nothing", %{dir: dir} do
       test_pid = self()
-      runner = fn cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0} end
+
+      runner = fn cmd, args, _ ->
+        send(test_pid, {:ran, cmd, args})
+        {"", 0}
+      end
 
       assert {:error, :no_image} =
                Container.run(["x"], run_opts(dir, runner) |> Keyword.delete(:image))

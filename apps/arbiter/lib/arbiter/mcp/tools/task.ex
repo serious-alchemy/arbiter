@@ -27,8 +27,6 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.WorkerFiling
   alias Arbiter.Usage.Estimate
 
-  require Ash.Query
-
   # P-08: `append_notes` appends to `notes` server-side (atomic, so it can't
   # lose a concurrent write); `""` on any text field clears it (D-T-18/29).
   @progress_fields ~w(notes append_notes qa_notes deployment_notes pr_body)

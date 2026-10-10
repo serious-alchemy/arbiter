@@ -27,8 +27,6 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
       ceiling per response.
   """
 
-  require Logger
-
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.SpawnEnv

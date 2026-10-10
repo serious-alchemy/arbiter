@@ -7,7 +7,7 @@ defmodule Arbiter.Accounts.LoginRecipesTest do
 
   @moduletag :tmp_dir
 
-  defp run(provider, args, mode, env \\ [], input \\ nil) do
+  defp run(provider, args, mode, env, input \\ nil) do
     script = FakeLoginCli.script(provider)
 
     task =

@@ -220,7 +220,8 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       _e = epic(ws, "dead-render-epic")
 
       :meck.expect(Arbiter.Tasks, :epic_rollups, fn epics ->
-        send(test, :rows_read) && :meck.passthrough([epics])
+        send(test, :rows_read)
+        :meck.passthrough([epics])
       end)
 
       html = conn |> get(~p"/epics") |> html_response(200)

@@ -224,7 +224,7 @@ defmodule Arbiter.Nodes.Bridge.Mux do
         take(rest, n - byte_size(bin), [bin | acc])
 
       {{:value, bin}, rest} ->
-        <<head::binary-size(n), tail::binary>> = bin
+        <<head::binary-size(^n), tail::binary>> = bin
         {IO.iodata_to_binary(Enum.reverse([head | acc])), :queue.in_r(tail, rest)}
     end
   end

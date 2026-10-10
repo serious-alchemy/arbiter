@@ -152,8 +152,8 @@ defmodule Arbiter.Reviews.PrState do
   counter, so an intermittent 404 streak doesn't carry over into an unrelated
   future failure.
   """
-  @spec resolve_and_persist(Ash.Resource.record(), map() | nil) ::
-          {:ok, Ash.Resource.record()} | :error
+  @spec resolve_and_persist(struct(), map() | nil) ::
+          {:ok, struct()} | :error
   def resolve_and_persist(record, workspace) do
     candidate = resolve(record, workspace)
     attrs = reconcile(record, candidate)

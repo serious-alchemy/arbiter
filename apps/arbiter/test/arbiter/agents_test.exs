@@ -243,7 +243,7 @@ defmodule Arbiter.AgentsTest do
       ws = %Workspace{config: %{}}
 
       assert_raise FunctionClauseError, fn ->
-        Agents.prepare(ws, :invalid_role)
+        apply(Agents, :prepare, [ws, :invalid_role])
       end
     end
   end

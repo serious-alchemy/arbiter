@@ -49,8 +49,6 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.Image.Registry
 
-  require Logger
-
   @cli_dest "/opt/arbiter/cli/"
   @seed_dest "/opt/arbiter/seed"
   @seed_artifacts ["deps", "_build"]

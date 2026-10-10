@@ -12,8 +12,6 @@ defmodule Arbiter.Board.FastLaneTest do
   # supervisor.
   use Arbiter.DataCase, async: false
 
-  require Ash.Query
-
   alias Arbiter.Board.Autopilot
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker

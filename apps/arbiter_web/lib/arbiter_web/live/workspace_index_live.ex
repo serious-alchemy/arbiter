@@ -18,7 +18,6 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Forms
   alias ArbiterWeb.CoreComponents.Navigation
-  require Ash.Query
 
   @valid_tracker_types Workspace.valid_tracker_types()
   @valid_merger_strategies Workspace.valid_merger_strategies()

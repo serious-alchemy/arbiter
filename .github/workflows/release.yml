@@ -81,7 +81,7 @@ jobs:
           path: /opt/otp
           key: otp-static-openssl-ubi8-${{ hashFiles('scripts/build-release-otp.sh') }}
 
-      - name: Build Erlang/OTP 28 with static OpenSSL
+      - name: Build Erlang/OTP 29 with static OpenSSL
         if: steps.otp-cache.outputs.cache-hit != 'true'
         run: |
           bash scripts/build-release-otp.sh --prefix /opt/otp
@@ -91,10 +91,10 @@ jobs:
           echo "/opt/otp/bin" >> "$GITHUB_PATH"
           /opt/otp/bin/erl -noshell -eval 'ok = crypto:start(), io:format("~p~n", [crypto:info_lib()]), halt().'
 
-      - name: Install Elixir 1.19
+      - name: Install Elixir 1.20
         run: |
-          ELIXIR_VERSION="1.19.0"
-          OTP_MAJOR="28"
+          ELIXIR_VERSION="1.20.4"
+          OTP_MAJOR="29"
           curl -fsSL "https://repo.hex.pm/builds/elixir/v${ELIXIR_VERSION}-otp-${OTP_MAJOR}.zip" -o /tmp/elixir.zip
           mkdir -p /opt/elixir
           unzip -q /tmp/elixir.zip -d /opt/elixir

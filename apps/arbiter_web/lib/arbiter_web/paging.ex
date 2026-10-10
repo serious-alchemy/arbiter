@@ -15,8 +15,6 @@ defmodule ArbiterWeb.Paging do
   the existing dashboard reads.
   """
 
-  require Ash.Query
-
   @default_page_size 25
 
   @typedoc "A single page of results plus the metadata the pager needs."

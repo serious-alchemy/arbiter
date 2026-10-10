@@ -24,8 +24,8 @@
 set -euo pipefail
 
 # Keep OTP_VERSION in step with the OTP line used in CI (.github/workflows/ci.yml).
-OTP_VERSION="28.5.0.2"
-OTP_SHA256="70d000de601c1cf695b551bab5209226555363ad3cb810639810a3fc6c5306eb"
+OTP_VERSION="29.1.1"
+OTP_SHA256="054e0143e39c780e091107fc9b345792a9c1a55f6bac1eca1c1101510fc06bf6"
 
 # 3.5 is an OpenSSL LTS line (supported to 2030-04). Bump within it for
 # security fixes; the checksum is the upstream `.sha256` for the tarball.

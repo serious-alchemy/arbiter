@@ -158,7 +158,12 @@ defmodule Arbiter.WorkerShutdownTest do
       # Wedge the worker inside a callback so the shutdown exit signal sits in
       # its mailbox unread — a terminate/2 that never gets to run.
       wedger =
-        spawn(fn -> :sys.replace_state(pid, fn s -> Process.sleep(:infinity) && s end) end)
+        spawn(fn ->
+          :sys.replace_state(pid, fn s ->
+            Process.sleep(:infinity)
+            s
+          end)
+        end)
 
       on_exit(fn -> Process.exit(wedger, :kill) end)
       eventually(fn -> match?({:current_function, {Process, :sleep, 1}}, current(pid)) end)

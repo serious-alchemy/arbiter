@@ -119,11 +119,19 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
           # No listener on the port.
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -236,13 +244,27 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args})
 
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> raise ErlangError, original: :enoent
-          "ss" -> raise ErlangError, original: :enoent
-          "pgrep" -> {"9999\n", 0}
-          "kill" -> {"", 0}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            raise ErlangError, original: :enoent
+
+          "ss" ->
+            raise ErlangError, original: :enoent
+
+          "pgrep" ->
+            {"9999\n", 0}
+
+          "kill" ->
+            {"", 0}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -262,12 +284,24 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> raise ErlangError, original: :enoent
-          "ss" -> {"", 1}
-          "pgrep" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            raise ErlangError, original: :enoent
+
+          "ss" ->
+            {"", 1}
+
+          "pgrep" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -366,10 +400,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -387,10 +429,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -405,10 +455,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -432,10 +490,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -463,10 +529,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
@@ -500,10 +574,18 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"No files found for arbiter.service.\n", 1}
-          "lsof" -> {"", 1}
-          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
-          _ -> {"", 0}
+          "systemctl" ->
+            {"No files found for arbiter.service.\n", 1}
+
+          "lsof" ->
+            {"", 1}
+
+          "sh" ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
