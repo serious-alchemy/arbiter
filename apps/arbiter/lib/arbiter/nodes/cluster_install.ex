@@ -30,6 +30,10 @@ defmodule Arbiter.Nodes.ClusterInstall do
           node_name: String.t()
         }
 
+  @doc "The namespace the manifests default to."
+  @spec default_namespace() :: String.t()
+  def default_namespace, do: InstallManifest.default_namespace()
+
   @doc "The form fields that are carried into the manifest URL."
   @spec form_keys() :: [String.t()]
   def form_keys, do: @form_keys
@@ -48,6 +52,19 @@ defmodule Arbiter.Nodes.ClusterInstall do
          {:ok, version} <-
            present(Keyword.get_lazy(opts, :version, &Agent.release_tag/0), :no_release) do
       {:ok, [image: image(registry, version), primary_url: url, registry: registry]}
+    end
+  end
+
+  @doc """
+  The controller image of the running release alone (no `nodes.public_url` needed):
+  what an upgrade names. `{:error, :no_registry | :no_release}`.
+  """
+  @spec controller_image(keyword()) :: {:ok, String.t()} | {:error, atom()}
+  def controller_image(opts \\ []) do
+    with {:ok, registry} <- present(Settings.nodes_registry(), :no_registry),
+         {:ok, version} <-
+           present(Keyword.get_lazy(opts, :version, &Agent.release_tag/0), :no_release) do
+      {:ok, image(registry, version)}
     end
   end
 

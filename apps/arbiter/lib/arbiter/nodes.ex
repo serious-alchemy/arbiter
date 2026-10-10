@@ -33,6 +33,7 @@ defmodule Arbiter.Nodes do
 
   alias Arbiter.Nodes.{
     Agent,
+    ClusterInstall,
     Credentials,
     JoinToken,
     Node,
@@ -622,6 +623,7 @@ defmodule Arbiter.Nodes do
   """
   @spec upgrade(Node.t(), Actor.t() | String.t() | nil) ::
           {:ok, %{version: String.t(), sha256: String.t()}}
+          | {:ok, %{version: String.t(), image: String.t()}}
           | {:error, :offline | :revoked | :unavailable | :not_found}
   def upgrade(%Node{id: id}, actor) do
     case get_node(id) do
@@ -633,19 +635,42 @@ defmodule Arbiter.Nodes do
 
       %Node{} = node ->
         with pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline},
-             {:ok, %{version: version, sha256: sha}} <-
-               Agent.artifact() |> unavailable() do
-          Registry.notify(node.id, {:upgrade, %{"version" => version, "sha256" => sha}})
+             {:ok, upgrade} <- upgrade_spec(node) do
+          Registry.notify(node.id, {:upgrade, upgrade_payload(upgrade)})
 
-          record(:upgraded, node.id, Actor.resolve_label(actor), %{
-            "version" => version,
-            "requested" => true
-          })
+          record(
+            :upgraded,
+            node.id,
+            Actor.resolve_label(actor),
+            Map.merge(%{"requested" => true}, upgrade_detail(upgrade))
+          )
 
-          {:ok, %{version: version, sha256: sha}}
+          {:ok, upgrade}
         end
     end
   end
+
+  # A machine moves to the tarball the primary serves; a cluster node (K9) to the
+  # controller image of the same release.
+  defp upgrade_spec(%Node{kind: "cluster"}) do
+    with {:ok, image} <- ClusterInstall.controller_image(),
+         tag when is_binary(tag) <- Agent.release_tag() do
+      {:ok, %{version: tag, image: image}}
+    else
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  defp upgrade_spec(%Node{}) do
+    with {:ok, %{version: version, sha256: sha}} <- unavailable(Agent.artifact()),
+         do: {:ok, %{version: version, sha256: sha}}
+  end
+
+  defp upgrade_payload(%{version: v, image: image}), do: %{"version" => v, "image" => image}
+  defp upgrade_payload(%{version: v, sha256: sha}), do: %{"version" => v, "sha256" => sha}
+
+  defp upgrade_detail(%{version: v, image: image}), do: %{"version" => v, "image" => image}
+  defp upgrade_detail(%{version: v}), do: %{"version" => v}
 
   defp unavailable({:ok, _} = ok), do: ok
   defp unavailable(_), do: {:error, :unavailable}
