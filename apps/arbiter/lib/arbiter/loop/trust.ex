@@ -37,6 +37,10 @@ defmodule Arbiter.Loop.Trust do
   alias Arbiter.Guardrails
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Guardrails.TrustRecord
+  alias Arbiter.Loop
+  alias Arbiter.Loop.Apply
+  alias Arbiter.Loop.Notify
+  alias Arbiter.Loop.PendingWrite
   alias Arbiter.Loop.Trust.Criteria
   alias Arbiter.Loop.Trust.Sample
   alias Arbiter.Messages.Escalation
@@ -186,7 +190,9 @@ defmodule Arbiter.Loop.Trust do
         prior = Map.get(existing, subject)
         data = slice(by_subject, subject)
         {state, acted} = fold(subject, prior, rule_of[subject], data, ctx)
-        {persist(prior, state), acted}
+        {evidence, state} = Map.pop(state, :evidence)
+        record = persist(prior, state)
+        {record, acted ++ propose(record, evidence)}
       end)
       |> Enum.unzip()
 
@@ -274,6 +280,11 @@ defmodule Arbiter.Loop.Trust do
     {eligible_for, eligibility} = Criteria.eligibility(state.tier, facts)
 
     Map.merge(state, %{
+      evidence: %{
+        run_ids: counts.clean_run_ids,
+        task_ids: counts.clean_task_ids,
+        band: quality_band(eligibility, quality)
+      },
       runs: counts.runs,
       clean_runs: counts.clean_runs,
       clean_tickets: counts.clean_tickets,
@@ -287,6 +298,394 @@ defmodule Arbiter.Loop.Trust do
       eligible_for: eligible_for,
       eligibility: eligibility
     })
+  end
+
+  # The band the quality criterion was judged at, with its figures, for the
+  # proposal's pre-registered metric.
+  defp quality_band(%{"criteria" => criteria}, quality) do
+    case Enum.find(criteria, &(&1["name"] == "round1_quality")) do
+      %{"band" => band} -> {band, quality.bands[band]}
+      _ -> nil
+    end
+  end
+
+  defp quality_band(_eligibility, _quality), do: nil
+
+  # ---- promotion proposals (§6.3, §6.5) --------------------------------------
+
+  # An eligible subject gets a `trust_promotion` proposal (or reinforces the one
+  # it has); a subject that stopped being eligible has its live one superseded.
+  # The proposal is operator-only: `Arbiter.Loop.apply_pending/2` refuses it and
+  # `promote/4` applies it.
+  defp propose(%TrustRecord{eligible_for: nil} = record, _evidence) do
+    supersede(record, "the subject is no longer eligible: " <> unmet(record.eligibility))
+    []
+  end
+
+  defp propose(%TrustRecord{} = record, evidence) do
+    k = key(record)
+    from = to_string(record.tier)
+    to = to_string(record.eligible_for)
+    fresh? = live_proposals(k) == []
+
+    {metric, baseline} =
+      case evidence.band do
+        {band, %{"q" => q, "reviewed" => n}} ->
+          {"round-1 approve rate at #{band_label(band)}", "#{pct(q)} over #{n} reviewed"}
+
+        _ ->
+          {nil, nil}
+      end
+
+    candidate = %{
+      kind: :trust_promotion,
+      gist:
+        "promote #{k} #{from} → #{to}: #{record.clean_runs} clean run(s) on " <>
+          "#{record.clean_tickets} ticket(s), 0 critical or major events",
+      category: "trust:#{from}->#{to}",
+      target: k,
+      scope: :fleet,
+      incident_refs: evidence.run_ids,
+      task_refs: evidence.task_ids,
+      target_metric: metric,
+      baseline: baseline,
+      payload: %{
+        "provider" => record.provider,
+        "model" => record.model,
+        "from" => from,
+        "to" => to,
+        "criteria" => (record.eligibility || %{})["criteria"] || []
+      },
+      origin: "loop.trust"
+    }
+
+    # The §6.3 thresholds are the evidence bar here: an eligible subject's
+    # proposal lands `:proposed` at once.
+    case Loop.record(candidate,
+           evidence_bar: %{min_incidents: 1, min_distinct_tasks: 1},
+           actor: @actor
+         ) do
+      {:ok, row} when fresh? -> [%{action: :proposed, subject: k, proposal: row.id, to: record.eligible_for}]
+      {:ok, _row} -> []
+      {:error, why} ->
+        Logger.warning("Loop.Trust: proposal for #{k} not recorded: #{inspect(why)}")
+        []
+    end
+  end
+
+  defp live_proposals(target) do
+    PendingWrite
+    |> Ash.Query.filter(
+      kind == :trust_promotion and target == ^target and state in [:proposed, :hypothesis]
+    )
+    |> Ash.read!()
+  end
+
+  defp supersede(%TrustRecord{} = record, reason) do
+    for row <- live_proposals(key(record)) do
+      {:ok, row} =
+        Ash.update(row, %{rejection_reason: reason, actor: @actor},
+          action: :supersede,
+          actor: @actor
+        )
+
+      Notify.announce(row, :superseded)
+    end
+  end
+
+  defp unmet(%{"blocked_by" => blocked}) when is_binary(blocked), do: blocked
+
+  defp unmet(%{"criteria" => criteria}) when is_list(criteria) do
+    case for(%{"met" => false, "name" => name} <- criteria, do: name) do
+      [] -> "its tier changed"
+      names -> Enum.join(names, ", ")
+    end
+  end
+
+  defp unmet(_eligibility), do: "its tier changed"
+
+  defp band_label("d0_1"), do: "D0–D1"
+  defp band_label(band), do: String.upcase(band)
+
+  defp pct(nil), do: "—"
+  defp pct(q), do: "#{Float.round(q * 100, 1)}%"
+
+  # ---- promotion (operator-only, §6.4) ----------------------------------------
+
+  @doc """
+  Promote `subject` to tier `to` — the operator's act, never the Loop's.
+
+  Refused unless `opts[:authority]` is `:operator` (operator proof:
+  `Arbiter.MCP.Scope.operator?/1`; the default is `:restricted`, so a caller must
+  say so). No MCP tool calls this. `reason` is required, `to` must be above the
+  subject's tier, and the install must be guarded (a promotion on an install with
+  no subject rule would switch guardrails on for every other subject).
+
+  It writes the subject's own rule (`write_tier/6`: the matched rule's scope,
+  overrides and pin carried over), marks a live `trust_promotion` proposal to the
+  same tier `:applied` (actor `operator`) and supersedes any other, clears an
+  automatic suspension, and records the move in the trust record's history with
+  `actor: "operator"`.
+  """
+  @spec promote(subject() | String.t(), atom() | String.t(), String.t() | nil, keyword()) ::
+          {:ok, %{record: TrustRecord.t(), proposal: PendingWrite.t() | nil}}
+          | {:error, {:operator_only | :invalid, String.t()}}
+  def promote(subject, to, reason, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    rules = Keyword.get_lazy(opts, :rules, &Rules.all/0)
+
+    with :ok <- operator_only(Keyword.get(opts, :authority, :restricted)),
+         {:ok, key} <- subject_arg(subject),
+         {:ok, to} <- tier_arg(to),
+         {:ok, reason} <- reason_arg(reason),
+         :ok <- guarded(rules),
+         rule = match_rule(rules, key),
+         from = tier_of(rule, true),
+         :ok <- upward(from, to, key),
+         {:ok, _row} <- written(write_tier(key, rule, to, reason <> " (arb trust promote)", "operator")) do
+      proposal = settle_proposals(key, to)
+
+      record =
+        record_move(key, now, %{
+          "action" => "promoted",
+          "actor" => "operator",
+          "from" => to_string(from),
+          "to" => to_string(to),
+          "reason" => reason,
+          "proposal_id" => proposal && proposal.id
+        })
+
+      {:ok, %{record: record, proposal: proposal}}
+    end
+  end
+
+  defp operator_only(:operator), do: :ok
+
+  defp operator_only(authority) do
+    {:error,
+     {:operator_only,
+      "promoting a subject is operator-only: it needs operator proof (`arb trust promote` " <>
+        "from the operator's own shell), and a #{authority} token has none. No MCP tool can " <>
+        "promote. The coordinator may propose, demote, pin, and confirm or dismiss a suspension."}}
+  end
+
+  defp subject_arg({_provider, _model} = subject), do: {:ok, subject}
+
+  defp subject_arg(text) when is_binary(text) do
+    case parse_subject(text) do
+      {:ok, subject} -> {:ok, subject}
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
+  defp subject_arg(_), do: {:error, {:invalid, "a subject is provider/model"}}
+
+  defp tier_arg(tier) do
+    case Guardrails.Config.tier(tier) do
+      nil ->
+        {:error,
+         {:invalid,
+          "#{inspect(tier)} is not a tier (#{Enum.join(Guardrails.tiers(), ", ")})"}}
+
+      tier ->
+        {:ok, tier}
+    end
+  end
+
+  defp reason_arg(reason) when is_binary(reason) do
+    case String.trim(reason) do
+      "" -> {:error, {:invalid, "a reason is required (--reason)"}}
+      reason -> {:ok, reason}
+    end
+  end
+
+  defp reason_arg(_), do: {:error, {:invalid, "a reason is required (--reason)"}}
+
+  defp guarded([]),
+    do:
+      {:error,
+       {:invalid,
+        "no subject rule is configured, so guardrails are off and nothing is tiered; " <>
+          "configure the subject rules first (docs/design/guardrail-profiles.md §3.1)"}}
+
+  defp guarded(_rules), do: :ok
+
+  defp upward(from, to, key) do
+    if Guardrails.tier_rank(to) > Guardrails.tier_rank(from),
+      do: :ok,
+      else:
+        {:error,
+         {:invalid,
+          "#{key(key)} is #{from}: #{to} is not a promotion. A demotion needs no operator " <>
+            "(the coordinator tightens the subject rule); a suspension is ended with " <>
+            "`arb trust dismiss` or `arb trust confirm`."}}
+  end
+
+  defp written({:ok, row}), do: {:ok, row}
+  defp written({:error, {:operator_only, message}}), do: {:error, {:operator_only, message}}
+  defp written({:error, why}), do: {:error, {:invalid, inspect(why)}}
+
+  # The live proposal to `to` is applied (by the operator); any other is
+  # superseded by the operator's own choice of tier.
+  defp settle_proposals(key, to) do
+    key
+    |> key()
+    |> live_proposals()
+    |> Enum.reduce(nil, fn row, applied ->
+      if (row.payload || %{})["to"] == to_string(to) and applied == nil do
+        {:ok, row} = Apply.persist(row, "operator")
+        Apply.notify(row)
+        row
+      else
+        {:ok, row} =
+          Ash.update(
+            row,
+            %{rejection_reason: "superseded by arb trust promote --to #{to}", actor: "operator"},
+            action: :supersede,
+            actor: "operator"
+          )
+
+        Notify.announce(row, :superseded)
+        applied
+      end
+    end)
+  end
+
+  # An operator move: the tier and its clock restart, any suspension ends, and the
+  # move is the record's newest history entry.
+  defp record_move({provider, model} = key, now, entry) do
+    record =
+      get(key) ||
+        Ash.create!(TrustRecord, %{
+          provider: provider,
+          model: model,
+          family: Guardrails.subject(provider, model).family
+        })
+
+    entry =
+      Map.merge(entry, %{"at" => iso(now), "cleared_suspension" => record.suspended_at != nil})
+
+    Ash.update!(record, %{
+      tier: Guardrails.Config.tier(entry["to"]),
+      tier_since: now,
+      clock_started_at: now,
+      suspended_at: nil,
+      suspension: nil,
+      eligible_for: nil,
+      history: (record.history || []) ++ [entry]
+    })
+  end
+
+  # ---- the coordinator's decision on a suspension (§6.3) ----------------------
+
+  @doc """
+  Confirm an automatic suspension: the demotion to `quarantine` stands. The
+  subject's rule is lowered to `quarantine` (a pure tightening; the matched
+  rule's scope, overrides and pin carry over) and the suspension ends, so it is
+  eligible again for quarantine work only.
+
+  Options: `:authority` (`:coordinator` or `:operator`; default `:restricted`,
+  refused), `:actor`, `:now`.
+  """
+  @spec confirm(subject() | String.t(), keyword()) ::
+          {:ok, TrustRecord.t()} | {:error, {:forbidden | :invalid, String.t()}}
+  def confirm(subject, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    actor = Keyword.get(opts, :actor, "coordinator")
+
+    with :ok <- coordinator_or_operator(Keyword.get(opts, :authority, :restricted)),
+         {:ok, key} <- subject_arg(subject),
+         {:ok, record} <- suspended(key),
+         rule = match_rule(Rules.all(), key),
+         {:ok, _} <- to_quarantine(key, rule, record, actor) do
+      {:ok,
+       Ash.update!(record, %{
+         tier: :quarantine,
+         tier_since: now,
+         clock_started_at: now,
+         suspended_at: nil,
+         suspension: nil,
+         eligible_for: nil,
+         history:
+           record.history ++
+             [
+               history(now, "confirmed", actor, %{
+                 "event_id" => record.suspension["id"],
+                 "from" => record.suspension["prior_tier"],
+                 "to" => "quarantine"
+               })
+             ]
+       })}
+    end
+  end
+
+  defp to_quarantine(key, rule, record, actor) do
+    if tier_of(rule, true) == :quarantine do
+      {:ok, nil}
+    else
+      key
+      |> write_tier(
+        rule,
+        :quarantine,
+        "suspension confirmed: #{record.suspension["kind"]} on run #{record.suspension["run_id"]}",
+        actor,
+        tighten_only: true
+      )
+      |> written()
+    end
+  end
+
+  @doc """
+  Dismiss an automatic suspension as a false positive, with a recorded
+  `reason` (an authorised security probe is one): the suspension ends and the
+  subject's tier — which the suspension never changed — returns. This is not a
+  promotion: it only undoes a suspension nobody confirmed. The event it was for
+  is not acted on again.
+
+  Options: as `confirm/2`.
+  """
+  @spec dismiss(subject() | String.t(), String.t() | nil, keyword()) ::
+          {:ok, TrustRecord.t()} | {:error, {:forbidden | :invalid, String.t()}}
+  def dismiss(subject, reason, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    actor = Keyword.get(opts, :actor, "coordinator")
+
+    with :ok <- coordinator_or_operator(Keyword.get(opts, :authority, :restricted)),
+         {:ok, key} <- subject_arg(subject),
+         {:ok, reason} <- reason_arg(reason),
+         {:ok, record} <- suspended(key) do
+      {:ok,
+       Ash.update!(record, %{
+         suspended_at: nil,
+         suspension: nil,
+         history:
+           record.history ++
+             [
+               history(now, "dismissed", actor, %{
+                 "event_id" => record.suspension["id"],
+                 "tier" => record.suspension["prior_tier"],
+                 "reason" => reason
+               })
+             ]
+       })}
+    end
+  end
+
+  defp coordinator_or_operator(authority) when authority in [:coordinator, :operator], do: :ok
+
+  defp coordinator_or_operator(authority),
+    do:
+      {:error,
+       {:forbidden,
+        "confirming or dismissing a suspension is the coordinator's call; a #{authority} " <>
+          "token may not"}}
+
+  defp suspended(key) do
+    case get(key) do
+      %TrustRecord{suspended_at: %DateTime{}} = record -> {:ok, record}
+      %TrustRecord{} -> {:error, {:invalid, "#{key(key)} is not suspended"}}
+      nil -> {:error, {:invalid, "#{key(key)} has no trust record"}}
+    end
   end
 
   # ---- version drift -------------------------------------------------------------

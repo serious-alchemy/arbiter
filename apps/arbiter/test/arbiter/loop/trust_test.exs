@@ -194,6 +194,73 @@ defmodule Arbiter.Loop.TrustTest do
       assert %{suspension: %{"events" => [_, _]}} = Trust.get(@codex)
       assert [_] = pages(:trust_suspended)
     end
+
+    test "the coordinator confirms: the demotion to quarantine stands and the suspension ends",
+         %{ws: ws, run_id: run_id} do
+      event!(run_id, "s1", @codex, :public_upload_attempt, :critical, ~U[2026-10-09 11:00:00Z])
+      {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert {:ok, record} =
+               Trust.confirm("codex/gpt-5.1-codex", authority: :coordinator, actor: "coordinator")
+
+      assert record.suspended_at == nil
+      assert record.tier == :quarantine
+      assert rule_tier(@codex) == :quarantine
+      assert %{"action" => "confirmed", "actor" => "coordinator"} = List.last(record.history)
+
+      # Quarantine work only, but eligible again.
+      assert {:ok, _} = evaluate(ws, @codex)
+      assert {:error, _} = evaluate(ws, @codex, 2)
+    end
+
+    test "the coordinator dismisses a false positive: the tier returns, and the event does not suspend again",
+         %{ws: ws, run_id: run_id} do
+      event!(run_id, "s1", @codex, :public_upload_attempt, :critical, ~U[2026-10-09 11:00:00Z])
+      {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert {:ok, record} =
+               Trust.dismiss("codex/gpt-5.1-codex", "the authorised G17 probe",
+                 authority: :coordinator,
+                 actor: "coordinator"
+               )
+
+      assert record.suspended_at == nil
+
+      assert %{"action" => "dismissed", "reason" => "the authorised G17 probe"} =
+               List.last(record.history)
+
+      assert rule_tier(@codex) == :probation
+      assert {:ok, _} = evaluate(ws, @codex, 2)
+
+      assert {:ok, %{actions: []}} =
+               Trust.tick(now: DateTime.add(now(), 900), cutover: cutover(), workers: [])
+
+      assert %{suspended_at: nil} = Trust.get(@codex)
+    end
+
+    test "confirm and dismiss need a suspension, a reason to dismiss, and coordinator authority",
+         %{run_id: run_id} do
+      {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert {:error, {:invalid, why}} =
+               Trust.confirm("codex/gpt-5.1-codex", authority: :coordinator)
+
+      assert why =~ "not suspended"
+
+      event!(run_id, "s1", @codex, :public_upload_attempt, :critical, ~U[2026-10-10 12:30:00Z])
+
+      {:ok, _} =
+        Trust.tick(now: DateTime.add(now(), 3600), cutover: cutover(), workers: [])
+
+      assert {:error, {:invalid, _}} =
+               Trust.dismiss("codex/gpt-5.1-codex", " ", authority: :coordinator)
+
+      for op <- [&Trust.confirm(&1, authority: :restricted), &Trust.dismiss(&1, "x", authority: :restricted)] do
+        assert {:error, {:forbidden, _}} = op.("codex/gpt-5.1-codex")
+      end
+
+      assert %{suspended_at: %DateTime{}} = Trust.get(@codex)
+    end
   end
 
   describe "automatic demotion (§6.3)" do

@@ -70,6 +70,8 @@ defmodule Arbiter.Loop.Apply do
 
   This is the evidence bar's teeth: a `:hypothesis` is refused here, with its
   current evidence count and the shortfall named, and nothing downstream runs.
+  An operator-only kind (`trust_promotion`, G18) is refused at any state and any
+  authority: it is applied by `arb trust promote`, never through this pipeline.
   """
   @spec validate(PendingWrite.t()) :: :ok | {:error, {:not_applicable, String.t()}}
   def validate(%PendingWrite{} = row) do
@@ -99,6 +101,12 @@ defmodule Arbiter.Loop.Apply do
   """
   @spec side_effect(PendingWrite.t(), String.t(), keyword()) :: :ok | error()
   def side_effect(row, attribution, opts \\ [])
+
+  # G18: never here, whoever calls — `validate/1` already refuses it, and this
+  # keeps a direct call from applying it either. `Arbiter.Loop.Trust.promote/4`
+  # is the only apply path for a promotion.
+  def side_effect(%PendingWrite{kind: :trust_promotion} = row, _attribution, _opts),
+    do: {:error, {:not_applicable, Loop.inapplicable_reason(row)}}
 
   def side_effect(
         %PendingWrite{kind: :difficulty_override, payload: payload},
@@ -207,6 +215,9 @@ defmodule Arbiter.Loop.Apply do
   def payload_ready?(%PendingWrite{kind: :repo_doc_patch} = row) do
     with {:ok, _} <- repo_doc_args(row), do: :ok
   end
+
+  def payload_ready?(%PendingWrite{kind: :trust_promotion} = row),
+    do: {:error, {:not_applicable, Loop.inapplicable_reason(row)}}
 
   def payload_ready?(%PendingWrite{kind: kind}),
     do: {:error, {:unmapped, "no apply rule is defined for kind #{inspect(kind)}"}}
