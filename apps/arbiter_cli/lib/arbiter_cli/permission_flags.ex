@@ -4,7 +4,7 @@ defmodule ArbiterCli.PermissionFlags do
   create` and `arb ticket update`:
 
     * `--permission <p>` — declare a permission (`network:<host>[:<port>]`,
-      `tracker_write`, `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`;
+      `tracker_write`, `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`, `research_read`;
       `network?:host` marks an action optional);
     * `--remove-permission <p>` — (update) drop one.
 

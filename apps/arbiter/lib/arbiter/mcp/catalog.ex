@@ -580,7 +580,7 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "The permissions this ticket declares (G12, docs/design/guardrail-profiles.md " <>
                 "§5): `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, `prod_read`, " <>
-                "`prod_ssh`, `phi_data`; a `?` after the kind (`network?:host`) marks an action " <>
+                "`prod_ssh`, `phi_data`, `research_read`; a `?` after the kind (`network?:host`) marks an action " <>
                 "optional. On update this REPLACES the list. A permission whose binding says " <>
                 "`grant_by: operator` (default: `prod_ssh`) is recorded as `requested` and gives " <>
                 "no reach until the operator grants it; removing `phi_data` is operator-only. " <>
@@ -699,7 +699,7 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "The permissions this ticket declares (G12, docs/design/guardrail-profiles.md " <>
                 "§5): `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, `prod_read`, " <>
-                "`prod_ssh`, `phi_data`; a `?` after the kind (`network?:host`) marks an action " <>
+                "`prod_ssh`, `phi_data`, `research_read`; a `?` after the kind (`network?:host`) marks an action " <>
                 "optional. On update this REPLACES the list. A permission whose binding says " <>
                 "`grant_by: operator` (default: `prod_ssh`) is recorded as `requested` and gives " <>
                 "no reach until the operator grants it; removing `phi_data` is operator-only. " <>

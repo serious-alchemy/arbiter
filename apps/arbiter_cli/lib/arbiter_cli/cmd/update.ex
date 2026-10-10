@@ -125,7 +125,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   `--permission <p>` / `--remove-permission <p>` (bd-54m4vv) add or drop one of
   the permissions the ticket declares (`network:<host>[:<port>]`, `tracker_write`,
-  `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`; repeatable, comma lists).
+  `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`, `research_read`; repeatable, comma lists).
   The server folds them into the stored list. A permission whose workspace
   binding says `grant_by: operator` (default `prod_ssh`) is only `requested`
   until the operator grants it; removing `phi_data` is operator-only.
