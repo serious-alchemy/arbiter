@@ -81,17 +81,18 @@ defmodule Arbiter.NodeAgent.ExecTest do
     wait_until(fn -> run not in Runs.run_ids() end)
   end
 
-  defp wait_until(fun) do
-    deadline = System.monotonic_time(:millisecond) + 5_000
+  defp wait_until(fun, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
+    cond do
+      fun.() ->
+        :ok
 
-    Stream.repeatedly(fn ->
-      if fun.() or System.monotonic_time(:millisecond) > deadline,
-        do: :done,
-        else: Process.sleep(15)
-    end)
-    |> Enum.find(&(&1 == :done))
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
 
-    assert fun.()
+      true ->
+        Process.sleep(15)
+        wait_until(fun, deadline)
+    end
   end
 
   defp argv(stub), do: File.read!(Path.join(stub, "run.argv")) |> String.split("\n", trim: true)
