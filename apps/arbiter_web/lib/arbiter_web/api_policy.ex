@@ -31,6 +31,8 @@ defmodule ArbiterWeb.ApiPolicy do
       by `POST /api/dashboard/login_tokens` (P-28: a dashboard login is an operator
       grant, so an LLM coordinator session must not mint one;
       `docs/design/tier-proof-boundaries.md`);
+      by `POST /api/trust/promote` (G18: promoting a subject loosens its
+      guardrails, so only the operator does it, from `arb trust promote`);
       and by `/api/release/deploy`, which restarts the server onto a new release.
     * `:coordinator` — a `:coordinator`-tier token (the operator's minted
       token, an `ARB_TOKEN`, a coordinator session's own token).
@@ -150,6 +152,14 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/loop/pending/:id"} => :coordinator,
     {:post, "/api/loop/pending/:id/apply"} => :coordinator,
     {:post, "/api/loop/pending/:id/reject"} => :coordinator,
+
+    # ---- earned trust (G18) --------------------------------------------------
+    # A promotion loosens a subject's guardrails: operator proof only. The
+    # coordinator reads, and confirms or dismisses an automatic suspension.
+    {:get, "/api/trust"} => :coordinator,
+    {:post, "/api/trust/promote"} => :operator,
+    {:post, "/api/trust/confirm"} => :coordinator,
+    {:post, "/api/trust/dismiss"} => :coordinator,
 
     # ---- repos / skills ---------------------------------------------------
     {:get, "/api/repos"} => :coordinator,
@@ -369,7 +379,8 @@ defmodule ArbiterWeb.ApiPolicy do
       else:
         forbidden(
           scope,
-          "lacks operator proof (this route is operator-only: node administration, dashboard login)"
+          "lacks operator proof (this route is operator-only: node administration, dashboard " <>
+            "login, trust promotion)"
         )
   end
 

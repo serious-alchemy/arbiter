@@ -450,6 +450,61 @@ defmodule ArbiterCli.Cmd.LoopTest do
       assert out =~ "applied p-2"
     end
 
+    # G18: a trust_promotion is the operator's to apply (`arb trust promote`);
+    # the server refuses it here, so the batch neither tries nor counts it.
+    test "loop apply all skips an operator-only trust_promotion and still exits 0" do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/loop/pending"},
+         {%{
+            "pending" => [
+              %{
+                "id" => "p-1",
+                "kind" => "trust_promotion",
+                "target" => "codex/gpt-5.1-codex",
+                "gist" => "promote"
+              },
+              %{"id" => "p-2", "kind" => "skill_patch", "gist" => "two"}
+            ]
+          }, 200}},
+        {{"post", "/api/loop/pending/p-1/apply"},
+         fn conn ->
+           send(test_pid, :applied_trust)
+           Req.Test.json(conn, %{})
+         end},
+        {{"post", "/api/loop/pending/p-2/apply"},
+         {%{"pending" => %{"id" => "p-2", "gist" => "two"}}, 200}}
+      ])
+
+      {out, err, exit_code} = capture(fn -> Loop.run(["apply", "all"]) end)
+
+      assert exit_code == 0
+      assert out =~ "applied p-2"
+      assert err =~ "skipped p-1"
+      assert err =~ "arb trust promote"
+      refute_received :applied_trust
+    end
+
+    test "loop pending marks a trust_promotion as operator-only" do
+      stub_get("/api/loop/pending", %{
+        "pending" => [
+          %{
+            "id" => "p-1",
+            "kind" => "trust_promotion",
+            "state" => "proposed",
+            "applicable" => false,
+            "evidence_count" => 10,
+            "distinct_tasks" => 8,
+            "gist" => "promote codex/gpt-5.1-codex quarantine → probation"
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Loop.run(["pending"]) end)
+      assert out =~ "proposed (operator-only)"
+    end
+
     test "loop diff --json prints the full row" do
       stub_get("/api/loop/pending/p-1", %{
         "pending" => %{"id" => "p-1", "state" => "proposed", "diff" => "--- a\n+++ b\n"}

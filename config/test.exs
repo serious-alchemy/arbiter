@@ -278,6 +278,10 @@ config :arbiter, :loop_canary_ticker, enabled: false
 config :arbiter, :budget_patrol, enabled: false
 config :arbiter, :spend_patrol, enabled: false
 
+# G18: a spawn never asks the host's real agent CLI for its `--version`; a test
+# that needs a harness version hands `Arbiter.Agents.HarnessVersion` a fake one.
+config :arbiter, :harness_version, probe: false
+
 # bd-b1b3mp: tests call `Arbiter.Tasks.BacklogTailDigest.sweep/1` directly.
 config :arbiter, :backlog_tail_digest, enabled: false
 

@@ -51,6 +51,28 @@ defmodule Arbiter.Guardrails.EligibilityTest do
     end
   end
 
+  describe "suspension (G18)" do
+    test "a suspended subject is ineligible for any role, whatever its tier allowed" do
+      suspensions = %{
+        {"claude", "claude-opus-4-6"} => %{"kind" => "public_upload_attempt", "run_id" => "r1"}
+      }
+
+      for role <- [:implementer, :reviewer] do
+        assert {:error, detail} =
+                 evaluate(attrs("claude", "claude-opus-4-6", %{role: role}),
+                   suspensions: suspensions
+                 )
+
+        assert detail =~ "suspended"
+        assert detail =~ "public_upload_attempt"
+        assert detail =~ "arb trust"
+      end
+
+      assert {:ok, _} =
+               evaluate(attrs("claude", "claude-sonnet-5-5", %{}), suspensions: suspensions)
+    end
+  end
+
   describe "difficulty" do
     test "an implementer above the tier's max_difficulty is ineligible" do
       assert {:error, detail} =

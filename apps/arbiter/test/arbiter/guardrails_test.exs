@@ -93,6 +93,23 @@ defmodule Arbiter.GuardrailsTest do
       assert %Profile{tier: :privileged} = effective("claude", "claude-opus-4-6", ws())
     end
 
+    # G18: a promotion or demotion writes a rule for the one subject. It must win
+    # over the glob that matched it before, wherever it sits in the list.
+    test "an exact model beats a glob on the same keys, whatever the rule order" do
+      exact = %{
+        match: %{provider: "antigravity", model: "gemini-3.8-flash-low"},
+        tier: :probation
+      }
+
+      for rules <- [@rules ++ [exact], [exact | @rules]] do
+        assert %Profile{tier: :probation} =
+                 effective("antigravity", "gemini-3.8-flash-low", ws(), nil, rules)
+
+        assert %Profile{tier: :quarantine} =
+                 effective("antigravity", "gemini-3.8-flash-medium", ws(), nil, rules)
+      end
+    end
+
     test "scope keeps a subject to the workspaces and repos its rule lists" do
       assert %Profile{in_scope?: true} =
                effective("antigravity", "gemini-3.8-flash-low", ws(), "arbiter")
@@ -107,6 +124,38 @@ defmodule Arbiter.GuardrailsTest do
                  %{ws() | name: "emricare"},
                  "arbiter"
                )
+    end
+  end
+
+  describe "a suspended subject (G18)" do
+    test "is treated as quarantine and carries its suspension; other models are untouched" do
+      suspension = %{"kind" => "public_upload_attempt", "run_id" => "r1"}
+      suspensions = %{{"claude", "claude-opus-4-6"} => suspension}
+
+      assert %Profile{tier: :quarantine, min_mode: :strict, suspended: ^suspension} =
+               Guardrails.effective(
+                 Guardrails.subject("claude", "claude-opus-4-6"),
+                 ws(),
+                 nil,
+                 rules: @rules,
+                 suspensions: suspensions
+               )
+
+      assert %Profile{tier: :privileged, suspended: nil} =
+               Guardrails.effective(
+                 Guardrails.subject("claude", "claude-sonnet-5-5"),
+                 ws(),
+                 nil,
+                 rules: @rules,
+                 suspensions: suspensions
+               )
+    end
+
+    test "changes nothing on an unguarded install" do
+      assert Guardrails.effective(Guardrails.subject("claude", "claude-opus-4-6"), ws(), nil,
+               rules: [],
+               suspensions: %{{"claude", "claude-opus-4-6"} => %{}}
+             ) == nil
     end
   end
 

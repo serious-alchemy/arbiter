@@ -1353,6 +1353,43 @@
       status: :full
     },
     %{
+      id: "workspace/trust_show",
+      title: "Trust: show the subjects' tiers, records, recent events and pending proposals",
+      mcp: ["trust_show"],
+      cli: ["arb trust show", "arb trust"],
+      rest: ["GET /api/trust"],
+      status: :full,
+      note: "G18. One subject in full with `subject` (`?subject=` over REST)."
+    },
+    %{
+      id: "workspace/trust_promote",
+      title: "Trust: promote a subject (operator-only)",
+      mcp: nil,
+      cli: ["arb trust promote"],
+      rest: ["POST /api/trust/promote"],
+      status: :full,
+      note: "G18 §6.4: operator proof only. The CLI mints its token over the operator socket; the route is ApiPolicy :operator.",
+      absent: %{
+        mcp: {:intentional, "No MCP tool at any tier can promote: a promotion loosens a subject's guardrails and needs operator proof (guardrail-profiles §6.4)."}
+      }
+    },
+    %{
+      id: "workspace/trust_confirm_suspension",
+      title: "Trust: confirm an automatic suspension (the subject drops to quarantine)",
+      mcp: ["trust_confirm"],
+      cli: ["arb trust confirm"],
+      rest: ["POST /api/trust/confirm"],
+      status: :full
+    },
+    %{
+      id: "workspace/trust_dismiss_suspension",
+      title: "Trust: dismiss an automatic suspension as a false positive (the tier returns)",
+      mcp: ["trust_dismiss"],
+      cli: ["arb trust dismiss"],
+      rest: ["POST /api/trust/dismiss"],
+      status: :full
+    },
+    %{
       id: "workspace/memory_list_pending_candidates",
       title: "Memory: list pending candidates",
       mcp: ["memory_pending_list"],
