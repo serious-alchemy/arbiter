@@ -49,7 +49,7 @@ defmodule Arbiter.Tasks.IdleTicketsTest do
   end
 
   test "durable markers keep a ticket out of the idle set" do
-    pass = %{"pass" => %{"phase" => "fix", "round" => 1, "held" => true}}
+    pass = %{"pass" => %{"phase" => "revising", "round" => 1, "held" => true}}
     held = %{"held_resume" => %{"kind" => "resume"}}
     wait = %{"ci_wait" => %{"sha" => "abc", "expires_at" => "2026-10-10T13:00:00Z"}}
 
