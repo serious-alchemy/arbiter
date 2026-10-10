@@ -762,6 +762,33 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert has_element?(view, ~s(#{badge}[title="Runs on node gpu-box"]))
     end
 
+    # bd-b2iigy: a resume the scheduler holds for the primary's own worker cap.
+    test "an In-progress card whose resume is held for local capacity says so",
+         %{conn: conn, ws: ws} do
+      # Cap 0 keeps the (resumed, shared) autopilot from replaying it mid-test.
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+
+      on_exit(fn ->
+        Arbiter.Settings.set_nodes_local_max_workers(nil)
+      end)
+
+      task = issue(ws, "cut off by a restart")
+      {:ok, task} = Issue.start_work(task)
+
+      :ok = Autopilot.defer_resume(Autopilot, task.id, :resume, held_for: :local_capacity)
+      on_exit(fn -> Autopilot.cancel_deferred(Autopilot, task.id) end)
+
+      {:ok, view, _html} = live_board(conn)
+
+      card = ~s(#board-column-in_progress [id="card-#{task.id}"])
+      assert has_element?(view, card)
+      assert has_element?(view, ~s(#{card} [data-detail="in_progress"]), "held: local capacity")
+
+      :ok = Autopilot.cancel_deferred(Autopilot, task.id)
+      {:ok, view, _html} = live_board(conn)
+      refute has_element?(view, ~s(#{card} [data-detail="in_progress"]), "held: local capacity")
+    end
+
     test "a local run's card has no node badge", %{conn: conn, ws: ws} do
       task = issue(ws, "work on the primary")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)

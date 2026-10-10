@@ -133,6 +133,7 @@ defmodule Arbiter.Board.Drain do
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
           quota_hold: String.t() | nil,
+          held_local_capacity: [String.t()],
           checked_at: DateTime.t()
         }
 
@@ -240,6 +241,7 @@ defmodule Arbiter.Board.Drain do
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
+      held_local_capacity: Map.get(autopilot, :held_local_capacity, []),
       checked_at: DateTime.utc_now()
     }
   end
@@ -283,10 +285,16 @@ defmodule Arbiter.Board.Drain do
       slots_used: Map.get(status, :slots_used, 0),
       slot_holders: Map.get(status, :slot_holders, []),
       quota_hold: Map.get(status, :quota_hold),
+      held_local_capacity:
+        for(id <- Map.get(status, :held_local_capacity, []), do: held_json(id)),
       checked_at: status.checked_at,
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
   end
+
+  # bd-b2iigy: an automatic resume waiting on the primary's own worker cap
+  # (`Arbiter.Nodes.LocalCapacity`). Queued work, not in flight: no agent runs.
+  defp held_json(task_id), do: %{task_id: task_id, reason: "held: local capacity"}
 
   defp entry_json(entry) do
     %{
