@@ -253,8 +253,46 @@ defmodule Arbiter.Quota.Budget.Server do
     }
   end
 
+  # One pool's failure is that pool's alone (bd-1p8cxk): it is logged and
+  # published as an `:error` budget, and the other pools publish as usual. The
+  # server must not crash on its own computation; nothing reads it for a
+  # decision.
   defp publish_one(state, input) do
     key = {input.account_id, input.pool, Map.get(input, :policy_workspace)}
+    compute_and_publish(state, key, input)
+  rescue
+    e -> publish_error(state, input, Exception.message(e))
+  catch
+    kind, reason -> publish_error(state, input, "#{kind}: #{inspect(reason)}")
+  end
+
+  defp publish_error(state, input, message) do
+    key = {Map.get(input, :account_id), Map.get(input, :pool), Map.get(input, :policy_workspace)}
+    {account, pool, workspace} = key
+
+    Logger.error(
+      "Arbiter.Quota.Budget.Server: computing the budget of #{inspect(key)} failed: #{message}"
+    )
+
+    old = get(account, pool, workspace, state.table)
+
+    errored = %Budget{
+      account: account,
+      pool: pool,
+      policy_workspace: workspace,
+      budget: (old && old.budget) || 0,
+      binding: :error,
+      reason: "budget computation failed: #{message}",
+      computed_at: DateTime.utc_now()
+    }
+
+    :ets.insert(state.table, {key, errored})
+    if old == nil or old.binding != :error, do: announce(key, old, errored)
+
+    {key, state}
+  end
+
+  defp compute_and_publish(state, key, input) do
     previous = Map.get(state.trusted, key)
     old = get(elem(key, 0), elem(key, 1), elem(key, 2), state.table)
 
@@ -272,7 +310,7 @@ defmodule Arbiter.Quota.Budget.Server do
     if old == nil or old.budget != published.budget, do: announce(key, old, published)
 
     trusted =
-      if published.binding in [:no_reading, :unmetered] or
+      if published.binding in [:no_reading, :unmetered, :error] or
            published.binding in [
              :provider_refusing,
              :weekly_warning,
