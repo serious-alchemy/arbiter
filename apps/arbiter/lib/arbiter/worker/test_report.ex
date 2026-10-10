@@ -141,7 +141,7 @@ defmodule Arbiter.Worker.TestReport do
 
       found ->
         %{
-          line: found |> Enum.map(& &1.line) |> Enum.join("; "),
+          line: Enum.map_join(found, "; ", & &1.line),
           tests: found |> Enum.map(& &1.tests) |> Enum.sum(),
           failures: found |> Enum.map(& &1.failures) |> Enum.sum(),
           skipped: found |> Enum.map(& &1.skipped) |> Enum.sum()

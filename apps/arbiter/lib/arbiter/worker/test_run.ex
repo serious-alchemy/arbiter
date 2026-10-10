@@ -207,13 +207,11 @@ defmodule Arbiter.Worker.TestRun do
         lines = String.split(out, "\n", trim: true)
         {found, missing} = Enum.split_with(lines, &(not String.starts_with?(&1, "?")))
 
-        cond do
-          strict? and missing != [] ->
-            names = Enum.map_join(missing, ", ", &String.trim_leading(&1, "?"))
-            {:error, "no such test path: #{names}"}
-
-          true ->
-            {:ok, Enum.uniq(found)}
+        if strict? and missing != [] do
+          names = Enum.map_join(missing, ", ", &String.trim_leading(&1, "?"))
+          {:error, "no such test path: #{names}"}
+        else
+          {:ok, Enum.uniq(found)}
         end
 
       {:error, reason} ->
