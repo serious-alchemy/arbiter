@@ -3100,6 +3100,17 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # bd-bg87oz: the grace after a remote pass's `arb done` ran out with its container still
+  # up. The node removes it and uploads the final checkout before reporting the exit.
+  def handle_info({:__remote_pass_exit_grace__, handle}, %State{} = state) do
+    case Map.get(state.claude_sessions, handle) do
+      %{exit_status: nil} -> _ = Arbiter.Worker.Executor.Node.stop(handle)
+      _ -> :ok
+    end
+
+    {:noreply, state}
+  end
+
   def handle_info({:__worker_stopped__, _port}, %State{} = state) do
     # The worker completed (arb done won the race) or already failed — the
     # subprocess exit was expected. No escalation.
@@ -4158,6 +4169,16 @@ defmodule Arbiter.Worker do
     %State{meta: meta} = state
 
     cond do
+      # bd-bg87oz: a pass on a node says `arb done` while its container is still
+      # running; its checkout reaches the home clone with the node's final upload,
+      # which precedes the exit. Wait for the exit (`on_agent_stopped/3` re-enters
+      # here) rather than push and judge a clone that is as of the last snapshot.
+      pass?(meta) and remote_session_live?(state) ->
+        wait_for_remote_pass_exit(state)
+
+      pass?(meta) and remote_checkout_failed?(state) ->
+        fail_remote_checkout(state)
+
       pass?(meta) ->
         finish_pass(note_tasks_running_at_done(state))
 
@@ -4187,6 +4208,45 @@ defmodule Arbiter.Worker do
   # bd-741sid: a CI fix pass or a conflict pass — an ordinary run on its ticket
   # whose deliverable is a push to the PR's existing branch.
   defp pass?(meta), do: role_from_meta(meta) in [:fix_pass, :conflict_resolver]
+
+  defp remote_session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {handle, session} ->
+      remote_handle?(handle) and is_nil(Map.get(session, :exit_status))
+    end)
+  end
+
+  # The node's last upload of the run's checkout failed (it says so in its exit
+  # report): the home clone is as of an earlier snapshot, so the pass has nothing
+  # trustworthy to push or judge.
+  defp remote_checkout_failed?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {handle, session} ->
+      remote_handle?(handle) and match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome))
+    end)
+  end
+
+  defp fail_remote_checkout(%State{task_id: task_id} = state) do
+    Logger.warning(
+      "Worker: the node's final checkout of the pass on task=#{task_id} did not come back; " <>
+        "failing the pass instead of pushing a stale clone"
+    )
+
+    fail_now(state, :remote_checkout_failed)
+  end
+
+  # `arb done` was seen on a pass whose node run has not exited yet. The agent is on its
+  # way out; if it is not gone after the grace, ask the node to stop it, which
+  # uploads the checkout all the same.
+  defp wait_for_remote_pass_exit(%State{claude_sessions: sessions} = state) do
+    for {handle, session} <- sessions,
+        remote_handle?(handle),
+        is_nil(Map.get(session, :exit_status)) do
+      Process.send_after(self(), {:__remote_pass_exit_grace__, handle}, remote_pass_grace_ms())
+    end
+
+    state
+  end
+
+  defp remote_pass_grace_ms, do: Application.get_env(:arbiter, :remote_pass_exit_grace_ms, 60_000)
 
   # bd-741sid: the pass is done and its fix is on the PR's branch. The ticket
   # goes back to Merging and the run ends; the ticket's Watchdog, which kept
