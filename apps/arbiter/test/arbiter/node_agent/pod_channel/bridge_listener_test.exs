@@ -64,7 +64,8 @@ defmodule Arbiter.NodeAgent.PodChannel.BridgeListenerTest do
   defp boot(ctx, run \\ "run-1", bridges \\ ["proxy", "arb"], ip \\ @loopback),
     do: Kit.boot!(ctx.runs, Kit.spec!(run, bridges), ip)
 
-  defp connect(ctx, opts), do: :ssl.connect(@loopback, ctx.port, opts, 5_000)
+  defp connect(ctx, opts),
+    do: :ssl.connect(@loopback, ctx.port, [:binary, active: false] ++ opts, 5_000)
 
   defp assert_refused(reason) do
     assert_receive {:pod_channel_verdict, :bridge, {:error, ^reason}}, 5_000

@@ -77,8 +77,6 @@ defmodule Arbiter.NodeAgent.PodChannelKit do
 
   defp client_opts_der(der, key_der, ca, extra) do
     [
-      :binary,
-      active: false,
       cert: der,
       key: {:ECPrivateKey, key_der},
       cacerts: [ca.der],
@@ -90,8 +88,6 @@ defmodule Arbiter.NodeAgent.PodChannelKit do
 
   def client_opts_no_cert(ca) do
     [
-      :binary,
-      active: false,
       cacerts: [ca.der],
       verify: :verify_peer,
       server_name_indication: ~c"arbiter-controller"
