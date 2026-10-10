@@ -145,7 +145,6 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   end
 
   defp put_env_restoring(key, value) do
-
     prior = Application.fetch_env(:arbiter, key)
     Application.put_env(:arbiter, key, value)
 

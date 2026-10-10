@@ -115,7 +115,9 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#node-#{gone.id} [data-role=state]", "revoked")
     end
 
-    test "the header breaks capacity down by machine, with no ceiling over the sum (DC1)", %{conn: conn} do
+    test "the header breaks capacity down by machine, with no ceiling over the sum (DC1)", %{
+      conn: conn
+    } do
       Application.put_env(:arbiter, :remote_execution, true)
       on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
 
@@ -133,7 +135,11 @@ defmodule ArbiterWeb.NodesLiveTest do
 
     test "the local row's suggestion is the primary's hardware suggestion", %{conn: conn} do
       previous = Application.fetch_env(:arbiter, :local_hardware)
-      Application.put_env(:arbiter, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
+
+      Application.put_env(:arbiter, :local_hardware, %{
+        cpus: 12,
+        mem_total: 31 * 1024 * 1024 * 1024
+      })
 
       on_exit(fn ->
         case previous do

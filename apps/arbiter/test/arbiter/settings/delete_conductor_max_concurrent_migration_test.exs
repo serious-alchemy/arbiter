@@ -51,7 +51,11 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
 
       refute out =~ "conductor_system_max_concurrent"
       refute "conductor_system_max_concurrent" in columns("installation_settings")
-      assert [[nil, nil]] = query("SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings")
+
+      assert [[nil, nil]] =
+               query(
+                 "SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings"
+               )
     end
 
     test "set, no node and no override: copied to the local cap, with the advisory", %{install: m} do
@@ -60,7 +64,9 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
       out = capture_io(fn -> migrate_install!(m) end)
 
       assert [[6, advisory]] =
-               query("SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings")
+               query(
+                 "SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings"
+               )
 
       assert advisory =~ "conductor_system_max_concurrent (6) was removed"
       assert advisory =~ "`arb node set local --max-workers 6`"
@@ -76,7 +82,9 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
       capture_io(fn -> migrate_install!(m) end)
 
       assert [[nil, advisory]] =
-               query("SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings")
+               query(
+                 "SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings"
+               )
 
       assert advisory =~ "(6) was removed"
     end
@@ -87,7 +95,9 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
       capture_io(fn -> migrate_install!(m) end)
 
       assert [[2, advisory]] =
-               query("SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings")
+               query(
+                 "SELECT nodes_local_max_workers, local_cap_advisory FROM installation_settings"
+               )
 
       assert advisory =~ "(6) was removed"
     end
@@ -101,7 +111,11 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
   describe "the workspace key" do
     test "removes the conductor key, logs each value, and leaves the rest of the config",
          %{workspace: m} do
-      insert_workspace("w1", "alpha", %{"conductor" => %{"max_concurrent" => 4}, "quota" => %{"a" => 1}})
+      insert_workspace("w1", "alpha", %{
+        "conductor" => %{"max_concurrent" => 4},
+        "quota" => %{"a" => 1}
+      })
+
       insert_workspace("w2", "beta", %{"conductor" => %{"max_concurrent" => "3"}})
 
       out = capture_io(fn -> migrate_workspace!(m) end)
@@ -122,7 +136,10 @@ defmodule Arbiter.Settings.DeleteConductorMaxConcurrentMigrationTest do
     end
 
     test "leaves configs without the key byte-for-byte alone", %{workspace: m} do
-      Repo.query!("INSERT INTO workspaces (id, name, config) VALUES ('w1', 'plain', '{\"a\": 1}')")
+      Repo.query!(
+        "INSERT INTO workspaces (id, name, config) VALUES ('w1', 'plain', '{\"a\": 1}')"
+      )
+
       Repo.query!("INSERT INTO workspaces (id, name, config) VALUES ('w2', 'nil', NULL)")
 
       capture_io(fn -> migrate_workspace!(m) end)

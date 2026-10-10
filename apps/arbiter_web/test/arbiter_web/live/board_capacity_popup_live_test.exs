@@ -84,7 +84,12 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
       render_async(board, @async_timeout)
 
       assert board |> element("#board-slot-cap-figure") |> render() =~ "3"
-      assert has_element?(board, "#board-slot-cap-limits [data-limit='nodes'][data-binding='true']")
+
+      assert has_element?(
+               board,
+               "#board-slot-cap-limits [data-limit='nodes'][data-binding='true']"
+             )
+
       refute has_element?(board, "#board-slot-cap-limits [data-limit='ceiling']")
 
       # The autopilot audits the change from its own process; let it finish

@@ -102,7 +102,6 @@ defmodule Arbiter.Board.Snapshot do
   # `auto_resolvable?/1`. Everything else needs a person today.
   @auto_resolving_block_reasons [:behind_base, :ci_failed, :ci_cancelled]
 
-
   # bd-6bax7s: what a live worker's run state is *called* on a card held back
   # by a `:conflicts_with` mutex (`conflict_state/1`), and — by omission —
   # which states count as in flight at all. A `:finished` run is absent on

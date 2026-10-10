@@ -79,7 +79,11 @@ defmodule Arbiter.Workflows.GraphRemovalTest do
     test "conductor_system_max_concurrent is gone" do
       refute function_exported?(Arbiter.Settings, :conductor_system_max_concurrent, 0)
       refute function_exported?(Arbiter.Settings, :set_conductor_system_max_concurrent, 1)
-      assert Ash.Resource.Info.attribute(Arbiter.Settings.Installation, :conductor_system_max_concurrent) == nil
+
+      assert Ash.Resource.Info.attribute(
+               Arbiter.Settings.Installation,
+               :conductor_system_max_concurrent
+             ) == nil
     end
   end
 end

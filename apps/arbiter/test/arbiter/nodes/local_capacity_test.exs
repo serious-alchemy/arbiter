@@ -111,7 +111,9 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       fake_worker(ws)
       fake_worker(ws)
 
-      assert {:error, {:no_node_capacity, info}} = LocalCapacity.admit("bd-over", :implementer, [])
+      assert {:error, {:no_node_capacity, info}} =
+               LocalCapacity.admit("bd-over", :implementer, [])
+
       assert info.cap == 2
       assert length(info.holders) == 2
     end

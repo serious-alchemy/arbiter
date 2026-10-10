@@ -134,7 +134,9 @@ defmodule Arbiter.Workers.ReconcilerLocalCapacitySweepTest do
     assert StubResumeDeferrer.deferred_resume_ids() == [other.id]
   end
 
-  test "with no override the hardware suggestion is far from full, so nothing is deferred", %{ws: ws} do
+  test "with no override the hardware suggestion is far from full, so nothing is deferred", %{
+    ws: ws
+  } do
     a = cut_off!(ws, "a", 2)
     b = cut_off!(ws, "b", 2)
 
