@@ -1244,11 +1244,17 @@ defmodule Arbiter.Worker do
     # (`Arbiter.Accounts.Concurrency.live_count/1`). Recorded here, from inside
     # the registered process, because the entry dies with the process — no
     # path has to remember to decrement anything.
+    # DC4: the account and pool too, so seats can be counted per (account, pool)
+    # (`Arbiter.Quota.Seats`) from the registry alone.
+    workspace_id = effective_workspace_id(state)
+    provider = provider(meta)
+
     PRegistry.put_dispatch(
       state.registry_key,
-      effective_workspace_id(state),
-      provider(meta),
-      node_id: dispatch_node_id(meta)
+      workspace_id,
+      provider,
+      [node_id: dispatch_node_id(meta)] ++
+        seat_stamp(workspace_id, provider, dispatch_model(meta))
     )
 
     broadcast_lifecycle(:started, state)
@@ -3590,6 +3596,34 @@ defmodule Arbiter.Worker do
     if Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id,
       do: Arbiter.Nodes.LostResume.schedule(task_id),
       else: :ok
+  end
+
+  # The model the dispatch was routed to, before the CLI reports its own: the
+  # pool of an agy run depends on it (`ModelFamily.classify/2`).
+  defp dispatch_model(meta) when is_map(meta) do
+    case Map.get(meta, :model) || get_in(meta, [:routing_config, :model]) do
+      model when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  end
+
+  defp dispatch_model(_meta), do: nil
+
+  # DC4: the account and pool this run seats on. A run that named no provider
+  # draws on the workspace's default one, as `Arbiter.Accounts.Concurrency` counts
+  # it. A stamp that cannot be read is no stamp (`Arbiter.Quota.Seats` resolves
+  # the same thing at read time): never a reason for a worker to die at boot.
+  defp seat_stamp(workspace_id, provider, model) do
+    code = provider || to_string(Arbiter.Quota.default_provider(workspace_id))
+
+    [
+      account_id: AccountResolver.account_id(workspace_id, code),
+      pool: Arbiter.Agents.ModelFamily.classify(code, model).pool
+    ]
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   # The node a session handle executes on; nil for a local port.

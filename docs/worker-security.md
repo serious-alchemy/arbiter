@@ -1174,8 +1174,15 @@ container cannot reach a host socket): it never runs on the operator's agent.
     `MCP.Scope.permission?/2`, but no tool calls it yet: nothing enforces
     `tracker_write` server-side today. The env withholding (no `GH_TOKEN`) is
     what bites; the claim is for the tools that will check it.
-  * `permission_request` and live grants are G15; routing eligibility and
-    `guardrail_decision` on runs are G13 (below).
+  * `permission_request(permission, reason)` (G15a, worker tier, own task only)
+    validates the permission against the workspace bindings (a `network:` host
+    needs none; a data class is refused), writes a `requested` `permission_events`
+    row with the run id, and raises the `:permission_requested` attention through
+    `Escalation.post/1` — the coordinator's, or the operator's when the binding is
+    `grant_by: operator`. It answers "recorded, not granted" and changes nothing
+    about the run, and records no `guardrail_events` row. Deciding a request and
+    live grants are G15b/c; routing eligibility and `guardrail_decision` on runs
+    are G13 (below).
 
 `arb server doctor` (guardrails report) flags a binding that names a secret the
 workspace does not have (`binding_secret_missing`).
