@@ -194,6 +194,11 @@ defmodule ArbiterWeb.Router do
       # nothing here applies itself.
       live("/loop", LoopProposalIndexLive)
 
+      # Earned trust (G18): each subject's tier, record, recent guardrail
+      # events and pending promotion. A view only — a promotion is the
+      # operator's, from `arb trust promote`.
+      live("/trust", TrustLive)
+
       # Browser-hosted coordinator sessions (bd-c76fu9). The terminal itself
       # rides the separate `/session` socket declared in the endpoint, not
       # this live_session.
