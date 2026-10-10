@@ -22,7 +22,7 @@ defmodule Arbiter.NodeAgent.Backend do
   @doc "Start the run described by `%{spec: map, opts: keyword}` (the decoded `assign` spec)."
   @callback start_run(%{spec: map(), opts: keyword()}) :: {:ok, run} | {:error, term()}
 
-  @doc "Send `signal` (`\"TERM\"` or `\"KILL\"`) to the run's init."
+  @doc "Send `signal` (TERM or KILL) to the run's init."
   @callback signal(run, String.t()) :: :ok | {:error, :not_found}
 
   @doc "Stop the run; `{run, reason}` carries the cancel reason reported in its exit."
