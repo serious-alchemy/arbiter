@@ -28,9 +28,10 @@ defmodule Arbiter.MCP.Tools.RunTests do
 
   defp request(args) do
     with {:ok, paths} <- paths(args),
+         {:ok, changed} <- Tools.fetch_bool(args, "changed", false),
          {:ok, timeout} <- Tools.optional_integer(args, "timeout_seconds") do
       {:ok,
-       %{paths: paths, changed: Map.get(args, "changed") == true}
+       %{paths: paths, changed: changed}
        |> then(&if(timeout, do: Map.put(&1, :timeout_s, timeout), else: &1))}
     end
   end
