@@ -2749,7 +2749,7 @@ defmodule Arbiter.Worker do
     # adopting. From here the Worker owns the run's row (its id is the node's run id); the
     # row already says where it runs, on which session, and what it was told.
     adopted = adopted_session(state, port_args)
-    state = if adopted, do: %State{state | run_id: adopted.run_id}, else: state
+    state = take_adopted_run(state, adopted)
 
     # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
     # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
@@ -2776,7 +2776,7 @@ defmodule Arbiter.Worker do
     # on reading it back off a temp file that might already be gone.
     # An adopted session was told its prompt before the restart; the one built for the
     # adoption was never sent, so it is not recorded as what the run was told.
-    unless adopted, do: persist_composed_prompt(state, session_config)
+    persist_prompt_unless_adopted(state, session_config, adopted)
 
     cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
@@ -2825,8 +2825,7 @@ defmodule Arbiter.Worker do
     # `<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`
     # (agy) — see `Arbiter.Worker.SessionArchive`.
     # An adopted run keeps the config dir it ran under: its transcripts land there.
-    config_dir =
-      (adopted && adopted[:config_dir]) || effective_config_dir(port_args, provider)
+    config_dir = session_config_dir(adopted, port_args, provider)
 
     meta =
       (state.meta || %{})
@@ -2842,36 +2841,7 @@ defmodule Arbiter.Worker do
     new_state = %State{state | claude_sessions: sessions, meta: meta}
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
-
-    # The run's row records where it executes (nil = the primary).
-    node_id = handle_node_id(port)
-
-    # bd-4p1vui (§10.4.10): a run on a node holds no slot on the primary.
-    if node_id do
-      PRegistry.put_dispatch(
-        new_state.registry_key,
-        effective_workspace_id(new_state),
-        provider(new_state.meta),
-        node_id: node_id
-      )
-    end
-
-    # An adopted row already records all of this; nothing is written over it.
-    unless adopted do
-      if node_id && new_state.run_id do
-        backfill_run_fields(new_state.run_id, %{node_id: node_id}, new_state.task_id)
-      end
-
-      backfill_session_dispatch(
-        new_state.run_id,
-        new_state.task_id,
-        provider,
-        config_dir,
-        session_config
-      )
-
-      stamp_run_node(new_state.run_id, new_state.task_id, port)
-    end
+    record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
 
     # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
     # node stops counting against the primary's cap.
@@ -2893,6 +2863,46 @@ defmodule Arbiter.Worker do
        do: adopt
 
   defp adopted_session(_state, _port_args), do: nil
+
+  # From the adopted session on, the Worker owns the run's row.
+  defp take_adopted_run(%State{} = state, nil), do: state
+  defp take_adopted_run(%State{} = state, %{run_id: run_id}), do: %State{state | run_id: run_id}
+
+  defp persist_prompt_unless_adopted(state, session_config, nil),
+    do: persist_composed_prompt(state, session_config)
+
+  defp persist_prompt_unless_adopted(_state, _session_config, _adopted), do: :ok
+
+  defp session_config_dir(%{config_dir: dir}, _port_args, _provider) when is_binary(dir), do: dir
+
+  defp session_config_dir(_adopted, port_args, provider),
+    do: effective_config_dir(port_args, provider)
+
+  # The run's row records where it executes (nil = the primary), and a run on a node holds no
+  # slot on the primary (bd-4p1vui, §10.4.10). An adopted row already records all of it, so
+  # nothing is written over it.
+  defp record_session_opened(%State{} = state, port, adopted, spawn) do
+    node_id = handle_node_id(port)
+    if node_id, do: stamp_dispatch_node(state, node_id)
+    unless adopted, do: backfill_session_opened(state, port, node_id, spawn)
+    :ok
+  end
+
+  defp stamp_dispatch_node(%State{} = state, node_id) do
+    PRegistry.put_dispatch(
+      state.registry_key,
+      effective_workspace_id(state),
+      provider(state.meta),
+      node_id: node_id
+    )
+  end
+
+  defp backfill_session_opened(%State{run_id: run_id, task_id: task_id}, port, node_id, spawn) do
+    {provider, config_dir, session_config} = spawn
+    if node_id && run_id, do: backfill_run_fields(run_id, %{node_id: node_id}, task_id)
+    backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config)
+    stamp_run_node(run_id, task_id, port)
+  end
 
   # A remote session counts its stdout from where its stream started: 0 for a placement,
   # what the session resumed at for an adoption (`remote.stdout_start`).

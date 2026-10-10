@@ -112,13 +112,16 @@ defmodule Arbiter.Nodes.Session do
     :load,
     # K12: what the node says it is (`kind`, `k8s_version`, `degraded`, its `hb.capacity`) and
     # the prepare budget granted a run placed on it; a machine node leaves all but the budget
-    # at these defaults.
+    # at these defaults. Also the session's own budgets for a held run: how long it is held
+    # (`hold_ms`, bd-24o760) and how long the agent has to answer an `adopt` (bd-4p1vui).
     info: %{
       kind: "machine",
       k8s_version: nil,
       degraded: [],
       capacity: nil,
-      prepare_timeout_ms: @default_prepare_timeout_ms
+      prepare_timeout_ms: @default_prepare_timeout_ms,
+      hold_ms: @default_hold_ms,
+      adopt_timeout_ms: @default_adopt_timeout_ms
     },
     allow_skew?: false,
     state: :online,
@@ -140,15 +143,14 @@ defmodule Arbiter.Nodes.Session do
     recoveries: %{},
     # bd-24o760: runs the agent lists that have a live row on this node but no stream here
     # (`run => timer`): held, neither known nor quiesced, until Recovery asks for them or
-    # `hold_ms` runs out; `hold_expired` are the ones that ran out (told "unknown" next hello).
+    # `info.hold_ms` runs out; `hold_expired` are the ones that ran out (told "unknown" next
+    # hello).
     held: %{},
     hold_expired: MapSet.new(),
-    hold_ms: @default_hold_ms,
     # bd-4p1vui: adopted runs (`run => %{hold_left, timer, ref}`): what the hold had left
     # when the adoption took it (an undone adoption holds the run again for that long),
-    # and the `adopt_timeout_ms` timer while the agent has not answered (nil after).
+    # and the `info.adopt_timeout_ms` timer while the agent has not answered (nil after).
     adoptions: %{},
-    adopt_timeout_ms: @default_adopt_timeout_ms,
     reap_interval_ms: :infinity
   ]
 
@@ -425,16 +427,19 @@ defmodule Arbiter.Nodes.Session do
       thresholds: Liveness.current(),
       allow_skew?: Keyword.get(opts, :allow_skew, false),
       last_hb: clock.(),
-      reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms),
-      hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms),
-      adopt_timeout_ms: Keyword.get(opts, :adopt_timeout_ms, @default_adopt_timeout_ms)
+      reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms)
     }
 
     state =
-      put_info(
-        state,
+      state
+      |> put_info(
         :prepare_timeout_ms,
         Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
+      )
+      |> put_info(:hold_ms, Keyword.get(opts, :hold_ms, @default_hold_ms))
+      |> put_info(
+        :adopt_timeout_ms,
+        Keyword.get(opts, :adopt_timeout_ms, @default_adopt_timeout_ms)
       )
 
     {:ok, state |> schedule_tick() |> schedule_reap()}
@@ -975,7 +980,7 @@ defmodule Arbiter.Nodes.Session do
     Process.monitor(owner)
     handle = {:remote, {state.node_id, run, make_ref()}}
     ref = make_ref()
-    ms = Keyword.get(opts, :adopt_timeout_ms, state.adopt_timeout_ms)
+    ms = Keyword.get(opts, :adopt_timeout_ms, state.info.adopt_timeout_ms)
     timeout = Process.send_after(self(), {:adopt_timeout, run, ref}, ms)
     next = max(acked_offset(state.runs[run]), processed_offset(opts))
 
@@ -1138,7 +1143,7 @@ defmodule Arbiter.Nodes.Session do
   end
 
   defp hold(state, run) do
-    timer = Process.send_after(self(), {:hold_expired, run}, state.hold_ms)
+    timer = Process.send_after(self(), {:hold_expired, run}, state.info.hold_ms)
     %{state | held: Map.put(state.held, run, timer)}
   end
 
