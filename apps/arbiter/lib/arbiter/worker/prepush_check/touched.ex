@@ -92,6 +92,13 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
     end
   end
 
+  @doc """
+  `test_files/2` without the existence check: the test paths `files` would map to,
+  for a caller that checks them somewhere other than this host (a node's checkout).
+  """
+  @spec candidate_test_files([String.t()]) :: [String.t()]
+  def candidate_test_files(files), do: files |> Enum.flat_map(&candidate_tests/1) |> Enum.uniq()
+
   @doc "`paths` as one shell word list, each single-quoted."
   @spec quote_args([String.t()]) :: String.t()
   def quote_args(paths), do: Enum.map_join(paths, " ", &shell_quote/1)
