@@ -431,7 +431,8 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, worktree_path} <- resume_worktree(task, repo),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
-         {:ok, opts} <- resume_slot(task, :resume, opts) do
+         {:ok, opts} <- resume_slot(task, :resume, opts),
+         {:ok, opts} <- resume_local_capacity(task, :resume, opts) do
       prior_run_id = latest_run_id(task_id)
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
@@ -549,7 +550,8 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
          {:ok, session_id, session_provider} <- latest_session_id(task_id),
-         {:ok, opts} <- resume_slot(task, :resume_session, opts) do
+         {:ok, opts} <- resume_slot(task, :resume_session, opts),
+         {:ok, opts} <- resume_local_capacity(task, :resume_session, opts) do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
@@ -661,6 +663,63 @@ defmodule Arbiter.Worker.Dispatch do
       {:ok, _admitted} -> {:ok, opts}
       {:defer, info} -> defer_resume(task, kind, opts, info)
       {:error, _} = error -> error
+    end
+  end
+
+  # bd-b2iigy: may this resume run on the primary right now, given ITS cap
+  # (`Arbiter.Nodes.LocalCapacity`; the board's slot above is a different
+  # number)? A resume re-enters local work — a follow-up never goes to a node —
+  # so at the cap it waits. Asked at the same point as `resume_slot/3`, before
+  # the prior worker is stopped, so a hold leaves the task exactly as it was;
+  # `do_dispatch/2` admits for real at its own gate (and takes the slot).
+  #
+  # Human origin: refused as the hold (`{:error, {:no_node_capacity, info}}`,
+  # `force_slot` overrides, recorded). Automatic origin (the boot sweep, a
+  # Watchdog or LostResume auto-resume, a MergeQueue revise): handed to the
+  # scheduler as `held_for: :local_capacity`, which replays it, highest ticket
+  # priority first, the moment the primary has room. With no override of the
+  # cap nothing is read and nothing is held.
+  defp resume_local_capacity(%Issue{} = task, kind, opts) do
+    check_opts = [
+      force: Keyword.get(opts, :force_slot) == true,
+      actor: Keyword.get(opts, :slot_override_actor),
+      reason: {:local_only, :follow_up},
+      workspace_id: task.workspace_id
+    ]
+
+    case LocalCapacity.check(task.id, :resume, check_opts) do
+      :ok ->
+        {:ok, opts}
+
+      {:error, {:no_node_capacity, info}} = held ->
+        if Keyword.get(opts, :resume_origin, :human) == :automatic,
+          do: defer_for_local_capacity(task, kind, opts, info),
+          else: held
+    end
+  end
+
+  defp defer_for_local_capacity(%Issue{id: task_id}, kind, opts, info) do
+    require Logger
+
+    defer = Keyword.get_lazy(opts, :defer_resume, &configured_deferrer/0)
+    replay_opts = opts |> Keyword.delete(:defer_resume) |> Keyword.put(:held_for, :local_capacity)
+
+    case defer.(task_id, kind, replay_opts) do
+      :ok ->
+        Logger.info("Dispatch: deferred #{kind} of #{task_id} — #{info.phrase}")
+
+        {:deferred,
+         info
+         |> Map.take([:task_id, :cap, :holders, :phrase])
+         |> Map.merge(%{deferred: true, held_for: :local_capacity})}
+
+      other ->
+        Logger.warning(
+          "Dispatch: could not defer #{kind} of #{task_id} (#{inspect(other)}); refusing it " <>
+            "at the full local cap instead"
+        )
+
+        {:error, {:no_node_capacity, info}}
     end
   end
 

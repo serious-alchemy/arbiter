@@ -9231,8 +9231,8 @@ defmodule Arbiter.Worker do
           "Worker: pushing worktree branch to origin before PR open for task=#{task_id}"
         )
 
-        with :ok <- reconcile_before_push(worktree, task_id),
-             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, set_upstream: true) do
+        with {:ok, push_opts} <- plan_hosted_push(worktree, task_id),
+             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
           :ok
         else
           {:error, reason} ->
@@ -9242,6 +9242,31 @@ defmodule Arbiter.Worker do
 
             {:error, {:push_failed, reason}}
         end
+    end
+  end
+
+  # bd-4axlg0: a podman run (main, fix round or conflict pass) cannot push, and
+  # may have rebased its own branch; the rewritten history is "diverged" from
+  # the remote branch it replaces. When the remote holds nothing the rewrite
+  # loses (`PushState.rewrite_lease/3`), deliver it as a push with
+  # `--force-with-lease` pinned to the remote head just observed. Reconciling
+  # first (below) would rebase the rewrite back onto the very commits it
+  # replaced and fail on "previously applied" ones. Any other shape goes the
+  # ordinary way: reconcile, then a plain push. Never a bare `--force`.
+  defp plan_hosted_push(worktree, task_id) do
+    with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree) do
+      case Arbiter.Reviews.PushState.rewrite_plan(worktree, branch) do
+        {:rewrite, lease_sha} ->
+          Logger.info(
+            "Worker: `#{branch}` was rewritten locally; pushing with --force-with-lease " <>
+              "pinned to #{String.slice(lease_sha, 0, 12)} for task=#{task_id}"
+          )
+
+          {:ok, [set_upstream: true, force_with_lease: lease_sha]}
+
+        :none ->
+          with :ok <- reconcile_before_push(worktree, task_id), do: {:ok, [set_upstream: true]}
+      end
     end
   end
 

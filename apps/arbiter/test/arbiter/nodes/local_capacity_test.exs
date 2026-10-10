@@ -62,8 +62,8 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     test "names how each spawn kind is capped" do
       assert LocalCapacity.kinds() == %{
                implementer: :at_cap,
-               redispatch: :zero_only,
-               resume: :never,
+               redispatch: :at_cap,
+               resume: :at_cap,
                review: :zero_only,
                reviewer: :zero_only,
                fix_pass: :zero_only,
@@ -128,14 +128,80 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       assert :ok = LocalCapacity.admit("bd-own", :fix_pass, [])
     end
 
-    test "follow-up kinds are never held for being at the cap (no deadlock)", %{ws: ws} do
+    test "review-side follow-up kinds are never held for being at the cap (no deadlock)",
+         %{ws: ws} do
       {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
       fake_worker(ws)
       fake_worker(ws)
 
-      for kind <- [:review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round, :resume] do
+      for kind <- [:review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round] do
         assert :ok = LocalCapacity.admit("bd-follow-#{kind}", kind, [])
       end
+    end
+
+    # bd-b2iigy: a resume and a re-dispatch of a ticket already In progress were
+    # counted but never held, so a restart's resume sweep put 5 runs on a
+    # primary capped at 2.
+    test "a resume or re-dispatch is held when OTHER tickets fill the cap", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      fake_worker(ws)
+      {_k2, w2} = fake_worker(ws)
+
+      for kind <- [:resume, :redispatch] do
+        assert {:error, {:no_node_capacity, info}} = LocalCapacity.admit("bd-late", kind, [])
+        assert info.cap == 2
+        assert info.kind == kind
+        assert length(info.holders) == 2
+        assert info.phrase =~ "held — local capacity full (cap 2, 2 running)"
+      end
+
+      stop!(w2)
+      assert :ok = LocalCapacity.admit("bd-late", :resume, [])
+      LocalCapacity.release("bd-late")
+    end
+
+    test "a resume counts the slot it takes: the cap's worth resume, the rest are held" do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      assert :ok = LocalCapacity.admit("bd-r1", :resume, [])
+      assert :ok = LocalCapacity.admit("bd-r2", :resume, [])
+      assert {:error, {:no_node_capacity, _}} = LocalCapacity.admit("bd-r3", :resume, [])
+      LocalCapacity.release("bd-r1")
+      LocalCapacity.release("bd-r2")
+    end
+
+    test "a resume's own ticket does not count against it (it replaces its own run)",
+         %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      fake_worker(ws, key: "bd-self")
+      assert :ok = LocalCapacity.admit("bd-self", :resume, [])
+      assert :ok = LocalCapacity.admit("bd-self", :redispatch, [])
+      LocalCapacity.release("bd-self")
+    end
+
+    test "force still resumes over the cap", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      fake_worker(ws)
+      assert :ok = LocalCapacity.admit("bd-forced-resume", :resume, force: true)
+      LocalCapacity.release("bd-forced-resume")
+    end
+  end
+
+  describe "check/3 (admit without taking the slot)" do
+    test "answers like admit/3 but reserves nothing", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      assert :ok = LocalCapacity.check("bd-check-a", :resume, [])
+      assert :ok = LocalCapacity.check("bd-check-b", :resume, [])
+      assert [] = Placement.reservations()
+
+      fake_worker(ws)
+      assert {:error, {:no_node_capacity, info}} = LocalCapacity.check("bd-check-c", :resume, [])
+      assert info.cap == 1
+      assert [] = Placement.reservations()
+    end
+
+    test "is always :ok with no override", %{ws: ws} do
+      for _ <- 1..5, do: fake_worker(ws)
+      assert :ok = LocalCapacity.check("bd-check-default", :resume, [])
     end
   end
 
@@ -145,8 +211,8 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       :ok
     end
 
-    test "holds every local kind except a resume, naming the reason" do
-      for kind <- [:implementer, :review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round] do
+    test "holds every local kind, naming the reason" do
+      for kind <- Map.keys(LocalCapacity.kinds()) do
         assert {:error, {:no_node_capacity, info}} =
                  LocalCapacity.admit("bd-zero-#{kind}", kind,
                    reason: {:local_only, :non_claude_provider},
@@ -166,8 +232,13 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       assert info.phrase == "held — local capacity 0"
     end
 
-    test "a resume is counted but never held" do
+    test "a resume waits for the cap to rise rather than running here" do
+      assert {:error, {:no_node_capacity, %{cap: 0}}} =
+               LocalCapacity.admit("bd-zero-resume", :resume, [])
+
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
       assert :ok = LocalCapacity.admit("bd-zero-resume", :resume, [])
+      LocalCapacity.release("bd-zero-resume")
     end
 
     test "resumes as soon as the cap rises" do
