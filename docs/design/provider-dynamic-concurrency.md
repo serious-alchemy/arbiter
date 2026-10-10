@@ -44,13 +44,18 @@ implemented. The ticket plan is in [§12](#12-phased-plan-and-ticket-breakdown).
    control, and the gate's on/off pace hold. It still reads the line through
    `Gate.pace/6`, so there's one definition of pace. See
    [§3](#3-the-provider-budget).
-3. **The budget doesn't over-commit near a reset.** Three things prevent it:
+3. **The budget doesn't over-commit, even near a reset.** Four things prevent
+   it:
    - Seats count the work in flight from the registry, not from a snapshot.
    - The draw since the last capture is projected forward to now.
    - When a reset falls inside the horizon, the *fresh* window has to absorb
      what the seats will still draw after the reset.
+   - A fit that can't tell a seat's draw from the background isn't used, and
+     no draw per seat is taken below a floor. No fit can make a seat look
+     free.
 
-   See [§3.3](#33-the-capacity-function).
+   See [§3.3](#33-the-capacity-function) and
+   [§3.4](#34-measuring-the-draw-per-seat-hour).
 4. **The budget is recomputed on every quota capture, at every window reset and
    every 60 seconds.** A fall is published at once. A rise is published only
    after it clears a quarter-seat margin on two recomputes in a row. A budget
@@ -304,19 +309,20 @@ workspace) policy, because the line composes `min(account, workspace)`:
 | `line′(x)` | The fresh window's line `x` hours after its reset | The same call, with `reset_at` advanced one window and `used = 0` |
 | `t_r` | `reset_at − now` | The snapshot |
 | `S` | Seats on `π` now | §3.2 |
-| `ρ` | Draw per seat-hour, as a fraction of `w` | §3.4 |
+| `ρ` | Draw per seat-hour, as a fraction of `w`. Never below its floor `ρ_min` | §3.4 |
 | `b` | Background draw per hour (the coordinator, interactive sessions) | §3.4 |
 | `H` | The commitment horizon: how long an admitted seat keeps drawing | §3.4. The measured median In-progress life of a seat on `π`, clamped to [1 h, 4 h]; 2 h until measured |
 
 The function:
 
 ```
+ρ     = max(ρ, ρ_min)                          # the floor (§3.4), whatever ρ it's given
 u_now = u + (S · ρ + b) · lag                  # the draw the snapshot hasn't seen yet
 
 if t_r ≥ H:                                    # no reset inside the horizon
     n_w = (line(now + H) − u_now − b·H) / (ρ·H)
 
-else:                                          # the horizon crosses the reset
+else:                                          # 0 < t_r < H: the horizon crosses the reset
     n_before = (line(reset) − u_now − b·t_r) / (ρ·t_r)               # what can still be spent before the reset
     n_after  = (line′(H − t_r) − b·(H − t_r)) / (ρ·(H − t_r))        # what the fresh window absorbs afterwards
     n_w = min(n_before, n_after)
@@ -345,6 +351,15 @@ Here's why each piece is there:
   spend. The seats then spill into a window whose line starts at its floor
   (0.35 for 5h). `n_after` caps them at what that floor absorbs over the rest
   of their life (§3.8, example B).
+- **`ρ` has a floor, so every `n` is finite.** Every `n` divides by `ρ`.
+  With `ρ` near 0, `n` would be unbounded, `n_after` included. The budget
+  would then be held only by the ceiling, and by the machines once the
+  ceiling is cleared (§10.5). §3.4 drops a fit that can't tell a seat's draw
+  from `b`, and raises any other `ρ` below `ρ_min` to it. The function
+  applies the floor again to whatever `ρ` it's given. The other divisors are
+  positive by construction: `H` is at least 1 h, and the second branch runs
+  only for `0 < t_r < H`. A window at or past its reset is evaluated as the
+  fresh one (§3.5). So the budget is finite for any input (I11).
 - **`u_now` covers the capture lag.** The gate trusts a polled row for up to
   1,200 s (`gate.ex:194-195`). The projection charges the seats' draw since
   the capture. A run that started after the capture isn't in `u` at all.
@@ -401,11 +416,52 @@ uses non-negative least squares, the same `Scarcity.Calibration.fit/2`
 
 | Rung | `ρ` | When |
 |---|---|---|
-| 0 | The seat-hour fit for this (account, pool, window) | At least 8 intervals over 30 days, at least 3 with seats > 0 |
-| 1 | The fit for (provider, pool, window) across accounts | Another account on the same plan has a fit |
+| 0 | The seat-hour fit for this (account, pool, window) | At least 8 intervals over 30 days, at least 3 with seats > 0, and the fit measures a seat (below) |
+| 1 | The fit for (provider, pool, window) across accounts | Another account on the same plan has a fit that measures a seat |
 | 2 | The prior: `ρ = 1 / (W · k)`, where `k` is the account's `max_concurrent`, or 2 when that's unset. With no measurement, this assumes the operator's ceiling is the steady state | Always available |
 
-The rung and `n` go into the reason (§3.8). A prior-based budget says so.
+**A fit has to measure a seat.** The fit splits each interval's draw between
+the seats (`ρ`) and the background (`b`). When the seat count barely moves, as
+on a pool held at its ceiling with work queued, `seat_hours` tracks `hours`
+and the data can't tell the two apart. The fit can then give `b` most of the
+draw and leave `ρ` near 0. That isn't a cheap seat, and dividing by it would
+make every `n` in §3.3 unbounded. Such a fit predicts the past as well as the
+true one, so the calibration report's bias (§10.3) can't catch it. It shows
+only once more seats run. Two rules stop it:
+
+- **A `ρ` the data doesn't pin down falls through to the next rung.**
+  - `fit/2` already returns no coefficient when it puts one at 0
+    (`:non_positive`), as it does when the seat count never moves (Appendix
+    A), or when it can't separate a column from another (`:collinear`)
+    (`calibration.ex:38-42`, `:190-195`). Rungs 0 and 1 count that as no fit.
+  - A positive `ρ` must also be distinguishable from 0: its one-sided 95%
+    lower confidence bound, `ρ − t₀.₉₅·se(ρ)`, has to be above 0. `se` is the
+    least-squares standard error over the columns the fit didn't pin at 0,
+    with its residual degrees of freedom. It's large when `seat_hours` moves
+    with `hours`. DC2 adds it to `fit/2`'s coefficients.
+- **No `ρ` is taken below the floor `ρ_min = prior / 4`.** A fit that passes
+  but comes out lower is clamped to the floor, not dropped, so a seat measured
+  cheaper never gets a smaller budget than one measured dearer. At the floor,
+  `4k` seats track a line: 8 with `max_concurrent` unset (`k` = 2), and 12
+  under a ceiling of 3, which caps them at 3 anyway. The prior is `4·ρ_min`,
+  so rung 2 is never clamped.
+
+On synthetic intervals (Appendix A), take a pool held at 2.9–3.0 seats that
+draws exactly the prior's rate with no background, read to the poll's 1
+point. On two seeds of eight, the fit puts `ρ` at about 0.015, under a quarter
+of the truth, and `b` takes the rest.
+- **Taken as is** in Example A's state, that's a 5h `n` of about 10 instead
+  of the prior's 4.55. Once the ceiling no longer holds them at 3, 10 seats at
+  the true rate would run the window from 0.19 past 1.0 in 1.2 hours.
+- **The floor alone isn't enough.** Raised to it, they still give about 9.
+- **The confidence bound catches them.** Both have `t = ρ/se` near 0.5,
+  under the 95% cutoff of 1.86 at 8 degrees of freedom, so they fall through
+  to the prior. The other six have `t` above 2 and are kept.
+
+The rung, `n`, any rung passed over and why, and the floor when it binds go
+into the reason (§3.8). A prior-based budget says so ("6.7%/seat-h prior; own
+fit not distinguishable from 0"), and so does a floored one ("1.7%/seat-h
+floor; fit 0.1%").
 
 **The horizon `H`** is the median In-progress life of tickets pinned to the
 pool over 30 days. That runs from the first `active` transition to leaving
@@ -418,6 +474,9 @@ measured.
 `ρ_m = c_m × weighted tokens per seat-hour of m`. A seat then weighs
 `ρ_m / ρ̄`, so a premium-model ticket takes more than one seat-equivalent, and
 admission compares `Σ weights + w_new ≤ raw`. Phase 1 counts every seat as 1.
+Each `ρ_m` has to pass the same confidence-bound test as `ρ`, or its seats
+weigh 1 as in phase 1. It also takes the same floor, so no model's seat weighs
+less than `ρ_min / ρ̄`, and none looks free.
 
 ### 3.5 Hard zeros, and missing readings
 
@@ -487,7 +546,8 @@ Two further sources of churn are already damped:
   binding: :ceiling,                # or {:window, "5h"} | :provider_refusing | :paused | :quota_stop | :no_reading | :unmetered
   reason: "ceiling max_concurrent 3 (quota allows 4: 5h binds, 0.19 used, line 0.40 now and 0.80 in 2h, 6.7%/seat-h prior)",
   windows: [%{window: "5h", used: 0.19, used_now: 0.195, line_now: 0.4015, line_at_h: 0.8015,
-              reset_in_h: 3.0, rho: 0.0667, rho_source: :prior, b: 0.0, horizon_h: 2.0, n: 4.55}, …],
+              reset_in_h: 3.0, rho: 0.0667, rho_source: :prior, rho_min: 0.0167, b: 0.0,
+              horizon_h: 2.0, n: 4.55}, …],
   ceiling: %{max_concurrent: 3, share: nil},
   computed_at: ~U[2026-10-10 01:40:27Z], published_at: ~U[…], pending_rise: nil
 }
@@ -815,7 +875,8 @@ expiring(w) = max(0, line(reset) − (u_now + (S·ρ + b)·t_r))
 ```
 
 `explore(π) = floor(min over w of expiring(w) / (2·ρ·H))` is half of it, in
-seats. Exploration seats count against `budget(π)` like any other seat.
+seats, with the same floored `ρ` as the budget (§3.3). Exploration seats count
+against `budget(π)` like any other seat.
 
 ## 9. Observability
 
@@ -924,7 +985,7 @@ arbiter.admission_shadow_report` report the following:
 | Agreement | Comparable dispatches, the agreement rate, and every disagreement by cause: head-of-line skip, budget below the cap, budget above the cap (the ceiling binds, so no change), fair share, or repo cap |
 | Throughput | Minutes with a free machine where today held and the walk would have placed a card, and the reverse |
 | Pace safety | Per pool: the distribution of `u − line` at captures. Ahead-of-pace admissions, with count, largest `ε` and time back to the line. Projected exhaustion events (none allowed) |
-| Calibration | Predicted draw (`Σ S·ρ·Δt + b·Δt`) against the actual `Δu` per interval: bias and mean absolute error, per rung |
+| Calibration | Predicted draw (`Σ S·ρ·Δt + b·Δt`) against the actual `Δu` per interval: bias and mean absolute error, per rung. Each fit's `ρ`, `se` and `t`, and every fit the ladder passed over or floored, with why (§3.4) |
 | Stability | Published budget changes per pool per day, and the median dwell |
 | Near resets | Budget against seats in the last horizon before each reset, and usage in the first horizon after |
 
@@ -1016,18 +1077,19 @@ rollback is a forward migration that restores the column, if it's ever needed.
 | I8 | **No preemption.** Nothing that stops a run reads the budget | Structural: `Budget` is read only by `Admission`, the walk and the display |
 | I9 | **Follow-ups are never held because a layer is full**, in any mode. A layer at a hard zero still holds them, as `:zero_only` does today. In `enforce`, they're not pace-held either | Dispatch tests per follow-up role |
 | I10 | **The near-reset guard.** With a reset inside `H`, `budget ≤ n_after` | §3.8 example B as a fixture, plus a property over `t_r` |
+| I11 | **The budget is finite for any fit.** Every `ρ` the function divides by is at least `ρ_min`, so the budget is at most its value with each window's `ρ` at the floor. A fit the data doesn't pin down falls through to the next rung | Property over generated snapshots with at least one trusted window, seats, `t_r` and `ρ ≥ 0`, 0 included: `raw` is finite, and the budget is at most the budget at `ρ_min`. Three fits as fixtures (Appendix A): seats that never move, so `b` takes the whole draw and `fit/2` returns `:non_positive`; seats that barely move, the two seeds with `t` near 0.5; and a noise-free `ρ` of 0.001, which passes the test and is clamped. The first two get the prior's budget, with the passed-over rung in the reason |
 
 The fixtures are §3.8's two examples, flat mode, Codex `session`, both agy
 pools with a `nil` model, a stale primary window before and after its reset,
-and the exempt budget.
+the exempt budget, and I11's three fits.
 
 ## 12. Phased plan and ticket breakdown
 
 | # | Title | D | Depends on | Phase |
 |---|---|---|---|---|
 | DC1 | Delete `conductor.max_concurrent` (install setting and workspace key) and every surface in §5.1. The primary's default cap becomes `NodeAgent.Protocol.suggestion/2`, enforced. Stamp `node_id` on the registry entry. The migrations and advisory lines (§10.6). Docs updated | 3 | — | 0 |
-| DC2 | Seat-hour calibration: `seats` and `budget` columns on `quota_snapshots`; the NNLS fit `Δu = ρ·seat_hours + b·hours` per (account, pool, window), reusing `Scarcity.Calibration.fit/2`; `H` from `ticket_transitions`; the fallback ladder; `mix arbiter.budget_calibration` and `Arbiter.Release.budget_calibration/0`. Shadow only | 3 | — | 0 |
-| DC3 | `Arbiter.Quota.Budget`, the pure function (§3.3), with the hard zeros, the exempt budget and `expiring`/`explore`. The `now:` what-if on `Gate.pace/6`. `Budget.Server`: triggers, hysteresis, ETS, `budget_changed`. Nothing on an admission path reads it (a test pins that) | 3 | — (uses priors until DC2) | 1 |
+| DC2 | Seat-hour calibration: `seats` and `budget` columns on `quota_snapshots`; the NNLS fit `Δu = ρ·seat_hours + b·hours` per (account, pool, window), reusing `Scarcity.Calibration.fit/2`, which gains a standard error per coefficient; `H` from `ticket_transitions`; the fallback ladder, with its confidence-bound test and the `ρ` floor (§3.4); `mix arbiter.budget_calibration` and `Arbiter.Release.budget_calibration/0`. Shadow only | 3 | — | 0 |
+| DC3 | `Arbiter.Quota.Budget`, the pure function (§3.3), with the `ρ` floor (I11), the hard zeros, the exempt budget and `expiring`/`explore`. The `now:` what-if on `Gate.pace/6`. `Budget.Server`: triggers, hysteresis, ETS, `budget_changed`. Nothing on an admission path reads it (a test pins that) | 3 | — (uses priors until DC2) | 1 |
 | DC4 | Seats: per-pool occupancy (§3.2), with the pin seat for tickets In progress, cross-pool sub-workers and reservations. The registry stamps `account_id` and `pool`. Today's count is kept under `legacy` and `shadow` | 3 | — | 1 |
 | DC5 | Observability: the capacity strip and popups, the per-card layer reasons, the `CapacityExplainer` lines, `arb scheduler status` and `scheduler_status` budgets, machines and repos, the `quota_get` budget. Labelled "shadow" until `enforce` | 3 | DC3 | 1 |
 | DC6 | The walk: `Scheduler.plan/1` with capacity sets, pairs, skip-not-stop and multi-placement; `scheduler_admission` (legacy, shadow, enforce); `admission_shadow` on dispatch and on hold changes; `wait_cause` on plan entries. Ships at `legacy` | 4 | DC3, DC4 | 1 |
@@ -1071,6 +1133,7 @@ and the exempt budget.
 | E19 | `Accounts.Fields`; `WorkspaceProviderAccount` | `max_concurrent`, `share` | `budget_split`; `weight` | DC10 |
 | E20 | `History.record/2` (`history.ex`) | `utilization`, `ceiling` | `seats`, `budget` | DC2 |
 | E21 | `QueueOrder.build/6` (`queue_order.ex:105`) | Stored `slots_total` | The plan-time capacity | DC6 |
+| E22 | `Scarcity.Calibration.fit/2` (`calibration.ex:96`) | A coefficient per column, or `nil` with a reason | Plus each coefficient's standard error, for the ladder's test (§3.4) | DC2 |
 
 **Unchanged:**
 - `Pace.evaluate/4` and its verdicts;
@@ -1153,4 +1216,28 @@ and the exempt budget.
   them. The account's `max_concurrent` of 3 comes from the filing; a worker
   token can't read accounts.
 - **Example B** (§3.8): hypothetical state, the prior `ρ`, and `H` = 2 h.
+- **The degenerate fits** (§3.4, I11) come from `Calibration.fit/2` on this
+  branch, unchanged since `3d12c3e5`. They were run from a throwaway ExUnit
+  probe, which isn't committed.
+  - **Setup.** Ten intervals of 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 0.75, 1.25,
+    1.75 and 2.25 h, in that order. `seat_hours` is a density times the
+    hours, with the density uniform in [2.9, 3.0]. `Δu` is 0.0667 ×
+    `seat_hours`, plus uniform noise of ±0.005, rounded to 0.01. The density
+    is drawn before the noise in each interval. The seeds are
+    `:rand.seed(:exsss, {s, 7, 9})` for `s` = 1..8. `t` is `ρ/se`, where `se`
+    is the least-squares standard error over the columns the fit didn't pin
+    at 0, with `n − 2` degrees of freedom, or `n − 1` when `b` is pinned.
+  - **Seeds 4 and 7** fit `ρ` = 0.0147 and 0.0156, with `b` = 0.153 and 0.149
+    per hour, and `t` = 0.54 and 0.45. Put into Example A's state, they give
+    a 5h `n` of 10.2 and 9.9. Raised to Example A's floor of 0.0167, they
+    give 9.0 and 9.2.
+  - **The other six** fit `ρ` between 0.054 and 0.067, with `t` between 2.47
+    and 321.
+  - **The fit to the past.** The two degenerate fits' RMS errors, 0.0034 and
+    0.0038, sit inside the other six's range of 0.0030–0.0042. They fit the
+    past as well.
+  - **The edge cases.** With 3.0 seats in every interval and `Δu` = 0.2 ×
+    hours, `fit/2` returns `:non_positive` and `b` = 0.2. A noise-free `ρ` of
+    0.001, with `b` = 0.197 and densities of 2.9–3.0, comes back
+    `:calibrated` at 0.001.
 - **Code citations** are against `3d12c3e5`.
