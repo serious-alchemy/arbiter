@@ -696,7 +696,8 @@ defmodule ArbiterWeb.BoardLive do
         paused: paused?,
         admission: mode,
         exclude_engagements?: true,
-        local_held: local_held_ids()
+        local_held: local_held_ids(),
+        idle_check: idle_check()
       )
 
     capacity = capacity(mode)
@@ -716,6 +717,13 @@ defmodule ArbiterWeb.BoardLive do
       capacity: capacity,
       explain: explain(board, mode, capacity)
     }
+  end
+
+  # bd-3fbj83: orphaned tickets hold no slot; the scheduler's queued follow-ups
+  # are not orphans.
+  defp idle_check do
+    queued = Arbiter.Board.Autopilot.deferred_resume_ids()
+    fn issues -> Arbiter.Tasks.IdleTickets.ids(issues, queued_ids: queued) end
   end
 
   # bd-b2iigy: the tickets whose resume the scheduler holds for the primary's

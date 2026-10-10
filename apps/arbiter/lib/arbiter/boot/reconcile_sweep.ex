@@ -57,7 +57,11 @@ defmodule Arbiter.Boot.ReconcileSweep do
     # told which tickets it covered.
     ci_waits = reconciler.reconcile_ci_waits(primary?: primary?)
     passes = reconciler.reconcile_review_passes(primary?: primary?)
-    skip_ids = reconciler.restarted_ids([ci_waits, passes]) ++ Enum.map(owned, & &1.base_task_id)
+    # bd-3fbj83: a resume held for local capacity lived only in the autopilot queue.
+    held = reconciler.reconcile_held_resumes(primary?: primary?)
+
+    skip_ids =
+      reconciler.restarted_ids([ci_waits, passes, held]) ++ Enum.map(owned, & &1.base_task_id)
 
     reconciler.reconcile_open_pr_tasks(primary?: primary?, skip_ids: skip_ids)
     reconciler.reconcile_resumable_tasks(primary?: primary?, skip_ids: skip_ids)

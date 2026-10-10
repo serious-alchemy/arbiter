@@ -108,6 +108,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.HeldResume
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
@@ -465,8 +466,22 @@ defmodule Arbiter.Worker.Dispatch do
   def resume(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
-    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume(task_id, opts) end)
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn ->
+      task_id |> do_resume(opts) |> clear_held_resume(task_id)
+    end)
   end
+
+  # bd-3fbj83: a resume that actually started (not deferred again) supersedes any
+  # `held_resume` marker an earlier deferral left, so a later boot sweep does not
+  # re-queue a resume the ticket no longer needs.
+  defp clear_held_resume({:ok, %{deferred: true}} = result, _task_id), do: result
+
+  defp clear_held_resume({:ok, _} = result, task_id) do
+    HeldResume.clear_if_marked(task_id)
+    result
+  end
+
+  defp clear_held_resume(result, _task_id), do: result
 
   defp do_resume(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
@@ -576,7 +591,9 @@ defmodule Arbiter.Worker.Dispatch do
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
-    Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_resume_session(task_id, opts) end)
+    Drain.track(:dispatch_pending, %{task_id: task_id}, fn ->
+      task_id |> do_resume_session(opts) |> clear_held_resume(task_id)
+    end)
   end
 
   @doc """
@@ -1038,6 +1055,8 @@ defmodule Arbiter.Worker.Dispatch do
     case defer.(task_id, kind, replay_opts) do
       :ok ->
         Logger.info("Dispatch: deferred #{kind} of #{task_id} — #{phrase}")
+        # bd-3fbj83: the queue is in memory; leave a marker the boot sweep re-queues from.
+        HeldResume.mark(task_id, kind)
 
         {:deferred,
          info
