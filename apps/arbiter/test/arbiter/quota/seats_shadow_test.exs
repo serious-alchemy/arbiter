@@ -5,6 +5,10 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   run-stopping path reads them, and today's per-account count is unchanged.
   These tests pin the construction, and that a real worker and a real
   admission stamp what `Arbiter.Quota.Seats` reads.
+
+  DC6 (bd-9ycsk4) adds one reader: `Arbiter.Board.WalkInputs`, the scheduler
+  walk's capacity sets, gathered only under `scheduler_admission: shadow` or
+  `enforce` (`Arbiter.Board.AdmissionLegacyTest` pins that `legacy` reads none).
   """
   use Arbiter.DataCase, async: false
 
@@ -21,12 +25,15 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   @lib Path.expand("../../../lib", __DIR__)
   @consumers ~r/alias Arbiter\.Quota\.Seats|\bSeats\.(counts|count|holders|tally|base_task_id)\(/
 
-  test "only the seats module itself names it" do
+  # The seats module, and the scheduler walk's inputs (DC6, shadow and enforce only).
+  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex)
+
+  test "only the seats module and the walk's inputs name it" do
     offenders =
       @lib
       |> Path.join("**/*.{ex,exs}")
       |> Path.wildcard()
-      |> Enum.reject(&(Path.relative_to(&1, @lib) == "arbiter/quota/seats.ex"))
+      |> Enum.reject(&(Path.relative_to(&1, @lib) in @allowed))
       |> Enum.filter(&(File.read!(&1) =~ @consumers))
       |> Enum.map(&Path.relative_to(&1, @lib))
 

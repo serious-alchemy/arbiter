@@ -31,6 +31,10 @@ defmodule Arbiter.Settings.Installation do
       the epic-aware Ready order (`docs/design/epic-aware-scheduling.md` §6.6,
       read by `Arbiter.Board.Snapshot`). `nil` means the default: floors on,
       lift cap `max(slots_total - 1, 1)`, finish-first off, 24 hour aging.
+    * `:scheduler_admission` — the admission mode (DC6,
+      `docs/design/provider-dynamic-concurrency.md` §10.1): `"legacy"`,
+      `"shadow"` or `"enforce"`. `nil` means `legacy`, read by
+      `Arbiter.Board.Autopilot` on every pass.
     * `:board_autopilot_paused` — `Arbiter.Board.Autopilot`'s pause flag.
       `nil` means "no persisted value — fall back to the
       `:arbiter, :board_autopilot, enabled:` application env, else paused".
@@ -87,6 +91,7 @@ defmodule Arbiter.Settings.Installation do
     :scheduling_max_lifted_in_flight,
     :scheduling_finish_first,
     :scheduling_finish_first_max_wait_hours,
+    :scheduler_admission,
     :nodes_public_url,
     :nodes_allow_public_endpoint,
     :nodes_join_token_ttl_minutes,
@@ -254,6 +259,14 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1
 
       description "Hours a card may wait Ready and unblocked before it escapes the finish-first tiebreak (ES3); nil = 24."
+    end
+
+    attribute :scheduler_admission, :string do
+      public? true
+      allow_nil? true
+      constraints allow_empty?: false
+
+      description "Admission mode (DC6): legacy, shadow or enforce; nil = legacy."
     end
 
     attribute :dashboard_dismissed_update_version, :string do

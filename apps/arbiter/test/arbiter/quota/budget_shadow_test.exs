@@ -4,6 +4,13 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   computed and published, but nothing on an admission, gate, dispatch,
   scheduler or run-stopping path reads it. Until DC8 no dispatch decision may
   change, and these tests pin the construction.
+
+  DC6 (bd-9ycsk4) adds one reader: `Arbiter.Board.WalkInputs`, the scheduler
+  walk's capacity sets, which `Arbiter.Board.Snapshot.load/1` gathers only under
+  `scheduler_admission: shadow` or `enforce` and which decides no dispatch.
+  The admission surfaces below still never name the budget, and
+  `Arbiter.Board.AdmissionLegacyTest` pins at runtime that under `legacy` no
+  admission path calls it.
   """
   use Arbiter.DataCase, async: false
 
@@ -18,13 +25,15 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   # its server and inputs, or a call through an alias of any of them.
   @consumers ~r/Quota\.Budget(?!Calibration)\b|\bBudget\.(compute|publish|hysteresis|new_hysteresis|lowest|explore|expiring|Server|Inputs)\b/
 
-  # The budget's own modules, and the supervision tree that starts its server.
+  # The budget's own modules, the supervision tree that starts its server, and
+  # the scheduler walk's inputs (DC6, read only under shadow and enforce).
   @allowed ~w(
     arbiter/quota/budget.ex
     arbiter/quota/budget/server.ex
     arbiter/quota/budget/inputs.ex
     arbiter/quota/shadow_supervisor.ex
     arbiter/application.ex
+    arbiter/board/walk_inputs.ex
   )
 
   defp source_files(root) do
