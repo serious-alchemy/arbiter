@@ -8,6 +8,7 @@ defmodule Arbiter.Board.WalkInputsTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
+  alias Arbiter.Board.Scheduler
   alias Arbiter.Board.WalkInputs
   alias Arbiter.Quota.Budget
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -310,6 +311,46 @@ defmodule Arbiter.Board.WalkInputsTest do
              ]
 
       assert WalkInputs.node_groups(:remote_only, true, %{}, "ws") == []
+    end
+  end
+
+  # Seen live (v0.2.43): review-side runs count on the primary but its cap never
+  # holds them, so the primary sat at 4 of 2 — filling today's install-wide slot
+  # total — while a node had room.
+  describe "a primary over its own cap" do
+    test "a remote-eligible card is offered the node first, and the walk places it there" do
+      ws =
+        workspace!(%{
+          "worker" => %{"placement" => "prefer_remote"},
+          "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}
+        })
+
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      ticket = issue!(ws)
+
+      rows = [
+        %{id: "oryx", name: "ryan-oryx-pro", state: :online, health: :ready, max: 3, live: 1}
+      ]
+
+      walk =
+        gather(ws, [ticket],
+          budgets: [budget(claude, "claude", 9)],
+          seats: %{{claude.id, "claude"} => 5},
+          local: %{cap: 2, used: 4},
+          remote_available?: true,
+          nodes: rows
+        )
+
+      assert %{cap: 2, used: 4} = walk.nodes["local"]
+      assert %{cap: 3, used: 1, label: "ryan-oryx-pro"} = walk.nodes["oryx"]
+      assert [%{nodes: [["oryx"], ["local"]]}] = walk.candidates.(card(ticket))
+
+      plan = Scheduler.plan(%{ready: [card(ticket)], running: [], walk: walk})
+
+      assert plan.promote == ticket.id
+      assert [%{node: "oryx", pool: {account_id, "claude"}}] = plan.placements
+      assert account_id == claude.id
     end
   end
 end

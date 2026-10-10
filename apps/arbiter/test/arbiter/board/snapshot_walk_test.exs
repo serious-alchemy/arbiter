@@ -8,6 +8,7 @@ defmodule Arbiter.Board.SnapshotWalkTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  alias Arbiter.Board.AdmissionShadow
   alias Arbiter.Board.Snapshot
 
   @now ~U[2026-10-10 12:00:00Z]
@@ -112,6 +113,45 @@ defmodule Arbiter.Board.SnapshotWalkTest do
 
     assert %{wait_cause: :own_hold} =
              Enum.find(shadowed.walk.entries, &(&1.id == "bd-b"))
+  end
+
+  # Seen live (v0.2.43): today's slot total is the machines' caps summed
+  # (local 2 + node 3), and five tickets In progress fill it — four on the
+  # primary (two implementers and two review-side runs its cap never holds),
+  # one on the node. Today has no free worker slot; the walk counts each machine
+  # against its own cap and places the Ready card on the node's free slot.
+  test "a node's free slot is placeable while today's install-wide slot total is full" do
+    issues = Enum.map(1..5, &issue("bd-run-#{&1}", %{state: :active})) ++ [issue("bd-ready")]
+
+    walk = %{
+      pools: %{@claude => %{budget: 9, seats: 5, label: "claude:default"}},
+      nodes: %{
+        "local" => %{cap: 2, used: 4, label: "local"},
+        "oryx" => %{cap: 3, used: 1, label: "ryan-oryx-pro"}
+      },
+      candidates: fn _card -> [%{pool: @claude, nodes: [["oryx"], ["local"]]}] end
+    }
+
+    today = Snapshot.derive(input(issues: issues, slots_total: 5))
+    shadowed = Snapshot.derive(input(issues: issues, slots_total: 5, walk: walk))
+
+    assert Map.delete(shadowed, :walk) == today
+    assert today.promote == nil
+
+    assert %{state: :blocked, reason: "blocked — no free worker slot"} =
+             Enum.find(today.ready, &(&1.id == "bd-ready"))
+
+    assert %{promote: "bd-ready", placements: [%{id: "bd-ready", pool: @claude, node: "oryx"}]} =
+             shadowed.walk
+
+    # The shadow's row: today held on the slot total, the walk on the node.
+    assert %{
+             legacy_pick: nil,
+             walk_pick: "bd-ready",
+             cause: "legacy_hold",
+             legacy: %{"head" => "bd-ready", "hold" => "no_slot"},
+             walk: %{"pick" => "bd-ready", "node" => "oryx", "pool_label" => "claude:default"}
+           } = AdmissionShadow.event(shadowed, :shadow, @now)
   end
 
   @tag capture_log: true

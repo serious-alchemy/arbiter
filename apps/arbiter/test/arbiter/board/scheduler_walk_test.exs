@@ -382,6 +382,46 @@ defmodule Arbiter.Board.SchedulerWalkTest do
       assert Enum.map(plan.placements, & &1.node) ==
                ["node-b", "node-b", "node-a", "node-b", "local", "local"]
     end
+
+    # Seen live (v0.2.43): review-side runs count on the primary but are never
+    # held at its cap (`LocalCapacity` `:zero_only`), so the primary can sit over
+    # its cap while a node has room. Each machine is a capacity set of its own.
+    test "a node's free slots take work while review-side runs hold the primary over its cap" do
+      candidates = fn
+        %{id: "bd-local"} -> [%{pool: @claude, nodes: [["local"]]}]
+        _prefer_remote -> [%{pool: @claude, nodes: [["oryx"], ["local"]]}]
+      end
+
+      plan =
+        walk(
+          ready: [card("bd-local"), card("bd-1"), card("bd-2"), card("bd-3")],
+          walk: %{
+            pools: %{@claude => pool(9, 5)},
+            nodes: %{
+              # Two implementers and two review-side runs on a cap of 2.
+              "local" => machine(2, 4, label: "local"),
+              "oryx" => machine(3, 1, label: "ryan-oryx-pro")
+            },
+            candidates: candidates
+          }
+        )
+
+      assert %{state: :blocked, wait_cause: {:capacity, :node}, reason: reason} =
+               entry(plan, "bd-local")
+
+      assert reason =~ "local 4 of 2"
+
+      assert plan.promote == "bd-1"
+
+      assert Enum.map(plan.placements, &{&1.id, &1.node}) ==
+               [{"bd-1", "oryx"}, {"bd-2", "oryx"}]
+
+      assert %{state: :next, wait_cause: nil, pair: %{node: "oryx"}} = entry(plan, "bd-1")
+      assert %{state: :starting, pair: %{node: "oryx"}} = entry(plan, "bd-2")
+
+      # The node is full now too: the last card waits behind the placed work.
+      assert %{state: :queued, wait_cause: :queued} = entry(plan, "bd-3")
+    end
   end
 
   describe "own holds and claims across placements" do
