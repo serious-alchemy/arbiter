@@ -1065,6 +1065,30 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "trust_suspended/1 (G18)" do
+    test "names the suspended subject and the event, and how the coordinator decides" do
+      reason =
+        StopReason.trust_suspended(%{
+          subject: "antigravity/gemini-3.8-flash-low",
+          kind: "public_upload_attempt",
+          run_id: "run-1"
+        })
+
+      assert reason.category == :trust_suspended
+      assert reason.summary =~ "antigravity/gemini-3.8-flash-low"
+      assert reason.summary =~ "public_upload_attempt"
+      assert reason.remediation =~ "arb trust confirm"
+      assert reason.remediation =~ "arb trust dismiss"
+      assert StopReason.label(reason) =~ "suspended"
+      assert StopReason.to_map(reason).category == :trust_suspended
+    end
+
+    test "is operational for the loop's failure classifier" do
+      assert {:operational, :trust_suspended} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:trust_suspended]
+    end
+  end
+
   describe "node_lost/1 (RW12)" do
     test "is its own category, names the node, and is not a signal or an agent failure" do
       reason = StopReason.node_lost("edge-1")

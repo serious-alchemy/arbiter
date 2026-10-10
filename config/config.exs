@@ -204,7 +204,9 @@ config :phoenix, :json_library, Jason
 # raw secrets/tokens as JSON body params (P11 AC 4: never display or log a
 # credential's secret value).
 # "code": a login relay paste (bd-bh50vs) is a one-time auth code.
-config :phoenix, :filter_parameters, ["password", "secret", "token", "code"]
+# "value": `PATCH /api/installation/config` carries the setting's value under it,
+# which for `nodes.registry_password` (K8) is a registry password.
+config :phoenix, :filter_parameters, ["password", "secret", "token", "code", "value"]
 
 # Force exqlite to compile from source on RHEL8/glibc<2.33 systems; the
 # precompiled NIF requires glibc 2.33 which is not available on Amazon Linux 2

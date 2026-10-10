@@ -48,6 +48,10 @@ defmodule Arbiter.Settings.Installation do
       (the nodes page's `local` row); nil = no override, 0 allowed.
     * `:nodes_fence_after_s` / `:nodes_lost_after_s` — the liveness thresholds
       (§10.1; `Arbiter.Nodes.Liveness`): `nil` = 60 s / fence + 30 s.
+    * `:nodes_registry` / `:nodes_registry_username` / `:nodes_registry_password` /
+      `:nodes_registry_insecure` — the registry the primary publishes images to
+      (`Arbiter.Worker.Image.Publisher`, K8). The password is a Cloak ciphertext;
+      `nil` registry = nothing is published.
 
   Every field is nullable and `nil` always means "no override" — a fresh
   install that never writes here behaves exactly as it did before the setting
@@ -90,6 +94,10 @@ defmodule Arbiter.Settings.Installation do
     :nodes_fence_after_s,
     :nodes_lost_after_s,
     :nodes_local_max_workers,
+    :nodes_registry,
+    :nodes_registry_username,
+    :nodes_registry_password,
+    :nodes_registry_insecure,
     :dashboard_dismissed_update_version,
     :dashboard_dismissed_deploy
   ]
@@ -308,6 +316,37 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 0
 
       description "nodes.local_max_workers: the operator's cap on the primary's own workers (RW7); nil = the install's local concurrency, 0 = run nothing locally."
+    end
+
+    attribute :nodes_registry, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry: the host[:port]/path the primary publishes worker, seed and controller images to (K8); nil = no registry, nothing is pushed."
+    end
+
+    attribute :nodes_registry_username, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry_username: the registry login (K8)."
+    end
+
+    # A `Arbiter.Vault` (Cloak) ciphertext, never the plaintext: not public, and
+    # `sensitive?` keeps even the ciphertext out of inspect output.
+    attribute :nodes_registry_password, :binary do
+      public? false
+      allow_nil? true
+      sensitive? true
+
+      description "nodes.registry_password: Cloak-encrypted registry password (K8); write-only."
+    end
+
+    attribute :nodes_registry_insecure, :boolean do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry_insecure: push to a plain-HTTP or self-signed registry (K8); nil/false = TLS verified."
     end
 
     create_timestamp :created_at

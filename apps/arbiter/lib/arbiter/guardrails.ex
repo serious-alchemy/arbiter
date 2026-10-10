@@ -54,6 +54,7 @@ defmodule Arbiter.Guardrails do
   alias Arbiter.Guardrails.Config
   alias Arbiter.Guardrails.Profile
   alias Arbiter.Guardrails.Rules
+  alias Arbiter.Guardrails.Subjects
 
   @tiers [:quarantine, :probation, :trusted, :privileged]
   @modes [:bypass, :auto, :strict]
@@ -247,13 +248,41 @@ defmodule Arbiter.Guardrails do
   `tier bundle ⊓ rule overrides ⊓ workspace cap ⊓ repo cap` (§3.5).
 
   `nil` when no subject rule is configured: guardrails are off and `floor/2`
-  is the identity. Options: `:rules` (default `Arbiter.Guardrails.Rules.all/0`).
+  is the identity.
+
+  A subject suspended after a critical guardrail event (G18,
+  `Arbiter.Loop.Trust`) is treated as `quarantine` until the coordinator decides,
+  and the profile carries the suspension (`suspended`), which
+  `Arbiter.Guardrails.Eligibility` refuses outright.
+
+  Options: `:rules` (default `Arbiter.Guardrails.Rules.all/0`) and
+  `:suspensions` (`%{{provider, model} => suspension}`, default
+  `Arbiter.Guardrails.Subjects.suspensions/0`).
   """
   @spec effective(subject(), map() | nil, String.t() | nil, keyword()) :: Profile.t() | nil
   def effective(subject, workspace, repo \\ nil, opts \\ []) do
     case Keyword.get_lazy(opts, :rules, &Rules.all/0) do
-      [] -> nil
-      rules -> build(subject, workspace, repo, rules)
+      [] ->
+        nil
+
+      rules ->
+        subject
+        |> build(workspace, repo, rules)
+        |> suspend(subject, Keyword.get_lazy(opts, :suspensions, &Subjects.suspensions/0))
+    end
+  end
+
+  defp suspend(profile, %{provider: provider, model: model}, suspensions) do
+    case Map.get(suspensions, {provider, model}) do
+      nil ->
+        profile
+
+      suspension ->
+        %{
+          apply_caps(profile, %{max_tier: :quarantine})
+          | suspended: suspension,
+            capped_by: Enum.uniq(profile.capped_by ++ [:suspension])
+        }
     end
   end
 

@@ -152,6 +152,10 @@ defmodule Arbiter.Loop.FailureClassifier do
     # G19: a guardrail tier's spend cap parked the run. A policy stop, never a
     # judgement of the agent's work quality.
     spend_cap: {:operational, :spend_cap},
+    # G18: the run's subject was suspended after a critical guardrail event and
+    # the run parked. A policy stop about the subject, recorded against it as a
+    # guardrail event already, not a judgement of this run's work.
+    trust_suspended: {:operational, :trust_suspended},
     # RW12: the node a run was placed on was lost. Infrastructure, never the agent.
     node_lost: {:operational, :node_lost},
     # K12: a cluster took the pod away (A5), or a node refused the placement (A3).

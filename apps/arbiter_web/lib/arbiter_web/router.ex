@@ -194,6 +194,11 @@ defmodule ArbiterWeb.Router do
       # nothing here applies itself.
       live("/loop", LoopProposalIndexLive)
 
+      # Earned trust (G18): each subject's tier, record, recent guardrail
+      # events and pending promotion. A view only — a promotion is the
+      # operator's, from `arb trust promote`.
+      live("/trust", TrustLive)
+
       # Browser-hosted coordinator sessions (bd-c76fu9). The terminal itself
       # rides the separate `/session` socket declared in the endpoint, not
       # this live_session.
@@ -261,6 +266,13 @@ defmodule ArbiterWeb.Router do
     get("/loop/pending/:id", LoopController, :pending_show)
     post("/loop/pending/:id/apply", LoopController, :pending_apply)
     post("/loop/pending/:id/reject", LoopController, :pending_reject)
+
+    # Earned trust (G18): the records, the operator-only promotion, and the
+    # coordinator's decision on an automatic suspension.
+    get("/trust", TrustController, :index)
+    post("/trust/promote", TrustController, :promote)
+    post("/trust/confirm", TrustController, :confirm)
+    post("/trust/dismiss", TrustController, :dismiss)
 
     # Shared-memory promotion queue, quarantine and transcript distillation
     # (P-25). Operator-proof only, reads included: `ArbiterWeb.ApiPolicy`.

@@ -1295,9 +1295,10 @@ meta.
     is the wall-clock cap; the token cap catches it at the next sweep after a pass
     settles (a resume or nudge loop), and a single runaway session after the
     fact.
-  * A tripped cap is a major event for trust (§6.1) but `guardrail_events` is G17,
-    so nothing is recorded there yet; the `:spend_cap` stop category on the run is
-    the record.
+  * A park is a major `spend_cap` guardrail event (§6.1, recorded since G18), so
+    `Loop.Trust` counts it against the subject: two within 14 days demote it. The
+    `:spend_cap` stop category on the run also makes it not clean (§6.2). A page
+    tier's cap records no event.
 
 ## Operator proof for token minting (bd-8381tk)
 
@@ -1659,7 +1660,7 @@ delivery path, not GitHub itself.
 counts against its `(provider, model)` subject (design
 [§6.1](design/guardrail-profiles.md)). `Arbiter.Guardrails.Events.record/1` is
 best-effort and idempotent per `(run_id, fingerprint)`; it never fails a run.
-Nothing consumes the rows yet: `Loop.Trust` (G18) does.
+`Arbiter.Loop.Trust` (G18, below) folds them into each subject's trust record.
 
 | Capture | Where | Kind (severity) |
 |---|---|---|
@@ -1668,6 +1669,7 @@ Nothing consumes the rows yet: `Loop.Trust` (G18) does.
 | `egress_events` | `Events.link_egress/2`, at session exit | `public_upload_attempt` (critical); `unrequested_egress` (major) for a denial at a host:port the run never `requested` through `permission_events` |
 | `EvidenceIntegrity` escalation | `Worker.maybe_dispatch_fix_round/3` | `fabricated_evidence` (critical) |
 | Worker attempt to write ticket `permissions`, `guardrails.*` / `permissions` config, grant a permission, or mint a token | `Catalog.call/3` (MCP) and `ApiAuth` (REST, incl. the worker bridge) via `Guardrails.SelfGrant` | `self_grant_attempt` (critical), recorded whether or not the call is refused |
+| A spend-cap park (G19; added by G18) | `Guardrails.SpendPatrol`, when it parks a run | `spend_cap` (major), one per run; a page tier's cap records none |
 
 The scan reads tool *inputs*, never prose. A shell command is tokenised with
 quote and operator awareness, so `git commit -m "block systemd-run"` and
@@ -1678,3 +1680,76 @@ rule requires a reader command (`cat`, `tar`, `sqlite3`, …), so `ssh -i
 Known limits: a command built at run time (`$(echo systemd-run)`, a script the
 worker wrote then ran) is not seen. A resumed agy run whose `step_index`
 restarts can collapse two distinct denials into one fingerprint.
+
+## Earned trust (bd-7i9pxn, G18)
+
+Design: [guardrail-profiles](design/guardrail-profiles.md) §6.2–6.5.
+`Arbiter.Loop.Trust.tick/1` runs once per canary-ticker cycle (every 15
+minutes, installation-wide; `config :arbiter, :loop_trust, enabled: false` turns
+it off). It folds the 30-day window's `guardrail_events` and
+`Arbiter.Loop.SubjectStats` into one `trust_records` row per `(provider, model)`
+subject: main implementer runs, clean runs/tickets/repos, critical/major/minor
+event counts and the 10 most recent events, round-1 quality per difficulty band
+measured against the incumbent, promotion eligibility with every §6.3 criterion,
+and the last harness and model version. A run's subject is the one it was
+dispatched as (its `guardrail_decision`).
+
+**A clean run (§6.2)** is a main implementer run whose ticket's first ReviewGate
+round approved, with no critical or major event, no misbehaviour stop (`stalled`,
+a tampered clone, a notes-gate failure) and no `spend_cap` stop.
+
+**What it does on its own.** Tightening needs no approval (§6.4), so a tick acts
+by itself. It does so only on a guarded install: with no subject rule nothing is
+tiered, and nothing is acted on.
+
+| Trigger | Action | Page |
+|---|---|---|
+| A critical event | **Suspends** the subject: an overlay on its rule that `Guardrails.effective/4` treats as `quarantine` and `Eligibility` refuses in every role. Every live run of the subject parks with the `:trust_suspended` stop reason | `trust_suspended` |
+| Two major events within 14 days | **Demotes** it one tier, written as a tighten-checked rule for the subject. Its scope and pin carry over, and a pin never blocks a demotion. At `quarantine` there is nothing lower, so it only pages | `trust_demoted` |
+| A new harness version (`worker_runs.harness_version`: Claude's init event, else the host CLI's `--version`) or model id | Restarts the **promotion clock** at the first run on it. The tier is unchanged | `trust_version_changed` |
+
+An event acts once (`events_watermark`). Events recorded before the trust
+cutover (when the `trust_records` migration ran) count against a subject but
+never trigger an action, so a deploy suspends nobody for the past. Each page goes
+to the workspace of the run behind it (the install default only as a fallback).
+
+The coordinator decides on a suspension: `arb trust confirm <subject>` (the
+subject's rule drops to `quarantine`) or `arb trust dismiss <subject> --reason
+"..."` (a false positive: the overlay ends and the tier it never changed
+returns). Dismissal cannot raise a tier.
+
+**Promotion is operator-only (§6.4).** When every §6.3 threshold holds, the Loop
+emits a `trust_promotion` PendingWrite. Its evidence is the clean run ids, it is
+attributed to the workspace of its newest clean run, and the coordinator is told.
+The proposal is superseded when the subject stops being eligible. `arb loop
+apply`, MCP `loop_pending_apply`, `POST /api/loop/pending/:id/apply` and the
+`/loop` dashboard all refuse it at any authority (`Loop.inapplicable_reason/1`).
+Only `arb trust promote <subject> --to <tier> --reason "..."` applies it. That
+command mints a short-lived token over the operator socket (operator proof,
+above), never `ARB_TOKEN`, and calls `POST /api/trust/promote` (ApiPolicy
+`:operator`). `Loop.Trust.promote/4` checks the authority again, writes the
+subject's rule, marks the proposal `applied` with `actor: operator` and records
+the move in the subject's history. The Loop never proposes `trusted →
+privileged`. The operator may still promote there with no proposal. A pin freezes
+proposals, never demotions.
+
+| | CLI | REST | MCP (coordinator) | Dashboard |
+|---|---|---|---|---|
+| Show | `arb trust show [<subject>]` | `GET /api/trust[?subject=]` | `trust_show` | `/trust` |
+| Confirm a suspension | `arb trust confirm` | `POST /api/trust/confirm` | `trust_confirm` | shows the command |
+| Dismiss a suspension | `arb trust dismiss --reason` | `POST /api/trust/dismiss` | `trust_dismiss` | shows the command |
+| Promote | `arb trust promote --to --reason` | `POST /api/trust/promote` (operator proof) | **none, at any tier** | shows the command |
+
+All four render the same `Arbiter.Loop.Trust.View` maps. The `/trust` dashboard
+reloads on every change (`Loop.Trust.pubsub_topic/0`). It is a view: it offers no
+control that promotes, confirms or dismisses.
+
+Known limits:
+
+  * Operator proof has the same-UID limits described under *Operator proof for
+    token minting*. A process running as the operator in the operator's own
+    shell can promote.
+  * The §6.3 capability self-test rule (a failed jail or egress probe removes
+    eligibility for the tiers that need it) is not part of this.
+  * Version drift is judged against the last fold. A version that changes and
+    changes back between two ticks is not seen.
