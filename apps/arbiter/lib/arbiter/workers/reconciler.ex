@@ -64,6 +64,7 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.HeldResume
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.Watchdog
@@ -510,7 +511,7 @@ defmodule Arbiter.Workers.Reconciler do
     marker = ReviewPass.stored(issue)
 
     result =
-      if ResumeSlot.cut_off_by_restart?(task_id),
+      if marker["held"] == true or ResumeSlot.cut_off_by_restart?(task_id),
         do: rearm_fun.(issue),
         else: {:error, :not_interrupted}
 
@@ -529,8 +530,90 @@ defmodule Arbiter.Workers.Reconciler do
         )
 
         ReviewPass.put(task_id, nil)
+
+        # bd-3fbj83: a held round's run was not cut off, so the resume sweep skips
+        # the ticket (it has a PR, its last run ended on its own terms). Left
+        # alone it is an In-progress ticket nobody works: tell the coordinator.
+        if marker["held"] == true,
+          do: escalate_stuck_issue(issue, {:held_round_unrestartable, reason})
+
         not_restarted(report, task_id, reason)
     end
+  end
+
+  @doc """
+  Put a resume held for local capacity back in the queue after a restart
+  (bd-3fbj83).
+
+  `Arbiter.Board.Autopilot`'s deferral queue is in memory, so a restart dropped
+  every resume waiting on the primary's cap: the ticket stayed In progress, held
+  a slot, and nothing was working on it. `Arbiter.Worker.Dispatch` leaves a
+  `held_resume` marker on the ticket (`Arbiter.Worker.HeldResume`); each
+  In-progress ticket carrying one, with no worker, is handed back to the queue
+  (`held_for: :local_capacity`) and so shows in `arb scheduler status` as held and
+  replays when the primary has room. The marker stays until the queue replays or
+  drops the entry, so a second restart re-queues it again.
+
+  Run it after `reconcile_review_passes/1`; hand the restarted ids to the sweeps
+  after it (`restarted_ids/1`). Returns `{:ok, report}`, `{:ok, :skipped}` when
+  not the primary instance, or `{:error, reason}`.
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:defer_fun` — 3-arity `(task_id, kind, opts -> :ok | {:error, term()})`.
+      Defaults to `Arbiter.Board.Autopilot.defer_resume/3`.
+  """
+  @spec reconcile_held_resumes(keyword()) :: {:ok, report() | :skipped} | {:error, term()}
+  def reconcile_held_resumes(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      do_reconcile_held_resumes(
+        Keyword.get(opts, :defer_fun, &Arbiter.Board.Autopilot.defer_resume/3)
+      )
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  # A ticket carrying a ReviewGate `pass` marker is between review rounds, which
+  # `reconcile_review_passes/1` re-arms; a stale `held_resume` marker must not
+  # also queue a resume for it.
+  defp held_resume_due?(issue) do
+    not is_nil(HeldResume.stored_kind(issue)) and is_nil(ReviewPass.stored(issue)) and
+      not live_worker_for_issue?(issue)
+  end
+
+  defp do_reconcile_held_resumes(defer_fun) do
+    held =
+      Issue
+      |> Ash.Query.filter(state == :active)
+      |> Ash.read!()
+      |> Enum.filter(&held_resume_due?/1)
+
+    report =
+      Enum.reduce(held, empty_report(), fn %Issue{id: task_id} = issue, report ->
+        kind = HeldResume.stored_kind(issue)
+
+        case defer_fun.(task_id, kind, resume_origin: :automatic, held_for: :local_capacity) do
+          :ok ->
+            restarted(report, %{task_id: task_id, phase: kind, round: nil})
+
+          {:error, reason} ->
+            Logger.warning(
+              "Workers.Reconciler: cannot re-queue task #{task_id}'s held #{kind} " <>
+                "(#{inspect(reason)}); leaving it to the resume sweep"
+            )
+
+            not_restarted(report, task_id, reason)
+        end
+      end)
+
+    log_report("held-resume sweep", report)
+    {:ok, report}
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: held-resume sweep failed: #{Exception.message(e)}")
+      {:error, e}
   end
 
   defp default_rearm_pass(%Issue{id: task_id}),

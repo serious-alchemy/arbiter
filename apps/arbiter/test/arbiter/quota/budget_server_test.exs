@@ -113,6 +113,45 @@ defmodule Arbiter.Quota.Budget.ServerTest do
     assert Server.get(@account, "claude", nil, table).budget == fell
   end
 
+  test "keeps a short per-pool ring of recent changes for the popup (DC5, §9)", ctx do
+    {server, table} = start(ctx)
+    :ok = Server.recompute(server)
+    assert_receive {:budget_changed, _, nil, first, _}
+
+    set(ctx, used: 0.55)
+    :ok = Server.recompute(server)
+    assert_receive {:budget_changed, _, ^first, fell, _}
+
+    # newest first; the first publish is a change from nothing
+    assert [%{from: ^first, to: ^fell, reason: reason, at: %DateTime{}}, %{from: nil, to: ^first}] =
+             Server.changes(@account, "claude", nil, table)
+
+    assert is_binary(reason)
+    # the ring is not a budget: `all/1` still lists pools only
+    assert [%Budget{}] = Server.all(table)
+  end
+
+  test "the ring keeps only the last few changes", ctx do
+    {server, table} = start(ctx)
+
+    for used <- [0.19, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90] do
+      set(ctx, used: used)
+      :ok = Server.recompute(server)
+    end
+
+    assert length(Server.changes(@account, "claude", nil, table)) <= 5
+  end
+
+  test "an unpublished pool takes its ring with it", ctx do
+    {server, table} = start(ctx)
+    :ok = Server.recompute(server)
+    assert Server.changes(@account, "claude", nil, table) != []
+
+    set(ctx, pools: [])
+    :ok = Server.recompute(server)
+    assert Server.changes(@account, "claude", nil, table) == []
+  end
+
   test "an unchanged budget announces nothing", ctx do
     {server, _table} = start(ctx)
     :ok = Server.recompute(server)

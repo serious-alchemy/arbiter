@@ -22,6 +22,7 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     def sweep_worker_scopes(_), do: note(:scopes)
     def reconcile_ci_waits(_), do: note(:ci_waits)
     def reconcile_review_passes(_), do: note(:passes)
+    def reconcile_held_resumes(_), do: note(:held_resumes)
     def restarted_ids(_), do: []
     def reconcile_open_pr_tasks(_), do: note(:open_prs)
     def reconcile_resumable_tasks(_), do: note(:resume)
@@ -40,6 +41,7 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     defdelegate reconcile_shutdown_casualties(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_ci_waits(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_review_passes(opts), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_held_resumes(opts), to: Arbiter.Workers.Reconciler
     defdelegate restarted_ids(lists), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Arbiter.Workers.Reconciler
 
@@ -62,7 +64,7 @@ defmodule Arbiter.Boot.ReconcileSweepTest do
     end
   end
 
-  @reconcile_steps ~w(orphans casualties scopes ci_waits passes open_prs resume)a
+  @reconcile_steps ~w(orphans casualties scopes ci_waits passes held_resumes open_prs resume)a
 
   setup do
     Application.put_env(:arbiter, :sweep_test_pid, self())

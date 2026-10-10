@@ -13,7 +13,9 @@ defmodule Arbiter.Quota.Snapshot do
   `claude`, `quotas`, `spend_caps` (the dollar spend cap state of each capped
   account, `Arbiter.Quota.SpendCap`), `codex`, `codex_message`, `codex_credentials_expired`,
   `antigravity`, `gemini_credentials_expired`, `held_dispatches`,
-  `paused_providers`.
+  `paused_providers`, and `budget` (DC5: one block per account with its
+  provider-concurrency pools, `Arbiter.Board.CapacityView.account_blocks/2`;
+  labelled `shadow` until `scheduler_admission` is `enforce`).
   """
 
   alias Arbiter.Quota
@@ -56,6 +58,7 @@ defmodule Arbiter.Quota.Snapshot do
         Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id, spend_cache: spend),
       quotas: Quota.list_serialized_for_workspace(ws_id, spend_cache: spend),
       spend_caps: spend_caps(Map.values(accounts)),
+      budget: budget(Map.values(accounts)),
       codex: codex,
       codex_message: Quota.codex_absence_message(codex),
       # bd-1fpjgx: live off `CredentialWatchdog`'s held state, not the
@@ -96,6 +99,7 @@ defmodule Arbiter.Quota.Snapshot do
         ),
       quotas: Quota.list_serialized(account.id, spend_cache: spend),
       spend_caps: spend_caps([account.id]),
+      budget: budget([account.id]),
       codex: codex,
       codex_message: Quota.codex_absence_message(codex),
       codex_credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
@@ -108,6 +112,18 @@ defmodule Arbiter.Quota.Snapshot do
       held_dispatches: [],
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
+  end
+
+  # DC5 (bd-2c2a4g): the provider concurrency budget of each account, one block
+  # per account with its pools, labelled with the `scheduler_admission` mode
+  # (`Arbiter.Board.CapacityView`). Display only: a read that fails is `[]`.
+  defp budget(account_ids) do
+    account_ids
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Arbiter.Board.CapacityView.account_blocks()
+  rescue
+    _ -> []
   end
 
   # bd-a6grlr: one entry per capped account, wire-shaped by `SpendCap.to_map/1`

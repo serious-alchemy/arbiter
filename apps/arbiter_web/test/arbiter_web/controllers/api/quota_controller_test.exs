@@ -33,6 +33,34 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     refute Map.has_key?(resp["data"], "gemini")
   end
 
+  # DC5 (bd-2c2a4g, design §9): a `budget` block per account, labelled with the
+  # admission mode.
+  test "carries a budget block per account, labelled with the admission mode", %{
+    conn: conn,
+    ws: ws
+  } do
+    id = account_id!(ws.id)
+    on_exit(fn -> Arbiter.Settings.set_scheduler_admission(nil) end)
+    {:ok, _} = Arbiter.Settings.set_scheduler_admission("shadow")
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+
+    assert %{"mode" => "shadow", "decides" => false, "account_id" => ^id, "pools" => pools} =
+             Enum.find(resp["data"]["budget"], &(&1["account_id"] == id))
+
+    assert is_list(pools)
+  end
+
+  test "?account= carries only that account's budget block", %{conn: conn, ws: ws} do
+    id = account_id!(ws.id)
+    account = Ash.get!(ProviderAccount, id)
+
+    resp =
+      conn |> get("/api/quota", %{"account" => "claude:#{account.slug}"}) |> json_response(200)
+
+    assert [%{"account_id" => ^id}] = resp["data"]["budget"]
+  end
+
   # bd-6omte4: on bd-aro53b `arb quota` said "gating dispatch: none" while
   # the Antigravity gate held a fix round, and nothing said why.
   test "lists what the quota gate is holding, with provider and reason", %{conn: conn, ws: ws} do

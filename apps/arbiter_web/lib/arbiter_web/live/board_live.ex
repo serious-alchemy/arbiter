@@ -89,11 +89,13 @@ defmodule ArbiterWeb.BoardLive do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.CapacityExplainer
+  alias Arbiter.Board.CapacityView
   alias Arbiter.Board.Snapshot
   alias Arbiter.Settings
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Rank
+  alias ArbiterWeb.CapacityComponents
   alias ArbiterWeb.InstallationSettings
 
   @tasks_topic "tasks"
@@ -174,7 +176,8 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
-      |> assign(:explain, %{cap: nil, holds: %{}})
+      |> assign(:explain, empty_explain())
+      |> assign(:capacity, nil)
       |> assign(:board_loaded?, false)
       |> assign(:board_error, nil)
       |> assign(:board_loading?, false)
@@ -244,6 +247,7 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:local_cap_zero?, loaded.local_cap_zero?)
     |> assign(:scheduler_running, loaded.scheduler_running)
     |> assign(:explain, loaded.explain)
+    |> assign(:capacity, loaded.capacity)
     |> assign(:workspaces, loaded.workspaces)
     |> assign(:now, loaded.board.now)
     |> assign(:board_loaded?, true)
@@ -684,14 +688,19 @@ defmodule ArbiterWeb.BoardLive do
     running? = InstallationSettings.scheduler_running?()
     paused? = not running? or InstallationSettings.scheduler_paused?()
 
+    mode = admission_mode()
+
     board =
       Snapshot.load(
         now: DateTime.utc_now(),
         paused: paused?,
+        admission: mode,
         exclude_engagements?: true,
-        local_held: local_held_ids()
+        local_held: local_held_ids(),
+        idle_check: idle_check()
       )
 
+    capacity = capacity(mode)
     exit_if_view_gone(view)
     alerts = load_alerts()
     exit_if_view_gone(view)
@@ -705,8 +714,16 @@ defmodule ArbiterWeb.BoardLive do
       local_cap_zero?: local_cap_zero?(),
       scheduler_running: running?,
       workspaces: workspaces,
-      explain: explain(board)
+      capacity: capacity,
+      explain: explain(board, mode, capacity)
     }
+  end
+
+  # bd-3fbj83: orphaned tickets hold no slot; the scheduler's queued follow-ups
+  # are not orphans.
+  defp idle_check do
+    queued = Arbiter.Board.Autopilot.deferred_resume_ids()
+    fn issues -> Arbiter.Tasks.IdleTickets.ids(issues, queued_ids: queued) end
   end
 
   # bd-b2iigy: the tickets whose resume the scheduler holds for the primary's
@@ -719,13 +736,34 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
+  # DC5: the `scheduler_admission` mode the board plans under. Under `shadow` and
+  # `enforce` the board also carries the scheduler walk, whose per-card layer
+  # reasons it shows; today's fields are the same either way (I1, I2).
+  defp admission_mode do
+    Settings.scheduler_admission()
+  rescue
+    _ -> :legacy
+  end
+
+  # The budgets, machines and mode for the capacity strip (DC5). Display only: a
+  # read that fails leaves the board without a strip.
+  defp capacity(mode) do
+    CapacityView.status(mode: mode)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   # The explanation is presentation: a read of it that fails leaves the board
   # as it was, with the figures and no popups.
-  defp explain(board) do
-    CapacityExplainer.explain(board)
+  defp explain(board, mode, capacity) do
+    CapacityExplainer.explain(board, mode: mode, capacity: capacity)
   rescue
-    _ -> %{cap: nil, holds: %{}}
+    _ -> empty_explain()
   end
+
+  defp empty_explain, do: %{cap: nil, holds: %{}, layers: %{}, budget: nil}
 
   # RW8: the primary's own worker cap is overridden to 0 — nothing runs on this
   # machine, so local-only work (reviewers, fix and conflict passes, agy/codex,
@@ -1052,9 +1090,13 @@ defmodule ArbiterWeb.BoardLive do
                   agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of
                 </span>
                 <span class="sm:hidden">{slots_used(@board)}/</span>
-                <.slot_cap board={@board} cap={@explain.cap} />
+                <.slot_cap board={@board} cap={@explain.cap} budget={@explain.budget} />
                 <span class="hidden sm:inline">· {@board.slots_free} slots free</span>
               </span>
+              <CapacityComponents.capacity_strip
+                :if={@board_loaded? and @capacity}
+                capacity={@capacity}
+              />
               <span
                 :if={not @board_loaded?}
                 aria-hidden="true"
@@ -1348,7 +1390,13 @@ defmodule ArbiterWeb.BoardLive do
                 class="contents"
                 phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.board_card card={card} column={column.key} now={@now} holds={@explain.holds} />
+                <.board_card
+                  card={card}
+                  column={column.key}
+                  now={@now}
+                  holds={@explain.holds}
+                  layers={@explain.layers}
+                />
               </div>
 
               <.more
@@ -1516,6 +1564,7 @@ defmodule ArbiterWeb.BoardLive do
   attr(:column, :string, required: true)
   attr(:now, :any, required: true)
   attr(:holds, :map, default: %{}, doc: "ticket id => `CapacityExplainer` hold explanation")
+  attr(:layers, :map, default: %{}, doc: "ticket id => `CapacityExplainer` walk layer (DC5)")
 
   # One card, any column. What differs per column is read through the
   # `detail/2`, `activity/2`, `footer/3` and `accent/2` helpers above rather
@@ -1525,6 +1574,7 @@ defmodule ArbiterWeb.BoardLive do
       assign(assigns,
         detail: detail(assigns.column, assigns.card),
         hold: hold_of(assigns.column, assigns.card, assigns.holds),
+        layer: layer_of(assigns.column, assigns.card, assigns.layers),
         activity: activity(assigns.column, assigns.card),
         activity_href: activity_href(assigns.column, assigns.card),
         footer: footer(assigns.column, assigns.card, assigns.now)
@@ -1582,6 +1632,9 @@ defmodule ArbiterWeb.BoardLive do
       <:detail :if={@hold}>
         <.hold_badge card_id={@card.id} column={@column} hold={@hold} />
       </:detail>
+      <:detail :if={@layer && !@hold}>
+        <CapacityComponents.layer_reason id={@card.id} layer={@layer} />
+      </:detail>
       <:detail :if={@detail && !@hold}>
         <span
           data-detail={@column}
@@ -1631,6 +1684,18 @@ defmodule ArbiterWeb.BoardLive do
 
   defp hold_of(_column, _card, _holds), do: nil
 
+  # DC5: the scheduler walk's reason for a Ready card it would hold or start; the
+  # card already says "next", so that one adds nothing. A card that wears a hold
+  # badge carries its layer in the badge's popup instead.
+  defp layer_of("ready", card, layers) do
+    case Map.get(layers, card.id) do
+      %{state: state} = layer when state in [:waiting, :starting] -> layer
+      _ -> nil
+    end
+  end
+
+  defp layer_of(_column, _card, _layers), do: nil
+
   attr(:card_id, :string, required: true)
   attr(:column, :string, required: true)
   attr(:hold, :map, required: true)
@@ -1659,6 +1724,13 @@ defmodule ArbiterWeb.BoardLive do
       </:trigger>
       <p class="m-0 text-[var(--text-primary)]" data-hold-summary>{@hold.summary}</p>
       <p
+        :if={Map.get(@hold, :layer)}
+        class="m-0 text-[11px] text-[var(--text-secondary)]"
+        data-hold-layer
+      >
+        <span :if={@hold.layer.shadow?}>Shadow walk: </span>{@hold.layer.text}
+      </p>
+      <p
         :if={@hold.details}
         class="m-0 text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] break-words"
         data-hold-details
@@ -1683,6 +1755,11 @@ defmodule ArbiterWeb.BoardLive do
   attr(:cap, :map,
     default: nil,
     doc: "`CapacityExplainer.cap/1`, or nil when it could not be built"
+  )
+
+  attr(:budget, :map,
+    default: nil,
+    doc: "`CapacityExplainer.budget/2`: the pool, machine, repo and fair-share lines (DC5)"
   )
 
   # The toolbar's cap figure. With the explanation it is a button that opens a
@@ -1738,6 +1815,7 @@ defmodule ArbiterWeb.BoardLive do
           </span>
         </li>
       </ul>
+      <CapacityComponents.budget_lines :if={@budget} budget={@budget} />
       <div id="board-slot-cap-users" class="flex flex-col gap-[4px]">
         <p class="m-0 font-medium text-[var(--text-title)]">Using slots now</p>
         <p :if={@cap.users == []} class="m-0">Nothing holds a slot.</p>

@@ -241,6 +241,7 @@ defmodule Arbiter.Board.Autopilot do
   alias Arbiter.Boot.ResumeGate
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Worker.HeldResume
   alias Arbiter.Workflows.MergeQueue.ConflictResolver
   alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
@@ -664,6 +665,7 @@ defmodule Arbiter.Board.Autopilot do
         |> Keyword.put_new(:dispatch_holds, dispatch_holds(state))
         |> Keyword.put_new(:resume_queued, queued_resume_ids(state))
         |> Keyword.put_new(:local_held, local_held_ids(state))
+        |> Keyword.put_new(:idle_check, idle_check(state))
       )
 
     {:reply, snapshot, state}
@@ -703,6 +705,7 @@ defmodule Arbiter.Board.Autopilot do
 
     for %{kind: kind} <- dropped do
       Logger.info("board autopilot: deferred #{kind} for #{task_id} cancelled — ticket finished")
+      HeldResume.clear(task_id)
     end
 
     {:reply, :ok, %{state | deferred_resumes: kept}}
@@ -948,7 +951,8 @@ defmodule Arbiter.Board.Autopilot do
         [
           dispatch_holds: dispatch_holds(state),
           resume_queued: queued_resume_ids(state),
-          local_held: local_held_ids(state)
+          local_held: local_held_ids(state),
+          idle_check: idle_check(state)
         ] ++ walk_opts(mode)
       )
 
@@ -1109,6 +1113,12 @@ defmodule Arbiter.Board.Autopilot do
     end
   end
 
+  # bd-3fbj83: orphaned tickets (no run, nothing queued) hold no slot.
+  defp idle_check(state) do
+    queued = queued_resume_ids(state)
+    fn issues -> Arbiter.Tasks.IdleTickets.ids(issues, queued_ids: queued) end
+  end
+
   defp local_held_ids(%{deferred_resumes: queue}),
     do: for(%{wait: :local_capacity, task_id: id} <- queue, do: id)
 
@@ -1256,11 +1266,14 @@ defmodule Arbiter.Board.Autopilot do
   defp finish_resume(state, id, {:ok, %{deferred: true}}), do: {{:deferred, id}, state}
 
   defp finish_resume(state, id, {:ok, _}) do
+    HeldResume.clear(id)
     announce({:board_resumed, id})
     {{:resumed, id}, state}
   end
 
   defp finish_resume(state, id, {:error, reason} = error) do
+    HeldResume.clear(id)
+
     if error_shape(reason) in @benign_resume_errors do
       Logger.info("board autopilot: deferred resume of #{id} dropped: #{inspect(reason)}")
     else
