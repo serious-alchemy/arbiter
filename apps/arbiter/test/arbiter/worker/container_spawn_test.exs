@@ -178,6 +178,73 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "run_side_command/3 (bd-57nhsi: run_tests while the session's container is up)" do
+    setup do
+      test = self()
+
+      runner = fn cmd, args, opts ->
+        send(test, {:podman, cmd, args, opts})
+        {"tests output", 0}
+      end
+
+      previous = Application.get_env(:arbiter, :worker_container_runner)
+      Application.put_env(:arbiter, :worker_container_runner, runner)
+
+      on_exit(fn ->
+        if previous == nil,
+          do: Application.delete_env(:arbiter, :worker_container_runner),
+          else: Application.put_env(:arbiter, :worker_container_runner, previous)
+      end)
+
+      :ok
+    end
+
+    test "runs in a container named apart from the live session's, and removes only that one",
+         ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      assert {"tests output", 0} =
+               ContainerSpawn.run_side_command(port_args(ctx, request), "mix test", 30)
+
+      assert_received {:podman, "/usr/bin/podman", ["run" | args], _opts}
+      assert "mix test" in args
+      refute request.name in args
+      [side_name] = for ["--name", n] <- Enum.chunk_every(args, 2, 1), do: n
+      assert side_name =~ ~r/\A#{Regex.escape(request.name)}-x[0-9a-f]{8}\z/
+      assert byte_size(side_name) <= 64
+
+      assert_received {:podman, _cmd, ["rm" | rm_args], _}
+      assert side_name in rm_args
+      refute request.name in rm_args
+    end
+
+    test "each call gets its own name", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      ContainerSpawn.run_side_command(port_args(ctx, request), "true", 30)
+      ContainerSpawn.run_side_command(port_args(ctx, request), "true", 30)
+
+      names =
+        for {:podman, _, ["run" | args], _} <- drain_podman(),
+            ["--name", n] <- Enum.chunk_every(args, 2, 1),
+            do: n
+
+      assert [a, b] = names
+      assert a != b
+    end
+
+    test "a run without a sandbox is refused" do
+      assert {:error, :not_sandboxed} = ContainerSpawn.run_side_command(%{}, "true", 30)
+    end
+
+    defp drain_podman(acc \\ []) do
+      receive do
+        {:podman, _, _, _} = msg -> drain_podman([msg | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+  end
+
   describe "prepare/1 with a guardrail projection (G14, bd-ld8qde)" do
     defp capture_egress(ctx) do
       test = self()

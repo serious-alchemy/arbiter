@@ -429,6 +429,24 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert prompt =~ "flake_record"
     end
 
+    test "the fix-round prompt steers to run_tests only when the session has the MCP server",
+         ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-run-tests").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-run-tests",
+        target_branch: "main",
+        round: 1,
+        thread: []
+      }
+
+      put_app_env(:arbiter, Arbiter.MCP, inject_config: true)
+      assert ReviewGate.revise_prompt(state, "1. fix it") =~ "`run_tests` MCP tool"
+
+      put_app_env(:arbiter, Arbiter.MCP, inject_config: false)
+      refute ReviewGate.revise_prompt(state, "1. fix it") =~ "run_tests"
+    end
+
     test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
       rig = rig(ctx, "feature/ci-mcp")
       put_app_env(:arbiter, Arbiter.MCP, inject_config: true)

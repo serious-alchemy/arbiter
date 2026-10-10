@@ -10,7 +10,7 @@ defmodule Arbiter.Worker.TestRun do
 
   A *runner* says where the command executes — the same `exec` seam the pre-push
   check uses (`Arbiter.Worker.PrepushCheck`): `fn command, timeout_s ->
-  {output, status} | {:error, reason}` is `Arbiter.Worker.ContainerSpawn.run_command/3`
+  {output, status} | {:error, reason}` is `Arbiter.Worker.ContainerSpawn.run_side_command/3`
   for a local podman run, `Arbiter.Worker.Executor.Node.exec/4` for a run placed
   on a node (the node's agent runs it in a container of the run's shape), and a
   host `sh` for an unsandboxed run. Every command is a plain `sh -c` string, so
@@ -86,6 +86,10 @@ defmodule Arbiter.Worker.TestRun do
       end
     end
   end
+
+  @doc "The longest a `run_tests` call may run, in seconds."
+  @spec max_timeout_s() :: pos_integer()
+  def max_timeout_s, do: @max_timeout_s
 
   defp timeout(%{timeout_s: n}) when is_integer(n) and n > 0, do: min(n, @max_timeout_s)
   defp timeout(_), do: @default_timeout_s
@@ -285,6 +289,7 @@ defmodule Arbiter.Worker.TestRun do
     #{runs}
     } > "$LOG" 2>&1
     cat "$LOG"
+    printf '\n#{@log_marker}%s\n' "$LOG"
     exit $status
     """
   end
@@ -306,7 +311,25 @@ defmodule Arbiter.Worker.TestRun do
   defp group_of?(path, nil), do: not String.starts_with?(path, "apps/")
   defp group_of?(path, app), do: String.starts_with?(path, "apps/#{app}/")
 
+  # The path is printed first and again last: a node's exec keeps only the tail
+  # of a long output, which cuts the first line off. The last one wins.
   defp split_log_marker(output) do
+    {tail_path, output} = take_tail_marker(output)
+    {head_path, output} = take_head_marker(output)
+    {tail_path || head_path, output}
+  end
+
+  defp take_tail_marker(output) do
+    case Regex.run(~r/\n#{@log_marker}([^\n]*)\n?\z/, output, return: :index) do
+      [{start, _len}, {path_start, path_len}] ->
+        {String.trim(binary_part(output, path_start, path_len)), binary_part(output, 0, start)}
+
+      nil ->
+        {nil, output}
+    end
+  end
+
+  defp take_head_marker(output) do
     case String.split(output, "\n", parts: 2) do
       [@log_marker <> path, rest] -> {String.trim(path), rest}
       [@log_marker <> path] -> {String.trim(path), ""}

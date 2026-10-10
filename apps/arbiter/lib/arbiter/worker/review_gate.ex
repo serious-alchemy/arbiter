@@ -7624,13 +7624,29 @@ defmodule Arbiter.Worker.ReviewGate do
     no `mix run`. (Reading files, editing, and running `git` is fine.)
 
     #{ci_flake_guidance(state)}
-    #{PromptBuilder.test_tool_section()}
+    #{test_tool_section(adapter)}
     #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:
 
         arb done
     """
+  end
+
+  # bd-57nhsi: the authoring prompt steers to `run_tests` only when the session
+  # has the arbiter MCP server (`mcp_tools?`); so does the revise prompt. The
+  # server is absent when injection is off, or for agy with no isolated `$HOME`
+  # (`MCP.AgentConfig.Gemini` refuses, as `Dispatch.inject_mcp_config/3` sees).
+  defp test_tool_section(adapter) do
+    if Arbiter.MCP.inject_config?() and mcp_config_writable?(adapter),
+      do: PromptBuilder.test_tool_section(),
+      else: ""
+  end
+
+  defp mcp_config_writable?(adapter) do
+    adapter.provider() != "gemini" or
+      Arbiter.MCP.AgentConfig.Gemini.cli_flavour() != :agy or
+      Arbiter.Agents.Gemini.ConfigDir.enabled?()
   end
 
   # bd-49l0eo: a fix round in a container with no scoped credential commits; the

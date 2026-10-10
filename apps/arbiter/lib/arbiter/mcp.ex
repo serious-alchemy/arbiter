@@ -108,6 +108,15 @@ defmodule Arbiter.MCP do
   @spec max_depth() :: non_neg_integer()
   def max_depth, do: config(:max_depth, @default_max_depth)
 
+  @doc """
+  The per-call timeout, in seconds, a provider's MCP client is told to allow an
+  arbiter tool (bd-57nhsi). `run_tests` blocks its request for up to
+  `Arbiter.Worker.TestRun.max_timeout_s/0`, which is far above Codex's default
+  tool timeout (60s); a minute of margin covers the report.
+  """
+  @spec tool_timeout_sec() :: pos_integer()
+  def tool_timeout_sec, do: Arbiter.Worker.TestRun.max_timeout_s() + 60
+
   @doc "The `mcpServers` key written into `.mcp.json` (default `\"arbiter\"`)."
   @spec server_name() :: String.t()
   def server_name, do: config(:server_name, @default_server_name)

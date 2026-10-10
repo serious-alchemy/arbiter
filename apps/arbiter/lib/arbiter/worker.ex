@@ -2606,7 +2606,7 @@ defmodule Arbiter.Worker do
 
     reply =
       if is_binary(worktree) and File.dir?(worktree) do
-        exec = prepush_exec(meta) || test_host_exec(meta, worktree)
+        exec = test_exec(meta) || test_host_exec(meta, worktree)
         {:ok, %{exec: exec, worktree: worktree, target: Map.get(meta, :target_branch)}}
       else
         {:error, :no_worktree}
@@ -5390,6 +5390,27 @@ defmodule Arbiter.Worker do
   end
 
   defp remote_exec(_port_args), do: fn _command, _seconds -> {:error, :remote_run_unknown} end
+
+  # bd-57nhsi: the `run_tests` tool runs while the session's container is up, so a
+  # sandboxed local run gets a container of its own name (`run_command/3` reuses
+  # the session's and removes it afterwards, which would kill the session).
+  defp test_exec(meta) do
+    case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
+      {fun, _} when is_function(fun, 2) ->
+        fun
+
+      {_, %{remote: %{}}} ->
+        prepush_exec(meta)
+
+      {_, %{sandbox: %{}} = port_args} ->
+        fn command, seconds ->
+          Arbiter.Worker.ContainerSpawn.run_side_command(port_args, command, seconds)
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   defp test_host_exec(meta, worktree) do
     env =

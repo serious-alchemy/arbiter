@@ -170,6 +170,33 @@ defmodule Arbiter.Worker.TestRunTest do
       assert result.report.status == :timeout
       assert result.log_path == "/x/y.log"
     end
+
+    test "a node's tail-only output still yields the log path, from the closing marker", ctx do
+      # NodeAgent.Exec keeps the last 256 KiB: the opening marker line is gone.
+      tail_only = %{
+        exec: fn command, _ ->
+          if command =~ "ARB_TEST_LOG",
+            do: {"...cut\n5 tests, 0 failures\n\nARB_TEST_LOG=/x/z.log\n", 0},
+            else: ctx.exec.(command, 1)
+        end,
+        worktree: ctx.repo,
+        target: nil
+      }
+
+      assert {:ok, result} =
+               TestRun.run(tail_only, %{paths: ["apps/core/test/b_test.exs"]}, mix: ctx.fake)
+
+      assert result.log_path == "/x/z.log"
+      assert result.report.status == :passed
+      assert result.report.tests == 5
+      refute result.text =~ "ARB_TEST_LOG"
+    end
+
+    test "the command prints the log path again after the output", ctx do
+      command = TestRun.test_command(["apps/core/test/b_test.exs"], ctx.fake)
+      [_, after_cat] = String.split(command, ~s(cat "$LOG"\n), parts: 2)
+      assert after_cat =~ ~s(ARB_TEST_LOG=%s)
+    end
   end
 
   describe "run/3 with changed: true" do
