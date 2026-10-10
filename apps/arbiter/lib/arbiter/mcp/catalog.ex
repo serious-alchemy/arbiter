@@ -114,6 +114,7 @@ defmodule Arbiter.MCP.Catalog do
   | `repo_show` | coordinator | single repo from `list_repos()` |
   | `quota_get` | worker, coordinator | `Arbiter.Quota` snapshot per provider (or one account) |
   | `flake_record` | worker, coordinator | structured flake event for `arb loop analyze` (bd-6vullc) |
+  | `run_tests` | worker | `Arbiter.Worker.TestRun.run/3` through `Arbiter.Worker.test_runner/1`: `mix test` in the run's own environment, failures-only (bd-57nhsi) |
   | `external_review_list` | coordinator | `ExternalReview` audit records for a workspace (bd-31fh9e) |
   | `external_review_show` | coordinator | one `ExternalReview` record with its proposed comments |
   | `review_greenlight` | coordinator (`can_dispatch`) | posts the approved subset of a report-only review (bd-36qzgx) |
@@ -3701,6 +3702,54 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.flake_record/2
+    },
+    %{
+      name: "run_tests",
+      tiers: @worker,
+      description:
+        "Run `mix test` for your own run and get back ONLY what matters: pass/fail counts and, for " <>
+          "each failing test, its ExUnit header, assertion and a few stacktrace frames (capped; " <>
+          "every failing test is named). Compile chatter, passing dots and warnings stay out of " <>
+          "your context; the full log is saved in your run's temp directory and its path comes " <>
+          "back as `full_log` (read it only if the summary is not enough). Prefer this to running " <>
+          "`mix test` yourself. It runs in your run's own environment (the same container or " <>
+          "node, deps and `_build` as your shell) and blocks until the tests finish. Name what to " <>
+          "run with `paths` (test files, optionally `file.exs:LINE`, or directories; an umbrella " <>
+          "app-relative path such as `test/foo_test.exs` is found under `apps/*/`) or " <>
+          "`changed: true` (the tests mapped from what your branch touched: committed, " <>
+          "uncommitted and new files, `lib/x.ex` -> `test/x_test.exs`). A path that does not " <>
+          "exist is refused rather than silently running the whole suite. `status` is `passed`, " <>
+          "`failed`, `error` (e.g. a compile error, with the relevant excerpt), `timeout` or " <>
+          "`no_tests`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "paths" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Test files (optionally `:LINE`) or directories, repo-relative, e.g. " <>
+                "[\"apps/arbiter/test/arbiter/foo_test.exs\", \"apps/arbiter/test/arbiter/mcp\"]."
+          },
+          "changed" => %{
+            "type" => "boolean",
+            "description" =>
+              "Run the tests mapped from the files your branch changed (instead of `paths`)."
+          },
+          "timeout_seconds" => %{
+            "type" => "integer",
+            "description" =>
+              "Give up on the run after this long (default 600, at most 1800). A killed run " <>
+                "returns `timeout` with the output tail."
+          },
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. Optional; only your own ticket is accepted."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.run_tests/2
     },
     %{
       name: "repo_list",

@@ -62,7 +62,8 @@ defmodule Arbiter.Worker.TestRun do
           report: TestReport.t(),
           text: String.t(),
           log_path: String.t() | nil,
-          command: String.t()
+          command: String.t(),
+          ran?: boolean()
         }
 
   @doc """
@@ -94,7 +95,8 @@ defmodule Arbiter.Worker.TestRun do
       report: TestReport.build("", 0),
       text: "no tests: nothing in the change maps to a test file; pass `paths` to choose some",
       log_path: nil,
-      command: ""
+      command: "",
+      ran?: false
     }
   end
 
@@ -250,7 +252,13 @@ defmodule Arbiter.Worker.TestRun do
         report = TestReport.build(output, status, Keyword.take(opts, [:limit]))
 
         {:ok,
-         %{report: report, text: TestReport.render(report), log_path: log_path, command: command}}
+         %{
+           report: report,
+           text: TestReport.render(report),
+           log_path: log_path,
+           command: command,
+           ran?: true
+         }}
     end
   end
 
