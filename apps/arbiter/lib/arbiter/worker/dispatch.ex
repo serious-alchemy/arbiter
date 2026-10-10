@@ -2713,6 +2713,13 @@ defmodule Arbiter.Worker.Dispatch do
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
   # (repo unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain task close.
+  defp placed_node_id(opts) do
+    case Keyword.get(opts, :node) do
+      %{id: id} when is_binary(id) -> id
+      _ -> nil
+    end
+  end
+
   defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =
       case Keyword.get(opts, :review, false) do
@@ -2745,6 +2752,10 @@ defmodule Arbiter.Worker.Dispatch do
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
+      # bd-8ikgoc: the node placement chose, so the worker's registry entry is
+      # stamped from init and a run still starting up on a remote node never
+      # counts against the primary's cap.
+      |> put_if_present(:placed_node_id, placed_node_id(opts))
 
     base = maybe_put_resume_meta(base, opts)
 

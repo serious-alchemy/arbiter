@@ -10,7 +10,7 @@ defmodule Arbiter.Worker.ReleaseEnvAgentVarsTest do
 
   alias Arbiter.Worker.ReleaseEnv
 
-  @vars ~w(ARB_ROLE ARB_NODE_URL ARB_NODE_HOME ARB_NODE_CREDENTIAL_FILE)
+  @vars ~w(ARB_ROLE ARB_NODE_URL ARB_NODE_HOME ARB_NODE_CREDENTIAL_FILE ARB_AGENT_BACKEND)
 
   setup do
     saved = for name <- @vars, do: {name, System.get_env(name)}

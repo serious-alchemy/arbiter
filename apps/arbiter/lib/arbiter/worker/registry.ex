@@ -67,14 +67,43 @@ defmodule Arbiter.Worker.Registry do
   @spec put_dispatch(String.t(), String.t() | nil, atom() | String.t() | nil, keyword()) :: :ok
   def put_dispatch(registry_key, workspace_id, provider, opts \\ [])
       when is_binary(registry_key) do
-    value = %{
-      workspace_id: workspace_id,
-      provider: normalize_provider(provider),
-      released: Keyword.get(opts, :released, false),
-      node_id: Keyword.get(opts, :node_id)
-    }
+    Registry.update_value(__MODULE__, registry_key, fn prior ->
+      # A rewrite (the hold flag flipping) keeps the node `put_node/2` stamped.
+      node_id =
+        case {Keyword.fetch(opts, :node_id), prior} do
+          {{:ok, id}, _} -> id
+          {:error, %{node_id: id}} -> id
+          _ -> nil
+        end
 
-    Registry.update_value(__MODULE__, registry_key, fn _ -> value end)
+      %{
+        workspace_id: workspace_id,
+        provider: normalize_provider(provider),
+        released: Keyword.get(opts, :released, false),
+        node_id: node_id
+      }
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
+  Stamp the node the calling worker's run was placed on onto its own registry
+  entry (bd-8ikgoc). A worker registers at `init/1` before any node is known —
+  the placement only exists once its port opens — so without this every run on
+  a remote node would read as a primary run to `Arbiter.Nodes.LocalCapacity`.
+  `nil` is the primary. Must be called from the registered process; a no-op
+  otherwise or when `put_dispatch/4` has not run yet.
+  """
+  @spec put_node(String.t(), String.t() | nil) :: :ok
+  def put_node(registry_key, node_id) when is_binary(registry_key) do
+    Registry.update_value(__MODULE__, registry_key, fn
+      %{} = value -> Map.put(value, :node_id, node_id)
+      other -> other
+    end)
+
     :ok
   rescue
     _ -> :ok

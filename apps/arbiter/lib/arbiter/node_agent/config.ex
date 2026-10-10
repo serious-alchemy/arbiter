@@ -15,6 +15,9 @@ defmodule Arbiter.NodeAgent.Config do
       credential is the **only** secret an agent keeps at rest; it is read from
       that file, never from the environment or argv, and never printed
       (`inspect/1` hides it).
+    * `ARB_AGENT_BACKEND` — what runs the workers (`Arbiter.NodeAgent.Backend`):
+      `podman` (the default). Any other value is `{:unknown_backend, value}`,
+      which fails the agent's boot.
     * `ARB_NODE_MAX_WORKERS` — optional, a positive integer: the node owner's
       hard ceiling on concurrent workers, reported in `hello` as
       `capacity.ceiling` (§13). Anything else is ignored.
@@ -43,6 +46,7 @@ defmodule Arbiter.NodeAgent.Config do
     :max_workers,
     :proxy,
     run_opts: [],
+    backend: Arbiter.NodeAgent.Backend.Podman,
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
     readiness_ttl_ms: 600_000,
@@ -74,7 +78,8 @@ defmodule Arbiter.NodeAgent.Config do
       setting(opts, env, :credential_file, "ARB_NODE_CREDENTIAL_FILE") ||
         Path.join([home(env), ".config", "arbiter-node", "credential"])
 
-    with {:ok, url} <- primary_url(opts, env),
+    with {:ok, backend} <- backend(opts, env),
+         {:ok, url} <- primary_url(opts, env),
          {:ok, credential} <- read_credential(credential_file, opts),
          {:ok, node_id} <- node_id(credential) do
       {:ok,
@@ -88,6 +93,7 @@ defmodule Arbiter.NodeAgent.Config do
          )
          |> Keyword.merge(
            primary_url: url,
+           backend: backend,
            node_home: node_home,
            credential_file: credential_file,
            credential: credential,
@@ -148,6 +154,13 @@ defmodule Arbiter.NodeAgent.Config do
   defp setting(opts, env, key, env_name) do
     non_empty(Keyword.get(opts, key)) || non_empty(env[env_name]) ||
       non_empty(app_config(opts)[key])
+  end
+
+  defp backend(opts, env) do
+    case setting(opts, env, :backend, "ARB_AGENT_BACKEND") do
+      mod when is_atom(mod) and not is_nil(mod) -> {:ok, mod}
+      name -> Arbiter.NodeAgent.Backend.resolve(name)
+    end
   end
 
   defp max_workers(opts, env) do
