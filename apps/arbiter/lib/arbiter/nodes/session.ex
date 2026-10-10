@@ -94,6 +94,11 @@ defmodule Arbiter.Nodes.Session do
     :proto,
     :free_mem,
     :load,
+    :k8s_version,
+    :node_capacity,
+    kind: "machine",
+    degraded: [],
+    prepare_timeout_ms: @default_prepare_timeout_ms,
     allow_skew?: false,
     state: :online,
     fenced?: false,
@@ -192,6 +197,18 @@ defmodule Arbiter.Nodes.Session do
           {:ok, term()} | {:error, term()}
   def assign(pid, run, spec, owner, opts \\ []),
     do: GenServer.call(pid, {:assign, run, spec, owner, opts}, :infinity)
+
+  @doc """
+  The stage the node last reported for `run` (A3): `:assigned` (pushed, nothing heard),
+  `:pending`, `:starting`, `:running`, `:terminating`, or `nil` for a run this session does
+  not hold.
+  """
+  @spec run_stage(pid(), String.t()) :: atom() | nil
+  def run_stage(pid, run), do: GenServer.call(pid, {:run_stage, run})
+
+  @doc "Whether `run` has reached `running`: a run counts as started only then (A3)."
+  @spec run_started?(pid(), String.t()) :: boolean()
+  def run_started?(pid, run), do: GenServer.call(pid, {:run_stage, run}) in [:running, :terminating]
 
   @doc """
   The checkout context the primary placed `run` with (`assign/5`'s `:checkout`:
@@ -325,6 +342,7 @@ defmodule Arbiter.Nodes.Session do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       thresholds: Liveness.current(),
       allow_skew?: Keyword.get(opts, :allow_skew, false),
+      prepare_timeout_ms: Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms),
       last_hb: clock.(),
       reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms),
       hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms)
@@ -393,7 +411,7 @@ defmodule Arbiter.Nodes.Session do
         Process.monitor(owner)
         # What `Arbiter.Worker.Executor.Node` calls `stop/1` and `signal/2` with.
         handle = {:remote, {state.node_id, run, make_ref()}}
-        ms = Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
+        ms = Keyword.get(opts, :prepare_timeout_ms, state.prepare_timeout_ms)
         Process.send_after(self(), {:prepare_timeout, run}, ms)
 
         bridges = bridge_map(spec)
@@ -478,6 +496,9 @@ defmodule Arbiter.Nodes.Session do
 
   def handle_call({:abandon_run, run}, _from, state),
     do: {:reply, :ok, %{state | streams: RunStreams.abandon(state.streams, run)}}
+
+  def handle_call({:run_stage, run}, _from, state),
+    do: {:reply, RunStreams.stage(state.streams, run), state}
 
   def handle_call({:run_live?, run}, _from, state),
     do: {:reply, run in RunStreams.live(state.streams), state}
@@ -621,8 +642,13 @@ defmodule Arbiter.Nodes.Session do
   defp node_event_apply(state, "run.ready", %{"run" => run}),
     do: apply_streams(state, RunStreams.ready(state.streams, run))
 
-  defp node_event_apply(state, "run.refused", %{"run" => run} = payload),
-    do: apply_streams(state, RunStreams.refused(state.streams, run, payload))
+  defp node_event_apply(state, "run.refused", %{"run" => run} = payload) do
+    state = %{state | checkouts: Map.delete(state.checkouts, run)}
+    apply_streams(state, RunStreams.refused(state.streams, run, payload))
+  end
+
+  # A3: the node's capacity changed (a ConfigMap edit, a quota change).
+  defp node_event_apply(state, "capacity", %{} = capacity), do: put_node_capacity(state, capacity)
 
   # A cancel for a run the agent no longer has: it is over.
   defp node_event_apply(state, "run.gone", %{"run" => run}) do
@@ -642,6 +668,9 @@ defmodule Arbiter.Nodes.Session do
 
   defp node_event_apply(state, "stdout", {:binary, frame}) do
     case Arbiter.Nodes.StdoutFrame.decode(frame) do
+      {:ok, run, {:cursor, cursor}, bytes} ->
+        apply_streams(state, RunStreams.data_cursor(state.streams, run, cursor, bytes))
+
       {:ok, run, offset, bytes} ->
         apply_streams(state, RunStreams.data(state.streams, run, offset, bytes))
 
@@ -865,6 +894,10 @@ defmodule Arbiter.Nodes.Session do
         health: Skew.health(agent, Skew.primary()),
         caps: map(params["caps"]),
         capacity: map(params["capacity"]),
+        kind: kind(params["kind"]),
+        k8s_version: params["k8s_version"],
+        degraded: degraded(params["degraded"]),
+        node_capacity: nil,
         runs: hello_runs(hello_run_list(params)),
         retained: hello_retained(params),
         operator_max: node && node.max_workers,
@@ -875,6 +908,14 @@ defmodule Arbiter.Nodes.Session do
         last_hb: state.clock.()
     }
   end
+
+  defp kind("cluster"), do: "cluster"
+  defp kind(_), do: "machine"
+
+  # A7: `degraded` is a word or a list of them ("netpol_unenforced").
+  defp degraded(word) when is_binary(word), do: [word]
+  defp degraded(words) when is_list(words), do: Enum.filter(words, &is_binary/1)
+  defp degraded(_), do: []
 
   # The agent reports its runs under `inventory.runs`; a bare `runs` is accepted too.
   defp hello_run_list(params),
@@ -910,8 +951,17 @@ defmodule Arbiter.Nodes.Session do
       "max_workers" => max_workers(state),
       "runs" => verdicts
     }
+    |> put_limits(state)
     |> put_upgrade(state.health)
   end
+
+  # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
+  # prepare watchdog (`:prepare_timeout`) is the only clock on a run until it is `running`.
+  # Machine nodes are told nothing new.
+  defp put_limits(ok, %{kind: "cluster"} = state),
+    do: Map.put(ok, "limits", %{"prepare_timeout_s" => div(state.prepare_timeout_ms, 1000)})
+
+  defp put_limits(ok, _state), do: ok
 
   # A drain, or a node the skew rules keep new work off, takes no new runs
   # (§13: "a drain sets effective to 0 for new work"); runs it already has go on.
@@ -948,6 +998,12 @@ defmodule Arbiter.Nodes.Session do
         load: payload["load"] || state.load
     }
 
+    state =
+      state
+      |> heartbeat_degraded(payload)
+      |> heartbeat_capacity(payload["capacity"])
+      |> heartbeat_stages(payload["runs"])
+
     if state.state == :suspect do
       broadcast({:node_state, state.node_id, :online})
       %{state | state: :online}
@@ -961,6 +1017,45 @@ defmodule Arbiter.Nodes.Session do
   defp heartbeat_runs(runs, _old) when is_map(runs), do: runs
   defp heartbeat_runs(runs, _old) when is_list(runs), do: hello_runs(runs)
   defp heartbeat_runs(_none, old), do: old
+
+  # A cluster node's hb is authoritative for `degraded` (a missing key clears it).
+  defp heartbeat_degraded(%{kind: "cluster"} = state, payload),
+    do: %{state | degraded: degraded(payload["degraded"])}
+
+  defp heartbeat_degraded(state, _payload), do: state
+
+  defp heartbeat_capacity(state, %{} = capacity), do: put_node_capacity(state, capacity)
+  defp heartbeat_capacity(state, _none), do: state
+
+  # `hb.capacity{ceiling, running, pending, headroom, constrained}` (A3). A positive
+  # `ceiling` is the node owner's bound and feeds the effective cap like the hello's.
+  defp put_node_capacity(state, capacity) do
+    capacity_map =
+      case capacity["ceiling"] do
+        n when is_integer(n) and n > 0 -> Map.put(state.capacity, "ceiling", n)
+        _ -> state.capacity
+      end
+
+    if capacity != state.node_capacity, do: broadcast({:node_capacity, state.node_id, capacity})
+    %{state | node_capacity: capacity, capacity: capacity_map}
+  end
+
+  # A3: per-run `pending | starting | running | terminating`. Cluster nodes only: a machine
+  # agent's per-run phase names are its own, and `run.ready` alone says it started.
+  defp heartbeat_stages(%{kind: "cluster"} = state, runs) when is_map(runs) or is_list(runs) do
+    Enum.reduce(heartbeat_runs(runs, %{}), state, fn
+      {run, %{"state" => "running"}}, acc ->
+        apply_streams(acc, RunStreams.report_running(acc.streams, run))
+
+      {run, %{"state" => word}}, acc when is_binary(word) ->
+        %{acc | streams: RunStreams.report_stage(acc.streams, run, word)}
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp heartbeat_stages(state, _runs), do: state
 
   defp ack(payload) do
     %{"seq" => payload["seq"], "boot_epoch" => Nodes.boot_epoch()}
@@ -1059,6 +1154,10 @@ defmodule Arbiter.Nodes.Session do
       proto: state.proto,
       caps: state.caps,
       capacity: state.capacity,
+      kind: state.kind,
+      k8s_version: state.k8s_version,
+      degraded: state.degraded,
+      node_capacity: state.node_capacity,
       max_workers: max_workers(state),
       runs: state.runs,
       retained: state.retained,
