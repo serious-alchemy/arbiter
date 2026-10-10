@@ -683,7 +683,32 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("  enrolled:      #{n["enrolled_at"]}")
     IO.puts("  last seen:     #{n["last_seen_at"] || "never"}")
     if n["revoked_at"], do: IO.puts("  revoked:       #{n["revoked_at"]}")
+    print_cluster(n)
   end
+
+  # K9: a cluster node's kind and Kubernetes version, and, when it is behind, how it moves: by
+  # itself (it can patch its own Deployment) or by this exact command.
+  defp print_cluster(%{"kind" => "cluster"} = n) do
+    IO.puts("  kind:          cluster")
+    if n["k8s_version"], do: IO.puts("  Kubernetes:    #{n["k8s_version"]}")
+
+    cond do
+      n["upgrade_command"] ->
+        IO.puts("")
+        IO.puts("  This controller is #{n["health"]}: it cannot patch its own Deployment, so no")
+        IO.puts("  work is placed on it until it runs this server's version. Run:")
+        IO.puts("")
+        IO.puts("  #{n["upgrade_command"]}")
+
+      n["self_upgrade"] == true and n["health"] in ["outdated", "ahead"] ->
+        IO.puts("  upgrade:       this controller upgrades itself (to #{n["image"] || "this server's image"})")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp print_cluster(_n), do: :ok
 
   defp events(argv, mode) do
     ref = ref!(argv, "events")

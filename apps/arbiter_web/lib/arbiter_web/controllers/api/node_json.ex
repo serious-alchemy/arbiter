@@ -59,9 +59,12 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :contributes,
       :k8s_version,
       :degraded,
-      :pending
+      :pending,
+      :image,
+      :upgrade_command
     ])
     |> Map.put(:max_workers, row.override)
+    |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))
     |> put_constrained(row)
   end
 

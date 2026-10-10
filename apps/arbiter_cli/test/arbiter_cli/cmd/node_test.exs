@@ -487,6 +487,45 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert out =~ "max workers: 2"
     end
 
+    test "an outdated cluster node shows the exact command that moves it (K9)" do
+      cmd =
+        "kubectl -n ci-workers set image deployment/arbiter-controller " <>
+          "controller=r.example/arbiter/controller:0.2.43"
+
+      node =
+        Map.merge(@node, %{
+          "kind" => "cluster",
+          "health" => "outdated",
+          "k8s_version" => "v1.36.5+k3s1",
+          "upgrade_command" => cmd,
+          "self_upgrade" => false
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+
+      assert out =~ "kind:          cluster"
+      assert out =~ "Kubernetes:    v1.36.5+k3s1"
+      assert out =~ "outdated"
+      assert "  " <> cmd in String.split(out, "\n")
+    end
+
+    test "a cluster node that upgrades itself is told so instead of given a command" do
+      node =
+        Map.merge(@node, %{
+          "kind" => "cluster",
+          "health" => "outdated",
+          "self_upgrade" => true,
+          "upgrade_command" => nil,
+          "image" => "r.example/arbiter/controller:0.2.43"
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+      assert out =~ "upgrades itself"
+      refute out =~ "kubectl"
+    end
+
     test "shows the cap's sources, the ceiling that wins, and the workspace pin" do
       node =
         Map.merge(@node, %{

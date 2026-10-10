@@ -259,6 +259,17 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
                node
 
       assert node["k8s_version"] == nil
+      assert node["upgrade_command"] == nil
+    end
+
+    test "a cluster node enrolled by its token is a cluster before it ever connects (K9)" do
+      {:ok, %{token: t}} = Nodes.mint_join_token([name: "k3s", kind: "cluster"], @operator)
+      {:ok, _} = Nodes.redeem_join_token(t, %{kind: "cluster"})
+
+      node = json_response(get(operator_conn(), "/api/nodes/k3s"), 200)["node"]
+      assert node["kind"] == "cluster"
+      assert node["upgrade_command"] == nil
+      assert node["self_upgrade"] == false
     end
   end
 
