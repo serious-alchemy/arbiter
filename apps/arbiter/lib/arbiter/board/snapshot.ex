@@ -128,6 +128,7 @@ defmodule Arbiter.Board.Snapshot do
   @orphan_grace_seconds Lifecycle.View.orphan_grace_seconds()
 
   @type t :: %{
+          optional(:walk) => Scheduler.t(),
           backlog: [map()],
           blocked: [map()],
           ready: [Scheduler.entry()],
@@ -260,11 +261,17 @@ defmodule Arbiter.Board.Snapshot do
 
     # Only the Ready column is the scheduler's queue: a Blocked ticket is held
     # by its dependencies, which `Scheduler.plan/1` would skip over anyway.
+    queue = %{
+      ready: ready_cards(issues, columns, conflicts, order_ctx),
+      running: in_flight(authors, issues_by_id, changed),
+      conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now)
+    }
+
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, columns, conflicts, order_ctx),
-        running: in_flight(authors, issues_by_id, changed),
-        conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
+        ready: queue.ready,
+        running: queue.running,
+        conflict_claims: queue.conflict_claims,
         slots_free: slots_free,
         slot_note: Map.get(input, :slot_note),
         quota: quota,
@@ -316,8 +323,32 @@ defmodule Arbiter.Board.Snapshot do
       now: now
     }
 
-    Map.put(board, :attention, attention_items(board))
+    board
+    |> Map.put(:attention, attention_items(board))
+    |> put_walk(Map.get(input, :walk), queue, input, paused?)
   end
+
+  # DC6: the scheduler walk, planned beside today's plan over the same queue,
+  # only when the input carries its capacity sets (`scheduler_admission`
+  # shadow or enforce). It reads nothing today's plan decides with and writes
+  # nothing back to it, so the board's own fields are the same with or without
+  # it (I1, I2). The capacity sets ride with the plan, for the shadow record.
+  defp put_walk(board, %{} = walk, queue, input, paused?) do
+    plan =
+      Scheduler.plan(%{
+        ready: queue.ready,
+        running: queue.running,
+        conflict_claims: queue.conflict_claims,
+        card_guardrail: Map.get(input, :card_guardrail, %{}),
+        dispatch_holds: Map.get(input, :dispatch_holds, %{}),
+        paused: paused?,
+        walk: walk
+      })
+
+    Map.put(board, :walk, Map.merge(plan, Map.take(walk, [:pools, :nodes])))
+  end
+
+  defp put_walk(board, _walk, _queue, _input, _paused?), do: board
 
   @needed_issue_fields [
     :id,
