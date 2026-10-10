@@ -797,9 +797,13 @@ defmodule Arbiter.Board.Scheduler do
 
   defp pool_summary(caps, acc) do
     caps.pools
-    |> Enum.map(fn {id, pool} -> {pool_label(id, caps), seats(pool, id, acc), widest(pool)} end)
+    |> Enum.map(fn {id, pool} ->
+      {pool_label(id, caps), seats(pool, id, acc), widest(pool), Map.get(pool, :reason)}
+    end)
     |> Enum.sort()
-    |> Enum.map_join("; ", fn {label, seats, budget} -> "#{label} #{seats} of #{budget} seats" end)
+    |> Enum.map_join("; ", fn {label, seats, budget, reason} ->
+      "#{label} #{seats} of #{budget} seats" <> reason_suffix(reason)
+    end)
   end
 
   defp node_summary(caps, acc) do
