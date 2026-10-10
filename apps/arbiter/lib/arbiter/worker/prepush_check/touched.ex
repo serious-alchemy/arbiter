@@ -86,8 +86,13 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
   def tests_hint(worktree, target) when is_binary(worktree) do
     with {:ok, files} <- files(worktree, target),
          [_ | _] = tests <- test_files(files, worktree) do
+      runner =
+        if File.regular?(Path.join(worktree, "scripts/pre-push-tests.sh")),
+          do: "scripts/pre-push-tests.sh ",
+          else: ""
+
       "Tests for your changed files (run in the foreground): " <>
-        "scripts/pre-push-tests.sh " <> Enum.join(tests, " ")
+        runner <> Enum.join(tests, " ")
     else
       _ -> ""
     end

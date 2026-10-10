@@ -4447,6 +4447,10 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:host_pushes?, ContainerSpawn.podman?(policy))
               |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
               |> Keyword.put(:projection, projection)
+              |> Keyword.put(
+                :prepush_steps,
+                PromptBuilder.prepush_steps(workspace, Keyword.get(opts, :repo))
+              )
               |> then(&prompt_for_task(task, &1))
 
             provider = Atom.to_string(choice.type)

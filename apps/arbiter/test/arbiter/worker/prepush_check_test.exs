@@ -212,6 +212,12 @@ defmodule Arbiter.Worker.PrepushCheckTest do
       prompt = PrepushCheck.nudge_prompt("bd-4", meta, {:exit, 1, "boom"})
 
       assert prompt =~ "Tests for your changed files"
+      refute prompt =~ "scripts/pre-push-tests.sh"
+      assert prompt =~ "test/foo_test.exs"
+
+      File.mkdir_p!(Path.join(dir, "scripts"))
+      File.write!(Path.join(dir, "scripts/pre-push-tests.sh"), "")
+      prompt = PrepushCheck.nudge_prompt("bd-4", meta, {:exit, 1, "boom"})
       assert prompt =~ "scripts/pre-push-tests.sh test/foo_test.exs"
     end
 

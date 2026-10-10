@@ -140,17 +140,6 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            lacks, and then pipe it through `tail` or `grep` rather than letting the
            whole run into context.
 
-           VERIFICATION — Arbiter runs `mix format --check-formatted`,
-           `mix compile --warnings-as-errors` and `mix credo --strict` on your touched
-           files at the commit gate (when you print `arb done`, before anything is
-           pushed) and sends any failure back to this session. Do NOT run them
-           yourself, and do NOT run the full `mix precommit` / `mix audit` or poll a
-           backgrounded run. Run only the tests for your changed files, in the
-           foreground: for each changed `lib/<path>.ex` that is `test/<path>_test.exs`
-           in the same app (`cd apps/<app> && mix test test/<path>_test.exs`, or
-           `scripts/pre-push-tests.sh <files>`). The gate's output lists these tests
-           for your changed files.
-
            EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
            artifacts. A screenshot must be a real capture of the real app, a source
            or licence citation must name where the thing actually came from, and a
@@ -1133,13 +1122,30 @@ defmodule Arbiter.Worker.PromptBuilderTest do
   end
 
   describe "commit-gate diet (bd-g926uj)" do
-    test "the work prompt says the gate covers format/compile/credo and bans full precommit" do
-      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+    test "the work prompt lists the gate's steps and bans full precommit when a gate is configured" do
+      steps = [
+        %{cmd: "mix format --check-formatted", scope: :all},
+        %{cmd: "mix credo --strict {credo_files}", scope: :touched}
+      ]
 
-      assert prompt =~ "at the commit gate"
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", prepush_steps: steps)
+
+      assert prompt =~ "`mix format --check-formatted`"
       assert prompt =~ "Do NOT run them"
       assert prompt =~ "do NOT run the full `mix precommit`"
-      assert prompt =~ "tests for your changed files"
+      assert prompt =~ "tests mapped"
+      assert PromptBuilder.commit_gate_section(steps, false, "HINT-X") =~ "HINT-X"
+      assert PromptBuilder.commit_gate_section(steps, true, nil) =~ "`run_tests` tool"
+      refute prompt =~ "apps/<app>"
+    end
+
+    test "no gate wording when no pre-push recipe is configured" do
+      for opts <- [[worktree_path: "/tmp/wt"], [worktree_path: "/tmp/wt", prepush_steps: []]] do
+        prompt = PromptBuilder.prompt_for_task(task(%{}), opts)
+        refute prompt =~ "Do NOT run them"
+        refute prompt =~ "VERIFICATION — when you print"
+      end
     end
 
     test "with a worktree the per-step `arb inbox` instruction is gone but the file is read" do
