@@ -881,6 +881,46 @@ defmodule Arbiter.Worker.DispatchTest do
       refute registered =~ result.worktree_path
     end
 
+    # bd-8nu4g6: a task-type ticket has no branch worktree, only the `-inspect`
+    # checkout; under podman that must be a (read-only) private clone too, or the
+    # container spawn fails with :not_a_private_clone.
+    test "a podman-sandboxed task-type dispatch gets a read-only private-clone inspect checkout",
+         %{tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "podman-task-ws",
+          prefix: "pt",
+          config: %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "research", issue_type: :task, workspace_id: ws.id})
+
+      repo = seed_repo!(tmp, "pod-task-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "pod-task-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"podt/repo" => repo})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "podt/repo",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      # No branch worktree: nothing to merge or PR.
+      assert result.worktree_path == nil
+
+      inspect_path = Worktree.inspect_path(BranchNamer.derive(task))
+      assert Arbiter.Worker.PrivateClone.clone?(inspect_path)
+      assert Arbiter.Worker.PrivateClone.read_only?(inspect_path)
+      assert File.exists?(Path.join(inspect_path, "README.md"))
+
+      {registered, 0} = System.cmd("git", ["-C", repo, "worktree", "list", "--porcelain"])
+      refute registered =~ inspect_path
+    end
+
     # bd-d0sgb6: the policy is read once per dispatch. The workspace says podman
     # but the dispatch already holds a bwrap resolution (as if the config flipped
     # after it was read): layout and spawn both follow the held one, so the spawn
