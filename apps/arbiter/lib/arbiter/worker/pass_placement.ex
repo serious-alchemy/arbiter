@@ -48,7 +48,10 @@ defmodule Arbiter.Worker.PassPlacement do
 
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Refusal
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker
+  alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -62,9 +65,10 @@ defmodule Arbiter.Worker.PassPlacement do
 
   @doc """
   Place a pass. `attrs`: `:task_id`, `:kind`, `:provider`, `:layout`
-  (`GitLayout`), `:workspace` (a struct or nil) and optionally `:repo`,
-  `:local_work?`. `opts[:placement_opts]` is the seam over `Placement.place/2`
-  (`:nodes`, `:remote_available?`).
+  (`GitLayout`), `:workspace` (a struct or nil) and optionally `:workspace_id`,
+  `:clone_path` (the home clone the pass would run in: read for uncommitted work
+  only once placement is actually in play). `opts[:placement_opts]` is the seam over
+  `Placement.place/2` (`:nodes`, `:remote_available?`).
   """
   @spec place(map(), keyword()) ::
           {:ok, :local} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
@@ -82,7 +86,7 @@ defmodule Arbiter.Worker.PassPlacement do
         provider: Map.get(attrs, :provider),
         layout: Map.get(attrs, :layout),
         no_pr?: false,
-        local_work?: Map.get(attrs, :local_work?, false),
+        local_work?: local_work?(Map.get(attrs, :clone_path)),
         mode: mode
       }
 
@@ -176,6 +180,77 @@ defmodule Arbiter.Worker.PassPlacement do
   end
 
   def local_work?(_), do: false
+
+  @doc """
+  Seed the node `node` was placed on, or fall back to the primary.
+
+  `node` is `place/2`'s answer (`nil` for a local pass: `{:ok, nil, nil}`, nothing
+  read). `ctx`: `:task_id`, `:path` (the home clone), `:branch`, `:target`,
+  `:mode` (`worker.placement`), `:repo_path` and `:seed_paths`.
+
+  A clone the forge cannot be reconciled with (`seed/3`'s errors) cannot be
+  handed to a node: under `prefer_remote` the slot is given back and the pass
+  runs on the primary, its clone given the deps a thin node clone was cut without;
+  under `remote_only` there is no primary to fall back to and the error stands.
+  """
+  @spec seed_or_local(map() | nil, map()) ::
+          {:ok, map() | nil, seed() | nil} | {:error, {:remote_seed_failed, term()}}
+  def seed_or_local(nil, _ctx), do: {:ok, nil, nil}
+
+  def seed_or_local(node, %{path: path, branch: branch, target: target} = ctx) do
+    case seed(path, branch, target) do
+      {:ok, seed} ->
+        {:ok, node, seed}
+
+      {:error, reason} ->
+        release(ctx.task_id)
+
+        if ctx.mode == :remote_only do
+          {:error, {:remote_seed_failed, reason}}
+        else
+          Logger.warning(
+            "PassPlacement: #{ctx.task_id} cannot be seeded to #{node_name(node)} " <>
+              "(#{inspect(reason, limit: 10)}); running on the primary"
+          )
+
+          _ = Worktree.seed_worktree(ctx.repo_path, path, ctx.seed_paths)
+          {:ok, nil, nil}
+        end
+    end
+  end
+
+  defp node_name(%{name: name}) when is_binary(name), do: name
+  defp node_name(_), do: "the node"
+
+  @doc """
+  A pass's agent did not start on `node`. A node's own refusal
+  (`Arbiter.Nodes.Refusal`) is a hold, not a failure: the run is interrupted with
+  the typed `:placement_refused` cause (no attempt consumed) and the caller
+  returns `{:error, {:no_node_capacity, info}}`, which the Watchdog asks again
+  on. Anything else fails the pass's worker (`:spawn_failed`, as
+  `PassAdmission.agent_failed/2` does). Returns the error to hand back.
+  """
+  @spec start_failed(String.t(), pid(), map() | nil, term()) :: {:error, term()}
+  def start_failed(task_id, worker_pid, node, reason) do
+    case node && Refusal.from_start_error(reason) do
+      {:ok, refusal} ->
+        name = node_name(node)
+        cause = StopReason.placement_refused(name, refusal.reason, refusal[:detail])
+
+        _ =
+          try do
+            Worker.interrupt(worker_pid, cause)
+          catch
+            :exit, _ -> :ok
+          end
+
+        {:error, {:no_node_capacity, Refusal.info(task_id, name, refusal)}}
+
+      _ ->
+        _ = Worker.fail(worker_pid, StopReason.spawn_failed(reason))
+        {:error, reason}
+    end
+  end
 
   @doc """
   Refresh the home clone at `path` from the forge before the node is seeded from
