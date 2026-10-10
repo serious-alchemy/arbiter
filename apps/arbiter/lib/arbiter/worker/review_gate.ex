@@ -250,6 +250,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PassPlacement
+  alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -7691,7 +7692,7 @@ defmodule Arbiter.Worker.ReviewGate do
       )
 
     hint =
-      Arbiter.Worker.PrepushCheck.Touched.tests_hint(
+      Touched.tests_hint(
         Map.get(state, :worktree_path),
         Map.get(state, :target_branch)
       )
