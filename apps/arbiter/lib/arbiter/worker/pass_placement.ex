@@ -56,7 +56,7 @@ defmodule Arbiter.Worker.PassPlacement do
 
   require Logger
 
-  @type kind :: :fix_pass | :conflict_pass | :review_fix_round
+  @type kind :: :fix_pass | :conflict_pass | :review_fix_round | :reviewer
   @type seed :: %{
           remote_head: String.t(),
           target_tip: String.t(),
@@ -213,7 +213,11 @@ defmodule Arbiter.Worker.PassPlacement do
               "(#{inspect(reason, limit: 10)}); running on the primary"
           )
 
-          _ = Worktree.seed_worktree(ctx.repo_path, path, ctx.seed_paths)
+          # A clone cut thin for a node has no deps; one the caller seeded already
+          # (`repo_path: nil`) does.
+          if is_binary(ctx.repo_path),
+            do: Worktree.seed_worktree(ctx.repo_path, path, ctx.seed_paths)
+
           {:ok, nil, nil}
         end
     end

@@ -1,0 +1,434 @@
+defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
+  @moduledoc """
+  bd-bg87oz — a ReviewGate fix round (the implementer pass that answers a
+  REQUEST_CHANGES) is placed like any other podman Claude run that writes commits:
+  on a node with headroom under `prefer_remote`, held under `remote_only` while none
+  has room, seeded from the forge's current head of the branch and target tip, pushed
+  back by the gate with a lease pinned to the head it was seeded from, and
+  re-dispatched when its node is lost.
+
+  Real git with a real bare origin, a real author `Worker`, the real gate and shell
+  fixtures for the reviewer and the implementer. This host has no node, so the node is
+  the `:nodes` row the gate's `placement_opts` hands `Placement.place/2`, and the
+  fixture implementer runs in the author's private clone, which is exactly where a
+  collected checkout leaves a remote pass's commits. The node half (the seed bundle
+  over HTTP, the quarantine) is `ArbiterWeb.RemotePassTest`.
+  """
+
+  use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
+  alias Arbiter.CircuitBreaker
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
+  alias Arbiter.Worker
+  alias Arbiter.Worker.{PrivateClone, ReviewGate}
+
+  @two_rounds Path.expand("../../fixtures/review_two_rounds.sh", __DIR__)
+  @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
+  @revise_hang Path.expand("../../fixtures/revise_hang.sh", __DIR__)
+
+  setup do
+    CircuitBreaker.reset_all()
+    on_exit(&CircuitBreaker.reset_all/0)
+
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "rg-rfr-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}"
+      )
+
+    File.mkdir_p!(tmp)
+    repo = init_repo(tmp)
+
+    put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
+    put_app_env(:arbiter, :repo_paths, %{"trib/repo" => repo})
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    %{repo: repo, tmp: tmp, ws: workspace!("prefer_remote")}
+  end
+
+  defp workspace!(mode) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "rg-rfr-#{System.unique_integer([:positive])}",
+        prefix: "rf",
+        config: %{
+          "review" => %{"required" => true, "require_ci_green" => false},
+          "worker" => %{"placement" => mode},
+          "agent" => %{
+            "security" => %{
+              "repos" => %{"trib/repo" => %{"sandbox" => %{"backend" => "podman"}}}
+            }
+          }
+        }
+      })
+
+    ws
+  end
+
+  defp node_row(name, attrs \\ []) do
+    Map.merge(
+      %{
+        id: "node-" <> name,
+        name: name,
+        state: :online,
+        health: :ready,
+        labels: [],
+        workspace_ids: [],
+        live: 0,
+        max: 2
+      },
+      Map.new(attrs)
+    )
+  end
+
+  defp placement(rows), do: [nodes: rows, remote_available?: true]
+
+  describe "placement" do
+    test "the fix round is placed on a node, seeded at the forge's head and target tip", ctx do
+      rig = rig(ctx, "feature/rf-1")
+      main_tip = third_party_main!(ctx)
+      forge_head = sha(ctx.repo, "origin/" <> rig.branch)
+
+      stale_main = sha(rig.wt, "refs/remotes/origin/main")
+      refute stale_main == main_tip
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      wait_until(fn -> :sys.get_state(gate).fix_node != nil end)
+      state = :sys.get_state(gate)
+
+      assert %{id: "node-a"} = state.fix_node
+      # The lease the gate's push is pinned to is the head the node was seeded from.
+      assert state.pushed_remote_head == forge_head
+      # The node's seed source was refreshed from the forge: origin/<target> at its tip.
+      assert sha(rig.wt, "refs/remotes/origin/main") == main_tip
+
+      # The pass's run is counted on the node, not against the primary's cap.
+      assert %{meta: %{placed_node_id: "node-a"}} = Worker.state(impl_pid(state))
+      stop_gate(gate)
+    end
+
+    test "no node with room: the fix round runs on the primary", ctx do
+      rig = rig(ctx, "feature/rf-2")
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_hang],
+          rounds: 2,
+          placement_opts: placement([node_row("a", live: 2, max: 2)])
+        )
+
+      wait_until(fn -> Worker.whereis(impl_id(gate)) != nil end)
+      assert :sys.get_state(gate).fix_node == nil
+      stop_gate(gate)
+    end
+
+    test "a local_only workspace never reads a node", ctx do
+      rig = rig(ctx, "feature/rf-3")
+      ws = workspace!("local_only")
+
+      gate =
+        start_gate(rig, %{ctx | ws: ws},
+          revise_command: [@revise_hang],
+          rounds: 2,
+          placement_opts: [nodes: fn -> flunk("nodes read for a local_only fix round") end]
+        )
+
+      wait_until(fn -> Worker.whereis(impl_id(gate)) != nil end)
+      assert :sys.get_state(gate).fix_node == nil
+      stop_gate(gate)
+    end
+
+    test "a clone that diverged from the forge is not seeded: the round stays on the primary",
+         ctx do
+      rig = rig(ctx, "feature/rf-4")
+      # A commit the forge lacks, and one the clone lacks, on the same branch.
+      third_party_branch!(ctx, rig.branch)
+      File.write!(Path.join(rig.wt, "mine.txt"), "mine\n")
+      git!(["add", "mine.txt"], rig.wt)
+      git!(["commit", "-q", "-m", "an unpushed local commit"], rig.wt)
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      # Not a remote seed: whatever the gate does with the diverged head, no fix round
+      # is placed on a node.
+      Process.sleep(500)
+      assert :sys.get_state(gate).fix_node == nil
+      stop_gate(gate)
+    end
+  end
+
+  describe "remote_only" do
+    test "holds the fix round while no node has room: nothing spawned, no round consumed",
+         ctx do
+      rig = rig(ctx, "feature/rf-5")
+      ctx = %{ctx | ws: workspace!("remote_only")}
+      full = node_row("a", live: 2, max: 2)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 2,
+          placement_opts: placement([full]),
+          local_capacity_retry_ms: 25
+        )
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      held = :sys.get_state(gate)
+      assert held.local_hold.info.mode == :remote_only
+      assert Worker.whereis(impl_id(gate)) == nil
+      assert held.fix_node == nil
+
+      # A node frees a slot: the round starts there and the gate goes on to round 2.
+      :sys.replace_state(gate, &%{&1 | placement_opts: placement([node_row("b")])})
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+    end
+  end
+
+  describe "the host push of what the fix round brought back" do
+    test "a rebased branch is delivered with the lease and round 2 reviews the new head", ctx do
+      rig = rig(ctx, "feature/rf-6")
+      round1_head = sha(rig.wt, "HEAD")
+
+      start_gate(rig, ctx,
+        command: [@two_rounds, marker(ctx, rig), rig.branch],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+
+      rewritten = sha(rig.wt, "HEAD")
+      refute rewritten == round1_head
+      git!(["fetch", "-q", "origin"], ctx.repo)
+      assert sha(ctx.repo, "origin/" <> rig.branch) == rewritten
+    end
+
+    test "a third party's push after seeding is not overwritten; the task parks", ctx do
+      rig = rig(ctx, "feature/rf-7")
+      other = clone_other!(ctx, rig.branch)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      theirs = sha(other, "HEAD")
+
+      script = Path.join(ctx.tmp, "rewrite_then_third_party_push.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      #{@revise_rewrite}
+      git -C #{other} push -q origin #{rig.branch}
+      """)
+
+      File.chmod!(script, 0o755)
+
+      start_gate(rig, ctx,
+        command: [@two_rounds, marker(ctx, rig), rig.branch],
+        revise_command: [script],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, rig.task.id)) end, 60_000)
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], ctx.repo)
+      assert sha(ctx.repo, "origin/" <> rig.branch) == theirs
+    end
+  end
+
+  describe "the node under a fix round is lost" do
+    test "the round is dispatched again, placed afresh, and no round is consumed", ctx do
+      rig = rig(ctx, "feature/rf-8")
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      wait_until(fn -> :sys.get_state(gate).fix_node != nil end)
+      %{current_id: lost_id, round: round} = :sys.get_state(gate)
+
+      # The node is gone: nothing is left to place on, and the re-dispatched round
+      # answers at once.
+      :sys.replace_state(gate, fn s ->
+        %{s | revise_command: [@revise_commit], placement_opts: placement([])}
+      end)
+
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, "worker:" <> lost_id, {:worker_node_lost, lost_id})
+
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+      assert %{round: ^round} = :sys.get_state(gate)
+    end
+  end
+
+  # ---- helpers -----------------------------------------------------------------
+
+  defp stop_gate(gate) do
+    ref = Process.monitor(gate)
+
+    try do
+      GenServer.stop(gate, :normal)
+    catch
+      :exit, _ -> :ok
+    end
+
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+  end
+
+  # The reviewer fixture's round marker, outside every checkout.
+  defp marker(ctx, rig), do: Path.join(ctx.tmp, "round-marker-#{rig.task.id}")
+
+  defp impl_pid(state), do: Worker.whereis(state.current_id)
+
+  defp impl_id(gate), do: :sys.get_state(gate).current_id || "none"
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+  defp git!(args, repo), do: {_, 0} = git(args, repo)
+
+  defp init_repo(dir) do
+    repo = Path.join(dir, "repo")
+    bare = Path.join(dir, "origin.git")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    git!(["config", "user.email", "repo@example.com"], repo)
+    git!(["config", "user.name", "Repo"], repo)
+    git!(["config", "commit.gpgsign", "false"], repo)
+    File.write!(Path.join(repo, "README.md"), "seed\n")
+    git!(["add", "README.md"], repo)
+    git!(["commit", "-q", "-m", "seed"], repo)
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    git!(["remote", "add", "origin", bare], repo)
+    git!(["fetch", "-q", "origin"], repo)
+    repo
+  end
+
+  defp sha(repo, ref) do
+    case git(["rev-parse", ref], repo) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  end
+
+  defp clone_other!(ctx, branch) do
+    other = Path.join(ctx.tmp, "other-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", Path.join(ctx.tmp, "origin.git"), other])
+    git!(["config", "user.email", "o@example.com"], other)
+    git!(["config", "user.name", "O"], other)
+    git!(["config", "commit.gpgsign", "false"], other)
+    git!(["checkout", "-q", branch], other)
+    other
+  end
+
+  defp third_party_main!(ctx) do
+    other = clone_other!(ctx, "main")
+    File.write!(Path.join(other, "NEWER.md"), "newer\n")
+    git!(["add", "NEWER.md"], other)
+    git!(["commit", "-q", "-m", "main moved"], other)
+    git!(["push", "-q", "origin", "main"], other)
+    sha(other, "HEAD")
+  end
+
+  defp third_party_branch!(ctx, branch) do
+    other = clone_other!(ctx, branch)
+    File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+    git!(["add", "theirs.txt"], other)
+    git!(["commit", "-q", "-m", "theirs"], other)
+    git!(["push", "-q", "origin", branch], other)
+    sha(other, "HEAD")
+  end
+
+  # A feature branch with one commit, pushed, in the author's private clone (the
+  # layout a container gets, and the only one a node is seeded from).
+  defp rig(ctx, branch) do
+    {:ok, task} =
+      Ash.create(Issue, %{title: "fix round task", workspace_id: ctx.ws.id, issue_type: :feature})
+
+    task = put_state!(task, :active)
+
+    git!(["checkout", "-q", "-b", branch], ctx.repo)
+    File.write!(Path.join(ctx.repo, "feature.txt"), "worker work\n")
+    git!(["add", "feature.txt"], ctx.repo)
+    git!(["commit", "-q", "-m", "feature work"], ctx.repo)
+    git!(["push", "-q", "origin", branch], ctx.repo)
+    git!(["checkout", "-q", "main"], ctx.repo)
+
+    {:ok, wt} = PrivateClone.attach(ctx.repo, branch, "main")
+    git!(["config", "commit.gpgsign", "false"], wt)
+    git!(["fetch", "-q", "origin", branch], wt)
+    git!(["branch", "-q", "--set-upstream-to=origin/" <> branch, branch], wt)
+
+    %{task: task, branch: branch, wt: wt, author: start_author(task, ctx, branch, wt)}
+  end
+
+  defp start_author(task, ctx, branch, wt) do
+    {:ok, author} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ctx.ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: ctx.repo,
+          worktree_path: wt,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+    :ok = Worker.advance(author, :claude)
+    send(author, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
+    author
+  end
+
+  defp start_gate(rig, ctx, opts) do
+    {:ok, gate} =
+      ReviewGate.start(
+        Keyword.merge(
+          [
+            author: rig.author,
+            task_id: rig.task.id,
+            workspace_id: ctx.ws.id,
+            repo: "trib/repo",
+            worktree_path: rig.wt,
+            branch: rig.branch,
+            target_branch: "main",
+            timeout_ms: 15_000,
+            command: [@two_rounds, marker(ctx, rig), rig.branch],
+            command_provider: "claude",
+            placement_opts: placement([node_row("a")])
+          ],
+          opts
+        )
+      )
+
+    gate
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(20)
+        do_wait(fun, deadline)
+    end
+  end
+end
