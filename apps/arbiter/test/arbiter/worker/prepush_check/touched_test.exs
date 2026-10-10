@@ -64,6 +64,21 @@ defmodule Arbiter.Worker.PrepushCheck.TouchedTest do
     end
   end
 
+  describe "credo_files/1" do
+    test "keeps the Elixir files credo's config includes: those under lib/ or apps/*/lib/" do
+      files = [
+        "lib/a.ex",
+        "apps/x/lib/b.ex",
+        "apps/x/test/b_test.exs",
+        "apps/x/mix.exs",
+        "config/runtime.exs",
+        "apps/x/lib/c.md"
+      ]
+
+      assert Touched.credo_files(files) == ["lib/a.ex", "apps/x/lib/b.ex"]
+    end
+  end
+
   describe "test_files/2" do
     test "maps lib modules to existing tests, keeps changed tests, drops the unmapped", %{
       tmp_dir: dir

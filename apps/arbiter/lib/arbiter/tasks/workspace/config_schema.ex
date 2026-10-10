@@ -365,7 +365,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                       {name, cmd, timeout_s (default 120), scope: "all" |
                       "touched"} the commit gate runs in the run's own sandbox
                       before anything is pushed (bd-8wdrql). A "touched" step
-                      may use {files}, {elixir_files}, {test_files} in cmd and
+                      may use {files}, {elixir_files}, {credo_files}, {test_files} in cmd and
                       is skipped when they expand to nothing. A red step goes
                       back to the same worker session; overrides prepush_check.
       pre_push_budget_seconds

@@ -52,6 +52,18 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
   def elixir_files(files), do: Enum.filter(files, &(Path.extname(&1) in [".ex", ".exs"]))
 
   @doc """
+  The Elixir files credo analyses: those `.credo.exs` includes (`lib/`,
+  `apps/*/lib/`). Passing credo a file on the command line bypasses that filter,
+  so a touched test file would be linted by a rule set CI never applies to it.
+  """
+  @spec credo_files([String.t()]) :: [String.t()]
+  def credo_files(files) do
+    files
+    |> elixir_files()
+    |> Enum.filter(&Regex.match?(~r{^(apps/[^/]+/)?lib/}, &1))
+  end
+
+  @doc """
   The test files to run for `files`: a changed `*_test.exs` itself, and for a
   changed `lib/<path>.ex` (at the repo root or under `apps/<app>/`) the
   `test/<path>_test.exs` beside it — when that file exists in `worktree`.

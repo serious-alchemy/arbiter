@@ -13,7 +13,7 @@ defmodule Arbiter.Worker.PrepushCheck.Recipe do
           "arbiter": {"pre_push_checks": "arbiter"},
           "other":   {"pre_push_checks": [
             {"name": "format", "cmd": "mix format --check-formatted", "timeout_s": 60},
-            {"name": "credo", "cmd": "mix credo --strict {elixir_files}", "scope": "touched"}
+            {"name": "credo", "cmd": "mix credo --strict {credo_files}", "scope": "touched"}
           ]}
         }
       }}
@@ -22,7 +22,7 @@ defmodule Arbiter.Worker.PrepushCheck.Recipe do
       `arbiter_preset/0`. A step is `{name, cmd, timeout_s, scope}`:
       `cmd` runs under `sh -c` in the worktree root; `timeout_s` defaults to
       #{120}; `scope` is `"all"` (default) or `"touched"`. A `touched` step
-      may use `{files}`, `{elixir_files}` and `{test_files}` in `cmd`
+      may use `{files}`, `{elixir_files}`, `{credo_files}` and `{test_files}` in `cmd`
       (see `Arbiter.Worker.PrepushCheck.Touched`): each expands to the branch's
       changed files (shell-quoted), and a touched step whose placeholders expand
       to nothing is skipped.
@@ -178,7 +178,7 @@ defmodule Arbiter.Worker.PrepushCheck.Recipe do
       },
       %{
         name: "credo",
-        cmd: "MIX_ENV=test mix credo --strict {elixir_files}",
+        cmd: "MIX_ENV=test mix credo --strict {credo_files}",
         timeout_s: 90,
         scope: :touched
       },

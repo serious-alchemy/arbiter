@@ -46,7 +46,7 @@ pattern match hit the worker's own session tree, or another worker's processes.
 
       mix format --check-formatted                                  # or `mix format` to fix
       MIX_ENV=test mix compile --warnings-as-errors
-      MIX_ENV=test mix credo --strict <the .ex/.exs files you changed>
+      MIX_ENV=test mix credo --strict <the changed files under lib/ or apps/*/lib/>
       cd apps/arbiter && mix test test/arbiter/review_coverage_design_test.exs test/arbiter/mcp/catalog_doc_drift_test.exs   # doc citations + catalog drift
       scripts/pre-push-tests.sh <the test files for the modules you changed>               # groups by app
 

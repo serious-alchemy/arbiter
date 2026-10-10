@@ -196,9 +196,10 @@ defmodule Arbiter.Worker.PrepushCheck do
     limit = min(step.timeout_s, max(remaining, 0))
 
     outcome =
-      cond do
-        remaining <= 0 -> {:skipped, :budget, "skipped: the total time budget was already spent"}
-        true -> expand_and_run(step, worktree, touched, limit, exec)
+      if remaining <= 0 do
+        {:skipped, :budget, "skipped: the total time budget was already spent"}
+      else
+        expand_and_run(step, worktree, touched, limit, exec)
       end
 
     record(step, outcome, System.monotonic_time(:millisecond) - started, limit)
@@ -223,6 +224,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   @placeholders [
     {"{files}", :all_files},
     {"{elixir_files}", :elixir_files},
+    {"{credo_files}", :credo_files},
     {"{test_files}", :test_files}
   ]
 
@@ -256,6 +258,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp files_for(:all_files, files, _worktree), do: files
   defp files_for(:elixir_files, files, _worktree), do: Touched.elixir_files(files)
+  defp files_for(:credo_files, files, _worktree), do: Touched.credo_files(files)
   defp files_for(:test_files, files, worktree), do: Touched.test_files(files, worktree)
 
   # coreutils `timeout`: 124 = the command timed out, 137 = it needed the
