@@ -85,6 +85,7 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimePodmanTest do
       end
 
     File.cp!(channel.ca_file, Path.join(dirs["ca"], "ca.crt"))
+    File.chmod!(Path.join(dirs["ca"], "ca.crt"), 0o644)
     %{image: image, dirs: dirs, channel: channel, fixture: fixture}
   end
 
@@ -100,6 +101,9 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimePodmanTest do
       "--network=host",
       "--pull=never",
       "--userns=keep-id:uid=10001,gid=10001",
+      # the production backend runs unlabelled too; an enforcing host would otherwise
+      # deny the bind-mounted test dirs (user_home_t / tmp_t) to container_t
+      "--security-opt=label=disable",
       "--user",
       "10001:10001",
       "--read-only",

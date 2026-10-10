@@ -79,7 +79,10 @@ rm -rf "$run_dir/tls"
 if [ -d "$stage/tls" ]; then
   mv "$stage/tls" "$run_dir/tls"
   chmod 700 "$run_dir/tls"
-  chmod 600 "$run_dir"/tls/*.key
+  for key in "$run_dir"/tls/*.key; do
+    [ -f "$key" ] || die "the boot bundle carries no private keys"
+    chmod 600 "$key"
+  done
 else
   mkdir -p "$run_dir/tls"
 fi
