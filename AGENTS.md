@@ -42,7 +42,15 @@ pattern match hit the worker's own session tree, or another worker's processes.
 
 ## Project guidelines
 
-- **Before every commit and push** (including fix-pass rounds), run `mix precommit && mix audit`, fix any issues, and re-run if you make further edits. Format failures can occur after precommit if code changes are made after running it.
+- **Pre-push checks run for you (the commit gate).** When you print `arb done`, Arbiter runs this repo's pre-push recipe (`worker.repos.<repo>.pre_push_checks`) in your run's own sandbox *before* anything is pushed. A red step comes back to you in this same session with its trimmed output; fix it, commit, and print `arb done` again. It is bounded (about 3 minutes in total, a few attempts, then it escalates), and what ran is recorded on your run (`arb worker show <task-id>` → "Pre-push checks"). So do **not** try to run the full `mix precommit && mix audit` before every push — in a sandbox it often cannot run (`:socket_path_too_long`) and the gate covers the cheap failures that cost CI fix passes. Run the cheap loop below while you work; it is also the recipe for running by hand:
+
+      mix format --check-formatted                                  # or `mix format` to fix
+      MIX_ENV=test mix compile --warnings-as-errors
+      MIX_ENV=test mix credo --strict <the changed files under lib/ or apps/*/lib/>
+      cd apps/arbiter && mix test test/arbiter/review_coverage_design_test.exs test/arbiter/mcp/catalog_doc_drift_test.exs   # doc citations + catalog drift
+      scripts/pre-push-tests.sh <the test files for the modules you changed>               # groups by app
+
+  Edit a file a design doc cites by `path:line` (`docs/review-coverage-and-guard-policy.md`)? Move the citation with it; that doc test is the most common CI failure. Full `mix precommit && mix audit` (dialyzer, sobelow, the whole suite) is CI's job, or yours when you are running unsandboxed.
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
 - **CLI ↔ MCP parity.** Every coordinator-facing `arb` verb has an MCP twin: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔ `worker_list`, `arb ticket show` ↔ `ticket_show`, `arb attention` ↔ `coordinator_inbox`. `arb prime` (session-start briefing) is CLI only. Host-local verbs never call the server over HTTP and have no MCP twin: `install`, `session`, `where`, `init`, `version`, `self-update`, `upgrade`, `help`. `ArbiterCli.Verbs` is the verb registry; `Arbiter.MCP.Catalog.all/0` is the tool list (its moduledoc table is test-checked).

@@ -92,7 +92,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       may carry `"prepush_check"` (a non-empty command string),
       `"prepush_check_timeout_seconds"` (a positive integer) and
       `"prepush_check_on_timeout"` (`"proceed"` or `"fail"`) — bd-28c6qo,
-      `Arbiter.Worker.PrepushCheck`.
+      `Arbiter.Worker.PrepushCheck`. The multi-step recipe (bd-8wdrql,
+      `Arbiter.Worker.PrepushCheck.Recipe`) adds `"pre_push_checks"` (`"arbiter"`
+      or a list of `{name, cmd, timeout_s, scope}` steps), `"pre_push_budget_seconds"`
+      (a positive integer) and `"pre_push_max_attempts"` (a non-negative integer).
     * If `"worker.placement"` is present it must be `"local_only"` (the default),
       `"prefer_remote"` or `"remote_only"` (RW8, `Arbiter.Nodes.Placement`).
     * If `"attention"` is present, it must be a map whose
@@ -219,6 +222,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_seed_paths(block, label)
     |> validate_prepush_check(block, label)
+    |> validate_pre_push_recipe(block, label)
   end
 
   # bd-28c6qo: `prepush_check` (+ `_timeout_seconds`, `_on_timeout`), at either
@@ -229,6 +233,68 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_prepush_timeout(Map.get(block, "prepush_check_timeout_seconds"), label)
     |> validate_prepush_on_timeout(Map.get(block, "prepush_check_on_timeout"), label)
   end
+
+  # bd-8wdrql: the multi-step recipe, at either level
+  # (`Arbiter.Worker.PrepushCheck.Recipe`).
+  defp validate_pre_push_recipe(changeset, block, label) do
+    changeset
+    |> validate_pre_push_checks(Map.get(block, "pre_push_checks"), label)
+    |> validate_pre_push_positive(block, "pre_push_budget_seconds", label)
+    |> validate_pre_push_attempts(Map.get(block, "pre_push_max_attempts"), label)
+  end
+
+  defp validate_pre_push_checks(changeset, nil, _label), do: changeset
+  defp validate_pre_push_checks(changeset, "arbiter", _label), do: changeset
+
+  defp validate_pre_push_checks(changeset, steps, label) when is_list(steps) do
+    steps
+    |> Enum.with_index()
+    |> Enum.reduce(changeset, fn {step, i}, acc ->
+      validate_pre_push_step(acc, step, "#{label}.pre_push_checks[#{i}]")
+    end)
+  end
+
+  defp validate_pre_push_checks(changeset, _, label),
+    do:
+      prepush_error(
+        changeset,
+        ~s(#{label}.pre_push_checks must be "arbiter" or a list of steps)
+      )
+
+  defp validate_pre_push_step(changeset, %{"cmd" => cmd} = step, label)
+       when is_binary(cmd) do
+    if String.trim(cmd) == "" do
+      prepush_error(changeset, "#{label} must be a map with a non-empty cmd")
+    else
+      changeset
+      |> validate_pre_push_positive(step, "timeout_s", label)
+      |> validate_pre_push_scope(Map.get(step, "scope"), label)
+    end
+  end
+
+  defp validate_pre_push_step(changeset, _, label),
+    do: prepush_error(changeset, "#{label} must be a map with a non-empty cmd")
+
+  defp validate_pre_push_positive(changeset, map, key, label) do
+    case Map.get(map, key) do
+      nil -> changeset
+      n when is_integer(n) and n > 0 -> changeset
+      _ -> prepush_error(changeset, "#{label}.#{key} must be a positive integer")
+    end
+  end
+
+  defp validate_pre_push_scope(changeset, scope, _label) when scope in [nil, "all", "touched"],
+    do: changeset
+
+  defp validate_pre_push_scope(changeset, _, label),
+    do: prepush_error(changeset, ~s(#{label}.scope must be "all" or "touched"))
+
+  defp validate_pre_push_attempts(changeset, n, _label)
+       when is_nil(n) or (is_integer(n) and n >= 0),
+       do: changeset
+
+  defp validate_pre_push_attempts(changeset, _, label),
+    do: prepush_error(changeset, "#{label}.pre_push_max_attempts must be a non-negative integer")
 
   defp validate_prepush_command(changeset, nil, _label), do: changeset
 

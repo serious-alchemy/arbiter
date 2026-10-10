@@ -19,7 +19,7 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
     on_exit(&SpawnCanary.reset_cache/0)
 
     prev_tmp_root = Application.get_env(:arbiter, :worker_tmp_root)
-    tmp_root = Path.join(Arbiter.Config.Paths.scratch_root(), "canary-#{unique()}")
+    tmp_root = Path.join(Arbiter.Config.Paths.socket_root(), "cy-#{unique()}")
     File.mkdir_p!(tmp_root)
     Application.put_env(:arbiter, :worker_tmp_root, tmp_root)
 
