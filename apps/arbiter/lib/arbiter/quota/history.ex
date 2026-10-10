@@ -85,26 +85,26 @@ defmodule Arbiter.Quota.History do
       append_normalized(account_id, row, seats)
     else
       Enum.each(readings, fn {group, window, util, reset_at} ->
-        append(account_id, "antigravity", group, window, util, reset_at, nil, captured_at, seats)
+        append(%{
+          provider_account_id: account_id,
+          provider: "antigravity",
+          bucket: group,
+          window: window,
+          utilization: util,
+          resets_at: reset_at,
+          ceiling: nil,
+          captured_at: captured_at,
+          seats: seats
+        })
       end)
     end
   end
 
   defp do_record(account_id, row, seats), do: append_normalized(account_id, row, seats)
 
-  defp append(account_id, provider, bucket, window, util, reset_at, ceiling, captured_at, seats) do
+  defp append(attrs) do
     QuotaSnapshot
-    |> Ash.Changeset.for_create(:record, %{
-      provider_account_id: account_id,
-      provider: provider,
-      bucket: bucket,
-      window: window,
-      utilization: util / 1,
-      ceiling: ceiling,
-      resets_at: reset_at,
-      captured_at: captured_at,
-      seats: seats
-    })
+    |> Ash.Changeset.for_create(:record, %{attrs | utilization: attrs.utilization / 1})
     |> Ash.create!()
   end
 
@@ -122,17 +122,17 @@ defmodule Arbiter.Quota.History do
       ]
       |> Enum.filter(fn {label, util, _, _} -> is_binary(label) and is_number(util) end)
       |> Enum.each(fn {label, util, reset_at, ceiling} ->
-        append(
-          account_id,
-          snap.provider,
-          snap.provider,
-          label,
-          util,
-          reset_at,
-          ceiling,
-          captured_at,
-          seats
-        )
+        append(%{
+          provider_account_id: account_id,
+          provider: snap.provider,
+          bucket: snap.provider,
+          window: label,
+          utilization: util,
+          resets_at: reset_at,
+          ceiling: ceiling,
+          captured_at: captured_at,
+          seats: seats
+        })
       end)
     end
   end

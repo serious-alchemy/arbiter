@@ -248,23 +248,27 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
     sigma_sq = rss / max(dof, 1)
 
     ses =
-      x
-      |> Enum.with_index()
-      |> Enum.map(fn {_xi, i} ->
+      for i <- 0..(length(x) - 1)//1 do
         with true <- dof > 0,
              pos when is_integer(pos) <- Enum.find_index(passive, &(&1 == i)),
-             {:ok, z} <-
-               gauss(
-                 gram,
-                 for(k <- 0..(length(passive) - 1)//1, do: if(k == pos, do: 1.0, else: 0.0))
-               ) do
-          :math.sqrt(max(sigma_sq * Enum.at(z, pos), 0.0)) * b_scale / Enum.at(col_scale, i)
+             var when is_number(var) <- inverse_diagonal(gram, pos) do
+          :math.sqrt(max(sigma_sq * var, 0.0)) * b_scale / Enum.at(col_scale, i)
         else
           _ -> nil
         end
-      end)
+      end
 
     {if(dof > 0, do: dof), ses}
+  end
+
+  # `(G⁻¹)[pos][pos]`: solve `G z = e_pos`; `nil` when `G` is singular.
+  defp inverse_diagonal(gram, pos) do
+    unit = for k <- 0..(length(gram) - 1)//1, do: if(k == pos, do: 1.0, else: 0.0)
+
+    case gauss(gram, unit) do
+      {:ok, z} -> Enum.at(z, pos)
+      :singular -> nil
+    end
   end
 
   @t95 %{
