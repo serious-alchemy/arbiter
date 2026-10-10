@@ -28,6 +28,7 @@ spec:
         - |
           set -eu
           set -a
+          # shellcheck source=/dev/null
           . /run/arb/env
           set +a
           rm -f /run/arb/env
@@ -189,12 +190,16 @@ spec:
       env:
         - name: ARB_BRIDGE_ADDR
           value: 10.43.98.199
+        - name: ARB_CONFIG_DIR
+          value: /var/lib/arb/run/claude-config
         - name: ARB_RUN
           value: run-0123456789abcdef
         - name: ARB_SNAPSHOT_INTERVAL_S
           value: '300'
         - name: ARB_WORKTREE
           value: /home/arbiter/worktrees/bd-1nfuq5
+        - name: ARB_WORK_LIMIT_BYTES
+          value: '8589934592'
         - name: HOME
           value: /var/lib/arb/run/home
       image: registry.example.test/arbiter/beam@sha256:abababababababababababababababababababababababababababababababab

@@ -21,6 +21,10 @@ defmodule Arbiter.Nodes.Placement do
       unsandboxed; the jail needs the primary's filesystem and keyring);
     * a dispatch with no private clone (`:no_private_clone`: task and research
       types);
+    * a dispatch whose home clone already holds uncommitted work
+      (`:local_work`: a re-dispatch of a ticket an earlier local run left
+      dirty; the seed carries commits, not the work tree, and the run's snapshot
+      would replace it on the way back);
     * a workspace whose `worker.placement` is `local_only`
       (`:placement_local_only`).
 
@@ -94,6 +98,7 @@ defmodule Arbiter.Nodes.Placement do
           | :non_claude_provider
           | :not_podman
           | :no_private_clone
+          | :local_work
           | :placement_local_only
   @type request :: %{
           required(:task_id) => String.t(),
@@ -103,6 +108,7 @@ defmodule Arbiter.Nodes.Placement do
           required(:mode) => mode(),
           optional(:workspace_id) => String.t() | nil,
           optional(:no_pr?) => boolean(),
+          optional(:local_work?) => boolean(),
           optional(:labels) => [String.t()]
         }
   @type info :: %{
@@ -152,6 +158,7 @@ defmodule Arbiter.Nodes.Placement do
       not claude?(request.provider) -> {:local_only, :non_claude_provider}
       request.layout != :private_clone -> {:local_only, :not_podman}
       Map.get(request, :no_pr?, false) -> {:local_only, :no_private_clone}
+      Map.get(request, :local_work?, false) -> {:local_only, :local_work}
       request.mode == :local_only -> {:local_only, :placement_local_only}
       true -> :ok
     end
@@ -175,6 +182,10 @@ defmodule Arbiter.Nodes.Placement do
     do: "sandbox is not podman (bwrap-jailed or unsandboxed)"
 
   def reason_phrase(:no_private_clone, _), do: "no private clone (task or research dispatch)"
+
+  def reason_phrase(:local_work, _),
+    do: "its checkout already holds uncommitted work on the primary"
+
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
   @doc """

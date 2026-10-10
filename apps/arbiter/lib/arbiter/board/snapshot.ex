@@ -1185,16 +1185,32 @@ defmodule Arbiter.Board.Snapshot do
 
     # Seams #6: the workspace's resolved gate answers, the same module the
     # dispatcher's `check/4` runs, so the board and dispatch cannot disagree.
-    Arbiter.Quota.gate_for_workspace(workspace).board_hold(
-      latest_quota(account, provider),
-      {account, workspace},
-      opts
-    )
+    case Arbiter.Quota.gate_for_workspace(workspace).board_hold(
+           latest_quota(account, provider),
+           {account, workspace},
+           opts
+         ) do
+      :ok -> spend_cap_hold(account)
+      hold -> hold
+    end
   rescue
     _ -> :ok
   end
 
   defp quota_window_hold(_, _opts), do: :ok
+
+  # bd-a6grlr: the account's dollar spend cap, in force whatever the quota
+  # gate says (and with no quota snapshot at all, as an API-key account has
+  # none). The board's question is about fresh work - Autopilot promoting a
+  # Ready card - which is exactly what the cap holds.
+  defp spend_cap_hold(account) do
+    case Arbiter.Quota.SpendCap.check(account, nil) do
+      {:hold, %{phrase: phrase}} -> {:hold, phrase}
+      :ok -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
 
   # ---- shared column classification -----------------------------------------
 

@@ -153,6 +153,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   alias Arbiter.CircuitBreaker
   alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -628,6 +629,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # held intent could drain on a ceiling the dispatcher would re-hold at.
     accounts = provider_accounts(state)
 
+    # bd-a6grlr: a fresh dispatch is also held while its account's dollar
+    # spend cap holds. The drain replays with the quota gate skipped, so this
+    # is the only place a spend-held intent is judged again before admission.
+    spend = spend_holds(eligible, accounts)
+
     # Partition (fast: a pure gate check per item) into those the gate still
     # holds and those there is now headroom for. The gate check and quota read
     # are cheap; the expensive part — the real dispatch of each drained intent —
@@ -651,14 +657,42 @@ defmodule Arbiter.Workflows.DispatchQueue do
           task = exempt_task(state, item, account)
 
           not match?({:hold, _}, gate.check(task, quota, state.workspace, gate_opts)) and
-            slot_free?(state, item)
+            not Map.has_key?(spend, item.task_id) and slot_free?(state, item)
         end
       end)
 
     # Optimistically remove the to-dispatch intents now; the drain Task casts
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
-    %{state | items: on_hold ++ keep}
+    %{state | items: on_hold ++ Enum.map(keep, &refresh_spend_reason(&1, spend))}
+  end
+
+  # The spend cap's verdict for each held *fresh* dispatch that it still holds:
+  # `%{task_id => hold_reason}`. A follow-up (a started ticket) is never
+  # spend-held, so it is not read. Fails open - an unreadable cap holds nothing.
+  defp spend_holds(items, accounts) do
+    Enum.reduce(items, %{}, fn item, acc ->
+      with %{} = account <- Map.get(accounts, item_provider(item)),
+           %{} <- SpendCap.config(account),
+           %Issue{} = task <- load_task(item.task_id),
+           true <- SpendCap.fresh_dispatch?(task, item.opts),
+           {:hold, reason} <- SpendCap.check(account, task) do
+        Map.put(acc, item.task_id, reason)
+      else
+        _ -> acc
+      end
+    end)
+  rescue
+    _ -> %{}
+  end
+
+  # A kept item the spend cap holds carries the cap's *current* reason, so its
+  # `wake_at` is always ahead and the reset timer is re-armed from it.
+  defp refresh_spend_reason(%{task_id: task_id} = item, spend) do
+    case Map.fetch(spend, task_id) do
+      {:ok, reason} -> %{item | reason: reason}
+      :error -> item
+    end
   end
 
   # The P0 pace exemption (bd-6bxv7h) reads the held ticket's own priority, so
@@ -1078,13 +1112,21 @@ defmodule Arbiter.Workflows.DispatchQueue do
         _ -> []
       end)
 
+    # bd-a6grlr: a spend-held intent wakes the queue at the moment the cap's
+    # window resets (flat) or the paced line reaches the spend (paced).
+    spend_wakes =
+      Enum.flat_map(state.items, fn
+        %{reason: %{gate: :spend, wake_at: %DateTime{} = at}} -> [at]
+        _ -> []
+      end)
+
     now = DateTime.utc_now()
 
     # A stale/past snapshot reset_at must not win over a still-future item
     # hold just for being numerically smaller — `schedule_reset_drain/1`
     # already declines to arm a timer for a past time, so filter those out
     # here rather than letting one suppress a real future wake.
-    (snapshot_resets ++ item_holds)
+    (snapshot_resets ++ item_holds ++ spend_wakes)
     |> Enum.filter(&(DateTime.compare(&1, now) == :gt))
     |> Enum.min_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end

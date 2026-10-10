@@ -281,6 +281,7 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # every issue a test creates on a timer, off the sandbox connection. Tests
 # drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
 config :arbiter, :budget_patrol, enabled: false
+config :arbiter, :spend_watch, enabled: false
 config :arbiter, :spend_patrol, enabled: false
 
 # G18: a spawn never asks the host's real agent CLI for its `--version`; a test

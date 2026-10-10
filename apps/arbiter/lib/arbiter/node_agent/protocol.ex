@@ -71,11 +71,17 @@ defmodule Arbiter.NodeAgent.Protocol do
   # Facts plus the derived `suggestion` (computed here, agent-side, so the primary
   # only reads it) and the owner's `ceiling` (`ARB_NODE_MAX_WORKERS`) when set.
   defp capacity(%Config{} = config) do
+    config.backend.capacity()
+    |> put_present("ceiling", config.max_workers)
+  end
+
+  @doc "The host facts behind `capacity` (cpus, memory, suggestion), without the owner ceiling."
+  @spec capacity_facts() :: map()
+  def capacity_facts do
     %{cpus: cpus, mem_total: mem_total} = local_hardware()
 
     %{"cpus" => cpus, "suggestion" => suggestion(cpus, mem_total)}
     |> put_present("mem_total", mem_total)
-    |> put_present("ceiling", config.max_workers)
   end
 
   @doc """

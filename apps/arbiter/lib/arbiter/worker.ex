@@ -1222,15 +1222,11 @@ defmodule Arbiter.Worker do
     # (`Arbiter.Accounts.Concurrency.live_count/1`). Recorded here, from inside
     # the registered process, because the entry dies with the process — no
     # path has to remember to decrement anything.
-    #
-    # DC1 (§5.1): `meta[:node_id]` names the node a run was placed on
-    # (`Worker.Dispatch.build_worker_meta/3`), so the primary's own cap does not
-    # count it (`Arbiter.Nodes.LocalCapacity.holders/1`).
     PRegistry.put_dispatch(
       state.registry_key,
       effective_workspace_id(state),
       provider(meta),
-      node_id: Map.get(meta, :node_id)
+      node_id: placed_node_id(meta)
     )
 
     broadcast_lifecycle(:started, state)
@@ -2799,9 +2795,6 @@ defmodule Arbiter.Worker do
       |> maybe_put(:node_id, handle_node_id(port))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
-    # A run that landed on a node (a resume picks its own placement) says so on
-    # its registry entry, wherever it was first stamped.
-    PRegistry.put_node_id(new_state.registry_key, handle_node_id(port))
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
 
@@ -2821,6 +2814,10 @@ defmodule Arbiter.Worker do
     )
 
     stamp_run_node(new_state.run_id, new_state.task_id, port)
+
+    # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
+    # node stops counting against the primary's cap.
+    PRegistry.put_node(new_state.registry_key, node_id)
 
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
@@ -3415,6 +3412,10 @@ defmodule Arbiter.Worker do
   end
 
   # The node a session handle executes on; nil for a local port.
+  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
+  defp placed_node_id(_meta), do: nil
+
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
 
@@ -7487,8 +7488,7 @@ defmodule Arbiter.Worker do
       state.registry_key,
       effective_workspace_id(state),
       provider(state.meta),
-      released: not hold?,
-      node_id: Map.get(state.meta, :node_id)
+      released: not hold?
     )
   end
 
