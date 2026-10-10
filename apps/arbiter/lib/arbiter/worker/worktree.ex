@@ -286,15 +286,59 @@ defmodule Arbiter.Worker.Worktree do
     seed_paths = seed_paths(opts)
 
     result =
-      if File.dir?(path) do
-        refresh_or_recreate_detached(repo_path, path, base_branch, seed_paths)
-      else
-        add_detached(repo_path, path, base_branch, seed_paths)
+      cond do
+        layout(opts) == :private_clone ->
+          add_detached_clone(repo_path, path, base_branch)
+
+        File.dir?(path) ->
+          refresh_or_recreate_detached(repo_path, path, base_branch, seed_paths)
+
+        true ->
+          add_detached(repo_path, path, base_branch, seed_paths)
       end
 
     with {:ok, wt_path} <- result do
       _ = ensure_arbiter_exclude(wt_path)
       {:ok, wt_path}
+    end
+  end
+
+  # bd-8nu4g6: with `layout: :private_clone` (a podman-sandboxed run) the inspect
+  # checkout is a read-only `PrivateClone.create_review/3` at the freshly-fetched
+  # `origin/<base>`: a container cannot see the main repo's `.git`, so a linked
+  # worktree would be refused at spawn. Nothing in an inspect checkout is kept, so
+  # a leaf left by an earlier run (either layout) is removed and rebuilt, as the
+  # linked path re-points it. The clone has no push path and no branch to carry back.
+  defp add_detached_clone(repo_path, path, base_branch) do
+    with :ok <- ensure_origin_remote(repo_path),
+         :ok <- fetch_origin_branch(repo_path, base_branch),
+         :ok <- ensure_origin_ref(repo_path, base_branch),
+         {:ok, sha} <- run_git(["rev-parse", "--verify", "origin/" <> base_branch], cd: repo_path),
+         :ok <- reclaim_inspect_leaf(path) do
+      File.mkdir_p!(Path.dirname(path))
+      PrivateClone.create_review(repo_path, String.trim(sha), path: path, base: base_branch)
+    end
+  end
+
+  defp reclaim_inspect_leaf(path) do
+    cond do
+      PrivateClone.clone?(path) ->
+        PrivateClone.remove(path)
+
+      File.exists?(path) ->
+        case checked_out_branch(path) do
+          {:ok, branch} when branch != "HEAD" ->
+            {:error,
+             {:git_failed,
+              "worktree exists at #{path} on branch #{branch}, not a detached inspect " <>
+                "checkout; refusing to replace it (it may hold unpushed commits)"}}
+
+          _ ->
+            cleanup(path)
+        end
+
+      true ->
+        :ok
     end
   end
 
