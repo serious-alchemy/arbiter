@@ -105,6 +105,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Tasks.Workspace.ConfigSchema
   alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
   alias Ash.Changeset
 
@@ -1316,7 +1317,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_conductor(changeset, _conductor) do
     Changeset.add_error(changeset,
       field: :config,
-      message: Arbiter.Tasks.Workspace.ConfigSchema.conductor_removed_message()
+      message: ConfigSchema.conductor_removed_message()
     )
   end
 
