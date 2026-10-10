@@ -13,9 +13,24 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
 
   setup do
     ws = Ash.create!(Workspace, %{name: "lc-#{System.unique_integer([:positive])}"})
-    on_exit(fn -> Settings.set_nodes_local_max_workers(nil) end)
+    previous = Application.fetch_env(:arbiter, :local_hardware)
+
+    on_exit(fn ->
+      Settings.set_nodes_local_max_workers(nil)
+
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :local_hardware, v)
+        :error -> Application.delete_env(:arbiter, :local_hardware)
+      end
+    end)
+
     {:ok, ws: ws}
   end
+
+  @gib 1024 * 1024 * 1024
+
+  defp put_hardware(cpus, mem_total),
+    do: Application.put_env(:arbiter, :local_hardware, %{cpus: cpus, mem_total: mem_total})
 
   defp fake_worker(ws, opts \\ []) do
     key = Keyword.get(opts, :key, "lc-fake-#{System.unique_integer([:positive])}")
@@ -44,17 +59,32 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
   end
 
   describe "cap/0" do
-    test "defaults to the install's local concurrency and is not enforced" do
-      assert %{cap: cap, source: :default, enforced?: false} = LocalCapacity.cap()
-      assert cap == Arbiter.Board.Snapshot.system_max_concurrent()
+    test "defaults to the hardware suggestion" do
+      # The 12-CPU, 31 GiB primary of docs/design/provider-dynamic-concurrency.md §1.3.
+      put_hardware(12, 31 * @gib)
+
+      assert %{cap: 6, source: :suggestion} = cap = LocalCapacity.cap()
+      assert cap.cap == Arbiter.NodeAgent.Protocol.suggestion(12, 31 * @gib)
+      refute Map.has_key?(cap, :enforced?)
     end
 
-    test "an override replaces the default, down to 0, and is enforced" do
+    test "the suggestion has a floor of one worker" do
+      put_hardware(1, @gib div 2)
+      assert %{cap: 1, source: :suggestion} = LocalCapacity.cap()
+    end
+
+    test "with no hardware seam it reads this machine" do
+      Application.delete_env(:arbiter, :local_hardware)
+      assert %{cap: cap, source: :suggestion} = LocalCapacity.cap()
+      assert cap >= 1
+    end
+
+    test "an override replaces the default, down to 0" do
       {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
-      assert %{cap: 2, source: :override, enforced?: true} = LocalCapacity.cap()
+      assert %{cap: 2, source: :override} = LocalCapacity.cap()
 
       {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
-      assert %{cap: 0, source: :override, enforced?: true} = LocalCapacity.cap()
+      assert %{cap: 0, source: :override} = LocalCapacity.cap()
     end
   end
 
@@ -73,11 +103,31 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     end
   end
 
-  describe "admit/3 with no override (today's behaviour)" do
-    test "admits every kind, whatever is running", %{ws: ws} do
-      for _ <- 1..5, do: fake_worker(ws)
+  describe "admit/3 with no override" do
+    test "enforces the hardware suggestion", %{ws: ws} do
+      put_hardware(4, 64 * @gib)
+      assert %{cap: 2, source: :suggestion} = LocalCapacity.cap()
 
-      for kind <- Map.keys(LocalCapacity.kinds()) do
+      fake_worker(ws)
+      fake_worker(ws)
+
+      assert {:error, {:no_node_capacity, info}} = LocalCapacity.admit("bd-over", :implementer, [])
+      assert info.cap == 2
+      assert length(info.holders) == 2
+    end
+
+    test "a run stamped with a node_id is not the primary's", %{ws: ws} do
+      put_hardware(4, 64 * @gib)
+      for _ <- 1..3, do: fake_worker(ws, node_id: "node-1")
+      assert :ok = LocalCapacity.admit("bd-local", :implementer, [])
+    end
+
+    test "follow-up kinds are counted but never held for being at the suggestion", %{ws: ws} do
+      put_hardware(4, 64 * @gib)
+      fake_worker(ws)
+      fake_worker(ws)
+
+      for kind <- [:review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round] do
         assert :ok = LocalCapacity.admit("bd-none-#{kind}", kind, [])
       end
     end

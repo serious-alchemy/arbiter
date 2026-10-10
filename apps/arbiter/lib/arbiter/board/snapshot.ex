@@ -102,7 +102,6 @@ defmodule Arbiter.Board.Snapshot do
   # `auto_resolvable?/1`. Everything else needs a person today.
   @auto_resolving_block_reasons [:behind_base, :ci_failed, :ci_cancelled]
 
-  @default_system_max 16
 
   # bd-6bax7s: what a live worker's run state is *called* on a card held back
   # by a `:conflicts_with` mutex (`conflict_state/1`), and — by omission —
@@ -469,7 +468,7 @@ defmodule Arbiter.Board.Snapshot do
     slots_total =
       Keyword.get(opts, :slots_total) ||
         (capacity && capacity.effective) ||
-        system_max_concurrent()
+        fallback_capacity()
 
     {capacity, slots_total}
   end
@@ -631,58 +630,28 @@ defmodule Arbiter.Board.Snapshot do
     }
   end
 
-  @doc "The install-wide worker ceiling with no `Arbiter.Settings` override: app env, else the hardcoded default."
-  @spec default_system_max_concurrent() :: pos_integer()
-  def default_system_max_concurrent,
-    do: Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
-
-  @doc """
-  The install-wide worker ceiling — the runtime `Arbiter.Settings` override,
-  else app env, else #{@default_system_max}. (The `conductor_` prefix on the
-  setting name is historical — the board scheduler is the only dispatcher.)
-  """
-  @spec system_max_concurrent() :: pos_integer()
-  def system_max_concurrent do
-    Arbiter.Settings.conductor_system_max_concurrent() ||
-      Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
-  rescue
-    _ -> @default_system_max
-  end
-
-  @doc """
-  `conductor.max_concurrent` as an **optional hard ceiling** (RW14): the runtime
-  `Arbiter.Settings` override, else the `:conductor_system_max_concurrent` app
-  env, else `nil` — unset, meaning "use the sum of the available machines' caps"
-  (`Arbiter.Nodes.Capacity`). `system_max_concurrent/0` is the same number with
-  the hardcoded default filled in, which is the primary's default local cap.
-  """
-  @spec concurrency_ceiling() :: pos_integer() | nil
-  def concurrency_ceiling do
-    Arbiter.Settings.conductor_system_max_concurrent() ||
-      Application.get_env(:arbiter, :conductor_system_max_concurrent)
-  rescue
-    _ -> nil
-  end
-
   @doc """
   The install-wide effective concurrency: the sum of the available machines'
-  caps, under the ceiling if one is set (`Arbiter.Nodes.Capacity.effective/1`).
-  What the board plans to when it is not scoped to a workspace.
+  caps (`Arbiter.Nodes.Capacity.effective/1`). What the board plans to when it is
+  not scoped to a workspace.
   """
   @spec install_capacity(keyword()) :: non_neg_integer()
   def install_capacity(opts \\ []) do
     Arbiter.Nodes.Capacity.effective(capacity_opts(opts))
   rescue
-    _ -> system_max_concurrent()
+    _ -> fallback_capacity()
   end
+
+  # A capacity read that failed plans to the primary's own cap, never to a
+  # made-up install-wide number.
+  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().cap
 
   defp capacity_opts(opts), do: Keyword.take(opts, [:nodes, :remote_available?])
 
   @doc """
   The effective maximum concurrent workers for a workspace: the minimum of the
-  workspace-level cap (if set), the install's capacity (RW14: the sum of the
-  caps of every available machine, under the optional `conductor.max_concurrent`
-  ceiling — `Arbiter.Nodes.Capacity`), the placement term for the workspace's
+  install's capacity (RW14: the sum of the caps of every available machine —
+  `Arbiter.Nodes.Capacity`), the placement term for the workspace's
   `worker.placement` (the slots its work can actually be served in: a
   `local_only` workspace gets the primary's cap, so a local cap of 0 plans none;
   a `remote_only` one gets only the free node slots) and — since P8
@@ -731,7 +700,7 @@ defmodule Arbiter.Board.Snapshot do
   def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
     ws |> capacity_terms(already_counted, opts) |> Map.fetch!(:effective)
   rescue
-    _ -> system_max_concurrent()
+    _ -> fallback_capacity()
   end
 
   def effective_max_concurrent(workspace_id, already_counted, opts)
@@ -744,7 +713,7 @@ defmodule Arbiter.Board.Snapshot do
         install_capacity(opts)
     end
   rescue
-    _ -> system_max_concurrent()
+    _ -> fallback_capacity()
   end
 
   @doc """
@@ -756,18 +725,16 @@ defmodule Arbiter.Board.Snapshot do
   Returns `%{effective:, already_counted:, install:, workspace:, placement:,
   account:, terms:, binding:}`:
 
-    * `install` — `Arbiter.Nodes.Capacity.breakdown/1` (local cap, nodes,
-      ceiling);
-    * `workspace` — `%{id:, name:, max:}` (`max` is `conductor.max_concurrent`
-      on the workspace, or `nil`), `nil` for a fleet-wide read;
+    * `install` — `Arbiter.Nodes.Capacity.breakdown/1` (local cap, nodes);
+    * `workspace` — `%{id:, name:}`, `nil` for a fleet-wide read;
     * `placement` — `%{mode:, cap:, free:}`;
     * `account` — `nil`, `%{kind: :account, provider:, name:, limit:, headroom:}`
       or `%{kind: :routed, names:, capacity:}`;
     * `terms` — `[{key, value}]`, each limit in the board's own frame
-      (`key` is `:nodes`, `:ceiling`, `:workspace`, `:placement`,
-      `:placement_free` or `:account`); `effective` is their minimum;
+      (`key` is `:nodes`, `:placement`, `:placement_free` or `:account`);
+      `effective` is their minimum;
     * `binding` — the key of the lowest term, ties going to the limit set
-      on purpose (account, workspace, ceiling, then the machines, placement).
+      on purpose (the account, then the machines, placement).
 
   Raises when a read fails; `effective_max_concurrent/3` rescues.
   """
@@ -797,7 +764,6 @@ defmodule Arbiter.Board.Snapshot do
     install = Arbiter.Nodes.Capacity.breakdown(capacity_opts)
     mode = Arbiter.Nodes.Placement.mode(ws)
     placement = Arbiter.Nodes.Capacity.placement(mode, capacity_opts)
-    ws_max = workspace_config_max(ws)
 
     {headroom, live_count, account} =
       case routed_availability(ws, opts) do
@@ -816,13 +782,9 @@ defmodule Arbiter.Board.Snapshot do
 
     counted = already_counted || live_count.()
 
-    # The same fold as ever: workspace cap under the install, under the
-    # placement cap; then the account and placement headroom, each in the
-    # board's frame (`Concurrency.clamp/3`).
-    base_terms =
-      install_terms(install) ++
-        if(is_integer(ws_max) and ws_max > 0, do: [workspace: ws_max], else: []) ++
-        [placement: placement.cap]
+    # The install's machine sum under the placement cap; then the account and
+    # placement headroom, each in the board's frame (`Concurrency.clamp/3`).
+    base_terms = [nodes: install.sum, placement: placement.cap]
 
     base = base_terms |> Keyword.values() |> Enum.min()
     after_account = Concurrency.clamp(base, headroom, counted)
@@ -841,7 +803,7 @@ defmodule Arbiter.Board.Snapshot do
     finish_terms(%{
       already_counted: counted,
       install: install,
-      workspace: %{id: ws.id, name: ws.name, max: ws_max},
+      workspace: %{id: ws.id, name: ws.name},
       placement: Map.put(placement, :mode, mode),
       account: account,
       terms: base_terms ++ clamp_terms,
@@ -853,11 +815,11 @@ defmodule Arbiter.Board.Snapshot do
     capacity_terms(safe_workspace(workspace_id), already_counted, opts)
   end
 
-  # Ties go to the limit the operator set on purpose (account, workspace,
-  # ceiling), then to machine capacity — a placement term that merely repeats
+  # Ties go to the limit the operator set on purpose (the account), then to
+  # machine capacity — a placement term that merely repeats
   # the machine total, or a free-slot term that is still all free, is not what
   # is limiting anything.
-  @binding_order [:account, :workspace, :ceiling, :nodes, :placement, :placement_free]
+  @binding_order [:account, :nodes, :placement, :placement_free]
 
   defp finish_terms(%{terms: terms} = acc) do
     effective = Map.get_lazy(acc, :effective, fn -> terms |> Keyword.values() |> Enum.min() end)
@@ -865,9 +827,7 @@ defmodule Arbiter.Board.Snapshot do
     acc |> Map.put(:effective, effective) |> Map.put(:binding, binding)
   end
 
-  # `min(sum, ceiling)`: the install's own two terms.
-  defp install_terms(%{sum: sum, ceiling: ceiling}),
-    do: [nodes: sum] ++ if(is_integer(ceiling), do: [ceiling: ceiling], else: [])
+  defp install_terms(%{sum: sum}), do: [nodes: sum]
 
   defp account_term(nil, _provider, _ws, _headroom), do: nil
 
@@ -928,12 +888,6 @@ defmodule Arbiter.Board.Snapshot do
       routing_opts = Keyword.get(opts, :routing_opts, [])
       [routing: workspace && read_routing(workspace, routing_opts: routing_opts)]
     end
-  end
-
-  defp workspace_config_max(%Arbiter.Tasks.Workspace{} = ws) do
-    Arbiter.Tasks.Workspace.max_concurrent(ws)
-  rescue
-    _ -> nil
   end
 
   @doc """

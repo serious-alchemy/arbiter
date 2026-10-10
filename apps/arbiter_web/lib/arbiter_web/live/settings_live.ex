@@ -36,7 +36,6 @@ defmodule ArbiterWeb.SettingsLive do
   # The page's positive-integer rows: DOM id → registry key. A whitelist, so a
   # forged `setting` param can only ever name one of these.
   @int_settings %{
-    "concurrency" => "conductor_system_max_concurrent",
     "interval" => "credential_watchdog_interval_ms",
     "recovery" => "credential_watchdog_recovery_interval_ms"
   }
@@ -160,8 +159,6 @@ defmodule ArbiterWeb.SettingsLive do
   defp clear_error(socket, id),
     do: assign(socket, :errors, Map.delete(socket.assigns.errors, id))
 
-  defp saved_message("concurrency", nil), do: "Max concurrent workers reset to the default."
-  defp saved_message("concurrency", n), do: "Max concurrent workers set to #{n}."
   defp saved_message("interval", nil), do: "Watchdog poll interval reset to the default."
   defp saved_message("interval", n), do: "Watchdog poll interval set to #{n} ms."
   defp saved_message("recovery", nil), do: "Watchdog recovery interval reset to the default."
@@ -218,13 +215,6 @@ defmodule ArbiterWeb.SettingsLive do
 
         <Core.panel id="settings-scheduler" title="Scheduler" meta="board autopilot">
           <div class="flex flex-col divide-y divide-[var(--border-default)]">
-            <.int_row
-              id="concurrency"
-              label="Max concurrent workers"
-              help="The system-wide ceiling on workers the scheduler runs at once. A workspace or provider-account cap lower than this still binds first."
-              setting={@settings["conductor_system_max_concurrent"]}
-              error={@errors["concurrency"]}
-            />
             <.autopilot_row autopilot={@autopilot} />
           </div>
         </Core.panel>

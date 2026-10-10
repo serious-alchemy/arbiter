@@ -24,14 +24,19 @@ defmodule Arbiter.Tasks.Workspace.Changes.RejectUnknownConfigKeys do
     with false <- Changeset.get_argument(changeset, :force) == true,
          %{} = patch <- Changeset.get_argument(changeset, :patch),
          [_ | _] = unknown <- Enum.reject(patch, fn {k, _} -> k in known end) do
-      Changeset.add_error(changeset,
-        field: :config,
-        message:
-          "unknown top-level config key #{Enum.map_join(unknown, "; ", &describe/1)} " <>
-            "(see `arb config schema`; pass force to write it anyway)"
-      )
+      Changeset.add_error(changeset, field: :config, message: message(unknown))
     else
       _ -> changeset
+    end
+  end
+
+  # DC1: `conductor` is a known-removed key, so it says what replaced it.
+  defp message(unknown) do
+    if Enum.any?(unknown, fn {k, _} -> k == "conductor" end) do
+      ConfigSchema.conductor_removed_message()
+    else
+      "unknown top-level config key #{Enum.map_join(unknown, "; ", &describe/1)} " <>
+        "(see `arb config schema`; pass force to write it anyway)"
     end
   end
 

@@ -554,6 +554,10 @@ defmodule Arbiter.Nodes do
   @spec set_local_max_workers(non_neg_integer() | nil, Actor.t() | String.t() | nil) ::
           {:ok, non_neg_integer() | nil} | {:error, :invalid_value | term()}
   def set_local_max_workers(n, actor) when is_nil(n) or (is_integer(n) and n >= 0) do
+    # Setting the local cap, even to its current value, is the operator dealing
+    # with the DC1 migration's advisory (`Settings.local_cap_advisory/0`).
+    if Settings.local_cap_advisory(), do: Settings.clear_local_cap_advisory()
+
     if Settings.nodes_local_max_workers() == n do
       {:ok, n}
     else

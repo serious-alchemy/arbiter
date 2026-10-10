@@ -80,6 +80,25 @@ defmodule Arbiter.Worker.Registry do
     _ -> :ok
   end
 
+  @doc """
+  Record on the calling worker's own registry entry that its run executes on
+  node `node_id` (a no-op for `nil`, for a worker that stamped no dispatch
+  context, and for a non-owner). Keeps the rest of the entry as it is.
+  """
+  @spec put_node_id(String.t(), String.t() | nil) :: :ok
+  def put_node_id(_registry_key, nil), do: :ok
+
+  def put_node_id(registry_key, node_id) when is_binary(registry_key) do
+    Registry.update_value(__MODULE__, registry_key, fn
+      %{} = value -> Map.put(value, :node_id, node_id)
+      other -> other
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider),
     do: Atom.to_string(provider)
 

@@ -2325,22 +2325,16 @@ defmodule Arbiter.Worker.Dispatch do
   # (RW9). The slot reserved here is released when the dispatch returns, by
   # which point the worker is registered and counted in its place.
   #
-  # With `worker.placement` unset (`local_only`) and no override of the
-  # primary's cap there is nothing to decide, and nothing is read: dispatch is
-  # exactly what it was.
+  # The primary's cap is always enforced (its override, else its hardware
+  # suggestion: DC1), so every fresh dispatch is decided here.
   defp ensure_node_capacity(%Issue{} = task, opts) do
     workspace = load_workspace(task)
+    request = node_request(task, workspace, opts)
 
-    if Placement.mode(workspace) == :local_only and not LocalCapacity.cap().enforced? do
-      {:ok, opts}
-    else
-      request = node_request(task, workspace, opts)
-
-      case LocalCapacity.gate(request, node_gate_opts(opts)) do
-        {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
-        {:ok, :local} -> {:ok, opts}
-        {:error, _} = held -> held
-      end
+    case LocalCapacity.gate(request, node_gate_opts(opts)) do
+      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
+      {:ok, :local} -> {:ok, opts}
+      {:error, _} = held -> held
     end
   rescue
     e ->
@@ -2672,6 +2666,13 @@ defmodule Arbiter.Worker.Dispatch do
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
   # (repo unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain task close.
+  defp placed_node_id(opts) do
+    case Keyword.get(opts, :node) do
+      %{id: id} when is_binary(id) -> id
+      _ -> nil
+    end
+  end
+
   defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =
       case Keyword.get(opts, :review, false) do
@@ -2704,6 +2705,9 @@ defmodule Arbiter.Worker.Dispatch do
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))
+      # DC1 (§5.1): the node the run was placed on, so the worker's registry
+      # entry carries it from boot and the primary's cap does not count the run.
+      |> put_if_present(:node_id, placed_node_id(opts))
 
     base = maybe_put_resume_meta(base, opts)
 

@@ -1858,8 +1858,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   @doc """
   The nodes section: `nodes.public_url reachable` (an anonymous `GET
   <public_url>/nodes/ping`), whether the endpoint looks private (§4.3), one line
-  per node that is not revoked, the local worker cap and the cap total against
-  `conductor.max_concurrent`.
+  per node that is not revoked, the local worker cap, the cap total and, until the
+  operator sets the local cap, the DC1 migration's advisory for a removed
+  `conductor_system_max_concurrent`.
   """
   @spec check_nodes() :: [Result.t()]
   def check_nodes do
@@ -1881,7 +1882,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     registry = registry_results(resp["registry"])
 
     if nodes == [] and is_nil(url) and registry == [] and
-         "local_cap_zero" not in (resp["warnings"] || []) do
+         "local_cap_zero" not in (resp["warnings"] || []) and is_nil(resp["local_cap_advisory"]) do
       [nodes_result("nodes", :na, "no remote nodes enrolled")]
     else
       [
@@ -1891,6 +1892,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         Enum.map(nodes, &node_result/1) ++
         registry ++
         [local_cap_result(resp)] ++
+        advisory_result(resp["local_cap_advisory"]) ++
         capacity_result(resp, nodes)
     end
     |> Enum.reject(&is_nil/1)
@@ -2059,38 +2061,25 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp capacity_result(_resp, []), do: []
 
-  defp capacity_result(%{"total" => _} = resp, _nodes) do
-    breakdown = ArbiterCli.Cmd.Node.capacity_line(resp)
-    ceiling = resp["ceiling"]
-
-    cond do
-      "ceiling_below_total" in (resp["warnings"] || []) ->
-        [
-          nodes_result(
-            "node capacity vs conductor.max_concurrent",
-            :warn,
-            "#{breakdown}, but the ceiling conductor.max_concurrent = #{ceiling} cuts it: " <>
-              "the extra capacity will sit idle",
-            "Raise the ceiling, or clear it so the sum applies: " <>
-              "`arb settings unset conductor_system_max_concurrent`."
-          )
-        ]
-
-      is_nil(ceiling) ->
-        [nodes_result("node capacity", :ok, "#{breakdown}; no ceiling set")]
-
-      true ->
-        [
-          nodes_result(
-            "node capacity vs conductor.max_concurrent",
-            :ok,
-            "#{breakdown}; under the ceiling #{ceiling}"
-          )
-        ]
-    end
-  end
+  defp capacity_result(%{"total" => _} = resp, _nodes),
+    do: [nodes_result("node capacity", :ok, ArbiterCli.Cmd.Node.capacity_line(resp))]
 
   defp capacity_result(_resp, _nodes), do: []
+
+  # DC1 (§10.6): a stored `conductor_system_max_concurrent` was removed by the
+  # migration; the line it logged stays here until the local cap is set.
+  defp advisory_result(nil), do: []
+
+  defp advisory_result(advisory) do
+    [
+      nodes_result(
+        "conductor_system_max_concurrent removed",
+        :warn,
+        advisory,
+        "Setting the local cap (`arb node set local --max-workers N`) clears this note."
+      )
+    ]
+  end
 
   defp age(nil), do: "never"
 

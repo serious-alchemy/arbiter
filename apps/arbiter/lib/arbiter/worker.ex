@@ -1222,10 +1222,15 @@ defmodule Arbiter.Worker do
     # (`Arbiter.Accounts.Concurrency.live_count/1`). Recorded here, from inside
     # the registered process, because the entry dies with the process — no
     # path has to remember to decrement anything.
+    #
+    # DC1 (§5.1): `meta[:node_id]` names the node a run was placed on
+    # (`Worker.Dispatch.build_worker_meta/3`), so the primary's own cap does not
+    # count it (`Arbiter.Nodes.LocalCapacity.holders/1`).
     PRegistry.put_dispatch(
       state.registry_key,
       effective_workspace_id(state),
-      provider(meta)
+      provider(meta),
+      node_id: Map.get(meta, :node_id)
     )
 
     broadcast_lifecycle(:started, state)
@@ -2794,6 +2799,9 @@ defmodule Arbiter.Worker do
       |> maybe_put(:node_id, handle_node_id(port))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
+    # A run that landed on a node (a resume picks its own placement) says so on
+    # its registry entry, wherever it was first stamped.
+    PRegistry.put_node_id(new_state.registry_key, handle_node_id(port))
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
 
@@ -7479,7 +7487,8 @@ defmodule Arbiter.Worker do
       state.registry_key,
       effective_workspace_id(state),
       provider(state.meta),
-      released: not hold?
+      released: not hold?,
+      node_id: Map.get(state.meta, :node_id)
     )
   end
 

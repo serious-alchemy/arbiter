@@ -71,12 +71,24 @@ defmodule Arbiter.NodeAgent.Protocol do
   # Facts plus the derived `suggestion` (computed here, agent-side, so the primary
   # only reads it) and the owner's `ceiling` (`ARB_NODE_MAX_WORKERS`) when set.
   defp capacity(%Config{} = config) do
-    cpus = :erlang.system_info(:logical_processors_available) |> cpus()
-    mem_total = meminfo("MemTotal")
+    %{cpus: cpus, mem_total: mem_total} = local_hardware()
 
     %{"cpus" => cpus, "suggestion" => suggestion(cpus, mem_total)}
     |> put_present("mem_total", mem_total)
     |> put_present("ceiling", config.max_workers)
+  end
+
+  @doc """
+  This machine's CPU count and `MemTotal` in bytes (`nil` when unreadable): the
+  two facts `suggestion/2` takes. The primary reads them for its own default cap
+  (`Arbiter.Nodes.LocalCapacity`), the same way every node's `hello` reports them.
+  """
+  @spec local_hardware() :: %{cpus: pos_integer(), mem_total: non_neg_integer() | nil}
+  def local_hardware do
+    %{
+      cpus: :erlang.system_info(:logical_processors_available) |> cpus(),
+      mem_total: meminfo("MemTotal")
+    }
   end
 
   @cpus_per_worker 2

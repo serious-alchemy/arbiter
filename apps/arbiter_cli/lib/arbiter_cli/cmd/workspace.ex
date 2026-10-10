@@ -59,7 +59,7 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   For the full reference of every `workspace.config` key (tracker, merge,
   agent/review_agent, security, routing, review/review_gate, review_automation,
-  quota, conductor, standing_orders, repo_paths, pr_patrol, review_patrol) with
+  quota, standing_orders, repo_paths, pr_patrol, review_patrol) with
   valid values and defaults, see `arb config schema` (served by the running server).
   """
 

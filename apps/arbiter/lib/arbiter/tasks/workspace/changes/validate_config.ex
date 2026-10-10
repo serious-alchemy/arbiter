@@ -69,8 +69,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"notes_gate"` is present, it must be a map; if
       `"notes_gate.nudge_cap"` is present it must be a NON-NEGATIVE integer —
       `0` escalates on the first blank-notes completion (bd-4qjl0q).
-    * If `"conductor"` is present, it must be a map.
-    * If `"conductor.max_concurrent"` is present, it must be a positive integer.
+    * `"conductor"` is refused: `conductor.max_concurrent` was removed (DC1).
     * If `"review_automation"` is present, it must be a map.
     * If `"review_automation.default"` is present, it must be one of
       `"auto"`, `"report_only"` (alias `"propose"`), or `"flag"` (alias `"notify"`).
@@ -1312,36 +1311,13 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_conductor(changeset, nil), do: changeset
 
-  defp validate_conductor(changeset, conductor) when is_map(conductor) do
-    case Map.get(conductor, "max_concurrent") do
-      nil ->
-        changeset
-
-      n when is_integer(n) and n > 0 ->
-        changeset
-
-      s when is_binary(s) ->
-        case Integer.parse(s) do
-          {n, ""} when n > 0 ->
-            changeset
-
-          _ ->
-            Changeset.add_error(changeset,
-              field: :config,
-              message: "conductor.max_concurrent must be a positive integer; got: #{inspect(s)}"
-            )
-        end
-
-      other ->
-        Changeset.add_error(changeset,
-          field: :config,
-          message: "conductor.max_concurrent must be a positive integer; got: #{inspect(other)}"
-        )
-    end
-  end
-
-  defp validate_conductor(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "conductor must be a map")
+  # DC1: the whole `conductor` block went with `conductor.max_concurrent`; the
+  # migration strips it from stored configs, so only a new write can carry it.
+  defp validate_conductor(changeset, _conductor) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: Arbiter.Tasks.Workspace.ConfigSchema.conductor_removed_message()
+    )
   end
 
   # "auto" (review + post), "report_only"/"propose" (review + report, await

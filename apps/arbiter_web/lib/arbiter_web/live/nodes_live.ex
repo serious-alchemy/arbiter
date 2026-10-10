@@ -12,9 +12,8 @@ defmodule ArbiterWeb.NodesLive do
   **override** (an inline form, up or down; `local` may go to 0) and any
   **ceiling** the node's owner configured on the node, which the override
   cannot beat. The header breaks the install's capacity down by machine,
-  `local + Σ the caps of every available node`, under the optional
-  `conductor.max_concurrent` ceiling, and warns only when a ceiling the
-  operator set cuts the sum. A local cap of 0 keeps a warning up: work that can only run
+  `local + Σ the caps of every available node`; the `local` row's suggestion is
+  the primary's own hardware suggestion, enforced like any node's. A local cap of 0 keeps a warning up: work that can only run
   here — reviewers, fix and conflict passes, agy/codex, research — waits.
 
   Everything comes from `Arbiter.Nodes.Overview`; the page re-reads on every
@@ -584,15 +583,6 @@ defmodule ArbiterWeb.NodesLive do
         |> Enum.filter(&(&1.contributes == 0))
         |> Enum.map_join(", ", &"#{&1.name} (#{&1.state})")}
       </span>
-      <span :if={@overview.ceiling}>
-        <code class="font-[family-name:var(--font-mono)]">conductor.max_concurrent</code>
-        = <b class="tabular-nums text-[var(--text-title)]">{@overview.ceiling}</b>
-        (hard ceiling: the board plans <b class="tabular-nums text-[var(--text-title)]">{@overview.effective}</b>)
-      </span>
-      <span :if={is_nil(@overview.ceiling)}>
-        <code class="font-[family-name:var(--font-mono)]">conductor.max_concurrent</code>
-        not set: the sum applies
-      </span>
       <span :if={not @overview.remote_execution?} id="nodes-remote-off">
         remote execution is off: nodes add no capacity yet
       </span>
@@ -601,10 +591,6 @@ defmodule ArbiterWeb.NodesLive do
     <.warning :if={:local_cap_zero in @overview.warnings} id="nodes-local-cap-warning">
       The local cap is 0: nothing runs on this machine. Work that can only run here
       (reviewers, fix and conflict passes, agy/codex runs, research) will wait until a local slot opens.
-    </.warning>
-    <.warning :if={:ceiling_below_total in @overview.warnings} id="nodes-ceiling-warning">
-      conductor.max_concurrent ({@overview.ceiling}) is below the {@overview.total} slots the available machines add up to:
-      the extra capacity will sit idle. Clear it to use the sum, or raise it.
     </.warning>
 
     <div class="overflow-x-auto rounded-[var(--radius-field)] border border-solid border-[var(--border-default)]">

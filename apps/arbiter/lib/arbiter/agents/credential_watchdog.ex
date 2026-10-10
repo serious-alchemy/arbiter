@@ -72,7 +72,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   These three are **re-resolved at the top of every poll cycle**, not frozen
   into GenServer state at `init/1` — mirroring how `Arbiter.Board.Snapshot`
-  consults `Arbiter.Settings.conductor_system_max_concurrent/0` inline. So
+  consults `Arbiter.Settings` inline. So
   dropping an adapter from the probe list (e.g. `codex`, whose probe is a real
   billed round-trip against the ChatGPT backend) takes effect on the next tick
   with no restart. The per-adapter *expiry* map is ordinary GenServer state and
