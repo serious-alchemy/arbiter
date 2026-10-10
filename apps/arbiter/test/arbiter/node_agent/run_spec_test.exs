@@ -48,6 +48,89 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
     assert Enum.map(s.mounts, & &1.kind) == ["worktree", "home", "cli"]
   end
 
+  # bd-4ic681: a session resume's transcript, fetched from the primary into the run's
+  # config dir before the container starts. The spec names it; it never carries it.
+  describe "config dir session (bd-4ic681)" do
+    @sha String.duplicate("c", 64)
+
+    defp with_session(session) do
+      spec(%{
+        "mounts" => [
+          %{"kind" => "worktree", "path" => "/work/tree"},
+          %{"kind" => "config_dir", "path" => "/work/config", "session" => session}
+        ]
+      })
+    end
+
+    defp session(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "path" => "projects/-home-arb-wt-feature-1/0b5e7a4c-55d6-4c1f-9a51-6f3a1f2d9c01.jsonl",
+          "bytes" => 1234,
+          "sha256" => @sha
+        },
+        overrides
+      )
+    end
+
+    test "is accepted as a relative path under projects/, with its size and digest" do
+      assert {:ok, %RunSpec{mounts: mounts}} = RunSpec.validate(with_session(session()))
+
+      assert %{session: %{path: path, bytes: 1234, sha256: @sha}} =
+               Enum.find(mounts, &(&1.kind == "config_dir"))
+
+      assert path == session()["path"]
+    end
+
+    test "rides alongside the config files" do
+      spec =
+        spec(%{
+          "mounts" => [
+            %{"kind" => "worktree", "path" => "/work/tree"},
+            %{
+              "kind" => "config_dir",
+              "path" => "/work/config",
+              "files" => %{"CLAUDE.md" => Base.encode64("memory")},
+              "session" => session()
+            }
+          ]
+        })
+
+      assert {:ok, %RunSpec{mounts: mounts}} = RunSpec.validate(spec)
+      assert %{files: %{"CLAUDE.md" => "memory"}, session: %{}} = Enum.at(mounts, 1)
+    end
+
+    test "anything but a session JSONL under projects/ is refused" do
+      for path <- [
+            "../escape.jsonl",
+            "/abs/projects/x/s.jsonl",
+            "projects/../../x.jsonl",
+            "projects/slug/s.json",
+            "projects/slug/sub/s.jsonl",
+            ".credentials.json",
+            "projects/sl ug/s.jsonl"
+          ] do
+        assert {:error, {:refused, {:bad_value, "mounts.config_dir.session"}}} =
+                 RunSpec.validate(with_session(session(%{"path" => path}))),
+               "accepted #{inspect(path)}"
+      end
+    end
+
+    test "a bad size or digest is refused" do
+      for bad <- [
+            %{"bytes" => -1},
+            %{"bytes" => "12"},
+            %{"bytes" => 2 * 1024 * 1024 * 1024},
+            %{"sha256" => "nothex"},
+            %{"sha256" => nil}
+          ] do
+        assert {:error, {:refused, {:bad_value, "mounts.config_dir.session"}}} =
+                 RunSpec.validate(with_session(session(bad))),
+               "accepted #{inspect(bad)}"
+      end
+    end
+  end
+
   describe "worktree files (bd-8y8ztm)" do
     defp with_files(files) do
       spec(%{

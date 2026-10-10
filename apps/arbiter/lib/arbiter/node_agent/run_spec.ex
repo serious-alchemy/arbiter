@@ -36,7 +36,11 @@ defmodule Arbiter.NodeAgent.RunSpec do
   owns under its own root, mounted at `path`), `cli` (`name`, `sha256`, `path`
   under `/opt/arbiter/cli`: a content-addressed file the node fetches and
   caches), `prompt` (`content` base64, mounted read-only at `path`) and, on
-  `config_dir`, optional `files` (`settings.json`, `CLAUDE.md`, base64). The
+  `config_dir`, optional `files` (`settings.json`, `CLAUDE.md`, base64) and an
+  optional `session` (bd-4ic681: `%{"path", "bytes", "sha256"}`, the transcript of
+  the session a `--resume` command continues, at `projects/<cwd slug>/<sid>.jsonl`;
+  the agent fetches it from the primary, `GET /nodes/runs/<run>/session`, unless
+  the run's config dir already holds it). The
   `worktree` mount takes optional `files` too (bd-8y8ztm): the untracked agent
   config the primary injects into a worktree (`.mcp.json`, `.claude/skills/…`,
   base64, relative paths under an allowlist of roots) that a git bundle cannot
@@ -85,6 +89,8 @@ defmodule Arbiter.NodeAgent.RunSpec do
   @cli_dir "/opt/arbiter/cli/"
   @max_secret_bytes 65_536
   @max_prompt_bytes 4_194_304
+  @max_session_bytes 536_870_912
+  @session_path_re ~r/\Aprojects\/[A-Za-z0-9-]{1,255}\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.jsonl\z/
   # Container-side paths a spec may never mount over.
   @forbidden_dest ["/proc", "/sys", "/dev", "/run/arbiter", "/etc"]
 
@@ -317,24 +323,17 @@ defmodule Arbiter.NodeAgent.RunSpec do
   defp mount(_), do: refuse({:bad_value, "mounts"})
 
   # A config dir may be seeded with the install's generated settings and memory
-  # (the two files `ContainerSpawn` seeds locally), by name from an allowlist.
-  defp mount_for("config_dir", path, %{"files" => files}) when is_map(files) do
-    seeded =
-      Enum.reduce_while(files, {:ok, %{}}, fn
-        {name, content}, {:ok, acc} when name in @config_files and is_binary(content) ->
-          case Base.decode64(content) do
-            {:ok, bytes} when byte_size(bytes) <= 1_048_576 ->
-              {:cont, {:ok, Map.put(acc, name, bytes)}}
-
-            _ ->
-              {:halt, refuse({:bad_value, "mounts.config_dir.files"})}
-          end
-
-        {name, _}, _ ->
-          {:halt, refuse({:unknown_config_file, to_string(name)})}
-      end)
-
-    with {:ok, files} <- seeded, do: {:ok, %{kind: "config_dir", path: path, files: files}}
+  # (the two files `ContainerSpawn` seeds locally), by name from an allowlist, and may
+  # name the session transcript a `--resume` run continues (bd-4ic681), which the agent
+  # fetches from the primary into it before the container starts.
+  defp mount_for("config_dir", path, mount) do
+    with {:ok, files} <- config_files(Map.get(mount, "files")),
+         {:ok, session} <- config_session(Map.get(mount, "session")) do
+      {:ok,
+       %{kind: "config_dir", path: path}
+       |> put_present(:files, files)
+       |> put_present(:session, session)}
+    end
   end
 
   defp mount_for("worktree", path, %{"files" => files}) when is_map(files) do
@@ -367,6 +366,43 @@ defmodule Arbiter.NodeAgent.RunSpec do
   end
 
   defp mount_for("prompt", _path, _mount), do: refuse({:bad_value, "mounts.prompt"})
+
+  defp config_files(nil), do: {:ok, nil}
+
+  defp config_files(files) when is_map(files) do
+    Enum.reduce_while(files, {:ok, %{}}, fn
+      {name, content}, {:ok, acc} when name in @config_files and is_binary(content) ->
+        case Base.decode64(content) do
+          {:ok, bytes} when byte_size(bytes) <= 1_048_576 ->
+            {:cont, {:ok, Map.put(acc, name, bytes)}}
+
+          _ ->
+            {:halt, refuse({:bad_value, "mounts.config_dir.files"})}
+        end
+
+      {name, _}, _ ->
+        {:halt, refuse({:unknown_config_file, to_string(name)})}
+    end)
+  end
+
+  defp config_files(_), do: refuse({:bad_value, "mounts.config_dir.files"})
+
+  # Exactly one session JSONL at the slug of a cwd (`Usage.ClaudeSessionFile.project_slug/1`
+  # leaves only letters, digits and `-`), never a path outside `projects/`.
+  defp config_session(nil), do: {:ok, nil}
+
+  defp config_session(%{"path" => path, "bytes" => bytes, "sha256" => sha})
+       when is_binary(path) and is_integer(bytes) and bytes >= 0 and
+              bytes <= @max_session_bytes and is_binary(sha) do
+    if Regex.match?(@session_path_re, path) and Regex.match?(@sha_re, sha),
+      do: {:ok, %{path: path, bytes: bytes, sha256: sha}},
+      else: refuse({:bad_value, "mounts.config_dir.session"})
+  end
+
+  defp config_session(_), do: refuse({:bad_value, "mounts.config_dir.session"})
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp worktree_files(files) do
     decoded =

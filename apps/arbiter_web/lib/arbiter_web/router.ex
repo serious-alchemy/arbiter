@@ -100,6 +100,8 @@ defmodule ArbiterWeb.Router do
     get("/runs/:run/seed.bundle", NodeCheckoutController, :seed)
     put("/runs/:run/checkout", NodeCheckoutController, :checkout)
     put("/runs/:run/transcripts", NodeCheckoutController, :transcripts)
+    # bd-4ic681: the session transcript a resumed run continues.
+    get("/runs/:run/session", NodeCheckoutController, :session)
   end
 
   scope "/", ArbiterWeb do

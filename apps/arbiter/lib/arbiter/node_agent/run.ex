@@ -13,7 +13,9 @@ defmodule Arbiter.NodeAgent.Run do
   `prepare` (in a task, so a long image build never blocks a `cancel`): the
   run's directories under `<node_home>/runs/<run>/`, the image (built from the
   plan the spec carries when the node lacks it), the CLI files
-  (`Arbiter.NodeAgent.Files`), prompt and config-dir seeds, the secrets file on
+  (`Arbiter.NodeAgent.Files`), prompt and config-dir seeds (with, for a session
+  resume, the transcript it continues: `Arbiter.NodeAgent.Transcripts.fetch_session/4`,
+  bd-4ic681), the secrets file on
   tmpfs (`Arbiter.NodeAgent.Secrets`), the bridge sockets, the cgroup limits for
   the controllers the user manager delegated (`Arbiter.NodeAgent.Cgroups`) and the
   test-services pod. Then `Arbiter.Worker.Container.wrap/2` builds the argv
@@ -385,6 +387,7 @@ defmodule Arbiter.NodeAgent.Run do
          {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
          :ok <- seed_config(spec, dirs),
+         :ok <- seed_session(spec, config, dirs, opts),
          {:ok, limit_opts} <- limits(spec, opts),
          {:ok, bridge_paths} <- bridges(spec, opts),
          {:ok, secrets_file} <- secrets(spec, opts),
@@ -671,6 +674,28 @@ defmodule Arbiter.NodeAgent.Run do
           {:error, reason} -> {:halt, {:error, {:unschedulable, {:config_seed, reason}}}}
         end
       end)
+    else
+      _ -> :ok
+    end
+  end
+
+  # bd-4ic681: the transcript of the session a `--resume` command continues, fetched
+  # from the primary to the path the spec names under the run's config dir (the slug
+  # of the run's cwd, so `claude --resume` finds it). A config dir that already holds
+  # it (a re-open of this run on this node) keeps its own, newer copy. A run whose
+  # session cannot be had is refused rather than started to fail.
+  defp seed_session(spec, config, dirs, opts) do
+    with %{session: %{path: path} = session} <-
+           Enum.find(spec.mounts, &(&1.kind == "config_dir")),
+         %{host: host} <- dirs["config_dir"],
+         dest = Path.join(host, path),
+         false <- File.exists?(dest) do
+      fetch = Keyword.get(opts, :session_fun, &Transcripts.fetch_session/4)
+
+      case fetch.(config, spec.run, session, dest) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:unschedulable, {:session_seed_failed, reason}}}
+      end
     else
       _ -> :ok
     end

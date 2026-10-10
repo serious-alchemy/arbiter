@@ -183,6 +183,83 @@ defmodule Arbiter.NodeAgent.RunTest do
     end
   end
 
+  # bd-4ic681: a session resume's transcript is fetched from the primary into the run's
+  # config dir, at the path the spec names, before the container starts.
+  describe "the session a --resume run continues" do
+    @rel "projects/-work-tree/0b5e7a4c-55d6-4c1f-9a51-6f3a1f2d9c01.jsonl"
+
+    defp session_spec(run) do
+      spec(run, %{
+        "mounts" => [
+          %{"kind" => "worktree", "path" => "/work/tree"},
+          %{"kind" => "home", "path" => "/work/home"},
+          %{
+            "kind" => "config_dir",
+            "path" => "/work/config",
+            "session" => %{
+              "path" => @rel,
+              "bytes" => 12,
+              "sha256" => String.duplicate("d", 64)
+            }
+          },
+          %{"kind" => "tmp", "path" => "/work/tmp"}
+        ]
+      })
+    end
+
+    defp fetcher(test, result) do
+      fn config, run, session, dest ->
+        send(test, {:fetched, config.node_home, run, session, dest})
+
+        if result == :ok do
+          File.mkdir_p!(Path.dirname(dest))
+          File.write!(dest, ~s({"a":1}\n))
+        end
+
+        result
+      end
+    end
+
+    test "is fetched into the config dir before the container starts", %{opts: opts, home: home} do
+      opts = Keyword.put(opts, :session_fun, fetcher(self(), :ok))
+
+      assert {:ok, "rss"} = Runs.assign(session_spec("rss"), opts)
+      wait_event("rss", "run.ready")
+
+      dest = Path.join([home, "runs", "rss", "config", @rel])
+      assert_received {:fetched, ^home, "rss", %{path: @rel, bytes: 12}, ^dest}
+      assert File.read!(dest) == ~s({"a":1}\n)
+      wait_event("rss", "exit")
+    end
+
+    test "is not fetched again when the run's config dir already holds it (a re-open)", %{
+      opts: opts,
+      home: home
+    } do
+      dest = Path.join([home, "runs", "rso", "config", @rel])
+      File.mkdir_p!(Path.dirname(dest))
+      File.write!(dest, "the node's own, newer\n")
+      opts = Keyword.put(opts, :session_fun, fetcher(self(), :ok))
+
+      assert {:ok, "rso"} = Runs.assign(session_spec("rso"), opts)
+      wait_event("rso", "exit")
+
+      refute_received {:fetched, _, _, _, _}
+      assert File.read!(dest) == "the node's own, newer\n"
+    end
+
+    test "a fetch that fails refuses the run: nothing starts", %{opts: opts, stub: stub} do
+      opts = Keyword.put(opts, :session_fun, fetcher(self(), {:error, {:http, 404}}))
+
+      assert {:ok, "rsf"} = Runs.assign(session_spec("rsf"), opts)
+      refused = wait_event("rsf", "run.refused")
+
+      assert refused["reason"] == "unschedulable"
+      assert refused["detail"] =~ "session_seed_failed"
+      refute File.exists?(Path.join(stub, "run.argv"))
+    end
+  end
+
   describe "a run to completion" do
     test "streams stdout, reports exit status 0 and oom false", %{opts: opts, stub: stub} do
       File.write!(Path.join(stub, "lines"), "5")

@@ -367,4 +367,46 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       assert upload("/nodes/runs/#{@run}/transcripts", c.other_auth, body).status == 404
     end
   end
+
+  # bd-4ic681: the session a `--resume` run continues, seeded (redacted) into the run's
+  # config dir on the primary and named in its checkout context.
+  describe "GET /nodes/runs/:run/session" do
+    @session "projects/-work-tree/0b5e7a4c-55d6-4c1f-9a51-6f3a1f2d9c01.jsonl"
+
+    defp place_with_session!(c, run) do
+      File.mkdir_p!(Path.dirname(Path.join(c.config_dir, @session)))
+      File.write!(Path.join(c.config_dir, @session), ~s({"type":"user"}\n))
+
+      ctx = %{
+        home: c.home,
+        branch: @branch,
+        base: "main",
+        seeded_paths: [],
+        config_dir: c.config_dir,
+        session: @session
+      }
+
+      place!(c.pid, run, ctx)
+    end
+
+    test "serves the seeded transcript to the node the run is assigned to", c do
+      place_with_session!(c, "run-s")
+
+      conn = request(:get, "/nodes/runs/run-s/session", c.auth)
+      assert conn.status == 200
+      assert conn.resp_body == ~s({"type":"user"}\n)
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
+
+    test "a run with no session to resume is a 404", c do
+      assert request(:get, "/nodes/runs/#{@run}/session", c.auth).status == 404
+    end
+
+    test "needs a credential and a run assigned to the caller", c do
+      place_with_session!(c, "run-s2")
+
+      assert request(:get, "/nodes/runs/run-s2/session", []).status == 401
+      assert request(:get, "/nodes/runs/run-s2/session", c.other_auth).status == 404
+    end
+  end
 end

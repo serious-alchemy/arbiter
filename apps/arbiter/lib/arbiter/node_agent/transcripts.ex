@@ -6,6 +6,10 @@ defmodule Arbiter.NodeAgent.Transcripts do
   files are packed (links are never followed or stored), so what the primary's
   sanitising extractor (`Arbiter.Nodes.Transcripts`) accepts is what is sent;
   `.credentials.json` and the rest of the config dir stay on the node.
+
+  The other direction is one file (`fetch_session/4`, bd-4ic681): the transcript of
+  the session a `--resume` run continues, which the primary seeded, redacted, and
+  the run's spec names with its size and digest.
   """
 
   alias Arbiter.NodeAgent.Config
@@ -66,6 +70,94 @@ defmodule Arbiter.NodeAgent.Transcripts do
       end
     after
       File.rm(dest)
+    end
+  end
+
+  @doc """
+  The other direction (bd-4ic681): fetch the transcript of the session a `--resume`
+  run continues, `GET /nodes/runs/<run>/session` with the node credential, into
+  `dest` (the run's config dir, at the path its spec named). The body is streamed
+  to a part file, cut off past `session.bytes`, and kept only when it is exactly
+  that long with `session.sha256`. `:ok` or `{:error, reason}`.
+  """
+  @spec fetch_session(
+          Config.t(),
+          String.t(),
+          %{bytes: non_neg_integer(), sha256: String.t()},
+          Path.t()
+        ) ::
+          :ok | {:error, term()}
+  def fetch_session(%Config{} = config, run, %{bytes: bytes, sha256: sha}, dest) do
+    part = dest <> ".part"
+    File.mkdir_p!(Path.dirname(dest))
+    io = File.open!(part, [:write, :binary])
+
+    sink = fn {:data, data}, {req, resp} ->
+      if resp.status == 200 do
+        size = Req.Response.get_private(resp, :size, 0) + byte_size(data)
+        resp = Req.Response.put_private(resp, :size, size)
+
+        if size > bytes do
+          {:halt, {req, resp}}
+        else
+          :ok = IO.binwrite(io, data)
+          {:cont, {req, resp}}
+        end
+      else
+        {:cont, {req, resp}}
+      end
+    end
+
+    request =
+      Req.new(
+        [
+          url: Config.http_url(config, "/nodes/runs/#{run}/session"),
+          headers: [{"authorization", "Bearer " <> config.credential}],
+          decode_body: false,
+          into: sink,
+          retry: false,
+          receive_timeout: 600_000
+        ] ++ (config.req_options || [])
+      )
+
+    try do
+      case Req.get(request) do
+        {:ok, %Req.Response{status: 200}} ->
+          File.close(io)
+          keep_session(part, dest, bytes, sha)
+
+        {:ok, %Req.Response{status: status}} ->
+          {:error, {:http, status}}
+
+        {:error, reason} ->
+          {:error, {:download_failed, reason}}
+      end
+    after
+      File.close(io)
+      File.rm(part)
+    end
+  end
+
+  defp keep_session(part, dest, bytes, sha) do
+    got =
+      part
+      |> File.stream!(1_048_576)
+      |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+
+    got = got |> :crypto.hash_final() |> Base.encode16(case: :lower)
+
+    case File.stat(part) do
+      {:ok, %File.Stat{size: ^bytes}} when got == sha ->
+        with :ok <- File.rename(part, dest), do: File.chmod(dest, 0o600)
+
+      {:ok, %File.Stat{size: ^bytes}} ->
+        {:error, {:digest_mismatch, got}}
+
+      {:ok, %File.Stat{size: size}} ->
+        {:error, {:size_mismatch, size, bytes}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
