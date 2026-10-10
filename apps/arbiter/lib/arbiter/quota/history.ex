@@ -16,6 +16,7 @@ defmodule Arbiter.Quota.History do
   require Logger
   require Ash.Query
 
+  alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota
   alias Arbiter.Quota.CloudCode
@@ -40,7 +41,7 @@ defmodule Arbiter.Quota.History do
   """
   @spec record(String.t(), struct()) :: :ok
   def record(account_id, row) do
-    do_record(account_id, row)
+    do_record(account_id, row, seats_now(account_id))
     prune(provider_account_id: account_id)
   rescue
     e ->
@@ -48,9 +49,22 @@ defmodule Arbiter.Quota.History do
       :ok
   end
 
+  # The seats the account holds right now (bd-c1dief, DC2): the one live
+  # occupancy count the admission path already uses. Read, never written, and a
+  # failed read stores `nil` ("unknown"), not 0. It is the account's whole count,
+  # not a per-pool one; per-pool seats arrive with DC4, and an Antigravity
+  # account's two pools both carry the account figure until then.
+  defp seats_now(account_id) do
+    Concurrency.live_count(account_id)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   # Antigravity meters two model groups, each with its own 5h and weekly
   # window; one row per (group, window) the snapshot carries.
-  defp do_record(account_id, %GoogleQuota{provider: "antigravity"} = row) do
+  defp do_record(account_id, %GoogleQuota{provider: "antigravity"} = row, seats) do
     models =
       case row.snapshot do
         %{"models" => models} when is_list(models) -> models
@@ -68,32 +82,33 @@ defmodule Arbiter.Quota.History do
       end
 
     if readings == [] do
-      append_normalized(account_id, row)
+      append_normalized(account_id, row, seats)
     else
       Enum.each(readings, fn {group, window, util, reset_at} ->
-        append(account_id, "antigravity", group, window, util, reset_at, nil, captured_at)
+        append(%{
+          provider_account_id: account_id,
+          provider: "antigravity",
+          bucket: group,
+          window: window,
+          utilization: util,
+          resets_at: reset_at,
+          ceiling: nil,
+          captured_at: captured_at,
+          seats: seats
+        })
       end)
     end
   end
 
-  defp do_record(account_id, row), do: append_normalized(account_id, row)
+  defp do_record(account_id, row, seats), do: append_normalized(account_id, row, seats)
 
-  defp append(account_id, provider, bucket, window, util, reset_at, ceiling, captured_at) do
+  defp append(attrs) do
     QuotaSnapshot
-    |> Ash.Changeset.for_create(:record, %{
-      provider_account_id: account_id,
-      provider: provider,
-      bucket: bucket,
-      window: window,
-      utilization: util / 1,
-      ceiling: ceiling,
-      resets_at: reset_at,
-      captured_at: captured_at
-    })
+    |> Ash.Changeset.for_create(:record, %{attrs | utilization: attrs.utilization / 1})
     |> Ash.create!()
   end
 
-  defp append_normalized(account_id, row) do
+  defp append_normalized(account_id, row, seats) do
     with %Snapshot{} = snap <- Snapshot.normalize(row) do
       account = Resolver.get(account_id)
       workspace = account_id |> Resolver.workspaces() |> List.first()
@@ -107,16 +122,17 @@ defmodule Arbiter.Quota.History do
       ]
       |> Enum.filter(fn {label, util, _, _} -> is_binary(label) and is_number(util) end)
       |> Enum.each(fn {label, util, reset_at, ceiling} ->
-        append(
-          account_id,
-          snap.provider,
-          snap.provider,
-          label,
-          util,
-          reset_at,
-          ceiling,
-          captured_at
-        )
+        append(%{
+          provider_account_id: account_id,
+          provider: snap.provider,
+          bucket: snap.provider,
+          window: label,
+          utilization: util,
+          resets_at: reset_at,
+          ceiling: ceiling,
+          captured_at: captured_at,
+          seats: seats
+        })
       end)
     end
   end

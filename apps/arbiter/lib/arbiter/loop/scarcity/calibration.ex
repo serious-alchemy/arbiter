@@ -60,6 +60,7 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
           reason:
             nil | :too_few_observations | :too_few_model_observations | :collinear | :non_positive,
           share_per_weighted_token: float() | nil,
+          std_error: float() | nil,
           n: non_neg_integer()
         }
 
@@ -69,6 +70,8 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
           n: non_neg_integer(),
           models: %{String.t() => entry()},
           background_share_per_hour: float() | nil,
+          background_std_error: float() | nil,
+          dof: pos_integer() | nil,
           rmse: float() | nil
         }
 
@@ -145,12 +148,16 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
 
       {model_coefs, bg} = Enum.split(coefs, length(fit_models))
       blocked_models = Enum.filter(blocked, &(&1 < length(fit_models)))
+      {dof, ses} = std_errors(scaled, x, Enum.map(b, &(&1 / b_scale)), col_scale, b_scale, n)
+      {model_ses, bg_se} = Enum.split(ses, length(fit_models))
 
       entries =
         fit_models
-        |> Enum.zip(model_coefs)
+        |> Enum.zip(Enum.zip(model_coefs, model_ses))
         |> Enum.with_index()
-        |> Map.new(fn {{m, c}, i} -> {m, entry(c, i in blocked_models, seen[m])} end)
+        |> Map.new(fn {{m, {c, se}}, i} ->
+          {m, entry(c, i in blocked_models, seen[m], se)}
+        end)
         |> Map.merge(withheld)
 
       %{
@@ -159,6 +166,8 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
         n: n,
         models: entries,
         background_share_per_hour: background(bg),
+        background_std_error: if(background(bg), do: List.first(bg_se)),
+        dof: dof,
         rmse: rmse(columns, coefs, b, n)
       }
     end
@@ -187,15 +196,22 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
     if denom == 0.0, do: 0.0, else: dot(a, b) / denom
   end
 
-  defp entry(_c, true, n), do: absent(:collinear, n)
+  defp entry(_c, true, n, _se), do: absent(:collinear, n)
 
-  defp entry(c, false, n) when c > 0.0,
-    do: %{status: :calibrated, reason: nil, share_per_weighted_token: c, n: n}
+  defp entry(c, false, n, se) when c > 0.0,
+    do: %{status: :calibrated, reason: nil, share_per_weighted_token: c, std_error: se, n: n}
 
-  defp entry(_c, false, n), do: absent(:non_positive, n)
+  defp entry(_c, false, n, _se), do: absent(:non_positive, n)
 
-  defp absent(reason, n),
-    do: %{status: :insufficient_data, reason: reason, share_per_weighted_token: nil, n: n}
+  defp absent(reason, n) do
+    %{
+      status: :insufficient_data,
+      reason: reason,
+      share_per_weighted_token: nil,
+      std_error: nil,
+      n: n
+    }
+  end
 
   defp insufficient(models, seen, n, reason, withheld) do
     %{
@@ -204,8 +220,105 @@ defmodule Arbiter.Loop.Scarcity.Calibration do
       n: n,
       models: Map.new(models, &{&1, Map.get(withheld, &1) || absent(reason, seen[&1])}),
       background_share_per_hour: nil,
+      background_std_error: nil,
+      dof: nil,
       rmse: nil
     }
+  end
+
+  # Least-squares standard errors over the columns the fit left in the
+  # solution (`x > 0`); a column NNLS pinned at 0 is not a free parameter, so it
+  # costs no degree of freedom and has no standard error. `scaled` and `bs` are
+  # the unit-max-scaled problem `nnls/2` solved; the result is rescaled to the
+  # caller's units. `{dof, [se | nil]}` — one `se` per column.
+  defp std_errors(scaled, x, bs, col_scale, b_scale, n) do
+    passive = for {xi, i} <- Enum.with_index(x), xi > 0.0, do: i
+    dof = n - length(passive)
+    cols = Enum.map(passive, &Enum.at(scaled, &1))
+    gram = for ci <- cols, do: for(cj <- cols, do: dot(ci, cj))
+
+    fitted =
+      passive
+      |> Enum.zip(cols)
+      |> Enum.reduce(List.duplicate(0.0, n), fn {i, col}, acc ->
+        Enum.zip_with(acc, col, fn a, v -> a + Enum.at(x, i) * v end)
+      end)
+
+    rss = bs |> Enum.zip(fitted) |> Enum.map(fn {y, p} -> (y - p) * (y - p) end) |> Enum.sum()
+    sigma_sq = rss / max(dof, 1)
+
+    ses =
+      for i <- 0..(length(x) - 1)//1 do
+        with true <- dof > 0,
+             pos when is_integer(pos) <- Enum.find_index(passive, &(&1 == i)),
+             var when is_number(var) <- inverse_diagonal(gram, pos) do
+          :math.sqrt(max(sigma_sq * var, 0.0)) * b_scale / Enum.at(col_scale, i)
+        else
+          _ -> nil
+        end
+      end
+
+    {if(dof > 0, do: dof), ses}
+  end
+
+  # `(G⁻¹)[pos][pos]`: solve `G z = e_pos`; `nil` when `G` is singular.
+  defp inverse_diagonal(gram, pos) do
+    unit = for k <- 0..(length(gram) - 1)//1, do: if(k == pos, do: 1.0, else: 0.0)
+
+    case gauss(gram, unit) do
+      {:ok, z} -> Enum.at(z, pos)
+      :singular -> nil
+    end
+  end
+
+  @t95 %{
+    1 => 6.3138,
+    2 => 2.9200,
+    3 => 2.3534,
+    4 => 2.1318,
+    5 => 2.0150,
+    6 => 1.9432,
+    7 => 1.8946,
+    8 => 1.8595,
+    9 => 1.8331,
+    10 => 1.8125,
+    11 => 1.7959,
+    12 => 1.7823,
+    13 => 1.7709,
+    14 => 1.7613,
+    15 => 1.7531,
+    16 => 1.7459,
+    17 => 1.7396,
+    18 => 1.7341,
+    19 => 1.7291,
+    20 => 1.7247,
+    21 => 1.7207,
+    22 => 1.7171,
+    23 => 1.7139,
+    24 => 1.7109,
+    25 => 1.7081,
+    26 => 1.7056,
+    27 => 1.7033,
+    28 => 1.7011,
+    29 => 1.6991,
+    30 => 1.6973
+  }
+
+  @doc """
+  The one-sided 95% critical value of Student's t with `dof` degrees of freedom
+  (`nil` for `dof < 1`): a coefficient is distinguishable from 0 when
+  `c - t_critical(dof) * std_error > 0`. Tabulated to 30, then the Cornish-Fisher
+  expansion around the normal quantile.
+  """
+  @spec t_critical(integer()) :: float() | nil
+  def t_critical(dof) when is_integer(dof) and dof < 1, do: nil
+  def t_critical(dof) when is_map_key(@t95, dof), do: Map.fetch!(@t95, dof)
+
+  def t_critical(dof) when is_integer(dof) do
+    z = 1.6448536
+
+    z + (z * z * z + z) / (4 * dof) +
+      (5 * :math.pow(z, 5) + 16 * z * z * z + 3 * z) / (96 * dof * dof)
   end
 
   defp background([c]) when c > 0.0, do: c

@@ -121,38 +121,79 @@ defmodule Arbiter.Loop.Scarcity.Draw do
   def observations(samples, usage, opts) do
     pool = Keyword.fetch!(opts, :pool)
     provider = Keyword.fetch!(opts, :provider)
-    window = Keyword.fetch!(opts, :window)
-    min_s = opts[:min_interval_seconds] || min_interval(window)
-    max_s = opts[:max_interval_seconds] || max_interval(window)
 
     pooled =
       usage
       |> Enum.filter(&(ModelFamily.classify(&1.provider || provider, &1.model).pool == pool))
       |> Enum.sort_by(& &1.occurred_at, DateTime)
 
+    samples
+    |> intervals(Keyword.fetch!(opts, :window), opts)
+    |> Enum.map(fn %{anchor: anchor, sample: sample, elapsed: elapsed} ->
+      interval(anchor, sample, pooled, elapsed)
+    end)
+  end
+
+  @typedoc """
+  One usable interval between two captures: the anchor and closing `sample`, the
+  seconds between them, and every capture from the anchor to the sample
+  (`points`, in time order, including both ends) so a caller can integrate a
+  quantity sampled at each capture, not only at the ends.
+  """
+  @type interval :: %{
+          anchor: map(),
+          sample: map(),
+          elapsed: pos_integer(),
+          points: [map()]
+        }
+
+  @doc """
+  The usable intervals of one (bucket, window) series, by this module's rules:
+  captures closer than the window's minimum coalesce into the interval that
+  closes at the next far-enough capture, and an interval spanning a reset or a
+  polling gap longer than the window is dropped. `samples` are snapshot-shaped
+  maps (`:utilization`, `:resets_at`, `:captured_at`). Options:
+  `:min_interval_seconds` and `:max_interval_seconds`.
+
+  `observations/3` and `Arbiter.Quota.BudgetCalibration` both build on this, so
+  the two fits read the same intervals.
+  """
+  @spec intervals([map()], String.t(), keyword()) :: [interval()]
+  def intervals(samples, window, opts \\ []) do
+    min_s = opts[:min_interval_seconds] || min_interval(window)
+    max_s = opts[:max_interval_seconds] || max_interval(window)
+
     case Enum.sort_by(samples, & &1.captured_at, DateTime) do
       [] -> []
-      [anchor | rest] -> walk(rest, anchor, pooled, min_s, max_s, [])
+      [anchor | rest] -> walk(rest, anchor, [anchor], min_s, max_s, [])
     end
   end
 
-  defp walk([], _anchor, _usage, _min_s, _max_s, acc), do: Enum.reverse(acc)
+  # `trail` is the captures since the anchor, newest first.
+  defp walk([], _anchor, _trail, _min_s, _max_s, acc), do: Enum.reverse(acc)
 
-  defp walk([sample | rest], anchor, usage, min_s, max_s, acc) do
+  defp walk([sample | rest], anchor, trail, min_s, max_s, acc) do
     elapsed = DateTime.diff(sample.captured_at, anchor.captured_at)
 
     cond do
       reset?(anchor, sample) ->
-        walk(rest, sample, usage, min_s, max_s, acc)
+        walk(rest, sample, [sample], min_s, max_s, acc)
 
       elapsed < min_s ->
-        walk(rest, anchor, usage, min_s, max_s, acc)
+        walk(rest, anchor, [sample | trail], min_s, max_s, acc)
 
       elapsed > max_s ->
-        walk(rest, sample, usage, min_s, max_s, acc)
+        walk(rest, sample, [sample], min_s, max_s, acc)
 
       true ->
-        walk(rest, sample, usage, min_s, max_s, [interval(anchor, sample, usage, elapsed) | acc])
+        found = %{
+          anchor: anchor,
+          sample: sample,
+          elapsed: elapsed,
+          points: Enum.reverse([sample | trail])
+        }
+
+        walk(rest, sample, [sample], min_s, max_s, [found | acc])
     end
   end
 

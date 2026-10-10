@@ -16,6 +16,10 @@ defmodule Arbiter.Quota.QuotaSnapshot do
   `Arbiter.Quota.History.record/2`, and it serves reports, burn rate and
   calibration alike. Rows are never updated; `Arbiter.Quota.History.prune/1`
   deletes those past `config :arbiter, :quota_history, retention_days:`.
+  `seats` and `budget` (bd-c1dief, DC2) record the account's seat count and the
+  pool's published budget at the capture, for the seat-hour calibration
+  (`Arbiter.Quota.BudgetCalibration`).
+
   (`codex_quota_snapshots` is a separate, Codex-only raw-column log kept for
   the plan-window pacing work, bd-afvsnc.)
   """
@@ -44,7 +48,9 @@ defmodule Arbiter.Quota.QuotaSnapshot do
         :utilization,
         :ceiling,
         :resets_at,
-        :captured_at
+        :captured_at,
+        :seats,
+        :budget
       ]
     end
   end
@@ -59,6 +65,12 @@ defmodule Arbiter.Quota.QuotaSnapshot do
     attribute :ceiling, :float, public?: true
     attribute :resets_at, :utc_datetime, public?: true
     attribute :captured_at, :utc_datetime, allow_nil?: false, public?: true
+
+    # bd-c1dief (DC2): the seats the account held at the capture, and the
+    # pool's published budget (`nil` until DC3 publishes one). Both `nil` on a
+    # row captured before the columns existed.
+    attribute :seats, :integer, public?: true, constraints: [min: 0]
+    attribute :budget, :integer, public?: true, constraints: [min: 0]
     create_timestamp :inserted_at
   end
 end
