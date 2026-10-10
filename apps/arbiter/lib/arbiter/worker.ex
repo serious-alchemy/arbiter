@@ -1253,8 +1253,7 @@ defmodule Arbiter.Worker do
       state.registry_key,
       workspace_id,
       provider,
-      [node_id: dispatch_node_id(meta)] ++
-        seat_stamp(workspace_id, provider, dispatch_model(meta))
+      [node_id: placed_node_id(meta)] ++ seat_stamp(workspace_id, provider, dispatch_model(meta))
     )
 
     broadcast_lifecycle(:started, state)
@@ -2921,23 +2920,12 @@ defmodule Arbiter.Worker do
   defp session_config_dir(_adopted, port_args, provider),
     do: effective_config_dir(port_args, provider)
 
-  # The run's row records where it executes (nil = the primary), and a run on a node holds no
-  # slot on the primary (bd-4p1vui, §10.4.10). An adopted row already records all of it, so
-  # nothing is written over it.
+  # The run's row records where it executes (nil = the primary). An adopted row already
+  # records all of it, so nothing is written over it.
   defp record_session_opened(%State{} = state, port, adopted, spawn) do
     node_id = handle_node_id(port)
-    if node_id, do: stamp_dispatch_node(state, node_id)
     unless adopted, do: backfill_session_opened(state, port, node_id, spawn)
     :ok
-  end
-
-  defp stamp_dispatch_node(%State{} = state, node_id) do
-    PRegistry.put_dispatch(
-      state.registry_key,
-      effective_workspace_id(state),
-      provider(state.meta),
-      node_id: node_id
-    )
   end
 
   defp backfill_session_opened(%State{run_id: run_id, task_id: task_id}, port, node_id, spawn) do
@@ -3597,6 +3585,13 @@ defmodule Arbiter.Worker do
       do: Arbiter.Nodes.LostResume.schedule(task_id),
       else: :ok
   end
+
+  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.10): an adopting Worker's run is
+  # already on the node that held it.
+  defp placed_node_id(%{adopt: %{node_id: id}}) when is_binary(id), do: id
+  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
+  defp placed_node_id(_meta), do: nil
 
   # The model the dispatch was routed to, before the CLI reports its own: the
   # pool of an agy run depends on it (`ModelFamily.classify/2`).
@@ -7853,21 +7848,9 @@ defmodule Arbiter.Worker do
       state.registry_key,
       effective_workspace_id(state),
       provider(state.meta),
-      released: not hold?,
-      node_id: dispatch_node_id(state.meta)
+      released: not hold?
     )
   end
-
-  # bd-4p1vui (docs/design/remote-workers.md §10.4.10): the node a run executes on, for
-  # the registry entry `Arbiter.Nodes.LocalCapacity` reads (no node = a slot on the primary).
-  # An adopting Worker knows it from the start; any other learns it when its remote session
-  # opens (`meta[:node_id]`).
-  defp dispatch_node_id(meta) when is_map(meta),
-    do:
-      get_in(meta, [:adopt, :node_id]) || Map.get(meta, :placed_node_id) ||
-        Map.get(meta, :node_id)
-
-  defp dispatch_node_id(_meta), do: nil
 
   # Apply a ReviewGate verdict to a run waiting on the review gate.
   defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do

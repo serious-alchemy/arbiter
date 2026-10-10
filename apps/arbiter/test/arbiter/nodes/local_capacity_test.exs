@@ -383,6 +383,42 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
 
       refute task_id in LocalCapacity.holders()
     end
+
+    # bd-373tce: a placement whose node could not take the run falls back to the primary, so
+    # the run holds a primary slot, also once the ReviewGate's CI wait gives the account
+    # hold back (bd-cut6uv), which rewrites the entry.
+    test "a placed run whose session opened locally stays a primary holder", %{ws: ws} do
+      task_id = "lc-fallback-worker-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          meta: %{placed_node_id: Ecto.UUID.generate()}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      refute task_id in LocalCapacity.holders()
+
+      cat = System.find_executable("cat")
+      port_args = %{exec: cat, argv: [cat], cd: System.tmp_dir!()}
+
+      assert {:ok, port} =
+               GenServer.call(pid, {:__claude_session_open__, port_args, %{provider: :claude}})
+
+      assert is_port(port)
+      assert task_id in LocalCapacity.holders()
+
+      :sys.replace_state(pid, fn s -> %{s | state: :waiting, waiting_on: :review_gate} end)
+      send(pid, {:__review_gate_ci_wait__, true})
+      _ = :sys.get_state(pid)
+      refute task_id in LocalCapacity.holders()
+
+      send(pid, {:__review_gate_ci_wait__, false})
+      _ = :sys.get_state(pid)
+      assert task_id in LocalCapacity.holders()
+    end
   end
 
   describe "check/3 (admit without taking the slot)" do

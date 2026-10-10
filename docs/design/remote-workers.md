@@ -492,7 +492,12 @@ The container keeps what it was started with: its old worker-tier token (as `ARB
 
 #### 10.4.10 The adopted Worker's registry entry (coordinator review, point 4)
 
-`Arbiter.Nodes.LocalCapacity` counts against the primary's cap every live Worker whose registry entry has no `node_id` (`Worker.Registry.put_dispatch/4`). Until now no Worker set it, so a run placed on a node still took one of the primary's slots (bd-8ikgoc). An adopted Worker knows its node before its session opens, so `Worker.init/1` stamps `node_id` from the adoption, and `hold_account/2`'s later re-stamps keep it. Any Worker whose remote session opens also stamps it at that point, a fresh placement included, so no remote run counts as a local one.
+`Arbiter.Nodes.LocalCapacity` counts against the primary's cap every live Worker whose registry entry has no `node_id`. bd-8ikgoc (#659) stamps it for every remote run:
+* `Worker.init/1` stamps the node placement chose (`meta[:placed_node_id]`);
+* the session open stamps the node the run actually executes on (`Worker.Registry.put_node/2`, `nil` for a local fallback);
+* `put_dispatch/4`'s later re-stamps (`hold_account/2`) keep it.
+
+Adoption adds one case. An adopted Worker knows its node before its session opens, so `Worker.init/1` stamps it from the adoption (`meta[:adopt][:node_id]`). A run held on a node never counts as a local one, not even before its session attaches. The same `init/1` stamp carries DC4's seat (`account_id`, `pool`) as for any Worker: an adopted run is Claude, so it seats on the workspace's Claude account, pool `claude`.
 
 #### 10.4.11 Test plan (coordinator review, point 5)
 
