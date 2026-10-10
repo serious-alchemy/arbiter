@@ -206,7 +206,10 @@ defmodule Arbiter.NodesTest do
 
     test "enroll accepts `kind: cluster` from a string-keyed body too" do
       {token, _} = mint!(kind: "cluster")
-      assert {:ok, %{node: node}} = Nodes.redeem_join_token(token, %{"kind" => "cluster", "name" => "c"})
+
+      assert {:ok, %{node: node}} =
+               Nodes.redeem_join_token(token, %{"kind" => "cluster", "name" => "c"})
+
       assert node.kind == "cluster"
     end
 
@@ -217,7 +220,10 @@ defmodule Arbiter.NodesTest do
       assert {:ok, _} = Nodes.redeem_join_token(token, %{kind: "cluster", name: "x"})
 
       {token, _} = mint!()
-      assert {:error, :kind_mismatch} = Nodes.redeem_join_token(token, %{kind: "cluster", name: "y"})
+
+      assert {:error, :kind_mismatch} =
+               Nodes.redeem_join_token(token, %{kind: "cluster", name: "y"})
+
       assert {:ok, _} = Nodes.redeem_join_token(token, %{kind: "machine", name: "y"})
     end
 
@@ -231,7 +237,11 @@ defmodule Arbiter.NodesTest do
       {token, _} = mint!(kind: "cluster", name: "evt")
 
       assert {:ok, %{node: node}} =
-               Nodes.redeem_join_token(token, %{kind: "cluster", k8s_version: "v1.36.5+k3s1", agent_version: "0.2.43"})
+               Nodes.redeem_join_token(token, %{
+                 kind: "cluster",
+                 k8s_version: "v1.36.5+k3s1",
+                 agent_version: "0.2.43"
+               })
 
       [event] = events(:enrolled) |> Enum.filter(&(&1.node_id == node.id))
       assert event.detail["kind"] == "cluster"

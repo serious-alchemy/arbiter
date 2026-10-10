@@ -507,7 +507,7 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert out =~ "kind:          cluster"
       assert out =~ "Kubernetes:    v1.36.5+k3s1"
       assert out =~ "outdated"
-      assert "  " <> cmd in String.split(out, "\n")
+      assert ("  " <> cmd) in String.split(out, "\n")
     end
 
     test "a cluster node that upgrades itself is told so instead of given a command" do

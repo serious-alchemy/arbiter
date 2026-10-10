@@ -701,7 +701,9 @@ defmodule ArbiterCli.Cmd.Node do
         IO.puts("  #{n["upgrade_command"]}")
 
       n["self_upgrade"] == true and n["health"] in ["outdated", "ahead"] ->
-        IO.puts("  upgrade:       this controller upgrades itself (to #{n["image"] || "this server's image"})")
+        IO.puts(
+          "  upgrade:       this controller upgrades itself (to #{n["image"] || "this server's image"})"
+        )
 
       true ->
         :ok
