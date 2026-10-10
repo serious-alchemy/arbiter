@@ -80,11 +80,7 @@ defmodule ArbiterWeb.NodeChannel do
 
   # The run protocol (RW9): the node's events go to the session, which owns the
   # run table. A run event before `hello` has no session to go to and is dropped.
-<<<<<<< HEAD
-  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity exec.result)
-=======
-  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity adopt.refused)
->>>>>>> 3d2bba3c2 (Node adoption handshake: Session.adopt/adoptable/unadopt, agent Run.adopt, adopt.refused, line-boundary stdout acks (bd-4p1vui))
+  @run_events ~w(run.ready run.refused run.gone exit retained recovered reaped capacity exec.result adopt.refused)
 
   def handle_in(event, payload, %{assigns: %{session: session}} = socket)
       when event in @run_events and is_map(payload) do
