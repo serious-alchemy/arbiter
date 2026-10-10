@@ -25,10 +25,12 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   @lib Path.expand("../../../lib", __DIR__)
   @consumers ~r/alias Arbiter\.Quota\.Seats|\bSeats\.(counts|count|holders|tally|base_task_id)\(/
 
-  # The seats module, and the scheduler walk's inputs (DC6, shadow and enforce only).
-  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex)
+  # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only)
+  # and the capacity view (DC5, display only: it shows the live holders next to
+  # each budget and decides nothing).
+  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex arbiter/board/capacity_view.ex)
 
-  test "only the seats module and the walk's inputs name it" do
+  test "only the seats module, the walk's inputs and the capacity view name it" do
     offenders =
       @lib
       |> Path.join("**/*.{ex,exs}")

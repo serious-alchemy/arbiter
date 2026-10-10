@@ -134,6 +134,7 @@ defmodule Arbiter.Board.Drain do
           slot_holders: [String.t()],
           quota_hold: String.t() | nil,
           held_local_capacity: [String.t()],
+          capacity: map() | nil,
           checked_at: DateTime.t()
         }
 
