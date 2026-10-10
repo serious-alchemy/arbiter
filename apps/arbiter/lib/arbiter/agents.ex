@@ -375,6 +375,10 @@ defmodule Arbiter.Agents do
   defp default_agent_type(%Workspace{} = ws), do: agent_type(ws, :agent) || :claude
   defp default_agent_type(nil), do: :claude
 
+  # The static tail is the legacy default order, not the registry: grok is (as far as we
+  # know intentionally) left out, being D1-only/opt-in rather than an implicit failover target;
+  # the workspace pool above
+  # already carries any configured agent type.
   defp fallback_for_workspace(%Workspace{} = ws, orig, constraint) do
     pool = configured_types(ws.config, :agent)
     first_available((pool ++ [:claude, :gemini, :codex]) |> Enum.uniq(), orig, constraint)
