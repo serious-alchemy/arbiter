@@ -147,6 +147,74 @@ defmodule Arbiter.Loop.Scarcity.CalibrationTest do
     end
   end
 
+  describe "fit/2 standard errors (bd-c1dief, DC2)" do
+    # One column, no background: se(c) = sqrt(RSS / (n - 1) / sum x^2).
+    test "a single coefficient's standard error matches the closed form" do
+      xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+      noise = [0.1, -0.2, 0.15, -0.05, 0.2, -0.1, 0.05, -0.15, 0.1, -0.2]
+
+      obs =
+        for {x, e} <- Enum.zip(xs, noise),
+            do: %{share: 0.5 * x + e, hours: 1.0, draws: %{"seat" => x}}
+
+      fit = Calibration.fit(obs, background: false)
+      entry = fit.models["seat"]
+      c = entry.share_per_weighted_token
+
+      rss = obs |> Enum.map(fn o -> (o.share - c * o.draws["seat"]) ** 2 end) |> Enum.sum()
+      expected = :math.sqrt(rss / (length(obs) - 1) / Enum.sum(Enum.map(xs, &(&1 * &1))))
+
+      assert_in_delta entry.std_error, expected, 1.0e-9
+      assert fit.dof == length(obs) - 1
+    end
+
+    test "a background pinned at zero has no standard error and costs no degree of freedom" do
+      obs = for x <- 1..10, do: %{share: 0.1 * x, hours: 1.0 / x, draws: %{"seat" => x * 1.0}}
+      fit = Calibration.fit(obs)
+
+      assert fit.background_share_per_hour == nil
+      assert fit.background_std_error == nil
+      assert fit.dof == 9
+    end
+
+    test "noise-free data has a zero standard error" do
+      obs = for x <- 1..10, do: %{share: 0.1 * x, hours: 1.0, draws: %{"seat" => x * 1.0}}
+      fit = Calibration.fit(obs, background: false)
+      assert_in_delta fit.models["seat"].std_error, 0.0, 1.0e-9
+    end
+
+    test "the background coefficient carries its own standard error" do
+      :rand.seed(:exsss, {3, 4, 5})
+
+      obs =
+        for _ <- 1..30 do
+          h = 0.5 + :rand.uniform() * 3
+          s = h * (1 + :rand.uniform())
+
+          %{
+            share: 0.05 * s + 0.02 * h + (:rand.uniform() - 0.5) * 0.01,
+            hours: h,
+            draws: %{"seat" => s}
+          }
+        end
+
+      fit = Calibration.fit(obs)
+      assert fit.models["seat"].std_error > 0.0
+      assert fit.background_std_error > 0.0
+      assert fit.dof == 28
+    end
+  end
+
+  describe "t_critical/1" do
+    test "one-sided 95% cutoffs" do
+      assert_in_delta Calibration.t_critical(8), 1.860, 0.001
+      assert_in_delta Calibration.t_critical(1), 6.314, 0.001
+      assert_in_delta Calibration.t_critical(30), 1.697, 0.001
+      assert_in_delta Calibration.t_critical(1000), 1.646, 0.002
+      assert Calibration.t_critical(0) == nil
+    end
+  end
+
   describe "nnls/2" do
     test "solves an unconstrained-positive system exactly" do
       # columns [1,0,1], [0,1,1]; b = 2*c1 + 3*c2
