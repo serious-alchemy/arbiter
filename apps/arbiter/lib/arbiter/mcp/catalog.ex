@@ -398,7 +398,10 @@ defmodule Arbiter.MCP.Catalog do
           "live per-model Cloud Code Assist quota (`null` when that CLI isn't authenticated on " <>
           "this host). Coordinator only: `account` (uuid, `provider:slug` or an unambiguous slug) " <>
           "reads that one account's quota instead of a workspace's, in the REST " <>
-          "`GET /api/quota?account=` shape (`workspace` is then ignored).",
+          "`GET /api/quota?account=` shape (`workspace` is then ignored). `budget` is one block " <>
+          "per account (`account`, `account_id`, `mode`, `decides`, `pools`): each provider pool's " <>
+          "concurrency budget with its reason, labelled shadow until `scheduler_admission` is " <>
+          "`enforce`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -3264,7 +3267,11 @@ defmodule Arbiter.MCP.Catalog do
           "quiescent; `safe_to_restart` is true only when paused AND nothing is in flight; " <>
           "`in_flight` lists every live piece of work — fix passes, conflict resolvers, " <>
           "review rounds and dispatches keep running while paused. Check it before a " <>
-          "server restart. Coordinator only.",
+          "server restart. " <>
+          "Also `admission` (the `scheduler_admission` mode, labelled shadow until " <>
+          "enforce, with the walk's agreement so far), `budgets` (one per provider pool: " <>
+          "the integer budget, seats, free, binding, the reason and every window's numbers), " <>
+          "`machines` (cap, live, free), `repos` and `fair_share`. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
     },

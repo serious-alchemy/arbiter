@@ -45,11 +45,25 @@ defmodule Arbiter.Board.CapacityExplainer do
 
   @doc """
   The whole board's explanations in one pass, for the async load: the cap
-  popup and one hold explanation per held Ready card and per quota-held
-  Blocked card (`%{ticket_id => hold}`).
+  popup, one hold explanation per held Ready card and per quota-held Blocked
+  card (`%{ticket_id => hold}`), and (DC5, §9) the walk's layer reason per card
+  and the budget lines.
+
+  Options: `:mode` (the `scheduler_admission` mode; `:legacy` by default, which
+  shows no layer) and `:capacity` (a `Arbiter.Board.CapacityView.status/1`).
+  Under `shadow` every layer and budget line is labelled shadow: the walk
+  records what it would do, and today's gate and caps still decide.
   """
-  @spec explain(map()) :: %{cap: map() | nil, holds: %{String.t() => map()}}
-  def explain(board) when is_map(board) do
+  @spec explain(map(), keyword()) :: %{
+          cap: map() | nil,
+          holds: %{String.t() => map()},
+          layers: %{String.t() => map()},
+          budget: map() | nil
+        }
+  def explain(board, opts \\ []) when is_map(board) do
+    mode = Keyword.get(opts, :mode, :legacy)
+    layers = layers(board, mode)
+
     # Only the holds that have something to say: a mutex or file-overlap hold
     # is already one short line on its card.
     ready =
@@ -59,7 +73,7 @@ defmodule Arbiter.Board.CapacityExplainer do
             hold(hold, board, raw: entry.reason, workspace_id: entry.card[:workspace_id]),
           explained.kind != :other,
           into: %{} do
-        {id, explained}
+        {id, with_layer(explained, Map.get(layers, id))}
       end
 
     quota_held =
@@ -67,8 +81,96 @@ defmodule Arbiter.Board.CapacityExplainer do
         {id, dispatch_queue_hold(hold, reason)}
       end
 
-    %{cap: cap(board), holds: Map.merge(ready, quota_held)}
+    %{
+      cap: cap(board),
+      holds: Map.merge(ready, quota_held),
+      layers: layers,
+      budget: budget(Keyword.get(opts, :capacity), mode)
+    }
   end
+
+  defp with_layer(hold, nil), do: hold
+  defp with_layer(hold, layer), do: Map.put(hold, :layer, layer)
+
+  # ---- the walk's layers (DC5) ------------------------------------------------
+
+  # What the scheduler walk says about a card: the layer it waits on (the
+  # walk's own phrase) or the pair it is planned onto. Nothing under `legacy`,
+  # where no walk is planned.
+  defp layers(%{walk: %{entries: entries} = walk}, mode) when mode in [:shadow, :enforce] do
+    for entry <- entries, layer = layer(entry, walk, mode), into: %{} do
+      {entry.id, layer}
+    end
+  end
+
+  defp layers(_board, _mode), do: %{}
+
+  defp layer(%{wait_cause: {:capacity, layer}, reason: reason}, _walk, mode) do
+    %{layer: layer, state: :waiting, text: upcase(reason), shadow?: mode != :enforce}
+  end
+
+  defp layer(%{state: :next, pair: %{} = pair}, walk, mode),
+    do: planned(:next, "Next", pair, walk, mode)
+
+  defp layer(%{state: :starting, pair: %{} = pair}, walk, mode),
+    do: planned(:starting, "Starting", pair, walk, mode)
+
+  defp layer(_entry, _walk, _mode), do: nil
+
+  defp planned(state, word, pair, walk, mode) do
+    pool = get_in(walk, [:pools, pair.pool, :label]) || inspect(pair.pool)
+    node = get_in(walk, [:nodes, pair.node, :label]) || pair.node
+
+    %{
+      layer: nil,
+      state: state,
+      text: "#{word} — #{pool} on #{node}",
+      shadow?: mode != :enforce
+    }
+  end
+
+  defp upcase(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
+  defp upcase(other), do: other
+
+  # ---- the budget lines (DC5) -------------------------------------------------
+
+  @doc """
+  The pool, machine, repo and fair-share lines of a
+  `Arbiter.Board.CapacityView.status/1`, for the capacity popups: one line per
+  pool (`claude:default: 3 of 3 seats`, then its reason and the command that
+  changes its ceiling), one per machine, repo and fair-share row. `nil` without
+  a view.
+  """
+  @spec budget(map() | nil, atom()) :: map() | nil
+  def budget(nil, _mode), do: nil
+
+  def budget(%{pools: pools, machines: machines} = view, mode) do
+    %{
+      label: Atom.to_string(mode),
+      shadow?: mode != :enforce,
+      pools: Enum.map(pools, &pool_line/1),
+      machines: Enum.map(machines, &machine_line/1),
+      repos: Enum.map(Map.get(view, :repos, []), &repo_line/1),
+      fair_share: Enum.map(Map.get(view, :fair_share, []), &%{text: &1.text})
+    }
+  end
+
+  defp pool_line(pool) do
+    %{
+      text: "#{pool.label}: #{pool.seats} of #{pool.budget} seats",
+      reason: pool.reason,
+      state: pool.state,
+      change: pool.change_command
+    }
+  end
+
+  defp machine_line(%{cap: cap} = m) when is_integer(cap),
+    do: %{text: "#{m.name}: #{m.live} of #{cap} slots", state: m.state}
+
+  defp machine_line(m), do: %{text: "#{m.name}: #{m.live} running", state: m.state}
+
+  defp repo_line(repo),
+    do: %{text: "repo #{repo.label}: #{repo.used} of #{repo.cap} implementer runs"}
 
   # ---- the cap ----------------------------------------------------------------
 

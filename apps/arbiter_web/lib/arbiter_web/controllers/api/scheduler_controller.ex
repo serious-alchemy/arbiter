@@ -9,7 +9,10 @@ defmodule ArbiterWeb.Api.SchedulerController do
     * `GET /api/scheduler/status` — get the drain state (`Arbiter.Board.Drain`)
 
   Every route answers with the same body — `Arbiter.Board.Drain.to_json/1`,
-  shared with the `scheduler_status` MCP tool so the two cannot disagree.
+  shared with the `scheduler_status` MCP tool so the two cannot disagree. It carries `admission`
+  (the `scheduler_admission` mode, labelled shadow until enforce), `budgets` (one
+  per provider pool, with its reason), `machines`, `repos` and `fair_share`
+  (DC5, `Arbiter.Board.CapacityView`).
   """
 
   use ArbiterWeb, :controller
