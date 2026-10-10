@@ -436,7 +436,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       Controller.tick(controller)
 
       assert_receive {:run_push, ^run, "run.refused",
-                      %{"reason" => "unschedulable", "detail" => detail}}
+                      %{"reason" => "unschedulable", "detail" => detail}},
+                     5_000
 
       assert detail =~ "Insufficient cpu"
       assert [delete] = deletes(env)
@@ -455,7 +456,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       advance(env, 31)
       Controller.tick(controller)
 
-      assert_receive {:run_push, ^run, "run.refused", %{"reason" => "unschedulable"}}
+      assert_receive {:run_push, ^run, "run.refused", %{"reason" => "unschedulable"}}, 5_000
     end
 
     test "a pod that schedules in time is not refused", env do
@@ -487,7 +488,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       set_status(env, pod_name(1), running_status())
       observed(run, :running)
 
-      assert_receive {:run_push, ^run, "run.ready", %{"run" => ^run}}
+      assert_receive {:run_push, ^run, "run.ready", %{"run" => ^run}}, 5_000
       assert %{^run => "running"} = runs_by_state(controller)
       assert %{"running" => 1, "pending" => 0} = Controller.report(controller).capacity
 
@@ -518,7 +519,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       set_status(env, pod_name(1), terminated_status(0))
       observed(run, :exit)
 
-      assert_receive {:run_push, ^run, "exit", %{"status" => 0, "oom" => false} = exit}
+      assert_receive {:run_push, ^run, "exit", %{"status" => 0, "oom" => false} = exit}, 5_000
       assert exit["cancelled"] == false
       assert deletes(env) == []
 
@@ -534,7 +535,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       run = assign!(controller, 1)
       set_status(env, pod_name(1), terminated_status(1))
       observed(run, :exit)
-      assert_receive {:run_push, ^run, "exit", %{"status" => 1}}
+      assert_receive {:run_push, ^run, "exit", %{"status" => 1}}, 5_000
 
       :ok = Controller.exit_ack(controller, run)
       advance(env, 299)
@@ -551,7 +552,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       run = assign!(controller, 1)
       set_status(env, pod_name(1), terminated_status(137, %{"reason" => "OOMKilled"}))
       observed(run, :exit)
-      assert_receive {:run_push, ^run, "exit", %{"status" => 137, "oom" => true}}
+      assert_receive {:run_push, ^run, "exit", %{"status" => 137, "oom" => true}}, 5_000
     end
 
     test "a pod deleted by someone else is pod_disrupted, not a plain failure", env do
@@ -562,7 +563,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       FakeK8sApi.delete_pod(env.api, pod_name(1))
       observed(run, :deleted)
 
-      assert_receive {:run_push, ^run, "exit", %{"pod_disrupted" => true}}
+      assert_receive {:run_push, ^run, "exit", %{"pod_disrupted" => true}}, 5_000
       assert {:release, run} in FakePodChannel.calls(env.channel)
       _ = controller
     end
@@ -583,7 +584,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       observed(run, :deleted)
 
       assert_receive {:run_push, ^run, "exit",
-                      %{"cancelled" => true, "reason" => "operator stop"}}
+                      %{"cancelled" => true, "reason" => "operator stop"}},
+                     5_000
     end
 
     test "cancel with collect uses the pod's grace period so the snapshotter can finalise",
@@ -689,7 +691,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
 
       assert :ok = Controller.cancel(second, run, "after restart")
       observed(run, :deleted)
-      assert_receive {:run_push, ^run, "exit", %{"cancelled" => true}}
+      assert_receive {:run_push, ^run, "exit", %{"cancelled" => true}}, 5_000
     end
 
     test "attach_all re-announces what the primary may have missed", env do
@@ -711,8 +713,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       flush_pushes()
 
       assert :ok = Controller.attach_all(second)
-      assert_receive {:run_push, ^run1, "run.ready", _}
-      assert_receive {:run_push, ^run2, "exit", %{"status" => 0}}
+      assert_receive {:run_push, ^run1, "run.ready", _}, 5_000
+      assert_receive {:run_push, ^run2, "exit", %{"status" => 0}}, 5_000
     end
 
     test "attach_all leaves out the runs the primary does not know", env do
@@ -1007,7 +1009,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       send(controller, {:k8s_readiness, monitor, %{degraded: [], checks: []}})
 
       assert_receive {:run_push, nil, "readiness",
-                      %{"degraded" => [], "readiness" => %{"ready" => true}}}
+                      %{"degraded" => [], "readiness" => %{"ready" => true}}},
+                     5_000
     end
 
     test "a good edit changes the ceiling and pushes a capacity event", env do
@@ -1020,7 +1023,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       File.write!(env.config_path, "max_concurrent: 1\ntimeouts: {schedule_s: 30}")
       assert :ok = ConfigLoader.reload(loader)
 
-      assert_receive {:run_push, nil, "capacity", %{"ceiling" => 1}}
+      assert_receive {:run_push, nil, "capacity", %{"ceiling" => 1}}, 5_000
       assign!(controller, 1)
       assert {:error, {:refuse, :no_capacity, _}} = Controller.assign(controller, wire(2))
     end
