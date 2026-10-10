@@ -57,7 +57,9 @@ defmodule Arbiter.Worker.ResumeSlot do
   """
 
   alias Arbiter.Accounts.SlotLimit
+  alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Tasks.IdleTickets
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Workers.Run
@@ -108,10 +110,9 @@ defmodule Arbiter.Worker.ResumeSlot do
         {:ok, :held}
 
       true ->
-        holders =
-          opts
-          |> Keyword.get_lazy(:tickets, &tickets_in_progress/0)
-          |> holders_but(task, slot_opts(opts))
+        tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
+        slot_opts = Keyword.put_new_lazy(slot_opts(opts), :idle_ids, fn -> idle_ids(tickets) end)
+        holders = holders_but(tickets, task, slot_opts)
 
         cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
         acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
@@ -155,7 +156,14 @@ defmodule Arbiter.Worker.ResumeSlot do
   defp holders_but(tickets, %Issue{id: id}, slot_opts),
     do: tickets |> SlotGate.slot_holders(slot_opts) |> List.delete(id)
 
-  defp slot_opts(opts), do: Keyword.take(opts, [:held_ids])
+  # bd-3fbj83: orphaned tickets (no run, nothing queued) hold no slot.
+  defp idle_ids(tickets) do
+    IdleTickets.ids(tickets, queued_ids: Autopilot.deferred_resume_ids())
+  rescue
+    _ -> []
+  end
+
+  defp slot_opts(opts), do: Keyword.take(opts, [:held_ids, :idle_ids])
 
   @doc """
   Was `task_id`'s latest main run cut off by a restart rather than ended on its

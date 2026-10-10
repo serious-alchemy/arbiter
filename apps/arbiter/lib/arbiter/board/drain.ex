@@ -82,10 +82,12 @@ defmodule Arbiter.Board.Drain do
   """
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Tasks.IdleTickets
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Worker
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.ReviewPass
 
   require Ash.Query
 
@@ -222,8 +224,17 @@ defmodule Arbiter.Board.Drain do
 
     in_flight = promotions ++ tracked ++ workers
 
-    slot_holders =
-      opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> SlotGate.slot_holders()
+    tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
+
+    idle_ids =
+      Keyword.get_lazy(opts, :idle_ids, fn ->
+        IdleTickets.ids(tickets,
+          queued_ids:
+            Map.get(autopilot, :deferred_resumes, []) ++ Enum.map(in_flight, & &1.task_id)
+        )
+      end)
+
+    slot_holders = SlotGate.slot_holders(tickets, idle_ids: idle_ids)
 
     state =
       cond do
@@ -242,7 +253,7 @@ defmodule Arbiter.Board.Drain do
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
-      held_local_capacity: Map.get(autopilot, :held_local_capacity, []),
+      held_local_capacity: held_local_capacity(autopilot, tickets),
       capacity: capacity(Keyword.get(opts, :capacity)),
       checked_at: DateTime.utc_now()
     }
@@ -258,6 +269,16 @@ defmodule Arbiter.Board.Drain do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  # bd-3fbj83: the resumes the autopilot holds for local capacity, plus the fix
+  # rounds a ReviewGate holds (`ReviewPass`'s `held` marker, which is also what a
+  # restart re-arms them from).
+  defp held_local_capacity(autopilot, tickets) do
+    gate_held =
+      for ticket <- tickets, match?(%{"held" => true}, ReviewPass.stored(ticket)), do: ticket.id
+
+    Enum.uniq(Map.get(autopilot, :held_local_capacity, []) ++ gate_held)
   end
 
   # The board-wide quota/auth hold in the account-qualified wording the board

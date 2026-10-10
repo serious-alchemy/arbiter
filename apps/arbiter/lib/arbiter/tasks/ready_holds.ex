@@ -26,7 +26,12 @@ defmodule Arbiter.Tasks.ReadyHolds do
   end
 
   def for_workspace(ws_id) when is_binary(ws_id) do
-    [workspace_id: ws_id, paused: scheduler_idle?(), exclude_engagements?: true]
+    [
+      workspace_id: ws_id,
+      paused: scheduler_idle?(),
+      exclude_engagements?: true,
+      idle_check: &idle_ids/1
+    ]
     |> Snapshot.load()
     |> Map.get(:ready, [])
     |> Enum.filter(&(&1.state == :blocked))
@@ -34,6 +39,10 @@ defmodule Arbiter.Tasks.ReadyHolds do
   rescue
     _ -> %{}
   end
+
+  # bd-3fbj83: orphaned tickets hold no slot.
+  defp idle_ids(issues),
+    do: Arbiter.Tasks.IdleTickets.ids(issues, queued_ids: Autopilot.deferred_resume_ids())
 
   # A scheduler that is not running, or does not answer, counts as paused — the
   # reading that under-promises.

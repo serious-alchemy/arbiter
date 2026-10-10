@@ -28,6 +28,7 @@ defmodule Arbiter.Workers.ReconcilerLocalCapacitySweepTest do
     defdelegate reconcile_shutdown_casualties(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_ci_waits(opts), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_review_passes(opts), to: Arbiter.Workers.Reconciler
+    defdelegate reconcile_held_resumes(opts), to: Arbiter.Workers.Reconciler
     defdelegate restarted_ids(lists), to: Arbiter.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Arbiter.Workers.Reconciler
 
