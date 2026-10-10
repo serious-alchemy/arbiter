@@ -262,7 +262,11 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert Ash.get!(Issue, issue.id).state == :queued
     end
 
-    test "a research dispatch (no private clone) is held with that reason", %{ws: ws} do
+    # bd-6ypj2y: a task/research ticket has no branch, but a podman Claude run of
+    # one gets a read-only seeded checkout, so it is a placement candidate. What
+    # keeps the structural guard is the rest: bwrap/unsandboxed and non-Claude runs
+    # stay local, and so does a dispatch that gets no checkout at all.
+    defp research!(ws) do
       {:ok, created} =
         Ash.create(Issue, %{
           title: "research it",
@@ -272,9 +276,40 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
         })
 
       {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
+      issue
+    end
+
+    test "a non-podman research dispatch is held as local-only (not podman)", %{ws: ws} do
+      issue = research!(ws)
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue)
+      assert info.phrase =~ "run is local-only: sandbox is not podman"
+    end
+
+    test "a non-Claude podman task dispatch is held as local-only (provider)", %{ws: ws} do
+      issue = research!(ws)
+
+      assert {:error, {:no_node_capacity, info}} =
+               dispatch(issue, @podman ++ [agent_type: :codex])
+
+      assert info.phrase =~ "run is local-only: provider codex has no podman path"
+    end
+
+    test "a research dispatch given no checkout at all is held with that reason", %{ws: ws} do
+      issue = research!(ws)
+
+      assert {:error, {:no_node_capacity, info}} =
+               dispatch(issue, @podman ++ [provision_worktree: false])
+
+      assert info.phrase =~ "run is local-only: no checkout (provision_worktree: false)"
+    end
+
+    test "a podman Claude research dispatch is a node candidate, held while none is free" do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = research!(ws)
 
       assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman)
-      assert info.phrase =~ "run is local-only: no private clone (task or research dispatch)"
+      assert info.phrase =~ "held — local capacity 0 (no node had a free slot)"
     end
 
     test "force_slot goes over the cap", %{ws: ws} do
