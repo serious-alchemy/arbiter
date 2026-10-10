@@ -237,8 +237,20 @@ defmodule Arbiter.Agents.ProviderRouting do
         }
   def availability(%Workspace{} = ws, task, opts \\ []) do
     {record, available, dropped} = run_evaluation(ws, task, opts)
-    %{record: record, available: available, dropped: dropped, capacity: total_capacity(available)}
+
+    # The walk counts seats against budgets itself; account headroom is not read.
+    capacity = if walk?(opts), do: nil, else: total_capacity(available)
+
+    %{record: record, available: available, dropped: dropped, capacity: capacity}
   end
+
+  # DC6 (provider-dynamic-concurrency §4.2): `admission: :walk` asks who the
+  # ticket is *eligible* for. The scheduler walk's pool budgets and live seats
+  # replace the account-capacity and paced-line drops, so neither runs; every
+  # other drop — constraint, guardrails, sandbox, account, adapter, CLI, auth,
+  # circuit, confinement, capability, floor, the spend cap — is dispatch's.
+  # Only the walk passes it (`Arbiter.Board.WalkInputs`); dispatch never does.
+  defp walk?(opts), do: Keyword.get(opts, :admission) == :walk
 
   # bd-13pqcp: a constrained ticket's record names its constraint.
   defp put_constraint(record, task) do
@@ -783,7 +795,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       scoring: scoring_config(ws, task, opts),
       floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
       guardrails: guardrail_gate(task, opts),
-      gate: Arbiter.Quota.gate_for_workspace(ws)
+      gate: Arbiter.Quota.gate_for_workspace(ws),
+      walk?: walk?(opts)
     }
   end
 
@@ -924,7 +937,37 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp check(entry, ctx) do
-    checks = [
+    Enum.reduce_while(checks(ctx), {:ok, entry}, fn check, {:ok, entry} ->
+      case check.(entry, ctx) do
+        {:ok, entry} -> {:cont, {:ok, entry}}
+        {:drop, reason, detail} -> {:halt, {:drop, drop(entry, reason, detail)}}
+        {:drop, reason, detail, extra} -> {:halt, {:drop, drop(entry, reason, detail, extra)}}
+      end
+    end)
+  end
+
+  # The walk's eligibility (`walk?/1`): no capacity check, and the quota step
+  # keeps only the spend cap, ranking by headroom without the paced hold.
+  defp checks(%{walk?: true}) do
+    [
+      &check_guardrails/2,
+      &check_constraint/2,
+      &check_sandbox_backend/2,
+      &check_account/2,
+      &check_adapter/2,
+      &check_guardrail_floor/2,
+      &check_cli/2,
+      &check_auth/2,
+      &check_circuit/2,
+      &check_confinement/2,
+      &check_capability/2,
+      &check_floor/2,
+      &check_walk_quota/2
+    ]
+  end
+
+  defp checks(_ctx) do
+    [
       &check_guardrails/2,
       &check_constraint/2,
       &check_sandbox_backend/2,
@@ -940,14 +983,6 @@ defmodule Arbiter.Agents.ProviderRouting do
       &check_floor/2,
       &check_quota/2
     ]
-
-    Enum.reduce_while(checks, {:ok, entry}, fn check, {:ok, entry} ->
-      case check.(entry, ctx) do
-        {:ok, entry} -> {:cont, {:ok, entry}}
-        {:drop, reason, detail} -> {:halt, {:drop, drop(entry, reason, detail)}}
-        {:drop, reason, detail, extra} -> {:halt, {:drop, drop(entry, reason, detail, extra)}}
-      end
-    end)
   end
 
   defp drop(entry, reason, detail, extra \\ %{}),
@@ -1167,22 +1202,36 @@ defmodule Arbiter.Agents.ProviderRouting do
         {:drop, "quota_held", Map.get(reason, :phrase)}
 
       _ ->
-        # The P0 pace exemption (bd-6bxv7h) reads the task's own priority: an
-        # exempt dispatch's headroom is against the lifted line, the same one
-        # the gate just allowed it through, and a dispatch that only got
-        # through on the exemption says so on its candidate.
-        priority = task_priority(ctx.task)
-        headroom_opts = [model: model, now: ctx.now, priority: priority]
-        entry = put_pace_exempt(entry, quota, account, ctx, headroom_opts)
+        {:ok, with_headroom(entry, quota, ctx)}
+    end
+  end
 
-        if ctx.scoring do
-          windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
-          headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
-          {:ok, entry |> Map.put(:headroom, headroom) |> Map.put(:windows, windows)}
-        else
-          headroom = Headroom.binding(quota, {account, ctx.ws}, headroom_opts)
-          {:ok, Map.put(entry, :headroom, headroom)}
-        end
+  # The walk (`walk?/1`): the spend cap still drops an account, as it does for
+  # dispatch; the paced line does not — the pool's budget answers it — but the
+  # headroom still ranks the survivors, so an account past its line ranks
+  # after every account with room (§7, R5).
+  defp check_walk_quota(%{account: account} = entry, ctx) do
+    case spend_hold(account, ctx) do
+      {:hold, reason} -> {:drop, "quota_held", Map.get(reason, :phrase)}
+      :ok -> {:ok, with_headroom(entry, ctx.quota_fun.(account), ctx)}
+    end
+  end
+
+  # The P0 pace exemption (bd-6bxv7h) reads the task's own priority: an exempt
+  # dispatch's headroom is against the lifted line, the same one the gate just
+  # allowed it through, and a dispatch that only got through on the exemption
+  # says so on its candidate.
+  defp with_headroom(%{account: account, model: model} = entry, quota, ctx) do
+    priority = task_priority(ctx.task)
+    headroom_opts = [model: model, now: ctx.now, priority: priority]
+    entry = put_pace_exempt(entry, quota, account, ctx, headroom_opts)
+
+    if ctx.scoring do
+      windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
+      headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
+      entry |> Map.put(:headroom, headroom) |> Map.put(:windows, windows)
+    else
+      Map.put(entry, :headroom, Headroom.binding(quota, {account, ctx.ws}, headroom_opts))
     end
   end
 
