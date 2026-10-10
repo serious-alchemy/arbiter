@@ -366,8 +366,24 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                       code, so the push goes ahead and CI is the backstop) or
                       "fail" (treated like a failed check). An infra error
                       (no worktree, command not found) always proceeds.
+      pre_push_checks "arbiter" (the built-in recipe: format, compile warnings,
+                      credo on touched files, doc/catalog drift tests, tests
+                      mapped from changed modules) or a list of steps
+                      {name, cmd, timeout_s (default 120), scope: "all" |
+                      "touched"} the commit gate runs in the run's own sandbox
+                      before anything is pushed (bd-8wdrql). A "touched" step
+                      may use {files}, {elixir_files}, {credo_files}, {test_files} in cmd and
+                      is skipped when they expand to nothing. A red step goes
+                      back to the same worker session; overrides prepush_check.
+      pre_push_budget_seconds
+                      positive integer — total time for all steps (default 180).
+      pre_push_max_attempts
+                      non-negative integer — send-backs before the run escalates
+                      (default 2).
       repos           map, repo name -> {seed_paths, prepush_check,
-                      prepush_check_timeout_seconds, prepush_check_on_timeout},
+                      prepush_check_timeout_seconds, prepush_check_on_timeout,
+                      pre_push_checks, pre_push_budget_seconds,
+                      pre_push_max_attempts},
                       deep-merged over the workspace-level value (per-repo wins)
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]

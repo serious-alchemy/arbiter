@@ -1,68 +1,72 @@
 defmodule Arbiter.Worker.PrepushCheck do
   @moduledoc """
-  The per-repo pre-push check (bd-28c6qo, GitHub #24): a command the worker
-  commit gate runs in the worker's checkout before the branch is pushed or a
-  PR is opened, so a lint-class failure (format, credo, dialyzer, …) bounces
-  back to the same worker session instead of costing a CI run and a fix pass.
+  The per-repo pre-push check recipe (bd-28c6qo, GitHub #24; multi-step recipe
+  bd-8wdrql, GitHub #662): the commands the worker commit gate runs before the
+  branch is pushed or a PR is opened, so a lint-class failure (format, compile
+  warning, credo, a broken doc citation, a test the change broke) bounces back
+  to the same live worker session instead of costing a CI run and a cold fix pass.
 
   ## Config
 
-  Resolved like `worker.repos.<repo>.seed_paths` (`Arbiter.Worker.SeedPaths`):
-  `worker.repos.<repo>` is deep-merged over the workspace-level `worker` block.
+  See `Arbiter.Worker.PrepushCheck.Recipe`. `worker.repos.<repo>` is deep-merged
+  over the workspace-level `worker` block:
 
       {"worker": {
-        "prepush_check": "make lint",
-        "prepush_check_timeout_seconds": 1200,
         "repos": {
-          "arbiter": {"prepush_check": "mix precommit && mix audit"}
+          "arbiter": {"pre_push_checks": "arbiter"}
         }
       }}
 
-    * `prepush_check` — a shell command (`sh -c`), run in the worktree. Unset
-      or blank at both levels means **no check and no behaviour change**.
-    * `prepush_check_timeout_seconds` — positive integer, default
-      1200. Size it for the slowest step: dialyzer with a cold PLT takes
-      ~7 minutes on its own (seed `priv/plts` via `worker.repos.<repo>.seed_paths`
-      to avoid that).
-    * `prepush_check_on_timeout` — `"proceed"` (default) or `"fail"`.
+  `pre_push_checks` is a list of `{name, cmd, timeout_s, scope}` steps (or the
+  `"arbiter"` preset), bounded by `pre_push_budget_seconds` in total. The older
+  single-command `prepush_check` (+ `_timeout_seconds`) is one step. Unset or
+  blank at both levels means **no check and no behaviour change**.
 
-  ## Outcomes (`run/2`)
+  ## Outcomes (`run_steps/3`, `run/2`)
 
-    * exit 0 → `:ok`; the push proceeds.
-    * non-zero exit → `{:failed, status, output}`; the worker commit gate sends
-      `output` back to the same session and nothing is pushed.
-    * timed out → `{:timeout, output}`. A timeout says nothing about the code
-      (a slow or contended host), so by default the gate **fails open** — it logs
-      and lets the push go ahead, CI being the backstop — mirroring
-      `Arbiter.Agents.Preflight`'s timeout. `on_timeout: :fail` treats it as a
-      failure instead.
-    * the check could not be run at all (no worktree on disk, no `timeout`
-      binary, `sh` could not exec the command → 126/127, spawn raised) →
-      `{:error, reason}`; always fails open. A broken check must not strand work.
+  Every step runs (a red format step does not hide a red credo step) unless the
+  total budget runs out, in which case the rest are `:skipped`. The overall
+  `result`:
 
-  The command runs under coreutils `timeout` (SIGTERM to its whole process
-  group, SIGKILL 10 s later), so descendants like `mix`/`dialyzer` die with it.
-  It gets the sanitised `Arbiter.Worker.SpawnEnv` environment (no server
+    * all steps green or skipped for having nothing to check → `:ok`; the push proceeds.
+    * a step exited non-zero → `{:failed, status, output}` (the first one); the
+      worker commit gate sends every failed step's output back to the same
+      session and nothing is pushed.
+    * a step timed out, or the budget ran out → `{:timeout, output}`. A timeout
+      says nothing about the code (a slow or contended host), so by default the
+      gate **fails open** — it logs and lets the push go ahead, CI being the
+      backstop. `on_timeout: :fail` treats it as a failure instead.
+    * the checks could not be run at all (no worktree on disk, no `timeout`
+      binary, a command `sh` could not exec → 126/127, the sandbox refused,
+      spawn raised) → `{:error, reason}`; always fails open. A broken check
+      must not strand work.
+
+  `steps` is the per-step record (`t:step_result/0`) the worker writes to the
+  run (`Arbiter.Workers.RunStep` rows) and `arb worker show` renders.
+
+  ## Where it runs
+
+  On the host, in the worktree, under coreutils `timeout` (SIGTERM to its whole
+  process group, SIGKILL 10 s later, so `mix`/`dialyzer` descendants die with
+  it), with the sanitised `Arbiter.Worker.SpawnEnv` environment (no server
   secrets, no inherited `MIX_ENV`) and a private per-run `TMPDIR`
-  (`Arbiter.Worker.RunTmp`), removed afterwards.
+  (`Arbiter.Worker.RunTmp`). A podman-sandboxed run passes `:exec` instead
+  (`Arbiter.Worker.ContainerSpawn.run_command/3`): the same steps then run in
+  the run's own container, with its mounts, home and no network.
   """
 
   require Logger
 
+  alias Arbiter.Worker.PrepushCheck.Recipe
+  alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.RunTmp
-  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.SpawnEnv
 
-  @default_timeout_seconds 1200
   @kill_after_seconds 10
   @max_output_bytes 16_000
 
-  @type spec :: %{
-          command: String.t(),
-          timeout_seconds: pos_integer(),
-          on_timeout: :proceed | :fail
-        }
+  @type spec :: Recipe.spec() | map()
 
   @type result ::
           :ok
@@ -70,105 +74,243 @@ defmodule Arbiter.Worker.PrepushCheck do
           | {:timeout, String.t()}
           | {:error, term()}
 
-  @doc "The default `prepush_check_timeout_seconds`."
+  @type step_result :: %{
+          name: String.t(),
+          cmd: String.t(),
+          scope: Recipe.scope(),
+          status: :passed | :failed | :timeout | :skipped | :error,
+          exit_status: non_neg_integer() | nil,
+          duration_ms: non_neg_integer(),
+          limit_s: pos_integer() | nil,
+          output: String.t(),
+          reason: atom() | nil
+        }
+
+  @doc "The default `prepush_check_timeout_seconds` of the single-command form."
   @spec default_timeout_seconds() :: pos_integer()
-  def default_timeout_seconds, do: @default_timeout_seconds
+  defdelegate default_timeout_seconds, to: Recipe, as: :default_legacy_timeout_seconds
 
   @doc """
-  The check configured for `repo` in `workspace` (a `Workspace`, any
+  The recipe configured for `repo` in `workspace` (a `Workspace`, any
   config-bearing map, or `nil`), or `nil` when none is set.
   """
   @spec resolve(term(), String.t() | nil) :: spec() | nil
-  def resolve(%{config: %{"worker" => %{} = worker}}, repo) do
-    effective = SeedPaths.effective(worker, repo)
-
-    case effective do
-      %{"prepush_check" => command} when is_binary(command) ->
-        build_spec(String.trim(command), effective)
-
-      _ ->
-        nil
-    end
-  end
-
-  def resolve(_workspace, _repo), do: nil
-
-  defp build_spec("", _effective), do: nil
-
-  defp build_spec(command, effective) do
-    %{
-      command: command,
-      timeout_seconds: timeout_seconds(Map.get(effective, "prepush_check_timeout_seconds")),
-      on_timeout: on_timeout(Map.get(effective, "prepush_check_on_timeout"))
-    }
-  end
-
-  defp timeout_seconds(n) when is_integer(n) and n > 0, do: n
-  defp timeout_seconds(_), do: @default_timeout_seconds
-
-  defp on_timeout("fail"), do: :fail
-  defp on_timeout(_), do: :proceed
+  defdelegate resolve(workspace, repo), to: Recipe
 
   @doc """
-  Run the check in `worktree`. Blocks for up to `timeout_seconds` (plus the
-  kill grace) — call it from a task, not a GenServer callback.
+  Run the recipe in `worktree` and return only the overall result. Blocks for up
+  to the budget (plus the kill grace) — call it from a task, not a GenServer callback.
   """
   @spec run(spec(), String.t()) :: result()
-  def run(%{command: command, timeout_seconds: seconds}, worktree) when is_binary(worktree) do
+  def run(spec, worktree), do: run_steps(spec, worktree).result
+
+  @doc """
+  Run every step of `spec` in `worktree`, in order, within the spec's total budget.
+
+  Options: `:target` — the branch the diff is taken against for `scope: touched`
+  steps (the task's target branch); `:exec` — `fn command, timeout_s ->
+  {output, status} | {:error, term}` to run each (already expanded) command in
+  place of the host (the sandbox hook).
+  """
+  @spec run_steps(spec(), String.t(), keyword()) :: %{result: result(), steps: [step_result()]}
+  def run_steps(spec, worktree, opts \\ []) when is_binary(worktree) do
     with :ok <- check_worktree(worktree),
-         {:ok, timeout_bin} <- find_timeout() do
-      run_in_tmp(timeout_bin, command, seconds, worktree)
+         {:ok, exec, cleanup} <- executor(worktree, opts) do
+      try do
+        run_all(spec, worktree, exec, opts)
+      after
+        cleanup.()
+      end
+    else
+      {:error, _} = err -> %{result: err, steps: []}
     end
   rescue
-    e -> {:error, {:spawn_failed, Exception.message(e)}}
+    e -> %{result: {:error, {:spawn_failed, Exception.message(e)}}, steps: []}
   end
 
   defp check_worktree(worktree) do
     if File.dir?(worktree), do: :ok, else: {:error, {:no_worktree, worktree}}
   end
 
-  defp find_timeout do
-    case System.find_executable("timeout") do
-      nil -> {:error, :no_timeout_binary}
-      path -> {:ok, path}
+  defp executor(worktree, opts) do
+    case Keyword.get(opts, :exec) do
+      fun when is_function(fun, 2) -> {:ok, fun, fn -> :ok end}
+      _ -> host_executor(worktree)
     end
   end
 
-  defp run_in_tmp(timeout_bin, command, seconds, worktree) do
-    tmp =
-      case RunTmp.create("prepush") do
-        {:ok, dir} -> dir
-        {:error, _} -> nil
+  defp host_executor(worktree) do
+    case System.find_executable("timeout") do
+      nil ->
+        {:error, :no_timeout_binary}
+
+      timeout_bin ->
+        tmp =
+          case RunTmp.create("prepush") do
+            {:ok, dir} -> dir
+            {:error, _} -> nil
+          end
+
+        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp), nil)
+
+        exec = fn command, seconds ->
+          args = [
+            "--kill-after=#{@kill_after_seconds}",
+            Integer.to_string(seconds),
+            "sh",
+            "-c",
+            command
+          ]
+
+          ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
+        end
+
+        {:ok, exec, fn -> RunTmp.remove(tmp) end}
+    end
+  end
+
+  defp run_all(spec, worktree, exec, opts) do
+    steps = steps_of(spec)
+    budget = Map.get(spec, :budget_seconds) || spec.timeout_seconds
+    deadline = System.monotonic_time(:millisecond) + budget * 1000
+    touched = touched_for(steps, worktree, Keyword.get(opts, :target))
+
+    results = Enum.map(steps, &run_step(&1, worktree, touched, deadline, exec))
+    %{result: overall(results), steps: results}
+  end
+
+  # A spec built outside `Recipe` (the legacy shape) is one step.
+  defp steps_of(%{steps: [_ | _] = steps}), do: steps
+
+  defp steps_of(%{command: command, timeout_seconds: seconds}),
+    do: [%{name: "prepush_check", cmd: command, timeout_s: seconds, scope: :all}]
+
+  defp touched_for(steps, worktree, target) do
+    if Enum.any?(steps, &(&1.scope == :touched)), do: Touched.files(worktree, target), else: :none
+  end
+
+  defp run_step(step, worktree, touched, deadline, exec) do
+    started = System.monotonic_time(:millisecond)
+    remaining = div(deadline - started + 999, 1000)
+
+    limit = min(step.timeout_s, max(remaining, 0))
+
+    outcome =
+      if remaining <= 0 do
+        {:skipped, :budget, "skipped: the total time budget was already spent"}
+      else
+        expand_and_run(step, worktree, touched, limit, exec)
       end
 
-    try do
-      args = [
-        "--kill-after=#{@kill_after_seconds}",
-        Integer.to_string(seconds),
-        "sh",
-        "-c",
-        command
-      ]
+    record(step, outcome, System.monotonic_time(:millisecond) - started, limit)
+  end
 
-      env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp), nil)
+  defp expand_and_run(step, worktree, touched, seconds, exec) do
+    case expand(step, worktree, touched) do
+      :nothing_touched ->
+        {:skipped, :untouched, "skipped: no touched files for this step"}
 
-      timeout_bin
-      |> ReleaseEnv.cmd(args, cd: worktree, env: env, stderr_to_stdout: true)
-      |> classify()
-    after
-      RunTmp.remove(tmp)
+      {:ok, command} ->
+        command |> safe_exec(exec, seconds) |> classify()
     end
   end
+
+  defp safe_exec(command, exec, seconds) do
+    exec.(command, seconds)
+  rescue
+    e -> {:error, {:spawn_failed, Exception.message(e)}}
+  end
+
+  @placeholders [
+    {"{files}", :all_files},
+    {"{elixir_files}", :elixir_files},
+    {"{credo_files}", :credo_files},
+    {"{test_files}", :test_files}
+  ]
+
+  defp expand(%{scope: :touched, cmd: cmd}, worktree, touched) do
+    present = for {token, kind} <- @placeholders, String.contains?(cmd, token), do: {token, kind}
+
+    case {present, touched} do
+      {[], _} ->
+        {:ok, cmd}
+
+      {_, {:ok, files}} ->
+        replaced = for {token, kind} <- present, do: {token, files_for(kind, files, worktree)}
+
+        if Enum.any?(replaced, fn {_, list} -> list == [] end) do
+          :nothing_touched
+        else
+          {:ok,
+           Enum.reduce(replaced, cmd, fn {t, list}, acc ->
+             String.replace(acc, t, Touched.quote_args(list))
+           end)}
+        end
+
+      # The diff base could not be resolved: run the command over everything
+      # (the placeholder simply drops out) rather than silently skipping it.
+      {_, _} ->
+        {:ok, Enum.reduce(present, cmd, fn {token, _}, acc -> String.replace(acc, token, "") end)}
+    end
+  end
+
+  defp expand(%{cmd: cmd}, _worktree, _touched), do: {:ok, cmd}
+
+  defp files_for(:all_files, files, _worktree), do: files
+  defp files_for(:elixir_files, files, _worktree), do: Touched.elixir_files(files)
+  defp files_for(:credo_files, files, _worktree), do: Touched.credo_files(files)
+  defp files_for(:test_files, files, worktree), do: Touched.test_files(files, worktree)
 
   # coreutils `timeout`: 124 = the command timed out, 137 = it needed the
   # SIGKILL; 126/127 = `sh` could not exec the command itself.
-  defp classify({_output, 0}), do: :ok
-  defp classify({output, status}) when status in [124, 137], do: {:timeout, tail(output)}
+  defp classify({:error, reason}), do: {:error, reason, ""}
+  defp classify({_output, 0}), do: {:passed, 0, ""}
+  defp classify({output, status}) when status in [124, 137], do: {:timeout, status, tail(output)}
 
   defp classify({output, status}) when status in [126, 127],
-    do: {:error, {:not_runnable, status, tail(output)}}
+    do: {:error, {:not_runnable, status, tail(output)}, tail(output)}
 
   defp classify({output, status}), do: {:failed, status, tail(output)}
+
+  defp record(step, outcome, duration_ms, limit) do
+    {status, exit_status, reason, output} =
+      case outcome do
+        {:skipped, why, note} -> {:skipped, nil, why, note}
+        {:error, why, out} -> {:error, nil, why, out}
+        {status, code, out} -> {status, code, nil, out}
+      end
+
+    %{
+      name: step.name,
+      cmd: step.cmd,
+      scope: step.scope,
+      status: status,
+      exit_status: exit_status,
+      duration_ms: max(duration_ms, 0),
+      limit_s: if(limit > 0, do: limit),
+      output: output,
+      reason: reason
+    }
+  end
+
+  defp overall(results) do
+    cond do
+      failed = Enum.find(results, &(&1.status == :failed)) ->
+        {:failed, failed.exit_status, failed.output}
+
+      timed_out = Enum.find(results, &(&1.status == :timeout or budget_skip?(&1))) ->
+        {:timeout, timed_out.output}
+
+      errored = Enum.find(results, &(&1.status == :error)) ->
+        {:error, errored.reason}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp budget_skip?(%{status: :skipped, reason: :budget}), do: true
+  defp budget_skip?(_), do: false
 
   @doc """
   The last `max` bytes of `text`, cut on a line boundary and prefixed with a
@@ -236,21 +378,13 @@ defmodule Arbiter.Worker.PrepushCheck do
     """
     #{intro}
 
-    Check command (run from the repo root of your worktree):
-
-        #{command(meta)}
-
-    #{what_happened(detail)}
-
-    Output (last lines):
-
-    #{indent(output(detail))}
+    #{check_section(meta, detail, @max_output_bytes)}
 
     Do EXACTLY this, then print `arb done` again on its own line:
 
       1. Fix what the output reports. Do not delete or weaken the check, and
          do not skip it with flags — change the code.
-      2. Re-run the check command above yourself until it exits 0.
+      2. Re-run the failing command(s) above yourself until they exit 0.
       3. #{step_3}
     """
   end
@@ -264,11 +398,57 @@ defmodule Arbiter.Worker.PrepushCheck do
     detail = Map.get(meta, :prepush_detail)
     branch = Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch) || "(unknown)"
 
-    "the pre-push check (`worker.prepush_check`) is red on branch `#{branch}`, so the " <>
-      "branch was NOT pushed.\n\nCommand: #{command(meta)}\n" <>
-      "#{what_happened(detail)}\n\nOutput (last lines):\n" <>
-      indent(output(detail, @summary_output_bytes))
+    "the pre-push check (`worker.pre_push_checks`) is red on branch `#{branch}`, so the " <>
+      "branch was NOT pushed.\n\n" <> check_section(meta, detail, @summary_output_bytes)
   end
+
+  # The "what failed" block. With per-step results (a recipe run) it names each
+  # failed step with its own bounded output and lists the whole recipe for a
+  # manual re-run; without them (the legacy single command) it is the one command.
+  defp check_section(meta, detail, max) do
+    case failed_steps(meta) do
+      [] -> single_section(meta, detail, max)
+      failed -> steps_section(meta, failed, max)
+    end
+  end
+
+  defp single_section(meta, detail, max) do
+    "Check command (run from the repo root of your worktree):\n\n" <>
+      "    #{command(meta)}\n\n" <>
+      "#{what_happened(detail)}\n\nOutput (last lines):\n\n" <> indent(output(detail, max))
+  end
+
+  defp steps_section(meta, failed, max) do
+    per_step = div(max, length(failed))
+
+    blocks =
+      Enum.map_join(failed, "\n\n", fn step ->
+        "Step `#{step.name}` (`#{step.cmd}`): #{step_what_happened(step)}\n\n" <>
+          "Output (last lines):\n\n" <> indent(tail(step.output, per_step))
+      end)
+
+    "Pre-push recipe, run from the repo root of your worktree (a step marked `touched` " <>
+      "only sees the files your branch changed):\n\n" <>
+      recipe_list(meta) <> "\n\n" <> blocks
+  end
+
+  defp recipe_list(meta) do
+    steps = Map.get(meta, :prepush_steps) || []
+    Enum.map_join(steps, "\n", &"    #{&1.name}: #{&1.cmd}")
+  end
+
+  defp failed_steps(meta) do
+    (Map.get(meta, :prepush_steps) || [])
+    |> Enum.filter(&(&1.status in [:failed, :timeout]))
+  end
+
+  defp step_what_happened(%{status: :failed, exit_status: status}),
+    do: "exited with status #{status}."
+
+  defp step_what_happened(%{status: :timeout} = step),
+    do:
+      "timed out after #{step.limit_s}s and was killed (this workspace treats a timeout as a failure: " <>
+        "`worker.prepush_check_on_timeout` is \"fail\")."
 
   defp command(meta) do
     case Map.get(meta, :prepush_spec) do
@@ -286,7 +466,6 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp what_happened(_), do: "It did not pass."
 
-  defp output(detail, max \\ @max_output_bytes)
   defp output({_, _, text}, max) when is_binary(text), do: tail(text, max)
   defp output({:exit, _, text}, max), do: tail(text, max)
   defp output(_, _max), do: "(no output)"
