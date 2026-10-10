@@ -223,7 +223,6 @@ defmodule Arbiter.NodeAgent.PodChannel.Cert do
     case :public_key.pkix_path_validation(der, [], []) do
       {:ok, _} = ok -> ok
       {:error, {:bad_cert, reason}} -> {:error, {:ca_invalid, reason}}
-      {:error, reason} -> {:error, {:ca_invalid, reason}}
     end
   end
 

@@ -162,8 +162,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
     notify(opts, {:pod_channel_upload, run, kind, summary(result)})
 
     case result do
-      {:ok, 200, body} -> raw(conn, 200, body)
-      {:rejected, status, body} -> raw(conn, status, body)
+      {:ok, 200, body} -> relay(conn, 200, body)
+      {:rejected, status, body} -> relay(conn, status, body)
       {:error, _reason} -> json(conn, 502, %{error: "primary_unreachable"})
     end
   end
@@ -223,7 +223,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
     end
   end
 
-  defp raw(conn, status, body) do
+  defp relay(conn, status, body) do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(status, if(is_binary(body), do: body, else: Jason.encode!(body)))

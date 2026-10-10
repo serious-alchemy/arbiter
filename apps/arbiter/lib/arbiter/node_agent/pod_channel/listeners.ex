@@ -35,7 +35,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Listeners do
       ttl_s: ttl_s,
       rotate_after_ms: Keyword.get(opts, :rotate_after_ms, div(ttl_s * 1000, 4)),
       sup: nil,
-      timer: nil
+      generation: 0
     }
 
     {:ok, start_listeners(state)}
@@ -51,11 +51,18 @@ defmodule Arbiter.NodeAgent.PodChannel.Listeners do
     do: {:reply, :ok, state |> stop_listeners() |> start_listeners()}
 
   @impl true
-  def handle_info(:rotate, state), do: {:noreply, state |> stop_listeners() |> start_listeners()}
+  def handle_info({:rotate, generation}, %{generation: generation} = state),
+    do: {:noreply, state |> stop_listeners() |> start_listeners()}
+
+  # a timer that outlived a manual rotation
+  def handle_info({:rotate, _stale}, state), do: {:noreply, state}
   def handle_info(_other, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, state), do: stop_listeners(state) && :ok
+  def terminate(_reason, state) do
+    _ = stop_listeners(state)
+    :ok
+  end
 
   defp start_listeners(%{opts: opts} = state) do
     ca = Keyword.fetch!(opts, :ca)
@@ -91,16 +98,14 @@ defmodule Arbiter.NodeAgent.PodChannel.Listeners do
         strategy: :one_for_all
       )
 
-    timer = Process.send_after(self(), :rotate, min(state.rotate_after_ms, 2_000_000_000))
-    %{state | sup: sup, timer: timer}
+    generation = state.generation + 1
+    Process.send_after(self(), {:rotate, generation}, min(state.rotate_after_ms, 2_000_000_000))
+    %{state | sup: sup, generation: generation}
   end
 
-  defp stop_listeners(%{sup: nil} = state), do: state
-
-  defp stop_listeners(%{sup: sup, timer: timer} = state) do
-    if timer, do: Process.cancel_timer(timer)
+  defp stop_listeners(%{sup: sup} = state) do
     Supervisor.stop(sup)
-    %{state | sup: nil, timer: nil}
+    %{state | sup: nil}
   end
 
   defp ports_of(sup) do

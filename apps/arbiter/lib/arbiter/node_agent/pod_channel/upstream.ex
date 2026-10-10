@@ -26,24 +26,6 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
   """
   @spec stream_seed(Config.t(), String.t(), String.t(), Plug.Conn.t()) :: Plug.Conn.t()
   def stream_seed(%Config{} = config, run, have, conn) do
-    sink = fn {:data, data}, {req, resp} ->
-      current = resp.private[:pod_conn] || conn
-
-      if resp.status == 200 do
-        current = if resp.private[:pod_started], do: current, else: start_chunked(current)
-
-        case Plug.Conn.chunk(current, data) do
-          {:ok, current} ->
-            {:cont, {req, resp |> put(:pod_conn, current) |> put(:pod_started, true)}}
-
-          {:error, _closed} ->
-            {:halt, {req, resp |> put(:pod_conn, current) |> put(:pod_gone, true)}}
-        end
-      else
-        {:cont, {req, %{resp | body: (resp.body || "") <> data}}}
-      end
-    end
-
     request =
       Req.new(
         [
@@ -51,27 +33,53 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
           params: [have: have],
           headers: [{"authorization", "Bearer " <> config.credential}],
           decode_body: false,
-          into: sink,
+          into: seed_sink(conn),
           retry: false,
           receive_timeout: @receive_timeout_ms
         ] ++ (config.req_options || [])
       )
 
-    case Req.get(request) do
-      {:ok, %Req.Response{status: 200} = resp} ->
-        finish_seed(resp, conn)
+    Process.delete(:pod_seed_started)
+    seed_result(Req.get(request), conn, run)
+  end
 
-      {:ok, %Req.Response{status: status, body: body}} ->
-        relay(conn, status, body)
+  defp seed_result({:ok, %Req.Response{status: 200} = resp}, conn, _run),
+    do: finish_seed(resp, conn)
 
-      {:error, reason} ->
-        if conn.state == :chunked or conn.state == :sent do
-          raise "pod channel: seed stream for #{run} broke: #{inspect(reason)}"
-        else
-          relay(conn, 502, ~s({"error":"primary_unreachable"}))
-        end
+  defp seed_result({:ok, %Req.Response{status: status, body: body}}, conn, _run),
+    do: relay(conn, status, body)
+
+  defp seed_result({:error, reason}, conn, run) do
+    if Process.get(:pod_seed_started) do
+      raise "pod channel: seed stream for #{run} broke: #{inspect(reason)}"
+    else
+      relay(conn, 502, ~s({"error":"primary_unreachable"}))
     end
   end
+
+  # The conn is threaded through the response's private map: the sink runs in this
+  # process, one chunk at a time.
+  defp seed_sink(conn) do
+    fn {:data, data}, {req, resp} -> seed_chunk(data, conn, req, resp) end
+  end
+
+  defp seed_chunk(data, conn, req, %{status: 200} = resp) do
+    current = resp.private[:pod_conn] || conn
+    current = if resp.private[:pod_started], do: current, else: start_chunked(current)
+    Process.put(:pod_seed_started, true)
+
+    case Plug.Conn.chunk(current, data) do
+      {:ok, current} ->
+        {:cont, {req, resp |> put(:pod_conn, current) |> put(:pod_started, true)}}
+
+      {:error, _closed} ->
+        {:halt, {req, resp |> put(:pod_conn, current) |> put(:pod_gone, true)}}
+    end
+  end
+
+  # a non-200 is a small JSON error: kept whole so it can be relayed
+  defp seed_chunk(data, _conn, req, resp),
+    do: {:cont, {req, %{resp | body: (resp.body || "") <> data}}}
 
   defp finish_seed(resp, conn) do
     case resp.private do
@@ -110,7 +118,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
   for any other status, `{:error, reason}` when the primary was unreachable or the
   pod's body broke off.
 
-  The body is pumped through a request task a chunk at a time, so the plug
+  The body is pumped through a request process a chunk at a time, so the plug
   process keeps the `conn` (and its adapter state) and no byte is buffered beyond
   one chunk.
   """
@@ -161,8 +169,10 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
         ] ++ (config.req_options || [])
       )
 
-    task = Task.async(fn -> send_request(request) end)
-    pump(conn, ref, task, false)
+    {_pid, monitor} =
+      spawn_monitor(fn -> send(parent, {ref, :result, send_request(request)}) end)
+
+    pump(conn, ref, monitor, false)
   end
 
   defp send_request(request) do
@@ -175,39 +185,42 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
     e -> {:error, {:upload_failed, Exception.message(e)}}
   end
 
-  defp pump(conn, ref, %Task{ref: task_ref} = task, done?) do
+  defp pump(conn, ref, monitor, done?) do
     receive do
-      {^task_ref, result} ->
-        Process.demonitor(task_ref, [:flush])
+      {^ref, :result, result} ->
+        Process.demonitor(monitor, [:flush])
         {result, conn}
 
+      {:DOWN, ^monitor, :process, _pid, reason} ->
+        {{:error, {:upload_failed, reason}}, conn}
+
       {^ref, :pull, from} ->
-        pump_chunk(conn, ref, task, from, done?)
+        pump_chunk(conn, ref, monitor, from, done?)
     end
   end
 
-  defp pump_chunk(conn, ref, task, from, true) do
+  defp pump_chunk(conn, ref, monitor, from, true) do
     send(from, {ref, :eof})
-    pump(conn, ref, task, true)
+    pump(conn, ref, monitor, true)
   end
 
-  defp pump_chunk(conn, ref, task, from, false) do
+  defp pump_chunk(conn, ref, monitor, from, false) do
     case Plug.Conn.read_body(conn, length: @read_length, read_length: @read_length) do
       {:ok, "", conn} ->
         send(from, {ref, :eof})
-        pump(conn, ref, task, true)
+        pump(conn, ref, monitor, true)
 
       {:ok, data, conn} ->
         send(from, {ref, :chunk, data})
-        pump(conn, ref, task, true)
+        pump(conn, ref, monitor, true)
 
       {:more, data, conn} ->
         send(from, {ref, :chunk, data})
-        pump(conn, ref, task, false)
+        pump(conn, ref, monitor, false)
 
       {:error, _reason} ->
         send(from, {ref, :abort})
-        pump(conn, ref, task, true)
+        pump(conn, ref, monitor, true)
     end
   end
 end

@@ -91,7 +91,10 @@ defmodule Arbiter.NodeAgent.PodChannel do
   @spec release(String.t()) :: :ok
   defdelegate release(run), to: Runs
 
-  @doc "Tell the run's snapshotter something over `GET /commands` (`%{\"op\" => \"checkpoint\"}`)."
+  @doc """
+  Queue a command map (an `op` key such as `checkpoint`) for the run's
+  snapshotter, delivered over `GET /commands`.
+  """
   @spec push_command(String.t(), map()) :: :ok | {:error, :unknown_run}
   defdelegate push_command(run, command), to: Runs
 

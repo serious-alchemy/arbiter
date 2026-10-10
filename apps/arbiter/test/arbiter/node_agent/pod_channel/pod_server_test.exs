@@ -44,6 +44,15 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
          ),
          do: send_resp(conn, 422, ~s({"error":{"veto":"submodules"}}))
 
+    defp route(
+           %{method: "GET", path_info: ["nodes", "runs", "broken-run", "seed.bundle"]} = conn,
+           _test
+         ) do
+      conn = send_chunked(conn, 200)
+      {:ok, _conn} = chunk(conn, String.duplicate("a", 1000))
+      raise "the primary died mid-bundle"
+    end
+
     defp route(%{method: "GET", path_info: ["nodes", "runs", run, "seed.bundle"]} = conn, test) do
       send(test, {:primary, :seed, run, conn.query_string})
       conn = send_chunked(conn, 200)
@@ -124,12 +133,17 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
     do: request(ctx, method, path, files, name, [])
 
   defp request(ctx, method, path, files, name, opts) do
+    {:ok, resp} = request_result(ctx, method, path, files, name, opts)
+    resp
+  end
+
+  defp request_result(ctx, method, path, files, name, opts) do
     transport =
       if files,
         do: Kit.client_opts(files, name, ctx.ca),
         else: Kit.client_opts_no_cert(ctx.ca)
 
-    Req.request!(
+    Req.request(
       [
         method: method,
         url: url(ctx, path),
@@ -276,6 +290,12 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
       assert String.ends_with?(resp.body, "tail:run-1")
       assert_receive {:primary, :seed, "run-1", query}
       assert query == "have=abc%2Cdef"
+    end
+
+    test "a primary that breaks off mid-bundle is not passed off as a whole bundle", ctx do
+      %{files: files} = Kit.boot!(ctx.runs, Kit.spec!("broken-run"), @loopback)
+
+      assert {:error, _} = request_result(ctx, :get, "/seed.bundle", files, "control", [])
     end
 
     test "relays the primary's refusal (a veto) rather than a bundle", ctx do
