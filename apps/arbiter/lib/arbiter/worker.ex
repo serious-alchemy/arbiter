@@ -2866,7 +2866,7 @@ defmodule Arbiter.Worker do
 
     # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
     # node stops counting against the primary's cap.
-    PRegistry.put_node(new_state.registry_key, node_id)
+    PRegistry.put_node(new_state.registry_key, handle_node_id(port))
 
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
