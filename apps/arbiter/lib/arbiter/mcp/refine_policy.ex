@@ -194,6 +194,8 @@ defmodule Arbiter.MCP.RefinePolicy do
 
     # guardrails (G15a): a worker asks for a permission; a refine session is not a worker
     "permission_request" => @deny_reason_permission_request,
+    "ticket_permission_grant" =>
+      "granting a permission is coordinator or operator authority; a refine session may only suggest permissions",
 
     # tracker
     "tracker_claim" => @deny_reason_tracker,
