@@ -1843,6 +1843,10 @@ defmodule Arbiter.MCP.Tools do
   defdelegate breaker_list(scope, args), to: Arbiter.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Arbiter.MCP.Tools.Breaker
 
+  defdelegate trust_show(scope, args), to: Arbiter.MCP.Tools.Trust
+  defdelegate trust_confirm(scope, args), to: Arbiter.MCP.Tools.Trust
+  defdelegate trust_dismiss(scope, args), to: Arbiter.MCP.Tools.Trust
+
   defdelegate worker_dispatch(scope, args), to: Arbiter.MCP.Tools.Worker
   defdelegate worker_resume(scope, args), to: Arbiter.MCP.Tools.Worker
   defdelegate worker_review(scope, args), to: Arbiter.MCP.Tools.Worker
