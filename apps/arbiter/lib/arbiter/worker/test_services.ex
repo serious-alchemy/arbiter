@@ -244,7 +244,6 @@ defmodule Arbiter.Worker.TestServices do
   defp valid_image?(image),
     do: is_binary(image) and image != "" and not String.starts_with?(image, "-")
 
-
   defp valid_pairs?(pairs) when is_list(pairs) do
     Enum.all?(pairs, fn
       {k, v} -> is_binary(k) and Regex.match?(@env_re, k) and is_binary(v) and not nul?(v)
