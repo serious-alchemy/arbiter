@@ -342,17 +342,15 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
         {:error, reason} -> {:api_error, reason}
       end
 
-    cond do
-      match?({:pending, _}, state) or match?({:api_error, _}, state) ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          {:timeout, state}
-        else
-          Process.sleep(poll)
-          poll_until(client, name, deadline, poll)
-        end
-
-      true ->
-        state
+    if match?({:pending, _}, state) or match?({:api_error, _}, state) do
+      if System.monotonic_time(:millisecond) >= deadline do
+        {:timeout, state}
+      else
+        Process.sleep(poll)
+        poll_until(client, name, deadline, poll)
+      end
+    else
+      state
     end
   end
 
@@ -388,15 +386,13 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       )
 
   defp judge({:finished, outcome, status}, client, name) do
-    cond do
-      gate_failed?(status) ->
-        result(:unenforced, open: ["gate"], pull: :ok)
-
-      true ->
-        case Client.read_log(client, name, container: "worker") do
-          {:ok, log} -> judge_log(outcome, log, status)
-          {:error, reason} -> result(:inconclusive, reason: {:log_unreadable, reason}, pull: :ok)
-        end
+    if gate_failed?(status) do
+      result(:unenforced, open: ["gate"], pull: :ok)
+    else
+      case Client.read_log(client, name, container: "worker") do
+        {:ok, log} -> judge_log(outcome, log, status)
+        {:error, reason} -> result(:inconclusive, reason: {:log_unreadable, reason}, pull: :ok)
+      end
     end
   end
 

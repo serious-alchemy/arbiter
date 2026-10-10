@@ -83,7 +83,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
   @spec listen_port(GenServer.server()) :: :inet.port_number() | nil
   def listen_port(server), do: GenServer.call(server, :listen_port)
 
-  @doc "The `readiness` block of `hello`: `%{\"ready\" => no check failed, \"checks\" => checks}`."
+  @doc ~S|The `readiness` block of `hello`: `%{"ready" => no check failed, "checks" => checks}`.|
   @spec hello_readiness(report()) :: map()
   def hello_readiness(%{checks: checks}),
     do: %{"ready" => Enum.all?(checks, &(&1["status"] != "fail")), "checks" => checks}
