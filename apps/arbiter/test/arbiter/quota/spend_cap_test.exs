@@ -284,6 +284,9 @@ defmodule Arbiter.Quota.SpendCapTest do
       refute SpendCap.fresh_dispatch?(%{id: "bd-1", state: :open}, review: true)
       refute SpendCap.fresh_dispatch?(%{id: "bd-1#review", state: :open}, [])
       refute SpendCap.fresh_dispatch?(%{id: "bd-1:fixpass", state: :open}, [])
+      refute SpendCap.fresh_dispatch?(%{id: "bd-1:conflict", state: :open}, [])
+      refute SpendCap.fresh_dispatch?(%{id: "bd-1#impl2", state: :open}, [])
+      refute SpendCap.fresh_dispatch?(%{id: "bd-1#review#r3", state: :open}, [])
     end
   end
 end

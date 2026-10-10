@@ -53,6 +53,44 @@ defmodule Arbiter.MCP.AccountSetToolTest do
     assert {:ok, %{label: "Via MCP", max_concurrent: 2}} = Accounts.get_account("mcp-edit")
   end
 
+  test "sets, shows and clears the dollar spend cap (bd-a6grlr)" do
+    account!("mcp-spend")
+
+    assert {:ok, %{account: shown}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-spend",
+               "quota_config" => %{
+                 "spend_cap" => 20,
+                 "spend_window" => "week",
+                 "spend_mode" => "paced",
+                 "spend_metered" => true
+               }
+             })
+
+    assert shown.quota_config == %{
+             "spend_cap" => 20.0,
+             "spend_window" => "week",
+             "spend_mode" => "paced",
+             "spend_metered" => true
+           }
+
+    assert {:ok, %{account: cleared}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-spend",
+               "quota_config" => %{"spend_cap" => nil}
+             })
+
+    refute Map.has_key?(cleared.quota_config, "spend_cap")
+
+    assert {:tool_error, message, "validation_error"} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-spend",
+               "quota_config" => %{"spend_window" => "fortnight"}
+             })
+
+    assert message =~ "spend_window"
+  end
+
   test "a bad value is an invalid error and writes nothing" do
     account!("mcp-bad", %{label: "Before"})
 

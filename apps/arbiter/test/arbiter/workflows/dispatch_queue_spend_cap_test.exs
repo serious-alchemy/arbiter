@@ -82,6 +82,21 @@ defmodule Arbiter.Workflows.DispatchQueueSpendCapTest do
     assert id == task.id
   end
 
+  test "a held follow-up on a started ticket is not spend-held at the drain", %{
+    ws: ws,
+    queue: queue
+  } do
+    {:ok, started} = Ash.create(Issue, %{title: "already started", workspace_id: ws.id})
+    {:ok, %Issue{state: :active} = started} = Issue.start_work(started)
+
+    # Held by the ordinary quota gate (a fix round, say), not by the spend cap.
+    :ok = DispatchQueue.hold(ws.id, started.id, [resume: true], %{phrase: "5h quota"}, :claude)
+
+    :ok = DispatchQueue.drain(queue)
+    assert_receive {:dispatched, id, _opts}
+    assert id == started.id
+  end
+
   test "drains once the cap is raised", %{queue: queue, account: account, task: task} do
     hold!(task)
     Ash.update!(account, %{quota_config: %{"spend_cap" => 100.0, "spend_metered" => true}})
