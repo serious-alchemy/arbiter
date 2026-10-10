@@ -86,6 +86,13 @@ defmodule Arbiter.Test.FakeK8sApi do
   @doc "Deletes a pod (as `kubectl delete` would); emits DELETED."
   def delete_pod(api, name), do: GenServer.call(api, {:delete, name})
 
+  @doc """
+  Makes a `DELETE` request terminate a pod the way a real cluster does: the pod stays,
+  stamped with a `deletionTimestamp` (one MODIFIED), until the test finishes it with
+  `delete_pod/2` (the DELETED). Off by default: a request then removes the pod at once.
+  """
+  def graceful_deletes(api, on? \\ true), do: GenServer.call(api, {:graceful, on?})
+
   @doc "Forgets the event history: any resourceVersion before now is expired."
   def compact(api), do: GenServer.call(api, :compact)
 
@@ -179,7 +186,8 @@ defmodule Arbiter.Test.FakeK8sApi do
        finished: MapSet.new(),
        clock: nil,
        psa: false,
-       on_create: nil
+       on_create: nil,
+       graceful: false
      }}
   end
 
@@ -201,6 +209,31 @@ defmodule Arbiter.Test.FakeK8sApi do
     state = %{state | rv: rv, pods: Map.put(state.pods, name, pod)}
     {:reply, pod, emit(state, rv, type, pod)}
   end
+
+  def handle_call({:graceful, on?}, _from, state), do: {:reply, :ok, %{state | graceful: on?}}
+
+  def handle_call({:delete, name, :request}, _from, %{graceful: true} = state) do
+    case Map.fetch(state.pods, name) do
+      :error ->
+        {:reply, :not_found, state}
+
+      {:ok, pod} ->
+        rv = state.rv + 1
+
+        pod =
+          update_in(pod, ["metadata"], fn meta ->
+            meta
+            |> Map.put("resourceVersion", Integer.to_string(rv))
+            |> Map.put_new("deletionTimestamp", "2026-10-10T12:00:01Z")
+          end)
+
+        state = %{state | rv: rv, pods: Map.put(state.pods, name, pod)}
+        {:reply, :ok, emit(state, rv, :modified, pod)}
+    end
+  end
+
+  def handle_call({:delete, name, :request}, from, state),
+    do: handle_call({:delete, name}, from, state)
 
   def handle_call({:delete, name}, _from, state) do
     case Map.pop(state.pods, name) do
@@ -584,7 +617,7 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
          _
        ) do
     with :ok <- check_fail(conn, api, :delete) do
-      case FakeK8sApi.handle(api, {:delete, name}) do
+      case FakeK8sApi.handle(api, {:delete, name, :request}) do
         :ok -> json(conn, 200, %{"kind" => "Status", "status" => "Success"})
         :not_found -> status(conn, 404, "NotFound", "pods \"#{name}\" not found")
       end
