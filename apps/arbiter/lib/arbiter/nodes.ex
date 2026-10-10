@@ -52,6 +52,7 @@ defmodule Arbiter.Nodes do
   end
 
   @max_ttl_seconds 24 * 3600
+  @kinds ["machine", "cluster"]
   @rotation_overlap_seconds 10 * 60
   @touch_every_seconds 60
 
@@ -94,7 +95,8 @@ defmodule Arbiter.Nodes do
   @doc """
   Mint a join token. Options: `:ttl_seconds` (default `nodes.join_token_ttl_minutes`
   — 15 minutes — and at most 24 hours), and the pre-bound `:name`, `:labels`,
-  `:max_workers` the enrolling node inherits.
+  `:max_workers` the enrolling node inherits. `:kind` (`"machine"`, the default, or
+  `"cluster"`, K9) is what the token enrols: the enrolling node must say the same.
 
   Returns the secret **once**; only its hash is stored. Writes a
   `token_minted` event attributed to `actor`.
@@ -105,6 +107,9 @@ defmodule Arbiter.Nodes do
     ttl = Keyword.get(opts, :ttl_seconds, default_ttl_seconds())
 
     cond do
+      Keyword.get(opts, :kind, "machine") not in @kinds ->
+        {:error, :invalid_kind}
+
       not name_ok?(Keyword.get(opts, :name)) ->
         {:error, :invalid_name}
 
@@ -127,6 +132,7 @@ defmodule Arbiter.Nodes do
       name: Keyword.get(opts, :name),
       labels: Keyword.get(opts, :labels, []),
       max_workers: Keyword.get(opts, :max_workers),
+      kind: Keyword.get(opts, :kind, "machine"),
       created_by: label
     }
 
@@ -173,6 +179,7 @@ defmodule Arbiter.Nodes do
            find_join_token(Credentials.hash(secret)) || {:error, :invalid_token},
          node_id = Ash.UUIDv7.generate(),
          name = bound_name(token, attrs, node_id),
+         :ok <- ensure_kind(token, attrs),
          :ok <- ensure_name_valid(name),
          :ok <- ensure_name_free(name),
          :ok <- claim(token, node_id, now) do
@@ -226,8 +233,9 @@ defmodule Arbiter.Nodes do
       name: name,
       labels: bound_labels(token, attrs),
       max_workers: token.max_workers || attr(attrs, :max_workers),
+      kind: token.kind,
       join_token_id: token.id,
-      detail: %{"join_token_id" => token.id}
+      detail: enroll_detail(token, attrs)
     }
 
     case insert_node(binding, now, hint) do
@@ -258,6 +266,7 @@ defmodule Arbiter.Nodes do
       name: binding.name,
       labels: binding.labels,
       max_workers: binding.max_workers,
+      kind: Map.get(binding, :kind, "machine"),
       credential_hash: cred.hash,
       credential_prefix: cred.prefix,
       join_token_id: binding[:join_token_id],
@@ -273,6 +282,36 @@ defmodule Arbiter.Nodes do
         {:error, :name_taken}
     end
   end
+
+  # K9: a machine's script says nothing about its kind; a cluster controller says
+  # `cluster`. The token decides what it enrols, so a mismatch is refused before the
+  # token is spent.
+  defp ensure_kind(%JoinToken{kind: kind}, attrs) do
+    case attr(attrs, :kind) || "machine" do
+      ^kind -> :ok
+      _ -> {:error, :kind_mismatch}
+    end
+  end
+
+  # The audit record of an enrolment: the token, and for a cluster the facts its
+  # controller reported (bounded strings only).
+  defp enroll_detail(%JoinToken{kind: "cluster"} = token, attrs) do
+    Enum.reduce(
+      [:k8s_version, :agent_version],
+      %{"join_token_id" => token.id, "kind" => "cluster"},
+      fn key, acc ->
+        case attr(attrs, key) do
+          value when is_binary(value) and byte_size(value) <= 64 ->
+            Map.put(acc, Atom.to_string(key), value)
+
+          _ ->
+            acc
+        end
+      end
+    )
+  end
+
+  defp enroll_detail(token, _attrs), do: %{"join_token_id" => token.id, "kind" => token.kind}
 
   defp bound_name(token, attrs, node_id) do
     case token.name || attr(attrs, :name) do
