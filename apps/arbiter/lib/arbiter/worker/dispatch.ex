@@ -3488,7 +3488,9 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
-                 {:ok, port} <- ClaudeSession.start(session_opts) do
+                 # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
+                 # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
+                 {:ok, port} <- start_agent_session(opts, session_opts) do
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3502,6 +3504,11 @@ defmodule Arbiter.Worker.Dispatch do
             end
         end
     end
+  end
+
+  defp start_agent_session(opts, session_opts) do
+    start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
+    start.(session_opts)
   end
 
   # Resolve the agent's cwd.
