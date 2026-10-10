@@ -436,7 +436,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       Controller.tick(controller)
 
       assert_receive {:run_push, ^run, "run.refused",
-                      %{"reason" => "unschedulable", "detail" => detail}}, 5_000
+                      %{"reason" => "unschedulable", "detail" => detail}},
+                     5_000
 
       assert detail =~ "Insufficient cpu"
       assert [delete] = deletes(env)
@@ -583,7 +584,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       observed(run, :deleted)
 
       assert_receive {:run_push, ^run, "exit",
-                      %{"cancelled" => true, "reason" => "operator stop"}}, 5_000
+                      %{"cancelled" => true, "reason" => "operator stop"}},
+                     5_000
     end
 
     test "cancel with collect uses the pod's grace period so the snapshotter can finalise",
@@ -1007,7 +1009,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       send(controller, {:k8s_readiness, monitor, %{degraded: [], checks: []}})
 
       assert_receive {:run_push, nil, "readiness",
-                      %{"degraded" => [], "readiness" => %{"ready" => true}}}, 5_000
+                      %{"degraded" => [], "readiness" => %{"ready" => true}}},
+                     5_000
     end
 
     test "a good edit changes the ceiling and pushes a capacity event", env do
