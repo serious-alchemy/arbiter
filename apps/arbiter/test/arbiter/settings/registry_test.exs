@@ -65,7 +65,10 @@ defmodule Arbiter.Settings.RegistryTest do
       assert Settings.nodes_registry_password() == "s3cret-pw-value"
 
       raw =
-        Arbiter.Settings.Installation |> Ash.read!() |> hd() |> Map.fetch!(:nodes_registry_password)
+        Arbiter.Settings.Installation
+        |> Ash.read!()
+        |> hd()
+        |> Map.fetch!(:nodes_registry_password)
 
       assert is_binary(raw)
       refute raw =~ "s3cret-pw-value"

@@ -458,3 +458,6 @@ config :arbiter,
 config :arbiter,
        :systemd_run,
        Path.expand("../apps/arbiter/test/support/stub_bin/systemd-run", __DIR__)
+
+# K8: the controller-image boot publish is driven by `Publisher.publish_controller/1` in tests.
+config :arbiter, :image_publisher, boot: false
