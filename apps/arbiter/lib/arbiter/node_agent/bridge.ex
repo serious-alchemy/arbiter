@@ -52,6 +52,18 @@ defmodule Arbiter.NodeAgent.Bridge do
   def listen(server \\ __MODULE__, run, bridges),
     do: safe(server, {:listen, run, bridges}, {:error, :bridge_down})
 
+  @doc """
+  Take over a connection already accepted by another listener (the k8s pod
+  channel's TLS `:9443`, `Arbiter.NodeAgent.PodChannel.BridgeListener`), which has
+  authorized it as bridge `name` of `run`. The caller makes this process the
+  socket's controller first. From here it is exactly a connection the per-run
+  unix listener accepted: held while the channel is down, then a stream, then
+  `bridge.open{run, name, stream}`.
+  """
+  @spec adopt(GenServer.server(), String.t(), String.t(), term(), :tcp | :ssl) :: :ok
+  def adopt(server \\ __MODULE__, run, name, sock, transport),
+    do: GenServer.cast(server, {:accepted, run, name, sock, transport})
+
   @doc "The run is over: close its listeners and streams."
   @spec release(GenServer.server(), String.t()) :: :ok
   def release(server \\ __MODULE__, run), do: safe(server, {:release, run}, :ok)
@@ -123,6 +135,9 @@ defmodule Arbiter.NodeAgent.Bridge do
     do: {:reply, Map.put(Relay.info(state.relay), :held, length(state.held)), state}
 
   @impl true
+  def handle_cast({:accepted, run, name, sock, transport}, state),
+    do: {:noreply, accepted(state, run, name, sock, transport)}
+
   def handle_cast({:primary, event, payload}, %{channel: %{}} = state),
     do: relay(state, Relay.remote(state.relay, event, payload))
 
@@ -130,7 +145,7 @@ defmodule Arbiter.NodeAgent.Bridge do
 
   @impl true
   def handle_info({:accepted, run, name, sock}, state),
-    do: {:noreply, accepted(state, run, name, sock)}
+    do: {:noreply, accepted(state, run, name, sock, :tcp)}
 
   def handle_info({:bridge_stream, id, event}, state),
     do: relay(state, Relay.stream_event(state.relay, id, event))
@@ -140,7 +155,7 @@ defmodule Arbiter.NodeAgent.Bridge do
 
   def handle_info({:expire_held, sock}, state) do
     {expired, held} = Enum.split_with(state.held, &(&1.sock == sock))
-    Enum.each(expired, &:gen_tcp.close(&1.sock))
+    Enum.each(expired, &Stream.close(&1.transport, &1.sock))
     {:noreply, %{state | held: held}}
   end
 
@@ -157,7 +172,7 @@ defmodule Arbiter.NodeAgent.Bridge do
   def terminate(_reason, state) do
     Relay.stop_all(state.relay)
     Enum.each(state.listeners, fn {_run, ls} -> Enum.each(ls, &close_listener/1) end)
-    Enum.each(state.held, &:gen_tcp.close(&1.sock))
+    Enum.each(state.held, &Stream.close(&1.transport, &1.sock))
   end
 
   # A protocol violation by the primary drops the channel: the streams go, the
@@ -248,7 +263,7 @@ defmodule Arbiter.NodeAgent.Bridge do
     Enum.each(listeners, &close_listener/1)
 
     {mine, held} = Enum.split_with(state.held, &(&1.run == run))
-    Enum.each(mine, &:gen_tcp.close(&1.sock))
+    Enum.each(mine, &Stream.close(&1.transport, &1.sock))
 
     state = %{state | listeners: rest, held: held}
 
@@ -260,28 +275,37 @@ defmodule Arbiter.NodeAgent.Bridge do
 
   # ---- connections ----------------------------------------------------------
 
-  defp accepted(%{channel: nil} = state, run, name, sock), do: hold(state, run, name, sock)
-  defp accepted(state, run, name, sock), do: open_stream(state, run, name, sock)
+  defp accepted(%{channel: nil} = state, run, name, sock, transport),
+    do: hold(state, run, name, sock, transport)
 
-  defp hold(state, run, name, sock) do
+  defp accepted(state, run, name, sock, transport),
+    do: open_stream(state, run, name, sock, transport)
+
+  defp hold(state, run, name, sock, transport) do
     Process.send_after(self(), {:expire_held, sock}, state.hold_ms)
-    held = state.held ++ [%{run: run, name: name, sock: sock}]
+    held = state.held ++ [%{run: run, name: name, sock: sock, transport: transport}]
 
     {overflow, kept} = Enum.split(held, max(length(held) - state.hold_max, 0))
-    Enum.each(overflow, &:gen_tcp.close(&1.sock))
+    Enum.each(overflow, &Stream.close(&1.transport, &1.sock))
     %{state | held: kept}
   end
 
   defp open_held(state) do
     held = state.held
-    Enum.reduce(held, %{state | held: []}, &open_stream(&2, &1.run, &1.name, &1.sock))
+
+    Enum.reduce(
+      held,
+      %{state | held: []},
+      &open_stream(&2, &1.run, &1.name, &1.sock, &1.transport)
+    )
   end
 
-  defp open_stream(state, run, name, sock) do
+  defp open_stream(state, run, name, sock, transport) do
     id = state.next_id
 
-    with {:ok, pid} <- Stream.start_link(owner: self(), id: id, socket: sock),
-         :ok <- :gen_tcp.controlling_process(sock, pid) do
+    with {:ok, pid} <-
+           Stream.start_link(owner: self(), id: id, socket: sock, transport: transport),
+         :ok <- Stream.controlling_process(transport, sock, pid) do
       case Relay.open_local(state.relay, id, run, name, pid) do
         {:ok, relay} ->
           Stream.go(pid)
@@ -294,7 +318,7 @@ defmodule Arbiter.NodeAgent.Bridge do
       end
     else
       _ ->
-        :gen_tcp.close(sock)
+        Stream.close(transport, sock)
         state
     end
   end
