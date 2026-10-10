@@ -310,14 +310,15 @@ defmodule Arbiter.Quota.Budget.Server do
     if old == nil or old.budget != published.budget, do: announce(key, old, published)
 
     trusted =
-      if published.binding in [:no_reading, :unmetered, :error] or
-           published.binding in [
-             :provider_refusing,
-             :weekly_warning,
-             :paused,
-             :quota_stop,
-             :unavailable
-           ],
+      if published.binding in [
+           :no_reading,
+           :unmetered,
+           :provider_refusing,
+           :weekly_warning,
+           :paused,
+           :quota_stop,
+           :unavailable
+         ],
          do: state.trusted,
          else:
            Map.put(state.trusted, key, %{
