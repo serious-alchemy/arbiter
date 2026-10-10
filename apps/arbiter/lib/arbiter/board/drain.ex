@@ -230,7 +230,7 @@ defmodule Arbiter.Board.Drain do
       Keyword.get_lazy(opts, :idle_ids, fn ->
         IdleTickets.ids(tickets,
           queued_ids:
-            Map.get(autopilot, :held_local_capacity, []) ++ Enum.map(in_flight, & &1.task_id)
+            Map.get(autopilot, :deferred_resumes, []) ++ Enum.map(in_flight, & &1.task_id)
         )
       end)
 

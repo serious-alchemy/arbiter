@@ -102,6 +102,23 @@ defmodule Arbiter.Worker.DispatchLocalCapacityResumeTest do
       assert Worker.whereis(a.id) == first.worker_pid
     end
 
+    test "a deferral leaves a durable marker, and a resume that starts clears it", %{a: a} do
+      cap!(1)
+
+      assert {:ok, %{deferred: true}} =
+               Dispatch.resume(a.id, resume_origin: :automatic, start_driver: false)
+
+      assert Arbiter.Worker.HeldResume.stored_kind(Ash.get!(Issue, a.id)) == :resume
+
+      cap!(2)
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume(a.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      assert is_pid(pid)
+      assert Arbiter.Worker.HeldResume.stored_kind(Ash.get!(Issue, a.id)) == nil
+    end
+
     test "an automatic session resume is deferred the same way", %{a: a} do
       cap!(1)
       task_id = a.id

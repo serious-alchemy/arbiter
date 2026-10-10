@@ -51,6 +51,25 @@ defmodule Arbiter.Worker.ResumeSlotTest do
     end
   end
 
+  describe "orphaned tickets hold no slot (bd-3fbj83)" do
+    test "an idle ticket is not counted against the workspace cap", %{a: a, b: b} do
+      c = %{in_state(b, :active) | id: "orphan-1"}
+      tickets = [in_state(a, :queued), in_state(b, :active), c]
+
+      assert {:error, {:slot_cap_full, %{holders: holders}}} =
+               ResumeSlot.admit(in_state(a, :queued), tickets: tickets, cap: 2)
+
+      assert "orphan-1" in holders
+
+      assert {:ok, :acquired} =
+               ResumeSlot.admit(in_state(a, :queued),
+                 tickets: tickets,
+                 cap: 2,
+                 idle_ids: ["orphan-1"]
+               )
+    end
+  end
+
   describe "a ticket not In progress must acquire a slot" do
     test "resuming a :queued ticket needs a slot", %{a: a, b: b} do
       a = in_state(a, :queued)

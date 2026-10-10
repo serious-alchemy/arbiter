@@ -46,6 +46,21 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     end
   end
 
+  describe "bd-3fbj83: an orphaned ticket holds no slot on the loaded board" do
+    test "idle_check drops the orphan from slots_used", %{ws: ws} do
+      {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(4)
+      on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(nil) end)
+
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan", workspace_id: ws.id})
+      Ash.Seed.update!(orphan, %{state: :active})
+
+      assert Snapshot.load(workspace_id: ws.id).slots_used == 1
+
+      board = Snapshot.load(workspace_id: ws.id, idle_check: fn _issues -> [orphan.id] end)
+      assert board.slots_used == 0
+    end
+  end
+
   # bd-38of5i: `derive/1` takes the `parent_of` pairs as an input; `load/1` is
   # the half that has to go and read them. Without this the board would render
   # a chip-less card for every child on a live install while the pure tests
