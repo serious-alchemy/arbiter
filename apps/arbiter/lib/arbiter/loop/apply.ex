@@ -216,8 +216,14 @@ defmodule Arbiter.Loop.Apply do
     with {:ok, _} <- repo_doc_args(row), do: :ok
   end
 
-  def payload_ready?(%PendingWrite{kind: :trust_promotion} = row),
-    do: {:error, {:not_applicable, Loop.inapplicable_reason(row)}}
+  # A complete promotion payload needs no authoring; that it is operator-only is
+  # `validate/1`'s answer (the kind), not this one (the payload).
+  def payload_ready?(%PendingWrite{kind: :trust_promotion, payload: payload}) do
+    with {:ok, _} <- Payload.string(payload, "provider"),
+         {:ok, _} <- Payload.string(payload, "model"),
+         {:ok, _} <- Payload.string(payload, "to"),
+         do: :ok
+  end
 
   def payload_ready?(%PendingWrite{kind: kind}),
     do: {:error, {:unmapped, "no apply rule is defined for kind #{inspect(kind)}"}}

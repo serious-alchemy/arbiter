@@ -432,10 +432,10 @@ defmodule ArbiterCli.Cmd.Loop do
   # preconditions is marked beside the state — the listing problem the
   # payload-less rows caused, without suppressing the evidence they carry.
   defp state_field(row) do
-    if row["needs_authoring"] do
-      "#{row["state"]} (needs authoring)"
-    else
-      to_string(row["state"])
+    cond do
+      row["kind"] in @operator_only_kinds -> "#{row["state"]} (operator-only)"
+      row["needs_authoring"] -> "#{row["state"]} (needs authoring)"
+      true -> to_string(row["state"])
     end
   end
 
@@ -511,13 +511,36 @@ defmodule ArbiterCli.Cmd.Loop do
       |> maybe_put(:limit, Keyword.get(opts, :limit))
 
     case Client.get("/api/loop/pending", params) do
-      {:ok, %{"pending" => []}} when mode == :json -> IO.puts("[]")
-      {:ok, %{"pending" => []}} -> IO.puts("nothing to apply")
-      {:ok, %{"pending" => rows}} -> rows |> Enum.map(&apply_in_batch/1) |> report_batch(mode)
-      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
-      {:error, err} -> Output.die(err)
+      {:ok, %{"pending" => rows}} ->
+        {operator_only, rows} = Enum.split_with(rows, &(&1["kind"] in @operator_only_kinds))
+        Enum.each(operator_only, &note_operator_only/1)
+        apply_batch(rows, mode)
+
+      {:ok, other} ->
+        Output.die("unexpected response: #{inspect(other)}")
+
+      {:error, err} ->
+        Output.die(err)
     end
   end
+
+  # G18: a `trust_promotion` loosens a subject's guardrails, so the server
+  # refuses it here at any authority and the operator applies it with operator
+  # proof. Mirrors `Arbiter.Loop.PendingWrite.operator_only_kinds/0`.
+  @operator_only_kinds ["trust_promotion"]
+
+  defp note_operator_only(row) do
+    IO.puts(
+      :stderr,
+      "arb: skipped #{row["id"]} (#{row["kind"]}): operator-only — the operator applies it " <>
+        "with `arb trust promote #{row["target"] || "<subject>"} --to <tier> --reason \"...\"` " <>
+        "(see `arb trust show #{row["target"] || ""}`)"
+    )
+  end
+
+  defp apply_batch([], :json), do: IO.puts("[]")
+  defp apply_batch([], :text), do: IO.puts("nothing to apply")
+  defp apply_batch(rows, mode), do: rows |> Enum.map(&apply_in_batch/1) |> report_batch(mode)
 
   defp apply_in_batch(row) do
     case Client.post("/api/loop/pending/#{row["id"]}/apply", %{}) do

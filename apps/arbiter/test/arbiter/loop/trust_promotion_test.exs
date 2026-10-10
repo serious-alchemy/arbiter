@@ -141,6 +141,8 @@ defmodule Arbiter.Loop.TrustPromotionTest do
       end
 
       refute Loop.applicable?(row)
+      # Its payload is complete: it is operator-only, not unauthored.
+      assert Loop.authoring_gap(row) == nil
       assert rule_tier(@codex) == :quarantine
       assert [%{state: :proposed}] = proposals()
     end

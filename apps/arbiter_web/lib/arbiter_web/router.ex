@@ -262,6 +262,13 @@ defmodule ArbiterWeb.Router do
     post("/loop/pending/:id/apply", LoopController, :pending_apply)
     post("/loop/pending/:id/reject", LoopController, :pending_reject)
 
+    # Earned trust (G18): the records, the operator-only promotion, and the
+    # coordinator's decision on an automatic suspension.
+    get("/trust", TrustController, :index)
+    post("/trust/promote", TrustController, :promote)
+    post("/trust/confirm", TrustController, :confirm)
+    post("/trust/dismiss", TrustController, :dismiss)
+
     # Shared-memory promotion queue, quarantine and transcript distillation
     # (P-25). Operator-proof only, reads included: `ArbiterWeb.ApiPolicy`.
     # Candidate ids are `<session-id>/<file>.md`, so they travel as `id`
