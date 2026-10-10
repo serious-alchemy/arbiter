@@ -10,12 +10,15 @@ defmodule Arbiter.Quota.Budget do
   the published budget (§3.7). `Arbiter.Quota.Budget.Server` owns the clock,
   the ETS table and the `budget_changed` event.
 
-  ## Nothing reads it yet
+  ## Nothing decides by it yet
 
-  Until DC8, nothing on an admission, gate, dispatch or board path may read a
-  budget (invariants I1, I2 and I8). `Arbiter.Quota.BudgetShadowTest` pins that
-  structurally. The budget stops nothing that runs: it is read only by
-  admission (later), the walk (later) and the display.
+  Until DC8, nothing on an admission, gate or dispatch path may read a budget
+  (invariants I1, I2 and I8). `Arbiter.Quota.BudgetShadowTest` pins that
+  structurally. Its one reader is the scheduler walk (DC6,
+  `Arbiter.Board.WalkInputs`), which runs only under `scheduler_admission:
+  shadow` or `enforce` and is recorded beside today's decision, never in its
+  place. The budget stops nothing that runs: it is read only by admission
+  (DC8), the walk and the display.
 
   ## The function (§3.3)
 

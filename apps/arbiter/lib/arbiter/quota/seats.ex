@@ -2,10 +2,11 @@ defmodule Arbiter.Quota.Seats do
   @moduledoc """
   Per-pool seat occupancy (DC4, bd-5oquxn; design
   `docs/design/provider-dynamic-concurrency.md` §3.2). **Shadow only**: nothing
-  on an admission, gate, dispatch, scheduler or run-stopping path reads it
-  (I1/I2). `Arbiter.Accounts.Concurrency` keeps today's per-account process
-  count under `legacy` and `shadow`; this is the count the budget (DC3) and the
-  walk (DC6) will read.
+  on an admission, gate, dispatch or run-stopping path reads it (I1/I2).
+  `Arbiter.Accounts.Concurrency` keeps today's per-account process count under
+  `legacy` and `shadow`. The scheduler walk (DC6, `Arbiter.Board.WalkInputs`)
+  reads it under `scheduler_admission: shadow` or `enforce`, beside today's
+  decision and never in its place; admission reads it from DC8.
 
   A **seat** is one unit of in-flight work on an (account, pool) pair:
 

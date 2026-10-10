@@ -2330,6 +2330,9 @@ defmodule Arbiter.MCP.Catalog do
           "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
           "`scheduling_max_lifted_in_flight` and the `nodes.*` keys (remote-node enrolment) " <>
           "are operator-only and refused without an operator-proof token. " <>
+          "`scheduler_admission` (`legacy` | `shadow` | `enforce`; null = legacy) picks the " <>
+          "admission mode: shadow records the scheduler walk beside every dispatch; the " <>
+          "coordinator may set legacy or shadow, enforce is operator-only. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -2363,7 +2366,9 @@ defmodule Arbiter.MCP.Catalog do
               },
               %{
                 "type" => "string",
-                "description" => "http(s) URL for nodes.public_url."
+                "description" =>
+                  "http(s) URL for nodes.public_url; legacy, shadow or enforce for " <>
+                    "scheduler_admission."
               },
               %{
                 "type" => "array",

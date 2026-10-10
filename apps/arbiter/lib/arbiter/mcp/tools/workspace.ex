@@ -396,6 +396,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
       and the `nodes.*` keys — **operator only**, enforced in
       `Arbiter.Settings.Registry.put/3`: refused for any token without
       operator proof (the same on REST and `arb settings`).
+    * `scheduler_admission` — `legacy` (`null`), `shadow` or `enforce`
+      (`docs/design/provider-dynamic-concurrency.md` §10.1). The coordinator
+      may set `legacy` or `shadow`; `enforce` is **operator only**. Takes
+      effect on the next Autopilot pass.
 
   The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
   is required for any of them.
