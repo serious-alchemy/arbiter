@@ -27,7 +27,10 @@ defmodule Arbiter.Worker.NodeLostTest do
 
     Application.put_env(:arbiter, :node_lost_resume,
       enabled: true,
-      resume_fun: fn task_id -> send(test, {:resumed, task_id}) && {:ok, :stub} end
+      resume_fun: fn task_id ->
+        send(test, {:resumed, task_id})
+        {:ok, :stub}
+      end
     )
 
     Application.put_env(:arbiter, :worker_exit_grace_ms, 20)

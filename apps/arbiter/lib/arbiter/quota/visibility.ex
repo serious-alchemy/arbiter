@@ -50,8 +50,6 @@ defmodule Arbiter.Quota.Visibility do
   alias Arbiter.Quota
   alias Arbiter.Tasks.Workspace
 
-  require Ash.Query
-
   # Every quota provider code, as `ProviderAccount.provider` atoms.
   @providers [:claude, :codex, :antigravity]
 

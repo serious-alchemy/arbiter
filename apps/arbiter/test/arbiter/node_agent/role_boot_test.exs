@@ -13,7 +13,11 @@ defmodule Arbiter.NodeAgent.RoleBootTest do
     use GenServer
 
     def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
-    def init(test_pid), do: send(test_pid, :primary_child_started) && {:ok, test_pid}
+
+    def init(test_pid) do
+      send(test_pid, :primary_child_started)
+      {:ok, test_pid}
+    end
   end
 
   defp child_id(spec), do: Supervisor.child_spec(spec, []).id

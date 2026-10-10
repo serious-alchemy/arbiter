@@ -10,11 +10,10 @@ defmodule Arbiter.Settings.Installation do
 
   ## Fields
 
-    * `:conductor_system_max_concurrent` — install-wide worker concurrency
-      ceiling, read by the board scheduler (`Arbiter.Board.Snapshot`). `nil`
-      means "fall back to the `:arbiter, :conductor_system_max_concurrent`
-      application env, else the hardcoded default". The `conductor_` prefix is
-      historical (bd-a14qd1); renaming it would need a column migration.
+    * `:local_cap_advisory` — the line the DC1 migration left when it removed a
+      stored `conductor_system_max_concurrent`
+      (`Arbiter.Settings.local_cap_advisory/0`); cleared when the operator sets
+      the local cap.
     * `:credential_watchdog_adapters` — agent-type names
       (`Arbiter.Agents.valid_agent_types/0`) the
       `Arbiter.Agents.CredentialWatchdog` should probe. `nil` means "probe
@@ -69,7 +68,7 @@ defmodule Arbiter.Settings.Installation do
   end
 
   @settable [
-    :conductor_system_max_concurrent,
+    :local_cap_advisory,
     :credential_watchdog_adapters,
     :credential_watchdog_interval_ms,
     :credential_watchdog_recovery_interval_ms,
@@ -120,12 +119,11 @@ defmodule Arbiter.Settings.Installation do
   attributes do
     uuid_primary_key :id
 
-    attribute :conductor_system_max_concurrent, :integer do
+    attribute :local_cap_advisory, :string do
       public? true
       allow_nil? true
-      constraints min: 1
 
-      description "Install-wide worker concurrency ceiling read by the board scheduler."
+      description "Advisory left by the DC1 migration for a removed conductor_system_max_concurrent; shown by doctor until the local cap is set."
     end
 
     attribute :credential_watchdog_adapters, {:array, :string} do
@@ -315,7 +313,7 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
       constraints min: 0
 
-      description "nodes.local_max_workers: the operator's cap on the primary's own workers (RW7); nil = the install's local concurrency, 0 = run nothing locally."
+      description "nodes.local_max_workers: the operator's cap on the primary's own workers (RW7); nil = the primary's hardware suggestion, 0 = run nothing locally."
     end
 
     attribute :nodes_registry, :string do

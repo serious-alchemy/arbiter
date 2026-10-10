@@ -1,6 +1,5 @@
 defmodule Arbiter.Reviews.ExternalReviewBugTest do
   use Arbiter.DataCase, async: true
-  alias Arbiter.Reviews.ExternalReview
 
   test "follow_up_eligible? returns false when repos == []" do
     ws = %Arbiter.Tasks.Workspace{
@@ -12,7 +11,7 @@ defmodule Arbiter.Reviews.ExternalReviewBugTest do
       }
     }
 
-    prepared = %{
+    _prepared = %{
       workspace: ws,
       repo_name: "some-repo",
       mr_ref: "octo/widget#42"

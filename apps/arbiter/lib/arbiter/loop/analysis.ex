@@ -522,8 +522,6 @@ defmodule Arbiter.Loop.Analysis do
   defp fmt_draw(value, :window_share_5h), do: Scarcity.format_share(value)
   defp fmt_draw(value, :cost_usd), do: "$#{fmt(value)}"
 
-  defp fmt_median(nil, _unit), do: "n/a"
-
   defp fmt_median(value, :window_share_5h),
     do: "#{:erlang.float_to_binary(value * 100, decimals: 1)}%"
 
@@ -946,6 +944,5 @@ defmodule Arbiter.Loop.Analysis do
   defp min_or_nil([]), do: nil
   defp min_or_nil(list), do: Enum.min(list)
 
-  defp fmt(nil), do: "0.00"
   defp fmt(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 end

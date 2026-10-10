@@ -34,7 +34,9 @@ defmodule Arbiter.Workflows.PatrolServerTest do
       # gate_agent isn't reachable here (no state) — tests instead drive this
       # indirectly by sending :tick/:recheck to a server whose do_tick_body
       # flips ticks, and by a dedicated always-true/false variant below.
-      true
+      # Read through the process dictionary so the type checker cannot see a
+      # constant and flag the scaffold's no-work branches as dead.
+      Process.get({__MODULE__, :open_work?}, true)
     end
 
     @impl true
@@ -65,7 +67,7 @@ defmodule Arbiter.Workflows.PatrolServerTest do
       {:ok, schedule_next(struct!(__MODULE__, base))}
     end
 
-    def open_work?(_workspace_id, _repo), do: false
+    def open_work?(_workspace_id, _repo), do: Process.get({__MODULE__, :open_work?}, false)
 
     @impl true
     def do_tick_body(state), do: %{state | ticks: state.ticks + 1}

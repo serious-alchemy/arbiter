@@ -218,9 +218,10 @@ defmodule Arbiter.Worker.DispatchLocalCapacityResumeTest do
   end
 
   describe "with no override" do
-    test "dispatch is exactly what it was: a resume over the install default is admitted",
+    test "the hardware suggestion applies (enforced), and a resume under it is admitted",
          %{a: a} do
-      assert Arbiter.Nodes.LocalCapacity.cap().enforced? == false
+      ResumeSlotFixture.put_local_cap(nil)
+      assert %{source: :suggestion} = Arbiter.Nodes.LocalCapacity.cap()
 
       assert {:ok, _result} =
                Dispatch.resume(a.id, start_driver: false, claude_command: ["sleep", "2"])

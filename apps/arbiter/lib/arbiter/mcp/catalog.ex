@@ -69,8 +69,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_schema` | worker, coordinator | `Workspace.ConfigSchema.describe/0` |
   | `workspace_standing_order_add` | coordinator | `Workspace.Operations` (atomic append) |
   | `workspace_standing_order_remove` | coordinator | `Workspace.Operations` (atomic remove by index or text) |
-  | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog + quota-provider visibility) |
-  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility + output-offload sweeper switch) |
+  | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (credential watchdog + quota-provider visibility) |
+  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (credential watchdog + quota-provider visibility + output-offload sweeper switch) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
@@ -2282,8 +2282,6 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Read an install-wide runtime setting (not workspace-scoped): " <>
-          "`conductor_system_max_concurrent` (the system-wide concurrency ceiling the board " <>
-          "scheduler dispatches under), " <>
           "`credential_watchdog_adapters`, `credential_watchdog_interval_ms`, " <>
           "`credential_watchdog_recovery_interval_ms`, " <>
           "`quota_providers_shown` / `quota_providers_hidden` (the providers forced onto / off " <>
@@ -2301,7 +2299,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "enum" => Arbiter.Settings.Registry.keys(),
             "description" =>
-              "Setting name (e.g. \"conductor_system_max_concurrent\"). Omit for all settings."
+              "Setting name (e.g. \"credential_watchdog_interval_ms\"). Omit for all settings."
           }
         },
         "additionalProperties" => false
@@ -2313,8 +2311,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Set an install-wide runtime setting; `null` always clears the override and falls back " <>
-          "to the app-env/hardcoded default. `conductor_system_max_concurrent` (positive " <>
-          "integer) takes effect on the board scheduler's next tick. " <>
+          "to the app-env/hardcoded default. " <>
           ~s[`credential_watchdog_adapters` (list of agent types — "claude", "gemini", ] <>
           "\"codex\"; `[]` probes nothing), `credential_watchdog_interval_ms` and " <>
           "`credential_watchdog_recovery_interval_ms` (positive integers) take effect on the " <>
@@ -2337,7 +2334,7 @@ defmodule Arbiter.MCP.Catalog do
           "key" => %{
             "type" => "string",
             "enum" => Arbiter.Settings.Registry.keys(),
-            "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
+            "description" => "Setting name (e.g. \"credential_watchdog_interval_ms\"). Required."
           },
           "value" => %{
             "description" =>
@@ -2352,8 +2349,7 @@ defmodule Arbiter.MCP.Catalog do
                 "type" => "integer",
                 "minimum" => 1,
                 "description" =>
-                  "Positive integer for conductor_system_max_concurrent, " <>
-                    "credential_watchdog_interval_ms, credential_watchdog_recovery_interval_ms, " <>
+                  "Positive integer for credential_watchdog_interval_ms, credential_watchdog_recovery_interval_ms, " <>
                     "scheduling_max_lifted_in_flight or scheduling_finish_first_max_wait_hours."
               },
               %{

@@ -3185,7 +3185,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </div>
                     <div class="flex items-center justify-between gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
                       <.run_where node_name={RunNode.node_name(@worker)} id="worker-where" />
-                      <span>started {format_started(@worker && @worker.started_at)}</span>
+                      <span>started {format_started(@worker.started_at)}</span>
                       <span :if={worker_activity(@worker)}>{worker_activity(@worker)}</span>
                     </div>
                     <.link
@@ -4064,8 +4064,8 @@ defmodule ArbiterWeb.TaskDetailLive do
               id="rel-selected"
               class="flex items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] px-2 py-1.5"
             >
-              <code class="text-xs text-[var(--text-title)]">{@rel_target && @rel_target.id}</code>
-              <span class="truncate text-sm flex-1">{@rel_target && @rel_target.title}</span>
+              <code class="text-xs text-[var(--text-title)]">{@rel_target.id}</code>
+              <span class="truncate text-sm flex-1">{@rel_target.title}</span>
               <button
                 type="button"
                 id="rel-clear-target"
@@ -4138,10 +4138,10 @@ defmodule ArbiterWeb.TaskDetailLive do
               ⚠ {warning.text}
               <.link
                 :if={warning.link}
-                navigate={warning.link && warning.link.href}
+                navigate={warning.link.href}
                 class="ml-1 underline text-[var(--text-link)]"
               >
-                {warning.link && warning.link.label}
+                {warning.link.label}
               </.link>
             </div>
 
@@ -4196,9 +4196,9 @@ defmodule ArbiterWeb.TaskDetailLive do
           <p class="text-sm text-base-content/70 mb-3">
             <code class="text-xs">{@task_id}</code>
             <span class="font-[family-name:var(--font-mono)]">
-              {@rel_remove_entry && @rel_remove_entry.edge.type}
+              {@rel_remove_entry.edge.type}
             </span>
-            <code class="text-xs">{@rel_remove_entry && @rel_remove_entry.issue_id}</code>
+            <code class="text-xs">{@rel_remove_entry.issue_id}</code>
             — the edge is deleted; neither {@issue_label} is otherwise changed.
           </p>
           <div
@@ -5115,8 +5115,6 @@ defmodule ArbiterWeb.TaskDetailLive do
       length(String.split(body, "\n")) > @message_preview_lines
   end
 
-  defp long_message_body?(_), do: false
-
   defp message_expanded?(expanded, id), do: MapSet.member?(expanded, id)
 
   # The rail header carries the count, and says so when the cap is what the
@@ -5157,8 +5155,6 @@ defmodule ArbiterWeb.TaskDetailLive do
     end)
     |> Enum.join(" · ")
   end
-
-  defp worker_activity(nil), do: nil
 
   defp worker_activity(worker) do
     cond do

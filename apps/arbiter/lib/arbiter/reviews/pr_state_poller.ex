@@ -66,7 +66,6 @@ defmodule Arbiter.Reviews.PrStatePoller do
   use GenServer
 
   require Logger
-  require Ash.Query
 
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.{PrState, Record}

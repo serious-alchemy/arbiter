@@ -47,7 +47,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
             :ok
 
           {:deny, reason} ->
-            assert is_binary(reason) and reason != "", "#{name} has a blank deny reason"
+            assert reason != "", "#{name} has a blank deny reason"
         end
       end
     end

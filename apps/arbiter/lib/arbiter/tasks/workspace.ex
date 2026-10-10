@@ -706,37 +706,6 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
-  Per-workspace worker concurrency cap from `config["conductor"]["max_concurrent"]`.
-
-  When set, the board scheduler uses
-  `min(workspace_cap, system_cap, account_headroom, quota_headroom)` as the
-  effective concurrency limit for this workspace. Returns `nil` when not
-  configured, in which case the system-wide cap applies uncapped.
-
-  The `conductor` key name is historical (bd-a14qd1); renaming it would need a
-  workspace-config data migration.
-
-  Accepts a positive integer or the stringified integer that round-trips
-  through JSON config.
-  """
-  @spec max_concurrent(t()) :: pos_integer() | nil
-  def max_concurrent(workspace) do
-    case get_in(workspace.config || %{}, ["conductor", "max_concurrent"]) do
-      n when is_integer(n) and n > 0 ->
-        n
-
-      s when is_binary(s) ->
-        case Integer.parse(s) do
-          {n, ""} when n > 0 -> n
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  @doc """
   The PRPatrol author allowlist, from `config["pr_patrol"]["author_logins"]`.
 
   When set to a non-empty list of forge logins, PRPatrol files follow-ups only

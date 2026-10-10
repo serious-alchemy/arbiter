@@ -1175,7 +1175,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
          {%{"available" => true, "ssh" => %{"available" => true}}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy ssh transport") == :ok
     end
@@ -1216,7 +1216,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy ssh transport") == :warn
     end
@@ -1235,7 +1235,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when no escape vector is reachable" do
       escape_routes(%{"available" => true, "escape" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail escape vectors") == :ok
       assert result_of("agy jail escape vectors").detail =~ "xdg-dbus-proxy not installed"
@@ -1259,7 +1259,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the escape key" do
       escape_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail escape vectors") == :warn
     end
   end
@@ -1277,7 +1277,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the jail cannot read the install DB or other workspaces" do
       reads_routes(%{"available" => true, "reads" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail hidden reads") == :ok
     end
@@ -1301,7 +1301,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the reads key" do
       reads_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail hidden reads") == :warn
     end
   end
@@ -1319,7 +1319,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "ok when the host can run the jail in a network namespace" do
       network_routes(%{"available" => true, "network" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail network") == :ok
     end
@@ -1344,7 +1344,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     test "warns (could not check) when the server predates the network key" do
       network_routes(%{"available" => true})
-      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert status_of("agy jail network") == :warn
     end
   end
@@ -1352,7 +1352,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   describe "agy jail keyring proxy (bd-c9fqsk)" do
     test "ok when the proxy comes up under a per-run TMPDIR" do
       network_routes(%{"available" => true, "keyring" => %{"available" => true}})
-      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
       assert exit_code == 0
       assert status_of("agy jail keyring proxy") == :ok
     end
@@ -2767,60 +2767,38 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert hint =~ "arb node set local"
     end
 
-    test "conductor.max_concurrent below the sum of the caps warns" do
+    test "the capacity is green and shows the breakdown, with no ceiling to compare it to" do
       stub_nodes(
         nodes_resp(%{
           "public_url" => @url,
           "exposure" => "private",
           "nodes" => [node_row(%{"contributes" => 4})],
-          "total" => 7,
-          "effective" => 4,
-          "ceiling" => 4,
-          "warnings" => ["ceiling_below_total"]
-        })
-      )
-
-      assert %{status: :warn, detail: detail, hint: hint} =
-               named(nodes_results(), "node capacity vs conductor.max_concurrent")
-
-      assert detail =~ "capacity 7 = local 3 + box-1 4"
-      assert detail =~ "ceiling conductor.max_concurrent = 4"
-      assert hint =~ "unset conductor_system_max_concurrent"
-    end
-
-    test "with no ceiling set the capacity is green and shows the breakdown" do
-      stub_nodes(
-        nodes_resp(%{
-          "public_url" => @url,
-          "exposure" => "private",
-          "nodes" => [node_row(%{"contributes" => 4})],
-          "total" => 7,
-          "effective" => 7,
-          "ceiling" => nil
+          "total" => 7
         })
       )
 
       assert %{status: :ok, detail: detail} = named(nodes_results(), "node capacity")
       assert detail =~ "capacity 7 = local 3 + box-1 4"
-      assert detail =~ "no ceiling"
+      refute detail =~ "ceiling"
+      assert named(nodes_results(), "node capacity vs conductor.max_concurrent") == nil
     end
 
-    test "capacity within the ceiling is green" do
-      stub_nodes(
-        nodes_resp(%{
-          "public_url" => @url,
-          "exposure" => "private",
-          "nodes" => [node_row(%{})],
-          "total" => 3,
-          "effective" => 3,
-          "ceiling" => 4
-        })
-      )
+    test "the DC1 migration's advisory for a removed install cap is shown until the local cap is set" do
+      advisory =
+        "conductor_system_max_concurrent (6) was removed: the install's concurrency is the " <>
+          "sum of its machines' caps. To keep 6 on this machine: `arb node set local --max-workers 6`."
 
-      assert %{status: :ok, detail: detail} =
-               named(nodes_results(), "node capacity vs conductor.max_concurrent")
+      stub_nodes(nodes_resp(%{"local_cap_advisory" => advisory}))
 
-      assert detail =~ "under the ceiling 4"
+      assert %{status: :warn, detail: ^advisory, hint: hint} =
+               named(nodes_results(), "conductor_system_max_concurrent removed")
+
+      assert hint =~ "arb node set local"
+    end
+
+    test "no advisory, no line" do
+      stub_nodes(nodes_resp(%{"local_cap_advisory" => nil}))
+      assert named(nodes_results(), "conductor_system_max_concurrent removed") == nil
     end
 
     test "a server without /api/nodes, or an operator-less token (403), is a warn, not skipped" do

@@ -744,6 +744,7 @@ These surfaces go:
 `effective_max_concurrent`. It moves to the pin pool's seat check (§7).
 
 **The primary's default cap becomes its hardware suggestion, enforced.**
+- **As built (DC1, bd-74mtmp).** `LocalCapacity.cap/0` is `%{cap:, source: :override | :suggestion}` and is always enforced; `LocalCapacity.suggestion/0` reads the hardware once per boot (`NodeAgent.Protocol.local_hardware/0`), and `config :arbiter, :local_hardware` pins it for tests. The `installation_settings` migration `20261010120000_drop_conductor_system_max_concurrent` keeps the advisory line in a new `local_cap_advisory` column, which `GET /api/nodes` returns and `arb server doctor` and `arb node list` show until the operator sets the local cap (`arb node set local`); the workspace migration is `20261010120100_remove_conductor_from_workspace_configs`.
 - **Today.** `LocalCapacity.cap/0` defaults to `system_max_concurrent/0`, which
   is 16 and not enforced (`local_capacity.ex:102-110`).
 - **After DC1.** It's `nodes.local_max_workers` when set. Otherwise it's

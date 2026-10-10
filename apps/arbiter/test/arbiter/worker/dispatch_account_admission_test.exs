@@ -38,8 +38,8 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
+    ResumeSlotFixture.put_local_cap(10)
     # The scheduler cap is for machine load; the account cap is under test.
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 10)
 
     {:ok, ws} =
       Ash.create(Workspace, %{
@@ -110,7 +110,10 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
         topics: [],
         follow_up: false,
         snapshot: &Snapshot.load/1,
-        dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+        dispatch: fn id ->
+          send(test, {:dispatched, id})
+          {:ok, %{task_id: id}}
+        end
       )
 
     pid

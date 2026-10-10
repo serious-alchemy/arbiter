@@ -11,8 +11,6 @@ defmodule Arbiter.Skills.ScopingVersioningTest do
   alias Arbiter.Skills.Skill
   alias Arbiter.Tasks.Workspace
 
-  require Ash.Query
-
   setup do
     {:ok, ws_a} = Ash.create(Workspace, %{name: "ws-a", prefix: "wa"})
     {:ok, ws_b} = Ash.create(Workspace, %{name: "ws-b", prefix: "wb"})

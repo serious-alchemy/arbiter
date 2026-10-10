@@ -168,8 +168,6 @@ defmodule ArbiterWeb.Api.FallbackController do
     Enum.any?(errors, &match?(%Ash.Error.Query.NotFound{}, &1))
   end
 
-  defp contains_not_found?(_), do: false
-
   # A single validation error is common (e.g. bd-7mbrlg's acceptance-criteria
   # guard) and its message is specific enough to surface directly, sparing
   # callers (like the CLI) a round-trip through `details.errors` just to show

@@ -386,8 +386,12 @@ defmodule Arbiter.Board.Autopilot do
   @spec resumes_settled(GenServer.server()) :: :ok
   def resumes_settled(server \\ __MODULE__) do
     case GenServer.whereis(server) do
-      nil -> :ok
-      pid -> send(pid, :resumes_settled) && :ok
+      nil ->
+        :ok
+
+      pid ->
+        send(pid, :resumes_settled)
+        :ok
     end
   end
 

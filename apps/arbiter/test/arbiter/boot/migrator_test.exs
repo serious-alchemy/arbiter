@@ -30,7 +30,7 @@ defmodule Arbiter.Boot.MigratorTest do
       spec = Migrator.child_spec([])
 
       assert {module, :start_link, _args} = spec.start
-      refute module == Task
+      assert module == Migrator
       assert spec.type == :worker
     end
   end

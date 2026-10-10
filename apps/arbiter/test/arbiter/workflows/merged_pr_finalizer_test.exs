@@ -5,7 +5,6 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.MergedPRFinalizer
-  require Ash.Query
 
   # A minimal real GenServer double for `Arbiter.Worker` — just enough to
   # answer the `:snapshot` call `Worker.state/1` makes (bd-6w7j8h) and to

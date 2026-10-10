@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.Config do
 
   `schema` prints a comprehensive reference of every top-level config key
   (tracker, merge, agent/review_agent, security, routing, review/review_gate,
-  review_automation, quota, conductor, standing_orders, repo_paths, pr_patrol,
+  review_automation, quota, standing_orders, repo_paths, pr_patrol,
   review_patrol) with its sub-fields, valid enum values, and defaults. It is
   read from the running server (`GET /api/workspaces/config_schema`), the one
   copy the validator, MCP's `workspace_config_schema` and this verb all share.

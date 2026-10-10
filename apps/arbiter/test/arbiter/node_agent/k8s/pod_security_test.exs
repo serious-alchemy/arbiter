@@ -270,7 +270,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurityTest do
 
     test "a pod with no spec at all reports violations instead of crashing" do
       assert {:error, violations} = PodSecurity.check(%{}, opts())
-      assert violations != []
+      assert [_ | _] = violations
       assert {:error, _} = PodSecurity.check(%{"spec" => %{"containers" => "nope"}}, opts())
     end
   end

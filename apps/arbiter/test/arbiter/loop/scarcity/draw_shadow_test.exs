@@ -14,13 +14,17 @@ defmodule Arbiter.Loop.Scarcity.DrawShadowTest do
   @consumers ~r/Scarcity\.Draw|Scarcity\.Calibration|draw_share|draw_calibration/
 
   # The only files allowed to name the calibration: its own modules, the
-  # `Scarcity` seam, and the two operator entry points.
+  # `Scarcity` seam, and the two operator entry points. DC2's seat-hour
+  # calibration (bd-c1dief) reuses `Calibration.fit/2` and `Draw.intervals/3`
+  # and is itself pinned shadow-only by `Quota.BudgetCalibrationShadowTest`.
   @allowed ~w(
     arbiter/loop/scarcity.ex
     arbiter/loop/scarcity/draw.ex
     arbiter/loop/scarcity/calibration.ex
     arbiter/release.ex
+    arbiter/quota/budget_calibration.ex
     mix/tasks/arbiter.draw_calibration.ex
+    mix/tasks/arbiter.budget_calibration.ex
   )
 
   test "no routing, gate, dispatch or board module consumes the calibration" do

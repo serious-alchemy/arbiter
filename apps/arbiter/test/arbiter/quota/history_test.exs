@@ -44,6 +44,36 @@ defmodule Arbiter.Quota.HistoryTest do
     )
   end
 
+  # bd-c1dief (DC2): every capture records the seats the account holds.
+  test "each row carries the account's live seat count; budget stays unset until DC3" do
+    ws = Ash.create!(Workspace, %{name: "default"})
+    account_id = quota_account_id!(ws.id)
+
+    {:ok, _} = poll!(ws, 20, 8)
+
+    assert [%{seats: 0, budget: nil}, %{seats: 0, budget: nil}] = History.list(account_id)
+
+    test = self()
+    key = "history-seat-#{System.unique_integer([:positive])}"
+
+    pid =
+      spawn(fn ->
+        {:ok, _} = Registry.register(Arbiter.Worker.Registry, key, nil)
+        :ok = Arbiter.Worker.Registry.put_dispatch(key, ws.id, "claude")
+        send(test, :registered)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive :registered
+    {:ok, _} = poll!(ws, 30, 9)
+    send(pid, :stop)
+
+    assert [0, 0, 1, 1] = History.list(account_id) |> Enum.map(& &1.seats)
+  end
+
   test "each poll appends one row per window and never overwrites" do
     ws = Ash.create!(Workspace, %{name: "default"})
     account_id = quota_account_id!(ws.id)

@@ -230,9 +230,7 @@ defmodule Arbiter.Loop.CompetenceGenerator do
   defp mean([]), do: nil
   defp mean(values), do: Enum.sum(values) / length(values)
 
-  defp round1(nil), do: nil
   defp round1(n), do: Float.round(n * 1.0, 1)
 
-  defp round2(nil), do: nil
   defp round2(n), do: Float.round(n * 1.0, 2)
 end

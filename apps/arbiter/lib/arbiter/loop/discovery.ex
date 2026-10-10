@@ -46,8 +46,6 @@ defmodule Arbiter.Loop.Discovery do
   what `config/test.exs` sets, so no test can exec a real CLI by accident.
   """
 
-  require Logger
-
   alias Arbiter.Loop.{Corpus, FindingBuckets, Scarcity}
 
   # §4: one string per unit, ≤ 400 chars, ≤ 300 units newest-first.

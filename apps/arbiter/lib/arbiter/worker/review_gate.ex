@@ -3046,7 +3046,7 @@ defmodule Arbiter.Worker.ReviewGate do
             {:done,
              finish(
                state,
-               {:parked, infra_park_reason(category), infra_failure_message(reason)}
+               {:parked, :reviewer_failed, infra_failure_message(reason)}
              )}
 
           _ ->
@@ -4375,14 +4375,6 @@ defmodule Arbiter.Worker.ReviewGate do
   # names the real cause and remediation instead of the generic "no parseable
   # VERDICT line" message, which gave no signal that re-authenticating (or
   # waiting out a rate limit) would fix it.
-  # bd-9zuvbh: which park an infra failure stamps. The distinction is not
-  # cosmetic — bd-1xss5z was agy's own `--print-timeout` firing mid-review, and
-  # "the reviewer ran out of time" is a different operator action (raise the
-  # budget, shrink the review) from "the reviewer's session broke" (credentials,
-  # quota, a dead gateway).
-  defp infra_park_reason(:agent_print_timeout), do: :reviewer_timeout
-  defp infra_park_reason(_category), do: :reviewer_failed
-
   defp infra_failure_message(%StopReason{} = reason) do
     "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end
@@ -6131,29 +6123,24 @@ defmodule Arbiter.Worker.ReviewGate do
   # first pass (and again after a node is lost under it): a node with headroom
   # when the workspace allows it (`worker.placement`), else the primary. A
   # `remote_only` workspace with no node free is `{:error, {:placement_held, info}}`.
-  # With `worker.placement` unset and the primary's cap not enforced there is
-  # nothing to decide and nothing is read.
+  # The primary's cap is always enforced (DC1), so every first pass is decided.
   defp place_reviewer_pass(%{review_node: nil} = state, :reviewer) do
     ws = load_workspace(Map.get(state, :workspace_id))
 
-    if Placement.mode(ws) == :local_only and not LocalCapacity.cap().enforced? do
-      {:ok, %{state | review_node: :local}}
-    else
-      request = %{
-        task_id: state.task_id,
-        workspace_id: Map.get(state, :workspace_id),
-        kind: :reviewer,
-        provider: placement_provider(state, ws),
-        layout: GitLayout.for_review_workspace(ws, Map.get(state, :repo)),
-        no_pr?: false,
-        mode: Placement.mode(ws)
-      }
+    request = %{
+      task_id: state.task_id,
+      workspace_id: Map.get(state, :workspace_id),
+      kind: :reviewer,
+      provider: placement_provider(state, ws),
+      layout: GitLayout.for_review_workspace(ws, Map.get(state, :repo)),
+      no_pr?: false,
+      mode: Placement.mode(ws)
+    }
 
-      case LocalCapacity.gate(request, state.placement_opts) do
-        {:ok, {:node, row}} -> {:ok, %{state | review_node: row}}
-        {:ok, :local} -> {:ok, %{state | review_node: :local}}
-        {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
-      end
+    case LocalCapacity.gate(request, state.placement_opts) do
+      {:ok, {:node, row}} -> {:ok, %{state | review_node: row}}
+      {:ok, :local} -> {:ok, %{state | review_node: :local}}
+      {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
     end
   rescue
     e ->

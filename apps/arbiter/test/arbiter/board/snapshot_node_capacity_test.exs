@@ -1,8 +1,8 @@
 defmodule Arbiter.Board.SnapshotNodeCapacityTest do
   @moduledoc """
   RW14 (`docs/design/remote-workers.md` §13): the board's slot count is the sum
-  of the caps of every *available* node (the primary's own cap included), and
-  `conductor.max_concurrent` is an optional hard ceiling over that sum. A
+  of the caps of every *available* node (the primary's own cap included); there
+  is no install-wide ceiling over that sum (DC1 deleted it). A
   placement-headroom term stops the board planning slots that neither the
   primary nor any node can serve.
   """
@@ -19,18 +19,7 @@ defmodule Arbiter.Board.SnapshotNodeCapacityTest do
   @operator Actor.operator("cli")
 
   setup do
-    previous = Application.fetch_env(:arbiter, :conductor_system_max_concurrent)
-    Application.delete_env(:arbiter, :conductor_system_max_concurrent)
-    {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(nil)
-
     on_exit(fn ->
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(nil)
-
-      case previous do
-        {:ok, v} -> Application.put_env(:arbiter, :conductor_system_max_concurrent, v)
-        :error -> Application.delete_env(:arbiter, :conductor_system_max_concurrent)
-      end
-
       {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(nil)
     end)
 
@@ -71,24 +60,19 @@ defmodule Arbiter.Board.SnapshotNodeCapacityTest do
   end
 
   describe "no enrolled nodes" do
-    test "with no ceiling the effective concurrency is the local cap" do
+    test "the effective concurrency is the local cap" do
       ws = workspace!()
       local_cap!(4)
       assert effective(ws, []) == 4
     end
 
-    test "with no ceiling and no override it is the local default" do
+    test "with no override it is the local hardware suggestion (DC1)" do
       ws = workspace!()
-      assert effective(ws, []) == Snapshot.system_max_concurrent()
-    end
+      put_app_env(:arbiter, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
 
-    test "no regression: a ceiling equal to the local cap changes nothing" do
-      ws = workspace!()
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(3)
-      # The local cap defaults to the ceiling, exactly as before RW14.
-      assert Capacity.local_cap() == 3
-      assert effective(ws, []) == 3
-      assert Snapshot.effective_max_concurrent(ws.id) == 3
+      assert Capacity.local_cap() == 6
+      assert effective(ws, []) == 6
+      assert Snapshot.effective_max_concurrent(ws.id) == 6
     end
   end
 
@@ -144,42 +128,27 @@ defmodule Arbiter.Board.SnapshotNodeCapacityTest do
       assert breakdown.local == 2
       assert breakdown.remote == 3
       assert breakdown.sum == 5
-      assert breakdown.ceiling == nil
       assert breakdown.effective == 5
-      refute breakdown.ceiling_cuts?
       assert [%{name: "a", contributes: 3}, %{name: "b", contributes: 0}] = breakdown.nodes
     end
   end
 
-  describe "conductor.max_concurrent as an optional ceiling" do
+  describe "there is no install-wide ceiling over the sum (DC1)" do
     setup do
       local_cap!(2)
       %{ws: workspace!(placement("prefer_remote"))}
     end
 
-    test "when set it is a hard ceiling: min(sum, ceiling)", %{ws: ws} do
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(4)
-      assert effective(ws, [node("a", 3)]) == 4
-
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(9)
+    test "the sum applies", %{ws: ws} do
       assert effective(ws, [node("a", 3)]) == 5
     end
 
-    test "when unset the sum applies", %{ws: ws} do
-      assert effective(ws, [node("a", 3)]) == 5
-    end
+    test "the breakdown carries no ceiling" do
+      breakdown = Capacity.breakdown(nodes: [node("a", 3)], remote_available?: true)
 
-    test "the ceiling cuts capacity only when it is below the sum" do
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(4)
-      nodes = [node("a", 3)]
-
-      assert %{ceiling_cuts?: true, sum: 5, effective: 4} =
-               Capacity.breakdown(nodes: nodes, remote_available?: true)
-
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(5)
-
-      assert %{ceiling_cuts?: false} =
-               Capacity.breakdown(nodes: nodes, remote_available?: true)
+      assert %{sum: 5, effective: 5} = breakdown
+      refute Map.has_key?(breakdown, :ceiling)
+      refute Map.has_key?(breakdown, :ceiling_cuts?)
     end
   end
 

@@ -3,8 +3,8 @@ defmodule Arbiter.Accounts.SlotLimit do
   Which limit is *binding* when a workspace has no free worker slot, and how to
   say so (bd-48prlb).
 
-  `Arbiter.Board.Snapshot.effective_max_concurrent/3` folds three limits into
-  one number — the install cap, the workspace cap, and the provider account's
+  `Arbiter.Board.Snapshot.effective_max_concurrent/3` folds the limits into
+  one number — the install's machine capacity and the provider account's
   ceiling (`Concurrency.clamp/3`). That number is a derived, workspace-framed
   figure: when the account ceiling binds it is `min(base, own + (ceiling −
   live))`, and the account's live count includes every run on the account —
@@ -18,7 +18,7 @@ defmodule Arbiter.Accounts.SlotLimit do
 
   @typedoc "The binding limit. `:account` carries the live runs counted against it."
   @type t ::
-          %{limit: :install | :workspace, max: non_neg_integer()}
+          %{limit: :install, max: non_neg_integer()}
           | %{
               limit: :account,
               name: String.t(),
@@ -33,28 +33,18 @@ defmodule Arbiter.Accounts.SlotLimit do
   `account` is `nil` or `%{name:, limit:, live:, runs:}`; `own` is the
   workspace's own live count, as `Concurrency.clamp/3` takes it.
   """
-  @spec classify(
-          non_neg_integer(),
-          non_neg_integer() | nil,
-          map() | nil,
-          non_neg_integer()
-        ) :: t()
-  def classify(system_max, ws_max, account, own) do
-    {base, base_limit} =
-      if is_integer(ws_max) and ws_max > 0 and ws_max < system_max,
-        do: {ws_max, :workspace},
-        else: {system_max, :install}
-
+  @spec classify(non_neg_integer(), map() | nil, non_neg_integer()) :: t()
+  def classify(system_max, account, own) do
     case account do
       %{limit: limit, live: live} = acct when is_integer(limit) ->
-        if own + max(0, limit - live) < base do
+        if own + max(0, limit - live) < system_max do
           %{limit: :account, name: acct.name, max: limit, live: live, runs: acct.runs}
         else
-          %{limit: base_limit, max: base}
+          %{limit: :install, max: system_max}
         end
 
       _ ->
-        %{limit: base_limit, max: base}
+        %{limit: :install, max: system_max}
     end
   end
 
@@ -75,7 +65,7 @@ defmodule Arbiter.Accounts.SlotLimit do
       end
 
     own = own || (acct && length(Concurrency.holders(account))) || 0
-    classify(system_max, Arbiter.Tasks.Workspace.max_concurrent(ws), acct, own)
+    classify(system_max, acct, own)
   rescue
     _ -> nil
   end
@@ -84,15 +74,15 @@ defmodule Arbiter.Accounts.SlotLimit do
 
   @doc """
   The operator-facing phrase for a binding limit. `holders` are the slot-holding
-  tickets, used only when the install or workspace cap binds.
+  tickets, used only when the install cap binds.
   """
   @spec describe(t() | nil, [String.t()]) :: String.t() | nil
   def describe(%{limit: :account} = b, _holders) do
     "account #{b.name} at #{b.live}/#{b.max} live (#{runs(b.runs)})"
   end
 
-  def describe(%{limit: limit, max: max}, holders) when limit in [:install, :workspace] do
-    "the #{limit} cap is #{max} and #{held_by(holders)}"
+  def describe(%{limit: :install, max: max}, holders) do
+    "the install cap is #{max} and #{held_by(holders)}"
   end
 
   def describe(_binding, _holders), do: nil

@@ -12,8 +12,6 @@ defmodule Arbiter.Loop.PendingWriteWorkspaceBackfillTest do
   alias Arbiter.Loop.{PendingWrite, PendingWriteWorkspaceBackfill}
   alias Arbiter.Tasks.{Issue, Workspace}
 
-  require Ash.Query
-
   defp new_ws(attrs \\ %{}) do
     n = System.unique_integer([:positive])
 

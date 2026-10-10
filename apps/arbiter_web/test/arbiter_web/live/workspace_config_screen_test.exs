@@ -126,7 +126,6 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
       # every setting row this screen has always shown must still be present,
       # just now nested under a group heading
       assert html =~ ~s(data-setting-row="Tracker type")
-      assert html =~ ~s(data-setting-row="Max concurrent workers")
     end
   end
 
@@ -149,13 +148,12 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
              "some setting rows carry an empty consequence line"
     end
 
-    test "the concurrency cap explains how it combines with the other caps", %{conn: conn} do
+    test "there is no per-workspace concurrency cap row any more (DC1)", %{conn: conn} do
       ws = new_workspace()
       {:ok, _view, html} = live_workspace(conn, ws.id)
 
-      assert html =~ "Max concurrent workers"
-      assert html =~ "lowest of this, the account ceiling"
-      assert html =~ "the system cap and quota headroom"
+      refute html =~ "Max concurrent workers"
+      refute html =~ "conductor"
     end
 
     test "auto-dispatch describes the scheduler, not manual dispatch", %{conn: conn} do

@@ -61,7 +61,6 @@ defmodule Arbiter.Accounts.Migrate do
   """
 
   require Ash.Query
-  require Logger
 
   alias Arbiter.Accounts.Census
   alias Arbiter.Accounts.ProviderAccount

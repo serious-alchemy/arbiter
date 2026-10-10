@@ -52,8 +52,6 @@ defmodule Arbiter.Reviews.ConflictResolution do
   regions is reported `:authored` — more review, never less.
   """
 
-  require Logger
-
   @type region :: %{
           ours: [String.t()],
           base: [String.t()] | nil,

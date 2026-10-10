@@ -5,19 +5,16 @@ defmodule Arbiter.Nodes.Capacity do
 
   ## The rule
 
-      effective = min(local cap + Σ available node caps, ceiling)
+      effective = local cap + Σ available node caps
 
-    * the **local cap** is the primary's own (`Arbiter.Nodes.LocalCapacity.cap/0`);
+    * the **local cap** is the primary's own (`Arbiter.Nodes.LocalCapacity.cap/0`:
+      its override, else its hardware suggestion);
     * a node is **available** — and adds its effective cap — only while it is
       `online`, healthy (`ready`), has a known cap, and remote execution is on
       (`Arbiter.Nodes.Placement.remote_execution_available?/0`: until it is,
       nothing can run on a node, so a node's cap would be a slot nothing can
       serve). A `draining`, `suspect`, `offline`, `lost` (its session is gone, so
       it reads `offline`) or `revoked` node adds **0**;
-    * `conductor.max_concurrent` is an **optional hard ceiling**
-      (`Arbiter.Board.Snapshot.concurrency_ceiling/0`): unset means "use the
-      sum", set means `min(sum, ceiling)`. It stays operator-owned — it is also
-      the quota valve — and is never derived from a node.
 
   Provider-account caps bind separately and on top (`Board.Snapshot` folds them
   in with `Accounts.Concurrency.clamp/3`): the dispatch limit is
@@ -43,7 +40,6 @@ defmodule Arbiter.Nodes.Capacity do
   well while no node has room.
   """
 
-  alias Arbiter.Board.Snapshot
   alias Arbiter.Nodes.{LocalCapacity, Overview, Placement}
 
   @type node_entry :: %{
@@ -61,9 +57,7 @@ defmodule Arbiter.Nodes.Capacity do
           nodes: [node_entry()],
           remote: non_neg_integer(),
           sum: non_neg_integer(),
-          ceiling: pos_integer() | nil,
           effective: non_neg_integer(),
-          ceiling_cuts?: boolean(),
           remote_execution?: boolean()
         }
 
@@ -77,14 +71,13 @@ defmodule Arbiter.Nodes.Capacity do
   The whole picture. Options: `:nodes` (overview rows, or a 0-arity function
   returning them; default `Overview.node_rows/0`, read only when remote
   execution is on), `:remote_available?` (a seam over
-  `Placement.remote_execution_available?/0`), `:local_cap` and `:ceiling` (to
+  `Placement.remote_execution_available?/0`), and `:local_cap` (to
   reuse a value already read).
   """
   @spec breakdown(keyword()) :: breakdown()
   def breakdown(opts \\ []) do
     remote? = remote?(opts)
     local = Keyword.get_lazy(opts, :local_cap, &local_cap/0)
-    ceiling = Keyword.get_lazy(opts, :ceiling, &Snapshot.concurrency_ceiling/0)
     nodes = opts |> rows(remote?) |> Enum.map(&entry(&1, remote?))
     remote = Enum.sum_by(nodes, & &1.contributes)
     sum = local + remote
@@ -94,14 +87,12 @@ defmodule Arbiter.Nodes.Capacity do
       nodes: nodes,
       remote: remote,
       sum: sum,
-      ceiling: ceiling,
-      effective: if(ceiling, do: min(sum, ceiling), else: sum),
-      ceiling_cuts?: is_integer(ceiling) and ceiling < sum,
+      effective: sum,
       remote_execution?: remote?
     }
   end
 
-  @doc "The install-wide effective concurrency: `min(sum, ceiling)`."
+  @doc "The install-wide effective concurrency: the sum of the available machines' caps."
   @spec effective(keyword()) :: non_neg_integer()
   def effective(opts \\ []), do: breakdown(opts).effective
 

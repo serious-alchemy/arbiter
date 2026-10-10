@@ -15,40 +15,35 @@ defmodule Arbiter.Nodes.Overview do
       value) and `:ceiling` (what the node's owner set on the node itself, a
       hard bound the override cannot beat)
 
-  The `local` row's suggestion is the install's own local concurrency
-  (`Arbiter.Board.Snapshot.system_max_concurrent/0`), so an install that never
-  overrides it behaves as before. Its override may be 0.
+  The `local` row's suggestion is the primary's hardware suggestion
+  (`Arbiter.Nodes.LocalCapacity.suggestion/0`, `NodeAgent.Protocol.suggestion/2`),
+  the same formula a remote row's `suggested` comes from, and the default cap is
+  enforced. Its override may be 0.
 
   `total` is the install's capacity, `local + Σ the caps of every available
   node` (`Arbiter.Nodes.Capacity`: an offline, lost, draining, suspect, revoked
   or unhealthy node adds 0, and so does every node while remote execution is
-  off), and each node row's `:contributes` is what it added. `ceiling` is the
-  operator's `conductor.max_concurrent` when set and `nil` when not, and
-  `effective` is `min(total, ceiling)`, the concurrency the board plans to. The
-  ceiling is never derived from node caps. `warnings` names what the operator
-  should look at: `:local_cap_zero`, and `:ceiling_below_total` only while an
-  explicit ceiling cuts the sum.
+  off), and each node row's `:contributes` is what it added. `total` is the
+  concurrency the board plans to: there is no install-wide cap above the
+  machines. `warnings` names what the operator should look at: `:local_cap_zero`.
   """
 
   import Bitwise
 
   require Ash.Query
 
-  alias Arbiter.Board.Snapshot, as: Board
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Capacity, Hello, Node, Registry, Session, Skew}
+  alias Arbiter.Nodes.{Capacity, Hello, LocalCapacity, Node, Registry, Session, Skew}
   alias Arbiter.Settings
   alias Arbiter.Workers.{Run, RunState}
 
   @type row :: map()
 
-  @doc "The whole overview: `%{local:, nodes:, total:, effective:, ceiling:, remote_execution?:, warnings:}`."
+  @doc "The whole overview: `%{local:, nodes:, total:, remote_execution?:, warnings:}`."
   @spec build() :: %{
           local: row(),
           nodes: [row()],
           total: non_neg_integer(),
-          effective: non_neg_integer(),
-          ceiling: pos_integer() | nil,
           remote_execution?: boolean(),
           warnings: [atom()]
         }
@@ -65,10 +60,8 @@ defmodule Arbiter.Nodes.Overview do
       local: local,
       nodes: nodes,
       total: capacity.sum,
-      effective: capacity.effective,
-      ceiling: capacity.ceiling,
       remote_execution?: capacity.remote_execution?,
-      warnings: warnings(local, capacity)
+      warnings: warnings(local)
     }
   end
 
@@ -163,7 +156,7 @@ defmodule Arbiter.Nodes.Overview do
   defp pending(_snapshot), do: 0
 
   defp local_row(remote_run_ids) do
-    suggested = Board.system_max_concurrent()
+    suggested = LocalCapacity.suggestion()
     override = Settings.nodes_local_max_workers()
 
     %{
@@ -226,12 +219,7 @@ defmodule Arbiter.Nodes.Overview do
 
   # ---- warnings --------------------------------------------------------------
 
-  defp warnings(local, capacity) do
-    Enum.filter(
-      [local.max == 0 && :local_cap_zero, capacity.ceiling_cuts? && :ceiling_below_total],
-      & &1
-    )
-  end
+  defp warnings(local), do: if(local.max == 0, do: [:local_cap_zero], else: [])
 
   # ---- exposure (§4.3) -------------------------------------------------------
 

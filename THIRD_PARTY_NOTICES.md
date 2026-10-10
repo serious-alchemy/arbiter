@@ -45,7 +45,7 @@ do not edit it by hand.
 | lazy_html | 0.1.12 | Apache-2.0 |
 | mdex | 0.13.5 | MIT |
 | mdex_native | 0.2.8 | MIT |
-| meck | 0.9.2 | Apache-2.0 |
+| meck | 1.2.0 | Apache-2.0 |
 | mime | 2.0.7 | Apache-2.0 |
 | mint | 1.9.3 | Apache-2.0 |
 | mint_web_socket | 1.0.6 | Apache-2.0 |

@@ -129,7 +129,10 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
     assert {:ok, %{watched: 0, rewatched: 1, escalated: 0}} =
              Reconciler.reconcile_open_pr_tasks(
                watch_fun: fn _issue -> {:error, :no_adapter} end,
-               rewatch_fun: fn issue -> send(test_pid, {:patrol, issue.id}) && :ok end
+               rewatch_fun: fn issue ->
+                 send(test_pid, {:patrol, issue.id})
+                 :ok
+               end
              )
 
     assert_received {:patrol, id}

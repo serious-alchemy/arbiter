@@ -7,8 +7,8 @@ defmodule Arbiter.SettingsTest do
     test "every persisted write announces itself on Settings.topic/0" do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
 
-      assert {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
-      assert_receive {:installation_settings_changed, :conductor_system_max_concurrent}
+      assert {:ok, 4} = Settings.set_nodes_local_max_workers(4)
+      assert_receive {:installation_settings_changed, :nodes_local_max_workers}
 
       assert {:ok, []} = Settings.set_credential_watchdog_adapters([])
       assert_receive {:installation_settings_changed, :credential_watchdog_adapters}
@@ -17,45 +17,64 @@ defmodule Arbiter.SettingsTest do
     test "a rejected write announces nothing" do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
 
-      assert {:error, :invalid_value} = Settings.set_conductor_system_max_concurrent(0)
+      assert {:error, :invalid_value} = Settings.set_nodes_local_max_workers(-1)
       refute_receive {:installation_settings_changed, _}, 50
     end
   end
 
-  describe "conductor_system_max_concurrent/0" do
+  describe "nodes_local_max_workers/0" do
     test "returns nil when no override has been set" do
-      assert Settings.conductor_system_max_concurrent() == nil
+      assert Settings.nodes_local_max_workers() == nil
     end
 
     test "returns the persisted override after it is set" do
-      assert {:ok, 7} = Settings.set_conductor_system_max_concurrent(7)
-      assert Settings.conductor_system_max_concurrent() == 7
+      assert {:ok, 7} = Settings.set_nodes_local_max_workers(7)
+      assert Settings.nodes_local_max_workers() == 7
     end
   end
 
-  describe "set_conductor_system_max_concurrent/1" do
+  describe "set_nodes_local_max_workers/1" do
     test "creates the singleton row on first write" do
-      assert {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
-      assert Settings.conductor_system_max_concurrent() == 4
+      assert {:ok, 4} = Settings.set_nodes_local_max_workers(4)
+      assert Settings.nodes_local_max_workers() == 4
     end
 
     test "updates the existing singleton row on subsequent writes (no duplicate rows)" do
-      assert {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
-      assert {:ok, 9} = Settings.set_conductor_system_max_concurrent(9)
-      assert Settings.conductor_system_max_concurrent() == 9
+      assert {:ok, 4} = Settings.set_nodes_local_max_workers(4)
+      assert {:ok, 9} = Settings.set_nodes_local_max_workers(9)
+      assert Settings.nodes_local_max_workers() == 9
 
       assert {:ok, [_single_row]} = Ash.read(Arbiter.Settings.Installation)
     end
 
     test "nil clears the override" do
-      assert {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
-      assert {:ok, nil} = Settings.set_conductor_system_max_concurrent(nil)
-      assert Settings.conductor_system_max_concurrent() == nil
+      assert {:ok, 4} = Settings.set_nodes_local_max_workers(4)
+      assert {:ok, nil} = Settings.set_nodes_local_max_workers(nil)
+      assert Settings.nodes_local_max_workers() == nil
     end
 
-    test "rejects zero/negative integers" do
-      assert {:error, :invalid_value} = Settings.set_conductor_system_max_concurrent(0)
-      assert {:error, :invalid_value} = Settings.set_conductor_system_max_concurrent(-1)
+    test "rejects negative integers; zero is a real value (run nothing here)" do
+      assert {:ok, 0} = Settings.set_nodes_local_max_workers(0)
+      assert {:error, :invalid_value} = Settings.set_nodes_local_max_workers(-1)
+    end
+  end
+
+  describe "local_cap_advisory/0 (DC1 migration note)" do
+    test "is nil until the migration leaves one, and clearing is idempotent" do
+      assert Settings.local_cap_advisory() == nil
+      assert {:ok, nil} = Settings.clear_local_cap_advisory()
+      assert Settings.local_cap_advisory() == nil
+    end
+
+    test "setting the local cap through Nodes clears it, even to its current value" do
+      {:ok, 6} = Settings.set_nodes_local_max_workers(6)
+      [row] = Ash.read!(Arbiter.Settings.Installation)
+      {:ok, _} = Ash.update(row, %{local_cap_advisory: "x (6) was removed"}, action: :update)
+
+      assert Settings.local_cap_advisory() == "x (6) was removed"
+
+      assert {:ok, 6} = Arbiter.Nodes.set_local_max_workers(6, nil)
+      assert Settings.local_cap_advisory() == nil
     end
   end
 
@@ -88,11 +107,11 @@ defmodule Arbiter.SettingsTest do
       assert {:error, :invalid_value} = Settings.set_credential_watchdog_adapters([:claude])
     end
 
-    test "does not disturb the sibling conductor setting" do
-      {:ok, 6} = Settings.set_conductor_system_max_concurrent(6)
+    test "does not disturb the sibling local-cap setting" do
+      {:ok, 6} = Settings.set_nodes_local_max_workers(6)
       {:ok, _} = Settings.set_credential_watchdog_adapters(["claude"])
 
-      assert Settings.conductor_system_max_concurrent() == 6
+      assert Settings.nodes_local_max_workers() == 6
       assert {:ok, [_single_row]} = Ash.read(Arbiter.Settings.Installation)
     end
   end
@@ -117,7 +136,8 @@ defmodule Arbiter.SettingsTest do
       assert Settings.credential_watchdog_interval_ms() == nil
     end
 
-    test "rejects zero/negative integers" do
+    test "rejects negative integers; zero is a real value (run nothing here)" do
+      assert {:ok, 0} = Settings.set_nodes_local_max_workers(0)
       assert {:error, :invalid_value} = Settings.set_credential_watchdog_interval_ms(0)
       assert {:error, :invalid_value} = Settings.set_credential_watchdog_recovery_interval_ms(-1)
     end

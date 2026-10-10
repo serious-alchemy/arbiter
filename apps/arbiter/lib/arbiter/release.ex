@@ -11,6 +11,7 @@ defmodule Arbiter.Release do
   alias Arbiter.Agents.Routing.ShadowReport
   alias Arbiter.Loop.CompetenceGenerator
   alias Arbiter.Loop.Scarcity.Draw
+  alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Settings
 
   @app :arbiter
@@ -145,6 +146,31 @@ defmodule Arbiter.Release do
 
     results = Draw.calibrate(Keyword.take(opts, [:since, :until]))
     IO.puts(Draw.format(results))
+    results
+  end
+
+  @doc """
+  Print the seat-hour calibration (bd-c1dief, DC2 of
+  `docs/design/provider-dynamic-concurrency.md` §3.4): for each (account, pool,
+  window) the draw per seat-hour `ρ` fitted from `quota_snapshots`, the rung of
+  the fallback ladder it lands on (own fit, other accounts, or the prior), the
+  `ρ` floor, and the horizon `H`. Read-only and **shadow output only** — no
+  admission path reads it. A fit the data doesn't pin down says which rung it
+  passed over and why.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days) and
+  `:start` (default `true`; `false` when the repo is already running). Starts
+  only the repo, so it is safe beside a live server. Returns the
+  `Arbiter.Quota.BudgetCalibration.calibrate/1` results.
+
+      bin/arbiter eval 'Arbiter.Release.budget_calibration()'
+  """
+  @spec budget_calibration(keyword()) :: [BudgetCalibration.result()]
+  def budget_calibration(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    results = BudgetCalibration.calibrate(Keyword.take(opts, [:since, :until]))
+    IO.puts(BudgetCalibration.format(results))
     results
   end
 

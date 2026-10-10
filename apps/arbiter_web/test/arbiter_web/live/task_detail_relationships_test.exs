@@ -14,8 +14,6 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
   import Arbiter.LifecycleFixtures
   import ArbiterWeb.TaskDetailLiveHelpers
 
-  require Ash.Query
-
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue

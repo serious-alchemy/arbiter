@@ -47,8 +47,6 @@ defmodule Arbiter.Usage.CodexSessionFile do
   that estimate, within a tolerance.
   """
 
-  require Logger
-
   @type totals :: %{
           tokens_in: integer() | nil,
           tokens_out: integer() | nil,

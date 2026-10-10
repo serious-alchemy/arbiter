@@ -453,7 +453,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.coordinator_token,
           req("tools/call", %{
             "name" => "installation_config_set",
-            "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => 5}
+            "arguments" => %{"key" => "credential_watchdog_interval_ms", "value" => 5}
           })
         )
 
@@ -488,7 +488,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.coordinator_token,
           req("tools/call", %{
             "name" => "installation_config_set",
-            "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => "5"}
+            "arguments" => %{"key" => "credential_watchdog_interval_ms", "value" => "5"}
           })
         )
 

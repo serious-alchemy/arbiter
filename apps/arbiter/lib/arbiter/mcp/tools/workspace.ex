@@ -337,9 +337,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # ---- installation_config_get --------------------------------------------
 
   @doc """
-  Read an install-wide runtime setting (bd-2ogep0) — the system-wide
-  concurrency ceiling and the `Arbiter.Agents.CredentialWatchdog` knobs
-  (bd-ajgve2). Returns what REST/`arb settings` return: for one `key` the
+  Read an install-wide runtime setting (bd-2ogep0) — the
+  `Arbiter.Agents.CredentialWatchdog` knobs (bd-ajgve2) and the rest. Returns what REST/`arb settings` return: for one `key` the
   `Arbiter.Settings.Registry.describe/1` item (`value` in force, `override`,
   `overridden`, `default`, ...); with `key` omitted `value` is the map of
   effective values and `items` every item. `settings` is the bare overrides map
@@ -375,9 +374,6 @@ defmodule Arbiter.MCP.Tools.Workspace do
   in `Arbiter.MCP.Catalog`). `null` always clears an override, falling back to
   the application env / hardcoded default. Settable keys:
 
-    * `conductor_system_max_concurrent` — positive integer, the install-wide
-      worker ceiling. Takes effect on the board scheduler's next tick. (The
-      `conductor_` prefix is historical; see `Arbiter.Settings`.)
     * `credential_watchdog_adapters` — list of agent-type names
       (`Arbiter.Agents.valid_agent_types/0`) the Watchdog should probe; `[]`
       probes nothing.

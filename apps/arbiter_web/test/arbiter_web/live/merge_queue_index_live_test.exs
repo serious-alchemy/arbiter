@@ -245,7 +245,12 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
          %{conn: conn} do
       test = self()
       :meck.new(PullRequest, [:passthrough, :no_link])
-      :meck.expect(PullRequest, :merging_tickets, fn -> send(test, :queue_read) && [] end)
+
+      :meck.expect(PullRequest, :merging_tickets, fn ->
+        send(test, :queue_read)
+        []
+      end)
+
       on_exit(fn -> :meck.unload(PullRequest) end)
 
       doc = conn |> get(~p"/merge_queue") |> html_response(200) |> LazyHTML.from_document()

@@ -164,14 +164,17 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
 
     test "the list carries the local row, the capacity sums and the endpoint's exposure" do
       enroll!("alpha")
-      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(6)
+      {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(6)
+      on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(nil) end)
 
       body = json_response(get(operator_conn(), "/api/nodes"), 200)
 
       assert %{"name" => "local", "kind" => "local", "state" => "online", "max" => 6} =
                body["local"]
 
-      assert %{"total" => 6, "ceiling" => 6, "warnings" => []} = body
+      assert %{"total" => 6, "warnings" => []} = body
+      refute Map.has_key?(body, "ceiling")
+      refute Map.has_key?(body, "effective")
       assert body["public_url"] == @url
       assert body["exposure"] == "private"
       assert body["allow_public_endpoint"] == false

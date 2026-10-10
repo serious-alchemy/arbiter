@@ -991,7 +991,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
 
-      assert :ok = ContainerSpawn.teardown(%{sandbox: %{name: "arb-bd-x-1234"}})
+      assert :ok = apply(ContainerSpawn, :teardown, [%{sandbox: %{name: "arb-bd-x-1234"}}])
 
       assert_received {:ran, _podman,
                        ["rm", "--force", "--ignore", "--time", "0", "arb-bd-x-1234"]}

@@ -9,7 +9,7 @@ defmodule ArbiterWeb.Api.NodeController do
     * `GET /api/nodes`, `GET /api/nodes/:ref`, `GET /api/nodes/:ref/events` —
       **operator** reads. `:ref` is a node id or its name, or `local` for the
       primary. The list also carries the `local` row, the `total` of
-      `local + Σ remote caps` against the `ceiling` (`conductor.max_concurrent`),
+      `local + Σ remote caps`,
       `warnings`, and the `nodes.public_url` with its `exposure`
       (`private | public | unset`) and the image `registry` status (K8: reachability,
       published images, last error; never the password) for `arb server doctor`.
@@ -112,9 +112,8 @@ defmodule ArbiterWeb.Api.NodeController do
       nodes: Enum.map(Nodes.list_nodes(), &NodeJSON.node(&1, Map.fetch!(rows, &1.id))),
       local: NodeJSON.local(overview.local),
       total: overview.total,
-      effective: overview.effective,
-      ceiling: overview.ceiling,
       remote_execution: overview.remote_execution?,
+      local_cap_advisory: Settings.local_cap_advisory(),
       warnings: overview.warnings,
       public_url: url,
       exposure: Overview.exposure(url),

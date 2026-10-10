@@ -71,7 +71,7 @@ defmodule ArbiterCli.Cmd.SettingsTest do
 
   defp items do
     [
-      item("conductor_system_max_concurrent", %{
+      item("credential_watchdog_interval_ms", %{
         "value" => 3,
         "override" => 3,
         "overridden" => true
@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.SettingsTest do
   test "get lists value, source, default and autopilot (read-only)" do
     stub_config(items())
     {out, _err, 0} = capture(fn -> Settings.run(["get"]) end)
-    assert out =~ "conductor_system_max_concurrent"
+    assert out =~ "credential_watchdog_interval_ms"
     assert out =~ "override"
     assert out =~ "default"
     assert out =~ "autopilot"
@@ -98,7 +98,7 @@ defmodule ArbiterCli.Cmd.SettingsTest do
     stub_config(items())
 
     {out, _err, 0} =
-      capture(fn -> Settings.run(["get", "conductor_system_max_concurrent", "--json"]) end)
+      capture(fn -> Settings.run(["get", "credential_watchdog_interval_ms", "--json"]) end)
 
     assert %{"data" => %{"override" => 3}} = Jason.decode!(out)
   end
@@ -118,16 +118,16 @@ defmodule ArbiterCli.Cmd.SettingsTest do
     stub_config(items())
 
     {_out, _err, 0} =
-      capture(fn -> Settings.run(["unset", "conductor_system_max_concurrent"]) end)
+      capture(fn -> Settings.run(["unset", "credential_watchdog_interval_ms"]) end)
 
-    assert_received {:patched, %{"key" => "conductor_system_max_concurrent", "value" => nil}}
+    assert_received {:patched, %{"key" => "credential_watchdog_interval_ms", "value" => nil}}
   end
 
   test "a rejected value prints the server's message and exits non-zero" do
     stub_config(items())
 
     {_out, err, code} =
-      capture(fn -> Settings.run(["set", "conductor_system_max_concurrent", "-1"]) end)
+      capture(fn -> Settings.run(["set", "credential_watchdog_interval_ms", "-1"]) end)
 
     assert code != 0
     assert err =~ "positive integer"
@@ -152,7 +152,7 @@ defmodule ArbiterCli.Cmd.SettingsTest do
 
   test "set without a value and unknown subcommands die" do
     stub_config(items())
-    {_o, err, code} = capture(fn -> Settings.run(["set", "conductor_system_max_concurrent"]) end)
+    {_o, err, code} = capture(fn -> Settings.run(["set", "credential_watchdog_interval_ms"]) end)
     assert code != 0 and err =~ "requires"
     {_o, err, code} = capture(fn -> Settings.run(["bogus"]) end)
     assert code != 0 and err =~ "unknown"

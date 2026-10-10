@@ -28,6 +28,8 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
           ~s|d="$(dirname "$0")"\nprintf '%s\\n' "$@" > "$d/.spawn.$$" && mv "$d/.spawn.$$" "$d/spawn.$(date +%s%N)"\nprintf '%s' "$ARB_TOKEN" > "$d/.token.$$" && mv "$d/.token.$$" "$d/token"\nexec sleep 30\n|
       )
 
+    ResumeSlotFixture.put_local_cap(10)
+
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "resume-parity-#{System.unique_integer([:positive])}",
@@ -85,7 +87,7 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
   # Every spawn the stub has seen, oldest first, each as its argv (one element
   # per line — the multi-line prompt splits, but flags and their values stay
   # whole). Waits until `count` spawns have landed.
-  defp spawns(dir, count, attempts \\ 100) do
+  defp spawns(dir, count, attempts \\ 600) do
     found =
       dir
       |> Path.join("spawn.*")
@@ -108,7 +110,7 @@ defmodule ArbiterWeb.Api.WorkerResumeParityTest do
 
   # The stub writes `token` after its `spawn.*` line, so a spawn having landed
   # does not mean the token has: wait for it, non-empty.
-  defp token(dir, attempts \\ 100) do
+  defp token(dir, attempts \\ 600) do
     case File.read(Path.join(dir, "token")) do
       {:ok, token} when token != "" ->
         token
