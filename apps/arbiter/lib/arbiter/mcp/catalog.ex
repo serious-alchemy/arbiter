@@ -1117,7 +1117,7 @@ defmodule Arbiter.MCP.Catalog do
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
             "type" => "string",
-            "enum" => ["claude", "gemini", "codex", "grok"],
+            # `"enum"` is filled from the agent registry by `live_schema/1`.
             "description" =>
               "Override the workspace's default provider. Omit to use the workspace `agent.type` config."
           },

@@ -691,6 +691,185 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
       refute File.exists?(host_marker)
     end
 
+    test "an infra-signature failure is skipped as infra: never sent to the worker, no attempt used",
+         %{repo: repo} do
+      ws = recipe([step("compile", "true"), step("credo", "true")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      # What every step said on bd-c1dief: the run's container had no deps.
+      exec = fn _command, _timeout_s ->
+        {"** (Mix) Can't continue due to errors on dependencies\n" <>
+           "the dependency is not available, run \"mix deps.get\"", 1}
+      end
+
+      pid = start_worker(task, repo, path, %{prepush_exec: exec, prepush_nudge_cap: 2})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      meta = Worker.state(pid).meta
+      refute Map.has_key?(meta, :prepush_nudge_attempts)
+      refute Map.has_key?(meta, :commit_gate_reason)
+
+      assert [
+               %{name: "compile", status: :skipped, output: "skipped: infra" <> _},
+               %{name: "credo", status: :skipped}
+             ] = steps_of(pid)
+    end
+
+    test "a real failure beside an infra one is still sent back, and the infra step is not",
+         %{repo: repo} do
+      ws =
+        recipe(
+          [step("compile", "echo infra-step"), step("format", "echo real-step")],
+          %{"pre_push_max_attempts" => 0}
+        )
+
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      exec = fn
+        "echo infra-step", _ -> {"the dependency is not available, run \"mix deps.get\"", 1}
+        "echo real-step", _ -> {"mix format: lib/a.ex is not formatted", 1}
+      end
+
+      pid = start_worker(task, repo, path, %{prepush_exec: exec})
+      done(pid)
+      wait_until(fn -> failed?(pid) end)
+
+      esc = escalation(ws, task)
+      assert esc.body =~ "is not formatted"
+      refute esc.body =~ "mix deps.get"
+    end
+
+    # bd-9rrrgk: a run placed on a node. Its worktree on the primary has no deps and no
+    # image; the recipe goes to the node's agent (`exec`), answered here by the test.
+    # The node is real (a `Session`) with the test process as its channel.
+    defp node_run(%{id: node_id} = node, run_id) do
+      {:ok, %{pid: session}} =
+        Arbiter.Nodes.Registry.attach(
+          node,
+          self(),
+          %{
+            "agent_version" => "1.0.0",
+            "proto" => 1,
+            "arch" => "x86_64",
+            "caps" => %{"backend" => "podman", "exec" => "run"},
+            "capacity" => %{"cpus" => 8, "suggestion" => 4},
+            "runs" => []
+          },
+          tick_ms: :infinity
+        )
+
+      on_exit(fn ->
+        Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, session)
+      end)
+
+      {session, %{remote: %{node: node_id, run_id: run_id, request: %{}, prepared: nil}}}
+    end
+
+    defp enroll_node! do
+      {:ok, %{token: token}} =
+        Arbiter.Nodes.mint_join_token(
+          [name: "pp-node-#{System.unique_integer([:positive])}"],
+          "operator:test"
+        )
+
+      {:ok, %{node: node}} = Arbiter.Nodes.redeem_join_token(token)
+      node
+    end
+
+    # Answer the `exec`s the session has pushed to this (channel) process so far with
+    # `reply.(command)`; polled from `wait_until`, since the test process is the channel.
+    defp serve_execs(session, reply) do
+      receive do
+        {:node_session, {:push, "exec", %{"id" => id, "run" => run, "command" => command} = p}} ->
+          send(self(), {:exec_seen, p})
+          {output, status} = reply.(command)
+
+          Arbiter.Nodes.Session.node_event(session, "exec.result", %{
+            "run" => run,
+            "id" => id,
+            "status" => status,
+            "output" => output
+          })
+
+          serve_execs(session, reply)
+      after
+        0 -> false
+      end
+    end
+
+    test "a remote run's recipe runs on its node, in the run's container, not on the host",
+         %{repo: repo, tmp: tmp} do
+      host_marker = Path.join(tmp, "ran-on-host")
+      ws = recipe([step("format", "touch #{host_marker}"), step("compile", "mix compile")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+      {session, spawn_args} = node_run(enroll_node!(), "run-remote-1")
+
+      pid = start_worker(task, repo, path, %{claude_spawn: spawn_args})
+      done(pid)
+
+      wait_until(fn ->
+        serve_execs(session, fn _command -> {"ok", 0} end)
+        at_review_gate?(pid)
+      end)
+
+      assert_received {:exec_seen, %{"run" => "run-remote-1", "command" => "touch " <> _}}
+      assert_received {:exec_seen, %{"run" => "run-remote-1", "command" => "mix compile"}}
+      refute File.exists?(host_marker)
+      assert [%{status: :passed}, %{status: :passed}] = steps_of(pid)
+    end
+
+    test "a real failure on a remote run is still caught and returned to the live session",
+         %{repo: repo} do
+      ws = recipe([step("format", "mix format --check-formatted")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+      {session, spawn_args} = node_run(enroll_node!(), "run-remote-2")
+
+      pid = start_worker(task, repo, path, %{claude_spawn: spawn_args, prepush_nudge_cap: 0})
+      done(pid)
+
+      wait_until(fn ->
+        serve_execs(session, fn _ -> {"** (Mix) mix format failed: lib/a.ex", 1} end)
+        failed?(pid)
+      end)
+
+      assert Worker.state(pid).meta.commit_gate_reason == :prepush_failed
+      assert escalation(ws, task).body =~ "mix format failed"
+    end
+
+    test "a node that cannot run it is recorded as unavailable and the push proceeds",
+         %{repo: repo} do
+      ws = recipe([step("format", "mix format --check-formatted")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+      {session, spawn_args} = node_run(enroll_node!(), "run-remote-3")
+
+      pid = start_worker(task, repo, path, %{claude_spawn: spawn_args})
+      done(pid)
+
+      wait_until(fn ->
+        receive do
+          {:node_session, {:push, "exec", %{"id" => id, "run" => run}}} ->
+            Arbiter.Nodes.Session.node_event(session, "exec.result", %{
+              "run" => run,
+              "id" => id,
+              "error" => ":no_context"
+            })
+        after
+          0 -> :ok
+        end
+
+        at_review_gate?(pid)
+      end)
+
+      refute Map.has_key?(Worker.state(pid).meta, :prepush_nudge_attempts)
+      assert [%{name: "format", status: :error}] = steps_of(pid)
+    end
+
     test "a ReviewGate fix round is held to the same recipe", %{repo: repo} do
       ws = recipe([step("format", "echo fix-round-red; exit 1")], %{"pre_push_max_attempts" => 1})
       task = new_task(ws)

@@ -153,7 +153,25 @@ defmodule Arbiter.Worker.Executor.Node do
     :exit, _ -> :ok
   end
 
+  @doc """
+  Run `command` (`sh -c`) to completion in a container of `run`'s shape on `node` — its
+  image, mounts and limits, none of its secrets (bd-9rrrgk, the pre-push recipe of a
+  run placed there) — and return `{output, exit_status}`. The run's agent may have
+  ended: the node rebuilds the container from the spec the run was assigned with.
+  `{:error, reason}` when the node cannot (`:no_session`, `:not_connected`,
+  `:unsupported`, `{:exec_failed, node's reason}`, `:timeout`).
+  """
+  @spec exec(Nodes.Node.t() | String.t(), String.t(), String.t(), pos_integer()) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def exec(node, run, command, timeout_s) when is_binary(run) and is_binary(command) do
+    with {:ok, node_id} <- node_id(node),
+         {:ok, pid} <- session(node_id) do
+      Session.exec(pid, run, command, timeout_s)
+    end
+  end
+
   @doc "Tell the session an ended run can be forgotten."
+
   @spec release(Arbiter.Worker.Executor.handle()) :: :ok
   def release({:remote, {node_id, run, _ref}}) do
     case Nodes.Registry.lookup(node_id) do

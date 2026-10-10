@@ -142,6 +142,17 @@ defmodule Arbiter.Providers.PauseTest do
       assert Pause.list() == []
     end
 
+    test "providers/0 is derived from the agent registry and normalize accepts each" do
+      assert "grok" in Pause.providers()
+      assert "antigravity" in Pause.providers()
+
+      for code <- Pause.providers(), do: assert(Pause.normalize(code) == code)
+      assert {:ok, %{target: "grok"}} = Pause.pause("grok", reason: "x", by: "cli")
+      assert Pause.provider_paused?(:grok)
+      assert {:ok, _} = Pause.resume("grok")
+      refute Pause.provider_paused?(:grok)
+    end
+
     test "with no account the hold is provider-wide, and grok is a holdable provider" do
       assert {:ok, %{target: "antigravity"}} =
                Pause.quota_hold(:gemini, nil, in_secs(60), reason: "quota reached")

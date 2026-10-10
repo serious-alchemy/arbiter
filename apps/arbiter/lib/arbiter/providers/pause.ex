@@ -6,7 +6,7 @@ defmodule Arbiter.Providers.Pause do
   A pause is persisted on the installation settings row
   (`Arbiter.Settings.provider_pauses/0`) as `%{target => entry}`:
 
-    * `"claude"` / `"codex"` / `"antigravity"` — every account on the provider
+    * a provider code (`providers/0`: `"claude"`, `"codex"`, `"antigravity"`, `"grok"`, …) — every account on the provider
       (and, through `provider_paused?/1`, the account-less legacy routing);
     * `"account:<uuid>"` — one account.
 
@@ -34,8 +34,6 @@ defmodule Arbiter.Providers.Pause do
   alias Arbiter.Settings
 
   require Ash.Query
-
-  @providers ~w(claude codex antigravity grok)
 
   @type entry :: %{
           target: String.t(),
@@ -322,8 +320,17 @@ defmodule Arbiter.Providers.Pause do
   def normalize(nil), do: nil
   def normalize(p) when is_atom(p), do: normalize(Atom.to_string(p))
   def normalize("gemini"), do: "antigravity"
-  def normalize(p) when p in @providers, do: p
+  def normalize("antigravity"), do: "antigravity"
+  def normalize(p) when is_binary(p), do: if(p in Arbiter.Agents.valid_agent_types(), do: p)
   def normalize(_), do: nil
+
+  @doc """
+  Every holdable provider code, derived from the agent registry
+  (`Arbiter.Agents.valid_agent_types/0`) so a newly registered provider is
+  pausable with no edit here; `gemini` is spelled `antigravity`.
+  """
+  @spec providers() :: [String.t()]
+  def providers, do: Arbiter.Agents.valid_agent_types() |> Enum.map(&normalize/1) |> Enum.uniq()
 
   # ---- internals -----------------------------------------------------------
 

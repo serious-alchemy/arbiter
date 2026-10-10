@@ -6,7 +6,8 @@ defmodule ArbiterCli.Cmd.Provider do
       arb provider resume <provider|account-ref>
       arb provider list                      — active pauses: who, when, why
 
-  `<provider>` is `claude`, `codex` or `antigravity`; an account ref is an id,
+  `<provider>` is `claude`, `codex`, `antigravity` (alias `gemini`) or `grok`
+  (the server accepts every registered provider); an account ref is an id,
   `provider:slug` or an unambiguous slug (`arb account list`).
 
   A paused provider/account is dropped from every routing decision — implementer,

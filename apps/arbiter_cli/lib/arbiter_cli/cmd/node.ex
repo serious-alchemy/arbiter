@@ -377,6 +377,7 @@ defmodule ArbiterCli.Cmd.Node do
           row([
             "NAME",
             "STATE",
+            "VERSION",
             "LIVE/MAX",
             "SUGGESTED",
             "OVERRIDE",
@@ -397,13 +398,24 @@ defmodule ArbiterCli.Cmd.Node do
   end
 
   defp node_cells(%{"kind" => "local"} = n) do
-    [n["name"], n["state"], live_max(n), dash(n["suggested"]), dash(n["override"]), "-", "-", ""]
+    [
+      n["name"],
+      n["state"],
+      dash(n["agent_version"]),
+      live_max(n),
+      dash(n["suggested"]),
+      dash(n["override"]),
+      "-",
+      "-",
+      ""
+    ]
   end
 
   defp node_cells(n) do
     [
       n["name"],
       n["state"] || n["status"],
+      dash(n["agent_version"]),
       live_max(n),
       dash(n["suggested"]),
       dash(n["override"] || n["max_workers"]),
@@ -459,7 +471,7 @@ defmodule ArbiterCli.Cmd.Node do
   defp warning(other, _), do: other
 
   defp row(cells) do
-    widths = [24, 10, 9, 10, 9, 8, 26, 0]
+    widths = [24, 10, 10, 9, 10, 9, 8, 26, 0]
 
     cells
     |> Enum.zip(widths)
@@ -498,6 +510,7 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("#{n["name"]}")
     IO.puts("  id:            #{n["id"]}")
     IO.puts("  status:        #{n["status"]}")
+    IO.puts("  version:       #{n["agent_version"] || "-"}")
     IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
     IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")
     IO.puts("  labels:        #{Enum.join(n["labels"] || [], ", ")}")

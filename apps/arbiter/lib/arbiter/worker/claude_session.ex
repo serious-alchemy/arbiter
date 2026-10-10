@@ -436,6 +436,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                :arb_token,
                :workspace,
                :repo,
+               :base_branch,
                :image,
                :podman,
                :egress,
@@ -2014,10 +2015,13 @@ defmodule Arbiter.Worker.ClaudeSession do
   # grok's error `result` names its cause only in `errors[]`.
   defp format_event(%{"type" => "result"} = event, %{provider: "grok"}) do
     Enum.map(
-      [result_summary(event) | Arbiter.Agents.Grok.Stream.error_lines(event)],
+      [result_summary(event, "grok") | Arbiter.Agents.Grok.Stream.error_lines(event)],
       &{&1, false}
     )
   end
+
+  defp format_event(%{"type" => "system", "subtype" => "init"} = event, %{provider: "grok"}),
+    do: [{init_summary(event, "grok"), false}]
 
   defp format_event(event, %{provider: "codex"}),
     do: Arbiter.Agents.Codex.Stream.format_event(event)
@@ -2036,10 +2040,10 @@ defmodule Arbiter.Worker.ClaudeSession do
     Enum.flat_map(content, &tool_result_lines/1)
   end
 
-  defp format_event(%{"type" => "result"} = event), do: [{result_summary(event), false}]
+  defp format_event(%{"type" => "result"} = event), do: [{result_summary(event, nil), false}]
 
   defp format_event(%{"type" => "system", "subtype" => "init"} = event),
-    do: [{init_summary(event), false}]
+    do: [{init_summary(event, nil), false}]
 
   # rate_limit_event, partial-message deltas, unknown types: shown to no one.
   defp format_event(_event), do: []
@@ -2192,14 +2196,20 @@ defmodule Arbiter.Worker.ClaudeSession do
   # more importantly must pass through the same redaction choke-point.
   defp summarize_tool_input(input), do: StepSummary.summarize_tool_input(input)
 
-  defp init_summary(event) do
+  # The `⚙ <label> session …` summary lines are matched downstream (ReviewGate's
+  # `⚙` footer strip, the loop failure classifier/analysis/corpus docs), all
+  # provider-agnostic: keep the `⚙ <word> session <status>` shape.
+  defp session_label("grok"), do: "grok"
+  defp session_label(_provider), do: "claude"
+
+  defp init_summary(event, provider) do
     model = event["model"] || "?"
-    "⚙ claude session started (model #{model})"
+    "⚙ #{session_label(provider)} session started (model #{model})"
   end
 
-  defp result_summary(event) do
+  defp result_summary(event, provider) do
     status = if event["is_error"], do: "error", else: event["subtype"] || "done"
-    parts = ["⚙ claude session #{status}"]
+    parts = ["⚙ #{session_label(provider)} session #{status}"]
 
     parts =
       case event["duration_ms"] do
@@ -2264,6 +2274,11 @@ defmodule Arbiter.Worker.ClaudeSession do
           session,
           {:worker_denied, session.task_id, Map.get(session, :denied_command_line)}
         )
+
+    # bd-bg87oz: a pass on a node whose last checkout upload failed says so ahead of
+    # its exit, so a ReviewGate fix round does not push the stale clone.
+    if match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome)),
+      do: broadcast(session, {:worker_checkout_failed, session.task_id})
 
     # bd-cgdhlu: a run whose node was lost did not finish and did not fail; its
     # owner re-dispatches the pass, so it is told that, not an exit status it

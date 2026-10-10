@@ -42,7 +42,8 @@ defmodule Arbiter.NodeAgent.Protocol do
         "image" => "build",
         "upgrade" => "tarball",
         "bridge_streams" => "mux",
-        "run_hold" => "quiesce"
+        "run_hold" => "quiesce",
+        "exec" => "run"
       },
       "capacity" => capacity(config),
       "inventory" => %{

@@ -123,11 +123,12 @@ defmodule Arbiter.MCP.CatalogTest do
     end
 
     test "worker_dispatch exposes a provider enum field and keeps the with_claude alias" do
-      tool = Enum.find(Catalog.all(), &(&1.name == "worker_dispatch"))
+      assert {:ok, tool} = Catalog.fetch("worker_dispatch")
       props = tool.input_schema["properties"]
 
-      # The schema enum is the handler's accepted set (D-W-10): grok included.
+      # The schema enum is the handler's accepted set (D-W-10), read from the registry.
       assert props["provider"]["enum"] == Arbiter.Agents.valid_agent_types()
+      assert "grok" in props["provider"]["enum"]
       # The deprecated boolean aliases are still advertised so existing callers work.
       assert props["with_claude"]["type"] == "boolean"
       assert props["with_gemini"]["type"] == "boolean"

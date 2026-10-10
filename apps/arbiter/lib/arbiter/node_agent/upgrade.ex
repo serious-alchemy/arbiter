@@ -85,7 +85,7 @@ defmodule Arbiter.NodeAgent.Upgrade do
   def confirm(%Config{} = config) do
     with {:ok, body} <- File.read(pending_path(config)),
          %{"to" => to} = pending <- parse_pending(body),
-         true <- to == config.version do
+         true <- same_version?(to, config.version) do
       File.write!(Path.join(config.node_home, "confirmed"), "#{to} #{System.os_time(:second)}\n")
       File.rm(pending_path(config))
       prune(config, [to, Path.basename(Map.get(pending, "from", ""))])
@@ -94,6 +94,17 @@ defmodule Arbiter.NodeAgent.Upgrade do
       _ -> :none
     end
   end
+
+  @doc """
+  Whether two version strings name the same release. The primary stores the
+  target as `vX.Y.Z` while a running agent reports `X.Y.Z`, so a leading `v` and
+  surrounding whitespace do not count.
+  """
+  @spec same_version?(term(), term()) :: boolean()
+  def same_version?(a, b) when is_binary(a) and is_binary(b), do: normalize(a) == normalize(b)
+  def same_version?(_a, _b), do: false
+
+  defp normalize(version), do: version |> String.trim() |> String.trim_leading("v")
 
   # -- download + unpack ----------------------------------------------------------
 
