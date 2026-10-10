@@ -10,6 +10,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
     %{
       id: node.id,
       name: node.name,
+      kind: node.kind,
       status: node.status,
       labels: node.labels,
       max_workers: node.max_workers,
@@ -76,6 +77,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       name: t.name,
       labels: t.labels,
       max_workers: t.max_workers,
+      kind: t.kind,
       expires_at: t.expires_at,
       created_by: t.created_by
     }

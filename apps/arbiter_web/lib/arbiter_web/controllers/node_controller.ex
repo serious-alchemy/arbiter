@@ -8,6 +8,9 @@ defmodule ArbiterWeb.NodeController do
     * `GET /nodes/join` — the join script, rendered from `nodes.public_url`.
     * `GET /nodes/ping` — `pong`, so the script can check reachability before
       it spends a token.
+    * `GET /nodes/join/k8s.yaml` — the cluster install manifests (K9,
+      `Arbiter.NodeAgent.K8s.InstallManifest`), rendered from the query string. They
+      contain no secret, so the route is anonymous like the script.
     * `POST /nodes/enroll` — a join token **in the JSON body** (never a header
       or the query string) for a node credential. Rate limited
       (`Arbiter.Nodes.RateLimit`); every token failure is the same generic
@@ -29,8 +32,9 @@ defmodule ArbiterWeb.NodeController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.NodeAgent.K8s.InstallManifest
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Agent, Credentials, JoinScript, Pairing, RateLimit}
+  alias Arbiter.Nodes.{Agent, ClusterInstall, Credentials, JoinScript, Pairing, RateLimit}
   alias Arbiter.Settings
   alias ArbiterWeb.Loopback
 
@@ -56,6 +60,46 @@ defmodule ArbiterWeb.NodeController do
     end
   end
 
+  # K9: `kubectl apply -f <(curl -fsSL "<public_url>/nodes/join/k8s.yaml?name=...")`. There
+  # is no token, credential or key anywhere in the render, and no parameter that would put
+  # one there: an offered `?token=` is ignored, not echoed.
+  def k8s(conn, params) do
+    with {:ok, spec} <- parse_manifest(params),
+         {:ok, server} <- ClusterInstall.server_opts(),
+         {:ok, yaml} <- InstallManifest.yaml(spec, server) do
+      conn
+      |> put_resp_content_type("application/yaml")
+      |> put_resp_header("cache-control", "no-cache")
+      |> send_resp(200, yaml)
+    else
+      {:error, {:invalid, errors}} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(422, Enum.map_join(errors, "", &(&1 <> "\n")))
+
+      {:error, reason} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(503, manifest_unavailable(reason))
+    end
+  end
+
+  defp parse_manifest(params) do
+    case InstallManifest.parse(params) do
+      {:ok, spec} -> {:ok, spec}
+      {:error, errors} -> {:error, {:invalid, errors}}
+    end
+  end
+
+  defp manifest_unavailable(:no_public_url),
+    do: "nodes.public_url is not set on the primary; set it first\n"
+
+  defp manifest_unavailable(:no_registry),
+    do: "nodes.registry is not set on the primary; a cluster node needs an image it can pull\n"
+
+  defp manifest_unavailable(_reason),
+    do: "The primary has no deployed release to name a controller image for\n"
+
   def ping(conn, _params) do
     conn
     |> put_resp_content_type("text/plain")
@@ -70,7 +114,7 @@ defmodule ArbiterWeb.NodeController do
 
     with :ok <- rate_limit(key),
          {:ok, url} <- public_url(),
-         {:ok, artifact} <- agent_artifact() do
+         {:ok, artifact} <- agent_artifact(body["kind"]) do
       redeem(conn, body, key, url, artifact)
     else
       {:error, {:rate_limited, seconds}} ->
@@ -98,11 +142,17 @@ defmodule ArbiterWeb.NodeController do
     end
   end
 
-  defp agent_artifact do
+  # A cluster controller is an image, not a tarball: it upgrades by image (K§2.4) and
+  # never downloads the agent, so the primary need not be able to serve one.
+  defp agent_artifact("cluster"), do: {:ok, nil}
+
+  defp agent_artifact(_kind) do
     # Checked before the token is spent: a primary that cannot serve the agent
     # must not burn the operator's token.
     Agent.artifact()
   end
+
+  defp agent_artifact, do: agent_artifact(nil)
 
   defp redeem(conn, body, key, url, artifact) do
     params = body
@@ -120,6 +170,9 @@ defmodule ArbiterWeb.NodeController do
 
       {:error, :invalid_name} ->
         error(conn, 422, @bad_name)
+
+      {:error, :kind_mismatch} ->
+        error(conn, 422, "This join token is for a different kind of node than the kind sent")
     end
   end
 
@@ -218,23 +271,29 @@ defmodule ArbiterWeb.NodeController do
       &(is_list(&1) and Enum.all?(&1, fn l -> is_binary(l) end))
     )
     |> put_if(:max_workers, params["max_workers"], &(is_integer(&1) and &1 >= 1))
+    |> put_if(:kind, params["kind"], &is_binary/1)
+    |> put_if(:k8s_version, params["k8s_version"], &is_binary/1)
+    |> put_if(:agent_version, params["agent_version"], &is_binary/1)
   end
 
   defp put_if(map, key, value, valid?),
     do: if(valid?.(value), do: Map.put(map, key, value), else: map)
 
   defp respond_enrolled(conn, node, credential, url, artifact) do
-    body = %{
-      node_id: node.id,
-      name: node.name,
-      credential: credential,
-      ws_url: ws_url(url),
-      agent_version: artifact.version,
-      tarball_sha256: artifact.sha256,
-      labels: node.labels,
-      max_workers: node.max_workers,
-      proto: JoinScript.proto()
-    }
+    body =
+      put_artifact(
+        %{
+          node_id: node.id,
+          name: node.name,
+          kind: node.kind,
+          credential: credential,
+          ws_url: ws_url(url),
+          labels: node.labels,
+          max_workers: node.max_workers,
+          proto: JoinScript.proto()
+        },
+        artifact
+      )
 
     conn = put_resp_header(conn, "cache-control", "no-store")
 
@@ -246,6 +305,12 @@ defmodule ArbiterWeb.NodeController do
       json(conn, body)
     end
   end
+
+  # A cluster node has no tarball (it upgrades by image); say which release the primary is.
+  defp put_artifact(body, nil), do: Map.put(body, :agent_version, Agent.release_tag())
+
+  defp put_artifact(body, artifact),
+    do: Map.merge(body, %{agent_version: artifact.version, tarball_sha256: artifact.sha256})
 
   # `KEY=value` lines for the join script, which has no JSON parser. Only the
   # scalar fields it reads, each from a restricted character set.
