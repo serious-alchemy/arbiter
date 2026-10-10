@@ -44,6 +44,7 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
   @push_check Path.expand("../../fixtures/review_push_check.sh", __DIR__)
   @commit_then_approve Path.expand("../../fixtures/review_commit_then_approve.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
 
   setup do
     CircuitBreaker.reset_all()
@@ -409,6 +410,85 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
 
       assert sha(repo, "origin/" <> branch) == fix_head,
              "round 2 approved a head the remote does not carry"
+    end
+  end
+
+  # bd-4axlg0: a fix round (a podman container, which cannot push) that rebases
+  # or amends its branch hands the host a head that has "diverged" from the one
+  # the gate pushed in round 1. The gate delivers it with a lease pinned to the
+  # head it pushed, and reviews the new head.
+  describe "a fix round that rewrites its own branch (bd-4axlg0)" do
+    test "the rewrite is pushed with a lease and round 2 reviews the new head",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 60_000)
+
+      rewritten = sha(wt, "HEAD")
+      refute rewritten == round1_head, "the revise round should have rewritten the tip"
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == rewritten
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == rewritten
+    end
+
+    test "a third party's push during the round is not overwritten; the task parks",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite-race"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # The third party lands its commit on the remote branch from inside the
+      # round, while the implementer rewrites the local tip.
+      other = Path.join(tmp, "other-race")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      theirs = sha(other, "HEAD")
+
+      script = Path.join(tmp, "rewrite_then_third_party_push.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      #{@revise_rewrite}
+      git -C #{other} push -q origin #{branch}
+      """)
+
+      File.chmod!(script, 0o755)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [script],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 60_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
     end
   end
 
