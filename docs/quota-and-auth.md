@@ -350,6 +350,83 @@ A stop this cannot hold cleanly (a fix/conflict pass or reviewer, a ticket no
 longer In progress, an unknown provider, a reset beyond 8 days, or no queue to
 hold in) takes the older path unchanged.
 
+## A dollar spend cap per provider account (bd-a6grlr)
+
+The % quota thresholds bound *subscription* usage. For an account billed per
+token there was nothing that said "no more than $20 a week". An account can now
+carry a **dollar spend cap**, paced over its window the way the % thresholds
+are.
+
+```
+arb account set claude:api --spend-cap 20 --spend-window week --spend-mode paced
+arb account set claude:api --spend-cap none        # clear it
+```
+
+(`account_set` over MCP, `PATCH /api/accounts/:ref` and the Providers edit form
+take the same four `quota_config` keys: `spend_cap`, `spend_window`,
+`spend_mode`, `spend_metered`.)
+
+**Windows are fixed UTC calendar windows**, not rolling: a day starts 00:00 UTC,
+a week starts **Monday 00:00 UTC**, a month on the 1st. The spend counted is the
+ledger's for the account since the window opened; the window "resets" when the
+next one opens. Default window is `week`, default mode `flat`.
+
+**Only real metered spend counts.** The usage ledger prices every run, but for a
+Claude Max subscription that price is notional, and agy / Codex / Grok free tiers
+carry none. An account's spend counts only when it is *metered*:
+`spend_metered: true|false` says so explicitly; unset, it is metered exactly
+when it has an active `api_key` credential. A NULL `cost_usd` never counts. A cap
+on a non-metered account is accepted and reported as "no metered spend" - it
+never holds anything.
+
+**Paced like the percentages.** `flat` allows the whole cap at any time; `paced`
+allows `cap x elapsed fraction of the window` by now. The dollar window goes
+through `Gate.pace/6` (the `:spend` window, `utilization = spend / cap`), so there
+is one definition of the line (`Arbiter.Quota.Pace`) for % and $ windows. The
+planning margin (design O8) and the strict / look-ahead setting (design O1) are
+design proposals that are not in the gate yet; when they land in `Gate.pace/6`
+the spend window inherits them. Until then the line is strict: a fresh dispatch
+is held the moment spend is at or past the line.
+
+**Admission counts settled spend plus what is in flight.** Under the same
+per-account lock as the concurrency cap (`Arbiter.Accounts.Admission`), a fresh
+dispatch is checked against the settled ledger spend plus, for every worker or
+admitted dispatch holding a slot on the account, the rest of its ticket's
+estimated cost (`Usage.Estimate` median less what the ticket has already spent).
+The admission reserves the slot, so a burst of fresh dispatches each sees the
+earlier ones and cannot overshoot.
+
+**In-flight tickets may finish (this is deliberately not a hard zero).** Reaching
+the cap or the paced line holds only *fresh* dispatches - a ticket being started.
+Follow-ups on a ticket already started still run: ReviewGate reviewers and fix
+rounds, fix and conflict passes, resumes and re-dispatches of an In progress
+ticket. This is the O2 reading in `docs/design/provider-dynamic-concurrency.md`:
+follow-ups are held only by the hard rules (a provider refusing requests), and a
+spend cap is a scheduling rule. The account can therefore end a window somewhat
+past its cap, by at most the remaining cost of work already under way. An
+operator's `force_quota` dispatch also goes past the cap, recorded as for any
+quota bypass.
+
+**What a hold looks like.** A held fresh dispatch is queued in the workspace's
+`DispatchQueue` like a quota hold (`{:quota_held, id}` to every caller), with the
+reason `spend cap $20.00/week reached ($21.40 spent), resets 2026-10-19 00:00 UTC`
+or `spend pace: $12.00 of $10.00 allowed by now (...)`. It wakes at the window
+reset (flat) or the moment the paced line reaches the spend (paced), and the
+drain re-checks the cap before it replays. Routing treats a capped-out account
+as `quota_held` for a fresh implementer, so a ticket goes to another account when
+one has room. The same reason shows in `arb account show`, `arb quota` /
+`quota_get` (`spend_caps`), `arb scheduler status` (the board-wide hold) and the
+Providers page.
+
+**Paging.** `Arbiter.Quota.SpendWatch` raises an operator system alert
+(`spend_cap`) when metered spend (plus the in-flight estimate) reaches 80% of the
+cap and another when the cap is reached; each clears itself when the window
+resets or the cap is raised or removed.
+
+When the dynamic-concurrency design lands (`provider-dynamic-concurrency.md`,
+DC3), the spend cap becomes a window in `Quota.Budget` that holds fresh seats
+only.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:
