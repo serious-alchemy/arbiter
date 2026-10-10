@@ -116,6 +116,12 @@ defmodule Arbiter.Worker.Watchdog do
   persisted `worker_runs`), and parks through the same exhausted path once hit
   (bd-2l0hzm).
 
+  A `:ci_failed` block whose failing tests are all registered known flakes
+  (`Arbiter.Workflows.MergeQueue.KnownFlakes`, bd-4qj7io) is re-run once per
+  head, whether or not the PR touches them. If the registered test fails again
+  after the re-run, the flake did not clear and a fix pass is dispatched; a
+  failure in anything unregistered goes straight to a fix pass.
+
   A `:ci_failed` block whose failing tests are all outside the PR's diff (read
   from the failing checks' files and the PR diff, see
   `Arbiter.Workflows.MergeQueue.FlakeSuspect`) is re-run once per head instead
@@ -311,6 +317,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
   alias Arbiter.Workflows.MergeQueue.FlakeSuspect
+  alias Arbiter.Workflows.MergeQueue.KnownFlakes
 
   @default_interval_ms 60_000
   # Watchdog ceiling on consecutive :pending polls before we escalate and stop.
@@ -3205,15 +3212,16 @@ defmodule Arbiter.Worker.Watchdog do
 
       case flake_step(state, checks, head) do
         :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
-        {:rerun, files} -> rerun_suspected_flake(state, checks, head, files)
+        {:rerun, files, why} -> rerun_suspected_flake(state, checks, head, files, why)
         {:escalate, files, prev} -> park_as_suspected_flake(state, head, files, prev)
         {:fix, outside_diff} -> fix_or_cap(state, checks, outside_diff)
       end
     end
   end
 
-  # What to do about a red head whose failing tests may all be outside the
-  # diff (bd-2l0hzm, #2003):
+  # What to do about a red head whose failing tests may all be known flakes
+  # (`known_flake_step/3`, bd-4qj7io: re-run once, a second red is a fix pass),
+  # or all outside the diff (bd-2l0hzm, #2003):
   #
   #   * first red on this head, only untouched tests failing -> re-run CI;
   #   * red again on the same head before the re-run was seen pending, within
@@ -3231,6 +3239,31 @@ defmodule Arbiter.Worker.Watchdog do
   defp flake_step(%{flake_bypass: head}, _checks, head), do: {:fix, nil}
 
   defp flake_step(state, checks, head) do
+    case KnownFlakes.confined(checks) do
+      {:ok, ids} -> known_flake_step(state, head, ids)
+      :none -> outside_diff_step(state, checks, head)
+    end
+  end
+
+  # bd-4qj7io: every failing test is a registered flake (`KnownFlakes`). The
+  # first red on a head earns one re-run, whether or not the PR touches the
+  # test. A red again after the re-run was seen means the flake did not clear
+  # on retry, which is the failure the fix pass exists for.
+  defp known_flake_step(state, head, ids) do
+    case state.flake_rerun do
+      %{head: ^head, seen_pending: false, poll: poll}
+      when state.poll_count - poll < @flake_rerun_grace_polls ->
+        :await_rerun
+
+      %{head: ^head} ->
+        {:fix, nil}
+
+      _ ->
+        {:rerun, ids, "only in registered known-flaky tests"}
+    end
+  end
+
+  defp outside_diff_step(state, checks, head) do
     with {:ok, _tests} <- FlakeSuspect.failing_tests(checks),
          {:outside_diff, files} <- FlakeSuspect.classify(checks, pr_changed_files(state)) do
       case state.flake_rerun do
@@ -3242,19 +3275,19 @@ defmodule Arbiter.Worker.Watchdog do
           if Enum.any?(files, &(&1 in prev)), do: {:fix, files}, else: {:escalate, files, prev}
 
         _ ->
-          {:rerun, files}
+          {:rerun, files, "only in tests this PR does not touch"}
       end
     else
       _ -> {:fix, nil}
     end
   end
 
-  defp rerun_suspected_flake(state, checks, head, files) do
+  defp rerun_suspected_flake(state, checks, head, files, why) do
     case safe_rerun_ci(state) do
       {:ok, _} ->
         Logger.warning(
           "Worker.Watchdog: CI on task=#{state.task_id} mr=#{state.mr_ref} head=#{head} " <>
-            "failed only in tests this PR does not touch (#{Enum.join(files, ", ")}); " <>
+            "failed #{why} (#{Enum.join(files, ", ")}); " <>
             "re-running CI as a suspected flake instead of dispatching a fix pass"
         )
 
