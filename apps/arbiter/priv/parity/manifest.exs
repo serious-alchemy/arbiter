@@ -384,6 +384,18 @@
       }
     },
     %{
+      id: "workers/run_tests_failures_only",
+      title: "Worker runs its tests and gets back only the failures",
+      mcp: ["run_tests"],
+      cli: nil,
+      rest: nil,
+      status: :excluded,
+      absent: %{
+        cli: {:intentional, "Worker-tier MCP tool only: the run's sandbox and node exec path is reached through the worker process, and the worker's own `mix test` is the CLI-shaped fallback (bd-57nhsi)."},
+        rest: {:intentional, "Worker-tier MCP tool only: reached through the MCP transport by the worker agent in-session; no REST caller exists (bd-57nhsi)."}
+      }
+    },
+    %{
       id: "workers/dispatch_a_worker_on_a_ticket",
       title: "Dispatch a worker on a ticket",
       mcp: ["worker_dispatch"],

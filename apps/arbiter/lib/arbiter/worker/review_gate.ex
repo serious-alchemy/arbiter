@@ -7624,6 +7624,7 @@ defmodule Arbiter.Worker.ReviewGate do
     no `mix run`. (Reading files, editing, and running `git` is fine.)
 
     #{ci_flake_guidance(state)}
+    #{PromptBuilder.test_tool_section()}
     #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:

@@ -735,7 +735,9 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     make those checks pass:
 
       1. Read the failing checks below and reproduce the failure locally where
-         you can (run the failing test / linter / build).
+         you can (run the failing test / linter / build). For tests use the
+         `run_tests` MCP tool: it returns only the failures, not the whole
+         `mix test` output, and the path of the full log.
       2. Fix the ROOT CAUSE in the code. Do not paper over a real failure by
          deleting or skipping the test unless the test itself is genuinely wrong.
       3. Commit your fix (do NOT push):
