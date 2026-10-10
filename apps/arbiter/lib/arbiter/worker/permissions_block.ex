@@ -26,12 +26,15 @@ defmodule Arbiter.Worker.PermissionsBlock do
     #{granted(p)}#{withheld(p)}
     A `403` from the egress proxy, a missing environment variable or a missing
     key means "not granted". Do not try to work around it: no other credential,
-    no other host, no tunnel, no copy of a secret from another place. If the task
-    cannot be done without it, carry on with what you can, mark the affected
-    acceptance criteria as unmet in your completion notes and say which
-    permission was missing, and tell the coordinator now with
-    `arb message <coordinator task id> <what you need and why>`. You cannot grant
-    permissions to yourself.
+    no other host, no tunnel, no copy of a secret from another place. To ask for
+    it, call the MCP tool `permission_request` with the `permission` you need
+    (`network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, `prod_read`
+    or `prod_ssh`) and a `reason`. It answers "recorded, not granted": the
+    request goes to whoever may grant it, your access does not change, and
+    asking is not a violation. Then carry on with what you can. If the task
+    cannot be done without it, stop and mark the affected acceptance criteria as
+    unmet in your completion notes, saying which permission was missing. You
+    cannot grant permissions to yourself.
     """
   end
 

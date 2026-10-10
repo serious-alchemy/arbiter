@@ -60,7 +60,8 @@ defmodule Arbiter.Worker.PermissionsBlockTest do
 
   test "tells the worker never to work around a withheld permission and how to ask" do
     block = PermissionsBlock.render(Projection.sealed())
-    assert block =~ "arb message"
+    assert block =~ "permission_request"
+    assert block =~ "recorded, not granted"
     assert block =~ "unmet"
   end
 

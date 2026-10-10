@@ -43,6 +43,7 @@ defmodule Arbiter.MCP.Tools do
       `ticket_sync_upstream_close` / `dep_add` / `dep_remove`
     * `Arbiter.MCP.Tools.Workspace` — `workspace_show` / `workspace_config_*` /
       `installation_config_*`
+    * `Arbiter.MCP.Tools.PermissionRequest` — `permission_request`
     * `Arbiter.MCP.Tools.Messaging` — `inbox_check` / `coordinator_inbox` /
       `message_send` / `notify_list`
     * `Arbiter.MCP.Tools.Worker` — the `worker_*` lifecycle family, `run_log_list`,
@@ -1846,6 +1847,8 @@ defmodule Arbiter.MCP.Tools do
   defdelegate trust_show(scope, args), to: Arbiter.MCP.Tools.Trust
   defdelegate trust_confirm(scope, args), to: Arbiter.MCP.Tools.Trust
   defdelegate trust_dismiss(scope, args), to: Arbiter.MCP.Tools.Trust
+
+  defdelegate permission_request(scope, args), to: Arbiter.MCP.Tools.PermissionRequest
 
   defdelegate worker_dispatch(scope, args), to: Arbiter.MCP.Tools.Worker
   defdelegate worker_resume(scope, args), to: Arbiter.MCP.Tools.Worker
