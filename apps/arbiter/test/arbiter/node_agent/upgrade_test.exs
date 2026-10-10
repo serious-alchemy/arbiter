@@ -255,6 +255,19 @@ defmodule Arbiter.NodeAgent.UpgradeTest do
       refute File.exists?(Path.join(ctx.home, "upgrade.pending"))
     end
 
+    test "a pending `vX.Y.Z` is confirmed by an agent that reports `X.Y.Z`", ctx do
+      File.mkdir_p!(Path.join(ctx.home, "releases/v2.0.0/bin"))
+
+      File.write!(
+        Path.join(ctx.home, "upgrade.pending"),
+        "from=releases/1.0.0\nto=v2.0.0\nat=1\n"
+      )
+
+      assert :confirmed = Upgrade.confirm(%{ctx.config | version: "2.0.0"})
+      refute File.exists?(Path.join(ctx.home, "upgrade.pending"))
+      assert File.dir?(Path.join(ctx.home, "releases/v2.0.0"))
+    end
+
     test "is a no-op when no upgrade is pending, or it is for another version", ctx do
       assert :none = Upgrade.confirm(ctx.config)
       File.write!(Path.join(ctx.home, "upgrade.pending"), "from=a\nto=3.0.0\nat=1\n")
@@ -274,6 +287,16 @@ defmodule Arbiter.NodeAgent.UpgradeTest do
       assert :confirmed = Upgrade.confirm(%{ctx.config | version: "2.0.0"})
 
       assert Enum.sort(File.ls!(Path.join(ctx.home, "releases"))) == ["1.0.0", "2.0.0"]
+    end
+  end
+
+  describe "same_version?/2" do
+    test "ignores a leading v and surrounding whitespace" do
+      assert Upgrade.same_version?("0.2.40", "v0.2.40")
+      assert Upgrade.same_version?("v0.2.40", "0.2.40")
+      assert Upgrade.same_version?(" 0.2.40", "0.2.40")
+      refute Upgrade.same_version?("0.2.37", "v0.2.38")
+      refute Upgrade.same_version?(nil, "v0.2.38")
     end
   end
 end
