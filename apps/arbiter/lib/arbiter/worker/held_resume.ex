@@ -31,6 +31,19 @@ defmodule Arbiter.Worker.HeldResume do
   @spec clear(String.t()) :: :ok
   def clear(task_id) when is_binary(task_id), do: put(task_id, nil)
 
+  @doc "Clear the marker only when the ticket carries one (no write otherwise)."
+  @spec clear_if_marked(String.t()) :: :ok
+  def clear_if_marked(task_id) when is_binary(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, issue} -> if stored_kind(issue), do: clear(task_id)
+      _ -> :ok
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   @doc "The ticket's held resume kind (`:resume` / `:resume_session`), or `nil`."
   @spec stored_kind(map() | nil) :: atom() | nil
   def stored_kind(%{review_gate_state: %{"held_resume" => %{"kind" => kind}}}),

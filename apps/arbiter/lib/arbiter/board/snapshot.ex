@@ -265,7 +265,8 @@ defmodule Arbiter.Board.Snapshot do
     # column. A ticket between ReviewGate rounds keeps its slot with no agent
     # live (bd-45pwo1); Merging and Verifying release it. The worker rows
     # never enter into it. See `SlotGate`'s "A slot is a ticket In progress".
-    slots_used = SlotGate.slots_used(issues)
+    idle_opts = [idle_ids: Map.get(input, :idle_ids, [])]
+    slots_used = SlotGate.slots_used(issues, idle_opts)
     slots_free = max(slots_total - slots_used, 0)
 
     # Only the Ready column is the scheduler's queue: a Blocked ticket is held
@@ -324,7 +325,7 @@ defmodule Arbiter.Board.Snapshot do
       # bd-5fl9sx: the tickets holding the slots just counted, and the terms
       # `slots_total` is the minimum of — what `Arbiter.Board.CapacityExplainer`
       # reads, so the board can say *why* the cap is what it is.
-      slot_holders: SlotGate.slot_holders(issues),
+      slot_holders: SlotGate.slot_holders(issues, idle_opts),
       capacity: Map.get(input, :capacity),
       agents_live: agents_live,
       quota: quota,
@@ -468,8 +469,10 @@ defmodule Arbiter.Board.Snapshot do
     # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
     routing_opts = routing_opts(workspace, opts)
 
+    idle_ids = idle_ids(issues, opts)
+
     {capacity, slots_total} =
-      capacity_and_slots(workspace || workspace_id, issues, routing_opts, opts)
+      capacity_and_slots(workspace || workspace_id, issues, routing_opts, opts, idle_ids)
 
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
@@ -490,7 +493,7 @@ defmodule Arbiter.Board.Snapshot do
       slots_total: slots_total,
       capacity: capacity,
       slot_note:
-        Keyword.get_lazy(opts, :slot_note, fn -> slot_note(workspace, issues, slots_total) end),
+        Keyword.get_lazy(opts, :slot_note, fn -> slot_note(workspace, issues, slots_total, idle_ids) end),
       quota:
         Keyword.get_lazy(opts, :quota, fn ->
           quota_hold(workspace || workspace_id, routing_opts)
@@ -512,6 +515,7 @@ defmodule Arbiter.Board.Snapshot do
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
       local_held: Keyword.get(opts, :local_held, []),
+      idle_ids: idle_ids,
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -554,10 +558,14 @@ defmodule Arbiter.Board.Snapshot do
 
   # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
   # board can explain it. A read that fails leaves the pre-terms fallback.
-  defp capacity_and_slots(workspace, issues, routing_opts, opts) do
+  defp capacity_and_slots(workspace, issues, routing_opts, opts, idle_ids) do
     capacity =
       Keyword.get_lazy(opts, :capacity, fn ->
-        safe_capacity_terms(workspace, SlotGate.slots_used(issues), routing_opts)
+        safe_capacity_terms(
+          workspace,
+          SlotGate.slots_used(issues, idle_ids: idle_ids),
+          routing_opts
+        )
       end)
 
     slots_total =
@@ -620,18 +628,32 @@ defmodule Arbiter.Board.Snapshot do
 
   # bd-48prlb: why the board is full, named by the binding limit. Read only
   # when no slot is free, so a board with room pays nothing for it.
-  defp slot_note(%Arbiter.Tasks.Workspace{} = workspace, issues, slots_total) do
-    used = SlotGate.slots_used(issues)
+  defp slot_note(%Arbiter.Tasks.Workspace{} = workspace, issues, slots_total, idle_ids) do
+    used = SlotGate.slots_used(issues, idle_ids: idle_ids)
 
     if used >= slots_total do
       placement_note(workspace) ||
         workspace
         |> Arbiter.Accounts.SlotLimit.binding(used)
-        |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues))
+        |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues, idle_ids: idle_ids))
     end
   end
 
-  defp slot_note(_workspace, _issues, _slots_total), do: nil
+  defp slot_note(_workspace, _issues, _slots_total, _idle_ids), do: nil
+
+  # bd-3fbj83: the orphaned tickets, which hold no slot. `:idle_ids` names them
+  # outright; `:idle_check` (a 1-arity function over the issues, in production
+  # `Arbiter.Tasks.IdleTickets.ids/1`) computes them. Neither: none, so a pure
+  # board fixture is unaffected.
+  defp idle_ids(issues, opts) do
+    case {Keyword.get(opts, :idle_ids), Keyword.get(opts, :idle_check)} do
+      {ids, _} when is_list(ids) -> ids
+      {_, check} when is_function(check, 1) -> check.(issues)
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
 
   # RW14: the workspace's work has nowhere to go. Phrased like the dispatch-time
   # RW8 hold (`held — local capacity 0 …`), so the board and the dispatcher say

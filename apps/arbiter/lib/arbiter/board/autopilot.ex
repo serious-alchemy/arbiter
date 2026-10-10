@@ -665,6 +665,7 @@ defmodule Arbiter.Board.Autopilot do
         |> Keyword.put_new(:dispatch_holds, dispatch_holds(state))
         |> Keyword.put_new(:resume_queued, queued_resume_ids(state))
         |> Keyword.put_new(:local_held, local_held_ids(state))
+        |> Keyword.put_new(:idle_check, idle_check(state))
       )
 
     {:reply, snapshot, state}
@@ -945,6 +946,7 @@ defmodule Arbiter.Board.Autopilot do
     mode = admission_mode(state)
 
     {read_status, snapshot} =
+<<<<<<< HEAD
       read_board(
         state,
         [
@@ -952,6 +954,13 @@ defmodule Arbiter.Board.Autopilot do
           resume_queued: queued_resume_ids(state),
           local_held: local_held_ids(state)
         ] ++ walk_opts(mode)
+=======
+      read_board(state,
+        dispatch_holds: dispatch_holds(state),
+        resume_queued: queued_resume_ids(state),
+        local_held: local_held_ids(state),
+        idle_check: idle_check(state)
+>>>>>>> d7b52d9e4 (Orphaned active tickets hold no slot; clear stale held_resume markers (bd-3fbj83))
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
@@ -1109,6 +1118,12 @@ defmodule Arbiter.Board.Autopilot do
       {entry, _index} -> entry
       nil -> nil
     end
+  end
+
+  # bd-3fbj83: orphaned tickets (no run, nothing queued) hold no slot.
+  defp idle_check(state) do
+    queued = queued_resume_ids(state)
+    fn issues -> Arbiter.Tasks.IdleTickets.ids(issues, queued_ids: queued) end
   end
 
   defp local_held_ids(%{deferred_resumes: queue}),

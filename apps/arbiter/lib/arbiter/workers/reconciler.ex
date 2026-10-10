@@ -575,12 +575,20 @@ defmodule Arbiter.Workers.Reconciler do
     end
   end
 
+  # A ticket carrying a ReviewGate `pass` marker is between review rounds, which
+  # `reconcile_review_passes/1` re-arms; a stale `held_resume` marker must not
+  # also queue a resume for it.
+  defp held_resume_due?(issue) do
+    not is_nil(HeldResume.stored_kind(issue)) and is_nil(ReviewPass.stored(issue)) and
+      not live_worker_for_issue?(issue)
+  end
+
   defp do_reconcile_held_resumes(defer_fun) do
     held =
       Issue
       |> Ash.Query.filter(state == :active)
       |> Ash.read!()
-      |> Enum.filter(&(not is_nil(HeldResume.stored_kind(&1)) and not live_worker_for_issue?(&1)))
+      |> Enum.filter(&held_resume_due?/1)
 
     report =
       Enum.reduce(held, empty_report(), fn %Issue{id: task_id} = issue, report ->

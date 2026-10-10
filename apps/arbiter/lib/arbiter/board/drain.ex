@@ -82,6 +82,7 @@ defmodule Arbiter.Board.Drain do
   """
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Tasks.IdleTickets
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Worker
   alias Arbiter.Worker.Driver
@@ -224,7 +225,15 @@ defmodule Arbiter.Board.Drain do
     in_flight = promotions ++ tracked ++ workers
 
     tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
-    slot_holders = SlotGate.slot_holders(tickets)
+    idle_ids =
+      Keyword.get_lazy(opts, :idle_ids, fn ->
+        IdleTickets.ids(tickets,
+          queued_ids:
+            Map.get(autopilot, :held_local_capacity, []) ++ Enum.map(in_flight, & &1.task_id)
+        )
+      end)
+
+    slot_holders = SlotGate.slot_holders(tickets, idle_ids: idle_ids)
 
     state =
       cond do
