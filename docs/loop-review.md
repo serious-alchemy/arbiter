@@ -190,6 +190,14 @@ list, the full diff in the detail pane) and over MCP as `loop_pending_list` /
 `loop_pending_diff` / `loop_pending_apply` / `loop_pending_reject` — all
 **coordinator-tier only**, so a worker can never apply a fleet-wide change.
 
+One kind is never applied through this queue. A `trust_promotion` (G18) proposes
+raising a subject's guardrail tier, which loosens security. `arb loop apply`,
+`loop_pending_apply`, the REST apply route and the dashboard refuse it at any
+authority, and `arb loop apply all` skips it with a note. It is listed as
+`(operator-only)`, and `arb loop reject` still declines it. Only the operator
+applies it, with `arb trust promote` and operator proof (see
+[worker-security.md](worker-security.md), *Earned trust*).
+
 Every live row — `fleet`-scoped included — carries a real `workspace_id`
 (bd-3dasqm); `scope: :fleet` alone is the fleet marker, never a null
 `workspace_id`. A `:fleet` candidate raised with no workspace of its own is

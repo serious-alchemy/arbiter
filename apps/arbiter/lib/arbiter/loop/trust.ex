@@ -394,7 +394,9 @@ defmodule Arbiter.Loop.Trust do
            evidence_bar: %{min_incidents: 1, min_distinct_tasks: 1},
            actor: @actor
          ) do
-      {:ok, row} when fresh? ->
+      # A rejected proposal is reinforced in place and stays rejected (the
+      # coordinator declined it): only a row that is `:proposed` now is news.
+      {:ok, %PendingWrite{state: :proposed} = row} when fresh? ->
         [%{action: :proposed, subject: k, proposal: row.id, to: record.eligible_for}]
 
       {:ok, _row} ->

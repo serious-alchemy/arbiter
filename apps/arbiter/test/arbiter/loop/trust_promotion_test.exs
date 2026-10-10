@@ -141,6 +141,23 @@ defmodule Arbiter.Loop.TrustPromotionTest do
       assert proposals() == []
     end
 
+    test "a rejected one stays rejected: a later tick reinforces it and proposes nothing", %{
+      ws: ws
+    } do
+      eligible!(ws)
+      {:ok, %{actions: actions}} = tick!()
+      assert [%{action: :proposed}] = Enum.filter(actions, &(&1.action == :proposed))
+
+      [row] = proposals()
+      {:ok, _} = Loop.reject_pending(row, reason: "not yet", actor: "coordinator")
+
+      {:ok, %{actions: actions}} =
+        Trust.tick(now: DateTime.add(now(), 900), cutover: cutover(), workers: [])
+
+      refute Enum.any?(actions, &(&1.action == :proposed))
+      assert [%{state: :rejected}] = proposals()
+    end
+
     test "is superseded when the subject stops being eligible", %{ws: ws} do
       [run | _] = eligible!(ws)
       {:ok, _} = tick!()
