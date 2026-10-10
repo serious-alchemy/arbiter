@@ -32,7 +32,7 @@ defmodule Arbiter.Agents.Grok.NotionalCostTest do
 
   test "paid, unknown plans, other providers and cost-less rows are untouched" do
     row = attrs()
-    end
+    for plan <- ["pro", nil], do: assert(Stream.mark_notional_cost(row, plan) == row)
 
     claude = attrs(%{provider: "claude"})
     assert Stream.mark_notional_cost(claude, "free") == claude
