@@ -110,6 +110,11 @@ defmodule ArbiterCli.Cmd.Loop do
 
   alias ArbiterCli.{ArgParser, Client, Output}
 
+  # G18: a `trust_promotion` loosens a subject's guardrails, so the server
+  # refuses it at `apply` at any authority and the operator applies it with
+  # operator proof. Mirrors `Arbiter.Loop.PendingWrite.operator_only_kinds/0`.
+  @operator_only_kinds ["trust_promotion"]
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -523,11 +528,6 @@ defmodule ArbiterCli.Cmd.Loop do
         Output.die(err)
     end
   end
-
-  # G18: a `trust_promotion` loosens a subject's guardrails, so the server
-  # refuses it here at any authority and the operator applies it with operator
-  # proof. Mirrors `Arbiter.Loop.PendingWrite.operator_only_kinds/0`.
-  @operator_only_kinds ["trust_promotion"]
 
   defp note_operator_only(row) do
     IO.puts(
