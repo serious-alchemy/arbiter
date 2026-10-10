@@ -296,7 +296,8 @@ defmodule Arbiter.Board.Snapshot do
       in_progress:
         authors
         |> in_progress_cards(issues, issues_by_id, gate_workers_by_author, workers, columns, now)
-        |> decorate.(over_budget),
+        |> decorate.(over_budget)
+        |> with_local_held(Map.get(input, :local_held, [])),
       merging: issues |> merging_cards(workers, columns, watchdog_live) |> decorate.(over_budget),
       verifying: issues |> verifying_cards(columns) |> decorate.(over_budget),
       # A closed task that ran over is done — there is nothing left to act on,
@@ -450,6 +451,7 @@ defmodule Arbiter.Board.Snapshot do
         end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
+      local_held: Keyword.get(opts, :local_held, []),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -1365,6 +1367,14 @@ defmodule Arbiter.Board.Snapshot do
       # bd-cut6uv: the head the ticket's ReviewGate is waiting on CI for, if any.
       ci_wait: Map.get(view, :ci_wait)
     })
+  end
+
+  # bd-b2iigy: `local_held` is the ids of the tickets whose resume the scheduler
+  # holds for the primary's own worker cap (`Autopilot.status/0`'s
+  # `held_local_capacity`). The ticket stays In progress and keeps its board
+  # slot; the card says why nothing is running.
+  defp with_local_held(cards, local_held) do
+    Enum.map(cards, &Map.put(&1, :local_held, &1.id in local_held))
   end
 
   # bd-2gc809: a ticket whose ReviewGate waits on CI has no agent by design, and

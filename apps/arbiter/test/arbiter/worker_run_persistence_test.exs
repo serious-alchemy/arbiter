@@ -397,7 +397,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   end
 
   for provider <- ["claude", "agy"] do
-    test "an operator stop of a live #{provider} run records :interrupted/operator_stop, not :succeeded" do
+    test "an operator stop of a live #{provider} run records :stopped/operator_stop, not :succeeded" do
       task_id = "bd-opstop-#{unquote(provider)}-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
@@ -415,9 +415,29 @@ defmodule Arbiter.WorkerRunPersistenceTest do
 
       [run] = runs_for(task_id)
       assert run.state == :finished
-      assert run.outcome == :interrupted
+      assert run.outcome == :stopped
       assert run.failure_reason == "operator_stop"
       assert %DateTime{} = run.completed_at
+    end
+
+    test "an operator stop records the actor that asked, for #{provider}" do
+      task_id = "bd-opstop-actor-#{unquote(provider)}-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: "ws-runs",
+          meta: %{provider: unquote(provider)}
+        )
+
+      :ok = Worker.advance(pid, :run_claude)
+      Arbiter.Actor.put(Arbiter.Actor.system("coordinator"))
+      :ok = Worker.operator_stop(task_id)
+
+      [run] = runs_for(task_id)
+      assert run.outcome == :stopped
+      assert run.failure_reason == "operator_stop by system:coordinator"
     end
   end
 

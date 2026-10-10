@@ -1137,7 +1137,35 @@ defmodule Arbiter.Worker do
   convergence never count it as a success.
   """
   @spec operator_stop(ref()) :: :ok | {:error, :not_found}
-  def operator_stop(ref), do: stop(ref, {:shutdown, @operator_stop})
+  def operator_stop(ref) do
+    # bd-98gi5m: the run records who stopped it. The actor is the caller's, so
+    actor = Arbiter.Actor.current()
+
+    if actor do
+      label = Arbiter.Actor.label(actor)
+
+      cond do
+        is_binary(ref) -> note_stopper(ref, label)
+        is_pid(ref) -> note_stopper_pid(ref, label)
+        true -> :ok
+      end
+    end
+
+    stop(ref, {:shutdown, @operator_stop})
+  end
+
+  defp note_stopper(task_id, label) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> note_stopper_pid(pid, label)
+    end
+  end
+
+  defp note_stopper_pid(pid, label) do
+    if Process.alive?(pid), do: GenServer.call(pid, {:note_stopper, label})
+  catch
+    :exit, _ -> :ok
+  end
 
   # ---- GenServer callbacks -----------------------------------------------
 
@@ -2489,6 +2517,9 @@ defmodule Arbiter.Worker do
   def handle_call(:agent_session_live?, _from, %State{} = state) do
     {:reply, session_live?(state), state}
   end
+
+  def handle_call({:note_stopper, label}, _from, %State{} = state),
+    do: {:reply, :ok, %State{state | meta: Map.put(state.meta || %{}, :stopped_by, label)}}
 
   def handle_call({:advance, step}, _from, %State{state: run_state, outcome: outcome} = state)
       when run_state == :starting or (run_state == :finished and outcome == :failed) do
@@ -8780,6 +8811,14 @@ defmodule Arbiter.Worker do
             })
         end
 
+      # bd-98gi5m: a deliberate operator stop is neither a crash nor a shutdown.
+      :interrupted when reason == {:shutdown, @operator_stop} ->
+        record_run_finished(%State{
+          finished
+          | outcome: :stopped,
+            meta: Map.put(state.meta, :failure_reason, stopped_reason(state.meta))
+        })
+
       :interrupted ->
         record_run_finished(%State{
           finished
@@ -8818,7 +8857,13 @@ defmodule Arbiter.Worker do
     :ok
   end
 
-  defp interrupted_reason({:shutdown, @operator_stop}), do: Atom.to_string(@operator_stop)
+  defp stopped_reason(meta) do
+    case Map.get(meta || %{}, :stopped_by) do
+      nil -> Atom.to_string(@operator_stop)
+      by -> "#{@operator_stop} by #{by}"
+    end
+  end
+
   defp interrupted_reason(_), do: @shutdown_reason
 
   defp terminate_outcome(:normal), do: :completed
@@ -9208,8 +9253,8 @@ defmodule Arbiter.Worker do
           "Worker: pushing worktree branch to origin before PR open for task=#{task_id}"
         )
 
-        with :ok <- reconcile_before_push(worktree, task_id),
-             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, set_upstream: true) do
+        with {:ok, push_opts} <- plan_hosted_push(worktree, task_id),
+             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
           :ok
         else
           {:error, reason} ->
@@ -9219,6 +9264,31 @@ defmodule Arbiter.Worker do
 
             {:error, {:push_failed, reason}}
         end
+    end
+  end
+
+  # bd-4axlg0: a podman run (main, fix round or conflict pass) cannot push, and
+  # may have rebased its own branch; the rewritten history is "diverged" from
+  # the remote branch it replaces. When the remote holds nothing the rewrite
+  # loses (`PushState.rewrite_lease/3`), deliver it as a push with
+  # `--force-with-lease` pinned to the remote head just observed. Reconciling
+  # first (below) would rebase the rewrite back onto the very commits it
+  # replaced and fail on "previously applied" ones. Any other shape goes the
+  # ordinary way: reconcile, then a plain push. Never a bare `--force`.
+  defp plan_hosted_push(worktree, task_id) do
+    with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree) do
+      case Arbiter.Reviews.PushState.rewrite_plan(worktree, branch) do
+        {:rewrite, lease_sha} ->
+          Logger.info(
+            "Worker: `#{branch}` was rewritten locally; pushing with --force-with-lease " <>
+              "pinned to #{String.slice(lease_sha, 0, 12)} for task=#{task_id}"
+          )
+
+          {:ok, [set_upstream: true, force_with_lease: lease_sha]}
+
+        :none ->
+          with :ok <- reconcile_before_push(worktree, task_id), do: {:ok, [set_upstream: true]}
+      end
     end
   end
 

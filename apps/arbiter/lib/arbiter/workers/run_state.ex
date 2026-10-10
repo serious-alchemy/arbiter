@@ -9,7 +9,7 @@ defmodule Arbiter.Workers.RunState do
   |---|---|
   | kind | `implement \\| review \\| fix_pass \\| conflict` |
   | state | `starting \\| working \\| waiting \\| finished` |
-  | outcome (when finished) | `succeeded \\| failed \\| interrupted \\| handed_off` |
+  | outcome (when finished) | `succeeded \\| failed \\| interrupted \\| handed_off \\| stopped` |
 
     * `starting` — registered, agent not driving yet (a fresh dispatch, or a
       resume re-attaching to its preserved worktree).
@@ -27,11 +27,11 @@ defmodule Arbiter.Workers.RunState do
 
   @kinds [:implement, :review, :fix_pass, :conflict]
   @states [:starting, :working, :waiting, :finished]
-  @outcomes [:succeeded, :failed, :interrupted, :handed_off]
+  @outcomes [:succeeded, :failed, :interrupted, :handed_off, :stopped]
 
   @type kind :: :implement | :review | :fix_pass | :conflict
   @type state :: :starting | :working | :waiting | :finished
-  @type outcome :: :succeeded | :failed | :interrupted | :handed_off
+  @type outcome :: :succeeded | :failed | :interrupted | :handed_off | :stopped
 
   @doc "Every run kind."
   @spec kinds() :: [kind()]

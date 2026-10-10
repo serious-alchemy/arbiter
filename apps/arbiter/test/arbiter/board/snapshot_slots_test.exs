@@ -164,6 +164,40 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     end
   end
 
+  # bd-b2iigy: an In-progress ticket whose resume waits on the primary's own
+  # worker cap says so on its card.
+  describe "bd-b2iigy: resumes held for local capacity" do
+    test "the In-progress card of a held resume is flagged; others are not" do
+      board =
+        derive(
+          slots_total: 2,
+          issues: [issue("bd-held", %{state: :active}), issue("bd-running", %{state: :active})],
+          workers: [author("bd-running", :working, %{agent_live: true})],
+          local_held: ["bd-held"]
+        )
+
+      assert card(board, :in_progress, "bd-held").local_held == true
+      assert card(board, :in_progress, "bd-running").local_held == false
+    end
+
+    test "a held resume still holds its board slot" do
+      board =
+        derive(
+          slots_total: 1,
+          issues: [issue("bd-held", %{state: :active}), issue("bd-ready", %{state: :queued})],
+          local_held: ["bd-held"]
+        )
+
+      assert board.slots_used == 1
+      assert board.promote == nil
+    end
+
+    test "with nothing held no card is flagged" do
+      board = derive(issues: [issue("bd-1", %{state: :active})])
+      assert card(board, :in_progress, "bd-1").local_held == false
+    end
+  end
+
   describe "bd-asxw4e: a slot is a ticket In progress" do
     test "a :merging ticket holds no slot, even with a live CI fix pass on it" do
       board =

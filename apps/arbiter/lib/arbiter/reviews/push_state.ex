@@ -288,8 +288,17 @@ defmodule Arbiter.Reviews.PushState do
       path** — in particular a worktree sitting on `main` must never have
       `main`'s tip pushed onto the PR branch.
     * `{:error, reason, state}` — the head is definitely not on the remote and
-      could not be put there. A **diverged** branch is never force-pushed: the
-      remote may carry another worker's commits, so this escalates instead.
+      could not be put there. A **diverged** branch is overwritten only when
+      `rewrite_lease/3` clears it (a rebase of the ticket's own branch, pushed
+      with `--force-with-lease` pinned to the observed remote head, never a bare
+      `--force`); if the remote carries commits Arbiter did not push, this
+      escalates instead.
+
+  ## Options
+
+  Those of `inspect_branch/3`, plus `:expected_remote` — the remote head SHA
+  Arbiter last pushed or reviewed, which clears a rewrite whose commits no
+  longer patch-match the remote's (see `rewrite_lease/3`).
 
   Exactly one push attempt is made per call — the guard's bound
   (`GuardRegistry` row `G18`, `{:attempts, 1}`).
@@ -306,18 +315,35 @@ defmodule Arbiter.Reviews.PushState do
     end
   end
 
-  # A diverged branch must not be force-pushed: `origin/<branch>` may carry
-  # commits this worktree has never seen (a ReviewGate implementer round
-  # pushing straight to origin is the known producer — see
-  # `Worktree.rebase_onto_origin/2`). Refuse and let the caller escalate.
-  defp push_once(_path, _branch, %{status: :diverged} = state, _opts),
-    do: {:error, :diverged, state}
+  # A diverged branch is force-pushed only as a lease-pinned rewrite of the
+  # ticket's OWN branch (`rewrite_lease/3`): `origin/<branch>` may carry commits
+  # this worktree has never seen (another actor pushed straight to origin), and
+  # those must never be overwritten. Anything `rewrite_lease/3` does not clear
+  # is refused and the caller escalates.
+  defp push_once(path, branch, %{status: :diverged} = state, opts) do
+    case rewrite_lease(state, path, opts) do
+      {:ok, lease_sha} ->
+        Logger.info(
+          "PushState: delivering a rewrite of `#{branch}` with --force-with-lease pinned " <>
+            "to #{short(lease_sha)} (local #{short(state.local_head)})"
+        )
 
-  defp push_once(path, branch, state, opts) do
+        run_push(path, branch, state, opts, [
+          "--force-with-lease=refs/heads/#{branch}:#{lease_sha}"
+        ])
+
+      :refuse ->
+        {:error, :diverged, state}
+    end
+  end
+
+  defp push_once(path, branch, state, opts), do: run_push(path, branch, state, opts, [])
+
+  defp run_push(path, branch, state, opts, lease_args) do
     remote = state.remote
     refspec = "HEAD:refs/heads/" <> branch
 
-    case git(path, ["push", remote, refspec]) do
+    case git(path, ["push"] ++ lease_args ++ [remote, refspec]) do
       {:ok, _out} ->
         # A successful push updates refs/remotes/<remote>/<branch> locally, so
         # the confirmation read needs no second network round trip.
@@ -330,6 +356,75 @@ defmodule Arbiter.Reviews.PushState do
 
       :error ->
         {:error, :push_failed, state}
+    end
+  end
+
+  @doc """
+  Whether a diverged `branch` may be delivered as a rewrite (a rebase), and the
+  SHA the push's lease must pin (bd-4axlg0).
+
+  A container worker that rebases its branch onto current main rewrites its
+  commits; the host, which holds the forge credential, pushes them. A plain
+  push is rejected as non-fast-forward, and refusing outright parks a ticket
+  whose local branch is right. But a divergence can equally be someone else's
+  push to the branch, which a rewrite would destroy. So the rewrite is cleared
+  only when the remote holds nothing Arbiter does not already have:
+
+    * the remote head IS `:expected_remote` — the head Arbiter last pushed or
+      reviewed (what a round started from); or
+    * every commit the remote has and local HEAD lacks is patch-equivalent
+      (`git cherry`) to a commit local HEAD carries — a clean rebase, nothing
+      lost.
+
+  The lease is always pinned to the remote head just observed, never to a
+  tracking ref the push itself would refresh, so a push landing between this
+  check and the push is rejected by the remote and nothing is clobbered.
+  Returns `:refuse` for anything else, including a stale or missing remote.
+  """
+  @spec rewrite_lease(t(), String.t(), keyword()) :: {:ok, String.t()} | :refuse
+  def rewrite_lease(%{status: :diverged, remote_head: remote_head} = state, path, opts)
+      when is_binary(remote_head) do
+    cond do
+      Keyword.get(opts, :expected_remote) == remote_head -> {:ok, remote_head}
+      patch_equivalent?(path, state) -> {:ok, remote_head}
+      true -> :refuse
+    end
+  end
+
+  def rewrite_lease(_state, _path, _opts), do: :refuse
+
+  @doc """
+  For a caller that pushes itself (`Arbiter.Worker`'s pre-PR push): is the
+  divergence of `branch` from the remote a rewrite it may deliver?
+
+  `{:rewrite, lease_sha}` — diverged, and `rewrite_lease/3` clears it; push with
+  `--force-with-lease` pinned to `lease_sha`. `:none` — anything else (in sync,
+  ahead, behind, a divergence it does not clear, no remote, a worktree off the
+  branch): the caller's ordinary path applies, unchanged.
+  """
+  @spec rewrite_plan(String.t() | nil, String.t() | nil, keyword()) ::
+          {:rewrite, String.t()} | :none
+  def rewrite_plan(path, branch, opts \\ []) do
+    state = inspect_branch(path, branch, opts)
+
+    case rewrite_lease(state, path, opts) do
+      {:ok, lease_sha} -> {:rewrite, lease_sha}
+      :refuse -> :none
+    end
+  end
+
+  # `git cherry HEAD <remote>` lists the commits the remote has and HEAD lacks:
+  # `-` when HEAD carries a patch-equivalent commit, `+` when it does not.
+  defp patch_equivalent?(path, %{remote: remote, branch: branch}) do
+    case git(path, ["cherry", "HEAD", remote <> "/" <> branch]) do
+      {:ok, ""} ->
+        false
+
+      {:ok, out} ->
+        out |> String.split("\n", trim: true) |> Enum.all?(&String.starts_with?(&1, "- "))
+
+      :error ->
+        false
     end
   end
 

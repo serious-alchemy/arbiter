@@ -99,7 +99,9 @@ defmodule Arbiter.Accounts.Concurrency do
   A resume of an `:active` ticket passes `Arbiter.Worker.ResumeSlot` uncapped
   (stranding work is worse than overshooting), so resumes alone can exceed
   `max_concurrent` — the operator lowered it while workers ran, say. They
-  still resume; `account_headroom/3` is then `0` (it floors at zero, never
+  still resume (the provider account's ceiling never refuses one; the
+  *primary's own* worker cap, `Arbiter.Nodes.LocalCapacity`, does hold a resume
+  when it is enforced — bd-b2iigy); `account_headroom/3` is then `0` (it floors at zero, never
   negative), and `Arbiter.Board.Autopilot` dispatches nothing new until
   occupancy drops below the cap again.
 
