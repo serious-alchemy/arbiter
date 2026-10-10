@@ -4076,7 +4076,7 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, :missing_worktree}
 
       repo_path when is_binary(repo_path) ->
-        with {:ok, path} <- provision_inspect_checkout(task, repo_path, opts) do
+        with {:ok, path} <- provision_inspect_worktree(task, repo_path, opts) do
           {:ok, path, opts}
         end
     end
@@ -4189,47 +4189,6 @@ defmodule Arbiter.Worker.Dispatch do
     if Keyword.get(opts, :node),
       do: Keyword.put_new(opts, :provider, choice.type),
       else: opts
-  end
-
-  # The inspect checkout in the layout the spawn can use (bd-6ypj2y). A container is
-  # only ever handed a private clone (`ContainerSpawn`), so a podman run of a
-  # task/research ticket gets a read-only clone of the target tip: seeded to a node
-  # when the run is placed on one, never collected, and unable to push (any commit
-  # the agent makes there dies with the clone). Every other run keeps the detached
-  # linked worktree.
-  defp provision_inspect_checkout(%Issue{} = task, repo_path, opts) do
-    case git_layout(task, opts) do
-      :private_clone -> provision_inspect_clone(task, repo_path, opts)
-      _ -> provision_inspect_worktree(task, repo_path, opts)
-    end
-  end
-
-  defp provision_inspect_clone(%Issue{} = task, repo_path, opts) do
-    target = resolve_target_branch(task, opts)
-    path = task |> BranchNamer.derive() |> Worktree.inspect_path()
-
-    # A re-dispatch finds the previous run's clone at the same leaf; it holds nothing
-    # worth keeping (read-only, never synced back), so it is replaced by a fresh
-    # clone at the current tip.
-    _ = Checkout.teardown(path)
-    _ = Worktree.fetch_origin(repo_path, target)
-
-    case Checkout.provision_branch(repo_path, target,
-           path: path,
-           layout: :private_clone,
-           base: target
-         ) do
-      {:ok, %{path: path}} ->
-        {:ok, path}
-
-      {:error, reason} ->
-        Logger.warning(
-          "Dispatch: could not provision a read-only checkout for task #{task.id} from " <>
-            "#{repo_path} (#{inspect(reason)})"
-        )
-
-        {:error, {:inspect_worktree_failed, reason}}
-    end
   end
 
   # An isolated, detached checkout at the tip of `origin/<target>`, at the task's

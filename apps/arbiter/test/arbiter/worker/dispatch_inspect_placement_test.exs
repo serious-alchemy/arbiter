@@ -179,6 +179,37 @@ defmodule Arbiter.Worker.DispatchInspectPlacementTest do
     end
   end
 
+  test "the clone is seeded from the repo's configured seed_paths",
+       %{opts: opts, repo_path: repo_path} do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "inspect-seed-#{System.unique_integer([:positive])}",
+        prefix: "is#{System.unique_integer([:positive])}",
+        config: %{
+          "worker" => %{
+            "placement" => "prefer_remote",
+            "repos" => %{@repo => %{"seed_paths" => ["priv/plts"]}}
+          }
+        }
+      })
+
+    seeded = Path.join(repo_path, "priv/plts/core.plt")
+    File.mkdir_p!(Path.dirname(seeded))
+    File.write!(seeded, "compiled\n")
+
+    task = ticket!(ws, :research, "seeded")
+
+    capture_log(fn ->
+      assert {:ok, %{claude_port: port}} = Dispatch.dispatch(task.id, opts)
+      await_agent_exit(port)
+      stop_worker(task.id)
+    end)
+
+    path = task |> BranchNamer.derive() |> Worktree.inspect_path()
+    assert PrivateClone.read_only?(path)
+    assert File.read!(Path.join(path, "priv/plts/core.plt")) == "compiled\n"
+  end
+
   test "a commit the agent makes in the clone is discarded and can never be pushed",
        %{ws: ws, opts: opts, repo_path: repo_path} do
     task = ticket!(ws, :research, "agent commits")
