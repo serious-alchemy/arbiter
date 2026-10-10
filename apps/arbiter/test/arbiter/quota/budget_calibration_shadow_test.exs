@@ -14,7 +14,7 @@ defmodule Arbiter.Quota.BudgetCalibrationShadowTest do
   @consumers ~r/BudgetCalibration|budget_calibration/
 
   # The only files allowed to name the calibration: its own module, the two
-  # operator entry points, the budget that consumes it (DC3, bd-6c8g4t: its pure
+  # operator entry points, the admission shadow report (DC7), the budget that consumes it (DC3, bd-6c8g4t: its pure
   # function, server and inputs), and two moduledocs that point at it (`Draw` shares its
   # intervals; `QuotaSnapshot` documents the columns).
   @allowed ~w(
@@ -26,6 +26,7 @@ defmodule Arbiter.Quota.BudgetCalibrationShadowTest do
     arbiter/quota/quota_snapshot.ex
     arbiter/release.ex
     mix/tasks/arbiter.budget_calibration.ex
+    board/admission_shadow_report.ex
   )
 
   test "no admission, gate, dispatch, scheduler or board module reads the calibration" do

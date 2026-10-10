@@ -9,6 +9,7 @@ defmodule Arbiter.Release do
   require Logger
 
   alias Arbiter.Agents.Routing.ShadowReport
+  alias Arbiter.Board.AdmissionShadowReport
   alias Arbiter.Loop.CompetenceGenerator
   alias Arbiter.Loop.Scarcity.Draw
   alias Arbiter.Quota.BudgetCalibration
