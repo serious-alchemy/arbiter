@@ -291,6 +291,51 @@ defmodule ArbiterWeb.NodeChannelTest do
     end
   end
 
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): the adoption handshake crosses the
+  # channel both ways.
+  describe "adoption" do
+    test "adopt reaches the node, and the node's adopt.refused reaches the session", %{
+      node: node,
+      credential: credential
+    } do
+      row =
+        Ash.create!(Arbiter.Workers.Run, %{
+          task_id: "bd-node-chan",
+          base_task_id: "bd-node-chan",
+          repo: "trib/repo",
+          kind: :implement,
+          provider: "claude",
+          state: :working,
+          node_id: node.id,
+          started_at: DateTime.utc_now()
+        })
+
+      {socket, ok} =
+        join_and_hello(
+          node,
+          credential,
+          hello(%{
+            "caps" => %{"backend" => "podman", "run_hold" => "quiesce", "run_adopt" => "attach"},
+            "runs" => [%{"id" => row.id, "state" => "running", "exited" => false, "acked" => 0}]
+          })
+        )
+
+      assert ok["runs"] == %{row.id => "hold"}
+      session = Registry.lookup(node.id)
+      owner = self()
+
+      task =
+        Task.async(fn -> Session.adopt(session, row.id, %{"run" => row.id}, owner, []) end)
+
+      run_id = row.id
+      assert_push "adopt", %{"run" => ^run_id}
+      push(socket, "adopt.refused", %{"run" => run_id, "reason" => "exited"})
+
+      assert {:error, {:adopt_refused, "exited"}} = Task.await(task)
+      assert :ok = Session.adoptable(session, run_id)
+    end
+  end
+
   describe "missed heartbeats" do
     test "suspect at 30 s, fenced at 60 s, lost at 90 s: the channel closes and the runs are named",
          %{node: node, credential: credential, clock: clock} do

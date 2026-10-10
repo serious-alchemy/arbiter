@@ -23,6 +23,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     arbiter/quota/budget.ex
     arbiter/quota/budget/server.ex
     arbiter/quota/budget/inputs.ex
+    arbiter/quota/shadow_supervisor.ex
     arbiter/application.ex
   )
 

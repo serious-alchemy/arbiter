@@ -232,4 +232,91 @@ defmodule Arbiter.Agents.ProviderRoutingGuardrailsTest do
     assert {:ok, %{decision: decision}} = ProviderRouting.select(ws, task, :main, options)
     assert reasons(decision)[agy.slug] == "egress_unenforceable"
   end
+
+  # G15c (bd-dfay3f, design §5.6 step 4): a grant that widens the ticket past
+  # what its pinned implementer subject may hold sends the next spawn through
+  # the pin's fallback, on the same branch.
+  describe "a mid-run grant widens the ticket past the pinned subject" do
+    @prod_read %{
+      "prod_read" => %{"enforced_read_only" => true, "env_from_secret" => %{"A" => "b"}}
+    }
+
+    defp bound_fleet! do
+      ws = workspace!(Map.put(@most_quota, "guardrails", %{"bindings" => @prod_read}))
+      claude = account!(:claude, "claude")
+      agy = account!(:antigravity, "agy")
+      allow!(ws, claude, 0)
+      allow!(ws, agy, 1)
+
+      %{
+        ws: ws,
+        claude: claude,
+        agy: agy,
+        quotas: [{claude, claude_quota(0.7)}, {agy, agy_quota(0.0)}]
+      }
+    end
+
+    defp grant!(task, permission) do
+      task
+      |> Ash.Changeset.for_update(:set_permissions, %{permissions: [permission]},
+        context: %{guardrail_authority: :coordinator, permission_actor: "t"}
+      )
+      |> Ash.update!()
+    end
+
+    test "the next spawn falls back off the pinned subject with a guardrail reason" do
+      guard!()
+      %{ws: ws, claude: claude, agy: agy, quotas: quotas} = bound_fleet!()
+      task = task!(ws, %{difficulty: 1})
+
+      assert {:ok, %{decision: first}} = ProviderRouting.select(ws, task, :main, opts(quotas))
+      assert first["account_slug"] == agy.slug
+
+      pinned = Ash.get!(Issue, task.id)
+      assert pinned.implementer_account_id == agy.id
+
+      widened = grant!(pinned, "prod_read")
+
+      assert {:ok, %{agent_type: :claude, decision: decision}} =
+               ProviderRouting.select(ws, widened, :resume, opts(quotas))
+
+      assert decision["outcome"] == "fallback"
+      assert decision["account_slug"] == claude.slug
+      assert decision["fallback"] =~ "guardrail: pinned subject lacks prod_read"
+      assert decision["pinned_account_id"] == agy.id
+    end
+
+    test "with no eligible subject left there is no routed pick, never an ineligible fallback" do
+      guard!([%{match: %{provider: "claude"}, tier: :quarantine}] ++ @rules)
+      %{ws: ws, agy: agy, quotas: quotas} = bound_fleet!()
+      task = task!(ws, %{difficulty: 1})
+
+      assert {:ok, _} = ProviderRouting.select(ws, task, :main, opts(quotas))
+      pinned = Ash.get!(Issue, task.id)
+      assert pinned.implementer_account_id == agy.id
+
+      widened = grant!(pinned, "prod_read")
+
+      assert {:legacy, decision} = ProviderRouting.select(ws, widened, :resume, opts(quotas))
+      assert decision["outcome"] == "no_candidate"
+      assert decision["fallback"] =~ "guardrail: pinned subject lacks prod_read"
+      assert Enum.all?(decision["dropped"], &(&1["reason"] == "guardrail_ineligible"))
+    end
+
+    test "a grant within the pinned subject's profile leaves the routing alone" do
+      guard!([%{match: %{provider: "antigravity"}, tier: :privileged}] ++ @rules)
+      %{ws: ws, agy: agy, quotas: quotas} = bound_fleet!()
+      task = task!(ws, %{difficulty: 1})
+
+      assert {:ok, _} = ProviderRouting.select(ws, task, :main, opts(quotas))
+      widened = grant!(Ash.get!(Issue, task.id), "prod_read")
+
+      assert {:ok, %{decision: decision}} =
+               ProviderRouting.select(ws, widened, :resume, opts(quotas))
+
+      assert decision["outcome"] == "pinned"
+      assert decision["account_slug"] == agy.slug
+      refute decision["fallback"]
+    end
+  end
 end

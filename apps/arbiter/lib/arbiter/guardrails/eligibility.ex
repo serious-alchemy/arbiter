@@ -112,6 +112,35 @@ defmodule Arbiter.Guardrails.Eligibility do
     end
   end
 
+  @doc """
+  The required action permissions among `attrs.permissions` that the subject
+  cannot hold under its effective profile (`[]` when it holds them all, has no
+  profile, or is a reviewer): the permissions behind a `check_actions` refusal,
+  as canonical required forms. G15c names them when a mid-run grant makes a
+  pinned implementer subject ineligible (`docs/design/guardrail-profiles.md`
+  §5.6). Takes the same `attrs` and options as `evaluate/2`.
+  """
+  @spec lacking(attrs(), keyword()) :: [String.t()]
+  def lacking(%{} = attrs, opts \\ []) do
+    subject = Guardrails.subject(attrs.provider, attrs.model)
+
+    case Guardrails.effective(
+           subject,
+           Map.get(attrs, :workspace),
+           Map.get(attrs, :repo),
+           Keyword.take(opts, [:rules, :suspensions])
+         ) do
+      %Profile{} = profile ->
+        {_optional, required} =
+          withheld_split(profile, attrs.role, Map.get(attrs, :permissions) || [], attrs)
+
+        Enum.map(required, &required_form(&1.permission))
+
+      nil ->
+        []
+    end
+  end
+
   defp judge(profile, attrs, opts) do
     permissions = Map.get(attrs, :permissions) || []
     role = attrs.role
@@ -190,14 +219,7 @@ defmodule Arbiter.Guardrails.Eligibility do
   defp check_actions(_profile, :reviewer, _permissions, _attrs), do: {:ok, []}
 
   defp check_actions(profile, :implementer, permissions, attrs) do
-    projection =
-      Projection.build(permissions,
-        profile: profile,
-        block: Config.block(Map.get(attrs, :workspace)),
-        role: :implementer
-      )
-
-    {optional, required} = Enum.split_with(projection.withheld, &optional?(&1.permission))
+    {optional, required} = withheld_split(profile, :implementer, permissions, attrs)
 
     case required do
       [] ->
@@ -208,6 +230,21 @@ defmodule Arbiter.Guardrails.Eligibility do
          "cannot hold " <>
            Enum.map_join(required, "; ", &"#{required_form(&1.permission)} (#{&1.reason})")}
     end
+  end
+
+  # What the profile withholds from the ticket's permissions, as `{optional,
+  # required}`. Reviewers are given no action permissions, so withhold nothing.
+  defp withheld_split(_profile, :reviewer, _permissions, _attrs), do: {[], []}
+
+  defp withheld_split(profile, :implementer, permissions, attrs) do
+    projection =
+      Projection.build(permissions,
+        profile: profile,
+        block: Config.block(Map.get(attrs, :workspace)),
+        role: :implementer
+      )
+
+    Enum.split_with(projection.withheld, &optional?(&1.permission))
   end
 
   defp optional?(canonical) do

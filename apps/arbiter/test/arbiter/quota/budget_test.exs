@@ -424,6 +424,103 @@ defmodule Arbiter.Quota.BudgetTest do
     end
   end
 
+  # ---- windows with nil fields (P0: v0.2.42 boot crash, bd-1p8cxk) ----------------
+
+  describe "windows with nil reset_at, nil used or nil model" do
+    alias Arbiter.Quota.GoogleQuota
+
+    defp agy_row(models) do
+      %GoogleQuota{
+        provider: "antigravity",
+        used_percent: 40.0,
+        reset_at: nil,
+        captured_at: @a_now,
+        snapshot: %{"models" => models}
+      }
+    end
+
+    defp agy_models(reset) do
+      for {id, remaining} <- [
+            {"claude_and_gpt_models_5h", 60.0},
+            {"claude_and_gpt_models_weekly", 80.0},
+            {"gemini_models_5h", 50.0},
+            {"gemini_models_weekly", 70.0}
+          ] do
+        %{"model_id" => id, "remaining_percentage" => remaining, "reset_at" => reset}
+      end
+    end
+
+    defp agy_account,
+      do: %ProviderAccount{provider: :antigravity, quota_config: %{}, max_concurrent: nil}
+
+    test "antigravity:claude_and_gpt_models with a nil reset_at on the 5h window" do
+      b =
+        compute(
+          account: agy_account(),
+          pool: "claude_and_gpt_models",
+          model: "claude-sonnet-4",
+          quota: agy_row(agy_models(nil))
+        )
+
+      assert %Budget{} = b
+      assert window(b, "5h").reset_in_h == nil
+    end
+
+    test "antigravity gemini pool and a nil model" do
+      for model <- ["gemini-3-pro", nil] do
+        b =
+          compute(
+            account: agy_account(),
+            pool: "gemini_models",
+            model: model,
+            quota: agy_row(agy_models(nil))
+          )
+
+        assert %Budget{} = b
+      end
+    end
+
+    test "a stored reset in the past on the 5h window, nil on the weekly" do
+      past = DateTime.to_iso8601(DateTime.add(@a_now, -3600, :second))
+
+      models =
+        Enum.map(agy_models(nil), fn m ->
+          if String.ends_with?(m["model_id"], "_5h"), do: %{m | "reset_at" => past}, else: m
+        end)
+
+      assert %Budget{} = compute(account: agy_account(), quota: agy_row(models))
+    end
+
+    test "a Codex session window with no reset_at" do
+      codex = %ProviderAccount{provider: :codex, quota_config: %{}, max_concurrent: nil}
+
+      snap = %Snapshot{
+        provider: "codex",
+        utilization: 0.30,
+        status: "allowed",
+        reset_at: nil,
+        captured_at: @a_now,
+        window_label: "session"
+      }
+
+      assert %Budget{} = compute(account: codex, quota: snap, pool: "codex")
+    end
+
+    test "a nil used is a lost reading, with or without a reset_at" do
+      snap = %{example_a_snapshot() | utilization: nil, secondary_utilization: nil}
+      b = compute(quota: snap)
+      assert Enum.all?(b.windows, &(&1.status == :no_reading))
+
+      snap = %{snap | reset_at: nil, secondary_reset_at: nil}
+      assert %Budget{} = compute(quota: snap)
+    end
+
+    test "a Claude reading with nil reset_at on both windows" do
+      snap = %{example_a_snapshot() | reset_at: nil, secondary_reset_at: nil}
+      assert %Budget{} = compute(quota: snap)
+    end
+  end
+
   # ---- the exempt budget (R7) -------------------------------------------------
 
   describe "the exempt budget" do

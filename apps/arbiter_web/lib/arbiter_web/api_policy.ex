@@ -134,6 +134,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/issues/:id/resolve"} => :coordinator,
     {:post, "/api/issues/:id/handoff"} => :coordinator,
     {:post, "/api/issues/:id/handback"} => :coordinator,
+    {:post, "/api/issues/:id/permission"} => :coordinator,
 
     # ---- dependencies -----------------------------------------------------
     {:get, "/api/dependencies"} => :coordinator,

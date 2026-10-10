@@ -49,6 +49,8 @@ defmodule Arbiter.NodeAgent.Config do
     backend: Arbiter.NodeAgent.Backend.Podman,
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
+    # bd-4p1vui (§10.4.8): with no socket, runs are kept this long after the last ack
+    restart_grace_ms: 180_000,
     readiness_ttl_ms: 600_000,
     connect_timeout_ms: 10_000,
     hello_timeout_ms: 240_000,
@@ -88,8 +90,9 @@ defmodule Arbiter.NodeAgent.Config do
          opts
          |> merged_opts()
          |> Keyword.take(
-           ~w(hb_interval_ms fence_after_ms readiness_ttl_ms connect_timeout_ms hello_timeout_ms
-            idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun run_opts)a
+           ~w(hb_interval_ms fence_after_ms restart_grace_ms readiness_ttl_ms connect_timeout_ms
+            hello_timeout_ms idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun
+            run_opts)a
          )
          |> Keyword.merge(
            primary_url: url,

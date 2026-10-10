@@ -213,6 +213,16 @@
       note: "Same handoff behaviour and divergences as ticket_handoff (D-T-13, D-T-28)."
     },
     %{
+      id: "tickets/grant_or_deny_a_requested_permission",
+      title: "Grant or deny a requested permission",
+      mcp: ["ticket_permission_grant"],
+      cli: ["arb ticket permit"],
+      rest: ["POST /api/issues/:id/permission"],
+      status: :full,
+      note:
+        "Same decision on every surface (Arbiter.Tasks.PermissionDecision); the token's authority decides, so an operator-only binding is refused over MCP and a coordinator token, and answered with operator proof."
+    },
+    %{
       id: "tickets/push_close_upstream_for_an_already",
       title: "Push close upstream for an already-closed ticket",
       mcp: ["ticket_sync_upstream_close", "task_sync_upstream_close"],

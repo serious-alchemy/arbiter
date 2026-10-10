@@ -22,7 +22,10 @@ defmodule Arbiter.NodeAgent.Connection do
     `config.hb_interval_ms`). The agent **self-fences** when no ack has arrived
     for `fence_after` (default 60 s): it logs, records `fenced` in the status
     file and drops the connection, so the invariant `fence < lost` (§10.1) holds
-    from the agent's side. With no runs yet there is nothing to quiesce.
+    from the agent's side. With no runs yet there is nothing to quiesce. With
+    **no socket** (a primary restart closes it), the runs are kept for
+    `restart_grace` after the last ack (180 s, from `hello_ok`; bd-4p1vui, §10.4.8)
+    so a new Worker can adopt them, then fenced the same way.
   * **Upgrade.** A `hello_ok` (or an `upgrade` push) carrying
     `upgrade{version, sha256}` goes to `Arbiter.NodeAgent.Upgrader`; the first
     `hello_ok` of a freshly upgraded agent also confirms the upgrade.
@@ -47,6 +50,11 @@ defmodule Arbiter.NodeAgent.Connection do
     uploads are done) and says it may go with `retained.drop{run}`. A changed
     `boot_epoch` is logged and recorded in the status file. `reap{install,
     live_set}` runs `Arbiter.NodeAgent.Reaper`, install-scoped.
+  * **Adoption (bd-4p1vui, §10.4.3).** A `"hold"` run is left running and
+    detached until the primary either adopts it (`adopt{run}`: `Run.adopt/1`
+    attaches it and answers `run.ready{adopted: true, acked}`, or
+    `adopt.refused{run, reason}`) or asks for it to be quiesced (`quiesce{run}`).
+    `hello.caps.run_adopt` says this agent understands `adopt`.
   * Events the later children own (`drain`, `rotate`) are logged and ignored.
   """
   use GenServer
@@ -99,7 +107,11 @@ defmodule Arbiter.NodeAgent.Connection do
       last_ack: nil,
       hello_ok: nil,
       hello_timer: nil,
-      retry_timer: nil
+      retry_timer: nil,
+      # bd-4p1vui: the runs this connection's `hello_ok` answered `hold` (the only ones
+      # an `adopt` may take), and the fence for a socket that stays gone.
+      held: MapSet.new(),
+      grace_timer: nil
     }
 
     put_status(state, %{
@@ -201,6 +213,17 @@ defmodule Arbiter.NodeAgent.Connection do
   end
 
   def handle_info(:hello_timeout, state), do: {:noreply, state}
+
+  # bd-4p1vui (§10.4.8): no socket for `restart_grace` since the last ack.
+  def handle_info(:restart_grace_fence, %{phase: phase} = state) when phase != :ready do
+    grace_s = div(state.config.restart_grace_ms, 1000)
+    Logger.warning("node agent fenced: no primary for #{grace_s}s; stopping its runs")
+    put_status(state, %{fenced_at: DateTime.utc_now() |> DateTime.to_iso8601()})
+    Runs.fence_all()
+    {:noreply, %{state | grace_timer: nil}}
+  end
+
+  def handle_info(:restart_grace_fence, state), do: {:noreply, %{state | grace_timer: nil}}
 
   def handle_info(_other, state), do: {:noreply, state}
 
@@ -398,6 +421,25 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # bd-4p1vui (§10.4.9): a new Worker on the restarted primary takes a held run over. Only a
+  # run this connection's `hello_ok` answered `hold`, and only once; anything else is refused
+  # before the run is touched.
+  defp push(state, "adopt", %{"run" => run}) when is_binary(run) do
+    if state.phase == :ready and MapSet.member?(state.held, run) do
+      case Run.adopt(run) do
+        :ok -> Logger.info("node agent: primary adopted held run #{run}")
+        {:error, :not_found} -> adopt_refused(run, "gone")
+      end
+
+      %{state | held: MapSet.delete(state.held, run)}
+    else
+      adopt_refused(run, "not_held")
+      state
+    end
+  end
+
+  defp push(state, "adopt", _payload), do: state
+
   defp push(state, "retained.drop", %{"run" => run}) when is_binary(run) do
     Retained.drop(state.config, run)
     state
@@ -487,12 +529,19 @@ defmodule Arbiter.NodeAgent.Connection do
     config = state.config
     hb_interval_ms = seconds_to_ms(payload["hb_interval"], config.hb_interval_ms)
     fence_after_ms = seconds_to_ms(payload["fence_after"], config.fence_after_ms)
+    restart_grace_ms = seconds_to_ms(payload["restart_grace"], config.restart_grace_ms)
 
     cancel(state.hello_timer)
+    cancel(state.grace_timer)
 
     # Seeded with `hb_interval_ms` so the timer below has the same value the
     # fence check measures against.
-    config = %{config | hb_interval_ms: hb_interval_ms, fence_after_ms: fence_after_ms}
+    config = %{
+      config
+      | hb_interval_ms: hb_interval_ms,
+        fence_after_ms: fence_after_ms,
+        restart_grace_ms: restart_grace_ms
+    }
 
     state = %{
       state
@@ -501,6 +550,8 @@ defmodule Arbiter.NodeAgent.Connection do
         attempt: 0,
         hello_ok: payload,
         hello_timer: nil,
+        grace_timer: nil,
+        held: held_runs(payload["runs"]),
         last_ack: now(),
         hb_timer: Process.send_after(self(), :heartbeat, hb_interval_ms)
     }
@@ -590,6 +641,14 @@ defmodule Arbiter.NodeAgent.Connection do
     Runs.attach_all(unknown ++ held)
   end
 
+  defp held_runs(verdicts) when is_map(verdicts),
+    do: for({run, "hold"} <- verdicts, into: MapSet.new(), do: run)
+
+  defp held_runs(_verdicts), do: MapSet.new()
+
+  defp adopt_refused(run, reason),
+    do: send(self(), {:run_push, run, "adopt.refused", %{"run" => run, "reason" => reason}})
+
   defp run_opts(state) do
     [config: state.config, sink: self(), node_id: state.config.node_id] ++
       (state.config.run_opts || [])
@@ -667,10 +726,23 @@ defmodule Arbiter.NodeAgent.Connection do
         hb_timer: nil,
         hello_timer: nil,
         hb_refs: MapSet.new(),
-        hello_ok: nil
+        hello_ok: nil,
+        held: MapSet.new()
     }
 
-    schedule_retry(state, reason)
+    state |> arm_restart_grace() |> schedule_retry(reason)
+  end
+
+  # bd-4p1vui (§10.4.8): the socket is gone (a primary restart closes it). The runs are kept
+  # for `restart_grace` after the last ack, so a new Worker can adopt them, and then fenced
+  # like an open socket that stopped answering. Re-armed on every loss with the same
+  # deadline; a `hello_ok` cancels it.
+  defp arm_restart_grace(%{last_ack: nil} = state), do: state
+
+  defp arm_restart_grace(state) do
+    cancel(state.grace_timer)
+    delay = max(state.last_ack + state.config.restart_grace_ms - now(), 0)
+    %{state | grace_timer: Process.send_after(self(), :restart_grace_fence, delay)}
   end
 
   defp schedule_retry(state, reason) do

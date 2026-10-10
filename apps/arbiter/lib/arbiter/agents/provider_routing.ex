@@ -506,6 +506,11 @@ defmodule Arbiter.Agents.ProviderRouting do
         # Why it is not available: its drop reason, or that it is no longer an
         # implementer candidate at all.
         case Enum.find(dropped, &(&1.account.id == id)) do
+          %{guardrail_lacks: [_ | _] = lacks} ->
+            # G15c (design §5.6): a grant widened the ticket past what the
+            # pinned subject may hold under its profile.
+            {:unavailable, "guardrail: pinned subject lacks #{Enum.join(lacks, ", ")}"}
+
           %{} = entry ->
             {:unavailable,
              "pinned account #{label(entry.account)} unavailable (#{drop_text(entry)})"}
@@ -940,11 +945,13 @@ defmodule Arbiter.Agents.ProviderRouting do
       case check.(entry, ctx) do
         {:ok, entry} -> {:cont, {:ok, entry}}
         {:drop, reason, detail} -> {:halt, {:drop, drop(entry, reason, detail)}}
+        {:drop, reason, detail, extra} -> {:halt, {:drop, drop(entry, reason, detail, extra)}}
       end
     end)
   end
 
-  defp drop(entry, reason, detail), do: Map.merge(entry, %{reason: reason, detail: detail})
+  defp drop(entry, reason, detail, extra \\ %{}),
+    do: entry |> Map.merge(extra) |> Map.merge(%{reason: reason, detail: detail})
 
   # G13 (bd-atll60, design §5.4, §8): the guardrail eligibility of the
   # (provider, model) subject this candidate would run as — first, so that a
@@ -971,7 +978,10 @@ defmodule Arbiter.Agents.ProviderRouting do
         {:ok, Map.put(entry, :guardrail, %{profile: profile, permission_fallback: fallback})}
 
       {:error, detail} ->
-        {:drop, "guardrail_ineligible", detail}
+        # G15c: which of the ticket's in-force permissions the subject cannot
+        # hold, so a pinned subject's fallback can name them.
+        {:drop, "guardrail_ineligible", detail,
+         %{guardrail_lacks: Eligibility.lacking(attrs, rules: gate.rules)}}
     end
   end
 

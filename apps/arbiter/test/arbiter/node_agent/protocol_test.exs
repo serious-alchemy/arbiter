@@ -49,6 +49,14 @@ defmodule Arbiter.NodeAgent.ProtocolTest do
     end
   end
 
+  describe "hello/2 caps" do
+    test "advertises holding a run for recovery (bd-24o760) and handing it to a new Worker (bd-4p1vui)" do
+      caps = Protocol.hello(config([]), %{})["caps"]
+      assert caps["run_hold"] == "quiesce"
+      assert caps["run_adopt"] == "attach"
+    end
+  end
+
   describe "Config max_workers" do
     test "ARB_NODE_MAX_WORKERS parses to the ceiling; junk is ignored" do
       load = fn value ->

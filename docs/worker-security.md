@@ -1180,9 +1180,28 @@ container cannot reach a host socket): it never runs on the operator's agent.
     row with the run id, and raises the `:permission_requested` attention through
     `Escalation.post/1` — the coordinator's, or the operator's when the binding is
     `grant_by: operator`. It answers "recorded, not granted" and changes nothing
-    about the run, and records no `guardrail_events` row. Deciding a request and
-    live grants are G15b/c; routing eligibility and `guardrail_decision` on runs
-    are G13 (below).
+    about the run, and records no `guardrail_events` row. Routing eligibility and
+    `guardrail_decision` on runs are G13 (below).
+  * `ticket_permission_grant` (MCP, coordinator tier), `POST
+    /api/issues/:id/permission` and `arb ticket permit <id> <perm> [--deny
+    --reason …]` (G15b) answer a request through `Tasks.PermissionDecision`. The
+    authority is the token's (`Guardrails.Authority.from_scope/1`) checked against
+    the binding's `grant_by`: an operator-only binding needs operator proof, so it
+    is refused over MCP and to a coordinator token, and decided with `arb ticket
+    permit` from the operator's own shell. A grant or denial writes `granted` /
+    `denied` to `permission_events` with the actor (and the reason). A denial
+    needs a reason and is delivered to the worker's inbox; the request's attention
+    clears once nothing is pending.
+  * **A `network:` grant is live.** The decision calls
+    `Egress.invalidate_grants/1`, so the running worker's next `CONNECT` re-reads
+    its grants. A **guarded** run's loader (`Withholding.grants/2`) projects the
+    ticket's in-force permissions again under the run's own dispatch-time profile
+    and role (`Projection.profile`), so a reviewer, or a tier that does not list
+    `network:`, gains nothing from a grant. **Env, mount, tunnel and ssh grants
+    wait for the next spawn**: nothing in a running process or jail can change. A
+    resume dispatches again and `Withholding.for_spawn/5` projects the in-force
+    permissions afresh, so the grant arrives with the resumed run. Re-routing when
+    the pinned subject becomes ineligible is G15c.
 
 `arb server doctor` (guardrails report) flags a binding that names a secret the
 workspace does not have (`binding_secret_missing`).
