@@ -110,7 +110,10 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
       parsed =
         if resource == "cpu", do: Quantity.cpu(value, :k8s), else: Quantity.memory(value, :k8s)
 
-      with {:ok, n} <- parsed, do: n, else: (_ -> :error)
+      case parsed do
+        {:ok, n} -> n
+        :error -> :error
+      end
     end
   end
 

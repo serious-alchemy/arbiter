@@ -50,13 +50,20 @@ defmodule Arbiter.NodeAgent.K8s.Sweeper do
     labels = meta["labels"] || %{}
     run = labels[@run]
 
-    if labels[@install] == install and labels[@node] == node and present?(run) and
-         not MapSet.member?(keep, run) and not own?(meta, opts) and
-         is_nil(meta["deletionTimestamp"]) and is_binary(meta["name"]) do
+    if ours?(labels, install, node) and sweepable?(meta, run, keep, opts) do
       [%{name: meta["name"], uid: meta["uid"], run: run}]
     else
       []
     end
+  end
+
+  # All three labels, the first two equal to the controller's own.
+  defp ours?(labels, install, node),
+    do: labels[@install] == install and labels[@node] == node and present?(labels[@run])
+
+  defp sweepable?(meta, run, keep, opts) do
+    not MapSet.member?(keep, run) and not own?(meta, opts) and
+      is_nil(meta["deletionTimestamp"]) and is_binary(meta["name"])
   end
 
   defp own?(meta, opts) do

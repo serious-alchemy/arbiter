@@ -124,7 +124,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   def cancel(controller \\ __MODULE__, run, reason, opts \\ []),
     do: GenServer.call(controller, {:cancel, run, reason, opts}, 60_000)
 
-  @doc "`\"TERM\"`: delete with the pod's grace period; `\"KILL\"`: delete with grace 0."
+  @doc "TERM deletes with the pod's grace period; KILL deletes with grace 0."
   @spec signal(GenServer.server(), String.t(), String.t()) :: :ok | {:error, :not_found}
   def signal(controller \\ __MODULE__, run, signal) when signal in ["TERM", "KILL"],
     do: GenServer.call(controller, {:signal, run, signal}, 60_000)
@@ -540,10 +540,10 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   defp mark_gone(entry, state) do
     entry = %{entry | gone?: true}
 
-    cond do
-      entry.phase == :exited and not entry.acked? -> {entry, state}
-      true -> {nil, drop(state, entry)}
-    end
+    # An exit the primary has not acknowledged yet stays until `exit_ack/2`.
+    if entry.phase == :exited and not entry.acked?,
+      do: {entry, state},
+      else: {nil, drop(state, entry)}
   end
 
   defp drop(state, entry) do

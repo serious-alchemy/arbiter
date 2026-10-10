@@ -2,6 +2,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfigTest do
   use ExUnit.Case, async: true
 
   alias Arbiter.NodeAgent.K8s.ControllerConfig
+  alias Arbiter.NodeAgent.K8s.PodConfig
 
   @full """
   max_concurrent: 3
@@ -106,7 +107,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfigTest do
       assert pod.namespace == "arbiter-workers"
       assert pod.install_id == "inst-1"
       refute Map.has_key?(pod, :max_concurrent)
-      assert {:ok, _} = Arbiter.NodeAgent.K8s.PodConfig.normalize(pod)
+      assert {:ok, _} = PodConfig.normalize(pod)
     end
   end
 end
