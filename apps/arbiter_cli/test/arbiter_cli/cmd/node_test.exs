@@ -207,8 +207,6 @@ defmodule ArbiterCli.Cmd.NodeTest do
         "nodes" => [Map.put(@live_node, "contributes", 2)],
         "local" => @local,
         "total" => 5,
-        "effective" => 5,
-        "ceiling" => nil,
         "warnings" => []
       })
 
@@ -221,25 +219,21 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert out =~ "zone=a"
       assert out =~ "never"
       assert out =~ "capacity 5 = local 3 + box-1 2"
-      assert out =~ "conductor.max_concurrent: not set"
+      refute out =~ "conductor.max_concurrent"
       refute out =~ "idle"
     end
 
-    test "names a ceiling that cuts the sum, and the idle-capacity warning with it" do
+    test "prints the DC1 migration's advisory under the capacity line" do
       stub_get("/api/nodes", %{
         "nodes" => [Map.put(@live_node, "contributes", 2)],
         "local" => @local,
         "total" => 5,
-        "effective" => 4,
-        "ceiling" => 4,
-        "warnings" => ["ceiling_below_total"]
+        "warnings" => [],
+        "local_cap_advisory" => "conductor_system_max_concurrent (6) was removed: x"
       })
 
       {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
-      assert out =~ "conductor.max_concurrent = 4"
-      assert out =~ "plans 4"
-      assert out =~ "arb settings unset conductor_system_max_concurrent"
-      assert out =~ "will sit idle"
+      assert out =~ "note: conductor_system_max_concurrent (6) was removed: x"
     end
 
     test "lists a node that adds nothing as not counted" do
@@ -247,8 +241,6 @@ defmodule ArbiterCli.Cmd.NodeTest do
         "nodes" => [Map.merge(@live_node, %{"contributes" => 0, "state" => "draining"})],
         "local" => @local,
         "total" => 3,
-        "effective" => 3,
-        "ceiling" => nil,
         "warnings" => []
       })
 
@@ -261,7 +253,6 @@ defmodule ArbiterCli.Cmd.NodeTest do
         "nodes" => [],
         "local" => %{@local | "max" => 0, "override" => 0},
         "total" => 0,
-        "ceiling" => 3,
         "warnings" => ["local_cap_zero"]
       })
 
@@ -271,7 +262,7 @@ defmodule ArbiterCli.Cmd.NodeTest do
     end
 
     test "with only the primary it says there are no remote nodes" do
-      stub_get("/api/nodes", %{"nodes" => [], "local" => @local, "total" => 3, "ceiling" => 3})
+      stub_get("/api/nodes", %{"nodes" => [], "local" => @local, "total" => 3})
       {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
       assert out =~ "local"
       assert out =~ "No remote nodes"

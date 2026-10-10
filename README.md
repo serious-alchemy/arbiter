@@ -143,7 +143,7 @@ Visit the dashboard's **Workspace** page and configure:
 - **Repos** (projects to work in)
 - Worker/agent settings — model tier map, per-thinking-level args, provider overrides, and credentials (`agent.config.*`)
 - Security policy (`agent.security.*`)
-- Rate-limit throttling (`quota.*`) and per-workspace worker concurrency (`conductor.max_concurrent` — the key name is historical)
+- Rate-limit throttling (`quota.*`). Worker concurrency is bounded per machine (`arb node set`), per provider account (`max_concurrent`) and, optionally, per repo (`worker.repos.<repo>.max_concurrent`); `conductor.max_concurrent` was removed
 - Optionally a **tracker** (Jira, GitHub, Linear) and merge strategy
 
 Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.

@@ -37,7 +37,7 @@ build and strictly better (near-instant, zero steady-state DB polling) than
 tuning N independent timers.
 
 Out of scope, and confirmed untouched: `Application.get_env(:arbiter, …)`
-reads. Those (`conductor_system_max_concurrent`, `review_patrol_debounce_ms`,
+reads. Those (`review_patrol_debounce_ms`,
 `dispatch_queue_dispatcher`, `provider_pool_cooldown_ms`, credential-watchdog
 config, `quota_refresh_probe`) are compile/deploy-time OTP application config,
 not per-workspace DB config, and are *expected* to require a restart.

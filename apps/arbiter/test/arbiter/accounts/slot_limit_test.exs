@@ -7,37 +7,30 @@ defmodule Arbiter.Accounts.SlotLimitTest do
 
   @account %{name: "claude:default", limit: 2, live: 2, runs: ["bd-2qy0gu", "bd-c27m5o#review1"]}
 
-  describe "classify/4" do
+  describe "classify/3" do
     test "names the account when its ceiling is what clamps the workspace" do
-      # install 3, workspace 4, account 2/2 live, workspace holds 1: min(3, 1 + 0) = 1
+      # install 3, account 2/2 live, workspace holds 1: min(3, 1 + 0) = 1
       assert %{limit: :account, name: "claude:default", max: 2, live: 2} =
-               SlotLimit.classify(3, 4, @account, 1)
+               SlotLimit.classify(3, @account, 1)
     end
 
     test "names the install cap when it is the lowest" do
-      assert %{limit: :install, max: 3} = SlotLimit.classify(3, 4, %{@account | limit: 9}, 3)
-      assert %{limit: :install, max: 3} = SlotLimit.classify(3, nil, nil, 3)
-    end
-
-    test "names the workspace cap when it is below the install cap" do
-      assert %{limit: :workspace, max: 2} = SlotLimit.classify(3, 2, nil, 2)
+      assert %{limit: :install, max: 3} = SlotLimit.classify(3, %{@account | limit: 9}, 3)
+      assert %{limit: :install, max: 3} = SlotLimit.classify(3, nil, 3)
     end
   end
 
   describe "describe/2" do
     test "account: N/M live with every counted run and its role" do
-      limit = SlotLimit.classify(3, 4, @account, 1)
+      limit = SlotLimit.classify(3, @account, 1)
 
       assert SlotLimit.describe(limit, ["bd-2qy0gu"]) ==
                "account claude:default at 2/2 live (bd-2qy0gu implement, bd-c27m5o review)"
     end
 
-    test "install and workspace caps name themselves" do
+    test "the install cap names itself" do
       assert SlotLimit.describe(%{limit: :install, max: 3}, ["bd-a"]) ==
                "the install cap is 3 and 1 held by bd-a"
-
-      assert SlotLimit.describe(%{limit: :workspace, max: 2}, ["bd-a", "bd-b"]) ==
-               "the workspace cap is 2 and 2 held by bd-a, bd-b"
     end
   end
 
@@ -47,7 +40,7 @@ defmodule Arbiter.Accounts.SlotLimitTest do
         task_id: "bd-3t973v",
         cap: 1,
         holders: ["bd-2qy0gu"],
-        limit: SlotLimit.classify(3, 4, @account, 1)
+        limit: SlotLimit.classify(3, @account, 1)
       }
 
       message = ResumeSlot.refusal_message(info)

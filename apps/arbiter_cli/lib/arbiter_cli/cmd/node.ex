@@ -28,9 +28,8 @@ defmodule ArbiterCli.Cmd.Node do
   capacity, the node's own suggestion, your override, any ceiling set on the node
   itself (which the override cannot beat) and its last heartbeat, then the
   capacity breakdown, `capacity N = local a + node b`: the sum of every
-  available machine's cap. `conductor.max_concurrent` is an optional hard
-  ceiling over it, and the idle-capacity warning appears only when a ceiling
-  you set cuts it. `drain` stops new
+  available machine's cap. The primary's own cap defaults to its hardware
+  suggestion and is enforced like any node's. `drain` stops new
   work, `revoke` cuts the node off, `upgrade` asks a connected node to move to
   the release this install serves. Each writes a node event (`arb node events`).
 
@@ -423,7 +422,7 @@ defmodule ArbiterCli.Cmd.Node do
   defp print_totals(%{"local" => %{"max" => _}, "total" => _} = resp) do
     IO.puts("")
     IO.puts(capacity_line(resp))
-    IO.puts(ceiling_line(resp))
+    if advisory = resp["local_cap_advisory"], do: IO.puts("note: " <> advisory)
 
     for w <- resp["warnings"] || [], do: IO.puts("warning: " <> warning(w, resp))
   end
@@ -452,27 +451,10 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp idle_phrase(n), do: "#{n["name"]} #{n["state"] || n["status"] || "unavailable"}"
 
-  defp ceiling_line(%{"ceiling" => nil}),
-    do: "conductor.max_concurrent: not set (the sum applies)"
-
-  defp ceiling_line(%{"ceiling" => ceiling} = resp) do
-    effective = resp["effective"] || min(resp["total"] || ceiling, ceiling)
-
-    "conductor.max_concurrent = #{ceiling}: a hard ceiling, so the board plans #{effective} " <>
-      "(clear it with `arb settings unset conductor_system_max_concurrent`)"
-  end
-
-  defp ceiling_line(_), do: "conductor.max_concurrent: not reported"
-
   defp warning("local_cap_zero", _),
     do:
       "the local cap is 0: work that can only run on this machine (reviewers, fix and " <>
         "conflict passes, agy/codex, research) will wait"
-
-  defp warning("ceiling_below_total", resp),
-    do:
-      "conductor.max_concurrent (#{resp["ceiling"]}) is below #{resp["total"]}, the sum " <>
-        "of the available machines' caps: the extra capacity will sit idle"
 
   defp warning(other, _), do: other
 

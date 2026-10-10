@@ -229,7 +229,7 @@ It is not a seam on its own (see §1 row 4). It opens as part of the provider bu
   * `docs/provider-account-design.md:313,438,784` still describes it as live.
 * **The policy seam is `Arbiter.Quota.Gate`,** with the shape defects in §2.6.
 
-The "how many concurrent slots" question now has **no seam at all**. The board scheduler's slot gate reads `Settings.conductor_system_max_concurrent` and workspace `conductor.max_concurrent` directly. See §6, cross-workspace policy.
+The "how many concurrent slots" question now has **no seam at all**. The board scheduler's slot gate used to read `Settings.conductor_system_max_concurrent` and workspace `conductor.max_concurrent` directly; DC1 (bd-74mtmp) deleted both, and the slot count is now the sum of the machines' caps (`Arbiter.Nodes.Capacity`) under the provider accounts' ceilings. See §6, cross-workspace policy.
 
 ---
 

@@ -4,7 +4,7 @@ defmodule Arbiter.Settings.RegistryTest do
   alias Arbiter.Settings
   alias Arbiter.Settings.Registry
 
-  @keys ~w(conductor_system_max_concurrent credential_watchdog_adapters
+  @keys ~w(credential_watchdog_adapters
            credential_watchdog_interval_ms credential_watchdog_recovery_interval_ms
            quota_providers_shown quota_providers_hidden output_offload_enabled
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
@@ -20,11 +20,19 @@ defmodule Arbiter.Settings.RegistryTest do
 
   describe "cast/2" do
     test "positive integers, null, and stringified JSON" do
-      assert {:ok, 3} = Registry.cast("conductor_system_max_concurrent", 3)
-      assert {:ok, 3} = Registry.cast("conductor_system_max_concurrent", "3")
-      assert {:ok, nil} = Registry.cast("conductor_system_max_concurrent", nil)
-      assert {:error, msg} = Registry.cast("conductor_system_max_concurrent", 0)
+      assert {:ok, 3} = Registry.cast("credential_watchdog_interval_ms", 3)
+      assert {:ok, 3} = Registry.cast("credential_watchdog_interval_ms", "3")
+      assert {:ok, nil} = Registry.cast("credential_watchdog_interval_ms", nil)
+      assert {:error, msg} = Registry.cast("credential_watchdog_interval_ms", 0)
       assert msg =~ "positive integer"
+    end
+
+    test "the deleted conductor_system_max_concurrent is not a key any more (DC1)" do
+      refute "conductor_system_max_concurrent" in Registry.keys()
+      assert Registry.describe("conductor_system_max_concurrent") == nil
+
+      assert {:error, {:invalid, "unknown installation setting: conductor_system_max_concurrent"}} =
+               Registry.put("conductor_system_max_concurrent", 4)
     end
 
     test "adapter lists keep [] distinct from nil" do
@@ -258,9 +266,9 @@ defmodule Arbiter.Settings.RegistryTest do
     end
 
     test "invalid value changes nothing" do
-      {:ok, 4} = Registry.put("conductor_system_max_concurrent", 4)
-      assert {:error, {:invalid, _}} = Registry.put("conductor_system_max_concurrent", -1)
-      assert Settings.conductor_system_max_concurrent() == 4
+      {:ok, 4} = Registry.put("credential_watchdog_interval_ms", 4)
+      assert {:error, {:invalid, _}} = Registry.put("credential_watchdog_interval_ms", -1)
+      assert Settings.credential_watchdog_interval_ms() == 4
     end
 
     test "unknown key" do

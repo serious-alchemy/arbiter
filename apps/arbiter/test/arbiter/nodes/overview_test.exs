@@ -19,15 +19,12 @@ defmodule Arbiter.Nodes.OverviewTest do
     Application.put_env(:arbiter, :data_dir, home)
     previous_remote = Application.fetch_env(:arbiter, :remote_execution)
     Application.put_env(:arbiter, :remote_execution, true)
-    previous_ceiling = Application.fetch_env(:arbiter, :conductor_system_max_concurrent)
-    Application.delete_env(:arbiter, :conductor_system_max_concurrent)
 
     on_exit(fn ->
       restore(:node_primary_version, previous_version)
       restore(:data_dir, previous_dir)
       restore(:remote_execution, previous_remote)
-      restore(:conductor_system_max_concurrent, previous_ceiling)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(nil)
+      {:ok, _} = Settings.set_nodes_local_max_workers(nil)
 
       for {pid, _} <- Registry.list(),
           do: Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
@@ -206,17 +203,17 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert %{max: 3, cap_source: :ceiling} = row(Overview.build(), "capped")
     end
 
-    test "enrolling and connecting nodes never changes conductor.max_concurrent" do
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(3)
-      before = Arbiter.Settings.conductor_system_max_concurrent()
+    test "enrolling and connecting nodes never changes the local cap" do
+      {:ok, 3} = Nodes.set_local_max_workers(3, @operator)
 
       node = enroll!("big", max_workers: 50)
       connect!(node, hello(%{"capacity" => %{"suggestion" => 32, "ceiling" => 64}}))
 
-      assert Arbiter.Settings.conductor_system_max_concurrent() == before
-      # The ceiling is what the operator set, and it cuts the sum.
-      assert %{ceiling: 3, effective: 3} = Overview.build()
-      assert :ceiling_below_total in Overview.build().warnings
+      assert Settings.nodes_local_max_workers() == 3
+      assert %{total: 53, warnings: []} = overview = Overview.build()
+      # No install-wide ceiling: the overview carries none (DC1).
+      refute Map.has_key?(overview, :ceiling)
+      refute Map.has_key?(overview, :effective)
     end
 
     test "draining and revoked nodes show those states" do
@@ -241,12 +238,14 @@ defmodule Arbiter.Nodes.OverviewTest do
   end
 
   describe "build/0 local row" do
-    test "the primary is a local row whose default cap is the install's local concurrency" do
+    test "the primary is a local row whose default cap is its hardware suggestion" do
+      put_app_env(:arbiter, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
       %{local: local} = Overview.build()
 
       assert %{name: "local", kind: :local, state: :online, override: nil} = local
-      assert local.suggested == Arbiter.Board.Snapshot.system_max_concurrent()
-      assert local.max == local.suggested
+      assert local.suggested == 6
+      assert local.max == 6
+      assert local.cap_source == :suggestion
     end
 
     test "counts live local runs but not finished ones nor ones on a node" do
@@ -265,22 +264,21 @@ defmodule Arbiter.Nodes.OverviewTest do
   end
 
   describe "build/0 totals and warnings" do
-    test "sums local plus every available node's cap; conductor.max_concurrent is a ceiling over it" do
+    test "sums local plus every available node's cap" do
       {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(10)
       connect!(enroll!("a", max_workers: 3))
       connect!(enroll!("b"), hello(%{"capacity" => %{"suggestion" => 4}}))
       revoked = enroll!("c", max_workers: 9)
       {:ok, _} = Nodes.revoke(revoked, @operator)
 
-      assert %{total: 9, effective: 9, ceiling: 10, warnings: []} = Overview.build()
+      assert %{total: 9, warnings: []} = Overview.build()
     end
 
-    test "with no ceiling the sum applies and nothing warns" do
+    test "the sum applies and nothing warns" do
       {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
       connect!(enroll!("a", max_workers: 5))
 
-      assert %{total: 7, effective: 7, ceiling: nil, warnings: []} = Overview.build()
+      assert %{total: 7, warnings: []} = Overview.build()
     end
 
     test "a node that is not available adds 0: offline, draining, revoked or never connected" do
@@ -292,7 +290,7 @@ defmodule Arbiter.Nodes.OverviewTest do
       {:ok, _} = Nodes.revoke(enroll!("gone", max_workers: 4), @operator)
 
       overview = Overview.build()
-      assert %{total: 2, effective: 2} = overview
+      assert %{total: 2} = overview
       assert Enum.all?(overview.nodes, &(&1.contributes == 0))
     end
 
@@ -306,24 +304,8 @@ defmodule Arbiter.Nodes.OverviewTest do
       {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
       connect!(enroll!("a", max_workers: 3))
 
-      assert %{total: 2, effective: 2, remote_execution?: false} = Overview.build()
+      assert %{total: 2, remote_execution?: false} = Overview.build()
       assert %{contributes: 0} = row(Overview.build(), "a")
-    end
-
-    test "warns only when an explicit ceiling cuts the sum" do
-      {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(4)
-      connect!(enroll!("a", max_workers: 5))
-
-      assert %{total: 7, effective: 4, ceiling: 4, warnings: warnings} = Overview.build()
-      assert :ceiling_below_total in warnings
-    end
-
-    test "a ceiling above the sum does not warn: the sum is what applies" do
-      {:ok, 1} = Nodes.set_local_max_workers(1, @operator)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(20)
-
-      assert %{total: 1, effective: 1, warnings: []} = Overview.build()
     end
 
     test "a local cap of 0 is a persistent warning" do

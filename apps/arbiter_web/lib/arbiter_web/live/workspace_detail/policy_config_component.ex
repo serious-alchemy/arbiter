@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   @moduledoc """
   The workspace's dispatch policy: which tracker/merger back the workspace,
-  and the `merge.*` / `review*` / `routing.*` / `quota.*` / `conductor.*` /
+  and the `merge.*` / `review*` / `routing.*` / `quota.*` /
   `pr_patrol.*` knobs that shape every dispatch.
 
   One form, one submit: these fields are read together at dispatch time, so
@@ -58,7 +58,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
     {review_gate_patch, review_gate_unset} = review_gate_settings_patch(params)
     {review_automation_patch, review_automation_unset} = review_automation_settings_patch(params)
     {quota_patch, quota_unset} = quota_settings_patch(params)
-    {conductor_patch, conductor_unset} = conductor_settings_patch(params)
     {pr_patrol_patch, pr_patrol_unset} = pr_patrol_settings_patch(params)
     {review_patrol_patch, review_patrol_unset} = review_patrol_settings_patch(params)
 
@@ -74,7 +73,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
           |> maybe_put_map("review_gate", review_gate_patch)
           |> maybe_put_map("review_automation", review_automation_patch)
           |> maybe_put_map("quota", quota_patch)
-          |> maybe_put_map("conductor", conductor_patch)
           |> maybe_put_map("pr_patrol", pr_patrol_patch)
           |> maybe_put_map("review_patrol", review_patrol_patch)
 
@@ -83,7 +81,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
             review_gate_unset ++
             review_automation_unset ++
             routing_unset ++
-            quota_unset ++ conductor_unset ++ pr_patrol_unset ++ review_patrol_unset
+            quota_unset ++ pr_patrol_unset ++ review_patrol_unset
 
         case patch_config(socket.assigns.workspace, patch, unset) do
           {:ok, ws} ->
@@ -248,16 +246,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
     case blank_to_nil(params["review_patrol_our_login"]) do
       nil -> {%{}, ["review_patrol.our_login"]}
       v -> {%{"our_login" => v}, []}
-    end
-  end
-
-  # Builds the `conductor.max_concurrent` patch/unset pair — the per-workspace
-  # concurrency cap, uncapped by default, kept as its raw string form (same
-  # accepted-string-or-number pattern as `quota.*` above).
-  defp conductor_settings_patch(params) do
-    case blank_to_nil(params["conductor_max_concurrent"]) do
-      nil -> {%{}, ["conductor.max_concurrent"]}
-      v -> {%{"max_concurrent" => v}, []}
     end
   end
 
@@ -575,21 +563,6 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
                     value={cfg(@workspace, ["quota", "weekly_warning_policy"], "")}
                     size="sm"
                     class="w-[220px]"
-                  />
-                </:control>
-              </.setting_row>
-
-              <.setting_row
-                name="Max concurrent workers"
-                consequence="conductor.max_concurrent — the effective cap is the lowest of this, the account ceiling (P8, if configured), the system cap and quota headroom (P7)"
-              >
-                <:control>
-                  <Forms.input
-                    name="config[conductor_max_concurrent]"
-                    value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
-                    placeholder="uncapped"
-                    size="sm"
-                    class="w-[120px]"
                   />
                 </:control>
               </.setting_row>

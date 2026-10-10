@@ -731,7 +731,7 @@ defmodule ArbiterWeb.BoardLive do
   # machine, so local-only work (reviewers, fix and conflict passes, agy/codex,
   # research) is held until a node or the cap frees a slot.
   defp local_cap_zero? do
-    match?(%{cap: 0, enforced?: true}, Arbiter.Nodes.LocalCapacity.cap())
+    match?(%{cap: 0, source: :override}, Arbiter.Nodes.LocalCapacity.cap())
   end
 
   # Only the view's own exit: a linked port or helper that finished normally

@@ -2370,22 +2370,16 @@ defmodule Arbiter.Worker.Dispatch do
   # (RW9). The slot reserved here is released when the dispatch returns, by
   # which point the worker is registered and counted in its place.
   #
-  # With `worker.placement` unset (`local_only`) and no override of the
-  # primary's cap there is nothing to decide, and nothing is read: dispatch is
-  # exactly what it was.
+  # The primary's cap is always enforced (its override, else its hardware
+  # suggestion: DC1), so every fresh dispatch is decided here.
   defp ensure_node_capacity(%Issue{} = task, opts) do
     workspace = load_workspace(task)
+    request = node_request(task, workspace, opts)
 
-    if Placement.mode(workspace) == :local_only and not LocalCapacity.cap().enforced? do
-      {:ok, opts}
-    else
-      request = node_request(task, workspace, opts)
-
-      case LocalCapacity.gate(request, node_gate_opts(opts)) do
-        {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
-        {:ok, :local} -> {:ok, opts}
-        {:error, _} = held -> held
-      end
+    case LocalCapacity.gate(request, node_gate_opts(opts)) do
+      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
+      {:ok, :local} -> {:ok, opts}
+      {:error, _} = held -> held
     end
   rescue
     e ->

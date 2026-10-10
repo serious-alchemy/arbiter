@@ -12,11 +12,15 @@ defmodule Arbiter.Board.SnapshotAccountCeilingTest do
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Workspace
 
+  # The machine capacity the account ceilings below are measured against.
+  setup do
+    put_local_cap(6)
+  end
+
   defp workspace! do
     Ash.create!(Workspace, %{
       name: "board-ceiling-#{System.unique_integer([:positive])}",
-      prefix: "bc#{System.unique_integer([:positive])}",
-      config: %{"conductor" => %{"max_concurrent" => 6}}
+      prefix: "bc#{System.unique_integer([:positive])}"
     })
   end
 
@@ -120,8 +124,8 @@ defmodule Arbiter.Board.SnapshotAccountCeilingTest do
       assert Snapshot.effective_max_concurrent(ws.id) == 0
     end
 
-    test "a nil workspace is still the system max" do
-      assert Snapshot.effective_max_concurrent(nil) == Snapshot.system_max_concurrent()
+    test "a nil workspace is the machine capacity" do
+      assert Snapshot.effective_max_concurrent(nil) == Arbiter.Nodes.Capacity.effective()
     end
   end
 

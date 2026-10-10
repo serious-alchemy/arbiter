@@ -43,26 +43,6 @@ defmodule Arbiter.Settings do
   def topic, do: @topic
 
   @doc """
-  The install-wide worker concurrency ceiling override, or `nil` if unset
-  (caller should fall back to app env / hardcoded default). Never raises —
-  any read failure is treated as "unset".
-  """
-  @spec conductor_system_max_concurrent() :: pos_integer() | nil
-  def conductor_system_max_concurrent, do: read_setting(:conductor_system_max_concurrent)
-
-  @doc """
-  Set the install-wide worker concurrency ceiling. `nil` clears the
-  override (falls back to app env / hardcoded default). Returns the updated
-  value (or `nil` when cleared).
-  """
-  @spec set_conductor_system_max_concurrent(pos_integer() | nil) ::
-          {:ok, pos_integer() | nil} | {:error, term()}
-  def set_conductor_system_max_concurrent(n) when is_nil(n) or (is_integer(n) and n > 0),
-    do: write_setting(:conductor_system_max_concurrent, n)
-
-  def set_conductor_system_max_concurrent(_), do: {:error, :invalid_value}
-
-  @doc """
   The adapter names `Arbiter.Agents.CredentialWatchdog` should probe, or `nil`
   if unset (the Watchdog then probes every adapter in
   `Arbiter.Agents.adapters/0`). An empty list is a real value meaning "probe
@@ -695,6 +675,19 @@ defmodule Arbiter.Settings do
     do: write_setting(:nodes_local_max_workers, n)
 
   def set_nodes_local_max_workers(_), do: {:error, :invalid_value}
+
+  @doc """
+  The advisory the DC1 migration left when it removed a stored
+  `conductor_system_max_concurrent` (docs/design/provider-dynamic-concurrency.md
+  §10.6), or `nil`. `arb server doctor` shows it until the operator sets the
+  local cap (`Arbiter.Nodes.set_local_max_workers/2` clears it).
+  """
+  @spec local_cap_advisory() :: String.t() | nil
+  def local_cap_advisory, do: read_setting(:local_cap_advisory)
+
+  @doc "Clear the migration's advisory once the operator has dealt with it."
+  @spec clear_local_cap_advisory() :: {:ok, nil} | {:error, term()}
+  def clear_local_cap_advisory, do: write_setting(:local_cap_advisory, nil)
 
   # ---- nodes.registry (K8) -------------------------------------------------
 

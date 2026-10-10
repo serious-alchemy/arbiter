@@ -20,7 +20,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
     * `ArbiterWeb.WorkspaceDetail.PolicyConfigComponent` — the high-level
       enums (tracker type, merger strategy, routing policy, review gate,
-      quota, conductor, patrols).
+      quota, patrols).
     * `ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent` — the provider
       accounts each role (implementer, reviewer) may use, their preference
       order and this workspace's concurrency share of each, plus the

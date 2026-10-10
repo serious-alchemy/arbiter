@@ -39,7 +39,7 @@ defmodule Arbiter.Board.FastLaneTest do
     put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
     put_app_env(:arbiter, :repo_paths, %{"fl/repo" => repo})
     # max_concurrent = 1.
-    put_app_env(:arbiter, :conductor_system_max_concurrent, 1)
+    put_local_cap(1)
     on_exit(fn -> File.rm_rf!(tmp) end)
 
     {:ok, ws} =

@@ -60,7 +60,7 @@ defmodule Arbiter.Workflows.DispatchQueueHeldFixRoundTest do
 
     ResumeSlotFixture.setup_repo!()
     # Nothing else holds a slot: the parked ticket's resume is never deferred.
-    Application.put_env(:arbiter, :conductor_system_max_concurrent, 5)
+    {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(5)
 
     {:ok, task} = Ash.create(Issue, %{title: "rejected by the gate", workspace_id: ws.id})
     # Dispatched, then rejected by the ReviewGate: its worker lingers
@@ -194,7 +194,7 @@ defmodule Arbiter.Workflows.DispatchQueueHeldFixRoundTest do
       assert {:error, {:quota_held, _}} = fix_round(task)
 
       # Another ticket now fills the only slot.
-      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
+      {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(1)
       {:ok, other} = Ash.create(Issue, %{title: "took the slot", workspace_id: ws.id})
       {:ok, %Issue{state: :active}} = Issue.start_work(other)
 
@@ -205,7 +205,7 @@ defmodule Arbiter.Workflows.DispatchQueueHeldFixRoundTest do
       assert id == task.id
 
       # The slot frees: the next drain releases it.
-      Application.put_env(:arbiter, :conductor_system_max_concurrent, 5)
+      {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(5)
       drain_and_settle(pid)
       assert_received {:drained, ^id, _opts}
     end
