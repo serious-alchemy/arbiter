@@ -159,6 +159,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-28c6qo: the per-repo pre-push check (`sh -c <command>` under `timeout`)
     # via `ReleaseEnv.cmd/3`, with the sanitised `SpawnEnv` env.
     "apps/arbiter/lib/arbiter/worker/prepush_check.ex" => :scrubbed,
+    # bd-57nhsi: the run_tests tool's host exec (`sh -c` under `timeout`), same shape.
+    "apps/arbiter/lib/arbiter/worker/test_run.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/gitlab.ex" => :pure_tool,
