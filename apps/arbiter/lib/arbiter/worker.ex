@@ -1009,6 +1009,14 @@ defmodule Arbiter.Worker do
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
+  End a live run `:interrupted` with a typed `Arbiter.Worker.StopReason`, consuming no resume
+  attempt and asking for no automatic resume (K12, A3: a node's `refuse{...}` — the run never
+  started, so there is nothing to resume; `Arbiter.Nodes.Refusal` holds the ticket).
+  """
+  @spec interrupt(ref(), Arbiter.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def interrupt(ref, %Arbiter.Worker.StopReason{} = reason), do: call(ref, {:interrupt, reason})
+
+  @doc """
   Park a live run on a guardrail spend cap (G19, design §3.3).
 
   `reason` is a `StopReason.spend_cap/1`. The agent is stopped, the run finishes
@@ -2613,6 +2621,29 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call(
+        {:interrupt, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state =
+      %State{state | state: :finished, outcome: :interrupted, waiting_on: nil, meta: meta}
+
+    record_run_finished(new_state)
+    broadcast_lifecycle(:updated, new_state)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:interrupt, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :interrupted}}, state}
+  end
+
+  def handle_call(
         {:park_spend_cap, reason},
         _from,
         %State{state: run_state, waiting_on: waiting_on} = state
@@ -3263,6 +3294,11 @@ defmodule Arbiter.Worker do
       node_lost?(session) ->
         interrupt_node_lost(state, port, session)
 
+      # K12 (A5): the pod was evicted, preempted or deleted from outside. The node_lost
+      # policy: interrupted, no resume attempt consumed, re-dispatched through Placement.
+      pod_disrupted?(session) ->
+        interrupt_pod_disrupted(state, port, session)
+
       run_signalled_done?(state) ->
         on_claude_done(state)
 
@@ -3294,6 +3330,8 @@ defmodule Arbiter.Worker do
 
   defp node_lost?(session), do: match?(%{remote_outcome: %{node_lost?: true}}, session)
 
+  defp pod_disrupted?(session), do: match?(%{remote_outcome: %{pod_disrupted?: true}}, session)
+
   # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
   # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
   # `meta[:resume_attempts]` is not touched: the cap bounds *in-place* resumes of an
@@ -3302,16 +3340,36 @@ defmodule Arbiter.Worker do
   # it; the run row, not this process, is what the Driver's reap reads.
   defp interrupt_node_lost(%State{} = state, handle, _session) do
     name = node_name(handle)
-    reason = Arbiter.Worker.StopReason.node_lost(name)
 
+    interrupt_for_node(
+      state,
+      Arbiter.Worker.StopReason.node_lost(name),
+      "node lost: #{name}",
+      "node #{name} lost"
+    )
+  end
+
+  # A5: same policy as a lost node, its own typed cause.
+  defp interrupt_pod_disrupted(%State{} = state, handle, _session) do
+    name = node_name(handle)
+
+    interrupt_for_node(
+      state,
+      Arbiter.Worker.StopReason.pod_disrupted(name),
+      "pod disrupted: #{name}",
+      "pod disrupted on node #{name}"
+    )
+  end
+
+  defp interrupt_for_node(%State{} = state, reason, failure_reason, log_cause) do
     Logger.warning(
-      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — node #{name} lost; " <>
+      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — #{log_cause}; " <>
         "no resume attempt consumed"
     )
 
     meta =
       state.meta
-      |> Map.put(:failure_reason, "node lost: #{name}")
+      |> Map.put(:failure_reason, failure_reason)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
     new_state =

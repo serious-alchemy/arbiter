@@ -809,47 +809,52 @@ defmodule Arbiter.Worker.DriverTest do
 
     # RW12 (§10.3): a run cut off by a lost node is interrupted, not failed; its home
     # clone is what the resume re-enters, so the Driver's reap must leave it.
-    test "keeps the home clone of a run interrupted by a lost node", %{ws: ws, repo: repo} do
-      {:ok, clone} =
-        Arbiter.Worker.Worktree.create(repo, "feature/dt-lost", "main", layout: :private_clone)
+    # K12 (A5): a disrupted pod is the same.
+    for category <- ["node_lost", "pod_disrupted"] do
+      test "keeps the home clone of a run interrupted as #{category}", %{ws: ws, repo: repo} do
+        {:ok, clone} =
+          Arbiter.Worker.Worktree.create(repo, "feature/dt-#{unquote(category)}", "main",
+            layout: :private_clone
+          )
 
-      {:ok, task} = Ash.create(Issue, %{title: "cw-lost", workspace_id: ws.id})
-      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
-      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
-      {:ok, machine_pid} = Machine.start(machine_id)
-      put_state!(task, :active)
+        {:ok, task} = Ash.create(Issue, %{title: "cw-lost", workspace_id: ws.id})
+        {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+        {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+        {:ok, machine_pid} = Machine.start(machine_id)
+        put_state!(task, :active)
 
-      run = Ash.get!(Arbiter.Workers.Run, Worker.state(worker_pid).run_id)
+        run = Ash.get!(Arbiter.Workers.Run, Worker.state(worker_pid).run_id)
 
-      Ash.update!(
-        run,
-        %{
-          state: :finished,
-          outcome: :interrupted,
-          stop_category: "node_lost",
-          failure_reason: "node lost: n1"
-        },
-        action: :update
-      )
-
-      {:ok, driver_pid} =
-        Driver.start(
-          task_id: task.id,
-          worker_pid: worker_pid,
-          machine_id: machine_id,
-          machine_pid: machine_pid,
-          interval_ms: 5_000,
-          claude_driven: true,
-          worktree_path: clone,
-          cleanup_worktree: true
+        Ash.update!(
+          run,
+          %{
+            state: :finished,
+            outcome: :interrupted,
+            stop_category: unquote(category),
+            failure_reason: "interrupted: n1"
+          },
+          action: :update
         )
 
-      ref = Process.monitor(driver_pid)
-      Process.unlink(worker_pid)
-      Process.exit(worker_pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+        {:ok, driver_pid} =
+          Driver.start(
+            task_id: task.id,
+            worker_pid: worker_pid,
+            machine_id: machine_id,
+            machine_pid: machine_pid,
+            interval_ms: 5_000,
+            claude_driven: true,
+            worktree_path: clone,
+            cleanup_worktree: true
+          )
 
-      assert File.dir?(clone)
+        ref = Process.monitor(driver_pid)
+        Process.unlink(worker_pid)
+        Process.exit(worker_pid, :kill)
+        assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+        assert File.dir?(clone)
+      end
     end
 
     test "removes the worktree on successful completion when opted in", %{

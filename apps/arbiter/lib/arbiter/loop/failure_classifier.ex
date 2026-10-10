@@ -154,6 +154,9 @@ defmodule Arbiter.Loop.FailureClassifier do
     spend_cap: {:operational, :spend_cap},
     # RW12: the node a run was placed on was lost. Infrastructure, never the agent.
     node_lost: {:operational, :node_lost},
+    # K12: a cluster took the pod away (A5), or a node refused the placement (A3).
+    pod_disrupted: {:operational, :pod_disrupted},
+    placement_refused: {:operational, :placement_refused},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
     # bd-b6noq9: the run's workspace was deleted while it was alive. Always

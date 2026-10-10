@@ -1084,6 +1084,44 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "pod_disrupted/1 (K12, A5)" do
+    test "is its own category, names the node, and is interrupted-not-failed material" do
+      reason = StopReason.pod_disrupted("kube-1")
+
+      assert reason.category == :pod_disrupted
+      assert reason.summary =~ "kube-1"
+      assert reason.summary =~ "evicted"
+      assert reason.remediation =~ "resum"
+      assert reason.exit_status == nil
+      assert reason.signal == nil
+      assert StopReason.label(reason) =~ "pod disrupted"
+      assert StopReason.to_map(reason).category == :pod_disrupted
+    end
+
+    test "is infrastructure for the loop's failure classifier, like node_lost" do
+      assert {:operational, :pod_disrupted} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:pod_disrupted]
+    end
+  end
+
+  describe "placement_refused/3 (K12, A3)" do
+    test "is its own category naming the node and why it refused" do
+      reason = StopReason.placement_refused("kube-1", "unschedulable", "0/3 nodes available")
+
+      assert reason.category == :placement_refused
+      assert reason.summary =~ "kube-1"
+      assert reason.summary =~ "unschedulable"
+      assert reason.summary =~ "0/3 nodes available"
+      assert reason.exit_status == nil
+      assert StopReason.label(reason) =~ "refused"
+    end
+
+    test "is infrastructure for the loop's failure classifier" do
+      assert {:operational, :placement_refused} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:placement_refused]
+    end
+  end
+
   describe "classify/3 — grok (bd-cwq8b0)" do
     @free_usage "subscription:free-usage-exhausted: You've used all the included free usage " <>
                   "for model grok-4.7 for now. Usage resets over a rolling 24-hour window " <>
