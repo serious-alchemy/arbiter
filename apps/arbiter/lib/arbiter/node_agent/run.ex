@@ -684,20 +684,52 @@ defmodule Arbiter.NodeAgent.Run do
   # of the run's cwd, so `claude --resume` finds it). A config dir that already holds
   # it (a re-open of this run on this node) keeps its own, newer copy. A run whose
   # session cannot be had is refused rather than started to fail.
+  #
+  # The config dir outlives a container of the run and that container could write
+  # it, so nothing on the way to the file may be a link: the agent never writes
+  # through one.
   defp seed_session(spec, config, dirs, opts) do
     with %{session: %{path: path} = session} <-
            Enum.find(spec.mounts, &(&1.kind == "config_dir")),
-         %{host: host} <- dirs["config_dir"],
-         dest = Path.join(host, path),
-         false <- File.exists?(dest) do
-      fetch = Keyword.get(opts, :session_fun, &Transcripts.fetch_session/4)
-
-      case fetch.(config, spec.run, session, dest) do
-        :ok -> :ok
+         %{host: host} <- dirs["config_dir"] do
+      case session_target(host, path) do
+        :present -> :ok
+        :absent -> fetch_session(spec, config, session, Path.join(host, path), opts)
         {:error, reason} -> {:error, {:unschedulable, {:session_seed_failed, reason}}}
       end
     else
       _ -> :ok
+    end
+  end
+
+  defp session_target(host, path) do
+    parents = path |> Path.dirname() |> Path.split() |> Enum.scan(&Path.join(&2, &1))
+
+    if Enum.all?(parents, &real_dir_or_absent?(Path.join(host, &1))) do
+      case File.lstat(Path.join(host, path)) do
+        {:ok, %File.Stat{type: :regular}} -> :present
+        {:error, :enoent} -> :absent
+        _ -> {:error, :not_a_regular_file}
+      end
+    else
+      {:error, :link_in_path}
+    end
+  end
+
+  defp real_dir_or_absent?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} -> true
+      {:error, :enoent} -> true
+      _ -> false
+    end
+  end
+
+  defp fetch_session(spec, config, session, dest, opts) do
+    fetch = Keyword.get(opts, :session_fun, &Transcripts.fetch_session/4)
+
+    case fetch.(config, spec.run, session, dest) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:unschedulable, {:session_seed_failed, reason}}}
     end
   end
 

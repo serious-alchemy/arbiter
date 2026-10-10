@@ -90,7 +90,9 @@ defmodule Arbiter.NodeAgent.Transcripts do
   def fetch_session(%Config{} = config, run, %{bytes: bytes, sha256: sha}, dest) do
     part = dest <> ".part"
     File.mkdir_p!(Path.dirname(dest))
-    io = File.open!(part, [:write, :binary])
+    # whatever is at the part path (a leftover, a link) goes; it is never written through
+    _ = File.rm(part)
+    io = File.open!(part, [:write, :binary, :exclusive])
 
     sink = fn {:data, data}, {req, resp} ->
       if resp.status == 200 do

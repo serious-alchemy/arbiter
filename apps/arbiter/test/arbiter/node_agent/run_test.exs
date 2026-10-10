@@ -248,6 +248,25 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert File.read!(dest) == "the node's own, newer\n"
     end
 
+    # The run's config dir outlives its containers and a container can write it.
+    test "a link on the way to the session's path refuses the run; nothing is written through it",
+         %{opts: opts, home: home, root: root, stub: stub} do
+      elsewhere = Path.join(root, "elsewhere")
+      File.mkdir_p!(elsewhere)
+      config = Path.join([home, "runs", "rsl", "config", "projects"])
+      File.mkdir_p!(config)
+      File.ln_s!(elsewhere, Path.join(config, "-work-tree"))
+      opts = Keyword.put(opts, :session_fun, fetcher(self(), :ok))
+
+      assert {:ok, "rsl"} = Runs.assign(session_spec("rsl"), opts)
+      refused = wait_event("rsl", "run.refused")
+
+      assert refused["detail"] =~ "link_in_path"
+      refute_received {:fetched, _, _, _, _}
+      assert File.ls!(elsewhere) == []
+      refute File.exists?(Path.join(stub, "run.argv"))
+    end
+
     test "a fetch that fails refuses the run: nothing starts", %{opts: opts, stub: stub} do
       opts = Keyword.put(opts, :session_fun, fetcher(self(), {:error, {:http, 404}}))
 
