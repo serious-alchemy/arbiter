@@ -1656,6 +1656,7 @@ defmodule Arbiter.Worker do
       |> maybe_put(:result_subtype, Map.get(meta, :result_subtype))
       |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
       |> maybe_put(:result_message, Map.get(meta, :result_message))
+      |> maybe_put(:harness_version, Map.get(meta, :harness_version))
 
     # bd-apwfmy: keep StopReason's typed category, not just the prose summary
     # it renders into `failure_reason`. Same best-effort discipline — absent
@@ -3382,6 +3383,12 @@ defmodule Arbiter.Worker do
           |> maybe_put(:model, model)
           |> maybe_put(:provider, Map.get(session, :provider))
           |> maybe_put(:session_id, session_id)
+          # G18: the agent CLI's version — the one the stream reported, else
+          # the host binary's (`Arbiter.Agents.HarnessVersion`).
+          |> maybe_put(
+            :harness_version,
+            Map.get(usage, :harness_version) || Map.get(session, :harness_version)
+          )
           |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
           |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
           |> maybe_put(:result_message, Map.get(usage, :result_message))

@@ -171,6 +171,69 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.model == "claude-haiku-4-5"
   end
 
+  # G18: a harness version change resets a subject's promotion clock, so each run
+  # records the agent CLI's version — here, the one Claude's `init` event reports.
+  test "the harness version the session's init event reports lands on the Run row" do
+    task_id = "bd-runharness-#{System.unique_integer([:positive])}"
+    cwd = System.tmp_dir!()
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    init_event =
+      Jason.encode!(%{
+        "type" => "system",
+        "subtype" => "init",
+        "model" => "claude-opus-5",
+        "session_id" => "sess-harness-#{task_id}",
+        "claude_code_version" => "2.1.296"
+      })
+
+    events_path = Path.join(cwd, "harness-events-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(events_path, init_event <> "\n")
+    on_exit(fn -> File.rm(events_path) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["cat", events_path])
+
+    :ok =
+      wait_until(fn -> match?([%{session_id: "sess-harness-" <> _}], runs_for(task_id)) end, 3_000)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.harness_version == "2.1.296"
+  end
+
+  @tag :tmp_dir
+  test "a host-local spawn whose stream reports no version records the host binary's", %{
+    tmp_dir: dir
+  } do
+    task_id = "bd-runhostver-#{System.unique_integer([:positive])}"
+    fake = Path.join(dir, "agy")
+    File.write!(fake, "#!/bin/sh\necho 'agy version 1.2.16'\n")
+    File.chmod!(fake, 0o755)
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: dir,
+        provider: "gemini",
+        command: ["true"],
+        harness_probe: [executable: fake, probe: true]
+      )
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.harness_version == "1.2.16"
+  end
+
   test "difficulty_at_dispatch is captured from meta at Run creation (bd-dzz6ly)" do
     task_id = "bd-rundiff-#{System.unique_integer([:positive])}"
 
