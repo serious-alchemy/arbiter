@@ -133,6 +133,12 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
                view(ticket(:active), %{runs: runs}).attention
     end
 
+    test "an active ticket whose run finished stopped has no attention" do
+      runs = [run(%{state: :finished, outcome: :stopped})]
+
+      assert view(ticket(:active), %{runs: runs}).attention == nil
+    end
+
     test "a failed run with a follow-up round under way needs no one's attention" do
       runs = [
         run(%{state: :finished, outcome: :failed}),
