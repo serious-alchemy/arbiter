@@ -653,7 +653,7 @@ These surfaces go:
 | Surface | Where |
 |---|---|
 | Setting | `Arbiter.Settings.conductor_system_max_concurrent/0` (`settings.ex:50-63`); `Settings.Installation` attribute (`apps/arbiter/lib/arbiter/settings/installation.ex:13-15`, `:68`, `:115`); `Settings.Registry` key (`apps/arbiter/lib/arbiter/settings/registry.ex:23`, `:280-281`, `:324`, `:351`); the `installation_settings` column (migration `20260703160000_create_installation_settings.exs`); app env `:conductor_system_max_concurrent` |
-| Board | `Snapshot.default_system_max_concurrent/0`, `system_max_concurrent/0`, `concurrency_ceiling/0` (`snapshot.ex:632-663`), `@default_system_max 16` (`:105`), the `:ceiling` and `:workspace` terms in `capacity_terms/3` (`:793-848`) and `@binding_order` (`:858`), and the `|| system_max_concurrent()` fallbacks (`:470`, `:732`, `:745`) |
+| Board | `Snapshot.default_system_max_concurrent/0`, `system_max_concurrent/0`, `concurrency_ceiling/0` (`snapshot.ex:632-663`), `@default_system_max 16` (`:105`), the `:ceiling` and `:workspace` terms in `capacity_terms/3` (`:793-848`) and `@binding_order` (`:858`), and the `system_max_concurrent()` fallbacks (`:470`, `:732`, `:745`) |
 | Nodes | `Nodes.Capacity` ceiling (`capacity.ex:17-19`, `:87`, `:97`); `Nodes.Overview` ceiling, the `ceiling_below_total` warning and the local suggestion (`apps/arbiter/lib/arbiter/nodes/overview.ex:18-29`, `:206`) |
 | Workspace | `Workspace.max_concurrent/1` (`workspace.ex:709-735`); `ValidateConfig.validate_conductor/2` (`apps/arbiter/lib/arbiter/tasks/workspace/changes/validate_config.ex:72-73`, `:160`, `:1256-1288`) |
 | Explainer | `CapacityExplainer`'s `:ceiling` and `:workspace` limit keys and change hints (`apps/arbiter/lib/arbiter/board/capacity_explainer.ex:116-120`, `:236-241`) |
@@ -1038,7 +1038,7 @@ and the exempt budget.
 | E3 | `Concurrency.limit/2` (`concurrency.ex:236-239`), `occupants/0` (`:315-329`) | `min(max_concurrent, share)`; per-process count | `min(budget, max_concurrent, share)` per pool in `enforce`; seats (§3.2) | DC4, DC8 |
 | E4 | `Admission.decide/4` (`admission.ex:183`) | Account headroom | The pool's seat headroom; the planned pool | DC8 |
 | E5 | `put_dispatch/3` (`worker.ex:1206-1210`) | Workspace and provider | Plus `account_id`, `pool`, `node_id` | DC1, DC4 |
-| E6 | `Scheduler.plan/1`, `step/3`, `decide/3` (`scheduler.ex:164-198`, `:245-315`) | Head-of-line | The walk (§4) | DC6 |
+| E6 | `Scheduler.plan/1`, `step/3`, `decide/3` (`apps/arbiter/lib/arbiter/board/scheduler.ex:164-198`, `:245-315`) | Head-of-line | The walk (§4) | DC6 |
 | E7 | `Snapshot.capacity_terms/3` (`snapshot.ex:793-848`), `capacity_and_slots/4` (`:461-473`), `quota_hold/2` (`:979`), `ticket_quota_holds/3` (`:1034`) | One `slots_total`; binary holds | Capacity sets per pool, machine and repo; the binary holds retired in `enforce` | DC1, DC6, DC12 |
 | E8 | `Autopilot` (`autopilot.ex:278-285`, `:1105-1113`) | The 15 s hold is how cards get skipped | The race fallback only; subscribe to `budget_changed` | DC6 |
 | E9 | `Dispatch.dispatch/2` (`dispatch.ex:227-250`), `maybe_quota_gate` (`:2102`) | Gate, then account, then node | `opts[:planned]`; pace rules off for fresh admissions in `enforce`; `ensure_repo_capacity/2` after `:243` | DC8, DC9 |
@@ -1048,7 +1048,7 @@ and the exempt budget.
 | E13 | `LocalCapacity.cap/0` (`local_capacity.ex:102-110`) | `system_max_concurrent/0`, not enforced | The hardware suggestion, enforced | DC1 |
 | E14 | `Nodes.Capacity.breakdown/1` (`capacity.ex:84`), `Nodes.Overview` | A ceiling | No ceiling | DC1 |
 | E15 | `CapacityExplainer` (`capacity_explainer.ex:116-120`, `:236-253`) | Six limit keys | Pools, machines, repos, fair share | DC1, DC5 |
-| E16 | `Drain.to_json/1` (`drain.ex:275-289`), `cmd/scheduler.ex` (`:95-110`, `:200-207`) | Slots used | Budgets, machines, repos, admission mode | DC5 |
+| E16 | `Drain.to_json/1` (`drain.ex:275-289`), `apps/arbiter_cli/lib/arbiter_cli/cmd/scheduler.ex` (`:95-110`, `:200-207`) | Slots used | Budgets, machines, repos, admission mode | DC5 |
 | E17 | `board_live.ex` `#board-slots` (`:1030`), `slot_cap/1` (`:1672`), `hold_badge/1` (`:1622`) | One slot line | The capacity strip and per-chip popups | DC5 |
 | E18 | `validate_worker_repos/2` (`validate_config.ex:198-215`) | `seed_paths`, `prepush_check` | `max_concurrent` | DC9 |
 | E19 | `Accounts.Fields`; `WorkspaceProviderAccount` | `max_concurrent`, `share` | `budget_split`; `weight` | DC10 |
