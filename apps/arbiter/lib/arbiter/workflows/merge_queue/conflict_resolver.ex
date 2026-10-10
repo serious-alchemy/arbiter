@@ -60,6 +60,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Mergers
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -70,6 +71,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
@@ -96,7 +98,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
           # bd-741sid: a replay the scheduler already admitted into a slot, and
           # the test seam standing in for the fast lane (`PassAdmission`).
           optional(:slot_admitted) => boolean() | nil,
-          optional(:defer_resume) => (String.t(), atom(), keyword() -> term())
+          optional(:defer_resume) => (String.t(), atom(), keyword() -> term()),
+          # bd-bg87oz: the seam over `Nodes.Placement.place/2` (`:nodes`, `:remote_available?`).
+          optional(:placement_opts) => keyword()
         }
 
   @type resolve_result ::
@@ -204,7 +208,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
+  # bd-bg87oz: the slot a node placement reserved is the dispatch's until the pass's
+  # worker is registered, where it is counted in the slot's place.
   defp start_pass(task, context, args) do
+    do_start_pass(task, context, args)
+  after
+    PassPlacement.release(task.id)
+  end
+
+  defp do_start_pass(task, context, args) do
     # bd-5ef587: the pause is checked before any worktree is created.
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
@@ -216,12 +228,17 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
              task,
              context.workspace || maybe_load_workspace(task.workspace_id)
            ),
+         {:ok, node} <- place_pass(task, context, provider, args),
          :ok <- host_fetch(context, host_git?(context, provider)),
-         {:ok, worktree_path} <- create_worktree(context),
+         {:ok, worktree_path} <- create_worktree(context, node),
+         {:ok, node, seed} <- seed_node(node, worktree_path, context),
          {:ok, worker_pid} <-
-           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
+           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}, %{
+             node: node,
+             seed: seed
+           }),
          :ok <- settle_stale_operation(worktree_path),
-         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do
+         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider, node) do
       # bd-741sid: a pass the Watchdog queued for a slot is an attempt now.
       Arbiter.Worker.Watchdog.pass_started(task.id, :conflict, worker_pid)
 
@@ -232,6 +249,44 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          branch: context.branch
        }}
     end
+  end
+
+  # bd-bg87oz: where the pass runs. A node (`worker.placement`) when the pass is a
+  # podman Claude run on a private clone and one has room; the primary otherwise,
+  # under the primary's own cap. A `remote_only` workspace with no node free holds the
+  # pass: `{:error, {:no_node_capacity, info}}`.
+  defp place_pass(task, context, provider, args) do
+    workspace = context.workspace || maybe_load_workspace(task.workspace_id)
+
+    attrs = %{
+      task_id: task.id,
+      kind: :conflict_pass,
+      provider: provider,
+      layout: GitLayout.for_workspace(workspace, context.repo),
+      workspace: workspace,
+      workspace_id: task.workspace_id,
+      clone_path: Worktree.worktree_path(context.branch)
+    }
+
+    case PassPlacement.place(attrs, placement_opts: Map.get(args, :placement_opts, [])) do
+      {:ok, :local} -> {:ok, nil}
+      {:ok, {:node, row}} -> {:ok, row}
+      {:error, _} = held -> held
+    end
+  end
+
+  # bd-bg87oz: the home clone is brought to the forge's branch head and target tip
+  # before a node is seeded from it (`PassPlacement.seed/3`).
+  defp seed_node(node, worktree_path, context) do
+    PassPlacement.seed_or_local(node, %{
+      task_id: context.task.id,
+      path: worktree_path,
+      branch: context.branch,
+      target: context.target_branch,
+      mode: Placement.mode(context.workspace),
+      repo_path: context.repo_path,
+      seed_paths: SeedPaths.resolve(context.workspace, context.repo)
+    })
   end
 
   @doc """
@@ -295,14 +350,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     Gate.check_and_notify(task, workspace, provider, :predicted)
   end
 
-  defp start_agent(worker_pid, worktree_path, context, args, provider) do
-    case maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
-      {:ok, _port} = started ->
-        started
-
-      {:error, reason} = failed ->
-        PassAdmission.agent_failed(worker_pid, reason)
-        failed
+  defp start_agent(worker_pid, worktree_path, context, args, provider, node) do
+    case maybe_start_claude(worker_pid, worktree_path, context, args, provider, node) do
+      {:ok, _port} = started -> started
+      {:error, reason} -> PassPlacement.start_failed(context.task.id, worker_pid, node, reason)
     end
   end
 
@@ -532,13 +583,17 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   #
   # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
   # container backend (`Arbiter.Worker.GitLayout`).
-  defp create_worktree(%{repo_path: repo_path, branch: branch} = context) do
+  defp create_worktree(%{repo_path: repo_path, branch: branch} = context, node) do
     layout = GitLayout.for_workspace(context.workspace, context.repo)
+
+    # The home clone of a run placed on a node is thin (no deps seeding): the node's
+    # shadow clone is what the container works in.
+    seed_paths = if node, do: false, else: SeedPaths.resolve(context.workspace, context.repo)
 
     case Worktree.attach(repo_path, branch,
            layout: layout,
            base: context.target_branch,
-           seed_paths: SeedPaths.resolve(context.workspace, context.repo)
+           seed_paths: seed_paths
          ) do
       {:ok, path} -> {:ok, path}
       {:error, reason} -> {:error, {:worktree_failed, reason}}
@@ -550,7 +605,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          context,
          worktree_path,
          provider,
-         {fallback_reason, decision}
+         {fallback_reason, decision},
+         %{node: node, seed: seed}
        ) do
     meta = %{
       role: :conflict_resolver,
@@ -562,13 +618,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       conflict_resolver_branch: context.branch,
       # bd-4olwyg: the PR head this pass must move — `ConflictPassOutcome.verdict/1`
       # fails a pass that ends with the branch still here on origin.
-      conflict_start_head: Worktree.remote_head(worktree_path, context.branch),
+      conflict_start_head: start_head(worktree_path, context.branch, seed),
       repo_path: context.repo_path,
       # bd-19skda: a containerized pass can't push; the Worker pushes for it.
       conflict_host_push: host_git?(context, provider)
     }
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
+    # bd-8ikgoc: the node placement chose, so the registry counts the run there.
+    meta = if node, do: Map.put(meta, :placed_node_id, node.id), else: meta
 
     # bd-741sid: an ordinary run on the ticket, registered under its id.
     opts = [
@@ -613,10 +671,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
+  # bd-bg87oz: the forge head a node was seeded from is the head the host push's lease
+  # is pinned to; a local pass reads it from the forge as before.
+  defp start_head(_worktree_path, _branch, %{remote_head: head}), do: head
+  defp start_head(worktree_path, branch, nil), do: Worktree.remote_head(worktree_path, branch)
+
   # `:start_claude` defaults to `true` for production. Tests pass
   # `start_claude: false` (and a `:claude_command` argv) so they can verify
   # the resolver was invoked without spawning a real Claude subprocess.
-  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider, node) do
     case Map.get(args, :start_claude, true) do
       false ->
         {:ok, nil}
@@ -650,7 +713,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
                  owner: worker_pid,
                  worktree_path: worktree_path,
                  git_credential: git_credential
-               ] ++ Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+               ] ++
+                 Keyword.take(mcp_opts, [:arb_token]) ++
+                 container_opts(context, provider) ++ node_opts(node))
               |> add_command_or_prompt(
                 Map.put(context, :host_git, host_git?(context, provider)),
                 args,
@@ -673,6 +738,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         end
     end
   end
+
+  # bd-bg87oz: `ClaudeSession` hands the run to `Executor.Node` when the opts name a `:node`.
+  defp node_opts(nil), do: []
+  defp node_opts(node), do: [node: node]
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
