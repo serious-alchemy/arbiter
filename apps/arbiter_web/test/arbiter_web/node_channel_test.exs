@@ -258,6 +258,39 @@ defmodule ArbiterWeb.NodeChannelTest do
     end
   end
 
+  describe "cluster node events (K12, A3, A7)" do
+    test "a capacity event reaches the session; hello carries kind and degraded", %{
+      node: node,
+      credential: credential
+    } do
+      {socket, ok} =
+        join_and_hello(
+          node,
+          credential,
+          hello(%{
+            "kind" => "cluster",
+            "degraded" => "netpol_unenforced",
+            "capacity" => %{"ceiling" => 4}
+          })
+        )
+
+      # a cluster is told the prepare budget; its hello_ok is otherwise a machine's
+      assert %{"limits" => %{"prepare_timeout_s" => 1500}} = ok
+
+      assert %{kind: "cluster", degraded: ["netpol_unenforced"], node_capacity: nil} =
+               Session.snapshot(node.id)
+
+      push(socket, "capacity", %{"ceiling" => 4, "pending" => 1, "constrained" => true})
+      assert_receive {:node_capacity, _id, %{"constrained" => true}}
+      assert %{node_capacity: %{"pending" => 1}} = Session.snapshot(node.id)
+    end
+
+    test "a machine hello_ok has no limits", %{node: node, credential: credential} do
+      {_socket, ok} = join_and_hello(node, credential)
+      refute Map.has_key?(ok, "limits")
+    end
+  end
+
   describe "missed heartbeats" do
     test "suspect at 30 s, fenced at 60 s, lost at 90 s: the channel closes and the runs are named",
          %{node: node, credential: credential, clock: clock} do
