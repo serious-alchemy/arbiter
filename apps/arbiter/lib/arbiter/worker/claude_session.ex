@@ -458,12 +458,26 @@ defmodule Arbiter.Worker.ClaudeSession do
       run_id = Keyword.get(ctx, :run_id) || owner_run_id(ctx[:owner]) || Ecto.UUID.generate()
       port_args = Map.update!(port_args, :env, &ContainerSpawn.apply_env(&1, request))
       remote = %{node: node, request: request, run_id: run_id, prepared: nil}
+      owner = Keyword.fetch!(ctx, :owner)
 
-      with {:ok, handle} <- place_remote(remote, port_args, Keyword.fetch!(ctx, :owner)) do
+      with {:ok, handle} <- place_remote(remote, first_open_args(owner, port_args), owner) do
         {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
       end
     end
   end
+
+  # bd-4ic681: the node runs what the session's first open runs: for a session resume
+  # the Worker splices `--resume <sid>` and its continue prompt in when the session
+  # opens, and by then the run is already placed. The args stashed for later opens
+  # stay pristine (`Worker` keeps them so). An owner that is this process (or gone)
+  # has nothing to splice.
+  defp first_open_args(owner, port_args) when is_pid(owner) and owner != self() do
+    Arbiter.Worker.first_spawn_args(owner, port_args)
+  catch
+    :exit, _ -> port_args
+  end
+
+  defp first_open_args(_owner, port_args), do: port_args
 
   # The node knows the run by the id of the Worker's `worker_runs` row, so a node's
   # retained run (quiesced across a primary restart) is found by `Nodes.Recovery`,
@@ -484,7 +498,7 @@ defmodule Arbiter.Worker.ClaudeSession do
          {:ok, prepared} <-
            Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
              owner: owner,
-             checkout: remote.request.checkout
+             checkout: ContainerSpawn.checkout_context(remote.request, spec)
            ),
          {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
       {:ok, handle}

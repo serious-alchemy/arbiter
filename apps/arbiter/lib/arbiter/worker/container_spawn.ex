@@ -145,6 +145,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
   alias Arbiter.Worker.Withholding
+  alias Arbiter.Worker.WorkerEnv
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -1270,14 +1271,26 @@ defmodule Arbiter.Worker.ContainerSpawn do
   and the `run_id` the node knows the run by. The secret half of the env
   (everything the local path would pass as `-e NAME`) goes in `"secrets"`, never
   in `"env"`.
+
+  An argv that resumes a Claude session (`--resume <sid>`, bd-4ic681) needs that
+  session's JSONL in the run's config dir on the node, at the slug of the run's
+  cwd (the primary's worktree path: path transparency). It is seeded, redacted,
+  into the run's config dir here (`SessionHistory.seed_redacted/4`), where the
+  node's own transcript uploads land, and the `config_dir` mount names it
+  (`"session"`: path, bytes, sha256) for the node to fetch over HTTPS
+  (`GET /nodes/runs/:run/session`, authorized by `checkout_context/2`).
   """
   @spec remote_spec(map(), map(), String.t()) :: {:ok, map()} | {:error, term()}
   def remote_spec(request, %{argv: [_ | _] = argv} = port_args, run_id) when is_binary(run_id) do
+    # The prompt files this argv names: a session resume's first open runs a terse
+    # inline continue prompt, and the file of the prompt it replaced may be gone by a
+    # later re-open.
     with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
-         {:ok, prompts} <- prompt_mounts(request.prompt_paths) do
+         {:ok, prompts} <- prompt_mounts(prompt_paths(argv)) do
       {secret, literal} = split_env(env_pairs(port_args, request))
       worktree_files = Map.get(request, :worktree_files, %{})
       worktree_secrets = Map.get(request, :worktree_secrets, %{})
+      session = remote_session(request, port_args)
 
       {:ok,
        %{
@@ -1295,11 +1308,14 @@ defmodule Arbiter.Worker.ContainerSpawn do
                worktree_files
              ),
              %{"kind" => "home", "path" => request.home},
-             %{
-               "kind" => "config_dir",
-               "path" => request.config_dir,
-               "files" => Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
-             },
+             put_session(
+               %{
+                 "kind" => "config_dir",
+                 "path" => request.config_dir,
+                 "files" => Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
+               },
+               session
+             ),
              %{"kind" => "tmp", "path" => request.tmp_dir}
            ] ++
              Enum.map(request.cli, fn {sha, name, dest} ->
@@ -1316,6 +1332,77 @@ defmodule Arbiter.Worker.ContainerSpawn do
        |> put_checkout(request.checkout)}
     end
   end
+
+  # bd-4ic681: the session a `--resume` argv continues, seeded for the node. Only a
+  # Claude run with a checkout context can fetch it; a session nobody holds is left
+  # to the CLI to report ("No conversation found"), as a local run's is.
+  defp remote_session(%{provider: "claude", checkout: %{}} = request, %{argv: argv} = port_args) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(argv),
+         {:ok, secrets} <- transcript_secrets(request, port_args),
+         {:ok, seeded} <-
+           SessionHistory.seed_redacted(request.config_dir, request.worktree, sid, secrets) do
+      seeded
+    else
+      nil ->
+        nil
+
+      {:error, reason} ->
+        Logger.warning(
+          "ContainerSpawn: cannot carry session #{SessionHistory.resume_session_id(argv)} " <>
+            "to the node: #{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  defp remote_session(_request, _port_args), do: nil
+
+  # What a transcript leaving the primary must not carry: the workspace's secrets and
+  # every provider account's credential (`WorkerEnv.secret_values/1`), the
+  # credentials this spawn carries, and the run's MCP token. A list that cannot be
+  # read means no seed, never an unredacted one.
+  @credential_env ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY ARB_TOKEN)
+
+  defp transcript_secrets(request, port_args) do
+    spawn_env =
+      for {name, value} <- Map.get(port_args, :env, []),
+          name in @credential_env,
+          is_binary(value),
+          do: value
+
+    own_env = for name <- @credential_env, value = System.get_env(name), do: value
+
+    {:ok,
+     WorkerEnv.secret_values(request.task_id) ++
+       spawn_env ++ own_env ++ Map.values(Map.get(request, :worktree_secrets, %{}))}
+  rescue
+    e -> {:error, {:secrets_unreadable, Exception.message(e)}}
+  end
+
+  defp put_session(mount, nil), do: mount
+
+  defp put_session(mount, %{path: path, bytes: bytes, sha256: sha}),
+    do: Map.put(mount, "session", %{"path" => path, "bytes" => bytes, "sha256" => sha})
+
+  @doc """
+  The checkout context the node's `GET`s and `PUT`s for this run are authorized
+  against (`Arbiter.Nodes.Session.checkout_context/2`): `request.checkout`, plus
+  the session transcript `spec` seeded for it (`:session`, a path relative to the
+  checkout's `config_dir`, or nil). `nil` for a run with no checkout.
+  """
+  @spec checkout_context(map(), map()) :: map() | nil
+  def checkout_context(%{checkout: %{} = checkout}, spec) do
+    session =
+      Enum.find_value(spec["mounts"] || [], fn
+        %{"kind" => "config_dir", "session" => %{"path" => path}} -> path
+        _ -> nil
+      end)
+
+    Map.put(checkout, :session, session)
+  end
+
+  def checkout_context(_request, _spec), do: nil
 
   defp put_worktree_files(mount, files) when map_size(files) == 0, do: mount
 

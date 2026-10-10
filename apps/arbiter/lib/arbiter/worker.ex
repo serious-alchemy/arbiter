@@ -959,6 +959,16 @@ defmodule Arbiter.Worker do
   @spec resume(ref()) :: :ok | {:error, term()}
   def resume(ref), do: call(ref, :resume)
 
+  @doc false
+  # bd-4ic681: the args the FIRST open of a session runs with — `port_args` with
+  # `--resume <sid>` and the terse continue prompt spliced in when this worker was
+  # started for a session resume, exactly as `{:__claude_session_open__, ...}`
+  # splices them. A run placed on a node is assigned before its session opens
+  # (`ClaudeSession.start/1`), so the spec must carry them already.
+  @spec first_spawn_args(pid(), map()) :: map()
+  def first_spawn_args(pid, port_args) when is_pid(pid),
+    do: GenServer.call(pid, {:first_spawn_args, port_args})
+
   @doc """
   Open a merge request for `branch`, hand it to the ticket, and end the run.
 
@@ -2706,6 +2716,11 @@ defmodule Arbiter.Worker do
     state = %State{state | meta: Map.put(state.meta, key, value)}
     backfill_report(state.run_id, state.task_id, key, value)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:first_spawn_args, port_args}, _from, %State{} = state) do
+    {spawn_args, _pristine} = resume_spawn_args(state, port_args)
+    {:reply, spawn_args, state}
   end
 
   # Open a Claude session port. Called by Arbiter.Worker.ClaudeSession.start/1
