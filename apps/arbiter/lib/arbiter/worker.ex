@@ -5044,13 +5044,25 @@ defmodule Arbiter.Worker do
   defp prepush_exec(meta) do
     case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
       {fun, _} when is_function(fun, 2) -> fun
+      {_, %{remote: %{}} = port_args} -> remote_exec(port_args)
       {_, %{sandbox: %{}} = port_args} -> sandbox_exec(port_args)
       _ -> nil
     end
   end
 
-  # A run placed on a remote node has no local checkout to run in.
-  defp sandbox_exec(%{remote: %{}}), do: nil
+  # bd-9rrrgk: a run placed on a node has its deps, image and mounts on that node
+  # (the primary's worktree is only the ingested checkout), so the steps go to the
+  # node's agent, which runs them in a container of the run's shape. Without a node
+  # or a run id there is nothing to ask: every step is an infra error, never a run
+  # on the host (which has no deps and failed every step on bd-c1dief).
+  defp remote_exec(%{remote: %{node: node, run_id: run_id}})
+       when not is_nil(node) and is_binary(run_id) do
+    fn command, seconds ->
+      Arbiter.Worker.Executor.Node.exec(node, run_id, command, seconds)
+    end
+  end
+
+  defp remote_exec(_port_args), do: fn _command, _seconds -> {:error, :remote_run_unknown} end
 
   defp sandbox_exec(port_args) do
     fn command, seconds ->
