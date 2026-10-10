@@ -19,7 +19,20 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
       the values exist only in the worker process's environment, as under podman
       (`Container.secrets_wrapper/1`). The command arrives as separate argv
       words after `$0`, never interpolated into the script text.
+
+  ## The image's scripts (K7)
+
+  `bin/0` is the two programs the base image carries under `/opt/arbiter/bin`
+  (`Arbiter.Worker.Image` bakes them into the base layer, so a change to either
+  rebuilds the base once): `seed`, the init container's second stage, and
+  `snapshotter`, the native sidecar. They live in `priv/k8s_pod/` as plain files so
+  `shellcheck` and the podman harness can run them as the pod does.
   """
+
+  @bin_dir Path.expand("../../../../priv/k8s_pod", __DIR__)
+  @bin_names ~w(seed snapshotter)
+  for name <- @bin_names, do: @external_resource(Path.join(@bin_dir, name))
+  @bin Map.new(@bin_names, &{&1, File.read!(Path.join(@bin_dir, &1))})
 
   @seed ~S"""
   set -eu
@@ -55,6 +68,37 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @doc "The worker's entry wrapper: source and delete the secrets file, then `exec \"$@\"`."
   @spec entry() :: String.t()
   def entry, do: @entry
+
+  @doc "The programs the base image carries under `/opt/arbiter/bin`: `%{\"seed\" => text, \"snapshotter\" => text}`."
+  @spec bin() :: %{String.t() => String.t()}
+  def bin, do: @bin
+
+  @doc """
+  The `RUN` instruction that installs `bin/0` as `/opt/arbiter/bin/<name>` (mode
+  0755, owned by root, so the uid-10001 worker cannot rewrite them).
+
+  The files travel inside the Containerfile text, base64 in 76-column pieces,
+  because a base build runs from an empty context (a repo cannot `COPY` anything
+  into the base) and the plan a node agent builds from carries only text. No
+  heredoc syntax, so it builds on any buildah.
+  """
+  @spec image_install() :: String.t()
+  def image_install do
+    steps =
+      for {name, text} <- Enum.sort(@bin) do
+        b64 =
+          text
+          |> Base.encode64()
+          |> String.graphemes()
+          |> Enum.chunk_every(76)
+          |> Enum.map_join(" \\\n", &Enum.join/1)
+
+        "printf '%s' '#{b64}' | base64 -d > /opt/arbiter/bin/#{name}" <>
+          " && chmod 0755 /opt/arbiter/bin/#{name}"
+      end
+
+    "RUN mkdir -p /opt/arbiter/bin \\\n && " <> Enum.join(steps, " \\\n && ")
+  end
 
   @doc "Where the secrets file lives (a memory `emptyDir`); the seed container writes it."
   @spec env_file() :: String.t()

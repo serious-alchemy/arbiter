@@ -1,0 +1,239 @@
+#!/bin/sh
+# /opt/arbiter/bin/seed: the `seed` init container's second stage
+# (docs/design/remote-workers.md §16 K§10.1). `PodScripts.seed/0` runs the
+# network-policy gate and then execs this.
+#
+# It redeems the single-use boot nonce, unpacks the pod's secrets, certificates
+# and seed files, pulls the primary's bundle through the controller and builds
+# the same private-clone layout `Arbiter.Worker.PrivateClone` builds on a host:
+# a private `.git` directory, a `commondir` guard file holding ".", an
+# `objects/info/alternates` file (empty here: the clone owns its objects), an
+# empty `hooks` directory and a `config` written from the fixed template below.
+# Nothing in the config, the hooks or the refs comes from the bundle but the
+# objects and the refs the checkout names.
+#
+# POSIX sh (the image's /bin/sh is dash). Runs as uid 10001 with a read-only
+# root file system; every path it writes is a volume.
+set -eu
+umask 077
+
+run_dir=${ARB_RUN_DIR:-/run/arb}
+ca_file=${ARB_CA_FILE:-/etc/arb/ca/ca.crt}
+root=${ARB_WORK_ROOT:?ARB_WORK_ROOT is required}
+seed_layer=${ARB_SEED_LAYER:-/opt/arbiter/seed}
+boot_timeout=${ARB_BOOT_TIMEOUT_S:-60}
+
+addr=${ARB_BRIDGE_ADDR:?ARB_BRIDGE_ADDR is required}
+case $addr in
+  *:*) addr="[$addr]" ;;
+esac
+channel="https://${addr}:${ARB_CHANNEL_PORT:-9444}"
+
+# No ambient git configuration: the layout below is the only config there is.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0
+
+die() {
+  echo "arbiter seed: $1" >&2
+  exit "${2:-1}"
+}
+
+# -- 1. redeem the boot nonce --------------------------------------------------
+# 200 is the tar; 409 means the controller has not bound this pod's IP yet (the
+# nonce is not spent, ask again); 403 is final (spent, expired or replayed).
+# The nonce goes over stdin, never onto an argv.
+mkdir -p "$run_dir"
+boot_tar=$run_dir/boot.tar
+tries=0
+while :; do
+  code=$(printf '%s' "${ARB_BOOT_NONCE:?ARB_BOOT_NONCE is required}" |
+    curl -sS --cacert "$ca_file" --max-time 30 --data-binary @- \
+      -o "$boot_tar" -w '%{http_code}' "$channel/boot") || code=000
+  case $code in
+    200) break ;;
+    403) rm -f "$boot_tar"; die "the controller refused the boot nonce (spent, expired or replayed)" 78 ;;
+  esac
+  tries=$((tries + 1))
+  if [ "$tries" -ge "$boot_timeout" ]; then
+    rm -f "$boot_tar"
+    die "the controller did not serve /boot (last status $code)" 75
+  fi
+  sleep 1
+done
+
+# -- 2. unpack ----------------------------------------------------------------
+stage=$run_dir/boot
+rm -rf "$stage"
+mkdir -p "$stage"
+tar -xf "$boot_tar" -C "$stage" --no-same-owner -p ||
+  die "the boot bundle is not a tar"
+rm -f "$boot_tar"
+# A boot bundle has regular files only. A link in it is somebody trying to
+# write outside the stage.
+if [ -n "$(find "$stage" ! -type f ! -type d -print -quit)" ]; then
+  die "the boot bundle holds something that is not a regular file"
+fi
+
+# The certificates stay where the entry wrapper's socat and the snapshotter look.
+rm -rf "$run_dir/tls"
+if [ -d "$stage/tls" ]; then
+  mv "$stage/tls" "$run_dir/tls"
+  chmod 700 "$run_dir/tls"
+  chmod 600 "$run_dir"/tls/*.key
+else
+  mkdir -p "$run_dir/tls"
+fi
+
+# The secrets file always exists, so the entry wrapper can fail closed on a
+# missing one. It deletes the file once it has sourced it.
+if [ -f "$stage/secrets.env" ]; then
+  mv "$stage/secrets.env" "$run_dir/env"
+else
+  : >"$run_dir/env"
+fi
+chmod 600 "$run_dir/env"
+
+# Prompt files are mounted from `run` by sub-path; a sub-path whose source is
+# missing is created as a directory, so every source is made here, first.
+if [ -d "$stage/prompt" ]; then
+  for f in "$stage"/prompt/*; do
+    [ -f "$f" ] || continue
+    mv "$f" "$run_dir/prompt-${f##*/}"
+  done
+fi
+
+# -- 3. the checkout settings (manifest.json carries no secret) ----------------
+manifest=$stage/manifest.json
+[ -f "$manifest" ] || die "the boot bundle has no manifest.json"
+checkout=$(sed -n 's/.*"checkout":{\([^}]*\)}.*/\1/p' "$manifest" | head -n 1)
+field() { printf '%s' "$checkout" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+
+branch=main
+base=
+if [ -n "$checkout" ]; then
+  branch=$(field branch)
+  base=$(field base)
+  [ -n "$branch" ] || die "the manifest names no checkout branch"
+fi
+case $branch in -*) die "refusing a branch that starts with a dash" ;; esac
+git check-ref-format --branch "$branch" >/dev/null || die "bad checkout branch"
+if [ -n "$base" ]; then
+  case $base in -*) die "refusing a base that starts with a dash" ;; esac
+  git check-ref-format --branch "$base" >/dev/null || die "bad checkout base"
+fi
+
+wt=$root/wt
+bundle=$root/seed.bundle
+mkdir -p "$wt" "$root/home" "$root/claude-config"
+
+# -- 4. the bundle ------------------------------------------------------------
+format=sha1
+if [ -n "$checkout" ]; then
+  code=$(curl -sS --cacert "$ca_file" \
+    --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
+    --max-time "${ARB_SEED_TIMEOUT_S:-1200}" -o "$bundle" -w '%{http_code}' \
+    "$channel/seed.bundle") || code=000
+  if [ "$code" != 200 ]; then
+    # A refusal (a veto, an unknown run) is a small JSON body.
+    detail=$(head -c 300 "$bundle" 2>/dev/null || true)
+    rm -f "$bundle"
+    die "the seed bundle was not served (status $code) $detail" 75
+  fi
+  if head -c 256 "$bundle" | grep -aq '^@object-format=sha256'; then
+    format=sha256
+  fi
+fi
+
+# -- 5. the layout -------------------------------------------------------------
+git init -q --template= --object-format="$format" -b "$branch" "$wt"
+dot_git=$wt/.git
+git_in() { git -C "$wt" "$@"; }
+
+mkdir -p "$dot_git/hooks" "$dot_git/info" "$dot_git/objects/info"
+: >"$dot_git/objects/info/alternates"
+printf '.arbiter/\n' >"$dot_git/info/exclude"
+# The identity a container commits as (a pod sees no global git config).
+git_in config user.name arbiter
+git_in config user.email arbiter@localhost
+git_in config arbiter.branch "$branch"
+[ -z "$base" ] || git_in config arbiter.base "$base"
+
+known=
+if [ -n "$checkout" ]; then
+  heads=$(git_in bundle list-heads "$bundle") || die "the seed bundle is not a bundle"
+  has_head() { printf '%s\n' "$heads" | grep -q " $1\$"; }
+  has_head "refs/heads/$branch" || die "the seed bundle does not carry refs/heads/$branch"
+
+  base_ref=
+  if [ -n "$base" ]; then
+    for candidate in "refs/remotes/origin/$base" "refs/heads/$base"; do
+      if has_head "$candidate"; then
+        base_ref=$candidate
+        break
+      fi
+    done
+  fi
+  ckpt_ref=$(printf '%s\n' "$heads" | sed -n 's/^[0-9a-f]* \(refs\/arbiter\/checkpoint\/.*\)$/\1/p' | head -n 1)
+
+  specs="+refs/heads/$branch:refs/heads/$branch"
+  [ -z "$base_ref" ] || specs="$specs +$base_ref:refs/arbiter/seed/base"
+  [ -z "$ckpt_ref" ] || specs="$specs +$ckpt_ref:refs/arbiter/seed/checkpoint"
+  # shellcheck disable=SC2086 # the refspecs are validated names, split on purpose
+  git_in -c fetch.fsckObjects=true fetch -q --no-tags --update-head-ok "$bundle" $specs ||
+    die "fetching the seed bundle failed"
+  rm -f "$bundle"
+
+  head_sha=$(git_in rev-parse --verify -q "refs/heads/$branch")
+  git_in reset -q --hard HEAD
+  known=$head_sha
+
+  if [ -n "$base_ref" ]; then
+    base_sha=$(git_in rev-parse --verify -q refs/arbiter/seed/base)
+    git_in update-ref "refs/remotes/origin/$base" "$base_sha"
+    # A bare `<base>` resolves in a clone as it does in a linked worktree.
+    [ "$base" = "$branch" ] || git_in update-ref "refs/heads/$base" "$base_sha"
+    git_in update-ref -d refs/arbiter/seed/base
+    known="$known $base_sha"
+  fi
+
+  if [ -n "$ckpt_ref" ]; then
+    ckpt_sha=$(git_in rev-parse --verify -q refs/arbiter/seed/checkpoint)
+    # Restore the work tree to the checkpoint, keep the branch where it was.
+    git_in read-tree -u --reset "$ckpt_sha"
+    git_in reset -q --mixed "$head_sha"
+    git_in update-ref -d refs/arbiter/seed/checkpoint
+    known="$known $ckpt_sha"
+  fi
+fi
+
+# The guards PrivateClone makes read-only (and PodSpec mounts read-only). They
+# are written last, once nothing else needs to change them.
+printf '.\n' >"$dot_git/commondir"
+
+# What the snapshotter needs: the settings and the shas the primary already has.
+{
+  printf 'branch=%s\n' "$branch"
+  printf 'base=%s\n' "$base"
+  for sha in $known; do printf 'known=%s\n' "$sha"; done
+} >"$run_dir/checkout"
+
+# -- 6. seed layer and seed files ------------------------------------------------
+# The image's warm deps/_build, then what /boot delivered. Neither may reach
+# into `.git`.
+if [ -d "$seed_layer" ]; then
+  cp -a --no-preserve=ownership "$seed_layer/." "$wt/"
+  chmod -R u+rwX "$wt" 2>/dev/null || true
+fi
+if [ -e "$stage/worktree/.git" ]; then
+  die "the boot bundle tries to write into .git"
+fi
+if [ -d "$stage/worktree" ]; then
+  cp -R "$stage/worktree/." "$wt/"
+fi
+if [ -d "$stage/config_dir" ]; then
+  cp -R "$stage/config_dir/." "$root/claude-config/"
+fi
+rm -rf "$stage"
+
+git_in fsck --connectivity-only --no-dangling || die "git fsck failed on the seeded tree"
+echo "arbiter seed: run ${ARB_RUN:-?} seeded (branch $branch)" >&2

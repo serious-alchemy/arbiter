@@ -1,0 +1,261 @@
+#!/bin/sh
+# /opt/arbiter/bin/snapshotter: the `snapshotter` native sidecar
+# (docs/design/remote-workers.md §16 K§10.3).
+#
+# It shares the worker's `work` volume and has exactly the worker's hardening
+# and guard mounts. Every ARB_SNAPSHOT_INTERVAL_S, on a `checkpoint` command
+# from the controller, and early when the work volume passes 80 % of its size
+# limit, it snapshots the tree and PUTs a bundle (and the transcripts) to the
+# controller. When the worker container has ended the kubelet sends SIGTERM:
+# that is the "main is done" signal, and the handler takes the final snapshot,
+# uploads it and exits (0 when the upload landed, 1 when it did not).
+#
+# The tree is untrusted and its `.git` is writable by the worker, so git is
+# never run *in* it (`core.fsmonitor`, filters and hooks planted there would
+# run as this uid). A fresh bare repo of ours borrows the tree's objects through
+# `alternates`, `git add -A` runs there with `--work-tree` pointing at the tree
+# and a temporary index, and the tree's refs are read as plain files. The same
+# recipe as `Arbiter.NodeAgent.Checkout.package/1`.
+#
+# POSIX sh (dash). Runs as uid 10001 with a read-only root file system.
+set -u
+umask 077
+
+run=${ARB_RUN:?ARB_RUN is required}
+wt=${ARB_WORKTREE:?ARB_WORKTREE is required}
+run_dir=${ARB_RUN_DIR:-/run/arb}
+ca_file=${ARB_CA_FILE:-/etc/arb/ca/ca.crt}
+interval=${ARB_SNAPSHOT_INTERVAL_S:-300}
+config_dir=${ARB_CONFIG_DIR:-}
+work_limit=${ARB_WORK_LIMIT_BYTES:-0}
+untracked_cap=${ARB_MAX_UNTRACKED_BYTES:-50000000}
+upload_timeout=${ARB_UPLOAD_TIMEOUT_S:-90}
+poll_s=${ARB_COMMAND_POLL_S:-10}
+
+addr=${ARB_BRIDGE_ADDR:?ARB_BRIDGE_ADDR is required}
+case $addr in
+  *:*) addr="[$addr]" ;;
+esac
+channel="https://${addr}:${ARB_CHANNEL_PORT:-9444}"
+
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0 GIT_ATTR_NOSYSTEM=1
+
+say() { echo "arbiter snapshotter: $*" >&2; }
+
+# The settings seed wrote: branch, base, the shas the primary already has.
+branch=
+base=
+known=
+checkout=$run_dir/checkout
+if [ -f "$checkout" ]; then
+  while IFS='=' read -r key value; do
+    case $key in
+      branch) branch=$value ;;
+      base) base=$value ;;
+      known) known="$known $value" ;;
+    esac
+  done <"$checkout"
+fi
+
+work=$(mktemp -d /tmp/arb-snapshotter.XXXXXX) || { say "no scratch space"; exit 1; }
+poll_pid=
+trap 'rm -rf "$work"' EXIT
+
+term=0
+trap 'term=1' TERM INT
+
+# -- the tree's refs, read as files ---------------------------------------------
+ref_sha() {
+  sha=
+  if [ -f "$wt/.git/$1" ]; then
+    sha=$(head -n 1 "$wt/.git/$1")
+  elif [ -f "$wt/.git/packed-refs" ]; then
+    sha=$(awk -v ref="$1" '$2 == ref { print $1; exit }' "$wt/.git/packed-refs")
+  fi
+  case $sha in
+    *[!0-9a-f]* | '') return 1 ;;
+  esac
+  [ "${#sha}" -eq 40 ] || [ "${#sha}" -eq 64 ] || return 1
+  printf '%s\n' "$sha"
+}
+
+# -- uploads ----------------------------------------------------------------------
+# PUT a file with a Content-Length (the controller refuses chunked bodies).
+put() {
+  [ -f "$1" ] || return 1
+  http=$(curl -sS --cacert "$ca_file" \
+    --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
+    --max-time "$upload_timeout" -X PUT -H "content-type: $3" -T "$1" \
+    -o "$work/put.out" -w '%{http_code}' "$channel/$2") || http=000
+  if [ "$http" = 200 ]; then
+    return 0
+  fi
+  say "PUT /$2 failed (status $http) $(head -c 200 "$work/put.out" 2>/dev/null)"
+  return 1
+}
+
+put_retry() {
+  n=0
+  while [ "$n" -lt 3 ]; do
+    put "$@" && return 0
+    n=$((n + 1))
+    [ "$term" = 1 ] && [ "$n" -ge 2 ] && break
+    sleep 1
+  done
+  return 1
+}
+
+# -- one snapshot ------------------------------------------------------------------
+last_tip=
+last_tree=
+stamp=$work/transcripts.stamp
+
+snap_git() {
+  git --git-dir="$snap" --work-tree="$wt" -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false -c core.autocrlf=false "$@"
+}
+
+# take_snapshot <force>: 0 when a bundle is on the primary (or nothing changed),
+# 1 when the attempt failed.
+take_snapshot() {
+  force=$1
+  [ -n "$branch" ] || return 0
+  tip=$(ref_sha "refs/heads/$branch") || { say "no readable refs/heads/$branch"; return 1; }
+  snap=$work/snap.git
+  rm -rf "$snap"
+  git init -q --bare --template= "$snap" || return 1
+  printf '%s\n' "$wt/.git/objects" >"$snap/objects/info/alternates"
+  git --git-dir="$snap" config core.excludesFile "$wt/.git/info/exclude"
+  export GIT_INDEX_FILE=$snap/snap-index
+
+  # Untracked payload over the cap is vetoed before anything is hashed.
+  snap_git read-tree "$tip" || return 1
+  bytes=$(cd "$wt" && snap_git ls-files -o -z --exclude-standard |
+    xargs -0 -r stat -c '%s' -- 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+  rm -f "$GIT_INDEX_FILE"
+  if [ "$bytes" -gt "$untracked_cap" ]; then
+    say "veto: $bytes bytes untracked, cap $untracked_cap"
+    return 1
+  fi
+
+  snap_git add -A || return 1
+  tree=$(snap_git write-tree) || return 1
+  if [ "$force" != 1 ] && [ "$tip" = "$last_tip" ] && [ "$tree" = "$last_tree" ]; then
+    return 0
+  fi
+  commit=$(GIT_AUTHOR_NAME=arbiter GIT_AUTHOR_EMAIL=arbiter@localhost \
+    GIT_COMMITTER_NAME=arbiter GIT_COMMITTER_EMAIL=arbiter@localhost \
+    snap_git commit-tree -p "$tip" -m 'arbiter snapshot' "$tree") || return 1
+  snap_git update-ref "refs/arbiter/snapshot/$run" "$commit" || return 1
+  snap_git update-ref "refs/heads/$branch" "$tip" || return 1
+  rm -f "$GIT_INDEX_FILE"
+
+  refs="refs/arbiter/snapshot/$run"
+  tip_known=0
+  prereq=
+  for sha in $known; do
+    if snap_git cat-file -e "$sha^{commit}" 2>/dev/null; then
+      prereq="$prereq ^$sha"
+      [ "$sha" != "$tip" ] || tip_known=1
+    fi
+  done
+  [ "$tip_known" = 1 ] || refs="refs/heads/$branch $refs"
+  # shellcheck disable=SC2086 # refs and prerequisites are shas and validated names
+  snap_git bundle create "$work/checkpoint.bundle" $refs $prereq >/dev/null 2>&1 || {
+    say "git bundle create failed"
+    return 1
+  }
+  if put_retry "$work/checkpoint.bundle" checkpoint application/x-git-bundle; then
+    last_tip=$tip
+    last_tree=$tree
+    rm -rf "$snap" "$work/checkpoint.bundle"
+    return 0
+  fi
+  rm -rf "$snap" "$work/checkpoint.bundle"
+  return 1
+}
+
+# The CLI's transcripts (`projects/**` under its config dir), when any changed.
+upload_transcripts() {
+  force=$1
+  [ -n "$config_dir" ] && [ -d "$config_dir/projects" ] || return 0
+  if [ "$force" != 1 ] && [ -f "$stamp" ] &&
+    [ -z "$(find "$config_dir/projects" -type f -newer "$stamp" -print -quit)" ]; then
+    return 0
+  fi
+  : >"$work/transcripts.next"
+  tar -C "$config_dir" -czf "$work/transcripts.tgz" projects 2>/dev/null || return 1
+  if put_retry "$work/transcripts.tgz" transcripts application/gzip; then
+    mv "$work/transcripts.next" "$stamp"
+    rm -f "$work/transcripts.tgz"
+    return 0
+  fi
+  rm -f "$work/transcripts.tgz"
+  return 1
+}
+
+# Bytes the worker has put on the `work` volume: the tree, its home and its
+# config dir are all sub-paths of it.
+work_usage() {
+  du -sk "$wt" "${HOME:-/nonexistent}" ${config_dir:+"$config_dir"} 2>/dev/null |
+    awk '{ s += $1 } END { print s * 1024 }'
+}
+
+# A sleep a SIGTERM interrupts at once (`wait` returns when a trap fires).
+nap() {
+  sleep "$1" &
+  nap_pid=$!
+  wait "$nap_pid"
+  [ "$term" = 0 ] || kill "$nap_pid" 2>/dev/null
+  return 0
+}
+
+# -- the loop ------------------------------------------------------------------------
+say "run $run: checkpoint every ${interval}s"
+last_at=$(date +%s)
+early_at=0
+
+while [ "$term" = 0 ]; do
+  # The controller's command mailbox is the wait: it returns at once when a
+  # command is queued. Without a controller it degrades to a sleep.
+  curl -sS --cacert "$ca_file" \
+    --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
+    --max-time $((poll_s + 10)) -o "$work/commands.json" \
+    "$channel/commands?wait=$poll_s" 2>/dev/null &
+  poll_pid=$!
+  wait "$poll_pid"
+  rc=$?
+  [ "$term" = 0 ] || { kill "$poll_pid" 2>/dev/null; break; }
+  [ "$rc" = 0 ] || nap "$poll_s"
+  [ "$term" = 0 ] || break
+
+  now=$(date +%s)
+  due=0
+  if [ -f "$work/commands.json" ] && grep -q '"op" *: *"checkpoint"' "$work/commands.json"; then
+    due=1
+  fi
+  [ $((now - last_at)) -lt "$interval" ] || due=1
+  if [ "$work_limit" -gt 0 ] && [ $((now - early_at)) -ge 30 ]; then
+    used=$(work_usage)
+    if [ "$used" -ge $((work_limit / 10 * 8)) ]; then
+      say "work volume at ${used} of ${work_limit} bytes: early snapshot"
+      early_at=$now
+      due=1
+    fi
+  fi
+  rm -f "$work/commands.json"
+  [ "$due" = 1 ] || continue
+
+  take_snapshot 0 || say "checkpoint failed; the next one retries"
+  upload_transcripts 0 || say "transcripts upload failed"
+  last_at=$(date +%s)
+done
+
+# -- SIGTERM: the worker is done ---------------------------------------------------------
+say "SIGTERM: final snapshot"
+rc=0
+take_snapshot 1 || rc=1
+upload_transcripts 1 || rc=1
+say "final snapshot $([ "$rc" = 0 ] && echo done || echo FAILED)"
+exit "$rc"
