@@ -82,7 +82,6 @@ defmodule Arbiter.MCP.Tools.Trust do
     {:ok, %{verb => true, subject: detail}}
   end
 
-  defp decided({:error, {:operator_only, message}}, _verb), do: {:error, {:forbidden, message}}
   defp decided({:error, {kind, message}}, _verb), do: {:error, {kind, message}}
 
   defp actor(scope), do: Arbiter.PaperTrail.actor_label(scope) || "coordinator"
