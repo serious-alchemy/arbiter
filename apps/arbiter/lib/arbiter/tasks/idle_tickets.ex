@@ -39,8 +39,8 @@ defmodule Arbiter.Tasks.IdleTickets do
     now = Keyword.get(opts, :now) || DateTime.utc_now()
     grace_ms = Keyword.get(opts, :grace_ms, @default_grace_ms)
     queued = opts |> Keyword.get(:queued_ids, []) |> base_ids()
-    live =
-      opts |> Keyword.get_lazy(:workers, &list_workers/0) |> Enum.map(&Map.get(&1, :task_id)) |> base_ids()
+    workers = Keyword.get_lazy(opts, :workers, &list_workers/0)
+    live = workers |> Enum.map(&Map.get(&1, :task_id)) |> base_ids()
 
     for ticket <- tickets, idle?(ticket, queued, live, now, grace_ms), do: ticket.id
   end

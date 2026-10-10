@@ -493,7 +493,9 @@ defmodule Arbiter.Board.Snapshot do
       slots_total: slots_total,
       capacity: capacity,
       slot_note:
-        Keyword.get_lazy(opts, :slot_note, fn -> slot_note(workspace, issues, slots_total, idle_ids) end),
+        Keyword.get_lazy(opts, :slot_note, fn ->
+          slot_note(workspace, issues, slots_total, idle_ids)
+        end),
       quota:
         Keyword.get_lazy(opts, :quota, fn ->
           quota_hold(workspace || workspace_id, routing_opts)
@@ -635,7 +637,9 @@ defmodule Arbiter.Board.Snapshot do
       placement_note(workspace) ||
         workspace
         |> Arbiter.Accounts.SlotLimit.binding(used)
-        |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues, idle_ids: idle_ids))
+        |> Arbiter.Accounts.SlotLimit.describe(
+          SlotGate.slot_holders(issues, idle_ids: idle_ids)
+        )
     end
   end
 
