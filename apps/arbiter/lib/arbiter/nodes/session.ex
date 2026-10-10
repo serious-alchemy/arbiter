@@ -114,11 +114,10 @@ defmodule Arbiter.Nodes.Session do
     runs: %{},
     streams: %RunStreams{},
     # RW11: `run => the primary's checkout context` (home clone, branch, base),
-    # and the callers waiting on a checkout ingest, `run => [from]`.
+    # and the callers waiting on a checkout ingest, `run => [from]` (bd-9rrrgk: and, under
+    # `{:exec, id}`, the one caller waiting on that `exec` result).
     checkouts: %{},
     collectors: %{},
-    # bd-9rrrgk: the callers waiting on an `exec` result, `id => from`.
-    execs: %{},
     # RW12: what the agent retained (`run => report`), the recoveries in flight
     # (`run => %{ctx, waiters, phase, checkout}`) and the periodic reap.
     retained: %{},
@@ -519,7 +518,7 @@ defmodule Arbiter.Nodes.Session do
       payload = %{"run" => run, "id" => id, "command" => command, "timeout_s" => timeout_s}
       notify_channel(state, {:push, "exec", payload})
       Process.send_after(self(), {:exec_expired, id}, wait)
-      {:noreply, %{state | execs: Map.put(state.execs, id, from)}}
+      {:noreply, %{state | collectors: Map.put(state.collectors, {:exec, id}, from)}}
     else
       {:reply, {:error, :unsupported}, state}
     end
@@ -667,9 +666,9 @@ defmodule Arbiter.Nodes.Session do
   end
 
   def handle_info({:exec_expired, id}, state) do
-    {from, execs} = Map.pop(state.execs, id)
+    {from, collectors} = Map.pop(state.collectors, {:exec, id})
     if from, do: GenServer.reply(from, {:error, :timeout})
-    {:noreply, %{state | execs: execs}}
+    {:noreply, %{state | collectors: collectors}}
   end
 
   def handle_info(:reap, state),
@@ -764,13 +763,13 @@ defmodule Arbiter.Nodes.Session do
     do: finish_recovery(state, run, parts)
 
   defp node_event_apply(state, "exec.result", %{"id" => id} = result) do
-    case Map.pop(state.execs, id) do
+    case Map.pop(state.collectors, {:exec, id}) do
       {nil, _} ->
         state
 
-      {from, execs} ->
+      {from, collectors} ->
         GenServer.reply(from, exec_reply(result))
-        %{state | execs: execs}
+        %{state | collectors: collectors}
     end
   end
 
@@ -789,8 +788,11 @@ defmodule Arbiter.Nodes.Session do
   defp exec_reply(other), do: {:error, {:exec_failed, "bad result: " <> inspect(other, limit: 5)}}
 
   defp reply_execs(state, reply) do
-    Enum.each(state.execs, fn {_id, from} -> GenServer.reply(from, reply) end)
-    %{state | execs: %{}}
+    {execs, collectors} =
+      Map.split_with(state.collectors, fn {key, _} -> match?({:exec, _}, key) end)
+
+    Enum.each(execs, fn {_key, from} -> GenServer.reply(from, reply) end)
+    %{state | collectors: collectors}
   end
 
   # ---- recovery ----------------------------------------------------------------------
