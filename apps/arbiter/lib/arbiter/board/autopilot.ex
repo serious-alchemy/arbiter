@@ -946,21 +946,14 @@ defmodule Arbiter.Board.Autopilot do
     mode = admission_mode(state)
 
     {read_status, snapshot} =
-<<<<<<< HEAD
       read_board(
         state,
         [
           dispatch_holds: dispatch_holds(state),
           resume_queued: queued_resume_ids(state),
-          local_held: local_held_ids(state)
+          local_held: local_held_ids(state),
+          idle_check: idle_check(state)
         ] ++ walk_opts(mode)
-=======
-      read_board(state,
-        dispatch_holds: dispatch_holds(state),
-        resume_queued: queued_resume_ids(state),
-        local_held: local_held_ids(state),
-        idle_check: idle_check(state)
->>>>>>> d7b52d9e4 (Orphaned active tickets hold no slot; clear stale held_resume markers (bd-3fbj83))
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
