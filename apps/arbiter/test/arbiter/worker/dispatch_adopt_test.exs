@@ -166,6 +166,33 @@ defmodule Arbiter.Worker.DispatchAdoptTest do
     assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, row.id)
   end
 
+  # bd-373tce runs a placement its node refuses on the primary instead. An adoption is
+  # never run there: the run it did not take over is still held on its node, for
+  # `Nodes.Recovery` to collect, so a local run would be a duplicate of it.
+  test "an adopting spawn that fails is not run on the primary instead (no local duplicate)", %{
+    task: task,
+    row: row
+  } do
+    test = self()
+
+    refused = fn session_opts ->
+      send(test, {:spawn, session_opts[:node], session_opts[:adopt]})
+      {:error, :node_refused}
+    end
+
+    assert {:error, {:adoption_failed, _}} =
+             Dispatch.adopt(row, claude_start: refused, start_driver: false)
+
+    assert_received {:spawn, %{id: node_id}, %{run_id: run_id}}
+    assert node_id == row.node_id
+    assert run_id == row.id
+    refute_received {:spawn, _, _}
+
+    assert Worker.whereis(task.id) == nil
+    assert rows_for(task.id) == [row.id]
+    assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, row.id)
+  end
+
   test "a failure after the session was adopted (F7) is undone the same way", %{
     task: task,
     row: row

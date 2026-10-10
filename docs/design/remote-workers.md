@@ -464,6 +464,7 @@ Adoption ignores drain and skew: neither applies to a run that is already on the
 * **`Nodes.Recovery`.** Adoption is a step inside `recover_node/4`, with the same per-node and total budgets. The outcome map gains `:adopted`, which `ReconcileSweep` logs. `Recovery.unsettled/1` excludes an adopted run, because it has a live Worker.
 * **`Workers.Reconciler`.** Unchanged. A live Worker under the ticket's id owns the run (the orphan sweep skips it) and the ticket (the resume sweep skips it).
 * **The hold timer.** It starts at `hello`. `Session.adopt/5` cancels it and keeps what was left, and any failure re-arms it with that remainder. Expiry still quiesces, as the backstop for a run Recovery never reached.
+* **The local fallback (bd-373tce).** A placement its node cannot take runs on the primary instead (`Dispatch.start_session/6`). An adoption never does. Whatever fails its spawn (F3, F5, F6, F15), the run it did not take over is still held on its node for the collect, and a local run would duplicate it.
 * **Graceful stop.** As in bd-1dzyhb, plus the `stdout_offset` write (§10.4.5). An adopted run's Worker leaves it to the node on the next restart too, so a run can be adopted any number of times.
 
 #### 10.4.8 Restart length and the fence (coordinator review, point 1)

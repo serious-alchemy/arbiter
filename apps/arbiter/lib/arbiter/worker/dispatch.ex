@@ -3778,12 +3778,20 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, port, opts}
 
       {:error, reason} = error ->
-        if Keyword.get(opts, :node) && Placement.mode(load_workspace(task)) != :remote_only do
+        if local_fallback?(task, opts) do
           start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
         else
           error
         end
     end
+  end
+
+  # An adoption (bd-4p1vui, docs/design/remote-workers.md §10.4.6 F5) never falls back:
+  # the run it did not take over is still held on its node for `Nodes.Recovery` to
+  # collect, so a run here would be a duplicate of it.
+  defp local_fallback?(task, opts) do
+    Keyword.get(opts, :node) != nil and Keyword.get(opts, :adopt) == nil and
+      Placement.mode(load_workspace(task)) != :remote_only
   end
 
   defp start_session_locally(task, worker_pid, path, worktree_path, opts, reason) do
