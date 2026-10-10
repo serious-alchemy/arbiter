@@ -36,7 +36,9 @@ defmodule Arbiter.MCP.PermissionRequestTest do
         config: %{"guardrails" => @guardrails}
       })
 
-    {:ok, task} = Ash.create(Issue, %{title: "needs reach", workspace_id: ws.id, repo: "shipyard"})
+    {:ok, task} =
+      Ash.create(Issue, %{title: "needs reach", workspace_id: ws.id, repo: "shipyard"})
+
     task = put_state!(task, :active)
     {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ws.id})
 
@@ -227,7 +229,10 @@ defmodule Arbiter.MCP.PermissionRequestTest do
       before_issue = Ash.get!(Issue, ctx.task.id)
 
       assert {:ok, data} =
-               request(ctx.worker, %{"permission" => "network:api.example.com:443", "reason" => "x"})
+               request(ctx.worker, %{
+                 "permission" => "network:api.example.com:443",
+                 "reason" => "x"
+               })
 
       assert data.recorded == true
       assert data.granted == false

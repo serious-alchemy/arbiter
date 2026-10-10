@@ -71,7 +71,8 @@ defmodule Arbiter.Tasks.PermissionRequest do
     end
   end
 
-  defp require_reason(_), do: {:error, {:invalid, "`reason` is required: say what you need it for"}}
+  defp require_reason(_),
+    do: {:error, {:invalid, "`reason` is required: say what you need it for"}}
 
   defp parse(permission) do
     case Vocabulary.parse(permission) do
