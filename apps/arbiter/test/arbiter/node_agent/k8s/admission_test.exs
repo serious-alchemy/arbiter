@@ -4,7 +4,10 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionTest do
   alias Arbiter.NodeAgent.K8s.Admission
 
   defp facts(overrides \\ %{}) do
-    Map.merge(%{max_concurrent: 2, running: 0, pending: 0, headroom: 5, draining?: false}, overrides)
+    Map.merge(
+      %{max_concurrent: 2, running: 0, pending: 0, headroom: 5, draining?: false},
+      overrides
+    )
   end
 
   test "room under the ceiling and in the quota is admitted" do

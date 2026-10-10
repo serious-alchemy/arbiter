@@ -50,8 +50,12 @@ defmodule Arbiter.NodeAgent.K8s.SweeperTest do
   end
 
   test "another install's or another node's pods are never selected" do
-    other_install = pod("a", %{@labels | "arbiter.dev/install" => "inst-2"} |> Map.put("arbiter.dev/run", "r1"))
-    other_node = pod("b", %{@labels | "arbiter.dev/node" => "node-2"} |> Map.put("arbiter.dev/run", "r2"))
+    other_install =
+      pod("a", %{@labels | "arbiter.dev/install" => "inst-2"} |> Map.put("arbiter.dev/run", "r1"))
+
+    other_node =
+      pod("b", %{@labels | "arbiter.dev/node" => "node-2"} |> Map.put("arbiter.dev/run", "r2"))
+
     assert select([other_install, other_node]) == []
   end
 

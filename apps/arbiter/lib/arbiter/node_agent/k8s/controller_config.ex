@@ -130,7 +130,10 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
   end
 
   defp operator_keys(map) do
-    for {key, atom} <- @pod_keys, Map.has_key?(map, key), into: %{}, do: {atom, Map.fetch!(map, key)}
+    for {key, atom} <- @pod_keys,
+        Map.has_key?(map, key),
+        into: %{},
+        do: {atom, Map.fetch!(map, key)}
   end
 
   defp yaml_reason(%{__exception__: true} = error), do: Exception.message(error)

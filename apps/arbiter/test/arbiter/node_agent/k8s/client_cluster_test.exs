@@ -48,7 +48,9 @@ defmodule Arbiter.NodeAgent.K8s.ClientClusterTest do
   describe "get_lease/2 and update_lease/2" do
     test "reads the pre-created lease", %{api: api, client: client} do
       FakeK8sApi.put_lease(api, lease())
-      assert {:ok, %{"metadata" => %{"name" => "arbiter-controller"}}} = Client.get_lease(client, "arbiter-controller")
+
+      assert {:ok, %{"metadata" => %{"name" => "arbiter-controller"}}} =
+               Client.get_lease(client, "arbiter-controller")
 
       assert [%{path: "/apis/coordination.k8s.io/v1/namespaces/arb/leases/arbiter-controller"}] =
                FakeK8sApi.requests(api)
