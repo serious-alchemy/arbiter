@@ -197,20 +197,14 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
            Do this before printing `arb done`.
 
-           Coordination: at the start of each step, check your mailbox by running
-
-               arb inbox bd-golden1
-
-           This shows any direction from the coordinator or flags from sibling workers
-           (e.g. an upstream API shape changed) and marks them read. To leave a flag
-           for another worker, use `arb message <their-task-id> <text>`.
-
-           Between major steps, also check for `.arbiter/INBOX` in your working
-           directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
-           NOT error when the file is absent — the normal case). If it exists, read
+           Coordination: direction from the coordinator and flags from sibling workers
+           arrive as `.arbiter/INBOX` in your working directory; do not run `arb inbox`.
+           Between major steps, check for it using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX`
+           (this does NOT error when the file is absent — the normal case). If it exists, read
            it, act on any coordinator instructions it contains, then delete the file to
            acknowledge receipt. Treat it as a real-time message from the coordinator — it
-           takes precedence over your current task if it redirects you.
+           takes precedence over your current task if it redirects you. To leave a flag
+           for another worker, use `arb message <their-task-id> <text>`.
 
            CRITICAL — continuation discipline: NEVER end a response with only a plan
            or a statement of the next step (for example, announcing that you will now
@@ -1124,6 +1118,48 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       m = send_to("bd-golden1", %{})
       _ = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
       assert Ash.get!(Message, m.id).read_at == nil
+    end
+  end
+
+  describe "commit-gate diet (bd-g926uj)" do
+    test "the work prompt lists the gate's steps and bans full precommit when a gate is configured" do
+      steps = [
+        %{cmd: "mix format --check-formatted", scope: :all},
+        %{cmd: "mix credo --strict {credo_files}", scope: :touched}
+      ]
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", prepush_steps: steps)
+
+      assert prompt =~ "`mix format --check-formatted`"
+      assert prompt =~ "Do NOT run them"
+      assert prompt =~ "do NOT run the full `mix precommit`"
+      assert prompt =~ "tests mapped"
+      assert PromptBuilder.commit_gate_section(steps, false, "HINT-X") =~ "HINT-X"
+      assert PromptBuilder.commit_gate_section(steps, true, nil) =~ "`run_tests` tool"
+      refute prompt =~ "apps/<app>"
+    end
+
+    test "no gate wording when no pre-push recipe is configured" do
+      for opts <- [[worktree_path: "/tmp/wt"], [worktree_path: "/tmp/wt", prepush_steps: []]] do
+        prompt = PromptBuilder.prompt_for_task(task(%{}), opts)
+        refute prompt =~ "Do NOT run them"
+        refute prompt =~ "VERIFICATION — when you print"
+      end
+    end
+
+    test "with a worktree the per-step `arb inbox` instruction is gone but the file is read" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      refute prompt =~ "running\n\n    arb inbox"
+      assert prompt =~ "do not run `arb inbox`"
+      assert prompt =~ "[ -f .arbiter/INBOX ] && cat .arbiter/INBOX"
+    end
+
+    test "without a worktree there is no file delivery, so `arb inbox` stays" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "arb inbox bd-golden1"
     end
   end
 

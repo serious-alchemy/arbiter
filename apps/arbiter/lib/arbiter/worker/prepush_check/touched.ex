@@ -77,6 +77,29 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
     |> Enum.sort()
   end
 
+  @doc """
+  The "tests for your changed files" hint the gate prints for the worker: the
+  `scripts/pre-push-tests.sh` line for the test files mapped from the branch's
+  changed files, or `""` when none map (or the target cannot be resolved).
+  """
+  @spec tests_hint(String.t() | nil, String.t() | nil) :: String.t()
+  def tests_hint(worktree, target) when is_binary(worktree) do
+    with {:ok, files} <- files(worktree, target),
+         [_ | _] = tests <- test_files(files, worktree) do
+      runner =
+        if File.regular?(Path.join(worktree, "scripts/pre-push-tests.sh")),
+          do: "scripts/pre-push-tests.sh ",
+          else: ""
+
+      "Tests for your changed files (run in the foreground): " <>
+        runner <> Enum.join(tests, " ")
+    else
+      _ -> ""
+    end
+  end
+
+  def tests_hint(_worktree, _target), do: ""
+
   defp candidate_tests(file) do
     cond do
       String.ends_with?(file, "_test.exs") -> [file]

@@ -447,6 +447,53 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       refute ReviewGate.revise_prompt(state, "1. fix it") =~ "run_tests"
     end
 
+    test "the fix-round prompt carries no gate wording when no pre-push recipe is configured",
+         ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-no-gate").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-no-gate",
+        target_branch: "main",
+        round: 1,
+        thread: []
+      }
+
+      refute ReviewGate.revise_prompt(state, "1. fix it") =~ "Do NOT run them yourself"
+    end
+
+    test "the fix-round prompt names the configured gate steps and the changed tests", ctx do
+      rig = rig(ctx, "feature/ci-gate-steps")
+      File.mkdir_p!(Path.join(rig.wt, "test"))
+      File.write!(Path.join(rig.wt, "test/foo_test.exs"), "")
+      git!(["add", "-A"], rig.wt)
+      git!(["commit", "-q", "-m", "add test"], rig.wt)
+
+      ws =
+        new_ws(%{
+          "worker" => %{
+            "pre_push_checks" => [
+              %{"name" => "fmt", "cmd" => "mix format --check-formatted", "scope" => "all"}
+            ]
+          }
+        })
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ws.id,
+        branch: "feature/ci-gate-steps",
+        target_branch: "main",
+        worktree_path: rig.wt,
+        round: 1,
+        thread: []
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "1. fix it")
+      assert prompt =~ "`mix format --check-formatted`"
+      assert prompt =~ "Do NOT run them yourself"
+      assert prompt =~ "Tests for your changed files"
+      assert prompt =~ "test/foo_test.exs"
+    end
+
     test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
       rig = rig(ctx, "feature/ci-mcp")
       put_app_env(:arbiter, Arbiter.MCP, inject_config: true)

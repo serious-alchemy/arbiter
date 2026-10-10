@@ -422,7 +422,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{test_tool_section(opts)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), mcp?, nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 
@@ -431,21 +431,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
     #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
-    Coordination: at the start of each step, check your mailbox by running
-
-        arb inbox #{task.id}
-
-    This shows any direction from the coordinator or flags from sibling workers
-    (e.g. an upstream API shape changed) and marks them read. To leave a flag
-    for another worker, use `arb message <their-task-id> <text>`.
-
-    Between major steps, also check for `.arbiter/INBOX` in your working
-    directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
-    NOT error when the file is absent — the normal case). If it exists, read
-    it, act on any coordinator instructions it contains, then delete the file to
-    acknowledge receipt. Treat it as a real-time message from the coordinator — it
-    takes precedence over your current task if it redirects you.
-
+    #{coordination_section(task, opts)}
     CRITICAL — continuation discipline: NEVER end a response with only a plan
     or a statement of the next step (for example, announcing that you will now
     write a test instead of writing it). After ANY check (mailbox /
@@ -464,6 +450,92 @@ defmodule Arbiter.Worker.PromptBuilder do
     on a line by itself, exactly. The worker watches your stdout and
     will mark the task complete when it sees that marker.
     """
+  end
+
+  # bd-g926uj: the coordination block. Coordinator mail is also written to
+  # `.arbiter/INBOX` in the worktree (Arbiter.Messages.WorktreeDelivery), so
+  # with a worktree the per-step `arb inbox` round trip is redundant and only
+  # the file is read. Without a worktree there is no file delivery: keep it.
+  defp coordination_section(%Issue{id: id}, opts) do
+    if is_binary(Keyword.get(opts, :worktree_path)) do
+      """
+      Coordination: direction from the coordinator and flags from sibling workers
+      arrive as `.arbiter/INBOX` in your working directory; do not run `arb inbox`.
+      Between major steps, check for it using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX`
+      (this does NOT error when the file is absent — the normal case). If it exists, read
+      it, act on any coordinator instructions it contains, then delete the file to
+      acknowledge receipt. Treat it as a real-time message from the coordinator — it
+      takes precedence over your current task if it redirects you. To leave a flag
+      for another worker, use `arb message <their-task-id> <text>`.
+      """
+    else
+      """
+      Coordination: at the start of each step, check your mailbox by running
+
+          arb inbox #{id}
+
+      This shows any direction from the coordinator or flags from sibling workers
+      (e.g. an upstream API shape changed) and marks them read. To leave a flag
+      for another worker, use `arb message <their-task-id> <text>`.
+
+      Between major steps, also check for `.arbiter/INBOX` in your working
+      directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
+      NOT error when the file is absent — the normal case). If it exists, read
+      it, act on any coordinator instructions it contains, then delete the file to
+      acknowledge receipt. Treat it as a real-time message from the coordinator — it
+      takes precedence over your current task if it redirects you.
+      """
+    end
+  end
+
+  # bd-g926uj: what the commit gate covers, so the worker neither re-runs it nor
+  # waits on a backgrounded full precommit; and which tests are its job. Only
+  # emitted when a pre-push recipe is configured (`steps` non-empty): with none,
+  # nothing else lints and the worker must keep running its own checks.
+  @doc false
+  @spec commit_gate_section([map()] | nil, boolean(), String.t() | nil) :: String.t()
+  def commit_gate_section(steps, mcp?, tests_hint)
+
+  def commit_gate_section([_ | _] = steps, mcp?, tests_hint) do
+    cmds =
+      Enum.map_join(steps, "\n", fn step ->
+        scope = if Map.get(step, :scope) == :touched, do: " (touched files)", else: ""
+        "- `#{step.cmd}`#{scope}"
+      end)
+
+    how =
+      if mcp?,
+        do: "with the `run_tests` tool and `changed: true`",
+        else: "by running just those test files"
+
+    hint = if tests_hint in [nil, ""], do: "", else: tests_hint <> "\n"
+
+    """
+    VERIFICATION — when you print `arb done` (before anything is pushed) Arbiter
+    runs these checks and sends any failure back to this session:
+    #{cmds}
+    Do NOT run them yourself, and do NOT run the full `mix precommit` /
+    `mix audit` or poll a backgrounded run. Run only the tests for your changed
+    files, in the foreground, #{how}. The gate's output lists the tests mapped
+    from your changed files.
+    #{hint}
+    """
+  end
+
+  def commit_gate_section(_steps, _mcp?, _tests_hint), do: ""
+
+  @doc """
+  The commands of the pre-push recipe that applies to `workspace`/`repo`, as
+  `[%{cmd:, scope:}]`, or `[]` when no gate is configured (or it cannot be resolved).
+  """
+  @spec prepush_steps(term(), String.t() | nil) :: [map()]
+  def prepush_steps(workspace, repo) do
+    case Arbiter.Worker.PrepushCheck.resolve(workspace, repo) do
+      %{steps: [_ | _] = steps} -> Enum.map(steps, &Map.take(&1, [:cmd, :scope]))
+      _ -> []
+    end
+  rescue
+    _ -> []
   end
 
   # bd-buefg4: agy-only. Claude's Read tool already tells the model about

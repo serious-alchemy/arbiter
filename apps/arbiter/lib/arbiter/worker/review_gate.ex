@@ -250,6 +250,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PassPlacement
+  alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
@@ -7667,7 +7668,7 @@ defmodule Arbiter.Worker.ReviewGate do
     no `mix run`. (Reading files, editing, and running `git` is fine.)
 
     #{ci_flake_guidance(state)}
-    #{test_tool_section(adapter)}
+    #{test_tool_section(adapter)}#{revise_gate_section(state, adapter)}
     #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:
@@ -7679,6 +7680,26 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-57nhsi: the authoring prompt steers to `run_tests` only when the session
   # has the arbiter MCP server (`mcp_tools?`); so does the revise prompt.
   defp test_tool_section(adapter), do: PromptBuilder.test_tool_section_for(adapter)
+
+  # bd-g926uj: a fix round goes through the same commit gate. Say what it covers
+  # (only when a recipe is configured) and, since the branch already has changes,
+  # which tests map from them.
+  defp revise_gate_section(state, adapter) do
+    steps =
+      PromptBuilder.prepush_steps(
+        load_workspace(Map.get(state, :workspace_id)),
+        Map.get(state, :repo)
+      )
+
+    hint =
+      Touched.tests_hint(
+        Map.get(state, :worktree_path),
+        Map.get(state, :target_branch)
+      )
+
+    mcp? = PromptBuilder.test_tool_section_for(adapter) != ""
+    PromptBuilder.commit_gate_section(steps, mcp?, hint)
+  end
 
   # bd-49l0eo: a fix round in a container with no scoped credential commits; the
   # push gate pushes for it.

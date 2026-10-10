@@ -434,6 +434,7 @@ defmodule Arbiter.Worker.PrepushCheck do
     #{intro}
 
     #{check_section(meta, detail, @max_output_bytes)}
+    #{tests_hint_block(meta)}
 
     Do EXACTLY this, then print `arb done` again on its own line:
 
@@ -442,6 +443,13 @@ defmodule Arbiter.Worker.PrepushCheck do
       2. Re-run the failing command(s) above yourself until they exit 0.
       3. #{step_3}
     """
+  end
+
+  defp tests_hint_block(meta) do
+    case Touched.tests_hint(Map.get(meta, :worktree_path), Map.get(meta, :target_branch)) do
+      "" -> ""
+      hint -> "\n" <> hint <> "\n"
+    end
   end
 
   @doc """
