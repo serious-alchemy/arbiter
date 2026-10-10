@@ -6046,29 +6046,24 @@ defmodule Arbiter.Worker.ReviewGate do
   # first pass (and again after a node is lost under it): a node with headroom
   # when the workspace allows it (`worker.placement`), else the primary. A
   # `remote_only` workspace with no node free is `{:error, {:placement_held, info}}`.
-  # With `worker.placement` unset and the primary's cap not enforced there is
-  # nothing to decide and nothing is read.
+  # The primary's cap is always enforced (DC1), so every first pass is decided.
   defp place_reviewer_pass(%{review_node: nil} = state, :reviewer) do
     ws = load_workspace(Map.get(state, :workspace_id))
 
-    if Placement.mode(ws) == :local_only and not LocalCapacity.cap().enforced? do
-      {:ok, %{state | review_node: :local}}
-    else
-      request = %{
-        task_id: state.task_id,
-        workspace_id: Map.get(state, :workspace_id),
-        kind: :reviewer,
-        provider: placement_provider(state, ws),
-        layout: GitLayout.for_review_workspace(ws, Map.get(state, :repo)),
-        no_pr?: false,
-        mode: Placement.mode(ws)
-      }
+    request = %{
+      task_id: state.task_id,
+      workspace_id: Map.get(state, :workspace_id),
+      kind: :reviewer,
+      provider: placement_provider(state, ws),
+      layout: GitLayout.for_review_workspace(ws, Map.get(state, :repo)),
+      no_pr?: false,
+      mode: Placement.mode(ws)
+    }
 
-      case LocalCapacity.gate(request, state.placement_opts) do
-        {:ok, {:node, row}} -> {:ok, %{state | review_node: row}}
-        {:ok, :local} -> {:ok, %{state | review_node: :local}}
-        {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
-      end
+    case LocalCapacity.gate(request, state.placement_opts) do
+      {:ok, {:node, row}} -> {:ok, %{state | review_node: row}}
+      {:ok, :local} -> {:ok, %{state | review_node: :local}}
+      {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
     end
   rescue
     e ->
