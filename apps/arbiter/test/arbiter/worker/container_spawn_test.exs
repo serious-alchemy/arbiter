@@ -122,6 +122,62 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "run_command/3 (bd-8wdrql: the pre-push recipe in the run's own container)" do
+    setup do
+      test = self()
+
+      runner = fn cmd, args, opts ->
+        send(test, {:podman, cmd, args, opts})
+        {"recipe output", 3}
+      end
+
+      previous = Application.get_env(:arbiter, :worker_container_runner)
+      Application.put_env(:arbiter, :worker_container_runner, runner)
+
+      on_exit(fn ->
+        if previous == nil,
+          do: Application.delete_env(:arbiter, :worker_container_runner),
+          else: Application.put_env(:arbiter, :worker_container_runner, previous)
+      end)
+
+      :ok
+    end
+
+    test "runs the command through `podman run` with the run's mounts, and returns its output and status",
+         ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      assert {"recipe output", 3} =
+               ContainerSpawn.run_command(
+                 port_args(ctx, request),
+                 "mix format --check-formatted",
+                 30
+               )
+
+      assert_received {:podman, "/usr/bin/podman", ["run" | args], _opts}
+      assert request.name in args
+      assert "mix format --check-formatted" in args
+      assert Enum.any?(mounts(["run" | args]), &String.contains?(&1, ctx.clone))
+      # the agent's command is replaced, not appended to
+      refute "--print" in args
+    end
+
+    test "removes the container by name afterwards, whatever happened", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      ContainerSpawn.run_command(port_args(ctx, request), "true", 30)
+
+      assert_received {:podman, "/usr/bin/podman", ["run" | _], _}
+      assert_received {:podman, _cmd, ["rm" | rm_args], _}
+      assert request.name in rm_args
+    end
+
+    test "a refused wrap is an error tuple, not a crash", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      args = %{port_args(ctx, request) | sandbox: %{request | image: nil}}
+      assert {:error, _} = ContainerSpawn.run_command(args, "true", 30)
+    end
+  end
+
   describe "prepare/1 with a guardrail projection (G14, bd-ld8qde)" do
     defp capture_egress(ctx) do
       test = self()

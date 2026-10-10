@@ -3407,8 +3407,17 @@ defmodule Arbiter.Worker do
 
     record_run_finished(new_state)
     broadcast_lifecycle(:updated, new_state)
-    Arbiter.Nodes.LostResume.schedule(state.task_id)
+    schedule_node_lost_resume(state.task_id)
     new_state
+  end
+
+  # A ReviewGate pass (`<task>#review...`, bd-cgdhlu) is not a ticket there is
+  # anything to resume: its gate heard `{:worker_node_lost, id}` from the session
+  # and re-dispatches the pass itself, local or remote per placement.
+  defp schedule_node_lost_resume(task_id) do
+    if Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id,
+      do: Arbiter.Nodes.LostResume.schedule(task_id),
+      else: :ok
   end
 
   # The node a session handle executes on; nil for a local port.
@@ -4987,15 +4996,22 @@ defmodule Arbiter.Worker do
     ref = make_ref()
     worktree = Map.fetch!(meta, :worktree_path)
 
+    run_opts = prepush_run_opts(meta)
+
     run = fn ->
-      send(me, {:__prepush_result__, ref, ctx, Arbiter.Worker.PrepushCheck.run(spec, worktree)})
+      send(
+        me,
+        {:__prepush_result__, ref, ctx,
+         Arbiter.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)}
+      )
     end
 
     case Task.Supervisor.start_child(Arbiter.TaskSupervisor, run) do
       {:ok, _pid} ->
         Logger.info(
           "Worker: task=#{state.task_id} running the pre-push check (#{ctx}, " <>
-            "timeout #{spec.timeout_seconds}s)"
+            "#{length(Map.get(spec, :steps) || [])} step(s), budget #{spec.timeout_seconds}s" <>
+            "#{if Keyword.has_key?(run_opts, :exec), do: ", in the run's sandbox", else: ""})"
         )
 
         new_meta = meta |> Map.put(:prepush_ref, ref) |> Map.put(:prepush_spec, spec)
@@ -5011,11 +5027,50 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # The check's verdict. `ctx` is where the run was headed: `:main` routes the
-  # branch on, `:fix_pass` finishes the pass.
-  defp on_prepush_result(%State{meta: meta} = state, ctx, result) do
+  # bd-8wdrql: where the recipe's steps run. A podman-sandboxed run executes them
+  # in its own container (same image, mounts and home as its session, no
+  # network); any other run on the host, in the worktree. `meta[:prepush_exec]`
+  # is the test seam. The diff base of `scope: touched` steps is the task's
+  # target branch.
+  defp prepush_run_opts(meta) do
+    base = [target: Map.get(meta, :target_branch)]
+
+    case prepush_exec(meta) do
+      nil -> base
+      exec -> [{:exec, exec} | base]
+    end
+  end
+
+  defp prepush_exec(meta) do
+    case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
+      {fun, _} when is_function(fun, 2) -> fun
+      {_, %{sandbox: %{}} = port_args} -> sandbox_exec(port_args)
+      _ -> nil
+    end
+  end
+
+  # A run placed on a remote node has no local checkout to run in.
+  defp sandbox_exec(%{remote: %{}}), do: nil
+
+  defp sandbox_exec(port_args) do
+    fn command, seconds ->
+      Arbiter.Worker.ContainerSpawn.run_command(port_args, command, seconds)
+    end
+  end
+
+  # The recipe's verdict. `ctx` is where the run was headed: `:main` routes the
+  # branch on, `:fix_pass` finishes the pass. The per-step results are recorded
+  # on the run (`Arbiter.Workers.PrepushStep`, shown by `arb worker show`) and
+  # kept in meta for the send-back prompt.
+  defp on_prepush_result(%State{meta: meta} = state, ctx, %{result: result, steps: steps}) do
     spec = Map.get(meta, :prepush_spec)
-    state = %State{state | meta: Map.delete(meta, :prepush_ref)}
+    attempt = Map.get(meta, :prepush_nudge_attempts, 0) + 1
+    Arbiter.Workers.PrepushSteps.record(state.run_id, state.task_id, attempt, steps)
+
+    state = %State{
+      state
+      | meta: meta |> Map.delete(:prepush_ref) |> Map.put(:prepush_steps, steps)
+    }
 
     case prepush_outcome(result, spec) do
       :pass ->
@@ -5104,8 +5159,16 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # The send-back budget: a run's own `meta[:prepush_nudge_cap]`, else the
+  # recipe's `pre_push_max_attempts`, else 2.
   defp prepush_nudge_cap(meta) do
-    case Map.get(meta, :prepush_nudge_cap) do
+    max_attempts =
+      case Map.get(meta, :prepush_spec) do
+        %{max_attempts: n} -> n
+        _ -> nil
+      end
+
+    case Map.get(meta, :prepush_nudge_cap, max_attempts) do
       n when is_integer(n) and n >= 0 -> n
       _ -> 2
     end

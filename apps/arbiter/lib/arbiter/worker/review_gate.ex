@@ -229,6 +229,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
+  alias Arbiter.Nodes.Placement
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Reviews.ConflictResolution
@@ -1242,6 +1243,14 @@ defmodule Arbiter.Worker.ReviewGate do
       # fix round's `launch_implementer/3` arguments).
       local_hold: nil,
       local_capacity_retry_ms: Keyword.get(opts, :local_capacity_retry_ms, 15_000),
+      # bd-cgdhlu: where the round's reviewer runs. nil until the round's first
+      # reviewer pass is placed (`place_reviewer_pass/2`), then `:local` or the
+      # node row the pass was placed on; the round's later passes (a re-prompt, a
+      # timeout retry, a provider rotation) stay there, and a node lost under a
+      # pass clears it so the re-dispatch is placed afresh. `placement_opts` is
+      # the seam over `Placement.place/2` (`:nodes`, `:remote_available?`).
+      review_node: nil,
+      placement_opts: Keyword.get(opts, :placement_opts, []),
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
       ci_entry: nil,
@@ -1471,6 +1480,9 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, state} ->
         {:noreply, state}
 
+      {:error, {:placement_held, info}} ->
+        {:noreply, hold_for_placement(state, info, {:reviewer, state.ci_entry})}
+
       {:error, reason} ->
         Logger.warning(
           "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
@@ -1548,19 +1560,28 @@ defmodule Arbiter.Worker.ReviewGate do
         :ok
 
       {:error, {:no_node_capacity, info}} ->
-        token = make_ref()
-        Process.send_after(self(), {:local_capacity_retry, token}, state.local_capacity_retry_ms)
-
-        if is_nil(state.local_hold) do
-          Logger.warning(
-            "ReviewGate: task=#{state.task_id} round #{state.round} #{kind} not started — " <>
-              info.phrase
-          )
-        end
-
-        {:held, %{state | local_hold: %{token: token, info: info, resume: resume}}}
+        {:held, arm_hold(state, kind, info, resume)}
     end
   end
+
+  defp arm_hold(state, kind, info, resume) do
+    token = make_ref()
+    Process.send_after(self(), {:local_capacity_retry, token}, state.local_capacity_retry_ms)
+
+    if is_nil(state.local_hold) do
+      Logger.warning(
+        "ReviewGate: task=#{state.task_id} round #{state.round} #{kind} not started — " <>
+          Map.get(info, :phrase, info.message)
+      )
+    end
+
+    %{state | local_hold: %{token: token, info: info, resume: resume}}
+  end
+
+  # bd-cgdhlu: the reviewer is placed right before it spawns, so a `remote_only`
+  # workspace with no node free holds the pass the way a cap of 0 does: nothing is
+  # spawned, no verdict is written and no round is consumed, and a timer asks again.
+  defp hold_for_placement(state, info, resume), do: arm_hold(state, :reviewer, info, resume)
 
   defp ci_gate_open(state, entry) do
     state = %{state | ci_entry: entry, ci_green: nil, ci_fallback: nil, ci_wait: nil}
@@ -2695,6 +2716,9 @@ defmodule Arbiter.Worker.ReviewGate do
       {:reviewer, entry} ->
         state |> ci_gate(entry) |> ci_reply()
 
+      {:redispatch, prompt} ->
+        redispatch_reviewer(state, prompt)
+
       {:implementer, findings, prefix} ->
         case launch_implementer(state, findings, prefix) do
           {:revise, state} -> {:noreply, state}
@@ -2764,6 +2788,28 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def handle_info({:timeout, _stale_round, _stale_attempt}, state), do: {:noreply, state}
 
+  # bd-cgdhlu: the node a reviewer pass was placed on was lost under it. The pass
+  # produced no verdict and nobody found a problem with the work, so it is neither
+  # parked `:reviewer_failed` nor does it consume a round or a retry: the same
+  # pass is dispatched again, placed afresh (another node, or locally, per
+  # `worker.placement`), exactly as a pass cut off by a primary restart is
+  # (bd-cqppxr).
+  def handle_info(
+        {:worker_node_lost, id},
+        %{current_id: id, phase: :reviewing, reported?: false} = state
+      )
+      when is_binary(state.current_prompt) do
+    Logger.warning(
+      "ReviewGate: the node under task=#{state.task_id} round #{state.round}'s reviewer was " <>
+        "lost; dispatching the pass again"
+    )
+
+    stop_worker(state)
+    redispatch_reviewer(%{state | review_node: nil}, state.current_prompt)
+  end
+
+  def handle_info({:worker_node_lost, _other}, state), do: {:noreply, state}
+
   # Author died before we could report — nothing to do.
   #
   # bd-2yt0d2: unless the author went because the node is stopping. Then the
@@ -2792,6 +2838,31 @@ defmodule Arbiter.Worker.ReviewGate do
     )
 
     {:stop, :shutdown, state}
+  end
+
+  defp redispatch_reviewer(state, prompt) do
+    retry_id = timeout_retry_id(state.current_id, state.attempt)
+
+    case launch_worker(state, retry_id, :reviewer, prompt, state.command) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      {:error, {:placement_held, info}} ->
+        {:noreply, hold_for_placement(state, info, {:redispatch, prompt})}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: re-dispatching the reviewer for task=#{state.task_id} failed: " <>
+            inspect(reason)
+        )
+
+        escalate_pre_review(
+          state,
+          "ReviewGate could not re-dispatch the round #{state.round} reviewer after its " <>
+            "node was lost: #{inspect(reason)}",
+          :reviewer_failed
+        )
+    end
   end
 
   defp pass_exit_grace_ms, do: Application.get_env(:arbiter, :worker_exit_grace_ms, 500)
@@ -3860,7 +3931,8 @@ defmodule Arbiter.Worker.ReviewGate do
         ci_green: nil,
         ci_fallback: nil,
         ci_wait: nil,
-        ci_retargets: 0
+        ci_retargets: 0,
+        review_node: nil
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -3897,6 +3969,9 @@ defmodule Arbiter.Worker.ReviewGate do
     case launch_worker(next, review_id, :reviewer, rereview_prompt(next), next.command) do
       {:ok, state} ->
         {:continue, state}
+
+      {:error, {:placement_held, info}} ->
+        {:continue, hold_for_placement(next, info, {:reviewer, next.ci_entry})}
 
       {:error, reason} ->
         # bd-9zuvbh / bd-7xtz6w: a reviewer that could not be spawned is a
@@ -5948,6 +6023,70 @@ defmodule Arbiter.Worker.ReviewGate do
   # fixture). The topic is known from the id alone, so subscribing ahead of the
   # port open is safe.
   defp launch_worker(state, id, role, prompt, command) do
+    with {:ok, state} <- place_reviewer_pass(state, role) do
+      try do
+        spawn_pass(state, id, role, prompt, command)
+      after
+        # The slot reserved on a node is the pass's only until its worker is
+        # registered, where it is counted in the slot's place.
+        if role == :reviewer, do: Placement.release(state.task_id)
+      end
+    end
+  end
+
+  # bd-cgdhlu: where a reviewer pass runs. Decided once per round, on the round's
+  # first pass (and again after a node is lost under it): a node with headroom
+  # when the workspace allows it (`worker.placement`), else the primary. A
+  # `remote_only` workspace with no node free is `{:error, {:placement_held, info}}`.
+  # With `worker.placement` unset and the primary's cap not enforced there is
+  # nothing to decide and nothing is read.
+  defp place_reviewer_pass(%{review_node: nil} = state, :reviewer) do
+    ws = load_workspace(Map.get(state, :workspace_id))
+
+    if Placement.mode(ws) == :local_only and not LocalCapacity.cap().enforced? do
+      {:ok, %{state | review_node: :local}}
+    else
+      request = %{
+        task_id: state.task_id,
+        workspace_id: Map.get(state, :workspace_id),
+        kind: :reviewer,
+        provider: placement_provider(state, ws),
+        layout: GitLayout.for_review_workspace(ws, Map.get(state, :repo)),
+        no_pr?: false,
+        mode: Placement.mode(ws)
+      }
+
+      case LocalCapacity.gate(request, state.placement_opts) do
+        {:ok, {:node, row}} -> {:ok, %{state | review_node: row}}
+        {:ok, :local} -> {:ok, %{state | review_node: :local}}
+        {:error, {:no_node_capacity, info}} -> {:error, {:placement_held, info}}
+      end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: reviewer placement crashed for #{state.task_id}: #{Exception.message(e)}"
+      )
+
+      {:ok, %{state | review_node: :local}}
+  end
+
+  defp place_reviewer_pass(state, _role), do: {:ok, state}
+
+  defp placement_provider(state, ws) do
+    case Map.get(state, :command_provider) do
+      provider when is_binary(provider) ->
+        provider
+
+      _ ->
+        case gated_adapter(state, ws, :reviewer, nil) do
+          {:ok, {adapter, _}} -> adapter.provider()
+          {:error, _reason} -> ws |> Agents.reviewer_type() |> to_string()
+        end
+    end
+  end
+
+  defp spawn_pass(state, id, role, prompt, command) do
     Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> id)
     attempt = state.attempt + 1
 
@@ -6468,12 +6607,21 @@ defmodule Arbiter.Worker.ReviewGate do
   # The container's `arb` needs the implementer's worker token as ARB_TOKEN
   # (`ContainerSpawn.prepare/1`); a reviewer has none.
   defp sandbox_session_opts(policy, ws, role, state, agent_opts) do
-    ContainerSpawn.session_opts(policy, ws, repo: Map.get(state, :repo)) ++
+    ContainerSpawn.session_opts(
+      policy,
+      ws,
+      [repo: Map.get(state, :repo)] ++ node_opts(state, role)
+    ) ++
       if(ContainerSpawn.podman?(policy) and role == :implementer,
         do: Keyword.take(agent_opts, [:arb_token]),
         else: []
       )
   end
+
+  # bd-cgdhlu: a reviewer placed on a node runs there (`ClaudeSession` hands the
+  # run to `Executor.Node` when the session opts name a `:node`).
+  defp node_opts(%{review_node: %{id: _} = node}, :reviewer), do: [node: node]
+  defp node_opts(_state, _role), do: []
 
   defp gated_adapter(state, ws, role, revision) do
     with {:ok, {adapter, _role_atom}} = resolved <- adapter_for(state, ws, role, revision),

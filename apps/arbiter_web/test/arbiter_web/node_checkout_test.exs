@@ -221,6 +221,35 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       assert {:ok, %{head: ^head}} = Task.await(waiter)
     end
 
+    # bd-cgdhlu: a reviewer's clone is seeded like any, but is never written back.
+    test "a read-only run is seeded but its checkout upload is refused (403)", c do
+      ro_run = "run-ro"
+      owner = self()
+
+      ctx = %{
+        home: c.home,
+        branch: @branch,
+        base: "main",
+        seeded_paths: [],
+        config_dir: c.config_dir,
+        read_only?: true
+      }
+
+      task =
+        Task.async(fn ->
+          Session.assign(c.pid, ro_run, %{"run" => ro_run}, owner, checkout: ctx)
+        end)
+
+      assert_receive {:node_session, {:push, "assign", _}}
+      Session.node_event(c.pid, "run.ready", %{"run" => ro_run})
+      assert {:ok, _} = Task.await(task)
+
+      assert request(:get, "/nodes/runs/#{ro_run}/seed.bundle", c.auth).status == 200
+      assert upload("/nodes/runs/#{ro_run}/checkout", c.auth, "x").status == 403
+      assert {:ok, :read_only} = Session.collect(c.pid, ro_run, :checkout, 1_000)
+      refute File.exists?(Path.join(c.home, "lib/new.txt"))
+    end
+
     test "a bundle carrying .git/config is rejected with 422 and recorded", c do
       {shadow, info} = seed!(c, c.auth)
 
