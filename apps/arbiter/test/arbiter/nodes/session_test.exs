@@ -86,6 +86,8 @@ defmodule Arbiter.Nodes.SessionTest do
       assert ok["hb_interval"] == 10
       assert ok["fence_after"] == 60
       assert ok["lost_after"] == 90
+      # bd-4p1vui (§10.4.8): how long the agent keeps its runs with no socket
+      assert ok["restart_grace"] == 180
       assert ok["health"] == "ready"
       assert ok["draining"] == false
     end

@@ -1232,6 +1232,8 @@ defmodule Arbiter.Nodes.Session do
       "hb_interval" => t.hb_interval_s,
       "fence_after" => t.fence_after_s,
       "lost_after" => t.lost_after_s,
+      # bd-4p1vui (§10.4.8): how long the agent keeps its runs with no socket
+      "restart_grace" => t.restart_grace_s,
       "health" => Atom.to_string(state.health),
       "draining" => state.draining?,
       "max_workers" => max_workers(state),
