@@ -197,7 +197,10 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["cat", events_path])
 
     :ok =
-      wait_until(fn -> match?([%{session_id: "sess-harness-" <> _}], runs_for(task_id)) end, 3_000)
+      wait_until(
+        fn -> match?([%{session_id: "sess-harness-" <> _}], runs_for(task_id)) end,
+        3_000
+      )
 
     :ok = Worker.advance(pid, :implement)
     :ok = Worker.complete(pid, :done)

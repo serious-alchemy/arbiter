@@ -144,7 +144,11 @@ defmodule ArbiterWeb.Api.TrustControllerTest do
 
   describe "the Loop's own apply route" do
     test "refuses a trust_promotion, operator proof or not", %{proposal: proposal} do
-      for conn <- [operator_conn(), build_conn() |> put_req_header("authorization", "Bearer " <> Scope.mint_coordinator(nil))] do
+      for conn <- [
+            operator_conn(),
+            build_conn()
+            |> put_req_header("authorization", "Bearer " <> Scope.mint_coordinator(nil))
+          ] do
         body = conn |> post("/api/loop/pending/#{proposal.id}/apply") |> json_response(409)
         assert body["error"]["message"] =~ "arb trust promote"
       end
@@ -161,7 +165,11 @@ defmodule ArbiterWeb.Api.TrustControllerTest do
         Ash.update(record, %{
           tier: :probation,
           suspended_at: DateTime.utc_now(),
-          suspension: %{"kind" => "public_upload_attempt", "run_id" => "r1", "prior_tier" => "probation"}
+          suspension: %{
+            "kind" => "public_upload_attempt",
+            "run_id" => "r1",
+            "prior_tier" => "probation"
+          }
         })
 
       %{record: record}

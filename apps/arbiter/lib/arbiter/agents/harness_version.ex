@@ -34,7 +34,8 @@ defmodule Arbiter.Agents.HarnessVersion do
   @spec host(atom() | String.t() | nil, keyword()) :: String.t() | nil
   def host(provider, opts \\ []) do
     with true <- Keyword.get_lazy(opts, :probe, &enabled?/0),
-         path when is_binary(path) <- Keyword.get_lazy(opts, :executable, fn -> executable(provider) end),
+         path when is_binary(path) <-
+           Keyword.get_lazy(opts, :executable, fn -> executable(provider) end),
          {:ok, identity} <- identity(path) do
       cached(path, identity, Keyword.get(opts, :timeout_ms, @default_timeout_ms))
     else

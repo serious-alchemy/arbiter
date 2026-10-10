@@ -67,11 +67,20 @@ defmodule ArbiterCli.Cmd.Trust do
 
   defp list(mode) do
     case Client.get("/api/trust") do
-      {:ok, %{"subjects" => _} = body} when mode == :json -> Output.emit_json(body)
-      {:ok, %{"subjects" => []}} -> IO.puts("no trust records yet (the Loop folds them on the canary ticker)")
-      {:ok, %{"subjects" => subjects}} -> print_list(subjects)
-      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
-      {:error, err} -> Output.die(err)
+      {:ok, %{"subjects" => _} = body} when mode == :json ->
+        Output.emit_json(body)
+
+      {:ok, %{"subjects" => []}} ->
+        IO.puts("no trust records yet (the Loop folds them on the canary ticker)")
+
+      {:ok, %{"subjects" => subjects}} ->
+        print_list(subjects)
+
+      {:ok, other} ->
+        Output.die("unexpected response: #{inspect(other)}")
+
+      {:error, err} ->
+        Output.die(err)
     end
   end
 
@@ -220,8 +229,15 @@ defmodule ArbiterCli.Cmd.Trust do
     IO.puts("  history:")
 
     Enum.each(history, fn h ->
-      extra = Enum.map_join(Map.drop(h, ~w(at action actor)), ", ", fn {k, v} -> "#{k}: #{format(v)}" end)
-      IO.puts("    #{h["at"]} #{h["action"]} (#{h["actor"]})" <> if(extra != "", do: " #{extra}", else: ""))
+      extra =
+        Enum.map_join(Map.drop(h, ~w(at action actor)), ", ", fn {k, v} ->
+          "#{k}: #{format(v)}"
+        end)
+
+      IO.puts(
+        "    #{h["at"]} #{h["action"]} (#{h["actor"]})" <>
+          if(extra != "", do: " #{extra}", else: "")
+      )
     end)
   end
 
@@ -261,7 +277,12 @@ defmodule ArbiterCli.Cmd.Trust do
 
     case rest do
       [subject] ->
-        decide("/api/trust/confirm", %{"subject" => subject}, "confirmed the suspension of #{subject}", mode)
+        decide(
+          "/api/trust/confirm",
+          %{"subject" => subject},
+          "confirmed the suspension of #{subject}",
+          mode
+        )
 
       _ ->
         Output.die("usage: arb trust confirm <provider/model>")

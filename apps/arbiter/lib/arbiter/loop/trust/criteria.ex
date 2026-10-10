@@ -96,8 +96,11 @@ defmodule Arbiter.Loop.Trust.Criteria do
     approved = for t <- tasks, t.first_round_approved? == true, into: MapSet.new(), do: t.task_id
 
     flagged =
-      for e <- events, e.severity in ["critical", "major"], e.run_id, into: MapSet.new(),
-        do: e.run_id
+      for e <- events,
+          e.severity in ["critical", "major"],
+          e.run_id,
+          into: MapSet.new(),
+          do: e.run_id
 
     main = Enum.filter(runs, &(main_run?(&1) and at_or_after?(&1.started_at, clock)))
     clean = Enum.filter(main, &clean?(&1, approved, flagged))
@@ -106,7 +109,8 @@ defmodule Arbiter.Loop.Trust.Criteria do
       runs: length(main),
       clean_runs: length(clean),
       clean_tickets: clean |> Enum.map(& &1.task_id) |> Enum.uniq() |> length(),
-      clean_repos: clean |> Enum.map(& &1.repo) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length(),
+      clean_repos:
+        clean |> Enum.map(& &1.repo) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length(),
       clean_run_ids: Enum.map(clean, & &1.id),
       clean_task_ids: clean |> Enum.map(& &1.task_id) |> Enum.uniq()
     }
@@ -208,8 +212,7 @@ defmodule Arbiter.Loop.Trust.Criteria do
   end
 
   def eligibility(:privileged, _facts),
-    do:
-      {nil, %{"from" => "privileged", "to" => nil, "criteria" => [], "note" => "the top tier"}}
+    do: {nil, %{"from" => "privileged", "to" => nil, "criteria" => [], "note" => "the top tier"}}
 
   def eligibility(tier, facts) do
     move = Map.fetch!(@moves, tier)
@@ -261,7 +264,8 @@ defmodule Arbiter.Loop.Trust.Criteria do
     {met, detail} =
       cond do
         own["reviewed"] < @min_reviewed ->
-          {false, "#{own["reviewed"]} reviewed ticket(s) at #{label(band)}; needs #{@min_reviewed}"}
+          {false,
+           "#{own["reviewed"]} reviewed ticket(s) at #{label(band)}; needs #{@min_reviewed}"}
 
         incumbent == nil ->
           {false, "no incumbent subject has #{@min_reviewed} reviewed tickets at #{label(band)}"}
