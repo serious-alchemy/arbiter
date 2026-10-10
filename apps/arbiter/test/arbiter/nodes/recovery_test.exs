@@ -546,11 +546,8 @@ defmodule Arbiter.Nodes.RecoveryTest do
         end
       end
 
-      assert {:ok, report} =
-               Recovery.await(
-                 adopt_opts(adopt_fun: wedged, node_timeout_ms: 1_000, total_timeout_ms: 2_000)
-               )
-
+      # the deadline is half the node's budget: about 1.5 s, and the collect has the rest
+      assert {:ok, report} = Recovery.await(adopt_opts(adopt_fun: wedged))
       assert report == %{run.id => :collected}
 
       assert_received {:adopter, w}
@@ -577,11 +574,7 @@ defmodule Arbiter.Nodes.RecoveryTest do
       adopt = worker_adopt(node)
       patient = fn run, o -> adopt.(run, Keyword.put(o, :adopt_timeout_ms, 60_000)) end
 
-      assert {:ok, report} =
-               Recovery.await(
-                 adopt_opts(adopt_fun: patient, node_timeout_ms: 1_000, total_timeout_ms: 2_000)
-               )
-
+      assert {:ok, report} = Recovery.await(adopt_opts(adopt_fun: patient))
       assert report == %{run.id => :collected}
       assert Worker.whereis(run.task_id) == nil
 
@@ -610,9 +603,10 @@ defmodule Arbiter.Nodes.RecoveryTest do
         end
       end
 
+      # the deadline (about 0.75 s) finds the run attached and waits; the backstop ends it
       assert {:ok, report} =
                Recovery.await(
-                 adopt_opts(adopt_fun: fun, node_timeout_ms: 1_000, total_timeout_ms: 1_000)
+                 adopt_opts(adopt_fun: fun, node_timeout_ms: 1_500, total_timeout_ms: 1_500)
                )
 
       assert report == %{run.id => :adopted}
