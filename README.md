@@ -4,12 +4,23 @@
 
 ## Prerequisites
 
-- **Elixir 1.19+ / Erlang 28+** — [mise](https://mise.jdx.dev/) is the
+- **Elixir 1.20+ / Erlang 29+** — [mise](https://mise.jdx.dev/) is the
   recommended way to install. With mise installed:
 
       mise install
 
   (The `.tool-versions` file in this repo pins the exact versions.)
+
+  The pair is Elixir 1.20.4 on Erlang/OTP 29.1.1. `.tool-versions` is the
+  source of truth; the same pair is pinned in `.github/workflows/ci.yml`
+  (`otp-version` / `elixir-version` and the cache keys), in the release
+  workflow (`ELIXIR_VERSION` / `OTP_MAJOR`, and `OTP_VERSION` in
+  `scripts/build-release-otp.sh`), as the worker-image fallback in
+  `Arbiter.Worker.Image`, and as each app's `elixir: "~> 1.20"`. A test
+  (`apps/arbiter/test/arbiter/toolchain_pins_test.exs`) fails when they drift,
+  so bump them together. Elixir 1.20's type checker is why the floor is 1.20:
+  the build compiles with `--warnings-as-errors`, and its type warnings are
+  part of that gate.
 
 Arbiter's datastore is **SQLite** — no database server or Docker is required.
 

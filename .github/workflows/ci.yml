@@ -51,8 +51,8 @@ jobs:
       - name: Install Erlang/Elixir
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "28.5"
-          elixir-version: "1.19.4"
+          otp-version: "29.1.1"
+          elixir-version: "1.20.4"
 
       - name: Restore deps/build cache
         id: cache1
@@ -61,9 +61,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-audit-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-audit-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-otp28.5-elixir1.19.4-audit-
+            ${{ runner.os }}-otp29.1.1-elixir1.20.4-audit-
 
       # The PLT is cached separately from _build. It is derived entirely from
       # mix.lock plus the OTP/Elixir pair, it is worth hundreds of MB, and
@@ -79,9 +79,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: priv/plts
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-plt-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-plt-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-otp28.5-elixir1.19.4-plt-
+            ${{ runner.os }}-otp29.1.1-elixir1.20.4-plt-
 
       - name: Install hex/rebar
         run: |
@@ -102,14 +102,14 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-audit-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-audit-${{ hashFiles('**/mix.lock') }}
 
       - name: Save dialyzer PLT
         if: ${{ !cancelled() && github.event_name == 'push' && steps.audit.outcome == 'success' && steps.cache2.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: priv/plts
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-plt-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-plt-${{ hashFiles('**/mix.lock') }}
 
   # NOTE: there was deliberately NO `mix test` job here for a while.
   #
@@ -202,8 +202,8 @@ jobs:
       - name: Install Erlang/Elixir
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "28.5"
-          elixir-version: "1.19.4"
+          otp-version: "29.1.1"
+          elixir-version: "1.20.4"
 
       - name: Restore deps/build cache
         id: cache3
@@ -212,9 +212,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
+            ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-
 
       - name: Install hex/rebar
         run: |
@@ -251,7 +251,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-${{ hashFiles('**/mix.lock') }}
 
   # Single aggregate check, named as the old monolithic job was.
   test:
