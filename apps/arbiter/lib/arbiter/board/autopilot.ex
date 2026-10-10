@@ -81,6 +81,14 @@ defmodule Arbiter.Board.Autopilot do
   already resumed, closed or gone is dropped quietly; any other failure is
   escalated once and dropped — the queue never retries it on its own.
 
+  A resume can also be deferred for the *primary's own* worker cap
+  (`held_for: :local_capacity`, `Arbiter.Nodes.LocalCapacity`, bd-b2iigy): a
+  restart's resume sweep brings back at most the cap's worth and queues the
+  rest here. Those wait on local room instead of a board slot (their ticket is
+  already In progress), replay highest ticket priority first, and show as
+  `held: local capacity` in `status/2` (`held_local_capacity`), the board and
+  `arb scheduler status`.
+
   The queue is in memory. A restart loses it, which is the same thing the
   restart does to everything else in flight: the boot reconciler re-resumes
   mid-flight tasks, and the patrols re-watch open PRs.

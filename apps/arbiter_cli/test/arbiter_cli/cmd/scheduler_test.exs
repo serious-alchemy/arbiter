@@ -144,7 +144,10 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
     end
 
     test "prints no held line when nothing waits on local capacity" do
-      stub_get("/api/scheduler/status", Map.merge(body("running"), %{"held_local_capacity" => []}))
+      stub_get(
+        "/api/scheduler/status",
+        Map.merge(body("running"), %{"held_local_capacity" => []})
+      )
 
       {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
 
