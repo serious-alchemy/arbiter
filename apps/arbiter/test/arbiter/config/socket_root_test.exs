@@ -7,9 +7,9 @@ defmodule Arbiter.Config.SocketRootTest do
   # sockaddr_un.sun_path is 108 bytes on Linux, 104 on macOS/BSD.
   @sun_path_limit 104
 
-  # Longest run id Egress accepts is 64 bytes; a real one is ~30. Budget the
-  # worst case plus the longest bridge name (16).
-  @run_id String.duplicate("r", 64)
+  # A real run id is ~30 bytes; budget 48 (the 64-byte validation cap would
+  # overflow any non-trivial root) plus the longest bridge name (16).
+  @run_id String.duplicate("r", 48)
 
   test "socket_root/0 is independent of how deep HOME/TMPDIR/scratch are" do
     deep = Path.join(["/home/ryan/.cache/arbiter/scratch/worker-tmp", String.duplicate("x", 60)])
