@@ -114,28 +114,34 @@ implemented. The ticket plan is in [§12](#12-phased-plan-and-ticket-breakdown).
 ## Why
 
 Admission today is split across six mechanisms, and each answers "how many" in
-a different unit (§1.2). On this install the one that binds is a hand-tuned
-integer: `claude:default`'s `max_concurrent`, raised from 2 to 3. It doesn't
-know the quota.
+a different unit (§1.2). On this install the static number that binds is a
+hand-tuned integer: `claude:default`'s `max_concurrent`, raised from 2 to 3. It
+doesn't know the quota.
 - **When the week is quiet,** it leaves headroom unused.
 - **When the week is tight,** the paced gate takes over and flips between
   "admit up to the cap" and "admit nothing".
 
-Neither number knows what a run costs.
+Neither the cap nor the gate knows what a run costs.
 
 Three more problems sit in the same path:
 
-- **Head-of-line blocking.** A board-wide hold on the head card stops the whole
-  queue (`apps/arbiter/lib/arbiter/board/scheduler.ex:255-259`, `:313-315`).
-  - A card's *own* quota verdict takes the same path (`ctx/3`, `:281`). So a
-    Ready card whose only pool is held stops every card behind it, even ones
-    another pool could take.
-  - The only skip is a dispatch refusal, which the next pass turns into a
-    15-second card hold (`apps/arbiter/lib/arbiter/board/autopilot.ex:278-285`,
-    `:1105-1113`). Autopilot finds it by trial and error, one failed dispatch at
-    a time.
-- **Over-commit.** Three paths let the account take on more work than it
-  counts:
+- **Head-of-line blocking, patched case by case.** The queue already skips
+  three kinds of card:
+  - a card whose provider constraint leaves no provider with room (bd-13pqcp);
+  - every unconstrained card of a workspace whose pool can't take one *sample*
+    ticket (bd-814vuy, `apps/arbiter/lib/arbiter/board/snapshot.ex:1103-1124`,
+    `:1192-1205`);
+  - a card whose dispatch was just refused, held for 15 s
+    (`apps/arbiter/lib/arbiter/board/autopilot.ex:278-285`, `:1105-1113`).
+
+  Anything else stops the queue. A board-wide hold on the head card ends the
+  pass (`apps/arbiter/lib/arbiter/board/scheduler.ex:255-259`, `:313-315`), and
+  a card's *own* quota verdict takes the same path (`ctx/3`, `:281`). One sample
+  ticket can't speak for cards whose tier, repo or guardrails give them
+  different pools. A held sample holds the whole workspace. A sample that's
+  fine leaves a held card at the head, stopping every card behind it (§4.2).
+- **Over-commit.** Three paths let more work start than the count or the
+  quota reading allows:
   - **Reviews.** A cross-family review parks the implementer's worker, so the
     implementer's account stops counting that ticket
     (`apps/arbiter/lib/arbiter/accounts/concurrency.ex:352-363`). The scheduler
@@ -158,7 +164,8 @@ Three more problems sit in the same path:
 
 | Step | Where | What it decides |
 |---|---|---|
-| Plan | `Scheduler.plan/1` (`apps/arbiter/lib/arbiter/board/scheduler.ex:164-198`), `step/3` (`:245-266`), `decide/3` (`:298-315`) | Orders Ready by the ES3 key (`order_key/1`). A card's own hold skips it. A board-wide hold (`:no_slot`, `{:quota, _}`) on the head **stops the queue**. At most one `promote` |
+| Plan | `Scheduler.plan/1` (`apps/arbiter/lib/arbiter/board/scheduler.ex:164-198`), `step/3` (`:245-266`), `decide/3` (`:298-315`) | Orders Ready by the ES3 key (`order_key/1`). A card's own hold skips it. A board-wide hold (`:no_slot`, `{:quota, _}`) on the head **stops the queue**, and so does a card's own quota verdict. At most one `promote` |
+| Skips | `ticket_constraint_holds/3` (`apps/arbiter/lib/arbiter/board/snapshot.ex:1103-1124`), `pool_holds/4` (`:1192-1205`), both through `ProviderConstraint.pick/3` | A constrained card with no allowed provider with room, and every unconstrained card of a workspace whose sample ticket has none, get card-own holds, so the plan passes them (bd-13pqcp, bd-814vuy) |
 | Holds | `Lifecycle.dispatchable/2` (`apps/arbiter/lib/arbiter/tasks/lifecycle/dispatchable.ex:88`) | Column, mutex, overlap, provider constraint and guardrail are card-own holds. Paused, quota and no slot are board holds |
 | Slots | `Snapshot.capacity_terms/3` (`apps/arbiter/lib/arbiter/board/snapshot.ex:793-848`), `SlotGate.slots_used/1` (`apps/arbiter/lib/arbiter/tasks/slot_gate.ex:202`) | `min(node sum, ceiling, workspace cap, placement cap)`, clamped by account headroom and placement free slots. A slot is a ticket `:active` |
 | Quota hold | `Snapshot.quota_hold/2` (`snapshot.ex:979`), `ticket_quota_holds/3` (`:1034`) | Binary: `:ok` or `{:hold, phrase}`, board-wide and per card |
@@ -220,13 +227,13 @@ integer above them, because every job that integer did now belongs to a layer.
 
 ### 2.2 Held or counted
 
-Every layer follows the same rule, which `LocalCapacity` already uses for
-nodes (`local_capacity.ex:70-79`):
+Every layer follows the rule `LocalCapacity` already uses for nodes
+(`local_capacity.ex:70-79`):
 
 | Work | At a full layer |
 |---|---|
 | A fresh dispatch (a new ticket entering In progress) | Waits in Ready, with that layer's reason |
-| A follow-up of in-flight work: a resume, a ReviewGate round, a CI fix pass or a conflict pass | Counted, never held for capacity. Stranding work costs more than overshooting (the no-deadlock rule `ResumeSlot` documents) |
+| A follow-up of in-flight work: a resume, a ReviewGate round, a CI fix pass or a conflict pass | Counted, and not held for being full. Stranding work costs more than overshooting (the no-deadlock rule `ResumeSlot` documents). The exceptions are the layer's own hard zeros: a machine whose cap is 0 still holds them, as `:zero_only` does today, and a pool holds them only on a hard rule (§3.5, §4.5) |
 
 A layer that falls below its occupancy stops admitting new work. It never stops
 work that's running.
@@ -267,7 +274,7 @@ A **seat** is one unit of in-flight work on a pool:
 
 | Holder | Takes a seat on | Today (`Concurrency.occupants/0`, `concurrency.ex:315-363`) |
 |---|---|---|
-| A ticket In progress (`SlotGate.holds_slot?/1`), in **every** phase, including between rounds, while its worker is parked on a cross-pool reviewer, and while it's released to wait for CI | Its implementer pin's pool | Counted only while its own worker, or a sub-worker on the same provider, is live. Parked, released (bd-cut6uv) and quota-held (bd-zkmvia) workers drop out |
+| A ticket In progress (`SlotGate.holds_slot?/1`), in **every** phase, including between rounds, while its worker is parked on a cross-pool reviewer, and while it's released to wait for CI | Its implementer pin's pool | Counted while its primary worker is the ticket's only live process, or while a sub-worker on the same provider runs. It drops out while the primary is parked behind a sub-worker on another provider (bd-dp0p58), released to wait for CI (bd-cut6uv) or held for quota (bd-zkmvia) |
 | A live run that doesn't belong to a ticket counted above on the same pool: a reviewer for a ticket pinned elsewhere, or a fix pass or conflict pass for a ticket in Merging | The pool it runs on | One per live worker |
 | An admitted dispatch whose worker hasn't registered | Its pool | Yes (`Admission.pending/0`) |
 
@@ -329,9 +336,10 @@ Here's why each piece is there:
   ticket leaves In progress, and its follow-ups are never held (§2.2). So the
   constraint has to hold one *seat life* ahead, not one run ahead.
 
-  A shorter horizon over-commits. Take 9 seats admitted to close a 30-minute
-  gap: they keep drawing for 90 minutes past that gap. With the illustrative
-  rate in §3.8, that would run a 5h window from 0.19 to past 1.0.
+  A shorter horizon over-commits. With §3.8's live readings and prior rate
+  (0.0667 per seat-hour), a 30-minute horizon admits 9 seats. They keep
+  drawing for 90 minutes after that horizon ends: 9 × 0.0667 × 2 h = 1.2 of
+  the window, which runs the 5h window from 0.19 to past 1.0.
 - **The fresh-window term is the over-commit guard near a reset.** Just before
   a reset, `n_before` grows without bound, because there's no time left to
   spend. The seats then spill into a window whose line starts at its floor
@@ -348,11 +356,11 @@ Here's why each piece is there:
   `ε = H/W − b·H`.
 
   On a 7d window that tolerance is about 1.2 points (`H/W = 2/168`), so a
-  weekly line acts as a hard line. On the 5h window it's 40 points of
-  *transient* band, never a steady offset. At the end of the horizon the
-  projected usage is back on the line, and the floor still binds early in a
-  window, because `line(t)` stays flat there. §3.9 and O1 cover how this
-  differs from the gate.
+  weekly line acts as a hard line. Early in the week, where the line sits
+  flat at its floor, the floor binds. On the 5h window it's 40 points of
+  *transient* band, never a steady offset: at the end of the horizon the
+  projected usage is back on the line. §3.9 and O1 cover how this differs from
+  the gate.
 - **Flat sides stay flat.** An account the operator keeps on `flat` has a
   constant line, so `n_w = (flat − u_now − b·H)/(ρ·H)`. Codex's `session` and
   agy's `used` labels, which have no window length, fall back to flat exactly
@@ -584,14 +592,23 @@ the next pass, because every pass starts from the top. So a P0 bound to a full
 pool gets that pool's next free seat, and other pools' work runs meanwhile. No
 reservation is needed.
 
-**Example, per the code.** Four Ready cards, in order:
+**Example, per the code (a hypothetical state).** Here's the setup:
+- `claude:default` has 3 of 3 seats in use.
+- agy's Gemini pool is over its weekly line, and its Claude/GPT pool has room.
+- `default` routes D3 to `standard` and D5 to `flagship`. agy's built-in tier
+  map (`apps/arbiter/lib/arbiter/agents/gemini/config.ex:45-50`) runs
+  `standard` as `gemini-3.8-flash-medium` (the Gemini pool) and `flagship` as
+  `claude-opus-4-6-thinking` (the Claude/GPT pool).
 
-| Card | Can use | Today | The walk |
+Two unconstrained Ready cards in `default`, in order:
+
+| Card | Its candidates | Today | The walk |
 |---|---|---|---|
-| bd-a, P1, `require: [antigravity]`, an economy (Gemini) model | agy Gemini only: weekly over its line, budget 0 | Its card quota hold rides the board-hold path, so it **stops the queue**. `promote` is `nil`; nothing dispatches until the Gemini line catches up | Skipped: "waiting for antigravity gemini: weekly 0.43 ≥ line 0.42" |
-| bd-b, P1 | Claude, 1 free seat | Queued behind bd-a | Placed on (claude, local) |
-| bd-c, P2, vstim, Claude only | Claude, now full | Queued | Skipped: "waiting for a Claude seat: 3 of 3" |
-| bd-d, P2 | Claude, or agy with a Claude/GPT model (R9) | Queued | Placed on (agy claude/gpt, local) when R9 lists that model; otherwise skipped |
+| bd-a, P1, D3 | Claude: full. agy on the Gemini pool: held | If bd-a is the workspace's sample, `pool_holds/4` holds every unconstrained card in `default`, bd-b included. If it isn't, bd-a's own quota verdict stops the queue at the head. Either way, nothing dispatches | Skipped: "waiting for claude: 3 of 3; antigravity gemini: weekly over its line" |
+| bd-b, P2, D5 | Claude: full. agy on the Claude/GPT pool: free | Held with bd-a, or queued behind it | Placed on (agy claude/gpt, local) |
+
+With R9's model choice, a D3 card could reach the Claude/GPT pool too, when
+its tier lists such a model.
 
 ### 4.3 One dispatch per pass, many placements per plan
 
@@ -674,7 +691,8 @@ These surfaces go:
   (`apps/arbiter/lib/arbiter/node_agent/protocol.ex:91`), the formula every node
   already reports: `min(cpus/2, 0.8 × MemTotal / 4 GiB)`, at least 1. It's
   enforced like a node's cap.
-- **On this machine,** the suggestion is 6 (§1.3), above today's binding 3.
+- **On the primary,** as a worker container sees it, the suggestion is 6
+  (§1.3), above today's binding 3.
 - **The local row on `/nodes`** shows the suggestion as its source, as remote
   rows do.
 
@@ -753,7 +771,7 @@ changes.
 |---|---|---|
 | Node capacity (RW8, RW14) | Chosen after the account (`dispatch.ex:242-243`), so the machine can't influence which account is picked | The walk picks the pair. The pool comes first, then a node that can run it. Non-Claude providers stay local-only (`Placement.eligible/1`'s `non_claude_provider`). Machine capacity is `Nodes.Capacity`'s sum, with no ceiling |
 | The scheduler cap (`slots_total`) | `min` of the terms, in tickets (`snapshot.ex:461-473`) | No independent number. The header shows per-pool seats and per-machine slots. Where a single number is still read (the lift cap and the header total), it's `min(Σ budget over pools any Ready card can use, Σ machine caps)`, computed at plan time |
-| Finish-first and the ES3 order | Head-of-line: a held head stops the order | The order key is unchanged and the walk keeps it. A skipped card is first in line on the next pass. Finish-first still ranks in-progress epics' children first, and when their pool is full, other work uses the capacity they can't |
+| Finish-first and the ES3 order | A held head stops the queue, apart from the skips in §1.1 | The order key is unchanged and the walk keeps it. A skipped card is first in line on the next pass. Finish-first still ranks in-progress epics' children first, and when their pool is full, other work uses the capacity they can't |
 | The ES lift cap (`max_lifted_in_flight`, default `slots_total − 1`) | Static between config changes | `QueueOrder.build/6` (`apps/arbiter/lib/arbiter/board/queue_order.ex:105`) gets the plan-time `slots_total` above, so the lift cap moves with the budgets. With 2 seats it's 1, and one seat still serves unlifted work |
 | ES7's readout and ES9's switch | Ready wait measured from `ticket_transitions` | Switching to the walk changes Ready wait by itself: skipped cards stop blocking others. ES7's 14-day window must not straddle the `enforce` switch, or it must split at that date. The plan entry gains `wait_cause` (`:queued`, `{:capacity, layer}`, `:own_hold`) so the readout can attribute wait |
 | R7's board hold (`exempt_card_holds`) | Per-card verdict at the exempt line | Replaced in `enforce` by the per-card exempt budget (§3.3) |
@@ -780,7 +798,7 @@ Status as of `3d12c3e5`:
 | R5 | Scoring: `Headroom.windows/3`, `Price`, `Score` | Ranks a card's open pools. In `enforce`, feasibility moves from `gate.check` to a free seat (§7) | **Keep**, re-scoped: rank only |
 | R6 | Hand competence matrix and its shadow report | Unaffected. Its shadow-and-report pattern is the model for §10 | **Keep** |
 | R7 | P0 pace exemption | The exempt budget: the same `{:paced_exempt, …}` side through the same function. The config keys and their tighten-only rules are unchanged | **Fold in** |
-| R9 | Within-provider model choice, plus in-flight reservations | The reservation half is seats (§3.2) plus the lag projection (§3.3). The model-choice half (`tier_models` lists, `entries/3`, `allow_upgrade`) is how a card reaches a pool with free seats, as bd-d does in §4.2 | **Keep, re-scoped**: model choice only |
+| R9 | Within-provider model choice, plus in-flight reservations | The reservation half is seats (§3.2) plus the lag projection (§3.3). The model-choice half (`tier_models` lists, `entries/3`, `allow_upgrade`) is how a card reaches a pool with free seats (§4.2's closing note) | **Keep, re-scoped**: model choice only |
 | R10 | Defer-until-reset (bd-3jshn8) | A full pool's budget rises at its reset by itself, so a card that only fits that pool already waits for the reset (§3.3). R10's distinct case is holding a card that *fits* another pool now because a cheaper pool resets soon. Under a budget, a free seat is one the pool can sustain on pace, so deferring it trades latency for nothing the budget doesn't already protect. Its one good idea, that near-reset quota is cheap, is the `n_before` term | **Drop** (close as superseded) |
 | R11 | Window-share `δ` | The same per-model share drives weighted seats (DC11) and the price's `δ` (unchanged) | **Fold in** (DC11) |
 | R12 | The difficulty feed | Unaffected | **Keep** |
@@ -840,6 +858,9 @@ node, repo and fair-share lines, and loses `:ceiling` and `:workspace`.
 
 MCP `scheduler_status` returns the same body, which keeps the two in parity.
 
+Here's an illustrative layout. It isn't a capture: the Claude line reuses §3.8's
+prior-rate example, and the other numbers only show the shape.
+
 ```
 Board scheduler is running.
 Admission: shadow (the new walk agrees on 47 of 52 dispatches since 2026-10-12)
@@ -854,9 +875,6 @@ Repos                                 cap   implementer runs
   default/vstim                         2      1
 Slots used: 3 (bd-…, bd-…, bd-…)
 ```
-
-The illustrative lines above are labelled as such. Real ones come from the
-running install.
 
 **Elsewhere.**
 - `quota_get` and `arb quota` gain a `budget` block per account.
@@ -943,15 +961,14 @@ two don't confound each other.
 ### 10.6 Migration notes
 
 **Install `conductor_system_max_concurrent` (DC1).** A migration drops the
-`installation_settings` column. First it does three things:
+`installation_settings` column. Before it does, it checks the stored value:
 
-1. **No value:** if no value is set, which is the live state per the operator,
-   it does nothing else.
-2. **A value, and no enrolled node:** if a value `K` is set, the install has no
-   enrolled node, and `nodes_local_max_workers` is unset, it copies `K` there.
-   It's the same machine and the same number, now enforced at the node layer.
-3. **The advisory line:** whenever a value was set, it logs one line, also shown
-   once by `arb server doctor`:
+- **Unset** (the live state, per the operator): nothing else happens.
+- **Set to `K`, with no enrolled node and `nodes_local_max_workers` unset:** it
+  copies `K` into `nodes_local_max_workers`. It's the same machine and the same
+  number, now enforced at the node layer.
+- **Set to `K`, in any case:** it logs one advisory line, which
+  `arb server doctor` also shows once:
 
    > conductor_system_max_concurrent (K) was removed: the install's
    > concurrency is the sum of its machines' caps. To keep K on this machine:
@@ -997,7 +1014,7 @@ rollback is a forward migration that restores the column, if it's ever needed.
 | I6 | **One definition of the line.** `Budget` reaches `Pace` only through `Gate.pace/6` | A module-boundary test (no direct `Pace` call), plus fixtures that compare `line(now)` with the gate's `effective_policy` |
 | I7 | **Hysteresis.** A monotone `raw` gives a monotone published budget, and oscillation inside `[B, B + 1.25)` publishes nothing | StreamData sequences |
 | I8 | **No preemption.** Nothing that stops a run reads the budget | Structural: `Budget` is read only by `Admission`, the walk and the display |
-| I9 | **Follow-ups are never capacity-held** in any mode. In `enforce`, they're not pace-held either | Dispatch tests per follow-up role |
+| I9 | **Follow-ups are never held because a layer is full**, in any mode. A layer at a hard zero still holds them, as `:zero_only` does today. In `enforce`, they're not pace-held either | Dispatch tests per follow-up role |
 | I10 | **The near-reset guard.** With a reset inside `H`, `budget ≤ n_after` | §3.8 example B as a fixture, plus a property over `t_r` |
 
 The fixtures are §3.8's two examples, flat mode, Codex `session`, both agy
@@ -1039,8 +1056,8 @@ and the exempt budget.
 | E4 | `Admission.decide/4` (`admission.ex:183`) | Account headroom | The pool's seat headroom; the planned pool | DC8 |
 | E5 | `put_dispatch/3` (`worker.ex:1206-1210`) | Workspace and provider | Plus `account_id`, `pool`, `node_id` | DC1, DC4 |
 | E6 | `Scheduler.plan/1`, `step/3`, `decide/3` (`apps/arbiter/lib/arbiter/board/scheduler.ex:164-198`, `:245-315`) | Head-of-line | The walk (§4) | DC6 |
-| E7 | `Snapshot.capacity_terms/3` (`snapshot.ex:793-848`), `capacity_and_slots/4` (`:461-473`), `quota_hold/2` (`:979`), `ticket_quota_holds/3` (`:1034`) | One `slots_total`; binary holds | Capacity sets per pool, machine and repo; the binary holds retired in `enforce` | DC1, DC6, DC12 |
-| E8 | `Autopilot` (`autopilot.ex:278-285`, `:1105-1113`) | The 15 s hold is how cards get skipped | The race fallback only; subscribe to `budget_changed` | DC6 |
+| E7 | `Snapshot.capacity_terms/3` (`snapshot.ex:793-848`), `capacity_and_slots/4` (`:461-473`), `quota_hold/2` (`:979`), `ticket_quota_holds/3` (`:1034`), `ticket_constraint_holds/3` (`:1103`), `pool_holds/4` (`:1192`) | One `slots_total`; binary holds; one sample ticket per workspace | Capacity sets per pool, machine and repo, and a per-card fit. The binary holds and the sample-based pool hold retire in `enforce`; a constraint stays a card-own hold | DC1, DC6, DC12 |
+| E8 | `Autopilot` (`autopilot.ex:278-285`, `:1105-1113`) | The 15 s hold skips a card a dispatch just refused | The race fallback only; subscribe to `budget_changed` | DC6 |
 | E9 | `Dispatch.dispatch/2` (`dispatch.ex:227-250`), `maybe_quota_gate` (`:2102`) | Gate, then account, then node | `opts[:planned]`; pace rules off for fresh admissions in `enforce`; `ensure_repo_capacity/2` after `:243` | DC8, DC9 |
 | E10 | A follow-up's quota check: `Dispatch.resume/2`'s quota gate for a ReviewGate fix round (bd-6omte4); `ReviewerRouting.check_quota/2` (`reviewer_routing.ex:868`) | The full gate | `pace: false` in `enforce`: the hard rules only | DC8 |
 | E11 | `DispatchQueue.slot_free?/2` (`dispatch_queue.ex:685`) | The cap | The seat check; no fresh quota holds in `enforce` | DC8 |
@@ -1072,10 +1089,10 @@ and the exempt budget.
 | Auto-tune `max_concurrent`: a job writes the computed number into the static field | It churns an operator-owned field and its audit trail. The binary gate still sits on top, and it needs the same hysteresis anyway |
 | Keep the gate, and add the budget only as a ceiling | The operator asked to replace the on/off gate. The gate also flaps at the line: seats admitted just under it all draw past it |
 | Rate-limit starts (a token bucket of starts per hour) | Runs are long, so the draw is concurrent. Machines are bounded by concurrency too, so one unit across layers is simpler to explain |
-| A short horizon (one run, 30–60 min) | It under-counts the commitment of a seat whose follow-ups are never held, and over-commits (§3.3, example B) |
+| A short horizon (one run, 30–60 min) | It under-counts the commitment of a seat whose follow-ups are never held, and over-commits (§3.3, and §3.8's example B near a reset) |
 | A budget in dollars | Dollars aren't the scarce unit on these plans (routing §2.4) |
 | An optimal assignment of cards to pairs each pass | It breaks the ES3 order and can't be explained from its record. The greedy walk in order *is* the policy |
-| Keep head-of-line blocking | It idles capacity a later card could use. The 15 s card hold is already a trial-and-error workaround for it |
+| Keep head-of-line blocking | It idles capacity a later card could use. The constraint hold, the per-workspace pool hold and the 15 s card hold are already workarounds for it, each covering one case |
 | Preempt when a budget falls | Stranding work costs more than an overshoot that converges as tickets finish |
 | Re-purpose `share` as the fair-share weight | It would silently change what a stored value means |
 | Keep `conductor.max_concurrent` as an optional ceiling (RW14) | The operator ruled it out on 2026-10-10. No layer leaves it a job, and it adds a third number to every capacity surface |
