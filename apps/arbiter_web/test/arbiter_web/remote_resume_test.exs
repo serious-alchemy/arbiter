@@ -168,8 +168,16 @@ defmodule ArbiterWeb.RemoteResumeTest do
     assert Worker.whereis(ctx.issue.id) == nil
 
     # 3. Recovery takes the run back into the home clone; the Reconciler settles its row.
+    # A held run whose container still runs would be adopted by a new Worker instead
+    # (bd-4p1vui; the next test): this is the run adoption does not take (switched off
+    # here, as for an agent without `run_adopt` or a container that stopped).
     assert {:ok, %{^run_id => :collected}} =
-             Recovery.await(primary?: true, node_timeout_ms: 20_000, total_timeout_ms: 30_000)
+             Recovery.await(
+               primary?: true,
+               adopt?: false,
+               node_timeout_ms: 20_000,
+               total_timeout_ms: 30_000
+             )
 
     assert git!(ctx.home, ["rev-parse", "refs/heads/" <> ctx.branch]) == node_a_commit
     assert File.read!(Path.join(ctx.home, "wip-a.txt")) == "uncommitted on node A\n"
@@ -185,7 +193,9 @@ defmodule ArbiterWeb.RemoteResumeTest do
 
     assert {:ok, %{worker_pid: pid}} = Dispatch.resume_session(ctx.issue.id, resume_opts(ctx))
     on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, pid) end)
-    assert_eventually(fn -> File.exists?(Path.join(ctx.stub, "r2.status")) end)
+    # The fake agent's last write: what it wrote before is whole (a redirect creates its
+    # file before the command has written to it).
+    assert_eventually(fn -> File.exists?(Path.join(ctx.stub, "r2.done")) end)
 
     %{run_id: r2_id} = Worker.state(pid)
     r2 = Ash.get!(Run, r2_id)
@@ -216,6 +226,62 @@ defmodule ArbiterWeb.RemoteResumeTest do
         :not_found -> false
       end
     end)
+  end
+
+  # bd-4p1vui composes with the wait for collect: with adoption on (the default), the run
+  # node A held across the restart goes to a new Worker through the real
+  # `Dispatch.adopt/2`, which the resume's hold does not block. A resume asked before
+  # that is held; one asked after is refused, since the ticket's run is live under its
+  # new Worker. Nothing is placed anywhere else.
+  test "a held run a new Worker adopts is never raced by a resume", ctx do
+    connect_agent!(ctx, ctx.node_a, "home-a")
+    r1 = run_row!(ctx)
+    run_id = r1.id
+    write_agent_script!(ctx, node_a_work())
+    assert {:ok, prepared} = place_on_a(ctx, r1)
+    assert {:ok, handle} = Executor.open(prepared)
+    assert_receive {^handle, {:data, {:eol, "line-1"}}}, 15_000
+
+    restart_primary!()
+    await_hold!(ctx.node_a.id, run_id)
+
+    assert {:error, {:no_node_capacity, %{reason: :awaiting_collect, phrase: phrase}}} =
+             Dispatch.resume_session(ctx.issue.id, resume_opts(ctx))
+
+    assert phrase =~ "(held); it is adopted or collected first"
+
+    adopt = fn run, opts -> Dispatch.adopt(run, Keyword.merge(resume_opts(ctx), opts)) end
+
+    assert {:ok, %{^run_id => :adopted}} =
+             Recovery.await(
+               primary?: true,
+               adopt_fun: adopt,
+               node_timeout_ms: 20_000,
+               total_timeout_ms: 30_000
+             )
+
+    adopter = Worker.whereis(ctx.issue.id)
+    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, adopter) end)
+    assert %{run_id: ^run_id} = Worker.state(adopter)
+
+    # The run is its Worker's now, not a node's claim; a resume is refused as active work.
+    assert Recovery.pending_collect(ctx.issue.id, gate_open?: true) == []
+
+    assert {:error, {:worker_active, _}} =
+             Dispatch.resume_session(ctx.issue.id, resume_opts(ctx))
+
+    assert Worker.whereis(ctx.issue.id) == adopter
+    assert [%{id: ^run_id}] = Ash.read!(Run) |> Enum.filter(&(&1.task_id == ctx.issue.id))
+    assert container_starts(ctx) == 1
+    assert Arbiter.NodeAgent.Run.info(run_id)["state"] == "running"
+  end
+
+  defp container_starts(ctx) do
+    ctx.stub
+    |> Path.join("calls")
+    |> File.read!()
+    |> String.split("\n")
+    |> Enum.count(&String.starts_with?(&1, "run "))
   end
 
   # ---- node A's run ------------------------------------------------------------------
@@ -297,6 +363,7 @@ defmodule ArbiterWeb.RemoteResumeTest do
     fi
     git -C "$wt" log --format=%H > "$D/r2.log"
     git -C "$wt" status --porcelain > "$D/r2.status"
+    : > "$D/r2.done"
     """
   end
 

@@ -903,6 +903,10 @@ defmodule Arbiter.Worker.Dispatch do
   # node, from a home clone that lacks that run's work, and race its container. It
   # waits for the collect: held for a human (409, nothing stopped), deferred for an
   # automatic origin and replayed once `resume_room?/2` sees it collected.
+  #
+  # After a restart Recovery may instead hand a held run to a new Worker (bd-4p1vui,
+  # §10.4.3): the run carries on and the Worker refuses this resume as active work.
+  # Adoption never comes through here (`adopt/2` asks none of the resume's gates).
   defp ensure_collected(%Issue{} = task, kind, opts) do
     case Recovery.pending_collect(task.id) do
       [] ->
@@ -916,7 +920,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp awaiting_collect(%Issue{id: task_id}, [first | _] = runs) do
     phrase =
       "held — run #{first.run} of #{task_id} is still on node #{first.node} " <>
-        "(#{first.state}); it is collected first"
+        "(#{first.state}); #{settled_by(first.state)} first"
 
     %{
       task_id: task_id,
@@ -928,9 +932,15 @@ defmodule Arbiter.Worker.Dispatch do
       message:
         phrase <>
           ". The resume starts from the home clone once that run's work is in it " <>
-          "(Recovery collects it after a restart); resume again once it is."
+          "(Recovery collects it after a restart, unless a new Worker adopts the run and " <>
+          "carries it on); resume again once it is collected."
     }
   end
+
+  # A run the node quiesced, or is handing back, can only be collected; one it still
+  # runs or holds may be adopted instead.
+  defp settled_by(state) when state in [:retained, :recovering], do: "it is collected"
+  defp settled_by(_state), do: "it is adopted or collected"
 
   defp hold_resume(:ok, _task, _kind, opts), do: {:ok, opts}
 

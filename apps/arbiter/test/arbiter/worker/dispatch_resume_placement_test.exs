@@ -344,7 +344,12 @@ defmodule Arbiter.Worker.DispatchResumePlacementTest do
       assert info.reason == :awaiting_collect
       assert [%{run: run_id, state: :held, node: "held-node"}] = info.runs
       assert run_id == run.id
-      assert info.message =~ "collected"
+      # A held run may yet be adopted by a new Worker (bd-4p1vui) rather than collected.
+      assert info.phrase ==
+               "held — run #{run.id} of #{c.task.id} is still on node held-node (held); " <>
+                 "it is adopted or collected first"
+
+      assert info.message =~ "adopts"
       refute_received {:spawned, _}
       assert Worker.whereis(c.task.id) == c.first.worker_pid
     end
@@ -369,8 +374,12 @@ defmodule Arbiter.Worker.DispatchResumePlacementTest do
       })
 
       assert {:error,
-              {:no_node_capacity, %{reason: :awaiting_collect, runs: [%{state: :retained}]}}} =
+              {:no_node_capacity,
+               %{reason: :awaiting_collect, runs: [%{state: :retained}], phrase: phrase}}} =
                Dispatch.resume_session(c.task.id, resume_opts([]))
+
+      # Quiesced, it can only be collected.
+      assert phrase =~ "(retained); it is collected first"
     end
 
     test "once the run is collected and settled, the resume goes ahead", c do
