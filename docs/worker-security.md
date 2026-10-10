@@ -1207,6 +1207,32 @@ container cannot reach a host socket): it never runs on the operator's agent.
 `arb server doctor` (guardrails report) flags a binding that names a secret the
 workspace does not have (`binding_secret_missing`).
 
+## Research read access to Arbiter's own data (`research_read`, bd-6ircwr)
+
+A research run that studies Arbiter itself (run history, logs, usage, review rounds,
+transcripts) is refused by the worker tier: `arb worker runs|log|show` and `arb usage`
+are coordinator-only routes, and the transcript archive is hidden from the sandbox.
+`research_read` is a ticket permission (G12 vocabulary, no argument, never optional) that
+opens a **read-only** window for one run. There is no new token tier: the grant rides the
+worker token's `permissions` claim.
+
+| Layer | What it does | Where |
+|---|---|---|
+| Declaration | A coordinator or the operator adds `research_read` to a `task` or `research` ticket. Any other issue type is refused; a worker never sets it (it may `permission_request` it) | `Permissions.check_issue_type/2` |
+| Workspace opt-in | **Off by default.** The workspace must bind it: `guardrails.bindings.research_read` (any map; `grant_by: operator` keeps it pending until the operator grants it). No binding, no claim, no mount | `ResearchGrant.resolve/3` |
+| Role | A reviewer is never given it (§5.4) | `ResearchGrant.resolve/3` |
+| API | The claim opens only the `:research_read` routes in `ApiPolicy`, all `GET`: `/api/workers` (index, show, log, run_log_list, history, history/:id), `/api/usage`, `/api/usage/events`, `/api/review_gate_rounds`. The controllers confine a workspace-bound token to **its own workspace** (another's data is a 404, naming another workspace a 403). Prompts, calibration, external reviews and every mutating route stay coordinator-only | `ApiPolicy`, the controllers |
+| Transcripts | Under `sandbox.backend: podman` the run's tmp dir gets `research-transcripts/`: a **copy** (mode `0444`) of the most recent transcripts of its workspace, plus an `index.tsv` (run id, task id, kind, start), bound read-only and announced as `ARBITER_TRANSCRIPTS_DIR`. It is a copy because the archive is keyed by run id with no workspace in the path (mounting it would expose every workspace), and a hard link would let a write reach the original. It lives and dies with the run. Other backends keep `arb worker log` as the way in | `ResearchGrant.stage_transcripts/3`, `ContainerSpawn.prepare/1` |
+| Audit | Each dispatch that grants it appends a `granted` `permission_events` row (source `system`); each request a granted token makes is logged (`research_read: <task> (workspace <id>) GET <path>`). A grant that is declared but withheld is logged with its reason | `ResearchGrant.audit/3`, `ApiAuth` |
+
+A run placed on a remote node is **refused** (`{:research_transcripts_unsupported,
+:remote_node}`) rather than started without its transcript mount. The snapshot is capped
+at 200 transcripts and 256 MiB in total (newest first). The audit row is per dispatch
+(`run_id` is empty: it is written before the run exists).
+
+Not covered: a mid-run grant takes effect at the next dispatch or resume (the claim is
+minted at spawn).
+
 ## Routing eligibility from guardrails (bd-atll60, G13)
 
 Guardrail eligibility is a **hard filter that runs before any optimisation**

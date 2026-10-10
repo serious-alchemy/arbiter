@@ -43,6 +43,8 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolvePermissions do
     declared = Changeset.get_attribute(changeset, :permissions)
 
     with {:ok, declared} <- Vocabulary.normalize(declared),
+         :ok <-
+           Vocabulary.check_issue_type(declared, Changeset.get_attribute(changeset, :issue_type)),
          {:ok, planned} <- Vocabulary.plan([], declared, authority, block) do
       repo = Changeset.get_attribute(changeset, :repo)
       carried = MapSet.new(declared, &Vocabulary.required_form/1)

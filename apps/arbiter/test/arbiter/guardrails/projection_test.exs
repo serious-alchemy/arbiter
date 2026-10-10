@@ -201,6 +201,12 @@ defmodule Arbiter.Guardrails.ProjectionTest do
       assert p.granted == [] and p.withheld == []
     end
 
+    test "research_read is not a tier-gated reach: it projects nothing here (ResearchGrant owns it)" do
+      p = build(["research_read", "network:api.example.com:443"], :probation)
+      assert p.granted == ["network:api.example.com:443"]
+      assert p.withheld == [] and p.claims == []
+    end
+
     test "a reviewer gets no action permissions at all" do
       p = build(["prod_read", "network:api.example.com:443"], :privileged, role: :reviewer)
       assert p.env == [] and p.hosts == [] and p.tunnels == []

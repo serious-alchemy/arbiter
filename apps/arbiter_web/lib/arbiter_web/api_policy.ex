@@ -79,6 +79,14 @@ defmodule ArbiterWeb.ApiPolicy do
       names the scope rule, never a silent miss.
     * `:message_mark_read` — coordinator; or a worker marking a message
       addressed to its own task.
+    * `:research_read` — coordinator; or a worker token whose ticket was granted
+      `research_read` (bd-6ircwr; `Arbiter.Worker.ResearchGrant`, off unless the
+      workspace binds it). Only on the read-only run, usage and review-round `GET`s
+      a research run needs to study Arbiter's own behaviour: `arb worker
+      runs|show|log`, `arb usage show|events`, `arb review rounds`. The controllers
+      confine a workspace-bound token to its own workspace, and no mutating route
+      carries this policy, so the grant opens no write. A worker without the claim,
+      and a refine token, get the coordinator-only refusal.
     * `:grok_token` — coordinator or worker. `POST /api/grok/token` hands a grok
       worker a short-lived access token (`Arbiter.Grok.CredentialBroker`); the
       refresh token never leaves the server. A refine token has no use for it.
@@ -107,6 +115,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :message_send
           | :message_show
           | :message_mark_read
+          | :research_read
           | :grok_token
 
   # The REST twin of `ticket_update_progress` (`Arbiter.MCP.Tools.Task`'s
@@ -278,15 +287,15 @@ defmodule ArbiterWeb.ApiPolicy do
     {:patch, "/api/installation/config"} => :coordinator,
 
     # ---- usage / reviews / quota ------------------------------------------
-    {:get, "/api/usage"} => :coordinator,
-    {:get, "/api/usage/events"} => :coordinator,
+    {:get, "/api/usage"} => :research_read,
+    {:get, "/api/usage/events"} => :research_read,
     {:get, "/api/usage/calibration"} => :coordinator,
     {:get, "/api/external_reviews"} => :coordinator,
     {:get, "/api/external_reviews/:id/transcript"} => :coordinator,
     {:get, "/api/external_reviews/:id"} => :coordinator,
     # Posts to the PR under the fleet's identity: dispatch tier, like the review itself.
     {:post, "/api/external_reviews/:id/greenlight"} => :dispatch,
-    {:get, "/api/review_gate_rounds"} => :coordinator,
+    {:get, "/api/review_gate_rounds"} => :research_read,
     {:get, "/api/quota"} => :quota_read,
     {:get, "/api/coverage_shadow/preflip_gate"} => :coordinator,
 
@@ -294,13 +303,15 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/workers/dispatch"} => :dispatch,
     {:post, "/api/workers/review"} => :dispatch,
     {:post, "/api/workers/:task_id/resume"} => :dispatch,
-    {:get, "/api/workers/history"} => :coordinator,
-    {:get, "/api/workers/history/:id"} => :coordinator,
-    {:get, "/api/workers"} => :coordinator,
-    {:get, "/api/workers/:task_id"} => :coordinator,
-    {:get, "/api/workers/:task_id/log"} => :coordinator,
+    # The read half is what a `research_read` grant opens (bd-6ircwr); the prompt
+    # (other tasks' composed instructions) and every write stay coordinator-only.
+    {:get, "/api/workers/history"} => :research_read,
+    {:get, "/api/workers/history/:id"} => :research_read,
+    {:get, "/api/workers"} => :research_read,
+    {:get, "/api/workers/:task_id"} => :research_read,
+    {:get, "/api/workers/:task_id/log"} => :research_read,
     {:get, "/api/workers/:task_id/prompt"} => :coordinator,
-    {:get, "/api/workers/:task_id/run_log_list"} => :coordinator,
+    {:get, "/api/workers/:task_id/run_log_list"} => :research_read,
     {:post, "/api/workers/:task_id/stop"} => :coordinator,
 
     # ---- queue / alerts / breakers / scheduler ----------------------------
@@ -382,6 +393,18 @@ defmodule ArbiterWeb.ApiPolicy do
           scope,
           "lacks operator proof (this route is operator-only: node administration, dashboard " <>
             "login, trust promotion)"
+        )
+  end
+
+  def authorize(:research_read, %Scope{tier: :coordinator}, _params), do: :ok
+
+  def authorize(:research_read, %Scope{tier: :worker} = scope, _params) do
+    if Scope.permission?(scope, "research_read"),
+      do: :ok,
+      else:
+        forbidden(
+          scope,
+          "may not call this route (coordinator only; a ticket granted research_read may read it)"
         )
   end
 
