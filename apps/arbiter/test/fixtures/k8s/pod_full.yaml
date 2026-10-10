@@ -1,0 +1,424 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/name: arbiter-worker
+    arbiter.dev/install: inst-1
+    arbiter.dev/node: node-1
+    arbiter.dev/run: run-0123456789abcdef
+    arbiter.dev/task: bd-1nfuq5
+  name: arb-run-0123456789ab
+  namespace: arbiter-workers
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: arbiter-controller
+      uid: '0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11'
+spec:
+  activeDeadlineSeconds: 5400
+  automountServiceAccountToken: false
+  containers:
+    - command:
+        - tini
+        - --
+        - sh
+        - -c
+        - |
+          set -eu
+          set -a
+          . /run/arb/env
+          set +a
+          rm -f /run/arb/env
+          exec "$$@"
+        - sh
+        - claude
+        - --print
+        - --output-format
+        - stream-json
+      env:
+        - name: ARB_BRIDGES
+          value: proxy arb
+        - name: ARB_BRIDGE_ADDR
+          value: 10.43.98.199
+        - name: ARB_WORKER_BEAD_ID
+          value: bd-1nfuq5
+        - name: AWS_ACCESS_KEY_ID
+          value: minioadmin
+        - name: AWS_SECRET_ACCESS_KEY
+          value: minioadmin
+        - name: DATABASE_URL
+          value: postgres://postgres:postgres@127.0.0.1:5432/vstim_test
+        - name: HOME
+          value: /var/lib/arb/run/home
+        - name: LANG
+          value: C.UTF-8
+        - name: PGHOST
+          value: 127.0.0.1
+        - name: PGPASSWORD
+          value: postgres
+        - name: PGPORT
+          value: '5432'
+        - name: PGUSER
+          value: postgres
+        - name: S3_ENDPOINT
+          value: http://127.0.0.1:9000
+      image: registry.example.test/arbiter/beam@sha256:abababababababababababababababababababababababababababababababab
+      imagePullPolicy: IfNotPresent
+      name: worker
+      resources:
+        limits:
+          cpu: 1500m
+          memory: 3Gi
+        requests:
+          cpu: '1'
+          ephemeral-storage: 4Gi
+          memory: 2Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        procMount: Default
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /run/arb
+          name: run
+        - mountPath: /etc/arb/ca
+          name: ca
+          readOnly: true
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5
+          name: work
+          subPath: wt
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git
+          name: work
+          subPath: wt/.git
+        - mountPath: /var/lib/arb/run/home
+          name: work
+          subPath: home
+        - mountPath: /var/lib/arb/run/claude-config
+          name: work
+          subPath: claude-config
+        - mountPath: /var/lib/arb/run/prompt.md
+          name: run
+          readOnly: true
+          subPath: prompt-0
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/config
+          name: work
+          readOnly: true
+          subPath: wt/.git/config
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/hooks
+          name: work
+          readOnly: true
+          subPath: wt/.git/hooks
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/commondir
+          name: work
+          readOnly: true
+          subPath: wt/.git/commondir
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/objects/info/alternates
+          name: work
+          readOnly: true
+          subPath: wt/.git/objects/info/alternates
+      workingDir: /home/arbiter/worktrees/bd-1nfuq5
+  dnsConfig:
+    nameservers:
+      - 127.0.0.1
+  dnsPolicy: None
+  enableServiceLinks: false
+  hostUsers: false
+  imagePullSecrets:
+    - name: gitlab-registry
+  initContainers:
+    - command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # step 0: the netpol gate (K1-A3). Refused means the policy is programmed.
+          gate_host=$${ARB_GATE_ADDR%:*}
+          gate_port=$${ARB_GATE_ADDR##*:}
+          tries=0
+          max=$$(( $${ARB_GATE_TIMEOUT_S:-30} * 10 ))
+          while socat -T1 /dev/null "TCP:$${gate_host}:$${gate_port},connect-timeout=1" >/dev/null 2>&1; do
+            tries=$$((tries + 1))
+            if [ "$$tries" -ge "$$max" ]; then
+              echo "arbiter seed: the network policy is not enforced (netpol_unenforced)" >&2
+              exit 70
+            fi
+            sleep 0.1
+          done
+          exec /opt/arbiter/bin/seed
+      env:
+        - name: ARB_BOOT_NONCE
+          value: nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        - name: ARB_BRIDGE_ADDR
+          value: 10.43.98.199
+        - name: ARB_CONFIG_DIR
+          value: /var/lib/arb/run/claude-config
+        - name: ARB_GATE_ADDR
+          value: 10.43.0.1:443
+        - name: ARB_GATE_TIMEOUT_S
+          value: '30'
+        - name: ARB_HOME
+          value: /var/lib/arb/run/home
+        - name: ARB_RUN
+          value: run-0123456789abcdef
+        - name: ARB_WORKTREE
+          value: /home/arbiter/worktrees/bd-1nfuq5
+        - name: ARB_WORK_ROOT
+          value: /arb/work
+        - name: HOME
+          value: /tmp
+      image: registry.example.test/arbiter/beam@sha256:abababababababababababababababababababababababababababababababab
+      imagePullPolicy: IfNotPresent
+      name: seed
+      resources:
+        limits:
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        procMount: Default
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - mountPath: /arb/work
+          name: work
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /run/arb
+          name: run
+        - mountPath: /etc/arb/ca
+          name: ca
+          readOnly: true
+    - args:
+        - postgres
+        - -c
+        - fsync=off
+        - -c
+        - listen_addresses=127.0.0.1
+      env:
+        - name: POSTGRES_USER
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          value: postgres
+        - name: POSTGRES_DB
+          value: vstim_test
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      image: docker.io/library/postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      name: svc-postgres
+      resources:
+        limits:
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      restartPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        procMount: Default
+        readOnlyRootFilesystem: true
+        runAsGroup: 70
+        runAsUser: 70
+      startupProbe:
+        exec:
+          command:
+            - pg_isready
+            - -h
+            - 127.0.0.1
+            - -p
+            - '5432'
+            - -U
+            - postgres
+            - -d
+            - vstim_test
+        failureThreshold: 120
+        periodSeconds: 1
+      volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: svc-postgres-0
+        - mountPath: /var/run/postgresql
+          name: svc-postgres-1
+    - args:
+        - silo
+        - server
+        - /data
+        - --address
+        - 127.0.0.1:9000
+        - --console-address
+        - 127.0.0.1:9001
+      env:
+        - name: MINIO_ROOT_USER
+          value: minioadmin
+        - name: MINIO_ROOT_PASSWORD
+          value: minioadmin
+        - name: MINIO_KMS_SECRET_KEY
+          value: tonic-dev-key:DeVeLYqwANQlgD5S1i+5+EKa0Qemll5hfObx4DeRPd0=
+      image: docker.io/pgsty/silo
+      imagePullPolicy: IfNotPresent
+      name: svc-s3
+      resources:
+        limits:
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      restartPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        procMount: Default
+        readOnlyRootFilesystem: true
+      startupProbe:
+        exec:
+          command:
+            - curl
+            - -fsS
+            - -o
+            - /dev/null
+            - http://127.0.0.1:9000/minio/health/ready
+        failureThreshold: 120
+        periodSeconds: 1
+      volumeMounts:
+        - mountPath: /data
+          name: svc-s3-0
+        - mountPath: /tmp
+          name: svc-s3-1
+    - command:
+        - tini
+        - --
+        - /opt/arbiter/bin/snapshotter
+      env:
+        - name: ARB_BRIDGE_ADDR
+          value: 10.43.98.199
+        - name: ARB_RUN
+          value: run-0123456789abcdef
+        - name: ARB_SNAPSHOT_INTERVAL_S
+          value: '120'
+        - name: ARB_WORKTREE
+          value: /home/arbiter/worktrees/bd-1nfuq5
+        - name: HOME
+          value: /var/lib/arb/run/home
+      image: registry.example.test/arbiter/beam@sha256:abababababababababababababababababababababababababababababababab
+      imagePullPolicy: IfNotPresent
+      name: snapshotter
+      resources:
+        limits:
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      restartPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        procMount: Default
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5
+          name: work
+          subPath: wt
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git
+          name: work
+          subPath: wt/.git
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/config
+          name: work
+          readOnly: true
+          subPath: wt/.git/config
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/hooks
+          name: work
+          readOnly: true
+          subPath: wt/.git/hooks
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/commondir
+          name: work
+          readOnly: true
+          subPath: wt/.git/commondir
+        - mountPath: /home/arbiter/worktrees/bd-1nfuq5/.git/objects/info/alternates
+          name: work
+          readOnly: true
+          subPath: wt/.git/objects/info/alternates
+        - mountPath: /var/lib/arb/run/home
+          name: work
+          subPath: home
+        - mountPath: /var/lib/arb/run/claude-config
+          name: work
+          subPath: claude-config
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /run/arb
+          name: run
+        - mountPath: /etc/arb/ca
+          name: ca
+          readOnly: true
+  nodeSelector:
+    kubernetes.io/hostname: mesanna
+  priorityClassName: arbiter-worker
+  restartPolicy: Never
+  runtimeClassName: gvisor
+  securityContext:
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 10001
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: arbiter-worker
+  terminationGracePeriodSeconds: 120
+  tolerations:
+    - effect: NoSchedule
+      key: dedicated
+      operator: Equal
+      value: arbiter
+  volumes:
+    - emptyDir:
+        sizeLimit: 8Gi
+      name: work
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: tmp
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+      name: run
+    - configMap:
+        name: arbiter-ca
+      name: ca
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi
+      name: svc-postgres-0
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi
+      name: svc-postgres-1
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi
+      name: svc-s3-0
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi
+      name: svc-s3-1
