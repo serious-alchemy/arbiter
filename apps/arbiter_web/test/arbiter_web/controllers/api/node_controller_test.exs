@@ -183,7 +183,13 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert body["registry"] == %{"configured" => false}
 
       previous = Application.get_env(:arbiter, :image_publisher, [])
-      Application.put_env(:arbiter, :image_publisher, Keyword.put(previous, :probe, fn _ -> :ok end))
+
+      Application.put_env(
+        :arbiter,
+        :image_publisher,
+        Keyword.put(previous, :probe, fn _ -> :ok end)
+      )
+
       on_exit(fn -> Application.put_env(:arbiter, :image_publisher, previous) end)
 
       {:ok, _} = Arbiter.Settings.Registry.put("nodes.registry", "registry.example.com/arb")
