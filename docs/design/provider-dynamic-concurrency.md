@@ -947,6 +947,35 @@ Slots used: 3 (bd-…, bd-…, bd-…)
 - `quota_snapshots` rows carry `seats` and `budget`, so Reports can chart budget
   against usage and the line later.
 
+**As built (DC5, bd-2c2a4g).**
+- **One read model.** `Arbiter.Board.CapacityView` is the only reader of the
+  budgets for display: the board, `scheduler_status` / `GET /api/scheduler/status`
+  and `quota_get` / `GET /api/quota` all render its `status/1`, so a pool reads
+  the same everywhere. `Budget.to_json/1` is the JSON shape. Seats are the live
+  count (`Quota.Seats`), never the count the budget was computed with. No
+  admission surface and nothing that stops a run names it (`BudgetShadowTest`).
+- **Labelled.** Every surface carries the `scheduler_admission` mode:
+  `admission: {mode, label, decides, agreement}`. `decides` is true only under
+  `enforce`; under `legacy` and `shadow` the strip, the popups, the status and
+  the `quota_get` block say today's gate and caps still decide. `agreement` is
+  read off the `AdmissionShadowEvent` rows of the current mode (comparable
+  hold changes, how many agreed, since the first), not per dispatch; DC7 owns
+  the full comparison.
+- **Board.** `#board-capacity` sits beside the existing slot line (it does not
+  replace `#board-slots` yet; that waits for DC8, when the budgets decide). The
+  board loads under the installation's mode, so under `shadow` and `enforce` it
+  carries the walk and a Ready card shows the walk's own reason
+  (`data-layer-reason`, "Shadow walk: Waiting for claude:default: 3 of 3
+  seats"), or inside its hold badge's popup. The cap popup lists the pool,
+  machine, repo and fair-share lines (`CapacityExplainer.budget/2`). The
+  popups' "recent changes" come from a five-entry ring `Budget.Server` keeps
+  per pool beside the budget (`Server.changes/4`).
+- **`repos` and `fair_share`** are in the body and empty until DC9 (the repo
+  cap) and DC10 (workspace fair share) give them a cap to report.
+- **Not done here:** `routing_decision.budget` (the dispatch record already
+  carries the pool and pair in `admission_shadow`), and removing `:ceiling` and
+  `:workspace` from `CapacityExplainer`, which DC1 already deleted.
+
 ## 10. Shadow comparison and migration
 
 ### 10.1 Modes
