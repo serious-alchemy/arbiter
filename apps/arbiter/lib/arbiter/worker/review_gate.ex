@@ -1281,7 +1281,9 @@ defmodule Arbiter.Worker.ReviewGate do
       resume_pass: nil,
       # Whether the ticket carries this gate's `pass` marker (`ReviewPass`), so
       # a gate that never launched a pass writes nothing to clear.
-      pass_marked?: false
+      pass_marked?: false,
+      # bd-3fbj83: the ticket's marker is a held fix round's (`hold_marker/1`).
+      held_marked?: false
     }
 
     state = restore_pass_state(state, Keyword.get(opts, :resume_pass))
@@ -1343,12 +1345,12 @@ defmodule Arbiter.Worker.ReviewGate do
     phase = if role == :implementer, do: :revising, else: :reviewing
     marker = ReviewPass.marker(state, phase, id, state.timeout_ms)
     safe(fn -> ReviewPass.put(state.task_id, marker) end)
-    %{state | pass_marked?: true}
+    %{state | pass_marked?: true, held_marked?: false}
   end
 
   defp clear_pass(%{pass_marked?: true} = state) do
     safe(fn -> ReviewPass.put(state.task_id, nil) end)
-    %{state | pass_marked?: false}
+    %{state | pass_marked?: false, held_marked?: false}
   end
 
   defp clear_pass(state), do: state
@@ -1592,7 +1594,27 @@ defmodule Arbiter.Worker.ReviewGate do
       )
     end
 
-    %{state | local_hold: %{token: token, info: info, resume: resume}}
+    state = %{state | local_hold: %{token: token, info: info, resume: resume}}
+    mark_held_fix_round(state, resume)
+  end
+
+  # bd-3fbj83: a held fix round lives only in this process, so a restart lost it:
+  # no pass marker (the reviewer's was cleared, no implementer ever launched), a
+  # last run that ended on its own terms, nothing for the boot sweep to re-arm,
+  # and the ticket stayed In progress holding a slot with nobody working it.
+  # Write the `pass` marker the round would have had, flagged `held`, so
+  # `Reconciler.reconcile_review_passes/1` re-arms it without a cut-off run.
+  # Written once per hold; `mark_pass/3` replaces it with the running pass's own.
+  defp mark_held_fix_round(state, {:implementer, _findings, _prefix}), do: hold_marker(state)
+  defp mark_held_fix_round(state, _resume), do: state
+
+  defp hold_marker(%{held_marked?: true} = state), do: state
+
+  defp hold_marker(state) do
+    id = implementer_task_id(state.review_id, state.round)
+    marker = state |> ReviewPass.marker(:revising, id, state.timeout_ms) |> Map.put(:held, true)
+    safe(fn -> ReviewPass.put(state.task_id, marker) end)
+    %{state | pass_marked?: true, held_marked?: true}
   end
 
   # bd-cgdhlu: the reviewer is placed right before it spawns, so a `remote_only`

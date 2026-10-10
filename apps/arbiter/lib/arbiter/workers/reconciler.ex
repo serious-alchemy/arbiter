@@ -510,7 +510,7 @@ defmodule Arbiter.Workers.Reconciler do
     marker = ReviewPass.stored(issue)
 
     result =
-      if ResumeSlot.cut_off_by_restart?(task_id),
+      if marker["held"] == true or ResumeSlot.cut_off_by_restart?(task_id),
         do: rearm_fun.(issue),
         else: {:error, :not_interrupted}
 
