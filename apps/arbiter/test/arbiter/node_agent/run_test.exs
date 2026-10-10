@@ -519,6 +519,9 @@ defmodule Arbiter.NodeAgent.RunTest do
       Runs.fence_all()
       assert :ok = Run.adopt("a3")
       assert %{"run" => "a3", "reason" => "cancelling"} = wait_event("a3", "adopt.refused")
+
+      # the stop finishes before the test does (the stub writes into the test's dir until then)
+      wait_until(fn -> Run.info("a3")["state"] == "exited" end)
     end
 
     test "an unknown run is not found" do
