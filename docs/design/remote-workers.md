@@ -1,6 +1,6 @@
 # Remote workers v2: join token + node agent (pull model) — design
 
-**Status:** implemented (RW1–RW13 landed 2026-10-05 to 2026-10-07; only the optional items listed under §18 are not built). The end-to-end suite and the operator procedure are in [`docs/remote-workers-runbook.md`](../remote-workers-runbook.md); a real second node (`ryan-oryx-pro`) is enrolled, and the real-node canary is the post-deploy verification of bd-afcoop (placement stays `local_only` until the operator flips it). Originally proposed 2026-10-05. Epic bd-9bk0af; design task bd-bw8a0m; committed by bd-dufrgb. Later children updated the §17 assumptions table as spikes landed; RW13 added §17.2. **The RW2 spike (bd-6tx1xv) landed 2026-10-06: per-criterion verdicts and evidence are in §17.1, and every amendment it caused is marked `[RW2]` inline.**
+**Status:** implemented (RW1–RW13 landed 2026-10-05 to 2026-10-07; only the optional items listed under §18 are not built). The end-to-end suite and the operator procedure are in [`docs/remote-workers-runbook.md`](../remote-workers-runbook.md); a real second node (`ryan-oryx-pro`) is enrolled, and the real-node canary is the post-deploy verification of bd-afcoop (placement stays `local_only` until the operator flips it). Originally proposed 2026-10-05. Epic bd-9bk0af; design task bd-bw8a0m; committed by bd-dufrgb. Later children updated the §17 assumptions table as spikes landed; RW13 added §17.2. **The RW2 spike (bd-6tx1xv) landed 2026-10-06: per-criterion verdicts and evidence are in §17.1, and every amendment it caused is marked `[RW2]` inline.** **bd-4p1vui (2026-10-10) amends §10.4: a remote run now survives a primary restart by Worker adoption (§10.4.2–10.4.7). v1's hold-then-collect remains the fallback for any run that cannot be adopted.**
 
 Task bd-bw8a0m, research. Revises and **replaces** bd-aowisc's notes (SSH push). Written against `main` at `9b5fb0733` (bd-aowisc was `99a27ed9`; 41 commits later). No code or config changed. Every existing module/function named here was found in the repo at that commit (§19 lists how; names that do not exist yet are marked **(new)**). Anything I relied on but did not observe is marked **[U#]** and indexed in §17.
 
@@ -28,7 +28,7 @@ The document is meant to stand alone. §1 is the one-screen summary, §2 says wh
 | 7 | **The script checks prerequisites and refuses; it never sudo-installs.** It may do user-level fixes only (`loginctl enable-linger` for self). | Auto-installing packages with sudo (§5.5). |
 | 8 | **Bridges: tunnel each per-run socket over the node channel** as multiplexed, credit-controlled streams. The agent listens on identically named unix sockets; the primary dials its own existing `Egress` listener for each stream. Egress policy, audit rows and `BridgeIdentity` do not change. | Per-run second WebSocket; agent-side proxy with uploaded audit (policy would leave the primary); direct TCP over the tailnet (needs an off-loopback listener). |
 | 9 | **Checkout sync: agent pushes a git bundle** over HTTPS (`PUT /nodes/runs/:run/checkout`); the primary unbundles into a **quarantine bare repo** (fsck, ref allowlist, **primary-side** path filter) before touching the home clone. Seeding goes the other way as a thin bundle `GET`. | Smart-HTTP receive-pack (needs a git credential on the node, an http-backend process, and runs hooks surface); `git fetch` from the node's `.git` (touches untrusted repo state). |
-| 10 | **A remote run does NOT survive a primary restart (v1).** It survives a *channel blip* up to a fence of 60 s. On any restart the agent quiesces the run and the primary **recovers** it (checkpoint pull) *before* `Reconciler` marks it interrupted and `ResumeGate` opens. | Survive-and-reattach (§10.4: needs worker adoption; and gains almost nothing because all network egress is on the primary). |
+| 10 | **Amended by bd-4p1vui: a remote run survives a primary restart by Worker adoption (§10.4).** It survives a *channel blip* up to a fence of 60 s, unchanged. On a restart shorter than the fence, a new Worker adopts the held run on the node: same run id, same container, no quiesce. A run that cannot be adopted falls back to v1: the agent quiesces it and the primary **recovers** it (checkpoint pull), all *before* `Reconciler` marks it interrupted and `ResumeGate` opens. | *v1 (bd-bw8a0m):* no survival, always collect ("needs worker adoption; gains almost nothing"). §10.4.2 says why adoption turned out to need no state from the old BEAM. |
 | 11 | **Liveness: 10 s heartbeat; agent self-fences at 60 s without an ack; primary declares the node lost at 90 s.** The invariant `fence < lost` replaces bd-aowisc's lease file. | Lease file touched over ssh. |
 | 12 | **Capacity (operator amendment 2026-10-06, RW8): every node, the primary included, has a cap: the operator's override (up or down) else the node's own suggestion, bounded by a ceiling the node's owner set.** One cap on the primary covers *all* local runs. `conductor.max_concurrent` stays operator-owned and is *not* auto-derived (**deleted by DC1, bd-74mtmp**: [provider-dynamic-concurrency §5.1](provider-dynamic-concurrency.md)). | Auto-summing node capacity into `conductor.max_concurrent` (it is also the quota/billing valve); the original `min(operator, ceiling)` rule (the operator could not raise a node above its suggestion). |
 | 13 | **Executor boundary** (`Arbiter.Worker.Executor`, **new**) shrinks to eight callbacks and has **one** implementation, `Executor.Node`. A k8s controller pod is just another *agent* speaking the same protocol, so it needs no new Executor. | An Executor per backend. |
@@ -94,6 +94,8 @@ New primary-side namespace **`Arbiter.Nodes`** (Ash domain, **new**): `Node`, `J
 | node→primary | `exit` | status, `oom?`, container id; `checkpoint{run, bundle_ref}`; `bridge.open{run, name, stream}` / `bridge.data` / `bridge.close` / `bridge.credit` (both directions) |
 
 **Cluster-node additions *(A1, A3, A4; K§3.2, K§14)*.** `hello.kind ∈ {machine, cluster}` and `caps` as K§3.2 lists them (`backend: podman|k8s`, `image: build|pull|registry`, `limits: cgroup|pod`, `upgrade: tarball|image`); skew rules unchanged. Per-run states are `pending | starting | running | terminating`, and the node may answer an `assign` with `refuse{reason ∈ no_capacity, unschedulable, image_unavailable, bad_spec}`. New node→primary event `capacity` and a `capacity{ceiling, running, pending, headroom, constrained}` field on `hb`; `hello_ok.limits.prepare_timeout_s`. The stdout cursor and its `ack` are an **opaque backend-defined string** (podman: decimal offset, as above; cluster: RFC 3339 nano timestamp); the primary stores and echoes it without interpreting it.
+
+**Adoption additions *(bd-4p1vui, §10.4.3)*.** `hello.caps.run_adopt = "attach"`; primary→node `adopt{run}`; node→primary `adopt.refused{run, reason}`; `run.ready` gains `adopted: true` and `acked`. The primary acks stdout only up to the last complete line (§10.4.5).
 
 Backpressure: Phoenix channels have none, so streams use a credit window (256 KiB per stream, 16 KiB frames, max 64 streams per run and 256 per node, total in-flight per node capped at **256 KiB [RW2: was 1 MiB; U4]**). The sender must schedule streams **fairly** (round-robin over streams with credit): under a small node cap a bulk push that is served first starves the SSE streams of other runs (a spike run with a 64 KiB cap lost one SSE client to a 60 s receive timeout; the cause was not captured and starvation is the suspect). Stdout replay after a blip uses the offset+ack scheme `Sessions.Stream` already uses.
 
@@ -339,27 +341,134 @@ Not built: the one-escalation-per-15-minutes outage message, and salvaging a ret
 
 **Improvement over SSH:** a returning node reports its **retained** shadows/transcripts in `hello`; the primary may pull them as a *salvage* ref (`refs/arbiter/salvage/<run>` in the main repo) instead of leaving them for a human. Optional hardening child.
 
-### 10.4 Does a remote run survive a primary restart? **Decided: no (v1).**
+### 10.4 Does a remote run survive a primary restart? **Amended (bd-4p1vui): yes, by Worker adoption; hold-then-collect is the fallback.**
 
-Reasons, in order of weight:
+**Status of this amendment.** Proposed on 2026-10-10 by bd-4p1vui for operator approval (that ticket's acceptance criterion 1). It was implemented in the same change, so a single review covers both the design and the code. It reverses the v1 decision (kept below as written, with its reasons) and keeps v1's hold-then-collect path, unchanged, as the fallback for every run that cannot be adopted.
+
+#### 10.4.1 The v1 decision (bd-bw8a0m), as it was
+
+Decided: no (v1). Reasons, in order of weight:
 1. **The run is stalled for the whole outage anyway.** All of a run's network (model API, `git push`, `arb`/MCP) goes through bridges whose far end is the primary. A restart takes the model API away from the container for its duration. Surviving would preserve only the CLI's in-memory conversation, which `claude --resume` rebuilds from the mirrored transcript, at the cost of a prompt-cache miss: the same cost local workers pay on every restart today (they die with the service, `MemoryScope`'s `BindsTo=`, and `Reconciler` resumes them).
 2. **Reattach needs worker adoption.** `Arbiter.Worker` is an 8,989-line GenServer whose state (usage accumulators, step/phase tracking, completion-sentinel detection, OutputLog continuity, the egress run's `BridgeIdentity` entry and token, the learn-mode policy state, the minted worker-tier token) lives in memory and is rebuilt only by `Dispatch.resume/2`. A `Worker.adopt/…` is a new D4-class path with its own failure modes (adopt versus a concurrent resume, the same class as "a resumed worker races a live prior worker").
 3. Local parity is the goal; better-than-local is not required for v1.
 
 **Revisit when:** deploys are frequent enough that long remote runs are repeatedly interrupted *and* resumption cost (not outage) dominates. The design leaves the door open: stdout is offset-addressed and acked, the run table is on the node, `hello` already reports live runs.
 
+#### 10.4.2 What changed: adoption is a resume whose spawn attaches instead of starting
+
+Reason 2 above assumed adoption had to carry the old Worker's memory across the restart. It does not. Each item in that list falls into one of four groups, and none of them needs the old BEAM:
+
+* **Rebuilt by the code a resume already runs.** That code is `Dispatch`, as reason 2 says. It rebuilds the worker meta (branch, repo path, target, merge title, issue type, `existing_pr_ref`), the egress run with its `BridgeIdentity` entry, a fresh worker-tier token, the `.mcp.json` and skills in the home clone, and the spawn args that later re-opens use (a commit-gate nudge, an in-place auto-resume). Egress policy and learn mode are rebuilt from the current policy, exactly as for any re-open.
+* **Persisted on the run row.** This covers the run id, kind, provider, model, session id, harness version, config dir, node, `started_at` and the resume lineage.
+* **Cumulative in the stream.** Claude's terminal `result` event carries the whole session's totals. Usage events are upserted per `(session_id, task_id)`, so the partial snapshot the old Worker flushed at shutdown is superseded by the adopting Worker's final one, which has the same session id because it is seeded from the row.
+* **Lost on every restart today, by the collect path too.** This is the in-place auto-resume counter (`meta[:resume_attempts]`), live spend, the activity line and the in-memory `output_lines` tail. The row's `output_lines` are only ever written at the end, so nothing persisted is lost.
+
+So a Worker adopting a held run is built by the resume pipeline, with one difference at the end. Instead of `Executor.Node.prepare/3` asking the node to start a container, `Executor.Node.adopt/3` asks it to hand over the container it is holding. Reason 1 still describes the outage itself. What adoption saves is everything after it: no quiesce, no checkpoint pull, no new row, no new shadow clone or seed bundle, no `claude --resume` and no prompt-cache miss. The CLI simply sees its proxy come back (U19: it rides through a stalled or refused proxy for 120 s or more, and through resets for about 90 s).
+
+#### 10.4.3 The adoption protocol
+
+1. **The old primary stops.** On a graceful stop, `Worker.terminate/2` leaves the run to the node (`Executor.Node.abandon/1`, bd-1dzyhb): the row stays live with its `node_id`, and the node is not told to stop the run. A hard kill does the same by default. The agent sees the socket drop, detaches its runs (stdout stays buffered from the last ack) and keeps the containers running. If the primary stays away past `fence_after` (60 s), the agent's fence stops them, and a fenced run is no longer adoptable: it is collected.
+2. **Hello.** The new session answers `hold` for a live row on this node and starts the hold timer (`hold_ms`, 150 s), as in bd-24o760 below.
+3. **The boot sweep.** `Nodes.Recovery.await/1` runs first in `ReconcileSweep`, per node, in parallel and within the same budget as today. For each run it calls **`Nodes.Adoption.attempt/3`** (new) first. Only if the run was not adopted does it call the existing `Session.recover/4` (collect), in the same task. A run is therefore either adopted or collected, and never both.
+4. **`Adoption.attempt/3`** checks, in order:
+   1. adoption is on (`config :arbiter, :node_run_adoption`, default `true`);
+   2. the row is eligible (§10.4.4);
+   3. `Session.adoptable/2` (new) agrees: the run is held and has not expired, the agent advertises `caps["run_adopt"]`, its last `hello`/`hb` report for the run says `running` and not exited, no recovery of the run is in flight, and a channel is attached.
+
+   It then calls `adopt_fun` (default **`Worker.Dispatch.adopt/2`**, new), with a timeout capped by the node's remaining budget. If the run ends up owned by a live Worker, the outcome is `:adopted`; otherwise it is `{:not_adopted, reason}`.
+5. **`Dispatch.adopt/2`** runs these steps:
+   1. Load the ticket: it must be active, not review-only, and have no live Worker.
+   2. Find its home clone (the resume's `resume_worktree/2`) and the node's row (`Overview.get/1`).
+   3. Set the opts: the row's provider as `agent_type`, `node:`, `resume: true`, `existing_pr_ref`, and `adopt:` (the row's id, session id, model, harness version, config dir, `started_at`).
+   4. Resolve the security policy.
+   5. `start_worker/3`: the Worker's meta carries `:adopt`, so `record_run_started/1` creates **no** row and hands nothing off, and `run_id` stays `nil` until the session is attached (step 8).
+   6. `maybe_start_claude/4`, as for a resume: a fresh token, MCP config and skills, `build_agent_session_opts/4`, then `ClaudeSession.start/1`. That runs `ContainerSpawn.prepare_remote/1` (a new egress run owned by the new Worker) and `remote_spec/3`, then `Executor.Node.adopt/3` instead of `prepare/3`.
+   7. Start the workflow machine and the driver.
+
+   It does **not** ask any of the "may new work start" gates: slot (`ResumeSlot`), the primary's cap (`LocalCapacity`), the quota and pause gates, account admission, placement, image publication. Nothing new starts, and the run already holds its slot on the node (its node's `live` count includes it). Any failure after the Worker started undoes the adoption (§10.4.6, F5–F7).
+6. **`Session.adopt/5`** (new) re-checks step 4.3. It reads and cancels the hold timer, keeping the time left. It then registers the run in `RunStreams` for the new owner with:
+   * the new spec's bridge map (`proxy`, `arb`, `t<n>` → the **new** egress listeners);
+   * the checkout context, whose `config_dir` is the row's (where earlier transcript uploads landed);
+   * `next` set to the agent's last reported acked offset.
+
+   It pushes `adopt{run}` and arms `adopt_timeout_ms` (30 s).
+7. **The agent's `Run.adopt/1`** (new) attaches a run that is `running` and neither cancelling nor quiescing. It rewinds to its last ack and pushes `run.ready{run, container, adopted: true, acked}`, then resends stdout from `acked`. A run in any other state is answered `adopt.refused{run, reason}`, and an unknown id is answered `adopt.refused{reason: "gone"}`.
+8. **The session takes `run.ready`.** It sets `next := acked` and answers `{:ok, handle}`. From then on, bridge streams for the run resolve to the new egress listeners (the node's per-run sockets and the container's argv are unchanged: a stream carries only `{run, name}`). The Worker's `__claude_session_open__` then:
+   * sets `run_id` to the row's id;
+   * seeds the session from the row (session id, model, harness version);
+   * appends to the same `OutputLog`;
+   * writes no `PromptLog` (the prompt it built was never sent);
+   * backfills nothing onto the row: no provider, config dir, node or provenance.
+
+   `Worker.advance(:claude)` then moves it to `:working`. `meta.adopted` records `%{run_id, node_id, at}`.
+9. **Nothing else changes.** `Recovery.remote_runs/0` and the `Reconciler`'s sweeps already skip a run, and a ticket, that has a live Worker.
+
+New wire events (proto 1, additive):
+
+| Direction | Event | Payload |
+|---|---|---|
+| node→primary, `hello.caps` | `run_adopt: "attach"` | the agent understands `adopt` |
+| primary→node | `adopt` | `{run}` |
+| node→primary | `run.ready` (existing) | gains `adopted: true` and `acked` (the offset its resend starts at) |
+| node→primary | `adopt.refused` | `{run, reason}`: `exited`, `cancelling`, `quiescing`, `preparing`, `gone` |
+
+#### 10.4.4 Which runs are adopted
+
+| Condition | Why |
+|---|---|
+| Row `state ∈ {starting, working}` | `waiting` is a question, or the review gate after `arb done`. Either way the agent is finishing, and the gate sweeps (bd-2yt0d2) own it. |
+| Row `kind = implement`, `role = base` | This is the ticket's own run, registered under the ticket's id. A reviewer, CI fix pass or conflict pass is collected, and its own sweep restarts it, as today. |
+| Row `provider = claude` | The only provider that runs remotely. |
+| Ticket `active`, not review-only, no live Worker | Otherwise the run is not the ticket's to continue. |
+| Node connected, `caps.run_adopt`, the run `hold` (not expired), last report `running` and not exited | Otherwise there is no container to continue. A fenced or exited run is collected: its final upload had nowhere to go during the outage, and quiesce retains it. |
+| This is the primary, with `:node_run_adoption` not `false` | `Recovery` runs only on the single primary (`SingleInstance`), so a second instance never adopts. The flag is the kill switch: off means every run is collected, the v1 behaviour. |
+
+Adoption ignores drain and skew: neither applies to a run that is already on the node. Cluster nodes do not advertise `run_adopt` yet, so their runs are collected.
+
+#### 10.4.5 Stdout across the restart
+
+* **The primary acks only up to the last complete line.** The ack offset is `next − |partial|`. A partial line is under 64 KiB (`LineSplitter`, `{:line, 65_536}`), well inside the 256 KiB credit window. So the agent's replay point is always the start of a line. Before this change, a line split across the restart lost its head with the old primary's `partial` buffer, and the adopting Worker would have received its tail as a garbled line. After a blip the resend is trimmed against `next` exactly as before, so a blip stays exactly-once.
+* **Adoption starts at the agent's acked offset.** No line is dropped. A line the old primary had taken, but whose ack was still in flight when the socket closed, is delivered again to the adopting Worker. So stdout is *at-least-once across a restart* for at most one ack's worth of lines. A replayed `arb done` is acted on, which is correct: the old Worker died before it could finish the hand-off.
+
+#### 10.4.6 Failure modes
+
+| # | Failure | What detects it | Outcome |
+|---|---|---|---|
+| F1 | The agent does not advertise `caps.run_adopt` (an older agent) | `Session.adoptable/2` | Collected, as in v1. |
+| F2 | The run is not held: the hold expired, the run was never held (no `run_hold`), or the agent restarted and lost it | `Session.adoptable/2` | Collected, or `:not_on_node` (then the `Reconciler`), as today. |
+| F3 | The container exited, was fenced, or is being cancelled before or during the handshake | The last report, or `adopt.refused` | The stream is dropped **without a cancel** and the run is held again with the time it had left. `recover` then quiesces it, which retains even an exited run, and collects it. |
+| F4 | The row is not eligible (§10.4.4) | `Adoption.attempt/3` | Collected. |
+| F5 | `Dispatch.adopt/2` fails before the session adopts: no home clone, policy or guardrail refusal, egress, image plan or CLI publication failed | Its `{:error, _}` | The Worker is stopped through `Worker.abandon_adoption/1`. Its `run_id` is still `nil`, so `terminate/2` writes nothing to the row. The run is collected. |
+| F6 | The agent does not answer `adopt` within `adopt_timeout_ms` | Session timer | As F3. A late `run.ready` or stdout for a run no longer in the table is ignored (nothing is acked, so the agent's window just fills), and the quiesce that follows stops it. |
+| F7 | A step fails after the session adopted (the session open, the machine, the driver) | `Dispatch.adopt/2` | `Executor.Node.unadopt/2` drops the stream by run id, without a cancel, and holds the run again. **Then** the Worker is stopped through `abandon_adoption/1`: its sessions are forgotten and `run_id` is `nil`, so neither its `terminate/2` nor the session's owner-down handler stops the container. The run is collected. |
+| F8 | The adopting Worker dies during the handshake | The session's owner monitor | While the stream is still adopting, owner-down drops it without a cancel and holds the run again (F3). After `run.ready` it is the ordinary "owner died, run cancelled". |
+| F9 | The channel blips during the handshake | Reconnect `hello` | The run is in the table, so it is `known`, and the agent's `attach` pushes `run.ready`. That completes the adoption (`next` is unchanged: a detached run's acked offset cannot move). |
+| F10 | The primary restarts again mid-adoption | — | The adopting Worker's `run_id` is `nil` until the session is attached, and after that its shutdown abandons as in step 1. The row stays live either way, and the next boot adopts or collects. |
+| F11 | Adoption races the hold timer, or Recovery's own quiesce | `Session.adopt/5` cancels the timer and refuses a run with a recovery in flight. `Session.recover/4` refuses a run attached to an owner. Recovery handles one node's runs in sequence. | Each held run ends exactly once: adopted, collected, or quiesced by the hold timer. |
+| F12 | Recovery's total budget kills a node's task mid-way | `Recovery.collect/2`'s backstop | That backstop no longer stamps `node_lost` on a run whose ticket has a live Worker: an adopted run stays adopted. |
+| F13 | The policy changed the run's bridges | The new spec's bridge map | A name the node still opens and the map lacks is reset (`unknown_bridge`): the current policy applies. A new name goes unused until a re-open. |
+
+#### 10.4.7 How adoption composes with what was there
+
+* **`Nodes.Recovery`.** Adoption is a step inside `recover_node/4`, with the same per-node and total budgets. The outcome map gains `:adopted`, which `ReconcileSweep` logs. `Recovery.unsettled/1` excludes an adopted run, because it has a live Worker.
+* **`Workers.Reconciler`.** Unchanged. A live Worker under the ticket's id owns the run (the orphan sweep skips it) and the ticket (the resume sweep skips it).
+* **The hold timer.** It starts at `hello`. `Session.adopt/5` cancels it and keeps what was left, and any failure re-arms it with that remainder. Expiry still quiesces, as the backstop for a run Recovery never reached.
+* **Graceful stop.** Unchanged (bd-1dzyhb). An adopted run's Worker leaves it to the node on the next restart too, so a run can be adopted any number of times.
+
+#### 10.4.8 What a restart does when a run is not adopted (v1 behaviour, unchanged)
+
 **Hello before Recovery (bd-24o760).** The node's `hello` can arrive before `Nodes.Recovery` has registered anything. The session therefore answers from the persisted `worker_runs` row: a run the session holds is `known`; a run with a live row naming this node is `hold` (the agent keeps it running, unattached); anything else is `unknown`. `Recovery`'s `recover` turns a hold into a `quiesce` push, then the usual `retained` → `recover` → `recovered`; if nobody asks within `hold_ms` (150 s) the session quiesces it itself, once. So the agent is never told "unknown run" for a run with a live row on its node, except in the two cases below, and collect-then-resume-local runs exactly once.
 
-**v1 behaviour is "hold, then collect" (operator ruling, 2026-10-08).** After a primary restart the node keeps the container running while it waits (`hold`), then `Recovery` quiesces and collects it (transcripts plus checkout land in the home clone) and the task resumes locally once. The run does *not* continue on the node. True re-attach (a Worker adopting the held run, item 2 above) is out of scope for v1 and tracked in bd-4p1vui. The e2e case in `remote_workers_e2e_test.exs` ("an agent that reconnects before Recovery has loaded keeps the live run until it is collected") asserts exactly this: the node reconnects before recovery has loaded, is told `hold`, and the run is collected once with no work lost.
+**v1 behaviour is "hold, then collect" (operator ruling, 2026-10-08), and it is now the fallback.** After a primary restart the node keeps the container running while it waits (`hold`). `Recovery` then quiesces and collects it (transcripts and checkout land in the home clone), and the task resumes locally, once. The run does *not* continue on the node. Under v1 this happened to every remote run. Since bd-4p1vui it happens only to a run that adoption (§10.4.3) does not take; the two never both run for one run. The e2e case in `remote_workers_e2e_test.exs` ("an agent that reconnects before Recovery has loaded keeps the live run until it is collected") asserts this path: the node reconnects before recovery has loaded, is told `hold`, and the run is collected once with no work lost. That case's run has no Worker-shaped owner to adopt it, so it is collected.
 
 **The two documented exceptions, where a live-row run is still answered `unknown`:**
 1. **Agents that do not advertise `caps["run_hold"]`** (older agents). They cannot receive the later `quiesce` push, so a `hold` would leave the run unattached forever; they get the pre-bd-24o760 `unknown` verdict and quiesce at once.
 2. **A hello after `hold_expired`.** If nobody claimed the hold within `hold_ms` the session has already quiesced the run itself; a later hello for the same id is answered `unknown` (the agent has nothing left running) even if the row is still `working` because the Reconciler has not yet marked it interrupted.
 
 **What a restart does instead (one path for graceful and hard):**
-* Graceful stop: `Worker.terminate/2` (`worker.ex:8049`) sends `cancel{reason: "server shutdown", collect: false}` and stamps the run interrupted ("server shutdown") exactly as today. No upload is attempted inside the terminate budget.
+* Graceful stop: `Worker.terminate/2` leaves the run to the node (`Executor.Node.abandon/1`, bd-1dzyhb). The node is not told to stop the run, the row is not stamped, and no upload is attempted inside the terminate budget. (The original text, "sends `cancel{reason: "server shutdown"}` and stamps the run interrupted", was replaced by bd-1dzyhb before adoption existed; adoption depends on the row staying live.)
 * Hard kill or crash: nothing is sent; the sockets die with the BEAM.
-* In both, the agent sees the socket drop, **stays quiet for no new work**, and reconnects. On `hello_ok` the `boot_epoch` has changed and the verdicts say "I do not know run X": the agent quiesces X (stops the container, takes the snapshot+bundle and transcript tar *locally*, retains them), and reports `retained`. Independently, `fence_after` stops the container at 60 s if the primary stays away that long.
+* In both, the agent sees the socket drop, **stays quiet for no new work**, and reconnects. On `hello_ok` the `boot_epoch` has changed. A run the verdicts say "I do not know" is quiesced: the agent stops the container, takes the snapshot bundle and transcript tar *locally*, retains them, and reports `retained`. A `hold` run waits for adoption or a `quiesce`. Independently, `fence_after` stops the container at 60 s if the primary stays away that long.
 
 ### 10.5 Boot ordering (bd-aowisc §6.3's hazard) and `Workers.Reconciler` / `Boot.ResumeGate`
 
@@ -377,6 +486,7 @@ The hazard is unchanged: `Reconciler.reconcile_orphaned_runs/1` flips live-state
 * **Agent.** `Run.quiesce/1` (from `hello_ok` for every `unknown` run): stop the container, `Checkout.package` the shadow and `Transcripts.pack` the config dir into `<node_home>/runs/<run>/retained/` (`Arbiter.NodeAgent.Retained`: `manifest.json`, `checkout.bundle`, `transcripts.tar.gz`), push `retained{run, task, checkout, transcripts, retained_at}`, and end the process: there is no `exit` for the primary to ack. The retained state is on disk, so it survives an agent restart and is listed in every `hello` (`inventory.retained`) until pulled. A changed `boot_epoch` is logged and recorded in the status file. The existing self-fence at `fence_after` is unchanged and still stops the containers while keeping the run directory.
 * **Pull.** `Session.recover/4` (`Executor.Node.recover/2`): the primary pushes `recover{run}`; the agent uploads the transcripts first, then the checkout bundle, through the ordinary `PUT /nodes/runs/:run/{transcripts,checkout}` endpoints, then pushes `recovered{run, transcripts, checkout}` (each `ok | none | failed: …`). The endpoints authorize the run because the session holds a *recovery context* for it (`Session.checkout_context/2` falls back to it) and for no longer than the recovery lasts. The context is the ticket's preserved private clone (`Recovery.context/1`: `Worktree.worktree_path(BranchNamer.derive(issue))`, `PrivateClone.branch/1`, `merge.base`, `Worktree.seeded_paths/1`, `run.config_dir`). The bundle lands through the same §9 quarantine as a live checkpoint.
 * **`Recovery.await/1`** runs first in `ReconcileSweep`, gated on `primary?`: per node (parallel, `Task.Supervisor.async_nolink`) it waits on the `nodes` PubSub topic for the session to connect, then recovers each of the node's live-state runs with a `node_id` and no live Worker. Budget 60 s per node, 90 s in all (U17 is still unmeasured against a real fleet restart). A node that never reconnects has its runs stamped `node_lost` (above); a reachable node with nothing for the run, a refused upload or a missing home clone leaves the row to `Reconciler` ("server restarted"), which then resumes it from whatever the home clone holds. A recovered run's row is untouched for the same reason, and `Reconciler.mark_interrupted/1` backfills its usage from the transcripts that just arrived.
+* **[bd-4p1vui] Adoption first.** For each of those runs, `Recovery` first tries `Nodes.Adoption.attempt/3` (§10.4.3). Only a run that is not adopted is recovered as described above, in the same task and budget. An adopted run's row stays live under its new Worker, so neither this sweep nor the `Reconciler` touches it, and the `{:unreachable, :timeout}` backstop skips any run whose ticket has a live Worker.
 
 **Rollout:** the new events are `retained`, `recovered`, `reaped` (agent→primary) and `recover`, `retained.drop`, `reap` (primary→agent). An agent older than this change answers `unknown` runs with `cancel` and ignores `recover`/`reap`: the run is then simply not recoverable (the pre-RW12 behaviour), and `Recovery` reports it `{:unreachable, :timeout}`.
 
@@ -415,6 +525,8 @@ Per-run delivery bounds *persistence*, not *exposure*: a compromised node can us
 | `collect(run_ref, :checkout \| :transcripts)` | request a checkpoint upload; ingest §9 |
 | `recover(node, run_ref)` | restart path §10.4/10.5 |
 | `reap(node, live_set)` | §10.6 |
+
+**[bd-4p1vui]** `Executor.Node` also has `adopt(node, run_spec, opts)`, the held-run twin of `prepare/3` (it re-owns a run the node kept across a primary restart instead of starting one), and `unadopt(node, run)`, which gives an adopted run back to the hold without a cancel (§10.4.3, §10.4.6 F7). They are not behaviour callbacks: adoption exists only for nodes.
 
 Everything above the Executor is backend-agnostic: `Node` state, `Placement`, the home/shadow handoff points, heartbeat/fence, the `node_lost` classification, the reaper's liveness rule. The polymorphism is in the **agent**, not in the Executor, which is the point of the next section.
 
