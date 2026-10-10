@@ -110,10 +110,11 @@ defmodule ArbiterWeb.NodeCheckoutController do
     end
   end
 
-  # `path` is the run's config dir and the session path its own spawn chose.
+  # `path` is the run's config dir and the session path its own spawn chose. A link
+  # there is not followed: only a regular file is served.
   # sobelow_skip ["Traversal.SendFile", "Traversal.FileModule"]
   defp send_session(conn, path) do
-    if File.regular?(path) do
+    if match?({:ok, %File.Stat{type: :regular}}, File.lstat(path)) do
       conn
       |> put_resp_content_type("application/x-ndjson")
       |> put_resp_header("cache-control", "no-store")

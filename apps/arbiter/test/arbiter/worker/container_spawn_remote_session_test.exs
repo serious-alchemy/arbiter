@@ -165,6 +165,23 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSessionTest do
     assert File.read!(dest) =~ "newer, from the node"
   end
 
+  # What is read here goes to another machine: a link at the session's path is never
+  # followed (it could name any file the primary can read).
+  test "a link at the session's path is not read or seeded through", ctx do
+    prior_transcript!(ctx, [%{"type" => "user", "message" => "hi"}])
+    slug = ClaudeSessionFile.project_slug(ctx.request.worktree)
+    dest = Path.join([ctx.request.config_dir, "projects", slug, @sid <> ".jsonl"])
+    File.mkdir_p!(Path.dirname(dest))
+    target = Path.join(ctx.base, "primary-only.txt")
+    File.write!(target, "a file the node must never see\n")
+    File.ln_s!(target, dest)
+
+    assert {:ok, spec} = ContainerSpawn.remote_spec(ctx.request, resume_args(), "run-1")
+
+    refute Map.has_key?(config_mount(spec), "session")
+    assert File.read!(target) == "a file the node must never see\n"
+  end
+
   # The first open of a session resume runs the resumed argv (a terse continue prompt,
   # inline); the original prompt file it replaced may be gone by a later re-open.
   test "prompt mounts follow the argv being run, not the one the run was prepared with", ctx do

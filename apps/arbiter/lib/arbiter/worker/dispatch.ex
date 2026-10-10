@@ -475,7 +475,13 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
          {:ok, opts} <- ensure_collected(task, :resume, opts),
          {:ok, opts} <- resume_slot(task, :resume, opts),
-         {:ok, opts} <- resume_capacity(task, :resume, opts, caller_override(opts)) do
+         {:ok, opts} <-
+           resume_capacity(
+             task,
+             :resume,
+             opts,
+             caller_override(opts) || Run.latest_authoring_provider(task_id)
+           ) do
       prior_run_id = latest_run_id(task_id)
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
@@ -726,8 +732,8 @@ defmodule Arbiter.Worker.Dispatch do
   # primary's cap is its gate only when it would stay there: a node with room lets
   # it through (the real gate places it), and a `remote_only` workspace with no node
   # free holds it. `provider` is the one the resume most likely runs on (the
-  # caller's, the session's); one resolved differently later is admitted at the
-  # real gate.
+  # caller's, the session's, the last authoring run's); one resolved differently
+  # later is admitted at the real gate.
   #
   # Human origin: refused as the hold (`{:error, {:no_node_capacity, info}}`,
   # `force_slot` overrides, recorded). Automatic origin (the boot sweep, a

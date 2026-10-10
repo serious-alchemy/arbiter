@@ -402,6 +402,18 @@ defmodule ArbiterWeb.NodeCheckoutTest do
       assert request(:get, "/nodes/runs/#{@run}/session", c.auth).status == 404
     end
 
+    test "a link at the session's path is not followed: 404, nothing served", c do
+      place_with_session!(c, "run-link")
+      dest = Path.join(c.config_dir, @session)
+      File.rm!(dest)
+      File.write!(Path.join(c.tmp, "primary-only.txt"), "never for a node\n")
+      File.ln_s!(Path.join(c.tmp, "primary-only.txt"), dest)
+
+      conn = request(:get, "/nodes/runs/run-link/session", c.auth)
+      assert conn.status == 404
+      refute conn.resp_body =~ "never for a node"
+    end
+
     test "needs a credential and a run assigned to the caller", c do
       place_with_session!(c, "run-s2")
 

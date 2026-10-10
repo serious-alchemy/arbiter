@@ -257,10 +257,15 @@ defmodule Arbiter.Worker.SessionHistory do
       else: {:error, :bad_session_id}
   end
 
+  # Only a regular file counts as the copy already there: anything else at that path
+  # (a link above all) is never read, since what is read here goes to another machine.
   defp seeded_copy(dest, session_id, secret_values) do
-    case File.read(dest) do
-      {:ok, bytes} ->
-        {:ok, bytes}
+    case File.lstat(dest) do
+      {:ok, %File.Stat{type: :regular}} ->
+        File.read(dest)
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:not_a_regular_file, type}}
 
       {:error, :enoent} ->
         with {:ok, source} <- find(session_id),

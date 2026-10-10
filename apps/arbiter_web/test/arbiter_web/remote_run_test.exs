@@ -467,6 +467,69 @@ defmodule ArbiterWeb.RemoteRunTest do
 
       GenServer.stop(pid, :normal)
     end
+
+    # An owner that cannot say what its first open runs is a placement failure, not a
+    # fresh agent started on the pristine argv where a session was to be continued.
+    test "an owner that cannot give the first open's args places nothing", ctx do
+      alias Arbiter.Agents.SecurityPolicy
+      alias Arbiter.Worker.ClaudeSession
+
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true
+          ] do
+        put_env_restoring(:arbiter, key, value)
+      end
+
+      sockets = Path.join(ctx.root, "sockets")
+      File.mkdir_p!(sockets)
+      proxy = Path.join(sockets, "proxy.sock")
+      File.write!(proxy, "")
+
+      egress = fn _opts ->
+        {:ok, [proxy_socket: proxy, proxy_port: 38_031, bridges: []], "rtest"}
+      end
+
+      worktree = Path.join(ctx.root, "clone")
+      File.mkdir_p!(worktree)
+
+      # Answers what `start/1` asks of a Worker before placing, and dies on the rest.
+      owner =
+        spawn(fn ->
+          receive_loop = fn loop ->
+            receive do
+              {:"$gen_call", from, :snapshot} ->
+                GenServer.reply(from, %{task_id: "bd-noowner", run_id: "r-noowner"})
+                loop.(loop)
+
+              {:"$gen_call", _from, {:first_spawn_args, _}} ->
+                exit(:gone)
+            end
+          end
+
+          receive_loop.(receive_loop)
+        end)
+
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      assert {:error, {:remote_placement_failed, {:owner_unreachable, _}}} =
+               ClaudeSession.start(
+                 owner: owner,
+                 worktree_path: worktree,
+                 command: ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", "/opt/arbiter/cli/claude"],
+                 env: [{"CLAUDE_CODE_OAUTH_TOKEN", @token}],
+                 security: policy,
+                 provider: "claude",
+                 image: "localhost/arbiter-dev/beam:abc123",
+                 claude_path: ctx.cli,
+                 arb_path: ctx.cli,
+                 egress: egress,
+                 node: %{id: ctx.node.id, capacity: %{}}
+               )
+
+      refute File.exists?(Path.join(ctx.stub, "run.argv"))
+    end
   end
 
   defp assert_eventually(fun, tries \\ 100) do
