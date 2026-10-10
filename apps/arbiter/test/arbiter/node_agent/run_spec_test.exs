@@ -130,6 +130,29 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
                RunSpec.validate(spec(%{"run" => "../x"}))
     end
 
+    test "a registry image carries a digest-pinned ref (A2); a tag-only ref is refused" do
+      ref = "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("a", 64)
+
+      assert {:ok, run} =
+               RunSpec.validate(spec(%{"image" => %{"tag" => "localhost/x:1", "ref" => ref}}))
+
+      assert run.image.ref == ref
+
+      for bad <- [
+            "registry.example.com/arbiter/worker:latest",
+            "-x@sha256:" <> String.duplicate("a", 64),
+            5
+          ] do
+        assert {:error, {:refused, {:bad_value, "image.ref"}}} =
+                 RunSpec.validate(spec(%{"image" => %{"tag" => "localhost/x:1", "ref" => bad}}))
+      end
+    end
+
+    test "an image with no ref has none" do
+      assert {:ok, run} = RunSpec.validate(spec(%{}))
+      refute Map.has_key?(run.image, :ref)
+    end
+
     test "host networking and unknown networks" do
       assert {:error, {:refused, {:bad_network, "host"}}} =
                RunSpec.validate(spec(%{"network" => "host"}))

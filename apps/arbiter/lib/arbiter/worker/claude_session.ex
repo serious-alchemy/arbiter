@@ -309,8 +309,27 @@ defmodule Arbiter.Worker.ClaudeSession do
                task_id: task_id,
                tmp_dir: tmp_dir
              ) do
+        session_config = host_harness_version(session_config, port_args, opts)
         GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
       end
+    end
+  end
+
+  # G18: a host-local spawn records the host CLI's version up front
+  # (`Arbiter.Agents.HarnessVersion`, cached per build); a stream that reports
+  # its own (Claude's `init`) wins later. A container or a remote node runs a
+  # binary that is not the host's, so neither is probed. `:harness_probe` is the
+  # test seam: options for `HarnessVersion.host/2`.
+  defp host_harness_version(config, %{remote: %{}}, _opts), do: config
+  defp host_harness_version(config, %{sandbox: %{}}, _opts), do: config
+
+  defp host_harness_version(config, _port_args, opts) do
+    case Arbiter.Agents.HarnessVersion.host(
+           Keyword.get(opts, :provider),
+           Keyword.get(opts, :harness_probe, [])
+         ) do
+      nil -> config
+      version -> Map.put(config, :harness_version, version)
     end
   end
 
@@ -1007,10 +1026,13 @@ defmodule Arbiter.Worker.ClaudeSession do
     )
   end
 
+  # G18: `claude_code_version` is the harness version the run's trust record
+  # tracks (a change resets the subject's promotion clock).
   defp absorb_usage(session, %{"type" => "system", "subtype" => "init"} = event) do
     update_usage(session, %{
       model: event["model"],
-      session_id: event["session_id"]
+      session_id: event["session_id"],
+      harness_version: event["claude_code_version"]
     })
   end
 

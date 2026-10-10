@@ -7,6 +7,7 @@ defmodule Arbiter.Guardrails.SpendPatrolTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Guardrails.Events
   alias Arbiter.Guardrails.SpendPatrol
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Workspace
@@ -124,6 +125,30 @@ defmodule Arbiter.Guardrails.SpendPatrolTest do
       assert [_] = escalations(task_id, :worker_stopped)
     end
 
+    # §6.1: a spend-cap park is a major guardrail event for quarantine and
+    # probation (the park tiers), so `Loop.Trust` counts it: two within 14 days
+    # demote the subject, and one blocks a promotion.
+    test "a park is a major spend_cap guardrail event on the run's subject", %{ws: ws} do
+      {pid, task_id} = live_worker(ws, decision())
+      %{run_id: run_id} = Worker.state(pid)
+      assert is_binary(run_id)
+
+      assert [%{action: :parked}] = SpendPatrol.sweep(now: later(65 * 60))
+
+      assert [event] = Events.for_run(run_id)
+      assert event.kind == :spend_cap
+      assert event.severity == :major
+      assert event.source == :spend_patrol
+      assert event.task_id == task_id
+      assert {event.provider, event.model} == {"antigravity", "gemini-3-flash"}
+      assert event.detail =~ "wall-clock"
+      assert event.detail =~ "quarantine"
+
+      # A second sweep finds nothing live to park, and records nothing more.
+      assert [] = SpendPatrol.sweep(now: later(70 * 60))
+      assert [_] = Events.for_run(run_id)
+    end
+
     test "leaves a run under its caps alone", %{ws: ws} do
       {pid, _task_id} = live_worker(ws, decision())
 
@@ -234,12 +259,16 @@ defmodule Arbiter.Guardrails.SpendPatrolTest do
       assert [%{task_id: ^task_id, action: :paged, cap: :wall_clock_s}] =
                SpendPatrol.sweep(now: later(1_200))
 
-      assert %{state: :working} = Worker.state(pid)
+      assert %{state: :working, run_id: run_id} = Worker.state(pid)
       assert [_] = escalations(task_id, :spend_cap_exceeded)
 
       # Still over on the next sweep: the open page is refreshed, not duplicated.
       SpendPatrol.sweep(now: later(1_300))
       assert [_] = escalations(task_id, :spend_cap_exceeded)
+
+      # A page tier's cap is not a guardrail event (§6.1: major for the park
+      # tiers only).
+      assert Events.for_run(run_id) == []
     end
   end
 end

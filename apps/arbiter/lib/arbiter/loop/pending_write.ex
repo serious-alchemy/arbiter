@@ -56,7 +56,24 @@ defmodule Arbiter.Loop.PendingWrite do
 
   # One list per vocabulary: the attribute constraints below, and every surface
   # that validates a `state` / `kind` filter (REST, MCP), read these.
-  @kinds [:skill_patch, :skill_create, :difficulty_override, :config_set, :repo_doc_patch]
+  @kinds [
+    :skill_patch,
+    :skill_create,
+    :difficulty_override,
+    :config_set,
+    :repo_doc_patch,
+    :trust_promotion
+  ]
+
+  # Kinds only the operator applies, and never through `Arbiter.Loop.apply_pending/2`
+  # (`arb loop apply`, MCP `loop_pending_apply`, the dashboard): a promotion
+  # loosens security (G18, guardrail-profiles §6.4), so it is applied by
+  # `arb trust promote` with operator proof (`Arbiter.Loop.Trust.promote/4`).
+  @operator_only_kinds [:trust_promotion]
+
+  @doc "The kinds `Arbiter.Loop.apply_pending/2` always refuses."
+  @spec operator_only_kinds() :: [atom()]
+  def operator_only_kinds, do: @operator_only_kinds
   @states [:proposed, :hypothesis, :applied, :rejected, :superseded]
 
   @doc "Every proposal kind."
@@ -178,6 +195,15 @@ defmodule Arbiter.Loop.PendingWrite do
     update :reject do
       require_atomic? false
       accept [:state, :rejection_reason, :actor]
+    end
+
+    # A proposal its producer withdrew because the evidence behind it no longer
+    # holds (`Arbiter.Loop.Trust`: the subject stopped being eligible). The reason
+    # rides in `rejection_reason`; nobody decided it.
+    update :supersede do
+      require_atomic? false
+      accept [:rejection_reason, :actor]
+      change set_attribute(:state, :superseded)
     end
 
     # Reserved for the follow-up re-grading pass (out of scope here).

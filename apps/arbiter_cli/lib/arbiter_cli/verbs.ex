@@ -224,6 +224,18 @@ defmodule ArbiterCli.Verbs do
        ]
      ]},
     {"dashboard", Module.concat(@cmd, Dashboard), [workspace: :none, probes: [["login"]]]},
+    # G18: trust records are installation-wide (one per subject), not per workspace.
+    {"trust", Module.concat(@cmd, Trust),
+     [
+       workspace: :none,
+       probes: [
+         ["show"],
+         ["show", "p/m"],
+         ["promote", "p/m"],
+         ["confirm", "p/m"],
+         ["dismiss", "p/m"]
+       ]
+     ]},
     {"prime", Module.concat(@cmd, Prime), [workspace: :resolve, probes: [[]]]},
     {"where", Module.concat(@cmd, Where), [workspace: :resolve, host_local?: true, probes: [[]]]},
     {"init", Module.concat(@cmd, Init), [workspace: :none, host_local?: true, probes: [[]]]},

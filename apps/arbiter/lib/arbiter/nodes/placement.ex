@@ -279,6 +279,27 @@ defmodule Arbiter.Nodes.Placement do
       "frees a slot, or when placement allows the primary."
   end
 
+  @doc """
+  The hold for a `remote_only` run whose node image could not be published
+  (K8: `Image.Publisher.fallback/2`'s `{:hold, reason}`): the same
+  `{:no_node_capacity, info}` shape as a full fleet, so every caller already
+  holds the card and retries.
+  """
+  @spec image_hold(request(), term()) :: info()
+  def image_hold(request, reason) do
+    %{
+      task_id: request.task_id,
+      node: nil,
+      mode: :remote_only,
+      nodes_known: 1,
+      image_error: reason,
+      message:
+        "held — the registry image for #{request.task_id} is not available " <>
+          "(#{inspect(reason)}); worker.placement is remote_only, so it does not run on " <>
+          "the primary. It starts when the image publishes."
+    }
+  end
+
   # ---- reservations ----------------------------------------------------------
 
   @doc """

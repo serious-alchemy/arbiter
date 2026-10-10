@@ -87,6 +87,67 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     end
   end
 
+  # K8: a registry node's image is published before the run is committed to it,
+  # and a publish that times out or fails falls back by `worker.placement`.
+  describe "a registry node whose image cannot be published" do
+    defp registry_row do
+      %{
+        id: "n-registry",
+        name: "registry-node",
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{"image" => "registry"}
+      }
+    end
+
+    defp timed_out(extra \\ []) do
+      [
+        nodes: [registry_row()],
+        image: "localhost/arbiter-dev/x:abc",
+        publish: [stub: fn _ctx -> {:error, {:timeout, 5}} end]
+      ] ++
+        @podman ++ extra
+    end
+
+    test "prefer_remote falls back to the primary and releases the node slot" do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, image timed out")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, timed_out())
+      assert is_pid(pid)
+      assert Placement.reservations() == []
+    end
+
+    test "remote_only holds the card with the image error, and reserves nothing" do
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "remote only, image timed out")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, timed_out())
+      assert info.mode == :remote_only
+      assert info.image_error == {:image_unavailable, {:timeout, 5}}
+      assert info.message =~ "registry image"
+
+      assert Worker.whereis(issue.id) == nil
+      assert Ash.get!(Issue, issue.id).state == :queued
+      assert Placement.reservations() == []
+    end
+
+    test "prefer_remote honours the primary's own cap when it falls back" do
+      {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, image timed out, primary full")
+
+      assert {:error, {:no_node_capacity, %{node: "local", cap: 0}}} =
+               dispatch(issue, timed_out())
+
+      assert Placement.reservations() == []
+    end
+  end
+
   describe "worker.placement: remote_only, but the run cannot go remote" do
     test "a run that is not the podman Claude implementer stays local (never refused)" do
       ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})

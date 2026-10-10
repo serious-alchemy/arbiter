@@ -3064,7 +3064,11 @@ defmodule Arbiter.MCP.ToolsTest do
       "nodes.allow_public_endpoint": nil,
       "nodes.join_token_ttl_minutes": nil,
       "nodes.fence_after_s": nil,
-      "nodes.lost_after_s": nil
+      "nodes.lost_after_s": nil,
+      "nodes.registry": nil,
+      "nodes.registry_username": nil,
+      "nodes.registry_password": nil,
+      "nodes.registry_insecure": nil
     }
 
     test "the coordinator tunes finish-first but not the operator-only floor switches", ctx do
@@ -3082,7 +3086,8 @@ defmodule Arbiter.MCP.ToolsTest do
 
       for key <- ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                     nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
-                    nodes.fence_after_s nodes.lost_after_s) do
+                    nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
+                    nodes.registry_password nodes.registry_insecure) do
         assert {:error, {:unauthorized, msg}} =
                  Tools.installation_config_set(ctx.coordinator, %{"key" => key, "value" => 1})
 

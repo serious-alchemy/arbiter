@@ -1018,7 +1018,18 @@ defmodule Arbiter.Worker do
   """
   @spec park_spend_cap(ref(), Arbiter.Worker.StopReason.t()) :: :ok | {:error, term()}
   def park_spend_cap(ref, %Arbiter.Worker.StopReason{category: :spend_cap} = reason),
-    do: call(ref, {:park_spend_cap, reason})
+    do: call(ref, {:park, reason})
+
+  @doc """
+  Park a live run whose subject was suspended after a critical guardrail event
+  (G18, design §6.3). `reason` is a `StopReason.trust_suspended/1`; otherwise the
+  same as `park_spend_cap/2`: the agent is stopped, the worktree kept, the run
+  finishes `:failed` with the typed cause and the coordinator gets the addressed
+  `worker_stopped` escalation.
+  """
+  @spec park_suspended(ref(), Arbiter.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def park_suspended(ref, %Arbiter.Worker.StopReason{category: :trust_suspended} = reason),
+    do: call(ref, {:park, reason})
 
   @doc """
   Deliver a ReviewGate (review-gate) verdict. Only valid from `:waiting` on
@@ -1673,6 +1684,7 @@ defmodule Arbiter.Worker do
       |> maybe_put(:result_subtype, Map.get(meta, :result_subtype))
       |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
       |> maybe_put(:result_message, Map.get(meta, :result_message))
+      |> maybe_put(:harness_version, Map.get(meta, :harness_version))
 
     # bd-apwfmy: keep StopReason's typed category, not just the prose summary
     # it renders into `failure_reason`. Same best-effort discipline — absent
@@ -2613,16 +2625,16 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call(
-        {:park_spend_cap, reason},
+        {:park, reason},
         _from,
         %State{state: run_state, waiting_on: waiting_on} = state
       )
       when live_run?(run_state, waiting_on) do
-    {:reply, :ok, park_spend_cap_now(state, reason)}
+    {:reply, :ok, park_now(state, reason)}
   end
 
-  def handle_call({:park_spend_cap, _reason}, _from, %State{state: run_state} = state) do
-    {:reply, {:error, {:invalid_transition, run_state, :park_spend_cap}}, state}
+  def handle_call({:park, reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, park_transition(reason)}}, state}
   end
 
   def handle_call(
@@ -3418,6 +3430,12 @@ defmodule Arbiter.Worker do
           |> maybe_put(:model, model)
           |> maybe_put(:provider, Map.get(session, :provider))
           |> maybe_put(:session_id, session_id)
+          # G18: the agent CLI's version — the one the stream reported, else
+          # the host binary's (`Arbiter.Agents.HarnessVersion`).
+          |> maybe_put(
+            :harness_version,
+            Map.get(usage, :harness_version) || Map.get(session, :harness_version)
+          )
           |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
           |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
           |> maybe_put(:result_message, Map.get(usage, :result_message))
@@ -3658,10 +3676,14 @@ defmodule Arbiter.Worker do
     new_state
   end
 
-  # G19: `fail_now/2` for a spend-cap park. Same teardown (kill the agent before the
-  # run is marked terminal, keep the worktree), but the page is the addressed
-  # `worker_stopped` escalation naming the cap rather than the generic `failed`.
-  defp park_spend_cap_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
+  defp park_transition(%Arbiter.Worker.StopReason{category: :spend_cap}), do: :park_spend_cap
+  defp park_transition(%Arbiter.Worker.StopReason{}), do: :park_suspended
+
+  # G19 / G18: `fail_now/2` for a policy park — a spend cap, or a suspended
+  # subject. Same teardown (kill the agent before the run is marked terminal, keep
+  # the worktree), but the page is the addressed `worker_stopped` escalation naming
+  # the cause rather than the generic `failed`.
+  defp park_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
     state = terminate_live_sessions(state)
     settle_pass_worktree(state)
 

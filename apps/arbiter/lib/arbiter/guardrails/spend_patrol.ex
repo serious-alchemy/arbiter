@@ -12,7 +12,9 @@ defmodule Arbiter.Guardrails.SpendPatrol do
       `Arbiter.Worker.park_spend_cap/2`: its agent is killed, its worktree is kept,
       the run finishes `:failed` with the typed `:spend_cap` stop reason, and the
       coordinator gets the addressed `worker_stopped` escalation. This is new:
-      `Arbiter.Usage.BudgetPatrol` deliberately never stops anything.
+      `Arbiter.Usage.BudgetPatrol` deliberately never stops anything. The park
+      is also a major `spend_cap` guardrail event (§6.1), which
+      `Arbiter.Loop.Trust` counts against the subject.
     * **`page`** (`trusted`, `privileged`) — the default is *no* cap here: those
       tiers are guarded by BudgetPatrol's p90 page, unchanged. An operator who sets
       a cap on a page tier (`config :arbiter, :guardrail_tiers`) gets a
@@ -43,6 +45,7 @@ defmodule Arbiter.Guardrails.SpendPatrol do
 
   use GenServer
 
+  alias Arbiter.Guardrails.Events
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.LiveSpend
@@ -208,6 +211,7 @@ defmodule Arbiter.Guardrails.SpendPatrol do
           "Guardrails.SpendPatrol: parked #{snap.task_id} — #{StopReason.spend_cap_figures(breach)}"
         )
 
+        record_event(snap, breach)
         [result(base, :parked, breach)]
 
       {:error, _already_not_live} ->
@@ -223,6 +227,29 @@ defmodule Arbiter.Guardrails.SpendPatrol do
 
     [result(base, :paged, breach)]
   end
+
+  # A park is a major guardrail event (design §6.1: major for quarantine and
+  # probation, the park tiers) against the subject the run was dispatched as, so
+  # `Arbiter.Loop.Trust` counts it: two within 14 days demote. One per run.
+  defp record_event(%{run_id: run_id} = snap, breach) when is_binary(run_id) do
+    subject = snap.meta.guardrail_decision["subject"] || %{}
+
+    Events.record(%{
+      run_id: run_id,
+      task_id: snap.task_id,
+      provider: subject["provider"],
+      model: subject["model"],
+      kind: :spend_cap,
+      severity: :major,
+      source: :spend_patrol,
+      detail:
+        "#{breach.tier}-tier #{StopReason.spend_cap_label(breach.cap)} cap: " <>
+          StopReason.spend_cap_figures(breach),
+      fingerprint: "spend_cap"
+    })
+  end
+
+  defp record_event(_snap, _breach), do: :error
 
   defp result(base, action, breach) do
     Map.merge(%{task_id: base, action: action}, breach)
