@@ -98,12 +98,12 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       echo "probe $1 closed"
     fi
   }
-  probe api "$ARB_CANARY_API_ADDR"
-  probe controller_port "$ARB_CANARY_CONTROLLER_PORT_ADDR"
-  probe foreign "$ARB_CANARY_FOREIGN_ADDR"
+  probe api "${ARB_CANARY_API_ADDR:-}"
+  probe controller_port "${ARB_CANARY_CONTROLLER_PORT_ADDR:-}"
+  probe foreign "${ARB_CANARY_FOREIGN_ADDR:-}"
   probe internet 1.1.1.1:443
-  probe node "$ARB_CANARY_NODE_ADDR"
-  probe bridge "$ARB_CANARY_BRIDGE_ADDR"
+  probe node "${ARB_CANARY_NODE_ADDR:-}"
+  probe bridge "${ARB_CANARY_BRIDGE_ADDR:-}"
   echo "canary done"
   """
 

@@ -143,6 +143,43 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
     end
   end
 
+  describe "script/0 (really executed)" do
+    @describetag :tmp_dir
+
+    test "reports open for a listener, closed for a dead port, skipped for an empty target" do
+      if System.find_executable("socat") && System.find_executable("sh") do
+        {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+        {:ok, open_port} = :inet.port(listener)
+        {:ok, dead} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+        {:ok, dead_port} = :inet.port(dead)
+        :gen_tcp.close(dead)
+
+        env = [
+          {"ARB_CANARY_API_ADDR", "127.0.0.1:#{dead_port}"},
+          {"ARB_CANARY_CONTROLLER_PORT_ADDR", "127.0.0.1:#{open_port}"},
+          {"ARB_CANARY_FOREIGN_ADDR", ""},
+          {"ARB_CANARY_NODE_ADDR", "127.0.0.1:#{dead_port}"},
+          {"ARB_CANARY_BRIDGE_ADDR", "127.0.0.1:#{open_port}"}
+        ]
+
+        {out, 0} = System.cmd("sh", ["-c", Canary.script()], env: env, stderr_to_stdout: true)
+        :gen_tcp.close(listener)
+
+        parsed = Canary.parse(out)
+        assert parsed.done?
+        assert parsed.probes["api"] == :closed
+        assert parsed.probes["controller_port"] == :open
+        assert parsed.probes["foreign"] == :skipped
+        assert parsed.probes["node"] == :closed
+        assert parsed.probes["bridge"] == :open
+        assert parsed.probes["internet"] in [:open, :closed]
+        # The script's output feeds the verdict: a connect on controller_port is a finding.
+        assert {:unenforced, open} = Canary.verdict(parsed)
+        assert "controller_port" in open
+      end
+    end
+  end
+
   describe "parse/1 and verdict/1" do
     @all_closed """
     probe api closed
