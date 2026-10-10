@@ -39,6 +39,30 @@ defmodule Arbiter.Agents.Grok.Stream do
   tier. `reasoning_tokens` is only in `grok usage <session>`, not the stream.
   """
 
+  @doc """
+  Ledger attrs for a grok run with its `total_cost_usd` treated as notional.
+
+  The CLI reports xAI list price even when nothing was billed (free tier), and
+  Arbiter has no signal for the account's tier, so a numeric `:cost_usd` is
+  moved out of the spendable column into `:cost_note` ("notional — free tier").
+  `cost_usd` becomes nil, so every `SUM(cost_usd)` total skips it. Other
+  providers, and rows without a cost, pass through unchanged.
+  """
+  @spec mark_notional_cost(map()) :: map()
+  def mark_notional_cost(%{provider: "grok", cost_usd: cost} = attrs) when is_number(cost) do
+    price = :erlang.float_to_binary(cost * 1.0, decimals: 6)
+    note = "notional — free tier: $#{price} list price, not billed"
+
+    %{attrs | cost_usd: nil, cost_note: join_note(Map.get(attrs, :cost_note), note)}
+  end
+
+  def mark_notional_cost(attrs), do: attrs
+
+  defp join_note(existing, note) when is_binary(existing) and existing != "",
+    do: existing <> "; " <> note
+
+  defp join_note(_, note), do: note
+
   # grok built-in -> the Claude tool it behaves like. Anything not listed (MCP
   # tools, future built-ins) keeps its own name, which the activity line shows.
   @tool_names %{

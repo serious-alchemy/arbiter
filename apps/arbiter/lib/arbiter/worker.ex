@@ -2092,6 +2092,8 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
+    attrs = Arbiter.Agents.Grok.Stream.mark_notional_cost(attrs)
+
     case existing_session_event(attrs) do
       nil ->
         case Ash.create(Arbiter.Usage.Event, attrs) do
