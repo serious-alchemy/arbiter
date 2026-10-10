@@ -259,7 +259,7 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
           task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          meta: %{provider: "claude", node_id: "node-7"}
+          meta: %{provider: "claude", placed_node_id: "node-7"}
         )
 
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
