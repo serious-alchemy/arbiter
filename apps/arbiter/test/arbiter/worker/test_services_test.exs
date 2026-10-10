@@ -101,6 +101,21 @@ defmodule Arbiter.Worker.TestServicesTest do
     end
   end
 
+  describe "uid" do
+    test "Postgres carries uid 70; s3 has none; a custom spec may set one" do
+      assert %{uid: 70} = TestServices.postgres()
+      refute Map.has_key?(TestServices.s3(), :uid)
+
+      assert {:ok, [%{uid: 1000}]} =
+               TestServices.resolve([%{name: "x", image: "docker.io/library/x", uid: 1000}])
+    end
+
+    test "the local podman argv is unchanged by uid" do
+      argv = TestServices.service_run_argv("podman", @pod, "c", TestServices.postgres())
+      refute "--user" in argv
+    end
+  end
+
   describe "the argv builders" do
     test "the pod has `lo` only and the host user, labelled with this server's pid" do
       argv = TestServices.pod_create_argv("podman", @pod)

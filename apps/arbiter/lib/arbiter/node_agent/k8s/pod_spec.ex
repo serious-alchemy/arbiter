@@ -115,7 +115,6 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     "/run/arbiter"
   ]
   @reserved_env ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_BRIDGES ARB_GATE_ADDR ARB_GATE_TIMEOUT_S ARB_SNAPSHOT_INTERVAL_S ARB_RUN ARB_WORKTREE)
-  @preset_uids %{"postgres" => 70}
   # Fields whose *contents* are data (a prompt may discuss `spc_t`); their keys are still not scanned.
   @data_keys ~w(env secrets command worker_env files content ready)
 
@@ -525,7 +524,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp service_uids(services) do
     Enum.reduce_while(services, {:ok, []}, fn service, {:ok, acc} ->
-      uid = Map.get(service, :uid) || Map.get(@preset_uids, service.name)
+      uid = Map.get(service, :uid)
 
       cond do
         uid == nil ->
