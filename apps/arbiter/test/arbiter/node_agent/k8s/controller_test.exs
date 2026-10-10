@@ -820,18 +820,48 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
 
     test "a reaped pod is not adopted again while it terminates", env do
       put_labelled(env, "orphan-pod", run_labels("run-orphan"))
-      controller = start_controller(env)
+      informer = start_informer(env)
+      controller = start_controller(env, informer: informer)
       observed("run-orphan", :running)
 
+      # A real cluster keeps the pod, stamped with a deletionTimestamp (the MODIFIED a
+      # graceful delete produces), until it has gone (the DELETED).
+      FakeK8sApi.graceful_deletes(env.api)
       Controller.reap(controller, %{install: "inst-1", live_set: []})
       assert Controller.report(controller).runs == []
-      # The final MODIFIED a graceful delete produces must not bring the run back.
-      put_labelled(env, "orphan-pod", run_labels("run-orphan"), %{
-        "deletionTimestamp" => "2026-10-10T12:00:01Z"
-      })
+
+      # Wait for the informer to have seen it terminate, then for the controller to have
+      # folded that event: only then does the assertion mean something.
+      await_informer(informer, fn pods ->
+        Enum.any?(pods, &(get_in(&1, ["metadata", "deletionTimestamp"]) != nil))
+      end)
+
+      _ = :sys.get_state(controller)
+      assert Controller.report(controller).runs == []
 
       FakeK8sApi.delete_pod(env.api, "orphan-pod")
+      await_informer(informer, &(&1 == []))
+      _ = :sys.get_state(controller)
       assert Controller.report(controller).runs == []
+    end
+
+    defp await_informer(informer, done?, deadline_ms \\ 5_000) do
+      deadline = System.monotonic_time(:millisecond) + deadline_ms
+      do_await_informer(informer, done?, deadline)
+    end
+
+    defp do_await_informer(informer, done?, deadline) do
+      cond do
+        done?.(Informer.pods(informer)) ->
+          :ok
+
+        System.monotonic_time(:millisecond) > deadline ->
+          flunk("the informer never reached the expected pod state")
+
+        true ->
+          Process.sleep(5)
+          do_await_informer(informer, done?, deadline)
+      end
     end
   end
 

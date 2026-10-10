@@ -192,7 +192,7 @@ defmodule ArbiterWeb.RemoteResumeTest do
     write_agent_script!(ctx, node_b_resume())
 
     assert {:ok, %{worker_pid: pid}} = Dispatch.resume_session(ctx.issue.id, resume_opts(ctx))
-    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, pid) end)
+    stop_worker_first!(pid)
     # The fake agent's last write: what it wrote before is whole (a redirect creates its
     # file before the command has written to it).
     assert_eventually(fn -> File.exists?(Path.join(ctx.stub, "r2.done")) end)
@@ -261,7 +261,7 @@ defmodule ArbiterWeb.RemoteResumeTest do
              )
 
     adopter = Worker.whereis(ctx.issue.id)
-    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, adopter) end)
+    stop_worker_first!(adopter)
     assert %{run_id: ^run_id} = Worker.state(adopter)
 
     # The run is its Worker's now, not a node's claim; a resume is refused as active work.
@@ -274,6 +274,48 @@ defmodule ArbiterWeb.RemoteResumeTest do
     assert [%{id: ^run_id}] = Ash.read!(Run) |> Enum.filter(&(&1.task_id == ctx.issue.id))
     assert container_starts(ctx) == 1
     assert Arbiter.NodeAgent.Run.info(run_id)["state"] == "running"
+  end
+
+  # Stops `worker` before the agent connection, the node endpoint and the run table
+  # (all `start_supervised`) are torn down, not after: ExUnit stops the test
+  # supervisor first and runs `on_exit` callbacks after it, so a Worker stopped from
+  # `on_exit` spends its last moments reacting to the node vanishing underneath it,
+  # writing its run row while the test is already over. This guard is started after
+  # all of them, so the supervisor shuts it down first, and it stops the Worker (a
+  # quiesced `terminate/2`, the run row finalised) while everything it talks to is
+  # still up. `on_exit` stays as a backstop for a Worker the guard never saw.
+  defp stop_worker_first!(worker) do
+    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, worker) end)
+
+    start_supervised!(%{
+      id: {:worker_guard, worker},
+      start: {__MODULE__, :start_worker_guard, [worker]},
+      shutdown: 20_000
+    })
+  end
+
+  @doc false
+  def start_worker_guard(worker),
+    do: :proc_lib.start_link(__MODULE__, :worker_guard, [self(), worker])
+
+  @doc false
+  def worker_guard(parent, worker) do
+    Process.flag(:trap_exit, true)
+    :proc_lib.init_ack(parent, {:ok, self()})
+
+    receive do
+      {:EXIT, ^parent, reason} ->
+        ref = Process.monitor(worker)
+        Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, worker)
+
+        receive do
+          {:DOWN, ^ref, :process, ^worker, _} -> :ok
+        after
+          20_000 -> :ok
+        end
+
+        exit(reason)
+    end
   end
 
   defp container_starts(ctx) do
