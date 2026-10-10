@@ -14,6 +14,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       labels: node.labels,
       max_workers: node.max_workers,
       workspace_ids: node.workspace_ids,
+      allow_unenforced_network: node.allow_unenforced_network,
       credential_prefix: node.credential_prefix,
       enrolled_at: node.enrolled_at,
       rotated_at: node.rotated_at,
@@ -54,10 +55,20 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :override,
       :ceiling,
       :cap_source,
-      :contributes
+      :contributes,
+      :k8s_version,
+      :degraded,
+      :pending
     ])
     |> Map.put(:max_workers, row.override)
+    |> put_constrained(row)
   end
+
+  # A3: `hb.capacity.constrained`, for cluster nodes (the `local` row has none).
+  defp put_constrained(map, %{constrained?: constrained?}),
+    do: Map.put(map, :constrained, constrained?)
+
+  defp put_constrained(map, _row), do: map
 
   def join_token(%JoinToken{} = t) do
     %{

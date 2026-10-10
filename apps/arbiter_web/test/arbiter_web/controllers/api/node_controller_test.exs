@@ -217,6 +217,56 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
     end
   end
 
+  describe "GET /api/nodes/:ref cluster fields (A3, A7)" do
+    test "a node that never connected is a machine with nothing degraded or pending" do
+      enroll!("alpha")
+      node = json_response(get(operator_conn(), "/api/nodes/alpha"), 200)["node"]
+
+      assert %{"kind" => "machine", "degraded" => [], "pending" => 0, "constrained" => false} =
+               node
+
+      assert node["k8s_version"] == nil
+    end
+  end
+
+  describe "PATCH /api/nodes/:ref allow_unenforced_network (A7)" do
+    test "the operator sets it, it is audited, and the node view reports it" do
+      node = enroll!("alpha")
+
+      assert json_response(get(operator_conn(), "/api/nodes/alpha"), 200)["node"][
+               "allow_unenforced_network"
+             ] == false
+
+      body =
+        json_response(
+          patch(operator_conn(), "/api/nodes/alpha", %{allow_unenforced_network: true}),
+          200
+        )
+
+      assert body["node"]["allow_unenforced_network"] == true
+      assert [event] = Nodes.events(node_id: node.id, kind: :network_override)
+      assert event.detail["allow_unenforced_network"] == true
+    end
+
+    test "only a boolean is accepted" do
+      enroll!("alpha")
+
+      for bad <- ["yes", 1, nil] do
+        assert patch(operator_conn(), "/api/nodes/alpha", %{allow_unenforced_network: bad}).status ==
+                 422
+      end
+    end
+
+    test "a coordinator session may not set it (403) and nothing is audited" do
+      node = enroll!("alpha")
+
+      assert patch(session_conn(), "/api/nodes/alpha", %{allow_unenforced_network: true}).status ==
+               403
+
+      assert [] = Nodes.events(node_id: node.id, kind: :network_override)
+    end
+  end
+
   describe "PATCH /api/nodes/local" do
     test "sets the primary's cap, 0 included, and audits it" do
       conn = patch(operator_conn(), "/api/nodes/local", %{max_workers: 0})

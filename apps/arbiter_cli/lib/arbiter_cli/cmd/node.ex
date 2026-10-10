@@ -62,7 +62,8 @@ defmodule ArbiterCli.Cmd.Node do
     name: :string,
     label: [:string, :keep],
     max_workers: :string,
-    workspace: [:string, :keep]
+    workspace: [:string, :keep],
+    allow_unenforced_network: :boolean
   ]
 
   @approve_switches [name: :string, max_workers: :integer, yes: :boolean]
@@ -555,8 +556,10 @@ defmodule ArbiterCli.Cmd.Node do
     {opts, rest, _} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
-    if ref == "local" and (opts[:name] || labels(opts) != [] || pins(opts) != []),
-      do: Output.die("arb node set local: only --max-workers applies to local")
+    if ref == "local" and
+         (opts[:name] || labels(opts) != [] || pins(opts) != [] ||
+            not is_nil(opts[:allow_unenforced_network])),
+       do: Output.die("arb node set local: only --max-workers applies to local")
 
     body =
       %{}
@@ -564,9 +567,14 @@ defmodule ArbiterCli.Cmd.Node do
       |> put(:labels, labels(opts))
       |> put_pins(pins(opts))
       |> put_max_workers(opts[:max_workers], ref == "local")
+      |> put_flag(:allow_unenforced_network, opts[:allow_unenforced_network])
 
     if body == %{},
-      do: Output.die("arb node set: nothing to set (--name, --label, --max-workers, --workspace)")
+      do:
+        Output.die(
+          "arb node set: nothing to set " <>
+            "(--name, --label, --max-workers, --workspace, --allow-unenforced-network)"
+        )
 
     case Client.patch(path(ref), stringify(body)) do
       {:ok, resp} when mode == :json -> Output.emit_json(resp)
@@ -579,6 +587,11 @@ defmodule ArbiterCli.Cmd.Node do
   defp put_pins(body, []), do: body
   defp put_pins(body, ["none"]), do: Map.put(body, :workspace_ids, [])
   defp put_pins(body, ids), do: Map.put(body, :workspace_ids, ids)
+
+  # A7: `--allow-unenforced-network` / `--no-allow-unenforced-network` (a cluster node whose
+  # NetworkPolicy is not enforced is only used when the operator says so; audited server-side).
+  defp put_flag(body, _key, nil), do: body
+  defp put_flag(body, key, value) when is_boolean(value), do: Map.put(body, key, value)
 
   defp put_max_workers(body, nil, _local?), do: body
   defp put_max_workers(body, "none", _local?), do: Map.put(body, :max_workers, nil)
