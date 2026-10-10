@@ -125,7 +125,8 @@ defmodule Arbiter.Worker.ReviewPass do
           base_sha: String.t() | nil,
           thread: [map()],
           open_findings: [map()],
-          revise_touched_files: MapSet.t(String.t()) | nil
+          revise_touched_files: MapSet.t(String.t()) | nil,
+          held: boolean()
         }
   def restore(%{"phase" => phase} = pass) do
     _ = Code.ensure_loaded(Arbiter.Worker.ReviewFindings)
@@ -139,7 +140,9 @@ defmodule Arbiter.Worker.ReviewPass do
       thread: pass |> Map.get("thread") |> List.wrap() |> Enum.map(&restore_thread_entry/1),
       open_findings:
         pass |> Map.get("open_findings") |> List.wrap() |> Enum.map(&restore_finding/1),
-      revise_touched_files: touched(pass["revise_touched_files"])
+      revise_touched_files: touched(pass["revise_touched_files"]),
+      # bd-3fbj83: a fix round the gate was holding for capacity; no run was cut off.
+      held: pass["held"] == true
     }
   end
 

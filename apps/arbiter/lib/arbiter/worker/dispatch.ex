@@ -105,6 +105,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.HeldResume
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
@@ -1038,6 +1039,8 @@ defmodule Arbiter.Worker.Dispatch do
     case defer.(task_id, kind, replay_opts) do
       :ok ->
         Logger.info("Dispatch: deferred #{kind} of #{task_id} — #{phrase}")
+        # bd-3fbj83: the queue is in memory; leave a marker the boot sweep re-queues from.
+        HeldResume.mark(task_id, kind)
 
         {:deferred,
          info

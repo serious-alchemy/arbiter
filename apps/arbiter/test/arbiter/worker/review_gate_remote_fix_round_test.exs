@@ -259,6 +259,10 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
       assert task_id == rig.task.id
       assert %{"held" => true} = Arbiter.Worker.ReviewPass.stored(Ash.get!(Issue, task_id))
 
+      # `arb scheduler status` lists it as held while it waits.
+      status = Arbiter.Board.Drain.status(tickets: [Ash.get!(Issue, task_id)])
+      assert task_id in status.held_local_capacity
+
       # Room frees: the round runs and the gate goes on to round 2.
       Agent.update(free?, fn _ -> true end)
       wait_until(fn -> Ash.get!(Issue, task_id).last_reviewed_sha != nil end, 30_000)

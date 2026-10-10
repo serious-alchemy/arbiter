@@ -241,6 +241,7 @@ defmodule Arbiter.Board.Autopilot do
   alias Arbiter.Boot.ResumeGate
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Worker.HeldResume
   alias Arbiter.Workflows.MergeQueue.ConflictResolver
   alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
@@ -703,6 +704,7 @@ defmodule Arbiter.Board.Autopilot do
 
     for %{kind: kind} <- dropped do
       Logger.info("board autopilot: deferred #{kind} for #{task_id} cancelled — ticket finished")
+      HeldResume.clear(task_id)
     end
 
     {:reply, :ok, %{state | deferred_resumes: kept}}
@@ -1256,11 +1258,14 @@ defmodule Arbiter.Board.Autopilot do
   defp finish_resume(state, id, {:ok, %{deferred: true}}), do: {{:deferred, id}, state}
 
   defp finish_resume(state, id, {:ok, _}) do
+    HeldResume.clear(id)
     announce({:board_resumed, id})
     {{:resumed, id}, state}
   end
 
   defp finish_resume(state, id, {:error, reason} = error) do
+    HeldResume.clear(id)
+
     if error_shape(reason) in @benign_resume_errors do
       Logger.info("board autopilot: deferred resume of #{id} dropped: #{inspect(reason)}")
     else

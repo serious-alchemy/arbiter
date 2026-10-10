@@ -1298,6 +1298,27 @@ defmodule Arbiter.Worker.ReviewGate do
   # A fix round cut off by the stop: a new implementer on the same worktree,
   # handed the findings the round was opened with (the thread's last entry for
   # it) and told what it may find there.
+  # bd-3fbj83: a round the gate was only *holding* for capacity never had an
+  # implementer, so there is no earlier attempt to warn about.
+  defp resume_revise_pass(%{resume_pass: %{held: true}} = state) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} fix round was held for " <>
+        "capacity across a server restart; launching it"
+    )
+
+    findings = revise_findings(state)
+
+    state =
+      record_thread(
+        %{state | resume_pass: nil},
+        :system,
+        "Round #{state.round} fix round re-queued",
+        "The server restarted while this round's fix round was held for capacity."
+      )
+
+    launch_implementer(state, findings)
+  end
+
   defp resume_revise_pass(state) do
     Logger.info(
       "ReviewGate: task=#{state.task_id} round #{state.round} fix round was cut off by a " <>
