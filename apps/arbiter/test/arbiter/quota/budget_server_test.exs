@@ -157,6 +157,28 @@ defmodule Arbiter.Quota.Budget.ServerTest do
     assert %Budget{budget: 0, binding: :paused} = Server.get(@account, "claude", nil, table)
   end
 
+  test "a pool whose computation raises reports an error; the other pools still publish", ctx do
+    good = ctx.inputs
+
+    inputs = fn calibration ->
+      [healthy] = good.(calibration)
+      [healthy, %{healthy | pool: "broken", now: :not_a_datetime}]
+    end
+
+    {server, table} = start(ctx, inputs: inputs)
+    assert :ok = Server.recompute(server)
+
+    assert %Budget{binding: :error, reason: "budget computation failed: " <> _} =
+             Server.get(@account, "broken", nil, table)
+
+    assert %Budget{budget: n, binding: binding} = Server.get(@account, "claude", nil, table)
+    assert is_integer(n) and binding != :error
+    assert_receive {:budget_changed, %{pool: "broken"}, nil, 0, _reason}
+
+    # still serving after the failure
+    assert :ok = Server.recompute(server)
+  end
+
   test "a pool that stops being reported is dropped", ctx do
     {server, table} = start(ctx)
     set(ctx, pools: ["claude", "other"])

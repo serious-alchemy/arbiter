@@ -49,10 +49,20 @@ defmodule Arbiter.NodeAgent.Run do
   `retained` push reports them, and the process ends, with no `exit` for the
   primary to ack. A run that had already exited is retained the same way.
 
+  ## Adopt (bd-4p1vui, §10.4.3)
+
+  `adopt/1` is what a run the primary *held* across its restart gets when a new
+  Worker takes it over: a run that is still `running` (and not being stopped) is
+  attached like a reconnect, and its `run.ready` says `adopted: true` and the
+  `acked` offset its stdout resend starts at. Any other run answers
+  `adopt.refused{run, reason}` (delivered even while detached), and stays as it is
+  for the primary's quiesce, which is the fallback.
+
   ## Messages to the sink
 
   `{:run_push, run_id, event, payload}` with `event` one of `"run.ready"`,
-  `"run.refused"`, `"stdout"` (`{:binary, frame}`), `"exit"` and `"retained"`.
+  `"run.refused"`, `"stdout"` (`{:binary, frame}`), `"exit"`, `"retained"` and
+  `"adopt.refused"`.
   """
 
   use GenServer, restart: :temporary
@@ -133,6 +143,13 @@ defmodule Arbiter.NodeAgent.Run do
   """
   @spec quiesce(String.t()) :: :ok | {:error, :not_found}
   def quiesce(run), do: cast(run, :quiesce)
+
+  @doc """
+  A new Worker on a restarted primary takes this run over (bd-4p1vui): attach it if
+  it is running, else answer `adopt.refused`.
+  """
+  @spec adopt(String.t()) :: :ok | {:error, :not_found}
+  def adopt(run), do: cast(run, :adopt)
 
   @doc "The primary has the `exit`: the run may go."
   @spec ack_exit(String.t()) :: :ok | {:error, :not_found}
@@ -254,6 +271,27 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   def handle_cast(:detach, state), do: {:noreply, %{state | connected?: false}}
+
+  # bd-4p1vui: only a run that is up and not on its way out can be continued.
+  def handle_cast(:adopt, %{phase: :running, cancelled: nil, quiesce?: false} = state) do
+    acked = StdoutBuffer.acked(state.buffer)
+    state = %{state | connected?: true, sent: acked}
+
+    state =
+      push(state, "run.ready", %{
+        "run" => state.spec.run,
+        "container" => state.spec.name,
+        "adopted" => true,
+        "acked" => acked
+      })
+
+    {:noreply, pump(state)}
+  end
+
+  def handle_cast(:adopt, state) do
+    {:noreply,
+     deliver(state, "adopt.refused", %{"run" => state.spec.run, "reason" => adopt_refusal(state)})}
+  end
 
   @impl true
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
@@ -1031,6 +1069,10 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   defp release_bridges(_state), do: :ok
+
+  defp adopt_refusal(%{quiesce?: true}), do: "quiescing"
+  defp adopt_refusal(%{phase: :running}), do: "cancelling"
+  defp adopt_refusal(%{phase: phase}), do: Atom.to_string(phase)
 
   defp report(state) do
     %{

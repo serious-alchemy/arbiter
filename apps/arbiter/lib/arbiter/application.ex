@@ -336,8 +336,9 @@ defmodule Arbiter.Application do
         Arbiter.Quota.StalenessWatch,
         # Publishes each provider pool's concurrency budget (bd-6c8g4t, DC3)
         # into ETS and announces `budget_changed`. Nothing on an admission path
-        # reads it until DC8; see Arbiter.Quota.Budget.Server.
-        Arbiter.Quota.Budget.Server,
+        # reads it until DC8; see Arbiter.Quota.Budget.Server. Run under its own
+        # temporary supervisor: a crash loop here must not stop the app (bd-1p8cxk).
+        Arbiter.Quota.ShadowSupervisor,
         # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
         # `workspace_spend/1` read their memoized 30-day ledger aggregates
         # from (bd-4p6pw7) — see that module's docs.

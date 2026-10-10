@@ -243,6 +243,129 @@ defmodule Arbiter.Worker.GuardrailDispatchTest do
     end
   end
 
+  # G15c (bd-dfay3f, design §5.6 step 4): a mid-run grant that widens the ticket
+  # past what the pinned implementer subject may hold re-routes the next spawn.
+  describe "a mid-run grant widens the ticket past the pinned subject" do
+    @prod_read %{
+      "prod_read" => %{"enforced_read_only" => true, "env_from_secret" => %{"A" => "b"}}
+    }
+
+    # Trusted, not a floored tier: a quarantine or probation floor is one this sandbox's codex
+    # adapter cannot confine, which would drop it before the grant matters.
+    @trusted_rules [
+      %{match: %{provider: "claude"}, tier: :privileged},
+      %{match: %{provider: "codex"}, tier: :trusted}
+    ]
+
+    defp pinned_codex!(accounts, rules \\ @trusted_rules) do
+      put_app_env(:arbiter, :guardrail_subject_rules, rules)
+
+      ws =
+        workspace!(%{
+          "agent" => %{"type" => ["codex", "claude"]},
+          "routing" => %{"provider_selection" => "most_quota"},
+          "guardrails" => %{"bindings" => @prod_read}
+        })
+
+      codex = account!(:codex)
+      allow!(ws, codex, 0)
+      codex_used!(codex, 10.0)
+
+      claude =
+        if accounts == :both do
+          claude = account!(:claude)
+          allow!(ws, claude, 1)
+          claude_used!(claude, 0.70)
+          claude
+        end
+
+      %{ws: ws, codex: codex, claude: claude}
+    end
+
+    defp first_run_and_stop!(task, sandbox) do
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: @repo, start_driver: false)
+      TestSandbox.own!(sandbox, first.worker_pid)
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+      {first, latest_run(task.id)}
+    end
+
+    defp grant!(task_id, permission) do
+      Issue
+      |> Ash.get!(task_id)
+      |> Ash.Changeset.for_update(:set_permissions, %{permissions: [permission]},
+        context: %{guardrail_authority: :coordinator, permission_actor: "t"}
+      )
+      |> Ash.update!()
+    end
+
+    defp resume(task, extra \\ []) do
+      Dispatch.resume(task.id, Keyword.merge([repo: @repo, start_driver: false], extra))
+    end
+
+    test "the next spawn is a fresh dispatch on the same branch from an eligible subject",
+         %{sandbox: sandbox} do
+      %{ws: ws, codex: codex, claude: claude} = pinned_codex!(:both)
+      task = task!(ws, %{difficulty: 1})
+
+      {first_result, first} = first_run_and_stop!(task, sandbox)
+      assert first.provider_account_id == codex.id
+
+      grant!(task.id, "prod_read")
+
+      {:ok, result} = resume(task, claude_command: ["true"])
+      TestSandbox.own!(sandbox, result.worker_pid)
+
+      run = latest_run(task.id)
+      assert run.provider == "claude"
+      assert run.provider_account_id == claude.id
+      assert run.routing_decision["outcome"] == "fallback"
+      assert run.provider_fallback =~ "guardrail: pinned subject lacks prod_read"
+      assert run.resumed_from_run_id == first.id
+
+      # A fresh dispatch of the other provider, not a session resume.
+      refute run.session_id
+      assert result.worktree_path == first_result.worktree_path
+
+      # The pin is kept: an operator may lift the permission again.
+      assert Ash.get!(Issue, task.id).implementer_account_id == codex.id
+    end
+
+    test "with no eligible subject the resume is refused and escalated, never run ineligibly",
+         %{sandbox: sandbox} do
+      %{ws: ws} = pinned_codex!(:codex_only)
+      task = task!(ws, %{difficulty: 1})
+
+      {_, first} = first_run_and_stop!(task, sandbox)
+      grant!(task.id, "prod_read")
+
+      assert {:error, {:guardrail_ineligible, _provider, _phrase}} = resume(task)
+      assert latest_run(task.id).id == first.id
+      assert [_] = escalations(task.id, :no_eligible_model)
+    end
+
+    test "a grant within the pinned subject's profile keeps the pin", %{sandbox: sandbox} do
+      privileged = [
+        %{match: %{provider: "claude"}, tier: :privileged},
+        %{match: %{provider: "codex"}, tier: :privileged}
+      ]
+
+      %{ws: ws, codex: codex} = pinned_codex!(:both, privileged)
+      task = task!(ws, %{difficulty: 1})
+
+      {_, _} = first_run_and_stop!(task, sandbox)
+      grant!(task.id, "prod_read")
+
+      {:ok, result} = resume(task, claude_command: ["true"])
+      TestSandbox.own!(sandbox, result.worker_pid)
+
+      run = latest_run(task.id)
+      assert run.provider_account_id == codex.id
+      assert run.routing_decision["outcome"] == "pinned"
+      assert is_nil(run.provider_fallback)
+      assert escalations(task.id, :no_eligible_model) == []
+    end
+  end
+
   describe "unguarded" do
     test "no subject rule configured dispatches exactly as before" do
       put_app_env(:arbiter, :guardrail_subject_rules, [])

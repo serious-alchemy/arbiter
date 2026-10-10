@@ -80,6 +80,9 @@ defmodule Arbiter.MCP.CatalogTest do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
       names = @worker |> Catalog.visible() |> Enum.map(& &1.name)
 
+      assert "permission_request" in names
+      refute "ticket_permission_grant" in names
+
       for tool <- @both_tier, do: assert(tool in names)
       for tool <- @coordinator_only, do: refute(tool in names)
     end
@@ -90,8 +93,11 @@ defmodule Arbiter.MCP.CatalogTest do
       for tool <- @both_tier, do: assert(tool in names)
       for tool <- @coordinator_only, do: assert(tool in names)
 
-      # Every canonical tool, plus one deprecated `task_*` alias per renamed tool (bd-4jojpw).
-      assert length(names) == length(Catalog.all()) + map_size(Catalog.legacy_aliases())
+      # Every canonical tool the coordinator tier may call (not the worker-only
+      # `permission_request`), plus one deprecated `task_*` alias per renamed tool (bd-4jojpw).
+      coordinator_tools = Enum.filter(Catalog.all(), &(:coordinator in &1.tiers))
+      assert length(names) == length(coordinator_tools) + map_size(Catalog.legacy_aliases())
+      refute "permission_request" in names
     end
 
     test "every tool declares an object input schema" do

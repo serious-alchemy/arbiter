@@ -27,6 +27,9 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
+    * `POST   /api/issues/:id/permission` — :permission (body: `permission`,
+      optional `deny` + `reason`) — grants or denies a requested permission
+      (G15b, bd-lozakf; `arb ticket permit`)
 
   P-14: `POST` / `PATCH` take only the fields in `Arbiter.Tasks.IssueFields`
   (a coordinator's user-facing set). ReviewPatrol / circuit-breaker /
@@ -54,6 +57,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.IssueFields
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
+  alias Arbiter.Tasks.PermissionDecision
   alias Arbiter.Tasks.Permissions
   alias Arbiter.Tasks.ReadyHolds
   alias Arbiter.Tasks.Verification
@@ -588,6 +592,27 @@ defmodule ArbiterWeb.Api.IssueController do
   hand-off. Body: `note` (required), what the operator has to do.
   """
   def handoff(conn, %{"id" => id} = params), do: move_attention(conn, id, :operator, params)
+
+  @doc """
+  Grant or deny a requested permission (G15b, bd-lozakf) — what `arb ticket
+  permit` wraps. Body: `permission` (required), `deny` (default false) and
+  `reason` (required with `deny`). The authority is the token's, never the
+  body's: an operator-only binding needs an operator-proof token.
+  """
+  def permission(conn, %{"id" => id} = params) do
+    scope = conn.assigns[:mcp_scope]
+
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, deny?} <- params |> Params.fetch_bool("deny", false) |> Params.to_rest(),
+         {:ok, decided} <-
+           PermissionDecision.answer(issue, params["permission"], deny?,
+             authority: Authority.from_scope(scope),
+             actor: Params.actor_label(scope),
+             reason: params["reason"]
+           ) do
+      json(conn, decided)
+    end
+  end
 
   @doc """
   Hand a ticket's attention back to the coordinator (bd-8nlez1) — the

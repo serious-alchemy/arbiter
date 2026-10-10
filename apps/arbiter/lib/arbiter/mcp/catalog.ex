@@ -88,6 +88,8 @@ defmodule Arbiter.MCP.Catalog do
   | `trust_show` | coordinator | `Arbiter.Loop.Trust.View.list/0` / `detail/1` (G18 earned trust; no tool promotes) |
   | `trust_confirm` | coordinator | `Arbiter.Loop.Trust.confirm/2` (an automatic suspension stands: quarantine) |
   | `trust_dismiss` | coordinator | `Arbiter.Loop.Trust.dismiss/3` (a suspension was a false positive: its tier returns) |
+  | `permission_request` | worker | `Arbiter.Tasks.PermissionRequest.submit/4` (G15a: records a `requested` event and raises `:permission_requested`; grants nothing) |
+  | `ticket_permission_grant` | coordinator | `Arbiter.Tasks.PermissionDecision.answer/4` (G15b: grant or deny a requested permission; operator-only bindings are refused without operator proof; a `network:` grant is live) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `usage_events_list` | coordinator | `Arbiter.Usage.list_events/1` (raw ledger rows, P-17) |
   | `usage_calibration` | coordinator | `Arbiter.Usage.calibration/1` (difficulty mis-rating report, P-17) |
@@ -152,6 +154,7 @@ defmodule Arbiter.MCP.Catalog do
 
   @both [:worker, :coordinator]
   @coordinator [:coordinator]
+  @worker [:worker]
 
   # Enum values for the loop-proposal queue tools. Kept as strings here because
   # they go straight into a JSON Schema; `Arbiter.Loop.PendingWrite` holds the
@@ -2744,6 +2747,79 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.trust_dismiss/2
+    },
+    %{
+      name: "permission_request",
+      tiers: @worker,
+      description:
+        "Ask for a permission this run does not have (a proxy `403`, a missing env var or key " <>
+          "means \"not granted\"). It validates `permission` against the workspace bindings, " <>
+          "records the request on your own ticket and tells whoever may grant it (the " <>
+          "coordinator, or the operator when the binding says so). It grants nothing: the answer " <>
+          "is \"recorded, not granted\" and your reach is unchanged. Carry on without it, or stop " <>
+          "and report the affected acceptance criteria as unmet. A legitimate request is not a " <>
+          "trust violation; a workaround attempt is.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "permission" => %{
+            "type" => "string",
+            "description" =>
+              "What you need: `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, " <>
+                "`prod_read` or `prod_ssh`. Required."
+          },
+          "reason" => %{
+            "type" => "string",
+            "description" =>
+              "What you need it for and what is blocked without it. Required; the grantor reads it."
+          },
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. Optional; only your own ticket is accepted."
+          }
+        },
+        "required" => ["permission", "reason"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.permission_request/2
+    },
+    %{
+      name: "ticket_permission_grant",
+      tiers: @coordinator,
+      description:
+        "Answer a worker's `permission_request` (or grant a permission on your own): grant " <>
+          "`permission` on ticket `id`, or `deny: true` with a `reason`. The binding's " <>
+          "`grant_by` decides who may: an operator-only permission needs operator proof, which " <>
+          "an MCP token does not carry, so it is refused here and answered with `arb ticket " <>
+          "permit` from the operator's shell. A `network:` grant is live: the running worker's " <>
+          "next connection to that host succeeds, no restart. An env, mount, tunnel or ssh " <>
+          "grant reaches the worker at its next spawn (resume it). A denial is delivered to the " <>
+          "worker's inbox with your `reason`. Both are recorded in `permission_events` with " <>
+          "you as the actor.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "permission" => %{
+            "type" => "string",
+            "description" =>
+              "The permission to decide, as the request named it: `network:<host>[:<port>]`, " <>
+                "`tracker_write`, `secrets:<name>`, `prod_read` or `prod_ssh`. Required."
+          },
+          "deny" => %{
+            "type" => "boolean",
+            "description" => "Deny instead of grant. Needs `reason`. Default false."
+          },
+          "reason" => %{
+            "type" => "string",
+            "description" =>
+              "Required with `deny`: the worker reads it. Optional on a grant (recorded)."
+          }
+        },
+        "required" => ["id", "permission"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_permission_grant/2
     },
     %{
       name: "memory_pending_list",

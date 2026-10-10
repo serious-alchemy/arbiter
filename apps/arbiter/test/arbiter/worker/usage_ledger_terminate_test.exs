@@ -908,4 +908,71 @@ defmodule Arbiter.Worker.UsageLedgerTerminateTest do
       end
     end
   end
+
+  # bd-1nd8lo: the recording path reads the workspace's grok account plan; a
+  # "free" plan makes total_cost_usd notional, any other plan keeps it spendable.
+  for plan <- ["free", "pro"] do
+    test "a grok session on a #{plan} account records the cost accordingly" do
+      plan = unquote(plan)
+      task_id = "bd-ledgergrok-#{plan}-#{System.unique_integer([:positive])}"
+      {:ok, ws} = Ash.create(Arbiter.Tasks.Workspace, %{name: "grok-#{plan}", prefix: "gk"})
+
+      {:ok, account} =
+        Ash.create(Arbiter.Accounts.ProviderAccount, %{
+          provider: :grok,
+          slug: "grok-#{plan}-#{System.unique_integer([:positive])}",
+          plan: plan
+        })
+
+      {:ok, _} =
+        Ash.create(Arbiter.Accounts.WorkspaceProviderAccount, %{
+          workspace_id: ws.id,
+          provider: :grok,
+          provider_account_id: account.id
+        })
+
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: ws.id)
+      cwd = System.tmp_dir!()
+
+      result_event =
+        Jason.encode!(%{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "result" => "done",
+          "total_cost_usd" => 0.627564,
+          "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
+        })
+
+      events_path = Path.join(cwd, "grok-#{plan}-#{System.unique_integer([:positive])}.jsonl")
+      File.write!(events_path, result_event <> "\n")
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["cat", events_path],
+          provider: "grok",
+          model: "grok-build"
+        )
+
+      :ok = wait_until(fn -> events_for(task_id) != [] end)
+      :ok = GenServer.stop(pid, :normal)
+
+      assert [event] = events_for(task_id)
+      assert event.provider_account_id == account.id
+      spend = Arbiter.Usage.spend_by_workspace()
+
+      if plan == "free" do
+        assert event.cost_usd == nil
+        assert event.cost_note =~ "notional"
+        assert event.raw["notional_cost_usd"] == 0.627564
+        assert get_in(spend, [ws.id, "grok"]) in [nil, 0]
+      else
+        assert event.cost_usd == 0.627564
+        assert event.cost_note == nil
+        assert get_in(spend, [ws.id, "grok"]) > 0
+      end
+    end
+  end
 end

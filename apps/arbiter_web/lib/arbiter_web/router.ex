@@ -244,6 +244,8 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/resolve", IssueController, :resolve)
     post("/issues/:id/handoff", IssueController, :handoff)
     post("/issues/:id/handback", IssueController, :handback)
+    # G15b (bd-lozakf): grant or deny a requested permission.
+    post("/issues/:id/permission", IssueController, :permission)
 
     # Dependencies
     get("/dependencies", DependencyController, :index)

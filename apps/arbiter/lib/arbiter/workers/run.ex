@@ -166,7 +166,8 @@ defmodule Arbiter.Workers.Run do
         :model_family,
         :routing_decision,
         :guardrail_decision,
-        :harness_version
+        :harness_version,
+        :stdout_offset
       ]
     end
   end
@@ -271,6 +272,16 @@ defmodule Arbiter.Workers.Run do
 
       description "The remote node the run was placed on (RW8, `Arbiter.Nodes.Placement`); " <>
                     "nil for a run on the primary."
+    end
+
+    # bd-4p1vui (docs/design/remote-workers.md §10.4.5).
+    attribute :stdout_offset, :integer do
+      public? true
+      constraints min: 0
+
+      description "How many of a remote run's stdout bytes its Worker had processed when it " <>
+                    "left the run to the node at a graceful stop; a Worker adopting the run starts " <>
+                    "its stream there. nil otherwise."
     end
 
     attribute :model_family, :string do

@@ -24,8 +24,10 @@ defmodule Arbiter.NodeAgent.StubPodman do
 
   Modes (`write_mode/2`): `lines` (print `line-1`…`line-N`, exit 0), `oom` (exit 137,
   `OOMKilled=true`), `hang` (print one line, then wait until removed), `slow`
-  (print `line-1`, wait for `<dir>/go`, print `line-2`, `line-3`, exit 0) and
-  `big` (print `STUB_BYTES` bytes, exit 0). `ps` and `pod ps` answer `<dir>/ps.json` and `<dir>/pods.json` (RW12, the reaper). The script itself is
+  (print `line-1`, wait for `<dir>/go`, print `line-2`, `line-3`, exit 0), `tick`
+  (print `line-1`, wait for `<dir>/go`, print `line-2`, then wait until removed:
+  a run that keeps going across a primary restart, bd-4p1vui) and `big` (print
+  `STUB_BYTES` bytes, exit 0). `ps` and `pod ps` answer `<dir>/ps.json` and `<dir>/pods.json` (RW12, the reaper). The script itself is
   `stub_podman.sh`, shared with `apps/arbiter_web`.
   """
 

@@ -455,14 +455,28 @@ defmodule Arbiter.Worker.ClaudeSession do
                  tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
                ]
            ) do
-      run_id = Keyword.get(ctx, :run_id) || owner_run_id(ctx[:owner]) || Ecto.UUID.generate()
+      adopt = Keyword.get(opts, :adopt)
+
+      run_id =
+        adopted_run_id(adopt) || Keyword.get(ctx, :run_id) || owner_run_id(ctx[:owner]) ||
+          Ecto.UUID.generate()
+
       port_args = Map.update!(port_args, :env, &ContainerSpawn.apply_env(&1, request))
       remote = %{node: node, request: request, run_id: run_id, prepared: nil}
       owner = Keyword.fetch!(ctx, :owner)
 
-      with {:ok, spawn_args} <- first_open_args(owner, port_args),
-           {:ok, handle} <- place_remote(remote, spawn_args, owner) do
-        {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
+      case adopt do
+        nil ->
+          with {:ok, spawn_args} <- first_open_args(owner, port_args),
+               {:ok, handle} <- place_remote(remote, spawn_args, owner) do
+            {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
+          end
+
+        %{} ->
+          with {:ok, handle, stdout_start} <- adopt_remote(remote, port_args, owner, adopt) do
+            remote = Map.put(%{remote | prepared: handle}, :stdout_start, stdout_start)
+            {:ok, Map.put(port_args, :remote, remote)}
+          end
       end
     end
   end
@@ -472,7 +486,9 @@ defmodule Arbiter.Worker.ClaudeSession do
   # opens, and by then the run is already placed. The args stashed for later opens
   # stay pristine (`Worker` keeps them so). An owner that cannot say is a placement
   # failure, never the pristine args: those would start a fresh agent where a session
-  # was to be continued. An owner that is this process has nothing to splice.
+  # was to be continued. An owner that is this process has nothing to splice. An
+  # adoption opens nothing on the node (its container is already running), so it
+  # never asks.
   defp first_open_args(owner, port_args) when is_pid(owner) and owner != self() do
     {:ok, Arbiter.Worker.first_spawn_args(owner, port_args)}
   catch
@@ -480,6 +496,38 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp first_open_args(_owner, port_args), do: {:ok, port_args}
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): `opts[:adopt]` (from
+  # `Arbiter.Worker.Dispatch.adopt/2`) names a run the node kept across a primary restart.
+  # The primary half ran above exactly as for a placement (egress for this owner, the
+  # image plan, the published CLI, the request a later re-open places from), and instead
+  # of starting a container the node hands that run over. Its run id is the row's (the
+  # adopting Worker has none until the session attaches).
+  defp adopted_run_id(%{run_id: run_id}) when is_binary(run_id), do: run_id
+  defp adopted_run_id(_adopt), do: nil
+
+  defp adopt_remote(remote, port_args, owner, adopt) do
+    with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
+         {:ok, prepared} <-
+           Arbiter.Worker.Executor.Node.adopt(remote.node, spec,
+             owner: owner,
+             checkout: adopted_checkout(remote.request.checkout, adopt),
+             stdout_offset: Map.get(adopt, :stdout_offset),
+             adopt_timeout_ms: Map.get(adopt, :timeout_ms)
+           ),
+         {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
+      {:ok, handle, prepared.stdout_start}
+    else
+      {:error, reason} -> {:error, {:remote_adoption_failed, reason}}
+    end
+  end
+
+  # The run's transcripts keep landing where they did before the restart: the row's
+  # config dir, not the one this spawn made.
+  defp adopted_checkout(%{} = checkout, %{config_dir: dir}) when is_binary(dir),
+    do: %{checkout | config_dir: dir}
+
+  defp adopted_checkout(checkout, _adopt), do: checkout
 
   # The node knows the run by the id of the Worker's `worker_runs` row, so a node's
   # retained run (quiesced across a primary restart) is found by `Nodes.Recovery`,
@@ -509,12 +557,12 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  # The handle of a spawn that was placed for its first open is consumed by it;
-  # what is stashed for re-opens must not carry it.
+  # The handle of a spawn that was placed (or adopted) for its first open is consumed by
+  # it; what is stashed for re-opens must not carry it: a re-open places a fresh run.
   @doc false
   @spec strip_prepared(map()) :: map()
   def strip_prepared(%{remote: %{} = remote} = port_args),
-    do: %{port_args | remote: %{remote | prepared: nil}}
+    do: %{port_args | remote: Map.delete(%{remote | prepared: nil}, :stdout_start)}
 
   def strip_prepared(port_args), do: port_args
 

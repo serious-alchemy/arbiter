@@ -39,6 +39,40 @@ defmodule Arbiter.Agents.Grok.Stream do
   tier. `reasoning_tokens` is only in `grok usage <session>`, not the stream.
   """
 
+  @doc """
+  Ledger attrs for a grok run with its `total_cost_usd` treated as notional
+  when the account is on the free tier (`plan` is "free", case-insensitive).
+
+  The CLI reports xAI list price even when nothing was billed, so on a free
+  account a numeric `:cost_usd` is moved out of the spendable column: it is kept
+  as `raw["notional_cost_usd"]` (for a separate display) and described in
+  `:cost_note`. `cost_usd` becomes nil, so every `SUM(cost_usd)` total skips
+  it. Paid or unknown plans, other providers, and rows without a cost pass
+  through unchanged.
+  """
+  @spec mark_notional_cost(map(), String.t() | nil) :: map()
+  def mark_notional_cost(%{provider: "grok", cost_usd: cost} = attrs, plan)
+      when is_number(cost) and is_binary(plan) do
+    if String.downcase(String.trim(plan)) == "free" do
+      price = :erlang.float_to_binary(cost * 1.0, decimals: 6)
+      note = "notional — free tier: $#{price} list price, not billed"
+      raw = Map.put(Map.get(attrs, :raw) || %{}, "notional_cost_usd", cost)
+
+      attrs
+      |> Map.merge(%{cost_usd: nil, cost_note: join_note(Map.get(attrs, :cost_note), note)})
+      |> Map.put(:raw, raw)
+    else
+      attrs
+    end
+  end
+
+  def mark_notional_cost(attrs, _plan), do: attrs
+
+  defp join_note(existing, note) when is_binary(existing) and existing != "",
+    do: existing <> "; " <> note
+
+  defp join_note(_, note), do: note
+
   # grok built-in -> the Claude tool it behaves like. Anything not listed (MCP
   # tools, future built-ins) keeps its own name, which the activity line shows.
   @tool_names %{

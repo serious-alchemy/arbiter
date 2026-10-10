@@ -92,6 +92,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_scope "a refine session is bound to one workspace and one ticket"
   @deny_reason_memory "the shared memory layer is coordinator authority"
   @deny_reason_trust "earned trust is coordinator and operator authority"
+  @deny_reason_permission_request "a permission request is the worker's own; a refine session may only suggest permissions"
 
   @deny %{
     # lifecycle / state
@@ -190,6 +191,11 @@ defmodule Arbiter.MCP.RefinePolicy do
     "trust_show" => @deny_reason_trust,
     "trust_confirm" => @deny_reason_trust,
     "trust_dismiss" => @deny_reason_trust,
+
+    # guardrails (G15a): a worker asks for a permission; a refine session is not a worker
+    "permission_request" => @deny_reason_permission_request,
+    "ticket_permission_grant" =>
+      "granting a permission is coordinator or operator authority; a refine session may only suggest permissions",
 
     # tracker
     "tracker_claim" => @deny_reason_tracker,
