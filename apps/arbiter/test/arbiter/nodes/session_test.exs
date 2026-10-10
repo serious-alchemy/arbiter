@@ -494,6 +494,69 @@ defmodule Arbiter.Nodes.SessionTest do
     end
   end
 
+  describe "exec in a run's container (bd-9rrrgk)" do
+    setup %{node: node, clock: c} do
+      params = hello(%{"caps" => %{"backend" => "podman", "exec" => "run"}})
+      {:ok, %{pid: pid}} = attach(node, c, self(), params)
+      %{pid: pid}
+    end
+
+    test "pushes `exec` to the node and returns the command's output and status", %{pid: pid} do
+      waiter = Task.async(fn -> Session.exec(pid, "run1", "mix format --check-formatted", 30) end)
+
+      assert_receive {:node_session,
+                      {:push, "exec",
+                       %{
+                         "run" => "run1",
+                         "id" => id,
+                         "command" => "mix format --check-formatted",
+                         "timeout_s" => 30
+                       }}}
+
+      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => id, "status" => 1, "output" => "red"})
+      assert {"red", 1} = Task.await(waiter)
+    end
+
+    test "a node that cannot run it (no context kept, no podman) is an error, not a status", %{
+      pid: pid
+    } do
+      waiter = Task.async(fn -> Session.exec(pid, "run1", "true", 30) end)
+      assert_receive {:node_session, {:push, "exec", %{"id" => id}}}
+      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => id, "error" => "no_context"})
+      assert {:error, {:exec_failed, "no_context"}} = Task.await(waiter)
+    end
+
+    test "a result for another id is ignored", %{pid: pid} do
+      waiter = Task.async(fn -> Session.exec(pid, "run1", "true", 30, 300) end)
+      assert_receive {:node_session, {:push, "exec", _}}
+      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => "other", "status" => 0, "output" => ""})
+      assert {:error, :timeout} = Task.await(waiter)
+    end
+
+    test "losing the channel answers the waiter", %{pid: pid, node: node, clock: c} do
+      channel = spawn(fn -> Process.sleep(:infinity) end)
+      params = hello(%{"caps" => %{"backend" => "podman", "exec" => "run"}})
+      {:ok, %{pid: ^pid}} = attach(node, c, channel, params)
+
+      waiter = Task.async(fn -> Session.exec(pid, "run1", "true", 30) end)
+      # The takeover's push goes to the new channel, not to this test.
+      _ = Session.snapshot(pid)
+      Process.exit(channel, :kill)
+      assert {:error, :not_connected} = Task.await(waiter)
+    end
+
+    test "an agent that does not advertise exec is unsupported, with nothing pushed", %{
+      node: node,
+      clock: c
+    } do
+      other = enroll!("old-agent")
+      {:ok, %{pid: old}} = attach(other, c)
+      assert {:error, :unsupported} = Session.exec(old, "run1", "true", 30)
+      refute_received {:node_session, {:push, "exec", _}}
+      _ = node
+    end
+  end
+
   describe "a run's owner going away" do
     setup %{node: node, clock: c} do
       {:ok, %{pid: pid}} = attach(node, c)

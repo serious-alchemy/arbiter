@@ -117,6 +117,8 @@ defmodule Arbiter.Nodes.Session do
     # and the callers waiting on a checkout ingest, `run => [from]`.
     checkouts: %{},
     collectors: %{},
+    # bd-9rrrgk: the callers waiting on an `exec` result, `id => from`.
+    execs: %{},
     # RW12: what the agent retained (`run => report`), the recoveries in flight
     # (`run => %{ctx, waiters, phase, checkout}`) and the periodic reap.
     retained: %{},
@@ -233,6 +235,27 @@ defmodule Arbiter.Nodes.Session do
   @spec collect(pid(), String.t(), :checkout, timeout()) :: {:ok, term()} | {:error, term()}
   def collect(pid, run, :checkout = kind, timeout \\ 120_000) do
     GenServer.call(pid, {:collect, run, kind}, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Run `command` (`sh -c`) to completion in the run's container on the node and return
+  `{output, exit_status}` (bd-9rrrgk: the pre-push recipe of a run placed on a node, where
+  the deps and the image live). The agent rebuilds the run's container from the spec it
+  was assigned with (same image, mounts, home, no agent secrets), so the run may already
+  have ended. `{:error, :unsupported}` for an agent without `caps["exec"]`,
+  `{:error, {:exec_failed, reason}}` when the node could not start it (no context for the
+  run, podman refused), `{:error, :not_connected | :timeout | :no_session}` otherwise.
+  The node enforces `timeout_s`; `wait_ms` (default `timeout_s` + 60 s) bounds this call.
+  """
+  @spec exec(pid(), String.t(), String.t(), pos_integer(), timeout() | nil) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def exec(pid, run, command, timeout_s, wait_ms \\ nil)
+      when is_binary(command) and is_integer(timeout_s) do
+    wait = wait_ms || (timeout_s + 60) * 1000
+    GenServer.call(pid, {:exec, run, command, timeout_s, wait}, wait + 5_000)
   catch
     :exit, {:timeout, _} -> {:error, :timeout}
     :exit, _ -> {:error, :no_session}
@@ -487,7 +510,23 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
+  def handle_call({:exec, _run, _command, _timeout_s, _wait}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:exec, run, command, timeout_s, wait}, from, state) do
+    if state.caps["exec"] do
+      id = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+      payload = %{"run" => run, "id" => id, "command" => command, "timeout_s" => timeout_s}
+      notify_channel(state, {:push, "exec", payload})
+      Process.send_after(self(), {:exec_expired, id}, wait)
+      {:noreply, %{state | execs: Map.put(state.execs, id, from)}}
+    else
+      {:reply, {:error, :unsupported}, state}
+    end
+  end
+
   def handle_call({:collect, _run, _kind}, _from, %{channel: nil} = state),
+
     do: {:reply, {:error, :not_connected}, state}
 
   # A read-only checkout (a reviewer's clone, bd-cgdhlu) uploads no bundle, so there is
@@ -597,6 +636,7 @@ defmodule Arbiter.Nodes.Session do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{channel_ref: ref} = state) do
     record(state, :disconnected, %{"reason" => inspect(reason)})
+    state = reply_execs(state, {:error, :not_connected})
     broadcast({:node_connection, state.node_id, :down})
     {:noreply, %{state | channel: nil, channel_ref: nil}}
   end
@@ -627,7 +667,14 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
-  def handle_info(:reap, state), do: {:noreply, state |> send_reap() |> schedule_reap()}
+  def handle_info({:exec_expired, id}, state) do
+    {from, execs} = Map.pop(state.execs, id)
+    if from, do: GenServer.reply(from, {:error, :timeout})
+    {:noreply, %{state | execs: execs}}
+  end
+
+  def handle_info(:reap, state),
+ do: {:noreply, state |> send_reap() |> schedule_reap()}
 
   def handle_info({:prepare_timeout, run}, state) do
     case RunStreams.fetch(state.streams, run) do
@@ -717,12 +764,35 @@ defmodule Arbiter.Nodes.Session do
   defp node_event_apply(state, "recovered", %{"run" => run} = parts),
     do: finish_recovery(state, run, parts)
 
+  defp node_event_apply(state, "exec.result", %{"id" => id} = result) do
+    case Map.pop(state.execs, id) do
+      {nil, _} ->
+        state
+
+      {from, execs} ->
+        GenServer.reply(from, exec_reply(result))
+        %{state | execs: execs}
+    end
+  end
+
   defp node_event_apply(state, "reaped", %{} = report) do
     record(state, :reaped, Map.take(report, ~w(containers pods dirs)))
     state
   end
 
   defp node_event_apply(state, _event, _payload), do: state
+
+  defp exec_reply(%{"error" => reason}), do: {:error, {:exec_failed, reason}}
+
+  defp exec_reply(%{"status" => status} = result) when is_integer(status),
+    do: {to_string(result["output"] || ""), status}
+
+  defp exec_reply(other), do: {:error, {:exec_failed, "bad result: " <> inspect(other, limit: 5)}}
+
+  defp reply_execs(state, reply) do
+    Enum.each(state.execs, fn {_id, from} -> GenServer.reply(from, reply) end)
+    %{state | execs: %{}}
+  end
 
   # ---- recovery ----------------------------------------------------------------------
 
