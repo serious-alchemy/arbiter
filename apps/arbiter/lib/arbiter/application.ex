@@ -334,6 +334,10 @@ defmodule Arbiter.Application do
         # still fires when CloudProbe has stopped reporting anything
         # (bd-2wnkoq).
         Arbiter.Quota.StalenessWatch,
+        # Publishes each provider pool's concurrency budget (bd-6c8g4t, DC3)
+        # into ETS and announces `budget_changed`. Nothing on an admission path
+        # reads it until DC8; see Arbiter.Quota.Budget.Server.
+        Arbiter.Quota.Budget.Server,
         # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
         # `workspace_spend/1` read their memoized 30-day ledger aggregates
         # from (bd-4p6pw7) — see that module's docs.

@@ -220,5 +220,12 @@ defmodule Arbiter.ApplicationTest do
         assert Arbiter.Quota.CloudProbe in ids
       end
     end
+
+    test "the provider budget server is supervised in every env (bd-6c8g4t)" do
+      for auto_start? <- [true, false] do
+        ids = Application.children(auto_start?: auto_start?) |> Enum.map(&child_id/1)
+        assert Arbiter.Quota.Budget.Server in ids
+      end
+    end
   end
 end

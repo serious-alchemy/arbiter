@@ -14,10 +14,14 @@ defmodule Arbiter.Quota.BudgetCalibrationShadowTest do
   @consumers ~r/BudgetCalibration|budget_calibration/
 
   # The only files allowed to name the calibration: its own module, the two
-  # operator entry points, and two moduledocs that point at it (`Draw` shares its
+  # operator entry points, the budget that consumes it (DC3, bd-6c8g4t: its pure
+  # function, server and inputs), and two moduledocs that point at it (`Draw` shares its
   # intervals; `QuotaSnapshot` documents the columns).
   @allowed ~w(
     arbiter/quota/budget_calibration.ex
+    arbiter/quota/budget.ex
+    arbiter/quota/budget/inputs.ex
+    arbiter/quota/budget/server.ex
     arbiter/loop/scarcity/draw.ex
     arbiter/quota/quota_snapshot.ex
     arbiter/release.ex
