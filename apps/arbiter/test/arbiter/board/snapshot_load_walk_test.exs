@@ -8,6 +8,7 @@ defmodule Arbiter.Board.SnapshotLoadWalkTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
+  alias Arbiter.Board.AdmissionShadow
   alias Arbiter.Board.Snapshot
   alias Arbiter.Quota.Budget
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -87,6 +88,65 @@ defmodule Arbiter.Board.SnapshotLoadWalkTest do
       assert pool == {account.id, "claude"}
       assert board.walk.pools[{account.id, "claude"}].budget == 2
     end
+  end
+
+  # Seen live (v0.2.43): today's slot total full, the primary over its own cap
+  # with review-side runs it never holds, and a node with room.
+  test "shadow places a remote-eligible card on a node's free slot while today has none", ctx do
+    remote_ws =
+      Ash.create!(Workspace, %{
+        name: "load-walk-remote-#{System.unique_integer([:positive])}",
+        prefix: "lr#{System.unique_integer([:positive])}",
+        config: %{
+          "worker" => %{"placement" => "prefer_remote"},
+          "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}
+        }
+      })
+
+    Ash.create!(WorkspaceProviderAccount, %{
+      workspace_id: remote_ws.id,
+      provider: :claude,
+      provider_account_id: ctx.account.id
+    })
+
+    remote =
+      Ash.create!(Issue, %{title: "remote", workspace_id: remote_ws.id, acceptance: "- walk"})
+      |> Ash.update!(%{}, action: :promote_to_ready)
+
+    walk_opts =
+      Keyword.merge(ctx.walk_opts,
+        local: %{cap: 2, used: 4},
+        remote_available?: true,
+        nodes: [
+          %{id: "oryx", name: "ryan-oryx-pro", state: :online, health: :ready, max: 3, live: 1}
+        ]
+      )
+
+    now = DateTime.utc_now()
+    opts = [workspace_id: remote_ws.id, now: now, slots_total: 0, walk_opts: walk_opts]
+
+    today = Snapshot.load(opts)
+    board = Snapshot.load([admission: :shadow] ++ opts)
+
+    assert Map.delete(board, :walk) == today
+    assert today.promote == nil
+
+    # Today holds the head on the slot total and queues the rest behind it.
+    assert %{state: :blocked, reason: reason} = Enum.find(today.ready, &(&1.id == ctx.ready.id))
+    assert reason =~ "no free worker slot"
+    assert %{state: :queued} = Enum.find(today.ready, &(&1.id == remote.id))
+
+    assert %{promote: promote, placements: [%{node: "oryx"}]} = board.walk
+    assert promote == remote.id
+
+    # The setup's ticket is local-only: it waits on the full primary.
+    assert %{wait_cause: {:capacity, :node}, reason: local_reason} =
+             Enum.find(board.walk.entries, &(&1.id == ctx.ready.id))
+
+    assert local_reason =~ "local 4 of 2"
+
+    assert %{legacy_pick: nil, walk_pick: ^promote, walk: %{"node" => "oryx"}} =
+             AdmissionShadow.event(board, :shadow, now)
   end
 
   @tag capture_log: true

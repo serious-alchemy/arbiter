@@ -318,5 +318,20 @@ defmodule Arbiter.Agents.ProviderRoutingGuardrailsTest do
       assert decision["account_slug"] == agy.slug
       refute decision["fallback"]
     end
+
+    # DC6: the scheduler walk asks eligibility through its own check list
+    # (`admission: :walk`), which shares the guardrail drop and what it names.
+    test "the walk's eligibility drops the subject too, naming what it lacks" do
+      guard!()
+      %{ws: ws, claude: claude, agy: agy, quotas: quotas} = bound_fleet!()
+      widened = grant!(task!(ws, %{difficulty: 1}), "prod_read")
+
+      walk = ProviderRouting.availability(ws, widened, opts(quotas, admission: :walk))
+
+      assert Enum.map(walk.available, & &1.account.id) == [claude.id]
+
+      assert [%{reason: "guardrail_ineligible", guardrail_lacks: ["prod_read"]}] =
+               Enum.filter(walk.dropped, &(&1.account.id == agy.id))
+    end
   end
 end
