@@ -40,7 +40,12 @@ defmodule Arbiter.NodeAgent.K8s.PodScriptsTest do
 
   test "entry fails closed when the secrets file is missing", %{tmp_dir: dir} do
     script = Path.join(dir, "entry.sh")
-    File.write!(script, String.replace(PodScripts.entry(), PodScripts.env_file(), Path.join(dir, "absent")))
+
+    File.write!(
+      script,
+      String.replace(PodScripts.entry(), PodScripts.env_file(), Path.join(dir, "absent"))
+    )
+
     assert {_out, code} = sh([script, "echo", "ran"])
     assert code != 0
   end
