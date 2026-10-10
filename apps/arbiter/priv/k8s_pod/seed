@@ -122,6 +122,10 @@ if [ -n "$base" ]; then
   git check-ref-format --branch "$base" >/dev/null || die "bad checkout base"
 fi
 
+# Everything above is a secret and stays 0600/0700. The tree is not: files are
+# created as git would on a host (0644/0755), as PrivateClone's are.
+umask 022
+
 wt=$root/wt
 bundle=$root/seed.bundle
 mkdir -p "$wt" "$root/home" "$root/claude-config"

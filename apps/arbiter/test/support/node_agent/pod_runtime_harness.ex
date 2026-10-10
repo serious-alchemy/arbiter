@@ -146,6 +146,12 @@ defmodule Arbiter.NodeAgent.PodRuntimeHarness do
     }
   end
 
-  @doc "The seed script's text (read from `priv/`)."
+  @doc """
+  The shell the scripts run under: `dash` when the host has it, as the image's
+  `/bin/sh` is (Debian), else `sh`. A bashism fails here rather than in a pod.
+  """
+  def shell, do: System.find_executable("dash") || System.find_executable("sh")
+
+  @doc "The path of a script under `priv/k8s_pod`."
   def script(name), do: Path.join(Application.app_dir(:arbiter, "priv/k8s_pod"), name)
 end

@@ -43,16 +43,14 @@ export GIT_TERMINAL_PROMPT=0 GIT_ATTR_NOSYSTEM=1
 
 say() { echo "arbiter snapshotter: $*" >&2; }
 
-# The settings seed wrote: branch, base, the shas the primary already has.
+# The settings seed wrote: the branch and the shas the primary already has.
 branch=
-base=
 known=
 checkout=$run_dir/checkout
 if [ -f "$checkout" ]; then
   while IFS='=' read -r key value; do
     case $key in
       branch) branch=$value ;;
-      base) base=$value ;;
       known) known="$known $value" ;;
     esac
   done <"$checkout"
@@ -127,7 +125,7 @@ take_snapshot() {
   git init -q --bare --template= "$snap" || return 1
   printf '%s\n' "$wt/.git/objects" >"$snap/objects/info/alternates"
   git --git-dir="$snap" config core.excludesFile "$wt/.git/info/exclude"
-  export GIT_INDEX_FILE=$snap/snap-index
+  export GIT_INDEX_FILE="$snap/snap-index"
 
   # Untracked payload over the cap is vetoed before anything is hashed.
   snap_git read-tree "$tip" || return 1
@@ -238,7 +236,7 @@ while [ "$term" = 0 ]; do
   [ $((now - last_at)) -lt "$interval" ] || due=1
   if [ "$work_limit" -gt 0 ] && [ $((now - early_at)) -ge 30 ]; then
     used=$(work_usage)
-    if [ "$used" -ge $((work_limit / 10 * 8)) ]; then
+    if [ "$used" -ge $((work_limit * 8 / 10)) ]; then
       say "work volume at ${used} of ${work_limit} bytes: early snapshot"
       early_at=$now
       due=1
@@ -257,5 +255,5 @@ say "SIGTERM: final snapshot"
 rc=0
 take_snapshot 1 || rc=1
 upload_transcripts 1 || rc=1
-say "final snapshot $([ "$rc" = 0 ] && echo done || echo FAILED)"
+if [ "$rc" = 0 ]; then say "final snapshot done"; else say "final snapshot FAILED"; fi
 exit "$rc"

@@ -44,7 +44,8 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
     %{fixture: fixture, channel: channel, dirs: dirs, env: env, wt: Path.join(dirs.work, "wt")}
   end
 
-  defp sh(script, env), do: System.cmd("sh", [H.script(script)], env: env, stderr_to_stdout: true)
+  defp sh(script, env),
+    do: System.cmd(H.shell(), [H.script(script)], env: env, stderr_to_stdout: true)
 
   test "seed redeems the nonce and builds the private-clone layout", ctx do
     assert {out, 0} = sh("seed", ctx.env)
@@ -141,7 +142,9 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
       File.write!(script, String.replace(PodScripts.entry(), PodScripts.env_file(), env_file))
 
       assert {"s3cret\n", 0} =
-               System.cmd("sh", [script, "sh", "-c", ~S(echo "$TOKEN")], stderr_to_stdout: true)
+               System.cmd(H.shell(), [script, "sh", "-c", ~S(echo "$TOKEN")],
+                 stderr_to_stdout: true
+               )
 
       refute File.exists?(env_file)
     end
@@ -236,7 +239,7 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
 
   defp start_snapshotter(env) do
     port =
-      Port.open({:spawn_executable, System.find_executable("sh")}, [
+      Port.open({:spawn_executable, H.shell()}, [
         :binary,
         :exit_status,
         :stderr_to_stdout,
