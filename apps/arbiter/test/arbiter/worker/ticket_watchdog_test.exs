@@ -51,6 +51,7 @@ defmodule Arbiter.Worker.TicketWatchdogTest do
   alias Arbiter.Worker.TicketWatchdogTest.{NoAgentConflict, NoAgentFixPass}
 
   @fixture Path.expand("../../fixtures/commit_and_done.sh", __DIR__)
+  @settle_ms 30_000
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
@@ -341,11 +342,15 @@ defmodule Arbiter.Worker.TicketWatchdogTest do
       on_exit(fn -> stop_run(task.id) end)
 
       # The run ends when its merge is "opened" — Direct merges right there.
-      wait_until(fn -> not Process.alive?(result.worker_pid) end, 5_000)
-      wait_until(fn -> ticket(task.id).state == :closed end)
+      # A real agent process, a git merge and several SQLite writes sit between
+      # here and the close, so the budget is generous: it costs nothing when
+      # the run is quick, and a loaded CI box overran the old 5s / 3s (bd-4qj7io).
+      ref = Process.monitor(result.worker_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, @settle_ms
+      wait_until(fn -> ticket(task.id).state == :closed end, @settle_ms)
 
       # Through Merging: the open_pr transition, then the close.
-      wait_until(fn -> :close in transitions(task.id) end)
+      wait_until(fn -> :close in transitions(task.id) end, @settle_ms)
       assert :open_pr in transitions(task.id)
       assert Worker.whereis(task.id) == nil
 

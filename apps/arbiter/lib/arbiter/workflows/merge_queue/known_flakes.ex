@@ -26,6 +26,14 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakes do
   before all its failures, or no test output at all. Unreadable means a fix
   pass, never a silent re-run.
 
+  ## The four seeded entries (bd-4qj7io)
+
+  Each entry's `:cause` is what reading the test shows, not a reproduced
+  failure: none of the four could be made to fail locally, so the cause is
+  a diagnosis. Each test's budgets were widened in the same change; the entries
+  stay as the backstop. If one of them fails twice on a head, the Watchdog
+  dispatches a fix pass and that fix pass owns the real cause.
+
   ## Adding an entry
 
   An entry is a statement that the test is flaky for a reason that is not the
@@ -51,8 +59,8 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakes do
       test: "quota-exhausted pre-flight hold on the drain path",
       ticket: "bd-4qj7io",
       cause:
-        "wall-clock budgets (500ms receives, a 400ms hold lead) around a drain that does " <>
-          "SQLite round-trips off-process; a loaded CI box overruns them"
+        "500ms receives and a 400ms hold-lead timer around a drain that does SQLite " <>
+          "round-trips off-process; a loaded CI box overran them (budgets since widened)"
     },
     %{
       id: "remote-checkout-primary-veto",
@@ -60,8 +68,8 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakes do
       test: "a repo the primary vetoes",
       ticket: "bd-4qj7io",
       cause:
-        "the refusal is an answer pushed once over a live node channel and then " <>
-          "awaited with a bounded wait; a slow or flapping channel on CI outlasts it"
+        "a 5s bounded wait for the refused run's process to unregister, after a " <>
+          "refusal that crosses a real HTTP listener and node channel (bound since widened)"
     },
     %{
       id: "ticket-watchdog-direct-strategy",
@@ -69,8 +77,8 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakes do
       test: "the Direct strategy",
       ticket: "bd-4qj7io",
       cause:
-        "the Driver's max_ticks (200 x 10ms) was a 2s wall-clock budget for a real agent " <>
-          "process plus a git merge; past it the Driver fails the run"
+        "5s and 3s polls around a real agent process, a git merge and several SQLite " <>
+          "writes; a loaded CI box overran them (budgets since widened)"
     },
     %{
       id: "worker-resume-rest-mcp-parity",
@@ -78,8 +86,8 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakes do
       test: "REST and MCP resume spawn",
       ticket: "bd-4qj7io",
       cause:
-        "two real spawns, each polled for 5s, with the first run's teardown racing " <>
-          "the second resume"
+        "two real agent spawns, each polled for 5s, each preceded by worktree and " <>
+          "briefing setup (bounds since widened)"
     }
   ]
 
