@@ -68,6 +68,10 @@ defmodule Arbiter.Worker.StopReason do
       `Arbiter.Guardrails.SpendPatrol` stopped the run (G19). Built by
       `spend_cap/1`, never by `classify/3`. A policy stop, not an agent failure; not
       resumable, since the cap is per ticket and would trip again.
+    * `:trust_suspended` — the run's subject was suspended after a critical
+      guardrail event and `Arbiter.Loop.Trust` parked every run of it in flight
+      (G18). Built by `trust_suspended/1`, never by `classify/3`. A policy stop;
+      not resumable until the coordinator dismisses the suspension.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
@@ -204,6 +208,7 @@ defmodule Arbiter.Worker.StopReason do
           | :killed
           | :memory_cap_exceeded
           | :spend_cap
+          | :trust_suspended
           | :spawn_exec_failed
           | :crashed
           | :stream_schema_drift
@@ -1030,6 +1035,33 @@ defmodule Arbiter.Worker.StopReason do
     }
   end
 
+  @doc """
+  Build a `:trust_suspended` reason (G18, guardrail-profiles §6.3): the run's
+  subject was suspended after a critical guardrail event, and every run of it in
+  flight is parked until the coordinator decides.
+
+  `info` is `%{subject: "provider/model", kind: event_kind, run_id: run}`, the
+  run being the one the event was recorded on.
+  """
+  @spec trust_suspended(%{subject: String.t(), kind: String.t(), run_id: String.t() | nil}) ::
+          t()
+  def trust_suspended(%{subject: subject, kind: kind} = info) do
+    %__MODULE__{
+      category: :trust_suspended,
+      summary:
+        "subject #{subject} was suspended after a critical guardrail event " <>
+          "(#{kind} on run #{info[:run_id] || "?"}) and this run was parked — the agent " <>
+          "was stopped and its worktree kept",
+      remediation:
+        "The coordinator confirms the suspension (`arb trust confirm #{subject}`: the " <>
+          "subject drops to quarantine) or dismisses it as a false positive " <>
+          "(`arb trust dismiss #{subject} --reason …`: its tier returns). Re-dispatch " <>
+          "the ticket after that; a suspended subject is not eligible for any work.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
   @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
   @spec spend_cap_figures(%{
           :cap => :tokens | :wall_clock_s,
@@ -1104,6 +1136,7 @@ defmodule Arbiter.Worker.StopReason do
         :killed -> "killed by signal #{reason.signal}"
         :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
         :spend_cap -> "spend cap reached (parked by the guardrail tier)"
+        :trust_suspended -> "subject suspended after a critical guardrail event (parked)"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"

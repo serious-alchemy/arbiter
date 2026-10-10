@@ -361,6 +361,8 @@ defmodule Arbiter.Worker.ReviewGate do
     :memory_cap_exceeded,
     # G19: a re-prompt re-runs into the same tier spend cap.
     :spend_cap,
+    # G18: a suspended subject is parked; a re-prompt would only be parked again.
+    :trust_suspended,
     # bd-2s755v: a re-prompt sends the same rejected `-m` model.
     :model_unavailable
   ]

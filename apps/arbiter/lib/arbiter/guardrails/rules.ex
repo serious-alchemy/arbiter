@@ -5,8 +5,8 @@ defmodule Arbiter.Guardrails.Rules do
 
   A rule is `%{match: %{provider:, family:, model:}, tier:, scope:, overrides:,
   pinned:, source:}`. It matches a subject when every key it names matches; the
-  **most specific** match wins (`model` glob, then `family`, then `provider`),
-  ties going to the earlier rule. No match is `nil`, which the caller reads as
+  **most specific** match wins (an exact `model`, then a `model` glob, then
+  `family`, then `provider`), ties going to the earlier rule. No match is `nil`, which the caller reads as
   `:quarantine`, the fail-safe default.
 
   Rules come from two places, DB rules first: the `guardrail_subjects` table
@@ -99,13 +99,17 @@ defmodule Arbiter.Guardrails.Rules do
 
   def matches?(_match, _subject), do: false
 
+  # An exact model (no `*`) outranks any glob: it is the most specific match
+  # there is, and it is what `Arbiter.Loop.Trust` writes when it promotes or
+  # demotes one subject (G18), so that rule wins over the glob that matched the
+  # subject before, wherever it sits in the list.
   defp specificity(match) do
     weight =
       Enum.max(
-        Enum.map(Map.keys(match), fn
-          :model -> 3
-          :family -> 2
-          :provider -> 1
+        Enum.map(match, fn
+          {:model, glob} -> if String.contains?(glob, "*"), do: 3, else: 4
+          {:family, _} -> 2
+          {:provider, _} -> 1
         end)
       )
 
