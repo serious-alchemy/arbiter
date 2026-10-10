@@ -55,7 +55,6 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
-  alias Arbiter.NodeAgent.Reaper
   alias Arbiter.NodeAgent.Retained
   alias Arbiter.NodeAgent.Run
   alias Arbiter.NodeAgent.Runs
@@ -63,7 +62,6 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.Upgrade
   alias Arbiter.NodeAgent.Upgrader
   alias Arbiter.NodeAgent.WsClient
-  alias Arbiter.Worker.PodmanReadiness
 
   require Logger
 
@@ -285,7 +283,7 @@ defmodule Arbiter.NodeAgent.Connection do
   end
 
   defp push(state, "assign", %{"run" => run, "spec" => spec}) when is_map(spec) do
-    case Runs.assign(Map.put(spec, "run", run), run_opts(state)) do
+    case backend(state).start_run(%{spec: Map.put(spec, "run", run), opts: run_opts(state)}) do
       {:ok, _run} ->
         :ok
 
@@ -314,7 +312,7 @@ defmodule Arbiter.NodeAgent.Connection do
   end
 
   defp push(state, "cancel", %{"run" => run} = payload) do
-    case Run.cancel(run, payload["reason"] || "cancelled") do
+    case backend(state).stop({run, payload["reason"] || "cancelled"}) do
       :ok -> :ok
       {:error, :not_found} -> send(self(), {:run_push, run, "run.gone", %{"run" => run}})
     end
@@ -324,13 +322,13 @@ defmodule Arbiter.NodeAgent.Connection do
 
   # RW11: the primary wants a checkpoint now.
   defp push(state, "collect", %{"run" => run, "kind" => "checkout"}) do
-    Run.collect(run)
+    backend(state).collect(run, kind: "checkout")
     state
   end
 
   defp push(state, "signal", %{"run" => run, "signal" => signal})
        when signal in ["TERM", "KILL"] do
-    Run.signal(run, signal)
+    backend(state).signal(run, signal)
     state
   end
 
@@ -388,7 +386,11 @@ defmodule Arbiter.NodeAgent.Connection do
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        Reaper.reap(config, %{install: install, live_set: Enum.filter(live, &is_binary/1)}, opts)
+        config.backend.reap(%{
+          config: config,
+          request: %{install: install, live_set: Enum.filter(live, &is_binary/1)},
+          opts: opts
+        })
       end)
 
     %{state | reap_task: task.ref}
@@ -409,7 +411,8 @@ defmodule Arbiter.NodeAgent.Connection do
   # -- hello ------------------------------------------------------------------------------------
 
   defp probe_readiness(state) do
-    fun = state.config.readiness_fun || (&PodmanReadiness.diagnose/0)
+    backend = state.config.backend
+    fun = state.config.readiness_fun || (&backend.readiness/0)
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
@@ -500,6 +503,8 @@ defmodule Arbiter.NodeAgent.Connection do
     put_status(state, %{boot_epoch_changed_at: DateTime.utc_now() |> DateTime.to_iso8601()})
     %{state | boot_epoch: epoch}
   end
+
+  defp backend(state), do: state.config.backend
 
   defp bridge(state), do: Keyword.get(state.config.run_opts, :bridge, Bridge)
 
