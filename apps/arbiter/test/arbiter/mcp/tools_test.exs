@@ -2576,6 +2576,30 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
       assert data.workspace.id == ctx.ws.id
     end
+
+    test "surfaces provider-scoped tier_models overrides (bd-7ifdke)", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "agent" => %{
+                "config" => %{
+                  "gemini" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}
+                }
+              }
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+
+      assert data.tier_model_overrides == %{
+               "agent.config.gemini.tier_models" => %{"standard" => "gemini-3.1-pro-high"}
+             }
+    end
   end
 
   describe "workspace_config_set/2 multi-key (P-21)" do
