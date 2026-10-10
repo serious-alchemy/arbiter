@@ -2433,11 +2433,21 @@ defmodule Arbiter.Worker.Dispatch do
       workspace_id: task.workspace_id,
       kind: node_kind(task, opts),
       provider: quota_gate_provider(task, workspace, opts),
-      layout: git_layout(task, opts),
-      no_pr?: no_private_clone?(task, opts),
+      layout: node_layout(task, workspace, opts),
+      no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
       mode: Placement.mode(workspace)
     }
+  end
+
+  # The layout the run's checkout would get. A `review: true` dispatch has no
+  # worktree of its own (`provision_worktree: false`); its checkout is the
+  # reviewer's, a private clone whenever the review may run in a container
+  # (bd-cgdhlu), so that is the layout placement asks about.
+  defp node_layout(%Issue{} = task, workspace, opts) do
+    if Keyword.get(opts, :review) == true,
+      do: workspace |> dispatch_policy(opts) |> GitLayout.for_review_policy(),
+      else: git_layout(task, opts)
   end
 
   # bd-373tce: does the checkout this dispatch would reuse already hold uncommitted
@@ -3765,8 +3775,10 @@ defmodule Arbiter.Worker.Dispatch do
         %{path: path} = checkout ->
           {:ok, path, Keyword.put(opts, :review_checkout, checkout)}
 
+        # A diff-only review reads the primary's own repo, which a node cannot
+        # be handed: it runs here instead (bd-cgdhlu).
         nil ->
-          {:ok, repo_path, opts}
+          {:ok, repo_path, Keyword.delete(opts, :node)}
       end
     else
       _ -> {:error, :missing_worktree}
@@ -3802,7 +3814,7 @@ defmodule Arbiter.Worker.Dispatch do
         # only through a sync-back.
         _ = Worktree.sync_branch(repo_path, branch)
 
-        case Checkout.provision_branch(repo_path, branch, prefix: "review") do
+        case Checkout.provision_branch(repo_path, branch, review_checkout_opts(opts, target)) do
           {:ok, %{path: path, head_sha: sha}} ->
             seed_review_checkout(task, repo_path, branch, path, opts)
             %{path: path, branch: branch, head_sha: sha, base_branch: target}
@@ -3816,6 +3828,15 @@ defmodule Arbiter.Worker.Dispatch do
             nil
         end
     end
+  end
+
+  # A review placed on a node (`opts[:node]`, bd-cgdhlu) is handed a read-only
+  # private clone of the head — the only layout a container gets, and what the
+  # node is seeded from. Every other review keeps the detached linked worktree.
+  defp review_checkout_opts(opts, target) do
+    if Keyword.get(opts, :node),
+      do: [prefix: "review", layout: :private_clone, base: target],
+      else: [prefix: "review"]
   end
 
   # The reviewer runs tests here, so it gets the same seeded deps/_build (and
@@ -3836,6 +3857,15 @@ defmodule Arbiter.Worker.Dispatch do
     BranchNamer.derive(task)
   rescue
     _ -> nil
+  end
+
+  # A review placed on a node names its provider, which is what keeps a podman
+  # `sandbox.backend` for a Claude reviewer in a private clone
+  # (`SecurityPolicy.for_review_spawn/2`, bd-cgdhlu). Any other review is unchanged.
+  defp review_policy_opts(opts, choice) do
+    if Keyword.get(opts, :node),
+      do: Keyword.put_new(opts, :provider, choice.type),
+      else: opts
   end
 
   # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
@@ -3985,7 +4015,7 @@ defmodule Arbiter.Worker.Dispatch do
         base_policy =
           workspace
           |> dispatch_policy(opts)
-          |> review_security_policy(opts)
+          |> review_security_policy(review_policy_opts(opts, choice))
 
         policy = guardrail_floor(base_policy, workspace, choice, opts)
 

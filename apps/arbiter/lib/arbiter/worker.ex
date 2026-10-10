@@ -3407,8 +3407,17 @@ defmodule Arbiter.Worker do
 
     record_run_finished(new_state)
     broadcast_lifecycle(:updated, new_state)
-    Arbiter.Nodes.LostResume.schedule(state.task_id)
+    schedule_node_lost_resume(state.task_id)
     new_state
+  end
+
+  # A ReviewGate pass (`<task>#review...`, bd-cgdhlu) is not a ticket there is
+  # anything to resume: its gate heard `{:worker_node_lost, id}` from the session
+  # and re-dispatches the pass itself, local or remote per placement.
+  defp schedule_node_lost_resume(task_id) do
+    if Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id,
+      do: Arbiter.Nodes.LostResume.schedule(task_id),
+      else: :ok
   end
 
   # The node a session handle executes on; nil for a local port.

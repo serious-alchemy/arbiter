@@ -35,6 +35,8 @@ case "$sub" in
           case "$a" in
             *:/work/tree|*:/work/tree:*|*:"$at"|*:"$at":*)
               h="${a%%:*}"
+              # what the shadow was seeded at (RW11), before the "run" edits it
+              git -C "$h" rev-parse HEAD > "$D/seeded.head" 2>/dev/null
               echo "edited by the run" > "$h/edited.txt"
               echo '{}' > "$h/.mcp.json" ;;
             *:/work/config|*:/work/config:*)
