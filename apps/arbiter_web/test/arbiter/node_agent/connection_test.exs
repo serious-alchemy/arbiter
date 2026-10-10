@@ -302,6 +302,154 @@ defmodule Arbiter.NodeAgent.ConnectionTest do
     assert File.dir?(Path.join([config.node_home, "runs", "f1", "worktree"]))
   end
 
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.8, §10.4.9): what the agent does across
+  # a primary restart so a new Worker can adopt its runs.
+  describe "across a primary restart" do
+    defp hang_agent(ctx, hello_ok, overrides \\ []) do
+      alias Arbiter.NodeAgent.Runs
+
+      stub = Path.join(ctx.home, "stub")
+      podman = ArbiterWeb.StubPodman.install(stub)
+      ArbiterWeb.StubPodman.write_mode(stub, "hang")
+      rt = Path.join(ctx.home, "rt")
+      File.mkdir_p!(rt)
+      cli = Path.join(ctx.home, "claude")
+      File.write!(cli, "#!/bin/sh\n")
+      File.chmod!(cli, 0o755)
+
+      for spec <- Runs.child_specs(), do: start_supervised!(spec)
+      Application.put_env(:arbiter_web, :fake_node_hello_ok, hello_ok)
+
+      {_conn, config} =
+        start_agent(
+          ctx,
+          [
+            live_runs_fun: &Runs.inventory/0,
+            run_opts: [
+              podman: podman,
+              runtime_dir: rt,
+              require_tmpfs: false,
+              image_fun: fn _image, _opts -> :ok end,
+              files_fun: fn _sha, _name -> {:ok, cli} end,
+              delegated_fun: fn -> ["memory", "pids", "cpu"] end
+            ]
+          ] ++ overrides
+        )
+
+      {config, stub}
+    end
+
+    defp place_hanging!(config, run) do
+      alias Arbiter.NodeAgent.Runs
+
+      spec = %{
+        "version" => 1,
+        "run" => run,
+        "name" => "arb-#{run}",
+        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "cwd" => "/work/tree",
+        "mounts" => [
+          %{"kind" => "worktree", "path" => "/work/tree"},
+          %{"kind" => "home", "path" => "/work/home"},
+          %{"kind" => "config_dir", "path" => "/work/config"},
+          %{"kind" => "tmp", "path" => "/work/tmp"}
+        ],
+        "env" => %{},
+        "secrets" => %{},
+        "limits" => %{"memory" => "1g"},
+        "command" => ["claude", "--print"]
+      }
+
+      opts = [config: config, sink: self(), node_id: config.node_id] ++ config.run_opts
+      assert {:ok, ^run} = Runs.assign(spec, opts)
+      assert_receive {:run_push, ^run, "run.ready", _}, 5_000
+    end
+
+    defp refused(run) do
+      assert_receive {:fake_node, :unexpected, {"adopt.refused", %{"run" => ^run} = refusal}},
+                     5_000
+
+      refusal["reason"]
+    end
+
+    test "adopt is passed on only for a run this connection's hello_ok held, and only once",
+         ctx do
+      alias Arbiter.NodeAgent.Runs
+      for spec <- Runs.child_specs(), do: start_supervised!(spec)
+
+      Application.put_env(:arbiter_web, :fake_node_hello_ok, %{
+        "hb_interval" => 0.03,
+        "fence_after" => 60,
+        "runs" => %{"held1" => "hold", "held2" => "hold", "known1" => "known"}
+      })
+
+      start_agent(ctx)
+      assert_receive {:fake_node, :channel, channel}, 5_000
+      assert_receive {:fake_node, :hello, _}, 5_000
+
+      # a held run goes on to the run table (no process for it here, so: gone)
+      send(channel, {:push, "adopt", %{"run" => "held1"}})
+      assert refused("held1") == "gone"
+
+      # the same run again, a run the primary knows, a run it never named: refused untouched
+      for run <- ["held1", "known1", "stranger"] do
+        send(channel, {:push, "adopt", %{"run" => run}})
+        assert refused(run) == "not_held"
+      end
+
+      # a hold belongs to the connection whose hello_ok gave it
+      Application.put_env(:arbiter_web, :fake_node_hello_ok, %{
+        "hb_interval" => 0.03,
+        "fence_after" => 60
+      })
+
+      flush_fake_node()
+      FakeNode.Endpoint.broadcast("node_socket:fake", "disconnect", %{})
+      assert_receive {:fake_node, :channel, channel}, 5_000
+      assert_receive {:fake_node, :hello, _}, 5_000
+
+      send(channel, {:push, "adopt", %{"run" => "held2"}})
+      assert refused("held2") == "not_held"
+    end
+
+    test "with no socket, the agent fences its runs restart_grace after the last ack", ctx do
+      {config, stub} =
+        hang_agent(ctx, %{"hb_interval" => 0.03, "fence_after" => 60, "restart_grace" => 0.3})
+
+      assert_receive {:fake_node, :hello, _}, 5_000
+      wait_until(fn -> status(config)["state"] == "ready" end)
+      place_hanging!(config, "g1")
+
+      # the primary goes away (a restart closes the socket)
+      stop_supervised!(FakeNode.Endpoint)
+
+      wait_until(fn ->
+        File.read!(Path.join(stub, "calls")) =~ "rm --force --ignore --time 0 arb-g1"
+      end)
+
+      assert status(config)["fenced_at"] != nil
+      wait_until(fn -> Arbiter.NodeAgent.Run.info("g1")["state"] == "exited" end)
+    end
+
+    test "a socket that comes back within restart_grace leaves the runs running", ctx do
+      {config, stub} =
+        hang_agent(ctx, %{"hb_interval" => 0.03, "fence_after" => 60, "restart_grace" => 0.8})
+
+      assert_receive {:fake_node, :hello, _}, 5_000
+      wait_until(fn -> status(config)["state"] == "ready" end)
+      place_hanging!(config, "g2")
+
+      stop_supervised!(FakeNode.Endpoint)
+      start_supervised!(FakeNode.endpoint_spec(port: ctx.port))
+      assert_receive {:fake_node, :hello, _}, 5_000
+
+      # well past the grace the first disconnect would have run out at: nothing was fenced
+      refute_receive {:run_push, "g2", "exit", _}, 1_200
+      refute File.read!(Path.join(stub, "calls")) =~ "rm --force"
+      assert Arbiter.NodeAgent.Run.info("g2")["state"] == "running"
+    end
+  end
+
   describe "version skew" do
     defp tarball(version) do
       dir = Path.join(System.tmp_dir!(), "arb-conn-tar-#{System.unique_integer([:positive])}")

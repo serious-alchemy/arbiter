@@ -86,6 +86,8 @@ defmodule Arbiter.Nodes.SessionTest do
       assert ok["hb_interval"] == 10
       assert ok["fence_after"] == 60
       assert ok["lost_after"] == 90
+      # bd-4p1vui (§10.4.8): how long the agent keeps its runs with no socket
+      assert ok["restart_grace"] == 180
       assert ok["health"] == "ready"
       assert ok["draining"] == false
     end
@@ -821,6 +823,238 @@ defmodule Arbiter.Nodes.SessionTest do
       assert_receive {:node_session, {:push, "retained.drop", %{"run" => "r1"}}}
       assert %{retained: retained} = Session.snapshot(pid)
       refute Map.has_key?(retained, "r1")
+    end
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): a new Worker takes a held run over.
+  describe "adoption" do
+    @actx %{home: "/h", branch: "arbiter/b", base: "main", seeded_paths: [], config_dir: "/c"}
+
+    defp adopt_caps,
+      do: %{"backend" => "podman", "run_hold" => "quiesce", "run_adopt" => "attach"}
+
+    defp adopt_hello(runs, caps \\ adopt_caps()) do
+      hello(%{
+        "caps" => caps,
+        "runs" =>
+          Enum.map(runs, fn {id, extra} ->
+            Map.merge(
+              %{"id" => id, "state" => "running", "exited" => false, "acked" => 42},
+              extra
+            )
+          end)
+      })
+    end
+
+    defp adopt_spec(run),
+      do: %{"run" => run, "bridges" => [%{"name" => "arb", "path" => "/new/arb.sock"}]}
+
+    defp held!(node, c, extra \\ %{}, opts \\ []) do
+      live = run!(:working, node.id)
+
+      {:ok, %{pid: pid}} =
+        Registry.attach(
+          node,
+          self(),
+          adopt_hello([{live.id, extra}]),
+          [clock: fn -> Agent.get(c, & &1) end, tick_ms: :infinity] ++ opts
+        )
+
+      {pid, live.id}
+    end
+
+    defp adopt_async(pid, run, owner \\ self()) do
+      Task.async(fn -> Session.adopt(pid, run, adopt_spec(run), owner, checkout: @actx) end)
+    end
+
+    defp collected!(pid, run) do
+      waiter = Task.async(fn -> Session.recover(pid, run, @actx, 5_000) end)
+      assert_receive {:node_session, {:push, "quiesce", %{"run" => ^run}}}, 2_000
+      Session.node_event(pid, "retained", retained_report(run))
+      assert_receive {:node_session, {:push, "recover", %{"run" => ^run}}}
+
+      Session.node_event(pid, "recovered", %{
+        "run" => run,
+        "transcripts" => "none",
+        "checkout" => "none"
+      })
+
+      assert {:ok, _} = Task.await(waiter)
+    end
+
+    test "a held, running run on an agent that can adopt is adoptable; anything else says why",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      assert :ok = Session.adoptable(pid, id)
+      assert {:error, :not_held} = Session.adoptable(pid, "ghost")
+
+      {pid2, id2} = held!(enroll!("exited-node"), c, %{"exited" => true})
+      assert {:error, :not_running} = Session.adoptable(pid2, id2)
+
+      {pid3, id3} = held!(enroll!("stopping-node"), c, %{"state" => "preparing"})
+      assert {:error, :not_running} = Session.adoptable(pid3, id3)
+
+      older = enroll!("older-node")
+      live = run!(:working, older.id)
+      caps = %{"backend" => "podman", "run_hold" => "quiesce"}
+      {:ok, %{pid: pid4}} = attach(older, c, self(), adopt_hello([{live.id, %{}}], caps))
+      assert {:error, :no_adopt_cap} = Session.adoptable(pid4, live.id)
+    end
+
+    test "adopt re-owns the held run: no cancel, no quiesce; the new bridges, context and stdout are the owner's",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      node_id = node.id
+      task = adopt_async(pid, id)
+
+      assert_receive {:node_session, {:push, "adopt", %{"run" => ^id}}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      # the owner learns where its stream starts: the node's acked offset
+      assert {:ok, {:remote, {^node_id, ^id, _}} = handle, 42} = Task.await(task)
+
+      assert Session.run_live?(pid, id)
+      assert Session.bridge_target(pid, id, "arb") == {:ok, "/new/arb.sock"}
+      assert {:ok, @actx} = Session.checkout_context(pid, id)
+
+      # the resend starts at the node's acked offset and reaches the new owner
+      frame = Arbiter.Nodes.StdoutFrame.encode(id, 42, "after the restart\n")
+      Session.node_event(pid, "stdout", {:binary, frame})
+      assert_receive {^handle, {:data, {:eol, "after the restart"}}}
+      assert_receive {:node_session, {:push, "ack", %{"run" => ^id, "offset" => 60}}}
+
+      refute_received {:node_session, {:push, "cancel", _}}
+      refute_received {:node_session, {:push, "quiesce", _}}
+
+      # a later hello (a blip) knows the run; it is no longer held
+      assert {:ok, %{hello_ok: ok}} = attach(node, c, self(), adopt_hello([{id, %{}}]))
+      assert ok["runs"] == %{id => "known"}
+      assert {:error, :not_held} = Session.adoptable(pid, id)
+    end
+
+    test "the stream starts where the old Worker's persisted stdout_offset says, past the node's ack",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c, %{"acked" => 42})
+      owner = self()
+
+      task =
+        Task.async(fn ->
+          Session.adopt(pid, id, adopt_spec(id), owner, checkout: @actx, stdout_offset: 50)
+        end)
+
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      assert {:ok, handle, 50} = Task.await(task)
+
+      # bytes 42..49 ("seven..\n") were processed by the old Worker before it stopped
+      frame = Arbiter.Nodes.StdoutFrame.encode(id, 42, "seven..\nafter\n")
+      Session.node_event(pid, "stdout", {:binary, frame})
+      assert_receive {^handle, {:data, {:eol, "after"}}}
+      refute_received {^handle, {:data, {:eol, "seven.."}}}
+    end
+
+    test "the hold timer is cancelled by the adoption: the adopted run is never quiesced",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c, %{}, hold_ms: 80)
+      task = adopt_async(pid, id)
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      assert {:ok, _handle, 42} = Task.await(task)
+      refute_receive {:node_session, {:push, "quiesce", _}}, 250
+    end
+
+    test "adopt.refused gives the run back to the hold, without a cancel, and it is still collected once",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      task = adopt_async(pid, id)
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "adopt.refused", %{"run" => id, "reason" => "exited"})
+
+      assert {:error, {:adopt_refused, "exited"}} = Task.await(task)
+      refute Session.run_live?(pid, id)
+      assert :error = Session.checkout_context(pid, id)
+      refute_received {:node_session, {:push, "cancel", _}}
+
+      collected!(pid, id)
+    end
+
+    test "an adoption the agent never answers times out without a cancel; the hold resumes with the time it had left",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c, %{}, hold_ms: 400, adopt_timeout_ms: 30)
+      task = adopt_async(pid, id)
+      assert_receive {:node_session, {:push, "adopt", _}}
+
+      assert {:error, :adopt_timeout} = Task.await(task)
+      refute Session.run_live?(pid, id)
+      refute_received {:node_session, {:push, "cancel", _}}
+
+      # a late answer for it changes nothing
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      refute Session.run_live?(pid, id)
+
+      assert_receive {:node_session, {:push, "quiesce", %{"run" => ^id}}}, 2_000
+      refute_receive {:node_session, {:push, "quiesce", _}}, 100
+    end
+
+    test "an adopting owner that dies mid-handshake gives the run back to the hold, not a cancel",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      task = adopt_async(pid, id, owner)
+      assert_receive {:node_session, {:push, "adopt", _}}
+
+      kill!(owner)
+      assert {:error, :owner_down} = Task.await(task)
+      refute_received {:node_session, {:push, "cancel", _}}
+      assert :ok = Session.adoptable(pid, id)
+    end
+
+    test "unadopt gives an adopted run back to the hold; its owner's death then cancels nothing",
+         %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      task = adopt_async(pid, id, owner)
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      assert {:ok, _handle, 42} = Task.await(task)
+
+      assert :ok = Session.unadopt(pid, id)
+      refute Session.run_live?(pid, id)
+      assert :ok = Session.adoptable(pid, id)
+
+      kill!(owner)
+      _ = Session.snapshot(pid)
+      refute_received {:node_session, {:push, "cancel", _}}
+
+      collected!(pid, id)
+    end
+
+    test "adopt refuses a run that is not held, or that a recovery is already collecting", %{
+      node: node,
+      clock: c
+    } do
+      {pid, id} = held!(node, c)
+
+      assert {:error, :not_held} =
+               Session.adopt(pid, "ghost", adopt_spec("ghost"), self(), checkout: @actx)
+
+      _recovering = Task.async(fn -> Session.recover(pid, id, @actx, 5_000) end)
+      assert_receive {:node_session, {:push, "quiesce", %{"run" => ^id}}}
+
+      assert {:error, :recovering} =
+               Session.adopt(pid, id, adopt_spec(id), self(), checkout: @actx)
+
+      refute_received {:node_session, {:push, "adopt", _}}
+    end
+
+    test "recover refuses a run that an owner holds attached", %{node: node, clock: c} do
+      {pid, id} = held!(node, c)
+      task = adopt_async(pid, id)
+      assert_receive {:node_session, {:push, "adopt", _}}
+      Session.node_event(pid, "run.ready", %{"run" => id, "adopted" => true, "acked" => 42})
+      assert {:ok, _handle, 42} = Task.await(task)
+
+      assert {:error, :attached} = Session.recover(pid, id, @actx, 1_000)
+      refute_received {:node_session, {:push, "quiesce", _}}
     end
   end
 
