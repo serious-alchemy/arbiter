@@ -17,6 +17,11 @@ defmodule Arbiter.NodeAgent.StubPodman do
       `/run/arbiter/secrets.env`, read while the "container" ran;
     * `calls` — every subcommand (`run`, `inspect`, `rm`, `kill`, …).
 
+  A fake agent (bd-4ic681): when `<dir>/agent_script` exists it runs (`sh`) before the
+  mode does, with the host paths of the run's worktree and config dir mounts and the
+  container's working directory as `$1`, `$2`, `$3`; what it prints goes to
+  `agent_script.out`.
+
   Modes (`write_mode/2`): `lines` (print `line-1`…`line-N`, exit 0), `oom` (exit 137,
   `OOMKilled=true`), `hang` (print one line, then wait until removed), `slow`
   (print `line-1`, wait for `<dir>/go`, print `line-2`, `line-3`, exit 0) and

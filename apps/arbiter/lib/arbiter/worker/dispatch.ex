@@ -4310,13 +4310,14 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # `:egress`, `:podman` and `:image` are the spawn's own injection points
   # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
-  # resume against a stand-in egress run and `podman` (bd-dh1gg1).
+  # resume against a stand-in egress run and `podman` (bd-dh1gg1); `:claude_path`
+  # and `:arb_path` name the CLI files a run placed on a node is handed (bd-4ic681).
   defp sandbox_session_opts(policy, workspace, opts),
     do:
       ContainerSpawn.session_opts(
         policy,
         workspace,
-        Keyword.take(opts, [:repo, :node, :egress, :podman, :image])
+        Keyword.take(opts, [:repo, :node, :egress, :podman, :image, :claude_path, :arb_path])
       )
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
