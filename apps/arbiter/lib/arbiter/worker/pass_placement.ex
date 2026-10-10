@@ -14,8 +14,8 @@ defmodule Arbiter.Worker.PassPlacement do
   on `row` for the calling process (release it with `release/1` once the pass's
   worker is registered), `{:ok, :local}` runs on the primary, and
   `{:error, {:no_node_capacity, info}}` holds the pass: held, never failed, and no
-  attempt spent. With `worker.placement` unset and the primary's cap not
-  overridden nothing is decided and nothing is read.
+  attempt spent. With `worker.placement` unset the pass stays local, and the
+  primary's own cap (always enforced, DC1) still decides whether it may start.
 
   `probe/3` is the cheap early form `Arbiter.Workflows.MergeQueue.PassAdmission`
   asks before it takes the ticket's slot: could a node take this pass? It does not
@@ -76,22 +76,18 @@ defmodule Arbiter.Worker.PassPlacement do
     workspace = Map.get(attrs, :workspace)
     mode = Placement.mode(workspace)
 
-    if mode == :local_only and not LocalCapacity.cap().enforced? do
-      {:ok, :local}
-    else
-      request = %{
-        task_id: task_id,
-        workspace_id: workspace_id(workspace, attrs),
-        kind: kind,
-        provider: Map.get(attrs, :provider),
-        layout: Map.get(attrs, :layout),
-        no_pr?: false,
-        local_work?: local_work?(Map.get(attrs, :clone_path)),
-        mode: mode
-      }
+    request = %{
+      task_id: task_id,
+      workspace_id: workspace_id(workspace, attrs),
+      kind: kind,
+      provider: Map.get(attrs, :provider),
+      layout: Map.get(attrs, :layout),
+      no_pr?: false,
+      local_work?: local_work?(Map.get(attrs, :clone_path)),
+      mode: mode
+    }
 
-      LocalCapacity.gate(request, Keyword.get(opts, :placement_opts, []))
-    end
+    LocalCapacity.gate(request, Keyword.get(opts, :placement_opts, []))
   rescue
     e ->
       Logger.warning(

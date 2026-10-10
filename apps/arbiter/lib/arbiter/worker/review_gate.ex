@@ -6193,7 +6193,6 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp fix_round_remote_possible(state, ws) do
     cond do
-      Placement.mode(ws) == :local_only and not LocalCapacity.cap().enforced? -> :local
       scoped_credential?(ws, Map.get(state, :repo)) -> :local
       true -> :remote_possible
     end
