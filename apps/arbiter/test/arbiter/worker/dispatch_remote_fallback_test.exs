@@ -17,6 +17,8 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
 
   import ExUnit.CaptureLog
 
+  alias Arbiter.Actor
+  alias Arbiter.Nodes
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Test.ResumeSlotFixture
   alias Arbiter.Worker
@@ -25,6 +27,7 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
   alias Arbiter.Worker.Worktree
 
   @repo ResumeSlotFixture.repo()
+  @operator Actor.operator("cli")
 
   setup do
     sandbox = ResumeSlotFixture.setup_repo!()
@@ -123,12 +126,11 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
     end
   end
 
-  defp wait_until(fun, tries \\ 500) do
-    cond do
-      fun.() -> :ok
-      tries == 0 -> flunk("condition not met within timeout")
-      true -> Process.sleep(20) && wait_until(fun, tries - 1)
-    end
+  # The stand-in `podman` logs its argv and exits; the port closing is the signal
+  # that it ran (a port already closed answers the monitor at once).
+  defp await_agent_exit(port) do
+    ref = Port.monitor(port)
+    assert_receive {:DOWN, ^ref, :port, ^port, _}, 5_000
   end
 
   defp stop_worker(task_id) do
@@ -165,11 +167,12 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
 
     output =
       capture_log(fn ->
-        assert {:ok, %{worker_pid: pid, worktree_path: ^path}} =
+        assert {:ok, %{worker_pid: pid, worktree_path: ^path, claude_port: port}} =
                  Dispatch.dispatch(task.id, opts)
 
         assert is_pid(pid)
-        wait_until(fn -> run_calls(log) > 0 end)
+        await_agent_exit(port)
+        assert run_calls(log) > 0
         stop_worker(task.id)
       end)
 
@@ -184,18 +187,38 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
 
     output =
       capture_log(fn ->
-        assert {:ok, %{worker_pid: pid, worktree_path: path}} = Dispatch.dispatch(task.id, opts)
+        assert {:ok, %{worker_pid: pid, worktree_path: path, claude_port: port}} =
+                 Dispatch.dispatch(task.id, opts)
+
         assert is_pid(pid)
 
         # The agent really started, on the primary.
-        wait_until(fn -> run_calls(log) > 0 end)
+        await_agent_exit(port)
+        assert run_calls(log) > 0
         assert File.dir?(path)
         assert Ash.get!(Issue, task.id).state == :active
-        assert Process.alive?(pid)
         stop_worker(task.id)
       end)
 
     assert output =~ "falling back to the primary"
+  end
+
+  test "a node refusal with no room on the primary holds the ticket instead of crashing it",
+       %{ws: ws, opts: opts, log: log} do
+    {:ok, 0} = Nodes.set_local_max_workers(0, @operator)
+    on_exit(fn -> {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(nil) end)
+
+    task = ticket!(ws, "node refuses, primary full")
+
+    output =
+      capture_log(fn ->
+        assert {:error, {:no_node_capacity, _info}} = Dispatch.dispatch(task.id, opts)
+      end)
+
+    # Held, not run past the cap and not failed: the ticket is back in the queue.
+    assert output =~ "falling back to the primary"
+    assert run_calls(log) == 0
+    assert Ash.get!(Issue, task.id).state == :queued
   end
 
   test "under remote_only a node refusal is not run on the primary", %{opts: opts, log: log} do

@@ -333,6 +333,13 @@ defmodule Arbiter.Worker.Dispatch do
       # `maybe_start_claude/4` is the frame that provisioned the checkout and
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.
+      # bd-373tce: the node refused the run and the primary has no room for it
+      # either. Nothing ran, so this is a hold, not a crash: the worker is stopped
+      # without a failed run and the ticket goes back to the Ready queue.
+      {:error, {:no_node_capacity, _info}} = held ->
+        hold_spawned_worker(task, worker_pid)
+        held
+
       {:error, reason} = err ->
         # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
         # image_unavailable | bad_spec}`) has started nothing and failed nothing. The card is
@@ -353,6 +360,21 @@ defmodule Arbiter.Worker.Dispatch do
       %{name: name} when is_binary(name) -> name
       _ -> "the node"
     end
+  end
+
+  defp hold_spawned_worker(%Issue{id: task_id}, worker_pid) do
+    if is_pid(worker_pid), do: Worker.stop(worker_pid, :normal, 5_000)
+
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id) do
+      Ash.update(task, %{}, action: :requeue)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp review_checkout_path(opts) do
@@ -3557,6 +3579,10 @@ defmodule Arbiter.Worker.Dispatch do
               _ = Worker.advance(worker_pid, :claude)
               {:ok, port, opts}
             else
+              {:error, {:no_node_capacity, _info}} = held ->
+                Checkout.teardown(review_checkout_path(opts))
+                held
+
               {:error, reason} ->
                 Checkout.teardown(review_checkout_path(opts))
                 {:error, {:claude_start_failed, reason}}
@@ -3600,11 +3626,28 @@ defmodule Arbiter.Worker.Dispatch do
 
     opts = Keyword.delete(opts, :node)
 
-    with :ok <- seed_for_local_run(task, worktree_path, opts),
+    with :ok <- admit_local_fallback(task, opts),
+         :ok <- seed_for_local_run(task, worktree_path, opts),
          {:ok, session_opts} <- build_agent_session_opts(task, worker_pid, path, opts),
          {:ok, port} <- ClaudeSession.start(session_opts) do
       {:ok, port, opts}
     end
+  end
+
+  # The fallback run is a local spawn like any other, so it passes the primary's
+  # own cap (`LocalCapacity`): `{:error, {:no_node_capacity, info}}` holds it.
+  defp admit_local_fallback(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+
+    admit_opts =
+      node_gate_opts(opts) ++
+        [
+          reason: :no_node,
+          provider: quota_gate_provider(task, workspace, opts),
+          workspace_id: task.workspace_id
+        ]
+
+    LocalCapacity.admit(task.id, node_kind(task, opts), admit_opts)
   end
 
   defp seed_for_local_run(%Issue{} = task, worktree_path, opts) when is_binary(worktree_path) do
