@@ -100,6 +100,37 @@ defmodule Arbiter.Worker.NodeLostTest do
              |> Ash.read!()
   end
 
+  test "the session's subscribers are told the node was lost, not that it exited",
+       %{pid: pid, task_id: task_id, dir: dir} do
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+    lose_node(pid, dir, %{oom?: false, exit_code: 255, cancelled?: false, node_lost?: true})
+
+    assert_receive {:worker_node_lost, ^task_id}, 2_000
+    refute_receive {:worker_exited, ^task_id, _}, 200
+  end
+
+  test "an ordinary exit still reaches the session's subscribers as an exit",
+       %{pid: pid, task_id: task_id, dir: dir} do
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+    lose_node(pid, dir, %{oom?: false, exit_code: 137, cancelled?: false, node_lost?: false})
+
+    assert_receive {:worker_exited, ^task_id, _}, 2_000
+    refute_receive {:worker_node_lost, _}, 100
+  end
+
+  # bd-cgdhlu: a ReviewGate pass (`<task>#review`) is not a ticket to resume; its
+  # gate re-dispatches it from `{:worker_node_lost, id}`.
+  test "a ReviewGate pass losing its node asks for no automatic resume", %{dir: dir} do
+    task_id = "bd-lostgate-#{System.unique_integer([:positive])}#review"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "r")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    lose_node(pid, dir, %{oom?: false, exit_code: 255, cancelled?: false, node_lost?: true})
+
+    assert %{state: :finished, outcome: :interrupted} = wait_finished(pid)
+    refute_receive {:resumed, _}, 300
+  end
+
   # K12 (A5): a pod evicted, preempted or deleted from outside is handled like a lost node.
   test "a pod_disrupted exit ends the run interrupted with no resume attempt consumed",
        %{pid: pid, task_id: task_id, dir: dir} do

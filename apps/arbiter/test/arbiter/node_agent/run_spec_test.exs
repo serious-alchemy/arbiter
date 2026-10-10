@@ -219,10 +219,28 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
                  spec(%{"checkout" => %{"branch" => "arbiter/bd-abc", "base" => "main"}})
                )
 
-      assert co == %{branch: "arbiter/bd-abc", base: "main", interval_ms: 300_000}
+      assert co == %{
+               branch: "arbiter/bd-abc",
+               base: "main",
+               interval_ms: 300_000,
+               read_only?: false
+             }
 
       assert {:ok, %RunSpec{checkout: %{interval_ms: 10_000}}} =
                RunSpec.validate(spec(%{"checkout" => %{"branch" => "b", "interval_s" => 10}}))
+    end
+
+    test "a read-only checkout (a reviewer's clone, bd-cgdhlu) is accepted; a non-boolean flag is not" do
+      assert {:ok, %RunSpec{checkout: %{read_only?: true}}} =
+               RunSpec.validate(spec(%{"checkout" => %{"branch" => "b", "read_only" => true}}))
+
+      assert {:ok, %RunSpec{checkout: %{read_only?: false}}} =
+               RunSpec.validate(spec(%{"checkout" => %{"branch" => "b", "read_only" => false}}))
+
+      for bad <- ["yes", 1, %{}] do
+        assert {:error, {:refused, {:bad_value, "checkout.read_only"}}} =
+                 RunSpec.validate(spec(%{"checkout" => %{"branch" => "b", "read_only" => bad}}))
+      end
     end
 
     test "refuses a malformed checkout" do

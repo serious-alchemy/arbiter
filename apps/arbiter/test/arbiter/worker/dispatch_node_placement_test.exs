@@ -116,6 +116,40 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     end
   end
 
+  # bd-cgdhlu: a `review: true` dispatch is a placement candidate when the review
+  # may run in a container.
+  describe "a review: true dispatch" do
+    test "under remote_only on a podman review is held while nothing can run remotely" do
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "review remote only")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman ++ [review: true])
+      assert info.mode == :remote_only
+      assert info.task_id == issue.id
+      assert Worker.whereis(issue.id) == nil
+      assert Placement.reservations() == []
+    end
+
+    test "under prefer_remote with the primary's cap at 0 and no node it is held, naming that" do
+      {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "review prefer remote")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman ++ [review: true])
+      assert info.phrase =~ "held — local capacity 0 (no node had a free slot)"
+    end
+
+    test "without a podman review it is never a candidate: local-only, held only by the cap" do
+      {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "review bwrap")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, review: true)
+      assert info.phrase =~ "run is local-only:"
+      refute info.phrase =~ "no node had a free slot"
+    end
+  end
+
   # K8: a registry node's image is published before the run is committed to it,
   # and a publish that times out or fails falls back by `worker.placement`.
   describe "a registry node whose image cannot be published" do
