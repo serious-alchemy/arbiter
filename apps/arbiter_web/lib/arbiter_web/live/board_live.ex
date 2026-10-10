@@ -685,7 +685,12 @@ defmodule ArbiterWeb.BoardLive do
     paused? = not running? or InstallationSettings.scheduler_paused?()
 
     board =
-      Snapshot.load(now: DateTime.utc_now(), paused: paused?, exclude_engagements?: true)
+      Snapshot.load(
+        now: DateTime.utc_now(),
+        paused: paused?,
+        exclude_engagements?: true,
+        local_held: local_held_ids()
+      )
 
     exit_if_view_gone(view)
     alerts = load_alerts()
@@ -702,6 +707,16 @@ defmodule ArbiterWeb.BoardLive do
       workspaces: workspaces,
       explain: explain(board)
     }
+  end
+
+  # bd-b2iigy: the tickets whose resume the scheduler holds for the primary's
+  # own worker cap. A scheduler that is not running or does not answer holds
+  # none.
+  defp local_held_ids do
+    case InstallationSettings.scheduler_status() do
+      %{} = status -> Map.get(status, :held_local_capacity, [])
+      _ -> []
+    end
   end
 
   # The explanation is presentation: a read of it that fails leaves the board
@@ -906,6 +921,9 @@ defmodule ArbiterWeb.BoardLive do
   defp detail(column, %{step: :awaiting_ci, ci_wait: %{sha: _} = wait})
        when column in ["in_progress", "merging"],
        do: Arbiter.Worker.ReviewCi.wait_label(wait)
+
+  # bd-b2iigy: its resume waits for a slot on the primary (`LocalCapacity`).
+  defp detail("in_progress", %{local_held: true}), do: "held: local capacity"
 
   defp detail(column, card) when column in ["in_progress", "merging"], do: step_label(card.step)
   defp detail("verifying", _card), do: "awaiting verification — restart & observe"

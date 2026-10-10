@@ -143,6 +143,38 @@ defmodule Arbiter.Board.DrainTest do
     end
   end
 
+  # bd-b2iigy: a resume waiting on the primary's own cap is visible, not silent.
+  describe "resumes held for local capacity" do
+    test "are listed, in the order they will resume, and do not make the scheduler busy" do
+      ap = start_autopilot!(paused: true)
+
+      :ok = Autopilot.defer_resume(ap, "bd-held-1", :resume, held_for: :local_capacity)
+      :ok = Autopilot.defer_resume(ap, "bd-slot-1", :resume, [])
+      :ok = Autopilot.defer_resume(ap, "bd-held-2", :resume_session, held_for: :local_capacity)
+
+      status = Drain.status(autopilot: ap, supervisor: empty_supervisor!())
+
+      assert status.held_local_capacity == ["bd-held-1", "bd-held-2"]
+      # A held resume is queued work, not a running agent: a paused scheduler
+      # with only those is still quiescent (a restart re-resumes them).
+      assert status.state == :quiescent
+
+      assert %{held_local_capacity: held} = Drain.to_json(status)
+
+      assert held == [
+               %{task_id: "bd-held-1", reason: "held: local capacity"},
+               %{task_id: "bd-held-2", reason: "held: local capacity"}
+             ]
+    end
+
+    test "none are listed when none are held" do
+      ap = start_autopilot!(paused: true)
+      status = Drain.status(autopilot: ap, supervisor: empty_supervisor!())
+      assert status.held_local_capacity == []
+      assert Drain.to_json(status).held_local_capacity == []
+    end
+  end
+
   describe "track/3 — live work outside the worker supervisor" do
     test "an entry is in flight exactly while its function runs" do
       ap = start_autopilot!(paused: true)
