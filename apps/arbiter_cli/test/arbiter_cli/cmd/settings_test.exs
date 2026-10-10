@@ -247,6 +247,14 @@ defmodule ArbiterCli.Cmd.SettingsSecretTest do
     refute out <> err =~ "98765"
   end
 
+  test "a bare null clears the secret instead of storing the string \"null\"" do
+    stub_patch()
+    {_out, err, 0} = capture(fn -> Settings.run(["set", "nodes.registry_password", "null"]) end)
+
+    assert_received {:patched, %{"key" => "nodes.registry_password", "value" => nil}}
+    refute err =~ "visible to other processes"
+  end
+
   test "stdin (-) is read as the secret" do
     stub_patch()
 

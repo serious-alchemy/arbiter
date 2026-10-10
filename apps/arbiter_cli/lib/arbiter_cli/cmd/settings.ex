@@ -93,6 +93,11 @@ defmodule ArbiterCli.Cmd.Settings do
         {["-"], nil} ->
           SecretInput.from_stdin!()
 
+        # A bare `null` clears the override, as for every other key (a literal
+        # "null" password goes by stdin or --file).
+        {["null"], nil} ->
+          nil
+
         {[raw], nil} ->
           SecretInput.warn_argv("`arb settings set #{key} -` (stdin) or `--file <path>`")
           raw

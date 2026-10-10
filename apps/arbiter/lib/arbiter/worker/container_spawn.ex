@@ -937,28 +937,67 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp remote_provider(provider), do: {:error, {:provider_not_remote, provider}}
 
   defp remote_image(opts, worktree, node) do
-    case Keyword.get(opts, :image) || Application.get_env(:arbiter, :worker_container_image) do
-      tag when is_binary(tag) and tag != "" ->
+    case explicit_image(opts) do
+      tag when is_binary(tag) ->
         registry_image(%{tag: tag, plan: nil}, node, %{}, opts)
 
-      _ ->
-        repo_path = PrivateClone.main_repo(worktree)
-
-        base =
-          Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
-
-        with true <- is_binary(repo_path) or {:error, {:not_a_private_clone, worktree}},
-             {:ok, plan} <- Image.plan(repo_path, base) do
-          ctx = %{
-            repo_path: repo_path,
-            base: base,
-            seed_paths: SeedPaths.resolve(Keyword.get(opts, :workspace), Keyword.get(opts, :repo))
-          }
-
-          registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
-        else
-          {:error, reason} -> {:error, {:image_unavailable, reason}}
+      nil ->
+        case PrivateClone.main_repo(worktree) do
+          repo_path when is_binary(repo_path) -> plan_image(opts, repo_path, node)
+          _ -> {:error, {:image_unavailable, {:not_a_private_clone, worktree}}}
         end
+    end
+  end
+
+  defp explicit_image(opts) do
+    case Keyword.get(opts, :image) || Application.get_env(:arbiter, :worker_container_image) do
+      tag when is_binary(tag) and tag != "" -> tag
+      _ -> nil
+    end
+  end
+
+  defp plan_image(opts, repo_path, node) do
+    base = Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+
+    case Image.plan(repo_path, base) do
+      {:ok, plan} ->
+        ctx = %{
+          repo_path: repo_path,
+          base: base,
+          seed_paths: SeedPaths.resolve(Keyword.get(opts, :workspace), Keyword.get(opts, :repo))
+        }
+
+        registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
+
+      {:error, reason} ->
+        {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  @doc """
+  Publish the run image for a node **before** the run is committed to it
+  (`Worker.Dispatch`). `:ok` for a node that builds its own image (nothing to
+  publish); for a registry node the same `registry_image/4` the spawn will
+  call, so its single-flight cache makes the spawn's own call instant.
+  `{:error, {:image_unavailable, reason}}` is what `Publisher.fallback/2` maps
+  to local or a hold. Options are `prepare_remote/1`'s `:image`, `:workspace`,
+  `:repo` and `:publish`.
+  """
+  @spec preflight_image(String.t() | nil, map(), keyword()) :: :ok | {:error, term()}
+  def preflight_image(repo_path, node, opts) do
+    cond do
+      not registry_node?(node) ->
+        :ok
+
+      is_binary(explicit_image(opts)) ->
+        with {:ok, _} <- registry_image(%{tag: explicit_image(opts), plan: nil}, node, %{}, opts),
+             do: :ok
+
+      is_binary(repo_path) ->
+        with {:ok, _} <- plan_image(opts, repo_path, node), do: :ok
+
+      true ->
+        {:error, {:image_unavailable, :no_repo}}
     end
   end
 

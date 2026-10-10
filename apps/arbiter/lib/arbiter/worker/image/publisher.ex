@@ -38,7 +38,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   `:runner` (podman, see `Image.run/3`), `:builder`, `:scratch`, `:cli`
   (`[{host_path, container_path}]`), `:deps_ensure`
   (`(repo, base, image_tag, opts -> {:ok, %{dir:, lock_hash:}} | {:error, _})`),
-  `:resolver`, `:artifact`, `:probe` (status reachability, `(Registry.t() -> :ok
+  `:resolver`, `:artifact`, `:fingerprint` (`(ctx -> term)`, what invalidates a cached image), `:probe` (status reachability, `(Registry.t() -> :ok
   | {:error, term})`).
   """
 
@@ -73,10 +73,52 @@ defmodule Arbiter.Worker.Image.Publisher do
         :disabled
 
       {:ok, cfg} ->
-        key = {:image, cfg.registry, plan.tag, Map.get(ctx, :seed_paths), Map.get(ctx, :base)}
+        key = image_key(ctx, cfg, opts)
         flight(key, :worker, fn -> Pipeline.publish_image(ctx, cfg, opts) end, opts)
     end
   end
+
+  # What the published image depends on: the toolchain tag, the repo whose
+  # `DepsCache` seeds it (two repos can share a toolchain tag), the seed rules
+  # and base, and a fingerprint of the inputs that change under a running server
+  # (the `claude`/`arb` binaries, `mix.lock`), so an update publishes again
+  # rather than serving a stale `ref`. An entry for an older fingerprint is
+  # dropped when the new one lands (`record_success/4`).
+  defp image_key(%{plan: plan} = ctx, cfg, opts) do
+    {:image, cfg.registry, plan.tag, Map.get(ctx, :repo_path), Map.get(ctx, :seed_paths),
+     Map.get(ctx, :base), fingerprint(ctx, opts)}
+  end
+
+  defp fingerprint(ctx, opts) do
+    case Keyword.fetch(opts, :fingerprint) do
+      {:ok, fun} -> fun.(ctx)
+      :error -> %{cli: cli_stamp(opts), lock: lock_stamp(ctx)}
+    end
+  end
+
+  defp cli_stamp(opts) do
+    case Pipeline.cli_files(opts) do
+      {:ok, files} ->
+        for {host, _dest} <- files do
+          case File.stat(host, time: :posix) do
+            {:ok, stat} -> {host, stat.size, stat.mtime}
+            {:error, reason} -> {host, reason}
+          end
+        end
+
+      {:error, reason} ->
+        reason
+    end
+  end
+
+  defp lock_stamp(%{plan: plan, repo_path: repo, base: base}) when is_binary(repo) do
+    case Arbiter.Worker.DepsCache.key(repo, base || "main", plan.tag) do
+      {:ok, %{lock_hash: hash}} -> hash
+      {:error, reason} -> reason
+    end
+  end
+
+  defp lock_stamp(_ctx), do: nil
 
   @doc "Build and push the controller image for the running release."
   @spec publish_controller(keyword()) :: {:ok, Pipeline.result()} | :disabled | {:error, term()}
@@ -296,13 +338,28 @@ defmodule Arbiter.Worker.Image.Publisher do
     state
   end
 
+  # An image entry is superseded by the same image under a newer fingerprint.
+  defp drop_superseded(cache, {:image, _, _, _, _, _, _} = key) do
+    prefix = key |> Tuple.delete_at(6) |> Tuple.to_list()
+
+    Map.reject(cache, fn
+      {{:image, _, _, _, _, _, _} = other, _} ->
+        other != key and other |> Tuple.delete_at(6) |> Tuple.to_list() == prefix
+
+      _ ->
+        false
+    end)
+  end
+
+  defp drop_superseded(cache, _key), do: cache
+
   defp record_success(state, key, kind, published) do
     entry = %{kind: kind, ref: published.ref, tag: published.tag, at: DateTime.utc_now()}
     excluded = get_in(published, [:seed, :excluded]) || []
 
     %{
       state
-      | cache: Map.put(state.cache, key, published),
+      | cache: state.cache |> drop_superseded(key) |> Map.put(key, published),
         published: Map.put(state.published, kind, entry),
         last_error: nil,
         seed_excluded: if(kind == :worker, do: excluded, else: state.seed_excluded)

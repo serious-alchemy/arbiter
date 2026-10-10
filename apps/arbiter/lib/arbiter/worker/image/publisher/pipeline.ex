@@ -143,7 +143,9 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
     end
   end
 
-  defp cli_files(opts) do
+  @doc false
+  @spec cli_files(keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def cli_files(opts) do
     case Keyword.fetch(opts, :cli) do
       {:ok, files} ->
         {:ok, files}

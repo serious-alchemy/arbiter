@@ -246,6 +246,68 @@ defmodule Arbiter.Worker.Image.PublisherTest do
     end
   end
 
+  describe "ensure_ready/2 cache key" do
+    test "two repos sharing a toolchain tag each get their own seed layer", %{
+      opts: opts,
+      ctx: ctx,
+      tmp: tmp,
+      cache: cache
+    } do
+      other = Path.join(tmp, "cache-b")
+      for dir <- ["deps", "_build", "mix_home"], do: File.mkdir_p!(Path.join(other, dir))
+      other_lock = String.duplicate("e", 64)
+
+      deps_ensure = fn repo, _base, _tag, _opts ->
+        if repo == "/repo-b",
+          do: {:ok, %{dir: other, seeded?: false, lock_hash: other_lock}},
+          else: {:ok, %{dir: cache, seeded?: false, lock_hash: @lock}}
+      end
+
+      opts = Keyword.put(opts, :deps_ensure, deps_ensure)
+
+      assert {:ok, a} = Publisher.ensure_ready(ctx, opts)
+      drain()
+      assert {:ok, b} = Publisher.ensure_ready(%{ctx | repo_path: "/repo-b"}, opts)
+
+      assert a.tag == b.tag
+      refute a.ref == b.ref
+      assert b.tag_ref =~ "seed#{String.slice(other_lock, 0, 12)}"
+      assert_received {:podman, ["push" | _]}
+    end
+
+    test "a new claude/arb binary publishes a new CLI layer instead of serving the cache", %{
+      opts: opts,
+      ctx: ctx,
+      tmp: tmp
+    } do
+      assert {:ok, first} = Publisher.ensure_ready(ctx, opts)
+
+      # Cached while nothing changed.
+      drain()
+      assert {:ok, ^first} = Publisher.ensure_ready(ctx, opts)
+      refute_received {:podman, _}
+
+      File.write!(Path.join(tmp, "claude"), "claude-binary-v2-with-a-different-size")
+      assert {:ok, second} = Publisher.ensure_ready(ctx, opts)
+      refute second.ref == first.ref
+      assert_received {:podman, ["push" | _]}
+    end
+
+    test "a changed mix.lock publishes again", %{opts: opts, ctx: ctx} do
+      lock = :counters.new(1, [])
+      opts = Keyword.put(opts, :fingerprint, fn _ctx -> :counters.get(lock, 1) end)
+
+      assert {:ok, first} = Publisher.ensure_ready(ctx, opts)
+      drain()
+      assert {:ok, ^first} = Publisher.ensure_ready(ctx, opts)
+      refute_received {:podman, _}
+
+      :counters.add(lock, 1, 1)
+      assert {:ok, ^first} = Publisher.ensure_ready(ctx, opts)
+      assert_received {:podman, ["push" | _]}
+    end
+  end
+
   describe "ensure_ready/2 when nodes.registry is unset" do
     test ":disabled, and podman is never called", %{opts: opts, ctx: ctx} do
       opts = Keyword.put(opts, :config, %{registry: nil})
