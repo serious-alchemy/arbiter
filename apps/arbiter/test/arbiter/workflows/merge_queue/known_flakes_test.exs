@@ -86,6 +86,55 @@ defmodule Arbiter.Workflows.MergeQueue.KnownFlakesTest do
     end
   end
 
+  describe "on the log excerpt the forge adapter really produces" do
+    # A raw GitHub Actions job log: timestamped, ANSI-coloured, with the noise
+    # `Arbiter.Mergers.CILogExcerpt` filters out before the Watchdog sees it.
+    defp raw_log(failures, total) do
+      lines =
+        ["Run mix test", "Compiling 12 files (.ex)", "Running ExUnit with seed: 1"] ++
+          Enum.flat_map(failures, fn {n, name, module} ->
+            [
+              "",
+              "\e[31m  #{n}) test #{name} (#{module})\e[0m",
+              "     test/arbiter/worker/ticket_watchdog_test.exs:#{n}",
+              "     Assertion with == failed"
+            ]
+          end) ++ ["", "Finished in 5.1 seconds", "#{total} tests, #{length(failures)} failures"]
+
+      lines
+      |> Enum.map_join("\n", &("2026-10-10T09:00:00.1234567Z " <> &1))
+    end
+
+    test "a registered failure in a real log is confined" do
+      log =
+        raw_log(
+          [
+            {1, "the Direct strategy (acceptance 9) a Direct merge",
+             "Arbiter.Worker.TicketWatchdogTest"}
+          ],
+          900
+        )
+
+      summary = Arbiter.Mergers.CILogExcerpt.extract(log, 4_000)
+      assert KnownFlakes.confined([check(summary)]) == {:ok, ["ticket-watchdog-direct-strategy"]}
+    end
+
+    test "an unregistered failure alongside it is not" do
+      log =
+        raw_log(
+          [
+            {1, "the Direct strategy (acceptance 9) a Direct merge",
+             "Arbiter.Worker.TicketWatchdogTest"},
+            {2, "something real", "Arbiter.Worker.TicketWatchdogTest"}
+          ],
+          900
+        )
+
+      summary = Arbiter.Mergers.CILogExcerpt.extract(log, 4_000)
+      assert KnownFlakes.confined([check(summary)]) == :none
+    end
+  end
+
   describe "the registry" do
     test "every entry names its ticket and cause and has a unique id" do
       entries = KnownFlakes.entries()
