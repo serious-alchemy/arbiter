@@ -13,6 +13,14 @@ set -u
 
 [ "$#" -gt 0 ] || { echo "pre-push-tests: no test files to run"; exit 0; }
 
+# The VM runs with UTF-8 file names, as in CI (LANG=C.UTF-8). Started under a
+# POSIX locale (a sandbox or service with no LANG) it falls back to latin1, where
+# File and Path mangle any non-ASCII name: a test with one in its fixture fails
+# here and passes in CI. `+fnu` is the runtime's own suggested fix; a `+fn` flag
+# already in ELIXIR_ERL_OPTIONS comes after it, so that one still wins.
+ELIXIR_ERL_OPTIONS="+fnu${ELIXIR_ERL_OPTIONS:+ $ELIXIR_ERL_OPTIONS}"
+export ELIXIR_ERL_OPTIONS
+
 status=0
 for app in $(printf '%s\n' "$@" | sed -n 's|^apps/\([^/]*\)/.*|\1|p' | sort -u); do
   files=$(printf '%s\n' "$@" | sed -n "s|^apps/$app/||p")
