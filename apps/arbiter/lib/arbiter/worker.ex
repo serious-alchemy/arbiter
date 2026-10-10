@@ -7266,24 +7266,20 @@ defmodule Arbiter.Worker do
         state
 
       true ->
-        escalate_gone_review_gate(state)
+        Logger.warning(
+          "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
+            "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
+        )
+
+        state
+        |> forget_review_gate()
+        |> apply_review_gate_verdict(
+          {:no_verdict,
+           "The ReviewGate process exited before delivering a verdict; the author's " <>
+             "liveness check found it gone. Nothing was merged. Re-run the review with " <>
+             "`arb worker resume #{state.task_id}`."}
+        )
     end
-  end
-
-  defp escalate_gone_review_gate(%State{} = state) do
-    Logger.warning(
-      "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
-        "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
-    )
-
-    state
-    |> forget_review_gate()
-    |> apply_review_gate_verdict(
-      {:no_verdict,
-       "The ReviewGate process exited before delivering a verdict; the author's " <>
-         "liveness check found it gone. Nothing was merged. Re-run the review with " <>
-         "`arb worker resume #{state.task_id}`."}
-    )
   end
 
   # Ask the gate what it is doing WITHOUT blocking this process: a wedged gate
