@@ -159,7 +159,9 @@ defmodule ArbiterWeb.CapacityComponents do
       >
         binds
       </span>
-      <span :if={@window.status != "ok"}> —    {@window.status}</span>
+      <span :if={@window.status != "ok"}>
+        &mdash; {@window.status}
+      </span>
       <span :if={@window.status == "ok"}>
         {num(@window.used)} used ({num(@window.used_now)} now), line {num(@window.line_now)} now and {num(
           @window.line_at_h
