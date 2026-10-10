@@ -13,7 +13,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoader do
   at a ceiling. A **missing** file is the defaults, since an install that never
   edited its ConfigMap has nothing to say.
 
-  A subscriber (`:notify`, a pid) gets `{:controller_config, loader, config}` when a
+  Subscribers (`:notify`, a pid or list, and `subscribe/2`) get `{:controller_config, loader, config}` when a
   new good config differs from the one held and `{:controller_degraded, loader,
   words}` when the degraded list changes.
 
@@ -44,6 +44,10 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoader do
   @spec degraded(GenServer.server()) :: [String.t()]
   def degraded(loader), do: GenServer.call(loader, :degraded)
 
+  @doc "Also tell `pid` about config and degraded changes."
+  @spec subscribe(GenServer.server(), pid()) :: :ok
+  def subscribe(loader, pid \\ self()), do: GenServer.call(loader, {:subscribe, pid})
+
   @doc "Re-read the file now; `:ok`, or the validation error (the last good config is kept)."
   @spec reload(GenServer.server()) :: :ok | {:error, term()}
   def reload(loader), do: GenServer.call(loader, :reload)
@@ -55,7 +59,7 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoader do
     state = %{
       path: Keyword.get(opts, :path, @default_path),
       interval: Keyword.get(opts, :interval_ms, @default_interval_ms),
-      notify: opts[:notify],
+      subscribers: opts[:notify] |> List.wrap() |> Enum.filter(&is_pid/1),
       config: nil,
       degraded: [],
       announce?: false
@@ -72,6 +76,9 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoader do
 
   def handle_call(:current, _from, state), do: {:reply, {:ok, state.config}, state}
   def handle_call(:degraded, _from, state), do: {:reply, state.degraded, state}
+
+  def handle_call({:subscribe, pid}, _from, state),
+    do: {:reply, :ok, %{state | subscribers: Enum.uniq([pid | state.subscribers])}}
 
   def handle_call(:reload, _from, state) do
     {result, state} = load(state)
@@ -134,6 +141,8 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoader do
     %{state | degraded: words}
   end
 
-  defp tell(%{notify: pid, announce?: true}, message) when is_pid(pid), do: send(pid, message)
+  defp tell(%{subscribers: pids, announce?: true}, message),
+    do: Enum.each(pids, &send(&1, message))
+
   defp tell(_state, _message), do: :ok
 end

@@ -99,7 +99,7 @@ defmodule Arbiter.Test.FakeK8sApi do
   def expire_with(api, mode) when mode in [:event, :http],
     do: GenServer.call(api, {:expire_with, mode})
 
-  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log`) answer `status`."
+  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log | :quota | :lease_get | :lease_update`) answer `status` (an integer, or `{code, message}`)."
   def fail_next(api, kind, status, count \\ 1),
     do: GenServer.call(api, {:fail, kind, status, count})
 
@@ -674,6 +674,7 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
   defp check_fail(conn, api, kind) do
     case FakeK8sApi.handle(api, {:maybe_fail, kind}) do
       :ok -> :ok
+      {:fail, {code, message}} -> status(conn, code, "InjectedFailure", message)
       {:fail, code} -> status(conn, code, "InjectedFailure", "injected #{code}")
     end
   end

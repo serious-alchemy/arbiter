@@ -83,6 +83,18 @@ defmodule Arbiter.NodeAgent.K8s.ConfigLoaderTest do
     refute_received {:controller_config, _, _}
   end
 
+  test "subscribe/2 adds a listener after start (the controller subscribes itself)", %{
+    tmp_dir: dir
+  } do
+    write!(dir, "max_concurrent: 4")
+    loader = start!(dir, notify: nil)
+    assert :ok = ConfigLoader.subscribe(loader, self())
+
+    write!(dir, "max_concurrent: 8")
+    assert :ok = ConfigLoader.reload(loader)
+    assert_receive {:controller_config, ^loader, %{max_concurrent: 8}}
+  end
+
   test "polls on its own interval", %{tmp_dir: dir} do
     write!(dir, "max_concurrent: 4")
     loader = start!(dir, interval_ms: 10)
