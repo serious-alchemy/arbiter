@@ -3424,9 +3424,9 @@ defmodule Arbiter.Worker do
 
   # bd-4p1vui (docs/design/remote-workers.md §10.4.6 F12): the process adopting the run for
   # this Worker went down before any session attached the run, so none ever will (only it
-  # opens that session): give the adoption up. This is what stops a Worker its adopter's
-  # start request outlived. Once a session attached the run `meta[:adopt]` is gone, and
-  # the adopter's DOWN is the one below.
+  # opens that session): give the adoption up. That also stops a Worker whose start request
+  # outlived its adopter. Once a session attached the run `meta[:adopt]` is gone, and the
+  # adopter's DOWN is the one below.
   def handle_info(
         {:DOWN, _ref, :process, pid, _reason},
         %State{meta: %{adopt: %{adopter: pid}}} = state
