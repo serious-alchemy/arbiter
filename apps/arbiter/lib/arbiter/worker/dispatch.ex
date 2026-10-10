@@ -2499,7 +2499,8 @@ defmodule Arbiter.Worker.Dispatch do
     admission = [
       force: Keyword.get(opts, :force_slot) == true,
       skip_spend: SpendCap.bypassed?(opts),
-      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
+      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by),
+      model: Keyword.get(opts, :model)
     ]
 
     case Keyword.get(opts, :routing_decision) do
