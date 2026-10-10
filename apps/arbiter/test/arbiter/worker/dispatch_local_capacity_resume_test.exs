@@ -155,6 +155,47 @@ defmodule Arbiter.Worker.DispatchLocalCapacityResumeTest do
     end
   end
 
+  # The production drain end to end: the real `Autopilot.defer_resume/4` queues
+  # the held resume, and the Autopilot's own default replay (`Dispatch.resume/2`
+  # with `slot_admitted: true`, its default `LocalCapacity.check/3` room test)
+  # starts it once B's slot frees — with the board showing no free slot at all.
+  test "the scheduler replays a held resume for real once the primary has room",
+       %{a: a, b: b, first: first} do
+    cap!(1)
+
+    {:ok, autopilot} =
+      Arbiter.Board.Autopilot.start_link(
+        name: nil,
+        paused: true,
+        interval_ms: :never,
+        debounce_ms: 60_000,
+        topics: [],
+        registry_settled?: fn -> true end,
+        snapshot: fn _ -> %{promote: nil, ready: [], slots_free: 0} end
+      )
+
+    assert {:ok, %{deferred: true, held_for: :local_capacity}} =
+             Dispatch.resume(a.id,
+               resume_origin: :automatic,
+               defer_resume: &Arbiter.Board.Autopilot.defer_resume(autopilot, &1, &2, &3),
+               start_driver: false,
+               claude_command: ["sleep", "2"]
+             )
+
+    assert Arbiter.Board.Autopilot.status(autopilot).held_local_capacity == [a.id]
+    assert :paused = Arbiter.Board.Autopilot.tick(autopilot)
+    assert Worker.whereis(a.id) == first.worker_pid
+
+    :ok = Worker.stop(b.id, :normal)
+    task_id = a.id
+    assert {:resumed, ^task_id} = Arbiter.Board.Autopilot.tick(autopilot, 30_000)
+
+    resumed = Worker.whereis(a.id)
+    assert resumed not in [nil, first.worker_pid]
+    assert Worker.state(resumed).meta[:resume] == true
+    assert Arbiter.Board.Autopilot.status(autopilot).held_local_capacity == []
+  end
+
   describe "with room on the primary" do
     test "a resume goes through and takes the second slot (cap 2, B live)", %{a: a, first: first} do
       cap!(2)
