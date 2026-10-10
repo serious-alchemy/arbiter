@@ -41,7 +41,13 @@ case "$sub" in
               echo '{}' > "$h/.mcp.json"
               # bd-bg87oz: a pass that writes commits. `shadow_script` is run with the shadow
               # clone's path, as the agent's work in it (a rebase, a fix commit).
-              if [ -e "$D/shadow_script" ]; then sh "$D/shadow_script" "$h" > "$D/shadow_script.out" 2>&1; fi ;;
+              if [ -e "$D/shadow_script" ]; then sh "$D/shadow_script" "$h" > "$D/shadow_script.out" 2>&1; fi
+              # bd-6ypj2y: an agent that commits in its checkout (the run's shadow clone)
+              if [ -e "$D/commit" ]; then
+                git -C "$h" add edited.txt
+                git -C "$h" -c user.name=agent -c user.email=agent@example.com commit -q -m "agent commit" \
+                  && git -C "$h" rev-parse HEAD > "$D/committed.head"
+              fi ;;
             *:/work/config|*:/work/config:*)
               h="${a%%:*}"
               mkdir -p "$h/projects/-work-tree"

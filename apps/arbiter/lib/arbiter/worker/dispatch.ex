@@ -2721,6 +2721,7 @@ defmodule Arbiter.Worker.Dispatch do
       provider: quota_gate_provider(task, workspace, opts),
       layout: node_layout(task, workspace, opts),
       no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
+      inspect?: Keyword.get(opts, :review) != true and inspect_checkout?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
       mode: Placement.mode(workspace)
     }
@@ -2769,6 +2770,13 @@ defmodule Arbiter.Worker.Dispatch do
       true -> :implementer
     end
   end
+
+  # bd-6ypj2y: a task/research dispatch that gets the read-only inspect checkout of
+  # the target tip (`provision_inspect_worktree/3`) rather than no checkout at all:
+  # the one clone-less shape a node can be handed. An explicit `provision_worktree`
+  # either way is a different shape (none, or a real branch worktree).
+  defp inspect_checkout?(%Issue{} = task, opts),
+    do: Issue.no_pr_type?(task.issue_type) and Keyword.get(opts, :provision_worktree) == nil
 
   defp no_private_clone?(%Issue{} = task, opts) do
     Keyword.get(opts, :provision_worktree, true) == false or
