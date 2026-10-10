@@ -34,8 +34,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   quoting is the emitter's job and no request value is ever spliced into text.
   """
 
-  alias Arbiter.Nodes
   alias Arbiter.NodeAgent.K8s.{AdmissionPolicy, ControllerConfig, ControllerManifest, Quantity}
+  alias Arbiter.Nodes
 
   @default_namespace "arbiter-workers"
   @default_max 2

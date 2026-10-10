@@ -188,6 +188,29 @@ tailnet through `tailscale serve`, agent 0.2.23, health `ready`, `max_workers` 1
 (enrolled 2026-10-07, per the coordinator's notes on bd-afcoop; it does not run real
 work until placement is turned on).
 
+### Join a Kubernetes cluster
+
+Needs `nodes.public_url` and `nodes.registry` (the controller image is
+`<registry>/controller:<server version>`, pushed by the primary after each start). Either
+click **Add node → Kubernetes cluster** on the Nodes page, or:
+
+```sh
+arb node add --kind cluster --name mesaana-k3s --namespace arbiter-workers --max-workers 2 \
+  [--reach tailscale] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
+```
+
+Both print the same three steps: apply the manifests with a cluster-admin kubeconfig
+(`kubectl apply -f manifests.yaml`; they contain no token, credential or key, so keep or
+diff them freely), create the join Secret with the token read from the terminal
+(`read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join
+--from-file=token=/dev/stdin`), and wait for the node to connect. With `--reach tailscale` also
+create the `arbiter-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:arbiter-node`).
+The join Secret is spent after first boot: delete it.
+
+A cluster node that is `outdated` after a server deploy upgrades itself when its Role allows it
+(`--self-upgrade on`, the default). Otherwise `arb node show <name>` and the node's page print
+the exact `kubectl -n NS set image deployment/arbiter-controller controller=IMAGE` to run.
+
 ### Pin and size the node
 
 ```sh
