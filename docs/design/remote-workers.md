@@ -454,7 +454,7 @@ Adoption ignores drain and skew: neither applies to a run that is already on the
 | F9 | The channel blips during the handshake | Reconnect `hello` | The run is in the table, so it is `known`, and the agent's `attach` pushes `run.ready`. That completes the adoption (`next` is unchanged: a detached run's acked offset cannot move). |
 | F10 | The primary restarts again mid-adoption | — | The adopting Worker's `run_id` is `nil` until the session is attached, and after that its shutdown abandons as in step 1. The row stays live either way, and the next boot adopts or collects. |
 | F11 | Adoption races the hold timer, or Recovery's own quiesce | `Session.adopt/5` cancels the timer and refuses a run with a recovery in flight. `Session.recover/4` refuses a run attached to an owner. Recovery handles one node's runs in sequence. | Each held run ends exactly once: adopted, collected, or quiesced by the hold timer. |
-| F12 | Recovery's total budget kills a node's task mid-way | `Recovery.collect/2`'s backstop | That backstop no longer stamps `node_lost` on a run whose ticket has a live Worker: an adopted run stays adopted. |
+| F12 | Recovery's total budget kills a node's task mid-way | `Recovery.collect/2`'s backstop | That backstop reports a run that the ticket's live Worker now owns (`Adoption.adopted?/1`: the Worker's run id is the run's) as `:adopted` and never stamps it `node_lost`. An adopted run stays adopted. |
 | F13 | The policy changed the run's bridges | The new spec's bridge map | A name the node still opens and the map lacks is reset (`unknown_bridge`): the current policy applies. A new name goes unused until a re-open. |
 | F14 | The outage outlasted `restart_grace` (180 s) | The agent's no-socket fence (§10.4.8) | The containers were stopped, so the run is not `running`: collected (quiesce retains a fenced run's work). |
 | F15 | An `adopt` the agent did not expect: a run its current connection's `hello_ok` did not answer `hold`, or a connection that has not said hello | The agent's `Connection` | `adopt.refused{reason: "not_held"}`, and the run is untouched. The primary side is as F3. |
@@ -517,7 +517,7 @@ The container keeps what it was started with: its old worker-tier token (as `ARB
   * F7: a failure after the session adopted (unadopt, then abandon);
   * the kill switch (`node_run_adoption: false`).
 
-  Each asserts that the run is collected exactly once (one `quiesce`, one `retained`, one `recover`, the work in the home clone) and that nothing was cancelled.
+  Each asserts that the run is collected exactly once: one `retained` report, the work in the home clone, the row left live for the `Reconciler`, no Worker, and no second row. The `Recovery` unit tests (`recovery_test.exs`, with a stand-in agent) assert the same failures at the protocol level: one `quiesce`, one `recover` and no `cancel` for F3, F5, F6 and F7. The `Session` unit tests assert no `cancel` on every undo path.
 * **Unit tests.**
   * `RunStreams`: line-boundary acks, and where an adopted stream starts.
   * `Session`: `adoptable`, `adopt`, `adopt.refused`, the timeout, owner-down, `unadopt`, and `recover` refusing an attached run.
