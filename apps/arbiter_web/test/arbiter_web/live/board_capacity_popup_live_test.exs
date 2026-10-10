@@ -21,7 +21,7 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
     for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
     Autopilot.resume(Autopilot)
 
-    {:ok, _} = Settings.set_conductor_system_max_concurrent(nil)
+    {:ok, _} = Settings.set_nodes_local_max_workers(nil)
 
     # No settings cleanup: the write lives in the test's sandbox transaction,
     # which rolls back. (A write from on_exit runs after the owner is gone.)
@@ -36,12 +36,9 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
     %{ws: ws}
   end
 
-  defp workspace_cap!(ws, n) do
-    {:ok, ws} =
-      Ash.update(ws, %{config: Map.put(ws.config || %{}, "conductor", %{"max_concurrent" => n})})
-
-    ws
-  end
+  # The primary's cap is what the board plans to (DC1): a workspace has no
+  # `max_concurrent` of its own any more.
+  defp local_cap!(n), do: {:ok, ^n} = Settings.set_nodes_local_max_workers(n)
 
   defp ready_ticket(ws, title) do
     {:ok, issue} =
@@ -74,24 +71,21 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
     end
 
     test "the figure is still the effective cap", %{conn: conn, ws: ws} do
-      workspace_cap!(ws, 2)
+      local_cap!(2)
       view = mount_board(conn)
 
       assert view |> element("#board-slot-cap-figure") |> render() =~ "2"
     end
 
-    test "a cap saved on /settings shows on the board without a refresh", %{conn: conn} do
+    test "a local cap set elsewhere shows on the board without a refresh", %{conn: conn} do
       board = mount_board(conn)
-      {:ok, settings, _html} = live(conn, "/settings")
 
-      settings
-      |> form("#settings-concurrency-form", %{"value" => "3"})
-      |> render_submit()
-
+      local_cap!(3)
       render_async(board, @async_timeout)
 
       assert board |> element("#board-slot-cap-figure") |> render() =~ "3"
-      assert has_element?(board, "#board-slot-cap-limits [data-limit='ceiling']")
+      assert has_element?(board, "#board-slot-cap-limits [data-limit='nodes'][data-binding='true']")
+      refute has_element?(board, "#board-slot-cap-limits [data-limit='ceiling']")
 
       # The autopilot audits the change from its own process; let it finish
       # before the sandbox owner exits.
@@ -121,41 +115,38 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
       assert panel =~ "group-has-[[aria-expanded=true]]/pop:block"
     end
 
-    test "marks the workspace setting as the binding input", %{conn: conn, ws: ws} do
-      workspace_cap!(ws, 2)
+    test "marks the machine capacity as the binding input", %{conn: conn} do
+      local_cap!(2)
       view = mount_board(conn)
 
       assert has_element?(
                view,
                "#board-slot-cap-headline",
-               "Limited to 2 by the workspace setting."
+               "The cap is 2: that is all the machine capacity there is."
              )
 
       assert has_element?(
                view,
-               "#board-slot-cap-limits [data-limit='workspace'][data-binding='true']"
+               "#board-slot-cap-limits [data-limit='nodes'][data-binding='true']"
              )
 
-      assert has_element?(
-               view,
-               "#board-slot-cap-limits [data-limit='nodes'][data-binding='false']"
-             )
+      refute has_element?(view, "#board-slot-cap-limits [data-limit='workspace']")
     end
 
-    test "lists every input in plain language and where each is changed", %{conn: conn, ws: ws} do
-      workspace_cap!(ws, 2)
+    test "lists every input in plain language and where each is changed", %{conn: conn} do
+      local_cap!(2)
       view = mount_board(conn)
       panel = view |> element("#board-slot-cap-panel") |> render()
 
       assert panel =~ "Capacity "
       assert panel =~ "this machine ("
       assert panel =~ "arb node set local --max-workers N"
-      assert panel =~ "arb config set conductor.max_concurrent N"
+      refute panel =~ "conductor.max_concurrent"
       refute panel =~ "max_concurrent /"
     end
 
     test "says which tickets use the slots, parked ones included", %{conn: conn, ws: ws} do
-      workspace_cap!(ws, 3)
+      local_cap!(3)
       parked = parked_ticket(ws, "waiting between rounds")
       view = mount_board(conn)
 
@@ -176,7 +167,7 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
 
   describe "held cards" do
     setup %{ws: ws} do
-      workspace_cap!(ws, 1)
+      local_cap!(1)
       parked = parked_ticket(ws, "holds the only slot")
       waiting = ready_ticket(ws, "waits for the slot")
       %{parked: parked, waiting: waiting}

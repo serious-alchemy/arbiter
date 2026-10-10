@@ -31,7 +31,6 @@ defmodule ArbiterWeb.NodesLiveTest do
 
       Settings.set_nodes_public_url(nil)
       Settings.set_nodes_local_max_workers(nil)
-      Settings.set_conductor_system_max_concurrent(nil)
 
       for {pid, _} <- Registry.list(),
           do: Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
@@ -116,12 +115,11 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#node-#{gone.id} [data-role=state]", "revoked")
     end
 
-    test "the header breaks capacity down by machine, under an optional ceiling", %{conn: conn} do
+    test "the header breaks capacity down by machine, with no ceiling over the sum (DC1)", %{conn: conn} do
       Application.put_env(:arbiter, :remote_execution, true)
       on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
 
       {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(10)
       connect!(enroll!("alpha", max_workers: 3))
 
       {:ok, view, _} = live(conn, ~p"/nodes")
@@ -129,33 +127,24 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#nodes-capacity-summary", "local 2")
       assert has_element?(view, "#nodes-capacity-summary", "alpha 3")
       assert has_element?(view, "#nodes-capacity-summary", "5")
-      assert has_element?(view, "#nodes-capacity-summary", "10")
+      refute has_element?(view, "#nodes-capacity-summary", "conductor.max_concurrent")
       refute has_element?(view, "#nodes-ceiling-warning")
     end
 
-    test "with no ceiling the sum applies and nothing warns", %{conn: conn} do
-      Application.put_env(:arbiter, :remote_execution, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
+    test "the local row's suggestion is the primary's hardware suggestion", %{conn: conn} do
+      previous = Application.fetch_env(:arbiter, :local_hardware)
+      Application.put_env(:arbiter, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
 
-      {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
-      connect!(enroll!("alpha", max_workers: 3))
-
-      {:ok, view, _} = live(conn, ~p"/nodes")
-
-      assert has_element?(view, "#nodes-capacity-summary", "not set")
-      refute has_element?(view, "#nodes-ceiling-warning")
-    end
-
-    test "warns only when an explicit conductor.max_concurrent cuts the sum", %{conn: conn} do
-      Application.put_env(:arbiter, :remote_execution, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :remote_execution) end)
-
-      {:ok, 2} = Nodes.set_local_max_workers(2, @operator)
-      {:ok, _} = Settings.set_conductor_system_max_concurrent(2)
-      connect!(enroll!("alpha", max_workers: 5))
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:arbiter, :local_hardware, v)
+          :error -> Application.delete_env(:arbiter, :local_hardware)
+        end
+      end)
 
       {:ok, view, _} = live(conn, ~p"/nodes")
-      assert has_element?(view, "#nodes-ceiling-warning")
+
+      assert has_element?(view, "#node-local [data-role=suggested]", "6")
     end
 
     test "a local cap of 0 shows a persistent warning", %{conn: conn} do
