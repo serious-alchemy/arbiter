@@ -186,6 +186,62 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     end
   end
 
+  # bd-8ikgoc: a worker registers at init with no node (the node is only known
+  # once its port opens), so the node must be stamped onto the entry afterwards
+  # and survive the hold flag being rewritten.
+  describe "runs placed on a remote node (bd-8ikgoc)" do
+    defp remote_worker(ws, node_id) do
+      key = "lc-remote-#{System.unique_integer([:positive])}"
+      test = self()
+
+      pid =
+        spawn(fn ->
+          {:ok, _} = Registry.register(WorkerRegistry, key, nil)
+          :ok = WorkerRegistry.put_dispatch(key, ws.id, "claude")
+          :ok = WorkerRegistry.put_node(key, node_id)
+          :ok = WorkerRegistry.put_dispatch(key, ws.id, "claude", released: false)
+          send(test, {:registered, self()})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:registered, ^pid}
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      key
+    end
+
+    test "never count against the primary's cap; resume and redispatch are admitted", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      node_id = Ecto.UUID.generate()
+      for _ <- 1..3, do: remote_worker(ws, node_id)
+      {local_key, _} = fake_worker(ws)
+
+      assert LocalCapacity.holders() == [local_key]
+
+      for kind <- [:resume, :redispatch] do
+        assert :ok = LocalCapacity.check("bd-mixed", kind, [])
+      end
+    end
+
+    test "holders of a hold are only the primary's runs", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      remote_worker(ws, Ecto.UUID.generate())
+      {local_key, _} = fake_worker(ws)
+
+      assert {:error, {:no_node_capacity, info}} = LocalCapacity.check("bd-held", :resume, [])
+      assert info.holders == [local_key]
+    end
+
+    test "the count agrees with Nodes.Capacity's local free slots", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      remote_worker(ws, Ecto.UUID.generate())
+      fake_worker(ws)
+      assert length(LocalCapacity.holders()) == 1
+    end
+  end
+
   describe "check/3 (admit without taking the slot)" do
     test "answers like admit/3 but reserves nothing", %{ws: ws} do
       {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)

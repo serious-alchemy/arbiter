@@ -2783,6 +2783,10 @@ defmodule Arbiter.Worker do
 
     stamp_run_node(new_state.run_id, new_state.task_id, port)
 
+    # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
+    # node stops counting against the primary's cap.
+    PRegistry.put_node(new_state.registry_key, node_id)
+
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
     {:reply, {:ok, port}, announce_phase(new_state)}
