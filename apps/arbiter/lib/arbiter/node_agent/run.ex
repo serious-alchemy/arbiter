@@ -524,13 +524,7 @@ defmodule Arbiter.NodeAgent.Run do
   # The checkout bundle, then the session transcripts (best effort: they are
   # provenance, the bundle is the work).
   defp upload(state) do
-    result =
-      Checkout.upload(
-        run_config(state),
-        %{run: state.spec.run, branch: state.spec.checkout.branch},
-        shadow(state),
-        state.known || []
-      )
+    result = upload_checkout(state)
 
     config_dir = Path.join([run_config(state).node_home, "runs", state.spec.run, "config"])
 
@@ -541,6 +535,19 @@ defmodule Arbiter.NodeAgent.Run do
     end
 
     result
+  end
+
+  # A read-only checkout (a reviewer's clone, bd-cgdhlu) has no work to hand back:
+  # only the transcripts are mirrored.
+  defp upload_checkout(%{spec: %{checkout: %{read_only?: true}}}), do: {:ok, :read_only}
+
+  defp upload_checkout(state) do
+    Checkout.upload(
+      run_config(state),
+      %{run: state.spec.run, branch: state.spec.checkout.branch},
+      shadow(state),
+      state.known || []
+    )
   end
 
   defp log_checkpoint(state, {:ok, _}), do: state

@@ -29,7 +29,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
   | `network` | `"none"` (default) or `"pasta"` |
   | `services` | test-services definitions (`Arbiter.Worker.TestServices` specs), or `[]` |
   | `command` | the argv run inside the container |
-  | `checkout` | optional (RW11): `%{"branch", "base", "interval_s"}`. The agent seeds the `worktree` mount as a shadow clone from the primary (`GET /nodes/runs/<run>/seed.bundle`), uploads a snapshot bundle every `interval_s` (default 300, 10..3600) and at exit |
+  | `checkout` | optional (RW11): `%{"branch", "base", "interval_s"}`. The agent seeds the `worktree` mount as a shadow clone from the primary (`GET /nodes/runs/<run>/seed.bundle`), uploads a snapshot bundle every `interval_s` (default 300, 10..3600) and at exit. `"read_only": true` (a reviewer's clone, bd-cgdhlu) seeds the same way but uploads no bundle, only the session transcripts |
   | `extra_args` | must be absent or `[]`: there is no way to pass a flag |
 
   Mount kinds: `worktree`, `home`, `config_dir`, `tmp` (directories the agent
@@ -472,7 +472,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
   defp limit_key("cpus"), do: :cpus
 
   @ref_re ~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}\z/
-  @checkout_keys ~w(branch base interval_s)
+  @checkout_keys ~w(branch base interval_s read_only)
 
   # RW11. The branch and base become ref names the agent writes in its own repos
   # and bundle refs, so they are held to a conservative subset of
@@ -483,8 +483,9 @@ defmodule Arbiter.NodeAgent.RunSpec do
     with :ok <- known_checkout_keys(map),
          {:ok, branch} <- ref(map["branch"], "checkout.branch", required: true),
          {:ok, base} <- ref(map["base"], "checkout.base", required: false),
-         {:ok, seconds} <- interval(map["interval_s"]) do
-      {:ok, %{branch: branch, base: base, interval_ms: seconds * 1000}}
+         {:ok, seconds} <- interval(map["interval_s"]),
+         {:ok, read_only?} <- read_only(map["read_only"]) do
+      {:ok, %{branch: branch, base: base, interval_ms: seconds * 1000, read_only?: read_only?}}
     end
   end
 
@@ -510,6 +511,10 @@ defmodule Arbiter.NodeAgent.RunSpec do
   end
 
   defp ref(_value, key, _opts), do: refuse({:bad_value, key})
+
+  defp read_only(nil), do: {:ok, false}
+  defp read_only(flag) when is_boolean(flag), do: {:ok, flag}
+  defp read_only(_), do: refuse({:bad_value, "checkout.read_only"})
 
   defp interval(nil), do: {:ok, 300}
   defp interval(s) when is_integer(s) and s in 10..3600, do: {:ok, s}

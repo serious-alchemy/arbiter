@@ -61,9 +61,10 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert Placement.eligible(@eligible) == :ok
     end
 
-    # bd-7ays3v: these three run in the container on a private clone too.
-    test "so are a ReviewGate reviewer and the merge queue's fix and conflict passes" do
-      for kind <- [:reviewer, :fix_pass, :conflict_pass] do
+    # bd-7ays3v: these run in the container on a private clone too; bd-cgdhlu adds
+    # the `review: true` dispatch (kind `:review`).
+    test "so are a ReviewGate reviewer, a review: true dispatch and the merge queue's fix and conflict passes" do
+      for kind <- [:reviewer, :review, :fix_pass, :conflict_pass] do
         assert Placement.eligible(%{@eligible | kind: kind}) == :ok
 
         assert {:local_only, :not_podman} =
@@ -75,7 +76,7 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
 
     test "every other spawn kind stays local" do
-      for kind <- [:redispatch, :resume, :review, :review_fix_round] do
+      for kind <- [:redispatch, :resume, :review_fix_round] do
         assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: kind})
       end
     end
@@ -169,6 +170,41 @@ defmodule Arbiter.Nodes.PlacementTest do
 
       assert {:error, {:no_node_capacity, _}} =
                place(%{mode: :remote_only}, [row("a")], remote_available?: false)
+    end
+
+    # bd-cgdhlu: a reviewer is placed like any eligible run.
+    test "a ReviewGate reviewer and a review dispatch: prefer_remote takes a node with headroom, else local" do
+      for kind <- [:reviewer, :review] do
+        assert {:ok, {:node, %{name: "a"}}} = place(%{kind: kind}, [row("a")])
+        Placement.release("bd-place1")
+
+        assert {:ok, {:local, :no_node}} =
+                 place(%{kind: kind}, [row("a", live: 2, max: 2)])
+      end
+    end
+
+    test "a reviewer under remote_only is held when no node has room, and placed when one has" do
+      for kind <- [:reviewer, :review] do
+        assert {:error, {:no_node_capacity, info}} =
+                 place(%{kind: kind, mode: :remote_only}, [row("a", live: 2, max: 2)])
+
+        assert info.mode == :remote_only
+
+        assert {:ok, {:node, %{name: "b"}}} =
+                 place(%{kind: kind, mode: :remote_only}, [row("a", live: 2, max: 2), row("b")])
+
+        Placement.release("bd-place1")
+      end
+    end
+
+    test "a reviewer in a local_only workspace, or one with no podman, never goes remote" do
+      for kind <- [:reviewer, :review] do
+        assert {:ok, {:local, {:local_only, :placement_local_only}}} =
+                 place(%{kind: kind, mode: :local_only}, [row("a")])
+
+        assert {:ok, {:local, {:local_only, :not_podman}}} =
+                 place(%{kind: kind, layout: :linked_worktree}, [row("a")])
+      end
     end
 
     test "remote_only still lets an ineligible run go local" do
