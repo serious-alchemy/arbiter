@@ -136,7 +136,7 @@ defmodule Arbiter.Board.Autopilot do
   now only ever produces `:auth_expired` on this path, so the `retry_not_before`
   branch below is currently unreachable from a real dispatch. It is kept
   because the autopilot tests still feed a `:quota_exhausted` shape in by hand
-  to exercise `record_failure/3` and `promote_or_hold/2` directly, and because
+  to exercise `record_failure/3` and `promote_or_hold/3` directly, and because
   `Arbiter.Workflows.DispatchQueue` may still produce that shape via its own
   path (see its moduledoc). If some other producer of `:quota_exhausted`
   reappears here, this hold still applies to it unchanged:
@@ -203,7 +203,7 @@ defmodule Arbiter.Board.Autopilot do
   now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
   and the board-level hold takes over — instead of one attempt per 15s/60s
   tick. The number of such attempts stays bounded by the number of free
-  slots, not unbounded, and `AuthHold`/`promote_or_hold/2` still cuts it off
+  slots, not unbounded, and `AuthHold`/`promote_or_hold/3` still cuts it off
   as soon as the threshold trips; only the attempts *before* that point land
   closer together. Suites that assert an exact tick-by-tick attempt count or
   outcome sequence against dead credentials should start Autopilot with
@@ -214,11 +214,28 @@ defmodule Arbiter.Board.Autopilot do
   events — nothing broadcasts when a clock crosses a deadline — so those
   stay on the fallback tick, which is why 60s is a compromise and not a
   formality: a hold that clears right after a pass can wait up to a minute
-  before the tick notices. `promote_or_hold/2`'s hold logic is unchanged.
+  before the tick notices. `promote_or_hold/3`'s hold logic is unchanged.
+
+  ## The admission shadow (DC6, bd-9ycsk4)
+
+  Every pass reads `scheduler_admission` (`docs/design/provider-dynamic-concurrency.md`
+  §10.1). Under `legacy`, the default, the pass is exactly as above: the board
+  is asked for nothing new and the dispatch gets today's options. Under
+  `shadow` (and `enforce`, until DC8 wires it) the board also plans the
+  scheduler walk (`Arbiter.Board.Scheduler`'s `:walk`, at `board.walk`), and
+  this process records it beside today's decision and never in its place:
+
+    * the card it dispatches is today's `promote`, as under `legacy` (I2), with
+      the walk's decision riding along as `admission_shadow`, which the run
+      stores on its `routing_decision`;
+    * one `Arbiter.Board.AdmissionShadowEvent` row is written each time either
+      side's outcome changes (`Arbiter.Board.AdmissionShadow.signature/1`),
+      never once per pass.
   """
 
   use GenServer
 
+  alias Arbiter.Board.AdmissionShadow
   alias Arbiter.Board.Drain
   alias Arbiter.Board.Snapshot
   alias Arbiter.Boot.ResumeGate
@@ -352,7 +369,15 @@ defmodule Arbiter.Board.Autopilot do
       `false`, so each `tick/2` call runs exactly one pass — matching the
       pre-bd-axgpec behaviour it is asserting against.
     * `:snapshot` / `:dispatch` — seams for tests; default to
-      `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
+      `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/2`. A
+      two-argument `:dispatch` also gets the extra dispatch options (the
+      admission shadow's record); a one-argument one gets the id alone.
+    * `:admission` — seam for tests; a 0-arity function returning the
+      `scheduler_admission` mode, read on every pass. Defaults to
+      `Arbiter.Board.AdmissionShadow.mode/0`.
+    * `:record_shadow` — seam for tests; a 1-arity function that writes an
+      admission hold-change event. Defaults to
+      `Arbiter.Board.AdmissionShadow.record_event/1`.
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
@@ -574,7 +599,13 @@ defmodule Arbiter.Board.Autopilot do
       debounce_ms: debounce,
       follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
-      dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
+      dispatch: Keyword.get(opts, :dispatch, &default_dispatch/2),
+      # DC6: the `scheduler_admission` mode, read on every pass, and where a
+      # hold change under the shadow is written. `shadow_signature` is the last
+      # pass's outcome on both sides, so a row is written per change, not per pass.
+      admission: Keyword.get(opts, :admission, &AdmissionShadow.mode/0),
+      record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
+      shadow_signature: nil,
       resume: Keyword.get(opts, :resume, &default_resume/3),
       local_room: Keyword.get(opts, :local_room, &default_local_room?/2),
       priority: Keyword.get(opts, :priority, &default_priority/1),
@@ -909,14 +940,24 @@ defmodule Arbiter.Board.Autopilot do
   defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
 
   defp plan(state) do
+    mode = admission_mode(state)
+
     {read_status, snapshot} =
-      read_board(state,
-        dispatch_holds: dispatch_holds(state),
-        resume_queued: queued_resume_ids(state),
-        local_held: local_held_ids(state)
+      read_board(
+        state,
+        [
+          dispatch_holds: dispatch_holds(state),
+          resume_queued: queued_resume_ids(state),
+          local_held: local_held_ids(state)
+        ] ++ walk_opts(mode)
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
+
+    state =
+      shadow_safely(%{state | shadow_signature: nil}, fn ->
+        note_admission(state, mode, read_status, snapshot)
+      end)
 
     cond do
       state.deferred_resumes != [] ->
@@ -926,10 +967,80 @@ defmodule Arbiter.Board.Autopilot do
         {:paused, state}
 
       is_binary(Map.get(snapshot, :promote)) ->
-        promote_or_hold(%{state | holds: []}, snapshot.promote)
+        extra = shadow_safely([], fn -> shadow_opts(snapshot, mode) end)
+        promote_or_hold(%{state | holds: []}, snapshot.promote, extra)
 
       true ->
         {:idle, note_holds(state, snapshot, read_status)}
+    end
+  end
+
+  # ---- the admission shadow (DC6) --------------------------------------------
+
+  # `legacy` asks the board for nothing new; `shadow` and `enforce` ask it to
+  # plan the scheduler walk beside today's plan (`Snapshot.load/1`).
+  defp walk_opts(mode), do: if(AdmissionShadow.walks?(mode), do: [admission: mode], else: [])
+
+  defp admission_mode(state) do
+    state.admission.()
+  rescue
+    _ -> :legacy
+  catch
+    :exit, _ -> :legacy
+  end
+
+  # The shadow is a record: nothing it computes may stop a pass or change a
+  # dispatch (I2). A failure is logged and the pass goes on without it.
+  defp shadow_safely(fallback, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("board autopilot: admission shadow skipped: #{Exception.message(e)}")
+      fallback
+  catch
+    kind, reason ->
+      Logger.warning("board autopilot: admission shadow skipped: #{inspect({kind, reason})}")
+      fallback
+  end
+
+  # One event row per change of either side's outcome (`AdmissionShadow.signature/1`),
+  # never one per pass. An unreadable board says nothing and keeps the last
+  # signature; a board without a walk (or `legacy`) forgets it, so the next
+  # walk is recorded from a clean slate.
+  defp note_admission(state, _mode, :error, _snapshot), do: state
+
+  defp note_admission(state, mode, :ok, %{walk: %{}} = snapshot) do
+    if AdmissionShadow.walks?(mode) do
+      signature = {mode, AdmissionShadow.signature(snapshot)}
+
+      if signature != state.shadow_signature,
+        do: record_shadow(state, AdmissionShadow.event(snapshot, mode, state.now.()))
+
+      %{state | shadow_signature: signature}
+    else
+      %{state | shadow_signature: nil}
+    end
+  end
+
+  defp note_admission(state, _mode, :ok, _snapshot), do: %{state | shadow_signature: nil}
+
+  defp record_shadow(state, attrs) do
+    state.record_shadow.(attrs)
+  rescue
+    e -> Logger.warning("board autopilot: admission shadow not recorded: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("board autopilot: admission shadow not recorded: #{inspect(reason)}")
+  end
+
+  # What rides on the dispatch: the walk's decision beside today's, as
+  # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
+  defp shadow_opts(snapshot, mode) do
+    with true <- AdmissionShadow.walks?(mode),
+         %{} = record <- AdmissionShadow.dispatch_record(snapshot, mode, snapshot.promote) do
+      [admission_shadow: record]
+    else
+      _ -> []
     end
   end
 
@@ -1062,12 +1173,12 @@ defmodule Arbiter.Board.Autopilot do
   # For a quota hold specifically this is the right call anyway: the window is
   # account-wide, so any other Ready card would hit the identical exhausted
   # quota if dispatched right now.
-  defp promote_or_hold(%{failures: failures, now: now} = state, id) do
+  defp promote_or_hold(%{failures: failures, now: now} = state, id, extra) do
     with %{retry_not_before: %DateTime{} = at} <- Map.get(failures, id),
          :lt <- DateTime.compare(now.(), at) do
       {{:held, id, at}, state}
     else
-      _ -> {:started, start_dispatch(state, id)}
+      _ -> {:started, start_dispatch(state, id, extra)}
     end
   end
 
@@ -1087,10 +1198,10 @@ defmodule Arbiter.Board.Autopilot do
   # The task, not this process, does the slow work. It never raises: the
   # result — good, bad or thrown — comes back as a plain term so the
   # bookkeeping in `handle_info/2` has one shape to deal with.
-  defp start_dispatch(state, id) do
+  defp start_dispatch(state, id, extra) do
     fun = fn ->
       try do
-        state.dispatch.(id)
+        call_dispatch(state.dispatch, id, extra)
       rescue
         e -> {:error, e}
       catch
@@ -1101,6 +1212,11 @@ defmodule Arbiter.Board.Autopilot do
     task = spawn_dispatch(fun)
     %{state | dispatching: %{ref: task.ref, id: id, waiters: []}}
   end
+
+  # The dispatch seam takes the extra options (the admission shadow's record)
+  # when it has room for them; a one-argument seam gets the id alone.
+  defp call_dispatch(fun, id, extra) when is_function(fun, 2), do: fun.(id, extra)
+  defp call_dispatch(fun, id, _extra), do: fun.(id)
 
   # Supervised when the app is up (a dispatch that crashes must not take the
   # autopilot with it); a plain linked Task otherwise, which only happens in a
@@ -1335,9 +1451,15 @@ defmodule Arbiter.Board.Autopilot do
   # moment the precedence rules change. A task with no assignment still relies
   # on the sole-configured-repo auto-select, exactly as before.
   # `dispatched_by` rides into the worker's meta so a drain report can name a
-  # board dispatch as one (bd-9fgg04), not just as "a dispatch".
-  defp default_dispatch(id),
-    do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true, dispatched_by: "autopilot")
+  # board dispatch as one (bd-9fgg04), not just as "a dispatch". `extra` is the
+  # admission shadow's record (DC6): empty under `legacy`, so the options are
+  # exactly today's.
+  defp default_dispatch(id, extra) do
+    Arbiter.Worker.Dispatch.dispatch(
+      id,
+      Keyword.merge([start_claude: true, dispatched_by: "autopilot"], extra)
+    )
+  end
 
   # bd-92mx1m: the scheduler has just admitted this resume into a free slot,
   # and the caller put `slot_admitted: true` on `opts` to say so.

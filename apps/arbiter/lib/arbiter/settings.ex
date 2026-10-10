@@ -520,6 +520,44 @@ defmodule Arbiter.Settings do
 
   def set_scheduling_finish_first_max_wait_hours(_), do: {:error, :invalid_value}
 
+  # ---- admission (DC6, docs/design/provider-dynamic-concurrency.md §10.1) ----
+
+  @scheduler_admission_modes ~w(legacy shadow enforce)
+
+  @doc "The `scheduler_admission` modes, the default first."
+  @spec scheduler_admission_modes() :: [String.t()]
+  def scheduler_admission_modes, do: @scheduler_admission_modes
+
+  @doc """
+  The admission mode in force: `:legacy` (the default, and what an unset or
+  unreadable row means), `:shadow` or `:enforce`. Never raises.
+  """
+  @spec scheduler_admission() :: :legacy | :shadow | :enforce
+  def scheduler_admission do
+    case scheduler_admission_override() do
+      "shadow" -> :shadow
+      "enforce" -> :enforce
+      _ -> :legacy
+    end
+  end
+
+  @doc "The persisted `scheduler_admission` override; `nil` = legacy."
+  @spec scheduler_admission_override() :: String.t() | nil
+  def scheduler_admission_override, do: read_setting(:scheduler_admission)
+
+  @doc "Persist the admission mode (a mode string or atom); `nil` clears it (legacy)."
+  @spec set_scheduler_admission(String.t() | atom() | nil) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def set_scheduler_admission(nil), do: write_setting(:scheduler_admission, nil)
+
+  def set_scheduler_admission(mode) when is_atom(mode),
+    do: set_scheduler_admission(Atom.to_string(mode))
+
+  def set_scheduler_admission(mode) when mode in @scheduler_admission_modes,
+    do: write_setting(:scheduler_admission, mode)
+
+  def set_scheduler_admission(_), do: {:error, :invalid_value}
+
   # ---- nodes (RW3, docs/design/remote-workers.md §4.3, §5.1) -----------------
 
   @default_join_token_ttl_minutes 15

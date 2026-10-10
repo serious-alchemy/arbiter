@@ -87,6 +87,17 @@ defmodule Arbiter.Settings.Registry do
           "tiebreak; null = 24. Takes effect on the next scheduler tick."
     },
     %{
+      key: "scheduler_admission",
+      type: "admission_mode",
+      description:
+        "Admission mode (provider-dynamic-concurrency §10): legacy (null; today's plan, gate " <>
+          "and caps), shadow (dispatch unchanged; the scheduler walk's decision is recorded " <>
+          "beside every dispatch and hold change) or enforce (operator-only; until DC8 wires " <>
+          "it, it dispatches and records exactly as shadow). Takes effect on the next " <>
+          "Autopilot pass.",
+      operator_only_values: ["enforce"]
+    },
+    %{
       key: "nodes.public_url",
       type: "http_url",
       description:
@@ -199,6 +210,7 @@ defmodule Arbiter.Settings.Registry do
 
   defp allowed("agent_type_list"), do: Arbiter.Agents.valid_agent_types()
   defp allowed("quota_provider_list"), do: Arbiter.Quota.Visibility.provider_codes()
+  defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
   defp allowed(_), do: nil
 
   @doc """
@@ -275,6 +287,15 @@ defmodule Arbiter.Settings.Registry do
   defp do_cast("secret", _),
     do: {:error, "value must be a non-empty string of at most 4096 bytes, or null"}
 
+  defp do_cast("admission_mode", mode) when is_binary(mode) do
+    if mode in Settings.scheduler_admission_modes(),
+      do: {:ok, mode},
+      else: {:error, "value must be legacy, shadow or enforce, or null"}
+  end
+
+  defp do_cast("admission_mode", _),
+    do: {:error, "value must be legacy, shadow or enforce, or null"}
+
   defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
     valid = allowed(type)
 
@@ -317,6 +338,7 @@ defmodule Arbiter.Settings.Registry do
 
     with :ok <- authorize(key, authority),
          {:ok, value} <- cast_for_put(key, raw),
+         :ok <- authorize_value(key, value, authority),
          do: write(key, value)
   end
 
@@ -324,6 +346,22 @@ defmodule Arbiter.Settings.Registry do
     do: {:error, {:unauthorized, "#{key} is operator-only — it needs an operator-proof token"}}
 
   defp authorize(_key, _authority), do: :ok
+
+  # A key whose *values* split by authority (`operator_only_values`): DC6's
+  # `scheduler_admission`, where the coordinator may set `legacy` or `shadow` —
+  # the kill switch, and tightening — but only the operator may set `enforce`
+  # (provider-dynamic-concurrency §10.1, §10.4).
+  defp authorize_value(_key, _value, :operator), do: :ok
+
+  defp authorize_value(key, value, _authority) do
+    entry = Enum.find(@schema, &(&1.key == key))
+
+    if value in Map.get(entry, :operator_only_values, []),
+      do:
+        {:error,
+         {:unauthorized, "#{key} #{value} is operator-only — it needs an operator-proof token"}},
+      else: :ok
+  end
 
   defp cast_for_put(key, raw) do
     case cast(key, raw) do
@@ -356,6 +394,8 @@ defmodule Arbiter.Settings.Registry do
 
   defp write("scheduling_finish_first_max_wait_hours", v),
     do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
+
+  defp write("scheduler_admission", v), do: wrap(Settings.set_scheduler_admission(v))
 
   defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
 
@@ -396,6 +436,8 @@ defmodule Arbiter.Settings.Registry do
   def override("scheduling_finish_first_max_wait_hours"),
     do: Settings.scheduling_finish_first_max_wait_hours()
 
+  def override("scheduler_admission"), do: Settings.scheduler_admission_override()
+
   def override("nodes.public_url"), do: Settings.nodes_public_url()
   def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
   def override("nodes.join_token_ttl_minutes"), do: Settings.nodes_join_token_ttl_override()
@@ -431,6 +473,8 @@ defmodule Arbiter.Settings.Registry do
 
   # nil = max(slots_total - 1, 1), which depends on the board.
   def default("scheduling_max_lifted_in_flight"), do: nil
+
+  def default("scheduler_admission"), do: "legacy"
 
   def default("nodes.public_url"), do: nil
   def default("nodes.registry"), do: nil
