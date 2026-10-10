@@ -34,6 +34,7 @@ defmodule Arbiter.Loop.Trust.Sample do
           role: String.t() | nil,
           model: String.t() | nil,
           repo: String.t() | nil,
+          workspace_id: String.t() | nil,
           started_at: DateTime.t() | nil,
           stop_category: String.t() | nil,
           failure_reason: String.t() | nil,
@@ -45,6 +46,7 @@ defmodule Arbiter.Loop.Trust.Sample do
           id: String.t(),
           run_id: String.t() | nil,
           task_id: String.t() | nil,
+          workspace_id: String.t() | nil,
           kind: String.t(),
           severity: String.t(),
           source: String.t() | nil,
@@ -82,14 +84,19 @@ defmodule Arbiter.Loop.Trust.Sample do
       [now: now, from: from, until: now, half_life_days: nil]
       |> SubjectStats.sample()
       |> Enum.map(fn task ->
-        Map.put(task, :subject, subject_of(known[task.run_id], task.provider, task.model, harness))
+        Map.put(
+          task,
+          :subject,
+          subject_of(known[task.run_id], task.provider, task.model, harness)
+        )
       end)
 
     %{
       runs: runs,
       events:
         Enum.map(raw_events, fn row ->
-          to_event(row, subject_of(known[row["run_id"]], row["provider"], row["model"], harness))
+          run = known[row["run_id"]]
+          to_event(row, subject_of(run, row["provider"], row["model"], harness), run)
         end),
       tasks: tasks
     }
@@ -103,9 +110,14 @@ defmodule Arbiter.Loop.Trust.Sample do
   @spec run_subject(map(), %{optional(String.t()) => String.t()}) :: subject() | nil
   def run_subject(row, harness \\ %{}) do
     case decision_subject(row["guardrail_decision"]) do
-      {provider, nil} -> adapter_subject(provider, row["model"], harness)
-      {provider, model} -> {provider, model}
-      nil -> adapter_subject(row["provider"] || infer_provider(row["model"]), row["model"], harness)
+      {provider, nil} ->
+        adapter_subject(provider, row["model"], harness)
+
+      {provider, model} ->
+        {provider, model}
+
+      nil ->
+        adapter_subject(row["provider"] || infer_provider(row["model"]), row["model"], harness)
     end
   end
 
@@ -173,7 +185,7 @@ defmodule Arbiter.Loop.Trust.Sample do
   # ---- rows -----------------------------------------------------------------
 
   @run_columns """
-  id, task_id, base_task_id, kind, role, provider, model, repo, started_at,
+  id, task_id, base_task_id, workspace_id, kind, role, provider, model, repo, started_at,
   stop_category, failure_reason, harness_version, guardrail_decision
   """
 
@@ -224,6 +236,7 @@ defmodule Arbiter.Loop.Trust.Sample do
       role: row["role"],
       model: row["model"],
       repo: row["repo"],
+      workspace_id: row["workspace_id"],
       started_at: parse(row["started_at"]),
       stop_category: row["stop_category"],
       failure_reason: row["failure_reason"],
@@ -232,11 +245,13 @@ defmodule Arbiter.Loop.Trust.Sample do
     }
   end
 
-  defp to_event(row, subject) do
+  # An event's workspace is its run's: `guardrail_events` records none itself.
+  defp to_event(row, subject, run) do
     %{
       id: row["id"],
       run_id: row["run_id"],
       task_id: row["task_id"] && Estimate.fold_task_id(row["task_id"]),
+      workspace_id: run && run.workspace_id,
       kind: row["kind"],
       severity: row["severity"],
       source: row["source"],

@@ -142,7 +142,11 @@ defmodule Arbiter.Loop.TrustTest do
       record = Trust.get(@codex)
       assert record.suspended_at == now()
 
-      assert %{"kind" => "public_upload_attempt", "run_id" => ^run_id, "prior_tier" => "probation"} =
+      assert %{
+               "kind" => "public_upload_attempt",
+               "run_id" => ^run_id,
+               "prior_tier" => "probation"
+             } =
                record.suspension
 
       # An overlay: the rule keeps its tier until the coordinator confirms.
@@ -255,7 +259,10 @@ defmodule Arbiter.Loop.TrustTest do
       assert {:error, {:invalid, _}} =
                Trust.dismiss("codex/gpt-5.1-codex", " ", authority: :coordinator)
 
-      for op <- [&Trust.confirm(&1, authority: :restricted), &Trust.dismiss(&1, "x", authority: :restricted)] do
+      for op <- [
+            &Trust.confirm(&1, authority: :restricted),
+            &Trust.dismiss(&1, "x", authority: :restricted)
+          ] do
         assert {:error, {:forbidden, _}} = op.("codex/gpt-5.1-codex")
       end
 
@@ -328,7 +335,13 @@ defmodule Arbiter.Loop.TrustTest do
     test "demoting a subject a glob matched writes its own rule and keeps the glob's scope", %{
       ws: ws
     } do
-      rule!(%{provider: "codex", model: "gpt-*", tier: :trusted, scope: %{"default" => ["arbiter"]}})
+      rule!(%{
+        provider: "codex",
+        model: "gpt-*",
+        tier: :trusted,
+        scope: %{"default" => ["arbiter"]}
+      })
+
       two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
 
       {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
@@ -424,6 +437,63 @@ defmodule Arbiter.Loop.TrustTest do
 
       {:ok, _} = Trust.dismiss("codex/gpt-5.1-codex", "probe", authority: :coordinator)
       assert_receive {:trust, :updated}
+    end
+  end
+
+  # The install default workspace is ambiguous here (`Workspaces.default_id/0`
+  # refuses: several workspaces, none named "default"), yet a page is a
+  # message, and a message needs a workspace: each goes to the workspace of the
+  # run behind it.
+  describe "pages on an install with several workspaces, none named default" do
+    setup do
+      %{other: workspace!()}
+    end
+
+    test "a suspension pages in the workspace of the event's run", %{other: other} do
+      rule!(%{provider: "codex", tier: :probation})
+      run_id = task!(other, "w1", @codex, at: ~U[2026-10-09 10:00:00Z])
+      event!(run_id, "w1", @codex, :public_upload_attempt, :critical, ~U[2026-10-09 11:00:00Z])
+
+      assert {:ok, %{actions: [%{action: :suspended}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert [page] = pages(:trust_suspended)
+      assert page.workspace_id == other.id
+    end
+
+    test "a demotion pages in the workspace of the newest major event's run", %{
+      ws: ws,
+      other: other
+    } do
+      rule!(%{provider: "codex", tier: :trusted})
+      r1 = task!(ws, "w2", @codex, at: ~U[2026-10-01 10:00:00Z])
+      r2 = task!(other, "w3", @codex, at: ~U[2026-10-05 10:00:00Z])
+      event!(r1, "w2", @codex, :credential_read, :major, ~U[2026-10-01 11:00:00Z])
+      event!(r2, "w3", @codex, :unrequested_egress, :major, ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: [%{action: :demoted}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert [page] = pages(:trust_demoted)
+      assert page.workspace_id == other.id
+    end
+
+    test "a version change pages in the workspace of the first run on the new version", %{
+      ws: ws,
+      other: other
+    } do
+      rule!(%{provider: "codex", tier: :probation})
+      task!(ws, "w4", @codex, at: ~U[2026-10-01 10:00:00Z], harness: "0.50.0")
+      {:ok, _} = Trust.tick(now: ~U[2026-10-02 00:00:00Z], cutover: cutover(), workers: [])
+
+      task!(other, "w5", @codex, at: ~U[2026-10-05 10:00:00Z], harness: "0.51.0")
+      task!(ws, "w6", @codex, at: ~U[2026-10-06 10:00:00Z], harness: "0.51.0")
+
+      assert {:ok, %{actions: [%{action: :version_changed}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert [page] = pages(:trust_version_changed)
+      assert page.workspace_id == other.id
     end
   end
 

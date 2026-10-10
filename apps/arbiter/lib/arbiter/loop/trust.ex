@@ -300,12 +300,14 @@ defmodule Arbiter.Loop.Trust do
       })
 
     {eligible_for, eligibility} = Criteria.eligibility(state.tier, facts)
+    clean = MapSet.new(counts.clean_run_ids)
 
     Map.merge(state, %{
       evidence: %{
         run_ids: counts.clean_run_ids,
         task_ids: counts.clean_task_ids,
-        band: quality_band(eligibility, quality)
+        band: quality_band(eligibility, quality),
+        workspaces: data.runs |> Enum.filter(&MapSet.member?(clean, &1.id)) |> run_workspaces()
       },
       runs: counts.runs,
       clean_runs: counts.clean_runs,
@@ -378,7 +380,12 @@ defmodule Arbiter.Loop.Trust do
         "to" => to,
         "criteria" => (record.eligibility || %{})["criteria"] || []
       },
-      origin: "loop.trust"
+      origin: "loop.trust",
+      # A promotion is installation-wide, but a proposal row (and the page it
+      # sends) needs a workspace: the one its newest clean run worked in.
+      # Left out, `Loop.record/2` falls back to the install default, which it
+      # refuses when that is ambiguous.
+      workspace_id: Enum.find(evidence.workspaces, &(is_binary(&1) and &1 != ""))
     }
 
     # The §6.3 thresholds are the evidence bar here: an eligible subject's
@@ -387,8 +394,12 @@ defmodule Arbiter.Loop.Trust do
            evidence_bar: %{min_incidents: 1, min_distinct_tasks: 1},
            actor: @actor
          ) do
-      {:ok, row} when fresh? -> [%{action: :proposed, subject: k, proposal: row.id, to: record.eligible_for}]
-      {:ok, _row} -> []
+      {:ok, row} when fresh? ->
+        [%{action: :proposed, subject: k, proposal: row.id, to: record.eligible_for}]
+
+      {:ok, _row} ->
+        []
+
       {:error, why} ->
         Logger.warning("Loop.Trust: proposal for #{k} not recorded: #{inspect(why)}")
         []
@@ -464,7 +475,8 @@ defmodule Arbiter.Loop.Trust do
          rule = match_rule(rules, key),
          from = tier_of(rule, true),
          :ok <- upward(from, to, key),
-         {:ok, _row} <- written(write_tier(key, rule, to, reason <> " (arb trust promote)", "operator")) do
+         {:ok, _row} <-
+           written(write_tier(key, rule, to, reason <> " (arb trust promote)", "operator")) do
       proposal = settle_proposals(key, to)
 
       record =
@@ -507,8 +519,7 @@ defmodule Arbiter.Loop.Trust do
     case Guardrails.Config.tier(tier) do
       nil ->
         {:error,
-         {:invalid,
-          "#{inspect(tier)} is not a tier (#{Enum.join(Guardrails.tiers(), ", ")})"}}
+         {:invalid, "#{inspect(tier)} is not a tier (#{Enum.join(Guardrails.tiers(), ", ")})"}}
 
       tier ->
         {:ok, tier}
@@ -726,8 +737,12 @@ defmodule Arbiter.Loop.Trust do
 
     if changed?(old.harness_version, new.harness_version) or
          changed?(old.model_version, new.model_version) do
-      clock = first_new_run(data.runs, prior, old) || state.last_run_at
-      page_version_changed(subject, state.tier, old, new, clock)
+      first = first_new_run(data.runs, prior, old)
+      clock = (first && first.started_at) || state.last_run_at
+
+      page_version_changed(subject, state.tier, old, new, clock, [
+        first && first.workspace_id | run_workspaces(data.runs)
+      ])
 
       entry = %{
         "from" => stringify(old),
@@ -765,10 +780,6 @@ defmodule Arbiter.Loop.Trust do
       &(changed?(old.harness_version, &1.harness_version) or changed?(old.model_version, &1.model))
     )
     |> Enum.min_by(& &1.started_at, DateTime, fn -> nil end)
-    |> case do
-      nil -> nil
-      run -> run.started_at
-    end
   end
 
   defp stringify(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
@@ -835,7 +846,11 @@ defmodule Arbiter.Loop.Trust do
   # subject one tier. A pin never blocks it (§6.3).
   defp demote(state, subject, prior, rule, data, ctx) do
     since =
-      [ctx.cutover, prior && prior.last_demoted_at, DateTime.add(ctx.now, -@demotion_days * 86_400)]
+      [
+        ctx.cutover,
+        prior && prior.last_demoted_at,
+        DateTime.add(ctx.now, -@demotion_days * 86_400)
+      ]
       |> Enum.reject(&is_nil/1)
       |> Enum.max(DateTime)
 
@@ -853,7 +868,8 @@ defmodule Arbiter.Loop.Trust do
     {%{
        state
        | last_demoted_at: ctx.now,
-         history: state.history ++ [history(ctx.now, "demotion_at_floor", @actor, majors_entry(majors))]
+         history:
+           state.history ++ [history(ctx.now, "demotion_at_floor", @actor, majors_entry(majors))]
      }, [%{action: :demotion_at_floor, subject: key(subject), events: Enum.map(majors, & &1.id)}]}
   end
 
@@ -1042,23 +1058,29 @@ defmodule Arbiter.Loop.Trust do
           arb trust dismiss #{k} --reason "..."        # a false positive: the #{tier} tier returns
 
       `arb trust show #{k}` has the record.
-      """
+      """,
+      [event.workspace_id]
     )
   end
 
-  defp page_version_changed(subject, tier, old, new, clock) do
+  defp page_version_changed(subject, tier, old, new, clock, workspaces) do
     k = key(subject)
 
-    page(:trust_version_changed, "trust: #{k} runs a new harness or model version", """
-    #{k} (tier #{tier}) changed version:
+    page(
+      :trust_version_changed,
+      "trust: #{k} runs a new harness or model version",
+      """
+      #{k} (tier #{tier}) changed version:
 
-      harness: #{old.harness_version || "—"} → #{new.harness_version || "—"}
-      model:   #{old.model_version || "—"} → #{new.model_version || "—"}
+        harness: #{old.harness_version || "—"} → #{new.harness_version || "—"}
+        model:   #{old.model_version || "—"} → #{new.model_version || "—"}
 
-    Its promotion clock restarted at #{iso(clock)}: only runs on the new version count toward a promotion from now on. Its tier is unchanged. A harness can change behaviour silently (agy's settings grammar did, bd-80talz), so watch its next runs.
+      Its promotion clock restarted at #{iso(clock)}: only runs on the new version count toward a promotion from now on. Its tier is unchanged. A harness can change behaviour silently (agy's settings grammar did, bd-80talz), so watch its next runs.
 
-    `arb trust show #{k}` has the record.
-    """)
+      `arb trust show #{k}` has the record.
+      """,
+      workspaces
+    )
   end
 
   defp page_demoted(subject, from, to, majors) do
@@ -1082,20 +1104,29 @@ defmodule Arbiter.Loop.Trust do
              "says #{to} (its scope and pin are unchanged; a pin never blocks a demotion)."}
       end
 
-    page(:trust_demoted, title, """
-    #{k} had two major guardrail events within #{@demotion_days} days:
+    page(
+      :trust_demoted,
+      title,
+      """
+      #{k} had two major guardrail events within #{@demotion_days} days:
 
-    #{events}
+      #{events}
 
-    #{outcome}
+      #{outcome}
 
-    Demotions are automatic; raising it again is the operator's call
-    (`arb trust promote #{k} --to <tier> --reason "..."`). `arb trust show #{k}` has the record.
-    """)
+      Demotions are automatic; raising it again is the operator's call
+      (`arb trust promote #{k} --to <tier> --reason "..."`). `arb trust show #{k}` has the record.
+      """,
+      majors |> Enum.reverse() |> Enum.map(& &1.workspace_id)
+    )
   end
 
-  defp page(kind, subject, body) do
-    with {:ok, ws_id} <- Arbiter.Tasks.Workspaces.default_id(),
+  # A page is a message, and a message needs a workspace: the first of
+  # `workspaces` (those of the runs behind it, most relevant first), else the
+  # install default — which refuses when it is ambiguous (several workspaces,
+  # none named "default"), so the runs' own come first.
+  defp page(kind, subject, body, workspaces) do
+    with {:ok, ws_id} <- page_workspace(workspaces),
          {:ok, _message} <-
            Escalation.post(%{
              kind: kind,
@@ -1114,6 +1145,21 @@ defmodule Arbiter.Loop.Trust do
     e ->
       Logger.warning("Loop.Trust: #{kind} page not posted: #{Exception.message(e)}")
       :skipped
+  end
+
+  defp page_workspace(workspaces) do
+    case Enum.find(workspaces, &(is_binary(&1) and &1 != "")) do
+      nil -> Arbiter.Tasks.Workspaces.default_id()
+      ws_id -> {:ok, ws_id}
+    end
+  end
+
+  # The workspaces of `runs`, newest run first.
+  defp run_workspaces(runs) do
+    runs
+    |> Enum.reject(&is_nil(&1.started_at))
+    |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
+    |> Enum.map(& &1.workspace_id)
   end
 
   # ---- record pieces -------------------------------------------------------------

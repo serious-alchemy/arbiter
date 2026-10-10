@@ -97,6 +97,31 @@ defmodule Arbiter.Loop.TrustPromotionTest do
       assert id == row.id
     end
 
+    # `Loop.record/2` attributes a fleet candidate with no workspace to the
+    # install default, and refuses when that is ambiguous (several workspaces,
+    # none named "default"). A proposal names the workspace its newest clean run
+    # worked in instead, so it is emitted on any install.
+    test "is emitted on an install with several workspaces, in its newest clean run's", %{
+      ws: ws
+    } do
+      other = workspace!()
+      eligible!(ws)
+      task!(other, "q11", @codex, at: ~U[2026-10-09 10:00:00Z])
+
+      {:ok, _} = tick!()
+
+      assert [%PendingWrite{state: :proposed} = row] = proposals()
+      assert row.workspace_id == other.id
+      assert length(row.incident_refs) == 11
+
+      assert [page] =
+               Message
+               |> Ash.Query.filter(escalation_kind == :loop_proposal)
+               |> Ash.read!()
+
+      assert page.workspace_id == other.id
+    end
+
     test "is never emitted for a pinned subject", %{ws: ws} do
       eligible!(ws, pinned: true)
       {:ok, _} = tick!()
