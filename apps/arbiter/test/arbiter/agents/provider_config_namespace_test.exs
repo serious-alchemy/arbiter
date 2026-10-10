@@ -179,4 +179,26 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
     end
   end
+
+  describe "agy-only standard override (bd-7ifdke)" do
+    alias Arbiter.Agents.ModelFamily
+
+    test "agy standard resolves to pro-high while Claude standard stays the Claude default" do
+      agent_config = %{"gemini" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}}
+
+      assert ModelFamily.model_for_tier(:antigravity, "standard", agent_config) ==
+               "gemini-3.1-pro-high"
+
+      assert ModelFamily.model_for_tier(:claude, "standard", agent_config) ==
+               Claude.Config.default_tier_models()["standard"]
+
+      Gemini.Config.put_active(agent_config)
+      Claude.Config.put_active(agent_config)
+
+      assert Gemini.Config.model_for_tier("standard", :agy) == "gemini-3.1-pro-high"
+
+      assert Claude.Config.model_for_tier("standard") ==
+               Claude.Config.default_tier_models()["standard"]
+    end
+  end
 end
