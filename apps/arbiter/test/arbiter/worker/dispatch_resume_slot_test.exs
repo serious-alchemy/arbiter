@@ -43,7 +43,9 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
   defp park_a(a, release \\ :merging), do: ResumeSlotFixture.park!(a, release)
 
   # Task B was admitted into the slot A freed: In progress.
-  defp admit_b(ws, b), do: ResumeSlotFixture.admit!(ws, b)
+  # On a node, so these tests exercise `ResumeSlot`'s board cap alone and the
+  # primary's own (enforced) cap never defers the resume under test.
+  defp admit_b(ws, b), do: ResumeSlotFixture.admit!(ws, b, node_id: "node-b")
 
   defp overrides(ws), do: ResumeSlotFixture.overrides(ws)
 

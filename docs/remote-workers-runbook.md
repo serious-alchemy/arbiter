@@ -196,8 +196,10 @@ arb node set build-1 --workspace <workspace-id> # only these workspaces run here
 arb node set local --max-workers 2              # the primary's own cap; 0 = nodes do the work
 ```
 
-`arb node list` shows `local + Σ remote caps` against `conductor.max_concurrent`; raise
-that setting when you add capacity.
+`arb node list` shows `local + Σ remote caps`, which is the capacity the board plans to; there is
+no install-wide cap above it (the old `conductor.max_concurrent` was removed). The primary's own
+cap defaults to its hardware suggestion (`min(cpus/2, 0.8 × MemTotal / 4 GiB)`, at least 1) and is
+enforced; `arb node set local --max-workers N` overrides it.
 
 ### Turn placement on
 

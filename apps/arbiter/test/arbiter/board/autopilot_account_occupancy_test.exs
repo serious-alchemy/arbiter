@@ -33,6 +33,8 @@ defmodule Arbiter.Board.AutopilotAccountOccupancyTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
+    # The machine cap is not what is under test; the account cap is.
+    ResumeSlotFixture.put_local_cap(5)
 
     {:ok, ws} =
       Ash.create(Workspace, %{

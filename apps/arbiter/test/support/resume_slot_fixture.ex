@@ -61,7 +61,7 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     put_env_restoring(:worktree_root, sandbox.worktree_root)
     put_env_restoring(:repo_paths, %{@repo => sandbox.repo})
     # The 2026-09-23 incident's cap.
-    put_local_cap_restoring(1)
+    put_local_cap(1)
     # bd-80ecol: a resume reaches the real-agent dispatch guard, which refuses
     # a Claude spawn with no credential of its own. The stub needs none, but
     # the guard can't know that.
@@ -91,11 +91,16 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     first
   end
 
-  @doc "A running worker for `task`, In progress: it holds a slot."
-  def admit!(ws, %Issue{} = task) do
+  @doc """
+  A running worker for `task`, In progress: it holds a slot. `node_id:` places it
+  on a node, so it holds the board's slot but not the primary's own cap
+  (`Arbiter.Nodes.LocalCapacity`).
+  """
+  def admit!(ws, %Issue{} = task, opts \\ []) do
     id = task.id
     {:ok, %Issue{state: :active}} = Issue.start_work(task)
-    {:ok, pid} = Worker.start(task_id: id, repo: @repo, workspace_id: ws.id)
+    meta = if node_id = opts[:node_id], do: %{node_id: node_id}, else: %{}
+    {:ok, pid} = Worker.start(task_id: id, repo: @repo, workspace_id: ws.id, meta: meta)
     :ok = Worker.advance(pid, :implement)
     on_exit(fn -> stop_quietly(id) end)
     pid
@@ -128,8 +133,12 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     end)
   end
 
-  # The primary's worker cap (`nodes.local_max_workers`) for the rest of the test.
-  defp put_local_cap_restoring(n) do
+  @doc """
+  The primary's worker cap (`nodes.local_max_workers`; `nil` = the hardware
+  suggestion) for the rest of the test. `setup_repo!/1` pins it to 1, so a test
+  that is not about the cap raises it after setting up.
+  """
+  def put_local_cap(n) do
     prior = Arbiter.Settings.nodes_local_max_workers()
     {:ok, _} = Arbiter.Settings.set_nodes_local_max_workers(n)
     on_exit(fn -> Arbiter.Settings.set_nodes_local_max_workers(prior) end)

@@ -94,6 +94,40 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert ws.config["future_feature"] == %{"x" => 1}
     end
 
+    # DC1 (docs/design/provider-dynamic-concurrency.md §10.6)
+    test "refuses the removed conductor key, even empty, naming what replaced it" do
+      for conductor <- [%{"max_concurrent" => 4}, %{}] do
+        assert {:error, %Ash.Error.Invalid{} = error} =
+                 Ash.create(Workspace, %{name: "conductor", config: %{"conductor" => conductor}})
+
+        message = Exception.message(error)
+        assert message =~ "conductor.max_concurrent was removed (bd-8qdviv)"
+        assert message =~ "arb node set"
+        assert message =~ "worker.repos.<repo>.max_concurrent"
+      end
+    end
+
+    test "patch_config of the removed conductor key says it was removed, not 'unknown'" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "conductor-patch"})
+
+      for force <- [false, true] do
+        assert {:error, error} =
+                 Ash.update(
+                   ws,
+                   %{patch: %{"conductor" => %{"max_concurrent" => 4}}, force: force},
+                   action: :patch_config
+                 )
+
+        message = Exception.message(error)
+        assert message =~ "conductor.max_concurrent was removed"
+        refute message =~ "unknown top-level"
+      end
+    end
+
+    test "conductor is no longer a known top-level key" do
+      refute "conductor" in Arbiter.Tasks.Workspace.ConfigSchema.known_top_level_keys()
+    end
+
     test "succeeds with a valid merge.strategy" do
       config = %{"merge" => %{"strategy" => "direct"}}
       assert {:ok, ws} = Ash.create(Workspace, %{name: "direct-merge", config: config})

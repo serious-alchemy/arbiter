@@ -16,6 +16,7 @@ defmodule ArbiterWeb.Api.WorkerDispatchProviderConstraintTest do
 
   setup %{conn: conn} do
     ResumeSlotFixture.setup_repo!()
+    ResumeSlotFixture.put_local_cap(10)
 
     {:ok, ws} =
       Ash.create(Workspace, %{

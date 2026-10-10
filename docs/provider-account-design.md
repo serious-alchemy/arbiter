@@ -343,6 +343,12 @@ and every non-credential key in `worker_env`.
 
 ### 4.1 What actually happens today (worse than the ticket states)
 
+> **Historical (P8-era analysis).** `conductor.max_concurrent` (workspace) and
+> `conductor_system_max_concurrent` (install), described below, were deleted by
+> DC1 (bd-74mtmp, `docs/design/provider-dynamic-concurrency.md` §5.1): the
+> install's capacity is the sum of its machines' caps and the primary's own cap
+> defaults to its hardware suggestion, enforced.
+
 ```
 effective_cap = min(workspace_max, system_max, quota_headroom)
 ```

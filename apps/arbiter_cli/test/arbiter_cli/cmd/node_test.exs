@@ -240,7 +240,7 @@ defmodule ArbiterCli.Cmd.NodeTest do
       stub_get("/api/nodes", %{
         "nodes" => [Map.merge(@live_node, %{"contributes" => 0, "state" => "draining"})],
         "local" => @local,
-        "ceiling" => nil,
+        "total" => 3,
         "warnings" => []
       })
 

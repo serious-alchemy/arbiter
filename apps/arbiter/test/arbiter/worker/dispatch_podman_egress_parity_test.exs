@@ -25,6 +25,7 @@ defmodule Arbiter.Worker.DispatchPodmanEgressParityTest do
 
   setup do
     sandbox = ResumeSlotFixture.setup_repo!()
+    ResumeSlotFixture.put_local_cap(10)
 
     for {key, value} <- [
           worker_container_available: true,

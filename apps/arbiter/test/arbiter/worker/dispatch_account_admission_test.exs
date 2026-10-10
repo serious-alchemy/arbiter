@@ -38,6 +38,7 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
+    ResumeSlotFixture.put_local_cap(10)
     # The scheduler cap is for machine load; the account cap is under test.
 
     {:ok, ws} =

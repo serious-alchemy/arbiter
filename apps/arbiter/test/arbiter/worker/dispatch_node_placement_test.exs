@@ -19,6 +19,7 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
 
   setup do
     ResumeSlotFixture.setup_repo!()
+    ResumeSlotFixture.put_local_cap(nil)
     on_exit(fn -> Settings.set_nodes_local_max_workers(nil) end)
     %{ws: workspace!()}
   end

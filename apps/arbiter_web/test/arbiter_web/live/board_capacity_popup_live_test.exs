@@ -70,7 +70,7 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
       refute has_element?(view, "#board-concurrency-limited")
     end
 
-    test "the figure is still the effective cap", %{conn: conn, ws: ws} do
+    test "the figure is still the effective cap", %{conn: conn} do
       local_cap!(2)
       view = mount_board(conn)
 
@@ -201,7 +201,7 @@ defmodule ArbiterWeb.BoardCapacityPopupLiveTest do
 
       summary = view |> element("#hold-#{waiting.id}-panel [data-hold-summary]") |> render()
       assert summary =~ "Waiting for a free worker slot"
-      assert summary =~ "The workspace allows 1 at once"
+      assert summary =~ "All 1 slots on the available machines are in use"
       assert summary =~ parked.id
       assert summary =~ "starts when one finishes"
       refute summary =~ "no_slot"
