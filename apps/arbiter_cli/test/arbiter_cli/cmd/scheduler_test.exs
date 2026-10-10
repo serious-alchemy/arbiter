@@ -56,6 +56,128 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
     :ok
   end
 
+  # DC5 (bd-2c2a4g, design §9): the per-pool budgets, machines and repos.
+  describe "status budgets (DC5)" do
+    defp capacity_body(admission_overrides \\ %{}) do
+      Map.merge(body("running"), %{
+        "admission" =>
+          Map.merge(
+            %{
+              "mode" => "shadow",
+              "label" => "shadow",
+              "decides" => false,
+              "agreement" => %{
+                "comparable" => 52,
+                "agrees" => 47,
+                "since" => "2026-10-12T00:00:00Z"
+              }
+            },
+            admission_overrides
+          ),
+        "budgets" => [
+          %{
+            "label" => "claude:default",
+            "budget" => 3,
+            "seats" => 3,
+            "free" => 0,
+            "state" => "full",
+            "reason" => "ceiling max_concurrent 3 (quota allows 4: 5h binds)"
+          },
+          %{
+            "label" => "antigravity:default gemini",
+            "budget" => 0,
+            "seats" => 0,
+            "free" => 0,
+            "state" => "held_pace",
+            "reason" => "weekly 0.43 used ≥ line 0.42"
+          },
+          %{
+            "label" => "unmetered-pool",
+            "budget" => "unlimited",
+            "seats" => 2,
+            "free" => "unlimited",
+            "state" => "free",
+            "reason" => "no account: unmetered"
+          }
+        ],
+        "machines" => [
+          %{"id" => "local", "name" => "local", "cap" => 6, "live" => 3, "free" => 3},
+          %{"id" => "n1", "name" => "box", "cap" => nil, "live" => 1, "free" => nil}
+        ],
+        "repos" => [%{"label" => "default/vstim", "cap" => 2, "used" => 1}],
+        "fair_share" => []
+      })
+    end
+
+    test "names the admission mode and the shadow agreement" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Admission: shadow"
+      assert out =~ "agrees on 47 of 52"
+      assert out =~ "since 2026-10-12"
+      assert out =~ "today's gate and caps still decide"
+    end
+
+    test "enforce does not say shadow" do
+      stub_get(
+        "/api/scheduler/status",
+        capacity_body(%{"mode" => "enforce", "label" => "enforce", "decides" => true})
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Admission: enforce"
+      refute out =~ "still decide"
+    end
+
+    test "lists each provider pool with budget, seats, free and the reason" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Providers"
+      assert out =~ ~r/claude:default\s+3\s+3\s+0\s+ceiling max_concurrent 3/
+      assert out =~ ~r/antigravity:default gemini\s+0\s+0\s+0\s+weekly 0.43 used/
+      assert out =~ ~r/unmetered-pool\s+unlimited\s+2\s+unlimited/
+    end
+
+    test "lists machines with cap, live runs and free slots" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Machines"
+      assert out =~ ~r/local\s+6\s+3\s+3/
+      assert out =~ ~r/box\s+-\s+1\s+-/
+    end
+
+    test "lists repo caps with their implementer runs" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Repos"
+      assert out =~ ~r/default\/vstim\s+2\s+1/
+    end
+
+    test "a server that predates the budgets prints none of it" do
+      stub_get("/api/scheduler/status", body("running"))
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      refute out =~ "Admission"
+      refute out =~ "Providers"
+      refute out =~ "Machines"
+    end
+
+    test "--json passes the new keys through untouched" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status", "--json"]) end)
+
+      decoded = Jason.decode!(out)
+      assert decoded["admission"]["label"] == "shadow"
+      assert length(decoded["budgets"]) == 3
+      assert length(decoded["machines"]) == 2
+    end
+  end
+
   describe "status" do
     test "paused and draining names what is still in flight and says it is not safe" do
       stub_get("/api/scheduler/status", body("draining", [fix_pass()]))

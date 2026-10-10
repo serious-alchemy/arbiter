@@ -202,6 +202,73 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     end
   end
 
+  describe "a held fix round across a server restart (bd-3fbj83)" do
+    test "the boot sweep re-arms a held fix round, held again until room frees, then it runs",
+         ctx do
+      ctx = %{ctx | ws: workspace!("remote_only")}
+      rig = rig(ctx, "feature/rf-held")
+
+      free? = start_supervised!({Agent, fn -> true end})
+
+      nodes = fn ->
+        if Agent.get(free?, & &1), do: [node_row("a")], else: [node_row("a", live: 2, max: 2)]
+      end
+
+      placement_opts = [nodes: nodes, remote_available?: true]
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 2,
+          placement_opts: placement_opts,
+          local_capacity_retry_ms: 25
+        )
+
+      wait_until(fn -> :sys.get_state(gate).review_node != nil end)
+      Agent.update(free?, fn _ -> false end)
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+
+      # The restart: the gate dies with no terminate/2, so the hold, which lived
+      # only in its process, is gone. What is left is the ticket.
+      ref = Process.monitor(gate)
+      Process.exit(gate, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^gate, :killed}
+
+      aref = Process.monitor(rig.author)
+      Process.exit(rig.author, :kill)
+      assert_receive {:DOWN, ^aref, :process, _, _}
+
+      issue = Ash.get!(Issue, rig.task.id)
+      assert %{"phase" => "revising", "held" => true} = Arbiter.Worker.ReviewPass.stored(issue)
+
+      rearm = fn %Issue{id: id} ->
+        ReviewGate.rearm_pass(id,
+          revise_command: [@revise_commit],
+          command: [@two_rounds, marker(ctx, rig), rig.branch],
+          command_provider: "claude",
+          rounds: 2,
+          placement_opts: placement_opts,
+          local_capacity_retry_ms: 25
+        )
+      end
+
+      # Still no room after the restart: the sweep re-arms it, held again.
+      assert {:ok, %{restarted: [%{task_id: task_id, phase: :revising}]}} =
+               Arbiter.Workers.Reconciler.reconcile_review_passes(rearm_fun: rearm)
+
+      assert task_id == rig.task.id
+      assert %{"held" => true} = Arbiter.Worker.ReviewPass.stored(Ash.get!(Issue, task_id))
+
+      # `arb scheduler status` lists it as held while it waits.
+      status = Arbiter.Board.Drain.status(tickets: [Ash.get!(Issue, task_id)])
+      assert task_id in status.held_local_capacity
+
+      # Room frees: the round runs and the gate goes on to round 2.
+      Agent.update(free?, fn _ -> true end)
+      wait_until(fn -> Ash.get!(Issue, task_id).last_reviewed_sha != nil end, 30_000)
+    end
+  end
+
   describe "the host push of what the fix round brought back" do
     test "a rebased branch is delivered with the lease and round 2 reviews the new head", ctx do
       rig = rig(ctx, "feature/rf-6")

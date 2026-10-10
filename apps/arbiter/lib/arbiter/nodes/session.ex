@@ -118,6 +118,7 @@ defmodule Arbiter.Nodes.Session do
       kind: "machine",
       k8s_version: nil,
       degraded: [],
+      readiness: [],
       capacity: nil,
       prepare_timeout_ms: @default_prepare_timeout_ms,
       hold_ms: @default_hold_ms,
@@ -1226,6 +1227,7 @@ defmodule Arbiter.Nodes.Session do
           | kind: kind(params["kind"]),
             k8s_version: params["k8s_version"],
             degraded: degraded(params["degraded"]),
+            readiness: readiness(kind(params["kind"]), params["readiness"]),
             capacity: nil
         },
         runs: hello_runs(hello_run_list(params)),
@@ -1248,6 +1250,36 @@ defmodule Arbiter.Nodes.Session do
   defp degraded(word) when is_binary(word), do: [word]
   defp degraded(words) when is_list(words), do: Enum.filter(words, &is_binary/1)
   defp degraded(_), do: []
+
+  # K13: a cluster node's readiness block (`%{"checks" => [%{"id", "name", "status",
+  # "detail", "hint"}]}`: the canary and the Pod Security / quota / pull / clock checks).
+  # Display data for `arb server doctor` and the nodes page, so it is kept well-formed and
+  # bounded; a machine's own readiness stays on the machine (its `health` is what shows).
+  @max_readiness_checks 32
+  @max_readiness_text 500
+
+  defp readiness("cluster", %{"checks" => checks}) when is_list(checks) do
+    for %{"id" => id, "name" => name, "status" => status} = check <- checks,
+        is_binary(id),
+        is_binary(name),
+        status in ["ok", "warn", "fail"] do
+      %{
+        "id" => String.slice(id, 0, 64),
+        "name" => String.slice(name, 0, 120),
+        "status" => status,
+        "detail" => readiness_text(check["detail"]),
+        "hint" => readiness_text(check["hint"])
+      }
+    end
+    |> Enum.take(@max_readiness_checks)
+  end
+
+  defp readiness(_kind, _block), do: []
+
+  defp readiness_text(value) when is_binary(value),
+    do: String.slice(value, 0, @max_readiness_text)
+
+  defp readiness_text(_), do: nil
 
   # The agent reports its runs under `inventory.runs`; a bare `runs` is accepted too.
   defp hello_run_list(params),
@@ -1354,6 +1386,7 @@ defmodule Arbiter.Nodes.Session do
     state =
       state
       |> heartbeat_degraded(payload)
+      |> heartbeat_readiness(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
 
@@ -1377,6 +1410,12 @@ defmodule Arbiter.Nodes.Session do
     do: put_info(state, :degraded, degraded(word))
 
   defp heartbeat_degraded(state, _payload), do: state
+
+  # A cluster node's hb replaces the readiness checks when it carries them.
+  defp heartbeat_readiness(%{info: %{kind: "cluster"}} = state, %{"readiness" => block}),
+    do: put_info(state, :readiness, readiness("cluster", block))
+
+  defp heartbeat_readiness(state, _payload), do: state
 
   defp heartbeat_capacity(state, %{} = capacity), do: put_node_capacity(state, capacity)
   defp heartbeat_capacity(state, _none), do: state
@@ -1512,6 +1551,7 @@ defmodule Arbiter.Nodes.Session do
       kind: state.info.kind,
       k8s_version: state.info.k8s_version,
       degraded: state.info.degraded,
+      readiness: state.info.readiness,
       node_capacity: state.info.capacity,
       max_workers: max_workers(state),
       runs: state.runs,

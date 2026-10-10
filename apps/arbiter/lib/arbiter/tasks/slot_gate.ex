@@ -98,6 +98,14 @@ defmodule Arbiter.Tasks.SlotGate do
   weekly pace: it releases its slot while held (bd-zkmvia). The drain checks
   the cap again (`Arbiter.Worker.ResumeSlot.admit/2`) before replaying it.
 
+  A ticket nothing is working on holds no slot either (bd-3fbj83): `:active`
+  but with no live run, no queued or held follow-up and no ReviewGate marker
+  (`Arbiter.Tasks.IdleTickets`) is orphaned — a crash or restart lost its
+  follow-up — and counting it starved the provider cap for hours. Callers pass
+  those ids as `idle_ids:`. The ticket still raises its "nothing is working on
+  it" attention item; a ticket parked on a human keeps its slot because its
+  worker is live.
+
   Epics never hold a slot: they are never dispatched and never on the board.
   """
 
@@ -169,7 +177,8 @@ defmodule Arbiter.Tasks.SlotGate do
   def holds_slot?(ticket, opts) when is_map(ticket) do
     Lifecycle.state_of(ticket) == :active and
       Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
-      is_nil(ReviewCi.waiting(ticket)) and not held_for_quota?(ticket, opts)
+      is_nil(ReviewCi.waiting(ticket)) and not held_for_quota?(ticket, opts) and
+      not idle?(ticket, opts)
   end
 
   def holds_slot?(_ticket, _opts), do: false
@@ -188,6 +197,12 @@ defmodule Arbiter.Tasks.SlotGate do
     end
   end
 
+  # bd-3fbj83: `idle_ids:` names the orphaned tickets — `:active` with no live
+  # run and no queued or held follow-up (`Arbiter.Tasks.IdleTickets`). Nothing is
+  # working on them, so they hold no slot; the predicate stays pure and the
+  # caller computes the ids, the way it passes `held_ids:`.
+  defp idle?(ticket, opts), do: Map.get(ticket, :id) in Keyword.get(opts, :idle_ids, [])
+
   @doc """
   The ids of the tickets holding a slot, in the order given. `Arbiter.Worker.ResumeSlot`
   names them in a refusal; the board and `Arbiter.Board.Drain` report them.
@@ -198,15 +213,16 @@ defmodule Arbiter.Tasks.SlotGate do
   end
 
   @doc "How many of `tickets` hold a slot — the dispatch cap's used count."
-  @spec slots_used([map()]) :: non_neg_integer()
-  def slots_used(tickets) when is_list(tickets), do: tickets |> slot_holders() |> length()
+  @spec slots_used([map()], keyword()) :: non_neg_integer()
+  def slots_used(tickets, opts \\ []) when is_list(tickets),
+    do: tickets |> slot_holders(opts) |> length()
 
   @doc """
   Slots left out of `total` once `tickets` have taken theirs. Never negative:
   a forced dispatch or resume may legitimately push the count past the cap,
   and "-1 slots free" is not a thing a scheduler or a header should ever say.
   """
-  @spec slots_free(non_neg_integer(), [map()]) :: non_neg_integer()
-  def slots_free(total, tickets) when is_integer(total) and is_list(tickets),
-    do: max(total - slots_used(tickets), 0)
+  @spec slots_free(non_neg_integer(), [map()], keyword()) :: non_neg_integer()
+  def slots_free(total, tickets, opts \\ []) when is_integer(total) and is_list(tickets),
+    do: max(total - slots_used(tickets, opts), 0)
 end

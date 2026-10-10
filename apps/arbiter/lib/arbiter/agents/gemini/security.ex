@@ -691,6 +691,14 @@ defmodule Arbiter.Agents.Gemini.Security do
     ["command(gh gist create)", "command(gh gist edit)", "command(gh issue comment)"]
   end
 
+  defp expand_category(:no_ci_watch) do
+    [
+      "command(gh run watch)",
+      "command(gh run view)",
+      "command(gh pr checks)"
+    ]
+  end
+
   defp expand_category(_unknown), do: []
 
   # When the policy cuts network, deny agy's URL tools and the obvious shell

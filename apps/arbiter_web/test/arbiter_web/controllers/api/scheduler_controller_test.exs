@@ -152,6 +152,61 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
     end
   end
 
+  # DC5 (bd-2c2a4g, design §9): the budgets ride the status body, labelled shadow.
+  describe "GET /api/scheduler/status budgets (DC5)" do
+    setup do
+      :ok = :meck.new(Arbiter.Board.CapacityView, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Board.CapacityView) end)
+
+      view = %{
+        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
+        pools: [
+          %{
+            account: "acct-1",
+            pool: "antigravity:gemini_models",
+            budget: 0,
+            seats: 0,
+            free: 0,
+            binding: "window:weekly",
+            reason: "weekly 0.43 used ≥ line 0.42",
+            state: "held_pace"
+          }
+        ],
+        machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
+        repos: [],
+        fair_share: []
+      }
+
+      :meck.expect(Arbiter.Board.CapacityView, :status, fn -> view end)
+      :ok
+    end
+
+    test "carries admission, budgets, machines, repos and fair_share", %{conn: conn} do
+      body = conn |> get("/api/scheduler/status") |> json_response(200)
+
+      assert %{"label" => "shadow", "decides" => false} = body["admission"]
+
+      assert [
+               %{
+                 "pool" => "antigravity:gemini_models",
+                 "budget" => 0,
+                 "binding" => "window:weekly",
+                 "reason" => "weekly 0.43 used ≥ line 0.42",
+                 "state" => "held_pace"
+               }
+             ] = body["budgets"]
+
+      assert [%{"id" => "local", "cap" => 6, "live" => 3, "free" => 3}] = body["machines"]
+      assert body["repos"] == []
+      assert body["fair_share"] == []
+    end
+
+    test "pause and resume answer with the same body", %{conn: conn} do
+      assert %{"admission" => %{"label" => "shadow"}, "budgets" => [_]} =
+               conn |> post("/api/scheduler/pause") |> json_response(200)
+    end
+  end
+
   describe "internal failures are 5xx, not 400 (P-19)" do
     setup do
       :ok = :meck.new(Arbiter.Board.Drain, [:passthrough, :no_link])

@@ -445,6 +445,54 @@ defmodule Arbiter.Board.DrainTest do
       assert Jason.encode!(json)
     end
 
+    # DC5 (bd-2c2a4g, design §9): the per-pool budgets ride the status, shadow-labelled.
+    test "carries admission, budgets, machines, repos and fair_share" do
+      ap = start_autopilot!(paused: false)
+      sup = empty_supervisor!()
+
+      view = %{
+        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
+        pools: [%{account: "a1", pool: "claude", budget: 3, seats: 3, reason: "ceiling"}],
+        machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
+        repos: [],
+        fair_share: []
+      }
+
+      json =
+        [autopilot: ap, supervisor: sup, capacity: view] |> Drain.status() |> Drain.to_json()
+
+      assert json.admission == view.admission
+      assert json.budgets == view.pools
+      assert json.machines == view.machines
+      assert json.repos == []
+      assert json.fair_share == []
+      assert Jason.encode!(json)
+    end
+
+    test "reads the live capacity view when not handed one" do
+      ap = start_autopilot!(paused: false)
+
+      json = [autopilot: ap, supervisor: empty_supervisor!()] |> Drain.status() |> Drain.to_json()
+
+      assert %{label: label} = json.admission
+      assert label in ~w(legacy shadow enforce)
+      assert is_list(json.budgets)
+      assert [%{id: "local"} | _] = json.machines
+    end
+
+    test "a capacity read that fails leaves the drain state intact" do
+      ap = start_autopilot!(paused: false)
+
+      json =
+        [autopilot: ap, supervisor: empty_supervisor!(), capacity: fn -> raise "boom" end]
+        |> Drain.status()
+        |> Drain.to_json()
+
+      assert json.state == "running"
+      assert json.budgets == []
+      assert json.admission == nil
+    end
+
     # bd-1qjv3j: the board-wide hold rides the status in the account-qualified
     # wording, so `scheduler_status` and `arb prime` show which account is held.
     test "carries the account-qualified quota hold, nil when nothing is held" do

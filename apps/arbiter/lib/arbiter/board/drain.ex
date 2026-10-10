@@ -82,10 +82,12 @@ defmodule Arbiter.Board.Drain do
   """
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Tasks.IdleTickets
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Worker
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.ReviewPass
 
   require Ash.Query
 
@@ -134,6 +136,7 @@ defmodule Arbiter.Board.Drain do
           slot_holders: [String.t()],
           quota_hold: String.t() | nil,
           held_local_capacity: [String.t()],
+          capacity: map() | nil,
           checked_at: DateTime.t()
         }
 
@@ -221,8 +224,17 @@ defmodule Arbiter.Board.Drain do
 
     in_flight = promotions ++ tracked ++ workers
 
-    slot_holders =
-      opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> SlotGate.slot_holders()
+    tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
+
+    idle_ids =
+      Keyword.get_lazy(opts, :idle_ids, fn ->
+        IdleTickets.ids(tickets,
+          queued_ids:
+            Map.get(autopilot, :deferred_resumes, []) ++ Enum.map(in_flight, & &1.task_id)
+        )
+      end)
+
+    slot_holders = SlotGate.slot_holders(tickets, idle_ids: idle_ids)
 
     state =
       cond do
@@ -241,9 +253,32 @@ defmodule Arbiter.Board.Drain do
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
-      held_local_capacity: Map.get(autopilot, :held_local_capacity, []),
+      held_local_capacity: held_local_capacity(autopilot, tickets),
+      capacity: capacity(Keyword.get(opts, :capacity)),
       checked_at: DateTime.utc_now()
     }
+  end
+
+  # DC5: the budgets, machines and admission mode (`Arbiter.Board.CapacityView`).
+  # A view that cannot be read is `nil`: the drain verdict does not depend on it.
+  defp capacity(%{} = view), do: view
+
+  defp capacity(read) do
+    if is_function(read, 0), do: read.(), else: Arbiter.Board.CapacityView.status()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # bd-3fbj83: the resumes the autopilot holds for local capacity, plus the fix
+  # rounds a ReviewGate holds (`ReviewPass`'s `held` marker, which is also what a
+  # restart re-arms them from).
+  defp held_local_capacity(autopilot, tickets) do
+    gate_held =
+      for ticket <- tickets, match?(%{"held" => true}, ReviewPass.stored(ticket)), do: ticket.id
+
+    Enum.uniq(Map.get(autopilot, :held_local_capacity, []) ++ gate_held)
   end
 
   # The board-wide quota/auth hold in the account-qualified wording the board
@@ -290,7 +325,24 @@ defmodule Arbiter.Board.Drain do
       checked_at: status.checked_at,
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
+    |> Map.merge(capacity_json(Map.get(status, :capacity)))
   end
+
+  # DC5 (design §9): `admission` (the mode, labelled shadow until enforce), `budgets`
+  # (one per pool), `machines`, `repos` and `fair_share`. The REST body and the
+  # MCP `scheduler_status` share this, so they cannot drift.
+  defp capacity_json(%{} = view) do
+    %{
+      admission: view.admission,
+      budgets: view.pools,
+      machines: view.machines,
+      repos: view.repos,
+      fair_share: view.fair_share
+    }
+  end
+
+  defp capacity_json(_none),
+    do: %{admission: nil, budgets: [], machines: [], repos: [], fair_share: []}
 
   # bd-b2iigy: an automatic resume waiting on the primary's own worker cap
   # (`Arbiter.Nodes.LocalCapacity`). Queued work, not in flight: no agent runs.

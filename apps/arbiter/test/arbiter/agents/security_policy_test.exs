@@ -918,11 +918,11 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
     # bd-80talz: :no_gh_publish is worker-only too. An operator or coordinator
     # session commenting on an issue is ordinary work.
-    test "drops only :no_async_wait and :no_gh_publish from the baseline categories" do
+    test "drops only :no_async_wait, :no_gh_publish and :no_ci_watch from the baseline categories" do
       worker = SecurityPolicy.base().permissions.safe_defaults
       session = SecurityPolicy.interactive_session().permissions.safe_defaults
 
-      assert worker -- session == [:no_async_wait, :no_gh_publish]
+      assert worker -- session == [:no_async_wait, :no_gh_publish, :no_ci_watch]
       assert session -- worker == []
     end
 

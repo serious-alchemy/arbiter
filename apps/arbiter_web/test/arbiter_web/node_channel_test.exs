@@ -285,6 +285,22 @@ defmodule ArbiterWeb.NodeChannelTest do
       assert %{node_capacity: %{"pending" => 1}} = Session.snapshot(node.id)
     end
 
+    test "a cluster hello's readiness checks reach the session (K13)", %{
+      node: node,
+      credential: credential
+    } do
+      checks = [%{"id" => "netpol", "name" => "n", "status" => "fail", "detail" => "x"}]
+
+      {_socket, _ok} =
+        join_and_hello(
+          node,
+          credential,
+          hello(%{"kind" => "cluster", "readiness" => %{"ready" => false, "checks" => checks}})
+        )
+
+      assert %{readiness: [%{"id" => "netpol", "status" => "fail"}]} = Session.snapshot(node.id)
+    end
+
     test "a machine hello_ok has no limits", %{node: node, credential: credential} do
       {_socket, ok} = join_and_hello(node, credential)
       refute Map.has_key?(ok, "limits")

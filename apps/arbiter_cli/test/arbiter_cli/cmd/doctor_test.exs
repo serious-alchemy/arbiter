@@ -2596,6 +2596,107 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "not set"
     end
 
+    # K13 (docs/design/remote-workers.md §9.4, §13): a cluster node's readiness block.
+    defp cluster_row(attrs \\ %{}) do
+      node_row(
+        Map.merge(
+          %{
+            "name" => "k3s",
+            "kind" => "cluster",
+            "k8s_version" => "v1.31.2+k3s1",
+            "degraded" => [],
+            "readiness" => [
+              %{
+                "id" => "netpol",
+                "name" => "NetworkPolicy enforcement",
+                "status" => "ok",
+                "detail" => "enforced: only the bridge port connects",
+                "hint" => nil
+              },
+              %{
+                "id" => "quota",
+                "name" => "ResourceQuota",
+                "status" => "warn",
+                "detail" => "no ResourceQuota in the namespace",
+                "hint" => "Apply the install manifest's quota."
+              }
+            ]
+          },
+          attrs
+        )
+      )
+    end
+
+    test "a cluster node gets one row per readiness check, named for the node" do
+      stub_nodes(nodes_resp(%{"nodes" => [cluster_row()], "public_url" => @url}))
+      results = nodes_results()
+
+      assert %{status: :ok, detail: detail} =
+               named(results, "cluster k3s: NetworkPolicy enforcement")
+
+      assert detail =~ "enforced"
+
+      assert %{status: :warn, hint: hint, blocks_readiness: false} =
+               named(results, "cluster k3s: ResourceQuota")
+
+      assert hint =~ "quota"
+    end
+
+    test "a failing check is a warn that never blocks readiness (the section's rule)" do
+      row =
+        cluster_row(%{
+          "degraded" => ["netpol_unenforced"],
+          "readiness" => [
+            %{
+              "id" => "netpol",
+              "name" => "NetworkPolicy enforcement",
+              "status" => "fail",
+              "detail" => "NOT enforced: a worker-labelled pod reached internet",
+              "hint" => "The CNI does not enforce."
+            }
+          ]
+        })
+
+      stub_nodes(nodes_resp(%{"nodes" => [row], "public_url" => @url}))
+
+      assert %{status: :warn, blocks_readiness: false, detail: detail} =
+               named(nodes_results(), "cluster k3s: NetworkPolicy enforcement")
+
+      assert detail =~ "NOT enforced"
+    end
+
+    test "a node degraded netpol_unenforced is called out, with the override when set" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            cluster_row(%{
+              "degraded" => ["netpol_unenforced"],
+              "allow_unenforced_network" => true
+            })
+          ],
+          "public_url" => @url
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "cluster k3s: placement")
+      assert detail =~ "netpol_unenforced"
+      assert detail =~ "allow_unenforced_network"
+    end
+
+    test "a cluster node that has reported no readiness yet says so" do
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => []})], "public_url" => @url})
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "cluster k3s: readiness")
+      assert detail =~ "no readiness report"
+    end
+
+    test "a machine node gets no cluster rows" do
+      stub_nodes(nodes_resp(%{"nodes" => [node_row(%{})], "public_url" => @url}))
+      refute Enum.any?(nodes_results(), &String.starts_with?(&1.name, "cluster "))
+    end
+
     test "an unset registry adds no row and does not change the n/a line (K8)" do
       stub_nodes(nodes_resp(%{"registry" => %{"configured" => false}}))
       assert [%{name: "nodes", status: :na}] = nodes_results()

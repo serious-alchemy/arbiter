@@ -164,6 +164,14 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute Enum.any?(rules, &(&1 =~ "gh pr comment"))
     end
 
+    test "no_ci_watch denies polling CI from the shell" do
+      rules = Security.deny_rules(policy())
+
+      assert "Bash(gh run watch:*)" in rules
+      assert "Bash(gh run view:*)" in rules
+      assert "Bash(gh pr checks:*)" in rules
+    end
+
     test "is carried by the --settings document even under bypass" do
       assert ["--settings", json] = Security.settings_argv(policy())
       assert "Bash(curl *catbox.moe*)" in Jason.decode!(json)["permissions"]["deny"]

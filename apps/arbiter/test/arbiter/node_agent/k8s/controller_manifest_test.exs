@@ -29,6 +29,16 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
     end
   end
 
+  describe "deployment/1 canary addresses (K13)" do
+    test "the controller learns its pod IP and node IP from the downward API" do
+      {:ok, d} = ControllerManifest.deployment(@opts)
+      env = Map.new(container(d, "controller")["env"], &{&1["name"], &1})
+
+      assert env["ARB_POD_IP"]["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"
+      assert env["ARB_NODE_IP"]["valueFrom"]["fieldRef"]["fieldPath"] == "status.hostIP"
+    end
+  end
+
   describe "deployment/1 reach: :tailscale" do
     setup do
       {:ok, d} = ControllerManifest.deployment([reach: :tailscale] ++ @opts)

@@ -138,6 +138,93 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     end
   end
 
+  # DC5 (bd-2c2a4g, design §9): the provider concurrency budget of each account,
+  # shadow-labelled until `scheduler_admission` is `enforce`.
+  describe "arb quota budget" do
+    defp budget_block(mode, decides) do
+      %{
+        "account" => "claude:default",
+        "account_id" => "acct-1",
+        "mode" => mode,
+        "decides" => decides,
+        "pools" => [
+          %{
+            "label" => "claude:default",
+            "budget" => 3,
+            "seats" => 3,
+            "free" => 0,
+            "binding" => "ceiling",
+            "reason" => "ceiling max_concurrent 3 (quota allows 4: 5h binds)",
+            "state" => "full"
+          },
+          %{
+            "label" => "antigravity:default gemini",
+            "budget" => 0,
+            "seats" => 0,
+            "free" => 0,
+            "binding" => "window:weekly",
+            "reason" => "weekly 0.43 used ≥ line 0.42",
+            "state" => "held_pace"
+          }
+        ]
+      }
+    end
+
+    test "prints each pool's budget with its reason, labelled shadow" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [budget_block("shadow", false)]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+
+      assert out =~ "Concurrency budget (shadow"
+      assert out =~ "today's gate and caps still decide"
+      assert out =~ ~r/claude:default\s+3 of 3 seats.*ceiling max_concurrent 3/
+      assert out =~ ~r/antigravity:default gemini\s+0 of 0 seats.*weekly 0.43 used/
+    end
+
+    test "enforce is not labelled shadow" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [budget_block("enforce", true)]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+
+      assert out =~ "Concurrency budget (enforce)"
+      refute out =~ "still decide"
+    end
+
+    test "prints nothing for an account with no published pools, or an older server" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [%{"account" => "claude:default", "mode" => "shadow", "pools" => []}]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      refute out =~ "Concurrency budget"
+    end
+
+    test "--json passes the block through" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "budget" => [budget_block("shadow", false)]}
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run(["--json"]) end)
+      assert [%{"mode" => "shadow", "pools" => [_, _]}] = Jason.decode!(out)["budget"]
+    end
+  end
+
   # bd-a6grlr: the dollar spend cap of each capped account.
   describe "arb quota spend caps" do
     test "prints each capped account's spend state and the hold reason" do

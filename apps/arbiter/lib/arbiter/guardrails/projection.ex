@@ -21,7 +21,8 @@ defmodule Arbiter.Guardrails.Projection do
   | `prod_read` | the binding's `env_from_secret` | the binding's `hosts` | the binding's `tunnels` | | |
   | `prod_ssh` | | the binding's `hosts` (`host:22`) | | the binding's `ssh_key_secret` | |
 
-  A data class (`phi_data`) projects no reach: it only limits which subjects may
+  `research_read` projects nothing here (`Arbiter.Worker.ResearchGrant` owns it: it needs no
+  guardrail profile). A data class (`phi_data`) projects no reach: it only limits which subjects may
   be routed to (G13).
 
   ## When a permission is withheld although declared
@@ -126,7 +127,7 @@ defmodule Arbiter.Guardrails.Projection do
       %Profile{} = profile ->
         permissions
         |> Enum.flat_map(&parse/1)
-        |> Enum.reject(&(&1.kind == :phi_data))
+        |> Enum.reject(&(&1.kind in [:phi_data, :research_read]))
         |> Enum.reduce(%{sealed(role: role) | profile: profile}, &project(&1, &2, profile, block))
         |> finish()
     end

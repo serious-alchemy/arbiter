@@ -56,7 +56,9 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   ConfigMap changes. `:observer` (tests, diagnostics) additionally gets
   `{:run_observed, run, tag, resource_version}` after each pod event is folded in.
 
-  Options: `:client`, `:informer`, `:config_loader`, `:lease` (pid/name or `nil`),
+  Options: `:client`, `:informer`, `:config_loader`, `:readiness` (a
+  `Arbiter.NodeAgent.K8s.ReadinessMonitor`: `report/1` carries its `degraded` and check
+  list, and each of its runs is pushed as `"readiness"`), `:lease` (pid/name or `nil`),
   `:pod_channel` (`{module, server}` with `register/3`, `bind_pod_ip/3`, `release/2`;
   default `Arbiter.NodeAgent.PodChannel.Runs`), `:identity` (`registry`, `install_id`,
   `node_id`, `owner_uid`, `bridge_addr`, `gate_addr`, `own_pod`, `own_uid`,
@@ -75,6 +77,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   alias Arbiter.NodeAgent.K8s.PodSpec
   alias Arbiter.NodeAgent.K8s.PodState
   alias Arbiter.NodeAgent.K8s.Quota
+  alias Arbiter.NodeAgent.K8s.ReadinessMonitor
   alias Arbiter.NodeAgent.K8s.RunReport
   alias Arbiter.NodeAgent.K8s.Sweeper
   alias Arbiter.NodeAgent.PodChannel.Runs, as: PodRuns
@@ -153,7 +156,12 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   What `hello` and `hb` carry: `%{runs: [...], capacity: hb.capacity, degraded:
   [...]}`.
   """
-  @spec report(GenServer.server()) :: %{runs: [map()], capacity: map(), degraded: [String.t()]}
+  @spec report(GenServer.server()) :: %{
+          runs: [map()],
+          capacity: map(),
+          degraded: [String.t()],
+          readiness: map() | nil
+        }
   def report(controller \\ __MODULE__), do: GenServer.call(controller, :report)
 
   @doc "Ids of the runs the table holds."
@@ -177,6 +185,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       informer: Keyword.fetch!(opts, :informer),
       loader: Keyword.fetch!(opts, :config_loader),
       lease: opts[:lease],
+      readiness: opts[:readiness],
       channel: Keyword.get(opts, :pod_channel, {PodRuns, PodRuns}),
       identity: Keyword.fetch!(opts, :identity),
       sink: opts[:sink],
@@ -196,6 +205,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   @impl true
   def handle_continue(:subscribe, state) do
     :ok = ConfigLoader.subscribe(state.loader, self())
+    if state.readiness, do: :ok = ReadinessMonitor.subscribe(state.readiness, self())
     {:ok, pods} = Informer.subscribe(state.informer, self())
     state = %{state | synced?: Informer.synced?(state.informer)}
     state = Enum.reduce(pods, state, &on_pod_event(:added, &1, &2))
@@ -275,6 +285,15 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   def handle_info({:controller_config, _loader, _config}, state) do
     state = refresh_quota(state)
     push(state, nil, "capacity", build_report(state).capacity)
+    {:noreply, state}
+  end
+
+  def handle_info({:k8s_readiness, _monitor, report}, state) do
+    push(state, nil, "readiness", %{
+      "degraded" => report.degraded,
+      "readiness" => ReadinessMonitor.hello_readiness(report)
+    })
+
     {:noreply, state}
   end
 
@@ -821,7 +840,23 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
         config -> Admission.capacity(facts(state, config))
       end
 
-    %{runs: runs, capacity: capacity, degraded: ConfigLoader.degraded(state.loader)}
+    {degraded, readiness} = readiness_facts(state)
+
+    %{
+      runs: runs,
+      capacity: capacity,
+      degraded: Enum.uniq(ConfigLoader.degraded(state.loader) ++ degraded),
+      readiness: readiness
+    }
+  end
+
+  # K13: the readiness monitor's verdict (`degraded: netpol_unenforced`, the check list). A
+  # controller started without one (tests of the run table) reports neither.
+  defp readiness_facts(%{readiness: nil}), do: {[], nil}
+
+  defp readiness_facts(%{readiness: monitor}) do
+    report = ReadinessMonitor.report(monitor)
+    {report.degraded, ReadinessMonitor.hello_readiness(report)}
   end
 
   defp announce(state, %{phase: :live, state: :running} = entry),

@@ -11,6 +11,11 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   The admission surfaces below still never name the budget, and
   `Arbiter.Board.AdmissionLegacyTest` pins at runtime that under `legacy` no
   admission path calls it.
+
+  DC5 (bd-2c2a4g) adds the display readers: `Arbiter.Board.CapacityView`, the one
+  read model behind the board's capacity strip, `scheduler_status` and
+  `quota_get`. It is the only module outside the budget's own that names it,
+  and no admission surface, nor anything that stops a run, names `CapacityView`.
   """
   use Arbiter.DataCase, async: false
 
@@ -34,6 +39,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     arbiter/quota/shadow_supervisor.ex
     arbiter/application.ex
     arbiter/board/walk_inputs.ex
+    arbiter/board/capacity_view.ex
   )
 
   defp source_files(root) do
@@ -83,6 +89,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     for rel <- existing do
       source = File.read!(Path.join(@lib, rel))
       refute source =~ @consumers, "#{rel} reads the provider budget"
+      refute source =~ "CapacityView", "#{rel} reads the display view of the budgets"
       refute source =~ "arbiter_quota_budgets", "#{rel} reads the budget table"
     end
   end
@@ -91,6 +98,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     stoppers = Path.join(@lib, "arbiter/worker/**/*.ex") |> Path.wildcard()
     assert stoppers != []
     assert Enum.filter(stoppers, &(File.read!(&1) =~ @consumers)) == []
+    assert Enum.filter(stoppers, &(File.read!(&1) =~ "CapacityView")) == []
   end
 
   test "the budget reaches Pace only through the gate (I6)" do

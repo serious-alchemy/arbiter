@@ -33,6 +33,33 @@ defmodule Arbiter.Guardrails.PermissionsTest do
                Permissions.parse("secrets:broker_demo")
     end
 
+    test "research_read is a plain action: no argument, never optional (bd-6ircwr)" do
+      assert {:ok, %{kind: :research_read, optional?: false, canonical: "research_read"}} =
+               Permissions.parse("research_read")
+
+      assert {:error, msg} = Permissions.parse("research_read?")
+      assert msg =~ "optional"
+      assert {:error, _} = Permissions.parse("research_read:usage")
+    end
+
+    test "research_read is coordinator-grantable by default; a binding may make it operator-only" do
+      assert Permissions.grant_by("research_read", %{}) == :coordinator
+
+      block = %{"bindings" => %{"research_read" => %{"grant_by" => "operator"}}}
+      assert Permissions.grant_by("research_read", block) == :operator
+    end
+
+    test "check_issue_type/2 confines research_read to the no-PR task types" do
+      assert :ok = Permissions.check_issue_type(["research_read"], :task)
+      assert :ok = Permissions.check_issue_type(["research_read"], :research)
+      assert :ok = Permissions.check_issue_type(["tracker_write"], :feature)
+      assert :ok = Permissions.check_issue_type([], :bug)
+
+      assert {:error, msg} = Permissions.check_issue_type(["research_read"], :feature)
+      assert msg =~ "research_read"
+      assert msg =~ "task"
+    end
+
     test "prod permissions and data classes are never optional (§5.7)" do
       for name <- ~w(prod_read? prod_ssh? phi_data?) do
         assert {:error, msg} = Permissions.parse(name)

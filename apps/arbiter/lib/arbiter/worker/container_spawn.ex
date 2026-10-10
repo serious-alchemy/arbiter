@@ -140,6 +140,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
+  alias Arbiter.Worker.ResearchGrant
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.SessionHistory
@@ -151,6 +152,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
   require Logger
 
   @cli_dir "/opt/arbiter/cli"
+
+  # bd-6ircwr: a `research_read` run's read-only transcript snapshot, under its own tmp dir.
+  @research_dir "research-transcripts"
 
   # The model API and the hosts the CLI is known to talk to on its own. The
   # proxy runs in learn mode: these are the baseline an enforcing proxy would
@@ -274,6 +278,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
+         {:ok, research_dir} <- stage_research(opts, tmp_dir),
          {:ok, image} <- fetch_image(opts, worktree),
          {:ok, cli_mounts} <- cli_mounts(provider, opts),
          {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
@@ -291,7 +296,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          provider: provider,
          image: image,
          podman: Keyword.get(opts, :podman),
-         mounts: mounts,
+         mounts: with_research_mount(mounts, research_dir),
          home: home,
          config_dir: config_dir,
          writable_paths: Enum.uniq([tmp_dir | Map.get(policy.sandbox, :writable_paths, [])]),
@@ -301,7 +306,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          env:
            container_env(spec, Keyword.get(opts, :git_material)) ++
              GitCredential.container_env(Keyword.get(opts, :git_material)) ++
-             if(services, do: services.env, else: []),
+             if(services, do: services.env, else: []) ++ research_env(research_dir),
          git_secrets: git_secrets,
          pod: services && services.pod,
          deps_cache: deps_cache,
@@ -309,6 +314,34 @@ defmodule Arbiter.Worker.ContainerSpawn do
        }}
     end
   end
+
+  # bd-6ircwr: a `research_read` run (`:research_transcripts`, the workspace id)
+  # gets a snapshot of its own workspace's transcripts, staged under the run's
+  # tmp dir and bound read-only. A snapshot that cannot be made refuses the spawn:
+  # the run was promised it, and the alternative is a research run that quietly
+  # studies nothing. `:research_stager` is the test seam.
+  defp stage_research(opts, tmp_dir) do
+    case Keyword.get(opts, :research_transcripts) do
+      workspace_id when is_binary(workspace_id) and workspace_id != "" ->
+        stager = Keyword.get(opts, :research_stager, &ResearchGrant.stage_transcripts/3)
+
+        case stager.(workspace_id, Path.join(tmp_dir, @research_dir), []) do
+          {:ok, %{dir: dir}} -> {:ok, dir}
+          {:error, reason} -> {:error, {:research_transcripts_unavailable, reason}}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  defp with_research_mount(mounts, nil), do: mounts
+
+  defp with_research_mount(mounts, dir),
+    do: Keyword.update(mounts, :readonly_paths, [dir], &(&1 ++ [dir]))
+
+  defp research_env(nil), do: []
+  defp research_env(dir), do: [{"ARBITER_TRANSCRIPTS_DIR", dir}]
 
   # bd-9cygoo (G16): the scoped git credential travels as `podman run --secret`s,
   # created here on the host (value through a 0600 file, never argv) and removed

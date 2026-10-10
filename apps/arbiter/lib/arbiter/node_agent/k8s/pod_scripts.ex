@@ -34,7 +34,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   for name <- @bin_names, do: @external_resource(Path.join(@bin_dir, name))
   @bin Map.new(@bin_names, &{&1, File.read!(Path.join(@bin_dir, &1))})
 
-  @seed ~S"""
+  @gate ~S"""
   set -eu
   # step 0: the netpol gate (K1-A3). Refused means the policy is programmed.
   gate_host=${ARB_GATE_ADDR%:*}
@@ -49,8 +49,9 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
     fi
     sleep 0.1
   done
-  exec /opt/arbiter/bin/seed
   """
+
+  @seed @gate <> "exec /opt/arbiter/bin/seed\n"
 
   @entry ~S"""
   set -eu
@@ -65,6 +66,14 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @doc "The seed init container's script (gate first)."
   @spec seed() :: String.t()
   def seed, do: @seed
+
+  @doc """
+  Step 0 alone: the netpol gate, exiting 70 when the gate address stays reachable.
+  The readiness canary (`Arbiter.NodeAgent.K8s.Canary`) runs it as its `seed`
+  container, so its probes measure the steady state, not the start-up window.
+  """
+  @spec gate() :: String.t()
+  def gate, do: @gate
 
   @doc "The worker's entry wrapper: source and delete the secrets file, then `exec \"$@\"`."
   @spec entry() :: String.t()

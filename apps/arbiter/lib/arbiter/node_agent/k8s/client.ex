@@ -166,14 +166,63 @@ defmodule Arbiter.NodeAgent.K8s.Client do
     end
   end
 
-  @doc "Creates a pod from a manifest map. `{:error, :already_exists}` on a name clash."
-  @spec create_pod(t(), map()) :: {:ok, map()} | {:error, error()}
-  def create_pod(client, manifest) do
-    case request(client, :post, pods_path(client), json: manifest) do
+  @doc """
+  Creates a pod from a manifest map. `{:error, :already_exists}` on a name clash.
+  `dry_run: true` sends `?dryRun=All`: the API server runs admission (Pod Security,
+  the quota check, the priority class lookup, any `ValidatingAdmissionPolicy`) and
+  answers as it would, but stores nothing (the K13 readiness probe).
+  """
+  @spec create_pod(t(), map(), keyword()) :: {:ok, map()} | {:error, error()}
+  def create_pod(client, manifest, opts \\ []) do
+    params = if opts[:dry_run], do: [params: [dryRun: "All"]], else: []
+
+    case request(client, :post, pods_path(client), [json: manifest] ++ params) do
       {:error, :conflict} -> {:error, :already_exists}
       other -> other
     end
   end
+
+  @doc "One pod by name (`get` on `pods`). `{:error, :not_found}` when it is gone."
+  @spec get_pod(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_pod(client, name), do: request(client, :get, pods_path(client, name), [])
+
+  @doc """
+  The API server's clock, from the `Date` header of `GET /version` (readable by any
+  authenticated client: `system:public-info-viewer`). Second resolution.
+  `{:error, :no_date_header}` when the response has none or it does not parse.
+  """
+  @spec server_time(t()) :: {:ok, DateTime.t()} | {:error, error()}
+  def server_time(client) do
+    with {:ok, req} <- build(client, :get, "/version", []) do
+      case Req.request(req) do
+        {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
+          parse_date(Req.Response.get_header(resp, "date"))
+
+        {:ok, resp} ->
+          {:error, api_error(resp.status, resp.body)}
+
+        {:error, exception} ->
+          {:error, {:transport, exception}}
+      end
+    end
+  end
+
+  # IMF-fixdate: `Sat, 10 Oct 2026 12:00:00 GMT`.
+  defp parse_date([text | _]) do
+    with [_, day, mon, year, h, m, s] <-
+           Regex.run(~r/\A\w{3}, (\d{2}) (\w{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT\z/, text),
+         month when not is_nil(month) <-
+           Enum.find_index(~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec), &(&1 == mon)),
+         {:ok, date} <- Date.new(String.to_integer(year), month + 1, String.to_integer(day)),
+         {:ok, time} <-
+           Time.new(String.to_integer(h), String.to_integer(m), String.to_integer(s)) do
+      DateTime.new(date, time, "Etc/UTC")
+    else
+      _ -> {:error, :no_date_header}
+    end
+  end
+
+  defp parse_date(_), do: {:error, :no_date_header}
 
   @doc """
   Deletes a pod. Options: `:grace_period_seconds` (0 is sent as 0: SIGKILL

@@ -12,7 +12,7 @@ defmodule Arbiter.Nodes.Placement do
   node (bd-aowisc §5): the implementer and a resume of it, a merge-queue fix or
   conflict pass, a ReviewGate fix round, and the two reviewers, a ReviewGate
   reviewer and a `review: true` dispatch (bd-7ays3v, bd-cgdhlu, bd-bg87oz,
-  bd-4ic681). A resume (briefing or session, manual or the Reconciler's and
+  bd-4ic681), and a `task`/`research` ticket (bd-6ypj2y). A resume (briefing or session, manual or the Reconciler's and
   `Arbiter.Nodes.LostResume`'s automatic one) is a fresh spawn of the
   implementer: the node is seeded from the home clone, uncommitted work included
   (`Arbiter.Nodes.Checkout.seed_bundle/2`), and a session resume also gets the
@@ -20,7 +20,7 @@ defmodule Arbiter.Nodes.Placement do
   (`Arbiter.Worker.ContainerSpawn.remote_spec/3`). A reviewer reads the
   head it is handed and writes nothing back but its verdict and transcript, so
   its checkout is a read-only clone seeded through the bundle path and never
-  collected. A fix round and a fix or conflict pass write commits: the node is
+  collected; a task or research ticket's is the same. A fix round and a fix or conflict pass write commits: the node is
   seeded from the ticket's branch at its **current** `origin` head and
   `origin/<target>` at the forge tip (`Arbiter.Worker.PassPlacement`), the
   checkout comes back through the same quarantine as an implementer's, and the
@@ -34,8 +34,12 @@ defmodule Arbiter.Nodes.Placement do
       wired for Claude only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
       unsandboxed; the jail needs the primary's filesystem and keyring);
-    * a dispatch with no private clone (`:no_private_clone`: task and research
-      types);
+    * a dispatch handed no checkout at all (`:no_private_clone`: `provision_worktree:
+      false`). A `task` or `research` ticket is *not* one on podman Claude: it gets a
+      read-only seeded checkout of the target branch tip (`inspect?`, bd-6ypj2y),
+      placed like a reviewer's: nothing is collected or pushed back, and only notes,
+      progress and the transcript return. Off podman or Claude it is `:not_podman` /
+      `:non_claude_provider` like any other run;
     * a dispatch whose home clone already holds uncommitted work
       (`:local_work`: a re-dispatch of a ticket an earlier local run left
       dirty; the seed carries commits, not the work tree, and the run's snapshot
@@ -136,6 +140,7 @@ defmodule Arbiter.Nodes.Placement do
           required(:mode) => mode(),
           optional(:workspace_id) => String.t() | nil,
           optional(:no_pr?) => boolean(),
+          optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
           optional(:labels) => [String.t()]
         }
@@ -185,12 +190,19 @@ defmodule Arbiter.Nodes.Placement do
       request.kind not in @remote_kinds -> {:local_only, :follow_up}
       not claude?(request.provider) -> {:local_only, :non_claude_provider}
       request.layout != :private_clone -> {:local_only, :not_podman}
-      Map.get(request, :no_pr?, false) -> {:local_only, :no_private_clone}
+      no_checkout?(request) -> {:local_only, :no_private_clone}
       Map.get(request, :local_work?, false) -> {:local_only, :local_work}
       request.mode == :local_only -> {:local_only, :placement_local_only}
       true -> :ok
     end
   end
+
+  # A clone-less dispatch (task/research) is local unless it is marked `inspect?`:
+  # a podman run that is handed a read-only seeded checkout of the target tip, which
+  # a node can be given too (bd-6ypj2y). Any other kind of "no checkout" (an explicit
+  # `provision_worktree: false`) stays the structural guard.
+  defp no_checkout?(request),
+    do: Map.get(request, :no_pr?, false) and not Map.get(request, :inspect?, false)
 
   defp claude?(provider), do: to_string(provider) == "claude"
 
@@ -209,7 +221,7 @@ defmodule Arbiter.Nodes.Placement do
   def reason_phrase(:not_podman, _),
     do: "sandbox is not podman (bwrap-jailed or unsandboxed)"
 
-  def reason_phrase(:no_private_clone, _), do: "no private clone (task or research dispatch)"
+  def reason_phrase(:no_private_clone, _), do: "no checkout (provision_worktree: false)"
 
   def reason_phrase(:local_work, _),
     do: "its checkout already holds uncommitted work on the primary"
