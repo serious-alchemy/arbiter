@@ -2097,7 +2097,13 @@ defmodule Arbiter.Worker do
       role: role_to_usage_step(role)
     }
 
-    attrs = Arbiter.Agents.Grok.Stream.mark_notional_cost(attrs)
+    account_plan =
+      case AccountResolver.get(provider_account_id) do
+        %{plan: plan} -> plan
+        _ -> nil
+      end
+
+    attrs = Arbiter.Agents.Grok.Stream.mark_notional_cost(attrs, account_plan)
 
     case existing_session_event(attrs) do
       nil ->

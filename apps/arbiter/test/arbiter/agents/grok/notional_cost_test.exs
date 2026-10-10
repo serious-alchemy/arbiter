@@ -1,19 +1,64 @@
 defmodule Arbiter.Agents.Grok.NotionalCostTest do
-  use ExUnit.Case, async: true
+  use Arbiter.DataCase, async: true
 
   alias Arbiter.Agents.Grok.Stream
+  alias Arbiter.Usage
+  alias Arbiter.Usage.Event
 
-  test "grok cost moves into a notional note and out of cost_usd" do
-    out = Stream.mark_notional_cost(%{provider: "grok", cost_usd: 0.627564, cost_note: nil})
+  defp attrs(extra \\ %{}) do
+    Map.merge(
+      %{
+        task_id: "bd-notional-#{System.unique_integer([:positive])}",
+        repo: "arbiter",
+        workspace_id: "ws-notional",
+        step: :work,
+        occurred_at: DateTime.utc_now(),
+        provider: "grok",
+        cost_usd: 0.627564,
+        cost_note: nil,
+        raw: nil
+      },
+      extra
+    )
+  end
+
+  test "free-tier grok cost moves into a notional note and raw, out of cost_usd" do
+    out = Stream.mark_notional_cost(attrs(), "free")
     assert out.cost_usd == nil
     assert out.cost_note =~ "notional"
     assert out.cost_note =~ "0.627564"
+    assert out.raw["notional_cost_usd"] == 0.627564
   end
 
-  test "other providers and cost-less rows are untouched" do
-    claude = %{provider: "claude", cost_usd: 1.5, cost_note: nil}
-    assert Stream.mark_notional_cost(claude) == claude
-    nocost = %{provider: "grok", cost_usd: nil, cost_note: nil}
-    assert Stream.mark_notional_cost(nocost) == nocost
+  test "paid, unknown plans, other providers and cost-less rows are untouched" do
+    row = attrs()
+    end
+
+    claude = attrs(%{provider: "claude"})
+    assert Stream.mark_notional_cost(claude, "free") == claude
+    nocost = attrs(%{cost_usd: nil})
+    assert Stream.mark_notional_cost(nocost, "free") == nocost
+  end
+
+  test "a persisted notional row has a note and does not count in spend totals" do
+    {:ok, account} =
+      Ash.create(Arbiter.Accounts.ProviderAccount, %{provider: :grok, slug: "notional-free"})
+
+    free = Stream.mark_notional_cost(attrs(%{provider_account_id: account.id}), "free")
+
+    paid =
+      Stream.mark_notional_cost(attrs(%{provider_account_id: account.id, cost_usd: 2.0}), "pro")
+
+    {:ok, free_row} = Ash.create(Event, free)
+    {:ok, paid_row} = Ash.create(Event, paid)
+
+    assert free_row.cost_usd == nil
+    assert free_row.cost_note =~ "notional"
+    assert paid_row.cost_usd == 2.0
+    assert paid_row.cost_note == nil
+
+    totals = Usage.spend_by_account()
+
+    assert totals[account.id] == %{"grok" => 2}
   end
 end

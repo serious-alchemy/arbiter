@@ -40,23 +40,33 @@ defmodule Arbiter.Agents.Grok.Stream do
   """
 
   @doc """
-  Ledger attrs for a grok run with its `total_cost_usd` treated as notional.
+  Ledger attrs for a grok run with its `total_cost_usd` treated as notional
+  when the account is on the free tier (`plan` is "free", case-insensitive).
 
-  The CLI reports xAI list price even when nothing was billed (free tier), and
-  Arbiter has no signal for the account's tier, so a numeric `:cost_usd` is
-  moved out of the spendable column into `:cost_note` ("notional — free tier").
-  `cost_usd` becomes nil, so every `SUM(cost_usd)` total skips it. Other
-  providers, and rows without a cost, pass through unchanged.
+  The CLI reports xAI list price even when nothing was billed, so on a free
+  account a numeric `:cost_usd` is moved out of the spendable column: it is kept
+  as `raw["notional_cost_usd"]` (for a separate display) and described in
+  `:cost_note`. `cost_usd` becomes nil, so every `SUM(cost_usd)` total skips
+  it. Paid or unknown plans, other providers, and rows without a cost pass
+  through unchanged.
   """
-  @spec mark_notional_cost(map()) :: map()
-  def mark_notional_cost(%{provider: "grok", cost_usd: cost} = attrs) when is_number(cost) do
-    price = :erlang.float_to_binary(cost * 1.0, decimals: 6)
-    note = "notional — free tier: $#{price} list price, not billed"
+  @spec mark_notional_cost(map(), String.t() | nil) :: map()
+  def mark_notional_cost(%{provider: "grok", cost_usd: cost} = attrs, plan)
+      when is_number(cost) and is_binary(plan) do
+    if String.downcase(String.trim(plan)) == "free" do
+      price = :erlang.float_to_binary(cost * 1.0, decimals: 6)
+      note = "notional — free tier: $#{price} list price, not billed"
+      raw = Map.put(Map.get(attrs, :raw) || %{}, "notional_cost_usd", cost)
 
-    %{attrs | cost_usd: nil, cost_note: join_note(Map.get(attrs, :cost_note), note)}
+      attrs
+      |> Map.merge(%{cost_usd: nil, cost_note: join_note(Map.get(attrs, :cost_note), note)})
+      |> Map.put(:raw, raw)
+    else
+      attrs
+    end
   end
 
-  def mark_notional_cost(attrs), do: attrs
+  def mark_notional_cost(attrs, _plan), do: attrs
 
   defp join_note(existing, note) when is_binary(existing) and existing != "",
     do: existing <> "; " <> note
