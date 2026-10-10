@@ -101,7 +101,7 @@ defmodule Arbiter.Worker.ResearchGrant do
 
   defp bound?(workspace) do
     block = Config.block(workspace)
-    parsed = %{kind: :research_read, canonical: @permission}
+    parsed = %{kind: :research_read, optional?: false, canonical: @permission}
     not is_nil(Vocabulary.binding(block, parsed))
   end
 
