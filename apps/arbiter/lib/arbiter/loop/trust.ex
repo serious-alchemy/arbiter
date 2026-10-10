@@ -48,6 +48,7 @@ defmodule Arbiter.Loop.Trust do
   require Logger
 
   @window_days 30
+  @demotion_days 14
   @recent_events 10
   @cutover_migration 20_261_010_004_432
   @actor "loop:trust"
@@ -237,9 +238,14 @@ defmodule Arbiter.Loop.Trust do
     }
 
     {state, acted} =
-      if ctx.guarded? and tier != nil,
-        do: suspend(state, subject, prior, data, ctx),
-        else: {state, []}
+      if ctx.guarded? and tier != nil do
+        {state, changed} = version_change(state, subject, prior, data, ctx)
+        {state, suspended} = suspend(state, subject, prior, data, ctx)
+        {state, demoted} = demote(state, subject, prior, rule, data, ctx)
+        {state, changed ++ suspended ++ demoted}
+      else
+        {state, []}
+      end
 
     {judge(state, subject, prior, data, ctx), acted}
   end
@@ -282,6 +288,66 @@ defmodule Arbiter.Loop.Trust do
       eligibility: eligibility
     })
   end
+
+  # ---- version drift -------------------------------------------------------------
+
+  # A run on a new harness version, or reporting a new model id, restarts the
+  # promotion clock at the first such run — never the tier — and pages (§6.3).
+  # The first version a record sees is only recorded.
+  defp version_change(state, _subject, nil, _data, _ctx), do: {state, []}
+
+  defp version_change(state, subject, prior, data, ctx) do
+    old = %{harness_version: prior.harness_version, model_version: prior.model_version}
+    new = %{harness_version: state.harness_version, model_version: state.model_version}
+
+    if changed?(old.harness_version, new.harness_version) or
+         changed?(old.model_version, new.model_version) do
+      clock = first_new_run(data.runs, prior, old) || state.last_run_at
+      page_version_changed(subject, state.tier, old, new, clock)
+
+      entry = %{
+        "from" => stringify(old),
+        "to" => stringify(new),
+        "clock_started_at" => iso(clock)
+      }
+
+      {%{
+         state
+         | clock_started_at: later(clock, state.clock_started_at),
+           history: state.history ++ [history(ctx.now, "version_changed", @actor, entry)]
+       },
+       [
+         %{
+           action: :version_changed,
+           subject: key(subject),
+           from: old,
+           to: new,
+           clock_started_at: clock
+         }
+       ]}
+    else
+      {state, []}
+    end
+  end
+
+  defp changed?(nil, _new), do: false
+  defp changed?(_old, nil), do: false
+  defp changed?(old, new), do: old != new
+
+  defp first_new_run(runs, prior, old) do
+    runs
+    |> Enum.filter(&(prior.last_run_at == nil or after?(&1.started_at, prior.last_run_at)))
+    |> Enum.filter(
+      &(changed?(old.harness_version, &1.harness_version) or changed?(old.model_version, &1.model))
+    )
+    |> Enum.min_by(& &1.started_at, DateTime, fn -> nil end)
+    |> case do
+      nil -> nil
+      run -> run.started_at
+    end
+  end
+
+  defp stringify(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
 
   # ---- suspension --------------------------------------------------------------
 
@@ -335,6 +401,166 @@ defmodule Arbiter.Loop.Trust do
           }
 
         {state, [%{action: :suspended, subject: key(subject), event: event.id, parked: parked}]}
+    end
+  end
+
+  # ---- demotion -----------------------------------------------------------------
+
+  # Two major events within the demotion window — both after the cutover and
+  # after the last automatic demotion, so one pair demotes once — lower the
+  # subject one tier. A pin never blocks it (§6.3).
+  defp demote(state, subject, prior, rule, data, ctx) do
+    since =
+      [ctx.cutover, prior && prior.last_demoted_at, DateTime.add(ctx.now, -@demotion_days * 86_400)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(DateTime)
+
+    majors =
+      Enum.filter(data.events, &(&1.severity == "major" and after?(&1.inserted_at, since)))
+
+    if length(majors) >= 2,
+      do: lower(state, subject, rule, Enum.sort_by(majors, & &1.inserted_at, DateTime), ctx),
+      else: {state, []}
+  end
+
+  defp lower(%{tier: :quarantine} = state, subject, _rule, majors, ctx) do
+    page_demoted(subject, :quarantine, nil, majors)
+
+    {%{
+       state
+       | last_demoted_at: ctx.now,
+         history: state.history ++ [history(ctx.now, "demotion_at_floor", @actor, majors_entry(majors))]
+     }, [%{action: :demotion_at_floor, subject: key(subject), events: Enum.map(majors, & &1.id)}]}
+  end
+
+  defp lower(state, subject, rule, majors, ctx) do
+    to = Enum.at(Guardrails.tiers(), Guardrails.tier_rank(state.tier) - 1)
+
+    reason =
+      "two major guardrail events within #{@demotion_days} days " <>
+        "(#{Enum.map_join(majors, ", ", & &1.kind)}); automatic demotion"
+
+    case write_tier(subject, rule, to, reason, @actor, tighten_only: true) do
+      {:ok, _row} ->
+        page_demoted(subject, state.tier, to, majors)
+
+        entry =
+          majors
+          |> majors_entry()
+          |> Map.merge(%{"from" => to_string(state.tier), "to" => to_string(to)})
+
+        {%{
+           state
+           | tier: to,
+             tier_since: ctx.now,
+             clock_started_at: ctx.now,
+             last_demoted_at: ctx.now,
+             history: state.history ++ [history(ctx.now, "demoted", @actor, entry)]
+         },
+         [
+           %{
+             action: :demoted,
+             subject: key(subject),
+             from: state.tier,
+             to: to,
+             events: Enum.map(majors, & &1.id)
+           }
+         ]}
+
+      {:error, why} ->
+        Logger.warning("Loop.Trust: could not demote #{key(subject)}: #{inspect(why)}")
+        {state, []}
+    end
+  end
+
+  defp majors_entry(majors), do: %{"events" => Enum.map(majors, & &1.id)}
+
+  # ---- writing a subject's tier -------------------------------------------------
+
+  @doc false
+  # Set `subject`'s tier with a rule of its own. When the rule that matches it
+  # now is already that rule, only its tier changes; otherwise a rule for the
+  # exact subject is written, carrying the matched rule's scope, overrides and
+  # pin, so nothing but the tier moves (an exact model outranks any glob,
+  # `Arbiter.Guardrails.Rules`). `tighten_only: true` refuses the write unless it
+  # is a pure tightening of the rule in force.
+  @spec write_tier(subject(), map() | nil, Guardrails.tier(), String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def write_tier({provider, model} = subject, rule, tier, reason, actor, opts \\ []) do
+    inherited = if own_rule?(rule, subject), do: %{}, else: inherited(rule)
+
+    attrs =
+      Map.merge(inherited, %{provider: provider, model: model, tier: tier, reason: reason})
+
+    with :ok <- check_tighten(rule, attrs, subject, opts) do
+      Guardrails.Subjects.put(attrs, :operator, actor: actor)
+    end
+  end
+
+  defp own_rule?(%{source: :db, match: match}, {provider, model}),
+    do: match == %{provider: provider, model: model}
+
+  defp own_rule?(_rule, _subject), do: false
+
+  defp inherited(nil), do: %{}
+
+  defp inherited(%{source: :db} = rule) do
+    case Enum.find(Guardrails.Subjects.list(), &(Guardrails.Subjects.to_rule(&1) == [rule])) do
+      nil -> %{scope: rule.scope, pinned: rule.pinned}
+      row -> %{scope: row.scope, overrides: row.overrides, pinned: row.pinned}
+    end
+  end
+
+  defp inherited(rule) do
+    raw =
+      :arbiter
+      |> Application.get_env(:guardrail_subject_rules, [])
+      |> List.wrap()
+      |> Enum.find(&(Rules.normalize(&1, :env) == [rule]))
+
+    case raw do
+      nil ->
+        %{scope: rule.scope, pinned: rule.pinned}
+
+      raw ->
+        raw = Guardrails.Config.stringify(raw)
+
+        %{
+          scope: Map.get(raw, "scope"),
+          overrides: Map.get(raw, "overrides"),
+          pinned: Map.get(raw, "pinned") == true
+        }
+    end
+  end
+
+  defp check_tighten(rule, attrs, subject, opts) do
+    if Keyword.get(opts, :tighten_only, false) do
+      old = rule && Map.merge(%{scope: nil, overrides: %{}, pinned: false}, rule)
+
+      case Guardrails.Authority.rule_loosenings(old, written_rule(rule, attrs, subject)) do
+        [] -> :ok
+        loosenings -> {:error, {:not_a_tightening, loosenings}}
+      end
+    else
+      :ok
+    end
+  end
+
+  # The rule `write_tier/6` leaves in force: the subject's own rule with its tier
+  # changed, or the new exact rule it writes.
+  defp written_rule(rule, attrs, {provider, model} = subject) do
+    if own_rule?(rule, subject) do
+      %{rule | tier: attrs.tier}
+    else
+      %{
+        "match" => %{"provider" => provider, "model" => model},
+        "tier" => attrs.tier,
+        "scope" => Map.get(attrs, :scope),
+        "overrides" => Map.get(attrs, :overrides) || %{},
+        "pinned" => Map.get(attrs, :pinned) == true
+      }
+      |> Rules.normalize(:db)
+      |> hd()
     end
   end
 
@@ -394,6 +620,54 @@ defmodule Arbiter.Loop.Trust do
       `arb trust show #{k}` has the record.
       """
     )
+  end
+
+  defp page_version_changed(subject, tier, old, new, clock) do
+    k = key(subject)
+
+    page(:trust_version_changed, "trust: #{k} runs a new harness or model version", """
+    #{k} (tier #{tier}) changed version:
+
+      harness: #{old.harness_version || "—"} → #{new.harness_version || "—"}
+      model:   #{old.model_version || "—"} → #{new.model_version || "—"}
+
+    Its promotion clock restarted at #{iso(clock)}: only runs on the new version count toward a promotion from now on. Its tier is unchanged. A harness can change behaviour silently (agy's settings grammar did, bd-80talz), so watch its next runs.
+
+    `arb trust show #{k}` has the record.
+    """)
+  end
+
+  defp page_demoted(subject, from, to, majors) do
+    k = key(subject)
+
+    events =
+      Enum.map_join(majors, "\n", fn e ->
+        "  - #{e.kind} (#{e.source}) on run #{e.run_id || "?"}, ticket #{e.task_id || "?"}, " <>
+          "#{iso(e.inserted_at)}"
+      end)
+
+    {title, outcome} =
+      case to do
+        nil ->
+          {"trust: #{k} had two major guardrail events at quarantine",
+           "It is already at quarantine, the lowest tier, so nothing was lowered."}
+
+        to ->
+          {"trust: #{k} demoted #{from} → #{to} after two major guardrail events",
+           "It was demoted one tier automatically, #{from} → #{to}: a rule for #{k} now " <>
+             "says #{to} (its scope and pin are unchanged; a pin never blocks a demotion)."}
+      end
+
+    page(:trust_demoted, title, """
+    #{k} had two major guardrail events within #{@demotion_days} days:
+
+    #{events}
+
+    #{outcome}
+
+    Demotions are automatic; raising it again is the operator's call
+    (`arb trust promote #{k} --to <tier> --reason "..."`). `arb trust show #{k}` has the record.
+    """)
   end
 
   defp page(kind, subject, body) do

@@ -196,6 +196,154 @@ defmodule Arbiter.Loop.TrustTest do
     end
   end
 
+  describe "automatic demotion (§6.3)" do
+    defp two_majors!(ws, at1, at2) do
+      r1 = task!(ws, "d1", @codex, at: DateTime.add(at1, -3600))
+      r2 = task!(ws, "d2", @codex, at: DateTime.add(at2, -3600))
+      event!(r1, "d1", @codex, :credential_read, :major, at1)
+      event!(r2, "d2", @codex, :unrequested_egress, :major, at2)
+    end
+
+    test "two major events within 14 days demote the subject one tier, once", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :trusted})
+      two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: [%{action: :demoted, from: :trusted, to: :probation}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert rule_tier(@codex) == :probation
+      assert %TrustRecord{tier: :probation, last_demoted_at: demoted_at} = Trust.get(@codex)
+      assert demoted_at == now()
+
+      assert [page] = pages(:trust_demoted)
+      assert page.subject =~ "codex/gpt-5.1-codex"
+      assert page.body =~ "probation"
+
+      # The same pair never demotes twice.
+      assert {:ok, %{actions: []}} =
+               Trust.tick(now: DateTime.add(now(), 3600), cutover: cutover(), workers: [])
+
+      assert rule_tier(@codex) == :probation
+    end
+
+    test "a pin never blocks a demotion", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :trusted, pinned: true})
+      two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: [%{action: :demoted, to: :probation}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert %{tier: :probation, pinned: true} =
+               Arbiter.Guardrails.Rules.match(
+                 Arbiter.Guardrails.Rules.all(),
+                 Arbiter.Guardrails.subject("codex", "gpt-5.1-codex")
+               )
+    end
+
+    test "majors more than 14 days apart do not demote, nor does a single one", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :trusted})
+      two_majors!(ws, ~U[2026-09-15 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: []}} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+      assert rule_tier(@codex) == :trusted
+    end
+
+    test "majors before the trust cutover never demote", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :trusted})
+      two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: []}} =
+               Trust.tick(now: now(), cutover: ~U[2026-10-06 00:00:00Z], workers: [])
+
+      assert rule_tier(@codex) == :trusted
+    end
+
+    test "demoting a subject a glob matched writes its own rule and keeps the glob's scope", %{
+      ws: ws
+    } do
+      rule!(%{provider: "codex", model: "gpt-*", tier: :trusted, scope: %{"default" => ["arbiter"]}})
+      two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert %{tier: :probation, scope: %{"default" => ["arbiter"]}, match: match} =
+               Arbiter.Guardrails.Rules.match(
+                 Arbiter.Guardrails.Rules.all(),
+                 Arbiter.Guardrails.subject("codex", "gpt-5.1-codex")
+               )
+
+      assert match == %{provider: "codex", model: "gpt-5.1-codex"}
+      # Another model the glob matches keeps its tier.
+      assert rule_tier({"codex", "gpt-5.2"}) == :trusted
+    end
+
+    test "at quarantine there is nothing lower: the coordinator is still paged", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :quarantine})
+      two_majors!(ws, ~U[2026-10-01 11:00:00Z], ~U[2026-10-05 11:00:00Z])
+
+      assert {:ok, %{actions: [%{action: :demotion_at_floor}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert rule_tier(@codex) == :quarantine
+      assert [_] = pages(:trust_demoted)
+    end
+  end
+
+  describe "version drift (§6.3)" do
+    test "a harness version change resets the promotion clock, keeps the tier, and pages", %{
+      ws: ws
+    } do
+      rule!(%{provider: "codex", tier: :probation})
+      task!(ws, "v1", @codex, at: ~U[2026-10-01 10:00:00Z], harness: "0.50.0")
+
+      # The first version seen is recorded, not paged.
+      assert {:ok, %{actions: []}} =
+               Trust.tick(now: ~U[2026-10-02 00:00:00Z], cutover: cutover(), workers: [])
+
+      assert %{harness_version: "0.50.0", clock_started_at: nil, runs: 1} = Trust.get(@codex)
+
+      task!(ws, "v2", @codex, at: ~U[2026-10-05 10:00:00Z], harness: "0.51.0")
+
+      assert {:ok, %{actions: [%{action: :version_changed} = changed]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert changed.from == %{harness_version: "0.50.0", model_version: "gpt-5.1-codex"}
+      assert changed.to == %{harness_version: "0.51.0", model_version: "gpt-5.1-codex"}
+
+      record = Trust.get(@codex)
+      assert record.harness_version == "0.51.0"
+      assert record.clock_started_at == ~U[2026-10-05 10:00:00.000000Z]
+      # The tier stays; runs before the reset stop counting toward a promotion.
+      assert record.tier == :probation and rule_tier(@codex) == :probation
+      assert record.runs == 1
+
+      assert [page] = pages(:trust_version_changed)
+      assert page.body =~ "0.50.0"
+      assert page.body =~ "0.51.0"
+    end
+
+    test "a change of the model id the runs report does the same", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :probation})
+      task!(ws, "m1", @codex, at: ~U[2026-10-01 10:00:00Z], decision: true)
+      {:ok, _} = Trust.tick(now: ~U[2026-10-02 00:00:00Z], cutover: cutover(), workers: [])
+
+      task!(ws, "m2", @codex,
+        at: ~U[2026-10-05 10:00:00Z],
+        decision: true,
+        served: "gpt-5.1-codex-2026-10"
+      )
+
+      assert {:ok, %{actions: [%{action: :version_changed}]}} =
+               Trust.tick(now: now(), cutover: cutover(), workers: [])
+
+      assert %{model_version: "gpt-5.1-codex-2026-10", clock_started_at: clock, tier: :probation} =
+               Trust.get(@codex)
+
+      assert clock == ~U[2026-10-05 10:00:00.000000Z]
+      assert [_] = pages(:trust_version_changed)
+    end
+  end
+
   describe "subjects" do
     test "a run is its dispatch decision's subject, and so are its events", %{ws: ws} do
       rule!(%{provider: "antigravity", tier: :probation})
@@ -241,6 +389,17 @@ defmodule Arbiter.Loop.TrustTest do
       difficulty: difficulty,
       workspace: ws
     })
+  end
+
+  # The tier the installation's rules give the subject now.
+  defp rule_tier({provider, model}) do
+    case Arbiter.Guardrails.Rules.match(
+           Arbiter.Guardrails.Rules.all(),
+           Arbiter.Guardrails.subject(provider, model)
+         ) do
+      nil -> :quarantine
+      rule -> rule.tier
+    end
   end
 
   defp pages(kind) do

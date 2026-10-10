@@ -38,8 +38,10 @@ defmodule Arbiter.TrustFixtures do
   `:stop` (the run's `stop_category`), `:failure` (its `failure_reason`),
   `:harness` (`harness_version`), `:round1` (`true` approved, `false` rejected —
   a second, approved round follows —, `nil` none), `:open` (the ticket stays
-  active), `:adapter` (`worker_runs.provider`, default the subject's) and
-  `:decision` (record the subject in `guardrail_decision`).
+  active), `:adapter` (`worker_runs.provider`, default the subject's),
+  `:decision` (record the subject in `guardrail_decision`) and `:served` (the
+  model the run reported, `worker_runs.model`, when it differs from the
+  subject's).
   """
   def task!(ws, id, subject, opts \\ []) do
     at = Keyword.get(opts, :at, ~U[2026-10-01 10:00:00Z])
@@ -120,7 +122,7 @@ defmodule Arbiter.TrustFixtures do
         Keyword.get(opts, :repo, "arbiter"),
         Keyword.get(opts, :kind, "implement"),
         Keyword.get(opts, :role, "base"),
-        model,
+        Keyword.get(opts, :served, model),
         Keyword.get(opts, :adapter, provider),
         Keyword.get(opts, :difficulty, 1),
         opts[:stop],
