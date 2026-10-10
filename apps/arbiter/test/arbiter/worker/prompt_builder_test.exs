@@ -140,6 +140,17 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            lacks, and then pipe it through `tail` or `grep` rather than letting the
            whole run into context.
 
+           VERIFICATION — Arbiter runs `mix format --check-formatted`,
+           `mix compile --warnings-as-errors` and `mix credo --strict` on your touched
+           files at the commit gate (when you print `arb done`, before anything is
+           pushed) and sends any failure back to this session. Do NOT run them
+           yourself, and do NOT run the full `mix precommit` / `mix audit` or poll a
+           backgrounded run. Run only the tests for your changed files, in the
+           foreground: for each changed `lib/<path>.ex` that is `test/<path>_test.exs`
+           in the same app (`cd apps/<app> && mix test test/<path>_test.exs`, or
+           `scripts/pre-push-tests.sh <files>`). The gate's output lists these tests
+           for your changed files.
+
            EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
            artifacts. A screenshot must be a real capture of the real app, a source
            or licence citation must name where the thing actually came from, and a
@@ -197,20 +208,14 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
            Do this before printing `arb done`.
 
-           Coordination: at the start of each step, check your mailbox by running
-
-               arb inbox bd-golden1
-
-           This shows any direction from the coordinator or flags from sibling workers
-           (e.g. an upstream API shape changed) and marks them read. To leave a flag
-           for another worker, use `arb message <their-task-id> <text>`.
-
-           Between major steps, also check for `.arbiter/INBOX` in your working
-           directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
-           NOT error when the file is absent — the normal case). If it exists, read
+           Coordination: direction from the coordinator and flags from sibling workers
+           arrive as `.arbiter/INBOX` in your working directory; do not run `arb inbox`.
+           Between major steps, check for it using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX`
+           (this does NOT error when the file is absent — the normal case). If it exists, read
            it, act on any coordinator instructions it contains, then delete the file to
            acknowledge receipt. Treat it as a real-time message from the coordinator — it
-           takes precedence over your current task if it redirects you.
+           takes precedence over your current task if it redirects you. To leave a flag
+           for another worker, use `arb message <their-task-id> <text>`.
 
            CRITICAL — continuation discipline: NEVER end a response with only a plan
            or a statement of the next step (for example, announcing that you will now
@@ -1124,6 +1129,31 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       m = send_to("bd-golden1", %{})
       _ = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
       assert Ash.get!(Message, m.id).read_at == nil
+    end
+  end
+
+  describe "commit-gate diet (bd-g926uj)" do
+    test "the work prompt says the gate covers format/compile/credo and bans full precommit" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert prompt =~ "at the commit gate"
+      assert prompt =~ "Do NOT run them"
+      assert prompt =~ "do NOT run the full `mix precommit`"
+      assert prompt =~ "tests for your changed files"
+    end
+
+    test "with a worktree the per-step `arb inbox` instruction is gone but the file is read" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      refute prompt =~ "running\n\n    arb inbox"
+      assert prompt =~ "do not run `arb inbox`"
+      assert prompt =~ "[ -f .arbiter/INBOX ] && cat .arbiter/INBOX"
+    end
+
+    test "without a worktree there is no file delivery, so `arb inbox` stays" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "arb inbox bd-golden1"
     end
   end
 

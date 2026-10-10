@@ -422,7 +422,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{test_tool_section(opts)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{commit_gate_section()}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 
@@ -431,21 +431,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
     #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
-    Coordination: at the start of each step, check your mailbox by running
-
-        arb inbox #{task.id}
-
-    This shows any direction from the coordinator or flags from sibling workers
-    (e.g. an upstream API shape changed) and marks them read. To leave a flag
-    for another worker, use `arb message <their-task-id> <text>`.
-
-    Between major steps, also check for `.arbiter/INBOX` in your working
-    directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
-    NOT error when the file is absent — the normal case). If it exists, read
-    it, act on any coordinator instructions it contains, then delete the file to
-    acknowledge receipt. Treat it as a real-time message from the coordinator — it
-    takes precedence over your current task if it redirects you.
-
+    #{coordination_section(task, opts)}
     CRITICAL — continuation discipline: NEVER end a response with only a plan
     or a statement of the next step (for example, announcing that you will now
     write a test instead of writing it). After ANY check (mailbox /
@@ -463,6 +449,62 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     on a line by itself, exactly. The worker watches your stdout and
     will mark the task complete when it sees that marker.
+    """
+  end
+
+  # bd-g926uj: the coordination block. Coordinator mail is also written to
+  # `.arbiter/INBOX` in the worktree (Arbiter.Messages.WorktreeDelivery), so
+  # with a worktree the per-step `arb inbox` round trip is redundant and only
+  # the file is read. Without a worktree there is no file delivery: keep it.
+  defp coordination_section(%Issue{id: id}, opts) do
+    if is_binary(Keyword.get(opts, :worktree_path)) do
+      """
+      Coordination: direction from the coordinator and flags from sibling workers
+      arrive as `.arbiter/INBOX` in your working directory; do not run `arb inbox`.
+      Between major steps, check for it using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX`
+      (this does NOT error when the file is absent — the normal case). If it exists, read
+      it, act on any coordinator instructions it contains, then delete the file to
+      acknowledge receipt. Treat it as a real-time message from the coordinator — it
+      takes precedence over your current task if it redirects you. To leave a flag
+      for another worker, use `arb message <their-task-id> <text>`.
+      """
+    else
+      """
+      Coordination: at the start of each step, check your mailbox by running
+
+          arb inbox #{id}
+
+      This shows any direction from the coordinator or flags from sibling workers
+      (e.g. an upstream API shape changed) and marks them read. To leave a flag
+      for another worker, use `arb message <their-task-id> <text>`.
+
+      Between major steps, also check for `.arbiter/INBOX` in your working
+      directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
+      NOT error when the file is absent — the normal case). If it exists, read
+      it, act on any coordinator instructions it contains, then delete the file to
+      acknowledge receipt. Treat it as a real-time message from the coordinator — it
+      takes precedence over your current task if it redirects you.
+      """
+    end
+  end
+
+  # bd-g926uj: what the commit gate covers, so the worker neither re-runs it nor
+  # waits on a backgrounded full precommit; and which tests are its job.
+  @doc false
+  @spec commit_gate_section() :: String.t()
+  def commit_gate_section do
+    """
+    VERIFICATION — Arbiter runs `mix format --check-formatted`,
+    `mix compile --warnings-as-errors` and `mix credo --strict` on your touched
+    files at the commit gate (when you print `arb done`, before anything is
+    pushed) and sends any failure back to this session. Do NOT run them
+    yourself, and do NOT run the full `mix precommit` / `mix audit` or poll a
+    backgrounded run. Run only the tests for your changed files, in the
+    foreground: for each changed `lib/<path>.ex` that is `test/<path>_test.exs`
+    in the same app (`cd apps/<app> && mix test test/<path>_test.exs`, or
+    `scripts/pre-push-tests.sh <files>`). The gate's output lists these tests
+    for your changed files.
+
     """
   end
 

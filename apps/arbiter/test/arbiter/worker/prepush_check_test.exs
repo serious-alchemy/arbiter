@@ -182,6 +182,44 @@ defmodule Arbiter.Worker.PrepushCheckTest do
       assert prompt =~ "has been pushed and no PR has been opened"
     end
 
+    test "the send-back lists the tests for the changed files" do
+      dir = Path.join(System.tmp_dir!(), "pc-hint-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(dir) end)
+      File.mkdir_p!(Path.join(dir, "lib"))
+      File.mkdir_p!(Path.join(dir, "test"))
+      File.write!(Path.join(dir, "lib/foo.ex"), "")
+      File.write!(Path.join(dir, "test/foo_test.exs"), "")
+      git = fn args -> {_, 0} = System.cmd("git", ["-C", dir | args], stderr_to_stdout: true) end
+      git.(["init", "-q", "-b", "main"])
+
+      git.([
+        "-c",
+        "user.email=a@b",
+        "-c",
+        "user.name=a",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base"
+      ])
+
+      git.(["checkout", "-q", "-b", "work"])
+      git.(["add", "-A"])
+      git.(["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "change"])
+
+      meta = Map.merge(@meta, %{worktree_path: dir, target_branch: "main"})
+      prompt = PrepushCheck.nudge_prompt("bd-4", meta, {:exit, 1, "boom"})
+
+      assert prompt =~ "Tests for your changed files"
+      assert prompt =~ "scripts/pre-push-tests.sh test/foo_test.exs"
+    end
+
+    test "no test hint without a worktree" do
+      refute PrepushCheck.nudge_prompt("bd-5", @meta, {:exit, 1, "boom"}) =~
+               "Tests for your changed"
+    end
+
     test "a fix pass nudge tells the worker the arbiter pushes and does not claim no PR was opened" do
       detail = {:exit, 1, "test failure"}
       prompt = PrepushCheck.nudge_prompt("bd-2", @meta, detail, :fix_pass)
