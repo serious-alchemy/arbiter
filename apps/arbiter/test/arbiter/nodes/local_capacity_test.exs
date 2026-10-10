@@ -186,6 +186,153 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     end
   end
 
+  # bd-8ikgoc: a worker registers at init with no node (the node is only known
+  # once its port opens), so the node must be stamped onto the entry afterwards
+  # and survive the hold flag being rewritten.
+  describe "runs placed on a remote node (bd-8ikgoc)" do
+    defp remote_worker(ws, node_id) do
+      key = "lc-remote-#{System.unique_integer([:positive])}"
+      test = self()
+
+      pid =
+        spawn(fn ->
+          {:ok, _} = Registry.register(WorkerRegistry, key, nil)
+          :ok = WorkerRegistry.put_dispatch(key, ws.id, "claude")
+          :ok = WorkerRegistry.put_node(key, node_id)
+          :ok = WorkerRegistry.put_dispatch(key, ws.id, "claude", released: false)
+          send(test, {:registered, self()})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:registered, ^pid}
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      key
+    end
+
+    test "never count against the primary's cap; resume and redispatch are admitted", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      node_id = Ecto.UUID.generate()
+      for _ <- 1..3, do: remote_worker(ws, node_id)
+      {local_key, _} = fake_worker(ws)
+
+      assert LocalCapacity.holders() == [local_key]
+
+      for kind <- [:resume, :redispatch] do
+        assert :ok = LocalCapacity.check("bd-mixed", kind, [])
+      end
+    end
+
+    test "holders of a hold are only the primary's runs", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      remote_worker(ws, Ecto.UUID.generate())
+      {local_key, _} = fake_worker(ws)
+
+      assert {:error, {:no_node_capacity, info}} = LocalCapacity.check("bd-held", :resume, [])
+      assert info.holders == [local_key]
+    end
+
+    test "Nodes.Capacity's local free slots are cap minus LocalCapacity's holders", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      for _ <- 1..3, do: remote_worker(ws, Ecto.UUID.generate())
+      fake_worker(ws)
+
+      # Both read the one occupancy source (`Concurrency.live_occupants/0`), so
+      # the three remote runs are invisible to either. The `arb node list` row
+      # (`Overview.local_live/1`) counts DB Run rows minus node-session
+      # snapshots, which needs live node sessions this unit test cannot stand
+      # up; it is covered by overview_test.exs, not asserted here.
+      assert length(LocalCapacity.holders()) == 1
+
+      assert %{free: free} = Arbiter.Nodes.Capacity.placement(:prefer_remote, local_cap: 2)
+      # no remote nodes contribute, so every free slot is a local one
+      assert free == 2 - length(LocalCapacity.holders())
+    end
+
+    test "an entry registered with its placed node does not count before any port opens",
+         %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      node_id = Ecto.UUID.generate()
+      key = "lc-placed-#{System.unique_integer([:positive])}"
+      test = self()
+
+      pid =
+        spawn(fn ->
+          {:ok, _} = Registry.register(WorkerRegistry, key, nil)
+          :ok = WorkerRegistry.put_dispatch(key, ws.id, "claude", node_id: node_id)
+          send(test, {:registered, self()})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:registered, ^pid}
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+
+      assert LocalCapacity.holders() == []
+      assert :ok = LocalCapacity.check("bd-starting", :resume, [])
+    end
+
+    test "a worker started with a placed node never counts as a primary holder", %{ws: ws} do
+      task_id = "lc-placed-worker-#{System.unique_integer([:positive])}"
+      node_id = Ecto.UUID.generate()
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          meta: %{placed_node_id: node_id}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      assert %{node_id: ^node_id} =
+               Enum.find(
+                 Arbiter.Accounts.Concurrency.live_occupants(),
+                 &(&1.registry_key == task_id)
+               )
+
+      refute task_id in LocalCapacity.holders()
+    end
+
+    test "opening a session on a remote handle stamps its node onto the registry entry",
+         %{ws: ws} do
+      task_id = "lc-open-worker-#{System.unique_integer([:positive])}"
+      node_id = Ecto.UUID.generate()
+
+      {:ok, pid} =
+        Arbiter.Worker.start(task_id: task_id, repo: "arbiter", workspace_id: ws.id)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      # Registered at init with no node: it reads as a primary run.
+      assert task_id in LocalCapacity.holders()
+
+      handle = {:remote, {node_id, "run-#{task_id}", make_ref()}}
+
+      port_args = %{
+        remote: %{prepared: handle},
+        argv: ["claude"],
+        cd: System.tmp_dir!()
+      }
+
+      assert {:ok, ^handle} =
+               GenServer.call(pid, {:__claude_session_open__, port_args, %{provider: :claude}})
+
+      assert %{node_id: ^node_id} =
+               Enum.find(
+                 Arbiter.Accounts.Concurrency.live_occupants(),
+                 &(&1.registry_key == task_id)
+               )
+
+      refute task_id in LocalCapacity.holders()
+    end
+  end
+
   describe "check/3 (admit without taking the slot)" do
     test "answers like admit/3 but reserves nothing", %{ws: ws} do
       {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
