@@ -4,6 +4,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
       arb worker list             — each ticket with a live run: its current run's kind + state
       arb worker show <task-id>   — the ticket's current run (incl. recent output) + its recent runs
+                      + the pre-push check steps the commit gate ran for it (bd-8wdrql)
       arb worker runs [<task-id>] [--kind K] [--state S] [--outcome O] [--before <iso8601>]
                       [--limit N] — run history; with no task id, fleet-wide
       arb worker runs --run <run-id> — one run by id (metadata + output tail)
