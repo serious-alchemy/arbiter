@@ -136,6 +136,96 @@ defmodule Arbiter.Worker.TestReportTest do
     end
   end
 
+  # This repo's own ExUnit formatter (test_helper) prints `Result:` lines in
+  # place of ExUnit's `N tests, M failures`; seen on a real `mix test` run.
+  describe "build/3 with this repo's Result: summary" do
+    test "a green run" do
+      out = "....\nFinished in 0.2 seconds\n\nResult: 889 passed, 9 skipped, 1 excluded\n"
+      report = TestReport.build(out, 0)
+
+      assert report.status == :passed
+      assert report.tests == 898
+      assert report.failures == 0
+      assert report.skipped == 9
+    end
+
+    test "a red run" do
+      out = """
+      .
+
+        1) test adds numbers (ZZFailTest)
+           test/zz_tmp/zz_fail_test.exs:3
+           Assertion with == failed
+           code:  assert 1 + 1 == 3
+           left:  2
+           right: 3
+           stacktrace:
+             test/zz_tmp/zz_fail_test.exs:4: (test)
+
+
+      Finished in 0.00 seconds (0.00s async, 0.00s sync)
+
+      Result: 1/2 passed
+      Failed: 1 test
+      """
+
+      report = TestReport.build(out, 2)
+
+      assert report.status == :failed
+      assert report.tests == 2
+      assert report.failures == 1
+      assert [block] = report.failed_tests
+      assert block =~ "right: 3"
+      refute block =~ "Result:"
+    end
+
+    test "a red run of several tests" do
+      report = TestReport.build("Result: 8/12 passed\nFailed: 4 tests\n", 2)
+
+      assert report.tests == 12
+      assert report.failures == 4
+    end
+  end
+
+  describe "build/3 when failures print inline among dots and log lines" do
+    test "a block ends where the unindented output resumes" do
+      out = """
+      ..
+
+        1) test one (T)
+           test/t_test.exs:3
+           Assertion with == failed
+           stacktrace:
+             test/t_test.exs:4: (test)
+
+      ....
+      15:06:27.404 [warning] something noisy
+      ..
+
+        2) test two (T)
+           test/t_test.exs:9
+           ** (RuntimeError) two
+           stacktrace:
+             test/t_test.exs:10: (test)
+
+      ...
+      Finished in 0.1 seconds
+
+      Result: 5/7 passed
+      Failed: 2 tests
+      """
+
+      report = TestReport.build(out, 2)
+
+      assert [one, two] = report.failed_tests
+      assert one =~ "test/t_test.exs:4: (test)"
+      refute one =~ "noisy"
+      refute one =~ "...."
+      assert two =~ "** (RuntimeError) two"
+      refute two =~ "Finished"
+    end
+  end
+
   describe "build/3 on runs that never reached a summary" do
     test "a compile error comes back as an error with the relevant excerpt" do
       out = """

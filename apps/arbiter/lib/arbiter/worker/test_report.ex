@@ -34,7 +34,9 @@ defmodule Arbiter.Worker.TestReport do
   @ansi ~r/\e\[[0-9;?]*[A-Za-z]/
   @block_header ~r/^\s{0,4}(\d+)\) (test|doctest|property) /
   @summary ~r/^\s*(?:(\d+) doctests?, )?(?:(\d+) properties, )?(\d+) tests?, (\d+) failures?(?:, (\d+) invalid)?(?:, (\d+) skipped)?(?:, \((\d+) excluded\))?/
-  @chatter ~r/^\s*(Finished in |Randomized with seed|Running ExUnit with|Excluding tags|Including tags)/
+  @result_failed ~r/^\s*Result: (\d+)\/(\d+) passed(?:, (\d+) skipped)?/
+  @result_passed ~r/^\s*Result: (\d+) passed(?:, (\d+) skipped)?/
+  @chatter ~r/^\s*(Finished in |Result: |Failed: |Randomized with seed|Running ExUnit with|Excluding tags|Including tags)/
 
   @type status :: :passed | :failed | :error | :timeout
   @type t :: %{
@@ -133,36 +135,68 @@ defmodule Arbiter.Worker.TestReport do
 
   # One summary line per umbrella app run; sum them.
   defp counts(lines) do
-    lines
-    |> Enum.flat_map(fn line ->
-      case Regex.run(@summary, line) do
-        nil -> []
-        caps -> [{line, caps}]
-      end
-    end)
-    |> case do
+    case Enum.flat_map(lines, &summary_counts/1) do
       [] ->
         nil
 
       found ->
         %{
-          line: found |> Enum.map(fn {l, _} -> String.trim(l) end) |> Enum.join("; "),
-          tests: sum(found, 1) + sum(found, 3) + sum(found, 2),
-          failures: sum(found, 4),
-          skipped: sum(found, 6)
+          line: found |> Enum.map(& &1.line) |> Enum.join("; "),
+          tests: found |> Enum.map(& &1.tests) |> Enum.sum(),
+          failures: found |> Enum.map(& &1.failures) |> Enum.sum(),
+          skipped: found |> Enum.map(& &1.skipped) |> Enum.sum()
         }
     end
   end
 
-  defp sum(found, idx) do
-    Enum.reduce(found, 0, fn {_line, caps}, acc ->
-      case Enum.at(caps, idx) do
-        nil -> acc
-        "" -> acc
-        n -> acc + String.to_integer(n)
-      end
-    end)
+  # ExUnit's own `N tests, M failures`, or this repo's `Result:` formatter.
+  defp summary_counts(line) do
+    cond do
+      caps = Regex.run(@summary, line) ->
+        [_ | rest] = caps
+        [doctests, properties, tests, failures, _invalid, skipped] = pad(rest, 6)
+
+        [
+          %{
+            line: String.trim(line),
+            tests: int(doctests) + int(properties) + int(tests),
+            failures: int(failures),
+            skipped: int(skipped)
+          }
+        ]
+
+      caps = Regex.run(@result_failed, line) ->
+        [_, passed, total, skipped] = pad(caps, 4)
+
+        [
+          %{
+            line: String.trim(line),
+            tests: int(total),
+            failures: int(total) - int(passed),
+            skipped: int(skipped)
+          }
+        ]
+
+      caps = Regex.run(@result_passed, line) ->
+        [_, passed, skipped] = pad(caps, 3)
+
+        [
+          %{
+            line: String.trim(line),
+            tests: int(passed) + int(skipped),
+            failures: 0,
+            skipped: int(skipped)
+          }
+        ]
+
+      true ->
+        []
+    end
   end
+
+  defp pad(list, size), do: list ++ List.duplicate("", max(size - length(list), 0))
+  defp int(""), do: 0
+  defp int(n), do: String.to_integer(n)
 
   # -- failure blocks -------------------------------------------------------
 
@@ -172,7 +206,7 @@ defmodule Arbiter.Worker.TestReport do
         cond do
           Regex.match?(@block_header, line) -> {close(blocks, current), [line]}
           current == nil -> {blocks, nil}
-          block_end?(line) -> {close(blocks, current), nil}
+          block_end?(line) or unindented?(line) -> {close(blocks, current), nil}
           true -> {blocks, [line | current]}
         end
       end)
@@ -185,6 +219,10 @@ defmodule Arbiter.Worker.TestReport do
 
   # A block runs to the next header or to the run's closing chatter, not to the
   # next blank line: assertion output (diffs, `code:`) contains blank lines.
+  # ExUnit indents a failure's body; the dots, log lines and chatter that follow
+  # it start at the left margin.
+  defp unindented?(line), do: String.trim(line) != "" and not String.starts_with?(line, "    ")
+
   defp block_end?(line), do: Regex.match?(@chatter, line) or Regex.match?(@summary, line)
 
   defp trim_block(lines) do
