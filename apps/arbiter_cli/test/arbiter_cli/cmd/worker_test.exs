@@ -24,6 +24,60 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "arb done"
     end
 
+    test "lists the pre-push check steps with their status, and the failing output" do
+      stub_get("/api/workers/bd-pp", %{
+        "task_id" => "bd-pp",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => [],
+        "pre_push_checks" => [
+          %{
+            "attempt" => 1,
+            "name" => "format",
+            "cmd" => "mix format --check-formatted",
+            "status" => "failed",
+            "exit_status" => 1,
+            "duration_ms" => 1234,
+            "output" => "** (Mix) mix format failed"
+          },
+          %{
+            "attempt" => 2,
+            "name" => "format",
+            "cmd" => "mix format --check-formatted",
+            "status" => "passed",
+            "exit_status" => 0,
+            "duration_ms" => 900,
+            "output" => ""
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-pp"]) end)
+      assert out =~ "Pre-push checks"
+      assert out =~ ~r/attempt 1\s+format\s+failed.*exit 1.*1\.2s/
+      assert out =~ ~r/attempt 2\s+format\s+passed/
+      assert out =~ "mix format failed"
+    end
+
+    test "prints no pre-push section when the gate never ran" do
+      stub_get("/api/workers/bd-nopp", %{
+        "task_id" => "bd-nopp",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => [],
+        "pre_push_checks" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-nopp"]) end)
+      refute out =~ "Pre-push"
+    end
+
     test "shows the phase and agent liveness" do
       stub_get("/api/workers/bd-002", %{
         "task_id" => "bd-002",

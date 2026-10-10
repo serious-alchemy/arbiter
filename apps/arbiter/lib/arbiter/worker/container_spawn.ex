@@ -161,6 +161,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   # Names whose value changes how the `podman` client itself runs. They are
   # passed as `-e NAME=value`, never through the client's environment.
+  # run_command/3: how long past the step timeout the client may linger before the
+  # container is removed under it.
+  @run_command_grace_s 15
+
   @client_names ~w(PATH HOME USER LOGNAME SHELL LD_LIBRARY_PATH LD_PRELOAD
                    HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
                    http_proxy https_proxy all_proxy no_proxy)
@@ -1377,6 +1381,35 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   def wrap_port(%{sandbox: _}), do: {:error, :empty_command}
   def wrap_port(port_args), do: {:ok, port_args}
+
+  @doc """
+  Run `command` (`sh -c`) to completion in the run's own container: the spawn's
+  `port_args` with the agent's argv swapped for the command, so it gets the same
+  image, mounts, home, environment and (absent) network as the session had
+  (bd-8wdrql, the pre-push recipe). Returns `{output, exit_status}` — 124 when
+  `timeout_s` (plus a grace) elapsed — or `{:error, reason}` when the wrap was
+  refused. The container is removed by name afterwards, whatever happened.
+  """
+  @spec run_command(map(), String.t(), pos_integer()) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def run_command(%{sandbox: %{name: name}} = port_args, command, timeout_s)
+      when is_binary(command) and is_integer(timeout_s) do
+    inner = %{port_args | argv: ["sh", "-c", command]}
+
+    with {:ok, %{argv: [podman | args], env: env}} <- wrap_port(inner) do
+      try do
+        Container.cmd([], podman, args,
+          env: env,
+          stderr_to_stdout: true,
+          timeout: (timeout_s + @run_command_grace_s) * 1000
+        )
+      after
+        Container.teardown(name)
+      end
+    end
+  end
+
+  def run_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
 
   defp opts(request, port_args) do
     {inherit, literal} = split_env(env_pairs(port_args, request))

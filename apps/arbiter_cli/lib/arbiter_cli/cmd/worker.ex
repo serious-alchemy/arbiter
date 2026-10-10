@@ -364,6 +364,8 @@ defmodule ArbiterCli.Cmd.Worker do
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
     if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")
 
+    emit_pre_push_checks(snap["pre_push_checks"] || [])
+
     case snap["output_lines"] || [] do
       [] ->
         IO.puts("\n(no output lines captured)")
@@ -375,6 +377,34 @@ defmodule ArbiterCli.Cmd.Worker do
 
     emit_recent_runs(snap["runs"] || [])
   end
+
+  # bd-8wdrql: the pre-push recipe's steps for this run, per attempt; a red
+  # step carries the tail of its output.
+  defp emit_pre_push_checks([]), do: :ok
+
+  defp emit_pre_push_checks(steps) do
+    IO.puts("\nPre-push checks (#{length(steps)}):")
+
+    Enum.each(steps, fn s ->
+      exit_part = if s["exit_status"], do: "  exit #{s["exit_status"]}", else: ""
+
+      IO.puts(
+        "  attempt #{s["attempt"]}  #{String.pad_trailing(to_string(s["name"]), 14)} " <>
+          "#{String.pad_trailing(to_string(s["status"]), 8)}#{exit_part}  " <>
+          duration_label(s["duration_ms"])
+      )
+
+      if s["status"] in ["failed", "timeout", "error"] and is_binary(s["output"]) do
+        s["output"]
+        |> String.split("\n")
+        |> Enum.take(-20)
+        |> Enum.each(&IO.puts("      | #{&1}"))
+      end
+    end)
+  end
+
+  defp duration_label(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
+  defp duration_label(_), do: ""
 
   # bd-1uu19b: the ticket's recent runs, each labelled with its kind; `*`
   # marks the current one.
