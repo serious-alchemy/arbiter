@@ -513,7 +513,13 @@ defmodule Arbiter.Nodes.SessionTest do
                          "timeout_s" => 30
                        }}}
 
-      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => id, "status" => 1, "output" => "red"})
+      Session.node_event(pid, "exec.result", %{
+        "run" => "run1",
+        "id" => id,
+        "status" => 1,
+        "output" => "red"
+      })
+
       assert {"red", 1} = Task.await(waiter)
     end
 
@@ -522,14 +528,27 @@ defmodule Arbiter.Nodes.SessionTest do
     } do
       waiter = Task.async(fn -> Session.exec(pid, "run1", "true", 30) end)
       assert_receive {:node_session, {:push, "exec", %{"id" => id}}}
-      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => id, "error" => "no_context"})
+
+      Session.node_event(pid, "exec.result", %{
+        "run" => "run1",
+        "id" => id,
+        "error" => "no_context"
+      })
+
       assert {:error, {:exec_failed, "no_context"}} = Task.await(waiter)
     end
 
     test "a result for another id is ignored", %{pid: pid} do
       waiter = Task.async(fn -> Session.exec(pid, "run1", "true", 30, 300) end)
       assert_receive {:node_session, {:push, "exec", _}}
-      Session.node_event(pid, "exec.result", %{"run" => "run1", "id" => "other", "status" => 0, "output" => ""})
+
+      Session.node_event(pid, "exec.result", %{
+        "run" => "run1",
+        "id" => "other",
+        "status" => 0,
+        "output" => ""
+      })
+
       assert {:error, :timeout} = Task.await(waiter)
     end
 

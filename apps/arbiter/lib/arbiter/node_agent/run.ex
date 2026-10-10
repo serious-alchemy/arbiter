@@ -58,6 +58,7 @@ defmodule Arbiter.NodeAgent.Run do
   alias Arbiter.NodeAgent.{
     Cgroups,
     Checkout,
+    Exec,
     Files,
     Retained,
     RunSpec,
@@ -774,6 +775,8 @@ defmodule Arbiter.NodeAgent.Run do
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     command = if secrets_file, do: Container.secrets_wrapper(spec.command), else: spec.command
+    # bd-9rrrgk: what `Arbiter.NodeAgent.Exec` rebuilds a container from afterwards.
+    Exec.remember(spec.run, wrap_opts)
 
     case Container.wrap(command, wrap_opts) do
       {:ok, argv} -> {:ok, argv}

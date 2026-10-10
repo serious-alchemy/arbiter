@@ -526,7 +526,6 @@ defmodule Arbiter.Nodes.Session do
   end
 
   def handle_call({:collect, _run, _kind}, _from, %{channel: nil} = state),
-
     do: {:reply, {:error, :not_connected}, state}
 
   # A read-only checkout (a reviewer's clone, bd-cgdhlu) uploads no bundle, so there is
@@ -674,7 +673,7 @@ defmodule Arbiter.Nodes.Session do
   end
 
   def handle_info(:reap, state),
- do: {:noreply, state |> send_reap() |> schedule_reap()}
+    do: {:noreply, state |> send_reap() |> schedule_reap()}
 
   def handle_info({:prepare_timeout, run}, state) do
     case RunStreams.fetch(state.streams, run) do

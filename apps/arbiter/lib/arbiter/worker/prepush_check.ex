@@ -293,7 +293,9 @@ defmodule Arbiter.Worker.PrepushCheck do
   ]
 
   defp infra_signature(output) when is_binary(output) do
-    Enum.find_value(@infra_signatures, fn {label, re} -> if Regex.match?(re, output), do: label end)
+    Enum.find_value(@infra_signatures, fn {label, re} ->
+      if Regex.match?(re, output), do: label
+    end)
   end
 
   defp record(step, outcome, duration_ms, limit) do

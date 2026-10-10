@@ -34,7 +34,19 @@ defmodule Arbiter.NodeAgent.Backend do
   @doc "Take a checkpoint of the run now; `opts` may carry `:kind` (default `\"checkout\"`)."
   @callback collect(run, keyword()) :: :ok | {:error, term()}
 
+  @doc """
+  Run `command` (`sh -c`) to completion in a container of `run`'s shape — its image,
+  mounts and limits, none of its secrets — and return `{output, exit_status}`
+  (bd-9rrrgk, the pre-push recipe). The run need not be live. Optional: a backend
+  without it answers `{:error, :unsupported}`.
+  """
+  @callback exec(run, String.t(), pos_integer(), keyword()) ::
+              {String.t(), non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks exec: 4
+
   @doc "Ids of the runs this backend currently owns."
+
   @callback list_owned() :: [run]
 
   @doc "Remove leftovers of runs outside the live set: `%{config:, request:, opts:}`."

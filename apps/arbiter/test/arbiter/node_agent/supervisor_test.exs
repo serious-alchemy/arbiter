@@ -53,6 +53,7 @@ defmodule Arbiter.NodeAgent.SupervisorTest do
                Arbiter.NodeAgent.Status,
                Arbiter.NodeAgent.Upgrader,
                Arbiter.NodeAgent.RunRegistry,
+               Arbiter.NodeAgent.Exec,
                Arbiter.NodeAgent.RunSupervisor,
                Arbiter.NodeAgent.Bridge,
                Arbiter.NodeAgent.Connection

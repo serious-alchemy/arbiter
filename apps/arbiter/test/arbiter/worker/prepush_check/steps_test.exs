@@ -171,7 +171,9 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
       resolved
     end
 
-    test "a missing-deps failure is infra: the step is skipped, never a code failure", %{repo: repo} do
+    test "a missing-deps failure is infra: the step is skipped, never a code failure", %{
+      repo: repo
+    } do
       script =
         "echo 'Unchecked dependencies for environment test:' 1>&2; " <>
           "echo '* ash (Hex package)' 1>&2; " <>
