@@ -88,6 +88,7 @@ defmodule Arbiter.MCP.Catalog do
   | `trust_show` | coordinator | `Arbiter.Loop.Trust.View.list/0` / `detail/1` (G18 earned trust; no tool promotes) |
   | `trust_confirm` | coordinator | `Arbiter.Loop.Trust.confirm/2` (an automatic suspension stands: quarantine) |
   | `trust_dismiss` | coordinator | `Arbiter.Loop.Trust.dismiss/3` (a suspension was a false positive: its tier returns) |
+  | `permission_request` | worker | `Arbiter.Tasks.PermissionRequest.submit/4` (G15a: records a `requested` event and raises `:permission_requested`; grants nothing) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `usage_events_list` | coordinator | `Arbiter.Usage.list_events/1` (raw ledger rows, P-17) |
   | `usage_calibration` | coordinator | `Arbiter.Usage.calibration/1` (difficulty mis-rating report, P-17) |
@@ -152,6 +153,7 @@ defmodule Arbiter.MCP.Catalog do
 
   @both [:worker, :coordinator]
   @coordinator [:coordinator]
+  @worker [:worker]
 
   # Enum values for the loop-proposal queue tools. Kept as strings here because
   # they go straight into a JSON Schema; `Arbiter.Loop.PendingWrite` holds the
@@ -2744,6 +2746,41 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.trust_dismiss/2
+    },
+    %{
+      name: "permission_request",
+      tiers: @worker,
+      description:
+        "Ask for a permission this run does not have (a proxy `403`, a missing env var or key " <>
+          "means \"not granted\"). It validates `permission` against the workspace bindings, " <>
+          "records the request on your own ticket and tells whoever may grant it (the " <>
+          "coordinator, or the operator when the binding says so). It grants nothing: the answer " <>
+          "is \"recorded, not granted\" and your reach is unchanged. Carry on without it, or stop " <>
+          "and report the affected acceptance criteria as unmet. A legitimate request is not a " <>
+          "trust violation; a workaround attempt is.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "permission" => %{
+            "type" => "string",
+            "description" =>
+              "What you need: `network:<host>[:<port>]`, `tracker_write`, `secrets:<name>`, " <>
+                "`prod_read` or `prod_ssh`. Required."
+          },
+          "reason" => %{
+            "type" => "string",
+            "description" =>
+              "What you need it for and what is blocked without it. Required; the grantor reads it."
+          },
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. Optional; only your own ticket is accepted."
+          }
+        },
+        "required" => ["permission", "reason"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.permission_request/2
     },
     %{
       name: "memory_pending_list",

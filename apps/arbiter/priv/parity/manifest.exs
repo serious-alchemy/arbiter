@@ -362,6 +362,18 @@
     },
     # ---- workers ----
     %{
+      id: "workers/permission_request",
+      title: "Worker asks for a permission mid-run (recorded, never granted)",
+      mcp: ["permission_request"],
+      cli: nil,
+      rest: nil,
+      status: :excluded,
+      absent: %{
+        cli: {:intentional, "Worker-tier MCP tool only: a worker asks from inside its run and the request grants nothing; the grant path is the operator/coordinator permission surface (G12)."},
+        rest: {:intentional, "Worker-tier MCP tool only: a worker asks from inside its run and the request grants nothing; the grant path is the operator/coordinator permission surface (G12)."}
+      }
+    },
+    %{
       id: "workers/dispatch_a_worker_on_a_ticket",
       title: "Dispatch a worker on a ticket",
       mcp: ["worker_dispatch"],
