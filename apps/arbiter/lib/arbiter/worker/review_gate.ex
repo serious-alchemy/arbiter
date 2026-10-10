@@ -6589,7 +6589,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # The container's `arb` needs the implementer's worker token as ARB_TOKEN
   # (`ContainerSpawn.prepare/1`); a reviewer has none.
   defp sandbox_session_opts(policy, ws, role, state, agent_opts) do
-    ContainerSpawn.session_opts(policy, ws, [repo: Map.get(state, :repo)] ++ node_opts(state, role)) ++
+    ContainerSpawn.session_opts(
+      policy,
+      ws,
+      [repo: Map.get(state, :repo)] ++ node_opts(state, role)
+    ) ++
       if(ContainerSpawn.podman?(policy) and role == :implementer,
         do: Keyword.take(agent_opts, [:arb_token]),
         else: []

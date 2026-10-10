@@ -54,6 +54,21 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "RW8: `{:no_node_capacity, …}` holds the pass while the primary's own worker cap is 0 " <>
        "(retry timer; no verdict, no round consumed, no escalation) until the operator " <>
        "raises it — an operator capacity choice, not a guard"},
+    # bd-cgdhlu: the reviewer's placement. The same capacity hold as above, for a
+    # `remote_only` workspace with no node free: nothing spawned, no verdict, no round.
+    {Arbiter.Worker.ReviewGate, :place_reviewer_pass, 2,
+     "bd-cgdhlu: `{:placement_held, …}` holds the reviewer pass while a remote_only " <>
+       "workspace has no node free (retry timer; no verdict, no round consumed, no " <>
+       "escalation) — an operator placement choice, not a guard"},
+    {Arbiter.Worker.ReviewGate, :launch_first_reviewer_in_checkout, 1,
+     "bd-cgdhlu: hands `{:placement_held, …}` to `hold_for_placement/3` — a capacity hold, " <>
+       "not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :launch_next_reviewer_in_checkout, 2,
+     "bd-cgdhlu: hands `{:placement_held, …}` to `hold_for_placement/3` — a capacity hold, " <>
+       "not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :redispatch_reviewer, 2,
+     "bd-cgdhlu: a pass whose node was lost is dispatched again; `{:placement_held, …}` " <>
+       "holds it like any placement hold — a capacity hold, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,

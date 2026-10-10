@@ -474,8 +474,7 @@ defmodule Arbiter.Nodes.Session do
       true ->
         notify_channel(state, {:push, "collect", %{"run" => run, "kind" => Atom.to_string(kind)}})
 
-        {:noreply,
-         %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
+        {:noreply, %{state | collectors: Map.update(state.collectors, run, [from], &[from | &1])}}
     end
   end
 

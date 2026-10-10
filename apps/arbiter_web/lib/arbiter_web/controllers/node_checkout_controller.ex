@@ -101,7 +101,8 @@ defmodule ArbiterWeb.NodeCheckoutController do
       {:ok, pid, ctx} ->
         checked_upload(conn, pid, run, ctx, kind)
 
-      :error -> error(conn, 404, "Not found")
+      :error ->
+        error(conn, 404, "Not found")
     end
   end
 
