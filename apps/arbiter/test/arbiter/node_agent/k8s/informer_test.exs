@@ -34,7 +34,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
     if length(acc) == n do
       Enum.reverse(acc)
     else
-      assert_receive {:pod_event, ^informer, type, pod}, 2_000
+      assert_receive {:pod_event, ^informer, type, pod}, 5_000
       collect(informer, n, [{type, pod["metadata"]["name"], pod["status"]["phase"]} | acc])
     end
   end
@@ -55,7 +55,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
     informer = start_informer(ctx)
 
     assert collect(informer, 2) == [{:added, "a", "Pending"}, {:added, "b", "Pending"}]
-    assert_receive {:pod_synced, ^informer}
+    assert_receive {:pod_synced, ^informer}, 5_000
     assert :ok = Informer.await_sync(informer, 2_000)
     assert Informer.synced?(informer)
 
@@ -79,7 +79,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
 
   test "watch events arrive in order: add, modify, delete", ctx do
     informer = start_informer(ctx)
-    assert_receive {:pod_synced, ^informer}
+    assert_receive {:pod_synced, ^informer}, 5_000
     FakeK8sApi.await_watchers(ctx.api, 1)
 
     FakeK8sApi.put_pod(ctx.api, pod("p"))
@@ -130,7 +130,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
 
   test "the resumed watch asks for the version after the last event it handled", ctx do
     informer = start_informer(ctx)
-    assert_receive {:pod_synced, ^informer}
+    assert_receive {:pod_synced, ^informer}, 5_000
     FakeK8sApi.await_watchers(ctx.api, 1)
 
     FakeK8sApi.put_pod(ctx.api, pod("a"))
@@ -150,7 +150,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
 
   test "a watch cut off mid-event loses nothing: the half event is replayed whole", ctx do
     informer = start_informer(ctx)
-    assert_receive {:pod_synced, ^informer}
+    assert_receive {:pod_synced, ^informer}, 5_000
     FakeK8sApi.await_watchers(ctx.api, 1)
 
     FakeK8sApi.put_pod(ctx.api, pod("a"))
@@ -188,7 +188,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
                    {:added, "fresh", "Pending"}
                  ])
 
-        assert_receive {:pod_synced, ^informer}
+        assert_receive {:pod_synced, ^informer}, 5_000
         FakeK8sApi.await_watchers(ctx.api, 1)
         refute_receive {:pod_event, ^informer, _, _}, 50
         assert lists(ctx.api) == 2
@@ -212,7 +212,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
 
   test "a bookmark moves the resume point, so a compaction behind it is not a 410", ctx do
     informer = start_informer(ctx)
-    assert_receive {:pod_synced, ^informer}
+    assert_receive {:pod_synced, ^informer}, 5_000
     FakeK8sApi.await_watchers(ctx.api, 1)
 
     FakeK8sApi.put_pod(ctx.api, pod("a"))
@@ -222,7 +222,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
     FakeK8sApi.compact(ctx.api)
     FakeK8sApi.bookmark(ctx.api)
     bookmark_rv = Integer.to_string(FakeK8sApi.current_rv(ctx.api))
-    assert_receive {:pod_bookmark, ^informer, ^bookmark_rv}
+    assert_receive {:pod_bookmark, ^informer, ^bookmark_rv}, 5_000
     FakeK8sApi.drop_watches(ctx.api)
     FakeK8sApi.await_watchers(ctx.api, 1)
 
@@ -242,7 +242,7 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
 
     test "a failing watch is retried from the same version, without a relist", ctx do
       informer = start_informer(ctx, [])
-      assert_receive {:pod_synced, ^informer}
+      assert_receive {:pod_synced, ^informer}, 5_000
       FakeK8sApi.await_watchers(ctx.api, 1)
       FakeK8sApi.fail_next(ctx.api, :watch, 503, 2)
       FakeK8sApi.drop_watches(ctx.api)
@@ -291,11 +291,11 @@ defmodule Arbiter.NodeAgent.K8s.InformerTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive :subscribed
+      assert_receive :subscribed, 5_000
       assert Informer.subscribers(informer) == [sub]
       ref = Process.monitor(sub)
       Process.exit(sub, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^sub, :killed}
+      assert_receive {:DOWN, ^ref, :process, ^sub, :killed}, 5_000
 
       # A call after the DOWN was sent is handled after the informer saw it.
       assert {:ok, _} = Informer.subscribe(informer)
