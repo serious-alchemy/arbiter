@@ -19,6 +19,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
   """
   use Supervisor
 
+  alias Arbiter.NodeAgent.Backend
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Connection
@@ -37,10 +38,11 @@ defmodule Arbiter.NodeAgent.Supervisor do
 
     case Config.load(opts) do
       {:ok, config} ->
+        backend = config.backend
         # The run table before the connection: `Connection` addresses runs.
         config = %{
           config
-          | live_runs_fun: config.live_runs_fun || (&Runs.inventory/0),
+          | live_runs_fun: config.live_runs_fun || (&backend.inventory/0),
             run_opts: bridge_run_opts(config.run_opts)
         }
 
@@ -55,6 +57,11 @@ defmodule Arbiter.NodeAgent.Supervisor do
             [{Bridge, node_home: config.node_home}, {Connection, config: config}],
           strategy: :one_for_one
         )
+
+      {:error, {:unknown_backend, name}} ->
+        raise ArgumentError,
+              "unknown ARB_AGENT_BACKEND #{inspect(name)} (expected one of: " <>
+                "#{Enum.join(Backend.names(), ", ")})"
 
       {:error, reason} ->
         Logger.error("node agent is not configured: #{inspect(reason)}")
