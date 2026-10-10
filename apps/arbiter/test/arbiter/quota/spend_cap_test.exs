@@ -57,7 +57,8 @@ defmodule Arbiter.Quota.SpendCapTest do
 
   describe "config/1" do
     test "reads the cap with week / flat defaults" do
-      assert %{usd: 20.0, window: :week, mode: :flat} = SpendCap.config(account(%{"spend_cap" => 20.0}))
+      assert %{usd: 20.0, window: :week, mode: :flat} =
+               SpendCap.config(account(%{"spend_cap" => 20.0}))
     end
 
     test "reads window and mode" do
@@ -74,12 +75,20 @@ defmodule Arbiter.Quota.SpendCapTest do
 
   describe "bounds/2: fixed UTC windows" do
     test "day starts at 00:00 UTC" do
-      assert %{start: ~U[2026-10-14 00:00:00Z], reset_at: ~U[2026-10-15 00:00:00Z], seconds: 86_400} =
+      assert %{
+               start: ~U[2026-10-14 00:00:00Z],
+               reset_at: ~U[2026-10-15 00:00:00Z],
+               seconds: 86_400
+             } =
                SpendCap.bounds(:day, @now)
     end
 
     test "week starts Monday 00:00 UTC" do
-      assert %{start: ~U[2026-10-12 00:00:00Z], reset_at: ~U[2026-10-19 00:00:00Z], seconds: 604_800} =
+      assert %{
+               start: ~U[2026-10-12 00:00:00Z],
+               reset_at: ~U[2026-10-19 00:00:00Z],
+               seconds: 604_800
+             } =
                SpendCap.bounds(:week, @now)
     end
 
@@ -94,7 +103,8 @@ defmodule Arbiter.Quota.SpendCapTest do
 
       assert s == 31 * 86_400
 
-      assert %{reset_at: ~U[2027-01-01 00:00:00Z]} = SpendCap.bounds(:month, ~U[2026-12-31 23:00:00Z])
+      assert %{reset_at: ~U[2027-01-01 00:00:00Z]} =
+               SpendCap.bounds(:month, ~U[2026-12-31 23:00:00Z])
     end
   end
 
@@ -122,7 +132,12 @@ defmodule Arbiter.Quota.SpendCapTest do
       cfg = SpendCap.config(acct)
       %{reset_at: reset, seconds: seconds} = SpendCap.bounds(:week, @half_week)
 
-      gate = Gate.pace(acct, :spend, "spend_week", 11.0 / 20.0, reset, now: @half_week, window_seconds: seconds)
+      gate =
+        Gate.pace(acct, :spend, "spend_week", 11.0 / 20.0, reset,
+          now: @half_week,
+          window_seconds: seconds
+        )
+
       mine = SpendCap.verdict(cfg, 11.0, @half_week)
 
       assert gate.verdict == mine.verdict
@@ -263,7 +278,8 @@ defmodule Arbiter.Quota.SpendCapTest do
       assert {:hold, reason} = SpendCap.check(acct, nil, now: @half_week, in_flight: 0.0)
       assert reason.phrase =~ "spend pace: $12.00 of $10.00 allowed by now"
       # $12 is allowed at 60% of the week: Thursday 2026-10-15 12:00 + 0.1 week
-      assert reason.wake_at == DateTime.add(~U[2026-10-12 00:00:00Z], round(0.6 * 604_800), :second)
+      assert reason.wake_at ==
+               DateTime.add(~U[2026-10-12 00:00:00Z], round(0.6 * 604_800), :second)
     end
 
     test "paced: allowed while under the line" do

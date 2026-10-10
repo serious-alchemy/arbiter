@@ -15,7 +15,9 @@ defmodule Arbiter.Quota.SnapshotSpendCapTest do
   defp setup_account(config, spent) do
     n = System.unique_integer([:positive])
     ws = Ash.create!(Workspace, %{name: "qs-#{n}", prefix: "qs#{n}"})
-    account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "qs-#{n}", quota_config: config})
+
+    account =
+      Ash.create!(ProviderAccount, %{provider: :claude, slug: "qs-#{n}", quota_config: config})
 
     Ash.create!(WorkspaceProviderAccount, %{
       workspace_id: ws.id,
@@ -49,7 +51,9 @@ defmodule Arbiter.Quota.SnapshotSpendCapTest do
 
   test "for_workspace reports a cap on a non-metered account as no metered spend" do
     {ws, _} = setup_account(%{"spend_cap" => 20.0, "spend_metered" => false}, 400.0)
-    assert %{spend_caps: [%{"state" => "no_metered_spend", "holding" => false}]} = Snapshot.for_workspace(ws.id)
+
+    assert %{spend_caps: [%{"state" => "no_metered_spend", "holding" => false}]} =
+             Snapshot.for_workspace(ws.id)
   end
 
   test "for_workspace: no capped account, no entries" do
@@ -59,6 +63,8 @@ defmodule Arbiter.Quota.SnapshotSpendCapTest do
 
   test "for_account carries the one account's cap" do
     {_ws, account} = setup_account(%{"spend_cap" => 20.0, "spend_metered" => true}, 3.0)
-    assert %{spend_caps: [%{"spent_usd" => 3.0, "holding" => false}]} = Snapshot.for_account(account)
+
+    assert %{spend_caps: [%{"spent_usd" => 3.0, "holding" => false}]} =
+             Snapshot.for_account(account)
   end
 end

@@ -71,7 +71,8 @@ defmodule Arbiter.Workflows.DispatchQueueSpendCapTest do
   end
 
   defp hold!(task) do
-    assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, force: true, start_driver: false)
+    assert {:error, {:quota_held, _}} =
+             Dispatch.dispatch(task.id, force: true, start_driver: false)
   end
 
   test "stays held through a drain while the cap holds", %{queue: queue, task: task} do

@@ -16,7 +16,9 @@ defmodule Arbiter.Quota.SpendWatchTest do
   defp account!(config) do
     n = System.unique_integer([:positive])
     ws = Ash.create!(Workspace, %{name: "sw-#{n}", prefix: "sw#{n}"})
-    account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "sw-#{n}", quota_config: config})
+
+    account =
+      Ash.create!(ProviderAccount, %{provider: :claude, slug: "sw-#{n}", quota_config: config})
 
     Ash.create!(WorkspaceProviderAccount, %{
       workspace_id: ws.id,

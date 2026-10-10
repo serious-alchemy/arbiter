@@ -109,7 +109,9 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert has_element?(view, "#account-#{account.id}-pace-7d[data-pace-verdict=ok]")
     end
 
-    test "shows a capped account's metered dollar spend against its cap (bd-a6grlr)", %{conn: conn} do
+    test "shows a capped account's metered dollar spend against its cap (bd-a6grlr)", %{
+      conn: conn
+    } do
       account =
         account!(:claude, "pv-spend", %{
           quota_config: %{"spend_cap" => 20.0, "spend_metered" => true}
@@ -129,7 +131,12 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert has_element?(view, "#account-#{account.id}-spend-cap[data-spend-state=holding]")
       assert has_element?(view, "#account-#{account.id}-spend-cap", "$25.00")
       assert has_element?(view, "#account-#{account.id}-spend-cap", "$20.00/week")
-      assert has_element?(view, "#account-#{account.id}-spend-cap", "spend cap $20.00/week reached")
+
+      assert has_element?(
+               view,
+               "#account-#{account.id}-spend-cap",
+               "spend cap $20.00/week reached"
+             )
 
       assert has_element?(view, "#account-#{quiet.id}-spend-cap", "no metered spend")
       refute has_element?(view, "#account-#{plain.id}-spend-cap")

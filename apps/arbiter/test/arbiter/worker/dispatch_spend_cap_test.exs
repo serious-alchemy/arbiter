@@ -148,7 +148,10 @@ defmodule Arbiter.Worker.DispatchSpendCapTest do
     test "a resume", %{ws: ws, account: account} do
       issue = interrupted!(ws, account)
       assert {:error, {:quota_held, _}} = dispatch(ready!(ws, "fresh one is held"))
-      assert {:ok, %{worker_pid: pid}} = Dispatch.resume(issue.id, start_driver: false, resume_origin: :human)
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume(issue.id, start_driver: false, resume_origin: :human)
+
       assert is_pid(pid)
     end
 
@@ -225,6 +228,7 @@ defmodule Arbiter.Worker.DispatchSpendCapTest do
       b = ready!(ws, "second")
       opts = [spend_opts: [estimate_fun: fn _id -> 12.0 end]]
       {pa, {:ok, _}} = hold_admission(a, opts)
+
       # In flight: 12.0 estimate - 4.0 spent = 8.0, on top of 10.0 settled: 18 < 20 (22 if the 4.0 were counted twice).
       {pb, rb} = hold_admission(b, opts)
       assert {:ok, _} = rb

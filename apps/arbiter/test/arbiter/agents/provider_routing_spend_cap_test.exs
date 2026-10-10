@@ -64,7 +64,8 @@ defmodule Arbiter.Agents.ProviderRoutingSpendCapTest do
     spend!(capped, 12.0)
     task = Ash.create!(Issue, %{title: "route me", workspace_id: ws.id})
 
-    decision = ProviderRouting.evaluate(ws, task, quota_fun: fn _ -> nil end, gemini_code: "antigravity")
+    decision =
+      ProviderRouting.evaluate(ws, task, quota_fun: fn _ -> nil end, gemini_code: "antigravity")
 
     assert dropped_reasons(decision)[capped.slug] == "quota_held"
 
@@ -78,7 +79,8 @@ defmodule Arbiter.Agents.ProviderRoutingSpendCapTest do
     spend!(capped, 2.0)
     task = Ash.create!(Issue, %{title: "route me", workspace_id: ws.id})
 
-    decision = ProviderRouting.evaluate(ws, task, quota_fun: fn _ -> nil end, gemini_code: "antigravity")
+    decision =
+      ProviderRouting.evaluate(ws, task, quota_fun: fn _ -> nil end, gemini_code: "antigravity")
 
     refute Map.has_key?(dropped_reasons(decision), capped.slug)
   end

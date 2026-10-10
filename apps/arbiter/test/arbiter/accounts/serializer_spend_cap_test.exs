@@ -41,6 +41,7 @@ defmodule Arbiter.Accounts.SerializerSpendCapTest do
 
   test "a cap on a non-metered account says there is no metered spend" do
     account = account!(%{"spend_cap" => 20.0, "spend_metered" => false})
+
     assert %{spend_cap: %{"state" => "no_metered_spend", "metered" => false}} =
              Serializer.data(account, detailed?: true)
   end

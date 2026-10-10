@@ -160,7 +160,8 @@ defmodule ArbiterCli.Cmd.QuotaTest do
               "in_flight_usd" => 0.0,
               "allowed_usd" => 20.0,
               "resets_at" => "2026-10-19T00:00:00Z",
-              "reason" => "spend cap $20.00/week reached ($21.40 spent), resets 2026-10-19 00:00 UTC"
+              "reason" =>
+                "spend cap $20.00/week reached ($21.40 spent), resets 2026-10-19 00:00 UTC"
             },
             %{
               "account" => "claude:max",
