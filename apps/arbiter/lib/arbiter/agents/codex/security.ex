@@ -141,6 +141,10 @@ defmodule Arbiter.Agents.Codex.Security do
     [["gh", "gist", ["create", "edit"]], ["gh", "issue", "comment"]]
   end
 
+  defp expand_category(:no_ci_watch) do
+    [["gh", "run", ["watch", "view"]], ["gh", "pr", "checks", "--watch"]]
+  end
+
   # :no_outside_writes (kernel sandbox only), :no_async_wait (no such tools).
   defp expand_category(_other), do: []
 

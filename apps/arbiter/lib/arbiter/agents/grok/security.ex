@@ -242,6 +242,16 @@ defmodule Arbiter.Agents.Grok.Security do
   defp category(:no_gh_publish, _opts),
     do: %{deny: ["Bash(gh gist create:*)", "Bash(gh gist edit:*)", "Bash(gh issue comment:*)"]}
 
+  defp category(:no_ci_watch, _opts),
+    do: %{
+      deny: [
+        "Bash(gh run watch:*)",
+        "Bash(gh run view:*)",
+        "Bash(gh pr checks --watch:*)",
+        "Bash(gh pr checks -w:*)"
+      ]
+    }
+
   # A category added to `SecurityPolicy` without a grok mapping must fail a
   # test (`security_test.exs`, "coverage guard"), not weaken the spawn quietly.
   defp category(_unknown, _opts), do: %{}

@@ -1697,7 +1697,7 @@ defmodule Arbiter.Mergers.Github do
            &summarize_check(
              &1,
              fn id -> fetch_annotations(cfg, owner, repo, id) end,
-             fn id -> fetch_job_log_excerpt(cfg, owner, repo, id) end
+             fn id -> fetch_job_log(cfg, owner, repo, id) end
            )
          )}
 
@@ -1759,15 +1759,19 @@ defmodule Arbiter.Mergers.Github do
       |> Enum.join("\n")
       |> truncate(@log_tail_limit)
 
+    {log_excerpt, log_path} = job_log(run, log_fun)
+
     # The log excerpt is bounded on its own so a long output summary cannot crowd it out.
     summary =
-      [head, job_log_excerpt(run, log_fun)]
+      [head, log_excerpt]
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.join("\n")
 
     %{
       name: Map.get(run, "name") || "check",
       summary: summary,
+      conclusion: Map.get(run, "conclusion"),
+      log_path: log_path,
       url: Map.get(run, "details_url") || Map.get(run, "html_url"),
       # The source files the run's failure annotations point at. GitHub Actions
       # leaves `output` empty on a failed job, so these are often the only
@@ -1819,26 +1823,43 @@ defmodule Arbiter.Mergers.Github do
   # The filtered job log (failing tests, file:line, assertion blocks). A GitHub
   # Actions job's id is its check-run id. Fetched host-side so a podman worker,
   # which has neither `gh` nor a token, still sees why CI failed (bd-1fzpx8).
-  defp job_log_excerpt(run, log_fun) do
+  defp job_log(run, log_fun) do
     case Map.get(run, "id") do
       id when is_integer(id) -> log_fun.(id)
-      _ -> nil
+      _ -> {nil, nil}
     end
   end
 
   # Best-effort, like annotations: GitHub answers `/logs` with a redirect to a
   # short-lived download URL (Req follows it), and non-Actions check runs 404.
-  defp fetch_job_log_excerpt(cfg, owner, repo, job_id) do
+  defp fetch_job_log(cfg, owner, repo, job_id) do
     case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/jobs/#{job_id}/logs", []) do
       {:ok, %Req.Response{status: status, body: body}}
       when status in 200..299 and is_binary(body) ->
-        case CILogExcerpt.extract(body, @log_tail_limit) do
-          "" -> nil
-          excerpt -> "--- job log (filtered) ---\n" <> excerpt
-        end
+        excerpt =
+          case CILogExcerpt.extract(body, @log_tail_limit) do
+            "" -> nil
+            excerpt -> "--- job log (filtered) ---\n" <> excerpt
+          end
+
+        {excerpt, save_full_log(owner, repo, job_id, body)}
 
       _ ->
-        nil
+        {nil, nil}
+    end
+  end
+
+  # The whole log, kept so the fix pass can grep it instead of asking the forge
+  # (bd-d0q7s4). Best-effort: a write that fails leaves the briefing without a path.
+  defp save_full_log(owner, repo, job_id, body) do
+    dir = Path.join(System.tmp_dir!(), "arbiter-ci-logs")
+    path = Path.join(dir, "#{owner}-#{repo}-job-#{job_id}.log")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(path, body) do
+      path
+    else
+      _ -> nil
     end
   end
 

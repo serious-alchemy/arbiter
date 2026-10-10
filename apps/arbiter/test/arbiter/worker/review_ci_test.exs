@@ -391,5 +391,20 @@ defmodule Arbiter.Worker.ReviewCiTest do
       assert text =~ "re-run once"
       assert ReviewCi.failure_findings(@sha, "o/r#7", [], false) =~ "could not be re-run"
     end
+
+    test "failure_findings/4 carries the final status, the saved log path and the no-polling rule" do
+      text =
+        ReviewCi.failure_findings(
+          @sha,
+          "o/r#7",
+          [%{name: "test", summary: "1) boom", log_path: "/var/ci/job-1.log"}],
+          true
+        )
+
+      assert text =~ "CI status for #{@sha}: FAILED"
+      assert text =~ "failing jobs: test"
+      assert text =~ "full log: /var/ci/job-1.log"
+      assert text =~ "Do NOT poll CI"
+    end
   end
 end
