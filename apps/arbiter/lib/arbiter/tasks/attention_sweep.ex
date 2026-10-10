@@ -117,7 +117,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
   def over_limit(%{attention: attention, ticket: ticket} = item, limits, seen, now) do
     cond do
       attention.cause == :run_crashed and limits.max_resumes > 0 and
-          (ticket.attention_resume_attempts || 0) >= limits.max_resumes ->
+          resume_attempts(ticket, item, seen, now) >= limits.max_resumes ->
         "coordinator did not resolve within #{limits.max_resumes} resume attempts"
 
       attention.cause == :awaiting_verification ->
@@ -204,6 +204,14 @@ defmodule Arbiter.Tasks.AttentionSweep do
           {key, now}
       end
     end)
+  end
+
+  # bd-98gi5m: attempts from an earlier failure streak (the last resume long
+  # before this attention was raised) are history, not attempts at this one.
+  defp resume_attempts(ticket, item, seen, now) do
+    if AttentionLimits.streak_live?(ticket.attention_resumed_at, clock_start(item, seen, now)),
+      do: ticket.attention_resume_attempts || 0,
+      else: 0
   end
 
   defp clock_start(%{attention: attention, ticket_id: id}, seen, now) do

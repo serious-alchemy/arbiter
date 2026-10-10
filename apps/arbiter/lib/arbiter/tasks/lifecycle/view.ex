@@ -93,7 +93,10 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workers.Run
   alias Arbiter.Workflows.DispatchQueue
+
+  require Ash.Query
 
   @type column ::
           :backlog | :blocked | :ready | :in_progress | :merging | :verifying | :closed
@@ -360,6 +363,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       {state, _} when state in [:starting, :working] -> :running
       {:waiting, _} -> if Worker.awaiting_review_gate?(run), do: :running, else: :waiting
       {:finished, :succeeded} -> :succeeded
+      {:finished, :stopped} -> :stopped
       {:finished, _} -> :waiting
       _ -> nil
     end
@@ -367,9 +371,42 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # No live author run at all: orphaned once past the dispatch grace. An epic
   # never gets a run, so it never reads as orphaned.
+  #
+  # bd-98gi5m: nor is a ticket whose latest run was deliberately stopped.
   defp orphaned?(ticket, ctx) do
     Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
-      past_grace?(ticket, Map.get(ctx, :now))
+      past_grace?(ticket, Map.get(ctx, :now)) and
+      not stopped?(ticket, ctx)
+  end
+
+  defp stopped?(ticket, ctx) do
+    runs = runs_for(ticket, ctx)
+    id = Map.get(ticket, :id)
+
+    cond do
+      Enum.any?(author_runs(runs, id), &(run_class(&1) == :stopped)) ->
+        true
+
+      is_binary(id) ->
+        latest_run_stopped?(id)
+
+      true ->
+        false
+    end
+  end
+
+  defp latest_run_stopped?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id or base_task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{state: :finished, outcome: :stopped}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp past_grace?(_ticket, nil), do: true
@@ -486,7 +523,6 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   # attention.
   defp run_fact(ticket, runs, ctx) do
     id = Map.get(ticket, :id)
-    authors = author_runs(runs, id)
 
     cond do
       Enum.any?(runs, &(run_class(&1) == :running)) ->
@@ -495,11 +531,27 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       match?(%{state: :waiting}, primary(runs, id)) ->
         :question
 
-      authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) ->
-        held_or(:failed, ticket, ctx)
+      true ->
+        author_fact(author_runs(runs, id), ticket, ctx)
+    end
+  end
 
-      authors == [] and Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) ->
-        held_or(:orphaned, ticket, ctx)
+  defp author_fact([], ticket, ctx) do
+    if Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) do
+      held_or(:orphaned, ticket, ctx)
+    end
+  end
+
+  defp author_fact(authors, ticket, ctx) do
+    classes = Enum.map(authors, &run_class/1)
+
+    cond do
+      # bd-98gi5m: a deliberate stop is not a crash.
+      Enum.all?(classes, &(&1 in [:waiting, :stopped])) and :stopped in classes ->
+        nil
+
+      Enum.all?(classes, &(&1 == :waiting)) ->
+        held_or(:failed, ticket, ctx)
 
       true ->
         nil
