@@ -268,6 +268,46 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
                "coordinator did not resolve within 3 resume attempts"
     end
 
+    test "resume attempts from an earlier failure streak do not count toward the limit", ctx do
+      for _ <- 1..3 do
+        raise_crash(ctx.task)
+        {:ok, _} = Attention.clear(ctx.task.id, :run_restarted, resumed_from_failure: true)
+      end
+
+      ctx.task.id
+      |> then(&Ash.get!(Issue, &1))
+      |> Ash.Changeset.for_update(:update, %{})
+      |> Ash.Changeset.force_change_attribute(
+        :attention_resumed_at,
+        DateTime.add(DateTime.utc_now(), -3 * 3600, :second)
+      )
+      |> Ash.update!()
+
+      raise_crash(ctx.task)
+
+      assert %{promoted: []} = AttentionSweep.run(now: DateTime.utc_now())
+      assert Ash.get!(Issue, ctx.task.id).attention_owner != :operator
+    end
+
+    test "an active ticket whose worker was stopped gets no run_crashed attention in the sweep",
+         ctx do
+      {:ok, pid} =
+        Worker.start(
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          meta: %{provider: "agy"}
+        )
+
+      :ok = Worker.advance(pid, :run_agy)
+      Arbiter.Actor.put(Arbiter.Actor.system("coordinator"))
+      :ok = Worker.operator_stop(ctx.task.id)
+
+      now = DateTime.add(DateTime.utc_now(), 120, :second)
+      assert Attention.current(Ash.get!(Issue, ctx.task.id), now: now) == nil
+      assert %{promoted: []} = AttentionSweep.run(now: now)
+    end
+
     test "a resumed run counts an attempt only when it resumes a failed run", ctx do
       for {outcome, expected} <- [{:succeeded, 0}, {:failed, 1}] do
         prior =

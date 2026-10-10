@@ -61,6 +61,19 @@ defmodule Arbiter.Tasks.AttentionLimits do
     }
   end
 
+  @resume_streak_seconds 3600
+
+  @doc """
+  Whether a resume at `resumed_at` belongs to the failure streak that reaches
+  `at` (bd-98gi5m): the resume was no more than an hour before `at`. A ticket
+  never resumed (nil) has no streak.
+  """
+  @spec streak_live?(DateTime.t() | nil, DateTime.t()) :: boolean()
+  def streak_live?(nil, _at), do: false
+
+  def streak_live?(%DateTime{} = resumed_at, %DateTime{} = at),
+    do: DateTime.diff(at, resumed_at, :second) <= @resume_streak_seconds
+
   @doc ~s(The limit phrase a promotion's note names, e.g. `"4h"` or `"90m"`.)
   @spec describe_minutes(pos_integer()) :: String.t()
   def describe_minutes(minutes) when rem(minutes, 60) == 0, do: "#{div(minutes, 60)}h"

@@ -6,7 +6,7 @@ defmodule Arbiter.Workers.RunStateTest do
   test "the vocabulary is exactly the ticket's table" do
     assert RunState.kinds() == [:implement, :review, :fix_pass, :conflict]
     assert RunState.states() == [:starting, :working, :waiting, :finished]
-    assert RunState.outcomes() == [:succeeded, :failed, :interrupted, :handed_off]
+    assert RunState.outcomes() == [:succeeded, :failed, :interrupted, :handed_off, :stopped]
   end
 
   describe "kind_from_meta/1" do
