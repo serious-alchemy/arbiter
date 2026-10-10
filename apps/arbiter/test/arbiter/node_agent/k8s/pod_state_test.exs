@@ -389,6 +389,111 @@ defmodule Arbiter.NodeAgent.K8s.PodStateTest do
     end
   end
 
+  describe "snapshot field on exit (K1-A7)" do
+    defp exited_with(snapshotter) do
+      scheduled(%{
+        "phase" => "Succeeded",
+        "initContainerStatuses" => [terminated("seed", 0, "Completed")] ++ snapshotter,
+        "containerStatuses" => [terminated("worker", 0, "Completed")]
+      })
+    end
+
+    test "snapshotter exited 0 -> :complete" do
+      pod = exited_with([terminated("snapshotter", 0, "Completed")])
+      assert {:exit, %{snapshot: :complete}} = PodState.observe(pod, @opts)
+    end
+
+    test "snapshotter exited non-zero (SIGKILLed at the grace limit) -> :killed" do
+      pod = exited_with([terminated("snapshotter", 137, "Error")])
+      assert {:exit, %{snapshot: :killed, exit_code: 0}} = PodState.observe(pod, @opts)
+    end
+
+    test "snapshotter missing or not yet terminated -> :absent" do
+      assert {:exit, %{snapshot: :absent}} = PodState.observe(exited_with([]), @opts)
+
+      pod = exited_with([running("snapshotter")])
+      assert {:exit, %{snapshot: :absent}} = PodState.observe(pod, @opts)
+    end
+
+    test "every exit variant carries it (oom, deadline, failed, init_failed)" do
+      snap = [terminated("snapshotter", 0, "Completed")]
+
+      oom =
+        scheduled(%{
+          "phase" => "Failed",
+          "initContainerStatuses" => snap,
+          "containerStatuses" => [terminated("worker", 137, "OOMKilled")]
+        })
+
+      deadline = pod(%{"phase" => "Failed", "reason" => "DeadlineExceeded"})
+      failed = pod(%{"phase" => "Failed", "reason" => "Boom"})
+
+      init =
+        scheduled(%{"phase" => "Failed", "initContainerStatuses" => [terminated("seed", 7)]})
+
+      assert {:exit, %{snapshot: :complete}} = PodState.observe(oom, @opts)
+      assert {:exit, %{snapshot: :absent}} = PodState.observe(deadline, @opts)
+      assert {:exit, %{snapshot: :absent}} = PodState.observe(failed, @opts)
+      assert {:exit, %{snapshot: :absent}} = PodState.observe(init, @opts)
+    end
+  end
+
+  describe "service sidecars (K1-A7)" do
+    test "worker running while a sidecar is terminated with exit 1 -> still running" do
+      pod =
+        scheduled(%{
+          "phase" => "Running",
+          "initContainerStatuses" => [
+            terminated("seed", 0, "Completed"),
+            terminated("postgres", 1),
+            running("snapshotter")
+          ],
+          "containerStatuses" => [running("worker")]
+        })
+
+      assert {:running, %{}} = PodState.observe(pod, @opts)
+    end
+
+    test "a sidecar terminated non-zero before the worker starts -> starting(services)" do
+      pod =
+        scheduled(%{
+          "initContainerStatuses" => [
+            terminated("seed", 0, "Completed"),
+            terminated("postgres", 1)
+          ],
+          "containerStatuses" => [waiting("worker", "PodInitializing")]
+        })
+
+      assert {:starting, %{detail: :services}} = PodState.observe(pod, @opts)
+    end
+
+    test "a sidecar in CrashLoopBackOff before the worker starts -> starting(services)" do
+      pod =
+        scheduled(%{
+          "initContainerStatuses" => [
+            terminated("seed", 0, "Completed"),
+            waiting("postgres", "CrashLoopBackOff", "back-off 40s restarting")
+          ],
+          "containerStatuses" => [waiting("worker", "PodInitializing")]
+        })
+
+      assert {:starting, %{detail: :services}} = PodState.observe(pod, @opts)
+    end
+
+    test "a sidecar still crash-looping after ready_timeout_s -> refuse service_not_ready" do
+      pod =
+        scheduled(%{
+          "initContainerStatuses" => [
+            terminated("seed", 0, "Completed"),
+            waiting("postgres", "CrashLoopBackOff")
+          ]
+        })
+
+      assert {:refuse, %{reason: :service_not_ready, detail: "postgres: CrashLoopBackOff"}} =
+               PodState.observe(pod, now: @now, ready_timeout_s: 30)
+    end
+  end
+
   describe "failures outside the table" do
     test "an init container that failed -> exit with reason init_failed and the container named" do
       pod =

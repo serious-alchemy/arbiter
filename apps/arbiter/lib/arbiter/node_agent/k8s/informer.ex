@@ -205,6 +205,10 @@ defmodule Arbiter.NodeAgent.K8s.Informer do
     end
   rescue
     exception -> {kind, :error, {:exception, Exception.message(exception)}}
+  catch
+    # An exit or throw (a Finch pool checkout exit, say) would otherwise take the
+    # informer down through the task link.
+    caught, reason -> {kind, :error, {caught, reason}}
   end
 
   defp finish_task(state, {:list, :ok, %{items: items, resource_version: rv}}) do
