@@ -198,6 +198,46 @@ defmodule Arbiter.NodeAgent.K8s.Client do
   defp put_unless_nil(map, _key, nil), do: map
   defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
 
+  # --- resourcequotas and the Lease (K5) ----------------------------------------
+
+  @doc """
+  The namespace's `ResourceQuota` objects (`get/list` on `resourcequotas`, the only
+  verb the Role grants there). The headroom the controller reports is computed from
+  them, see `Arbiter.NodeAgent.K8s.Quota`.
+  """
+  @spec list_resource_quotas(t()) :: {:ok, [map()]} | {:error, error()}
+  def list_resource_quotas(client) do
+    case request(client, :get, "/api/v1/namespaces/#{client.namespace}/resourcequotas", []) do
+      {:ok, %{"items" => items}} when is_list(items) -> {:ok, items}
+      {:ok, _} -> {:ok, []}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  A `coordination.k8s.io` Lease by name. The install pre-creates the single
+  `arbiter-controller` Lease, and the Role grants `get`/`update` on that name only,
+  so there is no create here.
+  """
+  @spec get_lease(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_lease(client, name), do: request(client, :get, lease_path(client, name), [])
+
+  @doc """
+  Replaces a Lease (`PUT`, the object as `get_lease/2` returned it with the changes).
+  The `resourceVersion` inside is the precondition: `{:error, :conflict}` when
+  someone else wrote first, which is how two controllers find out about each other.
+  """
+  @spec update_lease(t(), map()) :: {:ok, map()} | {:error, error()}
+  def update_lease(client, lease) do
+    name = get_in(lease, ["metadata", "name"])
+    request(client, :put, lease_path(client, name), json: lease)
+  end
+
+  defp lease_path(client, name),
+    do:
+      "/apis/coordination.k8s.io/v1/namespaces/#{client.namespace}/leases/" <>
+        URI.encode(name, &URI.char_unreserved?/1)
+
   # --- logs -------------------------------------------------------------------
 
   @doc """

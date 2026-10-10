@@ -113,6 +113,11 @@ defmodule Arbiter.MixProject do
       {:bandit, "~> 1.5"},
       {:plug, "~> 1.15"},
 
+      # The k8s controller's operator config (ConfigMap `arbiter-controller-config`,
+      # Arbiter.NodeAgent.K8s.ControllerConfig): YAML, parsed into a closed schema.
+      # Already in the lock through ash's reactor.
+      {:yaml_elixir, "~> 2.11"},
+
       # The node agent's WebSocket client (RW5, docs/design/remote-workers.md
       # U2): Arbiter.NodeAgent.WsClient speaks Phoenix's V2 serializer over it.
       # Only depends on mint, which finch already brings in.
