@@ -1113,7 +1113,7 @@ the exempt budget, and I11's three fits.
 
 | # | Where | Today | Change | Ticket |
 |---|---|---|---|---|
-| E1 | `Gate.pace/6` (`gate.ex:618`) | Evaluates at `now` | A `now:` what-if, plus a fresh-window variant (`used = 0`, `reset_at` advanced one window). The routing design proposed the same what-if for R10 | DC3 |
+| E1 | `Gate.pace/6` (`gate.ex:621`) | Evaluates at `now` | The `now:` what-if was already there; DC3 added `Gate.fresh_pace/5` (`used = 0`, `reset_at` advanced one window) and `Gate.hard_stop/3` (the status rules alone, for the hard zeros). The routing design proposed the same what-if for R10 | DC3 |
 | E2 | New `Arbiter.Quota.Budget` and `Budget.Server` | — | §3 | DC3 |
 | E3 | `Concurrency.limit/2` (`concurrency.ex:236-239`), `occupants/0` (`:315-329`) | `min(max_concurrent, share)`; per-process count | `min(budget, max_concurrent, share)` per pool in `enforce`; seats (§3.2) | DC4, DC8 |
 | E4 | `Admission.decide/4` (`admission.ex:183`) | Account headroom | The pool's seat headroom; the planned pool | DC8 |
