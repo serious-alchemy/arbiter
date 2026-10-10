@@ -45,9 +45,31 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
     put_app_env(:arbiter, :repo_paths, %{"trib/repo" => repo})
 
-    on_exit(fn -> File.rm_rf!(tmp) end)
+    on_exit(fn -> rm_rf_settled!(tmp) end)
 
     %{repo: repo, tmp: tmp, ws: workspace!("prefer_remote")}
+  end
+
+  # A fix-round child (git, a fixture script) can still be flushing into the tree
+  # when teardown runs, so `File.rm_rf!/1` races it and raises `:eexist` /
+  # `:enotempty` (bd-axlnpu). Retry until the writers have gone.
+  defp rm_rf_settled!(dir, attempts \\ 50) do
+    case File.rm_rf(dir) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason, _file} when attempts > 1 and reason in [:eexist, :enotempty] ->
+        receive do
+        after
+          100 -> rm_rf_settled!(dir, attempts - 1)
+        end
+
+      {:error, reason, file} ->
+        raise File.Error,
+          reason: reason,
+          action: "remove files and directories recursively from",
+          path: file
+    end
   end
 
   defp workspace!(mode) do

@@ -18,6 +18,13 @@ defmodule Arbiter.Test.FakeK8sApi do
   The test drives the cluster with `put_pod/2`, `delete_pod/2`, `compact/1`,
   `bookmark/1`, `drop_watches/2`, `push_log/3`, and observes with `requests/1`
   and `await_watchers/2`. Resource versions are integers rendered as strings.
+
+  K5 adds what the controller core reads and writes besides pods:
+
+    * `GET resourcequotas` (`put_quota/2` sets them);
+    * `GET`/`PUT` on a `coordination.k8s.io` `Lease` (`put_lease/2` pre-creates one,
+      `lease/2` reads it back). A `PUT` carrying a stale `resourceVersion` is a 409,
+      like the real server; there is no `POST`, the install pre-creates the Lease.
   """
 
   use GenServer
@@ -92,9 +99,18 @@ defmodule Arbiter.Test.FakeK8sApi do
   def expire_with(api, mode) when mode in [:event, :http],
     do: GenServer.call(api, {:expire_with, mode})
 
-  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log`) answer `status`."
+  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log | :quota | :lease_get | :lease_update`) answer `status` (an integer, or `{code, message}`)."
   def fail_next(api, kind, status, count \\ 1),
     do: GenServer.call(api, {:fail, kind, status, count})
+
+  @doc "Sets (or replaces) a `ResourceQuota` object by `metadata.name`."
+  def put_quota(api, quota), do: GenServer.call(api, {:put_quota, quota})
+
+  @doc "Pre-creates (or replaces) a Lease; the server owns its resourceVersion."
+  def put_lease(api, lease), do: GenServer.call(api, {:put_lease, lease})
+
+  @doc "The Lease `name` as the server holds it, or nil."
+  def lease(api, name), do: GenServer.call(api, {:get_lease, name})
 
   @doc "Blocks until at least `n` watches are open."
   def await_watchers(api, n), do: GenServer.call(api, {:await_watchers, n}, 5_000)
@@ -132,6 +148,8 @@ defmodule Arbiter.Test.FakeK8sApi do
        fail: %{},
        expire_with: :event,
        logs: %{},
+       quotas: %{},
+       leases: %{},
        followers: %{},
        finished: MapSet.new()
      }}
@@ -267,6 +285,41 @@ defmodule Arbiter.Test.FakeK8sApi do
 
         for {from, _} <- ready, do: GenServer.reply(from, :ok)
         {:reply, {:ok, replay}, %{state | waiters: waiting}}
+    end
+  end
+
+  def handle_call({:put_quota, quota}, _from, state) do
+    {:reply, :ok,
+     %{state | quotas: Map.put(state.quotas, get_in(quota, ["metadata", "name"]), quota)}}
+  end
+
+  def handle_call(:quotas, _from, state) do
+    {:reply, state.quotas |> Enum.sort() |> Enum.map(&elem(&1, 1)), state}
+  end
+
+  def handle_call({:put_lease, lease}, _from, state) do
+    name = get_in(lease, ["metadata", "name"])
+    rv = state.rv + 1
+    lease = put_in(lease, ["metadata", "resourceVersion"], Integer.to_string(rv))
+    {:reply, lease, %{state | rv: rv, leases: Map.put(state.leases, name, lease)}}
+  end
+
+  def handle_call({:get_lease, name}, _from, state), do: {:reply, state.leases[name], state}
+
+  def handle_call({:update_lease, name, lease}, _from, state) do
+    case state.leases[name] do
+      nil ->
+        {:reply, :not_found, state}
+
+      held ->
+        if get_in(lease, ["metadata", "resourceVersion"]) ==
+             get_in(held, ["metadata", "resourceVersion"]) do
+          rv = state.rv + 1
+          lease = put_in(lease, ["metadata", "resourceVersion"], Integer.to_string(rv))
+          {:reply, {:ok, lease}, %{state | rv: rv, leases: Map.put(state.leases, name, lease)}}
+        else
+          {:reply, :conflict, state}
+        end
     end
   end
 
@@ -439,6 +492,57 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
     end
   end
 
+  defp route(
+         %{method: "GET", path_info: ["api", "v1", "namespaces", ns, "resourcequotas"]} = conn,
+         api,
+         ns,
+         _body
+       ) do
+    with :ok <- check_fail(conn, api, :quota) do
+      json(conn, 200, %{
+        "kind" => "ResourceQuotaList",
+        "apiVersion" => "v1",
+        "metadata" => %{},
+        "items" => FakeK8sApi.handle(api, :quotas)
+      })
+    end
+  end
+
+  defp route(
+         %{
+           method: "GET",
+           path_info: ["apis", "coordination.k8s.io", "v1", "namespaces", ns, "leases", name]
+         } = conn,
+         api,
+         ns,
+         _body
+       ) do
+    with :ok <- check_fail(conn, api, :lease_get) do
+      case FakeK8sApi.handle(api, {:get_lease, name}) do
+        nil -> status(conn, 404, "NotFound", "leases \"#{name}\" not found")
+        lease -> json(conn, 200, lease)
+      end
+    end
+  end
+
+  defp route(
+         %{
+           method: "PUT",
+           path_info: ["apis", "coordination.k8s.io", "v1", "namespaces", ns, "leases", name]
+         } = conn,
+         api,
+         ns,
+         body
+       ) do
+    with :ok <- check_fail(conn, api, :lease_update) do
+      case FakeK8sApi.handle(api, {:update_lease, name, Jason.decode!(body)}) do
+        {:ok, lease} -> json(conn, 200, lease)
+        :conflict -> status(conn, 409, "Conflict", "the object has been modified")
+        :not_found -> status(conn, 404, "NotFound", "leases \"#{name}\" not found")
+      end
+    end
+  end
+
   defp route(conn, _api, _ns, _body), do: status(conn, 404, "NotFound", "no route")
 
   # --- watch ----------------------------------------------------------------
@@ -570,6 +674,7 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
   defp check_fail(conn, api, kind) do
     case FakeK8sApi.handle(api, {:maybe_fail, kind}) do
       :ok -> :ok
+      {:fail, {code, message}} -> status(conn, code, "InjectedFailure", message)
       {:fail, code} -> status(conn, code, "InjectedFailure", "injected #{code}")
     end
   end
