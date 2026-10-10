@@ -146,6 +146,47 @@ defmodule Arbiter.Loop.TrustPromotionTest do
     end
   end
 
+  describe "the view (arb trust show, trust_show, /trust)" do
+    test "a subject's tier, record, recent events and pending proposal", %{ws: ws} do
+      [run | _] = eligible!(ws)
+      event!(run, "q1", @codex, :permission_denial, :minor, ~U[2026-10-01 12:00:00Z])
+      {:ok, _} = tick!()
+      [row] = proposals()
+
+      assert {:ok, detail} = Arbiter.Loop.Trust.View.detail("codex/gpt-5.1-codex")
+
+      assert detail.subject == "codex/gpt-5.1-codex"
+      assert detail.tier == "quarantine"
+      assert detail.effective_tier == "quarantine"
+      assert detail.suspended == nil
+      assert detail.record.clean_runs == 10
+      assert detail.record.minor_events == 1
+      assert detail.eligibility.eligible_for == "probation"
+      assert [%{"kind" => "permission_denial"}] = detail.recent_events
+      assert [%{id: id, to: "probation", state: "proposed"}] = detail.pending
+      assert id == row.id
+
+      assert {:error, :not_found} = Arbiter.Loop.Trust.View.detail("codex/nope")
+    end
+
+    test "a suspended subject shows quarantine as its effective tier, and the list says so", %{
+      ws: ws
+    } do
+      [run | _] = eligible!(ws)
+      rule!(%{provider: "codex", tier: :probation})
+      event!(run, "q1", @codex, :public_upload_attempt, :critical, ~U[2026-10-10 11:00:00Z])
+      {:ok, _} = tick!()
+
+      summaries = Arbiter.Loop.Trust.View.list()
+      codex = Enum.find(summaries, &(&1.subject == "codex/gpt-5.1-codex"))
+
+      assert codex.tier == "probation"
+      assert codex.effective_tier == "quarantine"
+      assert %{kind: "public_upload_attempt"} = codex.suspended
+      assert Enum.find(summaries, &(&1.subject == "claude/claude-opus-4-6")).tier == "privileged"
+    end
+  end
+
   describe "promote/4" do
     test "applies the proposal with operator authority and records actor operator", %{ws: ws} do
       eligible!(ws)

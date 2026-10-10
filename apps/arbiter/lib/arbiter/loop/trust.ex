@@ -96,6 +96,27 @@ defmodule Arbiter.Loop.Trust do
     end
   end
 
+  @doc """
+  PubSub topic (`Arbiter.PubSub`) every change to the trust records is announced
+  on as `{:trust, :updated}`: a tick, a promotion, a confirmation or a dismissal.
+  The `/trust` dashboard subscribes.
+  """
+  @spec pubsub_topic() :: String.t()
+  def pubsub_topic, do: "trust"
+
+  defp broadcast do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, pubsub_topic(), {:trust, :updated})
+  rescue
+    _ -> :ok
+  end
+
+  defp announced({:ok, _} = result) do
+    broadcast()
+    result
+  end
+
+  defp announced(result), do: result
+
   @doc "The `provider/model` key for a subject."
   @spec key(subject() | TrustRecord.t()) :: String.t()
   def key(%TrustRecord{provider: provider, model: model}), do: "#{provider}/#{model}"
@@ -196,6 +217,7 @@ defmodule Arbiter.Loop.Trust do
       end)
       |> Enum.unzip()
 
+    broadcast()
     {:ok, %{records: records, actions: List.flatten(actions)}}
   end
 
@@ -457,6 +479,7 @@ defmodule Arbiter.Loop.Trust do
 
       {:ok, %{record: record, proposal: proposal}}
     end
+    |> announced()
   end
 
   defp operator_only(:operator), do: :ok
@@ -617,6 +640,7 @@ defmodule Arbiter.Loop.Trust do
              ]
        })}
     end
+    |> announced()
   end
 
   defp to_quarantine(key, rule, record, actor) do
@@ -669,6 +693,7 @@ defmodule Arbiter.Loop.Trust do
              ]
        })}
     end
+    |> announced()
   end
 
   defp coordinator_or_operator(authority) when authority in [:coordinator, :operator], do: :ok

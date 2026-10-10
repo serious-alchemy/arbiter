@@ -411,6 +411,29 @@ defmodule Arbiter.Loop.TrustTest do
     end
   end
 
+  describe "notification" do
+    test "a tick and a decision announce themselves on the trust topic", %{ws: ws} do
+      rule!(%{provider: "codex", tier: :probation})
+      run_id = task!(ws, "n1", @codex, at: ~U[2026-10-09 10:00:00Z])
+      event!(run_id, "n1", @codex, :public_upload_attempt, :critical, ~U[2026-10-09 11:00:00Z])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Trust.pubsub_topic())
+
+      {:ok, _} = Trust.tick(now: now(), cutover: cutover(), workers: [])
+      assert_receive {:trust, :updated}
+
+      {:ok, _} = Trust.dismiss("codex/gpt-5.1-codex", "probe", authority: :coordinator)
+      assert_receive {:trust, :updated}
+    end
+  end
+
+  describe "the trust cutover" do
+    test "defaults to when the trust_records migration ran" do
+      assert %DateTime{} = cutover = Trust.cutover()
+      assert DateTime.compare(cutover, DateTime.utc_now()) == :lt
+    end
+  end
+
   describe "subjects" do
     test "a run is its dispatch decision's subject, and so are its events", %{ws: ws} do
       rule!(%{provider: "antigravity", tier: :probation})
