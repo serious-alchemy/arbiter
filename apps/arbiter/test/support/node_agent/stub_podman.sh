@@ -65,6 +65,13 @@ case "$sub" in
         while [ ! -e "$D/go" ]; do sleep 0.05; done
         echo "line-2"; echo "line-3"; exit 0 ;;
       hang) echo "line-1"; while [ ! -e "$D/removed" ]; do sleep 0.05; done; exit 137 ;;
+      # bd-4p1vui: keeps running across a primary restart and prints after it
+      tick)
+        echo "line-1"
+        while [ ! -e "$D/go" ]; do sleep 0.05; done
+        echo "line-2"
+        while [ ! -e "$D/removed" ]; do sleep 0.05; done
+        exit 137 ;;
       big) head -c "${STUB_BYTES:-1000000}" /dev/zero | tr '\0' 'x'; echo; exit 0 ;;
     esac ;;
   inspect) cat "$D/oom" 2>/dev/null || echo false ;;

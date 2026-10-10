@@ -81,6 +81,7 @@ defmodule Arbiter.MCP.CatalogTest do
       names = @worker |> Catalog.visible() |> Enum.map(& &1.name)
 
       assert "permission_request" in names
+      refute "ticket_permission_grant" in names
 
       for tool <- @both_tier, do: assert(tool in names)
       for tool <- @coordinator_only, do: refute(tool in names)

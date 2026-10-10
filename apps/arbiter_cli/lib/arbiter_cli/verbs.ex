@@ -64,6 +64,7 @@ defmodule ArbiterCli.Verbs do
     ["rank", "bd-1"],
     ["verify", "bd-1"],
     ["resolve", "bd-1"],
+    ["permit", "bd-1", "prod_read"],
     ["handoff", "bd-1"],
     ["handback", "bd-1"],
     ["claim", "1"],

@@ -12,20 +12,27 @@ defmodule Arbiter.Nodes.Liveness do
     * `lost_after_s` — silence after which the *primary* declares the node
       **lost** (`nodes.lost_after_s`, default `fence_after_s + 30`).
 
+  * `restart_grace_s` — how long an agent with **no socket** keeps its runs
+      after its last ack before it fences them (bd-4p1vui, §10.4.8): 180 s, twice
+      the measured deploy, so a primary restart (which closes the socket) leaves
+      them for a new Worker to adopt. Fixed.
+
   **Invariant: `fence_after_s < lost_after_s`.** By the time the primary
   re-dispatches a run elsewhere the old container is already stopped. It is
   enforced here, in `validate/2`, and the `nodes.*` settings refuse a value that
-  would break it (`Arbiter.Settings`), so it cannot be configured away.
+  would break it (`Arbiter.Settings`), so it cannot be configured away. It is the
+  open-socket bound; with no socket the bound is `restart_grace_s`.
   """
 
   @enforce_keys [:hb_interval_s, :suspect_after_s, :fence_after_s, :lost_after_s]
-  defstruct [:hb_interval_s, :suspect_after_s, :fence_after_s, :lost_after_s]
+  defstruct [:hb_interval_s, :suspect_after_s, :fence_after_s, :lost_after_s, :restart_grace_s]
 
   @type t :: %__MODULE__{
           hb_interval_s: pos_integer(),
           suspect_after_s: pos_integer(),
           fence_after_s: pos_integer(),
-          lost_after_s: pos_integer()
+          lost_after_s: pos_integer(),
+          restart_grace_s: pos_integer()
         }
 
   @type state :: :online | :suspect | :lost
@@ -37,10 +44,15 @@ defmodule Arbiter.Nodes.Liveness do
   @min_fence_after_s 30
   @max_fence_after_s 90
   @max_lost_after_s 3600
+  @restart_grace_s 180
 
   @doc "The heartbeat interval in seconds (fixed)."
   @spec hb_interval_s() :: pos_integer()
   def hb_interval_s, do: @hb_interval_s
+
+  @doc "How long an agent with no socket keeps its runs (bd-4p1vui, §10.4.8)."
+  @spec restart_grace_s() :: pos_integer()
+  def restart_grace_s, do: @restart_grace_s
 
   @doc "The fence used when `nodes.fence_after_s` is not set."
   @spec default_fence_after_s() :: pos_integer()
@@ -107,7 +119,8 @@ defmodule Arbiter.Nodes.Liveness do
       hb_interval_s: @hb_interval_s,
       suspect_after_s: min(@default_suspect_after_s, fence - @hb_interval_s),
       fence_after_s: fence,
-      lost_after_s: lost
+      lost_after_s: lost,
+      restart_grace_s: @restart_grace_s
     }
   end
 

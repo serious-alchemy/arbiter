@@ -2,9 +2,14 @@ defmodule Arbiter.Nodes.Recovery do
   @moduledoc """
   Restart recovery for runs on nodes (`docs/design/remote-workers.md` §10.4–10.5).
 
-  A remote run does **not** survive a primary restart (v1). When the primary
-  comes back, every node reconnects with a new `boot_epoch`; the agent quiesces
-  the runs the new primary does not know (`Arbiter.NodeAgent.Run.quiesce/1`),
+  Since bd-4p1vui a remote run survives a primary restart by **Worker adoption**
+  (§10.4.3): for each run, `await/1` first asks `Arbiter.Nodes.Adoption.attempt/3`, and a
+  new Worker takes the run the node held over (same row, same container). Only a run
+  that is not adopted is collected as below, in the same task: adopted or collected,
+  never both.
+
+  When the primary comes back, every node reconnects with a new `boot_epoch`; the agent
+  quiesces the runs the new primary does not know (`Arbiter.NodeAgent.Run.quiesce/1`),
   keeping their snapshot, bundle and transcripts locally, and reports them
   `retained`. `await/1` is what makes the primary take that work **before**
   anything acts on the stale rows. It is the first step of the boot sweep
@@ -15,9 +20,8 @@ defmodule Arbiter.Nodes.Recovery do
 
   A node's hello can arrive before this has run. The session answers it from the
   persisted row (`hold`, see `Arbiter.Nodes.Session`): the agent keeps the container
-  running until `recover` below quiesces it, so it is never told "unknown run" for a run
-  with a live row on it. Re-attaching such a run to a new Worker instead of collecting
-  it needs Worker adoption, which `docs/design/remote-workers.md` §10.4 decides against for v1 (bd-4p1vui).
+  running until it is adopted or `recover` below quiesces it, so it is never told
+  "unknown run" for a run with a live row on it.
 
   For every run in a live state with a `node_id` (and no live Worker) it waits, in
   parallel across nodes, for the node's session to be connected, then asks the
@@ -50,12 +54,14 @@ defmodule Arbiter.Nodes.Recovery do
   ## Options
 
   `:primary?` (default `SingleInstance.primary?/0`; `false` skips), `:node_timeout_ms`,
-  `:total_timeout_ms`, and `:context_fun` (`run -> {:ok, ctx} | {:error, reason}`,
-  default `context/1`).
+  `:total_timeout_ms`, `:context_fun` (`run -> {:ok, ctx} | {:error, reason}`,
+  default `context/1`), and for adoption `:adopt?` (default
+  `Arbiter.Nodes.Adoption.enabled?/0`) and `:adopt_fun` (default
+  `Arbiter.Worker.Dispatch.adopt/2`).
   """
 
   alias Arbiter.Nodes
-  alias Arbiter.Nodes.{Node, Registry, Session}
+  alias Arbiter.Nodes.{Adoption, Node, Registry, Session}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker.{BranchNamer, PrivateClone, Worktree}
   alias Arbiter.Workers.{Run, RunState}
@@ -65,8 +71,9 @@ defmodule Arbiter.Nodes.Recovery do
 
   @default_node_timeout_ms 60_000
   @default_total_timeout_ms 90_000
+  @default_adopt_timeout_ms 30_000
 
-  @type outcome :: :collected | {:unreachable, term()}
+  @type outcome :: :adopted | :collected | {:unreachable, term()}
 
   @doc "Recover the runs nodes hold. See the moduledoc. Returns `{:ok, %{run_id => outcome}}`."
   @spec await(keyword()) :: {:ok, %{String.t() => outcome()} | :skipped}
@@ -149,10 +156,24 @@ defmodule Arbiter.Nodes.Recovery do
       {task, _} ->
         Task.shutdown(task, :brutal_kill)
         {node_id, runs} = Map.fetch!(by_task, task.ref)
-        results = Map.new(runs, &{&1.id, {:unreachable, :timeout}})
+        results = Map.new(runs, &{&1.id, after_kill(&1)})
         mark_lost(node_id, runs, results)
         results
     end)
+  end
+
+  # bd-4p1vui (§10.4.6 F12): a run the killed task had handed to a new Worker stays adopted.
+  # One it was still handing over (its Worker's session had not attached it) goes back to its
+  # node's hold first, so no Worker is left adopting a run stamped `node_lost` here.
+  defp after_kill(run) do
+    if Adoption.abandon_unattached(run) == :ok do
+      Logger.warning(
+        "Nodes.Recovery: the budget ran out while run #{run.id} (#{run.task_id}) was being " <>
+          "adopted; the adoption is undone"
+      )
+    end
+
+    if Adoption.adopted?(run), do: :adopted, else: {:unreachable, :timeout}
   end
 
   # ---- one node ---------------------------------------------------------------------
@@ -214,7 +235,44 @@ defmodule Arbiter.Nodes.Recovery do
     :exit, _ -> :error
   end
 
+  # bd-4p1vui (§10.4.3): a new Worker adopts the run if it can; only a run that is not
+  # adopted is collected, here, in the same task: adopted or collected, never both. The
+  # adoption, all of it (`Adoption.attempt/3`'s deadline), gets at most half of what is left
+  # of the node's budget, so the collect it may fall back to still has time.
   defp recover_run(pid, run, deadline, opts) do
+    adopt_ms = min(@default_adopt_timeout_ms, max(div(deadline - now(), 2), 1))
+
+    adoption_opts =
+      [adopt_timeout_ms: adopt_ms] ++ Keyword.take(opts, [:adopt?, :adopt_fun])
+
+    case Adoption.attempt(pid, run, adoption_opts) do
+      :adopted ->
+        Logger.info("Nodes.Recovery: run #{run.id} (#{run.task_id}) adopted by a new Worker")
+        :adopted
+
+      {:not_adopted, reason} ->
+        log_not_adopted(run, reason)
+        collect_run(pid, run, deadline, opts)
+    end
+  end
+
+  # A run that was never a candidate (adoption off, not the ticket's own run, an older
+  # agent, not held) is ordinary; one that was tried and failed is worth a warning.
+  defp log_not_adopted(run, reason) do
+    if quiet_refusal?(reason),
+      do: Logger.debug("Nodes.Recovery: run #{run.id} not adopted (#{inspect(reason)})"),
+      else:
+        Logger.warning(
+          "Nodes.Recovery: adopting run #{run.id} (#{run.task_id}) failed " <>
+            "(#{inspect(reason, limit: 10)}); collecting it instead"
+        )
+  end
+
+  defp quiet_refusal?(:disabled), do: true
+  defp quiet_refusal?({:ineligible, _}), do: true
+  defp quiet_refusal?(reason), do: reason in [:no_adopt_cap, :not_held, :not_running]
+
+  defp collect_run(pid, run, deadline, opts) do
     context_fun = Keyword.get(opts, :context_fun, &context/1)
 
     case context_fun.(run) do
