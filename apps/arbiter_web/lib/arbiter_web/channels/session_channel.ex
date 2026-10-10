@@ -99,8 +99,6 @@ defmodule ArbiterWeb.SessionChannel do
   alias Arbiter.Sessions.Stream
   alias Arbiter.Sessions.TranscriptReplay
 
-  require Logger
-
   # How often an attached channel re-stamps `last_client_at` (§4.6 item 2) —
   # short enough that `Arbiter.Sessions.IdleReaper`'s 24h default TTL never
   # sees a continuously-attached client as idle, long enough not to matter as

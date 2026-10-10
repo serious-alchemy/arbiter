@@ -5,7 +5,8 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   ## The incident
 
-  On 2026-09-23, with `conductor_system_max_concurrent = 1`, bd-3usjdj ran out
+  On 2026-09-23, with the install-wide cap at 1 (then `conductor_system_max_concurrent`,
+  since removed by DC1), bd-3usjdj ran out
   of ReviewGate fix rounds and parked at `:waiting_on_you`, which releases its
   slot (bd-45pwo1). Autopilot correctly admitted bd-d7mfdq into the freed slot.
   Four seconds later the coordinator ran `arb worker resume bd-3usjdj`, and

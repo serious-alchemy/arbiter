@@ -551,9 +551,7 @@ defmodule Arbiter.Trackers.Gitlab do
 
   # ---- Internals: user resolution -----------------------------------------
 
-  # Resolve a username (or a numeric id, passed through) to a GitLab user id.
-  defp resolve_user_id(_cfg, id) when is_integer(id), do: {:ok, id}
-
+  # Resolve a username (a purely numeric one is taken as the id) to a GitLab user id.
   defp resolve_user_id(cfg, username) when is_binary(username) do
     case Integer.parse(username) do
       {id, ""} ->

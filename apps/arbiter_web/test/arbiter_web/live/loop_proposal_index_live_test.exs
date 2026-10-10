@@ -179,7 +179,8 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       :meck.new(Loop, [:passthrough, :no_link])
 
       :meck.expect(Loop, :list_pending, fn opts ->
-        send(test, :loop_list) && :meck.passthrough([opts])
+        send(test, :loop_list)
+        :meck.passthrough([opts])
       end)
 
       on_exit(fn -> :meck.unload(Loop) end)

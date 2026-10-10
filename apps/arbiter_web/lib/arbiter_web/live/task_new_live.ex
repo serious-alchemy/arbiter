@@ -30,7 +30,6 @@ defmodule ArbiterWeb.TaskNewLive do
   alias Arbiter.Worker.Dispatch
   alias ArbiterWeb.TaskForm
   alias Phoenix.LiveView.AsyncResult
-  require Ash.Query
   require Logger
 
   @impl true

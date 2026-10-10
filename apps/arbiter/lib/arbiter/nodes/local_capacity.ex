@@ -8,17 +8,14 @@ defmodule Arbiter.Nodes.LocalCapacity do
 
   ## The cap
 
-    * default — the install's local concurrency, `conductor.max_concurrent`
-      (`Board.Snapshot.system_max_concurrent/0`). The board already plans to it,
-      so with no override this module admits everything and **dispatch behaves
-      exactly as before**.
+    * default — the primary's hardware suggestion, `NodeAgent.Protocol.suggestion/2`
+      of this machine's CPUs and memory: the formula every node already reports
+      (`min(cpus / 2, 0.8 × MemTotal / 4 GiB)`, at least 1). It is **enforced**
+      like any node's cap (docs/design/provider-dynamic-concurrency.md §5.1, DC1).
+      It replaces the install-wide `conductor.max_concurrent`, which is gone.
     * override — `nodes.local_max_workers` (`Arbiter.Nodes.set_local_max_workers/2`,
       the nodes page, `arb node set local --max-workers N`), up or down, **down
-      to 0** so remote nodes do the work and the machine stays free. An override
-      is *enforced* here.
-
-  `conductor.max_concurrent` is a different number: the operator-owned global
-  quota valve. It is never derived from this cap or from any node's.
+      to 0** so remote nodes do the work and the machine stays free.
 
   ## What counts, and what is held
 
@@ -67,7 +64,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   """
 
   alias Arbiter.Accounts.Concurrency
-  alias Arbiter.Board.Snapshot
+  alias Arbiter.NodeAgent.Protocol
   alias Arbiter.Nodes.Placement
   alias Arbiter.Settings
   alias Arbiter.Worker.Registry, as: WorkerRegistry
@@ -106,18 +103,42 @@ defmodule Arbiter.Nodes.LocalCapacity do
   def kinds, do: @kinds
 
   @doc """
-  The primary's cap: `%{cap:, source: :override | :default, enforced?:}`.
-  `enforced?` is true only for an operator override.
+  The primary's cap: `%{cap:, source: :override | :suggestion}`. Always enforced.
   """
-  @spec cap() :: %{cap: non_neg_integer(), source: :override | :default, enforced?: boolean()}
+  @spec cap() :: %{cap: non_neg_integer(), source: :override | :suggestion}
   def cap do
     case Settings.nodes_local_max_workers() do
-      nil -> %{cap: Snapshot.system_max_concurrent(), source: :default, enforced?: false}
-      n -> %{cap: n, source: :override, enforced?: true}
+      nil -> %{cap: suggestion(), source: :suggestion}
+      n -> %{cap: n, source: :override}
     end
   rescue
-    # An unreadable cap must not stop the fleet: read as "not enforced".
-    _ -> %{cap: Snapshot.system_max_concurrent(), source: :default, enforced?: false}
+    # An unreadable override must not stop the fleet: fall back to the suggestion.
+    _ -> %{cap: suggestion(), source: :suggestion}
+  end
+
+  @doc """
+  This machine's hardware suggestion, `NodeAgent.Protocol.suggestion/2`. The
+  hardware is read once per boot; `config :arbiter, :local_hardware` (a map of
+  `:cpus` and `:mem_total`) pins it, which is how the test suite holds it steady.
+  """
+  @spec suggestion() :: pos_integer()
+  def suggestion do
+    %{cpus: cpus, mem_total: mem_total} =
+      Application.get_env(:arbiter, :local_hardware) || hardware()
+
+    Protocol.suggestion(cpus, mem_total)
+  end
+
+  defp hardware do
+    case :persistent_term.get({__MODULE__, :hardware}, nil) do
+      nil ->
+        hardware = Protocol.local_hardware()
+        :persistent_term.put({__MODULE__, :hardware}, hardware)
+        hardware
+
+      hardware ->
+        hardware
+    end
   end
 
   @doc """
@@ -148,8 +169,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   has room: `Placement.place/2`, then `admit/3` for a run that stays local.
 
     * `{:ok, {:node, row}}` — placed on a node (a slot is reserved);
-    * `{:ok, :local}` — runs here (a slot of the primary's cap is reserved when
-      the cap is enforced);
+    * `{:ok, :local}` — runs here (a slot of the primary's cap is reserved);
     * `{:error, {:no_node_capacity, info}}` — held.
 
   `request` is a `t:Arbiter.Nodes.Placement.request/0`; `opts` are
@@ -181,18 +201,14 @@ defmodule Arbiter.Nodes.LocalCapacity do
 
   @doc """
   Admit `kind` for `task_id` onto the primary. `:ok`, or `{:error,
-  {:no_node_capacity, info}}` (nothing reserved). With no override this is
-  always `:ok` and reserves nothing.
+  {:no_node_capacity, info}}` (nothing reserved).
 
   Options: `:force` (go over; recorded), `:actor`, `:reason` (why the run is
   local, for the hold phrase), `:provider`, `:workspace_id`.
   """
   @spec admit(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def admit(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
-    case cap() do
-      %{enforced?: false} -> :ok
-      %{cap: cap} -> admit_enforced(task_id, kind, cap, opts)
-    end
+    admit_enforced(task_id, kind, cap().cap, opts)
   end
 
   @doc """
@@ -205,10 +221,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   """
   @spec check(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def check(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
-    case cap() do
-      %{enforced?: false} -> :ok
-      %{cap: cap} -> admit_enforced(task_id, kind, cap, Keyword.put(opts, :reserve?, false))
-    end
+    admit_enforced(task_id, kind, cap().cap, Keyword.put(opts, :reserve?, false))
   end
 
   defp admit_enforced(task_id, kind, cap, opts) do

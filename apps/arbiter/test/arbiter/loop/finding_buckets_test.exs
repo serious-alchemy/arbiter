@@ -25,8 +25,8 @@ defmodule Arbiter.Loop.FindingBucketsTest do
                "#{category} has no attribution row"
 
         assert kind in [:skill_patch, :skill_create]
-        assert is_binary(skill) and skill =~ ~r/^[a-z0-9-]+$/
-        assert is_binary(imperative) and String.length(imperative) > 20
+        assert skill =~ ~r/^[a-z0-9-]+$/
+        assert String.length(imperative) > 20
       end
     end
 

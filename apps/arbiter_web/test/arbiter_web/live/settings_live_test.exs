@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.SettingsLiveTest do
   @moduledoc """
   `/settings` (bd-3tnoi9): the install-wide settings in one place — the
-  scheduler's concurrency cap and autopilot switch, the credential watchdog's
+  scheduler's autopilot switch, the credential watchdog's
   adapters and intervals, the theme switcher, and a read-only About section.
 
   Every save goes through `ArbiterWeb.InstallationSettings` (the board's cap
@@ -27,7 +27,6 @@ defmodule ArbiterWeb.SettingsLiveTest do
   end
 
   defp reset_settings do
-    {:ok, _} = Settings.set_conductor_system_max_concurrent(nil)
     {:ok, _} = Settings.set_credential_watchdog_adapters(nil)
     {:ok, _} = Settings.set_credential_watchdog_interval_ms(nil)
     {:ok, _} = Settings.set_credential_watchdog_recovery_interval_ms(nil)
@@ -82,64 +81,12 @@ defmodule ArbiterWeb.SettingsLiveTest do
     end
   end
 
-  describe "system max concurrent workers" do
-    test "shows the default, marked as not overridden, when nothing is set", %{conn: conn} do
+  describe "the deleted system max concurrent workers row (DC1)" do
+    test "is gone from the page", %{conn: conn} do
       view = live_settings(conn)
 
-      assert has_element?(view, "#settings-concurrency[data-override='false']")
-      default = to_string(Arbiter.Board.Snapshot.default_system_max_concurrent())
-      assert has_element?(view, "#settings-concurrency-effective", default)
-      assert has_element?(view, "#settings-concurrency-default", default)
-    end
-
-    test "saving a positive integer persists it and marks the override", %{conn: conn} do
-      view = live_settings(conn)
-
-      submit(view, "#settings-concurrency-form", %{"value" => "3"})
-
-      assert Settings.conductor_system_max_concurrent() == 3
-      assert has_element?(view, "#settings-concurrency[data-override='true']")
-      assert has_element?(view, "#settings-concurrency-effective", "3")
-      assert has_element?(view, "#toast-info", "set to 3")
-    end
-
-    test "a blank value clears the override", %{conn: conn} do
-      {:ok, 3} = Settings.set_conductor_system_max_concurrent(3)
-      view = live_settings(conn)
-      assert has_element?(view, "#settings-concurrency[data-override='true']")
-
-      submit(view, "#settings-concurrency-form", %{"value" => "  "})
-
-      assert Settings.conductor_system_max_concurrent() == nil
-      assert has_element?(view, "#settings-concurrency[data-override='false']")
-    end
-
-    test "invalid input shows an inline error and changes nothing", %{conn: conn} do
-      {:ok, 5} = Settings.set_conductor_system_max_concurrent(5)
-      view = live_settings(conn)
-
-      for bad <- ["0", "-2", "abc", "1.5", "3 workers"] do
-        submit(view, "#settings-concurrency-form", %{"value" => bad})
-
-        assert has_element?(
-                 view,
-                 "#settings-concurrency-field[data-invalid='true']",
-                 "positive whole number"
-               )
-
-        assert Settings.conductor_system_max_concurrent() == 5
-      end
-    end
-
-    test "a change made elsewhere shows without a refresh", %{conn: conn} do
-      view = live_settings(conn)
-      assert has_element?(view, "#settings-concurrency[data-override='false']")
-
-      {:ok, 7} = Settings.set_conductor_system_max_concurrent(7)
-
-      assert render(view) =~ "settings-concurrency"
-      assert has_element?(view, "#settings-concurrency[data-override='true']")
-      assert has_element?(view, "#settings-concurrency-effective", "7")
+      refute has_element?(view, "#settings-concurrency")
+      refute has_element?(view, "#settings-concurrency-form")
     end
   end
 

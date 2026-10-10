@@ -60,7 +60,6 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Usage.Estimate
   alias Arbiter.Workers.Current
   alias ArbiterWeb.Api.WorkspaceParam
-  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 

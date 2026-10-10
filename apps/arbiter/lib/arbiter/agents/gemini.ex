@@ -184,7 +184,6 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   defp jail_blocker_message(reason) when is_binary(reason), do: reason
-  defp jail_blocker_message(reason), do: inspect(reason)
 
   @no_keyring_message "agy needs a keyring (D-Bus) or its own login on this host"
 
@@ -521,8 +520,6 @@ defmodule Arbiter.Agents.Gemini do
 
   defp tool_result_line?(line) when is_binary(line),
     do: String.starts_with?(line, "⏴ ")
-
-  defp tool_result_line?(_), do: false
 
   # Splice `insert` (a nudge/resume prompt, see the two shapes below) into a
   # stashed `default_argv/2` invocation. Both the `:agy` and `:gemini`

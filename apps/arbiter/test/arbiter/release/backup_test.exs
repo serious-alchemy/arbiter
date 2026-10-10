@@ -89,7 +89,7 @@ defmodule Arbiter.Release.BackupTest do
     # Smash a data page in the middle of the copy.
     bytes = File.read!(dest)
     mid = div(byte_size(bytes), 2)
-    <<head::binary-size(mid), _::binary-size(64), tail::binary>> = bytes
+    <<head::binary-size(^mid), _::binary-size(64), tail::binary>> = bytes
     File.write!(dest, head <> :binary.copy(<<0xFF>>, 64) <> tail)
 
     assert {:error, _} = Backup.integrity_check(dest)

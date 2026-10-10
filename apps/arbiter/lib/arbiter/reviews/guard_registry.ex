@@ -951,15 +951,18 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :escalated_once,
       sites: [
         {Watchdog, :flake_step, 3},
-        {Watchdog, :rerun_suspected_flake, 4},
+        {Watchdog, :known_flake_step, 3},
+        {Watchdog, :outside_diff_step, 3},
+        {Watchdog, :rerun_suspected_flake, 5},
         {Watchdog, :safe_rerun_ci, 1},
         {Watchdog, :park_as_suspected_flake, 4}
       ],
       anchors: ["@flake_rerun_grace_polls", "flake_rerun"],
       summary:
-        "a ci_failed block failing only in tests outside the diff is re-run once per head; " <>
-          "the same test failing again gets a briefed fix pass, different ones escalate " <>
-          "as a suspected flake"
+        "a ci_failed block failing only in registered known-flaky tests (bd-4qj7io), or only " <>
+          "in tests outside the diff, is re-run once per head; the same test failing again " <>
+          "gets a fix pass (briefed, for outside-diff tests), different outside-diff ones " <>
+          "escalate as a suspected flake"
     }
   ]
 

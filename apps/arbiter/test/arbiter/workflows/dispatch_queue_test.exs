@@ -22,6 +22,12 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
   require Ash.Query
 
+  # How long a test waits for an event the drain Task produces off-process. It is
+  # an upper bound, not a delay: every wait returns the moment the event lands.
+  # The drain does SQLite reads before it dispatches, and a loaded CI box took
+  # longer than the 500ms these used to allow (bd-4qj7io).
+  @settle_ms 5_000
+
   # Records each drain re-dispatch to the pid stashed in app-env, so the
   # priority-order drain can be asserted without spawning real workers.
   defmodule RecordingDispatcher do
@@ -154,7 +160,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   # The drain Task's `{:requeue, item}` cast lands on the queue asynchronously
   # after the test process already observed the dispatcher's `dispatch_attempt`
   # message — poll instead of asserting `state/1` immediately after.
-  defp wait_for_held_item(pid, budget_ms \\ 500) do
+  defp wait_for_held_item(pid, budget_ms \\ 5_000) do
     case DispatchQueue.state(pid) do
       %{items: [item | _]} ->
         item
@@ -661,7 +667,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
 
       :ok = DispatchQueue.drain(pid)
-      assert_receive {:dispatch_attempt, task_id}, 500
+      assert_receive {:dispatch_attempt, task_id}, @settle_ms
       assert task_id == task.id
 
       held_item = wait_for_held_item(pid)
@@ -717,7 +723,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
 
       :ok = DispatchQueue.drain(pid)
-      assert_receive {:dispatch_attempt, task_id}, 500
+      assert_receive {:dispatch_attempt, task_id}, @settle_ms
 
       held_item = wait_for_held_item(pid)
       assert DateTime.compare(held_item.retry_not_before, DateTime.utc_now()) == :lt
@@ -726,7 +732,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # the "task still dispatches promptly once the window rolls" behaviour
       # observed for bd-7qbavq at 23:20:03.
       :ok = DispatchQueue.drain(pid)
-      assert_receive {:dispatch_attempt, ^task_id}, 500
+      assert_receive {:dispatch_attempt, ^task_id}, @settle_ms
     end
 
     test "the armed :drain_on_reset timer fires on its own and redrains, without a manual drain/1 call" do
@@ -744,7 +750,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # nothing will ever send. Set immediately before that drain, with enough
       # margin for the drain's own DB work, and short enough to still observe the
       # timer fire for real inside the budget (round-2 finding 1).
-      hold_lead_ms = 400
+      hold_lead_ms = 1_500
       on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
 
       Application.put_env(
@@ -774,11 +780,11 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       )
 
       :ok = DispatchQueue.drain(pid)
-      assert_receive {:dispatch_attempt, task_id}, 500
+      assert_receive {:dispatch_attempt, task_id}, @settle_ms
 
       # Do NOT call drain/1 again — the hold's own :drain_on_reset timer should
       # wake the queue on its own and re-run the (still-failing) probe.
-      assert_receive {:dispatch_attempt, ^task_id}, 2_000
+      assert_receive {:dispatch_attempt, ^task_id}, @settle_ms
     end
   end
 
@@ -806,8 +812,8 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(pid)
 
-      assert_receive {:dispatch_attempt, first}, 500
-      assert_receive {:dispatch_attempt, second}, 500
+      assert_receive {:dispatch_attempt, first}, @settle_ms
+      assert_receive {:dispatch_attempt, second}, @settle_ms
       assert first == boom.id
       assert second == ok.id
 

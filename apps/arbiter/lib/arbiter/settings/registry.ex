@@ -12,20 +12,12 @@ defmodule Arbiter.Settings.Registry do
   """
 
   alias Arbiter.Agents.CredentialWatchdog
-  alias Arbiter.Board.Snapshot
   alias Arbiter.Settings
 
   @type key :: String.t()
   @type error :: {:invalid, String.t()}
 
   @schema [
-    %{
-      key: "conductor_system_max_concurrent",
-      type: "positive_integer",
-      description:
-        "System-wide worker concurrency ceiling the board scheduler dispatches under. " <>
-          "Takes effect on the next scheduler tick."
-    },
     %{
       key: "credential_watchdog_adapters",
       type: "agent_type_list",
@@ -340,9 +332,6 @@ defmodule Arbiter.Settings.Registry do
     end
   end
 
-  defp write("conductor_system_max_concurrent", v),
-    do: wrap(Settings.set_conductor_system_max_concurrent(v))
-
   defp write("credential_watchdog_adapters", v),
     do: wrap(Settings.set_credential_watchdog_adapters(v))
 
@@ -389,7 +378,6 @@ defmodule Arbiter.Settings.Registry do
 
   @doc "The raw persisted override (`nil` = none) for a key."
   @spec override(key()) :: term()
-  def override("conductor_system_max_concurrent"), do: Settings.conductor_system_max_concurrent()
   def override("credential_watchdog_adapters"), do: Settings.credential_watchdog_adapters()
   def override("credential_watchdog_interval_ms"), do: Settings.credential_watchdog_interval_ms()
 
@@ -424,8 +412,6 @@ defmodule Arbiter.Settings.Registry do
 
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
-  def default("conductor_system_max_concurrent"), do: Snapshot.default_system_max_concurrent()
-
   def default("credential_watchdog_adapters"),
     do: Enum.map(Arbiter.Agents.adapters(), fn {type, _} -> to_string(type) end)
 

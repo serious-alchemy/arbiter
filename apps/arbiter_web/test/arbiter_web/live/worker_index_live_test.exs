@@ -281,7 +281,12 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   test "the dead render shows the loading state and does not walk live workers", %{conn: conn} do
     test = self()
     :meck.new(Arbiter.Worker, [:passthrough, :no_link])
-    :meck.expect(Arbiter.Worker, :list_children, fn -> send(test, :worker_walk) && [] end)
+
+    :meck.expect(Arbiter.Worker, :list_children, fn ->
+      send(test, :worker_walk)
+      []
+    end)
+
     on_exit(fn -> :meck.unload(Arbiter.Worker) end)
 
     doc = conn |> get(~p"/workers") |> html_response(200) |> LazyHTML.from_document()

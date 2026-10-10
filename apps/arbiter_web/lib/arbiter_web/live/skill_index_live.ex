@@ -32,7 +32,6 @@ defmodule ArbiterWeb.SkillIndexLive do
 
   use ArbiterWeb, :live_view
 
-  require Ash.Query
   require Logger
 
   alias Arbiter.Skills

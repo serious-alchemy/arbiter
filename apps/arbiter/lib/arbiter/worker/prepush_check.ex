@@ -55,8 +55,6 @@ defmodule Arbiter.Worker.PrepushCheck do
   the run's own container, with its mounts, home and no network.
   """
 
-  require Logger
-
   alias Arbiter.Worker.PrepushCheck.Recipe
   alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.ReleaseEnv
@@ -467,7 +465,6 @@ defmodule Arbiter.Worker.PrepushCheck do
   defp what_happened(_), do: "It did not pass."
 
   defp output({_, _, text}, max) when is_binary(text), do: tail(text, max)
-  defp output({:exit, _, text}, max), do: tail(text, max)
   defp output(_, _max), do: "(no output)"
 
   defp indent(text) do

@@ -77,7 +77,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
       snap =
         CloudCode.antigravity(agy_cmd: "definitely-not-a-real-agy-binary-xyz-#{__ENV__.line}")
 
-      refute is_nil(snap)
+      assert %{} = snap
       assert snap.provider == "antigravity"
       assert snap.models == []
       assert snap.message =~ "not installed"
@@ -125,7 +125,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
             {:error, {:exit, 1}},
             {:error, :malformed}
           ] do
-        refute is_nil(CloudCode.antigravity(antigravity_opts(result)))
+        assert %{} = CloudCode.antigravity(antigravity_opts(result))
       end
     end
   end
@@ -139,7 +139,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
     test "a 0-exit executable with no parseable output degrades to the malformed-JSON message" do
       snap = CloudCode.antigravity(agy_cmd: "true")
 
-      refute is_nil(snap)
+      assert %{} = snap
       assert snap.message =~ "unexpected data"
     end
 
@@ -178,8 +178,8 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       opts = [agy_cmd: script]
 
-      refute is_nil(CloudCode.antigravity(opts))
-      refute is_nil(CloudCode.antigravity(opts))
+      assert %{} = CloudCode.antigravity(opts)
+      assert %{} = CloudCode.antigravity(opts)
 
       {:ok, contents} = File.read(counter)
       assert String.trim(contents) |> String.split("\n") |> length() == 1

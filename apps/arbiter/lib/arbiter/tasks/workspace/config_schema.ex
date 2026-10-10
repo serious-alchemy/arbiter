@@ -26,7 +26,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
   # subsystems own (skills, refine, coordinator_notifications, the deprecated
   # security block). A `:patch_config` write of any other root is refused.
   @top_level_keys ~w(tracker merge agent review_agent security guardrails routing review
-                     review_gate notes_gate review_automation quota conductor worker attention
+                     review_gate notes_gate review_automation quota worker attention
                      loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
                      refine coordinator_notifications review_scope)
 
@@ -34,7 +34,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
   # is the mistake this table exists to catch (bd-311cun).
   @security_roots ~w(sandbox permissions)
 
+  @conductor_removed "conductor.max_concurrent was removed (bd-8qdviv): bound a machine with " <>
+                       "`arb node set`, a provider with the account's `max_concurrent`, a " <>
+                       "workspace's use of an account with `--share`, or a repo with " <>
+                       "`worker.repos.<repo>.max_concurrent`."
+
+  @doc "The refusal for the deleted `conductor` config key (DC1)."
+  @spec conductor_removed_message() :: String.t()
+  def conductor_removed_message, do: @conductor_removed
+
   @doc "The top-level keys a config write may set without `force`."
+
   @spec known_top_level_keys() :: [String.t()]
   def known_top_level_keys, do: @top_level_keys
 
@@ -324,9 +334,6 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                           exempt cap, the ceiling an exempt dispatch may lift
                           the paced line to. Never raises it; never above the
                           flat ceiling.
-
-    conductor  (map)
-      max_concurrent  positive integer — cap on concurrently-dispatched workers
 
     worker  (map — how a worker checkout is provisioned, bd-2jerqw)
       placement       "local_only" (default — every run stays on this machine),

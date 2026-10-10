@@ -21,8 +21,6 @@ defmodule Arbiter.Worker.WatchdogLocalGitCoverageTest do
   import Arbiter.Test.GitFixture
   import ExUnit.CaptureLog
 
-  require Logger
-
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow.Tally

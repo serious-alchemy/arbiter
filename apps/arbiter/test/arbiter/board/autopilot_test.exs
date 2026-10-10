@@ -51,7 +51,12 @@ defmodule Arbiter.Board.AutopilotTest do
         defaults
       else
         defaults ++
-          [dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end]
+          [
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
+          ]
       end
 
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
@@ -502,8 +507,12 @@ defmodule Arbiter.Board.AutopilotTest do
             paused: false,
             snapshot: &two_card_snapshot/1,
             dispatch: fn
-              "bd-1" -> {:error, error}
-              id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}}
+              "bd-1" ->
+                {:error, error}
+
+              id ->
+                send(test, {:dispatched, id})
+                {:ok, %{task_id: id}}
             end
           )
 

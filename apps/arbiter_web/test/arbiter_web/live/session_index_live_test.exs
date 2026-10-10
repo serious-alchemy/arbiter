@@ -366,7 +366,11 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "the dead render shows the loading state and reads nothing", %{conn: conn} do
       test = self()
-      :meck.expect(Sessions, :list, fn -> send(test, :sessions_read) && :meck.passthrough([]) end)
+
+      :meck.expect(Sessions, :list, fn ->
+        send(test, :sessions_read)
+        :meck.passthrough([])
+      end)
 
       html = conn |> get(~p"/sessions") |> html_response(200)
 

@@ -42,8 +42,6 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workflows.ReviewThreadFollowUp
 
-  require Logger
-
   # This module both defines the behaviour and ships the default
   # implementation, so it implements itself.
   @behaviour __MODULE__

@@ -247,6 +247,59 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
 
       assert Concurrency.live_count(account) == 0
     end
+
+    # DC1 (§5.1): a run placed on a node says so on its registry entry, so the
+    # primary's cap does not count it.
+    test "stamps the node it was placed on, and keeps it when the account hold is released" do
+      ws = workspace!("real-worker-node")
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "remote", workspace_id: ws.id})
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: %{provider: "claude", placed_node_id: "node-7"}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+
+      node_id = fn ->
+        Enum.find_value(WorkerRegistry.live_dispatches(), fn d ->
+          if d.pid == pid, do: d.node_id
+        end)
+      end
+
+      assert node_id.() == "node-7"
+      refute task.id in Arbiter.Nodes.LocalCapacity.holders()
+
+      # The ReviewGate CI wait releases and retakes the hold: both rewrite the entry.
+      :sys.replace_state(pid, fn s -> %{s | state: :waiting, waiting_on: :review_gate} end)
+      send(pid, {:__review_gate_ci_wait__, true})
+      _ = :sys.get_state(pid)
+      assert node_id.() == "node-7"
+
+      send(pid, {:__review_gate_ci_wait__, false})
+      _ = :sys.get_state(pid)
+      assert node_id.() == "node-7"
+    end
+
+    test "a worker with no node is the primary's" do
+      ws = workspace!("real-worker-local")
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "local", workspace_id: ws.id})
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: %{provider: "claude"}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+
+      assert task.id in Arbiter.Nodes.LocalCapacity.holders()
+    end
   end
 
   describe "account_headroom/2 (§4.2)" do

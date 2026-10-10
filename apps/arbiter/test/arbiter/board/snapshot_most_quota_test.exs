@@ -18,7 +18,7 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
 
   setup do
     on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)
-    put_app_env(:arbiter, :conductor_system_max_concurrent, 3)
+    put_local_cap(3)
     :ok
   end
 
@@ -280,7 +280,7 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
       assert Snapshot.effective_max_concurrent(ws.id, 0) == 2
     end
 
-    test "is capped by the system cap" do
+    test "is capped by the machine cap" do
       ws = most_quota!()
       claude = account!(:claude, %{max_concurrent: 5})
       codex = account!(:codex, %{max_concurrent: 5})
@@ -292,29 +292,7 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
       assert Snapshot.effective_max_concurrent(ws.id, 0) == 3
     end
 
-    test "is capped by the workspace cap" do
-      ws =
-        Ash.create!(Workspace, %{
-          name: "smq-cap-#{System.unique_integer([:positive])}",
-          prefix: "smqc#{System.unique_integer([:positive])}",
-          config: %{
-            "agent" => %{"type" => ["claude", "codex"]},
-            "routing" => %{"provider_selection" => "most_quota"},
-            "conductor" => %{"max_concurrent" => 1}
-          }
-        })
-
-      claude = account!(:claude, %{max_concurrent: 2})
-      codex = account!(:codex, %{max_concurrent: 2})
-      allow!(ws, claude, 0)
-      allow!(ws, codex, 1)
-      claude_used!(claude, 0.1)
-      codex_used!(codex, 10.0)
-
-      assert Snapshot.effective_max_concurrent(ws.id, 0) == 1
-    end
-
-    test "an unbounded available candidate leaves the workspace and system caps in charge" do
+    test "an unbounded available candidate leaves the machine cap in charge" do
       ws = most_quota!()
       %{} = claude_held_codex_free!(ws, %{max_concurrent: 1})
 

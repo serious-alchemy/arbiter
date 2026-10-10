@@ -17,7 +17,6 @@ defmodule Arbiter.Usage.SummarizeProjectionTest do
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
   alias Arbiter.Usage.SummarizeOracle
-  require Ash.Query
 
   @day1 ~U[2026-06-01 12:00:00.000000Z]
   @day2 ~U[2026-06-02 09:00:00.000000Z]

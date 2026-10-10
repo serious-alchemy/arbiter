@@ -7,8 +7,7 @@ defmodule Arbiter.Board.CapacityExplainer do
   ## It reads the scheduler's own numbers
 
   The cap is the minimum of several limits — machine capacity (the local cap
-  plus every available node), the install-wide ceiling, the workspace's
-  `conductor.max_concurrent`, where the workspace's work may run, and the
+  plus every available node), where the workspace's work may run, and the
   provider account's headroom. `Arbiter.Board.Snapshot.capacity_terms/3` is
   the one function that folds them, and `effective_max_concurrent/3` *is*
   its `effective`; `Snapshot.load/1` keeps the terms on the board (`capacity`)
@@ -116,7 +115,7 @@ defmodule Arbiter.Board.CapacityExplainer do
   defp limit_keys(terms) do
     present = Keyword.keys(terms.terms)
 
-    [:nodes, :ceiling, :workspace, :placement, :placement_free, :account]
+    [:nodes, :placement, :placement_free, :account]
     |> Enum.filter(&(&1 in present or (&1 == :account and terms.account != nil)))
     |> Enum.reject(&(&1 == :placement and trivial_placement?(terms)))
   end
@@ -128,12 +127,6 @@ defmodule Arbiter.Board.CapacityExplainer do
 
   defp headline(%{binding: :nodes} = t, _a),
     do: "The cap is #{t.effective}: that is all the machine capacity there is."
-
-  defp headline(%{binding: :ceiling} = t, _a),
-    do: "Limited to #{t.effective} by the install-wide limit."
-
-  defp headline(%{binding: :workspace} = t, _a),
-    do: "Limited to #{t.effective} by the workspace setting."
 
   defp headline(%{binding: :placement} = t, _a),
     do: "Limited to #{t.effective} by where this workspace's work may run."
@@ -155,14 +148,6 @@ defmodule Arbiter.Board.CapacityExplainer do
 
     "Capacity #{install.sum} = this machine (#{install.local})#{machines}" <> remote_off(install)
   end
-
-  defp limit_text(:ceiling, %{install: %{ceiling: ceiling, sum: sum}}, _account) do
-    cut = if ceiling < sum, do: ", below the #{sum} the machines could run", else: ""
-    "Install-wide limit: #{ceiling}#{cut}"
-  end
-
-  defp limit_text(:workspace, %{workspace: %{max: max}}, _account),
-    do: "Workspace setting: at most #{max} at once"
 
   defp limit_text(:placement, %{placement: placement}, _account),
     do:
@@ -232,13 +217,6 @@ defmodule Arbiter.Board.CapacityExplainer do
   defp change_hint(:nodes, _terms, _a),
     do:
       "Change with `arb node set local --max-workers N` (this machine) or `arb node set <node> --max-workers N`."
-
-  defp change_hint(:ceiling, _terms, _a),
-    do:
-      "Change with `arb settings set conductor_system_max_concurrent N`, or clear it with `arb settings unset conductor_system_max_concurrent`."
-
-  defp change_hint(:workspace, _terms, _a),
-    do: "Change with `arb config set conductor.max_concurrent N`."
 
   defp change_hint(:placement, _terms, _a),
     do: "Change with `arb config set worker.placement local_only|prefer_remote|remote_only`."
@@ -459,12 +437,6 @@ defmodule Arbiter.Board.CapacityExplainer do
     "Waiting for a free worker slot. #{binding_reason(binding, terms)}#{using(holders)}. " <>
       "It starts when one finishes."
   end
-
-  defp binding_reason(:workspace, t),
-    do: "The workspace allows #{t.effective} at once and they are all in use"
-
-  defp binding_reason(:ceiling, t),
-    do: "The install-wide limit is #{t.effective} at once and they are all in use"
 
   defp binding_reason(:placement_free, _t),
     do: "The machines this workspace may use have no free slot"

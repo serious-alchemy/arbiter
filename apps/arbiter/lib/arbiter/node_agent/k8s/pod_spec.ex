@@ -340,7 +340,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   end
 
   defp mount(%{kind: kind}), do: bad_spec({:unknown_mount_kind, kind})
-  defp mount(%{} = mount), do: bad_spec({:unknown_mount_kind, Map.get(mount, :kind)})
+  defp mount(%{}), do: bad_spec({:unknown_mount_kind, nil})
   defp mount(_), do: bad_spec({:bad_value, :mounts})
 
   # The image's own CLI directory is not something a mount can land on.

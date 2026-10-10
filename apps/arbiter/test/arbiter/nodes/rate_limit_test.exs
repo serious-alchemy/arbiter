@@ -132,6 +132,6 @@ defmodule Arbiter.Nodes.RateLimitTest do
   end
 
   test "an unknown rule is a programming error" do
-    assert_raise FunctionClauseError, fn -> RateLimit.check(:nope, "k", []) end
+    assert_raise FunctionClauseError, fn -> apply(RateLimit, :check, [:nope, "k", []]) end
   end
 end

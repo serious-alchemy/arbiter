@@ -154,14 +154,7 @@ defmodule Arbiter.Worker.ResumeSlotTest do
 
   describe "reading the world" do
     setup do
-      prior = Application.get_env(:arbiter, :conductor_system_max_concurrent)
-      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
-
-      on_exit(fn ->
-        if prior,
-          do: Application.put_env(:arbiter, :conductor_system_max_concurrent, prior),
-          else: Application.delete_env(:arbiter, :conductor_system_max_concurrent)
-      end)
+      put_local_cap(1)
     end
 
     test "reads the tickets In progress and the configured cap when not handed them", %{

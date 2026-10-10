@@ -33,7 +33,6 @@ defmodule Arbiter.Workers.SessionArchiveBackfill do
   """
 
   require Ash.Query
-  require Logger
 
   alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run

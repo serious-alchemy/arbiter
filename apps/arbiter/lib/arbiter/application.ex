@@ -12,11 +12,36 @@ defmodule Arbiter.Application do
   alias Arbiter.Workflows.PRPatrolSupervisor
   alias Arbiter.Workflows.ReviewPatrolSupervisor
 
+  require Logger
+
   @impl true
   def start(_type, _args) do
+    warn_removed_env()
+
     with {:ok, role} <- Arbiter.NodeAgent.role(),
          {:ok, children} <- boot_children(role) do
       Supervisor.start_link(children, strategy: :one_for_one, name: Arbiter.Supervisor)
+    end
+  end
+
+  @doc """
+  Log a one-time warning when the removed app env `:conductor_system_max_concurrent`
+  is set (DC1, `docs/design/provider-dynamic-concurrency.md` §10.6). It is no
+  longer read; the cap it expressed now lives on the node (`arb node set`).
+  Returns `:ok` either way.
+  """
+  @spec warn_removed_env() :: :ok
+  def warn_removed_env do
+    case Application.get_env(:arbiter, :conductor_system_max_concurrent) do
+      nil ->
+        :ok
+
+      k ->
+        Logger.warning(
+          "app env :conductor_system_max_concurrent (#{inspect(k)}) is no longer read: " <>
+            "the install's concurrency is the sum of its machines' caps. " <>
+            "To keep #{inspect(k)} on this machine: `arb node set local --max-workers #{inspect(k)}`."
+        )
     end
   end
 

@@ -36,7 +36,6 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   use Mix.Task
 
   require Ash.Query
-  require Logger
 
   alias Arbiter.Tasks.DoltImport.Mapper
 

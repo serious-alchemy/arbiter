@@ -75,7 +75,7 @@ defmodule Arbiter.Worker.Image do
   @git_timeout_ms 30_000
   @podman_timeout_ms 60_000
 
-  @default_toolchain %{erlang: "28.2", elixir: "1.19.4"}
+  @default_toolchain %{erlang: "29.1.1", elixir: "1.20.4"}
 
   # The base's Debian release must be at least as new as the one the toolchain
   # source images (`library/elixir:*-slim`, built on `erlang:*-slim`) track: their

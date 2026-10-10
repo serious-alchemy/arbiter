@@ -415,8 +415,6 @@ defmodule Arbiter.Loop.Report do
     """
   end
 
-  defp ci(_), do: ""
-
   defp recurring_flakes(%{recurring_flakes: [_ | _] = flakes} = ci) do
     body =
       Enum.map_join(flakes, "\n", fn f ->

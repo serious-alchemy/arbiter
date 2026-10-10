@@ -47,10 +47,7 @@
   # value. Deleting the clause converts that into a FunctionClauseError inside
   # a GenServer — for the Watchdog and the patrols, a crash loop on live
   # workers. The clause stays; the warning does not.
-  {"lib/arbiter/agents/gemini.ex", :pattern_match_cov},
-  {"lib/arbiter/agents/gemini/stream.ex", :pattern_match_cov},
   {"lib/arbiter/mcp/tools/task.ex", :pattern_match_cov},
-  {"lib/arbiter/skills/selection.ex", :pattern_match_cov},
   {"lib/arbiter/tasks/claim.ex", :pattern_match_cov},
   {"lib/arbiter/worker.ex", :pattern_match_cov},
   {"lib/arbiter/worker/claude_session.ex", :pattern_match_cov},
@@ -60,7 +57,6 @@
   {"lib/arbiter/workflows/machine.ex", :pattern_match_cov},
   {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match_cov},
   {"lib/arbiter/workflows/review_patrol.ex", :pattern_match_cov},
-  {"lib/arbiter_cli/client.ex", :pattern_match_cov},
   {"lib/arbiter_cli/cmd/loop.ex", :pattern_match_cov},
   {"lib/arbiter_web/live/loop_proposal_index_live.ex", :pattern_match_cov},
 
@@ -96,7 +92,6 @@
   #     unused. No entry needed for either module.
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
-  {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/loop_controller.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/scheduler_controller.ex", :pattern_match},
@@ -120,7 +115,6 @@
   #   downstream of the same `ArbiterCli.Version.dev_build?/0` constant noted
   #   in group 2 — no filter here either, for the same reason.
   {"lib/arbiter/loop/analysis.ex", :guard_fail},
-  {"lib/arbiter/trackers/gitlab.ex", :guard_fail},
   {"lib/arbiter/worker.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :guard_fail},
   {"lib/arbiter/worker/dispatch.ex", :neg_guard_fail},
@@ -135,12 +129,8 @@
   # site here builds a MapSet and passes it straight to another MapSet
   # function — `MapSet.union/2`, `MapSet.disjoint?/2` — which is exactly the
   # supported use.
-  {"lib/arbiter/board/file_scope.ex", :contract_with_opaque},
-  {"lib/arbiter/board/snapshot.ex", :call_without_opaque},
   {"lib/arbiter/tasks/epic_rollup.ex", :call_without_opaque},
   {"lib/arbiter/usage/estimate.ex", :call_without_opaque},
-  {"lib/arbiter/workflows/review_patrol.ex", :call_without_opaque},
-  {"lib/arbiter/worker.ex", :call_without_opaque},
 
   # ── 5. `pattern_match` fallout from the `:exact_compare` fixes ────────────
   #

@@ -2960,7 +2960,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert data.config["repo_paths"] == %{"my.repo" => "/srv/my.repo"}
 
-      assert {:ok, data} =
+      assert {:ok, _data} =
                Tools.workspace_config_set(ctx.coordinator, %{
                  "key" => "repo_paths.other",
                  "value" => "/srv/other"
@@ -3032,7 +3032,6 @@ defmodule Arbiter.MCP.ToolsTest do
   describe "installation_config_get/2 + installation_config_set/2" do
     setup do
       on_exit(fn ->
-        Arbiter.Settings.set_conductor_system_max_concurrent(nil)
         Arbiter.Settings.set_credential_watchdog_adapters(nil)
         Arbiter.Settings.set_credential_watchdog_interval_ms(nil)
         Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
@@ -3049,7 +3048,6 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     @empty_settings %{
-      conductor_system_max_concurrent: nil,
       credential_watchdog_adapters: nil,
       credential_watchdog_interval_ms: nil,
       credential_watchdog_recovery_interval_ms: nil,
@@ -3121,19 +3119,19 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert data.value == effective
       # the default is in force, so the effective value is not the bare override
-      assert data.value.conductor_system_max_concurrent ==
-               Arbiter.Settings.Registry.default("conductor_system_max_concurrent")
+      assert data.value.credential_watchdog_interval_ms ==
+               Arbiter.Settings.Registry.default("credential_watchdog_interval_ms")
 
-      assert data.value.conductor_system_max_concurrent != nil
+      assert data.value.credential_watchdog_interval_ms != nil
       assert Enum.map(data.items, & &1.key) == Arbiter.Settings.Registry.keys()
     end
 
     test "returns the same item as REST/CLI for a known key (effective + override)", ctx do
-      default = Arbiter.Settings.Registry.default("conductor_system_max_concurrent")
+      default = Arbiter.Settings.Registry.default("credential_watchdog_interval_ms")
 
       assert {:ok, data} =
                Tools.installation_config_get(ctx.worker, %{
-                 "key" => "conductor_system_max_concurrent"
+                 "key" => "credential_watchdog_interval_ms"
                })
 
       assert data.value == default
@@ -3142,18 +3140,18 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.default == default
       assert data.type == "positive_integer"
 
-      {:ok, 5} = Arbiter.Settings.set_conductor_system_max_concurrent(5)
+      {:ok, 5} = Arbiter.Settings.set_credential_watchdog_interval_ms(5)
 
       assert {:ok, data} =
                Tools.installation_config_get(ctx.worker, %{
-                 "key" => "conductor_system_max_concurrent"
+                 "key" => "credential_watchdog_interval_ms"
                })
 
-      assert data.key == "conductor_system_max_concurrent"
+      assert data.key == "credential_watchdog_interval_ms"
       assert data.value == 5
       assert data.override == 5
       assert data.overridden == true
-      assert data.settings.conductor_system_max_concurrent == 5
+      assert data.settings.credential_watchdog_interval_ms == 5
     end
 
     test "errors for an unknown key", ctx do
@@ -3166,26 +3164,26 @@ defmodule Arbiter.MCP.ToolsTest do
     test "coordinator can set a positive integer value", ctx do
       assert {:ok, data} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => 3
                })
 
-      assert data.key == "conductor_system_max_concurrent"
+      assert data.key == "credential_watchdog_interval_ms"
       assert data.value == 3
-      assert Arbiter.Settings.conductor_system_max_concurrent() == 3
+      assert Arbiter.Settings.credential_watchdog_interval_ms() == 3
     end
 
     test "coordinator can clear the override with a null value", ctx do
-      {:ok, 3} = Arbiter.Settings.set_conductor_system_max_concurrent(3)
+      {:ok, 3} = Arbiter.Settings.set_credential_watchdog_interval_ms(3)
 
       assert {:ok, data} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => nil
                })
 
       assert data.value == nil
-      assert Arbiter.Settings.conductor_system_max_concurrent() == nil
+      assert Arbiter.Settings.credential_watchdog_interval_ms() == nil
     end
 
     test "rejects an unknown key", ctx do
@@ -3201,7 +3199,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "rejects a non-positive-integer value", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => 0
                })
 
@@ -3218,7 +3216,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "requires a value argument", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent"
+                 "key" => "credential_watchdog_interval_ms"
                })
 
       assert msg =~ "value"
@@ -3411,12 +3409,12 @@ defmodule Arbiter.MCP.ToolsTest do
       # This verifies the backend validation accepts native integers (what well-formed MCP clients send)
       assert {:ok, data} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => 5
                })
 
       assert data.value == 5
-      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+      assert Arbiter.Settings.credential_watchdog_interval_ms() == 5
     end
 
     test "native list value round-trips successfully for adapter key (coordinator)", ctx do
@@ -3457,15 +3455,15 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
     end
 
-    test "unwraps a stringified integer value for conductor_system_max_concurrent", ctx do
+    test "unwraps a stringified integer value for credential_watchdog_interval_ms", ctx do
       assert {:ok, data} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => "5"
                })
 
       assert data.value == 5
-      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+      assert Arbiter.Settings.credential_watchdog_interval_ms() == 5
     end
 
     test "malformed string for credential_watchdog_adapters fails validation", ctx do
@@ -3479,11 +3477,11 @@ defmodule Arbiter.MCP.ToolsTest do
                })
     end
 
-    test "malformed string for conductor_system_max_concurrent fails validation", ctx do
+    test "malformed string for credential_watchdog_interval_ms fails validation", ctx do
       # A non-integer string should fail validation
       assert {:error, {:invalid, "value must be a positive integer or null"}} =
                Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "conductor_system_max_concurrent",
+                 "key" => "credential_watchdog_interval_ms",
                  "value" => "not a number"
                })
     end
@@ -7434,7 +7432,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "a message sent the way the CLI sends it (no workspace) reaches the recipient's inbox_check in a multi-workspace install",
-         ctx do
+         _ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-multi", prefix: "pmu"})
 
       {:ok, other_task} =
@@ -7477,7 +7475,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
     end
 
-    test "coordinator_inbox_clear task_id clears the thread in every workspace", ctx do
+    test "coordinator_inbox_clear task_id clears the thread in every workspace", _ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-clear-other", prefix: "pcl"})
 
       {:ok, other_task} =

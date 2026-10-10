@@ -11,7 +11,6 @@ defmodule Arbiter.Loop.PassIntegrationTest do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker.OutputLog
-  require Ash.Query
 
   setup do
     prev = Application.get_env(:arbiter, :output_log_root)

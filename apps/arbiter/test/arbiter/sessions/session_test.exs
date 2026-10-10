@@ -13,8 +13,6 @@ defmodule Arbiter.Sessions.SessionTest do
   alias Arbiter.Sessions.UsageIngest
   alias Arbiter.Tasks.Workspace
 
-  require Ash.Query
-
   defp tmp_dir!(tag) do
     dir =
       Path.join(

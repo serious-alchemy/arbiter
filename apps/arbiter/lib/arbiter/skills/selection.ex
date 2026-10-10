@@ -177,8 +177,6 @@ defmodule Arbiter.Skills.Selection do
     end
   end
 
-  defp apply_task_layer(names, overrides, _), do: {names, overrides}
-
   # ---- Entry normalization -------------------------------------------------
 
   # Normalize a raw config value into a list of entries (each a string or map).

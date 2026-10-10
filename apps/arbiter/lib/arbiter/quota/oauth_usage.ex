@@ -69,8 +69,6 @@ defmodule Arbiter.Quota.OAuthUsage do
   no separate probe that spends a billed request to keep it warm.
   """
 
-  require Logger
-
   alias Arbiter.Agents.Claude.ConfigDir
 
   @default_base_url "https://api.anthropic.com"

@@ -118,7 +118,7 @@ defmodule Arbiter.NodeAgent.RunTest do
     wait_until(fn -> run not in Runs.run_ids() end, 5_000)
   end
 
-  defp wait_until(fun, timeout \\ 5_000) do
+  defp wait_until(fun, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline)
   end

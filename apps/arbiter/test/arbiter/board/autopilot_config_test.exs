@@ -47,7 +47,12 @@ defmodule Arbiter.Board.AutopilotConfigTest do
         defaults
       else
         defaults ++
-          [dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end]
+          [
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
+          ]
       end
 
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
@@ -312,7 +317,10 @@ defmodule Arbiter.Board.AutopilotConfigTest do
             paused: false,
             follow_up: false,
             snapshot: fn opts -> board("bd-1", opts[:paused]) end,
-            dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
           )
 
         assert Enum.sort(Registry.keys(Arbiter.PubSub, pid)) ==

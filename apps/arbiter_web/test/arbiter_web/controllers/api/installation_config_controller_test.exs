@@ -11,7 +11,6 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
 
   setup do
     on_exit(fn ->
-      Settings.set_conductor_system_max_concurrent(nil)
       Settings.set_credential_watchdog_adapters(nil)
       Settings.set_credential_watchdog_interval_ms(nil)
       Settings.set_credential_watchdog_recovery_interval_ms(nil)
@@ -37,11 +36,11 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
     end
 
     test "reflects an override and supports ?key=", %{conn: conn} do
-      {:ok, 5} = Settings.set_conductor_system_max_concurrent(5)
+      {:ok, 5} = Settings.set_credential_watchdog_interval_ms(5)
 
-      assert %{"data" => %{"key" => "conductor_system_max_concurrent"} = item} =
+      assert %{"data" => %{"key" => "credential_watchdog_interval_ms"} = item} =
                conn
-               |> get("/api/installation/config", %{"key" => "conductor_system_max_concurrent"})
+               |> get("/api/installation/config", %{"key" => "credential_watchdog_interval_ms"})
                |> json_response(200)
 
       assert item["value"] == 5
@@ -87,11 +86,11 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
     end
 
     test "invalid value is 422 and changes nothing", %{conn: conn} do
-      {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
-      body = %{"key" => "conductor_system_max_concurrent", "value" => -2}
+      {:ok, 4} = Settings.set_credential_watchdog_interval_ms(4)
+      body = %{"key" => "credential_watchdog_interval_ms", "value" => -2}
       resp = conn |> patch("/api/installation/config", body) |> json_response(422)
       assert resp["error"]["message"] =~ "positive integer"
-      assert Settings.conductor_system_max_concurrent() == 4
+      assert Settings.credential_watchdog_interval_ms() == 4
     end
 
     test "unknown key and missing value are 422", %{conn: conn} do
@@ -115,10 +114,10 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
         end)
 
       for {key, value} <- [
-            {"conductor_system_max_concurrent", 0},
+            {"credential_watchdog_interval_ms", 0},
             {"credential_watchdog_adapters", ["bogus"]},
             {"quota_providers_hidden", "x"},
-            {"conductor_system_max_concurrent", 6},
+            {"credential_watchdog_interval_ms", 6},
             {"credential_watchdog_adapters", []}
           ] do
         args = %{"key" => key, "value" => value}
@@ -258,9 +257,9 @@ defmodule ArbiterWeb.Api.InstallationConfigControllerTest do
 
       assert wconn |> get("/api/installation/config") |> json_response(403)
 
-      body = %{"key" => "conductor_system_max_concurrent", "value" => 9}
+      body = %{"key" => "credential_watchdog_interval_ms", "value" => 9}
       assert wconn |> patch("/api/installation/config", body) |> json_response(403)
-      assert Settings.conductor_system_max_concurrent() == nil
+      assert Settings.credential_watchdog_interval_ms() == nil
     end
   end
 end

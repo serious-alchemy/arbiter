@@ -27,7 +27,7 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
     test "no longer accepts :gemini, and writes no row" do
       ws = workspace!()
 
-      assert_raise FunctionClauseError, fn -> CloudCode.refresh(ws.id, :gemini) end
+      assert_raise FunctionClauseError, fn -> apply(CloudCode, :refresh, [ws.id, :gemini]) end
       assert Repo.aggregate(from(q in "cloud_code_quotas"), :count) == 0
     end
 

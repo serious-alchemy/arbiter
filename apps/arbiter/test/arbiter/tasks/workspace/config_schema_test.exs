@@ -51,7 +51,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
     text = ConfigSchema.render()
 
     for key <- ~w(tracker merge agent review_agent security routing review_gate
-                  review_automation quota conductor loop standing_orders repo_paths
+                  review_automation quota loop standing_orders repo_paths
                   pr_patrol review_patrol worker seed_paths) do
       assert text =~ key
     end
@@ -121,7 +121,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
   # here when code starts reading one; a miss in `known_top_level_keys/0`
   # would otherwise silently refuse valid operator writes.
   @config_roots ~w(tracker merge agent review_agent security guardrails routing review
-                   review_gate notes_gate review_automation quota conductor worker attention
+                   review_gate notes_gate review_automation quota worker attention
                    loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
                    refine coordinator_notifications review_scope)
 

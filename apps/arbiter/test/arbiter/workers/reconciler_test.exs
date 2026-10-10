@@ -567,7 +567,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
     {:ok, issue} = Ash.update(issue, %{review_only: true})
 
     test_pid = self()
-    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
+
+    rewatch = fn %Issue{id: id} ->
+      send(test_pid, {:rewatched, id})
+      :ok
+    end
 
     assert {:ok, %{rewatched: 1, escalated: 0}} =
              Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
@@ -590,7 +594,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     test_pid = self()
-    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
+
+    rewatch = fn %Issue{id: id} ->
+      send(test_pid, {:rewatched, id})
+      :ok
+    end
 
     assert {:ok, %{rewatched: 0, escalated: 0}} =
              Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
@@ -677,7 +685,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     test_pid = self()
-    resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, id} end
+
+    resume = fn %Issue{id: id} ->
+      send(test_pid, {:resumed, id})
+      {:ok, id}
+    end
 
     assert {:ok, %{resumed: 0, escalated: 0}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
@@ -801,7 +813,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
     })
 
     test_pid = self()
-    resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, %{task_id: id}} end
+
+    resume = fn %Issue{id: id} ->
+      send(test_pid, {:resumed, id})
+      {:ok, %{task_id: id}}
+    end
 
     assert {:ok, %{resumed: 1, escalated: 0}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
@@ -862,7 +878,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
       assert Arbiter.Worker.ResumeSlot.cut_off_by_restart?(issue.id)
 
       test_pid = self()
-      resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, %{task_id: id}} end
+
+      resume = fn %Issue{id: id} ->
+        send(test_pid, {:resumed, id})
+        {:ok, %{task_id: id}}
+      end
 
       assert {:ok, %{resumed: 1, escalated: 0}} =
                Reconciler.reconcile_resumable_tasks(resume_fun: resume)
@@ -944,7 +964,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
     unresumable = create_issue(ws.id, %{state: :active})
 
     test_pid = self()
-    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
+
+    rewatch = fn %Issue{id: id} ->
+      send(test_pid, {:rewatched, id})
+      :ok
+    end
+
     resume = fn %Issue{} -> {:error, :no_outpost} end
 
     # Boot ordering: open-PR sweep first (re-watch), then resume sweep.
