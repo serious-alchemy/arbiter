@@ -66,8 +66,6 @@ defmodule Arbiter.Workflows.ReviewReply do
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.SpawnEnv
 
-  require Logger
-
   # A future CLI change could reintroduce a different stdin/startup diagnostic
   # on this same path (bd-79s7i1) — this strip is a backstop, not the fix.
   # The structural fix is in `default_compose/2`: stdin is explicitly closed

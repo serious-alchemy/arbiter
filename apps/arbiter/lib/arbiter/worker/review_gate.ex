@@ -2908,7 +2908,7 @@ defmodule Arbiter.Worker.ReviewGate do
             {:done,
              finish(
                state,
-               {:parked, infra_park_reason(category), infra_failure_message(reason)}
+               {:parked, :reviewer_failed, infra_failure_message(reason)}
              )}
 
           _ ->
@@ -4215,14 +4215,6 @@ defmodule Arbiter.Worker.ReviewGate do
   # names the real cause and remediation instead of the generic "no parseable
   # VERDICT line" message, which gave no signal that re-authenticating (or
   # waiting out a rate limit) would fix it.
-  # bd-9zuvbh: which park an infra failure stamps. The distinction is not
-  # cosmetic — bd-1xss5z was agy's own `--print-timeout` firing mid-review, and
-  # "the reviewer ran out of time" is a different operator action (raise the
-  # budget, shrink the review) from "the reviewer's session broke" (credentials,
-  # quota, a dead gateway).
-  defp infra_park_reason(:agent_print_timeout), do: :reviewer_timeout
-  defp infra_park_reason(_category), do: :reviewer_failed
-
   defp infra_failure_message(%StopReason{} = reason) do
     "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end

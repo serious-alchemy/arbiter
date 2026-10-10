@@ -567,7 +567,6 @@ defmodule Arbiter.Agents.Gemini.Stream do
   defp output_text(_), do: ""
 
   defp lines(text) when is_binary(text), do: String.split(text, "\n")
-  defp lines(_), do: []
 
   defp truncate_lines(lines, max) do
     case Enum.split(lines, max) do

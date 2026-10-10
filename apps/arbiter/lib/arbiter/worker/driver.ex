@@ -429,7 +429,7 @@ defmodule Arbiter.Worker.Driver do
             {:ok, task} ->
               has_tracker_ref?(task)
 
-            :error ->
+            {:error, _} ->
               false
           end
       end

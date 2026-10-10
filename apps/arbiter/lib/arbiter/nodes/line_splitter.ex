@@ -35,11 +35,11 @@ defmodule Arbiter.Nodes.LineSplitter do
         do_split(rest, max, [{:eol, line} | acc])
 
       [_line, _rest] ->
-        <<chunk::binary-size(max), rest::binary>> = data
+        <<chunk::binary-size(^max), rest::binary>> = data
         do_split(rest, max, [{:noeol, chunk} | acc])
 
       [partial] when byte_size(partial) > max ->
-        <<chunk::binary-size(max), rest::binary>> = partial
+        <<chunk::binary-size(^max), rest::binary>> = partial
         do_split(rest, max, [{:noeol, chunk} | acc])
 
       [partial] ->

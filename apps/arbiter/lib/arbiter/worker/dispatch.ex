@@ -3076,8 +3076,6 @@ defmodule Arbiter.Worker.Dispatch do
   # and only for slug-shaped repos, so a normal repo-name dispatch never pays
   # the git cost. Covers client↔apex-client, server↔apex_server, and the
   # other acme repos where repo name ≠ slug.
-  defp slug_repo_path(_ws_id, repo) when not is_binary(repo), do: nil
-
   defp slug_repo_path(ws_id, repo) do
     if String.contains?(repo, "/") do
       target = RepoConfig.normalize_slug(repo)

@@ -39,7 +39,6 @@ defmodule Arbiter.Accounts.Resolver do
   """
 
   require Ash.Query
-  require Logger
 
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderCredential

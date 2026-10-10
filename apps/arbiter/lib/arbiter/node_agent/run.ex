@@ -843,7 +843,7 @@ defmodule Arbiter.NodeAgent.Run do
 
   defp send_frames(state, offset, body) do
     size = min(@frame_bytes, byte_size(body))
-    <<head::binary-size(size), rest::binary>> = body
+    <<head::binary-size(^size), rest::binary>> = body
     push(state, "stdout", {:binary, StdoutFrame.encode(state.spec.run, offset, head)})
     send_frames(state, offset + size, rest)
   end

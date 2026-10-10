@@ -47,8 +47,6 @@ defmodule Arbiter.Worker.PrepushCheck do
   (`Arbiter.Worker.RunTmp`), removed afterwards.
   """
 
-  require Logger
-
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.SeedPaths
@@ -288,7 +286,6 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp output(detail, max \\ @max_output_bytes)
   defp output({_, _, text}, max) when is_binary(text), do: tail(text, max)
-  defp output({:exit, _, text}, max), do: tail(text, max)
   defp output(_, _max), do: "(no output)"
 
   defp indent(text) do

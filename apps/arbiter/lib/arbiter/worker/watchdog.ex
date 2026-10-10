@@ -4035,8 +4035,6 @@ defmodule Arbiter.Worker.Watchdog do
   defp watch_pipeline_from_workspace(%Arbiter.Tasks.Workspace{} = ws),
     do: Arbiter.Tasks.Workspace.watch_pipeline?(ws)
 
-  defp watch_pipeline_from_workspace(_), do: false
-
   # Watchdog: bd-66ey1o / bd-akr4il. After `:max_polls` consecutive non-terminal
   # polls, escalate to the coordinator and either:
   #   - auto_merge ON  → the bounded auto-resume (auto-merge should fire
@@ -4549,8 +4547,6 @@ defmodule Arbiter.Worker.Watchdog do
       _ -> 0
     end
   end
-
-  defp awaiting_review_resume_attempts(_), do: 0
 
   # Auto-resume budget. Opt wins; else workspace config
   # (`merge.max_awaiting_review_resumes`); else the module default. 0 is a valid
