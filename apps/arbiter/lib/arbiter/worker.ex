@@ -1236,6 +1236,7 @@ defmodule Arbiter.Worker do
     state = %State{state | last_phase: Arbiter.Worker.Phase.of(snapshot(state))}
 
     state = record_run_started(state)
+    watch_adopter(meta)
 
     # P8 (`docs/provider-account-design.md` §4.2): stamp this worker's dispatch
     # context onto its own registry entry so the account concurrency ceiling
@@ -1553,6 +1554,12 @@ defmodule Arbiter.Worker do
       log_run_warning("create", state.task_id, e)
       state
   end
+
+  # bd-4p1vui (§10.4.6 F12): the process adopting the run for this Worker
+  # (`meta[:adopt][:adopter]`, `Dispatch.adopt/2`'s caller), watched until a session
+  # attaches the run. One already gone is reported at once.
+  defp watch_adopter(%{adopt: %{adopter: pid}}) when is_pid(pid), do: Process.monitor(pid)
+  defp watch_adopter(_meta), do: nil
 
   @doc """
   Resolves the provider (e.g. `"claude"`, `"codex"`, `"gemini"`) a worker's
@@ -2730,20 +2737,8 @@ defmodule Arbiter.Worker do
     {:reply, {:error, {:invalid_transition, run_state, :review_gate_verdict}}, state}
   end
 
-  # bd-4p1vui: unadopt first, by node and run id, so the run is back on hold before this
-  # Worker's death reaches the node's session (owner-down would cancel a run it owned).
-  def handle_call(:abandon_adoption, _from, %State{meta: meta} = state) do
-    case Map.get(meta || %{}, :adopt) || Map.get(meta || %{}, :adopted) do
-      %{run_id: run_id, node_id: node_id} when is_binary(run_id) ->
-        Arbiter.Worker.Executor.Node.unadopt(node_id, run_id)
-
-      _ ->
-        :ok
-    end
-
-    Logger.warning("Worker: task=#{state.task_id} gave up adopting its run; it is collected")
-    {:stop, :normal, :ok, %State{state | run_id: nil, claude_sessions: %{}, state: :finished}}
-  end
+  def handle_call(:abandon_adoption, _from, %State{} = state),
+    do: {:stop, :normal, :ok, give_up_adoption(state)}
 
   # Only an adoption no session has attached yet: `meta[:adopt]` goes, and `run_id` comes,
   # in the session open, which this process serializes with this call.
@@ -2893,6 +2888,22 @@ defmodule Arbiter.Worker do
   # From the adopted session on, the Worker owns the run's row.
   defp take_adopted_run(%State{} = state, nil), do: state
   defp take_adopted_run(%State{} = state, %{run_id: run_id}), do: %State{state | run_id: run_id}
+
+  # bd-4p1vui: unadopt first, by node and run id, so the run is back on hold before this
+  # Worker's death reaches the node's session (owner-down would cancel a run it owned).
+  # The caller stops: with no `run_id` and no sessions, nothing is written to the row.
+  defp give_up_adoption(%State{meta: meta} = state) do
+    case Map.get(meta || %{}, :adopt) || Map.get(meta || %{}, :adopted) do
+      %{run_id: run_id, node_id: node_id} when is_binary(run_id) ->
+        Arbiter.Worker.Executor.Node.unadopt(node_id, run_id)
+
+      _ ->
+        :ok
+    end
+
+    Logger.warning("Worker: task=#{state.task_id} gave up adopting its run; its node holds it")
+    %State{state | run_id: nil, claude_sessions: %{}, state: :finished}
+  end
 
   defp persist_prompt_unless_adopted(state, session_config, nil),
     do: persist_composed_prompt(state, session_config)
@@ -3410,6 +3421,17 @@ defmodule Arbiter.Worker do
     _ = maybe_dispatch_fix_round(state, verdict, findings)
     {:noreply, state}
   end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.6 F12): the process adopting the run for
+  # this Worker went down before any session attached the run, so none ever will (only it
+  # opens that session): give the adoption up. This is what stops a Worker its adopter's
+  # start request outlived. Once a session attached the run `meta[:adopt]` is gone, and
+  # the adopter's DOWN is the one below.
+  def handle_info(
+        {:DOWN, _ref, :process, pid, _reason},
+        %State{meta: %{adopt: %{adopter: pid}}} = state
+      ),
+      do: {:stop, :normal, give_up_adoption(state)}
 
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
   # unrelated monitor) — nothing to do.

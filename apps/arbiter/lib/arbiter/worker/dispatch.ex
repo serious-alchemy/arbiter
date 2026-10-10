@@ -625,8 +625,14 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # The Worker watches `adopter` (this process) until a session attaches the run: if this
+  # call is cut off first, the Worker gives the adoption up itself (§10.4.6 F12).
   defp adopt_opts(%Issue{} = task, %Run{} = run, repo, node, opts) do
-    adopt = Map.put(Arbiter.Nodes.Adoption.adopt_info(run), :timeout_ms, opts[:adopt_timeout_ms])
+    adopt =
+      run
+      |> Arbiter.Nodes.Adoption.adopt_info()
+      |> Map.put(:timeout_ms, opts[:adopt_timeout_ms])
+      |> Map.put(:adopter, self())
 
     opts =
       opts

@@ -413,7 +413,11 @@ defmodule Arbiter.Nodes.RecoveryTest do
 
     defp never_adopt do
       test = self()
-      fn run, _ -> send(test, {:adopt_called, run.id}) && {:error, :not_expected} end
+
+      fn run, _ ->
+        send(test, {:adopt_called, run.id})
+        {:error, :not_expected}
+      end
     end
 
     test "with adoption switched off (the kill switch), the run is collected and nothing is adopted" do

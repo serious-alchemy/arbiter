@@ -166,7 +166,13 @@ defmodule Arbiter.Nodes.Recovery do
   # One it was still handing over (its Worker's session had not attached it) goes back to its
   # node's hold first, so no Worker is left adopting a run stamped `node_lost` here.
   defp after_kill(run) do
-    _ = Adoption.abandon_unattached(run)
+    if Adoption.abandon_unattached(run) == :ok do
+      Logger.warning(
+        "Nodes.Recovery: the budget ran out while run #{run.id} (#{run.task_id}) was being " <>
+          "adopted; the adoption is undone"
+      )
+    end
+
     if Adoption.adopted?(run), do: :adopted, else: {:unreachable, :timeout}
   end
 

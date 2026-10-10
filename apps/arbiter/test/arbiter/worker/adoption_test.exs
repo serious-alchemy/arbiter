@@ -223,6 +223,55 @@ defmodule Arbiter.Worker.AdoptionTest do
       assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, other.id)
     end
 
+    # An adopter cut off between starting the Worker and the session open (§10.4.6 F12).
+    test "a Worker whose adopter goes down before a session attached the run gives the adoption up" do
+      row = row!()
+      adopter = spawn(fn -> receive(do: (:go -> :ok)) end)
+      meta = %{adopt: Map.put(adopt_info(row), :adopter, adopter)}
+      {:ok, pid} = Worker.start(task_id: row.task_id, repo: "arbiter", meta: meta)
+      ref = Process.monitor(pid)
+
+      send(adopter, :go)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+      assert Worker.whereis(row.task_id) == nil
+      assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, row.id)
+      assert rows_for(row.task_id) == [row.id]
+    end
+
+    test "a Worker started after its adopter was already gone gives the adoption up at once" do
+      row = row!()
+      adopter = spawn(fn -> :ok end)
+      gone = Process.monitor(adopter)
+      assert_receive {:DOWN, ^gone, :process, ^adopter, _}
+
+      meta = %{adopt: Map.put(adopt_info(row), :adopter, adopter)}
+      {:ok, pid} = Worker.start(task_id: row.task_id, repo: "arbiter", meta: meta)
+      ref = Process.monitor(pid)
+
+      # :normal, or :noproc if it was already gone
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      assert Worker.whereis(row.task_id) == nil
+      assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, row.id)
+    end
+
+    test "once a session attached the run, its adopter going down changes nothing" do
+      row = row!()
+      adopter = spawn(fn -> receive(do: (:go -> :ok)) end)
+      meta = %{adopt: Map.put(adopt_info(row), :adopter, adopter)}
+      {:ok, pid} = Worker.start(task_id: row.task_id, repo: "arbiter", meta: meta)
+      on_exit(fn -> if Process.alive?(pid), do: Worker.abandon_adoption(pid) end)
+      _handle = open!(pid, row.node_id, row.id)
+
+      gone = Process.monitor(adopter)
+      send(adopter, :go)
+      assert_receive {:DOWN, ^gone, :process, ^adopter, _}
+      _ = :sys.get_state(pid)
+
+      assert Worker.whereis(row.task_id) == pid
+      assert %{run_id: run_id} = Worker.state(pid)
+      assert run_id == row.id
+    end
+
     test "a shutdown before its session opened leaves the row live for the next boot" do
       put_env!(:worker_node_stopping_override, true)
       sup = start_sup!()

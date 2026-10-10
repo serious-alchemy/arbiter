@@ -145,6 +145,9 @@ defmodule Arbiter.Worker.DispatchAdoptTest do
     assert %{run_id: ^adopted, node_id: ^node_id, session_id: "sess-before-restart"} =
              opts[:adopt]
 
+    # the Worker watches this call until the session attached the run (§10.4.6 F12)
+    assert opts[:adopt][:adopter] == self()
+
     assert %{id: ^node_id} = opts[:node]
     # the spawn is the podman one a placement would build (that is what re-opens use)
     assert opts[:security].sandbox.backend == :podman
@@ -211,7 +214,11 @@ defmodule Arbiter.Worker.DispatchAdoptTest do
   test "a row that is not adoptable, or a ticket with a Worker already, is refused before anything starts",
        %{task: task, row: row} do
     test = self()
-    never = fn _ -> send(test, :spawned) && {:error, :not_expected} end
+
+    never = fn _ ->
+      send(test, :spawned)
+      {:error, :not_expected}
+    end
 
     {:ok, review} = Ash.update(row, %{role: "review"}, action: :update)
     assert {:error, {:ineligible, :role}} = Dispatch.adopt(review, claude_start: never)
