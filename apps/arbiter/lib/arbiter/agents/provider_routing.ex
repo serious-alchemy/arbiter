@@ -141,6 +141,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Headroom
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Sandbox
@@ -1132,7 +1133,23 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
-  defp check_quota(%{account: account, model: model} = entry, ctx) do
+  defp check_quota(%{account: account} = entry, ctx) do
+    case spend_hold(account, ctx) do
+      {:hold, reason} -> {:drop, "quota_held", Map.get(reason, :phrase)}
+      :ok -> check_quota_window(entry, ctx)
+    end
+  end
+
+  # bd-a6grlr: an account past its dollar spend cap takes no fresh work, so a
+  # fresh implementer (`:main`) routes to another account instead of being
+  # held on this one. Follow-up roles are never spend-held.
+  defp spend_hold(account, %{role: :main, task: %Issue{} = task}) do
+    if SpendCap.fresh_dispatch?(task, []), do: SpendCap.check(account, task), else: :ok
+  end
+
+  defp spend_hold(_account, _ctx), do: :ok
+
+  defp check_quota_window(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
 
     case ctx.gate.check(ctx.task, quota, ctx.ws, account: account, model: model, now: ctx.now) do

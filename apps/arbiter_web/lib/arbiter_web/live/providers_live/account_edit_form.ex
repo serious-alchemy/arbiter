@@ -247,6 +247,22 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     {"Ignore — a weekly warning does not hold", "ignore"},
     {"Hold — a weekly warning holds dispatch", "hold"}
   ]
+  @spend_window_options [
+    {"Default (week)", ""},
+    {"Day — from 00:00 UTC", "day"},
+    {"Week — from Monday 00:00 UTC", "week"},
+    {"Month — from the 1st, 00:00 UTC", "month"}
+  ]
+  @spend_mode_options [
+    {"Default (flat)", ""},
+    {"Flat — the whole cap, any time", "flat"},
+    {"Paced — cap × elapsed fraction", "paced"}
+  ]
+  @spend_metered_options [
+    {"Default (metered with an API key)", ""},
+    {"Metered — costs are real spend", "true"},
+    {"Not metered — costs are notional", "false"}
+  ]
   @status_options [{"Enabled", "true"}, {"Parked — kept, but never routed to", "false"}]
   @priority_options [
     {"Off — nothing is exempt", ""},
@@ -460,6 +476,55 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
         />
       </fieldset>
 
+      <fieldset
+        id={"edit-form-#{@account.id}-spend-cap"}
+        class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3"
+      >
+        <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+          Dollar spend cap
+        </legend>
+        <p class="m-0 sm:col-span-2 lg:col-span-4 max-w-3xl text-[12px] text-[var(--arb-text-muted)]">
+          Holds new dispatches once metered spend in the window reaches the cap. Tickets already started finish. Only real metered spend counts: subscription and free-tier costs are notional and never count. Windows are fixed UTC: day from 00:00, week from Monday 00:00, month from the 1st. Blank cap = no cap.
+        </p>
+        <.field
+          form={@form}
+          id={@account.id}
+          key="spend_cap"
+          label="Cap (USD)"
+          hint="spend_cap"
+          errors={@errors}
+          placeholder="20"
+          inputmode="decimal"
+        />
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="spend_window"
+          label="Window"
+          hint="spend_window"
+          options={spend_window_options()}
+          errors={@errors}
+        />
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="spend_mode"
+          label="Mode"
+          hint="spend_mode"
+          options={spend_mode_options()}
+          errors={@errors}
+        />
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="spend_metered"
+          label="Metered"
+          hint="spend_metered"
+          options={spend_metered_options()}
+          errors={@errors}
+        />
+      </fieldset>
+
       <p
         :if={@account.provider == :grok}
         id={"edit-form-#{@account.id}-grok-note"}
@@ -504,6 +569,9 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   defp mode_options, do: @mode_options
   defp policy_options, do: @policy_options
   defp priority_options, do: @priority_options
+  defp spend_window_options, do: @spend_window_options
+  defp spend_mode_options, do: @spend_mode_options
+  defp spend_metered_options, do: @spend_metered_options
 
   attr :form, :any, required: true
   attr :id, :string, required: true

@@ -9,7 +9,8 @@ defmodule Arbiter.Accounts.FieldsTest do
                Enum.sort(~w(threshold_mode throttle_threshold weekly_threshold paced_floor
                             weekly_paced_floor weekly_warning_policy window_seconds
                             pace_exempt_priority pace_exempt_threshold
-                            weekly_pace_exempt_threshold))
+                            weekly_pace_exempt_threshold spend_cap spend_window
+                            spend_mode spend_metered))
     end
 
     test "identity is create-only, secrets are not in the registry" do

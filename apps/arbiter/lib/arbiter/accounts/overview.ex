@@ -57,6 +57,7 @@ defmodule Arbiter.Accounts.Overview do
           live_count: non_neg_integer(),
           max_concurrent: non_neg_integer() | nil,
           quotas: [map()],
+          spend_cap: Arbiter.Quota.SpendCap.status() | nil,
           health: map(),
           usage: map()
         }
@@ -91,6 +92,7 @@ defmodule Arbiter.Accounts.Overview do
         credentials: account_credentials,
         live_count: Concurrency.live_count(account),
         max_concurrent: account.max_concurrent,
+        spend_cap: Arbiter.Quota.SpendCap.status(account),
         quotas:
           quotas
           |> Map.get(account.id, [])

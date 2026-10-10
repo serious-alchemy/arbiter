@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Alert do
   list is exactly what is still wrong. Omitting `-w` lists every workspace.
 
   `--kind` is one of `credential_expired`, `quota_poll_failing`,
-  `quota_snapshot_stale`, `overage_alert`, `budget_exceeded`. Coordinator only.
+  `quota_snapshot_stale`, `overage_alert`, `budget_exceeded`, `spend_cap`. Coordinator only.
   """
 
   alias ArbiterCli.{ArgParser, Client, Output, Workspace}

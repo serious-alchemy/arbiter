@@ -90,6 +90,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
   alias Arbiter.Nodes.Refusal
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
@@ -2309,10 +2310,32 @@ defmodule Arbiter.Worker.Dispatch do
 
       case Admission.admit(task, provider, admission_opts(opts)) do
         {:ok, _admitted} -> :ok
+        {:error, {:spend_cap, reason}} -> hold_for_spend(task, provider, opts, reason)
         {:error, _} = refused -> refused
       end
     else
       :ok
+    end
+  end
+
+  # bd-a6grlr: the account's dollar spend cap is reached (or past its paced
+  # line). A fresh dispatch is held in the workspace's `DispatchQueue` like a
+  # quota hold - the same `{:quota_held, id}` answer every caller already
+  # handles - and drained once `SpendCap` says the window has room again. If
+  # the queue is unreachable it fails open, as the quota gate does: dropping
+  # the work is worse than overshooting.
+  defp hold_for_spend(%Issue{workspace_id: ws_id} = task, provider, opts, reason) do
+    case DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
+      :ok ->
+        {:error, {:quota_held, task.id}}
+
+      {:error, hold_err} ->
+        Logger.warning(
+          "Dispatch: spend cap held #{task.id} but enqueue failed (#{inspect(hold_err)}); " <>
+            "allowing dispatch to avoid dropping work"
+        )
+
+        :ok
     end
   end
 
@@ -2430,6 +2453,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp admission_opts(opts) do
     admission = [
       force: Keyword.get(opts, :force_slot) == true,
+      skip_spend: SpendCap.bypassed?(opts),
       actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
     ]
 

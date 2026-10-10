@@ -219,6 +219,26 @@
       cli: :same,
       rest: :same
     },
+    "spend_cap" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
+    "spend_window" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
+    "spend_mode" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
+    "spend_metered" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
     "identity_source" => {:internal, "set by the credential attach / login flows, never typed"},
     "identity_verified_at" => {:internal, "set by identity verification, never typed"},
     "merged_into_id" => {:internal, "written by the typed merge operation (`arb account merge`)"}
@@ -238,6 +258,10 @@
     "pace_exempt_priority" => :same,
     "pace_exempt_threshold" => :same,
     "weekly_pace_exempt_threshold" => :same,
+    "spend_cap" => :same,
+    "spend_window" => :same,
+    "spend_mode" => :same,
+    "spend_metered" => :same,
     "provider_account_ref" =>
       {:internal,
        "create-only: the provider's own uuid is asserted at creation (`Arbiter.Accounts.Fields`)"},

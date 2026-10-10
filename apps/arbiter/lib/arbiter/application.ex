@@ -161,6 +161,9 @@ defmodule Arbiter.Application do
         # bd-8j9i9p: pages the coordinator once when an open task's worker spend
         # crosses its estimate group's p90. Informational — it stops nothing.
         Arbiter.Usage.BudgetPatrol,
+        # bd-a6grlr: pages the operator at 80% of an account's dollar spend cap
+        # and again when it is reached. The cap itself is enforced at admission.
+        Arbiter.Quota.SpendWatch,
         # G19: parks a live quarantine/probation run past its tier's token or wall-clock
         # cap, and pages for an operator-set cap on a page tier.
         Arbiter.Guardrails.SpendPatrol,
