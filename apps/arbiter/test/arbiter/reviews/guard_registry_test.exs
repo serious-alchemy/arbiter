@@ -215,7 +215,7 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "the output log could not be opened: infrastructure"},
     {Arbiter.Worker, :park_notes_gate, 2,
      "the PR-notes gate (task notes missing), a separate gate from review coverage"},
-    {Arbiter.Worker, :escalate_notes_gate, 2, "see park_notes_gate/2"},
+    {Arbiter.Worker, :escalate_notes_gate, 3, "see park_notes_gate/2"},
     {Arbiter.Worker, :park_merge_failure, 3,
      "the worker's own merge attempt failed; the merge guard is W1–W7 / M1–M3"},
     {Arbiter.Worker, :escalate_merge_conflict, 3, "see park_merge_failure/3"},
