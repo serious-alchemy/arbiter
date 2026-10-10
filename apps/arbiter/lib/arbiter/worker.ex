@@ -970,6 +970,17 @@ defmodule Arbiter.Worker do
   def abandon_adoption(ref), do: call(ref, :abandon_adoption)
 
   @doc """
+  `abandon_adoption/1`, but only while this Worker is still adopting `run_id` (bd-4p1vui,
+  §10.4.6 F12): its `meta[:adopt]` names the run and no session has attached it. A Worker
+  whose session attached the run owns it and answers `{:error, :attached}`; any other,
+  `{:error, :not_adopting}`. One call, so it cannot race the session open: this is how an
+  adoption whose caller was cut off is undone.
+  """
+  @spec abandon_adoption(ref(), String.t()) :: :ok | {:error, :attached | :not_adopting}
+  def abandon_adoption(ref, run_id) when is_binary(run_id),
+    do: call(ref, {:abandon_adoption, run_id})
+
+  @doc """
   Open a merge request for `branch`, hand it to the ticket, and end the run.
 
   Resolves the workspace's merger adapter, calls `open/4`, records the
@@ -2733,6 +2744,21 @@ defmodule Arbiter.Worker do
     Logger.warning("Worker: task=#{state.task_id} gave up adopting its run; it is collected")
     {:stop, :normal, :ok, %State{state | run_id: nil, claude_sessions: %{}, state: :finished}}
   end
+
+  # Only an adoption no session has attached yet: `meta[:adopt]` goes, and `run_id` comes,
+  # in the session open, which this process serializes with this call.
+  def handle_call(
+        {:abandon_adoption, run_id},
+        from,
+        %State{meta: %{adopt: %{run_id: run_id}}} = state
+      ),
+      do: handle_call(:abandon_adoption, from, state)
+
+  def handle_call({:abandon_adoption, run_id}, _from, %State{run_id: run_id} = state),
+    do: {:reply, {:error, :attached}, state}
+
+  def handle_call({:abandon_adoption, _run_id}, _from, state),
+    do: {:reply, {:error, :not_adopting}, state}
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
     state = %State{state | meta: Map.put(state.meta, key, value)}

@@ -156,15 +156,19 @@ defmodule Arbiter.Nodes.Recovery do
       {task, _} ->
         Task.shutdown(task, :brutal_kill)
         {node_id, runs} = Map.fetch!(by_task, task.ref)
-        # bd-4p1vui: a run the killed task had already handed to a new Worker stays adopted
         results = Map.new(runs, &{&1.id, after_kill(&1)})
         mark_lost(node_id, runs, results)
         results
     end)
   end
 
-  defp after_kill(run),
-    do: if(Adoption.adopted?(run), do: :adopted, else: {:unreachable, :timeout})
+  # bd-4p1vui (§10.4.6 F12): a run the killed task had handed to a new Worker stays adopted.
+  # One it was still handing over (its Worker's session had not attached it) goes back to its
+  # node's hold first, so no Worker is left adopting a run stamped `node_lost` here.
+  defp after_kill(run) do
+    _ = Adoption.abandon_unattached(run)
+    if Adoption.adopted?(run), do: :adopted, else: {:unreachable, :timeout}
+  end
 
   # ---- one node ---------------------------------------------------------------------
 
@@ -227,8 +231,8 @@ defmodule Arbiter.Nodes.Recovery do
 
   # bd-4p1vui (§10.4.3): a new Worker adopts the run if it can; only a run that is not
   # adopted is collected, here, in the same task: adopted or collected, never both. The
-  # adoption gets at most half of what is left of the node's budget, so the collect it may
-  # fall back to still has time.
+  # adoption, all of it (`Adoption.attempt/3`'s deadline), gets at most half of what is left
+  # of the node's budget, so the collect it may fall back to still has time.
   defp recover_run(pid, run, deadline, opts) do
     adopt_ms = min(@default_adopt_timeout_ms, max(div(deadline - now(), 2), 1))
 

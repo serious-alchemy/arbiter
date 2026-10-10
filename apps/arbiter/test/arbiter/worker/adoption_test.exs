@@ -193,6 +193,36 @@ defmodule Arbiter.Worker.AdoptionTest do
       end
     end
 
+    # §10.4.6 F12: what undoes an adoption whose caller was cut off.
+    test "abandon_adoption/2 gives up only an adoption no session has attached" do
+      row = row!()
+
+      {:ok, pid} =
+        Worker.start(task_id: row.task_id, repo: "arbiter", meta: %{adopt: adopt_info(row)})
+
+      on_exit(fn -> if Process.alive?(pid), do: Worker.abandon_adoption(pid) end)
+
+      assert {:error, :not_adopting} = Worker.abandon_adoption(pid, Ecto.UUID.generate())
+      _handle = open!(pid, row.node_id, row.id)
+
+      # attached: the Worker owns the run and keeps it
+      assert {:error, :attached} = Worker.abandon_adoption(pid, row.id)
+      assert %{run_id: run_id} = Worker.state(pid)
+      assert run_id == row.id
+
+      # not attached yet: given up as abandon_adoption/1 does, the row untouched
+      other = row!()
+
+      {:ok, adopting} =
+        Worker.start(task_id: other.task_id, repo: "arbiter", meta: %{adopt: adopt_info(other)})
+
+      ref = Process.monitor(adopting)
+      assert :ok = Worker.abandon_adoption(adopting, other.id)
+      assert_receive {:DOWN, ^ref, :process, ^adopting, :normal}
+      assert Worker.whereis(other.task_id) == nil
+      assert %{state: :working, outcome: nil, completed_at: nil} = Ash.get!(Run, other.id)
+    end
+
     test "a shutdown before its session opened leaves the row live for the next boot" do
       put_env!(:worker_node_stopping_override, true)
       sup = start_sup!()

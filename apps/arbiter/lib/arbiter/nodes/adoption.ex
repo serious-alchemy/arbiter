@@ -15,19 +15,23 @@ defmodule Arbiter.Nodes.Adoption do
     3. the node's session agrees (`Arbiter.Nodes.Session.adoptable/2`: the run is held, the
        agent advertises `caps["run_adopt"]` and reported it `running`, nothing is collecting
        it);
-    4. `adopt_fun` (default `Arbiter.Worker.Dispatch.adopt/2`) succeeds, and the ticket's
-       Worker afterwards owns the run.
+    4. `adopt_fun` (default `Arbiter.Worker.Dispatch.adopt/2`) succeeds within
+       `:adopt_timeout_ms`, and the ticket's Worker afterwards owns the run.
 
   Anything else is `{:not_adopted, reason}`, and the adopt function is responsible for
   leaving nothing behind (`Arbiter.Worker.abandon_adoption/1`): the run is held again,
   uncancelled, for the collect that follows.
+
+  `:adopt_timeout_ms` bounds the whole adoption, not only the node's answer: the egress
+  run, the image plan and its publication come before the node is even asked (§10.4.6
+  F12). An adopter cut off before its Worker's session attached the run is undone by
+  `abandon_unattached/1`, so no Worker is left adopting it; one whose session attached it
+  owns the run and is left to finish.
   """
 
   alias Arbiter.Nodes.Session
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
-
-  require Logger
 
   @type outcome :: :adopted | {:not_adopted, term()}
 
@@ -54,7 +58,8 @@ defmodule Arbiter.Nodes.Adoption do
   @doc """
   Try to adopt `run` through its node's `session`. Options: `:adopt?` (default
   `enabled?/0`), `:adopt_fun` (`(run, opts) -> {:ok, _} | {:error, reason}`, default
-  `Arbiter.Worker.Dispatch.adopt/2`) and `:adopt_timeout_ms` (passed on to it).
+  `Arbiter.Worker.Dispatch.adopt/2`) and `:adopt_timeout_ms` (the whole adoption's
+  deadline, see the moduledoc; also passed on to `adopt_fun`, for the node's answer).
   """
   @spec attempt(pid(), Run.t(), keyword()) :: outcome()
   def attempt(session, %Run{} = run, opts \\ []) do
@@ -63,7 +68,7 @@ defmodule Arbiter.Nodes.Adoption do
     with :ok <- switched_on(opts),
          :ok <- eligible(run),
          :ok <- Session.adoptable(session, run.id),
-         {:ok, _} <- adopt_fun.(run, Keyword.take(opts, [:adopt_timeout_ms])),
+         {:ok, _} <- adopt_within(adopt_fun, run, opts),
          :ok <- owned_by_worker(run) do
       :adopted
     else
@@ -99,8 +104,65 @@ defmodule Arbiter.Nodes.Adoption do
   @spec adopted?(Run.t()) :: boolean()
   def adopted?(%Run{} = run), do: owned_by_worker(run) == :ok
 
+  @doc """
+  Undo an adoption of `run` whose adopter was cut off (bd-4p1vui, §10.4.6 F12): if the
+  ticket's Worker is still adopting `run` (no session has attached it), it gives the run
+  back to its node's hold, uncancelled, and stops (`Arbiter.Worker.abandon_adoption/2`).
+  `:ok` when it did, `{:error, :attached}` when the Worker owns the run (it is adopted),
+  `{:error, :not_adopting}` when there is nothing to undo.
+  """
+  @spec abandon_unattached(Run.t()) :: :ok | {:error, :attached | :not_adopting}
+  def abandon_unattached(%Run{id: id, task_id: task_id}) do
+    case Worker.whereis(task_id) do
+      pid when is_pid(pid) -> Worker.abandon_adoption(pid, id)
+      _ -> {:error, :not_adopting}
+    end
+  catch
+    :exit, _ -> {:error, :not_adopting}
+  end
+
   defp switched_on(opts) do
     if Keyword.get_lazy(opts, :adopt?, &enabled?/0), do: :ok, else: {:error, :disabled}
+  end
+
+  # The adopter runs linked to this process, so it never outlives it (`Nodes.Recovery`'s
+  # budget backstop kills this process, and then undoes what is left itself).
+  defp adopt_within(adopt_fun, %Run{} = run, opts) do
+    fun_opts = Keyword.take(opts, [:adopt_timeout_ms])
+    task = Task.async(fn -> call_adopt_fun(adopt_fun, run, fun_opts) end)
+
+    case Task.yield(task, Keyword.get(opts, :adopt_timeout_ms) || :infinity) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, {:exit, reason}}
+      nil -> cut_off(task, run)
+    end
+  end
+
+  # An adopter whose Worker's session attached the run is past the point of no return: what
+  # is left (the machine and the driver) is quick, so it finishes. Any other is undone first
+  # and stopped after, so it cannot start a Worker the undo missed; a Worker it started in
+  # between is undone once it is stopped.
+  defp cut_off(task, run) do
+    case abandon_unattached(run) do
+      {:error, :attached} ->
+        Task.await(task, :infinity)
+
+      _undone_or_nothing ->
+        _ = Task.shutdown(task, :brutal_kill)
+
+        case abandon_unattached(run) do
+          {:error, :attached} -> {:ok, :attached}
+          _ -> {:error, :adopt_timeout}
+        end
+    end
+  end
+
+  defp call_adopt_fun(adopt_fun, run, opts) do
+    adopt_fun.(run, opts)
+  rescue
+    e -> {:error, {:crashed, Exception.message(e)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp owned_by_worker(%Run{id: id, task_id: task_id}) do

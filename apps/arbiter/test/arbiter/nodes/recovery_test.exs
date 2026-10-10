@@ -485,24 +485,137 @@ defmodule Arbiter.Nodes.RecoveryTest do
       adopt = worker_adopt(node)
 
       fun = fn
-        %Run{id: id} = run, o when id == adopted.id ->
-          adopt.(run, o)
+        %Run{id: id} = run, o when id == adopted.id -> adopt.(run, o)
+        _other, _o -> {:error, :not_this_one}
+      end
 
-        _wedged, _o ->
+      # the other run's collect never returns: only the backstop ends the node's task
+      context = fn
+        %Run{id: id} when id == wedged.id ->
           receive do
             :never -> :ok
           end
+
+        run ->
+          context_fun(run)
       end
 
       assert {:ok, report} =
                Recovery.await(
-                 opts(node_timeout_ms: 1_500, total_timeout_ms: 1_500, adopt_fun: fun)
+                 opts(
+                   node_timeout_ms: 1_500,
+                   total_timeout_ms: 1_500,
+                   adopt_fun: fun,
+                   context_fun: context
+                 )
                )
 
       assert report[adopted.id] == :adopted
       assert {:unreachable, :timeout} = report[wedged.id]
       assert %{state: :working, outcome: nil} = reload(adopted)
       assert %{state: :finished, stop_category: "node_lost"} = reload(wedged)
+    end
+
+    # §10.4.6 F12: the deadline holds the whole adoption, not only the node's answer
+    # (egress, the image plan and its publication come before the node is asked).
+    test "an adopter that started its Worker and then wedged is cut off: no Worker is left, the run is collected once" do
+      node = enroll!("adopt-wedged")
+      run = run!(node)
+      start_holding_agent(node, [run])
+      test = self()
+
+      wedged = fn %Run{} = run, _o ->
+        {:ok, w} =
+          Worker.start(
+            task_id: run.task_id,
+            repo: "arbiter",
+            meta: %{adopt: Adoption.adopt_info(run)}
+          )
+
+        send(test, {:adopter, w})
+
+        receive do
+          :never -> :ok
+        end
+      end
+
+      assert {:ok, report} =
+               Recovery.await(
+                 adopt_opts(adopt_fun: wedged, node_timeout_ms: 1_000, total_timeout_ms: 2_000)
+               )
+
+      assert report == %{run.id => :collected}
+
+      assert_received {:adopter, w}
+      ref = Process.monitor(w)
+      assert_receive {:DOWN, ^ref, :process, ^w, _}
+      assert Worker.whereis(run.task_id) == nil
+
+      refute saw("adopt", run.id)
+      assert saw("quiesce", run.id)
+      refute saw("quiesce", run.id)
+      assert saw("recover", run.id)
+      refute saw("recover", run.id)
+      refute saw("cancel", run.id)
+      assert %{state: :working, outcome: nil, stdout_offset: nil} = reload(run)
+      assert Recovery.unsettled(report) == []
+    end
+
+    test "an adoption still waiting on the node at its deadline is undone without a cancel and collected once" do
+      node = enroll!("adopt-slow-node")
+      run = run!(node)
+      start_holding_agent(node, [run], %{run.id => :silent})
+
+      # the node's own answer may take far longer than the adoption as a whole
+      adopt = worker_adopt(node)
+      patient = fn run, o -> adopt.(run, Keyword.put(o, :adopt_timeout_ms, 60_000)) end
+
+      assert {:ok, report} =
+               Recovery.await(
+                 adopt_opts(adopt_fun: patient, node_timeout_ms: 1_000, total_timeout_ms: 2_000)
+               )
+
+      assert report == %{run.id => :collected}
+      assert Worker.whereis(run.task_id) == nil
+
+      assert saw("adopt", run.id)
+      assert saw("quiesce", run.id)
+      refute saw("quiesce", run.id)
+      assert saw("recover", run.id)
+      refute saw("recover", run.id)
+      refute saw("cancel", run.id)
+      assert %{state: :working, outcome: nil, stdout_offset: nil} = reload(run)
+    end
+
+    test "an adopter whose Worker's session attached the run is let finish, and the backstop leaves the run adopted" do
+      node = enroll!("adopt-attached")
+      run = run!(node)
+      on_exit(fn -> stop_worker(run.task_id) end)
+      start_holding_agent(node, [run])
+      adopt = worker_adopt(node)
+
+      # the session attached the run; what is left (the machine, the driver) never returns
+      fun = fn run, o ->
+        {:ok, _} = adopt.(run, o)
+
+        receive do
+          :never -> :ok
+        end
+      end
+
+      assert {:ok, report} =
+               Recovery.await(
+                 adopt_opts(adopt_fun: fun, node_timeout_ms: 1_000, total_timeout_ms: 1_000)
+               )
+
+      assert report == %{run.id => :adopted}
+      assert saw("adopt", run.id)
+      refute saw("quiesce", run.id)
+      refute saw("cancel", run.id)
+
+      assert %{state: :working, outcome: nil} = reload(run)
+      assert %{run_id: run_id} = Worker.state(Worker.whereis(run.task_id))
+      assert run_id == run.id
     end
   end
 

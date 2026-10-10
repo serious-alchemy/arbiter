@@ -601,9 +601,9 @@ defmodule Arbiter.Worker.Dispatch do
 
   Returns `{:ok, %{worker_pid, run_id, ...}}`, or `{:error, reason}` with no Worker left
   behind and the row untouched: the run is back on its node's hold, uncancelled, for
-  `Arbiter.Nodes.Recovery` to collect. `:adopt_timeout_ms` bounds the node's answer; the
-  dispatch seams (`:claude_start`, `:start_driver`, `:workflow_module`, `:egress`,
-  `:podman`, `:image`) work as for `dispatch/2`.
+  `Arbiter.Nodes.Recovery` to collect. `:adopt_timeout_ms` bounds the node's answer (and
+  `Nodes.Adoption.attempt/3` the whole call); the dispatch seams (`:claude_start`,
+  `:start_driver`, `:workflow_module`, `:egress`, `:podman`, `:image`) work as for `dispatch/2`.
   """
   @spec adopt(Run.t(), dispatch_opts()) :: {:ok, map()} | {:error, term()}
   def adopt(%Run{} = run, opts \\ []) do

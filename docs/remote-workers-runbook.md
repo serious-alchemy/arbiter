@@ -284,7 +284,9 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
      run from it.
 
    A run is adopted or collected, never both. An adoption that fails at any step leaves
-   the run running and uncancelled for the collect. To turn adoption off, set
+   the run running and uncancelled for the collect. An adoption gets at most half of
+   what is left of its node's budget (30 s at most); one that runs over it is given up
+   the same way, so the collect still has time. To turn adoption off, set
    `config :arbiter, :node_run_adoption, false` before the restart: every run is then
    collected.
 4. A node that never comes back has its runs stamped `interrupted` / `node_lost`
@@ -354,7 +356,7 @@ Start with `arb node list`, `arb node events <name>`, `arb doctor`, and on the n
 | Run dies about a second in with `MCP config file not found: <primary worktree>/.mcp.json` | fixed in the release after v0.2.24 (bd-8y8ztm): the injected `.mcp.json` and `.claude/skills/` are untracked, so the git bundle never carried them. They now ride in the spec (`worktree` mount `files`), written into the shadow clone; the scope token travels as the secret `ARBITER_MCP_TOKEN`, never in the file on the node |
 | Container cannot reach anything | by design it is network-less; egress goes through the bridge. If the bridge is down, `arb node events` shows `disconnected`; policy denials show in the run's egress events |
 | After a restart a run did not recover | the node did not reconnect within 60 s, or the home clone was missing; the run is resumed from whatever the home clone holds ("server restarted") or stamped `node_lost` |
-| After a restart a run was collected, not adopted | the primary log says why: `Nodes.Recovery: adopting run … failed (…); collecting it instead`, or a debug line for a run that was never a candidate. Common causes: the restart outlasted `restart_grace` (180 s), so the container was stopped; the container had exited; the agent predates `caps.run_adopt` (upgrade it); the run was a reviewer or a CI or conflict pass (only a ticket's own implement run is adopted); or `:node_run_adoption` is `false`. Nothing is lost: the collect lands the work in the home clone |
+| After a restart a run was collected, not adopted | the primary log says why: `Nodes.Recovery: adopting run … failed (…); collecting it instead`, or a debug line for a run that was never a candidate. Common causes: the restart outlasted `restart_grace` (180 s), so the container was stopped; the container had exited; the adoption overran its deadline (`:adopt_timeout`, for example a slow image publication); the agent predates `caps.run_adopt` (upgrade it); the run was a reviewer or a CI or conflict pass (only a ticket's own implement run is adopted); or `:node_run_adoption` is `false`. Nothing is lost: the collect lands the work in the home clone |
 | Leftover `arb-…` containers or `~/.arbiter-node/runs/*` | the primary sends the live set on every `hello` and every 10 min; containers outside it are removed, run directories after 24 h. The agent never reaps on its own |
 | `arb node add` refuses to print the token | stdout is not a terminal; use `--token-file` |
 
