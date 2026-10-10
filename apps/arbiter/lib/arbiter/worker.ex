@@ -5114,7 +5114,10 @@ defmodule Arbiter.Worker do
     if is_binary(worktree) and File.dir?(worktree) do
       sync_back_after_run(state)
 
-      push_opts = [set_upstream: true] ++ if(is_binary(branch), do: [branch: branch], else: [])
+      push_opts =
+        [set_upstream: true] ++
+          if(is_binary(branch), do: [branch: branch], else: []) ++
+          fix_pass_lease(meta)
 
       case Arbiter.Worker.Worktree.push(worktree, push_opts) do
         {:ok, _} ->
@@ -5129,6 +5132,19 @@ defmodule Arbiter.Worker do
       end
     else
       deliver_pass(state)
+    end
+  end
+
+  # bd-bg87oz: a fix pass placed on a node (`Arbiter.Worker.PassPlacement`) was seeded
+  # from the forge's head of its branch, and may have rewritten it (a rebase, an
+  # amend) in the shadow clone. The primary pushes it with `--force-with-lease`
+  # pinned to the head it was seeded from: its rewrite lands, and a push by anyone
+  # else since makes the lease refuse. Never a bare `--force`; a pass with no seed
+  # head pushes as before.
+  defp fix_pass_lease(meta) do
+    case Map.get(meta || %{}, :fix_pass_start_head) do
+      head when is_binary(head) -> [force_with_lease: head]
+      _ -> []
     end
   end
 
