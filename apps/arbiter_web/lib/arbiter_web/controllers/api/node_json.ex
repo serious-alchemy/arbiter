@@ -59,6 +59,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :contributes,
       :k8s_version,
       :degraded,
+      :readiness,
       :pending,
       :image,
       :upgrade_command

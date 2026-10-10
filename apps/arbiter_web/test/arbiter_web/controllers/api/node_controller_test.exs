@@ -259,6 +259,7 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
                node
 
       assert node["k8s_version"] == nil
+      assert node["readiness"] == []
       assert node["upgrade_command"] == nil
     end
 

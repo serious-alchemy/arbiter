@@ -120,6 +120,67 @@ defmodule Arbiter.Nodes.SessionClusterTest do
     end
   end
 
+  describe "readiness (K13)" do
+    @checks [
+      %{
+        "id" => "netpol",
+        "name" => "NetworkPolicy enforcement",
+        "status" => "ok",
+        "detail" => "enforced",
+        "hint" => nil
+      },
+      %{"id" => "quota", "name" => "ResourceQuota", "status" => "warn", "detail" => "none"}
+    ]
+
+    test "a cluster hello's readiness checks land in the snapshot", %{node: node} do
+      {:ok, %{pid: pid}} =
+        attach(node, cluster_hello(%{"readiness" => %{"ready" => true, "checks" => @checks}}))
+
+      assert %{readiness: [%{"id" => "netpol", "status" => "ok"}, %{"id" => "quota"}]} =
+               Session.snapshot(pid)
+    end
+
+    test "a heartbeat replaces them; one that is silent leaves them", %{node: node} do
+      {:ok, %{pid: pid}} =
+        attach(node, cluster_hello(%{"readiness" => %{"checks" => @checks}}))
+
+      bad = [%{"id" => "netpol", "name" => "n", "status" => "fail", "detail" => "x"}]
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "readiness" => %{"checks" => bad}})
+      assert %{readiness: [%{"status" => "fail"}]} = Session.snapshot(pid)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 2})
+      assert %{readiness: [%{"status" => "fail"}]} = Session.snapshot(pid)
+    end
+
+    test "only well-formed, bounded checks are kept", %{node: node} do
+      junk = [
+        "nope",
+        %{"id" => "ok", "name" => "n", "status" => "bogus", "detail" => "d"},
+        %{
+          "id" => "fine",
+          "name" => "n",
+          "status" => "warn",
+          "detail" => String.duplicate("x", 5_000)
+        }
+      ]
+
+      {:ok, %{pid: pid}} =
+        attach(node, cluster_hello(%{"readiness" => %{"checks" => junk}}))
+
+      assert %{readiness: [%{"id" => "fine", "detail" => detail}]} = Session.snapshot(pid)
+      assert String.length(detail) <= 600
+    end
+
+    test "a machine node's readiness is not recorded here", %{node: node} do
+      {:ok, %{pid: pid}} = attach(node, hello(%{"readiness" => %{"checks" => @checks}}))
+      assert %{readiness: []} = Session.snapshot(pid)
+    end
+
+    test "a cluster hello without readiness has none", %{node: node} do
+      {:ok, %{pid: pid}} = attach(node, cluster_hello())
+      assert %{readiness: []} = Session.snapshot(pid)
+    end
+  end
+
   describe "capacity (A3)" do
     @capacity %{
       "ceiling" => 6,

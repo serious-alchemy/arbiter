@@ -151,6 +151,7 @@ defmodule Arbiter.Nodes.Overview do
       kind: kind(node, snapshot),
       k8s_version: Map.get(snapshot, :k8s_version),
       degraded: Map.get(snapshot, :degraded, []),
+      readiness: Map.get(snapshot, :readiness, []),
       constrained?: constrained?(snapshot),
       pending: pending(snapshot)
     }
