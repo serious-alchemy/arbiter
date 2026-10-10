@@ -10,7 +10,8 @@ defmodule Arbiter.Settings.RegistryTest do
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
            scheduling_finish_first scheduling_finish_first_max_wait_hours
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
-           nodes.fence_after_s nodes.lost_after_s)
+           nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
+           nodes.registry_password nodes.registry_insecure)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -31,6 +32,64 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:ok, ["claude"]} = Registry.cast("credential_watchdog_adapters", "[\"claude\"]")
       assert {:ok, nil} = Registry.cast("credential_watchdog_adapters", nil)
       assert {:error, _} = Registry.cast("credential_watchdog_adapters", ["bogus"])
+    end
+  end
+
+  describe "nodes.registry settings (K8)" do
+    test "the registry reference is a bare host[:port]/path, no scheme or credentials" do
+      assert {:ok, "registry.example.com/arbiter"} =
+               Registry.cast("nodes.registry", "registry.example.com/arbiter")
+
+      assert {:ok, "localhost:5000"} = Registry.cast("nodes.registry", "localhost:5000")
+      assert {:ok, nil} = Registry.cast("nodes.registry", nil)
+
+      for bad <- ["https://registry.example.com", "user:pw@registry.example.com", "a b", "-x/y"] do
+        assert {:error, msg} = Registry.cast("nodes.registry", bad)
+        assert msg =~ "registry"
+      end
+    end
+
+    test "all four keys are operator-only" do
+      for key <- ~w(nodes.registry nodes.registry_username nodes.registry_password
+                    nodes.registry_insecure) do
+        assert key in Registry.operator_only_keys()
+
+        assert {:error, {:unauthorized, _}} = Registry.put(key, "x", authority: :coordinator)
+      end
+    end
+
+    test "the password is stored encrypted and no read surface ever returns it" do
+      assert {:ok, stored} = Registry.put("nodes.registry_password", "s3cret-pw-value")
+      refute inspect(stored) =~ "s3cret-pw-value"
+
+      assert Settings.nodes_registry_password() == "s3cret-pw-value"
+
+      raw =
+        Arbiter.Settings.Installation |> Ash.read!() |> hd() |> Map.fetch!(:nodes_registry_password)
+
+      assert is_binary(raw)
+      refute raw =~ "s3cret-pw-value"
+
+      described = Registry.describe("nodes.registry_password")
+      assert described.overridden
+      refute inspect(described) =~ "s3cret-pw-value"
+      refute inspect(Registry.all()) =~ "s3cret-pw-value"
+      refute inspect(Registry.overrides()) =~ "s3cret-pw-value"
+
+      assert {:ok, nil} = Registry.put("nodes.registry_password", nil)
+      assert Settings.nodes_registry_password() == nil
+      refute Registry.describe("nodes.registry_password").overridden
+    end
+
+    test "username, registry and insecure round-trip" do
+      assert {:ok, "reg.example.com:5000/arb"} =
+               Registry.put("nodes.registry", "reg.example.com:5000/arb")
+
+      assert {:ok, "bot"} = Registry.put("nodes.registry_username", "bot")
+      assert {:ok, true} = Registry.put("nodes.registry_insecure", true)
+      assert Settings.nodes_registry() == "reg.example.com:5000/arb"
+      assert Settings.nodes_registry_username() == "bot"
+      assert Settings.nodes_registry_insecure?()
     end
   end
 
@@ -214,7 +273,8 @@ defmodule Arbiter.Settings.RegistryTest do
   describe "put/3 authority (P-20, D-C-3)" do
     @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
-                      nodes.fence_after_s nodes.lost_after_s)
+                      nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
+                      nodes.registry_password nodes.registry_insecure)
 
     test "operator_only_keys/0 is the schema's operator-only set" do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)
