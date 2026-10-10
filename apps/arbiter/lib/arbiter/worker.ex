@@ -3133,21 +3133,37 @@ defmodule Arbiter.Worker do
   # The ReviewGate (review gate) exited before delivering a verdict. Do NOT strand
   # the author waiting on the review gate — treat it as an inconclusive review and
   # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
+  #
+  # bd-2lfzs8 / #650: unless the node is stopping. A gate that stops itself for
+  # the shutdown (a reviewer or fix-round pass cut off by the same SIGTERM) leaves
+  # its `pass` marker for the boot sweep to re-run; the author, still alive for
+  # the moment, must not read that as "no verdict" and park the ticket `review
+  # inconclusive` / fail its run. Stay waiting: `terminate/2` is on its way and
+  # records the run `:interrupted`.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
         %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_ref: ref}} = state
       ) do
-    Logger.warning(
-      "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
-        "(#{inspect(reason)}); escalating as no_verdict"
-    )
+    if node_stopping?() do
+      Logger.info(
+        "Worker: ReviewGate for task=#{state.task_id} went down with the node " <>
+          "(#{inspect(reason)}); leaving its pass for the boot sweep"
+      )
 
-    {:noreply,
-     apply_review_gate_verdict(
-       state,
-       {:no_verdict,
-        "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
-     )}
+      {:noreply, state}
+    else
+      Logger.warning(
+        "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
+          "(#{inspect(reason)}); escalating as no_verdict"
+      )
+
+      {:noreply,
+       apply_review_gate_verdict(
+         state,
+         {:no_verdict,
+          "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
+       )}
+    end
   end
 
   # bd-7xtz6w: the author's own check that its ReviewGate is still judging.
@@ -7239,24 +7255,35 @@ defmodule Arbiter.Worker do
   end
 
   defp check_review_gate(%State{} = state, gate) do
-    if Process.alive?(gate) do
-      probe_review_gate(state, gate)
-      state
-    else
-      Logger.warning(
-        "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
-          "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
-      )
+    cond do
+      Process.alive?(gate) ->
+        probe_review_gate(state, gate)
+        state
 
-      state
-      |> forget_review_gate()
-      |> apply_review_gate_verdict(
-        {:no_verdict,
-         "The ReviewGate process exited before delivering a verdict; the author's " <>
-           "liveness check found it gone. Nothing was merged. Re-run the review with " <>
-           "`arb worker resume #{state.task_id}`."}
-      )
+      # bd-2lfzs8: a gate gone because the node is stopping is the boot sweep's
+      # to re-arm, not a lost verdict (see the `:DOWN` handler).
+      node_stopping?() ->
+        state
+
+      true ->
+        escalate_gone_review_gate(state)
     end
+  end
+
+  defp escalate_gone_review_gate(%State{} = state) do
+    Logger.warning(
+      "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
+        "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
+    )
+
+    state
+    |> forget_review_gate()
+    |> apply_review_gate_verdict(
+      {:no_verdict,
+       "The ReviewGate process exited before delivering a verdict; the author's " <>
+         "liveness check found it gone. Nothing was merged. Re-run the review with " <>
+         "`arb worker resume #{state.task_id}`."}
+    )
   end
 
   # Ask the gate what it is doing WITHOUT blocking this process: a wedged gate
