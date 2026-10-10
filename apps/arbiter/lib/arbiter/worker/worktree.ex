@@ -288,7 +288,7 @@ defmodule Arbiter.Worker.Worktree do
     result =
       cond do
         layout(opts) == :private_clone ->
-          add_detached_clone(repo_path, path, base_branch)
+          add_detached_clone(repo_path, path, base_branch, seed_paths)
 
         File.dir?(path) ->
           refresh_or_recreate_detached(repo_path, path, base_branch, seed_paths)
@@ -309,14 +309,22 @@ defmodule Arbiter.Worker.Worktree do
   # worktree would be refused at spawn. Nothing in an inspect checkout is kept, so
   # a leaf left by an earlier run (either layout) is removed and rebuilt, as the
   # linked path re-points it. The clone has no push path and no branch to carry back.
-  defp add_detached_clone(repo_path, path, base_branch) do
+  defp add_detached_clone(repo_path, path, base_branch, seed_paths) do
     with :ok <- ensure_origin_remote(repo_path),
          :ok <- fetch_origin_branch(repo_path, base_branch),
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, sha} <- run_git(["rev-parse", "--verify", "origin/" <> base_branch], cd: repo_path),
          :ok <- reclaim_inspect_leaf(path) do
       File.mkdir_p!(Path.dirname(path))
-      PrivateClone.create_review(repo_path, String.trim(sha), path: path, base: base_branch)
+
+      with {:ok, clone} <-
+             PrivateClone.create_review(repo_path, String.trim(sha),
+               path: path,
+               base: base_branch
+             ) do
+        :ok = seed_worktree(repo_path, clone, seed_paths)
+        {:ok, clone}
+      end
     end
   end
 
