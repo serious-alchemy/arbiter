@@ -21,7 +21,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
 
   ## Moving the owner (bd-8nlez1)
 
-  The table is the default. A ticket whose `attention_owner` is set, for the
+  The table is the default. A `:permission_requested` whose binding says
+  `grant_by: operator` is handed to the operator at once
+  (`Arbiter.Tasks.PermissionRequest`). A ticket whose `attention_owner` is set, for the
   cause it has now (`attention_owner_cause`), belongs to that owner instead:
   the coordinator handed it off with a note, the operator handed it back, or
   a coordinator-owned item outlived its limit (`Arbiter.Tasks.AttentionSweep`).
@@ -40,6 +42,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   | `:awaiting_verification` | | coordinator | `:verification` |
   | `:tracker_sync_failed` | | coordinator | `:tracker_sync` |
   | `:no_eligible_model` | | coordinator | `:guardrail` |
+  | `:permission_requested` | | coordinator | `:permission_grant` |
 
   ## Where the cause comes from
 
@@ -135,7 +138,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
           {:tracker_sync_failed, nil, :coordinator, :tracker_sync,
            "its external tracker could not be synced"},
           {:no_eligible_model, nil, :coordinator, :guardrail,
-           "no attached model is eligible for it under the guardrail profiles"}
+           "no attached model is eligible for it under the guardrail profiles"},
+          {:permission_requested, nil, :coordinator, :permission_grant,
+           "its worker asked for a permission it was not given"}
         ] ++
           for(
             reason <- ReviewPark.park_reasons(),
