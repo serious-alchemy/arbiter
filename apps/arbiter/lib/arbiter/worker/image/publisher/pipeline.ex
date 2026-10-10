@@ -90,23 +90,26 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
     with {:ok, _} <- Builder.ensure(builder, plan, Keyword.take(opts, [:runner, :scratch])),
          {:ok, toolchain} <- push(plan.tag, "worker", plan.hash, :toolchain, cfg, opts) do
-      workdir(opts, fn work ->
-        with {:ok, cli, cli_suffix} <- cli_layer(plan, work, cfg, opts) do
-          {seed, seed_report} = seed_layer(ctx, plan, cli_suffix, cli.local, work, cfg, opts)
-          layers = [toolchain, cli] ++ List.wrap(seed)
-          cleanup_local(Enum.reverse(for l <- layers, l.layer != :toolchain, do: l.local), opts)
-          final = List.last(layers)
+      workdir(opts, &upper_layers(ctx, toolchain, &1, cfg, opts))
+    end
+  end
 
-          {:ok,
-           %{
-             ref: final.ref,
-             tag_ref: final.tag_ref,
-             tag: plan.tag,
-             layers: Enum.map(layers, &Map.delete(&1, :local)),
-             seed: seed_report
-           }}
-        end
-      end)
+  # The CLI layer over the toolchain, then the best-effort seed layer over that.
+  defp upper_layers(%{plan: plan} = ctx, toolchain, work, cfg, opts) do
+    with {:ok, cli, cli_suffix} <- cli_layer(plan, work, cfg, opts) do
+      {seed, seed_report} = seed_layer(ctx, plan, cli_suffix, cli.local, work, cfg, opts)
+      layers = [toolchain, cli] ++ List.wrap(seed)
+      cleanup_local(Enum.reverse(for l <- layers, l.layer != :toolchain, do: l.local), opts)
+      final = List.last(layers)
+
+      {:ok,
+       %{
+         ref: final.ref,
+         tag_ref: final.tag_ref,
+         tag: plan.tag,
+         layers: Enum.map(layers, &Map.delete(&1, :local)),
+         seed: seed_report
+       }}
     end
   end
 

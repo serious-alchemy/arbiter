@@ -33,6 +33,7 @@ defmodule ArbiterWeb.Api.NodeController do
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{JoinScript, Overview, Pairing, RateLimit}
   alias Arbiter.Settings
+  alias Arbiter.Worker.Image.Publisher
   alias ArbiterWeb.Api.NodeJSON
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -117,7 +118,7 @@ defmodule ArbiterWeb.Api.NodeController do
       warnings: overview.warnings,
       public_url: url,
       exposure: Overview.exposure(url),
-      registry: Arbiter.Worker.Image.Publisher.status(),
+      registry: Publisher.status(),
       allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
     })
   end

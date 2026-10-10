@@ -140,8 +140,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
-  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.SessionHistory
   alias Arbiter.Worker.TestServices
   alias Arbiter.Worker.Withholding
