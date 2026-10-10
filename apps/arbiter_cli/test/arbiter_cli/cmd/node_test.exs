@@ -217,6 +217,8 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert first =~ "local" and first =~ "1/3"
       assert second =~ "box-1" and second =~ "online" and second =~ "1/2"
       assert out =~ "zone=a"
+      assert out =~ "VERSION"
+      assert out =~ "1.2.3"
       assert out =~ "never"
       assert out =~ "capacity 5 = local 3 + box-1 2"
       refute out =~ "conductor.max_concurrent"
