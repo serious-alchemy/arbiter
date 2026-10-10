@@ -54,6 +54,7 @@ defmodule ArbiterWeb.NodeCheckoutController do
         branch: ctx.branch,
         base: ctx.base,
         have: have,
+        seeded_paths: Map.get(ctx, :seeded_paths) || [],
         dest: dest
       )
 

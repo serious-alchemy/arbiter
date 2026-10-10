@@ -221,6 +221,145 @@ defmodule Arbiter.Nodes.CheckoutTest do
     end
   end
 
+  # bd-4ic681: a resume's home clone holds the work its run was cut off in the middle
+  # of. The seed carries it as the run's first checkpoint, which the node restores
+  # uncommitted and the ingest's hand-off treats as what the home clone held.
+  describe "seed bundle of a home clone with uncommitted work" do
+    defp dirty_home!(home) do
+      File.write!(Path.join(home, "lib/keep.txt"), "keep, edited and not committed\n")
+      File.rm!(Path.join(home, "lib/gone.txt"))
+      File.write!(Path.join(home, "notes.txt"), "half-done\n")
+      File.chmod!(Path.join(home, "bin/run.sh"), 0o644)
+    end
+
+    test "carries it as the run's checkpoint, restored uncommitted on the node", c do
+      dirty_home!(c.home)
+      expected = modes(c.home)
+      status = git!(c.home, ["status", "--porcelain"])
+
+      %{seed: seed, shadow: shadow, info: info} = seed!(c)
+
+      checkpoint = seed.refs["refs/arbiter/checkpoint/#{@run}"]
+      assert is_binary(checkpoint)
+      assert git!(c.home, ["rev-parse", "refs/arbiter/checkpoint/#{@run}"]) == checkpoint
+      assert git!(c.home, ["rev-parse", checkpoint <> "^"]) == c.base
+
+      # the node's shadow: the branch at the tip, the work tree at the checkpoint
+      assert info.head == c.base
+      assert modes(shadow) == expected
+      assert git!(shadow, ["status", "--porcelain"]) == status
+
+      # and the home clone is left exactly as it was: work tree, index, branch
+      assert modes(c.home) == expected
+      assert git!(c.home, ["status", "--porcelain"]) == status
+      assert git!(c.home, ["diff", "--cached", "--name-only"]) == ""
+      assert git!(c.home, ["rev-parse", "HEAD"]) == c.base
+    end
+
+    test "leaves out injected config, the exclude set and the run's seeded paths", c do
+      token = "arb-mcp-token-#{System.unique_integer([:positive])}"
+
+      File.write!(
+        Path.join(c.home, ".mcp.json"),
+        ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer #{token}"}}}})
+      )
+
+      File.mkdir_p!(Path.join(c.home, "deps/dep"))
+      File.write!(Path.join(c.home, "deps/dep/mix.exs"), "dep\n")
+      File.mkdir_p!(Path.join(c.home, "priv/seeded"))
+      File.write!(Path.join(c.home, "priv/seeded/blob"), "seeded\n")
+      File.write!(Path.join(c.home, "notes.txt"), "half-done\n")
+
+      {:ok, seed} =
+        Checkout.seed_bundle(c.home,
+          run: @run,
+          branch: @branch,
+          base: "main",
+          seeded_paths: ["priv/seeded"],
+          dest: Path.join(c.tmp, "seed-filtered.bundle")
+        )
+
+      checkpoint = seed.refs["refs/arbiter/checkpoint/#{@run}"]
+      tree = git!(c.home, ["ls-tree", "-r", "--name-only", checkpoint])
+
+      assert tree =~ "notes.txt"
+      refute tree =~ ".mcp.json"
+      refute tree =~ "deps/"
+      refute tree =~ "priv/seeded"
+      refute File.read!(seed.path) =~ token
+    end
+
+    test "a clean home clone gets no checkpoint", c do
+      %{seed: seed} = seed!(c)
+
+      refute Map.has_key?(seed.refs, "refs/arbiter/checkpoint/#{@run}")
+
+      assert {_, code} =
+               git(c.home, ["rev-parse", "-q", "--verify", "refs/arbiter/checkpoint/r1"])
+
+      assert code != 0
+    end
+
+    test "a run that already has a checkpoint is seeded from it, not from the work tree", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{snapshot: snapshot}} = Checkout.ingest(up.path, c.ctx)
+
+      %{seed: again} = seed!(%{c | node: Path.join(c.tmp, "node-again")})
+      assert again.refs["refs/arbiter/checkpoint/#{@run}"] == snapshot
+    end
+
+    test "untracked work over the cap is a veto: the run is not placed", c do
+      File.write!(Path.join(c.home, "big.bin"), :binary.copy("x", 4096))
+
+      assert {:error, {:veto, :untracked_size, _}} =
+               Checkout.seed_bundle(c.home,
+                 run: @run,
+                 branch: @branch,
+                 base: "main",
+                 max_untracked_bytes: 1024,
+                 dest: Path.join(c.tmp, "seed-big.bundle")
+               )
+    end
+
+    # A local container ran in this clone before; nothing its `.git/config` names runs
+    # on the primary while the work tree is snapshotted.
+    test "runs no hook, fsmonitor or filter the home clone's own config names", c do
+      pwned = Path.join(c.tmp, "pwned")
+      git!(c.home, ["config", "core.fsmonitor", "touch #{pwned}-fsmonitor"])
+      git!(c.home, ["config", "filter.evil.clean", "touch #{pwned}-filter; cat"])
+      File.write!(Path.join(c.home, ".gitattributes"), "* filter=evil\n")
+      hook = Path.join(c.home, ".git/hooks/post-checkout")
+      File.write!(hook, "#!/bin/sh\ntouch #{pwned}-hook\n")
+      File.chmod!(hook, 0o755)
+      dirty_home!(c.home)
+
+      %{seed: seed} = seed!(c)
+
+      assert is_binary(seed.refs["refs/arbiter/checkpoint/#{@run}"])
+      assert Path.wildcard(pwned <> "*") == []
+    end
+
+    test "the node's work comes back over the seeded checkpoint: what it deleted is gone", c do
+      dirty_home!(c.home)
+      %{shadow: shadow, info: info} = seed!(c)
+
+      File.rm!(Path.join(shadow, "notes.txt"))
+      File.write!(Path.join(shadow, "lib/new.txt"), "from the node\n")
+      git!(shadow, ["add", "lib/new.txt"])
+      git!(shadow, ["commit", "-q", "-m", "node commit"])
+      expected = modes(shadow)
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{head: head}} = Checkout.ingest(up.path, c.ctx)
+
+      assert git!(c.home, ["rev-parse", "refs/heads/#{@branch}"]) == head
+      refute File.exists?(Path.join(c.home, "notes.txt"))
+      assert modes(c.home) == expected
+    end
+  end
+
   describe "ingest quarantine" do
     test "executes no hooks, in the quarantine or the home clone", c do
       marker = Path.join(c.tmp, "HOOK_RAN")

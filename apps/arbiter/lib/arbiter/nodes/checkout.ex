@@ -13,6 +13,13 @@ defmodule Arbiter.Nodes.Checkout do
   shas, or would leave nothing to send. A repo `veto/2` refuses (submodules,
   LFS) is never seeded.
 
+  A home clone that holds uncommitted work for a run with no checkpoint yet (a
+  resume of a run cut off mid-task, bd-4ic681) has it snapshotted first, as that
+  run's checkpoint, so the node starts from the work tree and not only the
+  commits. The snapshot leaves the home clone's index and config alone and takes
+  only the paths an ingest would accept back (no injected config, deps or
+  seeded paths).
+
   ## Ingest (node → primary): a quarantine, in this order
 
   `ingest/2` takes the uploaded bundle and
@@ -109,8 +116,13 @@ defmodule Arbiter.Nodes.Checkout do
   Build the seed bundle for a run into `opts[:dest]`.
 
   Options: `:run`, `:branch`, `:base` (names), `:have` (shas the node holds),
-  `:dest`, `:max_bytes`. Returns `{:ok, %{path, bytes, thin?, refs}}`, where
+  `:dest`, `:max_bytes`, and for the work tree `:seeded_paths` and
+  `:max_untracked_bytes`. Returns `{:ok, %{path, bytes, thin?, refs}}`, where
   `refs` is `%{ref => sha}` as the bundle carries them.
+
+  A home clone holding uncommitted work for a run with no checkpoint yet (a
+  resume of a run cut off mid-task, bd-4ic681) has it snapshotted first, as the
+  run's checkpoint: see `checkpoint_work_tree/4`.
   """
   @spec seed_bundle(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def seed_bundle(home, opts) do
@@ -122,6 +134,8 @@ defmodule Arbiter.Nodes.Checkout do
          branch_ref = "refs/heads/" <> branch,
          tip when is_binary(tip) <- Git.rev_parse(git_dir, branch_ref) || {:error, :no_branch},
          :ok <- veto(home, tip),
+         :ok <-
+           checkpoint_work_tree(home, git_dir, tip, Keyword.put(opts, :branch_ref, branch_ref)),
          refs = seed_refs(git_dir, run, branch_ref, Keyword.get(opts, :base)),
          have = known_shas(git_dir, Keyword.get(opts, :have, [])),
          {:ok, thin?} <- create_seed(git_dir, branch_ref, refs, have, dest),
@@ -139,6 +153,136 @@ defmodule Arbiter.Nodes.Checkout do
 
   defp seed_max_bytes,
     do: Application.get_env(:arbiter, :node_seed_max_bytes, @default_seed_max_bytes)
+
+  # bd-4ic681: the run's first checkpoint, taken from the home clone's work tree when
+  # the run has none yet and the home clone is on the run branch: the uncommitted work
+  # a resumed run was cut off in the middle of. `seed_refs/4` then carries it, the node
+  # restores it uncommitted (`Arbiter.NodeAgent.Checkout.seed/1`), and the first
+  # ingest's hand-off reads it as what the work tree held, so a file the node deletes
+  # is deleted here too. A clean work tree takes no checkpoint.
+  #
+  # Snapshotted the way the node snapshots its shadow (`NodeAgent.Checkout.package/1`):
+  # in a throwaway bare repo that borrows the home clone's objects, with the home clone
+  # as its work tree and a temporary index, so neither the home clone's index nor its
+  # `.git/config` is read (a hook, fsmonitor or clean filter a local container wrote
+  # there never runs here). Only paths the primary would take back are added: injected
+  # config (a bearer token in `.mcp.json`), deps, build output and the run's seeded
+  # paths stay behind unhashed (`Inspect.denied_path?/2`). The vetoes and the untracked
+  # cap of an ingest apply.
+  defp checkpoint_work_tree(home, git_dir, tip, opts) do
+    run = Keyword.fetch!(opts, :run)
+
+    cond do
+      Git.rev_parse(git_dir, checkpoint_ref(run)) -> :ok
+      not on_branch?(home, git_dir, Keyword.fetch!(opts, :branch_ref)) -> :ok
+      true -> snapshot_work_tree(home, git_dir, tip, opts)
+    end
+  end
+
+  defp on_branch?(home, git_dir, branch_ref) do
+    case Git.run(["symbolic-ref", "-q", "HEAD"], git_dir: git_dir, work_tree: home) do
+      {:ok, ^branch_ref} -> true
+      _ -> false
+    end
+  end
+
+  defp snapshot_work_tree(home, git_dir, tip, opts) do
+    run = Keyword.fetch!(opts, :run)
+    scratch = Path.dirname(Keyword.fetch!(opts, :dest))
+    snap = Path.join(scratch, "seed-snap-#{run}-#{System.unique_integer([:positive])}.git")
+    work = [git_dir: snap, work_tree: home, env: [{"GIT_INDEX_FILE", Path.join(snap, "index")}]]
+    seeded = Keyword.get(opts, :seeded_paths, [])
+    cap = Keyword.get(opts, :max_untracked_bytes) || max_untracked_bytes()
+
+    try do
+      with :ok <- init_snapshot_repo(snap, git_dir),
+           {:ok, _} <- Git.run(["read-tree", tip], work),
+           {:ok, changed, untracked} <- work_tree_changes(work, seeded),
+           :ok <- untracked_cap(home, untracked, cap),
+           :ok <- stage(work, changed),
+           {:ok, tree} <- Git.run(["write-tree"], work) do
+        if tree == Git.rev_parse(git_dir, tip <> "^{tree}"),
+          do: :ok,
+          else: keep_checkpoint(snap, git_dir, tip, tree, run)
+      end
+    after
+      File.rm_rf(snap)
+    end
+  end
+
+  defp init_snapshot_repo(snap, git_dir) do
+    File.mkdir_p!(Path.dirname(snap))
+
+    with {:ok, _} <- Git.run(["init", "-q", "--bare", snap]),
+         :ok <- config(snap, "core.excludesFile", Path.join(git_dir, "info/exclude")),
+         :ok <- config(snap, "core.autocrlf", "false") do
+      File.write(
+        Path.join(snap, "objects/info/alternates"),
+        Path.join(git_dir, "objects") <> "\n"
+      )
+    end
+  end
+
+  # Against the tip loaded into the temporary index: the tracked paths modified or
+  # deleted in the work tree, and the untracked ones git does not ignore, less every
+  # path the primary keeps to itself.
+  defp work_tree_changes(work, seeded) do
+    with {:ok, tracked} <- Git.run(["ls-files", "-z", "-m", "-d"], work),
+         {:ok, untracked} <- Git.run(["ls-files", "-z", "-o", "--exclude-standard"], work) do
+      keep = fn out ->
+        out
+        |> String.split(<<0>>, trim: true)
+        |> Enum.reject(&Inspect.denied_path?(&1, seeded))
+      end
+
+      untracked = keep.(untracked)
+      {:ok, Enum.uniq(keep.(tracked) ++ untracked), untracked}
+    end
+  end
+
+  # Measured with lstat before anything is hashed, as the node does.
+  defp untracked_cap(home, untracked, cap) do
+    bytes =
+      Enum.reduce(untracked, 0, fn path, acc ->
+        case File.lstat(Path.join(home, path)) do
+          {:ok, %File.Stat{type: :regular, size: size}} -> acc + size
+          _ -> acc
+        end
+      end)
+
+    if bytes > cap,
+      do: {:error, {:veto, :untracked_size, "#{bytes} bytes untracked, cap #{cap}"}},
+      else: :ok
+  end
+
+  defp stage(work, paths) do
+    paths
+    |> Enum.chunk_every(200)
+    |> Enum.reduce_while(:ok, fn chunk, :ok ->
+      case Git.run(["add", "-A", "--"] ++ chunk, work) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp keep_checkpoint(snap, git_dir, tip, tree, run) do
+    with {:ok, commit} <-
+           Git.run(["commit-tree", "-p", tip, "-m", "arbiter seed checkpoint", tree],
+             git_dir: snap
+           ),
+         {:ok, tip_entries} <- Inspect.entries(snap, tip),
+         {:ok, entries} <- Inspect.entries(snap, commit),
+         :ok <- Inspect.veto(snap, entries, tip_entries),
+         {:ok, _} <- Git.run(["update-ref", "refs/arbiter/seed", commit], git_dir: snap),
+         {:ok, _} <-
+           Git.run(
+             ["fetch", "-q", "--no-tags", snap, "+refs/arbiter/seed:#{checkpoint_ref(run)}"],
+             git_dir: git_dir
+           ) do
+      :ok
+    end
+  end
 
   defp seed_refs(git_dir, run, branch_ref, base) do
     base_refs = if base, do: ["refs/remotes/origin/" <> base, "refs/heads/" <> base], else: []
