@@ -128,6 +128,36 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Seconds of silence after which the primary declares a node lost and interrupts " <>
           "its runs; must exceed nodes.fence_after_s; null = fence + 30. Operator-only."
+    },
+    %{
+      key: "nodes.registry",
+      type: "registry_ref",
+      description:
+        "The registry the primary publishes worker, seed and controller images to, as " <>
+          "host[:port][/path] with no scheme (e.g. registry.example.com/arbiter); null = no " <>
+          "registry, nothing is pushed. Use a PRIVATE registry: the CLI layer carries real " <>
+          "claude/arb binaries. Operator-only."
+    },
+    %{
+      key: "nodes.registry_username",
+      type: "registry_user",
+      description: "Login for nodes.registry; null = anonymous push. Operator-only."
+    },
+    %{
+      key: "nodes.registry_password",
+      type: "secret",
+      description:
+        "Password or token for nodes.registry. Stored encrypted (Cloak), write-only: no " <>
+          "surface returns it, and it is handed to podman through a 0600 auth file, never " <>
+          "argv. Send it with `arb settings set nodes.registry_password -` (reads stdin). " <>
+          "Operator-only."
+    },
+    %{
+      key: "nodes.registry_insecure",
+      type: "boolean",
+      description:
+        "Push to nodes.registry over plain HTTP or with an untrusted certificate " <>
+          "(--tls-verify=false); null/false = TLS verified. Operator-only."
     }
   ]
 
@@ -141,10 +171,17 @@ defmodule Arbiter.Settings.Registry do
   # MCP, REST and `arb settings` all refuse them for a non-operator token.
   @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                     nodes.public_url nodes.allow_public_endpoint
-                    nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s)
+                    nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
+                    nodes.registry nodes.registry_username nodes.registry_password
+                    nodes.registry_insecure)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
+  # Values that are strings whatever they look like: a password of "12345" must not
+  # be unwrapped to an integer.
+  @secret_mask "********"
+  @string_types ~w(registry_ref registry_user secret)
+
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
   @doc "Every settable key, in display order."
@@ -180,7 +217,7 @@ defmodule Arbiter.Settings.Registry do
   @spec cast(key(), term()) :: {:ok, term()} | {:error, String.t()}
   def cast(key, raw) when key in @keys do
     type = Enum.find(@schema, &(&1.key == key)).type
-    do_cast(type, unwrap(raw))
+    do_cast(type, if(type in @string_types, do: raw, else: unwrap(raw)))
   end
 
   def cast(key, _raw), do: {:error, "unknown installation setting: #{key}"}
@@ -219,6 +256,32 @@ defmodule Arbiter.Settings.Registry do
 
   defp do_cast("join_token_ttl", _),
     do: {:error, "value must be a positive integer of minutes or null"}
+
+  defp do_cast("registry_ref", v) when is_binary(v) do
+    if Settings.valid_registry?(v),
+      do: {:ok, v},
+      else:
+        {:error,
+         "value must be a registry host[:port][/path] with no scheme, credentials or spaces " <>
+           "(e.g. registry.example.com/arbiter), or null"}
+  end
+
+  defp do_cast("registry_ref", _),
+    do: {:error, "value must be a registry host[:port][/path] string, or null"}
+
+  defp do_cast("registry_user", v) when is_binary(v) do
+    if v != "" and byte_size(v) <= 256 and not String.match?(v, ~r/[\s\x00-\x1f\x7f:]/),
+      do: {:ok, v},
+      else: {:error, "value must be a registry username with no spaces or colons, or null"}
+  end
+
+  defp do_cast("registry_user", _), do: {:error, "value must be a registry username, or null"}
+
+  defp do_cast("secret", v) when is_binary(v) and v != "" and byte_size(v) <= 4096,
+    do: {:ok, v}
+
+  defp do_cast("secret", _),
+    do: {:error, "value must be a non-empty string of at most 4096 bytes, or null"}
 
   defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
     valid = allowed(type)
@@ -316,6 +379,11 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.fence_after_s", v), do: wrap(Settings.set_nodes_fence_after_s(v))
   defp write("nodes.lost_after_s", v), do: wrap(Settings.set_nodes_lost_after_s(v))
 
+  defp write("nodes.registry", v), do: wrap(Settings.set_nodes_registry(v))
+  defp write("nodes.registry_username", v), do: wrap(Settings.set_nodes_registry_username(v))
+  defp write("nodes.registry_password", v), do: wrap(Settings.set_nodes_registry_password(v))
+  defp write("nodes.registry_insecure", v), do: wrap(Settings.set_nodes_registry_insecure(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -346,6 +414,14 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.fence_after_s"), do: Settings.nodes_fence_after_s()
   def override("nodes.lost_after_s"), do: Settings.nodes_lost_after_s_override()
 
+  def override("nodes.registry"), do: Settings.nodes_registry()
+  def override("nodes.registry_username"), do: Settings.nodes_registry_username()
+  def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
+
+  # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
+  def override("nodes.registry_password"),
+    do: if(Settings.nodes_registry_password_set?(), do: @secret_mask)
+
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
   def default("conductor_system_max_concurrent"), do: Snapshot.default_system_max_concurrent()
@@ -371,6 +447,10 @@ defmodule Arbiter.Settings.Registry do
   def default("scheduling_max_lifted_in_flight"), do: nil
 
   def default("nodes.public_url"), do: nil
+  def default("nodes.registry"), do: nil
+  def default("nodes.registry_username"), do: nil
+  def default("nodes.registry_password"), do: nil
+  def default("nodes.registry_insecure"), do: false
   def default("nodes.allow_public_endpoint"), do: false
   def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
   def default("nodes.fence_after_s"), do: Arbiter.Nodes.Liveness.default_fence_after_s()

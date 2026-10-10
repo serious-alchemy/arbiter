@@ -122,7 +122,8 @@ defmodule Arbiter.Workers.Run do
         :node_id,
         :model_family,
         :routing_decision,
-        :guardrail_decision
+        :guardrail_decision,
+        :harness_version
       ]
     end
 
@@ -164,7 +165,8 @@ defmodule Arbiter.Workers.Run do
         :node_id,
         :model_family,
         :routing_decision,
-        :guardrail_decision
+        :guardrail_decision,
+        :harness_version
       ]
     end
   end
@@ -246,6 +248,15 @@ defmodule Arbiter.Workers.Run do
 
       description "Recorded fallback explanation when the original provider was unavailable; " <>
                     "nil when no fallback occurred."
+    end
+
+    attribute :harness_version, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The agent CLI's version for the run (e.g. \"2.1.296\"), as the session " <>
+                    "reported it or the host binary answered; nil when neither said. A " <>
+                    "change resets the subject's trust promotion clock (G18)."
     end
 
     attribute :provider_account_id, :uuid do

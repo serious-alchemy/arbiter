@@ -15,7 +15,9 @@ defmodule Arbiter.Guardrails.Events do
     * egress: `link_egress/2` folds a run's `egress_events` into events;
     * fabricated evidence: `Arbiter.Worker` when `EvidenceIntegrity` escalates;
     * self-grant: `record_self_grant/3`, called where the worker bridge or the
-      MCP catalog refuses a worker's attempt.
+      MCP catalog refuses a worker's attempt;
+    * a spend-cap park: `Arbiter.Guardrails.SpendPatrol` (major, for the park
+      tiers).
   """
 
   alias Arbiter.Guardrails.Event

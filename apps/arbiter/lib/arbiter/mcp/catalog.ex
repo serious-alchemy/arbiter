@@ -85,6 +85,9 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_propose_routing` | coordinator | `Arbiter.Loop.propose_routing/1` (operator-authored routing canary proposal) |
   | `loop_canary_status` | coordinator | `Arbiter.Loop.Canary.status/1` (both arms' metrics + verdict progress) |
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
+  | `trust_show` | coordinator | `Arbiter.Loop.Trust.View.list/0` / `detail/1` (G18 earned trust; no tool promotes) |
+  | `trust_confirm` | coordinator | `Arbiter.Loop.Trust.confirm/2` (an automatic suspension stands: quarantine) |
+  | `trust_dismiss` | coordinator | `Arbiter.Loop.Trust.dismiss/3` (a suspension was a false positive: its tier returns) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `usage_events_list` | coordinator | `Arbiter.Usage.list_events/1` (raw ledger rows, P-17) |
   | `usage_calibration` | coordinator | `Arbiter.Usage.calibration/1` (difficulty mis-rating report, P-17) |
@@ -154,7 +157,8 @@ defmodule Arbiter.MCP.Catalog do
   # they go straight into a JSON Schema; `Arbiter.Loop.PendingWrite` holds the
   # authoritative atom constraints.
   @loop_states ~w(proposed hypothesis applied rejected superseded)
-  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)
+  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch
+                 trust_promotion)
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
@@ -2668,6 +2672,81 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.loop_pending_reject/2
+    },
+
+    # ---- earned trust (G18, guardrail-profiles §6.3–6.5) ----------------------
+    #
+    # Coordinator-only. The coordinator reads the records and decides on an
+    # automatic suspension; it never promotes. There is deliberately no
+    # `trust_promote`: no MCP tool, at any tier, can promote a subject, because a
+    # promotion loosens its guardrails and needs operator proof
+    # (`arb trust promote`). `loop_pending_apply` refuses a `trust_promotion`.
+    %{
+      name: "trust_show",
+      tiers: @coordinator,
+      description:
+        "Earned trust (G18): every subject's (`provider/model`) tier, its 30-day record " <>
+          "(runs, clean runs, critical/major/minor guardrail events, round-1 approve rate), " <>
+          "promotion eligibility, last harness and model version, any automatic suspension " <>
+          "and any pending `trust_promotion` proposal. With `subject`, that one subject in full: " <>
+          "recent events and history too. A promotion is operator-only: no MCP tool can apply " <>
+          "one; the operator runs `arb trust promote`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "subject" => %{
+            "type" => "string",
+            "description" =>
+              "Optional `provider/model` (e.g. `antigravity/gemini-3.8-flash-low`) to show in full."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.trust_show/2
+    },
+    %{
+      name: "trust_confirm",
+      tiers: @coordinator,
+      description:
+        "Confirm an automatic suspension (a critical guardrail event suspended `subject`): " <>
+          "the demotion to `quarantine` stands. The subject's rule drops to quarantine and the " <>
+          "suspension ends, so it is eligible again for quarantine work only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "subject" => %{
+            "type" => "string",
+            "description" => "The suspended subject, `provider/model`. Required."
+          }
+        },
+        "required" => ["subject"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.trust_confirm/2
+    },
+    %{
+      name: "trust_dismiss",
+      tiers: @coordinator,
+      description:
+        "Dismiss an automatic suspension of `subject` as a false positive (an authorised " <>
+          "security probe is one), with a recorded `reason`: the suspension ends and the tier " <>
+          "it never changed returns. Not a promotion: it cannot raise a tier.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "subject" => %{
+            "type" => "string",
+            "description" => "The suspended subject, `provider/model`. Required."
+          },
+          "reason" => %{
+            "type" => "string",
+            "description" => "Why it was a false positive. Required; recorded in the history."
+          }
+        },
+        "required" => ["subject", "reason"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.trust_dismiss/2
     },
     %{
       name: "memory_pending_list",

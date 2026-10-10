@@ -202,6 +202,20 @@ defmodule Arbiter.Loop.SubjectStatsTest do
       _ = SubjectStats.sample(@opts)
       assert row_counts() == before
     end
+
+    # G18 reads the first attempt back: `Arbiter.Loop.Trust` attributes a task's
+    # round-1 quality to the subject that run was dispatched as.
+    test "each task names its first attempt: run id, start and repo", %{tasks: tasks} do
+      %{rows: [[first_id]]} =
+        Repo.query!(
+          "SELECT id FROM worker_runs WHERE task_id = 't2' AND kind = 'implement' ORDER BY started_at LIMIT 1"
+        )
+
+      t2 = Enum.find(tasks, &(&1.task_id == "t2"))
+      assert t2.run_id == first_id
+      assert t2.started_at == ~U[2026-09-02 10:00:00.000000Z]
+      assert t2.repo == "arbiter"
+    end
   end
 
   describe "recency weighting" do

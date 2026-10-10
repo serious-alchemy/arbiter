@@ -756,18 +756,7 @@ defmodule Arbiter.Loop do
            from_ref: "loop",
            workspace_id: ws_id,
            subject: "loop proposal ready for review: #{row.gist}",
-           body: """
-           A loop-analysis finding has crossed the evidence bar and is queued as a reviewable proposal.
-
-           Kind:      #{row.kind} (#{row.scope}-scoped)
-           Evidence:  #{row.evidence_count} incident(s) across #{row.distinct_tasks} distinct task(s)
-           Metric:    #{row.target_metric || "—"} (baseline: #{row.baseline || "—"})
-
-           Nothing has been applied. Review it with:
-
-               arb loop diff #{row.id}
-               arb loop apply #{row.id}      # or: arb loop reject #{row.id} --reason "..."
-           """
+           body: escalation_body(row)
          }) do
       {:ok, _message} ->
         :ok
@@ -780,6 +769,39 @@ defmodule Arbiter.Loop do
     e ->
       Logger.debug("Arbiter.Loop escalation swallowed: #{Exception.message(e)}")
       :skipped
+  end
+
+  # G18: a promotion proposal is the operator's to apply, never `arb loop apply`'s.
+  defp escalation_body(%PendingWrite{kind: :trust_promotion} = row) do
+    payload = row.payload || %{}
+
+    """
+    The Loop finds that #{row.target} meets the §6.3 thresholds for #{payload["from"]} → #{payload["to"]} (docs/design/guardrail-profiles.md).
+
+    Evidence:  #{row.evidence_count} clean run(s) across #{row.distinct_tasks} ticket(s)
+    Metric:    #{row.target_metric || "—"} (#{row.baseline || "—"})
+
+    Nothing has been applied, and the coordinator cannot apply it: a promotion loosens security, so it is operator-only. Review the record with `arb trust show #{row.target}`. The operator applies it from their own shell:
+
+        arb trust promote #{row.target} --to #{payload["to"]} --reason "..."
+
+    or declines it with `arb loop reject #{row.id} --reason "..."`.
+    """
+  end
+
+  defp escalation_body(row) do
+    """
+    A loop-analysis finding has crossed the evidence bar and is queued as a reviewable proposal.
+
+    Kind:      #{row.kind} (#{row.scope}-scoped)
+    Evidence:  #{row.evidence_count} incident(s) across #{row.distinct_tasks} distinct task(s)
+    Metric:    #{row.target_metric || "—"} (baseline: #{row.baseline || "—"})
+
+    Nothing has been applied. Review it with:
+
+        arb loop diff #{row.id}
+        arb loop apply #{row.id}      # or: arb loop reject #{row.id} --reason "..."
+    """
   end
 
   @doc """
@@ -838,17 +860,33 @@ defmodule Arbiter.Loop do
     end
   end
 
-  @doc "True when the proposal is in a state an operator may apply (`:proposed` only)."
+  @doc """
+  True when the proposal is in a state an operator may apply (`:proposed` only)
+  through `apply_pending/2`. Never for an operator-only kind
+  (`PendingWrite.operator_only_kinds/0`), whatever its state.
+  """
   @spec applicable?(PendingWrite.t()) :: boolean()
-  def applicable?(%PendingWrite{state: :proposed}), do: true
-  def applicable?(%PendingWrite{}), do: false
+  def applicable?(%PendingWrite{} = row), do: inapplicable_reason(row) == nil
 
   @doc """
   Human-readable explanation of why a proposal is not applicable, naming its
   current evidence count and what is still needed. `nil` when it *is*
   applicable.
+
+  A `trust_promotion` (G18) is never applicable here: a promotion loosens
+  security, so `arb loop apply`, MCP `loop_pending_apply` and the dashboard all
+  refuse it, and the operator applies it with `arb trust promote`.
   """
   @spec inapplicable_reason(PendingWrite.t()) :: String.t() | nil
+  def inapplicable_reason(%PendingWrite{kind: :trust_promotion} = row) do
+    payload = row.payload || %{}
+
+    "operator-only: a trust_promotion loosens a subject's guardrails, so it is never " <>
+      "applied through the Loop's apply (`arb loop apply`, `loop_pending_apply`, the " <>
+      "dashboard). The operator applies it with operator proof: `arb trust promote " <>
+      "#{row.target || "<subject>"} --to #{payload["to"] || "<tier>"} --reason \"…\"`"
+  end
+
   def inapplicable_reason(%PendingWrite{state: :proposed}), do: nil
 
   def inapplicable_reason(%PendingWrite{state: :hypothesis} = row) do

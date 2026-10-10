@@ -102,6 +102,32 @@ defmodule Arbiter.Loop.CanaryTickerTest do
     end
   end
 
+  describe "the trust fold (G18)" do
+    test "a poll folds the window into the trust records" do
+      ws = workspace!("trust-ticker")
+      yesterday = DateTime.add(DateTime.utc_now(), -86_400, :second)
+
+      Arbiter.TrustFixtures.task!(ws, "tk-1", {"codex", "gpt-5.1-codex"}, at: yesterday)
+
+      assert :ok = CanaryTicker.poll(start_ticker!())
+
+      assert [%Arbiter.Guardrails.TrustRecord{provider: "codex", model: "gpt-5.1-codex", runs: 1}] =
+               Arbiter.Loop.Trust.list()
+    end
+
+    test "is skipped when `:loop_trust` is disabled" do
+      ws = workspace!("trust-ticker-off")
+      yesterday = DateTime.add(DateTime.utc_now(), -86_400, :second)
+      Arbiter.TrustFixtures.task!(ws, "tk-2", {"codex", "gpt-5.1-codex"}, at: yesterday)
+
+      Application.put_env(:arbiter, :loop_trust, enabled: false)
+      on_exit(fn -> Application.delete_env(:arbiter, :loop_trust) end)
+
+      assert :ok = CanaryTicker.poll(start_ticker!())
+      assert Arbiter.Loop.Trust.list() == []
+    end
+  end
+
   describe "the timer" do
     test "does not schedule itself when disabled" do
       pid = start_ticker!()

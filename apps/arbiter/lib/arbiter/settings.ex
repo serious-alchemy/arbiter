@@ -696,6 +696,104 @@ defmodule Arbiter.Settings do
 
   def set_nodes_local_max_workers(_), do: {:error, :invalid_value}
 
+  # ---- nodes.registry (K8) -------------------------------------------------
+
+  # `host[:port]` then optional `/path` segments: no scheme, no userinfo, no
+  # query. The same shape `podman push` takes as a repository prefix.
+  @registry_re ~r|\A[a-z0-9][a-z0-9.-]*(:\d{1,5})?(/[a-z0-9][a-z0-9._-]*)*\z|i
+  @registry_user_re ~r/\A[^\s\x00-\x1f\x7f:]{1,256}\z/
+  @registry_password_max 4096
+
+  @doc "`nodes.registry` (`host[:port][/path]`), or `nil` when no registry is configured."
+  @spec nodes_registry() :: String.t() | nil
+  def nodes_registry, do: read_setting(:nodes_registry)
+
+  @doc "Whether `value` is a valid `nodes.registry` reference."
+  @spec valid_registry?(term()) :: boolean()
+  def valid_registry?(value) when is_binary(value),
+    do: byte_size(value) <= 255 and Regex.match?(@registry_re, value)
+
+  def valid_registry?(_), do: false
+
+  @spec set_nodes_registry(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_registry(nil), do: write_setting(:nodes_registry, nil)
+
+  def set_nodes_registry(value) when is_binary(value) do
+    if valid_registry?(value),
+      do: write_setting(:nodes_registry, value),
+      else: {:error, :invalid_value}
+  end
+
+  def set_nodes_registry(_), do: {:error, :invalid_value}
+
+  @doc "The registry login, or `nil`."
+  @spec nodes_registry_username() :: String.t() | nil
+  def nodes_registry_username, do: read_setting(:nodes_registry_username)
+
+  @spec set_nodes_registry_username(String.t() | nil) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_registry_username(nil), do: write_setting(:nodes_registry_username, nil)
+
+  def set_nodes_registry_username(user) when is_binary(user) do
+    if Regex.match?(@registry_user_re, user),
+      do: write_setting(:nodes_registry_username, user),
+      else: {:error, :invalid_value}
+  end
+
+  def set_nodes_registry_username(_), do: {:error, :invalid_value}
+
+  @doc "Whether the registry is plain-HTTP or self-signed (`--tls-verify=false`)."
+  @spec nodes_registry_insecure?() :: boolean()
+  def nodes_registry_insecure?, do: read_setting(:nodes_registry_insecure) == true
+
+  @doc "The persisted `nodes.registry_insecure` override."
+  @spec nodes_registry_insecure() :: boolean() | nil
+  def nodes_registry_insecure, do: read_setting(:nodes_registry_insecure)
+
+  @spec set_nodes_registry_insecure(boolean() | nil) :: {:ok, boolean() | nil} | {:error, term()}
+  def set_nodes_registry_insecure(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:nodes_registry_insecure, v)
+
+  def set_nodes_registry_insecure(_), do: {:error, :invalid_value}
+
+  @doc """
+  The decrypted registry password, or `nil`. For `Arbiter.Worker.Image.Registry`
+  only: it is handed to podman through a 0600 auth file, never argv, and no
+  settings surface (`Settings.Registry`, REST, MCP, CLI) returns it.
+  """
+  @spec nodes_registry_password() :: String.t() | nil
+  def nodes_registry_password do
+    case read_setting(:nodes_registry_password) do
+      cipher when is_binary(cipher) -> Arbiter.Vault.decrypt!(cipher)
+      _ -> nil
+    end
+  rescue
+    # A key that no longer decrypts is "no password", not a crashed publish.
+    _ -> nil
+  end
+
+  @doc "Whether a registry password is stored (without decrypting it)."
+  @spec nodes_registry_password_set?() :: boolean()
+  def nodes_registry_password_set?, do: is_binary(read_setting(:nodes_registry_password))
+
+  @doc """
+  Encrypt (`Arbiter.Vault`) and persist the registry password; `nil` clears it.
+  Returns `{:ok, :set | nil}`: the plaintext and the ciphertext both stay out
+  of the result.
+  """
+  @spec set_nodes_registry_password(String.t() | nil) :: {:ok, :set | nil} | {:error, term()}
+  def set_nodes_registry_password(nil) do
+    with {:ok, _} <- write_setting(:nodes_registry_password, nil), do: {:ok, nil}
+  end
+
+  def set_nodes_registry_password(pw)
+      when is_binary(pw) and byte_size(pw) > 0 and byte_size(pw) <= @registry_password_max do
+    with {:ok, _} <- write_setting(:nodes_registry_password, Arbiter.Vault.encrypt!(pw)),
+         do: {:ok, :set}
+  end
+
+  def set_nodes_registry_password(_), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other
