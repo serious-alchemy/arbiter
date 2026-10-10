@@ -9,6 +9,7 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
 
   alias Arbiter.Board.AdmissionShadowEvent
   alias Arbiter.Board.AdmissionShadowReport, as: Report
+  alias Arbiter.Board.AdmissionShadowReport.Quota
   alias Arbiter.Quota.QuotaSnapshot
 
   @t0 ~U[2026-10-01 00:00:00Z]
@@ -361,6 +362,48 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
       assert r.over_budget_before == true
       assert_in_delta r.max_used_after, 0.05, 1.0e-9
     end
+
+    test "a resets_at that jitters between polls is one reset, not several" do
+      reset = at(300)
+
+      snapshots = [
+        snap(200, 0.5, 3, %{budget: 1, resets_at: DateTime.add(reset, 2, :second)}),
+        snap(230, 0.55, 3, %{budget: 3, resets_at: DateTime.add(reset, -3, :second)}),
+        snap(260, 0.6, 2, %{budget: 3, resets_at: reset}),
+        snap(280, 0.62, 3, %{budget: 3, resets_at: DateTime.add(reset, 4, :second)}),
+        snap(310, 0.02, 3, %{budget: 3, resets_at: at(600)}),
+        snap(360, 0.05, 2, %{budget: 3, resets_at: at(600)})
+      ]
+
+      %{near_resets: [r], gate: gate} = build(%{snapshots: snapshots})
+
+      # the last-seen resets_at represents the instance
+      assert r.reset_at == DateTime.add(reset, 4, :second)
+      # every capture of the instance inside the horizon counts, not a fragment
+      assert r.max_seats_before == 3
+      assert r.min_budget_before == 1
+      assert r.over_budget_before == true
+      assert_in_delta r.max_used_after, 0.05, 1.0e-9
+
+      refute Enum.find(gate, &(&1.id == :weekly_resets)).status == :met
+    end
+
+    test "one weekly reset seen with jittered times is not two weekly resets" do
+      week = 7 * 24 * 60
+      reset = at(week)
+
+      snapshots = [
+        snap(week - 90, 0.8, 2, %{window: "7d", resets_at: DateTime.add(reset, 3, :second)}),
+        snap(week - 60, 0.82, 2, %{window: "7d", resets_at: DateTime.add(reset, -2, :second)}),
+        snap(week + 10, 0.01, 2, %{window: "7d", resets_at: at(2 * week)})
+      ]
+
+      %{near_resets: resets, gate: gate} = build(%{snapshots: snapshots})
+
+      assert length(resets) == 1
+      assert Quota.weekly_resets(resets) == 1
+      assert Enum.find(gate, &(&1.id == :weekly_resets)).status == :unmet
+    end
   end
 
   describe "the enforce gate (§10.4)" do
@@ -379,6 +422,13 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
 
       assert Enum.find(gate, &(&1.id == :comparable_dispatches)).status == :met
       assert Enum.find(gate, &(&1.id == :days_in_shadow)).status == :met
+    end
+
+    test "days in shadow counts days that hold a record, not time since the first" do
+      # one day of shadow long ago, then nothing: 14 days elapsed, 1 day covered
+      %{gate: gate} = build(%{dispatches: [dispatch(0), dispatch(60)]})
+
+      assert Enum.find(gate, &(&1.id == :days_in_shadow)).status == :unmet
     end
   end
 

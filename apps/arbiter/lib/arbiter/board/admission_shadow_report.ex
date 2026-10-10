@@ -231,7 +231,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
 
   defp gate(report, data, events) do
     stamps = Enum.map(data.dispatches, & &1.at) ++ Enum.map(events, & &1.at)
-    days = days_in_shadow(stamps, data.until)
+    days = days_in_shadow(stamps)
 
     [
       criterion(
@@ -267,15 +267,15 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   defp criterion(id, label, status, detail),
     do: %{id: id, label: label, status: status, detail: detail}
 
-  defp days_in_shadow([], _until), do: 0.0
-
-  defp days_in_shadow(stamps, until),
-    do: DateTime.diff(until, Enum.min(stamps, DateTime)) / 86_400
+  # Coverage, not elapsed time: the distinct UTC days that hold a shadow record.
+  # A day of shadow long ago followed by a switch back to legacy is one day.
+  defp days_in_shadow(stamps),
+    do: stamps |> Enum.map(&DateTime.to_date/1) |> Enum.uniq() |> length()
 
   defp days_status(days) when days >= @gate_days, do: :met
   defp days_status(_days), do: :unmet
 
-  defp days_detail(days), do: "#{Float.round(days, 1)} days of records"
+  defp days_detail(days), do: "#{days} days with shadow records"
 
   defp count_status(n, need) when n >= need, do: :met
   defp count_status(_n, _need), do: :unmet

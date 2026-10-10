@@ -19,6 +19,11 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
   @default_horizon_hours 2.0
   @long_window_seconds 2 * 86_400
   @weekly_seconds 6 * 86_400
+  # `resets_at` is reported to the second but jitters between polls; a new
+  # window instance moves it by hours (the tolerance `Draw` uses).
+  @reset_jitter_seconds 600
+  # Below this a utilization reading's own rounding dominates the delta.
+  @utilization_epsilon 1.0e-9
 
   @type rows :: [map()]
 
@@ -314,9 +319,7 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
       pool = Draw.pool(provider, bucket)
 
       rows
-      |> Enum.map(& &1.resets_at)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
+      |> window_instances()
       |> Enum.flat_map(
         &reset_entry(&1, rows, h, %{
           account: account,
@@ -329,17 +332,57 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
     |> Enum.sort_by(&{&1.pool, &1.window, &1.reset_at}, fn a, b -> a <= b end)
   end
 
-  defp reset_entry(reset, rows, h, meta) do
+  # Group a series' captures (oldest first) into window instances the way
+  # `Draw` does: a new instance starts only when `resets_at` moves by more than
+  # the jitter tolerance, or utilization falls. An instance is represented by
+  # its last-seen `resets_at`, so one real reset is one entry however its
+  # reported time wobbled. Instances that never reported a `resets_at` drop out.
+  defp window_instances(rows) do
+    rows
+    |> Enum.chunk_while(
+      nil,
+      fn row, acc ->
+        case acc do
+          nil ->
+            {:cont, {[row], row, row.resets_at}}
+
+          {members, prev, reset} ->
+            if prev.utilization - row.utilization > @utilization_epsilon or
+                 reset_moved?(reset, row.resets_at) do
+              {:cont, members, {[row], row, row.resets_at}}
+            else
+              {:cont, {[row | members], row, row.resets_at || reset}}
+            end
+        end
+      end,
+      fn
+        nil -> {:cont, nil}
+        {members, _prev, _reset} -> {:cont, members, nil}
+      end
+    )
+    |> Enum.flat_map(fn members ->
+      members = Enum.reverse(members)
+
+      case members |> Enum.map(& &1.resets_at) |> Enum.reject(&is_nil/1) |> List.last() do
+        nil -> []
+        reset -> [%{reset: reset, members: members}]
+      end
+    end)
+  end
+
+  defp reset_moved?(%DateTime{} = a, %DateTime{} = b),
+    do: abs(DateTime.diff(a, b)) > @reset_jitter_seconds
+
+  defp reset_moved?(_a, _b), do: false
+
+  defp reset_entry(%{reset: reset, members: members}, rows, h, meta) do
     span = round(h * 3600)
 
-    before =
-      Enum.filter(rows, fn r ->
-        r.resets_at == reset and DateTime.diff(reset, r.captured_at) in 1..span
-      end)
+    before = Enum.filter(members, &(DateTime.diff(reset, &1.captured_at) in 1..span))
 
     after_rows =
       Enum.filter(rows, fn r ->
-        r.resets_at != reset and DateTime.diff(r.captured_at, reset) in 0..span
+        not Enum.any?(members, &(&1 == r)) and DateTime.diff(r.captured_at, reset) in 0..span
       end)
 
     seen_after? = Enum.any?(rows, &(DateTime.compare(&1.captured_at, reset) != :lt))
@@ -376,8 +419,21 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
     near_resets
     |> Enum.filter(&((&1.window_seconds || 0) >= @weekly_seconds))
     |> Enum.group_by(& &1.account_id, & &1.reset_at)
-    |> Enum.map(fn {_account, resets} -> resets |> Enum.uniq() |> length() end)
+    |> Enum.map(fn {_account, resets} -> count_distinct_resets(resets) end)
     |> Enum.max(fn -> 0 end)
+  end
+
+  # Reset times within the jitter tolerance of the previous one are the same
+  # reset (e.g. one reset seen through several buckets).
+  defp count_distinct_resets(resets) do
+    resets
+    |> Enum.sort(DateTime)
+    |> Enum.reduce({0, nil}, fn reset, {n, last} ->
+      if last && DateTime.diff(reset, last) <= @reset_jitter_seconds,
+        do: {n, reset},
+        else: {n + 1, reset}
+    end)
+    |> elem(0)
   end
 
   # ---- shared ------------------------------------------------------------------
