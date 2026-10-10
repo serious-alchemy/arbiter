@@ -138,49 +138,51 @@ defmodule Arbiter.Quota.Budget do
   @spec compute(keyword() | map()) :: t()
   def compute(opts) do
     opts = Map.new(opts)
-    now = Map.get_lazy(opts, :now, &DateTime.utc_now/0)
     account = Map.get(opts, :account)
     workspace = Map.get(opts, :workspace)
-    policy = {account, workspace}
-    seats = max(Map.get(opts, :seats) || 0, 0)
-    horizon = clamp_horizon(Map.get(opts, :horizon))
     snapshot = Snapshot.normalize(Map.get(opts, :quota), model: Map.get(opts, :model))
-
-    ctx = %{
-      policy: policy,
-      account: account,
-      now: now,
-      seats: seats,
-      horizon: horizon,
-      rates: Map.get(opts, :rates) || %{},
-      background: Map.get(opts, :background) || 0.0,
-      priority: nil
-    }
-
-    exempt = Gate.pace_exempt_priority(policy)
-    windows = snapshot |> eval_windows(ctx)
+    ctx = context(opts, account, workspace)
 
     base = %__MODULE__{
       account: Map.get(opts, :account_id) || account_id(account),
       pool: Map.get(opts, :pool),
       policy_workspace: workspace_id(workspace),
-      seats: seats,
-      windows: windows,
+      seats: ctx.seats,
+      windows: eval_windows(snapshot, ctx),
       ceiling: ceiling(account, Map.get(opts, :share)),
-      horizon: horizon,
-      computed_at: now
+      horizon: ctx.horizon,
+      computed_at: ctx.now
     }
 
+    decide(base, opts, snapshot, ctx)
+  end
+
+  defp context(opts, account, workspace) do
+    %{
+      policy: {account, workspace},
+      account: account,
+      now: Map.get_lazy(opts, :now, &DateTime.utc_now/0),
+      seats: max(Map.get(opts, :seats) || 0, 0),
+      horizon: clamp_horizon(Map.get(opts, :horizon)),
+      rates: Map.get(opts, :rates) || %{},
+      background: Map.get(opts, :background) || 0.0,
+      priority: nil
+    }
+  end
+
+  defp decide(base, opts, snapshot, ctx) do
+    exempt = Gate.pace_exempt_priority(ctx.policy)
+
     cond do
-      zero = hard_zero(opts, snapshot, policy, now) ->
+      zero = hard_zero(opts, snapshot, ctx.policy, ctx.now) ->
         hard(base, zero, exempt, snapshot)
 
       snapshot == nil and Map.get(opts, :metered?, true) == false ->
         unmetered(base)
 
       true ->
-        case trusted(windows) do
-          [] -> no_reading(base, Map.get(opts, :previous), now)
+        case trusted(base.windows) do
+          [] -> no_reading(base, Map.get(opts, :previous), ctx.now)
           trusted -> quota(base, trusted, ctx, snapshot, exempt)
         end
     end
@@ -534,12 +536,8 @@ defmodule Arbiter.Quota.Budget do
     end
   end
 
-  defp ceiling_name(%{max_concurrent: mc, share: share}) do
-    cond do
-      mc && (share == nil or mc <= share) -> "max_concurrent"
-      true -> "share"
-    end
-  end
+  defp ceiling_name(%{max_concurrent: mc, share: share}),
+    do: if(mc && (share == nil or mc <= share), do: "max_concurrent", else: "share")
 
   defp binding_detail(%__MODULE__{} = b) do
     w = Enum.find(b.windows, &(&1.window == b.quota_binding and &1.status == :ok))
