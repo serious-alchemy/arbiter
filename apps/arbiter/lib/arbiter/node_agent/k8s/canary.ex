@@ -25,8 +25,9 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       probes that follow measure the steady state. A gate that never closes exits
       70, which is the verdict `unenforced` on its own;
     * the `worker` container runs `script/0` instead of the entry wrapper (there is
-      no seed to write `/run/arb/env`), with small resource requests; the snapshotter
-      is dropped and the `work`/`.git` mounts with it.
+      no seed to write `/run/arb/env`) and without `tini`, so the image needs only `sh`
+      and `socat`; it asks for small resources; the snapshotter is dropped and the
+      `work`/`.git` mounts with it.
 
   ## The probes
 
@@ -239,7 +240,7 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       |> Enum.map(fn {name, value} -> %{"name" => name, "value" => value || ""} end)
 
     worker
-    |> Map.put("command", escape(["tini", "--", "sh", "-c", @script]))
+    |> Map.put("command", escape(["sh", "-c", @script]))
     |> Map.put("env", env)
     |> Map.put("resources", %{
       "requests" => %{"cpu" => "50m", "memory" => "32Mi"},
