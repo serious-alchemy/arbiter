@@ -257,6 +257,8 @@ defmodule Arbiter.Board.WalkInputs do
     end
   rescue
     e -> {:none, "its candidates could not be read (#{Exception.message(e)})"}
+  catch
+    :exit, reason -> {:none, "its candidates could not be read (#{inspect(reason, limit: 5)})"}
   end
 
   defp routed(ws, issue, ctx) do

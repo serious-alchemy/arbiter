@@ -342,6 +342,8 @@ defmodule Arbiter.Board.Snapshot do
   # shadow or enforce). It reads nothing today's plan decides with and writes
   # nothing back to it, so the board's own fields are the same with or without
   # it (I1, I2). The capacity sets ride with the plan, for the shadow record.
+  # A walk that cannot be planned is left out: losing today's board to it would
+  # read as an unreadable board, and Autopilot would dispatch nothing (I2).
   defp put_walk(board, %{} = walk, queue, input, paused?) do
     plan =
       Scheduler.plan(%{
@@ -355,6 +357,20 @@ defmodule Arbiter.Board.Snapshot do
       })
 
     Map.put(board, :walk, Map.merge(plan, Map.take(walk, [:pools, :nodes])))
+  rescue
+    e ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk was not planned: #{Exception.message(e)}"
+      )
+
+      board
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk was not planned: #{inspect({kind, reason})}"
+      )
+
+      board
   end
 
   defp put_walk(board, _walk, _queue, _input, _paused?), do: board

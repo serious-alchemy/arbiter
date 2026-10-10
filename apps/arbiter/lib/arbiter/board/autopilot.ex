@@ -947,7 +947,11 @@ defmodule Arbiter.Board.Autopilot do
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
-    state = note_admission(state, mode, read_status, snapshot)
+
+    state =
+      shadow_safely(%{state | shadow_signature: nil}, fn ->
+        note_admission(state, mode, read_status, snapshot)
+      end)
 
     cond do
       state.deferred_resumes != [] ->
@@ -957,7 +961,8 @@ defmodule Arbiter.Board.Autopilot do
         {:paused, state}
 
       is_binary(Map.get(snapshot, :promote)) ->
-        promote_or_hold(%{state | holds: []}, snapshot.promote, shadow_opts(snapshot, mode))
+        extra = shadow_safely([], fn -> shadow_opts(snapshot, mode) end)
+        promote_or_hold(%{state | holds: []}, snapshot.promote, extra)
 
       true ->
         {:idle, note_holds(state, snapshot, read_status)}
@@ -976,6 +981,20 @@ defmodule Arbiter.Board.Autopilot do
     _ -> :legacy
   catch
     :exit, _ -> :legacy
+  end
+
+  # The shadow is a record: nothing it computes may stop a pass or change a
+  # dispatch (I2). A failure is logged and the pass goes on without it.
+  defp shadow_safely(fallback, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("board autopilot: admission shadow skipped: #{Exception.message(e)}")
+      fallback
+  catch
+    kind, reason ->
+      Logger.warning("board autopilot: admission shadow skipped: #{inspect({kind, reason})}")
+      fallback
   end
 
   # One event row per change of either side's outcome (`AdmissionShadow.signature/1`),

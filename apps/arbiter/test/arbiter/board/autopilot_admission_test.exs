@@ -183,6 +183,17 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
     end
   end
 
+  @tag capture_log: true
+  test "a walk the shadow cannot read records nothing and still dispatches today's card" do
+    broken = Map.put(board("bd-1", nil, walk?: false), :walk, %{promote: "bd-2"})
+    pid = start(:shadow, fn _ -> broken end)
+
+    assert {:ok, "bd-1"} = Autopilot.tick(pid)
+    assert_receive {:dispatched, "bd-1", []}
+    refute_received {:shadow_event, _}
+    assert Process.alive?(pid)
+  end
+
   test "a one-argument dispatch seam is still called under shadow, with the id alone" do
     test = self()
 

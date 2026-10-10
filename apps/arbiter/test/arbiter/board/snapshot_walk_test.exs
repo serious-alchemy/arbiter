@@ -114,6 +114,27 @@ defmodule Arbiter.Board.SnapshotWalkTest do
              Enum.find(shadowed.walk.entries, &(&1.id == "bd-b"))
   end
 
+  @tag capture_log: true
+  test "a walk that cannot be planned is left out; today's board is never lost to it" do
+    issues = [issue("bd-a")]
+    today = Snapshot.derive(input(issues: issues))
+
+    broken = [
+      # A malformed pool (no budget at all).
+      walk(fn _ -> [%{pool: @claude, nodes: ["local"]}] end, %{@claude => %{seats: 0}}),
+      # A candidates function that raises.
+      walk(fn _ -> raise "boom" end),
+      # Something that is not a walk at all.
+      %{pools: :nope, nodes: :nope, candidates: :nope}
+    ]
+
+    for walk <- broken do
+      board = Snapshot.derive(input(issues: issues, walk: walk))
+      refute Map.has_key?(board, :walk)
+      assert board == today
+    end
+  end
+
   # ---- I2 at the board ----------------------------------------------------------
 
   defp issue_gen(id) do
