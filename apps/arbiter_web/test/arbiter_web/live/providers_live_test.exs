@@ -109,6 +109,39 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert has_element?(view, "#account-#{account.id}-pace-7d[data-pace-verdict=ok]")
     end
 
+    test "shows a capped account's metered dollar spend against its cap (bd-a6grlr)", %{
+      conn: conn
+    } do
+      account =
+        account!(:claude, "pv-spend", %{
+          quota_config: %{"spend_cap" => 20.0, "spend_metered" => true}
+        })
+
+      event!(account, %{provider: "claude", cost_usd: 25.0})
+
+      quiet =
+        account!(:claude, "pv-nospend", %{
+          quota_config: %{"spend_cap" => 20.0, "spend_metered" => false}
+        })
+
+      plain = account!(:codex, "pv-nocap")
+
+      {:ok, view, _html} = live_providers(conn)
+
+      assert has_element?(view, "#account-#{account.id}-spend-cap[data-spend-state=holding]")
+      assert has_element?(view, "#account-#{account.id}-spend-cap", "$25.00")
+      assert has_element?(view, "#account-#{account.id}-spend-cap", "$20.00/week")
+
+      assert has_element?(
+               view,
+               "#account-#{account.id}-spend-cap",
+               "spend cap $20.00/week reached"
+             )
+
+      assert has_element?(view, "#account-#{quiet.id}-spend-cap", "no metered spend")
+      refute has_element?(view, "#account-#{plain.id}-spend-cap")
+    end
+
     test "an account with no quota snapshot says so rather than drawing empty bars", %{conn: conn} do
       account = account!(:codex, "pv-noquota")
       {:ok, view, _html} = live_providers(conn)

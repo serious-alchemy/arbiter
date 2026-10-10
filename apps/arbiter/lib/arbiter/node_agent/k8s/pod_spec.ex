@@ -114,7 +114,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     "/etc",
     "/run/arbiter"
   ]
-  @reserved_env ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_BRIDGES ARB_GATE_ADDR ARB_GATE_TIMEOUT_S ARB_SNAPSHOT_INTERVAL_S ARB_RUN ARB_WORKTREE)
+  @reserved_env ~w(ARB_BOOT_NONCE ARB_BRIDGE_ADDR ARB_BRIDGES ARB_GATE_ADDR ARB_GATE_TIMEOUT_S ARB_SNAPSHOT_INTERVAL_S ARB_RUN ARB_WORKTREE ARB_WORK_LIMIT_BYTES ARB_CONFIG_DIR)
   # Fields whose *contents* are data (a prompt may discuss `spc_t`); their keys are still not scanned.
   @data_keys ~w(env secrets command worker_env files content ready)
 
@@ -669,13 +669,22 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
       "restartPolicy" => "Always",
       "command" => escape(["tini", "--", "/opt/arbiter/bin/snapshotter"]),
       "env" =>
-        env_list(%{
-          "ARB_BRIDGE_ADDR" => cfg.bridge_addr,
-          "ARB_RUN" => run.run,
-          "ARB_WORKTREE" => worktree(run),
-          "ARB_SNAPSHOT_INTERVAL_S" => Integer.to_string(run.interval),
-          "HOME" => mount_path(run, "home") || "/tmp"
-        }),
+        env_list(
+          %{
+            "ARB_BRIDGE_ADDR" => cfg.bridge_addr,
+            "ARB_RUN" => run.run,
+            "ARB_WORKTREE" => worktree(run),
+            "ARB_SNAPSHOT_INTERVAL_S" => Integer.to_string(run.interval),
+            "ARB_WORK_LIMIT_BYTES" => Integer.to_string(work_limit_bytes(cfg)),
+            "HOME" => mount_path(run, "home") || "/tmp"
+          }
+          |> then(
+            &if(path = mount_path(run, "config_dir"),
+              do: Map.put(&1, "ARB_CONFIG_DIR", path),
+              else: &1
+            )
+          )
+        ),
       "securityContext" => hardening(),
       "resources" => aux_resources(cfg),
       "volumeMounts" =>
@@ -686,6 +695,13 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
             %{"name" => "ca", "mountPath" => @ca_dir, "readOnly" => true}
           ]
     }
+  end
+
+  # What the snapshotter's 80 % early-snapshot threshold is a fraction of (K1-A7:
+  # the kubelet evicts on `sizeLimit` and gives the sidecar about two seconds).
+  defp work_limit_bytes(cfg) do
+    {:ok, bytes} = Quantity.memory(cfg.worker["work_size_limit"], :k8s)
+    bytes
   end
 
   defp worker(run, cfg) do

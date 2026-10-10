@@ -1256,6 +1256,24 @@ Decisions the design left open, and what the tests pin:
 * **Per-run secrets are not Kubernetes objects.** Only the CA goes to a store (`CAStore`); leaves, keys, tokens and seed files exist only in `Runs`' memory and the `/boot` response. `PodChannelTest` checks that nothing but `ca.crt`/`ca.key` is written and that no secret or leaf key appears in either.
 * `bandit` and `plug` are now direct dependencies of `apps/arbiter` (already in the lock; the web app serves with the same).
 
+#### K7 as built: the pod runtime (bd-dzyclc)
+
+| Piece | Where | Notes |
+|---|---|---|
+| `seed` (stage 1: netpol gate) | `PodScripts.seed/0`, the init container's `command` | unchanged from K4; `exec`s stage 2 |
+| `seed` (stage 2) | `apps/arbiter/priv/k8s_pod/seed` → `/opt/arbiter/bin/seed` | redeems `/boot` (409 → retry, 403 → exit 78), unpacks into `/run/arb` (`tls/`, `env`, `prompt-<n>`, `checkout`), `GET /seed.bundle`, builds the `PrivateClone` layout, then the seed layer and the `/boot` seed files. Never `.git`. |
+| entry wrapper | `PodScripts.entry/0` | unchanged: source `/run/arb/env`, delete it, `exec "$@"`. `seed` always creates the file so a missing one still fails closed. |
+| `snapshotter` | `apps/arbiter/priv/k8s_pod/snapshotter` → `/opt/arbiter/bin/snapshotter` | checkpoint every `ARB_SNAPSHOT_INTERVAL_S`, on a `checkpoint` command (it long-polls `/commands`, so the poll is the wait), and early at 80 % of `ARB_WORK_LIMIT_BYTES`; SIGTERM = final snapshot (exit 0 uploaded, 1 not). Same recipe as `NodeAgent.Checkout.package/1`: never runs git *in* the writable `.git`. |
+| base image | `Image` `@base_containerfile` | `tini`; `arbiter` uid/gid 10001 with a passwd entry and `/home/arbiter`; both programs baked in as base64 (the base builds from an empty context and a node agent builds from the plan's text). No `USER` instruction: a local podman worker still runs `--userns=keep-id` as the host user. |
+
+Choices the design left open:
+
+* **Snapshot scratch space is `/tmp`** (the memory `emptyDir`, `tmp_size_limit`): the snapshot repo holds the blobs `git add -A` hashes for changed and untracked files, and the bundle is written next to it. A tree with more than ~`tmp_size_limit` of changed bytes fails the snapshot (logged, exit 1 on the final one). The untracked-payload veto (`ARB_MAX_UNTRACKED_BYTES`, default 50 MB, the primary's own cap) fires first for new files.
+* **Commit identity** in the pod's clone is `arbiter <arbiter@localhost>` (the machine agent's shadow uses the same); `PrivateClone` copies the operator's.
+* **`.git/config`** differs from the host's only by `arbiter.mainRepo`, `origin`, upstream tracking, `core.alternateRefsPrefixes` and the identity (`PodLayoutContractTest`). `info/exclude` is the worker's to edit; the snapshotter honours it as a bandwidth optimisation and the primary re-filters.
+* **Not in K7:** the in-pod `socat` bridge listeners in the entry wrapper (the pod builder gives bridge *names* only, so the port per bridge is undecided), and the stdout numbering filter (K5 has no consumer yet). Both change `PodScripts.entry/0` and the goldens, and nothing in the cluster reads them yet.
+* **Verified here:** `PodRuntimeTest`, `PodLayoutContractTest`, `PodScriptsLintTest` (shellcheck 0.10.0 and dash) run the real scripts against the real `:9444` listener. `PodRuntimePodmanTest` is the same flow inside the built image under rootless podman; it is opt-in (`--include podman`) and was **not run** by the author (no podman on the build host).
+
 #### K12 as built (bd-4x1usg): the primary side of A3–A5 and A7
 
 All of it is additive for cluster nodes and inert for machine nodes (a `hello` without `kind: "cluster"` is a machine; `NodeLostTest`, `SessionTest` and `RunStreamsTest` still pin the machine shapes, and `SessionClusterTest` has an explicit no-regression block).

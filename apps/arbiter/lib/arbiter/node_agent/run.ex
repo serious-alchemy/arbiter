@@ -151,6 +151,14 @@ defmodule Arbiter.NodeAgent.Run do
     :exit, _ -> nil
   end
 
+  @doc "The exit report once the container has exited, `nil` before (or for an unknown run)."
+  @spec outcome(String.t()) :: map() | nil
+  def outcome(run) do
+    GenServer.call(via(run), :outcome, 5_000)
+  catch
+    :exit, _ -> nil
+  end
+
   defp cast(run, message) do
     case Registry.lookup(Arbiter.NodeAgent.RunRegistry, run) do
       [{pid, _}] -> GenServer.cast(pid, message)
@@ -178,6 +186,7 @@ defmodule Arbiter.NodeAgent.Run do
 
   @impl true
   def handle_call(:info, _from, state), do: {:reply, report(state), state}
+  def handle_call(:outcome, _from, state), do: {:reply, state.exit, state}
 
   @impl true
   def handle_cast({:cancel, reason}, %{phase: :preparing} = state),

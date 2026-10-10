@@ -77,7 +77,7 @@ defmodule Arbiter.Worker.ReleaseEnv do
   # Repo. So the role and the agent's own settings are scrubbed like release vars.
   @static_release_vars ~w(
     ROOTDIR BINDIR ERTS_LIB_DIR
-    ARB_ROLE ARB_NODE_URL ARB_NODE_HOME ARB_NODE_CREDENTIAL_FILE ARB_NODE_ENV_FILE
+    ARB_ROLE ARB_NODE_URL ARB_NODE_HOME ARB_NODE_CREDENTIAL_FILE ARB_NODE_ENV_FILE ARB_AGENT_BACKEND
   )
 
   @doc """

@@ -138,6 +138,62 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     end
   end
 
+  # bd-a6grlr: the dollar spend cap of each capped account.
+  describe "arb quota spend caps" do
+    test "prints each capped account's spend state and the hold reason" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "held_dispatches" => [],
+          "spend_caps" => [
+            %{
+              "account" => "claude:api",
+              "cap_usd" => 20.0,
+              "window" => "week",
+              "mode" => "flat",
+              "metered" => true,
+              "state" => "holding",
+              "holding" => true,
+              "used_usd" => 21.4,
+              "spent_usd" => 21.4,
+              "in_flight_usd" => 0.0,
+              "allowed_usd" => 20.0,
+              "resets_at" => "2026-10-19T00:00:00Z",
+              "reason" =>
+                "spend cap $20.00/week reached ($21.40 spent), resets 2026-10-19 00:00 UTC"
+            },
+            %{
+              "account" => "claude:max",
+              "cap_usd" => 5.0,
+              "window" => "day",
+              "mode" => "paced",
+              "metered" => false,
+              "state" => "no_metered_spend",
+              "holding" => false,
+              "resets_at" => "2026-10-11T00:00:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert out =~ "Spend caps"
+      assert out =~ "claude:api  $20.00/week (flat)  $21.40 of $20.00 used"
+      assert out =~ "HOLDING fresh dispatches: spend cap $20.00/week reached"
+      assert out =~ "claude:max  $5.00/day (paced)  no metered spend"
+    end
+
+    test "prints nothing when no account has a cap" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "spend_caps" => []}
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      refute out =~ "Spend caps"
+    end
+  end
+
   describe "arb quota" do
     test "renders 5h and 7d utilization, status, and reset times in text mode" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})

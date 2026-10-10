@@ -1225,7 +1225,8 @@ defmodule Arbiter.Worker do
     PRegistry.put_dispatch(
       state.registry_key,
       effective_workspace_id(state),
-      provider(meta)
+      provider(meta),
+      node_id: placed_node_id(meta)
     )
 
     broadcast_lifecycle(:started, state)
@@ -2814,6 +2815,10 @@ defmodule Arbiter.Worker do
 
     stamp_run_node(new_state.run_id, new_state.task_id, port)
 
+    # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
+    # node stops counting against the primary's cap.
+    PRegistry.put_node(new_state.registry_key, node_id)
+
     # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
     # honest starts and ends at the port.
     {:reply, {:ok, port}, announce_phase(new_state)}
@@ -3416,6 +3421,10 @@ defmodule Arbiter.Worker do
   end
 
   # The node a session handle executes on; nil for a local port.
+  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
+  defp placed_node_id(_meta), do: nil
+
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
 

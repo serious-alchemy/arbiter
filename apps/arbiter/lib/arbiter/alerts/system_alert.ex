@@ -33,7 +33,8 @@ defmodule Arbiter.Alerts.SystemAlert do
     :credential_expired,
     :overage_alert,
     :quota_poll_failing,
-    :quota_snapshot_stale
+    :quota_snapshot_stale,
+    :spend_cap
   ]
   @owners [:operator, :coordinator]
 

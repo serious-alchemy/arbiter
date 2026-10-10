@@ -57,6 +57,7 @@ defmodule Arbiter.Worker.Image do
   always runs for real (against a scratch repo in tests).
   """
 
+  alias Arbiter.NodeAgent.K8s.PodScripts
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.ReleaseEnv
@@ -87,9 +88,13 @@ defmodule Arbiter.Worker.Image do
   RUN apt-get update \\
    && apt-get install -y --no-install-recommends \\
         bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
-        openssh-client procps socat sqlite3 \\
+        openssh-client procps socat sqlite3 tini \\
    && rm -rf /var/lib/apt/lists/*
+  RUN groupadd --gid 10001 arbiter \\
+   && useradd --uid 10001 --gid 10001 --no-log-init --create-home \\
+        --home-dir /home/arbiter --shell /bin/sh arbiter
   RUN mkdir -p /opt/arbiter/cli
+  #{PodScripts.image_install()}
   ENV PATH=/opt/arbiter/cli:$PATH
   """
 

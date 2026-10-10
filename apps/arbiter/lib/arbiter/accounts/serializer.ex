@@ -13,11 +13,13 @@ defmodule Arbiter.Accounts.Serializer do
   require Ash.Query
 
   alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+  alias Arbiter.Quota.SpendCap
 
   @fingerprint_prefix 12
 
   @doc """
-  One account. `detailed?: true` adds `credentials` and `workspaces`.
+  One account. `detailed?: true` adds `credentials`, `workspaces` and `spend_cap`
+  (the dollar spend cap with the metered spend so far in its window, or `nil`).
   """
   @spec data(ProviderAccount.t(), keyword()) :: map()
   def data(%ProviderAccount{} = account, opts \\ []) do
@@ -44,6 +46,7 @@ defmodule Arbiter.Accounts.Serializer do
       base
       |> Map.put(:credentials, Enum.map(credentials_for(account.id), &credential/1))
       |> Map.put(:workspaces, Enum.map(links_for(account.id), &link/1))
+      |> Map.put(:spend_cap, account |> SpendCap.status() |> SpendCap.to_map())
     else
       base
     end
