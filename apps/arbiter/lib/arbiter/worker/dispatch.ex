@@ -2390,8 +2390,27 @@ defmodule Arbiter.Worker.Dispatch do
       provider: quota_gate_provider(task, workspace, opts),
       layout: git_layout(task, opts),
       no_pr?: no_private_clone?(task, opts),
+      local_work?: local_work?(task, opts, Placement.mode(workspace)),
       mode: Placement.mode(workspace)
     }
+  end
+
+  # bd-373tce: does the checkout this dispatch would reuse already hold uncommitted
+  # work? Only the primary has it: the seed bundle carries commits, and the
+  # snapshot of a remote run would replace the work tree on its way back. A
+  # `local_only` workspace is never placed, so nothing is read for it. A checkout
+  # git cannot read counts as holding work — the safe answer is to keep it here.
+  defp local_work?(_task, _opts, :local_only), do: false
+
+  defp local_work?(%Issue{} = task, opts, _mode) do
+    if no_private_clone?(task, opts) do
+      false
+    else
+      path = task |> BranchNamer.derive() |> Worktree.worktree_path()
+      File.dir?(path) and Worktree.has_uncommitted?(path) != {:ok, false}
+    end
+  rescue
+    _ -> true
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
@@ -3523,9 +3542,14 @@ defmodule Arbiter.Worker.Dispatch do
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
+<<<<<<< HEAD
                  # `:claude_start` is a test seam over `ClaudeSession.start/1` (a node's
                  # `refuse{...}` is injected through it: `Arbiter.Worker.DispatchRefusalTest`).
                  {:ok, port} <- start_agent_session(opts, session_opts) do
+=======
+                 {:ok, port, opts} <-
+                   start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
+>>>>>>> f8ddfce73 (Remote placement: keep dirty local checkouts on the primary, fall back to local on node refusal, always seed the branch ref (bd-373tce))
               # Move the run out of :starting so UI/CLI report a meaningful
               # state while Claude works. In claude_driven mode the Driver
               # never ticks the Machine, so without this nudge the run would
@@ -3541,11 +3565,63 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+<<<<<<< HEAD
   defp start_agent_session(opts, session_opts) do
     start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
     start.(session_opts)
   end
 
+=======
+  # bd-373tce: a run `ensure_node_capacity/2` placed on a node that the node then
+  # cannot take (it refuses the seed as `unschedulable`, is unreachable, ...) runs
+  # on the primary instead: by here the ticket is already In progress with a worker
+  # registered, so failing the spawn would crash a run that nothing was wrong with.
+  # `remote_only` never runs local, so its failure stands. The home clone was cut
+  # thin for the node (no deps), so it is seeded the way a local run's is first.
+  defp start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
+    case ClaudeSession.start(session_opts) do
+      {:ok, port} ->
+        {:ok, port, opts}
+
+      {:error, reason} = error ->
+        if Keyword.get(opts, :node) && Placement.mode(load_workspace(task)) != :remote_only do
+          start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
+        else
+          error
+        end
+    end
+  end
+
+  defp start_session_locally(task, worker_pid, path, worktree_path, opts, reason) do
+    Logger.warning(
+      "Dispatch: node placement failed for #{task.id} (#{inspect(reason, limit: 10)}); " <>
+        "falling back to the primary"
+    )
+
+    opts = Keyword.delete(opts, :node)
+
+    with :ok <- seed_for_local_run(task, worktree_path, opts),
+         {:ok, session_opts} <- build_agent_session_opts(task, worker_pid, path, opts),
+         {:ok, port} <- ClaudeSession.start(session_opts) do
+      {:ok, port, opts}
+    end
+  end
+
+  defp seed_for_local_run(%Issue{} = task, worktree_path, opts) when is_binary(worktree_path) do
+    repo = Keyword.get(opts, :repo)
+
+    case resolve_repo_path(task, repo) do
+      repo_path when is_binary(repo_path) ->
+        Worktree.seed_worktree(repo_path, worktree_path, seed_paths(task, repo))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp seed_for_local_run(_task, _worktree_path, _opts), do: :ok
+
+>>>>>>> f8ddfce73 (Remote placement: keep dirty local checkouts on the primary, fall back to local on node refusal, always seed the branch ref (bd-373tce))
   # Resolve the agent's cwd.
   #
   # A provisioned worktree is already cut from `origin/<target>` by
