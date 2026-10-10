@@ -800,6 +800,33 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
              }
     end
 
+    test "every preset translates to a native sidecar whose startupProbe is its ready argv" do
+      pod =
+        build!(
+          run_spec(%{"services" => [%{"preset" => "postgres"}, %{"preset" => "s3"}]}),
+          %{service_image_allowlist: ["docker.io/pgsty/"]}
+        )
+
+      for {name, preset} <- [
+            {"svc-postgres", Arbiter.Worker.TestServices.postgres()},
+            {"svc-s3", Arbiter.Worker.TestServices.s3()}
+          ] do
+        svc = container(pod, name)
+        assert svc["restartPolicy"] == "Always"
+        assert svc["startupProbe"]["exec"]["command"] == preset.ready
+        assert svc["securityContext"]["readOnlyRootFilesystem"] == true
+      end
+    end
+
+    test "a custom service uid is honoured; a service without ready has no startupProbe" do
+      svc = %{name: "redis", image: "docker.io/library/redis:7", uid: 999}
+      {:ok, pod} = PodSpec.build(%{run_spec() | services: [svc]}, config())
+
+      svc = container(pod, "svc-redis")
+      assert svc["securityContext"]["runAsUser"] == 999
+      refute Map.has_key?(svc, "startupProbe")
+    end
+
     test "K1-A9: Postgres runs as uid 70 with the full hardening; the default uid applies elsewhere" do
       pod =
         build!(
