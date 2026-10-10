@@ -69,6 +69,22 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :redispatch_reviewer, 2,
      "bd-cgdhlu: a pass whose node was lost is dispatched again; `{:placement_held, …}` " <>
        "holds it like any placement hold — a capacity hold, not a refusal of the work"},
+    # bd-bg87oz: the fix round's placement. The same capacity hold, for a `remote_only`
+    # workspace with no node free: nothing spawned, no verdict, no round consumed.
+    {Arbiter.Worker.ReviewGate, :place_fix_round, 1,
+     "bd-bg87oz: `{:placement_held, …}` holds the fix round while a remote_only workspace " <>
+       "has no node free (retry timer; no verdict, no round consumed, no escalation) — an " <>
+       "operator placement choice, not a guard. A clone the forge cannot be reconciled with " <>
+       "is a placement failure (`:remote_seed_failed`), reported as the round not starting"},
+    {Arbiter.Worker.ReviewGate, :launch_implementer_now, 3,
+     "bd-bg87oz: hands `{:placement_held, …}` to the capacity hold — not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :redispatch_implementer, 2,
+     "bd-bg87oz: a fix round whose node was lost is dispatched again; `{:placement_held, …}` " <>
+       "holds it like any placement hold — a capacity hold, not a refusal of the work"},
+    {Arbiter.Worker, :fail_remote_checkout, 1,
+     "bd-bg87oz: a remote pass whose node could not upload its final checkout fails the pass " <>
+       "(the ticket goes back to Merging for the Watchdog's next attempt) rather than push a " <>
+       "stale clone — an infrastructure failure of the run, not a review/merge guard"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,

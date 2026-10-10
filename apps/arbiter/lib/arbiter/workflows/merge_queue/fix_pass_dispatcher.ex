@@ -51,6 +51,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.Merger
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -61,6 +62,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
@@ -92,7 +94,9 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           # bd-741sid: a replay the scheduler already admitted into a slot, and
           # the test seam standing in for the fast lane (`PassAdmission`).
           optional(:slot_admitted) => boolean() | nil,
-          optional(:defer_resume) => (String.t(), atom(), keyword() -> term())
+          optional(:defer_resume) => (String.t(), atom(), keyword() -> term()),
+          # bd-bg87oz: the seam over `Nodes.Placement.place/2` (`:nodes`, `:remote_available?`).
+          optional(:placement_opts) => keyword()
         }
 
   @type dispatch_result ::
@@ -223,7 +227,15 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     :exit, _ -> :skip
   end
 
+  # bd-bg87oz: the slot a node placement reserved is the dispatch's until the pass's
+  # worker is registered, where it is counted in the slot's place.
   defp start_pass(task, context, args) do
+    do_start_pass(task, context, args)
+  after
+    PassPlacement.release(task.id)
+  end
+
+  defp do_start_pass(task, context, args) do
     # bd-5ef587: the pause is checked before any worktree is created.
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
@@ -235,10 +247,15 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
              task,
              context.workspace || maybe_load_workspace(task.workspace_id)
            ),
-         {:ok, worktree_path} <- create_worktree(context),
+         {:ok, node} <- place_pass(task, context, provider, args),
+         {:ok, worktree_path} <- create_worktree(context, node),
+         {:ok, node, seed} <- seed_node(node, worktree_path, context),
          {:ok, worker_pid} <-
-           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
-         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do
+           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}, %{
+             node: node,
+             seed: seed
+           }),
+         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider, node) do
       # bd-741sid: a pass the Watchdog queued for a slot is an attempt now.
       Arbiter.Worker.Watchdog.pass_started(task.id, :fix_pass, worker_pid)
       {:ok, %{worker_pid: worker_pid, worktree_path: worktree_path, branch: context.branch}}
@@ -255,15 +272,49 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     Gate.check_and_notify(task, workspace, provider, :predicted)
   end
 
-  defp start_agent(worker_pid, worktree_path, context, args, provider) do
-    case maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
-      {:ok, _port} = started ->
-        started
-
-      {:error, reason} = failed ->
-        PassAdmission.agent_failed(worker_pid, reason)
-        failed
+  defp start_agent(worker_pid, worktree_path, context, args, provider, node) do
+    case maybe_start_claude(worker_pid, worktree_path, context, args, provider, node) do
+      {:ok, _port} = started -> started
+      {:error, reason} -> PassPlacement.start_failed(context.task.id, worker_pid, node, reason)
     end
+  end
+
+  # bd-bg87oz: where the pass runs. A node (`worker.placement`) when the pass is a
+  # podman Claude run on a private clone and one has room; the primary otherwise,
+  # under the primary's own cap. A `remote_only` workspace with no node free holds the
+  # pass: `{:error, {:no_node_capacity, info}}`.
+  defp place_pass(task, context, provider, args) do
+    workspace = context.workspace || maybe_load_workspace(task.workspace_id)
+
+    attrs = %{
+      task_id: task.id,
+      kind: :fix_pass,
+      provider: provider,
+      layout: GitLayout.for_workspace(workspace, context.repo),
+      workspace: workspace,
+      workspace_id: task.workspace_id,
+      clone_path: Worktree.worktree_path(context.branch)
+    }
+
+    case PassPlacement.place(attrs, placement_opts: Map.get(args, :placement_opts, [])) do
+      {:ok, :local} -> {:ok, nil}
+      {:ok, {:node, row}} -> {:ok, row}
+      {:error, _} = held -> held
+    end
+  end
+
+  # bd-bg87oz: the home clone is brought to the forge's branch head and target tip
+  # before a node is seeded from it (`PassPlacement.seed/3`).
+  defp seed_node(node, worktree_path, context) do
+    PassPlacement.seed_or_local(node, %{
+      task_id: context.task.id,
+      path: worktree_path,
+      branch: context.branch,
+      target: context.target_branch,
+      mode: Placement.mode(context.workspace),
+      repo_path: context.repo_path,
+      seed_paths: SeedPaths.resolve(context.workspace, context.repo)
+    })
   end
 
   defp load_task_or_use(_task_id, %{task: %Issue{} = task}), do: {:ok, task}
@@ -413,13 +464,17 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   #
   # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
   # container backend (`Arbiter.Worker.GitLayout`).
-  defp create_worktree(%{repo_path: repo_path, branch: branch} = context) do
+  defp create_worktree(%{repo_path: repo_path, branch: branch} = context, node) do
     layout = GitLayout.for_workspace(context.workspace, context.repo)
+
+    # The home clone of a run placed on a node is thin (no deps seeding): the node's
+    # shadow clone is what the container works in.
+    seed_paths = if node, do: false, else: SeedPaths.resolve(context.workspace, context.repo)
 
     case Worktree.attach(repo_path, branch,
            layout: layout,
            base: context.target_branch,
-           seed_paths: SeedPaths.resolve(context.workspace, context.repo)
+           seed_paths: seed_paths
          ) do
       {:ok, path} -> {:ok, path}
       {:error, reason} -> {:error, {:worktree_failed, reason}}
@@ -431,7 +486,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
          context,
          worktree_path,
          provider,
-         {fallback_reason, decision}
+         {fallback_reason, decision},
+         %{node: node, seed: seed}
        ) do
     meta = %{
       role: :fix_pass,
@@ -445,6 +501,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     }
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
+    meta = put_node_meta(meta, node, seed)
 
     # bd-741sid: registered under the ticket id, like every run on the ticket.
     opts = [
@@ -484,10 +541,22 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
+  # bd-bg87oz: a pass placed on a node is counted there (bd-8ikgoc), and the forge
+  # head it was seeded from is what the host push's lease is pinned to
+  # (`Worker.push_and_deliver_fix_pass/1`): a push to the branch after that point makes
+  # the lease refuse instead of being clobbered.
+  defp put_node_meta(meta, nil, _seed), do: meta
+
+  defp put_node_meta(meta, node, seed) do
+    meta
+    |> Map.put(:placed_node_id, node.id)
+    |> Map.put(:fix_pass_start_head, seed.remote_head)
+  end
+
   # `:start_claude` defaults to `true` for production. Tests pass
   # `start_claude: false` (and a `:claude_command` argv) so they can verify the
   # dispatcher was invoked without spawning a real Claude subprocess.
-  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+  defp maybe_start_claude(worker_pid, worktree_path, context, args, provider, node) do
     case Map.get(args, :start_claude, true) do
       false ->
         {:ok, nil}
@@ -534,7 +603,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
                  projection: projection,
                  git_credential: git_credential
                ] ++
-                 Keyword.take(mcp_opts, [:arb_token]) ++ container_opts(context, provider))
+                 Keyword.take(mcp_opts, [:arb_token]) ++
+                 container_opts(context, provider) ++ node_opts(node, context))
               |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
             case ClaudeSession.start(session_opts) do
@@ -565,6 +635,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
   defp container_pass?(context, provider),
     do: not is_nil(ContainerSpawn.pass_policy(context.workspace, context.repo, provider))
+
+  # bd-bg87oz: `ClaudeSession` hands the run to `Executor.Node` when the opts name a `:node`.
+  # The pass's resolved target rides along: the node is seeded with `origin/<target>`.
+  defp node_opts(nil, _context), do: []
+  defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do

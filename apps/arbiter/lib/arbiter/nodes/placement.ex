@@ -9,16 +9,21 @@ defmodule Arbiter.Nodes.Placement do
 
   `eligible/1` is pure and runs before any node is looked at. Only a
   **podman-backed Claude run** with a private clone is ever a candidate for a
-  node (bd-aowisc §5): the implementer, a merge-queue fix or conflict pass, and
-  the two reviewers, a ReviewGate reviewer and a `review: true` dispatch
-  (bd-7ays3v, bd-cgdhlu). A reviewer reads the head it is handed and writes
-  nothing back but its verdict and transcript, so its checkout is a read-only
-  clone seeded through the bundle path and never collected. Everything else
-  stays on the primary, and `Arbiter.Nodes.LocalCapacity` is the cap that
-  governs it:
+  node (bd-aowisc §5): the implementer, a merge-queue fix or conflict pass, a
+  ReviewGate fix round, and the two reviewers, a ReviewGate reviewer and a
+  `review: true` dispatch (bd-7ays3v, bd-cgdhlu, bd-bg87oz). A reviewer reads the
+  head it is handed and writes nothing back but its verdict and transcript, so
+  its checkout is a read-only clone seeded through the bundle path and never
+  collected. A fix round and a fix or conflict pass write commits: the node is
+  seeded from the ticket's branch at its **current** `origin` head and
+  `origin/<target>` at the forge tip (`Arbiter.Worker.PassPlacement`), the
+  checkout comes back through the same quarantine as an implementer's, and the
+  host pushes it with `--force-with-lease` pinned to the remote head seeded
+  from. Everything else stays on the primary, and `Arbiter.Nodes.LocalCapacity`
+  is the cap that governs it:
 
-    * the spawn kinds bound to the primary (`:follow_up`: resumes, re-dispatches
-      of work already under way, ReviewGate fix rounds);
+    * the spawn kinds bound to the primary (`:follow_up`: resumes and
+      re-dispatches of work already under way);
     * every non-Claude provider (`:non_claude_provider`; the podman backend is
       wired for Claude only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
@@ -96,7 +101,16 @@ defmodule Arbiter.Nodes.Placement do
   # may run on a node once RW9 places them. The rest are bound to the primary.
   # `:review` is a `review: true` dispatch (bd-cgdhlu): placed on a node, its
   # checkout is a read-only private clone like a ReviewGate reviewer's.
-  @remote_kinds [:implementer, :review, :reviewer, :fix_pass, :conflict_pass]
+  # `:review_fix_round` (bd-bg87oz) is a ReviewGate implementer pass: it commits
+  # in the author's private clone, which is seeded to the node like any other.
+  @remote_kinds [
+    :implementer,
+    :review,
+    :reviewer,
+    :fix_pass,
+    :conflict_pass,
+    :review_fix_round
+  ]
 
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::

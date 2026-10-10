@@ -3,8 +3,8 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
   RW8 guard tests (bd-3igo6h): the set of spawn kinds counted against the
   primary's cap is documented and pinned, every spawn site goes through the
   cap, and only a podman-backed Claude run on a private clone (the implementer,
-  a ReviewGate reviewer, a `review: true` dispatch, a merge-queue fix or conflict pass;
-  bd-7ays3v, bd-cgdhlu) is ever
+  a ReviewGate reviewer or fix round, a `review: true` dispatch, a merge-queue fix or
+  conflict pass; bd-7ays3v, bd-cgdhlu, bd-bg87oz) is ever
   a placement candidate.
   """
   use ExUnit.Case, async: true
@@ -124,7 +124,15 @@ defmodule Arbiter.Nodes.LocalCapacityKindsTest do
       # the two modes that allow a node.
       assert Enum.sort(eligible) ==
                for(
-                 kind <- [:conflict_pass, :fix_pass, :implementer, :review, :reviewer],
+                 kind <-
+                   [
+                     :conflict_pass,
+                     :fix_pass,
+                     :implementer,
+                     :review,
+                     :review_fix_round,
+                     :reviewer
+                   ],
                  mode <- [:prefer_remote, :remote_only],
                  do: {kind, :claude, :private_clone, false, mode}
                )

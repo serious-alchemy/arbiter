@@ -62,9 +62,9 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
 
     # bd-7ays3v: these run in the container on a private clone too; bd-cgdhlu adds
-    # the `review: true` dispatch (kind `:review`).
-    test "so are a ReviewGate reviewer, a review: true dispatch and the merge queue's fix and conflict passes" do
-      for kind <- [:reviewer, :review, :fix_pass, :conflict_pass] do
+    # the `review: true` dispatch (kind `:review`); bd-bg87oz the ReviewGate fix round.
+    test "so are a ReviewGate reviewer and fix round, a review: true dispatch and the merge queue's fix and conflict passes" do
+      for kind <- [:reviewer, :review, :fix_pass, :conflict_pass, :review_fix_round] do
         assert Placement.eligible(%{@eligible | kind: kind}) == :ok
 
         assert {:local_only, :not_podman} =
@@ -76,7 +76,7 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
 
     test "every other spawn kind stays local" do
-      for kind <- [:redispatch, :resume, :review_fix_round] do
+      for kind <- [:redispatch, :resume] do
         assert {:local_only, :follow_up} = Placement.eligible(%{@eligible | kind: kind})
       end
     end
