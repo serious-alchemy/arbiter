@@ -67,7 +67,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   """
   @spec ensure_ready(map(), keyword()) ::
           {:ok, Pipeline.result()} | :disabled | {:error, term()}
-  def ensure_ready(%{plan: plan} = ctx, opts \\ []) do
+  def ensure_ready(%{plan: _} = ctx, opts \\ []) do
     case Registry.fetch(opts) do
       :unset ->
         :disabled
