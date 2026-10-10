@@ -84,8 +84,10 @@ defmodule Arbiter.Board.Autopilot do
   A resume can also be deferred for the *primary's own* worker cap
   (`held_for: :local_capacity`, `Arbiter.Nodes.LocalCapacity`, bd-b2iigy): a
   restart's resume sweep brings back at most the cap's worth and queues the
-  rest here. Those wait on local room instead of a board slot (their ticket is
-  already In progress), replay highest ticket priority first, and show as
+  rest here. Those wait on room where they would run instead of a board slot
+  (their ticket is already In progress): the primary's cap, or a node with a
+  free slot for a resume placement may send there (`Dispatch.resume_room?/2`,
+  bd-4ic681). They replay highest ticket priority first, and show as
   `held: local capacity` in `status/2` (`held_local_capacity`), the board and
   `arb scheduler status`.
 
