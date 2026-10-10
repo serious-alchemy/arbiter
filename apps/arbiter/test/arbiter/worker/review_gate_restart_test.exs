@@ -276,6 +276,59 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
     end
   end
 
+  describe "a fix round killed by the server stopping, author still alive (bd-2lfzs8 / #650)" do
+    test "is interrupted, not judged inconclusive, resumed at boot and re-reviewed", ctx do
+      # The author spawns (and monitors) its own gate, as it does in production.
+      rig =
+        rig(ctx, "feature/rs-650", %{
+          review_spawn: true,
+          review_command: [@reject_once],
+          revise_command: [@revise_hang],
+          review_rounds: 3
+        })
+
+      %{meta: %{review_gate_pid: gate}} = Worker.state(rig.author)
+
+      wait_until(fn -> match?(%{"phase" => "revising"}, pass_marker(rig)) end, 15_000)
+      impl_id = rig.task.id <> "#review#impl1"
+      assert Worker.whereis(impl_id)
+
+      # The fix round's agent takes the SIGTERM (143) and the gate stops itself
+      # for the node stopping — while the author, still alive, monitors it.
+      put_app_env(:arbiter, :worker_node_stopping_override, true)
+      gate_ref = Process.monitor(gate)
+      send(gate, {:worker_exited, impl_id, 143})
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      # The author saw the gate go. It must not read that as "no verdict".
+      _ = :sys.get_state(rig.author)
+      assert %{state: :waiting, waiting_on: :review_gate} = Worker.state(rig.author)
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+      assert %{"phase" => "revising", "round" => 1} = pass_marker(rig)
+
+      :ok = GenServer.stop(rig.author, :shutdown)
+      stop_workers(rig, :shutdown)
+      put_app_env(:arbiter, :worker_node_stopping_override, false)
+
+      assert_interrupted(rig.task.id)
+      assert_interrupted(impl_id)
+      refute Arbiter.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
+      assert Ash.get!(Issue, rig.task.id).attention_resume_attempts == 0
+
+      assert {:ok, %{rearmed: 1, failed: 0, restarted: [%{phase: :revising, round: 1}]}} =
+               Reconciler.reconcile_review_passes(
+                 rearm_fun:
+                   rearm_fun(rig, command: [@reject_once], revise_command: [@revise_commit])
+               )
+
+      assert_received {:rearmed, {:ok, regate}}
+      assert_gate_reports(regate)
+
+      assert [%{round: 1, verdict: :request_changes}, %{round: 2, verdict: :approve}] =
+               review_rounds(rig)
+    end
+  end
+
   describe "the ticket while a pass is cut off" do
     test "reads as working, not crashed, and the marker is a believable one", ctx do
       rig = rig(ctx, "feature/rs-5")
@@ -513,7 +566,7 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
   end
 
   # A feature branch with one commit, in its own worktree, already pushed.
-  defp rig(ctx, branch) do
+  defp rig(ctx, branch, author_meta \\ %{}) do
     {:ok, task} =
       Ash.create(Issue, %{title: "restart task", workspace_id: ctx.ws.id, issue_type: :feature})
 
@@ -542,25 +595,29 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
       branch: branch,
       wt: wt,
       head: sha(wt, "HEAD"),
-      author: start_author(task, ctx, branch, wt)
+      author: start_author(task, ctx, branch, wt, author_meta)
     }
   end
 
-  defp start_author(task, ctx, branch, wt) do
+  defp start_author(task, ctx, branch, wt, author_meta) do
     {:ok, author} =
       Worker.start(
         task_id: task.id,
         repo: "trib/repo",
         workspace_id: ctx.ws.id,
-        meta: %{
-          branch: branch,
-          repo_path: ctx.repo,
-          worktree_path: wt,
-          target_branch: "main",
-          merge_title: "Merge #{task.id}",
-          review_required: true,
-          review_spawn: false
-        }
+        meta:
+          Map.merge(
+            %{
+              branch: branch,
+              repo_path: ctx.repo,
+              worktree_path: wt,
+              target_branch: "main",
+              merge_title: "Merge #{task.id}",
+              review_required: true,
+              review_spawn: false
+            },
+            author_meta
+          )
       )
 
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
