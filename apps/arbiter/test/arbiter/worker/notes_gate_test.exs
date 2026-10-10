@@ -316,6 +316,43 @@ defmodule Arbiter.Worker.NotesGateTest do
     end
   end
 
+  describe "research run that declares it could not do the work (bd-8r2iat)" do
+    test "parks with an escalation instead of closing completed", %{ws: ws} do
+      notes =
+        "Triage NOT performed: no gh CLI or ci_* MCP tools in this sandbox. Needs re-dispatch."
+
+      task = new_task(ws, notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      refute snap.outcome == :succeeded
+      assert snap.meta.failure_reason =~ "work not performed"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.state == :closed
+
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation
+      assert escalation.body =~ "NOT performed"
+    end
+
+    test "real findings still complete", %{ws: ws} do
+      task = new_task(ws, "Root cause: flaky timeout in foo_test; re-ran green.")
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+    end
+  end
+
   describe "operational `task` type has no notes gate (bd-9s9dqz)" do
     test "arb-done with blank notes completes cleanly", %{ws: ws} do
       task = new_task(ws, nil, :task)

@@ -441,7 +441,8 @@ defmodule Arbiter.Workflows.PRPatrol do
            &handled?(pr_number, state.workspace_id, &1)
          ) do
       {reason, extra_protocol, fingerprint} when is_binary(reason) ->
-        if ci_follow_up?(extra_protocol) and fix_pass_in_flight?(pr_number, state) do
+        if ci_follow_up?(extra_protocol) and
+             (fix_pass_in_flight?(pr_number, state) or merge_owns_ci?(pr_number, state)) do
           {state, false}
         else
           file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
@@ -474,6 +475,28 @@ defmodule Arbiter.Workflows.PRPatrol do
       true
     else
       _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  # bd-8r2iat: a PR whose ticket is in `:merging` is the merge Watchdog's — it
+  # polls the PR and runs the CI fix pass (`fixing_ci`) itself, and the ReviewGate
+  # owns the in_review window (`review_gate_holds?/2`). A CI follow-up filed here
+  # duplicates that, and a research worker has no CI tools to triage with
+  # (PR #705: bd-b6ct5l). Deduped by `pr_ref`, like `fix_pass_in_flight?/2`.
+  defp merge_owns_ci?(pr_number, state) do
+    case GateActivity.authoring_task(state.workspace_id, to_string(pr_number), state.repo) do
+      %Issue{id: task_id, state: :merging} ->
+        Logger.info(
+          "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
+            "task #{task_id} is in Merging and the merge Watchdog owns its CI"
+        )
+
+        true
+
+      _ ->
+        false
     end
   rescue
     _ -> false
@@ -904,8 +927,27 @@ defmodule Arbiter.Workflows.PRPatrol do
 
       names ->
         {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
-         CIFailureFollowUp.instructions(names), nil}
+         CIFailureFollowUp.instructions(names, failing_check_logs(adapter, mr_ref)), nil}
     end
+  end
+
+  # bd-8r2iat: the failing jobs' log excerpts, fetched host-side so a sandboxed
+  # follow-up (no `gh`, no CI tools) still sees why CI failed — the same
+  # `failing_check_logs/1` the Watchdog briefs a fix pass with (bd-1fzpx8).
+  # Best-effort: no surface or any error yields no excerpts.
+  defp failing_check_logs(adapter, mr_ref) do
+    if function_exported?(adapter, :failing_check_logs, 1) do
+      case adapter.failing_check_logs(mr_ref) do
+        {:ok, checks} when is_list(checks) -> checks
+        _ -> []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   # CHANGES_REQUESTED: from the batched signals when present, else ONE per-PR

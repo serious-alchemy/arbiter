@@ -4428,11 +4428,33 @@ defmodule Arbiter.Worker do
   defp complete_no_pr(%State{meta: meta} = state) do
     if findings_type?(meta) do
       case notes_gate(state) do
-        :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
+        :ok -> complete_unless_unperformed(state)
         {:gate, :blank} -> handle_notes_gate(state)
       end
     else
       complete_now(note_tasks_running_at_done(state), :claude_done)
+    end
+  end
+
+  # bd-8r2iat: non-blank notes pass the notes gate, but notes that say the work
+  # was NOT performed (no tools in the sandbox, "needs re-dispatch") are not
+  # findings. Park for the coordinator with the reason instead of closing
+  # completed and silently dropping the work.
+  defp complete_unless_unperformed(%State{task_id: task_id} = state) do
+    with {:ok, notes} when is_binary(notes) <- fetch_task_notes(task_id),
+         true <- Arbiter.Worker.UnperformedWork.declared?(notes) do
+      reason = Arbiter.Worker.UnperformedWork.reason(notes)
+
+      escalate_notes_gate(
+        state,
+        "bd-8r2iat: research task #{task_id} signalled `arb done` but its notes say the " <>
+          "work was not performed: #{reason}\n\nThe ticket is parked, not completed. " <>
+          "Re-dispatch it with the tools it needs (or do the work directly)."
+      )
+
+      fail_now(state, "work not performed: #{reason}")
+    else
+      _ -> complete_now(note_tasks_running_at_done(state), :claude_done)
     end
   end
 
