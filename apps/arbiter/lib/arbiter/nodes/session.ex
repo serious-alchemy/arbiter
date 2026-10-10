@@ -94,11 +94,16 @@ defmodule Arbiter.Nodes.Session do
     :proto,
     :free_mem,
     :load,
-    :k8s_version,
-    :node_capacity,
-    kind: "machine",
-    degraded: [],
-    prepare_timeout_ms: @default_prepare_timeout_ms,
+    # K12: what the node says it is (`kind`, `k8s_version`, `degraded`, its `hb.capacity`) and
+    # the prepare budget granted a run placed on it; a machine node leaves all but the budget
+    # at these defaults.
+    info: %{
+      kind: "machine",
+      k8s_version: nil,
+      degraded: [],
+      capacity: nil,
+      prepare_timeout_ms: @default_prepare_timeout_ms
+    },
     allow_skew?: false,
     state: :online,
     fenced?: false,
@@ -343,11 +348,17 @@ defmodule Arbiter.Nodes.Session do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       thresholds: Liveness.current(),
       allow_skew?: Keyword.get(opts, :allow_skew, false),
-      prepare_timeout_ms: Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms),
       last_hb: clock.(),
       reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms),
       hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms)
     }
+
+    state =
+      put_info(
+        state,
+        :prepare_timeout_ms,
+        Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
+      )
 
     {:ok, state |> schedule_tick() |> schedule_reap()}
   end
@@ -412,7 +423,7 @@ defmodule Arbiter.Nodes.Session do
         Process.monitor(owner)
         # What `Arbiter.Worker.Executor.Node` calls `stop/1` and `signal/2` with.
         handle = {:remote, {state.node_id, run, make_ref()}}
-        ms = Keyword.get(opts, :prepare_timeout_ms, state.prepare_timeout_ms)
+        ms = Keyword.get(opts, :prepare_timeout_ms, state.info.prepare_timeout_ms)
         Process.send_after(self(), {:prepare_timeout, run}, ms)
 
         bridges = bridge_map(spec)
@@ -895,10 +906,13 @@ defmodule Arbiter.Nodes.Session do
         health: Skew.health(agent, Skew.primary()),
         caps: map(params["caps"]),
         capacity: map(params["capacity"]),
-        kind: kind(params["kind"]),
-        k8s_version: params["k8s_version"],
-        degraded: degraded(params["degraded"]),
-        node_capacity: nil,
+        info: %{
+          state.info
+          | kind: kind(params["kind"]),
+            k8s_version: params["k8s_version"],
+            degraded: degraded(params["degraded"]),
+            capacity: nil
+        },
         runs: hello_runs(hello_run_list(params)),
         retained: hello_retained(params),
         operator_max: node && node.max_workers,
@@ -909,6 +923,8 @@ defmodule Arbiter.Nodes.Session do
         last_hb: state.clock.()
     }
   end
+
+  defp put_info(state, key, value), do: %{state | info: Map.put(state.info, key, value)}
 
   defp kind("cluster"), do: "cluster"
   defp kind(_), do: "machine"
@@ -959,8 +975,8 @@ defmodule Arbiter.Nodes.Session do
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
   # prepare watchdog (`:prepare_timeout`) is the only clock on a run until it is `running`.
   # Machine nodes are told nothing new.
-  defp put_limits(ok, %{kind: "cluster"} = state),
-    do: Map.put(ok, "limits", %{"prepare_timeout_s" => div(state.prepare_timeout_ms, 1000)})
+  defp put_limits(ok, %{info: %{kind: "cluster"} = info}),
+    do: Map.put(ok, "limits", %{"prepare_timeout_s" => div(info.prepare_timeout_ms, 1000)})
 
   defp put_limits(ok, _state), do: ok
 
@@ -1021,8 +1037,8 @@ defmodule Arbiter.Nodes.Session do
 
   # A cluster node's hb replaces `degraded` when it names it (`[]` clears); a heartbeat that
   # says nothing leaves a raised flag standing, so omitting the key can never un-degrade it.
-  defp heartbeat_degraded(%{kind: "cluster"} = state, %{"degraded" => word}),
-    do: %{state | degraded: degraded(word)}
+  defp heartbeat_degraded(%{info: %{kind: "cluster"}} = state, %{"degraded" => word}),
+    do: put_info(state, :degraded, degraded(word))
 
   defp heartbeat_degraded(state, _payload), do: state
 
@@ -1038,13 +1054,14 @@ defmodule Arbiter.Nodes.Session do
         _ -> state.capacity
       end
 
-    if capacity != state.node_capacity, do: broadcast({:node_capacity, state.node_id, capacity})
-    %{state | node_capacity: capacity, capacity: capacity_map}
+    if capacity != state.info.capacity, do: broadcast({:node_capacity, state.node_id, capacity})
+    %{put_info(state, :capacity, capacity) | capacity: capacity_map}
   end
 
   # A3: per-run `pending | starting | running | terminating`. Cluster nodes only: a machine
   # agent's per-run phase names are its own, and `run.ready` alone says it started.
-  defp heartbeat_stages(%{kind: "cluster"} = state, runs) when is_map(runs) or is_list(runs) do
+  defp heartbeat_stages(%{info: %{kind: "cluster"}} = state, runs)
+       when is_map(runs) or is_list(runs) do
     Enum.reduce(heartbeat_runs(runs, %{}), state, fn
       {run, %{"state" => "running"}}, acc ->
         apply_streams(acc, RunStreams.report_running(acc.streams, run))
@@ -1156,10 +1173,10 @@ defmodule Arbiter.Nodes.Session do
       proto: state.proto,
       caps: state.caps,
       capacity: state.capacity,
-      kind: state.kind,
-      k8s_version: state.k8s_version,
-      degraded: state.degraded,
-      node_capacity: state.node_capacity,
+      kind: state.info.kind,
+      k8s_version: state.info.k8s_version,
+      degraded: state.info.degraded,
+      node_capacity: state.info.capacity,
       max_workers: max_workers(state),
       runs: state.runs,
       retained: state.retained,

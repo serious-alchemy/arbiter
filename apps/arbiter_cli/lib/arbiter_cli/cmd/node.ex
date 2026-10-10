@@ -556,10 +556,8 @@ defmodule ArbiterCli.Cmd.Node do
     {opts, rest, _} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
-    if ref == "local" and
-         (opts[:name] || labels(opts) != [] || pins(opts) != [] ||
-            not is_nil(opts[:allow_unenforced_network])),
-       do: Output.die("arb node set local: only --max-workers applies to local")
+    if ref == "local" and not local_applicable?(opts),
+      do: Output.die("arb node set local: only --max-workers applies to local")
 
     body =
       %{}
@@ -582,6 +580,12 @@ defmodule ArbiterCli.Cmd.Node do
       {:error, err} -> Output.die(err)
     end
   end
+
+  # The primary has a cap and nothing else to set.
+  defp local_applicable?(opts),
+    do:
+      is_nil(opts[:name]) and labels(opts) == [] and pins(opts) == [] and
+        is_nil(opts[:allow_unenforced_network])
 
   # `--workspace none` clears the pin (any workspace may run on the node).
   defp put_pins(body, []), do: body

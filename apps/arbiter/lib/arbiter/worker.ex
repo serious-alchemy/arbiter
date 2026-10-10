@@ -3291,13 +3291,10 @@ defmodule Arbiter.Worker do
       # not failed, and no resume attempt is consumed. Ahead of run_signalled_done?/1
       # for the same reason as a node shutdown: whatever the agent printed last, its
       # worktree on the node is not here to commit from.
-      node_lost?(session) ->
-        interrupt_node_lost(state, port, session)
-
-      # K12 (A5): the pod was evicted, preempted or deleted from outside. The node_lost
+      # K12 (A5): so is a pod evicted, preempted or deleted from outside, with the same
       # policy: interrupted, no resume attempt consumed, re-dispatched through Placement.
-      pod_disrupted?(session) ->
-        interrupt_pod_disrupted(state, port, session)
+      node_interrupted?(session) ->
+        interrupt_node_run(state, port, session)
 
       run_signalled_done?(state) ->
         on_claude_done(state)
@@ -3328,9 +3325,10 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp node_lost?(session), do: match?(%{remote_outcome: %{node_lost?: true}}, session)
-
-  defp pod_disrupted?(session), do: match?(%{remote_outcome: %{pod_disrupted?: true}}, session)
+  defp node_interrupted?(session),
+    do:
+      match?(%{remote_outcome: %{node_lost?: true}}, session) or
+        match?(%{remote_outcome: %{pod_disrupted?: true}}, session)
 
   # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
   # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
@@ -3338,27 +3336,26 @@ defmodule Arbiter.Worker do
   # agent that stopped on its own, and this one did not. The worker stays registered
   # in its finished state (as a failed one does) until the automatic resume replaces
   # it; the run row, not this process, is what the Driver's reap reads.
-  defp interrupt_node_lost(%State{} = state, handle, _session) do
+  defp interrupt_node_run(%State{} = state, handle, session) do
     name = node_name(handle)
 
-    interrupt_for_node(
-      state,
-      Arbiter.Worker.StopReason.node_lost(name),
-      "node lost: #{name}",
-      "node #{name} lost"
-    )
-  end
+    case session do
+      %{remote_outcome: %{node_lost?: true}} ->
+        interrupt_for_node(
+          state,
+          Arbiter.Worker.StopReason.node_lost(name),
+          "node lost: #{name}",
+          "node #{name} lost"
+        )
 
-  # A5: same policy as a lost node, its own typed cause.
-  defp interrupt_pod_disrupted(%State{} = state, handle, _session) do
-    name = node_name(handle)
-
-    interrupt_for_node(
-      state,
-      Arbiter.Worker.StopReason.pod_disrupted(name),
-      "pod disrupted: #{name}",
-      "pod disrupted on node #{name}"
-    )
+      _pod_disrupted ->
+        interrupt_for_node(
+          state,
+          Arbiter.Worker.StopReason.pod_disrupted(name),
+          "pod disrupted: #{name}",
+          "pod disrupted on node #{name}"
+        )
+    end
   end
 
   defp interrupt_for_node(%State{} = state, reason, failure_reason, log_cause) do

@@ -114,12 +114,6 @@ defmodule Arbiter.Nodes.Overview do
     %{
       id: node.id,
       name: node.name,
-      kind: kind(snapshot),
-      k8s_version: snapshot && snapshot.k8s_version,
-      degraded: (snapshot && snapshot.degraded) || [],
-      constrained?: constrained?(snapshot),
-      pending: pending(snapshot),
-      allow_unenforced_network: node.allow_unenforced_network,
       labels: node.labels,
       status: node.status,
       state: state(node, snapshot),
@@ -138,7 +132,23 @@ defmodule Arbiter.Nodes.Overview do
       override: node.max_workers,
       ceiling: positive(capacity["ceiling"]),
       workspace_ids: node.workspace_ids,
-      draining?: node.status == :draining
+      draining?: node.status == :draining,
+      allow_unenforced_network: node.allow_unenforced_network
+    }
+    |> Map.merge(cluster_fields(snapshot))
+  end
+
+  # A3/A7: what a cluster node adds to its row. A node that never connected, and every
+  # machine, is a machine with nothing degraded, constrained or pending.
+  defp cluster_fields(nil), do: cluster_fields(%{})
+
+  defp cluster_fields(snapshot) do
+    %{
+      kind: kind(snapshot),
+      k8s_version: Map.get(snapshot, :k8s_version),
+      degraded: Map.get(snapshot, :degraded, []),
+      constrained?: constrained?(snapshot),
+      pending: pending(snapshot)
     }
   end
 
