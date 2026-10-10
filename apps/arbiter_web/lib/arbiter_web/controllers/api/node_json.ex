@@ -60,6 +60,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :k8s_version,
       :degraded,
       :readiness,
+      :allow_unenforced_network,
       :pending,
       :image,
       :upgrade_command

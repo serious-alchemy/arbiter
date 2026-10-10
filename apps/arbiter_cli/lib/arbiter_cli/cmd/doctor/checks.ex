@@ -1889,7 +1889,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         public_url_result(url, nodes),
         exposure_result(url, resp)
       ] ++
-        Enum.map(nodes, &node_result/1) ++
+        Enum.flat_map(nodes, &node_results/1) ++
         registry ++
         [local_cap_result(resp)] ++
         advisory_result(resp["local_cap_advisory"]) ++
@@ -2005,6 +2005,66 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp exposure_result(url, _resp),
     do: nodes_result("nodes.public_url is a private endpoint", :ok, url)
+
+  # A cluster node (`docs/design/remote-workers.md` k8s §9.4, K13) adds its controller's
+  # readiness block under it: one row per check (the NetworkPolicy canary, Pod Security,
+  # PriorityClass, quota, image pull, clock), so the doctor says whether the cluster can
+  # take worker pods and why not. A `fail` is a `[warn]` here like every node problem: a
+  # cluster's state is the operator's to act on, not a reason to roll back a deploy.
+  defp node_results(%{"kind" => "cluster"} = n),
+    do: [node_result(n) | cluster_results(n)]
+
+  defp node_results(n), do: [node_result(n)]
+
+  defp cluster_results(n) do
+    name = n["name"]
+
+    checks =
+      case n["readiness"] do
+        [_ | _] = checks -> Enum.map(checks, &cluster_check_result(name, &1))
+        _ -> [cluster_no_report_result(name)]
+      end
+
+    List.wrap(cluster_placement_result(name, n)) ++ checks
+  end
+
+  defp cluster_check_result(node, check) do
+    nodes_result(
+      "cluster #{node}: #{check["name"] || check["id"]}",
+      if(check["status"] == "ok", do: :ok, else: :warn),
+      check["detail"] || "",
+      if(check["status"] == "ok", do: nil, else: check["hint"])
+    )
+  end
+
+  defp cluster_no_report_result(node) do
+    nodes_result(
+      "cluster #{node}: readiness",
+      :warn,
+      "no readiness report yet: the controller has not sent its first hello with one",
+      "Check the controller pod (`kubectl -n arbiter-workers logs deploy/arbiter-controller`); " <>
+        "a controller older than this server does not report readiness. Run `arb node upgrade #{node}`."
+    )
+  end
+
+  defp cluster_placement_result(node, n) do
+    if "netpol_unenforced" in List.wrap(n["degraded"]) do
+      override? = n["allow_unenforced_network"] == true
+
+      nodes_result(
+        "cluster #{node}: placement",
+        :warn,
+        if(override?,
+          do:
+            "degraded: netpol_unenforced, but placement is allowed by the operator's " <>
+              "allow_unenforced_network override (audited)",
+          else: "degraded: netpol_unenforced: no work is placed on this node"
+        ),
+        "The cluster's CNI does not enforce the worker NetworkPolicies (or the canary could not prove it). " <>
+          "See docs/remote-workers-k8s-runbook.md, 'The canary says netpol_unenforced'."
+      )
+    end
+  end
 
   defp node_result(n) do
     state = n["state"] || n["status"]
