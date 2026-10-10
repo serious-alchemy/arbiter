@@ -62,6 +62,7 @@ defmodule Arbiter.Accounts.Admission do
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Quota.SpendCap
   alias Arbiter.Tasks.Issue
@@ -148,16 +149,29 @@ defmodule Arbiter.Accounts.Admission do
             registry_key: String.t(),
             pid: pid(),
             workspace_id: String.t() | nil,
-            provider: String.t() | nil
+            provider: String.t() | nil,
+            account_id: String.t() | nil,
+            pool: String.t() | nil
           }
         ]
   def pending do
     @registry
     |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
-    |> Enum.flat_map(fn {task_id, pid, %{workspace_id: ws_id, provider: provider}} ->
-      if Process.alive?(pid),
-        do: [%{registry_key: task_id, pid: pid, workspace_id: ws_id, provider: provider}],
-        else: []
+    |> Enum.flat_map(fn {task_id, pid, %{workspace_id: ws_id, provider: provider} = value} ->
+      if Process.alive?(pid) do
+        [
+          %{
+            registry_key: task_id,
+            pid: pid,
+            workspace_id: ws_id,
+            provider: provider,
+            account_id: Map.get(value, :account_id),
+            pool: Map.get(value, :pool)
+          }
+        ]
+      else
+        []
+      end
     end)
   rescue
     _ -> []
@@ -213,7 +227,7 @@ defmodule Arbiter.Accounts.Admission do
   defp decide_slot(%Issue{} = task, account, provider, opts) do
     case Concurrency.limit(account, task.workspace_id) do
       nil ->
-        if SpendCap.config(account), do: reserve(task, provider)
+        if SpendCap.config(account), do: reserve(task, account, provider, opts)
         {:ok, :unlimited}
 
       cap ->
@@ -221,11 +235,11 @@ defmodule Arbiter.Accounts.Admission do
 
         cond do
           length(holders) < cap ->
-            reserve(task, provider)
+            reserve(task, account, provider, opts)
             {:ok, :admitted}
 
           Keyword.get(opts, :force) == true ->
-            reserve(task, provider)
+            reserve(task, account, provider, opts)
             record_override(task, info(task, account, cap, holders), opts)
             {:ok, :forced}
 
@@ -237,10 +251,26 @@ defmodule Arbiter.Accounts.Admission do
 
   # A second concurrent dispatch of the same task finds the key taken: the
   # first holds the slot, and only one of the two can start a worker.
-  defp reserve(%Issue{id: id, workspace_id: ws_id}, provider) do
-    case Registry.register(@registry, id, %{workspace_id: ws_id, provider: code(provider)}) do
+  defp reserve(%Issue{id: id, workspace_id: ws_id}, %ProviderAccount{} = account, provider, opts) do
+    value = %{
+      workspace_id: ws_id,
+      provider: code(provider),
+      account_id: account.id,
+      pool: pool(provider, Keyword.get(opts, :model))
+    }
+
+    case Registry.register(@registry, id, value) do
       {:ok, _owner} -> :ok
       {:error, {:already_registered, _pid}} -> :ok
+    end
+  end
+
+  # DC4: the pool the reservation seats (`Arbiter.Quota.Seats`). Only an explicit
+  # model can tell agy's two pools apart; without one the provider's default pool.
+  defp pool(provider, model) do
+    case code(provider) do
+      nil -> nil
+      code -> ModelFamily.classify(code, model).pool
     end
   end
 

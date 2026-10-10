@@ -1222,11 +1222,16 @@ defmodule Arbiter.Worker do
     # (`Arbiter.Accounts.Concurrency.live_count/1`). Recorded here, from inside
     # the registered process, because the entry dies with the process — no
     # path has to remember to decrement anything.
+    # DC4: the account and pool too, so seats can be counted per (account, pool)
+    # (`Arbiter.Quota.Seats`) from the registry alone.
+    workspace_id = effective_workspace_id(state)
+    provider = provider(meta)
+
     PRegistry.put_dispatch(
       state.registry_key,
-      effective_workspace_id(state),
-      provider(meta),
-      node_id: placed_node_id(meta)
+      workspace_id,
+      provider,
+      [node_id: placed_node_id(meta)] ++ seat_stamp(workspace_id, provider, dispatch_model(meta))
     )
 
     broadcast_lifecycle(:started, state)
@@ -3435,6 +3440,34 @@ defmodule Arbiter.Worker do
   # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
   defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
   defp placed_node_id(_meta), do: nil
+
+  # The model the dispatch was routed to, before the CLI reports its own: the
+  # pool of an agy run depends on it (`ModelFamily.classify/2`).
+  defp dispatch_model(meta) when is_map(meta) do
+    case Map.get(meta, :model) || get_in(meta, [:routing_config, :model]) do
+      model when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  end
+
+  defp dispatch_model(_meta), do: nil
+
+  # DC4: the account and pool this run seats on. A run that named no provider
+  # draws on the workspace's default one, as `Arbiter.Accounts.Concurrency` counts
+  # it. A stamp that cannot be read is no stamp (`Arbiter.Quota.Seats` resolves
+  # the same thing at read time): never a reason for a worker to die at boot.
+  defp seat_stamp(workspace_id, provider, model) do
+    code = provider || to_string(Arbiter.Quota.default_provider(workspace_id))
+
+    [
+      account_id: AccountResolver.account_id(workspace_id, code),
+      pool: Arbiter.Agents.ModelFamily.classify(code, model).pool
+    ]
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
 
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
