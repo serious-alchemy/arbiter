@@ -634,6 +634,73 @@ defmodule Arbiter.Quota.Gate do
   end
 
   @doc """
+  The paced line of the **fresh** window that follows the one resetting at
+  `reset_at` (design `provider-dynamic-concurrency.md` §3.3, `line′`): the same
+  thresholds as `pace/6`, read at `opts[:now]` with `used = 0` and the reset
+  advanced one window length. Right after the reset it is the paced floor; it
+  rises with the clock from there. A window with no known length cannot be
+  advanced, and falls back to its flat side exactly as `pace/6` does.
+
+  Options as for `pace/6`. This is `Arbiter.Quota.Budget`'s only route to the
+  fresh window's line, so there is still one definition of pace.
+  """
+  @spec fresh_pace(
+          policy(),
+          :primary | :long | :spend,
+          String.t() | nil,
+          DateTime.t() | nil,
+          keyword()
+        ) :: Pace.t()
+  def fresh_pace(policy, window, label, reset_at, opts \\ []) do
+    {account, _workspace} = policy |> merge_account(Keyword.get(opts, :account)) |> split_policy()
+    seconds = Keyword.get_lazy(opts, :window_seconds, fn -> window_seconds(label, account) end)
+
+    next_reset =
+      case {reset_at, seconds} do
+        {%DateTime{}, seconds} when is_integer(seconds) ->
+          DateTime.add(reset_at, seconds, :second)
+
+        _ ->
+          reset_at
+      end
+
+    pace(policy, window, label, 0.0, next_reset, opts)
+  end
+
+  @doc """
+  The first of the gate's **status** rules that stops `quota` outright under
+  `policy`, or `nil` (design §3.5's hard zeros): rule 1 (the primary window
+  past-plan), rule 2 (the long window rejected) and rule 5 (the long window at
+  `allowed_warning` under `weekly_warning_policy: hold`), in the order and with
+  the staleness trust `gating_window/3` applies them. The utilization rules
+  (3 and 4) are the paced line's question and are left to `pace/6`.
+
+  Options as for `gating_window/3`. Nothing on the admission path calls this.
+  """
+  @spec hard_stop(quota_source(), policy(), keyword()) :: binding_window() | nil
+  def hard_stop(quota, policy, opts \\ []) do
+    case Snapshot.normalize(quota, opts) do
+      nil ->
+        nil
+
+      %Snapshot{} = s ->
+        now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+        policy = merge_account(policy, Keyword.get(opts, :account))
+        pace_opts = [now: now, priority: nil]
+        primary? = not snapshot_stale?(s, now)
+        long? = not snapshot_long_stale?(s, now)
+
+        [
+          {primary?, &primary_status_binding/3},
+          {long?, &secondary_status_binding/3},
+          {long?, &secondary_warning_binding/3}
+        ]
+        |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
+        |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, pace_opts) end)
+    end
+  end
+
+  @doc """
   The effective `pace_exempt_priority` under `policy` (design §4.2): the
   lowest-urgency priority (`0..4`) whose dispatches are exempt from the paced
   line, or `nil` for no exemption.
