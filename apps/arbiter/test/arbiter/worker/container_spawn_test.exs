@@ -318,6 +318,48 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "prepare/1 with a research_read grant (bd-6ircwr)" do
+    defp stager(test) do
+      fn workspace_id, dest, _opts ->
+        File.mkdir_p!(dest)
+        File.write!(Path.join(dest, "run-1.log"), "line\n")
+        send(test, {:staged, workspace_id, dest})
+        {:ok, %{dir: dest, count: 1}}
+      end
+    end
+
+    test "mounts the workspace's transcript snapshot read-only, inside the run's own tmp dir",
+         ctx do
+      opts = [research_transcripts: "ws-1", research_stager: stager(self())] ++ ctx.opts
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+
+      dir = Path.join(ctx.tmp_dir, "research-transcripts")
+      assert_received {:staged, "ws-1", ^dir}
+      assert dir in request.mounts[:readonly_paths]
+      assert Map.new(request.env)["ARBITER_TRANSCRIPTS_DIR"] == dir
+
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      assert "#{dir}:#{dir}:ro" in mounts(argv)
+    end
+
+    test "a run with no grant gets no snapshot and no mount", ctx do
+      assert {:ok, request} =
+               ContainerSpawn.prepare([research_stager: stager(self())] ++ ctx.opts)
+
+      refute_received {:staged, _, _}
+      refute Enum.any?(request.mounts[:readonly_paths], &String.contains?(&1, "research"))
+      refute Map.has_key?(Map.new(request.env), "ARBITER_TRANSCRIPTS_DIR")
+    end
+
+    test "a snapshot that cannot be staged refuses the spawn rather than running without it",
+         ctx do
+      failing = fn _ws, _dest, _opts -> {:error, :enospc} end
+      opts = [research_transcripts: "ws-1", research_stager: failing] ++ ctx.opts
+
+      assert {:error, {:research_transcripts_unavailable, :enospc}} = ContainerSpawn.prepare(opts)
+    end
+  end
+
   describe "prepare/1" do
     test "describes a rootless container over the private clone, bridges and per-run dirs",
          ctx do

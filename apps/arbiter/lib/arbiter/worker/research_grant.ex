@@ -35,7 +35,7 @@ defmodule Arbiter.Worker.ResearchGrant do
   The grant is audited as a `granted` `permission_events` row per dispatch
   (`audit/3`), on top of the `declared`/`requested`/`granted` rows the ticket
   already carries; each request a granted token makes is logged by
-  `ArbiterWeb.ApiPolicy.audit/3`'s caller.
+  `ArbiterWeb.Plugs.ApiAuth`.
   """
 
   require Ash.Query
@@ -162,7 +162,10 @@ defmodule Arbiter.Worker.ResearchGrant do
   defp write_index(dest, runs) do
     rows =
       Enum.map(runs, fn r ->
-        Enum.join([r.id, r.task_id, r.kind, r.started_at && DateTime.to_iso8601(r.started_at)], "\t")
+        Enum.join(
+          [r.id, r.task_id, r.kind, r.started_at && DateTime.to_iso8601(r.started_at)],
+          "\t"
+        )
       end)
 
     path = Path.join(dest, @index)
@@ -177,7 +180,11 @@ defmodule Arbiter.Worker.ResearchGrant do
   """
   @spec audit(Issue.t(), String.t() | nil, keyword()) :: :ok | :error
   def audit(%Issue{id: id}, run_id, opts \\ []) do
-    count = Keyword.get(opts, :transcripts, 0)
+    snapshot =
+      case Keyword.get(opts, :transcripts) do
+        nil -> "a read-only snapshot of its workspace's transcripts (podman backend)"
+        count -> "a read-only snapshot of #{count} transcripts"
+      end
 
     Permissions.record!(
       [%{permission: @permission, event: :granted}],
@@ -187,7 +194,7 @@ defmodule Arbiter.Worker.ResearchGrant do
       run_id: run_id,
       reason:
         "research access projected into the run: read-only run/usage/review-round routes of " <>
-          "its workspace, and a read-only snapshot of #{count} transcripts"
+          "its workspace, and #{snapshot}"
     )
   rescue
     error ->

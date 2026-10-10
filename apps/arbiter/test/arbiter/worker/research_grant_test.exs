@@ -103,7 +103,12 @@ defmodule Arbiter.Worker.ResearchGrantTest do
       assert {:error, error} =
                Ash.create(
                  Issue,
-                 %{title: "t", workspace_id: ws.id, issue_type: :feature, permissions: ["research_read"]},
+                 %{
+                   title: "t",
+                   workspace_id: ws.id,
+                   issue_type: :feature,
+                   permissions: ["research_read"]
+                 },
                  context: @coordinator
                )
 

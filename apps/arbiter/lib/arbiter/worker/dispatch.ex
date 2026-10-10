@@ -111,6 +111,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
+  alias Arbiter.Worker.ResearchGrant
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.RunProvenance
@@ -4355,7 +4356,12 @@ defmodule Arbiter.Worker.Dispatch do
             # minted before routing, carries none).
             projection = guardrail_projection(task, workspace, choice, opts)
             {:ok, git_credential} = git_credential_plan(workspace, policy, opts)
-            opts = reinject_permission_claims(task, projection, opts)
+
+            # bd-6ircwr: `research_read` is not a tier-gated reach, so it is decided
+            # here, not by the projection: the claim rides the same re-minted token,
+            # and the podman spawn mounts the workspace's transcripts read-only.
+            research = research_grant(task, workspace, opts)
+            opts = reinject_permission_claims(task, projection.claims ++ research.claims, opts)
 
             # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
             # the worker OAuth token from this workspace's `worker_env` before
@@ -4380,7 +4386,8 @@ defmodule Arbiter.Worker.Dispatch do
                   # with `policy`, which is what wraps it under `podman`.
                   sandbox_wrap: true
                 ] ++
-                Keyword.take(opts, [:mcp_config, :arb_token])
+                Keyword.take(opts, [:mcp_config, :arb_token]) ++
+                research_agent_opts(research, task)
 
             tracker_context = fetch_tracker_context(task, workspace)
 
@@ -4719,9 +4726,37 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp git_credential_checked(other, _workspace, _policy, _opts), do: other
 
-  defp reinject_permission_claims(_task, %{claims: []}, opts), do: opts
+  # bd-6ircwr: whether this spawn is given `research_read`. A grant is audited (a
+  # `granted` permission event) before it takes effect; a declared permission that
+  # is withheld is logged with its reason so the operator can see why a research
+  # run came up without it.
+  defp research_grant(%Issue{} = task, workspace, opts) do
+    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+    decision = ResearchGrant.resolve(task, workspace, role)
 
-  defp reinject_permission_claims(%Issue{} = task, %{claims: claims}, opts) do
+    cond do
+      decision.granted? ->
+        ResearchGrant.audit(task, nil)
+        decision
+
+      decision.withheld && role == :implementer ->
+        Logger.warning("research_read withheld for #{task.id}: #{decision.withheld}")
+        decision
+
+      true ->
+        decision
+    end
+  end
+
+  # The workspace whose transcripts a granted run may read, for the podman spawn.
+  defp research_agent_opts(%{granted?: true}, %Issue{workspace_id: ws}),
+    do: [research_transcripts: ws]
+
+  defp research_agent_opts(_research, _task), do: []
+
+  defp reinject_permission_claims(_task, [], opts), do: opts
+
+  defp reinject_permission_claims(%Issue{} = task, claims, opts) do
     Keyword.merge(
       opts,
       inject_mcp_config(

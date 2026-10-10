@@ -33,7 +33,13 @@ defmodule Arbiter.Guardrails.Permissions do
 
   @type authority :: Arbiter.Guardrails.Authority.authority()
   @type kind ::
-          :network | :tracker_write | :secrets | :prod_read | :prod_ssh | :phi_data | :research_read
+          :network
+          | :tracker_write
+          | :secrets
+          | :prod_read
+          | :prod_ssh
+          | :phi_data
+          | :research_read
   @type parsed :: %{
           kind: kind(),
           optional?: boolean(),

@@ -163,7 +163,8 @@ defmodule ArbiterWeb.ResearchTierTest do
           assert read(ctx.research, "/api/workers/history").status == 200
         end)
 
-      assert log =~ "research_read: #{ctx.task.id} (workspace #{ctx.ws.id}) GET /api/workers/history"
+      assert log =~
+               "research_read: #{ctx.task.id} (workspace #{ctx.ws.id}) GET /api/workers/history"
     end
 
     test "is refused (403) on every route that is not a research read", ctx do
@@ -199,7 +200,12 @@ defmodule ArbiterWeb.ResearchTierTest do
     end
 
     test "a refine token never gets it", ctx do
-      refine = %Scope{tier: :refine, workspace_id: ctx.ws.id, issue_id: ctx.task.id, permissions: ["research_read"]}
+      refine = %Scope{
+        tier: :refine,
+        workspace_id: ctx.ws.id,
+        issue_id: ctx.task.id,
+        permissions: ["research_read"]
+      }
 
       for {:get, _} <- @research_routes do
         assert {:error, :forbidden, _} = ApiPolicy.authorize(:research_read, refine, %{})

@@ -394,6 +394,7 @@ defmodule Arbiter.Worker.ClaudeSession do
                :egress,
                :projection,
                :git_material,
+               :research_transcripts,
                :codex_path,
                :codex_source_home
              ]) ++
