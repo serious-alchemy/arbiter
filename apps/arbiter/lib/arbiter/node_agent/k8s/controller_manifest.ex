@@ -36,7 +36,9 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
 
   @doc """
   Options: `:image`, `:primary_url`, `:node_name` (required), `:namespace`
-  (default `arbiter-workers`), `:reach` (default `:direct`).
+  (default `arbiter-workers`), `:reach` (default `:direct`), `:self_upgrade`
+  (default `true`; `ARB_K8S_SELF_UPGRADE`, whether the Role lets the controller patch
+  its own Deployment's image, see `Arbiter.NodeAgent.K8s.SelfUpgrade`).
   """
   @spec deployment(keyword()) :: {:ok, map()} | {:error, term()}
   def deployment(opts) do
@@ -47,7 +49,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
          {:ok, node_name} <- fetch(opts, :node_name),
          true <- reach in [:direct, :tailscale] || {:error, {:bad_reach, reach}} do
       namespace = Keyword.get(opts, :namespace, "arbiter-workers")
-      {:ok, build(image, primary_url, node_name, namespace, reach)}
+      self_upgrade = Keyword.get(opts, :self_upgrade, true) == true
+      {:ok, build(image, primary_url, node_name, namespace, reach, self_upgrade)}
     end
   end
 
@@ -58,7 +61,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
     end
   end
 
-  defp build(image, primary_url, node_name, namespace, reach) do
+  defp build(image, primary_url, node_name, namespace, reach, self_upgrade) do
     labels = %{"app.kubernetes.io/name" => @name}
 
     %{
@@ -82,21 +85,23 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
               "runAsGroup" => @uid,
               "seccompProfile" => %{"type" => "RuntimeDefault"}
             },
-            "containers" => [controller(image, primary_url, node_name, reach)] ++ sidecar(reach),
-            "volumes" => volumes(reach)
+            "containers" =>
+              [controller(image, primary_url, node_name, reach, self_upgrade)] ++ sidecar(reach),
+            "volumes" => volumes()
           }
         }
       }
     }
   end
 
-  defp controller(image, primary_url, node_name, reach) do
+  defp controller(image, primary_url, node_name, reach, self_upgrade) do
     env =
       [
         %{"name" => "ARB_ROLE", "value" => "agent"},
         %{"name" => "ARB_AGENT_BACKEND", "value" => "k8s"},
         %{"name" => "ARB_PRIMARY_URL", "value" => primary_url},
-        %{"name" => "ARB_NODE_NAME", "value" => node_name}
+        %{"name" => "ARB_NODE_NAME", "value" => node_name},
+        %{"name" => "ARB_K8S_SELF_UPGRADE", "value" => to_string(self_upgrade)}
       ] ++ proxy_env(reach)
 
     %{
@@ -107,7 +112,12 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       "resources" => %{
         "requests" => %{"cpu" => "100m", "memory" => "256Mi"},
         "limits" => %{"cpu" => "1", "memory" => "512Mi"}
-      }
+      },
+      "volumeMounts" => [
+        %{"name" => "join", "mountPath" => "/etc/arb/join", "readOnly" => true},
+        %{"name" => "config", "mountPath" => "/etc/arb/config", "readOnly" => true},
+        %{"name" => "tmp", "mountPath" => "/tmp"}
+      ]
     }
   end
 
@@ -157,8 +167,16 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
     ]
   end
 
-  defp volumes(:direct), do: []
-  defp volumes(:tailscale), do: [%{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "128Mi"}}]
+  # `join` is the operator's one-shot Secret (optional: the controller keeps the
+  # credential in `arbiter-node-credential` afterwards), `config` the closed-schema
+  # ConfigMap (K§4.1), `tmp` the only writable path (shared with the sidecar).
+  defp volumes do
+    [
+      %{"name" => "join", "secret" => %{"secretName" => "arbiter-join", "optional" => true}},
+      %{"name" => "config", "configMap" => %{"name" => "arbiter-controller-config"}},
+      %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "512Mi"}}
+    ]
+  end
 
   defp hardening do
     %{
