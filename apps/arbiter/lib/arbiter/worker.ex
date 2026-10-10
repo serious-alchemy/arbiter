@@ -1236,11 +1236,7 @@ defmodule Arbiter.Worker do
       state.registry_key,
       effective_workspace_id(state),
       provider(meta),
-<<<<<<< HEAD
-      node_id: placed_node_id(meta)
-=======
       node_id: dispatch_node_id(meta)
->>>>>>> a5a9bac0a (Worker adoption: adopting init takes the row over, seeded session open, stdout_offset, abandon_adoption, registry node_id; Executor.Node.adopt/unadopt (bd-4p1vui))
     )
 
     broadcast_lifecycle(:started, state)
@@ -3539,10 +3535,6 @@ defmodule Arbiter.Worker do
   end
 
   # The node a session handle executes on; nil for a local port.
-  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
-  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
-  defp placed_node_id(_meta), do: nil
-
   defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
   defp handle_node_id(_handle), do: nil
 
@@ -7779,7 +7771,9 @@ defmodule Arbiter.Worker do
   # An adopting Worker knows it from the start; any other learns it when its remote session
   # opens (`meta[:node_id]`).
   defp dispatch_node_id(meta) when is_map(meta),
-    do: get_in(meta, [:adopt, :node_id]) || Map.get(meta, :node_id)
+    do:
+      get_in(meta, [:adopt, :node_id]) || Map.get(meta, :placed_node_id) ||
+        Map.get(meta, :node_id)
 
   defp dispatch_node_id(_meta), do: nil
 
