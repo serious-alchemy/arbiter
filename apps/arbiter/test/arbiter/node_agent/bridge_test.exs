@@ -29,7 +29,7 @@ defmodule Arbiter.NodeAgent.BridgeTest do
   end
 
   setup do
-    home = Path.join(System.tmp_dir!(), "nab-#{System.unique_integer([:positive])}")
+    home = Path.join(Arbiter.Config.Paths.socket_root(), "nab-#{System.unique_integer([:positive])}")
     File.mkdir_p!(home)
     on_exit(fn -> File.rm_rf!(home) end)
 
@@ -161,7 +161,7 @@ defmodule Arbiter.NodeAgent.BridgeTest do
   end
 
   test "the stream cap refuses the connection rather than queueing it" do
-    home = Path.join(System.tmp_dir!(), "nab-#{System.unique_integer([:positive])}")
+    home = Path.join(Arbiter.Config.Paths.socket_root(), "nab-#{System.unique_integer([:positive])}")
     File.mkdir_p!(home)
     on_exit(fn -> File.rm_rf!(home) end)
 

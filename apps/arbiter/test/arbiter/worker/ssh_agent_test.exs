@@ -13,7 +13,7 @@ defmodule Arbiter.Worker.SshAgentTest do
     key_path = Path.join(tmp, "id_test")
     {_, 0} = System.cmd("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key_path])
     # a short dir: AF_UNIX paths are capped at 107 bytes
-    dir = Path.join(System.tmp_dir!(), "sa#{System.unique_integer([:positive])}")
+    dir = Path.join(Arbiter.Config.Paths.socket_root(), "sa#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(dir) end)
     %{key: File.read!(key_path), dir: dir}
   end

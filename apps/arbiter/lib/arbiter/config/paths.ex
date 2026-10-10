@@ -89,6 +89,37 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Short directory for **Unix-domain socket** files (bd-gegc00, #663).
+
+  `sockaddr_un.sun_path` is 108 bytes (104 on macOS/BSD), and a worker's
+  `HOME`/`TMPDIR` (and so `scratch_root/0`) can already be ~90 bytes deep, so
+  a socket under either fails with `:socket_path_too_long`. Every socket the
+  egress proxy, bridges, ssh-agent and their tests create lives under this
+  root instead.
+
+  Resolution: `ARBITER_SOCKET_ROOT`, then `config :arbiter, :socket_root`,
+  then `/tmp/arb-<8 hex>` where the hex is a hash of `scratch_root/0` (so two
+  installs, or a sandbox with its own scratch root, never share a directory).
+  Callers create it (`File.mkdir_p/1` + `chmod 0o700`).
+  """
+  @spec socket_root() :: String.t()
+  def socket_root do
+    System.get_env("ARBITER_SOCKET_ROOT") ||
+      Application.get_env(:arbiter, :socket_root) ||
+      default_socket_root()
+  end
+
+  defp default_socket_root do
+    tag =
+      :sha256
+      |> :crypto.hash(scratch_root())
+      |> binary_part(0, 4)
+      |> Base.encode16(case: :lower)
+
+    "/tmp/arb-" <> tag
+  end
+
+  @doc """
   Root holding one per-run `TMPDIR` for each worker/agent child
   (`Arbiter.Worker.RunTmp`). Disk-backed under the scratch root, never `/tmp`
   (tmpfs, i.e. RAM, on the dogfood host).
