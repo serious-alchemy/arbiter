@@ -142,12 +142,14 @@ defmodule Arbiter.Test.FakeK8sApi do
     name = pod["metadata"]["name"]
     type = if Map.has_key?(state.pods, name), do: :modified, else: :added
     rv = state.rv + 1
+    # A pod keeps its uid across modifications; a test recreating one sets a new uid.
+    held_uid = get_in(state.pods, [name, "metadata", "uid"])
 
     pod =
       update_in(pod, ["metadata"], fn meta ->
         meta
         |> Map.put("resourceVersion", Integer.to_string(rv))
-        |> Map.put_new("uid", "uid-#{name}-#{rv}")
+        |> Map.put_new("uid", held_uid || "uid-#{name}-#{rv}")
       end)
 
     state = %{state | rv: rv, pods: Map.put(state.pods, name, pod)}
@@ -485,6 +487,10 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
       {:fake_drop, :close} ->
         conn
 
+      # The handler traps exits: a server shutdown arrives as a message.
+      {:EXIT, _from, _reason} ->
+        conn
+
       {:fake_drop, :truncate} ->
         elem(chunk(conn, ~s({"type":"MODIFIED","obj)), 1)
     after
@@ -550,6 +556,9 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
         end
 
       :fake_log_end ->
+        conn
+
+      {:EXIT, _from, _reason} ->
         conn
     after
       30_000 -> conn
