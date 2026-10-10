@@ -26,7 +26,8 @@ defmodule Arbiter.Quota.BudgetCalibrationShadowTest do
     arbiter/quota/quota_snapshot.ex
     arbiter/release.ex
     mix/tasks/arbiter.budget_calibration.ex
-    board/admission_shadow_report.ex
+    arbiter/board/admission_shadow_report.ex
+    arbiter/board/admission_shadow_report/quota.ex
   )
 
   test "no admission, gate, dispatch, scheduler or board module reads the calibration" do

@@ -66,7 +66,11 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   @spec collect(keyword()) :: data()
   def collect(opts \\ []) do
     until = Keyword.get_lazy(opts, :until, &DateTime.utc_now/0)
-    since = Keyword.get_lazy(opts, :since, fn -> DateTime.add(until, -@default_days * 86_400, :second) end)
+
+    since =
+      Keyword.get_lazy(opts, :since, fn ->
+        DateTime.add(until, -@default_days * 86_400, :second)
+      end)
 
     snapshots =
       QuotaSnapshot
@@ -87,7 +91,9 @@ defmodule Arbiter.Board.AdmissionShadowReport do
 
   defp read_dispatches(since, until) do
     Run
-    |> Ash.Query.filter(not is_nil(routing_decision) and started_at >= ^since and started_at <= ^until)
+    |> Ash.Query.filter(
+      not is_nil(routing_decision) and started_at >= ^since and started_at <= ^until
+    )
     |> Ash.Query.sort(started_at: :asc)
     |> Ash.Query.select([:id, :started_at, :routing_decision])
     |> Ash.read!()
@@ -108,8 +114,11 @@ defmodule Arbiter.Board.AdmissionShadowReport do
 
   defp read_accounts(snapshots) do
     case snapshots |> Enum.map(& &1.provider_account_id) |> Enum.uniq() do
-      [] -> %{}
-      ids -> ProviderAccount |> Ash.Query.filter(id in ^ids) |> Ash.read!() |> Map.new(&{&1.id, &1})
+      [] ->
+        %{}
+
+      ids ->
+        ProviderAccount |> Ash.Query.filter(id in ^ids) |> Ash.read!() |> Map.new(&{&1.id, &1})
     end
   end
 
@@ -155,7 +164,11 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       rate: if(comparable != [], do: length(agree) / length(comparable)),
       not_comparable: length(other),
       by_cause: cause_counts(disagree),
-      pools: comparable |> Enum.group_by(&pool_of/1) |> Enum.map(&pool_agreement/1) |> Enum.sort_by(& &1.pool),
+      pools:
+        comparable
+        |> Enum.group_by(&pool_of/1)
+        |> Enum.map(&pool_agreement/1)
+        |> Enum.sort_by(& &1.pool),
       budget_below_cap: budget_counts(budgets, &</2),
       budget_above_cap: budget_counts(budgets, &>/2)
     }
@@ -179,7 +192,9 @@ defmodule Arbiter.Board.AdmissionShadowReport do
 
   defp budget_counts(budgets, compare) do
     budgets
-    |> Enum.filter(fn b -> is_integer(b["budget"]) and is_integer(b["cap"]) and compare.(b["budget"], b["cap"]) end)
+    |> Enum.filter(fn b ->
+      is_integer(b["budget"]) and is_integer(b["cap"]) and compare.(b["budget"], b["cap"])
+    end)
     |> Enum.frequencies_by(&(&1["label"] || &1["pool"] || @none))
   end
 
@@ -193,8 +208,11 @@ defmodule Arbiter.Board.AdmissionShadowReport do
         {event, min(minutes, @max_dwell_minutes), minutes > @max_dwell_minutes}
       end)
 
-    walk_ahead = Enum.filter(intervals, fn {e, _, _} -> is_nil(e.legacy_pick) and not is_nil(e.walk_pick) end)
-    legacy_ahead = Enum.filter(intervals, fn {e, _, _} -> not is_nil(e.legacy_pick) and is_nil(e.walk_pick) end)
+    walk_ahead =
+      Enum.filter(intervals, fn {e, _, _} -> is_nil(e.legacy_pick) and not is_nil(e.walk_pick) end)
+
+    legacy_ahead =
+      Enum.filter(intervals, fn {e, _, _} -> not is_nil(e.legacy_pick) and is_nil(e.walk_pick) end)
 
     %{
       walk_ahead_minutes: total(walk_ahead),
@@ -216,7 +234,12 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     days = days_in_shadow(stamps, data.until)
 
     [
-      criterion(:days_in_shadow, "#{@gate_days} days in shadow", days_status(days), days_detail(days)),
+      criterion(
+        :days_in_shadow,
+        "#{@gate_days} days in shadow",
+        days_status(days),
+        days_detail(days)
+      ),
       criterion(
         :weekly_resets,
         "at least #{@gate_weekly_resets} weekly resets of the binding account",
@@ -241,10 +264,13 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     ]
   end
 
-  defp criterion(id, label, status, detail), do: %{id: id, label: label, status: status, detail: detail}
+  defp criterion(id, label, status, detail),
+    do: %{id: id, label: label, status: status, detail: detail}
 
   defp days_in_shadow([], _until), do: 0.0
-  defp days_in_shadow(stamps, until), do: DateTime.diff(until, Enum.min(stamps, DateTime)) / 86_400
+
+  defp days_in_shadow(stamps, until),
+    do: DateTime.diff(until, Enum.min(stamps, DateTime)) / 86_400
 
   defp days_status(days) when days >= @gate_days, do: :met
   defp days_status(_days), do: :unmet
@@ -274,9 +300,14 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     label = "calibration bias within ±#{round(@gate_bias * 100)}% on the binding window"
 
     cond do
-      worst == nil -> criterion(:calibration_bias, label, :unknown, "no fitted interval to compare")
-      worst <= @gate_bias -> criterion(:calibration_bias, label, :met, "worst #{pct(worst)}")
-      true -> criterion(:calibration_bias, label, :unmet, "worst #{pct(worst)}")
+      worst == nil ->
+        criterion(:calibration_bias, label, :unknown, "no fitted interval to compare")
+
+      worst <= @gate_bias ->
+        criterion(:calibration_bias, label, :met, "worst #{pct(worst)}")
+
+      true ->
+        criterion(:calibration_bias, label, :unmet, "worst #{pct(worst)}")
     end
   end
 
@@ -293,7 +324,12 @@ defmodule Arbiter.Board.AdmissionShadowReport do
         criterion(:stability, label, :unknown, "no published budget in the captures")
 
       true ->
-        criterion(:stability, label, :met, "busiest hour #{seen |> Enum.map(& &1.max_changes_per_hour) |> Enum.max()}")
+        criterion(
+          :stability,
+          label,
+          :met,
+          "busiest hour #{seen |> Enum.map(& &1.max_changes_per_hour) |> Enum.max()}"
+        )
     end
   end
 
@@ -341,7 +377,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     [
       head,
       cause_lines("  disagreements", a.by_cause),
-      Enum.map_join(a.pools, "", &pool_line/1),
+      Enum.map_join(a.pools, "\n", &pool_line/1),
       count_line("  budget below today's cap (rows)", a.budget_below_cap),
       count_line("  budget above today's cap, ceiling binds (rows)", a.budget_above_cap)
     ]
@@ -350,7 +386,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   end
 
   defp pool_line(p) do
-    "\n  #{p.pool}: #{p.comparable} comparable, #{p.agree} agree" <> cause_inline(p.by_cause)
+    "  #{p.pool}: #{p.comparable} comparable, #{p.agree} agree" <> cause_inline(p.by_cause)
   end
 
   defp cause_inline(by_cause) when map_size(by_cause) == 0, do: ""
@@ -365,14 +401,22 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   defp pairs(map), do: map |> Enum.sort() |> Enum.map_join(", ", fn {k, v} -> "#{k} #{v}" end)
 
   defp throughput_text(t) do
-    pools = if map_size(t.by_pool) == 0, do: "", else: "\n  walk ahead by pool: #{minutes_pairs(t.by_pool)}"
-    capped = if t.capped_intervals > 0, do: "\n  #{t.capped_intervals} interval(s) capped at 6 h", else: ""
+    pools =
+      if map_size(t.by_pool) == 0,
+        do: "",
+        else: "\n  walk ahead by pool: #{minutes_pairs(t.by_pool)}"
+
+    capped =
+      if t.capped_intervals > 0,
+        do: "\n  #{t.capped_intervals} interval(s) capped at 6 h",
+        else: ""
 
     "Throughput\n  walk would place, today held: #{mins(t.walk_ahead_minutes)}\n" <>
       "  today places, walk would hold: #{mins(t.legacy_ahead_minutes)}" <> pools <> capped
   end
 
-  defp minutes_pairs(map), do: map |> Enum.sort() |> Enum.map_join(", ", fn {k, v} -> "#{k} #{mins(v)}" end)
+  defp minutes_pairs(map),
+    do: map |> Enum.sort() |> Enum.map_join(", ", fn {k, v} -> "#{k} #{mins(v)}" end)
 
   defp pace_text([]), do: "Pace safety\n  no quota captures"
 
@@ -389,12 +433,17 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   defp eps(%{largest_epsilon: nil}), do: ""
 
   defp eps(p) do
-    back = if p.minutes_back_to_line, do: ", back on the line after #{mins(p.minutes_back_to_line)}", else: ""
+    back =
+      if p.minutes_back_to_line,
+        do: ", back on the line after #{mins(p.minutes_back_to_line)}",
+        else: ""
+
     never = if p.never_back > 0, do: ", #{p.never_back} not back by the window's end", else: ""
     " (largest ε #{signed(p.largest_epsilon)}#{back}#{never})"
   end
 
-  defp calibration_text(%{rungs: [], fits: []}), do: "Calibration\n  no quota history to calibrate from"
+  defp calibration_text(%{rungs: [], fits: []}),
+    do: "Calibration\n  no quota history to calibrate from"
 
   defp calibration_text(%{rungs: rungs, fits: fits}) do
     rung_lines =
@@ -403,16 +452,22 @@ defmodule Arbiter.Board.AdmissionShadowReport do
           "mean abs error #{opt_pct(r.mean_abs_error)}"
       end)
 
-    "Calibration (predicted vs actual draw)\n#{rung_lines}\n" <> Enum.map_join(fits, "\n", &fit_line/1)
+    "Calibration (predicted vs actual draw)\n#{rung_lines}\n" <>
+      Enum.map_join(fits, "\n", &fit_line/1)
   end
 
   defp fit_line(f) do
     se = if f.se, do: " se #{pct(f.se)}", else: ""
     t = if f.t, do: " t #{Float.round(f.t * 1.0, 2)}", else: ""
     floor = if f.floored?, do: " floored from #{pct(f.raw_rho)}", else: ""
-    passed = Enum.map_join(f.passed_over, "", fn {rung, why} -> "\n      passed over rung #{rung}: #{inspect(why)}" end)
 
-    "  #{f.pool} / #{f.window} (#{f.account_id}): rung #{f.rung}, ρ #{pct(f.rho)}/seat-h#{se}#{t}#{floor}" <> passed
+    passed =
+      Enum.map_join(f.passed_over, "", fn {rung, why} ->
+        "\n      passed over rung #{rung}: #{inspect(why)}"
+      end)
+
+    "  #{f.pool} / #{f.window} (#{f.account_id}): rung #{f.rung}, ρ #{pct(f.rho)}/seat-h#{se}#{t}#{floor}" <>
+      passed
   end
 
   defp stability_text([]), do: "Stability\n  no quota captures"
@@ -457,7 +512,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   defp opt_pct(x), do: pct(x)
 
   defp signed(nil), do: "n/a"
-  defp signed(x), do: (if x >= 0, do: "+", else: "") <> pct(x)
+  defp signed(x), do: if(x >= 0, do: "+", else: "") <> pct(x)
 
   defp mins(m), do: "#{:erlang.float_to_binary(m * 1.0, decimals: 0)} min"
   defp opt_mins(nil), do: "n/a"

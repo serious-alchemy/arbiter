@@ -1047,6 +1047,39 @@ arbiter.admission_shadow_report` report the following:
 | Stability | Published budget changes per pool per day, and the median dwell |
 | Near resets | Budget against seats in the last horizon before each reset, and usage in the first horizon after |
 
+**As built (DC7, bd-6cuqcf).** `Arbiter.Board.AdmissionShadowReport`
+(`collect/1` reads, `build/1` is pure, `format/1` renders), with the quota-side
+sections in `AdmissionShadowReport.Quota`. Both entry points take `:since` and
+`:until` (default the last 30 days) and are read-only.
+- **Agreement** reads `routing_decision.admission_shadow` off the runs. Only
+  comparable dispatches count towards the rate; disagreements are split by the
+  record's `cause` and by the pool of the walk's pick. The walk has no separate
+  fair-share cause yet, so a fair-share limit reads as `capacity:provider`.
+  "Budget below / above the cap" counts the `admission_shadow_events` budgets
+  rows per pool.
+- **Throughput** treats each event row as holding until the next. An interval is
+  capped at 6 h (and counted as capped), because a switch back to `legacy`
+  writes no row to end it.
+- **Pace safety** reads `u − line` from `Gate.pace/6` under the account's real
+  policy at each capture's own time (I6). An ahead-of-pace admission is a
+  capture where the account's seats rose with `u` over the line; `ε` is the
+  margin there, and the time back is to the first later capture at or under
+  it. A projected exhaustion is `u + (S·ρ + b)·t_r ≥ 1` at a capture, counted
+  once per run of consecutive captures; with no `ρ` it says unknown.
+- **Calibration** predicts each observed interval's `Δu` from the resolved `ρ`
+  and the fit's `b` (0 when the fit has none) and reports bias
+  (`Σ(pred − actual) / Σ actual`) and mean absolute error per rung, beside each
+  fit's `ρ`, `se`, `t` and what it passed over.
+- **Stability** sees a change only at a capture, so one shorter than the poll
+  interval is invisible. **Near resets** lists the resets the history saw.
+- **Gate** prints each §10.4 criterion as met, unmet or unknown. "Every
+  disagreement class reviewed" is always unknown: it is the operator's call.
+  The bias criterion uses the windows the budget bound on (the `binding` of the
+  event rows), else every fit.
+- Run it as `mix arbiter.admission_shadow_report` or, on a release,
+  `bin/arbiter eval 'Arbiter.Release.admission_shadow_report()'`. It has no MCP
+  twin: it is a host-local operator report like the R5 and DC2 reports.
+
 ### 10.4 The gate to `enforce`
 
 All of these, then an operator OK:

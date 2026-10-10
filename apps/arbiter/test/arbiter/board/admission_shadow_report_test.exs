@@ -82,7 +82,12 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
           "cause" => "capacity:provider"
         }),
         dispatch(4, %{"pick" => "bd-c", "agrees" => false, "cause" => "queued"}),
-        dispatch(5, %{"pick" => nil, "agrees" => false, "comparable" => false, "cause" => "paused"})
+        dispatch(5, %{
+          "pick" => nil,
+          "agrees" => false,
+          "comparable" => false,
+          "cause" => "paused"
+        })
       ]
 
       %{agreement: a} = build(%{dispatches: dispatches})
@@ -439,6 +444,34 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
         end)
 
       assert output =~ "claude"
+    end
+
+    test "the mix task is wired to the same report" do
+      assert Code.ensure_loaded?(Mix.Tasks.Arbiter.AdmissionShadowReport)
+
+      assert Mix.Task.get("arbiter.admission_shadow_report") ==
+               Mix.Tasks.Arbiter.AdmissionShadowReport
+    end
+
+    test "no admission, gate, dispatch, scheduler or board module reads the report" do
+      lib = Path.expand("../../../lib", __DIR__)
+      allowed = ~w(
+        arbiter/board/admission_shadow_report.ex
+        arbiter/board/admission_shadow_report/quota.ex
+        arbiter/quota/budget_calibration.ex
+        arbiter/release.ex
+        mix/tasks/arbiter.admission_shadow_report.ex
+      )
+
+      offenders =
+        lib
+        |> Path.join("**/*.ex")
+        |> Path.wildcard()
+        |> Enum.reject(&(Path.relative_to(&1, lib) in allowed))
+        |> Enum.filter(&(File.read!(&1) =~ ~r/AdmissionShadowReport|admission_shadow_report/))
+        |> Enum.map(&Path.relative_to(&1, lib))
+
+      assert offenders == []
     end
 
     test "writes nothing" do

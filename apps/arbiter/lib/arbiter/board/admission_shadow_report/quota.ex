@@ -38,7 +38,8 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
     snapshots
     |> series()
     |> Enum.map(fn {{account, provider, bucket, window}, rows} ->
-      {Draw.pool(provider, bucket), pace_series(rows, Map.get(accounts, account), window, rates, account)}
+      {Draw.pool(provider, bucket),
+       pace_series(rows, Map.get(accounts, account), window, rates, account)}
     end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.map(fn {pool, parts} -> pace_pool(pool, parts) end)
@@ -46,11 +47,16 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
   end
 
   defp pace_series(rows, account, window, rates, account_id) do
-    side = if (Gate.window_seconds(window, account) || 0) >= @long_window_seconds, do: :long, else: :primary
+    side =
+      if (Gate.window_seconds(window, account) || 0) >= @long_window_seconds,
+        do: :long,
+        else: :primary
 
     margins =
       Enum.map(rows, fn r ->
-        pace = Gate.pace({account, nil}, side, window, r.utilization, r.resets_at, now: r.captured_at)
+        pace =
+          Gate.pace({account, nil}, side, window, r.utilization, r.resets_at, now: r.captured_at)
+
         Map.put(r, :ahead, r.utilization - pace.ceiling)
       end)
 
@@ -65,14 +71,19 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
   defp admissions(rows) do
     rows
     |> Enum.with_index()
-    |> Enum.filter(fn {r, i} -> i > 0 and seat_rise?(Enum.at(rows, i - 1), r) and r.ahead > 0.0 end)
+    |> Enum.filter(fn {r, i} ->
+      i > 0 and seat_rise?(Enum.at(rows, i - 1), r) and r.ahead > 0.0
+    end)
     |> Enum.map(fn {r, i} ->
       back =
         rows
         |> Enum.drop(i + 1)
         |> Enum.find(&(&1.ahead <= 0.0))
 
-      %{epsilon: r.ahead, minutes_back: back && DateTime.diff(back.captured_at, r.captured_at) / 60}
+      %{
+        epsilon: r.ahead,
+        minutes_back: back && DateTime.diff(back.captured_at, r.captured_at) / 60
+      }
     end)
   end
 
@@ -155,7 +166,10 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
       end)
       |> Enum.sort_by(& &1.rung)
 
-    %{rungs: rungs, fits: Enum.map(fits, &(&1 |> Map.merge(errors(&1.pairs)) |> Map.delete(:pairs)))}
+    %{
+      rungs: rungs,
+      fits: Enum.map(fits, &(&1 |> Map.merge(errors(&1.pairs)) |> Map.delete(:pairs)))
+    }
   end
 
   defp fit_entry(r) do
@@ -196,7 +210,8 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
     %{
       intervals: n,
       bias: if(n > 0 and actual > 0, do: (predicted - actual) / actual),
-      mean_abs_error: if(n > 0, do: pairs |> Enum.map(fn {p, a} -> abs(p - a) end) |> Enum.sum() |> Kernel./(n))
+      mean_abs_error:
+        if(n > 0, do: pairs |> Enum.map(fn {p, a} -> abs(p - a) end) |> Enum.sum() |> Kernel./(n))
     }
   end
 
@@ -225,7 +240,8 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
         budget_captures: runs |> Enum.map(& &1.captures) |> Enum.sum(),
         changes: length(changes),
         changes_per_day: length(changes) / days,
-        max_changes_per_hour: runs |> Enum.map(&busiest_hour(&1.changes)) |> Enum.max() |> Kernel.*(1.0),
+        max_changes_per_hour:
+          runs |> Enum.map(&busiest_hour(&1.changes)) |> Enum.max() |> Kernel.*(1.0),
         median_dwell_minutes: median(dwells)
       }
     end)
@@ -273,7 +289,10 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
     sorted = Enum.sort(values)
     n = length(sorted)
     mid = div(n, 2)
-    if rem(n, 2) == 1, do: Enum.at(sorted, mid) * 1.0, else: (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
+
+    if rem(n, 2) == 1,
+      do: Enum.at(sorted, mid) * 1.0,
+      else: (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
   end
 
   # ---- near resets -------------------------------------------------------------
@@ -298,7 +317,14 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
       |> Enum.map(& &1.resets_at)
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
-      |> Enum.flat_map(&reset_entry(&1, rows, h, %{account: account, pool: pool, window: window, seconds: seconds}))
+      |> Enum.flat_map(
+        &reset_entry(&1, rows, h, %{
+          account: account,
+          pool: pool,
+          window: window,
+          seconds: seconds
+        })
+      )
     end)
     |> Enum.sort_by(&{&1.pool, &1.window, &1.reset_at}, fn a, b -> a <= b end)
   end
