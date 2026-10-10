@@ -8,6 +8,8 @@ defmodule Arbiter.Worker.Registry do
   `{:via, Registry, ...}` tuples.
   """
 
+  alias Arbiter.Agents.ModelFamily
+
   @doc """
   Return the `:via` tuple a `Arbiter.Worker` GenServer registers under for
   the given `task_id`.
@@ -59,6 +61,13 @@ defmodule Arbiter.Worker.Registry do
   placed on; `nil` (the default) is the primary. `Arbiter.Nodes.LocalCapacity`
   counts only the runs with no node against the primary's own cap.
 
+  `account_id:` and `pool:` (DC4, `docs/design/provider-dynamic-concurrency.md`
+  §3.2) stamp the provider account the run draws on and its quota pool, so
+  `Arbiter.Quota.Seats` can count per (account, pool) from the registry alone.
+  The pool defaults to `Arbiter.Agents.ModelFamily.classify/2` of the provider
+  and `model:`; both survive a rewrite that does not name them. Nothing on the
+  admission path reads them.
+
   Must be called *from* the registered process; `Registry.update_value/3` only
   lets an owner rewrite its own value. A non-owner (or an unregistered key) is
   a no-op rather than an error — the dispatch context is an optimisation for
@@ -68,19 +77,17 @@ defmodule Arbiter.Worker.Registry do
   def put_dispatch(registry_key, workspace_id, provider, opts \\ [])
       when is_binary(registry_key) do
     Registry.update_value(__MODULE__, registry_key, fn prior ->
-      # A rewrite (the hold flag flipping) keeps the node `put_node/2` stamped.
-      node_id =
-        case {Keyword.fetch(opts, :node_id), prior} do
-          {{:ok, id}, _} -> id
-          {:error, %{node_id: id}} -> id
-          _ -> nil
-        end
+      # A rewrite (the hold flag flipping) keeps the node `put_node/2` stamped,
+      # and the account and pool the first stamp recorded.
+      provider = normalize_provider(provider)
 
       %{
         workspace_id: workspace_id,
-        provider: normalize_provider(provider),
+        provider: provider,
         released: Keyword.get(opts, :released, false),
-        node_id: node_id
+        node_id: stamped(opts, prior, :node_id, nil),
+        account_id: stamped(opts, prior, :account_id, nil),
+        pool: stamped(opts, prior, :pool, pool_of(provider, Keyword.get(opts, :model)))
       }
     end)
 
@@ -109,6 +116,18 @@ defmodule Arbiter.Worker.Registry do
     _ -> :ok
   end
 
+  # An explicit option wins, then what the prior stamp recorded, then `default`.
+  defp stamped(opts, prior, key, default) do
+    case {Keyword.fetch(opts, key), prior} do
+      {{:ok, value}, _} -> value
+      {:error, %{^key => value}} when not is_nil(value) -> value
+      _ -> default
+    end
+  end
+
+  defp pool_of(nil, _model), do: nil
+  defp pool_of(provider, model), do: ModelFamily.classify(provider, model).pool
+
   defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider),
     do: Atom.to_string(provider)
 
@@ -117,7 +136,8 @@ defmodule Arbiter.Worker.Registry do
 
   @doc """
   Every **live** registry entry that recorded a dispatch context via
-  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:, released:, node_id:}`.
+  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:, released:, node_id:,
+  account_id:, pool:}`.
 
   Entries whose process has already died are dropped here rather than by the
   caller: Registry's monitor-based cleanup is asynchronous, so a killed worker
@@ -131,7 +151,9 @@ defmodule Arbiter.Worker.Registry do
             workspace_id: String.t() | nil,
             provider: String.t() | nil,
             released: boolean(),
-            node_id: String.t() | nil
+            node_id: String.t() | nil,
+            account_id: String.t() | nil,
+            pool: String.t() | nil
           }
         ]
   def live_dispatches do
@@ -147,7 +169,9 @@ defmodule Arbiter.Worker.Registry do
               workspace_id: ws_id,
               provider: provider,
               released: Map.get(value, :released, false),
-              node_id: Map.get(value, :node_id)
+              node_id: Map.get(value, :node_id),
+              account_id: Map.get(value, :account_id),
+              pool: Map.get(value, :pool)
             }
           ]
         else
