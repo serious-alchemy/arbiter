@@ -300,9 +300,10 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       {_, 0} = git(["push", "-q", "origin", "feature/abc"], other)
       theirs = origin_sha(repo, "feature/abc")
 
-      # The ordinary path (rebase onto theirs, plain push) still applies; what
-      # must never happen is the rewrite overwriting their commit.
-      _ = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+      # The rewrite path is not taken (`plan_hosted_push` falls to the ordinary
+      # reconcile: rebase onto theirs, plain push), so the open succeeds and
+      # their commit survives on origin underneath ours.
+      assert {:ok, _ref} = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
 
       {_, 0} = git(["merge-base", "--is-ancestor", theirs, "feature/abc"], repo.bare)
     end

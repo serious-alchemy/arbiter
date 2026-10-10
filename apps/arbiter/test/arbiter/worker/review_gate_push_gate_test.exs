@@ -490,6 +490,48 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       git!(["fetch", "-q", "origin"], repo)
       assert sha(repo, "origin/" <> branch) == theirs
     end
+
+    test "a third-party commit seen while :behind is not a lease for a later rewrite",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite-behind"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # Before the gate starts, a third party lands a commit on top of the
+      # local head: the round begins `:behind`, and the remote head is a SHA
+      # Arbiter neither pushed nor reviewed.
+      other = Path.join(tmp, "other-behind")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+      theirs = sha(other, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      # An untracked file in the way makes the gate's fast-forward onto their
+      # commit fail, so it falls through to the ordinary fix round.
+      File.write!(Path.join(wt, "theirs.txt"), "in the way\n")
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 60_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+    end
   end
 
   # ---- AC2: stamps and coverage name the pushed head -----------------------

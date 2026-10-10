@@ -2167,7 +2167,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp push_gate(state), do: {:ok, state}
 
-  defp note_pushed_remote_head(state, %{remote_head: sha}) when is_binary(sha),
+  # Only a remote head Arbiter holds locally is one it pushed or reviewed. A
+  # `:behind` branch has a remote head AHEAD of the local head — commits someone
+  # else pushed, which the reviewer never read — and recording that SHA would
+  # let `PushState.rewrite_lease/3` clear a rewrite over the third party's work.
+  defp note_pushed_remote_head(state, %{remote_head: sha, local_head: sha}) when is_binary(sha),
     do: Map.put(state, :pushed_remote_head, sha)
 
   defp note_pushed_remote_head(state, _push_state), do: state
