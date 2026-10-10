@@ -149,6 +149,8 @@ defmodule Arbiter.Worker.Dispatch do
           # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway; recorded.
           force: boolean(),
           dispatched_by: String.t() | nil,
+          # DC6: the admission shadow's record, stored on the run's routing decision.
+          admission_shadow: map() | nil,
           # bd-92mx1m, resume/2 and resume_session/2 only — see ResumeSlot.
           resume_origin: :human | :automatic,
           force_slot: boolean(),
@@ -2124,6 +2126,8 @@ defmodule Arbiter.Worker.Dispatch do
 
   # A held dispatch is replayed verbatim on drain; strip routing's own choice
   # so the replay routes afresh instead of reading it as a caller override.
+  # The admission shadow's record (DC6) belongs to the pass that planned the
+  # held dispatch, not to the drain's replay, so it goes too.
   defp unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
 
@@ -2132,7 +2136,8 @@ defmodule Arbiter.Worker.Dispatch do
         :routing_decision,
         :routing_choice,
         :routed_agent_type,
-        :resolved_policy
+        :resolved_policy,
+        :admission_shadow
       ])
 
     if routed && Keyword.get(opts, :agent_type) == routed,
@@ -2749,6 +2754,19 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # DC6: the admission shadow's record (`Arbiter.Board.AdmissionShadow`, only
+  # under `scheduler_admission: shadow` or `enforce`) joins the routing decision
+  # the run stores, as `admission_shadow`. It is a record: the decision's own
+  # keys, and so the run's account and family, are untouched.
+  defp recorded_decision(opts) do
+    case {Keyword.get(opts, :routing_decision), Keyword.get(opts, :admission_shadow)} do
+      {decision, nil} -> decision
+      {nil, %{} = shadow} -> %{"admission_shadow" => shadow}
+      {%{} = decision, %{} = shadow} -> Map.put(decision, "admission_shadow", shadow)
+      {decision, _other} -> decision
+    end
+  end
+
   defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =
       case Keyword.get(opts, :review, false) do
@@ -2775,7 +2793,7 @@ defmodule Arbiter.Worker.Dispatch do
       )
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
       # bd-40pzpj: the routing decision, account and family the run records.
-      |> Map.merge(ProviderRouting.run_meta(Keyword.get(opts, :routing_decision)))
+      |> Map.merge(ProviderRouting.run_meta(recorded_decision(opts)))
       # bd-atll60 (G13): the guardrail decision the run was spawned under.
       |> put_if_present(:guardrail_decision, guardrail_decision(task, opts))
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
