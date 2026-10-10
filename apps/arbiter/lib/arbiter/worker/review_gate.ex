@@ -362,6 +362,8 @@ defmodule Arbiter.Worker.ReviewGate do
     :memory_cap_exceeded,
     # G19: a re-prompt re-runs into the same tier spend cap.
     :spend_cap,
+    # G18: a suspended subject is parked; a re-prompt would only be parked again.
+    :trust_suspended,
     # bd-2s755v: a re-prompt sends the same rejected `-m` model.
     :model_unavailable
   ]
@@ -1094,6 +1096,12 @@ defmodule Arbiter.Worker.ReviewGate do
       #   1. prove which commit the reviewer saw (surfaces in the prompt and thread)
       #   2. detect whether the revise implementer actually committed new changes
       head_sha: nil,
+      # bd-4axlg0: the `origin/<branch>` head the push gate last saw carrying
+      # this branch's head (pushed by it, or already there). A fix round that
+      # rebases the branch rewrites history; the gate's push at the end of the
+      # round delivers that with a lease pinned to the remote head, cleared only
+      # while it is still this SHA. nil until the first push gate.
+      pushed_remote_head: nil,
       # bd-cbbgot: the `head_sha` a reviewer pass was last LAUNCHED on in this
       # gate. nil until the first reviewer starts. A fix round that changes
       # nothing parks only when it left the head a reviewer already read;
@@ -1412,7 +1420,7 @@ defmodule Arbiter.Worker.ReviewGate do
           {:error, reason} ->
             escalate_pre_review(state, reason, :head_not_pushed)
 
-          :ok ->
+          {:ok, state} ->
             spawn_reviewer_after_push(state)
         end
     end
@@ -2151,9 +2159,13 @@ defmodule Arbiter.Worker.ReviewGate do
   # One evaluation and at most one push per round — `GuardRegistry` row G18.
   defp push_gate(%{worktree_path: wt, branch: branch} = state)
        when is_binary(wt) and is_binary(branch) do
-    case PushState.ensure_pushed(wt, branch) do
-      {:ok, :already_pushed, _push_state} ->
-        :ok
+    # bd-4axlg0: a fix round (a podman container, which cannot push) may have
+    # rebased the branch. PushState delivers that as a lease-pinned rewrite when
+    # the remote still holds what this gate last saw there, and refuses it when
+    # someone else has pushed.
+    case PushState.ensure_pushed(wt, branch, expected_remote: Map.get(state, :pushed_remote_head)) do
+      {:ok, :already_pushed, push_state} ->
+        {:ok, note_pushed_remote_head(state, push_state)}
 
       {:ok, :pushed, push_state} ->
         Logger.info(
@@ -2161,7 +2173,7 @@ defmodule Arbiter.Worker.ReviewGate do
             "#{state.round} for task=#{state.task_id} (head #{push_state.local_head})"
         )
 
-        :ok
+        {:ok, note_pushed_remote_head(state, push_state)}
 
       {:ok, :unknown, push_state} ->
         Logger.info(
@@ -2169,14 +2181,23 @@ defmodule Arbiter.Worker.ReviewGate do
             "(#{push_state.status}); reviewing the local head"
         )
 
-        :ok
+        {:ok, state}
 
       {:error, reason, push_state} ->
         escalate_unpushed_head(state, push_state, reason)
     end
   end
 
-  defp push_gate(_state), do: :ok
+  defp push_gate(state), do: {:ok, state}
+
+  # Only a remote head Arbiter holds locally is one it pushed or reviewed. A
+  # `:behind` branch has a remote head AHEAD of the local head — commits someone
+  # else pushed, which the reviewer never read — and recording that SHA would
+  # let `PushState.rewrite_lease/3` clear a rewrite over the third party's work.
+  defp note_pushed_remote_head(state, %{remote_head: sha, local_head: sha}) when is_binary(sha),
+    do: Map.put(state, :pushed_remote_head, sha)
+
+  defp note_pushed_remote_head(state, _push_state), do: state
 
   # ---- the reviewer's own checkout at the pushed head (bd-a22hib) ----------
   #
@@ -2509,9 +2530,14 @@ defmodule Arbiter.Worker.ReviewGate do
      while the MR still held the unfixed commit. **Do not merge this branch by
      hand on the strength of a review it has not had.**
 
+     A rebase of the ticket's own branch is pushed automatically (with
+     `--force-with-lease` pinned to the remote head); this one was not, because
+     `#{push_state.remote}/#{state.branch}` carries commits Arbiter did not push
+     (or the lease was lost to a push that landed meanwhile), and overwriting
+     them could destroy another actor's work.
+
      To clear it: reconcile `#{state.branch}` with `#{push_state.remote}/#{state.branch}`
-     (rebase or merge — never force-push, the remote may carry another worker's
-     commits), push, and re-run the review.
+     (rebase or merge — never a bare force-push), push, and re-run the review.
      """
      |> String.trim()}
   end
@@ -3919,7 +3945,7 @@ defmodule Arbiter.Worker.ReviewGate do
       {:error, reason} ->
         {:done, escalate_pre_review_park(next, reason)}
 
-      :ok ->
+      {:ok, next} ->
         next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
     end
   end

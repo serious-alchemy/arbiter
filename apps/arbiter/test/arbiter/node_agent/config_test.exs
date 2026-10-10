@@ -110,6 +110,27 @@ defmodule Arbiter.NodeAgent.ConfigTest do
     assert {:error, :credential_malformed} = Config.load(env: env(home, cred))
   end
 
+  describe "proxy (§2.3)" do
+    test "ARB_NODE_PROXY wins over HTTPS_PROXY / ALL_PROXY; none means nil", %{
+      home: home,
+      cred: cred
+    } do
+      assert {:ok, %{proxy: nil}} = Config.load(env: env(home, cred))
+
+      assert {:ok, %{proxy: "http://127.0.0.1:1055"}} =
+               Config.load(
+                 env:
+                   env(home, cred, %{
+                     "ARB_NODE_PROXY" => "http://127.0.0.1:1055",
+                     "HTTPS_PROXY" => "http://other:3128"
+                   })
+               )
+
+      assert {:ok, %{proxy: "http://other:3128"}} =
+               Config.load(env: env(home, cred, %{"ALL_PROXY" => "http://other:3128"}))
+    end
+  end
+
   describe "URL policy (§4.3)" do
     for url <- ["http://127.0.0.1:4848", "http://localhost:4848", "http://[::1]:4848"] do
       test "plain http is allowed for loopback: #{url}", %{home: home, cred: cred} do

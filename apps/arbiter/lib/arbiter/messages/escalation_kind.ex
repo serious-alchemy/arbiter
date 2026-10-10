@@ -96,7 +96,13 @@ defmodule Arbiter.Messages.EscalationKind do
     :quota_poll_failing,
     :review_patrol_rate_limited,
     :scheduler_paused,
-    :setup_token_missing
+    :setup_token_missing,
+    # G18 (`Arbiter.Loop.Trust`): a subject's trust changed on its own — a
+    # suspension after a critical guardrail event, a demotion after two majors,
+    # a harness or model version change that reset its promotion clock.
+    :trust_demoted,
+    :trust_suspended,
+    :trust_version_changed
   ]
 
   @undeduped [:agent_raised, :legacy]

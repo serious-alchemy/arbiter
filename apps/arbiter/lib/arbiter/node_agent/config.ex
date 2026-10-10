@@ -18,6 +18,9 @@ defmodule Arbiter.NodeAgent.Config do
     * `ARB_NODE_MAX_WORKERS` — optional, a positive integer: the node owner's
       hard ceiling on concurrent workers, reported in `hello` as
       `capacity.ceiling` (§13). Anything else is ignored.
+    * `ARB_NODE_PROXY`, else `HTTPS_PROXY` / `ALL_PROXY` — an HTTP proxy the
+      WebSocket connects through (`http://127.0.0.1:1055`, tailscale's
+      userspace proxy, §2.3). Mint does not read the environment; the agent does.
 
   `load/1` returns an error tuple instead of raising: an agent that cannot start
   reports why in its status file (`arbiter-node status`) rather than crash-looping
@@ -38,6 +41,7 @@ defmodule Arbiter.NodeAgent.Config do
     :live_runs_fun,
     :readiness_fun,
     :max_workers,
+    :proxy,
     run_opts: [],
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
@@ -89,6 +93,7 @@ defmodule Arbiter.NodeAgent.Config do
            credential: credential,
            node_id: node_id,
            max_workers: max_workers(opts, env),
+           proxy: proxy(opts, env),
            status_path: Path.join(node_home, "status.json"),
            version: Keyword.get_lazy(opts, :version, &Arbiter.Version.app_version/0)
          )
@@ -152,6 +157,13 @@ defmodule Arbiter.NodeAgent.Config do
     end
   end
 
+  defp proxy(opts, env) do
+    names = ~w(ARB_NODE_PROXY HTTPS_PROXY https_proxy ALL_PROXY all_proxy)
+
+    non_empty(Keyword.get(opts, :proxy)) ||
+      Enum.find_value(names, &non_empty(env[&1])) || non_empty(app_config(opts)[:proxy])
+  end
+
   defp non_empty(value) when value in [nil, ""], do: nil
   defp non_empty(value), do: value
 
@@ -173,15 +185,17 @@ defmodule Arbiter.NodeAgent.Config do
     end
   end
 
-  defp loopback_only(url, host) do
+  defp loopback_only(url, host),
+    do: if(loopback_host?(host), do: {:ok, url}, else: {:error, {:insecure_url, url}})
+
+  @doc "Whether `host` (bracketed IPv6 allowed) is `localhost` or a loopback address."
+  @spec loopback_host?(String.t()) :: boolean()
+  def loopback_host?(host) when is_binary(host) do
     host = host |> String.trim_leading("[") |> String.trim_trailing("]")
 
-    loopback? =
-      host == "localhost" or
-        match?({:ok, {127, _, _, _}}, :inet.parse_address(String.to_charlist(host))) or
-        match?({:ok, {0, 0, 0, 0, 0, 0, 0, 1}}, :inet.parse_address(String.to_charlist(host)))
-
-    if loopback?, do: {:ok, url}, else: {:error, {:insecure_url, url}}
+    host == "localhost" or
+      match?({:ok, {127, _, _, _}}, :inet.parse_address(String.to_charlist(host))) or
+      match?({:ok, {0, 0, 0, 0, 0, 0, 0, 1}}, :inet.parse_address(String.to_charlist(host)))
   end
 
   defp read_credential(path, opts) do

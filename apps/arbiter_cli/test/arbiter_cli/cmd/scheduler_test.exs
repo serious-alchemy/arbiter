@@ -123,6 +123,37 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ "Slots used: 2 (bd-a, bd-b)"
     end
 
+    # bd-b2iigy: resumes waiting on the primary's own worker cap.
+    test "lists resumes held for local capacity" do
+      stub_get(
+        "/api/scheduler/status",
+        Map.merge(body("running"), %{
+          "held_local_capacity" => [
+            %{"task_id" => "bd-a", "reason" => "held: local capacity"},
+            %{"task_id" => "bd-b", "reason" => "held: local capacity"}
+          ]
+        })
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Held: local capacity"
+      assert out =~ "2 resume(s)"
+      assert out =~ "bd-a"
+      assert out =~ "bd-b"
+    end
+
+    test "prints no held line when nothing waits on local capacity" do
+      stub_get(
+        "/api/scheduler/status",
+        Map.merge(body("running"), %{"held_local_capacity" => []})
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      refute out =~ "Held:"
+    end
+
     test "a server that predates the slot count prints no slots line" do
       stub_get("/api/scheduler/status", body("running"))
 

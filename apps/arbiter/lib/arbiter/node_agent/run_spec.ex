@@ -19,7 +19,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
   | `version` | `1` |
   | `run`, `task`, `name` | the run id, the ticket id and the container name (`arb-…`) |
   | `install` | the primary's install id (label `arbiter.install`; reaping, RW12) |
-  | `image` | `%{"tag" => tag, "plan" => plan \\| nil}`; a plan is built on the node |
+  | `image` | `%{"tag" => tag, "plan" => plan \| nil}`; a plan is built on the node. A registry node (A2) gets `"ref"`, a digest-pinned reference the primary pushed, and no plan |
   | `cwd` | the container-side working directory (the primary's own path: path transparency) |
   | `mounts` | `[%{"kind" => k, "path" => container path, …}]`; kinds below |
   | `bridges` | `[%{"name" => n, "path" => container path}]`: the per-run sockets (RW10) |
@@ -215,11 +215,26 @@ defmodule Arbiter.NodeAgent.RunSpec do
     if String.starts_with?(tag, "-") or not Regex.match?(@tag_re, tag) do
       refuse({:bad_value, "image.tag"})
     else
-      with {:ok, plan} <- plan(image["plan"]), do: {:ok, %{tag: tag, plan: plan}}
+      with {:ok, plan} <- plan(image["plan"]),
+           {:ok, ref} <- image_ref(image) do
+        {:ok, Map.merge(%{tag: tag, plan: plan}, ref)}
+      end
     end
   end
 
   defp image(_), do: refuse({:missing, "image"})
+
+  # A2: a registry node pulls the digest-pinned `ref` the primary pushed; the
+  # tag stays for the labels. Absent for a build node.
+  @digest_ref_re ~r/\A[a-z0-9][a-z0-9.:_\/-]{0,200}@sha256:[0-9a-f]{64}\z/
+
+  defp image_ref(%{"ref" => ref}) do
+    if is_binary(ref) and Regex.match?(@digest_ref_re, ref),
+      do: {:ok, %{ref: ref}},
+      else: refuse({:bad_value, "image.ref"})
+  end
+
+  defp image_ref(_), do: {:ok, %{}}
 
   defp plan(nil), do: {:ok, nil}
 

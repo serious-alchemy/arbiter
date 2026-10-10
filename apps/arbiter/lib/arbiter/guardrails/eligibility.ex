@@ -8,6 +8,9 @@ defmodule Arbiter.Guardrails.Eligibility do
 
   `evaluate/2` requires, in this order (the first failure is the reason):
 
+    * **not suspended** — a subject `Arbiter.Loop.Trust` suspended after a
+      critical guardrail event takes no work in any role until the coordinator
+      confirms or dismisses the suspension (G18, §6.3);
     * **`scope`** — the workspace and repo are inside the subject's rule scope;
     * **difficulty** — an implementer's ticket difficulty (`nil` is D2, as
       routing treats it) is at most the profile's `max_difficulty`; a reviewer
@@ -102,7 +105,7 @@ defmodule Arbiter.Guardrails.Eligibility do
            subject,
            workspace,
            Map.get(attrs, :repo),
-           Keyword.take(opts, [:rules])
+           Keyword.take(opts, [:rules, :suspensions])
          ) do
       nil -> {:ok, %{profile: nil, permission_fallback: []}}
       %Profile{} = profile -> judge(profile, attrs, opts)
@@ -113,7 +116,8 @@ defmodule Arbiter.Guardrails.Eligibility do
     permissions = Map.get(attrs, :permissions) || []
     role = attrs.role
 
-    with :ok <- check_scope(profile, attrs),
+    with :ok <- check_suspension(profile),
+         :ok <- check_scope(profile, attrs),
          :ok <- check_difficulty(profile, role, Map.get(attrs, :difficulty)),
          {:ok, fallback} <- check_actions(profile, role, permissions, attrs),
          :ok <- check_data_classes(profile, permissions, attrs, opts) do
@@ -121,6 +125,20 @@ defmodule Arbiter.Guardrails.Eligibility do
     else
       {:error, why} -> {:error, "#{label(attrs)} (#{profile.tier}): #{why}"}
     end
+  end
+
+  # ---- suspension (G18) ----------------------------------------------------------
+
+  # A subject suspended after a critical guardrail event leaves eligibility for
+  # every role until the coordinator confirms (it drops to quarantine) or
+  # dismisses the suspension (its tier returns).
+  defp check_suspension(%Profile{suspended: nil}), do: :ok
+
+  defp check_suspension(%Profile{suspended: suspension}) do
+    {:error,
+     "suspended after a critical guardrail event (#{suspension["kind"] || "unknown"} on run " <>
+       "#{suspension["run_id"] || "?"}); the coordinator confirms or dismisses it " <>
+       "(`arb trust confirm` / `arb trust dismiss`)"}
   end
 
   # ---- scope ---------------------------------------------------------------------

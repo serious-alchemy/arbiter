@@ -121,6 +121,67 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     end
   end
 
+  # K8: a registry node's image is published before the run is committed to it,
+  # and a publish that times out or fails falls back by `worker.placement`.
+  describe "a registry node whose image cannot be published" do
+    defp registry_row do
+      %{
+        id: "n-registry",
+        name: "registry-node",
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{"image" => "registry"}
+      }
+    end
+
+    defp timed_out(extra \\ []) do
+      [
+        nodes: [registry_row()],
+        image: "localhost/arbiter-dev/x:abc",
+        publish: [stub: fn _ctx -> {:error, {:timeout, 5}} end]
+      ] ++
+        @podman ++ extra
+    end
+
+    test "prefer_remote falls back to the primary and releases the node slot" do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, image timed out")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, timed_out())
+      assert is_pid(pid)
+      assert Placement.reservations() == []
+    end
+
+    test "remote_only holds the card with the image error, and reserves nothing" do
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "remote only, image timed out")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, timed_out())
+      assert info.mode == :remote_only
+      assert info.image_error == {:image_unavailable, {:timeout, 5}}
+      assert info.message =~ "registry image"
+
+      assert Worker.whereis(issue.id) == nil
+      assert Ash.get!(Issue, issue.id).state == :queued
+      assert Placement.reservations() == []
+    end
+
+    test "prefer_remote honours the primary's own cap when it falls back" do
+      {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, image timed out, primary full")
+
+      assert {:error, {:no_node_capacity, %{node: "local", cap: 0}}} =
+               dispatch(issue, timed_out())
+
+      assert Placement.reservations() == []
+    end
+  end
+
   describe "worker.placement: remote_only, but the run cannot go remote" do
     test "a run that is not the podman Claude implementer stays local (never refused)" do
       ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
@@ -208,9 +269,11 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert Ash.get!(Issue, third.id).state == :queued
     end
 
-    test "a re-dispatch of a ticket already In progress is not held for being at the cap", %{
-      ws: ws
-    } do
+    # bd-b2iigy: a re-dispatch of an In-progress ticket replaces its own run, so
+    # its own worker never holds it back; but other tickets filling the cap do
+    # (it used to go over, and a restart put 5 runs on a cap of 2).
+    test "a re-dispatch of a ticket already In progress is held while OTHER tickets fill the cap",
+         %{ws: ws} do
       {:ok, 1} = Nodes.set_local_max_workers(1, nil)
       issue = ready!(ws, "active")
       assert {:ok, %{worker_pid: pid}} = dispatch(issue)
@@ -219,7 +282,25 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
 
       other = ready!(ws, "fills the slot")
-      assert {:ok, _} = dispatch(other)
+      assert {:ok, %{worker_pid: other_pid}} = dispatch(other)
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(Ash.get!(Issue, issue.id))
+      assert info.kind == :redispatch
+      assert info.cap == 1
+      assert Ash.get!(Issue, issue.id).state == :active
+      assert Worker.whereis(issue.id) == nil
+
+      other_ref = Process.monitor(other_pid)
+      :ok = Worker.stop(other.id, :normal)
+      assert_receive {:DOWN, ^other_ref, :process, _, _}, 5_000
+
+      assert {:ok, _} = dispatch(Ash.get!(Issue, issue.id))
+    end
+
+    test "a re-dispatch is never held by the ticket's own previous run", %{ws: ws} do
+      {:ok, 1} = Nodes.set_local_max_workers(1, nil)
+      issue = ready!(ws, "active")
+      assert {:ok, _} = dispatch(issue)
 
       assert {:ok, _} = dispatch(Ash.get!(Issue, issue.id))
     end

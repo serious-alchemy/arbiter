@@ -54,6 +54,8 @@ defmodule Arbiter.Nodes.RunStreams do
       waiter: waiter,
       bridges: bridges,
       state: :assigned,
+      stage: :assigned,
+      cursor: nil,
       next: 0,
       partial: "",
       exit: nil,
@@ -95,12 +97,57 @@ defmodule Arbiter.Nodes.RunStreams do
   def ready(table, run) do
     update(table, run, fn
       %{state: :assigned, waiter: waiter, handle: handle} = s ->
-        {%{s | state: :ready, waiter: nil}, reply(waiter, {:ok, handle})}
+        {%{s | state: :ready, stage: :running, waiter: nil}, reply(waiter, {:ok, handle})}
 
       s ->
         {s, []}
     end)
   end
+
+  @doc """
+  The node reports `run` `running` in a heartbeat: the same as `ready/2` (a run counts as
+  started only at `running`, A3), so a lost `run.ready` cannot strand the assign.
+  """
+  @spec report_running(t(), String.t()) :: {t(), [effect()]}
+  def report_running(table, run), do: ready(table, run)
+
+  @stages ~w(pending starting terminating)
+
+  @doc """
+  Record a per-run state the node reported (`pending | starting | terminating`; `running` is
+  `report_running/2`). A started run never moves back to `pending`/`starting`, and a word
+  outside the vocabulary is ignored, so a heartbeat can neither regress nor corrupt a run.
+  """
+  @spec report_stage(t(), String.t(), String.t()) :: t()
+  def report_stage(table, run, word) when word in @stages do
+    {table, []} =
+      update(table, run, fn
+        %{state: :done} = s -> {s, []}
+        %{state: :assigned} = s -> {%{s | stage: String.to_existing_atom(word)}, []}
+        s when word == "terminating" -> {%{s | stage: :terminating}, []}
+        s -> {s, []}
+      end)
+
+    table
+  end
+
+  def report_stage(table, _run, _word), do: table
+
+  @doc """
+  The run's stage: `:assigned` (pushed, nothing heard), `:pending`, `:starting`, `:running`,
+  `:terminating`, or `nil` for a run the table does not hold.
+  """
+  @spec stage(t(), String.t()) :: atom() | nil
+  def stage(%__MODULE__{streams: streams}, run) do
+    case streams do
+      %{^run => %{stage: stage}} -> stage
+      _ -> nil
+    end
+  end
+
+  @doc "A run counts as started only once it is `running` (or already `terminating`)."
+  @spec started?(t(), String.t()) :: boolean()
+  def started?(table, run), do: stage(table, run) in [:running, :terminating]
 
   @doc "The node refused the run: answer the waiter and drop the stream."
   @spec refused(t(), String.t(), map()) :: {t(), [effect()]}
@@ -138,6 +185,30 @@ defmodule Arbiter.Nodes.RunStreams do
           sends = for frame <- frames, do: {:send, s.owner, {s.handle, {:data, frame}}}
           {s, sends ++ [ack(run, s.next)]}
         end
+    end)
+    |> finish_if_complete(run)
+  end
+
+  @doc """
+  An `ARB2` frame (A4): the cursor is an opaque, backend-defined string naming the resume
+  point *after* these bytes. It is stored and echoed in the `ack`, never interpreted, so the
+  backend (the cluster's RFC 3339 timestamps) does its own de-duplication. The one thing the
+  table does is drop a frame whose cursor equals the last one it took (a replay of it).
+  """
+  @spec data_cursor(t(), String.t(), String.t(), binary()) :: {t(), [effect()]}
+  def data_cursor(table, run, cursor, bytes) when is_binary(cursor) do
+    update(table, run, fn
+      %{state: :done} = s ->
+        {s, []}
+
+      %{cursor: ^cursor} = s ->
+        {s, [cursor_ack(run, cursor)]}
+
+      s ->
+        {frames, partial} = LineSplitter.split(s.partial, bytes)
+        s = %{s | cursor: cursor, partial: partial}
+        sends = for frame <- frames, do: {:send, s.owner, {s.handle, {:data, frame}}}
+        {s, sends ++ [cursor_ack(run, cursor)]}
     end)
     |> finish_if_complete(run)
   end
@@ -240,27 +311,46 @@ defmodule Arbiter.Nodes.RunStreams do
     case Map.fetch(table.streams, run) do
       {:ok, %{exit: %{"size" => size} = exit, next: next, state: state} = s}
       when state != :done and next >= size ->
-        status = exit["status"]
+        complete(table, run, s, exit, effects)
 
-        outcome = %{
-          oom?: exit["oom"] == true,
-          exit_code: status,
-          cancelled?: exit["cancelled"] == true,
-          node_lost?: false
-        }
-
-        flushed =
-          for frame <- LineSplitter.flush(s.partial),
-              do: {:send, s.owner, {s.handle, {:data, frame}}}
-
-        s = %{s | state: :done, partial: "", outcome: outcome}
-
-        {put_in(table.streams[run], s),
-         effects ++ flushed ++ ended(s, outcome, status) ++ [{:push, "exit_ack", %{"run" => run}}]}
+      # A4: an opaque-cursor stream names its final cursor instead of a byte count.
+      {:ok, %{exit: %{"cursor" => cursor} = exit, cursor: cursor, state: state} = s}
+      when state != :done ->
+        complete(table, run, s, exit, effects)
 
       _ ->
         {table, effects}
     end
+  end
+
+  defp complete(table, run, s, exit, effects) do
+    status = exit["status"]
+
+    outcome =
+      %{
+        oom?: exit["oom"] == true,
+        exit_code: status,
+        cancelled?: exit["cancelled"] == true,
+        node_lost?: false
+      }
+      |> put_pod_disrupted(exit)
+
+    flushed =
+      for frame <- LineSplitter.flush(s.partial),
+          do: {:send, s.owner, {s.handle, {:data, frame}}}
+
+    s = %{s | state: :done, partial: "", outcome: outcome}
+
+    {put_in(table.streams[run], s),
+     effects ++ flushed ++ ended(s, outcome, status) ++ [{:push, "exit_ack", %{"run" => run}}]}
+  end
+
+  # A5: the pod was evicted, preempted or deleted from outside. Only set when true, so a
+  # machine node's outcome map is exactly what it was.
+  defp put_pod_disrupted(outcome, exit) do
+    if exit["pod_disrupted"] == true or exit["reason"] == "pod_disrupted",
+      do: Map.put(outcome, :pod_disrupted?, true),
+      else: outcome
   end
 
   defp ended(%{owner: owner, handle: handle}, outcome, status),
@@ -270,6 +360,7 @@ defmodule Arbiter.Nodes.RunStreams do
     ]
 
   defp ack(run, offset), do: {:push, "ack", %{"run" => run, "offset" => offset}}
+  defp cursor_ack(run, cursor), do: {:push, "ack", %{"run" => run, "cursor" => cursor}}
 
   defp reply(nil, _value), do: []
   defp reply(from, value), do: [{:reply, from, value}]

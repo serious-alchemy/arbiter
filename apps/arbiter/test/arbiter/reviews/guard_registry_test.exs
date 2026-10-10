@@ -168,10 +168,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker, :fail, 2,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
-    {Arbiter.Worker, :park_spend_cap_now, 2,
-     "G19: a guardrail tier's spend cap stops a runaway live run (`SpendPatrol`), a security " <>
-       "budget policy rather than a review/merge guard; the stopped run's page is the addressed " <>
-       "worker_stopped escalation"},
+    {Arbiter.Worker, :park_now, 2,
+     "G19: a guardrail tier's spend cap stops a runaway live run (`SpendPatrol`); G18: a " <>
+       "subject suspended after a critical guardrail event has its live runs parked " <>
+       "(`Loop.Trust`). Security policy, not a review/merge guard; the stopped run's page is " <>
+       "the addressed worker_stopped escalation"},
     {Arbiter.Worker, :hold_quota_stop, 5,
      "bd-a6vh2x: a run stopped on its provider's quota is held and resumed at the reset; " <>
        "the escalation is only the fallback when no hold could be queued — not a review/merge guard"},

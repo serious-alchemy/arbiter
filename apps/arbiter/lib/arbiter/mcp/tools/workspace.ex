@@ -119,7 +119,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
   @doc """
   A grouped summary of the workspace config: tracker, merge, agent,
   review_agent, routing, review, review_gate, standing_orders, and the names
-  of configured secrets (values never exposed). Mirrors `arb config overview`.
+  of configured secrets (values never exposed), plus `tier_model_overrides`
+  (provider-scoped `agent.config.<provider>.tier_models`, keyed by dotted
+  path). Mirrors `arb config overview`.
   Resolved from the optional `workspace` arg like `workspace_show`.
   """
   @spec workspace_config_overview(Scope.t(), map()) ::
@@ -136,6 +138,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
          merge: Map.get(config, "merge", %{}),
          agent: Map.get(config, "agent", %{}),
          review_agent: Map.get(config, "review_agent", %{}),
+         tier_model_overrides: tier_model_overrides(config),
          routing: Map.get(config, "routing", %{}),
          review: Map.get(config, "review", %{}),
          review_gate: Map.get(config, "review_gate", %{}),
@@ -143,6 +146,24 @@ defmodule Arbiter.MCP.Tools.Workspace do
          attention: config |> AttentionLimits.with_defaults() |> Map.get("attention"),
          secret_keys: workspace_secret_keys(ws)
        }}
+    end
+  end
+
+  # bd-7ifdke: the provider-scoped `<block>.config.<provider>.tier_models`
+  # overrides, surfaced flat so an operator sees which provider runs which
+  # model without digging through the raw agent config.
+  defp tier_model_overrides(config) do
+    for block <- ["agent", "review_agent"],
+        {provider, %{"tier_models" => %{} = tiers}} <- scoped_providers(config, block),
+        into: %{} do
+      {"#{block}.config.#{provider}.tier_models", tiers}
+    end
+  end
+
+  defp scoped_providers(config, block) do
+    case get_in(config, [block, "config"]) do
+      %{} = c -> c |> Enum.filter(fn {k, v} -> is_binary(k) and is_map(v) end) |> Enum.sort()
+      _ -> []
     end
   end
 

@@ -539,7 +539,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs ->
       case Map.get(block, "config") do
         nil -> cs
-        c when is_map(c) -> cs
+        c when is_map(c) -> validate_scoped_tier_models(cs, label, c)
         _ -> Changeset.add_error(cs, field: :config, message: "#{label}.config must be a map")
       end
     end)
@@ -547,6 +547,63 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_agent_block(changeset, label, _) do
     Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
+  end
+
+  # bd-7ifdke: provider-scoped `<block>.config.<provider>.tier_models`. A
+  # sub-map carrying `tier_models` must sit under a real provider key (a typo
+  # such as `antigravity`/`agy` — the adapter key is `gemini` — would be
+  # silently ignored), and each entry must map a known tier to a model name.
+  @tier_names ~w(economy standard premium flagship)
+
+  defp validate_scoped_tier_models(changeset, label, %{} = config) do
+    valid_types = Arbiter.Agents.valid_agent_types()
+
+    config
+    |> Enum.filter(fn {_k, v} ->
+      is_map(v) and not is_struct(v) and Map.has_key?(v, "tier_models")
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce(changeset, fn {provider, sub}, cs ->
+      path = "#{label}.config.#{provider}.tier_models"
+
+      cond do
+        provider not in valid_types ->
+          Changeset.add_error(cs,
+            field: :config,
+            message:
+              "#{label}.config.#{provider} is not a known provider for tier_models " <>
+                "(use one of #{Enum.join(valid_types, ", ")}; agy/antigravity is scoped under gemini)"
+          )
+
+        not is_map(sub["tier_models"]) ->
+          Changeset.add_error(cs, field: :config, message: "#{path} must be a map")
+
+        true ->
+          validate_tier_model_entries(cs, path, sub["tier_models"])
+      end
+    end)
+  end
+
+  defp validate_tier_model_entries(changeset, path, tier_models) do
+    Enum.reduce(Enum.sort(tier_models), changeset, fn {tier, model}, cs ->
+      cond do
+        tier not in @tier_names ->
+          Changeset.add_error(cs,
+            field: :config,
+            message:
+              "#{path}: unknown tier #{inspect(tier)}; must be one of #{Enum.join(@tier_names, ", ")}"
+          )
+
+        is_binary(model) and String.trim(model) != "" ->
+          cs
+
+        true ->
+          Changeset.add_error(cs,
+            field: :config,
+            message: "#{path}.#{tier} must be a non-empty model name string"
+          )
+      end
+    end)
   end
 
   # bd-5yydxh: `agent.security.sandbox.{egress,allow_hosts,backend}`, workspace-wide

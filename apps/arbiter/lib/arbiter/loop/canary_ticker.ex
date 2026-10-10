@@ -22,6 +22,11 @@ defmodule Arbiter.Loop.CanaryTicker do
   failed write, must not stop the cycle before it reaches the workspace whose
   canary is regressing.
 
+  After the workspaces, each cycle runs the earned-trust fold once,
+  installation-wide (`Arbiter.Loop.Trust.tick/1`, G18): the trust records, and
+  the automatic suspensions, demotions and promotion proposals they call for.
+  `config :arbiter, :loop_trust, enabled: false` turns that half off.
+
   ## Configuration
 
   Via `config :arbiter, :loop_canary_ticker`:
@@ -38,6 +43,7 @@ defmodule Arbiter.Loop.CanaryTicker do
   require Logger
 
   alias Arbiter.Loop.Canary
+  alias Arbiter.Loop.Trust
   alias Arbiter.Tasks.Workspace
 
   @default_interval_ms :timer.minutes(15)
@@ -93,11 +99,32 @@ defmodule Arbiter.Loop.CanaryTicker do
 
   defp run_cycle do
     Enum.each(workspaces(), &tick_workspace/1)
+    tick_trust()
     :ok
   rescue
     e ->
       Logger.debug("Loop.CanaryTicker cycle swallowed: #{Exception.message(e)}")
       :ok
+  end
+
+  # G18: the earned-trust fold rides the same timer, installation-wide, under its
+  # own rescue so a trust failure never costs a canary its tick (or the reverse).
+  defp tick_trust do
+    if trust_enabled?() do
+      case Trust.tick() do
+        {:ok, %{actions: []}} ->
+          :ok
+
+        {:ok, %{actions: actions}} ->
+          Enum.each(actions, &Logger.info("Loop.Trust #{&1.action}: #{&1.subject}"))
+      end
+    end
+  rescue
+    e -> Logger.warning("Loop.Trust tick raised: #{Exception.message(e)}")
+  end
+
+  defp trust_enabled? do
+    :arbiter |> Application.get_env(:loop_trust, []) |> Keyword.get(:enabled, true)
   end
 
   defp tick_workspace(workspace) do

@@ -155,4 +155,112 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert [{:reply, _, {:error, :node_lost}}] = e
     end
   end
+
+  describe "A3: per-run stages" do
+    test "a ready run counts as started (stage running)" do
+      {t, _} = S.ready(table(), "r1")
+      assert S.stage(t, "r1") == :running
+      assert S.started?(t, "r1")
+    end
+
+    test "a run still waiting for the node is not started, whatever it reports short of running" do
+      t = table()
+      assert S.stage(t, "r1") == :assigned
+      refute S.started?(t, "r1")
+
+      for reported <- ["pending", "starting"] do
+        t = S.report_stage(t, "r1", reported)
+        assert S.stage(t, "r1") == String.to_existing_atom(reported)
+        refute S.started?(t, "r1")
+      end
+    end
+
+    test "terminating is recorded once running; an unknown word changes nothing" do
+      {t, _} = S.ready(table(), "r1")
+      assert S.stage(S.report_stage(t, "r1", "terminating"), "r1") == :terminating
+      assert S.stage(S.report_stage(t, "r1", "bogus"), "r1") == :running
+    end
+
+    test "a late pending report cannot move a started run back" do
+      {t, _} = S.ready(table(), "r1")
+      assert S.stage(S.report_stage(t, "r1", "pending"), "r1") == :running
+    end
+
+    test "a node reporting running starts the run even if run.ready was lost" do
+      {t, effects} = S.report_running(table(), "r1")
+      assert [{:reply, _, {:ok, @handle}}] = effects
+      assert S.started?(t, "r1")
+    end
+
+    test "an unknown run has no stage and is not started" do
+      assert S.stage(%S{}, "nope") == nil
+      refute S.started?(%S{}, "nope")
+    end
+  end
+
+  describe "A3: refusals" do
+    test "every refuse reason is passed through for the dispatch to hold on" do
+      for reason <- ~w(no_capacity unschedulable image_unavailable bad_spec) do
+        {_t, [{:reply, _, {:error, {:refused, ^reason, "why"}}}]} =
+          S.refused(table(), "r1", %{"reason" => reason, "detail" => "why"})
+      end
+    end
+  end
+
+  describe "A4: opaque stdout cursors" do
+    test "an opaque frame is delivered and acked with its own cursor, uninterpreted" do
+      {t, _} = S.ready(table(), "r1")
+      {t, e} = S.data_cursor(t, "r1", "2026-10-06T10:00:00.000000001Z", "ab\ncd")
+      assert data_msgs(e) == [{:eol, "ab"}]
+
+      assert {:push, "ack", %{"run" => "r1", "cursor" => "2026-10-06T10:00:00.000000001Z"}} in e
+
+      {_t, e} = S.data_cursor(t, "r1", "2026-10-06T10:00:01.5Z", "e\n")
+      assert data_msgs(e) == [{:eol, "cde"}]
+      assert {:push, "ack", %{"run" => "r1", "cursor" => "2026-10-06T10:00:01.5Z"}} in e
+    end
+
+    test "an exit naming the final cursor finishes once that cursor has been delivered" do
+      owner = self()
+      {t, _} = S.ready(table(), "r1")
+      {t, e} = S.exit(t, "r1", %{"status" => 0, "cursor" => "c2"})
+      assert e == []
+
+      {t, _} = S.data_cursor(t, "r1", "c1", "one\n")
+      assert S.outcome(t, "r1") == :pending
+
+      {t, e} = S.data_cursor(t, "r1", "c2", "two\n")
+      assert {:send, owner, {@handle, {:exit_status, 0}}} in e
+      assert {:push, "exit_ack", %{"run" => "r1"}} in e
+      assert {:ok, %{exit_code: 0}} = S.outcome(t, "r1")
+    end
+
+    test "an exit that already matches the delivered cursor finishes at once" do
+      {t, _} = S.ready(table(), "r1")
+      {t, _} = S.data_cursor(t, "r1", "c1", "one\n")
+      {_t, e} = S.exit(t, "r1", %{"status" => 0, "cursor" => "c1"})
+      assert Enum.any?(e, &match?({:send, _, {_, {:exit_status, 0}}}, &1))
+    end
+
+    test "an integer-offset stream is untouched by the opaque path" do
+      {t, _} = S.ready(table(), "r1")
+      {_t, e} = S.data(t, "r1", 0, "ab\n")
+      assert {:push, "ack", %{"run" => "r1", "offset" => 3}} in e
+    end
+  end
+
+  describe "A5: pod_disrupted" do
+    test "an exit flagged pod_disrupted carries the flag in the outcome" do
+      {t, _} = S.ready(table(), "r1")
+      {t, _} = S.exit(t, "r1", %{"status" => 137, "size" => 0, "pod_disrupted" => true})
+      assert {:ok, %{pod_disrupted?: true, node_lost?: false}} = S.outcome(t, "r1")
+    end
+
+    test "an ordinary exit has no pod_disrupted key at all (machine outcome unchanged)" do
+      {t, _} = S.ready(table(), "r1")
+      {t, _} = S.exit(t, "r1", %{"status" => 1, "size" => 0})
+      assert {:ok, outcome} = S.outcome(t, "r1")
+      assert outcome |> Map.keys() |> Enum.sort() == [:cancelled?, :exit_code, :node_lost?, :oom?]
+    end
+  end
 end

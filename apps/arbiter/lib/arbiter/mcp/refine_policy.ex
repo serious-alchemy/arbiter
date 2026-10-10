@@ -91,6 +91,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_tracker "upstream tracker sync is coordinator authority"
   @deny_reason_scope "a refine session is bound to one workspace and one ticket"
   @deny_reason_memory "the shared memory layer is coordinator authority"
+  @deny_reason_trust "earned trust is coordinator and operator authority"
 
   @deny %{
     # lifecycle / state
@@ -183,6 +184,12 @@ defmodule Arbiter.MCP.RefinePolicy do
     "memory_quarantine_list" => @deny_reason_memory,
     "memory_quarantine_restore" => @deny_reason_memory,
     "memory_distill" => @deny_reason_memory,
+
+    # earned trust (G18): no tier can promote; reads and suspension decisions
+    # are the coordinator's
+    "trust_show" => @deny_reason_trust,
+    "trust_confirm" => @deny_reason_trust,
+    "trust_dismiss" => @deny_reason_trust,
 
     # tracker
     "tracker_claim" => @deny_reason_tracker,

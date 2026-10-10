@@ -99,6 +99,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/release/self_deploy.ex" => :scrubbed,
     # bd-6mo6be: worker-side `codex mcp list --json` check, via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/mcp/agent_config/codex.ex" => :scrubbed,
+    # bd-7i9pxn (G18): the host agent CLI's `--version` (the harness version a run
+    # records), via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/agents/harness_version.ex" => :scrubbed,
     # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.
     "apps/arbiter/lib/arbiter/agents/codex.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/worktree.ex" => :scrubbed,

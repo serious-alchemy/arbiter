@@ -116,6 +116,52 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
   end
 
+  describe "constrained nodes (A3) and degraded: netpol_unenforced (A7)" do
+    test "a constrained node ranks last even when it is the emptiest" do
+      rows = [row("idle-but-constrained", constrained?: true), row("busy", live: 1, max: 2)]
+      assert {:ok, {:node, %{name: "busy"}}} = place(%{mode: :remote_only}, rows)
+    end
+
+    test "prefer_remote skips a constrained node and runs locally when nothing else can take it" do
+      assert {:ok, {:local, :no_node}} = place(%{}, [row("a", constrained?: true)])
+    end
+
+    test "remote_only has no local to fall back on: a constrained node is the last resort" do
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{mode: :remote_only}, [row("a", constrained?: true)])
+    end
+
+    test "a node that is not constrained is unaffected, with or without the key" do
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, [row("a", constrained?: false)])
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, [row("a")])
+    end
+
+    test "a netpol_unenforced node is excluded" do
+      rows = [row("a", degraded: ["netpol_unenforced"])]
+      assert {:error, {:no_node_capacity, _}} = place(%{mode: :remote_only}, rows)
+      assert {:ok, {:local, :no_node}} = place(%{}, rows)
+    end
+
+    test "the per-node allow_unenforced_network override admits it again" do
+      rows = [row("a", degraded: ["netpol_unenforced"], allow_unenforced_network: true)]
+      assert {:ok, {:node, %{name: "a"}}} = place(%{mode: :remote_only}, rows)
+    end
+
+    test "the override covers only netpol_unenforced, not other degradations" do
+      rows = [row("a", degraded: ["something_else"], allow_unenforced_network: true)]
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, rows)
+    end
+
+    test "a healthy node is picked over an overridden unenforced one only by ranking, not exclusion" do
+      rows = [
+        row("a", degraded: ["netpol_unenforced"], allow_unenforced_network: true),
+        row("b", live: 1, max: 2)
+      ]
+
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, rows)
+    end
+  end
+
   describe "place/2" do
     test "an ineligible run is placed locally without consulting the pool" do
       rows = fn -> flunk("the node pool must not be read for an ineligible run") end

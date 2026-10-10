@@ -25,6 +25,8 @@ defmodule Arbiter.Loop.SubjectStats do
   difficulty correction. `sample/1` returns one map per **closed, completed**
   task whose first attempt started in the window:
 
+    * `:run_id`, `:started_at`, `:repo` — the first attempt itself, so the
+      guardrails' trust records (G18) attribute the task to that run's subject;
     * `:provider`, `:model`, `:family`, `:pool`, `:tier`, `:difficulty`
       (`difficulty_at_dispatch`, not the corrected one; a dispatch with none
       recorded keys as the routing default, D2), `:issue_type` (a string);
@@ -111,6 +113,9 @@ defmodule Arbiter.Loop.SubjectStats do
 
   @type task :: %{
           task_id: String.t(),
+          run_id: String.t(),
+          started_at: DateTime.t() | nil,
+          repo: String.t() | nil,
           provider: String.t() | nil,
           model: String.t(),
           family: ModelFamily.family() | nil,
@@ -213,7 +218,7 @@ defmodule Arbiter.Loop.SubjectStats do
       query(
         """
         SELECT id, task_id, base_task_id, model, model_tier, provider,
-               difficulty_at_dispatch, started_at
+               difficulty_at_dispatch, started_at, repo
         FROM worker_runs
         WHERE kind = 'implement' AND COALESCE(role, 'base') = 'base'
           AND model IS NOT NULL
@@ -381,6 +386,9 @@ defmodule Arbiter.Loop.SubjectStats do
 
     %{
       task_id: id,
+      run_id: first["id"],
+      started_at: started,
+      repo: first["repo"],
       provider: provider,
       model: first["model"],
       family: family,

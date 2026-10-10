@@ -10,6 +10,10 @@ bd-clzkvp), most-quota routing (`Arbiter.Quota.Headroom`,
 · **Reconciles with:** [guardrail profiles](guardrail-profiles.md) (bd-8apkz6,
 epic bd-1e80nw) · **Status:** proposed 2026-10-01. Nothing here is
 implemented. The ticket plan is in [§11](#11-phased-plan-and-ticket-breakdown).
+· **Re-scoped by (proposed):** [provider-dynamic-concurrency](provider-dynamic-concurrency.md)
+(bd-8qdviv, 2026-10-10). It folds R7, R11 and R16's expiring headroom into a
+per-pool concurrency budget, keeps R9's model choice, drops R10, and moves
+feasibility from the gate to a free seat once `enforce` is on. See its §8.
 
 ## Decision
 

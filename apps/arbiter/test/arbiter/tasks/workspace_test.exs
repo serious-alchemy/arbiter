@@ -236,6 +236,53 @@ defmodule Arbiter.Tasks.WorkspaceTest do
 
       assert err |> Exception.message() |> String.contains?("agent.type must be a string or list")
     end
+
+    test "accepts provider-scoped agent.config.<provider>.tier_models" do
+      config = %{
+        "agent" => %{
+          "type" => ["claude", "gemini"],
+          "config" => %{"gemini" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}}
+        }
+      }
+
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "tier-scoped-ok", config: config})
+    end
+
+    test "rejects tier_models scoped under an unknown provider key" do
+      config = %{
+        "agent" => %{
+          "config" => %{
+            "antigravity" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}
+          }
+        }
+      }
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "tier-bad-provider", config: config})
+
+      msg = Exception.message(err)
+      assert msg =~ "agent.config.antigravity"
+      assert msg =~ "not a known provider"
+    end
+
+    test "rejects an unknown tier, empty model, or non-map in a provider-scoped tier_models" do
+      bad_tier = %{"agent" => %{"config" => %{"gemini" => %{"tier_models" => %{"mega" => "x"}}}}}
+
+      bad_model = %{
+        "agent" => %{"config" => %{"gemini" => %{"tier_models" => %{"standard" => ""}}}}
+      }
+
+      not_map = %{"review_agent" => %{"config" => %{"claude" => %{"tier_models" => "opus"}}}}
+
+      assert {:error, err1} = Ash.create(Workspace, %{name: "tier-bad-tier", config: bad_tier})
+      assert Exception.message(err1) =~ "agent.config.gemini.tier_models: unknown tier"
+
+      assert {:error, err2} = Ash.create(Workspace, %{name: "tier-bad-model", config: bad_model})
+      assert Exception.message(err2) =~ "agent.config.gemini.tier_models.standard"
+
+      assert {:error, err3} = Ash.create(Workspace, %{name: "tier-not-map", config: not_map})
+      assert Exception.message(err3) =~ "review_agent.config.claude.tier_models must be a map"
+    end
   end
 
   describe "update/2" do

@@ -1065,6 +1065,30 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "trust_suspended/1 (G18)" do
+    test "names the suspended subject and the event, and how the coordinator decides" do
+      reason =
+        StopReason.trust_suspended(%{
+          subject: "antigravity/gemini-3.8-flash-low",
+          kind: "public_upload_attempt",
+          run_id: "run-1"
+        })
+
+      assert reason.category == :trust_suspended
+      assert reason.summary =~ "antigravity/gemini-3.8-flash-low"
+      assert reason.summary =~ "public_upload_attempt"
+      assert reason.remediation =~ "arb trust confirm"
+      assert reason.remediation =~ "arb trust dismiss"
+      assert StopReason.label(reason) =~ "suspended"
+      assert StopReason.to_map(reason).category == :trust_suspended
+    end
+
+    test "is operational for the loop's failure classifier" do
+      assert {:operational, :trust_suspended} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:trust_suspended]
+    end
+  end
+
   describe "node_lost/1 (RW12)" do
     test "is its own category, names the node, and is not a signal or an agent failure" do
       reason = StopReason.node_lost("edge-1")
@@ -1081,6 +1105,44 @@ defmodule Arbiter.Worker.StopReasonTest do
     test "is infrastructure, conclusive on its own, for the loop's failure classifier" do
       assert {:operational, :node_lost} ==
                Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:node_lost]
+    end
+  end
+
+  describe "pod_disrupted/1 (K12, A5)" do
+    test "is its own category, names the node, and is interrupted-not-failed material" do
+      reason = StopReason.pod_disrupted("kube-1")
+
+      assert reason.category == :pod_disrupted
+      assert reason.summary =~ "kube-1"
+      assert reason.summary =~ "evicted"
+      assert reason.remediation =~ "resum"
+      assert reason.exit_status == nil
+      assert reason.signal == nil
+      assert StopReason.label(reason) =~ "pod disrupted"
+      assert StopReason.to_map(reason).category == :pod_disrupted
+    end
+
+    test "is infrastructure for the loop's failure classifier, like node_lost" do
+      assert {:operational, :pod_disrupted} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:pod_disrupted]
+    end
+  end
+
+  describe "placement_refused/3 (K12, A3)" do
+    test "is its own category naming the node and why it refused" do
+      reason = StopReason.placement_refused("kube-1", "unschedulable", "0/3 nodes available")
+
+      assert reason.category == :placement_refused
+      assert reason.summary =~ "kube-1"
+      assert reason.summary =~ "unschedulable"
+      assert reason.summary =~ "0/3 nodes available"
+      assert reason.exit_status == nil
+      assert StopReason.label(reason) =~ "refused"
+    end
+
+    test "is infrastructure for the loop's failure classifier" do
+      assert {:operational, :placement_refused} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:placement_refused]
     end
   end
 

@@ -283,7 +283,12 @@ resolved at spawn time:
     `--model` and `--effort` are never passed together). Both surfaces are
     configurable per-workspace via `agent.config["tier_models"]` /
     `["thinking_argv"]`, optionally scoped under the `"gemini"`
-    `ProviderConfig` namespace.
+    `ProviderConfig` namespace. To send only agy's `standard` to pro while
+    Claude's stays Sonnet: `arb config set agent.config.gemini.tier_models.standard gemini-3.1-pro-high`
+    (the `gemini` key scopes both `agy` and `gemini`; workspace validation
+    rejects `tier_models` under an unknown provider key such as
+    `antigravity`, an unknown tier, or an empty model, and
+    `workspace_config_overview` lists them under `tier_model_overrides`).
 
 Built-in default mapping (signed off by the coordinator; do not change
 without re-litigation):

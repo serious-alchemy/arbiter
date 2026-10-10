@@ -32,7 +32,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        usage_calibration account_set
                        memory_pending_list memory_pending_diff memory_pending_apply
                        memory_pending_reject memory_quarantine_list memory_quarantine_restore
-                       memory_distill)
+                       memory_distill
+                       trust_show trust_confirm trust_dismiss)
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).

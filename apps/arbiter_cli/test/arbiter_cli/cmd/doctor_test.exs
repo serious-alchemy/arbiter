@@ -2596,6 +2596,95 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "not set"
     end
 
+    test "an unset registry adds no row and does not change the n/a line (K8)" do
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false}}))
+      assert [%{name: "nodes", status: :na}] = nodes_results()
+    end
+
+    test "a reachable registry is an ok row naming it and the last published image (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "password_set" => true,
+            "published" => [
+              %{"kind" => "worker", "ref" => "registry.example.com/arb/worker@sha256:abc"}
+            ],
+            "last_error" => nil,
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "nodes.registry")
+      assert detail =~ "registry.example.com/arb"
+      assert detail =~ "worker"
+      refute Enum.any?(nodes_results(), &(&1.name == "nodes"))
+    end
+
+    test "an unreachable registry warns, non-fatally, with a hint (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => false,
+            "reachable_detail" => ":econnrefused",
+            "published" => [],
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :warn, blocks_readiness: false} =
+               result = named(nodes_results(), "nodes.registry")
+
+      assert result.detail =~ "econnrefused"
+      assert result.hint =~ "nodes.registry"
+    end
+
+    test "a failed publish and excluded seed paths each warn (K8, K26)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "published" => [],
+            "last_error" => "worker: {:timeout, 600000}",
+            "seed_excluded" => ["priv/plts"]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :warn, detail: detail} = named(results, "nodes.registry")
+      assert detail =~ "timeout"
+      assert %{status: :warn, detail: seed} = named(results, "nodes.registry seed_paths")
+      assert seed =~ "priv/plts"
+    end
+
+    test "a registry whose password is missing for a username is called out (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "username" => "bot",
+            "password_set" => false,
+            "reachable" => true,
+            "published" => [],
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "nodes.registry")
+      assert detail =~ "password"
+    end
+
     test "a private endpoint is quiet; a public one warns" do
       stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
       assert %{status: :ok} = named(nodes_results(), "nodes.public_url is a private endpoint")

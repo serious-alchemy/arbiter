@@ -131,6 +131,51 @@ defmodule Arbiter.Worker.NodeLostTest do
     refute_receive {:resumed, _}, 300
   end
 
+  # K12 (A5): a pod evicted, preempted or deleted from outside is handled like a lost node.
+  test "a pod_disrupted exit ends the run interrupted with no resume attempt consumed",
+       %{pid: pid, task_id: task_id, dir: dir} do
+    lose_node(pid, dir, %{
+      oom?: false,
+      exit_code: 137,
+      cancelled?: false,
+      node_lost?: false,
+      pod_disrupted?: true
+    })
+
+    snap = wait_finished(pid)
+    assert %{state: :finished, outcome: :interrupted} = snap
+    assert snap.meta.stop_reason.category == :pod_disrupted
+    assert snap.meta.failure_reason =~ "pod disrupted"
+    assert Map.get(snap.meta, :resume_attempts, 0) == 0
+
+    run = Ash.get!(Run, snap.run_id)
+    assert run.outcome == :interrupted
+    assert run.stop_category == "pod_disrupted"
+
+    # re-dispatched through Placement exactly like a lost node, and not paged as a failure
+    assert_receive {:resumed, ^task_id}, 2_000
+    refute_receive {:resumed, _}, 100
+
+    assert [] =
+             Message
+             |> Ash.Query.filter(task_ref == ^task_id and kind == :escalation)
+             |> Ash.read!()
+  end
+
+  test "a pod_disrupted: false outcome (any machine exit) is unchanged", %{pid: pid, dir: dir} do
+    lose_node(pid, dir, %{
+      oom?: false,
+      exit_code: 137,
+      cancelled?: false,
+      node_lost?: false,
+      pod_disrupted?: false
+    })
+
+    snap = wait_finished(pid)
+    refute snap.outcome == :interrupted
+    refute_receive {:resumed, _}, 200
+  end
+
   test "an ordinary exit without the node_lost outcome is unchanged (still not interrupted)",
        %{pid: pid, dir: dir} do
     lose_node(pid, dir, %{oom?: false, exit_code: 137, cancelled?: false, node_lost?: false})
