@@ -101,4 +101,20 @@ defmodule Arbiter.Board.SnapshotLoadWalkTest do
     refute Map.has_key?(board, :walk)
     assert board.promote == ctx.ready.id
   end
+
+  @tag capture_log: true
+  test "a walk input read that exits leaves the board without one", ctx do
+    # The node overview, read only for the walk, exiting as a dead process would.
+    exiting = Stream.map([:row], fn _ -> exit(:node_overview_down) end)
+
+    board =
+      Snapshot.load(
+        workspace_id: ctx.ws.id,
+        admission: :shadow,
+        walk_opts: Keyword.merge(ctx.walk_opts, remote_available?: true, nodes: exiting)
+      )
+
+    refute Map.has_key?(board, :walk)
+    assert board.promote == ctx.ready.id
+  end
 end

@@ -543,6 +543,13 @@ defmodule Arbiter.Board.Snapshot do
       )
 
       input
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Board.Snapshot: the scheduler walk's inputs failed: #{inspect({kind, reason})}"
+      )
+
+      input
   end
 
   # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
