@@ -36,6 +36,8 @@ defmodule Arbiter.Worker.TestRun do
   """
 
   alias Arbiter.Worker.PrepushCheck.Touched
+  alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
   alias Arbiter.Worker.TestReport
 
   @default_timeout_s 600
@@ -94,6 +96,41 @@ defmodule Arbiter.Worker.TestRun do
       log_path: nil,
       command: ""
     }
+  end
+
+  @kill_after_s 10
+  @tmp_vars ~w(TMPDIR TMP TEMP)
+
+  @doc """
+  An `exec` for a run that is not sandboxed: `sh -c` in `worktree` on the host,
+  bounded by `timeout(1)` (124 on expiry), with the run's own `TMPDIR` when
+  `env` (the session's env pairs) names one, so the log lands where the worker
+  can read it.
+  """
+  @spec host_exec(String.t(), [{String.t(), String.t()}]) :: (String.t(), pos_integer() ->
+                                                                {String.t(), integer()}
+                                                                | {:error, term()})
+  def host_exec(worktree, env) do
+    tmp_pairs = for {k, v} <- env, to_string(k) in @tmp_vars, do: {to_string(k), to_string(v)}
+    cmd_env = SpawnEnv.cmd_env(tmp_pairs, nil)
+
+    fn command, seconds ->
+      case System.find_executable("timeout") do
+        nil ->
+          {:error, :no_timeout_binary}
+
+        timeout_bin ->
+          args = [
+            "--kill-after=#{@kill_after_s}",
+            Integer.to_string(seconds),
+            "sh",
+            "-c",
+            command
+          ]
+
+          ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: cmd_env, stderr_to_stdout: true)
+      end
+    end
   end
 
   # -- selecting the paths ----------------------------------------------------
