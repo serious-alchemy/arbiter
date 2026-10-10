@@ -10,6 +10,9 @@ defmodule Arbiter.Worker.AdoptionTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Accounts.WorkspaceProviderAccount
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Workers.Run
@@ -169,6 +172,52 @@ defmodule Arbiter.Worker.AdoptionTest do
       assert after_open.node_id == node_id
       assert rows_for(task_id) == [row.id]
       assert %{node_id: ^node_id} = registry_entry(task_id)
+    end
+
+    # §10.4.10 and DC4: the node comes from the adoption, the seat (account, pool) from the
+    # workspace's provider account, both in `init/1`; the session open re-stamps neither away.
+    test "stamps its registry entry with the adoption's node and its seat from the start" do
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "adopt-seat-#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "adopt-seat-#{System.unique_integer([:positive])}",
+          prefix: "as#{System.unique_integer([:positive])}"
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      row = row!()
+      task_id = row.task_id
+      node_id = row.node_id
+      account_id = account.id
+
+      # the meta `Dispatch.adopt/2` builds: its `agent_type: :claude` is the provider
+      {:ok, pid} =
+        Worker.start(
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          meta: %{adopt: adopt_info(row), provider: "claude"}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: Worker.abandon_adoption(pid) end)
+
+      assert %{node_id: ^node_id, provider: "claude", account_id: ^account_id, pool: "claude"} =
+               registry_entry(task_id)
+
+      _handle = open!(pid, node_id, row.id)
+
+      assert %{node_id: ^node_id, provider: "claude", account_id: ^account_id, pool: "claude"} =
+               registry_entry(task_id)
     end
 
     test "abandon_adoption gives up without writing the row, after the session opened or before" do
