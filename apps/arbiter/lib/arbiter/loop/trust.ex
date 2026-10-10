@@ -775,14 +775,20 @@ defmodule Arbiter.Loop.Trust do
   defp changed?(_old, nil), do: false
   defp changed?(old, new), do: old != new
 
+  # The earliest run since the last fold that reports a version other than `old`.
   defp first_new_run(runs, prior, old) do
     runs
-    |> Enum.filter(&(prior.last_run_at == nil or after?(&1.started_at, prior.last_run_at)))
-    |> Enum.filter(
-      &(changed?(old.harness_version, &1.harness_version) or changed?(old.model_version, &1.model))
-    )
+    |> Enum.filter(&(newer_run?(&1, prior) and new_version?(&1, old)))
     |> Enum.min_by(& &1.started_at, DateTime, fn -> nil end)
   end
+
+  defp newer_run?(run, prior),
+    do: prior.last_run_at == nil or after?(run.started_at, prior.last_run_at)
+
+  defp new_version?(run, old),
+    do:
+      changed?(old.harness_version, run.harness_version) or
+        changed?(old.model_version, run.model)
 
   defp stringify(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
 

@@ -139,24 +139,35 @@ defmodule ArbiterCli.Cmd.Trust do
   defp status(_subject), do: ""
 
   defp print_detail(d) do
-    r = d["record"] || %{}
-    v = d["versions"] || %{}
-
     IO.puts(d["subject"])
+    print_tier(d)
+    print_suspension(d["subject"], d["suspended"])
+    print_record(d["record"] || %{})
+    print_versions(d["versions"] || %{})
+    print_eligibility(d["eligibility"] || %{})
+    print_events(d["recent_events"] || [])
+    print_pending(d["subject"], d["pending"] || [])
+    print_history(d["history"] || [])
+  end
 
+  defp print_tier(d) do
     IO.puts(
       "  tier: #{d["tier"] || "— (no subject rule: guardrails off)"}" <>
         effective(d) <> "  pinned: #{if d["pinned"], do: "yes", else: "no"}"
     )
+  end
 
-    if s = d["suspended"] do
-      IO.puts(
-        "  suspended since #{s["at"]}: #{s["kind"]} on run #{s["run_id"] || "?"} — the " <>
-          "coordinator decides: arb trust confirm #{d["subject"]} | " <>
-          "arb trust dismiss #{d["subject"]} --reason \"...\""
-      )
-    end
+  defp print_suspension(_subject, nil), do: :ok
 
+  defp print_suspension(subject, s) do
+    IO.puts(
+      "  suspended since #{s["at"]}: #{s["kind"]} on run #{s["run_id"] || "?"} — the " <>
+        "coordinator decides: arb trust confirm #{subject} | " <>
+        "arb trust dismiss #{subject} --reason \"...\""
+    )
+  end
+
+  defp print_record(r) do
     IO.puts(
       "  record (#{r["window_days"]}d): #{r["clean_runs"]}/#{r["runs"]} clean runs on " <>
         "#{r["clean_tickets"]} ticket(s) across #{r["clean_repos"]} repo(s); events: " <>
@@ -166,13 +177,10 @@ defmodule ArbiterCli.Cmd.Trust do
     IO.puts(
       "  round-1 approve rate: #{pct(r["round1_approve_rate"])} over #{r["reviewed"]} reviewed"
     )
-
-    IO.puts("  versions: harness #{v["harness"] || "—"}, model #{v["model"] || "—"}")
-    print_eligibility(d["eligibility"] || %{})
-    print_events(d["recent_events"] || [])
-    print_pending(d["subject"], d["pending"] || [])
-    print_history(d["history"] || [])
   end
+
+  defp print_versions(v),
+    do: IO.puts("  versions: harness #{v["harness"] || "—"}, model #{v["model"] || "—"}")
 
   defp effective(%{"tier" => tier, "effective_tier" => tier}), do: ""
   defp effective(%{"effective_tier" => nil}), do: ""
