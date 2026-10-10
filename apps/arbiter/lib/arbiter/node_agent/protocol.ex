@@ -43,7 +43,12 @@ defmodule Arbiter.NodeAgent.Protocol do
         "upgrade" => "tarball",
         "bridge_streams" => "mux",
         "run_hold" => "quiesce",
+<<<<<<< HEAD
         "exec" => "run"
+=======
+        # bd-4p1vui: a held run can be handed to a new Worker (`adopt{run}`)
+        "run_adopt" => "attach"
+>>>>>>> 3d2bba3c2 (Node adoption handshake: Session.adopt/adoptable/unadopt, agent Run.adopt, adopt.refused, line-boundary stdout acks (bd-4p1vui))
       },
       "capacity" => capacity(config),
       "inventory" => %{

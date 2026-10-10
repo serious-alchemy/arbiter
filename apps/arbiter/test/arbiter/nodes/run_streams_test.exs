@@ -30,7 +30,8 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       {t, _} = S.ready(table(), "r1")
       {t, effects} = S.data(t, "r1", 0, "ab\ncd")
       assert data_msgs(effects) == [{:eol, "ab"}]
-      assert {:push, "ack", %{"run" => "r1", "offset" => 5}} in effects
+      # bd-4p1vui: the held partial "cd" is not acked yet (see the line-boundary tests)
+      assert {:push, "ack", %{"run" => "r1", "offset" => 3}} in effects
 
       {_t, effects} = S.data(t, "r1", 5, "e\n")
       assert data_msgs(effects) == [{:eol, "cde"}]
@@ -56,6 +57,86 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       {t, _} = S.ready(table(), "r1")
       {_t, effects} = S.data(t, "r1", 10, "late\n")
       assert effects == []
+    end
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.5): the node's replay point is always the
+  # start of a line, so a stream picked up by a new owner after a primary restart never
+  # begins mid-line (the head of that line died with the old primary's partial buffer).
+  describe "line-boundary acks" do
+    test "the ack stops at the start of a held partial line, and a replay from it delivers that line once" do
+      {t, _} = S.ready(table(), "r1")
+      {t, e} = S.data(t, "r1", 0, "ab\ncd")
+      assert data_msgs(e) == [{:eol, "ab"}]
+      assert {:push, "ack", %{"run" => "r1", "offset" => 3}} in e
+
+      # the node resends from the ack: the held "cd" is trimmed, not delivered twice
+      {_t, e} = S.data(t, "r1", 3, "cde\n")
+      assert data_msgs(e) == [{:eol, "cde"}]
+      assert {:push, "ack", %{"run" => "r1", "offset" => 7}} in e
+    end
+
+    test "bytes that only extend the held partial line move no ack" do
+      {t, _} = S.ready(table(), "r1")
+      {t, _} = S.data(t, "r1", 0, "ab\ncd")
+      {_t, e} = S.data(t, "r1", 5, "ef")
+      assert data_msgs(e) == []
+      assert {:push, "ack", %{"run" => "r1", "offset" => 3}} in e
+    end
+
+    test "a line cut at the port's 64 KiB limit is acked past the chunk it delivered" do
+      {t, _} = S.ready(table(), "r1")
+      {_t, e} = S.data(t, "r1", 0, String.duplicate("x", 65_536 + 10))
+      assert [{:noeol, chunk}] = data_msgs(e)
+      assert byte_size(chunk) == 65_536
+      assert {:push, "ack", %{"run" => "r1", "offset" => 65_536}} in e
+    end
+
+    test "a replay wholly before the held line is re-acked at the line start" do
+      {t, _} = S.ready(table(), "r1")
+      {t, _} = S.data(t, "r1", 0, "ab\ncd")
+      {_t, e} = S.data(t, "r1", 0, "ab\n")
+      assert e == [{:push, "ack", %{"run" => "r1", "offset" => 3}}]
+    end
+  end
+
+  # bd-4p1vui (§10.4.3): a run a node kept across a primary restart, taken over by a new owner.
+  describe "adoption" do
+    test "an adopted run resumes at the node's acked offset and its owner is answered on run.ready" do
+      waiter = {self(), make_ref()}
+      t = S.adopt(%S{}, "r1", @handle, self(), waiter, %{"arb" => "/new/arb.sock"}, 120)
+      assert S.adopting?(t, "r1")
+      assert S.bridge_target(t, "r1", "arb") == {:ok, "/new/arb.sock"}
+      refute S.started?(t, "r1")
+
+      {t, effects} = S.ready(t, "r1", %{"adopted" => true, "acked" => 120})
+      assert effects == [{:reply, waiter, {:ok, @handle}}]
+      refute S.adopting?(t, "r1")
+      assert S.started?(t, "r1")
+
+      {_t, e} = S.data(t, "r1", 120, "next\n")
+      assert data_msgs(e) == [{:eol, "next"}]
+      assert {:push, "ack", %{"run" => "r1", "offset" => 125}} in e
+    end
+
+    test "run.ready's acked offset wins over the one the run was adopted at" do
+      t = S.adopt(%S{}, "r1", @handle, self(), nil, %{}, 100)
+      {t, _} = S.ready(t, "r1", %{"acked" => 140})
+      {_t, e} = S.data(t, "r1", 140, "x\n")
+      assert data_msgs(e) == [{:eol, "x"}]
+    end
+
+    test "a plain run.ready (a reattach after a blip mid-handshake) keeps the adopted offset" do
+      t = S.adopt(%S{}, "r1", @handle, self(), nil, %{}, 100)
+      {t, _} = S.ready(t, "r1")
+      {_t, e} = S.data(t, "r1", 100, "x\n")
+      assert data_msgs(e) == [{:eol, "x"}]
+    end
+
+    test "an acked offset in run.ready does not move a run that was placed, not adopted" do
+      {t, _} = S.ready(table(), "r1", %{"acked" => 50})
+      {_t, e} = S.data(t, "r1", 0, "x\n")
+      assert data_msgs(e) == [{:eol, "x"}]
     end
   end
 

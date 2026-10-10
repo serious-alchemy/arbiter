@@ -462,6 +462,70 @@ defmodule Arbiter.NodeAgent.RunTest do
     end
   end
 
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): a primary that restarted adopts the
+  # run it held instead of collecting it.
+  describe "adopt" do
+    test "a running, detached run is attached: run.ready carries the acked offset and stdout resends from it",
+         %{opts: opts, stub: stub} do
+      StubPodman.write_mode(stub, "tick")
+      assert {:ok, "a1"} = Runs.assign(spec("a1"), opts)
+      wait_event("a1", "run.ready")
+      assert_receive {:run_push, "a1", "stdout", {:binary, frame}}, 5_000
+      assert {:ok, "a1", 0, "line-1\n"} = StdoutFrame.decode(frame)
+
+      # the old primary acked the first line, then went away; the run carried on
+      Run.ack("a1", 7)
+      Runs.detach_all()
+      File.write!(Path.join(stub, "go"), "")
+      wait_until(fn -> Run.info("a1")["stdout_offset"] == 14 end)
+      refute_received {:run_push, "a1", "stdout", _}
+
+      assert :ok = Run.adopt("a1")
+
+      assert %{"run" => "a1", "container" => "arb-a1", "adopted" => true, "acked" => 7} =
+               wait_event("a1", "run.ready")
+
+      assert_receive {:run_push, "a1", "stdout", {:binary, frame}}, 5_000
+      assert {:ok, "a1", 7, "line-2\n"} = StdoutFrame.decode(frame)
+
+      # nothing was stopped: it is the same container, still running
+      refute File.read!(Path.join(stub, "calls")) =~ "rm "
+      assert %{"state" => "running", "exited" => false} = Run.info("a1")
+
+      Run.cancel("a1", "test")
+      wait_event("a1", "exit")
+    end
+
+    test "a run that exited while it was held is refused, even detached, and quiesce still retains it",
+         %{opts: opts} do
+      assert {:ok, "a2"} = Runs.assign(spec("a2"), opts)
+      wait_event("a2", "exit")
+      Runs.detach_all()
+
+      assert :ok = Run.adopt("a2")
+      assert %{"run" => "a2", "reason" => "exited"} = wait_event("a2", "adopt.refused")
+
+      assert :ok = Run.quiesce("a2")
+      assert %{"run" => "a2"} = wait_event("a2", "retained")
+      assert_gone("a2")
+    end
+
+    test "a run that is being stopped (the fence fired) is refused", %{opts: opts, stub: stub} do
+      StubPodman.write_mode(stub, "hang")
+      assert {:ok, "a3"} = Runs.assign(spec("a3"), opts)
+      wait_event("a3", "run.ready")
+      Runs.detach_all()
+
+      Runs.fence_all()
+      assert :ok = Run.adopt("a3")
+      assert %{"run" => "a3", "reason" => "cancelling"} = wait_event("a3", "adopt.refused")
+    end
+
+    test "an unknown run is not found" do
+      assert {:error, :not_found} = Run.adopt("nope")
+    end
+  end
+
   describe "quiesce (RW12: the primary does not know the run)" do
     test "a running run is stopped and retained locally, with no exit for the primary to ack",
          %{opts: opts, stub: stub, home: home} do

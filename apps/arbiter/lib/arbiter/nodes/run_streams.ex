@@ -18,7 +18,16 @@ defmodule Arbiter.Nodes.RunStreams do
   its last ack, which is the last thing we acknowledged). New bytes are cut into
   lines exactly as a `{:line, 65_536}` port would (`Arbiter.Nodes.LineSplitter`)
   and sent to the owner as `{handle, {:data, {:eol | :noeol, line}}}`; the ack is
-  cumulative.
+  cumulative and stops at the start of the held partial line (bd-4p1vui), so the
+  node's replay point is always a line start: a new owner that picks the stream
+  up after a primary restart (`adopt/7`) never begins mid-line. The held part is
+  under 64 KiB, well inside the node's 256 KiB window.
+
+  ## Adoption (bd-4p1vui)
+
+  `adopt/7` registers a run the node kept running across a primary restart for a
+  new owner, starting at the node's acked offset; the owner is answered when the
+  node says `run.ready` (whose `acked`, when present, is the authoritative start).
 
   ## The end
 
@@ -60,11 +69,38 @@ defmodule Arbiter.Nodes.RunStreams do
       partial: "",
       exit: nil,
       cancel?: false,
-      outcome: nil
+      outcome: nil,
+      adopting?: false
     }
 
     put_in(table.streams[run], stream)
   end
+
+  @doc """
+  Register run `run`, which the node kept running across a primary restart, for a
+  new `owner` (bd-4p1vui): like `open/6`, but the stream starts at `next`, the
+  node's acked offset (it resends from there), and stays *adopting* until
+  `ready/3`.
+  """
+  @spec adopt(
+          t(),
+          String.t(),
+          term(),
+          pid(),
+          GenServer.from() | nil,
+          %{String.t() => Path.t()},
+          non_neg_integer()
+        ) :: t()
+  def adopt(%__MODULE__{} = table, run, handle, owner, waiter, bridges, next)
+      when is_integer(next) and next >= 0 do
+    table = open(table, run, handle, owner, waiter, bridges)
+    update_in(table.streams[run], &%{&1 | adopting?: true, next: next})
+  end
+
+  @doc "Whether `run` was adopted and the node has not yet said `run.ready`."
+  @spec adopting?(t(), String.t()) :: boolean()
+  def adopting?(%__MODULE__{streams: streams}, run),
+    do: match?(%{^run => %{adopting?: true}}, streams)
 
   @spec fetch(t(), String.t()) :: {:ok, map()} | :error
   def fetch(%__MODULE__{streams: streams}, run), do: Map.fetch(streams, run)
@@ -93,16 +129,28 @@ defmodule Arbiter.Nodes.RunStreams do
   def live(%__MODULE__{streams: streams}),
     do: for({run, %{state: state}} <- streams, state != :done, do: run) |> Enum.sort()
 
-  @spec ready(t(), String.t()) :: {t(), [effect()]}
-  def ready(table, run) do
+  @doc """
+  The node says the run is up (`run.ready`): the waiter gets the handle. For an
+  adopted run, the payload's `acked` (where the node's resend starts) sets the next
+  offset expected; a plain `run.ready` (a reattach) keeps the adopted one.
+  """
+  @spec ready(t(), String.t(), map()) :: {t(), [effect()]}
+  def ready(table, run, payload \\ %{}) do
     update(table, run, fn
       %{state: :assigned, waiter: waiter, handle: handle} = s ->
-        {%{s | state: :ready, stage: :running, waiter: nil}, reply(waiter, {:ok, handle})}
+        s = %{s | state: :ready, stage: :running, waiter: nil} |> adopted_start(payload)
+        {s, reply(waiter, {:ok, handle})}
 
       s ->
         {s, []}
     end)
   end
+
+  defp adopted_start(%{adopting?: true} = s, %{"acked" => acked})
+       when is_integer(acked) and acked >= 0,
+       do: %{s | next: acked, adopting?: false}
+
+  defp adopted_start(s, _payload), do: %{s | adopting?: false}
 
   @doc """
   The node reports `run` `running` in a heartbeat: the same as `ready/2` (a run counts as
@@ -176,14 +224,14 @@ defmodule Arbiter.Nodes.RunStreams do
         skip = next - offset
 
         if skip >= byte_size(bytes) do
-          {s, [ack(run, next)]}
+          {s, [line_ack(run, s)]}
         else
           fresh = binary_part(bytes, skip, byte_size(bytes) - skip)
           {frames, partial} = LineSplitter.split(s.partial, fresh)
           s = %{s | next: next + byte_size(fresh), partial: partial}
 
           sends = for frame <- frames, do: {:send, s.owner, {s.handle, {:data, frame}}}
-          {s, sends ++ [ack(run, s.next)]}
+          {s, sends ++ [line_ack(run, s)]}
         end
     end)
     |> finish_if_complete(run)
@@ -367,6 +415,9 @@ defmodule Arbiter.Nodes.RunStreams do
       {:send, owner, {handle, {:outcome, outcome}}},
       {:send, owner, {handle, {:exit_status, status}}}
     ]
+
+  # Everything before the held partial line (bd-4p1vui, see "stdout" above).
+  defp line_ack(run, %{next: next, partial: partial}), do: ack(run, next - byte_size(partial))
 
   defp ack(run, offset), do: {:push, "ack", %{"run" => run, "offset" => offset}}
   defp cursor_ack(run, cursor), do: {:push, "ack", %{"run" => run, "cursor" => cursor}}

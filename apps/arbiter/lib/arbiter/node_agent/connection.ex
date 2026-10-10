@@ -47,6 +47,11 @@ defmodule Arbiter.NodeAgent.Connection do
     uploads are done) and says it may go with `retained.drop{run}`. A changed
     `boot_epoch` is logged and recorded in the status file. `reap{install,
     live_set}` runs `Arbiter.NodeAgent.Reaper`, install-scoped.
+  * **Adoption (bd-4p1vui, §10.4.3).** A `"hold"` run is left running and
+    detached until the primary either adopts it (`adopt{run}`: `Run.adopt/1`
+    attaches it and answers `run.ready{adopted: true, acked}`, or
+    `adopt.refused{run, reason}`) or asks for it to be quiesced (`quiesce{run}`).
+    `hello.caps.run_adopt` says this agent understands `adopt`.
   * Events the later children own (`drain`, `rotate`) are logged and ignored.
   """
   use GenServer
@@ -395,6 +400,19 @@ defmodule Arbiter.NodeAgent.Connection do
   defp push(state, "quiesce", %{"run" => run}) when is_binary(run) do
     Logger.warning("node agent: primary asked to quiesce run #{run} for recovery")
     Run.quiesce(run)
+    state
+  end
+
+  # bd-4p1vui: a new Worker on the restarted primary takes a held run over.
+  defp push(state, "adopt", %{"run" => run}) when is_binary(run) do
+    case Run.adopt(run) do
+      :ok ->
+        Logger.info("node agent: primary adopted held run #{run}")
+
+      {:error, :not_found} ->
+        send(self(), {:run_push, run, "adopt.refused", %{"run" => run, "reason" => "gone"}})
+    end
+
     state
   end
 

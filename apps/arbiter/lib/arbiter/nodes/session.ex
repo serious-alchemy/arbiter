@@ -54,6 +54,21 @@ defmodule Arbiter.Nodes.Session do
   `hello` and periodically (`Arbiter.Nodes.Reaping`), and records `retained`,
   `recovered` and `reaped` node events.
 
+  ## Adoption (bd-4p1vui, §10.4.3)
+
+  A held run can instead be handed to a new Worker: `adopt/5` (the held-run twin of
+  `assign/5`) checks `adoptable/2` (the run is held, the agent advertises
+  `caps["run_adopt"]`, its last report says `running`, no recovery is collecting
+  it), cancels the hold timer keeping what was left, registers the run for the new
+  owner (`RunStreams.adopt/7`, starting at the agent's acked offset, with the new
+  spec's bridges and the given checkout context), pushes `adopt{run}` and answers
+  when the agent says `run.ready`. A refusal (`adopt.refused`), `adopt_timeout_ms`
+  (30 s) or the adopting owner dying mid-handshake drops the stream **without a
+  cancel** and holds the run again with the time it had left, so `recover/4` can
+  still quiesce and collect it: the fallback. `unadopt/2` does the same for an
+  adoption that completed but was undone. `recover/4` refuses a run an owner holds
+  attached.
+
   ## Messages to the channel
 
   `{:node_session, :drain}` / `{:node_session, :undrain}` and
@@ -79,6 +94,7 @@ defmodule Arbiter.Nodes.Session do
   @default_reap_interval_ms 10 * 60_000
   @default_prepare_timeout_ms 25 * 60_000
   @default_hold_ms 150_000
+  @default_adopt_timeout_ms 30_000
 
   defstruct [
     :node_id,
@@ -128,6 +144,11 @@ defmodule Arbiter.Nodes.Session do
     held: %{},
     hold_expired: MapSet.new(),
     hold_ms: @default_hold_ms,
+    # bd-4p1vui: adopted runs (`run => %{hold_left, timer, ref}`): what the hold had left
+    # when the adoption took it (an undone adoption holds the run again for that long),
+    # and the `adopt_timeout_ms` timer while the agent has not answered (nil after).
+    adoptions: %{},
+    adopt_timeout_ms: @default_adopt_timeout_ms,
     reap_interval_ms: :infinity
   ]
 
@@ -292,6 +313,35 @@ defmodule Arbiter.Nodes.Session do
       {:error, :no_session}
   end
 
+  @doc """
+  Whether `run` can be adopted now (bd-4p1vui, §10.4.3): `:ok`, or `{:error, reason}`
+  with `reason` one of `:not_connected`, `:no_adopt_cap` (an agent without
+  `caps["run_adopt"]`), `:recovering`, `:not_held` and `:not_running` (the agent's
+  last report does not say `running`, or says it exited).
+  """
+  @spec adoptable(pid(), String.t()) :: :ok | {:error, atom()}
+  def adoptable(pid, run), do: GenServer.call(pid, {:adoptable, run})
+
+  @doc """
+  Hand run `run`, which the node held across a primary restart, to `owner` (bd-4p1vui):
+  the held-run twin of `assign/5`. `spec` is the run spec the owner's spawn built (only
+  its `bridges` are used: the node keeps the container it has). Blocks until the node
+  attaches the run (`{:ok, handle}`), or `{:error, reason}`: an `adoptable/2` reason,
+  `{:adopt_refused, why}`, `:adopt_timeout`, `:owner_down` or `:node_lost`. On any error
+  the run is held again and nothing was cancelled. Options: `:checkout` (the context the
+  upload endpoints authorize against, as for `assign/5`) and `:adopt_timeout_ms`.
+  """
+  @spec adopt(pid(), String.t(), map(), pid(), keyword()) :: {:ok, term()} | {:error, term()}
+  def adopt(pid, run, spec, owner, opts \\ []),
+    do: GenServer.call(pid, {:adopt, run, spec, owner, opts}, :infinity)
+
+  @doc """
+  Undo an adoption (§10.4.6 F7): the run is forgotten here without a cancel and held
+  again, so `recover/4` can collect it. `:ok` for a run that is not adopted.
+  """
+  @spec unadopt(pid(), String.t()) :: :ok
+  def unadopt(pid, run), do: GenServer.call(pid, {:unadopt, run})
+
   @doc "Withdraw a recovery (its budget ran out): the upload endpoints stop accepting `run`."
   @spec recover_abort(pid(), String.t()) :: :ok
   def recover_abort(pid, run), do: GenServer.cast(pid, {:recover_abort, run})
@@ -372,7 +422,8 @@ defmodule Arbiter.Nodes.Session do
       allow_skew?: Keyword.get(opts, :allow_skew, false),
       last_hb: clock.(),
       reap_interval_ms: Keyword.get(opts, :reap_interval_ms, @default_reap_interval_ms),
-      hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms)
+      hold_ms: Keyword.get(opts, :hold_ms, @default_hold_ms),
+      adopt_timeout_ms: Keyword.get(opts, :adopt_timeout_ms, @default_adopt_timeout_ms)
     }
 
     state =
@@ -470,11 +521,31 @@ defmodule Arbiter.Nodes.Session do
     end
   end
 
+  def handle_call({:adoptable, run}, _from, state),
+    do: {:reply, adoptable_check(state, run), state}
+
+  def handle_call({:adopt, run, spec, owner, opts}, from, state) do
+    case adoptable_check(state, run) do
+      :ok -> {:noreply, start_adoption(state, run, spec, owner, opts, from)}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:unadopt, run}, _from, state) do
+    if Map.has_key?(state.adoptions, run),
+      do: {:reply, :ok, undo_adoption(state, run, {:error, :unadopted})},
+      else: {:reply, :ok, state}
+  end
+
   def handle_call({:recover, _run, _ctx}, _from, %{channel: nil} = state),
     do: {:reply, {:error, :not_connected}, state}
 
   def handle_call({:recover, run, ctx}, from, state) do
     cond do
+      # bd-4p1vui: a run an owner holds attached (an adopted one) is not to be collected.
+      run in RunStreams.live(state.streams) ->
+        {:reply, {:error, :attached}, state}
+
       Map.has_key?(state.recoveries, run) ->
         {:reply, {:error, :already_recovering}, state}
 
@@ -639,15 +710,28 @@ defmodule Arbiter.Nodes.Session do
     {:noreply, %{state | channel: nil, channel_ref: nil}}
   end
 
-  # A run's owner (the Worker) died: its runs are cancelled and forgotten.
+  # A run's owner (the Worker) died: its runs are cancelled and forgotten. A run it was
+  # still adopting (bd-4p1vui) is not cancelled: it goes back to the hold.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     state =
       Enum.reduce(RunStreams.owned_by(state.streams, pid), state, fn run, acc ->
-        {streams, effects} = RunStreams.cancel(acc.streams, run, "owner_down")
-        run_effects(drop_run(%{acc | streams: streams}, run), effects)
+        if RunStreams.adopting?(acc.streams, run) do
+          undo_adoption(acc, run, {:error, :owner_down})
+        else
+          {streams, effects} = RunStreams.cancel(acc.streams, run, "owner_down")
+          run_effects(drop_run(%{acc | streams: streams}, run), effects)
+        end
       end)
 
     {:noreply, state}
+  end
+
+  # bd-4p1vui: the agent did not answer an `adopt` in time.
+  def handle_info({:adopt_timeout, run, ref}, state) do
+    case state.adoptions do
+      %{^run => %{ref: ^ref}} -> {:noreply, undo_adoption(state, run, {:error, :adopt_timeout})}
+      _ -> {:noreply, state}
+    end
   end
 
   # A hold ran out with nobody asking for the run: it is quiesced like an unknown one.
@@ -704,8 +788,18 @@ defmodule Arbiter.Nodes.Session do
 
   # ---- run events -----------------------------------------------------------------
 
-  defp node_event_apply(state, "run.ready", %{"run" => run}),
-    do: apply_streams(state, RunStreams.ready(state.streams, run))
+  defp node_event_apply(state, "run.ready", %{"run" => run} = payload) do
+    state
+    |> apply_streams(RunStreams.ready(state.streams, run, payload))
+    |> adoption_done(run)
+  end
+
+  # bd-4p1vui: the agent would not hand the run over; it goes back to the hold.
+  defp node_event_apply(state, "adopt.refused", %{"run" => run} = payload) do
+    if RunStreams.adopting?(state.streams, run),
+      do: undo_adoption(state, run, {:error, {:adopt_refused, payload["reason"]}}),
+      else: state
+  end
 
   defp node_event_apply(state, "run.refused", %{"run" => run} = payload) do
     state = %{state | checkouts: Map.delete(state.checkouts, run)}
@@ -853,6 +947,102 @@ defmodule Arbiter.Nodes.Session do
 
   defp ingested({:ok, result}), do: result
   defp ingested(_none), do: nil
+
+  # ---- adoption (bd-4p1vui) -----------------------------------------------------------
+
+  defp adoptable_check(state, run) do
+    cond do
+      is_nil(state.channel) -> {:error, :not_connected}
+      is_nil(state.caps["run_adopt"]) -> {:error, :no_adopt_cap}
+      Map.has_key?(state.recoveries, run) -> {:error, :recovering}
+      not Map.has_key?(state.held, run) -> {:error, :not_held}
+      not running_report?(state.runs[run]) -> {:error, :not_running}
+      true -> :ok
+    end
+  end
+
+  # What the agent last said of the run (`hello` or `hb`): up, and not exited.
+  defp running_report?(%{"state" => "running"} = report), do: report["exited"] != true
+  defp running_report?(_report), do: false
+
+  defp start_adoption(state, run, spec, owner, opts, from) do
+    {timer, held} = Map.pop(state.held, run)
+    hold_left = cancel_hold(timer)
+    Process.monitor(owner)
+    handle = {:remote, {state.node_id, run, make_ref()}}
+    ref = make_ref()
+    ms = Keyword.get(opts, :adopt_timeout_ms, state.adopt_timeout_ms)
+    timeout = Process.send_after(self(), {:adopt_timeout, run, ref}, ms)
+    next = acked_offset(state.runs[run])
+
+    state = %{
+      state
+      | held: held,
+        streams:
+          RunStreams.adopt(state.streams, run, handle, owner, from, bridge_map(spec), next),
+        checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout)),
+        adoptions:
+          Map.put(state.adoptions, run, %{hold_left: hold_left, timer: timeout, ref: ref})
+    }
+
+    notify_channel(state, {:push, "adopt", %{"run" => run}})
+    state
+  end
+
+  # The hold's timer is cancelled; how long it had left (0 if it already fired: its
+  # message then finds the run no longer held and does nothing).
+  defp cancel_hold(timer) do
+    case Process.cancel_timer(timer) do
+      ms when is_integer(ms) -> ms
+      false -> 0
+    end
+  end
+
+  defp acked_offset(%{"acked" => acked}) when is_integer(acked) and acked >= 0, do: acked
+  defp acked_offset(_report), do: 0
+
+  # The agent attached the adopted run: its handshake timer is no longer needed.
+  defp adoption_done(state, run) do
+    case state.adoptions do
+      %{^run => %{timer: timer} = adoption} when not is_nil(timer) ->
+        if RunStreams.adopting?(state.streams, run) do
+          state
+        else
+          Process.cancel_timer(timer)
+          %{state | adoptions: Map.put(state.adoptions, run, %{adoption | timer: nil, ref: nil})}
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  # An adoption that did not happen, or was undone: the owner still waiting is answered
+  # `reply`, the run is forgotten here **without** a cancel, and it is held again for
+  # what the hold had left, so `recover/4` (or the hold's expiry) can still quiesce it.
+  defp undo_adoption(state, run, reply) do
+    {adoption, adoptions} = Map.pop(state.adoptions, run)
+    if adoption && adoption.timer, do: Process.cancel_timer(adoption.timer)
+
+    case RunStreams.fetch(state.streams, run) do
+      {:ok, %{waiter: waiter}} when not is_nil(waiter) -> GenServer.reply(waiter, reply)
+      _ -> :ok
+    end
+
+    %{state | adoptions: adoptions}
+    |> drop_run(run)
+    |> rehold(run, (adoption && adoption.hold_left) || 0)
+  end
+
+  # Only a run the agent still lists is held again.
+  defp rehold(state, run, ms) do
+    if Map.has_key?(state.runs, run) do
+      timer = Process.send_after(self(), {:hold_expired, run}, max(ms, 0))
+      %{state | held: Map.put(state.held, run, timer)}
+    else
+      state
+    end
+  end
 
   # ---- reaping -----------------------------------------------------------------------
 
@@ -1273,11 +1463,15 @@ defmodule Arbiter.Nodes.Session do
     {waiters, collectors} = Map.pop(state.collectors, run, [])
     Enum.each(waiters, &GenServer.reply(&1, {:error, :run_gone}))
 
+    {adoption, adoptions} = Map.pop(state.adoptions, run)
+    if adoption && adoption.timer, do: Process.cancel_timer(adoption.timer)
+
     %{
       state
       | streams: RunStreams.drop(state.streams, run),
         checkouts: Map.delete(state.checkouts, run),
-        collectors: collectors
+        collectors: collectors,
+        adoptions: adoptions
     }
   end
 
