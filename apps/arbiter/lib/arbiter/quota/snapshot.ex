@@ -10,12 +10,14 @@ defmodule Arbiter.Quota.Snapshot do
 
   Keys: `workspace_id`, `workspace`, `requested_workspace`, `account`,
   `workspaces`, `account_policy`, `policy_binding`, `effective_policy`,
-  `claude`, `quotas`, `codex`, `codex_message`, `codex_credentials_expired`,
+  `claude`, `quotas`, `spend_caps` (the dollar spend cap state of each capped
+  account, `Arbiter.Quota.SpendCap`), `codex`, `codex_message`, `codex_credentials_expired`,
   `antigravity`, `gemini_credentials_expired`, `held_dispatches`,
   `paused_providers`.
   """
 
   alias Arbiter.Quota
+  alias Arbiter.Quota.SpendCap
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.DispatchQueue
 
@@ -53,6 +55,7 @@ defmodule Arbiter.Quota.Snapshot do
       claude:
         Quota.serialize(accounts["claude"], "claude", workspace_id: ws_id, spend_cache: spend),
       quotas: Quota.list_serialized_for_workspace(ws_id, spend_cache: spend),
+      spend_caps: spend_caps(Map.values(accounts)),
       codex: codex,
       codex_message: Quota.codex_absence_message(codex),
       # bd-1fpjgx: live off `CredentialWatchdog`'s held state, not the
@@ -92,6 +95,7 @@ defmodule Arbiter.Quota.Snapshot do
           do: Quota.serialize(account.id, "claude", spend_cache: spend)
         ),
       quotas: Quota.list_serialized(account.id, spend_cache: spend),
+      spend_caps: spend_caps([account.id]),
       codex: codex,
       codex_message: Quota.codex_absence_message(codex),
       codex_credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
@@ -104,6 +108,26 @@ defmodule Arbiter.Quota.Snapshot do
       held_dispatches: [],
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
+  end
+
+  # bd-a6grlr: one entry per capped account, wire-shaped by `SpendCap.to_map/1`
+  # plus the account's `provider:slug`. Uncapped accounts are omitted.
+  defp spend_caps(account_ids) do
+    account_ids
+    |> Enum.uniq()
+    |> Enum.map(&Arbiter.Accounts.Resolver.get/1)
+    |> Enum.flat_map(fn
+      nil ->
+        []
+
+      account ->
+        case SpendCap.status(account) do
+          nil -> []
+          status -> [status |> SpendCap.to_map() |> Map.put("account", status.account)]
+        end
+    end)
+  rescue
+    _ -> []
   end
 
   defp held_dispatches(ws_id) do

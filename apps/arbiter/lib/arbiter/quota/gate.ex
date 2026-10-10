@@ -591,7 +591,10 @@ defmodule Arbiter.Quota.Gate do
   thresholds for that window, evaluated by `Arbiter.Quota.Pace.evaluate/4`.
 
   `window` is `:primary` (5h / session) or `:long` (7d / weekly) and picks
-  which settings apply; `label` is the snapshot's window label, which
+  which settings apply, or `:spend` (bd-a6grlr) for the account's dollar spend
+  cap (`Arbiter.Quota.SpendCap`): `utilization` is then spend / cap, and the
+  window's length is passed as the `:window_seconds` option (a calendar month
+  has no fixed length); `label` is the snapshot's window label, which
   `window_seconds/2` turns into the window's length. The gate's utilization
   rules hold exactly when this returns `verdict: :holding` — they are decided
   through it — so a quota bar coloured from this can never read red while the
@@ -609,7 +612,7 @@ defmodule Arbiter.Quota.Gate do
   """
   @spec pace(
           policy(),
-          :primary | :long,
+          :primary | :long | :spend,
           String.t() | nil,
           number() | nil,
           DateTime.t() | nil,
@@ -620,7 +623,7 @@ defmodule Arbiter.Quota.Gate do
       policy = policy |> merge_account(Keyword.get(opts, :account)) |> split_policy()
 
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
-    seconds = window_seconds(label, account)
+    seconds = Keyword.get_lazy(opts, :window_seconds, fn -> window_seconds(label, account) end)
 
     Pace.evaluate(
       utilization,
@@ -769,6 +772,15 @@ defmodule Arbiter.Quota.Gate do
   # composed `min(account, workspace)` across both sides, so a workspace that
   # sets one tightens the account's. A flat side is already the hard ceiling and
   # is left alone.
+  #
+  # The `:spend` window (bd-a6grlr) is the dollar spend cap's: `utilization` is
+  # spend / cap, the account's `spend_mode` picks a paced line (cap x elapsed
+  # fraction, floor 0) or a flat one (the whole cap), and a workspace has no
+  # say. Same `Pace.evaluate/4`, so a dollar line and a % line can never be two
+  # definitions.
+  defp pace_thresholds({account, _workspace}, :spend, _priority),
+    do: %{sides: [side(account_config(account), :spend)], default: 1.0}
+
   defp pace_thresholds({account, workspace} = policy, window, priority) do
     sides =
       Enum.reject(
@@ -804,6 +816,13 @@ defmodule Arbiter.Quota.Gate do
 
   defp exempt_cap_key(:primary), do: "pace_exempt_threshold"
   defp exempt_cap_key(:long), do: "weekly_pace_exempt_threshold"
+
+  defp side(config, :spend) do
+    case config |> Map.get("spend_mode") |> parse_mode() do
+      :paced -> {:paced, 0.0, 1.0}
+      :flat -> {:flat, 1.0}
+    end
+  end
 
   defp side(config, window) do
     flat = config |> Map.get(flat_key(window)) |> parse_fraction()

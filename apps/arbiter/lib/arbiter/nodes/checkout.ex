@@ -124,7 +124,7 @@ defmodule Arbiter.Nodes.Checkout do
          :ok <- veto(home, tip),
          refs = seed_refs(git_dir, run, branch_ref, Keyword.get(opts, :base)),
          have = known_shas(git_dir, Keyword.get(opts, :have, [])),
-         {:ok, thin?} <- create_seed(git_dir, refs, have, dest),
+         {:ok, thin?} <- create_seed(git_dir, branch_ref, refs, have, dest),
          {:ok, bytes} <- seed_size(dest, Keyword.get(opts, :max_bytes, seed_max_bytes())),
          {:ok, heads} <- list_heads(git_dir, dest) do
       {:ok,
@@ -161,8 +161,12 @@ defmodule Arbiter.Nodes.Checkout do
   end
 
   # Thin when there is something to be thin against; a bundle git would call
-  # empty (every ref already held) is sent whole.
-  defp create_seed(git_dir, refs, have, dest) do
+  # empty (every ref already held) is sent whole. So is one that leaves the run
+  # branch out: git omits a ref whose tip the `^have` prerequisites already reach
+  # (a re-dispatched branch with no commits of its own, cut from a base the node
+  # has since moved past), and the node refuses a seed with no branch head
+  # (`:no_branch_in_seed`).
+  defp create_seed(git_dir, branch_ref, refs, have, dest) do
     File.rm(dest)
     File.mkdir_p!(Path.dirname(dest))
 
@@ -170,7 +174,8 @@ defmodule Arbiter.Nodes.Checkout do
          {:ok, _} <-
            Git.run(["bundle", "create", dest] ++ refs ++ Enum.map(have, &("^" <> &1)),
              git_dir: git_dir
-           ) do
+           ),
+         true <- carries_ref?(git_dir, dest, branch_ref) do
       {:ok, true}
     else
       _ ->
@@ -194,6 +199,13 @@ defmodule Arbiter.Nodes.Checkout do
 
       {:error, reason} ->
         {:error, {:bundle_failed, reason}}
+    end
+  end
+
+  defp carries_ref?(git_dir, bundle, ref) do
+    case list_heads(git_dir, bundle) do
+      {:ok, heads} -> Enum.any?(heads, fn {_sha, name} -> name == ref end)
+      _ -> false
     end
   end
 

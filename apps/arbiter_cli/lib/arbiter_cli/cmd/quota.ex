@@ -116,8 +116,37 @@ defmodule ArbiterCli.Cmd.Quota do
       data["gemini_credentials_expired"] == true
     )
 
+    emit_spend_caps(data["spend_caps"])
     emit_held(data["held_dispatches"])
   end
+
+  # bd-a6grlr: the dollar spend cap of each capped account and what it is
+  # holding. Silent when no account has one.
+  defp emit_spend_caps([_ | _] = caps) do
+    IO.puts("")
+    IO.puts("Spend caps (metered spend only; fresh dispatches are held, started tickets finish):")
+
+    Enum.each(caps, fn cap ->
+      head = "  #{cap["account"]}  #{money_usd(cap["cap_usd"])}/#{cap["window"]} (#{cap["mode"]})"
+
+      if cap["metered"] == false do
+        IO.puts("#{head}  no metered spend")
+      else
+        IO.puts(
+          "#{head}  #{money_usd(cap["used_usd"])} of #{money_usd(cap["allowed_usd"])} used" <>
+            " (#{money_usd(cap["spent_usd"])} spent + #{money_usd(cap["in_flight_usd"])} in flight)" <>
+            ", resets #{cap["resets_at"]}"
+        )
+
+        if cap["holding"], do: IO.puts("    HOLDING fresh dispatches: #{cap["reason"]}")
+      end
+    end)
+  end
+
+  defp emit_spend_caps(_caps), do: :ok
+
+  defp money_usd(n) when is_number(n), do: "$" <> money(n)
+  defp money_usd(_), do: "$0.00"
 
   # bd-6omte4: what the quota gate is actually holding, with the provider and
   # the gate's own reason. The per-provider "gating dispatch" lines read one

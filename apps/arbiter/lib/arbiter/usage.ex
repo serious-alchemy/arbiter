@@ -296,6 +296,28 @@ defmodule Arbiter.Usage do
     end
   end
 
+  @doc """
+  Priced spend (USD) the ledger holds for one provider account since `since`
+  — the settled half of the dollar spend cap (`Arbiter.Quota.SpendCap`,
+  bd-a6grlr). Rows with no price (`cost_usd` NULL or not positive) never count.
+  Whether the account's priced rows are *real* spend or a notional
+  API-equivalent price is the caller's call (`SpendCap.metered?/1`): this reads
+  the ledger only. `0.0` for an account with no rows.
+  """
+  @spec priced_spend_since(String.t(), DateTime.t()) :: float()
+  def priced_spend_since(account_id, %DateTime{} = since) when is_binary(account_id) do
+    from(e in LedgerRow,
+      where: e.provider_account_id == ^account_id and e.occurred_at >= ^since,
+      where: not is_nil(e.cost_usd) and e.cost_usd > 0.0,
+      select: sum(e.cost_usd)
+    )
+    |> Repo.one()
+    |> case do
+      nil -> 0.0
+      total -> total / 1
+    end
+  end
+
   defp group_totals(rows) do
     Enum.reduce(rows, %{}, fn {key, provider, total}, acc ->
       Map.update(acc, key, %{provider => total}, &Map.put(&1, provider, total))

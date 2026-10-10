@@ -925,6 +925,106 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
   @doc """
+  Raise a dollar spend-cap page as a system alert (bd-a6grlr): `level` is
+  `:warning` (metered spend reached 80% of the account's cap) or `:reached`
+  (spend plus the in-flight estimate reached the cap, so fresh dispatches on the
+  account are held). `status` is `Arbiter.Quota.SpendCap.status/2`.
+
+  One alert per account and level (`<account id>:warning` / `:reached`), so the
+  second level opens - and is announced - as its own page; a repeat of the same
+  condition only refreshes the figures. Raising one level clears the other (a
+  reached cap supersedes its 80% warning). Cleared by `spend_cap_cleared/1` when
+  the condition goes away. Best-effort, returns `:ok`.
+  """
+  @spec spend_cap_alert(map(), String.t() | nil, :warning | :reached) :: :ok
+  def spend_cap_alert(%{account_id: account_id} = status, ws_id, level)
+      when is_binary(account_id) and level in [:warning, :reached] do
+    other = if level == :reached, do: :warning, else: :reached
+    clear_alert(:spend_cap, spend_cap_key(account_id, other))
+
+    raise_alert(
+      :spend_cap,
+      spend_cap_key(account_id, level),
+      ws_id,
+      spend_cap_subject(status, level),
+      spend_cap_detail(status, level)
+    )
+  end
+
+  def spend_cap_alert(_status, _ws_id, _level), do: :ok
+
+  @doc "Clear both spend-cap pages for `account_id`. A no-op when none is active."
+  @spec spend_cap_cleared(String.t()) :: :ok
+  def spend_cap_cleared(account_id) when is_binary(account_id) do
+    clear_alert(:spend_cap, spend_cap_key(account_id, :warning))
+    clear_alert(:spend_cap, spend_cap_key(account_id, :reached))
+  end
+
+  def spend_cap_cleared(_account_id), do: :ok
+
+  @doc """
+  Clear the spend-cap pages of every account not in `seen` - the account ids a
+  sweep just assessed. An account that is gone (deleted, merged) has nothing
+  left to page about. Best-effort, returns `:ok`.
+  """
+  @spec spend_cap_recovered([String.t()]) :: :ok
+  def spend_cap_recovered(seen) when is_list(seen) do
+    keep = for id <- seen, level <- [:warning, :reached], do: spend_cap_key(id, level)
+    _ = Alerts.clear_except(:spend_cap, keep)
+    :ok
+  rescue
+    e ->
+      Logger.warning("CoordinatorNotifier.spend_cap_recovered/1 raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp spend_cap_key(account_id, level), do: "#{account_id}:#{level}"
+
+  defp spend_cap_subject(status, :reached),
+    do:
+      "#{status.account} spend cap reached — $#{fmt_usd(status.cap)}/#{status.window} " <>
+        "(fresh dispatches held)"
+
+  defp spend_cap_subject(status, :warning),
+    do:
+      "#{status.account} at 80% of its spend cap — $#{fmt_usd(status.used)} of " <>
+        "$#{fmt_usd(status.cap)}/#{status.window}"
+
+  defp spend_cap_detail(status, level) do
+    [
+      "Account #{status.account}: $#{fmt_usd(status.spent)} metered spend this #{status.window}" <>
+        in_flight_clause(status) <>
+        " against a $#{fmt_usd(status.cap)}/#{status.window} cap (#{status.mode}).",
+      spend_cap_consequence(status, level),
+      "Only real metered spend counts; subscription and free-tier costs are notional and are " <>
+        "excluded. Change it with `arb account set #{status.account} --spend-cap N`. This alert " <>
+        "clears by itself when the condition goes away."
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp spend_cap_consequence(status, :reached) do
+    "Fresh dispatches on this account are held until the window resets " <>
+      "(#{Calendar.strftime(status.resets_at, "%Y-%m-%d %H:%M UTC")}) or the cap is raised. " <>
+      "Tickets already started - reviewers, fix and conflict passes, resumes - still run, " <>
+      "so spend can finish somewhat past the cap."
+  end
+
+  defp spend_cap_consequence(%{mode: :paced}, :warning) do
+    "Fresh dispatches are not held at the cap yet; the paced line may hold them earlier."
+  end
+
+  defp spend_cap_consequence(_status, :warning),
+    do: "Fresh dispatches are not held yet; they are held when the cap is reached."
+
+  defp in_flight_clause(%{in_flight: in_flight} = status) when in_flight > 0.005,
+    do: " plus ~$#{fmt_usd(status.in_flight)} estimated for work in flight"
+
+  defp in_flight_clause(_status), do: ""
+
+  @doc """
   Raise a sustained `/api/oauth/usage` polling outage as a system alert
   (bd-4fbpto, bd-7gt8rm).
 

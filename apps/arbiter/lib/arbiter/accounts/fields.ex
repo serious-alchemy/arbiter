@@ -172,10 +172,41 @@ defmodule Arbiter.Accounts.Fields do
       name: "weekly_pace_exempt_threshold",
       type: :fraction,
       doc: "7-day cap for exempt dispatches, in (0, 1]."
+    },
+    %{
+      name: "spend_cap",
+      type: :usd,
+      doc:
+        "Dollar cap on metered spend per spend_window; fresh dispatches are held once it is " <>
+          "reached (in-flight tickets finish). none clears it."
+    },
+    %{
+      name: "spend_window",
+      type: :spend_window,
+      doc:
+        "day | week | month: the cap's fixed UTC window (week starts Monday 00:00 UTC). " <>
+          "Default week."
+    },
+    %{
+      name: "spend_mode",
+      type: :mode,
+      doc:
+        "flat (the whole cap is allowed at any time) or paced (cap x elapsed fraction). " <>
+          "Default flat."
+    },
+    %{
+      name: "spend_metered",
+      type: :boolean,
+      doc:
+        "Whether this account's ledger costs are real metered spend. Unset: metered only " <>
+          "with an active api_key credential. Subscription and free-tier costs are notional " <>
+          "and never count."
     }
   ]
 
   @quota_keys Enum.map(@quota_specs, & &1.name)
+  @spend_windows ~w(day week month)
+  @spend_modes ~w(flat paced)
   @policies ~w(ignore hold)
   @off_words ~w(none off)
 
@@ -350,7 +381,47 @@ defmodule Arbiter.Accounts.Fields do
   defp validate_value("pace_exempt_priority", value, :patch) when value in @off_words,
     do: {:ok, nil}
 
+  defp validate_value("spend_cap", value, :patch) when value in @off_words,
+    do: {:ok, nil}
+
   defp validate_value(_key, nil, :patch), do: {:ok, nil}
+
+  defp validate_value("spend_cap", value, _) do
+    case usd(value) do
+      {:ok, usd} ->
+        {:ok, usd}
+
+      :error ->
+        invalid_quota("spend_cap must be a positive dollar amount (got #{inspect(value)})")
+    end
+  end
+
+  defp validate_value("spend_window", value, _) do
+    if value in @spend_windows do
+      {:ok, value}
+    else
+      invalid_quota(
+        "spend_window must be one of #{Enum.join(@spend_windows, ", ")} (got #{inspect(value)})"
+      )
+    end
+  end
+
+  defp validate_value("spend_mode", value, _) do
+    if value in @spend_modes do
+      {:ok, value}
+    else
+      invalid_quota(
+        "spend_mode must be one of #{Enum.join(@spend_modes, ", ")} (got #{inspect(value)})"
+      )
+    end
+  end
+
+  defp validate_value("spend_metered", value, _) do
+    case cast_boolean(value) do
+      {:ok, bool} -> {:ok, bool}
+      :error -> invalid_quota("spend_metered must be true or false (got #{inspect(value)})")
+    end
+  end
 
   defp validate_value("threshold_mode", mode, _) do
     if mode in Gate.threshold_modes() do
@@ -428,6 +499,17 @@ defmodule Arbiter.Accounts.Fields do
   end
 
   defp fraction(_), do: :error
+
+  defp usd(n) when is_number(n) and n > 0, do: {:ok, n * 1.0}
+
+  defp usd(s) when is_binary(s) do
+    case Float.parse(String.trim_leading(s, "$")) do
+      {f, ""} when f > 0 -> {:ok, f}
+      _ -> :error
+    end
+  end
+
+  defp usd(_), do: :error
 
   defp priority(n) when is_integer(n) and n >= 0 and n <= 4, do: {:ok, n}
 
