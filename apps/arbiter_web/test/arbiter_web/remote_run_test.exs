@@ -164,6 +164,28 @@ defmodule ArbiterWeb.RemoteRunTest do
       refute Executor.live?(handle)
     end
 
+    # bd-9rrrgk: the pre-push recipe of a run placed here runs on the node, after the run's
+    # agent has exited and the node has forgotten it.
+    test "exec runs a command in a container of the run's shape once the run is over", ctx do
+      {:ok, prepared} = Executor.prepare(ctx.node.id, spec("e1x"), owner: self())
+      {:ok, handle} = Executor.open(prepared)
+      assert [_ | _] = collect(handle)
+      assert_eventually(fn -> not Executor.live?(handle) end)
+
+      assert {"line-1\nline-2\nline-3\n", 0} =
+               Executor.exec(ctx.node.id, "e1x", "mix format --check-formatted", 30)
+
+      argv = File.read!(Path.join(ctx.stub, "run.argv")) |> String.split("\n", trim: true)
+      assert ["sh", "-c", "mix format --check-formatted"] = Enum.take(argv, -3)
+      assert "--rm" in argv
+      refute Enum.any?(argv, &(&1 =~ "secrets.env"))
+    end
+
+    test "exec for a run the node never prepared is an error from the node", ctx do
+      assert {:error, {:exec_failed, reason}} = Executor.exec(ctx.node.id, "never", "true", 30)
+      assert reason =~ "no_context"
+    end
+
     test "OOMKilled and the exit code are reported", ctx do
       StubPodman.write_mode(ctx.stub, "oom")
       {:ok, prepared} = Executor.prepare(ctx.node.id, spec("e2"), owner: self())

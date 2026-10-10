@@ -7,7 +7,7 @@ defmodule Arbiter.NodeAgent.Backend.Podman do
   """
   @behaviour Arbiter.NodeAgent.Backend
 
-  alias Arbiter.NodeAgent.{Protocol, Reaper, Run, Runs}
+  alias Arbiter.NodeAgent.{Exec, Protocol, Reaper, Run, Runs}
   alias Arbiter.Worker.PodmanReadiness
 
   @impl true
@@ -35,7 +35,11 @@ defmodule Arbiter.NodeAgent.Backend.Podman do
   end
 
   @impl true
-  def list_owned, do: Runs.run_ids()
+  def exec(run, command, timeout_s, opts), do: Exec.run(run, command, timeout_s, opts)
+
+  @impl true
+  def list_owned,
+    do: Runs.run_ids()
 
   @impl true
   def reap(%{config: config, request: request, opts: opts}),
