@@ -780,7 +780,6 @@ defmodule ArbiterWeb.NodesLive do
     """
   end
 
-  attr :id, :string, required: true
   # bd-6w7usy: "not counted: box (online, derated)" for a node offering nothing because it
   # has derated itself.
   defp not_counted(n) do
@@ -801,6 +800,7 @@ defmodule ArbiterWeb.NodesLive do
     if parts != [], do: Enum.join(parts, " · ")
   end
 
+  attr :id, :string, required: true
   attr :row, :map, required: true
   attr :cap_error, :string, default: nil
 
