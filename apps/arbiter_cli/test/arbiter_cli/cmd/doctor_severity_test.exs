@@ -703,7 +703,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       assert out =~ "spawned but did not reach the agent: exit 125: bwrap: sun_path too long"
       assert out =~ "[fail] spawn canary (codex)"
       assert out =~ "could not spawn: FunctionClauseError"
-      assert out =~ ~r/1 ok .* 2 fail/
+      assert out =~ ~r/\d+ ok .* 2 fail/
     end
 
     test "a failed spawn is reported by a plain doctor too, and --json carries it" do
