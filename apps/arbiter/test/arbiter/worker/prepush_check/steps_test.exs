@@ -385,7 +385,7 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
     test "each piece of that failure is infra on its own", %{repo: repo} do
       for output <- [
             "Error happened while installing lazy_html from precompiled binary: cannot download",
-            "fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 3128",
+            "** (Mix) Command \"git --git-dir=.git fetch\" failed\nfatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 3128",
             "** (Mix) Could not compile with \"make\" (exit status: 2).",
             "** (Mix) Could not resolve host: repo.hex.pm",
             "Failed to fetch record for 'hexpm/ash' from registry (using cache): :econnrefused"
@@ -396,6 +396,16 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
                  PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {output, 1} end),
                "not infra: #{output}"
       end
+    end
+
+    test "a bare network error with no Mix dependency context is a code failure", %{repo: repo} do
+      spec = spec([step("tests", "true")])
+
+      out =
+        "fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 3128"
+
+      assert %{result: {:failed, 1, ^out}} =
+               PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end)
     end
 
     test "a real compile error that merely mentions make is still a code failure", %{repo: repo} do
