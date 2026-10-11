@@ -1050,7 +1050,8 @@ defmodule Arbiter.Board.Autopilot do
   # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
   defp shadow_opts(snapshot, mode) do
     with true <- AdmissionShadow.walks?(mode),
-         %{} = record <- AdmissionShadow.dispatch_record(snapshot, pool_resolver(), snapshot.promote) do
+         %{} = record <-
+           AdmissionShadow.dispatch_record(snapshot, pool_resolver(), snapshot.promote) do
       [admission_shadow: record]
     else
       _ -> []
