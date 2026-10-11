@@ -1321,14 +1321,17 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   remote; under `sandbox.backend: podman`, a read-only `PrivateClone` review
   clone whose `origin` leads nowhere), through the live spawn path
   (`Loop.Replay.CliRunner`: the adapter's argv under the workspace's policy and
-  guardrail floor, `ClaudeSession.port_args/6`, a deadline), with only the
-  account's credential and fences on `arb`, `gh`/`glab` and git in its env. The
-  score (`Loop.Replay.Score`) is the live ReviewGate prompt's round-1 verdict read
-  by the live `converged` rule (without the live verdict re-prompt), the repo's
+  guardrail floor, at the thinking level a dispatch would use,
+  `ClaudeSession.port_args/6`, a deadline), with only the account's credential
+  and fences on `arb`, `gh`/`glab` and git in its env. The score
+  (`Loop.Replay.Score`) is the live ReviewGate prompt's round-1 verdict read by
+  the live `converged` rule (without the live verdict re-prompt), the repo's
   pre-push recipe as its tests, and the overlap of files and added lines with the
-  merged change. Each replay is a `replay_runs` row (`Loop.ReplayRun`), its own
-  source: nothing goes to `worker_runs`, `review_gate_rounds`, `usage_events`, the
-  ticket or the matrix, and `Loop.Replay.Evidence` summarises scored replays per
+  merged change. Each replay is a `replay_runs` row (`Loop.ReplayRun`, with what
+  each run drew), its own source: nothing goes to `worker_runs`,
+  `review_gate_rounds`, `usage_events`, the ticket or the matrix; a replay whose
+  node died is finished as abandoned, and its checkout removed, by the next one.
+  `Loop.Replay.Evidence` summarises scored replays per
   cell as `source: "replay"` with a weight (0.5 by default; O10). It runs in the
   live node, which publishes the budgets (`bin/arbiter rpc
   'Arbiter.Release.replay(…, async: true)'`); `Arbiter.Release.replay_report/1`,
