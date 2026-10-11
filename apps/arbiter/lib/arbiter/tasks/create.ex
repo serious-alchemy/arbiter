@@ -3,23 +3,25 @@ defmodule Arbiter.Tasks.Create do
   The one ticket-create path (P-14). REST `POST /api/issues`, MCP
   `ticket_create` and the dashboard's `TaskNewLive` all call `run/2`; none of
   them re-implements dedup, the upstream-failure drain, edge creation or the
-  acceptance warning any more.
+  acceptance warning any more. (`Arbiter.Tasks.BatchCreate` is the many-tickets
+  twin: same rules, one transaction for the whole batch.)
 
   `run/2` owns, in order:
 
     1. **Dedup** (`Arbiter.Tasks.Dedup`) unless `force: true`.
-    2. **Edge preflight** — the `parent_id` parent and every `deps` ticket must
-       exist and share the new ticket's workspace. A bad edge refuses the whole
-       create *before* anything is written, which is what makes the create and
-       its edges effectively atomic: only a race (an endpoint deleted between
-       the preflight and the write) can fail an edge afterwards.
-    3. `Ash.create(Issue, attrs)`.
-    4. **The upstream-create failure drain** — `CreateUpstream` stashes its
-       failure in the calling process's dictionary; draining it here, in the
-       process that ran the create, is the only correct place.
-    5. The `parent_of` edge (`parent_id` → new ticket) and one `blocks` edge per
-       `deps` entry (dep → new ticket).
-    6. The acceptance warning for a gated type filed without `acceptance`.
+    2. **Edge preflight** — the `parent_id` parent and every `deps` / `blocks`
+       ticket must exist and share the new ticket's workspace. A bad edge
+       refuses the whole create *before* anything is written.
+    3. **One transaction** — `Ash.create(Issue, attrs)` plus the `parent_of`
+       edge (`parent_id` → new ticket), one `blocks` edge per `deps` entry
+       (dep → new ticket) and one per `blocks` entry (new ticket → target). Any
+       edge failure (a cycle, an endpoint deleted after the preflight) rolls the
+       ticket back too: a create with edges either lands whole or not at all.
+    4. **The upstream mirror**, after the commit. The ticket is created with
+       `skip_upstream_create: true` inside the transaction and mirrored by
+       `CreateUpstream.mirror/1` once it has committed, so a rolled-back create
+       never leaves an orphaned upstream issue.
+    5. The acceptance warning for a gated type filed without `acceptance`.
 
   ## Result
 
@@ -27,19 +29,22 @@ defmodule Arbiter.Tasks.Create do
     * `{:duplicate, {:local_dup, [Issue.t()]} | {:tracker_dup, [map()]}}` —
       refused by dedup; nothing was created.
     * `{:partial, issue, failures}` — the ticket **exists**, but the upstream
-      mirror and/or an edge failed. `failures` is a non-empty list of maps with
-      a `:kind` (`:upstream_create_failed` | `:edge_failed`), a `:message`
-      that names the ticket id, and the kind's own detail keys. An issue cannot
-      be un-created (its paper-trail version row pins it), so the contract is
-      "the task exists, report what is missing" — callers must surface the id.
+      mirror failed. `failures` is a non-empty list of maps with a `:kind`
+      (`:upstream_create_failed` | `:upstream_ref_persist_failed`), a `:message`
+      that names the ticket id, and the kind's own detail keys. The ticket is
+      committed by then, so the contract is "the task exists, report what is
+      missing" — callers must surface the id.
     * `{:error, {kind, message}}` — a preflight refusal (`:not_found`,
-      `:invalid`); nothing was created.
+      `:invalid`) or an edge the transaction rejected (`:invalid`, naming the
+      edge); nothing was created.
     * `{:error, %Ash.Error.Invalid{}}` — the action rejected the attrs.
 
   ## Options
 
     * `:force` — skip dedup (default `false`).
-    * `:deps` — ticket ids that block the new ticket (`blocks` edges).
+    * `:deps` — ticket ids that block the new ticket (`blocks` edges, dep → new).
+      This is the REST `deps` / `depends_on` param.
+    * `:blocks` — ticket ids the new ticket blocks (`blocks` edges, new → target).
     * `:created_by` — the attribution label stamped on the edges.
     * `:context` — the Ash context for the create. REST and MCP pass
       `:guardrail_authority` / `:permission_actor` here so the ticket's declared
@@ -51,6 +56,7 @@ defmodule Arbiter.Tasks.Create do
   also an `Issue :create` argument, informing the tracker default).
   """
 
+  alias Arbiter.Repo
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
@@ -74,10 +80,11 @@ defmodule Arbiter.Tasks.Create do
     force? = Keyword.get(opts, :force, false) == true
     parent_id = blank_to_nil(fetch(attrs, :parent_id))
     deps = opts |> Keyword.get(:deps, []) |> List.wrap()
+    blocks = opts |> Keyword.get(:blocks, []) |> List.wrap()
 
     with :ok <- dedup(attrs, force?),
-         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps) do
-      create(attrs, parent_id, deps, opts)
+         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps ++ blocks) do
+      create(attrs, parent_id, deps, blocks, opts)
     else
       {:dup, dup} -> {:duplicate, dup}
       {:error, _} = err -> err
@@ -118,8 +125,8 @@ defmodule Arbiter.Tasks.Create do
 
   # ---- preflight ------------------------------------------------------------
 
-  defp preflight(workspace_id, parent_id, deps) do
-    [parent_id | deps]
+  defp preflight(workspace_id, parent_id, others) do
+    [parent_id | others]
     |> Enum.reject(&is_nil/1)
     |> Enum.reduce_while(:ok, fn id, :ok ->
       case check_endpoint(id, workspace_id) do
@@ -149,36 +156,52 @@ defmodule Arbiter.Tasks.Create do
 
   # ---- create ---------------------------------------------------------------
 
-  defp create(attrs, parent_id, deps, opts) do
-    case Ash.create(Issue, attrs, context: Keyword.get(opts, :context, %{})) do
-      {:ok, issue} ->
-        upstream = CreateUpstream.last_error()
-        edge_failures = attach_edges(issue, parent_id, deps, opts)
+  defp create(attrs, parent_id, deps, blocks, opts) do
+    skip_upstream? = truthy?(fetch(attrs, :skip_upstream_create))
 
-        case upstream_failures(upstream) ++ edge_failures do
-          [] -> {:ok, issue, ac_warnings(issue)}
-          failures -> {:partial, issue, failures}
+    create_attrs =
+      attrs
+      |> Map.drop([:skip_upstream_create, "skip_upstream_create"])
+      |> Map.put("skip_upstream_create", true)
+
+    tx =
+      Repo.transaction(fn ->
+        with {:ok, issue} <-
+               Ash.create(Issue, create_attrs, context: Keyword.get(opts, :context, %{})),
+             :ok <- attach_edges(issue, parent_id, deps, blocks, opts) do
+          issue
+        else
+          {:error, reason} -> Repo.rollback(reason)
         end
+      end)
 
-      {:error, _} = err ->
-        err
+    case tx do
+      {:ok, %Issue{} = issue} -> finish(issue, skip_upstream?)
+      {:error, reason} -> {:error, normalize_error(reason)}
     end
   end
 
-  defp upstream_failures(nil), do: []
+  defp finish(issue, skip_upstream?) do
+    {issue, upstream} = if skip_upstream?, do: {issue, nil}, else: CreateUpstream.mirror(issue)
 
-  defp upstream_failures(err) do
-    [
-      Map.merge(err, %{
-        kind: err.kind,
-        message: err.message
-      })
-    ]
+    case upstream_failures(upstream) do
+      [] -> {:ok, issue, ac_warnings(issue)}
+      failures -> {:partial, issue, failures}
+    end
   end
+
+  # An Ash error from the create itself passes through; an edge refusal is a
+  # `{:edge_rejected, message}` (see `attach_edges/5`) and becomes `:invalid`.
+  defp normalize_error({:edge_rejected, message}), do: {:invalid, message}
+  defp normalize_error(%{__exception__: true} = err), do: err
+  defp normalize_error(other), do: {:invalid, describe(other)}
+
+  defp upstream_failures(nil), do: []
+  defp upstream_failures(err), do: [Map.merge(err, %{kind: err.kind, message: err.message})]
 
   # ---- edges ----------------------------------------------------------------
 
-  defp attach_edges(issue, parent_id, deps, opts) do
+  defp attach_edges(issue, parent_id, deps, blocks, opts) do
     writer = Keyword.get(opts, :edge_writer, &Dependencies.add/4)
     edge_opts = opts |> Keyword.take([:created_by]) |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
@@ -190,17 +213,25 @@ defmodule Arbiter.Tasks.Create do
     dep_edges =
       for dep <- deps, do: {dep, issue.id, :blocks, "add dependency #{dep} -> #{issue.id}"}
 
-    for {from, to, type, what} <- parent_edge ++ dep_edges,
-        {:error, reason} <- [writer.(from, to, type, edge_opts)] do
-      %{
-        kind: :edge_failed,
-        task_id: issue.id,
-        edge: %{from: from, to: to, type: type},
-        message:
-          "ticket #{issue.id} was created, but failed to #{what}: #{describe(reason)} — " <>
-            "the ticket is filed without that edge; add it with dep_add rather than filing again"
-      }
-    end
+    block_edges =
+      for target <- blocks,
+          do: {issue.id, target, :blocks, "add dependency #{issue.id} -> #{target}"}
+
+    Enum.reduce_while(parent_edge ++ dep_edges ++ block_edges, :ok, fn edge, :ok ->
+      {from, to, type, what} = edge
+
+      case writer.(from, to, type, edge_opts) do
+        {:error, reason} ->
+          {:halt,
+           {:error,
+            {:edge_rejected,
+             "cannot #{what}: #{describe(reason)} — nothing was created (the ticket and its " <>
+               "edges are one atomic write)"}}}
+
+        _ok ->
+          {:cont, :ok}
+      end
+    end)
   end
 
   defp describe({_kind, message}) when is_binary(message), do: message
