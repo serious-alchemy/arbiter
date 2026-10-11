@@ -32,13 +32,18 @@ defmodule ArbiterCli.Cmd.RestartSystemdWaitTest do
               [head | rest] -> {head, rest}
             end)
 
-          {"ActiveState=#{state}\n", 0}
+          {show_output(state), 0}
 
         _ ->
           {"", 0}
       end
     end)
   end
+
+  defp show_output({state, id, job}),
+    do: "ActiveState=#{state}\nInvocationID=#{id}\nJob=#{job}\n"
+
+  defp show_output(state), do: "ActiveState=#{state}\n"
 
   defp cmds(acc \\ []) do
     receive do
@@ -83,7 +88,25 @@ defmodule ArbiterCli.Cmd.RestartSystemdWaitTest do
            ) == 1
   end
 
-  test "down_message names the state and the recovery and rollback commands" do
+  test "an `active` read of the old instance (same InvocationID) is not success" do
+    # baseline read, then old instance still active, then a new instance
+    stub_systemctl([{"active", "old", ""}, {"active", "old", ""}, {"active", "new", ""}])
+
+    assert {:ok, [{:systemd_restart, :ok, nil}], _} = Restart.perform("/tmp/x", 5_000)
+    # a second `show` poll was needed: the first `active` was the old instance
+    shows = Enum.count(cmds(), &match?({"systemctl", ["--user", "show" | _]}, &1))
+    assert shows >= 4
+  end
+
+  test "an `active` unit with a queued job is not success; stays down is reported" do
+    stub_systemctl([{"active", "old", ""}, {"active", "new", "123"}])
+
+    assert {:down, [{:systemd_restart, :down, "inactive"}], _} =
+             Restart.perform("/tmp/x", 5_000)
+  end
+
+  test "down_message
+ names the state and the recovery and rollback commands" do
     msg = Restart.down_message({:systemd_restart, :down, "inactive"})
     assert msg =~ "server is DOWN"
     assert msg =~ "systemctl --user daemon-reexec"

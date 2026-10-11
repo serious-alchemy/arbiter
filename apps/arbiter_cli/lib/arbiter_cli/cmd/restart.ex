@@ -288,11 +288,13 @@ defmodule ArbiterCli.Cmd.Restart do
     # `--no-block`: a plain `restart` waits for the start job and hangs for as
     # long as systemd leaves that job in `waiting` (the 2026-10-11 outage). We
     # enqueue the job and watch the unit ourselves, bounded, in `await_active/2`.
+    baseline_id = unit_info()[:invocation_id]
+
     case run_cmd("systemctl", ["--user", "restart", "--no-block", "arbiter.service"],
            stderr_to_stdout: true
          ) do
       {_out, 0} ->
-        await_active()
+        await_active(baseline_id)
 
       {out, code} ->
         Output.die(
@@ -313,8 +315,12 @@ defmodule ArbiterCli.Cmd.Restart do
   # try `daemon-reexec` + one more start, logged. Returns the action tuple:
   # `:ok`, `:recovered` (needed the reexec), or `:down` with the last state.
   # An unreadable state is "no verdict" and falls through to the doctor wait.
-  defp await_active(poll \\ 0, retried? \\ false) do
-    state = active_state()
+  # `active` only counts once it is a *new* instance with no queued job: right
+  # after `restart --no-block` the old instance still reads `active` until
+  # systemd starts the job, so an unchanged InvocationID (or a pending Job) is
+  # treated like `inactive` and counts toward the stuck window.
+  defp await_active(baseline_id, poll \\ 0, retried? \\ false) do
+    state = settled_state(unit_info(), baseline_id)
 
     cond do
       state == "active" ->
@@ -328,11 +334,11 @@ defmodule ArbiterCli.Cmd.Restart do
 
       not retried? and poll >= @service_stuck_s and state in ["inactive", "failed"] ->
         recover_stuck_start(state)
-        await_active(poll + 1, true)
+        await_active(baseline_id, poll + 1, true)
 
       true ->
         sleep(@service_poll_ms)
-        await_active(poll + 1, retried?)
+        await_active(baseline_id, poll + 1, retried?)
     end
   end
 
@@ -354,21 +360,53 @@ defmodule ArbiterCli.Cmd.Restart do
     e in ErlangError -> Start.log_text("recovery failed: #{inspect(e.original)}")
   end
 
-  defp active_state do
-    case run_cmd("systemctl", ["--user", "show", "arbiter.service", "-p", "ActiveState"],
-           stderr_to_stdout: true
-         ) do
-      {out, 0} ->
-        case out |> String.trim() |> String.replace_prefix("ActiveState=", "") do
-          "" -> nil
-          state -> state
-        end
+  defp settled_state(nil, _baseline_id), do: nil
+
+  defp settled_state(%{state: "active"} = info, baseline_id) do
+    stale? =
+      info[:job] not in [nil, ""] or (baseline_id != nil and info[:invocation_id] == baseline_id)
+
+    if stale?, do: "inactive", else: "active"
+  end
+
+  defp settled_state(%{state: state}, _baseline_id), do: state
+
+  # ActiveState/InvocationID/Job of arbiter.service, or nil when unreadable.
+  defp unit_info do
+    args = [
+      "--user",
+      "show",
+      "arbiter.service",
+      "-p",
+      "ActiveState",
+      "-p",
+      "InvocationID",
+      "-p",
+      "Job"
+    ]
+
+    case run_cmd("systemctl", args, stderr_to_stdout: true) do
+      {out, 0} -> parse_unit_info(out)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp parse_unit_info(out) do
+    props =
+      for line <- String.split(out, "\n", trim: true),
+          [k, v] <- [String.split(line, "=", parts: 2)],
+          into: %{},
+          do: {k, String.trim(v)}
+
+    case props do
+      %{"ActiveState" => state} when state != "" ->
+        %{state: state, invocation_id: props["InvocationID"] || "", job: props["Job"]}
 
       _ ->
         nil
     end
-  rescue
-    _ -> nil
   end
 
   # ---- stop --------------------------------------------------------------

@@ -538,7 +538,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         prior ->
           "\n\nExact rollback (re-point `current` at the previous release, then start):\n" <>
             "  ln -sfn #{prior} #{ctx.current_link}\n" <>
-            "  systemctl --user start arbiter.service"
+            "  systemctl --user start arbiter.service" <> crossed_restore_note(ctx)
       end
 
     skipped =
@@ -546,6 +546,20 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
     Restart.emit_down(ctx.mode, actions, rollback <> skipped)
   end
+
+  # The new release ships migrations the prior one lacks: if it got far enough
+  # to run them, the prior release must not boot on that database.
+  defp crossed_restore_note(%{rollback_plan: %{crossed: [_ | _]}, backup: backup}) do
+    where =
+      if backup,
+        do: "restore the pre-deploy database backup #{backup.path} first",
+        else: "there is no pre-deploy backup, so check the database before rolling back"
+
+    "\n  NOTE: this release adds migrations the previous one lacks; if they already ran, " <>
+      where <> " (or start the new release instead)."
+  end
+
+  defp crossed_restore_note(_ctx), do: ""
 
   defp finish_failed(ctx, outcome) do
     {state, extra} = failure_status(outcome, ctx)
