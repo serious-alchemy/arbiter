@@ -224,6 +224,7 @@ defmodule ArbiterCli.Verbs do
          ["remove", "n"]
        ]
      ]},
+    {"batch", Module.concat(@cmd, Batch), [workspace: :resolve, probes: [[]]]},
     {"dashboard", Module.concat(@cmd, Dashboard), [workspace: :none, probes: [["login"]]]},
     # G18: trust records are installation-wide (one per subject), not per workspace.
     {"trust", Module.concat(@cmd, Trust),
