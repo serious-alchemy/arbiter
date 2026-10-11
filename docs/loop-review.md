@@ -437,6 +437,44 @@ routing change and keep the final call, use the operator flow:
    `loop.canary_max_age_days`, as before; a canary already held for your
    decision does not expire, it waits for apply/reject (or a revert verdict).
 
+## Offline replays (R15, `bd-c7lx65`): operator-invoked, expiring quota only
+
+A replay re-runs a closed task on another model, in an isolated checkout at the
+task's base commit, with no PR and no merge. It scores the result against the
+change that merged. The score is the round-1 verdict of the live ReviewGate
+prompt, read by the live `converged` rule; the repo's pre-push recipe and the
+overlap with the merged change count beside it. It is the design's first step
+for a new model (`docs/design/paced-quota-routing-signals.md` §7.2).
+
+1. **Pick tasks.**
+
+       bin/arbiter eval 'Arbiter.Release.replay_candidates(difficulty: 2, limit: 10)'
+
+   (or `mix arbiter.replay_report --candidates --difficulty 2`). A ticket with
+   permissions, a review-only one, or one whose merged change can't be found is
+   listed with the reason it can't be replayed.
+2. **Run one in the live node.** Admission reads the budgets only the live
+   node publishes:
+
+       bin/arbiter rpc 'Arbiter.Release.replay(task_id: "bd-…", account: "claude:default", model: "claude-sonnet-5-5", async: true)'
+
+   The replay is refused unless every pool it draws on (the model's and the
+   scoring reviewer's) has room under `Budget.explore/2`, half its expiring
+   headroom, beside the replays already running. Options: `reviewer:` /
+   `reviewer_model:`, `thinking:` / `reviewer_thinking:`, `tests: false`,
+   `timeout_ms:`.
+3. **Read it.**
+
+       bin/arbiter eval 'Arbiter.Release.replay_report()'
+
+   It shows replays by state, the evidence per cell (provider, model,
+   difficulty, type) labelled as replay evidence with its own weight, and the
+   latest outcomes and refusals.
+
+A replay never merges, pushes, opens or touches a PR. It never writes to the
+ticket, `worker_runs`, `review_gate_rounds`, `usage_events` or the competence
+matrix. Replay evidence reaches routing only through a canary you start.
+
 ## Where lessons land (you choose, per finding)
 
 - **A skill** — the primary home for a *general working practice* (read
