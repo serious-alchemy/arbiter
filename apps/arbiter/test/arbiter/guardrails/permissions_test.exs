@@ -232,4 +232,33 @@ defmodule Arbiter.Guardrails.PermissionsTest do
       assert Permissions.defaults(block, nil) == [{"prod_read", :workspace_default}]
     end
   end
+
+  describe "blast-radius markers (R14)" do
+    test "blast:<name> parses; a bare, optional or malformed one is refused" do
+      assert {:ok, %{kind: :blast, canonical: "blast:control_plane"}} =
+               Permissions.parse("blast:control_plane")
+
+      assert {:error, _} = Permissions.parse("blast")
+      assert {:error, _} = Permissions.parse("blast?:control_plane")
+      assert {:error, _} = Permissions.parse("blast:Bad Name")
+      assert Permissions.blast_marker?("blast:prod_data")
+      refute Permissions.blast_marker?("phi_data")
+    end
+
+    test "anyone may add a marker (declared), only the operator may remove it" do
+      assert {:ok, [%{permission: "blast:prod_data", event: :declared}]} =
+               Permissions.plan([], ["blast:prod_data"], :coordinator, %{})
+
+      assert {:error, msg} = Permissions.plan(["blast:prod_data"], [], :coordinator, %{})
+      assert msg =~ "operator-only"
+
+      assert {:ok, [%{permission: "blast:prod_data", event: :revoked}]} =
+               Permissions.plan(["blast:prod_data"], [], :operator, %{})
+    end
+
+    test "a binding cannot make a marker operator-grant: it has no grant" do
+      block = %{"bindings" => %{"blast:prod_data" => %{"grant_by" => "operator"}}}
+      assert Permissions.grant_by("blast:prod_data", block) == :coordinator
+    end
+  end
 end

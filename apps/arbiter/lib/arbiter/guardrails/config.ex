@@ -27,7 +27,7 @@ defmodule Arbiter.Guardrails.Config do
   @match_keys ~w(provider family model)
   @cap_keys ~w(match max_tier min_mode egress max_difficulty spend review)
   @binding_keys ~w(grant_by min_tier enforced_read_only tunnels hosts env_from_secret token_env
-                   ssh_key_secret token_secret tags)
+                   ssh_key_secret token_secret tags min_model_tier)
   @grant_by ~w(operator coordinator)
   @cross_family ~w(required workspace)
   @fallbacks ~w(hold record workspace)
@@ -241,6 +241,11 @@ defmodule Arbiter.Guardrails.Config do
         Map.get(binding, "min_tier"),
         Enum.map(Guardrails.tiers(), &Atom.to_string/1),
         "#{label}.min_tier"
+      ) ++
+      enum_error(
+        Map.get(binding, "min_model_tier"),
+        Arbiter.Agents.Floors.ladder(),
+        "#{label}.min_model_tier"
       ) ++
       bool_error(Map.get(binding, "enforced_read_only"), "#{label}.enforced_read_only") ++
       tunnels_error(Map.get(binding, "tunnels"), "#{label}.tunnels") ++
