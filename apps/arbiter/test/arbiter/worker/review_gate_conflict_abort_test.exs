@@ -12,9 +12,11 @@ defmodule Arbiter.Worker.ReviewGateConflictAbortTest do
 
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Test.GitFixture
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
   alias Arbiter.Worker.ConflictAbortFindings
+  alias Arbiter.Worker.PrivateClone
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
@@ -89,14 +91,14 @@ defmodule Arbiter.Worker.ReviewGateConflictAbortTest do
 
   # The author parks on a verdict handed to it directly, the way the gate
   # delivers one (`review_spawn: false` skips starting a real gate).
-  defp park_on(ws, repo, branch, verdict, meta, rounds) do
+  defp park_on(ws, repo, branch, verdict, meta, rounds, recorded \\ nil) do
     {:ok, task} =
       Ash.create(Issue, %{title: "conflicted task", workspace_id: ws.id, issue_type: :feature})
 
     task = put_state!(task, :active)
     :ok = seed_feature_branch(repo, branch)
     # Recorded before the verdict reaches the author, as the gate does.
-    record_conflict_rounds(task, rounds)
+    record_conflict_rounds(task, rounds, recorded || conflict_findings())
 
     {:ok, pid} =
       Worker.start(
@@ -125,17 +127,19 @@ defmodule Arbiter.Worker.ReviewGateConflictAbortTest do
     task
   end
 
-  defp record_conflict_rounds(_task, 0), do: :ok
+  defp record_conflict_rounds(task, n, findings, offset \\ 0)
 
-  defp record_conflict_rounds(task, n) do
-    for round <- 1..n do
+  defp record_conflict_rounds(_task, 0, _findings, _offset), do: :ok
+
+  defp record_conflict_rounds(task, n, findings, offset) do
+    for round <- (offset + 1)..(offset + n) do
       {:ok, _} =
         Ash.create(Round, %{
           task_id: task.id,
           round: round,
           role: :review,
           verdict: :request_changes,
-          findings: conflict_findings(),
+          findings: findings,
           converged: false
         })
     end
@@ -187,5 +191,155 @@ defmodule Arbiter.Worker.ReviewGateConflictAbortTest do
     assert StubFixRoundDispatcher.dispatch_count() == 0
     assert [{task_id, _, 0, :conflict_rounds_exhausted}] = StubFixRoundDispatcher.escalations()
     assert task_id == task.id
+  end
+
+  defp new_ws do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "pc-#{System.unique_integer([:positive])}",
+        prefix: "pc",
+        config: %{"review" => %{"required" => true}}
+      })
+
+    ws
+  end
+
+  defp findings_at(head, files \\ ["a.ex"]),
+    do: ConflictAbortFindings.findings(%{branch: "feature/x", target_branch: "main"}, files, head)
+
+  describe "podman fix-round worktree (private clone), bd-6sosvl" do
+    # A podman worker's checkout is a private clone (git layout B) whose
+    # `origin/<target>` is a copy the host made when it was cut. The gate's
+    # conflict round ran in it with nothing to merge: the container can't fetch,
+    # and the target ref was stale or absent. The host has to hand it over.
+    setup do
+      fixture = GitFixture.forge_and_checkout(%{"README.md" => "seed\n"})
+      branch = "feature/bd-6sosvl-#{System.unique_integer([:positive])}"
+      {:ok, clone} = PrivateClone.create(fixture.checkout, branch, "main")
+
+      GitFixture.commit!(clone, %{"README.md" => "branch version\n"}, "branch edit")
+
+      # The target advances on the forge, behind the clone's back, into the same file.
+      GitFixture.git!(fixture.seed, ["pull", "-q", "origin", "main"])
+      forge_tip = GitFixture.commit!(fixture.seed, %{"README.md" => "fleet version\n"}, "fleet")
+      GitFixture.git!(fixture.seed, ["push", "-q", "origin", "main"])
+
+      Map.merge(fixture, %{clone: clone, branch: branch, forge_tip: forge_tip})
+    end
+
+    defp park_in_clone(ctx, rounds) do
+      ws = new_ws()
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "podman conflict", workspace_id: ws.id, issue_type: :feature})
+
+      task = put_state!(task, :active)
+      record_conflict_rounds(task, rounds, conflict_findings())
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: ctx.branch,
+            repo_path: ctx.checkout,
+            worktree_path: ctx.clone,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_spawn: false
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, conflict_findings()})
+      task
+    end
+
+    test "the host provisions the CURRENT origin/<target> before the conflict round is dispatched",
+         ctx do
+      # Stale: the clone's origin/main is what it was cut with, not the forge tip.
+      refute GitFixture.git!(ctx.clone, ["rev-parse", "origin/main"]) == ctx.forge_tip
+
+      park_in_clone(ctx, 1)
+      wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+
+      assert GitFixture.git!(ctx.clone, ["rev-parse", "origin/main"]) == ctx.forge_tip
+      assert [%{conflict: true, target_branch: "main"}] = StubFixRoundDispatcher.dispatches()
+
+      # What the container then does: merge it. It conflicts, so the file is
+      # unmerged, not "fatal: ambiguous argument".
+      assert {out, 1} = git(["merge", "--no-edit", "origin/main"], ctx.clone)
+      assert out =~ "CONFLICT"
+      _ = git(["merge", "--abort"], ctx.clone)
+    end
+
+    test "a clone that lost origin/<target> gets it back", ctx do
+      GitFixture.git!(ctx.clone, ["update-ref", "-d", "refs/remotes/origin/main"])
+
+      park_in_clone(ctx, 1)
+      wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
+
+      assert GitFixture.git!(ctx.clone, ["rev-parse", "origin/main"]) == ctx.forge_tip
+    end
+
+    test "a target ref the host cannot provision escalates once with that reason, no round",
+         ctx do
+      GitFixture.git!(ctx.clone, ["update-ref", "-d", "refs/remotes/origin/main"])
+      GitFixture.git!(ctx.clone, ["remote", "set-url", "origin", Path.join(ctx.root, "gone.git")])
+
+      task = park_in_clone(ctx, 1)
+      wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+
+      assert StubFixRoundDispatcher.dispatch_count() == 0
+      assert [{task_id, _, 0, {:no_target_ref, detail}}] = StubFixRoundDispatcher.escalations()
+      assert task_id == task.id
+      assert detail =~ "origin/main"
+    end
+  end
+
+  describe "no-progress conflict rounds, bd-6sosvl" do
+    test "a second rejection at the same head escalates instead of dispatching again",
+         %{repo: repo, ws: ws} do
+      stuck = findings_at("abc123")
+      task = park_on(ws, repo, "feature/np1", {:request_changes, stuck}, %{}, 2, stuck)
+
+      wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+      assert StubFixRoundDispatcher.dispatch_count() == 0
+      assert [{task_id, _, 0, :conflict_no_progress}] = StubFixRoundDispatcher.escalations()
+      assert task_id == task.id
+    end
+
+    test "a second rejection at a NEW head is progress", %{
+      repo: repo,
+      ws: ws
+    } do
+      task = park_on(ws, repo, "feature/np2", {:request_changes, findings_at("def456")}, %{}, 0)
+      record_conflict_rounds(task, 1, findings_at("abc123"))
+      refute ConflictAbortFindings.no_progress?(task.id)
+      record_conflict_rounds(task, 1, findings_at("def456"), 1)
+      refute ConflictAbortFindings.no_progress?(task.id)
+    end
+
+    test "the same head twice is no progress; an unknown head never is", %{
+      repo: repo,
+      ws: ws
+    } do
+      task = park_on(ws, repo, "feature/np3", {:request_changes, findings_at("abc123")}, %{}, 0)
+      record_conflict_rounds(task, 2, findings_at("abc123"))
+      assert ConflictAbortFindings.no_progress?(task.id)
+
+      task2 = park_on(ws, repo, "feature/np4", {:request_changes, conflict_findings()}, %{}, 0)
+      record_conflict_rounds(task2, 2, conflict_findings())
+      refute ConflictAbortFindings.no_progress?(task2.id)
+    end
   end
 end

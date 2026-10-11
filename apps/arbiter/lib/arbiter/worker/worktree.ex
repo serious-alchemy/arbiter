@@ -535,6 +535,42 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
+  @doc """
+  Make the CURRENT `origin/<target>` resolvable in the checkout at `path`, from
+  the host, and return its sha (bd-6sosvl).
+
+  For a worker that cannot fetch for itself. A podman container has no forge
+  credential or network route to one, so a ReviewGate conflict round (an author
+  asked to merge `origin/<target>`) can only merge what the host put in its
+  private clone. The clone's copy is the one it was cut with, or gone; a stale
+  one merges as "Already up to date", a missing one is
+  `fatal: ambiguous argument 'origin/main'`, and either way the round commits
+  nothing and the gate rejects the same head again (#772).
+
+  `{:error, {:no_target_ref, detail}}` when the host cannot fetch it or it does
+  not resolve afterwards: asking a worker to merge it would be a round that
+  cannot succeed.
+  """
+  @spec provision_target(path(), String.t()) ::
+          {:ok, String.t()} | {:error, {:no_target_ref, String.t()}}
+  def provision_target(path, target_branch)
+      when is_binary(path) and is_binary(target_branch) do
+    with :ok <- fetch_origin(path, target_branch),
+         :ok <- ensure_origin_ref(path, target_branch),
+         {:ok, out} <-
+           run_git(["rev-parse", "--verify", "refs/remotes/origin/" <> target_branch], cd: path) do
+      {:ok, String.trim(out)}
+    else
+      {:error, reason} ->
+        {:error,
+         {:no_target_ref,
+          "origin/#{target_branch} could not be provisioned in #{path}: #{format_reason(reason)}"}}
+    end
+  end
+
+  defp format_reason({_tag, msg}) when is_binary(msg), do: msg
+  defp format_reason(reason), do: inspect(reason)
+
   defp ensure_origin_ref(repo_path, base_branch) do
     ref = "refs/remotes/origin/" <> base_branch
 

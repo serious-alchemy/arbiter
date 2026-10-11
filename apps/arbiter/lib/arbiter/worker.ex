@@ -8365,7 +8365,12 @@ defmodule Arbiter.Worker do
         findings_digest: digest
       }
       |> maybe_arg(:claude_command, Map.get(state.meta, :fix_round_command))
-      |> then(&if(conflict?, do: Map.put(&1, :conflict, true), else: &1))
+      |> then(
+        &if(conflict?,
+          do: &1 |> Map.put(:conflict, true) |> maybe_arg(:target_branch, opts[:target_branch]),
+          else: &1
+        )
+      )
 
     task_id = state.task_id
     workspace_id = state.workspace_id
@@ -8432,12 +8437,50 @@ defmodule Arbiter.Worker do
   # the findings a real fix round was dispatched for. What bounds it is
   # `ConflictAbortFindings.max_rounds/0`, counted from the gate's recorded rounds
   # (the one being handled included).
+  #
+  # bd-6sosvl: two things keep it from looping on a round that cannot succeed. The
+  # host puts the CURRENT `origin/<target>` into the author's checkout first (a
+  # podman container cannot fetch it), and gives up with the real reason when it
+  # cannot. And a rejection at the very head the previous one was made at means
+  # that round committed nothing; the gate escalates instead of repeating it.
   defp conflict_round(dispatcher, %State{} = state, findings, attempts) do
-    if ConflictAbortFindings.rejected_rounds(state.task_id) > ConflictAbortFindings.max_rounds() do
-      give_up_fix_round(dispatcher, state, attempts, :conflict_rounds_exhausted)
-    else
-      digest = Map.get(state.meta, :review_gate_findings_digest)
-      start_fix_round(dispatcher, state, findings, digest, attempts, conflict: true)
+    target = Map.get(state.meta, :target_branch) || "main"
+
+    cond do
+      ConflictAbortFindings.rejected_rounds(state.task_id) > ConflictAbortFindings.max_rounds() ->
+        give_up_fix_round(dispatcher, state, attempts, :conflict_rounds_exhausted)
+
+      ConflictAbortFindings.no_progress?(state.task_id) ->
+        give_up_fix_round(dispatcher, state, attempts, :conflict_no_progress)
+
+      true ->
+        case provision_conflict_target(state, target) do
+          :ok ->
+            digest = Map.get(state.meta, :review_gate_findings_digest)
+
+            start_fix_round(dispatcher, state, findings, digest, attempts,
+              conflict: true,
+              target_branch: target
+            )
+
+          {:error, {:no_target_ref, _detail} = reason} ->
+            give_up_fix_round(dispatcher, state, attempts, reason)
+        end
+    end
+  end
+
+  # No checkout to provision (an ad-hoc run with no worktree): nothing to fetch
+  # into, the round's own re-attach cuts what it needs.
+  defp provision_conflict_target(%State{meta: meta}, target) do
+    case Map.get(meta, :worktree_path) do
+      path when is_binary(path) ->
+        case Arbiter.Worker.Worktree.provision_target(path, target) do
+          {:ok, _sha} -> :ok
+          {:error, _} = error -> error
+        end
+
+      _ ->
+        :ok
     end
   end
 

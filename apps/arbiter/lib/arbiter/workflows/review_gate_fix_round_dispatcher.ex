@@ -79,6 +79,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
           required(:findings) => String.t(),
           required(:findings_digest) => String.t() | nil,
           optional(:conflict) => boolean(),
+          optional(:target_branch) => String.t(),
           optional(:workspace_id) => String.t() | nil,
           optional(:claude_command) => [String.t()]
         }
@@ -101,6 +102,16 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       and each conflict round handed back a branch that still conflicts
       (bd-1u15tl). Conflict rounds do not spend the fix-round budget, so this is
       their own bound.
+    * `:conflict_no_progress` — the gate rejected the branch for conflicting with
+      its target at the very head it last rejected it at
+      (`Arbiter.Worker.ConflictAbortFindings.no_progress?/1`, bd-6sosvl): the
+      conflict round in between committed nothing, so another identical one
+      cannot either. Escalated once, instead of looping to the round cap.
+    * `{:no_target_ref, detail}` — the host could not make the current
+      `origin/<target>` resolvable in the author's checkout
+      (`Arbiter.Worker.Worktree.provision_target/2`, bd-6sosvl), so a worker
+      asked to merge it could not (a podman container cannot fetch). No round is
+      dispatched.
     * `:fabricated_evidence` — the reviewer says the work fabricated or
       falsified its evidence (`Arbiter.Worker.EvidenceIntegrity`, bd-80talz).
       A fix round would hand that back to the same provider, and the reviewer
@@ -122,6 +133,8 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
           :budget_exhausted
           | :not_converging
           | :conflict_rounds_exhausted
+          | :conflict_no_progress
+          | {:no_target_ref, String.t()}
           | :fabricated_evidence
           | :needs_coordinator
           | {:dispatch_failed, term()}
@@ -264,12 +277,30 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     push; Arbiter pushes for it), do not open a new PR, then finish as usual so the gate can
     review.
 
+    #{target_note(args)}
+
     ### What the gate reported
 
     #{Map.get(args, :findings) |> to_string() |> String.trim()}
 
     """
   end
+
+  # bd-6sosvl: the host has already fetched the target into this checkout (the
+  # run may have no network or forge credential, so it could not itself), so say
+  # which ref to merge and not to go looking for a remote or a local branch.
+  defp target_note(%{target_branch: target}) when is_binary(target) do
+    """
+    The host has already fetched the current target into this checkout as
+    `origin/#{target}`: run `git merge origin/#{target}`. There is no remote to
+    fetch from here and no local `#{target}` branch to name, so do not try either.
+    If `origin/#{target}` does not resolve, say so plainly in your final output
+    instead of finishing without a commit.
+    """
+    |> String.trim()
+  end
+
+  defp target_note(_args), do: ""
 
   defp briefing(%{task_id: task_id} = args) do
     """
@@ -380,6 +411,12 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   defp subject(task_id, _attempts, :conflict_rounds_exhausted, _total_reviews),
     do: "#{task_id}: ReviewGate cannot review the branch — it keeps conflicting with its target"
 
+  defp subject(task_id, _attempts, :conflict_no_progress, _total_reviews),
+    do: "#{task_id}: ReviewGate conflict round made no progress — branch still conflicts"
+
+  defp subject(task_id, _attempts, {:no_target_ref, _detail}, _total_reviews),
+    do: "#{task_id}: ReviewGate cannot provision the target ref — conflict round not dispatched"
+
   defp subject(task_id, _attempts, :fabricated_evidence, _total_reviews),
     do: "#{task_id}: ReviewGate reviewer flagged fabricated evidence — no automatic fix round"
 
@@ -440,6 +477,38 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     one can integrate them. Rebase or merge the target into the branch by hand
     (or send it back), then re-run the gate: `review_gate_rounds_list #{task_id}`
     shows each conflict rejection and the files it named.
+    """
+  end
+
+  defp body(task_id, attempts, :conflict_no_progress, _total_reviews) do
+    """
+    Task #{task_id}'s branch conflicts with its target, and the conflict round the
+    ReviewGate dispatched for it handed back the SAME head: the author committed
+    nothing, so the gate rejected the identical branch again. Nothing was
+    reviewed and no code finding was raised; the #{attempts} fix round(s) already
+    run were not spent on this. Another identical round was not dispatched.
+
+    Typical causes: the author's sandbox could not merge the target, or it judged
+    the conflict needs a human decision and stopped. `worker_show #{task_id}` has
+    the last round's output. Merge the target into the branch by hand (or send it
+    back with direction), then re-run the gate: `review_gate_rounds_list #{task_id}`
+    shows each conflict rejection and the head it was made at.
+    """
+  end
+
+  defp body(task_id, attempts, {:no_target_ref, detail}, _total_reviews) do
+    """
+    Task #{task_id}'s branch conflicts with its target, but the host could not put
+    the target ref into the branch's checkout, so no conflict round was
+    dispatched: a worker asked to merge `origin/<target>` there (a podman run has
+    no remote it can fetch from) could not, and would only have been rejected
+    again. Nothing was reviewed; the #{attempts} fix round(s) already run were not
+    spent on this.
+
+    Host-side detail: #{detail}
+
+    Fix the checkout's `origin` (or the forge access the host fetches with), or
+    merge the target into the branch by hand, then re-run the gate.
     """
   end
 
