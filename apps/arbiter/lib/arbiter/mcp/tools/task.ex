@@ -14,6 +14,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.BulkRead
+  alias Arbiter.Tasks.BulkResult
   alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
@@ -589,6 +590,9 @@ defmodule Arbiter.MCP.Tools.Task do
   promoting an already-queued task is a no-op success, not an error.
   """
   @spec task_promote(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_promote(%Scope{} = scope, %{"ids" => _} = args),
+    do: bulk(scope, args, &task_promote/2)
+
   def task_promote(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
@@ -618,6 +622,21 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp with_promotion_note(result, %Scope{}), do: result
 
+  # Apply `single` to every id in `args["ids"]`, each independently, and return the
+  # shared per-id result (`Arbiter.Tasks.BulkResult`). The other args (e.g. a
+  # shared `acceptance_waived`) go to every id unchanged, so each id still meets
+  # the single-id rules: acceptance refusal, refine subtree scope, idempotence.
+  defp bulk(scope, args, single) do
+    case BulkResult.fetch_ids(args) do
+      {:ok, ids} ->
+        base = Map.delete(args, "ids")
+        {:ok, BulkResult.run(ids, fn id -> single.(scope, Map.put(base, "id", id)) end)}
+
+      {:error, message} ->
+        {:error, {:invalid, message}}
+    end
+  end
+
   # ---- task_demote --------------------------------------------------------
 
   @doc """
@@ -629,6 +648,9 @@ defmodule Arbiter.MCP.Tools.Task do
   """
   @spec task_demote(Scope.t(), map()) ::
           {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_demote(%Scope{} = scope, %{"ids" => _} = args),
+    do: bulk(scope, args, &task_demote/2)
+
   def task_demote(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
@@ -684,6 +706,19 @@ defmodule Arbiter.MCP.Tools.Task do
   @rank_usage "give exactly one of: top, bottom, before_id, after_id (optionally with pinned), or pinned alone"
 
   @spec task_rank(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_rank(%Scope{} = scope, %{"ids" => _} = args) do
+    with {:ok, ids} <- BulkResult.fetch_ids(args) do
+      single = Map.delete(args, "ids")
+
+      {:ok,
+       BulkResult.run_rank(ids, single, fn id, step_args ->
+         task_rank(scope, Map.put(step_args, "id", id))
+       end)}
+    else
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
   def task_rank(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),

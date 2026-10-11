@@ -155,6 +155,22 @@ defmodule Arbiter.MCP.Catalog do
 
   @both [:worker, :coordinator]
   @coordinator [:coordinator]
+
+  # bd-3cyf8j: the bulk form of the lifecycle verbs. One shared per-id result shape
+  # (`Arbiter.Tasks.BulkResult`), documented once and reused by each description.
+  @bulk_max Arbiter.Tasks.BulkResult.max_batch()
+  @bulk_result_doc "Bulk: pass `ids` (array, at most #{@bulk_max}) instead of `id`; each id is applied " <>
+                     "independently (never all-or-nothing) and the reply is `{results: [{id, status: " <>
+                     "\"ok\" | \"refused\" | \"not_found\", reason?, ticket?}], counts: {total, ok, refused, " <>
+                     "not_found}}` in input order — `ticket` is the single-id reply, `reason` explains a " <>
+                     "refusal. The single-id form is unchanged."
+  @bulk_ids_schema %{
+    "type" => "array",
+    "items" => %{"type" => "string"},
+    "minItems" => 1,
+    "maxItems" => @bulk_max,
+    "description" => "Bulk alternative to `id`: ticket ids, at most #{@bulk_max}."
+  }
   @worker [:worker]
 
   # Enum values for the loop-proposal queue tools. Kept as strings here because
@@ -835,11 +851,13 @@ defmodule Arbiter.MCP.Catalog do
           "auto-waived). **Promote last.** Autopilot can claim a ticket within seconds of it going " <>
           "Ready, so every `parent_of` child and every dependency edge the ticket needs must " <>
           "already exist before you promote it — an edge added after the promote can lose the " <>
-          "race. A refine-tier promotion returns this rule as `promotion_note`.",
+          "race. A refine-tier promotion returns this rule as `promotion_note`. " <>
+          @bulk_result_doc <> " A shared `acceptance_waived` applies to every id.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema,
           "acceptance_waived" => %{
             "type" => "string",
             "description" =>
@@ -848,7 +866,7 @@ defmodule Arbiter.MCP.Catalog do
                 "isn't D0. Persisted onto the ticket and shown in `ticket_show`."
           }
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_promote/2
@@ -862,13 +880,15 @@ defmodule Arbiter.MCP.Catalog do
           "not an error. A ticket can only be demoted if it has no live worker and its state is `queued`, " <>
           "or `active` / `merging` with its run stopped. Refuses a ticket with a live worker, and one that " <>
           "is Verifying or Closed, with a clear reason — demoting those would orphan the worker or undo " <>
-          "completed work.",
+          "completed work. " <>
+          @bulk_result_doc,
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_demote/2
@@ -882,11 +902,15 @@ defmodule Arbiter.MCP.Catalog do
           "Coordinator only. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required, unless `pinned` is given alone. " <>
           "`before_id`/`after_id` must name a ticket in the same workspace, or the call is rejected. " <>
           "Never changes `priority` — ranking before/after a ticket in a different priority band " <>
-          "only orders within rank, it does not move the ticket into that band.",
+          "only orders within rank, it does not move the ticket into that band. " <>
+          "Bulk: `ids` is an ORDERED list sharing one move, and the tickets end up in list order " <>
+          "(`top`/`bottom`: a block with `ids[0]` first; `after_id`: chained after it; `before_id`: in order ahead of it). " <>
+          @bulk_result_doc,
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema,
           "top" => %{"type" => "boolean", "description" => "Move to the top of the workspace."},
           "bottom" => %{
             "type" => "boolean",
@@ -908,7 +932,7 @@ defmodule Arbiter.MCP.Catalog do
                 "`false` moves then unpins."
           }
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
