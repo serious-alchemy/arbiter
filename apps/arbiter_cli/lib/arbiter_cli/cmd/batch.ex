@@ -160,53 +160,52 @@ defmodule ArbiterCli.Cmd.Batch do
 
   # ----- refusal -----
 
+  # {leading words, why}: the first matching prefix refuses the line.
+  @refused [
+    {["watch"], "it never exits"},
+    {["server", "start"], "it is long-lived"},
+    {["server", "restart"], "it is long-lived"},
+    {["server", "deploy"], "it is long-lived"},
+    {["start"], "it is long-lived"},
+    {["restart"], "it is long-lived"},
+    {["self-update"], "it replaces the running binary"},
+    {["upgrade"], "it replaces the running binary"},
+    {["install"], "it modifies the host"},
+    {["session"], "it is interactive"},
+    {["scheduler", "wait"], "it blocks"},
+    {["dashboard", "login"], "it is interactive"}
+  ]
+
   @doc false
   @spec refusal([String.t()]) :: String.t() | nil
   def refusal(argv) do
     words = Enum.reject(argv, &String.starts_with?(&1, "-"))
-    follow? = Enum.any?(argv, &(&1 in ["-f", "--follow"]))
 
-    case words do
-      ["batch" | _] ->
-        "nested `arb batch` is not allowed"
-
-      ["watch" | _] ->
-        not_allowed("watch", "it never exits")
-
-      [log | _] when log in ["logs", "log"] and follow? ->
-        not_allowed("logs -f", "it never exits")
-
-      ["worker", "log" | _] when follow? ->
-        not_allowed("worker log -f", "it never exits")
-
-      ["server", sub | _] when sub in ["start", "restart", "deploy"] ->
-        not_allowed("server #{sub}", "it is long-lived")
-
-      [v | _] when v in ["restart", "start"] ->
-        not_allowed(v, "it is long-lived")
-
-      ["update" | _] ->
-        if deploy_update?(argv), do: not_allowed("update (deploy)", "it is long-lived")
-
-      [v | _] when v in ["self-update", "upgrade"] ->
-        not_allowed(v, "it replaces the running binary")
-
-      ["install" | _] ->
-        not_allowed("install", "it modifies the host")
-
-      ["session" | _] ->
-        not_allowed("session", "it is interactive")
-
-      ["scheduler", "wait" | _] ->
-        not_allowed("scheduler wait", "it blocks")
-
-      ["dashboard", "login" | _] ->
-        not_allowed("dashboard login", "it is interactive")
-
-      _ ->
-        nil
+    cond do
+      match?(["batch" | _], words) -> "nested `arb batch` is not allowed"
+      follow_log?(words, argv) -> not_allowed("logs -f", "it never exits")
+      deploy_update?(words, argv) -> not_allowed("update (deploy)", "it is long-lived")
+      true -> table_refusal(words)
     end
   end
+
+  defp table_refusal(words) do
+    Enum.find_value(@refused, fn {prefix, why} ->
+      if Enum.take(words, length(prefix)) == prefix, do: not_allowed(Enum.join(prefix, " "), why)
+    end)
+  end
+
+  defp follow_log?(words, argv) do
+    follow? = Enum.any?(argv, &(&1 in ["-f", "--follow"]))
+    follow? and (match?(["worker", "log" | _], words) or hd_in?(words, ["log", "logs"]))
+  end
+
+  defp hd_in?([h | _], list), do: h in list
+  defp hd_in?(_, _), do: false
+
+  # `arb update` with no id (or flags first) is the legacy deploy.
+  defp deploy_update?(["update" | _], argv), do: deploy_update?(argv)
+  defp deploy_update?(_, _), do: false
 
   defp deploy_update?(["update"]), do: true
   defp deploy_update?(["update", first | _]), do: String.starts_with?(first, "-")
