@@ -398,6 +398,75 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
       end
     end
 
+    # bd-4uom27: what every step printed on a node run (bd-7yj8qv) whose seed lacked
+    # `mdex_native`, a `rustler_precompiled` NIF: a different library and a different
+    # message from the `elixir_make` one above.
+    @mdex_native_failure """
+    ==> mdex_native
+    Compiling 1 file (.ex)
+    ** (RuntimeError) Error while downloading precompiled NIF: couldn't fetch NIF from https://github.com/leandrocp/mdex_native/releases/download/v0.2.8/libmdex_native_nif-v0.2.8-nif-2.16-x86_64-unknown-linux-gnu.so.tar.gz: {:failed_connect, [{:to_address, {~c"github.com", 443}}, {:inet, [:inet], :nxdomain}]}
+
+        (rustler_precompiled 0.9.0) lib/rustler_precompiled.ex:773: RustlerPrecompiled.download_or_reuse_nif_file/3
+    could not compile dependency :mdex_native, "mix compile" failed. Errors may have been logged above.
+    """
+
+    test "a precompiled NIF that cannot be downloaded is infra, not a code failure",
+         %{repo: repo} do
+      spec = spec([step("compile", "true")])
+
+      assert %{result: {:error, {:infra, "compile", label}}, steps: [compile]} =
+               PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {@mdex_native_failure, 1} end)
+
+      assert label =~ "fetch or build a dependency"
+      assert compile.status == :skipped and compile.reason == :infra
+    end
+
+    test "a dependency that fails to compile for any reason is infra, whatever it says",
+         %{repo: repo} do
+      spec = spec([step("compile", "true")])
+
+      for output <- [
+            "** (RuntimeError) Error while downloading precompiled NIF: couldn't fetch NIF",
+            "== Compilation error in file lib/foo.ex ==\n** (CompileError) lib/foo.ex:1: boom\ncould not compile dependency :jason, \"mix compile\" failed. Errors may have been logged above.",
+            "could not compile dependency :some_nif, \"mix compile\" failed. Unable to find the NIF"
+          ] do
+        assert %{result: {:error, {:infra, "compile", _}}} =
+                 PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {output, 1} end),
+               "not infra: #{output}"
+      end
+    end
+
+    test "once a step could not download a NIF, the rest are skipped unrun", %{repo: repo} do
+      test_pid = self()
+
+      exec = fn command, _timeout_s ->
+        send(test_pid, {:ran, command})
+        {@mdex_native_failure, 1}
+      end
+
+      spec = spec([step("format", "one"), step("compile", "two"), step("credo", "three")])
+
+      assert %{result: {:error, {:infra, "format", _}}, steps: steps} =
+               PrepushCheck.run_steps(spec, repo, exec: exec)
+
+      assert_received {:ran, "one"}
+      refute_received {:ran, "two"}
+      refute_received {:ran, "three"}
+      assert Enum.all?(steps, &(&1.status == :skipped and &1.reason == :infra))
+    end
+
+    test "a failure in the project's own umbrella app is a code failure, not a dependency one",
+         %{repo: repo} do
+      File.mkdir_p!(Path.join(repo, "apps/my_app"))
+      spec = spec([step("compile", "true")])
+
+      out =
+        "== Compilation error in file lib/my_app/a.ex ==\n** (CompileError) lib/my_app/a.ex:3: undefined function nope/0\ncould not compile dependency :my_app, \"mix compile\" failed. Errors may have been logged above."
+
+      assert %{result: {:failed, 1, _}} =
+               PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end)
+    end
+
     test "a bare network error with no Mix dependency context is a code failure", %{repo: repo} do
       spec = spec([step("tests", "true")])
 
