@@ -46,9 +46,12 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
+  require Ash.Query
+
   alias Arbiter.Guardrails.Authority
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
+  alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.EffectivePriority
@@ -72,12 +75,24 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def index(conn, params) do
     with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :read),
-         {:ok, filters} <- build_filters(params) do
+         {:ok, filters} <- build_filters(params),
+         {:ok, include} <- parse_include(params) do
       filters = if ws_id, do: [{:workspace_id, ws_id} | filters], else: filters
       query = Ash.Query.do_filter(Ash.Query.new(Issue), filters)
 
+      # bd-7sxpln: `ids=a,b` is the bulk show — the named tickets (still
+      # filtered by the rest), unknown ones reported in `not_found`.
+      {query, wanted} = restrict_ids(query, params)
+
       case Ash.read(query) do
         {:ok, issues} ->
+          issues = order_by_ids(issues, wanted)
+          not_found = if wanted, do: wanted -- Enum.map(issues, & &1.id)
+          # Epics carry `child_closed`/`child_total`; `include=` adds the
+          # parent/dependency edges — each one batch read, never per ticket.
+          issues = BulkRead.load(issues)
+          edges = if include == [], do: %{}, else: BulkRead.edges(issues)
+          extras = Map.new(issues, &{&1.id, BulkRead.row_extras(&1, include, edges)})
           # P-13 (D-T-17): every row carries its lifecycle projection (`column`,
           # `step`, `blocked_by`, ...), as the MCP `ticket_list` rows do.
           views = Projection.views(issues)
@@ -85,6 +100,8 @@ defmodule ArbiterWeb.Api.IssueController do
           render(conn, :index,
             issues: issues,
             views: views,
+            extras: extras,
+            not_found: not_found,
             holds: holds_for(views, ws_id),
             workspace_id: ws_id
           )
@@ -93,6 +110,27 @@ defmodule ArbiterWeb.Api.IssueController do
           err
       end
     end
+  end
+
+  defp parse_include(params) do
+    case BulkRead.parse_include(params["include"]) do
+      {:ok, include} -> {:ok, include}
+      {:error, msg} -> {:error, {:invalid_request, msg}}
+    end
+  end
+
+  defp restrict_ids(query, %{"ids" => raw}) when is_binary(raw) do
+    ids = raw |> String.split(",", trim: true) |> Enum.map(&String.trim/1) |> Enum.uniq()
+    {Ash.Query.filter(query, id in ^ids), ids}
+  end
+
+  defp restrict_ids(query, _params), do: {query, nil}
+
+  defp order_by_ids(issues, nil), do: issues
+
+  defp order_by_ids(issues, ids) do
+    by_id = Map.new(issues, &{&1.id, &1})
+    for id <- ids, is_map_key(by_id, id), do: by_id[id]
   end
 
   def ready(conn, params) do
