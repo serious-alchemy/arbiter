@@ -233,6 +233,36 @@ defmodule ArbiterWeb.BoardCapacityStripLiveTest do
       assert panel =~ "Shadow"
       assert has_element?(lv, "#pool-chip-acct-claude-claude-panel [data-budget-reason]")
     end
+  end
+
+  describe "a pool under its account's own admission mode (O11)" do
+    setup do
+      mode!("shadow")
+      :ok
+    end
+
+    test "names the account's admission mode and where it came from", %{conn: conn} do
+      stub_view(
+        view("shadow", [claude_pool(%{mode: "enforce", mode_source: "account", decides: true})])
+      )
+
+      lv = mount_board(conn)
+
+      assert has_element?(
+               lv,
+               "#pool-chip-acct-claude-claude-panel [data-pool-admission='enforce'][data-pool-admission-source='account']"
+             )
+
+      refute lv |> element("#pool-chip-acct-claude-claude-panel") |> render() =~ "Shadow:"
+    end
+  end
+
+  describe "a pool's popup (windows)" do
+    setup %{conn: conn} do
+      mode!("shadow")
+      stub_view(view("shadow", [claude_pool()]))
+      %{lv: mount_board(conn)}
+    end
 
     test "shows the binding window with every number behind the budget", %{lv: lv} do
       assert has_element?(

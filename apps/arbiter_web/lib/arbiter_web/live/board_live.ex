@@ -700,7 +700,7 @@ defmodule ArbiterWeb.BoardLive do
         idle_check: idle_check()
       )
 
-    capacity = capacity(mode)
+    capacity = capacity(Arbiter.Accounts.AdmissionMode.installation())
     exit_if_view_gone(view)
     alerts = load_alerts()
     exit_if_view_gone(view)
@@ -739,8 +739,10 @@ defmodule ArbiterWeb.BoardLive do
   # DC5: the `scheduler_admission` mode the board plans under. Under `shadow` and
   # `enforce` the board also carries the scheduler walk, whose per-card layer
   # reasons it shows; today's fields are the same either way (I1, I2).
+  # The strictest of the installation key and any account's override (O11): a
+  # single account trialling `shadow` or `enforce` still gets a walk.
   defp admission_mode do
-    Settings.scheduler_admission()
+    Arbiter.Accounts.AdmissionMode.walk_mode()
   rescue
     _ -> :legacy
   end

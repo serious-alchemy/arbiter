@@ -42,15 +42,9 @@ defmodule Arbiter.Board.AdmissionShadow do
 
   @board_holds [:no_slot, :quota, :paused]
 
-  @doc "The admission mode in force; `:legacy` when it cannot be read."
+  @doc "The mode the walk is planned under: the strictest of the installation key and every account override (`Arbiter.Accounts.AdmissionMode.walk_mode/0`)."
   @spec mode() :: mode()
-  def mode do
-    Arbiter.Settings.scheduler_admission()
-  rescue
-    _ -> :legacy
-  catch
-    :exit, _ -> :legacy
-  end
+  def mode, do: Arbiter.Accounts.AdmissionMode.walk_mode()
 
   @doc "Whether `mode` plans the scheduler walk beside today's plan."
   @spec walks?(mode()) :: boolean()

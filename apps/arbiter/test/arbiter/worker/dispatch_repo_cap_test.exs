@@ -166,4 +166,47 @@ defmodule Arbiter.Worker.DispatchRepoCapTest do
       assert {:ok, _} = dispatch(ready!(ws, "second"), scheduler_admission: nil)
     end
   end
+
+  describe "per-account admission override (O11)" do
+    defp attach!(ws, slug, admission) do
+      {:ok, account} =
+        Ash.create(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: slug,
+          admission: admission
+        })
+
+      {:ok, _} = Arbiter.Accounts.attach_workspace(ws.id, :claude, account.id)
+      account
+    end
+
+    test "an account in enforce refuses at the cap while the installation key is legacy", %{
+      ws: ws
+    } do
+      attach!(ws, "o11-enforce", :enforce)
+
+      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
+
+      assert {:error, {:repo_at_capacity, _}} =
+               dispatch(ready!(ws, "second"), scheduler_admission: nil)
+    end
+
+    test "an account in shadow decides nothing even when the installation key enforces", %{ws: ws} do
+      {:ok, _} = Arbiter.Settings.set_scheduler_admission(:enforce)
+      attach!(ws, "o11-shadow", :shadow)
+
+      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
+      assert {:ok, _} = dispatch(ready!(ws, "second"), scheduler_admission: nil)
+    end
+
+    test "an account with no override follows the installation key", %{ws: ws} do
+      {:ok, _} = Arbiter.Settings.set_scheduler_admission(:enforce)
+      attach!(ws, "o11-inherit", nil)
+
+      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
+
+      assert {:error, {:repo_at_capacity, _}} =
+               dispatch(ready!(ws, "second"), scheduler_admission: nil)
+    end
+  end
 end

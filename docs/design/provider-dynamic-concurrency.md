@@ -1021,6 +1021,17 @@ Slots used: 3 (bd-…, bd-…, bd-…)
 The mode is the installation setting `scheduler_admission`. It's install-wide
 because the Ready queue is (epic-aware §6.6).
 
+**Per-account override (O11).** An account may carry its own `admission`
+(`arb account set <ref> --admission legacy|shadow|enforce|inherit`, MCP
+`account_set`); unset it follows the install key. The budget is per
+`(account, pool)`, so one account can trial `enforce` while another stays in
+`shadow`. Dispatch gates (the repo cap) use the mode of the account the run
+routes to; the walk is planned whenever the install key or any override is
+`shadow` or `enforce` (`Arbiter.Accounts.AdmissionMode.walk_mode/0`). Node-layer
+caps are always enforced. `arb scheduler status`, `quota_get` and the board
+show each pool's effective mode and whether it came from the account or the
+installation.
+
 | Mode | Dispatches by | Records |
 |---|---|---|
 | `legacy` (the default when DC6 ships) | Today's plan, gate and caps | Nothing new |
