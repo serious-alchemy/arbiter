@@ -62,7 +62,8 @@ defmodule Arbiter.Loop.PendingWrite do
     :difficulty_override,
     :config_set,
     :repo_doc_patch,
-    :trust_promotion
+    :trust_promotion,
+    :competence_matrix
   ]
 
   # Kinds only the operator applies, and never through `Arbiter.Loop.apply_pending/2`

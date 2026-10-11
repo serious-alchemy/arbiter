@@ -345,6 +345,30 @@ defmodule Arbiter.Settings do
   end
 
   @doc """
+  Merge `rows` into the live competence matrix (R13, bd-d5rdsc): a row replaces
+  the live row with the same `match`; every other live row stays. The matrix
+  being replaced is kept as the previous one (for `rollback_competence_matrix/0`)
+  in the same write. Rows are validated like `set_competence_matrix/1`'s.
+  """
+  @spec merge_competence_rows([map()]) :: {:ok, [map()]} | {:error, term()}
+  def merge_competence_rows(rows) do
+    with {:ok, rows} <- Competence.normalize_rows(rows),
+         {:ok, row} <- get_or_create_singleton() do
+      live = row.competence_matrix || []
+      replaced = MapSet.new(rows, & &1["match"])
+      merged = Enum.reject(live, &MapSet.member?(replaced, &1["match"])) ++ rows
+
+      with {:ok, updated} <-
+             write_settings(row, %{
+               competence_matrix: merged,
+               competence_matrix_previous: live
+             }) do
+        {:ok, updated.competence_matrix}
+      end
+    end
+  end
+
+  @doc """
   Roll the live matrix back to the one the last promotion replaced. The
   matrix being rolled back becomes the previous one, so a second call rolls
   forward again. `{:error, :no_previous}` when there is nothing to roll back to.
