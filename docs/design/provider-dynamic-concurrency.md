@@ -775,6 +775,27 @@ becomes the only machine bound.
 | Enforced | In the walk, and in a new `ensure_repo_capacity/2` after `ensure_node_capacity/2`, with a reservation under the same `:global.trans` pattern |
 | Who may set it | The operator or the coordinator. It only tightens |
 
+**As built (DC9, bd-7oy77e).**
+- `Arbiter.Worker.RepoCap` counts and admits. The count is derived from the
+  worker registry (each entry now stamps its `repo`) and the reservations, with
+  no counter. It counts an implementer's registry key (no `#`, `:fixpass`,
+  `:conflict`, `#…#impl<N>`), not a reviewer's. A primary counts only while its
+  ticket is In progress and it is not released to wait for CI, so a Merging
+  ticket's parked worker is not a run (O3 stays at "the spec counts runs").
+- `validate_worker_repos/2` refuses a `max_concurrent` that is not a positive
+  integer.
+- The walk's repo layer is fed by `WalkInputs`: `repos` holds each capped repo
+  with its runs now, and a card's candidates name its `{workspace, repo}`.
+- `Dispatch.ensure_repo_capacity/2` runs after `maybe_resolve_repo_for_real_work/2`
+  and not straight after `ensure_node_capacity/2`, because the repo is bound
+  only there. It refuses a fresh dispatch with `{:repo_at_capacity, info}`
+  (held like a full account), goes over for `force_slot` (recorded as a
+  `repo_cap_override` event), and **decides only under
+  `scheduler_admission: enforce`**: under `legacy` and `shadow` it reads no
+  count (I1, I2).
+- The display is `CapacityView.status/1`'s `repos`, shown by the board's
+  capacity popups, `arb scheduler status` and `scheduler_status`.
+
 **What it bounds.** The cap limits how many tickets in one repo are being
 written at once, and that bounds:
 - shared test services;
@@ -797,6 +818,22 @@ pipeline in flight should count.
 | Exempt | Own-P0 cards are never skipped for fair share |
 | Work-conserving | With no such `v`, the card goes above its share. An idle share is borrowed, so it isn't a hard cap |
 | Preemption | None. Running work keeps its seats, and fairness converges as tickets finish |
+
+**As built (DC10, bd-ag5nlo).** `budget_split` is a `provider_accounts` column
+(`queue` | `fair`, default `queue`, set with `arb account set <ref>
+--budget-split fair` or `account_set`); `weight` is a `workspace_provider_accounts`
+column (positive integer, default 1, `arb account attach … --weight N`). The
+arithmetic is `Arbiter.Board.FairShare`; `WalkInputs` puts a `fair` map
+(`seats`, `weights`, `labels`) on a fair account's pools and the walk applies
+the skip rule in `pick_pair` (a skipped card may still take another pool; its
+reason reads `waiting for <pool>: fair share — …`). "Own-P0" is the card's own
+priority 0. "Same effective band" is `effective_priority || priority`. Demand is
+read lazily: a card's candidates for other workspaces are asked only when the
+card's workspace already holds its smallest possible share and another workspace
+has a seat or a Ready card. The share is shown in `CapacityView`'s `fair_share`
+rows (at full demand, over the workspaces linked or seated), the capacity popups
+and `arb scheduler status`. Like the rest of the walk it decides nothing until
+DC8 (I1/I2). O4 stays open: the default is `queue`.
 
 **What this guarantees.** A workspace with a P1 waiting gets its share of the
 next free seats, however many P1s another workspace queued first. Ranks are
@@ -970,8 +1007,9 @@ Slots used: 3 (bd-…, bd-…, bd-…)
   machine, repo and fair-share lines (`CapacityExplainer.budget/2`). The
   popups' "recent changes" come from a five-entry ring `Budget.Server` keeps
   per pool beside the budget (`Server.changes/4`).
-- **`repos` and `fair_share`** are in the body and empty until DC9 (the repo
-  cap) and DC10 (workspace fair share) give them a cap to report.
+- **`repos` and `fair_share`** are in the body. `repos` lists each capped repo
+  (DC9: `label`, `cap`, `used`, `free`, `state`, `holders`); `fair_share` is
+  empty until DC10 (workspace fair share) gives it a cap to report.
 - **Not done here:** `routing_decision.budget` (the dispatch record already
   carries the pool and pair in `admission_shadow`), and removing `:ceiling` and
   `:workspace` from `CapacityExplainer`, which DC1 already deleted.

@@ -754,11 +754,19 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Update a ticket's fields in the workspace (priority / title / …). It never moves the " <>
           "lifecycle `state`: use `ticket_promote` / `ticket_demote` / `ticket_close` / " <>
-          "`ticket_reopen` for that.",
+          "`ticket_reopen` for that. " <>
+          @bulk_result_doc <>
+          " The same fields are applied to every id; bulk `notes` (a REPLACE) is refused " <>
+          "unless `confirm_replace_notes: true`, while `append_notes` works freely.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema,
+          "confirm_replace_notes" => %{
+            "type" => "boolean",
+            "description" => "Bulk only: required to send `notes` (replace) with `ids`."
+          },
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "acceptance" => %{"type" => "string"},
@@ -857,7 +865,7 @@ defmodule Arbiter.MCP.Catalog do
                 "(e.g. \"emricare/tonic\")."
           }
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_update/2
@@ -868,11 +876,12 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Close a ticket in the workspace. Optional `reason`. Also closes the linked external " <>
           "tracker issue by default when the ticket has a `tracker_ref`; pass " <>
-          "`close_upstream: false` to leave it open.",
+          "`close_upstream: false` to leave it open. " <> @bulk_result_doc,
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema,
           "reason" => %{"type" => "string"},
           "close_upstream" => %{
             "type" => "boolean",
@@ -880,7 +889,7 @@ defmodule Arbiter.MCP.Catalog do
               "Also close the linked tracker issue (default true; pass false to opt out)."
           }
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_close/2
@@ -910,11 +919,15 @@ defmodule Arbiter.MCP.Catalog do
           "(bd-9so315). Pass exactly one of `observed` or `failed`, whose value is the " <>
           "evidence — what you actually saw on the running server. `observed` closes the " <>
           "ticket; `failed` reopens it for another attempt. The evidence is persisted on the " <>
-          "ticket either way.",
+          "ticket either way. " <>
+          @bulk_result_doc <>
+          " The one `observed`/`failed` evidence applies to every id; each `failed` id " <>
+          "reopens exactly as a single verify does.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
+          "ids" => @bulk_ids_schema,
           "observed" => %{
             "type" => "string",
             "description" =>
@@ -928,7 +941,7 @@ defmodule Arbiter.MCP.Catalog do
                 "another attempt, with the evidence persisted for the next worker."
           }
         },
-        "required" => ["id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.task_verify/2
@@ -1306,7 +1319,9 @@ defmodule Arbiter.MCP.Catalog do
               "Dispatch even though the provider account this run would use has no free slot " <>
                 "(its `max_concurrent`, or this workspace's share, is reached). Without it such a " <>
                 "dispatch is refused with the account, its cap and the runs holding it. The " <>
-                "override is recorded as an `account_cap_override` event. Defaults to false."
+                "override is recorded as an `account_cap_override` event. It also goes over a " <>
+                "full repo cap (`worker.repos.<repo>.max_concurrent`), recorded as a " <>
+                "`repo_cap_override` event. Defaults to false."
           },
           "force_quota" => %{
             "type" => "boolean",

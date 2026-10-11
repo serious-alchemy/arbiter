@@ -83,6 +83,53 @@ defmodule Arbiter.Quota.HistoryTest do
     assert [nil, nil, ^budget, ^budget] = History.list(account_id) |> Enum.map(& &1.budget)
   end
 
+  test "an Antigravity capture records each model group's own pool budget" do
+    ws = Ash.create!(Workspace, %{name: "default"})
+    account_id = quota_account_id!(ws.id, "antigravity")
+    table = :history_agy_budget_table
+    Application.put_env(:arbiter, :quota_budget_table, table)
+    on_exit(fn -> Application.delete_env(:arbiter, :quota_budget_table) end)
+
+    pools = ["antigravity:gemini_models", "antigravity:claude_and_gpt_models"]
+
+    inputs = fn _calibration ->
+      for pool <- pools,
+          do: %{account_id: account_id, account: nil, pool: pool, quota: nil, hard: :paused}
+    end
+
+    start_supervised!(
+      {Quota.Budget.Server,
+       name: :history_agy_budget_server,
+       table: table,
+       inputs: inputs,
+       enabled: true,
+       tick_ms: :never,
+       calibration: :never}
+    )
+
+    :ok = Quota.Budget.Server.recompute(:history_agy_budget_server)
+
+    for pool <- pools do
+      assert %{budget: b} = Quota.Budget.Server.get(account_id, pool, nil, table)
+      assert is_integer(b)
+    end
+
+    bucket = fn window ->
+      %{"window" => window, "remaining_fraction" => 0.5, "reset_time" => "2026-10-12T12:00:00Z"}
+    end
+
+    groups =
+      for name <- ["Gemini Models", "Claude and GPT models"],
+          do: %{"name" => name, "buckets" => [bucket.("5h"), bucket.("weekly")]}
+
+    probe = fn -> {:ok, %{"command" => %{"data" => %{"groups" => groups}}}} end
+    assert %{} = Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: probe)
+
+    rows = History.list(account_id)
+    assert length(rows) == 4
+    assert Enum.all?(rows, &is_integer(&1.budget))
+  end
+
   test "capture records nil when the budget table is missing" do
     ws = Ash.create!(Workspace, %{name: "default"})
     account_id = quota_account_id!(ws.id)

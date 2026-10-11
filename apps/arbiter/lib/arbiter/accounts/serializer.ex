@@ -34,6 +34,7 @@ defmodule Arbiter.Accounts.Serializer do
       identity_source: account.identity_source,
       identity_verified_at: iso(account.identity_verified_at),
       max_concurrent: account.max_concurrent,
+      budget_split: account.budget_split,
       quota_config: account.quota_config || %{},
       enabled: account.enabled,
       merged_into_id: account.merged_into_id,
@@ -75,7 +76,8 @@ defmodule Arbiter.Accounts.Serializer do
       workspace_id: link.workspace_id,
       provider: link.provider,
       provider_account_id: link.provider_account_id,
-      share: link.share
+      share: link.share,
+      weight: link.weight
     }
   end
 

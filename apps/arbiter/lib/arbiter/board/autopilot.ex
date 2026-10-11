@@ -299,6 +299,9 @@ defmodule Arbiter.Board.Autopilot do
   # plan; it lifts when an eligible account frees or the constraint is edited,
   # and is held as briefly as a full account.
   #
+  # `:repo_at_capacity` (DC9): the card's repo is at its
+  # `worker.repos.<repo>.max_concurrent`. Held, never failed, like a full account.
+  #
   # `:no_node_capacity` (RW8): no node had a free slot for a `remote_only`
   # workspace, or the primary's own cap (`Arbiter.Nodes.LocalCapacity`) held a
   # local run. Held, never failed: it lifts when a slot frees or the operator
@@ -307,6 +310,7 @@ defmodule Arbiter.Board.Autopilot do
     :account_at_capacity,
     :provider_constraint,
     :no_node_capacity,
+    :repo_at_capacity,
     :quota_held,
     :provider_paused
   ]
@@ -1340,6 +1344,11 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
   defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
+
+  defp failure_detail({:repo_at_capacity, %{repo: repo, cap: cap}}),
+    do: "repo #{repo}: #{cap} of #{cap} implementer runs"
+
+  defp failure_detail({:repo_at_capacity, _}), do: "repo at capacity"
   defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
   defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
@@ -1406,6 +1415,9 @@ defmodule Arbiter.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:no_node_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:repo_at_capacity, _info}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),

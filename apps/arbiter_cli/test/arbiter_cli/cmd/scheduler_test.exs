@@ -183,6 +183,38 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ ~r/default\/vstim\s+2\s+1/
     end
 
+    test "lists each workspace's weight, seats and share on a fair account" do
+      body =
+        Map.put(capacity_body(), "fair_share", [
+          %{
+            "label" => "claude:default",
+            "workspaces" => [
+              %{
+                "name" => "vstim",
+                "workspace_id" => "w1",
+                "weight" => 3,
+                "seats" => 2,
+                "share" => 2.25
+              },
+              %{
+                "name" => "arbiter",
+                "workspace_id" => "w2",
+                "weight" => 1,
+                "seats" => 1,
+                "share" => 0.75
+              }
+            ]
+          }
+        ])
+
+      stub_get("/api/scheduler/status", body)
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Fair share"
+      assert out =~ ~r/claude:default \/ vstim\s+3\s+2\s+2.3/
+      assert out =~ ~r/claude:default \/ arbiter\s+1\s+1\s+0.8/
+    end
+
     test "a server that predates the budgets prints none of it" do
       stub_get("/api/scheduler/status", body("running"))
       {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)

@@ -47,6 +47,7 @@ defmodule Arbiter.MCP.Catalog.AccountSchema do
   defp json_type(%{type: :boolean}), do: "boolean"
   defp json_type(%{type: :count}), do: ["integer", "null"]
   defp json_type(%{type: :text}), do: ["string", "null"]
+  defp json_type(%{type: :budget_split}), do: %{"enum" => ["queue", "fair"]}
 
   # Every quota value may be null (a clear) and numbers may arrive as strings.
   defp quota_type(:fraction), do: ["number", "string", "null"]

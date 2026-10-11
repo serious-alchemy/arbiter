@@ -37,6 +37,11 @@ System.delete_env("ARBITER_MEMORY_ROOT")
 # only where tmux is absent.
 tmux_exclude = if System.find_executable("tmux"), do: [], else: [:tmux]
 
+# bd-96ddf6 (Q9): `:qwen_cli` drives the real qwen CLI against the scripted OpenAI
+# fixture server; it runs wherever `qwen` is installed. `:live_ollama` additionally
+# needs a local Ollama and is opt-in (docs/qwen-test-harness.md).
+qwen_exclude = if System.find_executable("qwen"), do: [], else: [:qwen_cli]
+
 # bd-b95w36: `:systemd_user` is the restart-survival regression test — it
 # starts a stand-in systemd user service, restarts it for real, and checks that
 # a session launched from inside it survives with no gap in its output. Same
@@ -75,8 +80,17 @@ max_cases_opts =
 ExUnit.start(
   [
     exclude:
-      [:live_systemd, :live_claude, :live_codex, :systemd_user, :podman, :spike_rw, :k8s] ++
-        tmux_exclude
+      [
+        :live_systemd,
+        :live_claude,
+        :live_codex,
+        :live_ollama,
+        :systemd_user,
+        :podman,
+        :spike_rw,
+        :k8s
+      ] ++
+        tmux_exclude ++ qwen_exclude
   ] ++
     max_cases_opts
 )
