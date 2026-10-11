@@ -131,7 +131,8 @@ defmodule Arbiter.Loop.Analysis do
         %{rows: proposals, dropped: dropped} =
           Proposals.record_all(report,
             workspace_id: workspace_id,
-            actor: Keyword.get(opts, :actor, "loop")
+            actor: Keyword.get(opts, :actor, "loop"),
+            difficulty_cells: difficulty_cells(opts, workspace_id)
           )
 
         envelope =
@@ -143,6 +144,22 @@ defmodule Arbiter.Loop.Analysis do
       else
         {:ok, envelope}
       end
+    end
+  end
+
+  # R12 (bd-druqc1): the per-cell "difficulty raised" feed is opt-in
+  # (`difficulty_feed?: true`, the `difficulty_feed` request param); off, no
+  # measurement is read and the proposals are exactly what they were. The
+  # caller's `:since`/`:until` window is forwarded so evidence stays inside it.
+  defp difficulty_cells(opts, workspace_id) do
+    if Keyword.get(opts, :difficulty_feed?, false) do
+      window =
+        [from: opts[:since], until: opts[:until]]
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+      Arbiter.Loop.SubjectStats.sample([workspace_id: workspace_id] ++ window)
+    else
+      []
     end
   end
 
