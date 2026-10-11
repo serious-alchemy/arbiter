@@ -460,16 +460,27 @@ for a new model (`docs/design/paced-quota-routing-signals.md` §7.2).
 
    The replay is refused unless every pool it draws on (the model's and the
    scoring reviewer's) has room under `Budget.explore/2`, half its expiring
-   headroom, beside the replays already running. Options: `reviewer:` /
-   `reviewer_model:`, `thinking:` / `reviewer_thinking:`, `tests: false`,
-   `timeout_ms:`.
+   headroom, beside the replays already running. It holds those seats until
+   it finishes or its deadline passes (both runs' timeouts, the tests' budget
+   and half an hour). Past the deadline, the next replay marks it abandoned
+   and removes its checkout.
+
+   It is also refused, with no record, unless both models run OS-confined:
+   in a container (`sandbox.backend: podman`), or under a provider's own
+   network jail (agy). Claude on the host has only its permission layer, so
+   a workspace with no container backend can't replay Claude. Options:
+   `reviewer:` / `reviewer_model:`, `thinking:` / `reviewer_thinking:`,
+   `tests: false`, `timeout_ms:` / `review_timeout_ms:`.
 3. **Read it.**
 
        bin/arbiter eval 'Arbiter.Release.replay_report()'
 
    It shows replays by state, the evidence per cell (provider, model,
    difficulty, type) labelled as replay evidence with its own weight, and the
-   latest outcomes and refusals.
+   latest outcomes and refusals. The tests run the model's code, so they run
+   only in the replayed model's container: a replay on the host reports them
+   `not_run`. A replay that rewrote its checkout's `.git` is `failed`
+   (`tampered`) and is not scored.
 
 A replay never merges, pushes, opens or touches a PR. It never writes to the
 ticket, `worker_runs`, `review_gate_rounds`, `usage_events` or the competence
