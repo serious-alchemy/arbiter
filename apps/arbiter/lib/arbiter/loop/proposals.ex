@@ -90,6 +90,7 @@ defmodule Arbiter.Loop.Proposals do
 
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Loop
+  alias Arbiter.Loop.CompetenceProposals
   alias Arbiter.Loop.FindingBuckets
   alias Arbiter.Loop.Report
   alias Arbiter.Loop.Scarcity
@@ -117,7 +118,10 @@ defmodule Arbiter.Loop.Proposals do
   `"loop.analyze"`), `:workspace_config` (the workspace's `config` map, used
   to render the `:config_set` cluster patch — resolved by the caller; this
   function never fetches it itself), `:difficulty_cells` (`SubjectStats.sample/1`
-  tasks for the R12 difficulty feed; default none, which is the feed off).
+  tasks for the R12 difficulty feed; default none, which is the feed off),
+  `:competence_cells` (the same shape, for the R13 matrix feed; default none) and
+  `:competence_rows` (the live matrix those cells are compared with; read from
+  the installation only when there are cells).
   """
   @spec candidates(Report.t(), keyword()) :: [map()]
   def candidates(%Report{} = report, opts \\ []) do
@@ -129,6 +133,7 @@ defmodule Arbiter.Loop.Proposals do
       misestimate_candidates(report, workspace_id, origin) ++
       misestimate_cluster_candidates(report, workspace_id, workspace_config, origin) ++
       difficulty_feed_candidates(Keyword.get(opts, :difficulty_cells, []), workspace_id, origin) ++
+      competence_candidates(opts, workspace_id, origin) ++
       ci_lint_candidates(report, workspace_id, origin)
   end
 
@@ -472,6 +477,28 @@ defmodule Arbiter.Loop.Proposals do
     do: Scarcity.format_share(share)
 
   defp draw_gist(m, _unit), do: "$#{fmt(Map.get(m, :cost_usd))}"
+
+  # ---- learned competence (bd-d5rdsc, R13; design §3.3, §11) --------------
+  #
+  # `:competence_cells` is `SubjectStats.sample/1` output; with none (the feed
+  # off) this contributes nothing. The live rows default to the installation's
+  # effective matrix, read only when there are cells to compare. Proposals
+  # only: a matrix change is applied by an operator or landed by the Stage 3
+  # canary (`Arbiter.Loop.Canary`), never by this pass.
+  defp competence_candidates(opts, workspace_id, origin) do
+    case Keyword.get(opts, :competence_cells, []) do
+      [] ->
+        []
+
+      tasks ->
+        live_rows = Keyword.get_lazy(opts, :competence_rows, &Arbiter.Agents.Routing.Competence.rows/0)
+
+        CompetenceProposals.candidates(tasks, live_rows,
+          workspace_id: workspace_id,
+          origin: origin
+        )
+    end
+  end
 
   # ---- difficulty feed (bd-druqc1, R12; design §3.2) ----------------------
   #
