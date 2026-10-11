@@ -9,7 +9,8 @@ defmodule Arbiter.Agents.Routing.Score do
 
     * `price(c)` — `Arbiter.Quota.Price.price/2` over the candidate's trusted
       windows (`:windows`, from `Arbiter.Quota.Headroom.windows/3`) and its
-      expected draw (`:draw`, default `1.0`). With no draw estimate it is
+      expected draw (`:draw`, default `1.0`), plus the runs reserved on its pool since
+      its snapshot (`:reserved`, default `0`; `Arbiter.Agents.PoolReservations`). With no draw estimate it is
       `1/h` on the binding window, so on its own the price reproduces
       `most_quota`'s headroom order exactly (design §9, I2);
     * `time_h(c)` — the expected hours to merge for the candidate's competence
@@ -114,18 +115,22 @@ defmodule Arbiter.Agents.Routing.Score do
 
   defp calculate_price_and_draw(entry) do
     windows = Map.get(entry, :windows, [])
+    # Runs already started on this pool that its snapshot has not seen yet
+    # (`Arbiter.Agents.PoolReservations`): they add up with this draw before
+    # pricing (design §2.1, §2.5). `0` — nothing in flight — changes nothing.
+    reserved = (Map.get(entry, :reserved) || 0) * 1.0
 
     case Map.get(entry, :sides) do
       %{author: author} = sides ->
         price_sides(
           windows,
-          author * 1.0,
+          author * 1.0 + reserved,
           Map.get(sides, :review),
           Map.get(entry, :reviewer_windows)
         )
 
       _ ->
-        draw = (Map.get(entry, :draw) || 1.0) * 1.0
+        draw = (Map.get(entry, :draw) || 1.0) * 1.0 + reserved
         {Price.price(windows, draw), draw, nil, nil}
     end
   end

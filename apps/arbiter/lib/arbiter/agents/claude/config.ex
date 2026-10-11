@@ -264,7 +264,7 @@ defmodule Arbiter.Agents.Claude.Config do
 
   def model_for_tier(tier) when is_binary(tier) do
     {:ok, cfg} = resolve()
-    overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
+    overrides = ProviderConfig.first_models(Map.get(cfg.raw, "tier_models"))
 
     case Map.get(overrides, tier) || Map.get(@default_tier_models, tier) do
       m when is_binary(m) and m != "" -> m
@@ -337,15 +337,6 @@ defmodule Arbiter.Agents.Claude.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
-
-  # Filter a workspace-supplied map down to string→string entries.
-  defp stringy_map(nil), do: %{}
-
-  defp stringy_map(m) when is_map(m) do
-    for {k, v} <- m, is_binary(k), is_binary(v) and v != "", into: %{}, do: {k, v}
-  end
-
-  defp stringy_map(_), do: %{}
 
   # Filter a workspace-supplied map down to string→list-of-strings entries.
   defp list_map(nil), do: %{}

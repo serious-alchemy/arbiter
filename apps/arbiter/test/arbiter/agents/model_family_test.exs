@@ -112,4 +112,46 @@ defmodule Arbiter.Agents.ModelFamilyTest do
       assert ModelFamily.model_for_tier(:nonesuch, "premium", %{}) == nil
     end
   end
+
+  describe "models_for_tier/3 and tiers_above/2 (R9)" do
+    test "a string tier_models entry is a one-element list, and model_for_tier is its head" do
+      assert ModelFamily.models_for_tier(:claude, "economy", %{}) == ["haiku"]
+
+      config = %{"tier_models" => %{"economy" => "haiku-x"}}
+      assert ModelFamily.models_for_tier(:claude, "economy", config) == ["haiku-x"]
+      assert ModelFamily.model_for_tier(:claude, "economy", config) == "haiku-x"
+    end
+
+    test "a list is ordered, the first entry is the default, junk entries are dropped" do
+      config = %{
+        "gemini" => %{
+          "tier_models" => %{"economy" => ["gemini-3.8-flash-low", "", 7, "claude-sonnet-4-6"]}
+        }
+      }
+
+      assert ModelFamily.models_for_tier(:antigravity, "economy", config) ==
+               ["gemini-3.8-flash-low", "claude-sonnet-4-6"]
+
+      assert ModelFamily.model_for_tier(:antigravity, "economy", config) == "gemini-3.8-flash-low"
+    end
+
+    test "an empty or unusable override falls back to the built-in map" do
+      empty = %{"tier_models" => %{"economy" => []}}
+      assert ModelFamily.models_for_tier(:claude, "economy", empty) == ["haiku"]
+
+      assert ModelFamily.models_for_tier(:claude, "flagship", %{}) == []
+      assert ModelFamily.models_for_tier(:nonesuch, "economy", %{}) == []
+      assert ModelFamily.models_for_tier(:claude, nil, %{}) == []
+    end
+
+    test "tiers_above/2 walks the ladder upward and never includes the tier itself" do
+      assert ModelFamily.tiers_above("economy", 1) == ["standard"]
+      assert ModelFamily.tiers_above("economy", 3) == ["standard", "premium", "flagship"]
+      assert ModelFamily.tiers_above("premium", 5) == ["flagship"]
+      assert ModelFamily.tiers_above("flagship", 2) == []
+      assert ModelFamily.tiers_above("economy", 0) == []
+      assert ModelFamily.tiers_above("nonesuch", 2) == []
+      assert ModelFamily.tiers_above(nil, 2) == []
+    end
+  end
 end

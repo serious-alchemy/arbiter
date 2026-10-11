@@ -39,6 +39,12 @@ defmodule Arbiter.Agents.ModelFamily do
   way the adapter will at spawn, so routing can know the model — and so the
   pool — before it picks an account.
 
+  A tier may list several models (`tier_models.economy: ["a", "b"]`, R9). The
+  first is the default every adapter spawns with, so `model_for_tier/3` and the
+  adapters read a list exactly as they read its head; `models_for_tier/3` gives
+  routing the whole list so `Arbiter.Agents.ProviderRouting` can price each
+  model's pool.
+
   ## The reviewer tier → model map (bd-a1ke2c)
 
   A cross-family reviewer (`review_agent.cross_family`,
@@ -56,6 +62,7 @@ defmodule Arbiter.Agents.ModelFamily do
 
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Codex.Config, as: CodexConfig
+  alias Arbiter.Agents.Floors
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.ProviderConfig
 
@@ -119,15 +126,26 @@ defmodule Arbiter.Agents.ModelFamily do
   The concrete model `provider` runs for `tier`, resolved as its adapter will:
   `agent_config[<adapter>]["tier_models"]`, then the flat
   `agent_config["tier_models"]`, then the adapter's built-in map. `nil` when
-  nothing names one (the CLI's own default then applies).
+  nothing names one (the CLI's own default then applies). When the tier lists
+  several models (`models_for_tier/3`), the first is the default.
   """
   @spec model_for_tier(atom() | String.t() | nil, String.t() | nil, map() | nil) ::
           String.t() | nil
-  def model_for_tier(provider, tier, agent_config)
+  def model_for_tier(provider, tier, agent_config),
+    do: provider |> models_for_tier(tier, agent_config) |> List.first()
+
+  @doc """
+  Every model `provider` may run for `tier`, in configured order (R9, design
+  §5.2). A `tier_models` entry is a model id or an ordered list of them; the
+  first is the default `model_for_tier/3` returns, and a one-element list
+  behaves exactly like the string. `[]` when nothing names one.
+  """
+  @spec models_for_tier(atom() | String.t() | nil, String.t() | nil, map() | nil) :: [String.t()]
+  def models_for_tier(provider, tier, agent_config)
       when is_binary(tier) and tier != "" do
     case builtin(provider) do
       nil ->
-        nil
+        []
 
       {adapter, defaults} ->
         overrides =
@@ -135,11 +153,31 @@ defmodule Arbiter.Agents.ModelFamily do
           |> ProviderConfig.apply_overrides(adapter)
           |> Map.get("tier_models")
 
-        present(overrides, tier) || present(defaults, tier)
+        case listed(overrides, tier) do
+          [] -> listed(defaults, tier)
+          models -> models
+        end
     end
   end
 
-  def model_for_tier(_provider, _tier, _agent_config), do: nil
+  def models_for_tier(_provider, _tier, _agent_config), do: []
+
+  @doc """
+  The first `n` tiers above `tier` on the routing ladder
+  (`Arbiter.Agents.Floors.ladder/0`), lowest first; `[]` for a tier off the
+  ladder or `n < 1`. What `routing.scoring.allow_upgrade` adds (design §5.2).
+  """
+  @spec tiers_above(String.t() | nil, integer()) :: [String.t()]
+  def tiers_above(tier, n) when is_binary(tier) and is_integer(n) and n > 0 do
+    ladder = Floors.ladder()
+
+    case Enum.find_index(ladder, &(&1 == tier)) do
+      nil -> []
+      index -> ladder |> Enum.drop(index + 1) |> Enum.take(n)
+    end
+  end
+
+  def tiers_above(_tier, _n), do: []
 
   @doc """
   The tier a `family` reviewer runs for a task whose reviewer tier is `tier`:
@@ -188,12 +226,6 @@ defmodule Arbiter.Agents.ModelFamily do
 
   defp builtin(_), do: nil
 
-  defp present(%{} = map, tier) do
-    case Map.get(map, tier) do
-      m when is_binary(m) and m != "" -> m
-      _ -> nil
-    end
-  end
-
-  defp present(_, _tier), do: nil
+  defp listed(%{} = map, tier), do: map |> Map.get(tier) |> ProviderConfig.model_ids()
+  defp listed(_, _tier), do: []
 end

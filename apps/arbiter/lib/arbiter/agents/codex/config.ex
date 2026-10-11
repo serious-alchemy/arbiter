@@ -185,7 +185,7 @@ defmodule Arbiter.Agents.Codex.Config do
     ctx = validation_context()
     default = if ctx.backend == :custom, do: nil, else: Map.get(@default_tier_models, tier)
 
-    case Map.get(stringy_map(Map.get(cfg.raw, "tier_models")), tier) || default do
+    case Map.get(ProviderConfig.first_models(Map.get(cfg.raw, "tier_models")), tier) || default do
       nil -> nil
       model -> usable_for_tier(tier, model, default, ctx)
     end
@@ -264,12 +264,4 @@ defmodule Arbiter.Agents.Codex.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
-
-  defp stringy_map(nil), do: %{}
-
-  defp stringy_map(m) when is_map(m) do
-    for {k, v} <- m, is_binary(k), is_binary(v) and v != "", into: %{}, do: {k, v}
-  end
-
-  defp stringy_map(_), do: %{}
 end
