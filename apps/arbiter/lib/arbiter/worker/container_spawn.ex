@@ -136,6 +136,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
+  alias Arbiter.Worker.GateEnv
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Publisher
@@ -1510,14 +1511,28 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   # The `podman run` invocation alone, without the session-only side effects of
   # `wrap_port/1` (codex auth reopen, resume seeding).
-  defp wrap_argv(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
-    with {:ok, spec} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
+  defp wrap_argv(port_args, offline? \\ false)
+
+  defp wrap_argv(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args, offline?) do
+    with {:ok, spec} <- network_spec(request, offline?),
          {:ok, [podman | args]} <-
-           Container.wrap(Jail.network_command(spec, argv), opts(request, port_args)) do
+           Container.wrap(Jail.network_command(spec, argv), opts(request, port_args, offline?)) do
       {:ok,
-       %{port_args | exec: podman, argv: [podman | args], env: inherit_pairs(port_args, request)}}
+       %{
+         port_args
+         | exec: podman,
+           argv: [podman | args],
+           env: inherit_pairs(port_args, request, offline?)
+       }}
     end
   end
+
+  # The pre-push gate's container has no egress: no bridge to wait for, so a proxy
+  # socket that is already gone cannot refuse it (bd-9xcogk).
+  defp network_spec(_request, true), do: {:ok, nil}
+
+  defp network_spec(request, false),
+    do: Jail.network_spec(Keyword.put(request.network, :socat, "socat"))
 
   @doc """
   Run `command` (`sh -c`) to completion in the run's own container: the spawn's
@@ -1526,14 +1541,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
   (bd-8wdrql, the pre-push recipe). Returns `{output, exit_status}` — 124 when
   `timeout_s` (plus a grace) elapsed — or `{:error, reason}` when the wrap was
   refused. The container is removed by name afterwards, whatever happened.
+
+  The container is offline (bd-9xcogk): the agent's egress bridge is not mounted and
+  its proxy variables are not set, since that proxy belongs to the agent's run and may
+  be gone by now. The deps and `_build` it needs are in the worktree already.
   """
   @spec run_command(map(), String.t(), pos_integer()) ::
           {String.t(), non_neg_integer()} | {:error, term()}
   def run_command(%{sandbox: %{name: name}} = port_args, command, timeout_s)
       when is_binary(command) and is_integer(timeout_s) do
-    inner = %{port_args | argv: ["sh", "-c", command]}
-
-    with {:ok, %{argv: [podman | args], env: env}} <- wrap_port(inner) do
+    with {:ok, %{argv: [podman | args], env: env}} <- gate_argv(port_args, command) do
       try do
         Container.cmd([], podman, args,
           env: env,
@@ -1547,6 +1564,13 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   def run_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
+
+  # The `podman run` argv and client env `run_command/3` runs `command` with.
+  @doc false
+  @spec gate_argv(map(), String.t()) ::
+          {:ok, %{argv: [String.t()], env: list()}} | {:error, term()}
+  def gate_argv(%{sandbox: %{}} = port_args, command) when is_binary(command),
+    do: wrap_argv(%{port_args | argv: ["sh", "-c", command]}, true)
 
   @doc """
   Like `run_command/3`, for a command run *while the session's container is
@@ -1582,8 +1606,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
     String.slice(base, 0, 64 - 11) <> "-x" <> suffix
   end
 
-  defp opts(request, port_args) do
-    {inherit, literal} = split_env(env_pairs(port_args, request))
+  defp opts(request, port_args, offline? \\ false) do
+    {inherit, literal} = split_env(env_pairs(port_args, request, offline?))
 
     base = [
       worktree: request.mounts[:worktree],
@@ -1594,9 +1618,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       name: request.name,
       home: request.home,
       writable_paths: request.writable_paths,
-      bridges: [
-        request.network[:proxy_socket] | Enum.map(request.network[:bridges], &elem(&1, 1))
-      ],
+      bridges: bridges(request, offline?),
       cli_mounts: request.cli_mounts,
       env: literal,
       podman_secrets: Map.get(request, :git_secrets, []),
@@ -1607,14 +1629,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
     if request.podman, do: [{:podman, request.podman} | base], else: base
   end
 
-  # The explicit pairs of the spawn plus the container's own.
-  defp env_pairs(port_args, request) do
+  defp bridges(_request, true), do: []
+
+  defp bridges(request, false),
+    do: [request.network[:proxy_socket] | Enum.map(request.network[:bridges], &elem(&1, 1))]
+
+  # The explicit pairs of the spawn plus the container's own. An offline (gate)
+  # container carries none of the egress proxy's.
+  defp env_pairs(port_args, request, offline? \\ false) do
     set = for {name, value} <- Map.get(port_args, :env, []), is_binary(value), do: {name, value}
-    Map.to_list(Map.new(set ++ request.env))
+    pairs = Map.to_list(Map.new(set ++ request.env))
+    if offline?, do: GateEnv.drop_proxy(pairs), else: pairs
   end
 
-  defp inherit_pairs(port_args, request),
-    do: port_args |> env_pairs(request) |> split_env() |> elem(0)
+  defp inherit_pairs(port_args, request, offline?),
+    do: port_args |> env_pairs(request, offline?) |> split_env() |> elem(0)
 
   defp split_env(pairs), do: Enum.split_with(pairs, fn {name, _} -> not client_name?(name) end)
 

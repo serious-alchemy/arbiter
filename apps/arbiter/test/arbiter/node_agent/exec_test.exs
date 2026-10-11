@@ -131,6 +131,35 @@ defmodule Arbiter.NodeAgent.ExecTest do
     refute File.read!(Path.join(stub, "run.env")) =~ @token
   end
 
+  # bd-9xcogk: the agent's proxy env names a bridge the command's container does not
+  # have (no bridges, `--network=none`), so every fetch died on 127.0.0.1:3128.
+  test "the agent's proxy env is not carried into the command's container", %{
+    opts: opts,
+    stub: stub
+  } do
+    proxied =
+      Map.put(spec("x5"), "env", %{
+        "ARB_HOST" => "http://127.0.0.1:4848",
+        "HTTP_PROXY" => "http://127.0.0.1:3128",
+        "https_proxy" => "http://127.0.0.1:3128",
+        "NO_PROXY" => "127.0.0.1",
+        "GIT_SSH_COMMAND" => "ssh -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p'"
+      })
+
+    assert {:ok, "x5"} = Runs.assign(proxied, opts)
+    assert_receive {:run_push, "x5", "exit", _}, 5_000
+    assert :ok = Run.ack_exit("x5")
+    wait_until(fn -> "x5" not in Runs.run_ids() end)
+
+    assert {_, 0} = Exec.run("x5", "true", 30, opts)
+
+    # (`run.env` is the test VM's own env, which may carry a proxy of its own.)
+    recorded = Enum.join(argv(stub), "\n")
+    refute recorded =~ ~r/proxy/i
+    refute recorded =~ "GIT_SSH_COMMAND"
+    assert recorded =~ "ARB_HOST"
+  end
+
   test "the container is removed by name afterwards", %{opts: opts, stub: stub} do
     finished_run("x3", opts)
     assert {_, 0} = Exec.run("x3", "true", 30, opts)

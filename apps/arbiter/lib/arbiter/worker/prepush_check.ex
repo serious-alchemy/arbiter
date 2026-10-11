@@ -66,6 +66,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   the worktree has neither (bd-9rrrgk).
   """
 
+  alias Arbiter.Worker.GateEnv
   alias Arbiter.Worker.PrepushCheck.Recipe
   alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.ReleaseEnv
@@ -74,6 +75,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   @kill_after_seconds 10
   @max_output_bytes 16_000
+  @offline_deps_label "could not fetch or build a dependency (the gate has no network)"
 
   @type spec :: Recipe.spec() | map()
 
@@ -160,7 +162,7 @@ defmodule Arbiter.Worker.PrepushCheck do
             {:error, _} -> nil
           end
 
-        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp), nil)
+        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp) ++ GateEnv.host_unsets(), nil)
 
         exec = fn command, seconds ->
           args = [
@@ -184,8 +186,41 @@ defmodule Arbiter.Worker.PrepushCheck do
     deadline = System.monotonic_time(:millisecond) + budget * 1000
     touched = touched_for(steps, worktree, Keyword.get(opts, :target))
 
-    results = Enum.map(steps, &run_step(&1, worktree, touched, deadline, exec))
+    results = run_each(steps, worktree, touched, deadline, exec)
     %{result: overall(results), steps: results}
+  end
+
+  # In order. A step that found a dependency it cannot fetch or build in the gate
+  # (no network) says the same of every later step, each of which would burn its
+  # timeout retrying: they are recorded as skipped infra without running.
+  defp run_each(steps, worktree, touched, deadline, exec) do
+    {results, _halt} =
+      Enum.map_reduce(steps, nil, fn
+        step, nil ->
+          result = run_step(step, worktree, touched, deadline, exec)
+          {result, offline_deps_halt(result)}
+
+        step, label ->
+          {not_run(step, label), label}
+      end)
+
+    results
+  end
+
+  defp offline_deps_halt(%{status: :skipped, reason: :infra, output: output}) do
+    label = infra_label(output)
+    if label == @offline_deps_label, do: label
+  end
+
+  defp offline_deps_halt(_), do: nil
+
+  defp not_run(step, label) do
+    record(
+      step,
+      {:infra, label, "not run: an earlier step could not fetch or build a dependency"},
+      0,
+      0
+    )
   end
 
   # A spec built outside `Recipe` (the legacy shape) is one step.
@@ -295,6 +330,8 @@ defmodule Arbiter.Worker.PrepushCheck do
   # `skipped: infra` and the gate fails open (bd-9rrrgk). Matched on the output
   # of a failing step only, and on phrases a code failure does not print.
   @infra_signatures [
+    {@offline_deps_label,
+     ~r/Error happened while installing \S+ from precompiled binary|Could not compile with "make"|unable to access 'https?:|Failed to connect to \S+ port \d+|Could not resolve host|Failed to fetch record for|Could not (install|find) Hex/},
     {"dependencies are not available (mix deps.get)",
      ~r/the dependency is not available|Unchecked dependencies for environment|Can't continue due to errors on dependencies|dependency [\w:]+ is not available|run [`"']?mix deps\.get/i},
     {"deps missing for the formatter's import_deps",
