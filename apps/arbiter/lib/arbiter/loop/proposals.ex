@@ -94,6 +94,7 @@ defmodule Arbiter.Loop.Proposals do
   alias Arbiter.Loop.Report
   alias Arbiter.Loop.Scarcity
   alias Arbiter.Loop.SkillClause
+  alias Arbiter.Loop.SubjectStats
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -115,7 +116,8 @@ defmodule Arbiter.Loop.Proposals do
   Options: `:workspace_id` (stamped on each candidate), `:origin` (defaults to
   `"loop.analyze"`), `:workspace_config` (the workspace's `config` map, used
   to render the `:config_set` cluster patch — resolved by the caller; this
-  function never fetches it itself).
+  function never fetches it itself), `:difficulty_cells` (`SubjectStats.sample/1`
+  tasks for the R12 difficulty feed; default none, which is the feed off).
   """
   @spec candidates(Report.t(), keyword()) :: [map()]
   def candidates(%Report{} = report, opts \\ []) do
@@ -126,6 +128,7 @@ defmodule Arbiter.Loop.Proposals do
     finding_candidates(report, workspace_id, origin) ++
       misestimate_candidates(report, workspace_id, origin) ++
       misestimate_cluster_candidates(report, workspace_id, workspace_config, origin) ++
+      difficulty_feed_candidates(Keyword.get(opts, :difficulty_cells, []), workspace_id, origin) ++
       ci_lint_candidates(report, workspace_id, origin)
   end
 
@@ -469,6 +472,80 @@ defmodule Arbiter.Loop.Proposals do
     do: Scarcity.format_share(share)
 
   defp draw_gist(m, _unit), do: "$#{fmt(Map.get(m, :cost_usd))}"
+
+  # ---- difficulty feed (bd-druqc1, R12; design §3.2) ----------------------
+  #
+  # Competence keys on `difficulty_at_dispatch`, so a rubric that runs a tier
+  # low is absorbed by the matrix rather than repaired. The repair is the
+  # Loop's `:difficulty_override` lane, fed by each cell's "difficulty raised"
+  # rate. `tasks` is `SubjectStats.sample/1` output; with none (the feed off)
+  # this contributes nothing. A cell proposal is a fleet-wide hypothesis whose
+  # payload names the cell and no `task_id`, so `Apply.payload_ready?/1`
+  # refuses it until an operator authors the concrete change: proposals only,
+  # nothing auto-applies.
+
+  # A cell needs the ladder's minimum sample before its rate is read, and at
+  # least this share of its tasks corrected upward.
+  @raised_rate_threshold 0.3
+
+  defp difficulty_feed_candidates([], _workspace_id, _origin), do: []
+
+  defp difficulty_feed_candidates(tasks, workspace_id, origin) do
+    tasks
+    |> Enum.group_by(&{&1.provider, &1.model, &1.difficulty, &1.issue_type})
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.flat_map(fn {cell, cell_tasks} ->
+      summary = SubjectStats.summarize(cell_tasks)
+      {_provider, _model, difficulty, _type} = cell
+
+      if difficulty < proposal_ceiling() and summary.n >= SubjectStats.min_n() and
+           summary.difficulty_raised >= @raised_rate_threshold do
+        [feed_candidate(cell, cell_tasks, summary, workspace_id, origin)]
+      else
+        []
+      end
+    end)
+  end
+
+  defp feed_candidate({provider, model, difficulty, type}, tasks, summary, workspace_id, origin) do
+    rate = summary.difficulty_raised
+    cell = "#{provider}/#{model} D#{difficulty}/#{type || "any"}"
+
+    raised =
+      tasks |> Enum.filter(& &1.difficulty_raised?) |> Enum.map(& &1.task_id) |> Enum.uniq()
+
+    %{
+      kind: :difficulty_override,
+      scope: :fleet,
+      category: "difficulty raised rate (#{cell})",
+      target: nil,
+      difficulty: difficulty,
+      repo: nil,
+      gist:
+        elide(
+          "rubric runs low for #{cell}: #{pct(rate)} of #{summary.n} tasks were raised " <>
+            "above D#{difficulty}"
+        ),
+      target_metric: "difficulty-raised rate for #{cell}",
+      baseline: pct(rate),
+      incident_refs: raised,
+      task_refs: raised,
+      payload: %{
+        "cell" => %{
+          "provider" => provider,
+          "model" => model,
+          "difficulty" => difficulty,
+          "issue_type" => type
+        },
+        "n" => summary.n,
+        "difficulty_raised_rate" => rate,
+        "reason" => "raised_rate"
+      },
+      diff: nil,
+      origin: origin,
+      workspace_id: workspace_id
+    }
+  end
 
   # ---- difficulty-misestimate clustering (bd-70nblx) ----------------------
   #

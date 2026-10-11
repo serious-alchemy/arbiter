@@ -15,10 +15,12 @@ defmodule Arbiter.Worker.ImageTest do
 
   defp resolver(digest \\ @digest), do: fn _ref -> {:ok, "sha256:" <> digest} end
 
-  # Answers only for the shared base's FROM; any other ref goes to `other`.
+  # Answers only for the shared base's FROMs (the OS and arb's Erlang runtime);
+  # any other ref goes to `other`.
   defp base_only(other \\ fn ref -> flunk("resolver asked for #{ref}") end) do
     fn
       "docker.io/library/debian:trixie-slim" -> {:ok, "sha256:" <> @digest}
+      "docker.io/library/erlang:" <> _ -> {:ok, "sha256:" <> @digest}
       ref -> other.(ref)
     end
   end
@@ -132,6 +134,92 @@ defmodule Arbiter.Worker.ImageTest do
                Image.plan(repo_with(%{"a" => "2"}), "main", opts())
                |> elem(1)
                |> then(& &1.base.hash)
+    end
+  end
+
+  # bd-59m96o: an arb compiled on OTP 29 cannot load on a repo image's OTP 27
+  # ("corrupt atom table"), so the base carries an Erlang for arb alone.
+  describe "plan/3: the base carries the Erlang/OTP arb runs on (bd-59m96o)" do
+    test "the arb runtime is the official Erlang image of arb's release, pinned, off PATH" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
+      base = plan.base.containerfile
+
+      assert base =~ "FROM docker.io/library/erlang:29-slim@sha256:#{@digest} AS arb_otp"
+      assert base =~ "COPY --from=arb_otp /usr/local/lib/erlang /opt/arbiter/otp"
+      assert base =~ ~s(LABEL arbiter.arb-otp="29")
+      assert {"docker.io/library/erlang:29-slim", "sha256:" <> @digest} in plan.pins
+
+      # The OS stage is still the last one, and PATH still names only the CLI
+      # dir: the repo's own Erlang stays the one its toolchain layer installs.
+      assert [_, os_stage] = String.split(base, ~r/^FROM /m, parts: 3) |> Enum.drop(1)
+      assert os_stage =~ ~r/\Adocker\.io\/library\/debian:trixie-slim@/
+      assert base =~ "ENV PATH=/opt/arbiter/cli:$PATH"
+      refute base =~ ~r/^ENV PATH=.*\/opt\/arbiter\/otp/m
+    end
+
+    test "a repo pinned to an older Erlang keeps it, and gets the arb runtime beside it" do
+      repo = repo_with(%{".tool-versions" => "erlang 27.1.2\nelixir 1.17.3-otp-27\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
+
+      assert plan.toolchain.erlang == "27.1.2"
+      assert plan.containerfile =~ "elixir:1.17.3-otp-27-slim"
+      assert plan.base.containerfile =~ "erlang:29-slim"
+      # The toolchain layer copies /usr/local only: it cannot reach /opt/arbiter/otp.
+      refute plan.containerfile =~ "/opt/arbiter"
+    end
+
+    test "another arb release is another base, and so another image" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      {:ok, a} = Image.plan(repo, "main", opts(arb_otp: "29"))
+      {:ok, b} = Image.plan(repo, "main", opts(arb_otp: "30"))
+
+      refute a.base.tag == b.base.tag
+      refute a.tag == b.tag
+    end
+
+    test "by default the runtime is the release the host's arb was built on" do
+      dir = tmp_dir("arb")
+      stamped = Arbiter.Test.ArbEscriptFixture.build!(dir, stamp: "31", name: "arb")
+      unstamped = Arbiter.Test.ArbEscriptFixture.build!(dir, stamp: nil, name: "old-arb")
+      repo = repo_with(%{"README.md" => "hi\n"})
+
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_path: stamped))
+      assert plan.base.containerfile =~ "FROM docker.io/library/erlang:31-slim@"
+
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_path: unstamped))
+
+      assert plan.base.containerfile =~
+               "FROM docker.io/library/erlang:#{System.otp_release()}-slim@"
+    end
+
+    test "the runtime keeps what the VM loads and drops sources, headers and docs" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
+      [run] = Regex.run(~r/^RUN find \/usr\/local\/lib\/erlang .*$/m, plan.base.containerfile)
+
+      root = tmp_dir("otp")
+
+      kept =
+        ~w(bin/erl erts-1.0/bin/beam.smp lib/stdlib-1.0/ebin/lists.beam lib/crypto-1.0/priv/lib/crypto.so releases/29/OTP_VERSION)
+
+      dropped =
+        ~w(lib/stdlib-1.0/src/lists.erl lib/stdlib-1.0/include/ms_transform.hrl erts-1.0/include/erl_nif.h lib/stdlib-1.0/doc/chunks/lists.chunk lib/crypto-1.0/c_src/crypto.c lib/ssl-1.0/examples/certs/x.pem)
+
+      for rel <- kept ++ dropped do
+        File.mkdir_p!(Path.dirname(Path.join(root, rel)))
+        File.write!(Path.join(root, rel), "x")
+      end
+
+      command =
+        run
+        |> String.replace_prefix("RUN ", "")
+        |> String.replace("/usr/local/lib/erlang", root)
+
+      assert {"", 0} = System.cmd("sh", ["-c", command], stderr_to_stdout: true)
+
+      for rel <- kept, do: assert(File.exists?(Path.join(root, rel)), "#{rel} was removed")
+      for rel <- dropped, do: refute(File.exists?(Path.join(root, rel)), "#{rel} was kept")
     end
   end
 

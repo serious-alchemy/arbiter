@@ -65,7 +65,11 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
     volumes = for [flag, v] <- Enum.chunk_every(argv, 2, 1, :discard), flag == "-v", do: v
     [path] = for "PATH=" <> p <- argv, do: p
 
-    for name <- @mounted, do: assert("/host/bin/#{name}:/opt/arbiter/cli/#{name}:ro" in volumes)
+    for {host, dest} <- cli_mounts(), do: assert("#{host}:#{dest}:ro" in volumes)
+    assert "/host/bin/claude:/opt/arbiter/cli/claude:ro" in volumes
+    # bd-59m96o: the host's arb escript sits beside `arb`, the launcher that
+    # runs it on an Erlang that can load it.
+    assert "/host/bin/arb:/opt/arbiter/cli/arb.escript:ro" in volumes
     assert path == "/opt/arbiter/cli:/x/bin"
   end
 
@@ -94,8 +98,5 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
 
   defp image_source, do: File.read!(Path.join([File.cwd!(), "lib/arbiter/worker/image.ex"]))
 
-  defp base_containerfile do
-    [_, cf] = Regex.run(~r/@base_containerfile """\n(.*?)\n  """/s, image_source())
-    cf
-  end
+  defp base_containerfile, do: Arbiter.Worker.Image.base_containerfile(System.otp_release())
 end

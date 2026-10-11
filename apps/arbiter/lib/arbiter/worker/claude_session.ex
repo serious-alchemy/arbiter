@@ -379,6 +379,10 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  # `:claude_path`, `:codex_path` and `:arb_path` name the host CLIs the container
+  # mounts, as for a run placed on a node; unset (every real spawn), ContainerSpawn
+  # finds them on this host. A test that names its stand-ins never mounts the
+  # host's own, nor fails on a host that has none (bd-59m96o).
   defp prepare_container(opts, policy, port_args, ctx) do
     provider = Keyword.get(opts, :provider) || "claude"
 
@@ -395,8 +399,10 @@ defmodule Arbiter.Worker.ClaudeSession do
                :projection,
                :git_material,
                :research_transcripts,
+               :claude_path,
                :codex_path,
-               :codex_source_home
+               :codex_source_home,
+               :arb_path
              ]) ++
                [
                  provider: provider,

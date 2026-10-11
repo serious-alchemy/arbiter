@@ -61,11 +61,19 @@ defmodule ArbiterCli.MixProject do
   defp extra_applications(_), do: []
 
   # Escript build config: produces `arb` binary that runs `ArbiterCli.Main.main/1`.
+  #
+  # bd-59m96o: the comment line (`%% arb-otp=29`) records the Erlang/OTP release
+  # the escript is compiled on. A BEAM file loads only on that release or a
+  # newer one (an OTP 29 build on OTP 27: "corrupt atom table"), so the server
+  # reads it to give worker images a runtime arb can load, and the launcher that
+  # runs arb inside a worker container reads it to refuse an older Erlang
+  # clearly (`Arbiter.Worker.ArbCli`).
   defp escript do
     [
       main_module: ArbiterCli.Main,
       name: "arb",
-      app: nil
+      app: nil,
+      comment: "arb-otp=#{System.otp_release()}"
     ]
   end
 
