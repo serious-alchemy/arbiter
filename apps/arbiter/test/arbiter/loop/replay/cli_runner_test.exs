@@ -352,6 +352,23 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
       assert {:ok, :private_clone} = CliRunner.layout(:review, podman)
     end
 
+    test "layout/2: a run whose writes the policy leaves unconfined is refused, as a dispatch is",
+         %{spec: spec} do
+      codex = fn mode ->
+        security = %{"sandbox" => %{"backend" => "podman"}, "permissions" => %{"mode" => mode}}
+        ws = workspace!(%{"agent" => %{"type" => ["codex"], "security" => security}})
+        account!(ws, :codex, "tok-codex")
+        %{spec | workspace: ws, provider: :codex, model: "gpt-5.5-codex"}
+      end
+
+      assert {:ok, :private_clone} = CliRunner.layout(:implement, codex.("auto"))
+
+      # `:strict` runs Codex `-s read-only`, with no write confinement to work
+      # in: the fail-closed dispatch gate refuses it, and so does a replay.
+      assert {:error, {:unconfined, :implement, :codex}} =
+               CliRunner.layout(:implement, codex.("strict"))
+    end
+
     test "the scoring reviewer of a container workspace runs in the container",
          %{rec: rec, spec: spec, clone: clone, container_opts: container_opts} do
       output!(rec, [assistant("VERDICT: APPROVE\narb done")])

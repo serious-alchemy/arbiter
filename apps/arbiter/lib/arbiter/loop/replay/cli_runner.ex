@@ -18,7 +18,9 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   A replayed model is untrusted, so `layout/2` refuses a side whose policy
   leaves it without an OS jail on its way out (the adapter's
   `egress_confinement/1` is not `:os_jail`; Claude on the host has only its
-  permission layer), and the harness refuses the replay before admission. A
+  permission layer) or with no write confinement at all (Codex under
+  `:strict`, which a dispatch refuses too), and the harness refuses the replay
+  before admission. A
   reviewer whose review backend would leave it unjailed runs in the
   implementer's container instead, when that one is confined. A container
   needs a private clone to mount (`{:ok, :private_clone}`); a jailed run on
@@ -218,13 +220,15 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   end
 
   # Confined means an OS jail on the way out (a container's network namespace,
-  # agy's bwrap network jail): what keeps a run from the operator's credentials
-  # and the network. A permission layer alone (Claude on the host) is not.
+  # agy's bwrap network jail), what keeps a run from the operator's credentials
+  # and the network, and writes the policy confines at all (the fail-closed
+  # dispatch gate refuses a spawn with none: Codex `-s read-only` under
+  # `:strict`). A permission layer alone (Claude on the host) is not a jail.
   defp confined?(type, policy) do
     adapter = Agents.for_type(type)
 
-    Code.ensure_loaded?(adapter) and function_exported?(adapter, :egress_confinement, 1) and
-      adapter.egress_confinement(policy) == :os_jail
+    Agents.egress_confinement(adapter, policy) == :os_jail and
+      Agents.write_confined?(adapter, policy)
   end
 
   # A provider with no container wrap point (agy, grok) is never spawned under
