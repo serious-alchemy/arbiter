@@ -83,7 +83,7 @@ defmodule Arbiter.Worker.ArbCli do
   if [ -x "$runtime/bin/escript" ]; then
     why="its runtime for arb ($runtime) is ${rt:+OTP }${rt:-of an unknown release}: the image predates this arb, rebuild it (arb image build)"
   else
-    why="it has no runtime for arb at $runtime: it is not built FROM \${ARBITER_BASE}, Arbiter's worker base image"
+    why="it has no runtime for arb at $runtime: it is not built on Arbiter's current worker base image (FROM \${ARBITER_BASE})"
   fi
   echo "arb: cannot start: this arb was built on Erlang/OTP $need and an older release cannot load it; the image's own Erlang is ${own:+OTP }${own:-missing} and $why." >&2
   echo "arb: the arbiter MCP tools work without the CLI." >&2
