@@ -467,6 +467,23 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
                PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end)
     end
 
+    test "a failing test that merely prints a dependency or NIF message stays a code failure",
+         %{repo: repo} do
+      spec = spec([step("tests", "true")])
+
+      for quoted <- [
+            "** (RuntimeError) Error while downloading precompiled NIF: couldn't fetch NIF",
+            "could not compile dependency :jason, \"mix compile\" failed.",
+            "Error happened while installing foo from precompiled binary"
+          ] do
+        out = "  1) test shells out (MixTaskTest)\n     #{quoted}\n\n12 tests, 1 failure"
+
+        assert %{result: {:failed, 1, ^out}} =
+                 PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end),
+               "should be a code failure: #{quoted}"
+      end
+    end
+
     test "a bare network error with no Mix dependency context is a code failure", %{repo: repo} do
       spec = spec([step("tests", "true")])
 

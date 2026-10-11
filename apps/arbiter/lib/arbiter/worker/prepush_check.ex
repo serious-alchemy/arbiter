@@ -396,14 +396,16 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp offline_deps?(output, worktree) do
     cond do
+      # A test run that got far enough to print a failure summary compiled everything
+      # first: whatever it quotes of Mix or a NIF is test output, a code failure.
+      Regex.match?(@exunit_failures, output) ->
+        false
+
       Regex.match?(@offline_deps_strong, output) ->
         true
 
       third_party_dep_failed?(output, worktree) ->
         true
-
-      Regex.match?(@exunit_failures, output) ->
-        false
 
       true ->
         Regex.match?(@offline_deps_network, output) and Regex.match?(@mix_dep_context, output)
