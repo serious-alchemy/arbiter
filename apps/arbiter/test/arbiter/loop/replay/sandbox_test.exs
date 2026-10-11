@@ -62,6 +62,28 @@ defmodule Arbiter.Loop.Replay.SandboxTest do
       refute File.exists?(Path.join(dir, "lib/feature.ex"))
       refute git!(dir, ["log", "--all", "--format=%H"]) =~ ctx.known_good
       refute git!(dir, ["log", "--all", "--format=%s"]) =~ "the merged change"
+
+      # Not even by its id: the sandbox holds its own copy of the base's
+      # history and borrows nothing from the main repo.
+      refute File.exists?(Path.join(dir, ".git/objects/info/alternates"))
+      assert {_, status} = run(dir, ["cat-file", "-e", ctx.known_good])
+      assert status != 0
+
+      refute git!(dir, ["cat-file", "--batch-all-objects", "--batch-check"]) =~ ctx.known_good
+    end
+
+    test "it reads the base without the main repo: a jail that hides the main repo still works",
+         ctx do
+      dir = sandbox!(ctx)
+      hidden = ctx.repo <> ".hidden"
+      File.rename!(ctx.repo, hidden)
+
+      try do
+        assert git!(dir, ["log", "--format=%H", "-1"]) == ctx.base
+        commit!(dir, %{"lib/replayed.ex" => "defmodule Replayed do\nend\n"}, "replayed work")
+      after
+        File.rename!(hidden, ctx.repo)
+      end
     end
 
     test "refuses a base the main repo does not have", ctx do
@@ -145,6 +167,61 @@ defmodule Arbiter.Loop.Replay.SandboxTest do
 
     test "an untouched sandbox has no change", ctx do
       assert {:ok, %{files: [], patch: ""}} = Sandbox.change(sandbox!(ctx), ctx.base)
+    end
+  end
+
+  describe "seal/1 and verify/2: host git only in a sandbox the replay left alone" do
+    test "an untouched sandbox, and one with ordinary work in it, verify", ctx do
+      dir = sandbox!(ctx)
+      seal = Sandbox.seal(dir)
+
+      assert :ok = Sandbox.verify(dir, seal)
+
+      commit!(dir, %{"lib/replayed.ex" => "defmodule Replayed do\nend\n"}, "replayed work")
+      File.write!(Path.join(dir, "notes.txt"), "scratch\n")
+      assert :ok = Sandbox.verify(dir, seal)
+    end
+
+    test "git config the replayed model wrote (a program git would run) is refused", ctx do
+      for {key, value} <- [
+            {"diff.external", "/tmp/evil.sh"},
+            {"filter.x.clean", "/tmp/evil.sh"},
+            {"include.path", "/tmp/evil.config"}
+          ] do
+        dir = sandbox!(ctx)
+        seal = Sandbox.seal(dir)
+        git!(dir, ["config", key, value])
+
+        assert {:error, {:tampered, why}} = Sandbox.verify(dir, seal), key
+        assert why =~ "config"
+      end
+    end
+
+    test "a commondir redirect, or a .git that is no longer a directory, is refused", ctx do
+      dir = sandbox!(ctx)
+      seal = Sandbox.seal(dir)
+      File.write!(Path.join(dir, ".git/commondir"), "/tmp/elsewhere\n")
+      assert {:error, {:tampered, _}} = Sandbox.verify(dir, seal)
+
+      dir = sandbox!(ctx)
+      seal = Sandbox.seal(dir)
+      File.rename!(Path.join(dir, ".git"), Path.join(dir, ".git.moved"))
+      File.write!(Path.join(dir, ".git"), "gitdir: /tmp/elsewhere\n")
+      assert {:error, {:tampered, _}} = Sandbox.verify(dir, seal)
+    end
+
+    test "change/2 never runs an external diff or a textconv, even if one is configured", ctx do
+      dir = sandbox!(ctx)
+      marker = Path.join(ctx.root, "ext-diff-ran")
+      script = Path.join(ctx.root, "ext-diff.sh")
+      File.write!(script, "#!/bin/sh\ntouch #{marker}\n")
+      File.chmod!(script, 0o755)
+      git!(dir, ["config", "diff.external", script])
+      File.write!(Path.join(dir, "lib/app.ex"), "changed\n")
+
+      assert {:ok, %{files: ["lib/app.ex"], patch: patch}} = Sandbox.change(dir, ctx.base)
+      assert patch =~ "+changed"
+      refute File.exists?(marker)
     end
   end
 

@@ -1,25 +1,37 @@
 defmodule Arbiter.Loop.Replay.Sandbox do
   @moduledoc """
-  The isolated checkout an offline replay runs in (R15, bd-c7lx65;
-  `docs/design/paced-quota-routing-signals.md` §7.2): the closed task's repo at
-  its base commit, where nothing the replayed model does can reach the main
-  repo, its remote or the merged change.
+  The isolated checkout an offline replay runs in on the host (R15,
+  bd-c7lx65; `docs/design/paced-quota-routing-signals.md` §7.2): the closed
+  task's repo at its base commit, where nothing the replayed model does can
+  reach the main repo, its remote or the merged change.
 
   `create/3` builds a repository of its own rather than a linked worktree. A
   linked worktree shares the main repo's refs and config: the merged change
   would be one `git log --all` away, and its `origin` one `git push` away. The
   sandbox instead
 
-    * has its own `.git`, borrowing the main repo's objects read-only through
-      `objects/info/alternates` (the pattern `Arbiter.Worker.PrivateClone`
-      uses), so creating it copies nothing and anything it writes stays in its
-      own object store;
-    * has exactly one ref, `refs/heads/work` at the base commit, so nothing
-      after the base (the merged change included) is reachable from it. The
-      name is neutral: nothing in the checkout tells the replayed model it is
+    * has its own `.git` holding **its own copy of the base's history**, and
+      nothing else. It is built borrowing the main repo's objects through
+      `objects/info/alternates`, then repacked and cut loose (what `git clone
+      --dissociate` does), so no object after the base, the merged commit
+      included, is in it even by id, and it reads nothing from the main repo
+      (a jail that hides the main repo, as agy's does, leaves it working);
+    * has exactly one ref, `refs/heads/work` at the base commit. The name is
+      neutral: nothing in the checkout tells the replayed model it is
       re-running solved work;
     * has **no remote**, so `git push` and `git fetch` have nowhere to go;
     * carries a local identity, so the replayed model can commit.
+
+  ## Host git after a replay
+
+  The replayed model can write the sandbox's `.git`, and git runs programs a
+  repository's own config names (an external diff, a filter driver, an
+  included config). So every host-side git call after a replay is preceded by
+  `verify/2` against the `seal/1` taken when the sandbox was built: the config
+  is byte for byte the one the harness wrote, `.git` is still a directory, and
+  nothing redirects it (`commondir`, `config.worktree`). Diffs also never run
+  an external diff or a textconv, and host git runs with the server's secrets
+  unset (`Arbiter.Worker.SpawnEnv`).
 
   It lives outside the worktree root, under the replay's own directory, and
   `remove/1` deletes it. Every git call goes through
@@ -28,11 +40,13 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   """
 
   alias Arbiter.Nodes.Checkout.Git
+  alias Arbiter.Worker.SpawnEnv
 
   @branch "work"
   @no_remote "file:///dev/null/arbiter-replay-has-no-remote"
 
   @type change :: %{files: [String.t()], patch: String.t()}
+  @type seal :: %{config: binary()}
 
   @doc "The one branch a sandbox has, checked out at the base commit."
   @spec branch() :: String.t()
@@ -60,12 +74,16 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   end
 
   defp build(objects, base_sha, dir) do
-    git_dir = Path.join(dir, ".git")
+    alternates = Path.join([dir, ".git", "objects", "info", "alternates"])
 
     with :ok <- File.mkdir_p(dir),
          {:ok, _} <- Git.run(["init", "-q", "-b", @branch, dir]),
-         :ok <- File.write(Path.join([git_dir, "objects", "info", "alternates"]), objects <> "\n"),
+         :ok <- File.write(alternates, objects <> "\n"),
          {:ok, _} <- git(dir, ["update-ref", "refs/heads/" <> @branch, base_sha]),
+         # Copy what the one ref reaches into the sandbox's own pack, then stop
+         # borrowing: nothing after the base comes along.
+         {:ok, _} <- git(dir, ["repack", "-a", "-d", "-q"]),
+         :ok <- File.rm(alternates),
          {:ok, _} <- git(dir, ["reset", "-q", "--hard", base_sha]),
          {:ok, _} <- git(dir, ["config", "user.name", "arbiter replay"]),
          {:ok, _} <- git(dir, ["config", "user.email", "replay@arbiter.invalid"]),
@@ -73,6 +91,54 @@ defmodule Arbiter.Loop.Replay.Sandbox do
       :ok
     end
   end
+
+  @doc """
+  What `verify/2` holds the sandbox at `dir` to: its `.git/config` as the
+  harness left it. Take it once the harness is done configuring the sandbox,
+  before any model runs in it.
+  """
+  @spec seal(Path.t()) :: seal()
+  def seal(dir), do: %{config: config_digest(dir)}
+
+  @doc """
+  Whether host git may run in the sandbox at `dir`: `.git` is still a plain
+  directory, its `config` is the sealed one, and no `commondir` or
+  `config.worktree` redirects or extends it. `{:error, {:tampered, why}}`
+  otherwise. Reads files only; runs no git.
+  """
+  @spec verify(Path.t(), seal()) :: :ok | {:error, {:tampered, String.t()}}
+  def verify(dir, %{config: sealed}) do
+    dot_git = Path.join(dir, ".git")
+
+    cond do
+      not match?({:ok, %File.Stat{type: :directory}}, File.lstat(dot_git)) ->
+        tampered(".git is no longer a directory")
+
+      not match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(dot_git, "config"))) ->
+        tampered(".git/config is no longer a regular file")
+
+      config_digest(dir) != sealed ->
+        tampered(".git/config was changed after the sandbox was sealed")
+
+      File.exists?(Path.join(dot_git, "commondir")) ->
+        tampered(".git/commondir redirects the repository")
+
+      File.exists?(Path.join(dot_git, "config.worktree")) ->
+        tampered(".git/config.worktree extends the config")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp config_digest(dir) do
+    case File.read(Path.join([dir, ".git", "config"])) do
+      {:ok, body} -> :crypto.hash(:sha256, body)
+      {:error, reason} -> {:unreadable, reason}
+    end
+  end
+
+  defp tampered(why), do: {:error, {:tampered, why}}
 
   @doc """
   Add `paths` to the sandbox's own `info/exclude` (never the main repo's): the
@@ -96,7 +162,8 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   Everything the replay changed against `base_sha`: committed, staged,
   unstaged and untracked (but not ignored or excluded) files, as the sorted
   list of paths and the unified diff. Read through a scratch index, so the
-  sandbox's own index is untouched.
+  sandbox's own index is untouched. After a replay, call it only on a sandbox
+  that `verify/2` passes.
   """
   @spec change(Path.t(), String.t()) :: {:ok, change()} | {:error, term()}
   def change(dir, base_sha) do
@@ -106,10 +173,8 @@ defmodule Arbiter.Loop.Replay.Sandbox do
     try do
       with {:ok, _} <- git(dir, ["read-tree", "HEAD"], env),
            {:ok, _} <- git(dir, ["add", "-A"], env),
-           {:ok, names} <-
-             git(dir, ["diff", "--cached", "--name-only", "-z", "--no-renames", base_sha], env),
-           {:ok, patch} <-
-             git(dir, ["diff", "--cached", "--no-color", "--no-renames", base_sha], env) do
+           {:ok, names} <- git(dir, diff(["--cached", "--name-only", "-z", base_sha]), env),
+           {:ok, patch} <- git(dir, diff(["--cached", "--no-color", base_sha]), env) do
         {:ok, %{files: split_z(names), patch: patch}}
       end
     after
@@ -120,26 +185,26 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   @doc """
   Whether the committed change, `base_sha..HEAD`, nets to nothing: the live
   ReviewGate's empty-net-diff guard, under which an APPROVE does not converge.
+  After a replay, call it only on a sandbox that `verify/2` passes.
   """
   @spec committed_empty?(Path.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
   def committed_empty?(dir, base_sha) do
-    case git(dir, ["diff", "--quiet", base_sha, "HEAD"]) do
+    case git(dir, diff(["--quiet", base_sha, "HEAD"])) do
       {:ok, _} -> {:ok, true}
       {:error, {:git, 1, _}} -> {:ok, false}
       {:error, _} = error -> error
     end
   end
 
+  # A diff that runs no program the repository's config could name.
+  defp diff(args), do: ["diff", "--no-ext-diff", "--no-textconv", "--no-renames" | args]
+
   @doc "The merged change in the main repo at `repo_path`: `base_sha..head_sha`."
   @spec known_good(Path.t(), String.t(), String.t()) :: {:ok, change()} | {:error, term()}
   def known_good(repo_path, base_sha, head_sha) do
     with {:ok, common} <- common_dir(repo_path),
-         {:ok, names} <-
-           Git.run(["diff", "--name-only", "-z", "--no-renames", base_sha, head_sha],
-             git_dir: common
-           ),
-         {:ok, patch} <-
-           Git.run(["diff", "--no-color", "--no-renames", base_sha, head_sha], git_dir: common) do
+         {:ok, names} <- Git.run(diff(["--name-only", "-z", base_sha, head_sha]), git_dir: common),
+         {:ok, patch} <- Git.run(diff(["--no-color", base_sha, head_sha]), git_dir: common) do
       {:ok, %{files: split_z(names), patch: patch}}
     end
   end
@@ -192,8 +257,22 @@ defmodule Arbiter.Loop.Replay.Sandbox do
     if Git.exists?(common, sha <> "^{commit}"), do: :ok, else: {:error, {:unknown_commit, sha}}
   end
 
-  defp git(dir, args, env \\ []),
-    do: Git.run(args, git_dir: Path.join(dir, ".git"), work_tree: dir, cd: dir, env: env)
+  defp git(dir, args, env \\ []) do
+    Git.run(args,
+      git_dir: Path.join(dir, ".git"),
+      work_tree: dir,
+      cd: dir,
+      env: scrubbed() ++ env
+    )
+  end
+
+  # The server's own environment, unset for host git in a replay's checkout
+  # (its secrets among it), leaving the GIT_* names `Checkout.Git` sets itself.
+  defp scrubbed do
+    []
+    |> SpawnEnv.cmd_env(nil)
+    |> Enum.reject(fn {name, _} -> String.starts_with?(name, "GIT_") end)
+  end
 
   defp split_z(""), do: []
   defp split_z(out), do: out |> String.split(<<0>>, trim: true) |> Enum.sort()
