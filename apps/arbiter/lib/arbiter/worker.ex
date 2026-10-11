@@ -3240,6 +3240,27 @@ defmodule Arbiter.Worker do
   end
 
   def handle_info({port, {:exit_status, status}}, %State{} = state) when session_handle?(port) do
+    with {:ok, session} <- Map.fetch(state.claude_sessions, port),
+         true <- container_create_retry?(state, session, status) do
+      {:noreply, schedule_container_create_retry(state, port, session, status)}
+    else
+      _ -> handle_info({:__session_exit__, port, status}, state)
+    end
+  end
+
+  # bd-325sps: a deferred re-create of a container that libpod failed to create.
+  def handle_info({:__retry_container_create__, session}, %State{} = state) do
+    if live_run?(state.state, state.waiting_on) and not node_stopping?() do
+      {:noreply, retry_container_create(state, session)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  # The port closed for any other reason: classify, record and (if need be) schedule the
+  # stop check.
+  def handle_info({:__session_exit__, port, status}, %State{} = state)
+      when session_handle?(port) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
         cleanup_prompt_tmpfile(session)
@@ -5726,6 +5747,87 @@ defmodule Arbiter.Worker do
         _ -> nil
       end
     end)
+  end
+
+  # bd-325sps: `podman run` failing to *create* the container (libpod "container
+  # creation timeout", an OCI runtime create error) is host load, not the agent: it
+  # exits 126 having printed only `Error:` lines, before any agent output. Re-create
+  # the container from the stashed spawn args, a bounded number of times with a
+  # growing backoff, before letting the exit fall through to the stop path (which
+  # classifies it `:container_create_failed`, an infra failure that keeps the worktree).
+  defp container_create_retry?(%State{} = state, session, status) do
+    meta = state.meta || %{}
+
+    is_map(Map.get(meta, :claude_spawn)) and
+      Map.get(session, :exit_status) == nil and
+      (Map.get(meta, :container_create_retries) || 0) < container_create_retry_cap() and
+      live_run?(state.state, state.waiting_on) and
+      not node_stopping?() and
+      Arbiter.Worker.StopReason.container_create_failure?(
+        status,
+        Enum.reverse(Map.get(session, :output_lines, []))
+      )
+  end
+
+  defp container_create_retry_cap,
+    do: Application.get_env(:arbiter, :container_create_retries, 2)
+
+  defp container_create_backoff_ms(attempt),
+    do: Application.get_env(:arbiter, :container_create_retry_backoff_ms, 2_000) * attempt
+
+  defp schedule_container_create_retry(%State{} = state, port, session, status) do
+    attempt = (Map.get(state.meta, :container_create_retries) || 0) + 1
+    backoff = container_create_backoff_ms(attempt)
+
+    Logger.warning(
+      "Worker: container creation failed for task=#{state.task_id} (exit #{status}); " <>
+        "retrying in #{backoff}ms (attempt #{attempt}/#{container_create_retry_cap()})"
+    )
+
+    Process.send_after(
+      self(),
+      {:__retry_container_create__, Map.put(session, :exit_status, status)},
+      backoff
+    )
+
+    %State{
+      state
+      | claude_sessions: Map.delete(state.claude_sessions, port),
+        meta: Map.put(state.meta, :container_create_retries, attempt)
+    }
+  end
+
+  defp retry_container_create(%State{meta: meta} = state, failed_session) do
+    spawn_args = Map.get(meta, :claude_spawn)
+    # A creation that timed out can leave the half-made container holding its name.
+    _ = Arbiter.Worker.ContainerSpawn.stop(spawn_args, grace_ms: 0)
+
+    case safe_open_port(spawn_args, state.task_id) do
+      {:ok, port, scope} ->
+        now = DateTime.utc_now()
+
+        session =
+          failed_session
+          |> Map.put(:port, port)
+          |> Map.put(:scope, scope)
+          |> Map.put(:output_lines, [])
+          |> Map.put(:line_buf, "")
+          |> Map.put(:exit_status, nil)
+          |> Map.put(:exited_at, nil)
+          |> Map.put(:started_at, now)
+          |> Map.put(:activity, "starting")
+          |> Map.put(:activity_at, now)
+
+        sessions = Map.put(state.claude_sessions, port, session)
+        note_scope(%State{state | claude_sessions: sessions}, scope)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: container re-create failed for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        fail_stopped(state, failed_session)
+    end
   end
 
   # Shared relaunch mechanism for the gate nudges (commit gate bd-ofql8k, notes
