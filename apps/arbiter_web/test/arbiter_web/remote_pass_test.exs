@@ -53,7 +53,7 @@ defmodule ArbiterWeb.RemotePassTest do
   """
 
   setup %{tmp_dir: tmp_dir} do
-    root = Path.join(System.tmp_dir!(), "rp-#{System.unique_integer([:positive])}")
+    root = Path.join(Arbiter.Config.Paths.socket_root(), "rp-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 
