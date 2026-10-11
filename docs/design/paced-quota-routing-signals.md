@@ -1262,6 +1262,27 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   untouched (a price-only reorder there changes nothing until R6's projection).
   The report: `mix arbiter.routing_shadow_report`, or
   `bin/arbiter eval 'Arbiter.Release.shadow_report()'` on a release.
+- **R9 as built (bd-3go56q).** `ModelFamily.models_for_tier/3` returns a tier's
+  ordered `tier_models` list (a string is a one-element list; `model_for_tier/3`
+  and every adapter read its head). `ProviderRouting` expands each attached
+  account into one entry per listed model of the policy's tier, plus, with
+  `routing.scoring.allow_upgrade: n`, those of the `n` tiers above it
+  (`ModelFamily.tiers_above/2`; never below, an explicit rule `"model"` is never
+  expanded). Each entry is classified, gated, floored and priced on its own pool,
+  so a Gemini model over its line drops as `quota_held` while the same account's
+  Claude/GPT model competes (§5.3 is a test). The selection gains `:model`, set
+  only for a model beyond the tier's default (so one model per tier dispatches
+  exactly as before); `Dispatch` puts it in `opts[:model]` (read by the quota
+  gate, admission and capability checks, and applied below the context-thrash
+  escalation and a caller's own `:model`), marks it `:routed_model`, and
+  `unroute/1` strips it. The pin prefers the pinned account's entry in the
+  pinned family. In-flight reservations (`Agents.PoolReservations`): an admitted
+  dispatch reserves a run on its (account, pool); the scorer adds the runs
+  reserved after that pool's snapshot `captured_at` (within 1,200 s) to its draw,
+  in run-equivalents, before pricing. They only reorder under `scored`
+  (`most_quota` ignores them) and never drop a candidate. Per
+  [provider-dynamic-concurrency](provider-dynamic-concurrency.md) §8, the seat
+  accounting that supersedes this reservation half belongs to DC3/DC4.
 - **Phase 1 delivers value with no learned model.** R4, R5, R6, R7 and R8 add
   the capability matrix and floors as hard gates, the headroom price, and the
   hand competence matrix, all on top of the unchanged paced gate.
