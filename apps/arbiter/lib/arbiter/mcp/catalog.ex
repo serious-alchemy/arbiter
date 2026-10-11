@@ -3447,7 +3447,7 @@ defmodule Arbiter.MCP.Catalog do
           "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
           "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
           "and provider), `budget_exceeded` (per ticket) and `spend_cap` (per account: " <>
-          "80% of its dollar spend cap, or the cap reached). Each carries `kind`, `key`, `subject`, " <>
+          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

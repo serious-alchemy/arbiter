@@ -224,6 +224,11 @@ no install-wide cap above it (the old `conductor.max_concurrent` was removed). T
 cap defaults to its hardware suggestion (`min(cpus/2, 0.8 × MemTotal / 4 GiB)`, at least 1) and is
 enforced; `arb node set local --max-workers N` overrides it.
 
+Each machine also derates itself under thermal or memory pressure: it stops offering new slots
+(never killing a running worker) and `arb node list` shows `OFFERED` against `MAX`, the CPU
+temperature and the reason. Defaults (soft 90 °C, hard 95 °C, memory PSI 25 %, a 4 GiB
+`MemAvailable` floor) and how to tune them per machine: [machine-derate.md](machine-derate.md).
+
 ### Turn placement on
 
 Nothing runs remotely until a workspace opts in:
