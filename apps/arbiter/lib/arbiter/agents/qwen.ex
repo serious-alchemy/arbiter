@@ -346,7 +346,7 @@ defmodule Arbiter.Agents.Qwen do
     ["-o", "stream-json", "--yolo", "--bare"] ++
       ["--auth-type", auth_type(opts)] ++
       ["--max-session-turns", Integer.to_string(max_turns(opts))] ++
-      model_flag(opts)
+      model_flag(opts) ++ Arbiter.MCP.AgentConfig.Qwen.flags()
   end
 
   defp auth_type(opts) do
