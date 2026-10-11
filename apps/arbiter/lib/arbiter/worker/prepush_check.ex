@@ -51,6 +51,16 @@ defmodule Arbiter.Worker.PrepushCheck do
   `steps` is the per-step record (`t:step_result/0`) the worker writes to the
   run (`Arbiter.Workers.RunStep` rows) and `arb worker show` renders.
 
+  ## Offline, with no per-run proxy (bd-9xcogk)
+
+  The gate never has egress of its own to rely on. A container run (local or on a node)
+  gets no egress bridge and none of the agent's `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`
+  (`Arbiter.Worker.GateEnv`); a host run has loopback proxies of the server's environment
+  unset. The deps and `_build` (with test-only NIFs such as `lazy_html`) must already be in
+  the worktree. When they are not, the failure (`Error happened while installing …
+  from precompiled binary`, `Could not compile with "make"`, `Failed to connect to … port`)
+  is infra, and the steps after the first one that hit it are skipped unrun.
+
   ## Where it runs
 
   On the host, in the worktree, under coreutils `timeout` (SIGTERM to its whole

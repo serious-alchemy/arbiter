@@ -1606,7 +1606,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
     String.slice(base, 0, 64 - 11) <> "-x" <> suffix
   end
 
-  defp opts(request, port_args, offline? \\ false) do
+  defp opts(request, port_args, offline?) do
     {inherit, literal} = split_env(env_pairs(port_args, request, offline?))
 
     base = [
