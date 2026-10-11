@@ -18,12 +18,12 @@ defmodule Arbiter.Worker.DepsRelocateTest do
   defp compiled_source(root, env \\ "test") do
     File.mkdir_p!(Path.join(root, "deps/lazy_html/priv"))
     File.write!(Path.join(root, "deps/lazy_html/priv/#{@nif}"), "nif\n")
-    File.mkdir_p!(Path.join(root, "deps/lazy_html/c_src"))
+    File.mkdir_p!(Path.join(root, "deps/lazy_html/include"))
     lib = Path.join(root, "_build/#{env}/lib/lazy_html")
     File.mkdir_p!(Path.join(lib, "ebin"))
     File.mkdir_p!(Path.join(lib, ".mix"))
     File.ln_s!(Path.join(root, "deps/lazy_html/priv"), Path.join(lib, "priv"))
-    File.ln_s!(Path.join(root, "deps/lazy_html/c_src"), Path.join(lib, "include"))
+    File.ln_s!(Path.join(root, "deps/lazy_html/include"), Path.join(lib, "include"))
 
     File.write!(
       Path.join(lib, ".mix/compile.elixir"),
