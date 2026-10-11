@@ -14,6 +14,7 @@ defmodule Arbiter.Loop.Replay.AdmissionTest do
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Loop.Replay.Admission
   alias Arbiter.Quota.Budget
+  alias Arbiter.Quota.Budget.Server, as: BudgetServer
   alias Arbiter.Quota.Gate.Snapshot
 
   @now ~U[2026-10-10 01:40:27Z]
@@ -160,6 +161,66 @@ defmodule Arbiter.Loop.Replay.AdmissionTest do
       key = {"acct-claude", "claude"}
 
       assert {:ok, [_one]} = Admission.check([key, key], budgets(%{key => quiet()}), %{key => 1})
+    end
+  end
+
+  describe "published/4" do
+    test "reads what the budget server publishes for the pool: the workspace's policy, else the account's" do
+      now = DateTime.utc_now()
+
+      account = %ProviderAccount{
+        id: Ecto.UUID.generate(),
+        provider: :claude,
+        quota_config: %{"threshold_mode" => "paced"}
+      }
+
+      quota = %{
+        snapshot(0.10, 0.10, @five_hours, 3 * 86_400)
+        | captured_at: now,
+          reset_at: DateTime.add(now, @five_hours),
+          secondary_reset_at: DateTime.add(now, 3 * 86_400)
+      }
+
+      inputs = fn _calibration ->
+        [
+          %{
+            account_id: account.id,
+            account: account,
+            pool: "claude",
+            quota: quota,
+            now: now,
+            seats: 0,
+            horizon: 2.0
+          }
+        ]
+      end
+
+      table = :replay_admission_budgets
+
+      start_supervised!(
+        {BudgetServer,
+         name: :replay_admission_budget_server,
+         table: table,
+         inputs: inputs,
+         enabled: true,
+         tick_ms: :never,
+         calibration: :never}
+      )
+
+      :ok = BudgetServer.recompute(:replay_admission_budget_server)
+
+      # No policy of its own for this workspace: the account's budget applies.
+      assert %Budget{account: id} =
+               Admission.published(account.id, "claude", "ws-1", table: table)
+
+      assert id == account.id
+      assert Admission.published(account.id, "gemini", "ws-1", table: table) == nil
+
+      assert {:ok, [%{explore: 2, admitted: true}]} =
+               Admission.check(
+                 [{account.id, "claude"}],
+                 &Admission.published(&1, &2, "ws-1", table: table)
+               )
     end
   end
 

@@ -67,11 +67,18 @@ defmodule Arbiter.Loop.Replay.Admission do
   `workspace_id`: the workspace's own policy budget when one is published (a
   workspace only ever tightens the account's line), else the account's. `nil`
   where no `Budget.Server` publishes (a `bin/arbiter eval` or mix VM, a test).
+  `:table` names another server's ETS table (a test's own).
   """
-  @spec published(String.t(), String.t(), String.t() | nil) :: Budget.t() | nil
-  def published(account_id, pool, workspace_id \\ nil) do
-    (workspace_id && BudgetServer.get(account_id, pool, workspace_id)) ||
-      BudgetServer.get(account_id, pool)
+  @spec published(String.t(), String.t(), String.t() | nil, keyword()) :: Budget.t() | nil
+  def published(account_id, pool, workspace_id \\ nil, opts \\ []) do
+    get = fn policy_workspace ->
+      case Keyword.fetch(opts, :table) do
+        {:ok, table} -> BudgetServer.get(account_id, pool, policy_workspace, table)
+        :error -> BudgetServer.get(account_id, pool, policy_workspace)
+      end
+    end
+
+    (workspace_id && get.(workspace_id)) || get.(nil)
   end
 
   @doc """
