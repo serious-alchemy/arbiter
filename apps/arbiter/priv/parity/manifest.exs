@@ -2000,6 +2000,18 @@
       }
     },
     %{
+      id: "misc/batch_many_cli_commands_in_one_vm",
+      title: "Run many commands in one VM / connection",
+      mcp: nil,
+      cli: ["arb batch"],
+      rest: nil,
+      status: :excluded,
+      absent: %{
+        mcp: {:intentional, "MCP and REST clients already issue many operations per connection (the bulk verbs take lists); `arb batch` is the CLI analogue that avoids one BEAM boot per command."},
+        rest: {:intentional, "A CLI-side dispatcher over existing commands; REST has the bulk endpoints."}
+      }
+    },
+    %{
       id: "misc/bootstrap_a_coordinator_directory",
       title: "Bootstrap a coordinator directory",
       mcp: nil,
