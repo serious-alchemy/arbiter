@@ -86,8 +86,8 @@ defmodule Arbiter.Nodes.Session do
 
   use GenServer, restart: :temporary
 
-  alias Arbiter.Machine.Derate
   alias Arbiter.Actor
+  alias Arbiter.Machine.Derate
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{ClusterInstall, Hello, Liveness, Node, Reaping, RunStreams, Skew}
 
@@ -111,16 +111,16 @@ defmodule Arbiter.Nodes.Session do
     :proto,
     :free_mem,
     :load,
-    # bd-6w7usy: the machine's own sensing and derate decision from its last heartbeat
-    # (`%{level:, temp_c:, psi:, reason:}`); nil until a heartbeat names one, and again
-    # when a heartbeat stops naming it (unknown never derates).
-    :pressure,
     # K12: what the node says it is (`kind`, `k8s_version`, `degraded`, its `hb.capacity`) and
     # the prepare budget granted a run placed on it; a machine node leaves all but the budget
     # at these defaults. Also the session's own budgets for a held run: how long it is held
     # (`hold_ms`, bd-24o760) and how long the agent has to answer an `adopt` (bd-4p1vui).
+    # `pressure` (bd-6w7usy) is the machine's own sensing and derate decision from its last
+    # heartbeat (`%{level:, temp_c:, psi:, reason:}`); nil until a heartbeat names one, and
+    # again when a heartbeat stops naming it (unknown never derates).
     info: %{
       kind: "machine",
+      pressure: nil,
       k8s_version: nil,
       degraded: [],
       readiness: [],
@@ -1233,7 +1233,8 @@ defmodule Arbiter.Nodes.Session do
             k8s_version: params["k8s_version"],
             degraded: degraded(params["degraded"]),
             readiness: readiness(kind(params["kind"]), params["readiness"]),
-            capacity: nil
+            capacity: nil,
+            pressure: nil
         },
         runs: hello_runs(hello_run_list(params)),
         retained: hello_retained(params),
@@ -1379,7 +1380,7 @@ defmodule Arbiter.Nodes.Session do
   # ---- heartbeat -----------------------------------------------------------
 
   defp stamp(state, payload) do
-    before = state.pressure
+    before = state.info.pressure
 
     state = %{
       state
@@ -1387,9 +1388,10 @@ defmodule Arbiter.Nodes.Session do
         fenced?: false,
         runs: heartbeat_runs(payload["runs"], state.runs),
         free_mem: payload["free_mem"] || state.free_mem,
-        load: payload["load"] || state.load,
-        pressure: pressure(payload)
+        load: payload["load"] || state.load
     }
+
+    state = put_info(state, :pressure, pressure(payload))
 
     state =
       state
@@ -1427,7 +1429,8 @@ defmodule Arbiter.Nodes.Session do
   # shell watch). Off the session process: it writes to the database.
   defp announce_derate(before, state) do
     from = level_of(before)
-    to = level_of(state.pressure)
+    pressure = state.info.pressure
+    to = level_of(pressure)
 
     if from != to and :hard in [from, to] do
       event = %{
@@ -1436,8 +1439,8 @@ defmodule Arbiter.Nodes.Session do
         to: to,
         snapshot: %{
           level: to,
-          temp_c: state.pressure && state.pressure.temp_c,
-          reason_text: (state.pressure && state.pressure.reason) || (before && before.reason),
+          temp_c: pressure && pressure.temp_c,
+          reason_text: (pressure && pressure.reason) || (before && before.reason),
           offered: length(Map.keys(state.runs))
         }
       }
@@ -1616,7 +1619,7 @@ defmodule Arbiter.Nodes.Session do
       retained: state.retained,
       free_mem: state.free_mem,
       load: state.load,
-      pressure: state.pressure,
+      pressure: state.info.pressure,
       silence_ms: state.clock.() - state.last_hb
     }
   end

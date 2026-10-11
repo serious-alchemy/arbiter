@@ -12,6 +12,7 @@ defmodule Arbiter.Settings.Registry do
   """
 
   alias Arbiter.Agents.CredentialWatchdog
+  alias Arbiter.Machine.Derate.Config, as: DerateConfig
   alias Arbiter.Settings
 
   @type key :: String.t()
@@ -299,7 +300,7 @@ defmodule Arbiter.Settings.Registry do
     do: {:error, "value must be a non-empty string of at most 4096 bytes, or null"}
 
   defp do_cast("derate_config", map) when is_map(map) do
-    case Arbiter.Machine.Derate.Config.validate(map) do
+    case DerateConfig.validate(map) do
       {:ok, normalized} -> {:ok, normalized}
       {:error, msg} -> {:error, msg}
     end
@@ -499,7 +500,7 @@ defmodule Arbiter.Settings.Registry do
 
   def default("scheduler_admission"), do: "legacy"
 
-  def default("machine.derate"), do: Arbiter.Machine.Derate.Config.defaults()
+  def default("machine.derate"), do: DerateConfig.defaults()
   def default("nodes.public_url"), do: nil
   def default("nodes.registry"), do: nil
   def default("nodes.registry_username"), do: nil

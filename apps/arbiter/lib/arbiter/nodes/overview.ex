@@ -120,8 +120,6 @@ defmodule Arbiter.Nodes.Overview do
   defp node_row(%Node{} = node, snapshot) do
     capacity = (snapshot && snapshot.capacity) || %{}
     max = Hello.effective_max_workers(node.max_workers, capacity)
-    pressure = (snapshot && Map.get(snapshot, :pressure)) || %{}
-    derate_level = Map.get(pressure, :level, :none)
 
     %{
       id: node.id,
@@ -139,11 +137,6 @@ defmodule Arbiter.Nodes.Overview do
       caps: (snapshot && snapshot.caps) || %{},
       capacity: capacity,
       max: max,
-      offered: offered(max, run_ids(snapshot), derate_level),
-      derate: derate_level,
-      derate_reason: pressure[:reason],
-      temp_c: pressure[:temp_c],
-      psi: pressure[:psi],
       cap_source: Hello.cap_source(node.max_workers, capacity),
       suggested: positive(capacity["suggestion"]),
       override: node.max_workers,
@@ -153,6 +146,21 @@ defmodule Arbiter.Nodes.Overview do
       allow_unenforced_network: node.allow_unenforced_network
     }
     |> Map.merge(cluster_fields(node, snapshot))
+    |> Map.merge(derate_fields(max, snapshot))
+  end
+
+  # bd-6w7usy: what the machine says about itself, and the slots that leaves on offer.
+  defp derate_fields(max, snapshot) do
+    pressure = (snapshot && Map.get(snapshot, :pressure)) || %{}
+    level = Map.get(pressure, :level, :none)
+
+    %{
+      offered: offered(max, run_ids(snapshot), level),
+      derate: level,
+      derate_reason: pressure[:reason],
+      temp_c: pressure[:temp_c],
+      psi: pressure[:psi]
+    }
   end
 
   # The slots a machine offers the scheduler: its cap, less what it has derated itself by
