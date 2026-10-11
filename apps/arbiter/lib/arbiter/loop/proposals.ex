@@ -89,6 +89,7 @@ defmodule Arbiter.Loop.Proposals do
   """
 
   alias Arbiter.Agents.Routing.ByDifficulty
+  alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Loop
   alias Arbiter.Loop.CompetenceProposals
   alias Arbiter.Loop.FindingBuckets
@@ -492,7 +493,7 @@ defmodule Arbiter.Loop.Proposals do
 
       tasks ->
         live_rows =
-          Keyword.get_lazy(opts, :competence_rows, &Arbiter.Agents.Routing.Competence.rows/0)
+          Keyword.get_lazy(opts, :competence_rows, &Competence.rows/0)
 
         CompetenceProposals.candidates(tasks, live_rows,
           workspace_id: workspace_id,

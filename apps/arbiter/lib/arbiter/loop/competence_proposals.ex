@@ -135,8 +135,7 @@ defmodule Arbiter.Loop.CompetenceProposals do
   # What the live matrix says about the same cells, pre-registered with the
   # proposal so the goalposts cannot move after the apply.
   defp baseline(rows, live_rows) do
-    rows
-    |> Enum.map(fn %{"match" => m} ->
+    Enum.map_join(rows, "; ", fn %{"match" => m} ->
       live =
         Competence.lookup(live_rows, %{
           provider: m["provider"],
@@ -152,7 +151,6 @@ defmodule Arbiter.Loop.CompetenceProposals do
           else: "no live row"
         )
     end)
-    |> Enum.join("; ")
   end
 
   defp fmt(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)

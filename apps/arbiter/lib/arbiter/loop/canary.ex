@@ -17,6 +17,18 @@ defmodule Arbiter.Loop.Canary do
   canary in the first place. A routing rule is numeric, bounded, trivially
   reversible, and directly measurable — which is why it goes first, and alone.
 
+  ## Matrix canaries (R13, bd-d5rdsc)
+
+  The same machinery canaries a `:competence_matrix` proposal
+  (`Arbiter.Loop.CompetenceProposals`; design §7.1) as a `kind: "matrix"` block in
+  `loop.canary`: the block's `rule` is the proposed rows. Arms are the same
+  task-id hash; for a canary-arm task at the canaried difficulty (D0–D2, no
+  permissions) `matrix_rows/2` puts the rows ahead of the live matrix in the
+  scorer's ranking. Convergence is judged and reverted, expired and held exactly
+  as for a routing rule; `Metrics` adds each arm's pool draw to the report. A
+  promote merges the rows into the live matrix instead of writing
+  `routing.rules`; a revert or expiry writes nothing.
+
   ## The gate
 
   Nothing here runs unless the workspace sets

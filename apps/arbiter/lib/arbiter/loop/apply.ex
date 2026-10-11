@@ -34,6 +34,7 @@ defmodule Arbiter.Loop.Apply do
       operator rides along separately as the Ash actor on `persist/2`.
   """
 
+  alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Loop
   alias Arbiter.Loop.Apply.{Payload, RepoDoc}
   alias Arbiter.Loop.{Notify, PendingWrite}
@@ -279,7 +280,7 @@ defmodule Arbiter.Loop.Apply do
   defp competence_matrix_args(payload) do
     case Map.get(payload || %{}, "rows") do
       [_ | _] = rows ->
-        case Arbiter.Agents.Routing.Competence.normalize_rows(rows) do
+        case Competence.normalize_rows(rows) do
           {:ok, normalized} -> {:ok, %{rows: normalized}}
           {:error, msg} -> {:error, {:unmapped, msg}}
         end
