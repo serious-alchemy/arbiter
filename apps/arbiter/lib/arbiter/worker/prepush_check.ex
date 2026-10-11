@@ -381,9 +381,14 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp offline_deps?(output) do
     cond do
-      Regex.match?(@offline_deps_strong, output) -> true
-      Regex.match?(@exunit_failures, output) -> false
-      true -> Regex.match?(@offline_deps_network, output) and Regex.match?(@mix_dep_context, output)
+      Regex.match?(@offline_deps_strong, output) ->
+        true
+
+      Regex.match?(@exunit_failures, output) ->
+        false
+
+      true ->
+        Regex.match?(@offline_deps_network, output) and Regex.match?(@mix_dep_context, output)
     end
   end
 
