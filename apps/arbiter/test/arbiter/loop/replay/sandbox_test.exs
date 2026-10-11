@@ -168,6 +168,25 @@ defmodule Arbiter.Loop.Replay.SandboxTest do
     test "an untouched sandbox has no change", ctx do
       assert {:ok, %{files: [], patch: ""}} = Sandbox.change(sandbox!(ctx), ctx.base)
     end
+
+    test "writes nothing into the sandbox: a .git/objects the replay pointed elsewhere is only read",
+         ctx do
+      dir = sandbox!(ctx)
+      outside = Path.join(ctx.root, "outside-objects")
+      File.cp_r!(Path.join(dir, ".git/objects"), outside)
+      File.rm_rf!(Path.join(dir, ".git/objects"))
+      File.ln_s!(outside, Path.join(dir, ".git/objects"))
+      File.write!(Path.join(dir, "lib/new.ex"), "defmodule New do\nend\n")
+      listing = fn -> Path.wildcard(Path.join(outside, "**"), match_dot: true) end
+      before = listing.()
+      dot_git = File.ls!(Path.join(dir, ".git"))
+
+      assert {:ok, %{files: ["lib/new.ex"], patch: patch}} = Sandbox.change(dir, ctx.base)
+      assert patch =~ "+defmodule New do"
+
+      assert listing.() == before
+      assert File.ls!(Path.join(dir, ".git")) == dot_git
+    end
   end
 
   describe "seal/1 and verify/2: host git only in a sandbox the replay left alone" do

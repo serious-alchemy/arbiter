@@ -30,8 +30,8 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   `verify/2` against the `seal/1` taken when the sandbox was built: the config
   is byte for byte the one the harness wrote, `.git` is still a directory, and
   nothing redirects it (`commondir`, `config.worktree`). Diffs also never run
-  an external diff or a textconv, and host git runs with the server's secrets
-  unset (`Arbiter.Worker.SpawnEnv`).
+  an external diff or a textconv, `change/2` writes nothing in the sandbox, and
+  host git runs with the server's secrets unset (`Arbiter.Worker.SpawnEnv`).
 
   It lives outside the worktree root, under the replay's own directory, and
   `remove/1` deletes it. Every git call goes through
@@ -161,24 +161,45 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   @doc """
   Everything the replay changed against `base_sha`: committed, staged,
   unstaged and untracked (but not ignored or excluded) files, as the sorted
-  list of paths and the unified diff. Read through a scratch index, so the
-  sandbox's own index is untouched. After a replay, call it only on a sandbox
-  that `verify/2` passes.
+  list of paths and the unified diff. After a replay, call it only on a
+  sandbox that `verify/2` passes.
+
+  Host git writes nothing in the sandbox here: the index it builds and the
+  objects it adds go to a fresh directory of its own outside it, and the
+  sandbox's objects are only read (an alternate), wherever the replay pointed
+  `.git/objects`.
   """
   @spec change(Path.t(), String.t()) :: {:ok, change()} | {:error, term()}
   def change(dir, base_sha) do
-    index = Path.join([dir, ".git", "replay-change-#{System.unique_integer([:positive])}.index"])
-    env = [{"GIT_INDEX_FILE", index}]
+    with {:ok, scratch} <- scratch_dir() do
+      env = [
+        {"GIT_INDEX_FILE", Path.join(scratch, "index")},
+        {"GIT_OBJECT_DIRECTORY", Path.join(scratch, "objects")},
+        {"GIT_ALTERNATE_OBJECT_DIRECTORIES", Path.join([dir, ".git", "objects"])}
+      ]
 
-    try do
-      with {:ok, _} <- git(dir, ["read-tree", "HEAD"], env),
-           {:ok, _} <- git(dir, ["add", "-A"], env),
-           {:ok, names} <- git(dir, diff(["--cached", "--name-only", "-z", base_sha]), env),
-           {:ok, patch} <- git(dir, diff(["--cached", "--no-color", base_sha]), env) do
-        {:ok, %{files: split_z(names), patch: patch}}
+      try do
+        with {:ok, _} <- git(dir, ["read-tree", "HEAD"], env),
+             {:ok, _} <- git(dir, ["add", "-A"], env),
+             {:ok, names} <- git(dir, diff(["--cached", "--name-only", "-z", base_sha]), env),
+             {:ok, patch} <- git(dir, diff(["--cached", "--no-color", base_sha]), env) do
+          {:ok, %{files: split_z(names), patch: patch}}
+        end
+      after
+        File.rm_rf(scratch)
       end
-    after
-      File.rm(index)
+    end
+  end
+
+  # Made fresh: `File.mkdir/1` fails on anything already at the path, a
+  # planted symlink included.
+  defp scratch_dir do
+    name = "arbiter-replay-change-" <> Base.url_encode64(:crypto.strong_rand_bytes(12))
+    scratch = Path.join(System.tmp_dir!(), name)
+
+    with :ok <- File.mkdir(scratch),
+         :ok <- File.mkdir(Path.join(scratch, "objects")) do
+      {:ok, scratch}
     end
   end
 
