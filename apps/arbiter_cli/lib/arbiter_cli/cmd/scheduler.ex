@@ -213,6 +213,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
     )
 
     emit_table("Repos", ~w(cap runs), body["repos"], &repo_row/1)
+    emit_table("Fair share", ~w(weight seats share), fair_rows(body["fair_share"]), &fair_row/1)
   end
 
   defp emit_admission(%{"label" => label} = admission) do
@@ -273,6 +274,20 @@ defmodule ArbiterCli.Cmd.Scheduler do
 
   defp repo_row(r),
     do: {r["label"] || to_string(r["repo"]), [cell(r["cap"]), cell(r["used"])], nil}
+
+  # One row per workspace on each pool of an account that splits `fair` (DC10).
+  defp fair_rows(rows) when is_list(rows) do
+    for row <- rows, ws <- row["workspaces"] || [], do: {row["label"], ws}
+  end
+
+  defp fair_rows(_none), do: []
+
+  defp fair_row({label, ws}) do
+    share = if is_number(ws["share"]), do: Float.round(ws["share"] * 1.0, 1)
+
+    {"#{label} / #{ws["name"] || ws["workspace_id"]}",
+     [cell(ws["weight"]), cell(ws["seats"]), cell(share)], nil}
+  end
 
   defp cell(nil), do: "-"
   defp cell(value), do: to_string(value)

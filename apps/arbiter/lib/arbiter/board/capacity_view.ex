@@ -19,8 +19,15 @@ defmodule Arbiter.Board.CapacityView do
         pools: [pool],        # one per (account, pool); Budget.to_json/1 plus the display fields
         machines: [machine],  # the primary, then every node
         repos: [repo],        # one per capped repo (DC9): label, cap, used, free, state
-        fair_share: []        # DC10 (workspace fair share) fills these
+        fair_share: [row]     # DC10: one per pool of an account that splits `fair`
       }
+
+  A `fair_share` row (DC10, design §5.3) is `%{account:, pool:, label:, budget:,
+  workspaces: [%{workspace_id:, name:, weight:, seats:, share:}], text:}`: each
+  workspace on the pool with its link weight, the seats it holds and its share
+  of the budget at full demand (`budget × weight / Σ weight` over the
+  workspaces shown). The walk narrows that to the workspaces actually
+  demanding the pool, so a share it applies can be larger.
 
   A pool's `state` is `free`, `full`, `held_pace` (budget 0 because a quota
   window is ahead of its line) or `held_hard` (budget 0 by a hard rule: paused,
@@ -33,7 +40,7 @@ defmodule Arbiter.Board.CapacityView do
   and `state` (`free` or `full`). Only capped repos are listed. Like a pool, it
   decides a dispatch only under `enforce`.
 
-  Options (all seams): `:mode`, `:budgets`, `:holders`, `:accounts`, `:local`,
+  Options (all seams): `:mode`, `:budgets`, `:holders`, `:weights`, `:accounts`, `:local`,
   `:nodes`, `:remote_available?`, `:changes`, `:agreement`, `:workspaces`,
   `:repo_holders`.
   """
@@ -42,6 +49,7 @@ defmodule Arbiter.Board.CapacityView do
 
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Board.AdmissionShadowEvent
+  alias Arbiter.Board.FairShare
   alias Arbiter.Board.WalkInputs
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Overview
@@ -65,7 +73,7 @@ defmodule Arbiter.Board.CapacityView do
       pools: pools(opts),
       machines: machines(opts),
       repos: repos(opts),
-      fair_share: []
+      fair_share: fair_share(opts)
     }
   end
 
@@ -217,6 +225,55 @@ defmodule Arbiter.Board.CapacityView do
     do: "#{provider}:#{slug}"
 
   defp account_name(nil, id), do: id
+
+  # ---- fair share (DC10) ----------------------------------------------------------
+
+  defp fair_share(opts) do
+    accounts = accounts(opts)
+    budgets = Keyword.get_lazy(opts, :budgets, &BudgetServer.all/0)
+    fair = WalkInputs.fair_inputs(budgets, accounts, opts)
+
+    for %Budget{policy_workspace: nil, account: id, pool: pool} = b <- budgets,
+        inputs = Map.get(fair, {id, pool}),
+        row = fair_row(b, Map.get(accounts, id), inputs) do
+      row
+    end
+    |> Enum.sort_by(&{&1.account, &1.pool})
+  end
+
+  defp fair_row(%Budget{budget: budget} = b, account, inputs) when is_integer(budget) do
+    workspaces = Enum.uniq(Map.keys(inputs.seats) ++ Map.keys(inputs.weights))
+    shares = FairShare.shares(budget, inputs, workspaces)
+    label = WalkInputs.pool_label(account, b.pool)
+
+    rows =
+      workspaces
+      |> Enum.map(fn ws ->
+        %{
+          workspace_id: ws,
+          name: Map.get(inputs.labels, ws, ws),
+          weight: FairShare.weight(inputs, ws),
+          seats: Map.get(inputs.seats, ws, 0),
+          share: Map.fetch!(shares, ws)
+        }
+      end)
+      |> Enum.sort_by(&{&1.name, &1.workspace_id})
+
+    %{
+      account: account_name(account, b.account),
+      pool: b.pool,
+      label: label,
+      budget: budget,
+      workspaces: rows,
+      text:
+        "#{label} fair share (#{budget} seats): " <>
+          Enum.map_join(rows, "; ", fn r ->
+            "#{r.name} #{r.seats} of #{FairShare.format(r.share)} (weight #{r.weight})"
+          end)
+    }
+  end
+
+  defp fair_row(_unlimited, _account, _inputs), do: nil
 
   # ---- machines -----------------------------------------------------------------
 

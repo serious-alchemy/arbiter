@@ -20,11 +20,11 @@ defmodule Arbiter.MCP.ReadGapsTest do
   @coordinator %Scope{tier: :coordinator, workspace_id: nil}
   @secret "sk-super-secret-value-0123456789"
 
-  @account_keys ~w(deleted_at enabled id identity_source identity_verified_at inserted_at label
+  @account_keys ~w(budget_split deleted_at enabled id identity_source identity_verified_at inserted_at label
                    max_concurrent merged_into_id plan provider provider_account_ref
                    provider_org_ref quota_config slug updated_at)a
   @credential_keys ~w(active created_at env_var fingerprint id kind retired_at retired_at scopes)a
-  @link_keys ~w(id provider provider_account_id share workspace_id)a
+  @link_keys ~w(id provider provider_account_id share weight workspace_id)a
   @event_keys ~w(cache_creation_tokens cache_read_tokens cost_usd duration_ms exit_status id model
                  occurred_at provider repo session_id source step task_id thinking_tokens
                  tokens_in tokens_out worker_run_id workspace_id)a

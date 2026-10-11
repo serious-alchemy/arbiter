@@ -277,7 +277,7 @@ defmodule Arbiter.Board.CapacityViewTest do
       %Workspace{id: id, name: name, config: config}
     end
 
-    test "are empty when no repo has a cap; fair share waits for DC10" do
+    test "are empty when no repo has a cap and no account splits fair" do
       view = status(workspaces: [ws("w1", "vstim", [])])
       assert view.repos == []
       assert view.fair_share == []
@@ -318,6 +318,33 @@ defmodule Arbiter.Board.CapacityViewTest do
                %{label: "a-ws/vstim", used: 1, free: 2, state: "free"},
                %{label: "b-ws/vstim", used: 0, free: 1, state: "free"}
              ] = view.repos
+    end
+
+    test "a fair account lists each workspace's weight, seats and share (DC10)" do
+      fair = %ProviderAccount{id: @acct, provider: :claude, slug: "default", budget_split: :fair}
+
+      view =
+        status(
+          accounts: [fair, List.last(@accounts)],
+          holders: %{{@acct, "claude"} => ["bd-a1", "bd-a2:fixpass", "bd-b1"]},
+          weights: %{@acct => %{"ws-a" => 3, "ws-b" => 1}},
+          workspace_of: %{"bd-a1" => "ws-a", "bd-a2" => "ws-a", "bd-b1" => "ws-b"}
+        )
+
+      assert [row] = view.fair_share
+      assert %{label: "claude:default", budget: 3} = row
+
+      assert [
+               %{workspace_id: "ws-a", weight: 3, seats: 2},
+               %{workspace_id: "ws-b", weight: 1, seats: 1}
+             ] = row.workspaces
+
+      assert Enum.map(row.workspaces, & &1.share) == [2.25, 0.75]
+      assert row.text =~ "fair share"
+    end
+
+    test "a queue account has no fair-share row" do
+      assert status().fair_share == []
     end
   end
 
