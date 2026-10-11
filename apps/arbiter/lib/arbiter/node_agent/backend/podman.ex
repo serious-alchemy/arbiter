@@ -49,5 +49,5 @@ defmodule Arbiter.NodeAgent.Backend.Podman do
   def capacity, do: Protocol.capacity_facts()
 
   @impl true
-  def readiness, do: PodmanReadiness.diagnose()
+  def readiness, do: PodmanReadiness.diagnose(probes: PodmanReadiness.node_probes())
 end

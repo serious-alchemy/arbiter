@@ -180,9 +180,14 @@ defmodule ArbiterWeb.Api.ImageControllerTest do
     assert Enum.any?(resp["images"], &(&1["kind"] == "base"))
     assert Enum.any?(resp["images"], &(&1["name"] == "repo-imgrepo4"))
 
-    assert [%{"ref" => "docker.io/library/debian:trixie-slim", "digest" => @digest}] =
-             resp["pins"]
+    # The base's OS, and the Erlang/OTP it carries for arb (bd-59m96o; its
+    # release follows the host's arb, so only its shape is pinned here).
+    assert [
+             %{"ref" => "docker.io/library/debian:trixie-slim", "digest" => @digest},
+             %{"ref" => "docker.io/library/erlang:" <> erlang, "digest" => @digest}
+           ] = Enum.sort_by(resp["pins"], & &1["ref"])
 
+    assert erlang =~ ~r/\A\d+-slim\z/
     assert resp["refresh_due"] == false
   end
 

@@ -162,8 +162,10 @@ Read from the repos on the laptop on 2026-10-02.
 CLIs the base image needs: `claude` (a 244 MB dynamically linked bun binary;
 ran on glibc 2.36 without change), `codex`, `agy`, `grok` (no adapter exists:
 only a disabled login recipe in `accounts/login_recipes.ex`), `gh`, `glab`
-and `arb`. `arb` is an **escript**, so the image needs Erlang (it already
-has it for BEAM repos, but the `kube` and `nix` images would need it too).
+and `arb`. `arb` is an **escript**, so it needs an Erlang/OTP at least as new
+as the one that compiled it, which a repo's own Erlang need not be (emricare
+tonic pins OTP 27; the `kube` and `nix` images have none). The base image
+therefore carries an Erlang for arb alone ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)).
 
 ### 2.4 Build, rebuild and versioning, laptop and EC2
 
@@ -198,7 +200,8 @@ the default branch's committed tree (`origin/<default>`, else the local branch;
 read with `git cat-file`, never a worktree) and builds it from an **empty
 context**. Two layers: `localhost/arbiter-dev/base:<hash>` (Debian trixie,
 `git`, `procps`, `socat`, `build-essential`, an empty `/opt/arbiter/cli` on
-`PATH` for a versioned read-only provider-CLI mount) and
+`PATH` for a versioned read-only provider-CLI mount, and since bd-59m96o the
+Erlang/OTP arb runs on at `/opt/arbiter/otp`, off `PATH`) and
 `localhost/arbiter-dev/<name>:<hash>` (`FROM ${ARBITER_BASE}`). Every external
 `FROM` is rewritten to `ref@sha256:…` through a pin store
 (`~/.arbiter/images/pins.json`); an unpinnable `FROM` refuses the build. The
@@ -448,7 +451,7 @@ against real podman):
 |---|---|
 | The checkout, its `.git` and read-only guards, the main repo's `objects/` | `PrivateClone.mounts/1` |
 | `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR` | per run, under the run's temp dir; the config dir holds only the generated `settings.json` and `CLAUDE.md`, never a credential file or another run's history |
-| `claude` and `arb` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `arb` is an escript, so the image needs a matching OTP |
+| `claude` and `arb` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `arb` there is a launcher and the host's escript sits beside it as `arb.escript`; the launcher runs it on the base image's own Erlang for arb ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)), so the repo's Erlang need not match |
 | Token env | the spawn's explicit pairs only, each as `-e NAME` with the value in the `podman` client's environment: nothing on argv. `PATH`, `HOME`, `XDG_*` and the proxy variables are literals |
 | Proxy and Arbiter | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
 
@@ -567,6 +570,42 @@ already handed. What it cannot fix: two runs that both hold
 token T0 where the first one's refresh retires T0 server-side; the second then
 fails its own refresh. A re-opened run picks up T1 through `pull`, a run that is
 mid-turn does not.
+
+### 4.3 `arb` in a worker container (bd-59m96o)
+
+`arb` is an escript compiled by the host's Erlang/OTP, and a BEAM file loads
+only on the release that compiled it or a newer one. The OTP 28 and 29 builds
+die on emricare tonic's OTP 27 (`beam/beam_load.c(150): Error loading module
+nil_escript: corrupt atom table`, then `undefined function nil_escript:main/1`),
+and an image with no Erlang cannot run arb at all. A worker without arb still
+has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
+
+* **The stamp.** `mix escript.build` writes the release into the escript's
+  comment line: `%% arb-otp=29` (`apps/arbiter_cli/mix.exs`).
+  `Arbiter.Worker.ArbCli.built_otp/1` reads it.
+* **The runtime.** The base image copies `/usr/local/lib/erlang` out of the
+  official `docker.io/library/erlang:<release>-slim` image (digest-pinned like
+  every `FROM`, multi-arch, Debian trixie like the base) to
+  `/opt/arbiter/otp`, off `PATH`, minus sources, headers and docs (173 MB to
+  120 MB for OTP 29), and records the release as `LABEL arbiter.arb-otp`
+  (`Image.base_containerfile/1`). The release is the host arb's stamp, else the
+  server's own OTP (`ArbCli.runtime_otp/1`), so a new arb release is a new base
+  tag and the images rebuild on next use. A repo's toolchain is untouched: the
+  toolchain layer copies `/usr/local` only.
+* **The launcher.** `ContainerSpawn.cli_mounts/2` binds `ArbCli.launcher/1`
+  (a POSIX `sh` script, written once under `<image root>/cli`, named by its
+  content) as `/opt/arbiter/cli/arb` and the host's escript beside it as
+  `arb.escript`. It runs the escript on `/opt/arbiter/otp` when that release is
+  at least the stamp's; else on the image's own `escript` when its `erl` is new
+  enough; else it exits 69 naming both releases. Remote nodes (the file shelf)
+  and pushed images (the CLI layer) take the same two files.
+* **The doctor.** `arb server doctor`'s podman row carries an `arb in worker
+  containers` check (`PodmanReadiness`, probe `:arb`): a warning for no arb on
+  the host, an arb from an older Arbiter with no stamp, or a configured
+  `:worker_container_image` whose `arbiter.arb-otp` label is missing or older
+  than arb's release. The spawn gate and a node's readiness do not run it.
+
+Checked against real images in [Appendix G](#appendix-g-arb-on-an-otp-27-image-bd-59m96o).
 
 ## 5. Network
 
@@ -974,3 +1013,61 @@ turn began with "Code Mode is unavailable … host executable was not found".
 A hand probe in the same container flags showed `bwrap --ro-bind / / true` exiting 0, but
 the CLI's own `:auto` sandbox was **not** run live. `socat` logs one `waitpid` warning.
 
+
+## Appendix G: arb on an OTP 27 image (bd-59m96o)
+
+**The check, on a host with podman.** The opt-in test builds the real base and
+an Elixir 1.17.3 / OTP 27 toolchain image (tonic's `.tool-versions`), mounts an
+escript compiled by the test VM's OTP the way a dispatch mounts arb, and runs
+it with `Container.run/2`:
+
+    cd apps/arbiter && mix test --include podman test/arbiter/worker/arb_runtime_podman_test.exs
+
+It asserts that the image's `erl` is still OTP 27, that the image's own
+`escript` still fails to load the fixture (`corrupt atom table`), that `arb`
+runs it on the base's runtime, and that a base-only image with no Erlang runs
+`arb` too. By hand, after a deploy: `arb image build <tonic repo>`, then
+
+    podman run --rm --pull=never \
+      -v ~/.arbiter/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
+      -v ~/.local/bin/arb:/opt/arbiter/cli/arb.escript:ro \
+      <the tag it printed> arb version
+
+where the launcher file is the one the first podman spawn wrote (`ls
+~/.arbiter/images/cli`). Expect the CLI block of `arb version`, not
+`corrupt atom table`. `arb server doctor` lists no `arb in worker containers`
+warning on its podman sandbox row (`GET /api/server/podman_sandbox` shows the
+check itself, `ok`).
+
+**What was run for bd-59m96o (2026-10-11), without podman.** The worker that
+built this ran in a podman container with no podman of its own, so the test
+above was **not** run. Instead the image was assembled from the real layers,
+the way the generated Containerfiles build it: the amd64 layers of
+`erlang:29-slim` (OTP 29.1.1, trixie) and `elixir:1.17.3-otp-27-slim`
+(OTP 27.3.4.18, the toolchain source tonic's `.tool-versions` resolves to) were
+fetched from Docker Hub; `/usr/local/lib/erlang` of the first went to
+`/opt/arbiter/otp` and through the prune `RUN` taken verbatim from
+`Image.base_containerfile/1` (173 MB to 120 MB); `/usr/local` of the second
+was the toolchain; the launcher and a `MIX_ENV=prod mix escript.build` arb from
+this branch (line 2: `%% arb-otp=29`) were the cli mounts. Those three were
+bind-mounted at their real paths in a private user and mount namespace of the
+worker container itself, whose OS is the trixie worker base, with only the
+image's `PATH` (`env -i`):
+
+| Image | Command | Result |
+|---|---|---|
+| tonic's (OTP 27 toolchain, new base) | `erl … otp_release` | `27` (27.3.4.18), Elixir 1.17.3 |
+| same | `escript /opt/arbiter/cli/arb.escript version` | `Error loading module nil_escript: corrupt atom table`, `undefined function nil_escript:main/1`: the bug, still there for the image's own Erlang |
+| same | `arb version` | the CLI block, exit 0 |
+| no Erlang (`/usr/local` empty) | `arb version` | the CLI block, exit 0 |
+| OTP 27, no runtime (old base or custom image) | `arb version` | exit 69: `arb: cannot start: this arb was built on Erlang/OTP 29 and an older release cannot load it; the image's own Erlang is OTP 27 and it has no runtime for arb at /opt/arbiter/otp: it is not built on Arbiter's current worker base image (FROM ${ARBITER_BASE}).` |
+| no runtime, no Erlang | `arb version` | exit 69, `the image's own Erlang is missing` |
+| no runtime, OTP 29 toolchain | `arb version` | the CLI block, exit 0 (runs on the image's own Erlang) |
+
+The real OTP 27.1.2 the ticket names (a `builds.hex.pm` build) was checked the
+same way in ExUnit:
+
+    cd apps/arbiter && ARB_TEST_OLD_OTP_ROOT=/path/to/OTP-27.1.2 mix test test/arbiter/worker/arb_cli_test.exs
+
+which loads the OTP 29 fixture with 27.1.2 (`corrupt atom table`), then runs it
+through the launcher (OTP 29) and without a runtime (exit 69, `OTP 27`).
