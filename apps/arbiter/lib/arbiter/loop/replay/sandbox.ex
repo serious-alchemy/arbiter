@@ -14,8 +14,10 @@ defmodule Arbiter.Loop.Replay.Sandbox do
       `objects/info/alternates` (the pattern `Arbiter.Worker.PrivateClone`
       uses), so creating it copies nothing and anything it writes stays in its
       own object store;
-    * has exactly one ref, `refs/heads/replay` at the base commit, so nothing
-      after the base (the merged change included) is reachable from it;
+    * has exactly one ref, `refs/heads/work` at the base commit, so nothing
+      after the base (the merged change included) is reachable from it. The
+      name is neutral: nothing in the checkout tells the replayed model it is
+      re-running solved work;
     * has **no remote**, so `git push` and `git fetch` have nowhere to go;
     * carries a local identity, so the replayed model can commit.
 
@@ -27,9 +29,13 @@ defmodule Arbiter.Loop.Replay.Sandbox do
 
   alias Arbiter.Nodes.Checkout.Git
 
-  @branch "replay"
+  @branch "work"
 
   @type change :: %{files: [String.t()], patch: String.t()}
+
+  @doc "The one branch a sandbox has, checked out at the base commit."
+  @spec branch() :: String.t()
+  def branch, do: @branch
 
   @doc """
   Build the sandbox at `dir` (which must not exist) from the repo checked out at

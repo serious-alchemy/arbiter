@@ -339,6 +339,10 @@ config :arbiter, :loop_discovery_invoker, :disabled
 # bd-avt4lt: transcript distillation is the same kind of model call. Same fence.
 config :arbiter, :transcript_distillation_invoker, :disabled
 
+# bd-c7lx65 (R15): an offline replay spawns real agent CLIs. Same fence; tests
+# that run a replay pass their own `:runner`.
+config :arbiter, :loop_replay_runner, :disabled
+
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and

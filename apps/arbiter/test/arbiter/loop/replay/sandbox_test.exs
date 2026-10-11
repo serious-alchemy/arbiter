@@ -48,7 +48,7 @@ defmodule Arbiter.Loop.Replay.SandboxTest do
 
       assert git!(dir, ["rev-parse", "HEAD"]) == ctx.base
       assert git!(dir, ["remote"]) == ""
-      assert git!(dir, ["for-each-ref", "--format=%(refname)"]) == "refs/heads/replay"
+      assert git!(dir, ["for-each-ref", "--format=%(refname)"]) == "refs/heads/work"
       assert File.read!(Path.join(dir, "lib/app.ex")) =~ "defmodule App"
       assert git!(dir, ["status", "--porcelain"]) == ""
 
