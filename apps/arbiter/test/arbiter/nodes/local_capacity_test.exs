@@ -580,4 +580,120 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       assert {:ok, :local} = LocalCapacity.gate(request, [])
     end
   end
+
+  describe "self-derate (bd-6w7usy)" do
+    alias Arbiter.Machine.Monitor
+
+    # The primary's own monitor, scripted: `derate!(temp)` samples this reading.
+    setup do
+      {:ok, script} = Agent.start_link(fn -> readings(60.0) end)
+
+      start_supervised!(
+        {Monitor,
+         name: Monitor,
+         interval_ms: :manual,
+         alpha: 1.0,
+         config_fun: fn -> %Arbiter.Machine.Derate.Config{} end,
+         cap_fun: fn -> 4 end,
+         live_fun: fn -> 0 end,
+         sensor_fun: fn -> Agent.get(script, & &1) end}
+      )
+
+      put_hardware(8, 64 * @gib)
+      {:ok, 4} = Arbiter.Nodes.set_local_max_workers(4, nil)
+      {:ok, script: script}
+    end
+
+    defp readings(temp), do: %{temp_c: temp, psi: nil, mem_available: 20 * @gib}
+
+    defp derate!(script, temp) do
+      Agent.update(script, fn _ -> readings(temp) end)
+      Monitor.sample(Monitor)
+    end
+
+    test "healthy: cap/0 offers the whole cap", %{script: script} do
+      derate!(script, 60.0)
+      assert %{cap: 4, offered: 4, derate: :none, derate_reason: nil} = LocalCapacity.cap()
+    end
+
+    test "soft: offered is what is running; the cap itself is untouched", %{
+      ws: ws,
+      script: script
+    } do
+      fake_worker(ws)
+      derate!(script, 91.0)
+
+      assert %{cap: 4, offered: 1, derate: :soft, derate_reason: "thermal 91 °C"} =
+               LocalCapacity.cap()
+    end
+
+    test "soft: new implementers and resumes are held even with free slots", %{script: script} do
+      derate!(script, 91.0)
+
+      for kind <- [:implementer, :redispatch, :resume] do
+        assert {:error, {:no_node_capacity, info}} = LocalCapacity.admit("bd-hot", kind, [])
+        assert info.phrase =~ "held — #{Arbiter.Nodes.local_name()} thermal 91 °C"
+        assert info.derate == :soft
+      end
+    end
+
+    test "soft: follow-up kinds still run (a ticket waiting on its own review must not deadlock)",
+         %{script: script} do
+      derate!(script, 91.0)
+
+      for kind <- [:review, :reviewer, :fix_pass, :conflict_pass, :review_fix_round] do
+        assert :ok = LocalCapacity.admit("bd-soft-#{kind}", kind, [])
+      end
+    end
+
+    test "hard: nothing new starts here, fix passes and reviewers included", %{script: script} do
+      derate!(script, 96.0)
+
+      for kind <- Map.keys(LocalCapacity.kinds()) do
+        assert {:error, {:no_node_capacity, info}} = LocalCapacity.admit("bd-hard", kind, [])
+        assert info.derate == :hard
+        assert info.phrase =~ "thermal 96 °C"
+      end
+    end
+
+    test "check/3 sees the derate too, and takes nothing", %{script: script} do
+      derate!(script, 96.0)
+      assert {:error, {:no_node_capacity, _}} = LocalCapacity.check("bd-hard", :resume, [])
+    end
+
+    test "running workers are never stopped by a derate", %{ws: ws, script: script} do
+      {_key, pid} = fake_worker(ws)
+      derate!(script, 98.0)
+      assert Process.alive?(pid)
+      assert length(LocalCapacity.holders()) == 1
+    end
+
+    test "recovery lifts the hold", %{script: script} do
+      derate!(script, 96.0)
+      assert {:error, _} = LocalCapacity.admit("bd-x", :implementer, [])
+      Agent.update(script, fn _ -> readings(60.0) end)
+
+      # The monitor's own hysteresis (recover_s) governs when; here: force the lift.
+      :sys.replace_state(Process.whereis(Monitor), fn s ->
+        %{
+          s
+          | derate: %{s.derate | recover_since: System.monotonic_time(:millisecond) - 1_000_000}
+        }
+      end)
+
+      Monitor.sample(Monitor)
+      assert :ok = LocalCapacity.admit("bd-x", :implementer, [])
+    end
+
+    test "force goes over a derate, like it goes over the cap", %{script: script} do
+      derate!(script, 96.0)
+      assert :ok = LocalCapacity.admit("bd-forced", :implementer, force: true)
+    end
+
+    test "no monitor running: unknown never derates" do
+      stop_supervised!(Monitor)
+      assert %{cap: 4, offered: 4, derate: :none} = LocalCapacity.cap()
+      assert :ok = LocalCapacity.admit("bd-nomon", :implementer, [])
+    end
+  end
 end

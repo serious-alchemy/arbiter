@@ -285,6 +285,26 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
     end
   end
 
+  describe "self-derate fields (bd-6w7usy)" do
+    test "the list's local row and a node row carry offered, derate, reason, temp and pressure" do
+      enroll!("alpha")
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+
+      # Local: no monitor in the test env, so it offers its whole cap and reports no sensing.
+      local = body["local"]
+      assert local["offered"] == local["max"]
+      assert local["derate"] == "none"
+      assert Map.has_key?(local, "derate_reason")
+      assert Map.has_key?(local, "temp_c")
+      assert Map.has_key?(local, "psi")
+
+      row = Enum.find(body["nodes"], &(&1["name"] == "alpha"))
+      assert row["derate"] == "none"
+      assert Map.has_key?(row, "offered")
+      assert Map.has_key?(row, "temp_c")
+    end
+  end
+
   describe "PATCH /api/nodes/:ref allow_unenforced_network (A7)" do
     test "the operator sets it, it is audited, and the node view reports it" do
       node = enroll!("alpha")

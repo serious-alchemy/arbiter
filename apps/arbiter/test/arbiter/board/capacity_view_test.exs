@@ -202,6 +202,66 @@ defmodule Arbiter.Board.CapacityViewTest do
     test "free never goes below zero" do
       assert [%{free: 0, live: 4}] = status(local: %{cap: 2, used: 4}).machines
     end
+
+    test "a healthy machine offers its cap and reports no derate" do
+      assert [%{cap: 6, offered: 6, derate: "none", derate_reason: nil, temp_c: nil, psi: nil}] =
+               status().machines
+    end
+
+    test "a derated primary shows offered vs cap, the reason and what it sensed" do
+      local = %{
+        cap: 6,
+        used: 3,
+        offered: 3,
+        derate: :hard,
+        derate_reason: "thermal 96 °C",
+        temp_c: 96.2,
+        psi: %{"some_avg10" => 2.5}
+      }
+
+      assert [machine] = status(local: local).machines
+
+      assert %{
+               cap: 6,
+               offered: 3,
+               live: 3,
+               free: 0,
+               derate: "hard",
+               derate_reason: "thermal 96 °C",
+               temp_c: 96.2,
+               psi: %{"some_avg10" => 2.5}
+             } = machine
+    end
+
+    test "a derated node shows offered vs cap" do
+      nodes = [
+        %{
+          id: "n1",
+          name: "ryan-oryx-pro",
+          max: 6,
+          offered: 2,
+          live: 2,
+          state: :online,
+          derate: :soft,
+          derate_reason: "thermal 91 °C",
+          temp_c: 91.0,
+          psi: nil
+        }
+      ]
+
+      view = status(nodes: nodes, remote_available?: true)
+
+      assert [
+               _local,
+               %{cap: 6, offered: 2, free: 0, derate: "soft", derate_reason: "thermal 91 °C"}
+             ] =
+               view.machines
+    end
+
+    test "is JSON-encodable while derated" do
+      local = %{cap: 6, used: 3, offered: 3, derate: :soft, derate_reason: "x", temp_c: 91.0}
+      assert {:ok, _} = Jason.encode(status(local: local))
+    end
   end
 
   describe "repos and fair share" do

@@ -654,7 +654,7 @@ defmodule ArbiterWeb.NodesLive do
     >
       <span id="nodes-capacity-breakdown">
         capacity <b class="tabular-nums text-[var(--text-title)]">{@overview.total}</b>
-        = local <b class="tabular-nums text-[var(--text-title)]">{@overview.local.max}</b>
+        = local <b class="tabular-nums text-[var(--text-title)]">{@overview.local.contributes}</b>
         <span :for={n <- @overview.nodes} :if={n.contributes > 0}>
           + {n.name} <b class="tabular-nums text-[var(--text-title)]">{n.contributes}</b>
         </span>
@@ -662,7 +662,7 @@ defmodule ArbiterWeb.NodesLive do
       <span :if={Enum.any?(@overview.nodes, &(&1.contributes == 0))} id="nodes-capacity-idle">
         not counted: {@overview.nodes
         |> Enum.filter(&(&1.contributes == 0))
-        |> Enum.map_join(", ", &"#{&1.name} (#{&1.state})")}
+        |> Enum.map_join(", ", &not_counted/1)}
       </span>
       <span :if={not @overview.remote_execution?} id="nodes-remote-off">
         remote execution is off: nodes add no capacity yet
@@ -780,6 +780,26 @@ defmodule ArbiterWeb.NodesLive do
     """
   end
 
+  # bd-6w7usy: "not counted: box (online, derated)" for a node offering nothing because it
+  # has derated itself.
+  defp not_counted(n) do
+    derated = if Map.get(n, :derate, :none) in [:soft, :hard], do: ", derated", else: ""
+    "#{n.name} (#{n.state}#{derated})"
+  end
+
+  # What the machine senses about itself, when it reports it: "CPU 96°C · memory PSI 4.3%".
+  defp sensed(row) do
+    parts =
+      [
+        is_number(Map.get(row, :temp_c)) && "CPU #{round(row.temp_c)}°C",
+        match?(%{"some_avg10" => v} when is_number(v), Map.get(row, :psi)) &&
+          "memory PSI #{Float.round(row.psi["some_avg10"] * 1.0, 1)}%"
+      ]
+      |> Enum.filter(& &1)
+
+    if parts != [], do: Enum.join(parts, " · ")
+  end
+
   attr :id, :string, required: true
   attr :row, :map, required: true
   attr :cap_error, :string, default: nil
@@ -838,7 +858,23 @@ defmodule ArbiterWeb.NodesLive do
         data-role="capacity"
       >
         {@row.live}/{@row.max || "?"}
+        <span
+          :if={Map.get(@row, :derate, :none) in [:soft, :hard]}
+          data-role="derate"
+          data-level={@row.derate}
+          class="block text-[10.5px] text-[var(--arb-attention)]"
+        >
+          offering {@row.offered} of {@row.max} — {Map.get(@row, :derate_reason) || "derated"}
+        </span>
+        <span
+          :if={sensed(@row)}
+          data-role="sensed"
+          class="block text-[10.5px] text-[var(--text-label)]"
+        >
+          {sensed(@row)}
+        </span>
       </td>
+
       <td
         class="px-3 py-2 text-right tabular-nums font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
         data-role="suggested"

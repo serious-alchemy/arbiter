@@ -287,6 +287,66 @@ defmodule ArbiterWeb.BoardCapacityStripLiveTest do
       assert panel =~ "4 of 4"
       assert panel =~ "arb node set"
     end
+
+    test "a self-derated machine shows offered vs cap, its reading and why (bd-6w7usy)", %{
+      conn: conn
+    } do
+      mode!("shadow")
+
+      derated = %{
+        id: "n2",
+        name: "oryx",
+        cap: 6,
+        offered: 2,
+        live: 2,
+        free: 0,
+        state: "online",
+        derate: "hard",
+        derate_reason: "thermal 96 °C",
+        temp_c: 96.3,
+        psi: %{"some_avg10" => 4.25}
+      }
+
+      base = view("shadow", [])
+      stub_view(%{base | machines: base.machines ++ [derated]})
+      lv = mount_board(conn)
+
+      assert lv |> element("#node-chip-oryx-trigger") |> render() =~ "oryx 2/2 of 6"
+      assert has_element?(lv, "#node-chip-oryx [data-chip-state='held_hard']")
+
+      assert has_element?(lv, "#node-chip-oryx-panel [data-role='derate']")
+      derate = lv |> element("#node-chip-oryx-panel [data-role='derate']") |> render()
+      assert derate =~ "thermal 96 °C"
+      assert derate =~ "2 of 6"
+      assert derate =~ "resumes"
+
+      assert lv |> element("#node-chip-oryx-panel [data-role='sensed']") |> render() =~ "96°C"
+      refute has_element?(lv, "#node-chip-box-panel [data-role='derate']")
+    end
+
+    test "a soft derate reads as attention, not a failure", %{conn: conn} do
+      mode!("shadow")
+
+      soft = %{
+        id: "n2",
+        name: "oryx",
+        cap: 6,
+        offered: 2,
+        live: 2,
+        free: 0,
+        state: "online",
+        derate: "soft",
+        derate_reason: "low memory (MemAvailable 3.1 GiB)",
+        temp_c: nil,
+        psi: nil
+      }
+
+      base = view("shadow", [])
+      stub_view(%{base | machines: base.machines ++ [soft]})
+      lv = mount_board(conn)
+
+      assert has_element?(lv, "#node-chip-oryx [data-chip-state='held_pace']")
+    end
   end
 
   describe "the cap popup's budget lines" do

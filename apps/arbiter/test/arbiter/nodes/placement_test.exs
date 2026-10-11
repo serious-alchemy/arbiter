@@ -376,4 +376,51 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:ok, {:node, _}} = place(%{task_id: "bd-second"}, rows)
     end
   end
+
+  describe "a self-derated node (bd-6w7usy)" do
+    defp derated(name, level, attrs \\ []) do
+      row(
+        name,
+        [
+          max: 4,
+          live: 1,
+          offered: 1,
+          derate: level,
+          derate_reason: "thermal 96 °C",
+          temp_c: 96.0
+        ] ++ attrs
+      )
+    end
+
+    test "a soft or hard derated node is not a candidate even with free slots under its cap" do
+      for level <- [:soft, :hard] do
+        assert {:ok, {:local, :no_node}} =
+                 place(%{mode: :prefer_remote}, [derated("hot", level)])
+      end
+    end
+
+    test "placement goes to a healthy node instead" do
+      rows = [derated("hot", :hard), row("cool", max: 2)]
+      assert {:ok, {:node, %{name: "cool"}}} = place(%{mode: :remote_only}, rows)
+    end
+
+    test "every kind of run is kept off a hard-derated node (resumes, fix passes, reviewers)" do
+      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass, :review_fix_round, :reviewer] do
+        assert {:error, {:no_node_capacity, _}} =
+                 place(%{mode: :remote_only, kind: kind}, [derated("hot", :hard)])
+      end
+    end
+
+    test "the hold names the machine and what it sensed" do
+      assert {:error, {:no_node_capacity, info}} =
+               place(%{mode: :remote_only}, [derated("ryan-oryx-pro", :hard)])
+
+      assert info.message =~ "held — ryan-oryx-pro thermal 96 °C"
+      assert info.derated == [%{name: "ryan-oryx-pro", level: :hard, reason: "thermal 96 °C"}]
+    end
+
+    test "a hand-built row without :offered offers its cap" do
+      assert {:ok, {:node, %{name: "plain"}}} = place(%{mode: :remote_only}, [row("plain")])
+    end
+  end
 end

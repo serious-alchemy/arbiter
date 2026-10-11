@@ -835,6 +835,7 @@ hook where its condition is seen healthy again.
 | `quota_snapshot_stale` | `claude:<account id>` | `Quota.StalenessWatch` (bd-2wnkoq), on its own timer, every check while a Claude account's snapshot is older than `:stale_alert_threshold_seconds` — whether or not anything reports a poll failure | the next check finds that account's snapshot fresh, gone, or the account no longer linked to a workspace (`quota_snapshot_recovered/1`); a check that cannot read the snapshots clears nothing |
 | `overage_alert` | workspace and provider | `DispatchQueue` on a threshold crossing | the windowed spend is back under the threshold, the threshold is raised or removed (the queue re-reads it on each record), or the gate allows a dispatch on that provider outside overage |
 | `budget_exceeded` | task | `Usage.BudgetPatrol`, every sweep while over | the sweep finds the task no longer over its p90 (the estimate moved) or no longer open; a failed sweep clears nothing |
+| `machine_derate` | machine name (`local` for the primary) | `Machine.Alerting` (bd-6w7usy), when a machine enters a **hard** thermal derate (its own sensing: the primary's monitor, or a node's heartbeat) | the machine leaves hard derate after its readings stay clear for the recovery window; a soft derate raises nothing. Workspace-scoped like every alert: it goes on the oldest workspace. See `docs/machine-derate.md` |
 
 `credential_restored` no longer posts a "restored" message: the clear is the
 signal. `operator_login_lapsed` and `quota_grant_failing`, which fire in place

@@ -118,6 +118,9 @@ defmodule Arbiter.Application do
         # (RW6, docs/design/remote-workers.md §3, §10.1). Sessions read the Repo,
         # so this follows the migration gate.
         Arbiter.Nodes.Supervisor,
+        # bd-6w7usy: the primary senses its own temperature and memory pressure and
+        # derates the slots it offers (`Arbiter.Machine.Local`).
+        Arbiter.Machine.Local,
         # The shared circuit breaker (bd-5jr49o). Started early and with no deps
         # so every auto-filing / auto-escalating / auto-redispatching path can
         # gate through it; callers fail open if it is somehow absent.
