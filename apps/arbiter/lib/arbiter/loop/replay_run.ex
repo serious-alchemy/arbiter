@@ -34,7 +34,8 @@ defmodule Arbiter.Loop.ReplayRun do
 
   A `:running` row holds its seats on both pools for
   `Arbiter.Loop.Replay.Admission` until it finishes, or until it is old enough
-  that its node must have died (`Arbiter.Loop.Replay.running/1`).
+  that its node must have died (`Arbiter.Loop.Replay.running/1`); the next
+  replay then finishes it as `:failed` (abandoned) and removes its checkout.
   """
 
   use Ash.Resource,

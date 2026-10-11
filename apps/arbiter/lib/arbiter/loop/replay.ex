@@ -32,7 +32,10 @@ defmodule Arbiter.Loop.Replay do
        reviewer's pool is admitted again, and the live ReviewGate prompt gets
        one round-1 verdict, read by the live gate's `converged` rule.
     7. **The record** (`Arbiter.Loop.ReplayRun`) is finished, and the sandbox
-       removed, whatever happened.
+       removed, whatever happened. A replay whose node stopped mid-run cannot
+       clean up after itself, so each replay first sweeps: a record still
+       `:running` past the stale age is finished as abandoned, and the checkout
+       of any replay not running now is removed.
 
   ## What it never does
 
@@ -135,6 +138,7 @@ defmodule Arbiter.Loop.Replay do
          {:ok, author} <- author(opts, subject),
          {:ok, reviewer} <- reviewer(opts, subject, author, now) do
       budget_fun = budget_fun(opts, subject)
+      :ok = sweep(opts, now)
 
       case admit(subject, author, reviewer, budget_fun, now) do
         {:running, run} ->
@@ -168,7 +172,7 @@ defmodule Arbiter.Loop.Replay do
       result = run(opts)
 
       Logger.info(
-        "Loop.Replay: #{inspect(Keyword.get(opts, :task_id))} → #{describe_result(result)}"
+        "Loop.Replay: #{inspect(Keyword.get(opts, :task_id))}: #{describe_result(result)}"
       )
     end)
   end
@@ -364,23 +368,34 @@ defmodule Arbiter.Loop.Replay do
 
   # ---- the replay ----------------------------------------------------------------
 
+  # Whatever happens from here on, the record is finished: a raise anywhere
+  # (the runner's own `layout/2` included) is a failure, never a replay left
+  # `:running`.
   defp execute(run, ctx) do
     ctx = Map.merge(ctx, %{dir: Path.join(root(ctx.opts), run.id), run: run})
-    layout = layout(ctx)
-    ctx = Map.merge(ctx, %{layout: layout, checkout: checkout_path(layout, ctx)})
 
     outcome =
       try do
-        replay(ctx)
+        ctx |> place() |> replay_in_place()
       rescue
         error -> {:failed, %{reason: Exception.message(error)}}
       catch
         kind, reason -> {:failed, %{reason: Exception.format_banner(kind, reason)}}
-      after
-        unless Map.get(ctx.opts, :keep_sandbox, false), do: remove(ctx)
       end
 
     finish(run, outcome)
+  end
+
+  defp place(ctx) do
+    layout = layout(ctx)
+    Map.merge(ctx, %{layout: layout, checkout: checkout_path(layout, ctx)})
+  end
+
+  # The checkout and the scratch dir go whatever the replay did.
+  defp replay_in_place(ctx) do
+    replay(ctx)
+  after
+    unless Map.get(ctx.opts, :keep_sandbox, false), do: remove(ctx)
   end
 
   defp root(opts), do: Map.get(opts, :root) || Path.join(Paths.scratch_root(), "replays")
@@ -410,18 +425,78 @@ defmodule Arbiter.Loop.Replay do
   defp checkout_path(:sandbox, ctx), do: Path.join(ctx.dir, "checkout")
 
   defp remove(%{layout: :private_clone} = ctx) do
-    case PrivateClone.remove(ctx.checkout) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Loop.Replay: removing #{ctx.checkout}: #{inspect(reason)}")
-    end
-
+    remove_clone(ctx.checkout)
     Sandbox.remove(ctx.dir)
   end
 
   defp remove(ctx), do: Sandbox.remove(ctx.dir)
+
+  # `PrivateClone.remove/1` drops the clone's gc pin in the main repo too. A
+  # clone cut short is not one yet; the leaf (named for this replay alone) goes.
+  defp remove_clone(path) do
+    case PrivateClone.remove(path) do
+      :ok -> :ok
+      {:error, :not_a_private_clone} -> Sandbox.remove(path)
+      {:error, reason} -> Logger.warning("Loop.Replay: removing #{path}: #{inspect(reason)}")
+    end
+  end
+
+  # A replay whose node stopped mid-run left its record `:running` and its
+  # checkout on disk: nothing ran its cleanup. Before each replay, a record
+  # still `:running` past the stale age is finished as abandoned, and the
+  # checkout of every replay not running now is removed (a private clone's gc
+  # pin with it). A live replay's is never touched: its record is `:running`
+  # before its checkout exists.
+  defp sweep(opts, now) do
+    abandon(now)
+    live = now |> running() |> MapSet.new(& &1.id)
+    root = root(opts)
+
+    for id <- uuids(root), not MapSet.member?(live, id), do: Sandbox.remove(Path.join(root, id))
+
+    worktree_root = Paths.worktree_root()
+
+    for "replay-" <> id = leaf <- uuids(worktree_root, "replay-"),
+        not MapSet.member?(live, id),
+        do: remove_clone(Path.join(worktree_root, leaf))
+
+    :ok
+  end
+
+  defp abandon(now) do
+    cutoff = DateTime.add(now, -@stale_after_s, :second)
+
+    ReplayRun
+    |> Ash.Query.filter(state == :running and started_at <= ^cutoff)
+    |> Ash.read!()
+    |> Enum.each(fn run ->
+      Ash.update!(
+        run,
+        %{
+          state: :failed,
+          reason:
+            "abandoned: still running #{div(@stale_after_s, 3600)} hours after it " <>
+              "started (its node stopped before it finished)",
+          finished_at: DateTime.utc_now()
+        },
+        action: :finish
+      )
+    end)
+  end
+
+  # The entries of `dir` named `prefix` and a replay id.
+  defp uuids(dir, prefix \\ "") do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.filter(entries, fn entry ->
+          String.starts_with?(entry, prefix) and
+            match?({:ok, _}, Ecto.UUID.cast(String.replace_prefix(entry, prefix, "")))
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
 
   defp replay(%{subject: subject} = ctx) do
     with :ok <- File.mkdir_p(scratch(ctx)),

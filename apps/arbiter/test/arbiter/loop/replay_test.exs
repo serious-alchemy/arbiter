@@ -510,6 +510,44 @@ defmodule Arbiter.Loop.ReplayTest do
     end
   end
 
+  describe "the leftovers of a replay whose node died" do
+    test "are swept by the next replay; a live replay's checkout is left alone", ctx do
+      main_refs = refs(ctx.repo)
+      stale = running!(ctx, ctx.claude.id, "claude", DateTime.add(@now, -2 * 86_400))
+      leftover = Path.join(ctx.replays, stale.id)
+      File.mkdir_p!(Path.join(leftover, "checkout"))
+
+      leaf = Path.join(Arbiter.Config.Paths.worktree_root(), "replay-" <> stale.id)
+      {:ok, _} = PrivateClone.create_review(ctx.repo, ctx.base, path: leaf)
+
+      live = running!(ctx, ctx.claude.id, "claude", @now)
+      kept = Path.join(ctx.replays, live.id)
+      File.mkdir_p!(kept)
+
+      assert {:ok, %{state: :scored}} = replay(ctx)
+
+      refute File.exists?(leftover)
+      refute File.exists?(leaf)
+      assert refs(ctx.repo) == main_refs, "the dead clone's gc pin is dropped too"
+      assert File.exists?(kept)
+
+      assert %{state: :failed, reason: reason, finished_at: %DateTime{}} =
+               Ash.get!(ReplayRun, stale.id)
+
+      assert reason =~ "abandoned"
+      assert Ash.get!(ReplayRun, live.id).state == :running
+    end
+
+    test "a runner whose layout raises still finishes the record, never leaving it running",
+         ctx do
+      assert {:failed, run} = replay(ctx, runner: Arbiter.Test.RaisingReplayRunner)
+
+      assert run.reason =~ "layout exploded"
+      assert run.finished_at
+      assert Replay.running(@now) == []
+    end
+  end
+
   describe "failures" do
     test "a run that fails is recorded as failed, and its sandbox is still removed", ctx do
       runner = fn
