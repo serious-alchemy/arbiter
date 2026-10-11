@@ -131,6 +131,57 @@ defmodule Arbiter.NodeAgent.ExecTest do
     refute File.read!(Path.join(stub, "run.env")) =~ @token
   end
 
+  # bd-9xcogk: the agent's proxy env names a bridge the command's container does not
+  # have (no bridges, `--network=none`), so every fetch died on 127.0.0.1:3128.
+  test "the agent's proxy env is not carried into the command's container", %{
+    opts: opts,
+    stub: stub
+  } do
+    proxied =
+      Map.put(spec("x5"), "env", %{
+        "ARB_HOST" => "http://127.0.0.1:4848",
+        "HTTP_PROXY" => "http://127.0.0.1:3128",
+        "https_proxy" => "http://127.0.0.1:3128",
+        "NO_PROXY" => "127.0.0.1",
+        "GIT_SSH_COMMAND" => "ssh -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p'"
+      })
+
+    assert {:ok, "x5"} = Runs.assign(proxied, opts)
+    assert_receive {:run_push, "x5", "exit", _}, 5_000
+    assert :ok = Run.ack_exit("x5")
+    wait_until(fn -> "x5" not in Runs.run_ids() end)
+
+    assert {_, 0} = Exec.run("x5", "true", 30, opts)
+
+    # (`run.env` is the test VM's own env, which may carry a proxy of its own.)
+    recorded = Enum.join(argv(stub), "\n")
+    refute recorded =~ ~r/proxy/i
+    refute recorded =~ "GIT_SSH_COMMAND"
+    assert recorded =~ "ARB_HOST"
+  end
+
+  # bd-9xcogk: a re-placed run keeps the shadow's git-ignored `deps/` and `_build/`
+  # (`Checkout.build_shadow`), but a `priv` link inside it may still name the
+  # directory it was seeded in. The container sees the shadow at `/work/tree`, so the
+  # link must be relative to hold there; the re-check repairs it before it starts.
+  test "a node re-check finds the NIF the run's _build links to, from any mount point", %{
+    opts: opts
+  } do
+    finished_run("x6", opts)
+
+    shadow = Path.join([opts[:config].node_home, "runs", "x6", "worktree"])
+    File.mkdir_p!(Path.join(shadow, "deps/lazy_html/priv"))
+    File.write!(Path.join(shadow, "deps/lazy_html/priv/lazy_html.so"), "nif\n")
+    lib = Path.join(shadow, "_build/test/lib/lazy_html")
+    File.mkdir_p!(lib)
+    File.ln_s!(Path.join(shadow, "deps/lazy_html/priv"), Path.join(lib, "priv"))
+
+    assert {_, 0} = Exec.run("x6", "true", 30, opts)
+
+    assert {:ok, "../../../../deps/lazy_html/priv"} = File.read_link(Path.join(lib, "priv"))
+    assert File.exists?(Path.join(lib, "priv/lazy_html.so"))
+  end
+
   test "the container is removed by name afterwards", %{opts: opts, stub: stub} do
     finished_run("x3", opts)
     assert {_, 0} = Exec.run("x3", "true", 30, opts)

@@ -61,6 +61,7 @@ defmodule Arbiter.Worker.DepsCache do
   alias Arbiter.Config.Paths
   alias Arbiter.Mergers
   alias Arbiter.Worker.Container
+  alias Arbiter.Worker.DepsRelocate
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReleaseEnv
@@ -317,68 +318,15 @@ defmodule Arbiter.Worker.DepsCache do
 
   # Mix recompiles a dependency whose project directory is not the one its
   # manifest (`_build/<env>/lib/<dep>/.mix/compile.elixir`) was written in, so a
-  # `_build` seeded at one path is stale at every other (found measuring this:
-  # the bwrap path's host seed has the same first-use rebuild). The seed ran at
-  # the `src=` path in the stamp; point each manifest's directory at the
-  # worktree instead. Only a manifest we can read and whose directory is under
-  # that path is touched (`:safe` decoding: the file came out of a container);
-  # anything else is left alone and costs a recompile, never a wrong build.
+  # `_build` seeded at one path is stale at every other, and its `priv` symlinks
+  # still name the seed's scratch directory (see `DepsRelocate`). The seed ran at
+  # the `src=` path in the stamp; point both at the worktree instead.
   defp retarget_manifests(worktree, stamp) do
-    with [_, from] <- Regex.run(~r/^src=(.+)$/m, stamp) do
-      pattern = Path.join(worktree, "_build/*/lib/*/.mix/compile.elixir")
-
-      for file <- Path.wildcard(pattern, match_dot: true) do
-        retarget_manifest(file, from, worktree)
-      end
-    end
-
-    :ok
-  end
-
-  defp retarget_manifest(file, from, to) do
-    with {:ok, bin} <- File.read(file),
-         term when not is_nil(term) <- safe_decode(bin),
-         true <- mentions?(term, from) do
-      File.write(file, :erlang.term_to_binary(retarget(term, from, to), [:compressed]))
+    case Regex.run(~r/^src=(.+)$/m, stamp) do
+      [_, from] -> DepsRelocate.relocate(worktree, from)
+      _ -> DepsRelocate.relink(worktree)
     end
   end
-
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp safe_decode(bin) do
-    :erlang.binary_to_term(bin, [:safe])
-  rescue
-    ArgumentError -> nil
-  end
-
-  # The directory shows up twice over: as the dep's project dir, and inside the
-  # recorded app config (`tailwind: [cd: "<src>/apps/web"]`), which Mix compares
-  # too. Both are rewritten, to any depth.
-  defp mentions?(term, from) when is_binary(term), do: under?(term, from)
-  defp mentions?(term, from) when is_tuple(term), do: term |> Tuple.to_list() |> mentions?(from)
-  defp mentions?(term, from) when is_map(term), do: term |> Map.to_list() |> mentions?(from)
-  defp mentions?([head | tail], from), do: mentions?(head, from) or mentions?(tail, from)
-  defp mentions?(_, _), do: false
-
-  defp retarget(term, from, to) when is_binary(term) do
-    if under?(term, from),
-      do: to <> binary_part(term, byte_size(from), byte_size(term) - byte_size(from)),
-      else: term
-  end
-
-  defp retarget(term, from, to) when is_tuple(term),
-    do: term |> Tuple.to_list() |> retarget(from, to) |> List.to_tuple()
-
-  defp retarget(%{__struct__: _} = term, _from, _to), do: term
-
-  defp retarget(term, from, to) when is_map(term),
-    do: Map.new(term, fn {k, v} -> {retarget(k, from, to), retarget(v, from, to)} end)
-
-  defp retarget([head | tail], from, to),
-    do: [retarget(head, from, to) | retarget(tail, from, to)]
-
-  defp retarget(term, _from, _to), do: term
-
-  defp under?(dir, from), do: dir == from or String.starts_with?(dir, from <> "/")
 
   defp elapsed(started), do: System.monotonic_time(:millisecond) - started
 

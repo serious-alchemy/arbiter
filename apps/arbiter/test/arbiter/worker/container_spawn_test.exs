@@ -909,6 +909,28 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert has_literal?(wrapped.argv, "HOME=#{ctx.request.home}")
     end
 
+    # bd-9xcogk: the pre-push gate runs after the agent; the egress proxy is the
+    # agent's, and may be gone. The gate's container is offline, with no proxy env.
+    test "gate_argv/2 is offline: no proxy env, no bridge, and needs no live proxy socket", ctx do
+      File.rm!(ctx.proxy)
+      File.rm!(ctx.bridge)
+
+      assert {:ok, %{argv: argv}} =
+               ContainerSpawn.gate_argv(port_args(ctx, ctx.request), "mix compile")
+
+      assert "--network=none" in argv
+      assert Enum.take(argv, -3) == ["sh", "-c", "mix compile"]
+
+      refute Enum.any?(argv, &String.contains?(&1, "TCP-LISTEN"))
+      refute Enum.any?(argv, &String.contains?(&1, "socat"))
+      refute Enum.any?(argv, &(String.contains?(&1, "PROXY") or String.contains?(&1, "proxy")))
+      refute Enum.any?(mounts(argv), &String.contains?(&1, "proxy.sock"))
+      refute Enum.any?(mounts(argv), &String.contains?(&1, "arb.sock"))
+
+      assert "#{ctx.clone}:#{ctx.clone}:rw,Z" in mounts(argv)
+      assert has_literal?(argv, "HOME=#{ctx.request.home}")
+    end
+
     test "CLAUDE_CONFIG_DIR is the run's own dir on both sides", ctx do
       args = port_args(ctx, ctx.request, [{"CLAUDE_CONFIG_DIR", "/the/install/wide/dir"}])
       assert {"CLAUDE_CONFIG_DIR", ctx.request.config_dir} in args.env

@@ -142,6 +142,24 @@ defmodule Arbiter.Nodes.CheckoutTest do
       refute File.exists?(Path.join(shadow, "stray.txt"))
       assert File.exists?(Path.join(shadow, ".git"))
     end
+
+    # bd-9xcogk: what the re-checked run's container needs to build and test offline.
+    test "keeps the compiled NIF reachable: deps/, _build/ and the priv link between them", c do
+      File.write!(Path.join(c.home, ".gitignore"), "/deps/\n/_build/\n")
+      commit_all!(c.home, "ignore build dirs")
+
+      %{shadow: shadow} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, "deps/lazy_html/priv"))
+      File.write!(Path.join(shadow, "deps/lazy_html/priv/lazy_html.so"), "nif\n")
+      lib = Path.join(shadow, "_build/test/lib/lazy_html")
+      File.mkdir_p!(lib)
+      File.ln_s!("../../../../deps/lazy_html/priv", Path.join(lib, "priv"))
+
+      %{shadow: ^shadow} = seed!(c)
+
+      assert File.exists?(Path.join(shadow, "deps/lazy_html/priv/lazy_html.so"))
+      assert File.exists?(Path.join(lib, "priv/lazy_html.so"))
+    end
   end
 
   describe "round trip" do

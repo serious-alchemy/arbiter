@@ -717,6 +717,44 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
              ] = steps_of(pid)
     end
 
+    # bd-9xcogk: a fresh worktree whose `lazy_html` NIF is not built, and a proxy that
+    # is gone: not "still red", not an attempt, and no step after the first even runs.
+    test "an offline dependency build failure is infra: fails open, no attempt used, rest not run",
+         %{repo: repo} do
+      ws = recipe([step("compile", "one"), step("credo", "two"), step("tests", "three")])
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      test_pid = self()
+
+      exec = fn command, _timeout_s ->
+        send(test_pid, {:ran, command})
+
+        {"Using HTTP_PROXY: http://127.0.0.1:3128\n" <>
+           "Error happened while installing lazy_html from precompiled binary: cannot download: :enoent\n" <>
+           "fatal: unable to access 'https://github.com/lexbor/lexbor.git/': " <>
+           "Failed to connect to 127.0.0.1 port 3128\n" <>
+           "** (Mix) Could not compile with \"make\"", 1}
+      end
+
+      pid = start_worker(task, repo, path, %{prepush_exec: exec, prepush_nudge_cap: 2})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) end)
+
+      meta = Worker.state(pid).meta
+      refute Map.has_key?(meta, :prepush_nudge_attempts)
+      refute Map.has_key?(meta, :commit_gate_reason)
+
+      assert_received {:ran, "one"}
+      refute_received {:ran, "two"}
+
+      assert [
+               %{name: "compile", status: :skipped, output: "skipped: infra" <> _},
+               %{name: "credo", status: :skipped},
+               %{name: "tests", status: :skipped}
+             ] = steps_of(pid)
+    end
+
     test "a real failure beside an infra one is still sent back, and the infra step is not",
          %{repo: repo} do
       ws =

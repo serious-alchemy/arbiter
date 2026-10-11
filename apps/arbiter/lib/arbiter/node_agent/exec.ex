@@ -22,6 +22,8 @@ defmodule Arbiter.NodeAgent.Exec do
   use Agent
 
   alias Arbiter.Worker.Container
+  alias Arbiter.Worker.DepsRelocate
+  alias Arbiter.Worker.GateEnv
 
   @name __MODULE__
   @max_contexts 64
@@ -38,6 +40,7 @@ defmodule Arbiter.NodeAgent.Exec do
       wrap_opts
       |> Keyword.drop([:secrets_file, :pod, :bridges, :keep, :interactive, :podman_secrets])
       |> Keyword.update(:mount_map, %{}, & &1)
+      |> offline()
 
     Agent.update(@name, fn {contexts, order} ->
       order = [run | List.delete(order, run)]
@@ -69,6 +72,7 @@ defmodule Arbiter.NodeAgent.Exec do
   def run(run, command, timeout_s, opts \\ [])
       when is_binary(run) and is_binary(command) and is_integer(timeout_s) do
     with {:ok, context} <- fetch(run) do
+      relink_deps(context)
       name = unique_name(Keyword.fetch!(context, :name))
       wrap_opts = Keyword.put(context, :name, name)
       podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
@@ -91,6 +95,26 @@ defmodule Arbiter.NodeAgent.Exec do
         {:error, reason} ->
           {:error, {:wrap_refused, reason}}
       end
+    end
+  end
+
+  # The agent's proxy variables name a bridge this container does not have (it has
+  # none, and `--network=none`): carried over, every fetch dies on 127.0.0.1:3128.
+  # The command runs offline, on the deps and `_build` the run left (bd-9xcogk).
+  defp offline(context) do
+    context
+    |> Keyword.update(:env, [], &GateEnv.drop_proxy/1)
+    |> Keyword.update(:inherit_env, [], fn names ->
+      Enum.reject(names, &GateEnv.proxy_name?/1)
+    end)
+  end
+
+  # The run's `_build` may still link its NIFs (`priv`) at the directory it was
+  # seeded from; the gate runs offline and must find them in the checkout itself.
+  defp relink_deps(context) do
+    case Keyword.get(context, :worktree) do
+      worktree when is_binary(worktree) -> DepsRelocate.relink(worktree)
+      _ -> :ok
     end
   end
 

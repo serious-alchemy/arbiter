@@ -1,6 +1,7 @@
 defmodule Arbiter.Worker.Worktree do
   require Logger
 
+  alias Arbiter.Worker.DepsRelocate
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReleaseEnv
 
@@ -2191,6 +2192,16 @@ defmodule Arbiter.Worker.Worktree do
   Best-effort: failures are swallowed so a seeding issue never blocks
   worktree provisioning.
 
+  ## Relocation (bd-9xcogk)
+
+  A compiled `_build` names the directory it was built in: its `priv` symlinks
+  (where an `elixir_make` dependency such as `lazy_html` keeps its NIF) are absolute
+  links into the source's `deps/`, and each dependency's compile manifest records
+  the source as its project directory. Copied as is, the NIF is unreachable from
+  the worktree and Mix rebuilds the dependency on first use, which downloads or
+  compiles it and cannot work in the pre-push gate (no network). After the copy,
+  `Arbiter.Worker.DepsRelocate.relocate/2` points both at the worktree.
+
   ## Configuring what is seeded
 
   `worker.repos.<repo>.seed_paths` in the workspace config is a list of
@@ -2241,6 +2252,7 @@ defmodule Arbiter.Worker.Worktree do
       |> Enum.filter(&seed_entry(source_repo, worktree_path, &1))
 
     record_seeded_paths(worktree_path, copied)
+    DepsRelocate.relocate(worktree_path, source_repo)
     :ok
   rescue
     error ->
@@ -2282,6 +2294,7 @@ defmodule Arbiter.Worker.Worktree do
       end
     end)
 
+    DepsRelocate.relocate(worktree_path, source_repo)
     :ok
   rescue
     _ -> :ok
