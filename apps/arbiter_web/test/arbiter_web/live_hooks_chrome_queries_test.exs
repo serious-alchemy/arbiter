@@ -137,7 +137,9 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
       {:ok, warm, _html} = live(conn, ~p"/audit")
       render_async(warm)
 
-      # Count only reads issued by this test (the dead render) and the mounted
+      # Count only reads issued directly by this test process (the dead render;
+      # `hd(origin)`, so tasks the warm view left under it as an ancestor are
+      # excluded) and by the mounted
       # LiveView and its tasks. The telemetry event is global, so a concurrent
       # read by an unrelated process (bd-d78rmc: CI saw 3) is not the mount's.
       parent = self()
@@ -153,7 +155,7 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
 
       workspace_reads =
         Enum.count(found, fn {source, _, origin} ->
-          source == "workspaces" and (parent in origin or view_pid in origin)
+          source == "workspaces" and (hd(origin) == parent or view_pid in origin)
         end)
 
       assert workspace_reads <= 2, "workspaces read #{workspace_reads} times"
