@@ -12,6 +12,7 @@ defmodule Arbiter.Settings.Registry do
   """
 
   alias Arbiter.Agents.CredentialWatchdog
+  alias Arbiter.Machine.Derate.Config, as: DerateConfig
   alias Arbiter.Settings
 
   @type key :: String.t()
@@ -98,6 +99,16 @@ defmodule Arbiter.Settings.Registry do
       operator_only_values: ["enforce"]
     },
     %{
+      key: "machine.derate",
+      type: "derate_config",
+      description:
+        "The primary's self-derate thresholds (bd-6w7usy, docs/machine-derate.md), a JSON " <>
+          "object over thermal_soft_c (90), thermal_hard_c (95), thermal_delta_c (5), " <>
+          "psi_some_avg10 (25), psi_delta (10), mem_floor_gib (4), mem_delta_gib (1), " <>
+          "recover_s (180) and enabled (true); keys left out keep their default, null = all " <>
+          "defaults. Operator-only. Takes effect within ~10 s."
+    },
+    %{
       key: "nodes.public_url",
       type: "http_url",
       description:
@@ -175,6 +186,7 @@ defmodule Arbiter.Settings.Registry do
   @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                     nodes.public_url nodes.allow_public_endpoint
                     nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
+                    machine.derate
                     nodes.registry nodes.registry_username nodes.registry_password
                     nodes.registry_insecure)
 
@@ -287,6 +299,16 @@ defmodule Arbiter.Settings.Registry do
   defp do_cast("secret", _),
     do: {:error, "value must be a non-empty string of at most 4096 bytes, or null"}
 
+  defp do_cast("derate_config", map) when is_map(map) do
+    case DerateConfig.validate(map) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  defp do_cast("derate_config", _),
+    do: {:error, "value must be a JSON object of derate thresholds, or null"}
+
   defp do_cast("admission_mode", mode) when is_binary(mode) do
     if mode in Settings.scheduler_admission_modes(),
       do: {:ok, mode},
@@ -311,7 +333,7 @@ defmodule Arbiter.Settings.Registry do
     case Jason.decode(String.trim(raw)) do
       {:ok, decoded}
       when is_integer(decoded) or is_list(decoded) or is_nil(decoded) or
-             is_boolean(decoded) ->
+             is_boolean(decoded) or is_map(decoded) ->
         decoded
 
       _ ->
@@ -397,6 +419,7 @@ defmodule Arbiter.Settings.Registry do
 
   defp write("scheduler_admission", v), do: wrap(Settings.set_scheduler_admission(v))
 
+  defp write("machine.derate", v), do: wrap(Settings.set_machine_derate(v))
   defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
 
   defp write("nodes.allow_public_endpoint", v),
@@ -438,6 +461,7 @@ defmodule Arbiter.Settings.Registry do
 
   def override("scheduler_admission"), do: Settings.scheduler_admission_override()
 
+  def override("machine.derate"), do: Settings.machine_derate()
   def override("nodes.public_url"), do: Settings.nodes_public_url()
   def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
   def override("nodes.join_token_ttl_minutes"), do: Settings.nodes_join_token_ttl_override()
@@ -476,6 +500,7 @@ defmodule Arbiter.Settings.Registry do
 
   def default("scheduler_admission"), do: "legacy"
 
+  def default("machine.derate"), do: DerateConfig.defaults()
   def default("nodes.public_url"), do: nil
   def default("nodes.registry"), do: nil
   def default("nodes.registry_username"), do: nil

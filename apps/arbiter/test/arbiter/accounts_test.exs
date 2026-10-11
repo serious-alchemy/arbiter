@@ -536,6 +536,35 @@ defmodule Arbiter.AccountsTest do
   end
 
   describe "attach_workspace/4" do
+    test "weight defaults to 1, is stored, and a bare re-attach keeps it (DC10)" do
+      ws = create_workspace!("attach-weight-ws")
+      account = create_account!(%{provider: :claude, slug: "attach-weight"})
+      assert account.budget_split == :queue
+
+      assert {:ok, %{weight: 1}} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:ok, %{weight: 3}} =
+               Accounts.attach_workspace(ws.id, :claude, account.id, weight: 3)
+
+      assert {:ok, %{weight: 3}} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:ok, %{weight: 5}} =
+               Accounts.attach_workspace(ws.id, :claude, account.id, weight: "5")
+    end
+
+    test "weight must be a positive integer (DC10)" do
+      ws = create_workspace!("attach-bad-weight-ws")
+      account = create_account!(%{provider: :claude, slug: "attach-bad-weight"})
+
+      for bad <- [0, -2, "x", "1.5", 2.5] do
+        assert {:error, {:invalid_account, "weight must be a positive integer"}} =
+                 Accounts.attach_workspace(ws.id, :claude, account.id, weight: bad)
+      end
+
+      assert WorkspaceProviderAccount |> Ash.Query.filter(workspace_id == ^ws.id) |> Ash.read!() ==
+               []
+    end
+
     test "creates a workspace_provider_accounts row" do
       ws = create_workspace!("attach-ws-1")
       account = create_account!(%{provider: :claude, slug: "attach-acct"})

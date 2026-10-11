@@ -674,6 +674,61 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert out =~ "attached workspace ws-1 -> account acct-1 share=2"
   end
 
+  test "account attach --weight posts the fair-share weight (DC10)" do
+    stub_routes([
+      ws_list_route(),
+      {{"post", "/api/accounts/personal-max/attach"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert %{"workspace_id" => "ws-1", "weight" => 3} = Jason.decode!(body)
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "workspace_id" => "ws-1",
+           "provider_account_id" => "acct-1",
+           "weight" => 3
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Account.run(["attach", "ws-1", "claude", "personal-max", "--weight", "3"])
+      end)
+
+    assert exit_code == 0
+    assert out =~ "weight=3"
+  end
+
+  test "account set --budget-split patches the split, and rejects other words (DC10)" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"budget_split" => "fair"}
+
+         Req.Test.json(conn, %{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "enabled" => true
+         })
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--budget-split", "fair"]) end)
+
+    assert exit_code == 0
+
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--budget-split", "equal"]) end)
+
+    assert exit_code != 0
+    assert err =~ "--budget-split must be queue or fair"
+  end
+
   # D-A-17: a workspace *name* resolves, like every other workspace-scoped verb.
   test "account attach resolves a workspace name to its id" do
     stub_routes([

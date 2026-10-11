@@ -56,6 +56,7 @@ defmodule Arbiter.NodeAgent.SupervisorTest do
                Arbiter.NodeAgent.Exec,
                Arbiter.NodeAgent.RunSupervisor,
                Arbiter.NodeAgent.Bridge,
+               Arbiter.NodeAgent.Monitor,
                Arbiter.NodeAgent.Connection
              ])
   end

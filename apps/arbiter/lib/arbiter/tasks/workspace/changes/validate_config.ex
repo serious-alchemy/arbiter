@@ -50,6 +50,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.scoring"` is present (bd-adtnto), it must be a map whose
       `"mode"` is `"shadow"` or `"enforce"` and whose `"time_weight"` maps
       `"P0"`..`"P4"` to non-negative numbers.
+      `"allow_upgrade"` (R9) is a non-negative integer. A `tier_models` entry is a
+      model name or a non-empty list of them.
     * If `"routing.capability_gates"` is present, it must be a boolean
       (bd-57uzkl); a per-repo `"routing.repos.<repo>.requires"` must be a list
       of `Arbiter.Agents.CapabilityMatrix.capabilities/0`.
@@ -204,7 +206,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_worker_repos(changeset, repos) when is_map(repos) do
     Enum.reduce(repos, changeset, fn
       {repo, %{} = block}, cs ->
-        validate_worker_block(cs, block, "worker.repos.#{repo}")
+        cs
+        |> validate_worker_block(block, "worker.repos.#{repo}")
+        |> validate_repo_cap(block, "worker.repos.#{repo}")
 
       {repo, _}, cs ->
         Changeset.add_error(cs,
@@ -216,6 +220,24 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_worker_repos(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "worker.repos must be a map")
+  end
+
+  # DC9 (bd-7oy77e, `docs/design/provider-dynamic-concurrency.md` §5.2): the
+  # repo cap, a per-repo key only (`Arbiter.Worker.RepoCap`).
+  defp validate_repo_cap(changeset, block, label) do
+    case Map.fetch(block, "max_concurrent") do
+      :error ->
+        changeset
+
+      {:ok, n} when is_integer(n) and n > 0 ->
+        changeset
+
+      {:ok, _} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.max_concurrent must be a positive integer"
+        )
+    end
   end
 
   defp validate_worker_block(changeset, block, label) do
@@ -650,6 +672,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     end)
   end
 
+  defp model_name?(model), do: is_binary(model) and String.trim(model) != ""
+
   defp validate_tier_model_entries(changeset, path, tier_models) do
     Enum.reduce(Enum.sort(tier_models), changeset, fn {tier, model}, cs ->
       cond do
@@ -660,13 +684,18 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
               "#{path}: unknown tier #{inspect(tier)}; must be one of #{Enum.join(@tier_names, ", ")}"
           )
 
-        is_binary(model) and String.trim(model) != "" ->
+        model_name?(model) ->
+          cs
+
+        is_list(model) and model != [] and Enum.all?(model, &model_name?/1) ->
           cs
 
         true ->
           Changeset.add_error(cs,
             field: :config,
-            message: "#{path}.#{tier} must be a non-empty model name string"
+            message:
+              "#{path}.#{tier} must be a non-empty model name string " <>
+                "or a non-empty list of them"
           )
       end
     end)
@@ -907,6 +936,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       Map.get(scoring, "reviewer_coupling"),
       "routing.scoring.reviewer_coupling"
     )
+    |> validate_allow_upgrade(Map.get(scoring, "allow_upgrade"))
   end
 
   defp validate_scoring(changeset, other) do
@@ -923,6 +953,19 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset,
       field: :config,
       message: "#{field} must be true or false; got: #{inspect(value)}"
+    )
+  end
+
+  # R9 (bd-3go56q): how many tiers above the policy's a candidate may reach.
+  defp validate_allow_upgrade(changeset, value)
+       when is_nil(value) or (is_integer(value) and value >= 0),
+       do: changeset
+
+  defp validate_allow_upgrade(changeset, value) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "routing.scoring.allow_upgrade must be a non-negative integer; got: #{inspect(value)}"
     )
   end
 

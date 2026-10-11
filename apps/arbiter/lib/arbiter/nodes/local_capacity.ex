@@ -66,7 +66,10 @@ defmodule Arbiter.Nodes.LocalCapacity do
   """
 
   alias Arbiter.Accounts.Concurrency
+  alias Arbiter.Machine.Derate
+  alias Arbiter.Machine.Monitor
   alias Arbiter.NodeAgent.Protocol
+  alias Arbiter.Nodes
   alias Arbiter.Nodes.Placement
   alias Arbiter.Settings
   alias Arbiter.Worker.Registry, as: WorkerRegistry
@@ -105,10 +108,30 @@ defmodule Arbiter.Nodes.LocalCapacity do
   def kinds, do: @kinds
 
   @doc """
-  The primary's cap: `%{cap:, source: :override | :suggestion}`. Always enforced.
+  The primary's cap: `%{cap:, source: :override | :suggestion}`, always enforced, plus
+  what the machine has derated itself to (bd-6w7usy, `Arbiter.Machine.Derate`):
+
+    * `:offered` — the slots on offer: `cap` while healthy, otherwise no more than
+      is running (`Derate.apply_level/3`). The scheduler plans against this.
+    * `:derate` — `:none | :soft | :hard`, `:derate_reason` — e.g. `"thermal 96 °C"`
+      (`nil` while healthy), `:temp_c` — the smoothed CPU temperature, or `nil`.
+
+  The cap itself is the operator's number and is not touched by a derate.
   """
-  @spec cap() :: %{cap: non_neg_integer(), source: :override | :suggestion}
+  @spec cap() :: %{
+          required(:cap) => non_neg_integer(),
+          required(:source) => :override | :suggestion,
+          required(:offered) => non_neg_integer(),
+          required(:derate) => Derate.level(),
+          required(:derate_reason) => String.t() | nil,
+          required(:temp_c) => float() | nil
+        }
   def cap do
+    configured()
+    |> with_derate()
+  end
+
+  defp configured do
     case Settings.nodes_local_max_workers() do
       nil -> %{cap: suggestion(), source: :suggestion}
       n -> %{cap: n, source: :override}
@@ -116,6 +139,27 @@ defmodule Arbiter.Nodes.LocalCapacity do
   rescue
     # An unreadable override must not stop the fleet: fall back to the suggestion.
     _ -> %{cap: suggestion(), source: :suggestion}
+  end
+
+  # A machine whose monitor is not running (or has not sampled) offers its whole cap.
+  defp with_derate(%{cap: cap} = configured) do
+    case Monitor.current() do
+      %{level: level} = snapshot when level != :none ->
+        Map.merge(configured, %{
+          offered: Derate.apply_level(cap, length(holders()), level),
+          derate: level,
+          derate_reason: snapshot.reason_text,
+          temp_c: snapshot.temp_c
+        })
+
+      snapshot ->
+        Map.merge(configured, %{
+          offered: cap,
+          derate: :none,
+          derate_reason: nil,
+          temp_c: snapshot && snapshot.temp_c
+        })
+    end
   end
 
   @doc """
@@ -210,7 +254,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   """
   @spec admit(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def admit(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
-    admit_enforced(task_id, kind, cap().cap, opts)
+    admit_enforced(task_id, kind, cap(), opts)
   end
 
   @doc """
@@ -223,13 +267,17 @@ defmodule Arbiter.Nodes.LocalCapacity do
   """
   @spec check(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def check(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
-    admit_enforced(task_id, kind, cap().cap, Keyword.put(opts, :reserve?, false))
+    admit_enforced(task_id, kind, cap(), Keyword.put(opts, :reserve?, false))
   end
 
-  defp admit_enforced(task_id, kind, cap, opts) do
+  defp admit_enforced(task_id, kind, %{cap: cap} = capacity, opts) do
+    opts = Keyword.put(opts, :derate, capacity)
+
     case Map.fetch!(@kinds, kind) do
       :zero_only ->
-        if cap > 0 or forced?(opts),
+        # A soft derate holds only what could start a new slot's worth of work; a fix
+        # pass or reviewer is a follow-up of work already in flight. Hard holds those too.
+        if (cap > 0 and capacity.derate != :hard) or forced?(opts),
           do: :ok,
           else: refuse(task_id, kind, cap, holders(exclude_task: task_id), opts)
 
@@ -246,7 +294,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
     holders = holders(exclude_task: task_id)
 
     cond do
-      length(holders) < cap ->
+      length(holders) < cap and derated_level(opts) == :none ->
         reserve(task_id, opts)
         :ok
 
@@ -272,6 +320,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
 
   defp refuse(task_id, kind, cap, holders, opts) do
     phrase = phrase(cap, holders, Keyword.get(opts, :reason), Keyword.get(opts, :provider), kind)
+    phrase = derate_phrase(opts) || phrase
 
     info = %{
       task_id: task_id,
@@ -280,8 +329,9 @@ defmodule Arbiter.Nodes.LocalCapacity do
       cap: cap,
       holders: holders,
       reason: Keyword.get(opts, :reason),
+      derate: derated_level(opts),
       phrase: phrase,
-      message: message(task_id, phrase, cap)
+      message: message(task_id, phrase, cap, derated_level(opts))
     }
 
     {:error, {:no_node_capacity, info}}
@@ -302,19 +352,44 @@ defmodule Arbiter.Nodes.LocalCapacity do
     head <> suffix(reason, provider, kind)
   end
 
+  # bd-6w7usy: "held — local thermal 96 °C", the machine and what it sensed.
+  defp derate_phrase(opts) do
+    case Keyword.get(opts, :derate) do
+      %{derate: level, derate_reason: reason} when level != :none and is_binary(reason) ->
+        "held — #{Nodes.local_name()} #{reason}"
+
+      _ ->
+        nil
+    end
+  end
+
+  defp derated_level(opts) do
+    case Keyword.get(opts, :derate) do
+      %{derate: level} -> level
+      _ -> :none
+    end
+  end
+
   defp suffix({:local_only, why}, provider, kind),
     do: " (run is local-only: #{Placement.reason_phrase(why, %{provider: provider, kind: kind})})"
 
   defp suffix(:no_node, _provider, _kind), do: " (no node had a free slot)"
   defp suffix(_reason, _provider, _kind), do: ""
 
-  defp message(task_id, phrase, 0) do
+  defp message(task_id, phrase, _cap, level) when level != :none do
+    "#{phrase}: #{task_id} waits because this machine has derated itself (thermal or memory " <>
+      "pressure) and offers no new slots. Running workers are not touched. It starts when the " <>
+      "readings stay clear for the recovery window (`arb node list` shows the reading), or " <>
+      "with the override (`arb dispatch --over-cap`); the override is recorded."
+  end
+
+  defp message(task_id, phrase, 0, _level) do
     "#{phrase}: #{task_id} waits because this machine's worker cap is 0 — nodes do the work. " <>
       "It starts when the cap is raised (`arb node set local --max-workers N`) or, if it is " <>
       "remote-eligible, when a node has a free slot."
   end
 
-  defp message(task_id, phrase, _cap) do
+  defp message(task_id, phrase, _cap, _level) do
     "#{phrase}: #{task_id} waits for a slot on this machine. It starts when a run ends, " <>
       "when the cap is raised (`arb node set local --max-workers N`), or with the override " <>
       "(`arb dispatch --over-cap`); the override is recorded."

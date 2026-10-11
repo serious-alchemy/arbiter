@@ -54,4 +54,34 @@ defmodule Arbiter.Agents.ProviderConfig do
   end
 
   def apply_overrides(raw, _provider), do: raw
+
+  @doc """
+  The ordered model ids a `tier_models` value names (R9, bd-3go56q): a string is
+  a one-element list, a list keeps its order, and anything that is not a
+  non-empty string is dropped. `[]` when nothing usable is left.
+  """
+  @spec model_ids(term()) :: [String.t()]
+  def model_ids(value) when is_binary(value) and value != "", do: [value]
+
+  def model_ids(value) when is_list(value),
+    do: Enum.filter(value, &(is_binary(&1) and &1 != ""))
+
+  def model_ids(_value), do: []
+
+  @doc """
+  A `tier_models` map with every list collapsed to its first model id, the
+  entry an adapter spawns with (the rest are routing's alternatives, see
+  `Arbiter.Agents.ModelFamily.models_for_tier/3`). Entries that name no usable
+  model are dropped, as the adapters' own filter did for non-strings.
+  """
+  @spec first_models(term()) :: %{String.t() => String.t()}
+  def first_models(%{} = map) when not is_struct(map) do
+    for {tier, value} <- map,
+        is_binary(tier),
+        [first | _] <- [model_ids(value)],
+        into: %{},
+        do: {tier, first}
+  end
+
+  def first_models(_), do: %{}
 end

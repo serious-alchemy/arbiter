@@ -230,6 +230,8 @@ defmodule ArbiterWeb.Router do
     get("/issues/lifecycle", IssueController, :lifecycle)
     get("/issues", IssueController, :index)
     post("/issues", IssueController, :create)
+    # Batch create: many tickets + all their edges in one transaction.
+    post("/issues/batch", IssueController, :batch_create)
     get("/issues/:id", IssueController, :show)
     patch("/issues/:id", IssueController, :update)
     put("/issues/:id", IssueController, :update)
@@ -237,6 +239,9 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/reopen", IssueController, :reopen)
     # bd-3cyf8j: bulk forms (body `{ids: [...]}`), per-id results.
     post("/issues/promote", IssueController, :bulk_promote)
+    patch("/issues", IssueController, :bulk_update)
+    post("/issues/close", IssueController, :bulk_close)
+    post("/issues/verify", IssueController, :bulk_verify)
     post("/issues/demote", IssueController, :bulk_demote)
     post("/issues/rank", IssueController, :bulk_rank)
     post("/issues/:id/promote", IssueController, :promote)

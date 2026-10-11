@@ -51,6 +51,29 @@ defmodule Arbiter.Tasks.Issue.Changes.CreateUpstream do
   @spec last_error() :: map() | nil
   def last_error, do: Process.delete(@pdict_key)
 
+  @doc """
+  Mirror an already-committed `issue` upstream *now*, for a caller that created
+  it with `skip_upstream_create: true` inside its own transaction (a batch or an
+  atomic create-with-edges, where the network call must not run until the
+  transaction has committed).
+
+  Applies the same skip rules as the `Issue.create` hook (`tracker_type: :none`,
+  a supplied `tracker_ref`). Returns `{issue, nil}` (mirrored, or nothing to do)
+  or `{issue, failure}` where `failure` is the structured error
+  (`:upstream_create_failed` / `:upstream_ref_persist_failed`) — the ticket
+  exists either way.
+  """
+  @spec mirror(struct()) :: {struct(), map() | nil}
+  def mirror(issue) do
+    if needs_upstream_create?(issue, false) do
+      Process.delete(@pdict_key)
+      {:ok, issue} = do_create(issue)
+      {issue, last_error()}
+    else
+      {issue, nil}
+    end
+  end
+
   @impl true
   def change(changeset, _opts, _context) do
     skip = Ash.Changeset.get_argument(changeset, :skip_upstream_create) == true

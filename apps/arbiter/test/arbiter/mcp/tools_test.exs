@@ -3060,6 +3060,7 @@ defmodule Arbiter.MCP.ToolsTest do
       scheduling_finish_first: nil,
       scheduling_finish_first_max_wait_hours: nil,
       scheduler_admission: nil,
+      "machine.derate": nil,
       "nodes.public_url": nil,
       "nodes.allow_public_endpoint": nil,
       "nodes.join_token_ttl_minutes": nil,

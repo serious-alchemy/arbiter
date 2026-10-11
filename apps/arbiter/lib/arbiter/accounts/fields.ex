@@ -97,6 +97,16 @@ defmodule Arbiter.Accounts.Fields do
       doc: "Account concurrency ceiling. null / blank = no ceiling."
     },
     %{
+      name: "budget_split",
+      type: :budget_split,
+      clearable?: false,
+      phases: [:create, :update],
+      mcp?: true,
+      doc:
+        "queue (default: the ES3 order alone decides) or fair (a workspace at its weighted " <>
+          "share yields to another under its share, in the same band). It reorders; it never loosens a limit."
+    },
+    %{
       name: "provider_account_ref",
       type: :text,
       clearable?: true,
@@ -297,6 +307,14 @@ defmodule Arbiter.Accounts.Fields do
   end
 
   defp cast_field(%{type: :count}, value, _phase), do: cast_count(value)
+
+  defp cast_field(%{type: :budget_split}, value, _phase) do
+    case value |> to_string() |> String.trim() |> String.downcase() do
+      "queue" -> {:ok, :queue}
+      "fair" -> {:ok, :fair}
+      _ -> invalid_account("budget_split must be queue or fair")
+    end
+  end
 
   defp cast_field(%{type: :quota_config}, value, phase) when is_map(value) do
     case phase do

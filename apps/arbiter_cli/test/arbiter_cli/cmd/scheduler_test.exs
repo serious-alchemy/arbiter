@@ -146,8 +146,33 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
 
       assert out =~ "Machines"
-      assert out =~ ~r/local\s+6\s+3\s+3/
-      assert out =~ ~r/box\s+-\s+1\s+-/
+      assert out =~ ~r/local\s+6\s+6\s+3\s+3/
+      assert out =~ ~r/box\s+-\s+-\s+1\s+-/
+    end
+
+    test "shows a derated machine's offered slots, temperature, pressure and reason (bd-6w7usy)" do
+      hot = %{
+        "id" => "n2",
+        "name" => "ryan-oryx-pro",
+        "cap" => 6,
+        "offered" => 2,
+        "live" => 2,
+        "free" => 0,
+        "temp_c" => 96.3,
+        "psi" => %{"some_avg10" => 4.25},
+        "derate" => "hard",
+        "derate_reason" => "thermal 96 °C"
+      }
+
+      stub_get(
+        "/api/scheduler/status",
+        Map.update!(capacity_body(), "machines", &(&1 ++ [hot]))
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "offered"
+      assert out =~ ~r/ryan-oryx-pro\s+6\s+2\s+2\s+0\s+96°C\s+4.3%\s+hard derate: thermal 96 °C/
     end
 
     test "lists repo caps with their implementer runs" do
@@ -156,6 +181,38 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
 
       assert out =~ "Repos"
       assert out =~ ~r/default\/vstim\s+2\s+1/
+    end
+
+    test "lists each workspace's weight, seats and share on a fair account" do
+      body =
+        Map.put(capacity_body(), "fair_share", [
+          %{
+            "label" => "claude:default",
+            "workspaces" => [
+              %{
+                "name" => "vstim",
+                "workspace_id" => "w1",
+                "weight" => 3,
+                "seats" => 2,
+                "share" => 2.25
+              },
+              %{
+                "name" => "arbiter",
+                "workspace_id" => "w2",
+                "weight" => 1,
+                "seats" => 1,
+                "share" => 0.75
+              }
+            ]
+          }
+        ])
+
+      stub_get("/api/scheduler/status", body)
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Fair share"
+      assert out =~ ~r/claude:default \/ vstim\s+3\s+2\s+2.3/
+      assert out =~ ~r/claude:default \/ arbiter\s+1\s+1\s+0.8/
     end
 
     test "a server that predates the budgets prints none of it" do

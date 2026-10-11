@@ -340,6 +340,39 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # DC9: a `{:repo_at_capacity, _}` refusal (the repo is at its
+    # `worker.repos.<repo>.max_concurrent`) is held briefly like a full account.
+    test "a repo-at-capacity refusal holds briefly and never escalates" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+      info = %{task_id: "bd-1", repo: "vstim", cap: 2, holders: ["a", "b"]}
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:repo_at_capacity, info}}
+          end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      assert {:error, {:repo_at_capacity, ^info}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
+      refute_receive {:dispatch_attempt, _}, 50
+
+      for _ <- 1..5 do
+        Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+        tick_until_attempt(pid, clock, "bd-1")
+      end
+
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
     # bd-13pqcp: a dispatch the ticket's provider constraint refused (a stale
     # plan — the board holds such a card itself) is held briefly like a full
     # account, and never pages.
@@ -494,6 +527,8 @@ defmodule Arbiter.Board.AutopilotTest do
           {"account at capacity",
            {:account_at_capacity, %{account: "claude:default", cap: 2, holders: ["a", "b"]}},
            "claude:default at capacity"},
+          {"repo at capacity", {:repo_at_capacity, %{repo: "vstim", cap: 2, holders: ["a", "b"]}},
+           "repo vstim: 2 of 2 implementer runs"},
           {"quota held", {:quota_held, "bd-1"}, "quota held"},
           {"paused provider", {:provider_paused, :claude, "held — claude paused: x"},
            "claude paused"}

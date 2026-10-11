@@ -295,18 +295,20 @@ defmodule Arbiter.Accounts do
 
   @doc """
   Attach a workspace to an account for a provider — `arb account attach
-  <workspace> <provider> <slug> [--share N]`. Writes or updates the
+  <workspace> <provider> <slug> [--share N] [--weight N]`. Writes or updates the
   `(workspace_id, provider)` `WorkspaceProviderAccount` row (`ProviderAccount`
   ref resolved via `get_account/1`).
 
   `:share` is only touched when the caller explicitly passes it — a bare
   re-attach (no `--share`) leaves an existing share in place instead of
-  clobbering it back to `nil`.
+  clobbering it back to `nil`. `:weight` (DC10, the fair-share weight, a
+  positive integer) follows the same rule; a new link defaults to 1.
   """
   @spec attach_workspace(String.t(), atom() | String.t(), String.t(), keyword()) ::
           {:ok, WorkspaceProviderAccount.t()} | {:error, term()}
   def attach_workspace(workspace_id, provider, account_ref, opts \\ []) do
     with {:ok, provider} <- normalize_provider(provider),
+         {:ok, weight_opts} <- cast_weight(opts),
          {:ok, _workspace} <- get_workspace(workspace_id),
          {:ok, account} <- get_account(account_ref),
          :ok <- ensure_not_merged_away(account),
@@ -314,17 +316,24 @@ defmodule Arbiter.Accounts do
          :ok <- ensure_provider_match(account, provider) do
       case existing_link(workspace_id, provider) do
         nil ->
-          Ash.create(WorkspaceProviderAccount, %{
-            workspace_id: workspace_id,
-            provider: provider,
-            provider_account_id: account.id,
-            share: Keyword.get(opts, :share)
-          })
+          Ash.create(
+            WorkspaceProviderAccount,
+            Map.merge(
+              %{
+                workspace_id: workspace_id,
+                provider: provider,
+                provider_account_id: account.id,
+                share: Keyword.get(opts, :share)
+              },
+              Map.new(weight_opts)
+            )
+          )
 
         link ->
           attrs =
             %{provider_account_id: account.id}
             |> maybe_put_share(opts)
+            |> Map.merge(Map.new(weight_opts))
 
           link
           |> Ash.Changeset.for_update(:update, attrs)
@@ -332,6 +341,25 @@ defmodule Arbiter.Accounts do
       end
     end
   end
+
+  # `[]` when the caller sent no weight (an existing link keeps its own).
+  defp cast_weight(opts) do
+    case Keyword.fetch(opts, :weight) do
+      :error -> {:ok, []}
+      {:ok, nil} -> {:ok, []}
+      {:ok, weight} when is_integer(weight) and weight >= 1 -> {:ok, [weight: weight]}
+      {:ok, weight} -> parse_weight(weight)
+    end
+  end
+
+  defp parse_weight(weight) when is_binary(weight) do
+    case Integer.parse(String.trim(weight)) do
+      {n, ""} when n >= 1 -> {:ok, [weight: n]}
+      _ -> invalid_account("weight must be a positive integer")
+    end
+  end
+
+  defp parse_weight(_weight), do: invalid_account("weight must be a positive integer")
 
   @doc """
   Detach a workspace from an account — the inverse of `attach_workspace/4`.

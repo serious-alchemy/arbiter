@@ -1283,7 +1283,8 @@ defmodule Arbiter.Worker do
       state.registry_key,
       workspace_id,
       provider,
-      [node_id: placed_node_id(meta)] ++ seat_stamp(workspace_id, provider, dispatch_model(meta))
+      [node_id: placed_node_id(meta), repo: state.repo] ++
+        seat_stamp(workspace_id, provider, dispatch_model(meta))
     )
 
     broadcast_lifecycle(:started, state)

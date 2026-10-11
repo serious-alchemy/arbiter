@@ -15,6 +15,8 @@ defmodule ArbiterCli.Main do
                                   [--auto-close] [--tracker-ref R] [--tracker-type T]
                                   [--tracker-context-type T] [--tracker-context-ref R]
                                   [--require-provider p | --exclude-provider p]
+                                  [--depends-on id1,id2] [--blocks id1,id2]
+      arb ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]   (atomic graph)
       arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
                                   [--description d] [--notes t | --append-notes t]
                                   [--acceptance a | --acceptance-file PATH]
@@ -99,17 +101,19 @@ defmodule ArbiterCli.Main do
       arb account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
                           [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
       arb account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
-                          [--max-concurrent N|none] [--threshold-mode flat|paced] [--throttle-threshold F]
+                          [--max-concurrent N|none] [--budget-split queue|fair] [--threshold-mode flat|paced]
+                          [--throttle-threshold F]
                           [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
                           [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
                           [--pace-exempt-priority 0..4|none] [--pace-exempt-threshold F]
                           [--weekly-pace-exempt-threshold F] [--unset QUOTA_KEY]
-      arb account attach  <workspace> <provider> <ref> [--share N]
+      arb account attach  <workspace> <provider> <ref> [--share N] [--weight N]
       arb account detach  <workspace> <ref>
       arb account rotate  <ref> --kind k --env-var V (--secret S | --secret-file PATH | -)
       arb account merge   <from-ref> --into <into-ref>
 
       arb dep add         <from> <type> <to>
+      arb dep add         --stdin   (JSON edges or `<from> <type> <to>` lines; per-edge results)
       arb dep remove      <from> <to>
 
       arb config get      [dotted.key] [--workspace W] [--json]

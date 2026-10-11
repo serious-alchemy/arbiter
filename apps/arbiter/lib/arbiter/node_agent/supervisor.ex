@@ -8,6 +8,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
       Image.Builder       builds a run's image from the plan the spec carries
       RunRegistry         the run table (RW9: `Arbiter.NodeAgent.Runs`)
       RunSupervisor       one `Arbiter.NodeAgent.Run` per assigned run
+      Monitor             senses temperature and memory pressure, derates (bd-6w7usy)
       Connection          the WebSocket to the primary
 
   `start_link/1` takes the `Arbiter.NodeAgent.Config.load/1` options. A config
@@ -54,7 +55,11 @@ defmodule Arbiter.NodeAgent.Supervisor do
           ] ++
             image_builder() ++
             Runs.child_specs() ++
-            [{Bridge, node_home: config.node_home}, {Connection, config: config}],
+            [
+              {Bridge, node_home: config.node_home},
+              monitor_spec(config),
+              {Connection, config: config}
+            ],
           strategy: :one_for_one
         )
 
@@ -76,6 +81,23 @@ defmodule Arbiter.NodeAgent.Supervisor do
     run_opts
     |> Keyword.put_new(:bridges_fun, &Bridge.listen/2)
     |> Keyword.put_new(:bridges_release_fun, &Bridge.release/1)
+  end
+
+  # bd-6w7usy: the machine senses its own temperature and memory pressure and derates the slots
+  # it offers; each heartbeat reports the result (`Protocol.heartbeat/2`). Before `Connection`.
+  # Its cap is the node's own (suggestion, bounded by the owner's ceiling); the primary applies
+  # the derate level to whatever cap the operator has set.
+  defp monitor_spec(config) do
+    {Arbiter.Machine.Monitor,
+     name: config.monitor,
+     config_fun: fn -> config.derate end,
+     cap_fun: fn -> own_cap(config) end,
+     live_fun: fn -> length(Arbiter.NodeAgent.Protocol.live_runs(config)) end}
+  end
+
+  defp own_cap(config) do
+    suggestion = Arbiter.NodeAgent.Protocol.capacity_facts()["suggestion"]
+    if config.max_workers, do: min(suggestion, config.max_workers), else: suggestion
   end
 
   # `Image.Builder` builds a plan's image on this node (RW9). An agent boots

@@ -203,6 +203,16 @@ defmodule ArbiterWeb.CapacityComponents do
       <:trigger>{@machine.name} {machine_fill(@machine)}</:trigger>
       <p class="m-0 font-medium text-[var(--text-title)]">{machine_line(@machine)}</p>
       <p :if={@machine.state != "online"} class="m-0">This machine is {@machine.state}.</p>
+      <p :if={derated?(@machine)} data-role="derate" class="m-0 text-[var(--arb-attention)]">
+        {derate_line(@machine)}
+      </p>
+      <p
+        :if={sensed_line(@machine)}
+        data-role="sensed"
+        class="m-0 text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+      >
+        {sensed_line(@machine)}
+      </p>
       <p class="m-0 text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
         Change its cap with `arb node set {@machine.name} --max-workers N`.
       </p>
@@ -211,10 +221,20 @@ defmodule ArbiterWeb.CapacityComponents do
   end
 
   defp machine_state(%{state: state}) when state != "online", do: "held_hard"
+  defp machine_state(%{derate: "hard"}), do: "held_hard"
+  defp machine_state(%{derate: "soft"}), do: "held_pace"
   defp machine_state(%{free: 0}), do: "full"
   defp machine_state(_), do: "free"
 
-  defp machine_fill(%{cap: cap, live: live}) when is_integer(cap), do: "#{live}/#{cap}"
+  # bd-6w7usy: a machine that has derated itself offers fewer slots than its cap.
+  defp derated?(machine), do: Map.get(machine, :derate, "none") in ["soft", "hard"]
+
+  defp machine_fill(%{cap: cap, live: live} = machine) when is_integer(cap) do
+    if derated?(machine),
+      do: "#{live}/#{Map.get(machine, :offered, cap)} of #{cap}",
+      else: "#{live}/#{cap}"
+  end
+
   defp machine_fill(%{live: live}), do: "#{live}"
 
   defp machine_line(%{cap: cap, live: live, name: name}) when is_integer(cap),
@@ -222,6 +242,29 @@ defmodule ArbiterWeb.CapacityComponents do
 
   defp machine_line(%{live: live, name: name}),
     do: "#{name}: #{live} running; no cap reported"
+
+  defp derate_line(machine) do
+    hold =
+      if machine.derate == "hard",
+        do: "No new dispatches, resumes or fix passes start here",
+        else: "No new slots open here"
+
+    "Self-derated (#{machine.derate}): #{Map.get(machine, :derate_reason) || "pressure"}. " <>
+      "Offering #{Map.get(machine, :offered, 0)} of #{machine.cap} slots. #{hold}; " <>
+      "running workers continue."
+  end
+
+  defp sensed_line(machine) do
+    parts =
+      [
+        is_number(Map.get(machine, :temp_c)) && "CPU #{round(machine.temp_c)}°C",
+        match?(%{"some_avg10" => v} when is_number(v), Map.get(machine, :psi)) &&
+          "memory PSI #{Float.round(machine.psi["some_avg10"] * 1.0, 1)}%"
+      ]
+      |> Enum.filter(& &1)
+
+    if parts != [], do: Enum.join(parts, " · ")
+  end
 
   # ---- a Ready card's layer --------------------------------------------------------
 

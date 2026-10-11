@@ -17,6 +17,7 @@ defmodule ArbiterCli.Cmd.Account do
                                      provider shares it)
       arb account create <provider> <slug> [--label ...] [--plan ...]
                                      [--max-concurrent N] [--disable]
+                                     [--budget-split queue|fair]
                                      [--provider-account-ref ID]
                                      [--provider-org-ref ID]
                                      [<quota flags>, as for `set`]
@@ -28,6 +29,7 @@ defmodule ArbiterCli.Cmd.Account do
       arb account set    <ref> [--label TEXT] [--plan TEXT]
                                      [--enable | --disable]
                                      [--max-concurrent N|none]
+                                     [--budget-split queue|fair]
                                      [--threshold-mode flat|paced]
                                      [--throttle-threshold F]
                                      [--weekly-threshold F] [--paced-floor F]
@@ -82,11 +84,18 @@ defmodule ArbiterCli.Cmd.Account do
                                      `--label` / `--plan` / `--enable` /
                                      `--disable` (bd-8vkqd3): the display name,
                                      the plan, and whether the account is
-                                     parked. An empty `--label ""` clears it.
+                                     parked. `--budget-split fair` (DC10) lets
+                                     the workspaces sharing the account split
+                                     its budget by link `--weight`: a
+                                     workspace at its share yields to another
+                                     under its share in the same band (P0
+                                     never yields). `queue` (default) leaves
+                                     the ES3 order alone to decide. An empty
+                                     `--label ""` clears it.
                                      At least one flag is required. The whole
                                      edit is one write: a bad value changes
                                      nothing.
-      arb account attach <workspace> <provider> <ref> [--share N]
+      arb account attach <workspace> <provider> <ref> [--share N] [--weight N]
                                      Points a workspace (name or id; with
                                      `-w`/ARB_WORKSPACE the workspace may be
                                      left out) at an account for a provider —
@@ -99,6 +108,9 @@ defmodule ArbiterCli.Cmd.Account do
                                      a **cap, not a reservation**: shares may
                                      sum to more than the ceiling, and that is
                                      the useful configuration.
+                                     `--weight N` (positive, default 1) is its
+                                     fair-share weight; it has no effect until
+                                     the account is `--budget-split fair`.
       arb account detach <workspace> <ref>
                                      Removes that workspace's link to the
                                      account (name or id; `-w` may stand in
@@ -200,10 +212,12 @@ defmodule ArbiterCli.Cmd.Account do
                 # :string, not :integer, so `--max-concurrent none` can clear the
                 # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
                 max_concurrent: :string,
+                budget_split: :string,
                 provider_account_ref: :string,
                 provider_org_ref: :string,
                 unset: [:string, :keep],
                 share: :integer,
+                weight: :integer,
                 kind: :string,
                 env_var: :string,
                 secret: :string,
@@ -326,6 +340,7 @@ defmodule ArbiterCli.Cmd.Account do
     IO.puts("Plan:        #{account["plan"] || "-"}")
     IO.puts("Enabled:     #{account["enabled"]}")
     IO.puts("Max concurrent: #{account["max_concurrent"] || "(none)"}")
+    IO.puts("Budget split:  #{account["budget_split"] || "queue"}")
 
     emit_merged_into(account["merged_into_id"])
     emit_spend_cap(account["spend_cap"])
@@ -380,7 +395,8 @@ defmodule ArbiterCli.Cmd.Account do
 
   defp emit_link_line(l) do
     share = if l["share"], do: " share=#{l["share"]}", else: ""
-    IO.puts("  workspace #{l["workspace_id"]}#{share}")
+    weight = if l["weight"] && l["weight"] != 1, do: " weight=#{l["weight"]}", else: ""
+    IO.puts("  workspace #{l["workspace_id"]}#{share}#{weight}")
   end
 
   # ---- create ------------------------------------------------------------
@@ -393,6 +409,7 @@ defmodule ArbiterCli.Cmd.Account do
       |> maybe_put("label", opts[:label])
       |> maybe_put("plan", opts[:plan])
       |> maybe_put("max_concurrent", max_concurrent!(opts))
+      |> maybe_put("budget_split", budget_split!(opts))
       |> maybe_put("provider_account_ref", opts[:provider_account_ref])
       |> maybe_put("provider_org_ref", opts[:provider_org_ref])
       |> maybe_put("enabled", if(opts[:disable], do: false))
@@ -421,7 +438,7 @@ defmodule ArbiterCli.Cmd.Account do
     if payload == %{} do
       Output.die(
         "account set requires at least one of --label, --plan, --enable, --disable, " <>
-          "--max-concurrent, --unset, " <>
+          "--max-concurrent, --budget-split, --unset, " <>
           Enum.map_join(@quota_keys, ", ", &flag_name/1)
       )
     end
@@ -438,6 +455,7 @@ defmodule ArbiterCli.Cmd.Account do
     payload
     |> maybe_put("label", opts[:label])
     |> maybe_put("plan", opts[:plan])
+    |> maybe_put("budget_split", budget_split!(opts))
     |> maybe_put("enabled", if(opts[:enable], do: true, else: if(opts[:disable], do: false)))
   end
 
@@ -628,6 +646,7 @@ defmodule ArbiterCli.Cmd.Account do
     payload =
       %{"workspace_id" => ArbiterCli.Workspace.id_or_halt(workspace), "provider" => provider}
       |> maybe_put("share", opts[:share])
+      |> maybe_put("weight", opts[:weight])
 
     case Client.post("/api/accounts/" <> URI.encode(ref) <> "/attach", payload) do
       {:ok, link} -> emit_attach(link, mode)
@@ -675,9 +694,10 @@ defmodule ArbiterCli.Cmd.Account do
 
   defp emit_attach(link, :text) do
     share = if link["share"], do: " share=#{link["share"]}", else: ""
+    weight = if link["weight"] && link["weight"] != 1, do: " weight=#{link["weight"]}", else: ""
 
     IO.puts(
-      "attached workspace #{link["workspace_id"]} -> account #{link["provider_account_id"]}#{share}"
+      "attached workspace #{link["workspace_id"]} -> account #{link["provider_account_id"]}#{share}#{weight}"
     )
   end
 
@@ -820,6 +840,14 @@ defmodule ArbiterCli.Cmd.Account do
 
   # `nil` when the flag was not given at all, so `maybe_put/3` drops it;
   # an explicit `none` is the sentinel that clears the ceiling.
+  defp budget_split!(opts) do
+    case opts[:budget_split] do
+      nil -> nil
+      value when value in ["queue", "fair"] -> value
+      value -> Output.die("--budget-split must be queue or fair (got #{inspect(value)})")
+    end
+  end
+
   defp max_concurrent!(opts) do
     case opts[:max_concurrent] do
       nil -> nil

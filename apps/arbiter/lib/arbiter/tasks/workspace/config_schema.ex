@@ -147,6 +147,11 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
         api_keys          list of credentials_refs, round-robin rotated
         tier_models       map, tier -> concrete model, e.g.
                           {"economy":"haiku","standard":"sonnet","premium":"opus"}
+                          A tier may list several models, in order: the first is the
+                          default, and under provider_selection most_quota or scored
+                          the router may spend any listed model (each on its own
+                          quota pool), e.g. agy: {"economy":["gemini-3.8-flash-low",
+                          "claude-sonnet-4-6"]}
         thinking_argv     map, thinking level -> extra CLI argv, e.g.
                           {"high":["--effort","high"]}
         <provider>        (claude|gemini|codex) map — per-provider override
@@ -252,6 +257,11 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       scoring.competence  bool (default: false) — under scored, use the hand
                           competence matrix to estimate expected draw and time
                           to close for each candidate model and task difficulty.
+      scoring.allow_upgrade integer >= 0 (default: 0) — also offer the models of up to
+                          this many tiers ABOVE the routing policy's (never below), so
+                          work can reach a pool with room. Each is a candidate on its
+                          own pool; an upgrade costs more per run, so leave 0 unless
+                          a pool is routinely the one that's over its line.
       scoring.reviewer_coupling bool (default: false) — under competence, project
                           the cross-family reviewer and price review runs on the
                           projected reviewer's quota pool.
@@ -383,8 +393,14 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       repos           map, repo name -> {seed_paths, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts},
+                      pre_push_max_attempts, max_concurrent},
                       deep-merged over the workspace-level value (per-repo wins)
+                      max_concurrent (per repo only) is a positive integer, unset
+                      by default: the most implementer runs (the implementer,
+                      a fix round, a CI fix pass, a conflict pass; never a
+                      reviewer) in that repo at once. It holds a fresh
+                      dispatch, never a follow-up, and only under
+                      scheduler_admission=enforce (DC9).
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
                       single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]

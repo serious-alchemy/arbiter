@@ -48,6 +48,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
         :identity_source,
         :identity_verified_at,
         :max_concurrent,
+        :budget_split,
         :quota_config,
         :enabled,
         :merged_into_id
@@ -69,6 +70,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
         :identity_source,
         :identity_verified_at,
         :max_concurrent,
+        :budget_split,
         :quota_config,
         :enabled,
         :merged_into_id
@@ -147,6 +149,15 @@ defmodule Arbiter.Accounts.ProviderAccount do
       public? true
       allow_nil? true
       description "Account concurrency ceiling (§4). nil = no ceiling (migration default)."
+    end
+
+    attribute :budget_split, :atom do
+      public? true
+      allow_nil? false
+      default :queue
+      constraints one_of: [:queue, :fair]
+
+      description "Workspace split of a shared account's budget (DC10, design §5.3): queue = the ES3 order alone decides; fair = a workspace at its weighted share yields to another under its share, in the same band."
     end
 
     attribute :quota_config, :map do

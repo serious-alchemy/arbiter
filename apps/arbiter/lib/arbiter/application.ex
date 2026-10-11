@@ -118,12 +118,17 @@ defmodule Arbiter.Application do
         # (RW6, docs/design/remote-workers.md §3, §10.1). Sessions read the Repo,
         # so this follows the migration gate.
         Arbiter.Nodes.Supervisor,
+        # bd-6w7usy: the primary senses its own temperature and memory pressure and
+        # derates the slots it offers (`Arbiter.Machine.Local`).
+        Arbiter.Machine.Local,
         # The shared circuit breaker (bd-5jr49o). Started early and with no deps
         # so every auto-filing / auto-escalating / auto-redispatching path can
         # gate through it; callers fail open if it is somehow absent.
         Arbiter.CircuitBreaker,
         Arbiter.GitHub.Limiter,
         Arbiter.Agents.ProviderPool,
+        # R9 (bd-3go56q): in-flight run reservations per quota pool, read by the scorer.
+        Arbiter.Agents.PoolReservations,
         # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
         # no I/O), so the dispatch guard's fail-closed read of it never blocks.
         Arbiter.Agents.AuthHold,
@@ -141,6 +146,8 @@ defmodule Arbiter.Application do
         # `max_concurrent`, counted from admission until its worker registers —
         # see Arbiter.Accounts.Admission.
         {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
+        # DC9: the repo cap's reservations, the same pattern - see Arbiter.Worker.RepoCap.
+        {Registry, keys: :unique, name: Arbiter.Worker.RepoCap.Registry},
         # RW8: a dispatch placed on a node (or admitted onto the primary's own
         # cap), counted from placement until its worker registers — see
         # Arbiter.Nodes.Placement and Arbiter.Nodes.LocalCapacity.

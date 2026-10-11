@@ -129,6 +129,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.Floors
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.PoolReservations
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ReviewerRouting
@@ -156,6 +157,7 @@ defmodule Arbiter.Agents.ProviderRouting do
           agent_type: atom(),
           account: ProviderAccount.t() | nil,
           family: ModelFamily.family() | nil,
+          model: String.t() | nil,
           decision: decision()
         }
 
@@ -239,7 +241,10 @@ defmodule Arbiter.Agents.ProviderRouting do
     {record, available, dropped} = run_evaluation(ws, task, opts)
 
     # The walk counts seats against budgets itself; account headroom is not read.
-    capacity = if walk?(opts), do: nil, else: total_capacity(available)
+    capacity =
+      if walk?(opts),
+        do: nil,
+        else: available |> Enum.uniq_by(& &1.account.id) |> total_capacity()
 
     %{record: record, available: available, dropped: dropped, capacity: capacity}
   end
@@ -274,8 +279,9 @@ defmodule Arbiter.Agents.ProviderRouting do
     {available, dropped} =
       ws
       |> candidates()
+      |> Enum.flat_map(&entries(&1, ctx))
       |> Enum.with_index()
-      |> Enum.map(fn {candidate, index} -> check(entry(candidate, index, ctx), ctx) end)
+      |> Enum.map(fn {entry, index} -> check(Map.put(entry, :index, index), ctx) end)
       |> Enum.split_with(&match?({:ok, _}, &1))
 
     {available, scoring_fields} = available |> Enum.map(&elem(&1, 1)) |> order(ctx)
@@ -411,7 +417,10 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp override(base, entries, ws, override) do
     type = to_string(override)
-    entry = Enum.find(entries, &(&1.agent_type == type)) || override_entry(ws, override)
+
+    entry =
+      Enum.find(entries, &(&1.agent_type == type and not &1.picked?)) ||
+        override_entry(ws, override)
 
     decision =
       base
@@ -421,7 +430,7 @@ defmodule Arbiter.Agents.ProviderRouting do
         "override" => "dispatch-time provider override: #{type}"
       })
 
-    {:ok, selection(override, entry, decision)}
+    {:ok, %{selection(override, entry, decision) | model: nil}}
   end
 
   # The override's own account when it is a candidate that was dropped (or not
@@ -509,8 +518,8 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp pinned(%Issue{implementer_account_id: nil}, _entries, _dropped), do: :none
 
-  defp pinned(%Issue{implementer_account_id: id}, entries, dropped) do
-    case Enum.find(entries, &(&1.account.id == id)) do
+  defp pinned(%Issue{implementer_account_id: id} = task, entries, dropped) do
+    case pinned_entry(entries, id, task.implementer_family) do
       %{} = entry ->
         {:pinned, entry}
 
@@ -534,6 +543,22 @@ defmodule Arbiter.Agents.ProviderRouting do
         end
     end
   end
+
+  # The pin is (account, family): of the pinned account's available entries —
+  # already ranked — the one in the pinned family, so a later role stays in the
+  # pool the first choice drew on; else the account's best. A pin with no
+  # recorded family is the account alone, as it always was.
+  defp pinned_entry(entries, account_id, family) do
+    case Enum.filter(entries, &(&1.account.id == account_id)) do
+      [] -> nil
+      [best | _] = mine -> Enum.find(mine, &same_family?(&1, family)) || best
+    end
+  end
+
+  defp same_family?(_entry, family) when family in [nil, ""], do: false
+
+  defp same_family?(%{family: entry_family}, family),
+    do: to_string(entry_family) == to_string(family)
 
   @doc """
   Whether a dropped availability entry was dropped by the guardrails (G13) —
@@ -600,9 +625,16 @@ defmodule Arbiter.Agents.ProviderRouting do
       agent_type: agent_type,
       account: entry && entry.account,
       family: entry && entry.family,
+      model: entry && picked_model(entry),
       decision: decision
     }
   end
+
+  # What the spawn must be told: only a model the tier's default resolution would
+  # not run. The default one needs no carrying, so a one-model-per-tier
+  # workspace dispatches exactly as before.
+  defp picked_model(%{picked?: true, model: model}), do: model
+  defp picked_model(_entry), do: nil
 
   defp put_chosen(decision, entry, override \\ nil)
 
@@ -793,11 +825,20 @@ defmodule Arbiter.Agents.ProviderRouting do
       egress_confinement: Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2),
       capability: capability_gate(ws, task, opts),
       scoring: scoring_config(ws, task, opts),
+      allow_upgrade: allow_upgrade(ws),
       floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
       guardrails: guardrail_gate(task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws),
       walk?: walk?(opts)
     }
+  end
+
+  # R9: `routing.scoring.allow_upgrade` (default 0: the policy's tier only).
+  defp allow_upgrade(%Workspace{config: config}) do
+    case get_in(config || %{}, ["routing", "scoring", "allow_upgrade"]) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> 0
+    end
   end
 
   # G13 (bd-atll60): `nil` — no subject rule configured — is the whole off path:
@@ -906,34 +947,62 @@ defmodule Arbiter.Agents.ProviderRouting do
     end
   end
 
-  defp entry(%{account: account, agent_type: agent_type}, index, ctx) do
-    model = predicted_model(account, agent_type, ctx)
-    %{family: family, pool: pool} = ModelFamily.classify(account.provider, model)
+  # R9 (design §5.2): a candidate is an (account, model) pair, one entry for
+  # each model the account could run this ticket on — the policy tier's listed
+  # models (`ModelFamily.models_for_tier/3`), then, with
+  # `routing.scoring.allow_upgrade: n`, those of the next `n` tiers up. Never a
+  # tier below the policy's. The first entry is the default the spawn resolves
+  # by itself; the others are `picked?` choices the dispatch must carry
+  # (`selection.model`). With one model per tier — every workspace's config
+  # today — this is the single entry per account there always was.
+  defp entries(%{account: account, agent_type: agent_type}, ctx) do
+    ctx
+    |> candidate_models(account, agent_type)
+    |> Enum.with_index()
+    |> Enum.map(fn {model, position} ->
+      %{family: family, pool: pool} = ModelFamily.classify(account.provider, model)
 
-    %{
-      account: account,
-      agent_type: agent_type,
-      index: index,
-      model: model,
-      family: family,
-      pool: pool,
-      tier: ctx.tier
-    }
+      %{
+        account: account,
+        agent_type: agent_type,
+        model: model,
+        family: family,
+        pool: pool,
+        tier: ctx.tier,
+        picked?: position > 0
+      }
+    end)
   end
 
-  # The model the spawn would run on this account: the routed config's
-  # explicit `"model"` only when the account runs the routed adapter
-  # (Dispatch drops it for any other — `apply_agent_type_override/2`),
-  # otherwise the tier through the family's own map.
-  defp predicted_model(account, agent_type, ctx) do
+  defp candidate_models(ctx, account, agent_type) do
+    case routed_model(agent_type, ctx) do
+      model when is_binary(model) ->
+        [model]
+
+      nil ->
+        listed = ModelFamily.models_for_tier(account.provider, ctx.tier, ctx.agent_config)
+        upgrades = upgrade_models(account, ctx)
+        Enum.uniq(if(listed == [], do: [nil], else: listed) ++ upgrades)
+    end
+  end
+
+  # The models of the `allow_upgrade` tiers above the policy's, lowest first.
+  defp upgrade_models(account, ctx) do
+    for tier <- ModelFamily.tiers_above(ctx.tier, ctx.allow_upgrade),
+        model <- ModelFamily.models_for_tier(account.provider, tier, ctx.agent_config),
+        do: model
+  end
+
+  # The routed config's explicit `"model"` only when the account runs the
+  # routed adapter (Dispatch drops it for any other —
+  # `apply_agent_type_override/2`); an explicit model is a rule, not a tier,
+  # and is never expanded.
+  defp routed_model(agent_type, ctx) do
     routed_model = ctx.routed.config["model"]
 
     if is_binary(routed_model) and routed_model != "" and
-         to_string(ctx.routed.type) == agent_type do
-      routed_model
-    else
-      ModelFamily.model_for_tier(account.provider, ctx.tier, ctx.agent_config)
-    end
+         to_string(ctx.routed.type) == agent_type,
+       do: routed_model
   end
 
   defp check(entry, ctx) do
@@ -1229,11 +1298,26 @@ defmodule Arbiter.Agents.ProviderRouting do
     if ctx.scoring do
       windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
       headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
-      entry |> Map.put(:headroom, headroom) |> Map.put(:windows, windows)
+
+      entry
+      |> Map.put(:headroom, headroom)
+      |> Map.put(:windows, windows)
+      |> Map.put(:reserved, reserved(entry, quota, ctx))
     else
       Map.put(entry, :headroom, Headroom.binding(quota, {account, ctx.ws}, headroom_opts))
     end
   end
+
+  # R9 (design §2.5): runs dispatched onto this pool since its snapshot was
+  # captured. Only the scorer reads it, so `most_quota` is untouched.
+  defp reserved(%{account: account, pool: pool}, quota, ctx) do
+    PoolReservations.pending(account.id, pool, captured_at(quota), ctx.now,
+      exclude: ctx.task && Map.get(ctx.task, :id)
+    )
+  end
+
+  defp captured_at(%{captured_at: %DateTime{} = at}), do: at
+  defp captured_at(_quota), do: nil
 
   defp task_priority(%{priority: priority}) when is_integer(priority), do: priority
   defp task_priority(_task), do: nil
@@ -1376,9 +1460,15 @@ defmodule Arbiter.Agents.ProviderRouting do
       "used" => headroom && round4(headroom.used),
       "mode" => headroom && to_string(headroom.mode)
     }
+    |> put_reserved(entry)
     |> Map.merge(score_fields(Map.get(entry, :score)))
     |> maybe_put_cell(entry)
   end
+
+  defp put_reserved(record, %{reserved: n}) when is_integer(n) and n > 0,
+    do: Map.put(record, "reserved", n)
+
+  defp put_reserved(record, _entry), do: record
 
   defp score_fields(nil), do: %{}
 
@@ -1558,6 +1648,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       "account_slug" => entry.account.slug,
       "provider" => to_string(entry.account.provider),
       "family" => entry.family && to_string(entry.family),
+      "pool" => entry.pool,
+      "model" => entry.model,
       "reason" => entry.reason,
       "detail" => entry.detail
     }

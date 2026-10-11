@@ -368,4 +368,136 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert Overview.exposure("not a url") == :unset
     end
   end
+
+  describe "self-derate (bd-6w7usy)" do
+    alias Arbiter.Nodes.{Capacity, Session}
+
+    defp beat!(node, extra) do
+      pid = Registry.lookup(node.id)
+
+      {:ok, _} =
+        Session.heartbeat(
+          pid,
+          Map.merge(
+            %{
+              "seq" => 1,
+              "runs" => %{
+                "r1" => %{"state" => "running"},
+                "r2" => %{"state" => "running"}
+              }
+            },
+            extra
+          )
+        )
+    end
+
+    test "a node that reports no derate offers its whole cap" do
+      node = enroll!("cool")
+      connect!(node)
+      beat!(node, %{})
+
+      assert %{max: 4, offered: 4, derate: :none, derate_reason: nil, temp_c: nil, psi: nil} =
+               row(Overview.build(), "cool")
+    end
+
+    test "a soft derate offers only what is running; the cap is unchanged" do
+      node = enroll!("hot")
+      connect!(node)
+
+      beat!(node, %{
+        "temp_c" => 92.5,
+        "psi" => %{"some_avg10" => 3.0},
+        "derate" => "soft",
+        "derate_reason" => "thermal 93 °C"
+      })
+
+      assert %{
+               max: 4,
+               live: 2,
+               offered: 2,
+               derate: :soft,
+               derate_reason: "thermal 93 °C",
+               temp_c: 92.5,
+               psi: %{"some_avg10" => 3.0}
+             } = row(Overview.build(), "hot")
+    end
+
+    test "a derated node contributes its offered slots to the install's capacity" do
+      node = enroll!("hot")
+      connect!(node)
+      beat!(node, %{"derate" => "hard", "temp_c" => 97.0})
+
+      overview = Overview.build()
+      assert %{contributes: 2} = row(overview, "hot")
+
+      breakdown = Capacity.breakdown(nodes: overview.nodes, local_cap: 1, remote_available?: true)
+      assert breakdown.remote == 2
+      assert [%{cap: 4, contributes: 2}] = breakdown.nodes
+    end
+
+    test "a heartbeat that stops naming a derate lifts it (unknown never derates)" do
+      node = enroll!("hot")
+      connect!(node)
+      beat!(node, %{"derate" => "soft"})
+      assert %{derate: :soft} = row(Overview.build(), "hot")
+
+      beat!(node, %{})
+      assert %{derate: :none, offered: 4} = row(Overview.build(), "hot")
+    end
+
+    test "an unrecognised level is no derate" do
+      node = enroll!("odd")
+      connect!(node)
+      beat!(node, %{"derate" => "melted"})
+      assert %{derate: :none, offered: 4} = row(Overview.build(), "odd")
+    end
+  end
+
+  describe "hard-derate alerts from a node's heartbeat (bd-6w7usy)" do
+    alias Arbiter.Alerts
+    alias Arbiter.Nodes.Session
+    alias Arbiter.Tasks.Workspace
+
+    setup do
+      ws = Ash.create!(Workspace, %{name: "derate-alert-#{System.unique_integer([:positive])}"})
+      # The alert goes on the oldest workspace, which need not be this one: listen globally.
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(nil))
+      {:ok, ws: ws}
+    end
+
+    defp alert_for(name), do: Enum.find(Alerts.active(kind: :machine_derate), &(&1.key == name))
+
+    test "entering hard raises the machine_derate alert; leaving it clears it" do
+      node = enroll!("furnace")
+      connect!(node)
+      pid = Registry.lookup(node.id)
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "derate" => "soft", "temp_c" => 91.0})
+      refute alert_for("furnace")
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{
+          "seq" => 2,
+          "derate" => "hard",
+          "temp_c" => 96.0,
+          "derate_reason" => "thermal 96 °C"
+        })
+
+      # Raised from a task; its announcement is the signal.
+      assert_receive {:event, %{kind: "alert", event: "raised", alert_kind: "machine_derate"}},
+                     1_000
+
+      assert alert_for("furnace").subject =~ "thermal 96"
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 3, "derate" => "hard", "temp_c" => 96.5})
+      assert alert_for("furnace")
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 4, "derate" => "soft", "temp_c" => 88.0})
+
+      assert_receive {:event, %{kind: "alert", event: "cleared", alert_kind: "machine_derate"}},
+                     1_000
+
+      refute alert_for("furnace")
+    end
+  end
 end

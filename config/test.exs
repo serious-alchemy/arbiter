@@ -89,6 +89,10 @@ config :arbiter, :github_limiter_probe, false
 # suite's cap does not depend on the CI machine: 32 CPUs and 80 GiB suggest 16.
 config :arbiter, :local_hardware, %{cpus: 32, mem_total: 80 * 1024 * 1024 * 1024}
 
+# bd-6w7usy: the primary's own thermal/memory monitor reads the host; the suite must not
+# depend on (or be derated by) the machine running it. Its tests start a scripted one.
+config :arbiter, :machine_monitor, false
+
 # bd-a9zb7w: a ReviewGate REQUEST_CHANGES verdict now auto-dispatches an
 # implementer fix round (`Arbiter.Worker.maybe_dispatch_fix_round/3`). The real
 # dispatcher calls `Dispatch.resume/2` — a worktree, a fresh worker, a live

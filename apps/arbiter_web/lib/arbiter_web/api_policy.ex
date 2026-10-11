@@ -60,6 +60,10 @@ defmodule ArbiterWeb.ApiPolicy do
       descriptive fields. `arb create <title> --parent <own id>` is how a
       worker defers review-thread work and cites the filed key (bd-7ezcqb).
       A new ticket starts in Backlog, so nothing a worker files dispatches.
+    * `:issue_batch` — `POST /api/issues/batch`: coordinator; or a worker whose
+      **every entry** is a follow-up the single `:issue_create` rule allows (a child of
+      its own task, descriptive fields only) and which does not `promote`. The refusal
+      names the entry (`tickets[i]`).
     * `:dependency_add` — coordinator; or a worker adding the `parent_of`
       edge from its own task to a ticket in its workspace that has no parent
       yet — the second half of `arb create --parent`.
@@ -109,6 +113,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :quota_read
           | :issue_progress
           | :issue_create
+          | :issue_batch
           | :dependency_add
           | :own_task
           | :mailbox
@@ -128,12 +133,16 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/issues/lifecycle"} => :coordinator,
     {:get, "/api/issues"} => :coordinator,
     {:post, "/api/issues"} => :issue_create,
+    {:post, "/api/issues/batch"} => :issue_batch,
     {:get, "/api/issues/:id"} => :issue_read,
     {:patch, "/api/issues/:id"} => :issue_progress,
     {:put, "/api/issues/:id"} => :issue_progress,
     {:post, "/api/issues/:id/close"} => :coordinator,
     {:post, "/api/issues/:id/reopen"} => :coordinator,
     {:post, "/api/issues/promote"} => :coordinator,
+    {:patch, "/api/issues"} => :coordinator,
+    {:post, "/api/issues/close"} => :coordinator,
+    {:post, "/api/issues/verify"} => :coordinator,
     {:post, "/api/issues/demote"} => :coordinator,
     {:post, "/api/issues/rank"} => :coordinator,
     {:post, "/api/issues/:id/promote"} => :coordinator,
@@ -424,6 +433,7 @@ defmodule ArbiterWeb.ApiPolicy do
              :issue_read,
              :issue_progress,
              :issue_create,
+             :issue_batch,
              :dependency_add,
              :own_task,
              :mailbox,
@@ -463,6 +473,18 @@ defmodule ArbiterWeb.ApiPolicy do
 
   def authorize(:issue_create, %Scope{tier: :worker} = scope, params),
     do: filing(scope, WorkerFiling.authorize_create(scope, params))
+
+  def authorize(:issue_batch, %Scope{tier: :worker} = scope, params),
+    do: filing(scope, WorkerFiling.authorize_batch(scope, params))
+
+  # A bulk edge list is held to the single-edge rule *per edge* by the controller
+  # (`BulkEdges.run/2`'s `:authorize`): a refused edge is that edge's `rejected`
+  # result, the others still apply.
+  def authorize(:dependency_add, %Scope{tier: :worker}, %{"edges" => edges}) when is_list(edges),
+    do: :ok
+
+  def authorize(:dependency_add, %Scope{tier: :worker}, %{"_json" => edges}) when is_list(edges),
+    do: :ok
 
   def authorize(:dependency_add, %Scope{tier: :worker} = scope, params),
     do: filing(scope, WorkerFiling.authorize_dependency(scope, params))

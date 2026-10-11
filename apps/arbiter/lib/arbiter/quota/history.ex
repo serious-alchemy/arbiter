@@ -18,6 +18,7 @@ defmodule Arbiter.Quota.History do
 
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Loop.Scarcity.Draw
   alias Arbiter.Quota
   alias Arbiter.Quota.Budget.Server
   alias Arbiter.Quota.CloudCode
@@ -118,7 +119,12 @@ defmodule Arbiter.Quota.History do
   defp do_record(account_id, row, seats), do: append_normalized(account_id, row, seats)
 
   defp append(attrs) do
-    attrs = Map.put(attrs, :budget, published_budget(attrs.provider_account_id, attrs.bucket))
+    attrs =
+      Map.put(
+        attrs,
+        :budget,
+        published_budget(attrs.provider_account_id, Draw.pool(attrs.provider, attrs.bucket))
+      )
 
     QuotaSnapshot
     |> Ash.Changeset.for_create(:record, %{attrs | utilization: attrs.utilization / 1})

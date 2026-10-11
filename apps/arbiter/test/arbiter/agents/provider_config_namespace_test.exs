@@ -26,6 +26,23 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
     :ok
   end
 
+  describe "a tier_models list spawns with its first model (R9)" do
+    test "Claude, Codex and Gemini read the head of a list as they read a string" do
+      config = %{
+        "tier_models" => %{"economy" => ["first-model", "second-model"]},
+        "codex" => %{"tier_models" => %{"economy" => ["gpt-5.4-mini", "gpt-5.5"]}}
+      }
+
+      Claude.Config.put_active(config)
+      Codex.Config.put_active(config)
+      Gemini.Config.put_active(config)
+
+      assert Claude.Config.model_for_tier("economy") == "first-model"
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      assert Gemini.Config.model_for_tier("economy") == "first-model"
+    end
+  end
+
   describe "provider-scoped tier_models do not leak across a shared pool" do
     test "a codex-scoped tier_models override reaches Codex but not Claude/Gemini" do
       # The exact bd-a6vu3c incident: an override meant for Codex, applied to

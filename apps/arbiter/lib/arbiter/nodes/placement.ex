@@ -257,7 +257,7 @@ defmodule Arbiter.Nodes.Placement do
       :ok ->
         if Keyword.get_lazy(opts, :remote_available?, &remote_execution_available?/0),
           do: pick(request, opts),
-          else: none(request, 0)
+          else: none(request, [])
     end
   end
 
@@ -271,32 +271,44 @@ defmodule Arbiter.Nodes.Placement do
 
         case rank(candidates, reserved) do
           [%{constrained?: true} | _] when request.mode == :prefer_remote ->
-            none(request, length(rows))
+            none(request, rows)
 
           [row | _] ->
             reserve(request.task_id, row.id)
             {:ok, {:node, row}}
 
           [] ->
-            none(request, length(rows))
+            none(request, rows)
         end
       end,
       [node()]
     )
   end
 
-  defp none(%{mode: :remote_only} = request, known) do
+  defp none(%{mode: :remote_only} = request, rows) do
     info = %{
       task_id: request.task_id,
       node: nil,
       mode: :remote_only,
-      nodes_known: known
+      nodes_known: length(rows),
+      derated: derated(rows)
     }
 
     {:error, {:no_node_capacity, Map.put(info, :message, refusal_message(info))}}
   end
 
-  defp none(_request, _known), do: {:ok, {:local, :no_node}}
+  defp none(_request, _rows), do: {:ok, {:local, :no_node}}
+
+  # bd-6w7usy: the online nodes that have derated themselves (thermal or memory pressure),
+  # for the hold: "held — ryan-oryx-pro thermal 96 °C".
+  defp derated(rows) do
+    for row <- rows,
+        row.state == :online,
+        level = Map.get(row, :derate, :none),
+        level != :none do
+      %{name: Map.get(row, :name) || row.id, level: level, reason: Map.get(row, :derate_reason)}
+    end
+  end
 
   defp rows(opts) do
     case Keyword.get(opts, :nodes) do
@@ -310,7 +322,7 @@ defmodule Arbiter.Nodes.Placement do
     row.state == :online and
       row.health == :ready and
       is_integer(row.max) and row.max > 0 and
-      row.live + Map.get(reserved, row.id, 0) < row.max and
+      row.live + Map.get(reserved, row.id, 0) < Arbiter.Nodes.Capacity.offered(row) and
       network_enforced?(row) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, []))
@@ -346,6 +358,13 @@ defmodule Arbiter.Nodes.Placement do
   """
   @spec refusal_message(map()) :: String.t()
   def refusal_message(%{message: message}) when is_binary(message), do: message
+
+  def refusal_message(%{task_id: task_id, mode: mode, derated: [_ | _] = derated} = info) do
+    "held — #{Enum.map_join(derated, ", ", &"#{&1.name} #{&1.reason || "derated"}")} " <>
+      "(#{task_id}: worker.placement is #{mode}; #{Map.get(info, :nodes_known, 0)} node(s) known, " <>
+      "the derated one offers no new slots until its readings stay clear; running workers " <>
+      "are not stopped)."
+  end
 
   def refusal_message(%{task_id: task_id, mode: mode} = info) do
     "held — no node has capacity for #{task_id} (worker.placement is #{mode}; " <>

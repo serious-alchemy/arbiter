@@ -202,13 +202,149 @@ defmodule Arbiter.Board.CapacityViewTest do
     test "free never goes below zero" do
       assert [%{free: 0, live: 4}] = status(local: %{cap: 2, used: 4}).machines
     end
+
+    test "a healthy machine offers its cap and reports no derate" do
+      assert [%{cap: 6, offered: 6, derate: "none", derate_reason: nil, temp_c: nil, psi: nil}] =
+               status().machines
+    end
+
+    test "a derated primary shows offered vs cap, the reason and what it sensed" do
+      local = %{
+        cap: 6,
+        used: 3,
+        offered: 3,
+        derate: :hard,
+        derate_reason: "thermal 96 °C",
+        temp_c: 96.2,
+        psi: %{"some_avg10" => 2.5}
+      }
+
+      assert [machine] = status(local: local).machines
+
+      assert %{
+               cap: 6,
+               offered: 3,
+               live: 3,
+               free: 0,
+               derate: "hard",
+               derate_reason: "thermal 96 °C",
+               temp_c: 96.2,
+               psi: %{"some_avg10" => 2.5}
+             } = machine
+    end
+
+    test "a derated node shows offered vs cap" do
+      nodes = [
+        %{
+          id: "n1",
+          name: "ryan-oryx-pro",
+          max: 6,
+          offered: 2,
+          live: 2,
+          state: :online,
+          derate: :soft,
+          derate_reason: "thermal 91 °C",
+          temp_c: 91.0,
+          psi: nil
+        }
+      ]
+
+      view = status(nodes: nodes, remote_available?: true)
+
+      assert [
+               _local,
+               %{cap: 6, offered: 2, free: 0, derate: "soft", derate_reason: "thermal 91 °C"}
+             ] =
+               view.machines
+    end
+
+    test "is JSON-encodable while derated" do
+      local = %{cap: 6, used: 3, offered: 3, derate: :soft, derate_reason: "x", temp_c: 91.0}
+      assert {:ok, _} = Jason.encode(status(local: local))
+    end
   end
 
   describe "repos and fair share" do
-    test "are empty until DC9/DC10 give them a cap" do
-      view = status()
+    alias Arbiter.Tasks.Workspace
+
+    defp ws(id, name, repos) do
+      config = %{
+        "worker" => %{
+          "repos" => Map.new(repos, fn {r, cap} -> {r, %{"max_concurrent" => cap}} end)
+        }
+      }
+
+      %Workspace{id: id, name: name, config: config}
+    end
+
+    test "are empty when no repo has a cap and no account splits fair" do
+      view = status(workspaces: [ws("w1", "vstim", [])])
       assert view.repos == []
       assert view.fair_share == []
+    end
+
+    test "a capped repo shows its cap, the runs in it now and who holds them (DC9)" do
+      view =
+        status(
+          workspaces: [ws("w1", "vstim-ws", [{"vstim", 2}])],
+          repo_holders: %{{"w1", "vstim"} => ["bd-a", "bd-b:fixpass"], {"w1", "other"} => ["x"]}
+        )
+
+      assert [
+               %{
+                 repo: "vstim",
+                 label: "vstim",
+                 workspace: "vstim-ws",
+                 cap: 2,
+                 used: 2,
+                 free: 0,
+                 state: "full",
+                 holders: ["bd-a", "bd-b:fixpass"],
+                 change_command: command
+               }
+             ] = view.repos
+
+      assert command =~ "worker.repos.vstim.max_concurrent"
+    end
+
+    test "a repo with room is free; the same repo name in two workspaces is told apart" do
+      view =
+        status(
+          workspaces: [ws("w1", "a-ws", [{"vstim", 3}]), ws("w2", "b-ws", [{"vstim", 1}])],
+          repo_holders: %{{"w1", "vstim"} => ["bd-a"]}
+        )
+
+      assert [
+               %{label: "a-ws/vstim", used: 1, free: 2, state: "free"},
+               %{label: "b-ws/vstim", used: 0, free: 1, state: "free"}
+             ] = view.repos
+    end
+
+    test "a fair account lists each workspace's weight, seats and share (DC10)" do
+      fair = %ProviderAccount{id: @acct, provider: :claude, slug: "default", budget_split: :fair}
+
+      view =
+        status(
+          accounts: [fair, List.last(@accounts)],
+          holders: %{{@acct, "claude"} => ["bd-a1", "bd-a2:fixpass", "bd-b1"]},
+          weights: %{@acct => %{"ws-a" => 3, "ws-b" => 1}},
+          workspace_of: %{"bd-a1" => "ws-a", "bd-a2" => "ws-a", "bd-b1" => "ws-b"}
+        )
+
+      assert [row] = view.fair_share
+      assert %{label: "claude:default", budget: 3} = row
+
+      assert [
+               %{workspace_id: "ws-a", weight: 3, seats: 2},
+               %{workspace_id: "ws-b", weight: 1, seats: 1}
+             ] = row.workspaces
+
+      assert Enum.map(row.workspaces, & &1.share) == [2.25, 0.75]
+      assert row.text =~ "fair share"
+    end
+
+    test "a queue account has no fair-share row" do
+      assert status().fair_share == []
     end
   end
 

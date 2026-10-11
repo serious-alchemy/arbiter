@@ -13,7 +13,7 @@ defmodule ArbiterWeb.Api.AccountController do
       `max_concurrent`, nullable; `quota_config`, a partial merge of every key in
       `Arbiter.Accounts.Fields.quota_keys/0`; a `null` value clears that key).
       One write: a failure leaves the account untouched.
-    * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`;
+    * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share` and `weight`;
       not for a `grok` account)
     * `DELETE /api/accounts/:ref/attach/:workspace_id` — :detach (one workspace's link only)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
@@ -122,10 +122,12 @@ defmodule ArbiterWeb.Api.AccountController do
   # key must leave an existing share untouched (Accounts.attach_workspace/4),
   # not clobber it back to nil.
   defp share_opts(params) do
-    case Map.get(params, "share") do
-      nil -> []
-      share -> [share: share]
-    end
+    Enum.flat_map([share: "share", weight: "weight"], fn {key, param} ->
+      case Map.get(params, param) do
+        nil -> []
+        value -> [{key, value}]
+      end
+    end)
   end
 
   @doc """

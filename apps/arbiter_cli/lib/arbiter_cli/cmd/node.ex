@@ -544,6 +544,9 @@ defmodule ArbiterCli.Cmd.Node do
             "STATE",
             "VERSION",
             "LIVE/MAX",
+            "OFFERED",
+            "TEMP",
+            "PSI",
             "SUGGESTED",
             "OVERRIDE",
             "CEILING",
@@ -553,7 +556,11 @@ defmodule ArbiterCli.Cmd.Node do
           |> String.trim_trailing()
         )
 
-        for n <- rows, do: IO.puts(row(node_cells(n)) |> String.trim_trailing())
+        for n <- rows do
+          IO.puts(row(node_cells(n)) |> String.trim_trailing())
+          if line = derate_line(n), do: IO.puts(line)
+        end
+
         print_totals(resp)
         if nodes == [], do: IO.puts("\nNo remote nodes. Add one with `arb node add`.")
 
@@ -568,6 +575,9 @@ defmodule ArbiterCli.Cmd.Node do
       n["state"],
       dash(n["agent_version"]),
       live_max(n),
+      offered(n),
+      temp(n),
+      psi(n),
       dash(n["suggested"]),
       dash(n["override"]),
       "-",
@@ -582,6 +592,9 @@ defmodule ArbiterCli.Cmd.Node do
       n["state"] || n["status"],
       dash(n["agent_version"]),
       live_max(n),
+      offered(n),
+      temp(n),
+      psi(n),
       dash(n["suggested"]),
       dash(n["override"] || n["max_workers"]),
       dash(n["ceiling"]),
@@ -592,6 +605,27 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp live_max(%{"live" => live, "max" => max}), do: "#{live}/#{max || "?"}"
   defp live_max(_), do: "-"
+
+  # bd-6w7usy: what the machine offers the scheduler (its cap, less any self-derate), what it
+  # senses, and, under a derated row, why. An older server (no sensing) shows dashes.
+  defp offered(%{"offered" => offered}) when is_integer(offered), do: to_string(offered)
+  defp offered(_), do: "-"
+
+  defp temp(%{"temp_c" => t}) when is_number(t), do: "#{round(t)}°C"
+  defp temp(_), do: "-"
+
+  defp psi(%{"psi" => %{"some_avg10" => v}}) when is_number(v),
+    do: "#{:erlang.float_to_binary(v * 1.0, decimals: 1)}%"
+
+  defp psi(_), do: "-"
+
+  defp derate_line(%{"derate" => level} = n) when level in ["soft", "hard"] do
+    "  ↳ #{level} derate: #{n["derate_reason"] || "pressure"} — offering #{n["offered"] || 0} of " <>
+      "#{n["max"] || "?"} (no new slots#{if level == "hard", do: ", resumes and fix passes held", else: ""}; " <>
+      "running workers continue)"
+  end
+
+  defp derate_line(_), do: nil
 
   defp dash(nil), do: "-"
   defp dash(value), do: to_string(value)
@@ -636,7 +670,7 @@ defmodule ArbiterCli.Cmd.Node do
   defp warning(other, _), do: other
 
   defp row(cells) do
-    widths = [24, 10, 10, 9, 10, 9, 8, 26, 0]
+    widths = [24, 10, 10, 9, 8, 7, 7, 10, 9, 8, 26, 0]
 
     cells
     |> Enum.zip(widths)
@@ -677,6 +711,7 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("  status:        #{n["status"]}")
     IO.puts("  version:       #{n["agent_version"] || "-"}")
     IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
+    if line = derate_line(n), do: IO.puts(line)
     IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")
     IO.puts("  labels:        #{Enum.join(n["labels"] || [], ", ")}")
     IO.puts("  credential:    #{n["credential_prefix"] || "-"}…")

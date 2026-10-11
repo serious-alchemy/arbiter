@@ -204,8 +204,16 @@ defmodule ArbiterCli.Cmd.Scheduler do
   defp emit_capacity(body) do
     emit_admission(body["admission"])
     emit_table("Providers", ~w(budget seats free why), body["budgets"], &pool_row/1)
-    emit_table("Machines", ~w(cap live free), body["machines"], &machine_row/1)
+
+    emit_table(
+      "Machines",
+      ~w(cap offered live free temp psi why),
+      body["machines"],
+      &machine_row/1
+    )
+
     emit_table("Repos", ~w(cap runs), body["repos"], &repo_row/1)
+    emit_table("Fair share", ~w(weight seats share), fair_rows(body["fair_share"]), &fair_row/1)
   end
 
   defp emit_admission(%{"label" => label} = admission) do
@@ -237,11 +245,49 @@ defmodule ArbiterCli.Cmd.Scheduler do
      [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"])], pool["reason"]}
   end
 
-  defp machine_row(m),
-    do: {m["name"] || m["id"], [cell(m["cap"]), cell(m["live"]), cell(m["free"])], nil}
+  # bd-6w7usy: `offered` is the cap less any self-derate; `why` names the reason when derated.
+  defp machine_row(m) do
+    cells = [
+      cell(m["cap"]),
+      cell(m["offered"] || m["cap"]),
+      cell(m["live"]),
+      cell(m["free"]),
+      temp_cell(m["temp_c"]),
+      psi_cell(m["psi"])
+    ]
+
+    {m["name"] || m["id"], cells, derate_why(m)}
+  end
+
+  defp temp_cell(t) when is_number(t), do: "#{round(t)}°C"
+  defp temp_cell(_), do: "-"
+
+  defp psi_cell(%{"some_avg10" => v}) when is_number(v),
+    do: "#{:erlang.float_to_binary(v * 1.0, decimals: 1)}%"
+
+  defp psi_cell(_), do: "-"
+
+  defp derate_why(%{"derate" => level} = m) when level in ["soft", "hard"],
+    do: "#{level} derate: #{m["derate_reason"] || "pressure"}"
+
+  defp derate_why(_), do: nil
 
   defp repo_row(r),
     do: {r["label"] || to_string(r["repo"]), [cell(r["cap"]), cell(r["used"])], nil}
+
+  # One row per workspace on each pool of an account that splits `fair` (DC10).
+  defp fair_rows(rows) when is_list(rows) do
+    for row <- rows, ws <- row["workspaces"] || [], do: {row["label"], ws}
+  end
+
+  defp fair_rows(_none), do: []
+
+  defp fair_row({label, ws}) do
+    share = if is_number(ws["share"]), do: Float.round(ws["share"] * 1.0, 1)
+
+    {"#{label} / #{ws["name"] || ws["workspace_id"]}",
+     [cell(ws["weight"]), cell(ws["seats"]), cell(share)], nil}
+  end
 
   defp cell(nil), do: "-"
   defp cell(value), do: to_string(value)

@@ -70,6 +70,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.PoolReservations
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
@@ -112,6 +113,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
+  alias Arbiter.Worker.RepoCap
   alias Arbiter.Worker.ResearchGrant
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
@@ -227,6 +229,7 @@ defmodule Arbiter.Worker.Dispatch do
   after
     Admission.release(task_id)
     LocalCapacity.release(task_id)
+    RepoCap.release(task_id)
   end
 
   defp dispatch_steps(task_id, opts) do
@@ -251,6 +254,7 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, opts} <- ensure_node_capacity(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
+         :ok <- ensure_repo_capacity(task, opts),
          opts = put_security_policy(task, opts),
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_active(task, opts),
@@ -1462,6 +1466,22 @@ defmodule Arbiter.Worker.Dispatch do
       else: Keyword.put(opts, :routed_agent_type, Keyword.get(opts, :agent_type))
   end
 
+  # R9 (bd-3go56q): a model routing picked beyond the tier's default (a non-first
+  # `tier_models` entry, an `allow_upgrade` tier) rides in `:model`, which the
+  # quota gate, admission, capability check and the spawn already read, so the
+  # pool the router priced is the pool that is gated and spent. `:routed_model`
+  # marks it as routing's own rather than a caller's (`unroute/1`). A caller's
+  # `:model` wins and is left alone. `nil` (the default model — which is every
+  # selection with one model per tier) changes nothing.
+  @doc false
+  def put_routed_model(opts, model) when is_binary(model) and model != "" do
+    if explicit_model?(opts),
+      do: opts,
+      else: opts |> Keyword.put(:model, model) |> Keyword.put(:routed_model, model)
+  end
+
+  def put_routed_model(opts, _model), do: opts
+
   # bd-b7e33c AC5 post-merge finding: `resolve_resume_provider/2` picks the
   # provider off the most recent AUTHORING run, which is a separate query from
   # `latest_session_id/1`'s "most recent row with a session_id" — a newer row
@@ -1626,6 +1646,7 @@ defmodule Arbiter.Worker.Dispatch do
              :no_outpost,
              :no_session,
              :account_at_capacity,
+             :repo_at_capacity,
              :quota_held,
              :no_node_capacity,
              :provider_constraint,
@@ -1951,6 +1972,7 @@ defmodule Arbiter.Worker.Dispatch do
           :provider_fallback,
           ProviderRouting.truncate_fallback(selection.decision["fallback"])
         )
+        |> put_routed_model(selection.model)
         |> put_routing_decision(selection.decision)
 
       {:legacy, decision} ->
@@ -2435,17 +2457,25 @@ defmodule Arbiter.Worker.Dispatch do
   # so the replay routes afresh instead of reading it as a caller override.
   # The admission shadow's record (DC6) belongs to the pass that planned the
   # held dispatch, not to the drain's replay, so it goes too.
-  defp unroute(opts) do
+  @doc false
+  def unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
+    routed_model = Keyword.get(opts, :routed_model)
 
     opts =
       Keyword.drop(opts, [
         :routing_decision,
         :routing_choice,
         :routed_agent_type,
+        :routed_model,
         :resolved_policy,
         :admission_shadow
       ])
+
+    opts =
+      if routed_model && Keyword.get(opts, :model) == routed_model,
+        do: Keyword.delete(opts, :model),
+        else: opts
 
     if routed && Keyword.get(opts, :agent_type) == routed,
       do: Keyword.drop(opts, [:agent_type, :provider_fallback]),
@@ -2643,12 +2673,25 @@ defmodule Arbiter.Worker.Dispatch do
       provider = quota_gate_provider(task, load_workspace(task), opts)
 
       case Admission.admit(task, provider, admission_opts(opts)) do
-        {:ok, _admitted} -> :ok
+        {:ok, _admitted} -> reserve_pool(task, opts)
         {:error, {:spend_cap, reason}} -> hold_for_spend(task, provider, opts, reason)
         {:error, _} = refused -> refused
       end
     else
       :ok
+    end
+  end
+
+  # R9 (design §2.5): the admitted run now counts against the pool routing sent
+  # it to until that pool's next snapshot sees it, so the next dispatch in this
+  # tick prices the pool one run dearer instead of herding onto it.
+  defp reserve_pool(%Issue{id: id}, opts) do
+    case Keyword.get(opts, :routing_decision) do
+      %{"account_id" => account_id, "pool" => pool} ->
+        PoolReservations.reserve(id, account_id, pool)
+
+      _ ->
+        :ok
     end
   end
 
@@ -2671,6 +2714,43 @@ defmodule Arbiter.Worker.Dispatch do
 
         :ok
     end
+  end
+
+  # DC9 (bd-7oy77e, design provider-dynamic-concurrency §5.2): the repo cap,
+  # `worker.repos.<repo>.max_concurrent`. A fresh dispatch whose repo already has
+  # that many implementer runs is held (`{:repo_at_capacity, info}`, which every
+  # caller handles as it does a full account); a follow-up never is. The repo
+  # is known only once `maybe_resolve_repo_for_real_work/2` has bound it, so
+  # this sits after that rather than straight after `ensure_node_capacity/2`;
+  # the node and account reservations the earlier gates took are released with
+  # this one when the dispatch returns.
+  #
+  # Until DC8 nothing may change a dispatch decision (I1, I2), so it decides only
+  # under `scheduler_admission: enforce` and reads no count otherwise.
+  # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
+  defp ensure_repo_capacity(%Issue{} = task, opts) do
+    if fresh_admission?(task, opts) and admission_enforced?(opts) do
+      admit_opts = [
+        force: Keyword.get(opts, :force_slot) == true,
+        actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
+      ]
+
+      case RepoCap.admit(task, Keyword.get(opts, :repo), admit_opts) do
+        {:ok, _admitted} -> :ok
+        {:error, _} = refused -> refused
+      end
+    else
+      :ok
+    end
+  end
+
+  defp admission_enforced?(opts) do
+    mode = Keyword.get(opts, :scheduler_admission) || Arbiter.Settings.scheduler_admission()
+    mode == :enforce
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   # RW8 (bd-3igo6h): the second admission gate, after the provider account's.
@@ -4335,15 +4415,17 @@ defmodule Arbiter.Worker.Dispatch do
         # Order matters: apply the provider (agent_type) override first so it
         # can strip the routed, provider-specific model, then the bd-8cn795
         # thrash auto-escalation (a *default*, not an override), then let an
-        # explicit `--model` override win on top of everything.
+        # explicit `--model` override win on top of everything. A model routing
+        # picked (R9) is a default too: it goes in below the escalation.
         agent_type = resolve_session_agent_type(opts, task, workspace)
 
         choice =
           task
           |> Routing.decide(workspace, opts)
           |> apply_agent_type_override(agent_type)
+          |> apply_model_override(Keyword.get(opts, :routed_model))
           |> maybe_escalate_context_window(task.id)
-          |> apply_model_override(Keyword.get(opts, :model))
+          |> apply_model_override(caller_model(opts))
 
         # Resolve the spawn's security posture from the workspace (per-domain),
         # with an optional per-dispatch override from dispatch opts and the
@@ -4591,6 +4673,12 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp apply_model_override(choice, _), do: choice
+
+  # The caller's own `:model` — not the one routing put there (`put_routed_model/2`).
+  defp caller_model(opts) do
+    model = Keyword.get(opts, :model)
+    if model != Keyword.get(opts, :routed_model), do: model
+  end
 
   # bd-8cn795: a task whose most recent run died with `:context_thrash` (the
   # Claude CLI's "Autocompact is thrashing" loop detector) will die identically
