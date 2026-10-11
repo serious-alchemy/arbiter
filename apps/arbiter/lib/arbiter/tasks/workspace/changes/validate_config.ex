@@ -204,7 +204,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_worker_repos(changeset, repos) when is_map(repos) do
     Enum.reduce(repos, changeset, fn
       {repo, %{} = block}, cs ->
-        validate_worker_block(cs, block, "worker.repos.#{repo}")
+        cs
+        |> validate_worker_block(block, "worker.repos.#{repo}")
+        |> validate_repo_cap(block, "worker.repos.#{repo}")
 
       {repo, _}, cs ->
         Changeset.add_error(cs,
@@ -216,6 +218,24 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_worker_repos(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "worker.repos must be a map")
+  end
+
+  # DC9 (bd-7oy77e, `docs/design/provider-dynamic-concurrency.md` §5.2): the
+  # repo cap, a per-repo key only (`Arbiter.Worker.RepoCap`).
+  defp validate_repo_cap(changeset, block, label) do
+    case Map.fetch(block, "max_concurrent") do
+      :error ->
+        changeset
+
+      {:ok, n} when is_integer(n) and n > 0 ->
+        changeset
+
+      {:ok, _} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.max_concurrent must be a positive integer"
+        )
+    end
   end
 
   defp validate_worker_block(changeset, block, label) do
