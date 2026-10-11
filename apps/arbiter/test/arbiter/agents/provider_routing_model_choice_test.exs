@@ -16,8 +16,9 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
+  alias Arbiter.Agents.PoolReservations
   alias Arbiter.Agents.ProviderRouting
-  alias Arbiter.Quota.{AnthropicQuota, GoogleQuota}
+  alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota}
   alias Arbiter.Tasks.{Issue, Workspace}
 
   setup do
@@ -87,6 +88,18 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
       utilization_7d: u7,
       reset_7d_at: ahead(302_400),
       status_7d: "allowed",
+      captured_at: now()
+    }
+  end
+
+  defp codex_quota(session_pct) do
+    %CodexQuota{
+      provider: "codex",
+      session_used_percent: session_pct,
+      session_reset_at: ahead(3_600),
+      weekly_used_percent: 0.0,
+      weekly_reset_at: ahead(302_400),
+      limit_reached: false,
       captured_at: now()
     }
   end
@@ -368,6 +381,133 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
       assert length(one.available) == 1
       assert length(two.available) == 2
       assert two.capacity == one.capacity
+    end
+  end
+
+  describe "in-flight reservations (§2.5)" do
+    # Claude has 0.45 of headroom, Codex 0.40: the scorer prefers Claude, until
+    # a run is in flight on Claude's pool that its snapshot has not seen.
+    setup do
+      ws = workspace!(config(selection: "scored", scoring: %{"mode" => "enforce"}))
+      claude = account!(:claude, "claude")
+      codex = account!(:codex, "codex")
+      allow!(ws, claude, 0)
+      allow!(ws, codex, 1)
+      pairs = [{claude, claude_quota(0.40, 0.0)}, {codex, codex_quota(45.0)}]
+      %{ws: ws, claude: claude, codex: codex, pairs: pairs}
+    end
+
+    defp pick(ws, pairs) do
+      {:ok, selection} =
+        ProviderRouting.select(ws, task!(ws, %{difficulty: 2}), :main, opts(pairs, pin: false))
+
+      selection
+    end
+
+    test "without a reservation the roomier pool wins", %{ws: ws, pairs: pairs} do
+      assert pick(ws, pairs).agent_type == :claude
+    end
+
+    test "a run reserved on that pool after its snapshot moves the next dispatch off it", ctx do
+      PoolReservations.reserve("t-#{ctx.claude.id}", ctx.claude.id, "claude", ahead(5))
+
+      selection = pick(ctx.ws, ctx.pairs)
+      assert selection.agent_type == :codex
+
+      claude_row =
+        Enum.find(selection.decision["candidates"], &(&1["account_id"] == ctx.claude.id))
+
+      assert claude_row["reserved"] == 1
+    end
+
+    test "a reservation older than the snapshot is already in `used` and is ignored", ctx do
+      PoolReservations.reserve("t-#{ctx.claude.id}", ctx.claude.id, "claude", ahead(-60))
+      assert pick(ctx.ws, ctx.pairs).agent_type == :claude
+    end
+
+    test "a reservation on another pool of the same account does not count", ctx do
+      PoolReservations.reserve("t-#{ctx.claude.id}", ctx.claude.id, "other-pool", ahead(5))
+      assert pick(ctx.ws, ctx.pairs).agent_type == :claude
+    end
+
+    test "most_quota ignores reservations: it ranks by headroom alone", ctx do
+      ws = workspace!(config())
+      allow!(ws, ctx.claude, 0)
+      allow!(ws, ctx.codex, 1)
+      PoolReservations.reserve("t-#{ctx.claude.id}", ctx.claude.id, "claude", ahead(5))
+
+      assert pick(ws, ctx.pairs).agent_type == :claude
+    end
+
+    test "one eligible account: a reservation reorders nothing and holds nothing" do
+      ws = workspace!(config(selection: "scored", scoring: %{"mode" => "enforce"}))
+      claude = account!(:claude, "solo")
+      allow!(ws, claude, 0)
+      PoolReservations.reserve("t-#{claude.id}", claude.id, "claude", ahead(5))
+
+      assert pick(ws, [{claude, claude_quota(0.40, 0.0)}]).agent_type == :claude
+    end
+
+    test "a reservation never drops a candidate: a pool at its line is still dropped by the gate",
+         ctx do
+      PoolReservations.reserve("t-#{ctx.claude.id}", ctx.claude.id, "claude", ahead(5))
+      pairs = [{ctx.claude, claude_quota(0.40, 0.0)}, {ctx.codex, codex_quota(99.0)}]
+
+      # Codex is over its line (the gate drops it); Claude, though reserved on,
+      # is the only feasible candidate and still dispatches.
+      assert pick(ctx.ws, pairs).agent_type == :claude
+    end
+  end
+
+  describe "PoolReservations" do
+    test "counts live reservations after the capture and not the excluded task" do
+      account = "acct-#{System.unique_integer([:positive])}"
+      at = now()
+      PoolReservations.reserve("a-#{account}", account, "p", at)
+      PoolReservations.reserve("b-#{account}", account, "p", at)
+
+      assert PoolReservations.pending(account, "p", DateTime.add(at, -1), at) == 2
+      assert PoolReservations.pending(account, "p", at, at) == 0
+      assert PoolReservations.pending(account, "p", nil, at) == 2
+      assert PoolReservations.pending(account, "p", nil, at, exclude: "a-#{account}") == 1
+
+      PoolReservations.release("a-#{account}")
+      assert PoolReservations.pending(account, "p", nil, at) == 1
+    end
+
+    test "a reservation is forgotten after the trust window" do
+      account = "acct-#{System.unique_integer([:positive])}"
+      at = now()
+      PoolReservations.reserve("c-#{account}", account, "p", at)
+
+      later = DateTime.add(at, PoolReservations.ttl_seconds() + 1, :second)
+      assert PoolReservations.pending(account, "p", nil, later) == 0
+    end
+  end
+
+  describe "workspace config validation" do
+    defp create_ws(cfg),
+      do: Ash.create(Workspace, %{name: "mcv-#{System.unique_integer([:positive])}", config: cfg})
+
+    test "accepts a tier_models list and allow_upgrade" do
+      cfg = config(agy_tier_models: %{"economy" => [@gemini_flash, @claude_sonnet]})
+      cfg = put_in(cfg, ["routing", "scoring"], %{"allow_upgrade" => 2})
+      assert {:ok, _} = create_ws(cfg)
+    end
+
+    test "rejects an empty list, a junk entry and a bad allow_upgrade" do
+      for {cfg, expect} <- [
+            {config(agy_tier_models: %{"economy" => []}), "non-empty list"},
+            {config(agy_tier_models: %{"economy" => ["ok", ""]}), "non-empty list"},
+            {config(agy_tier_models: %{"economy" => 7}), "non-empty model name string"},
+            {put_in(config(), ["routing", "scoring"], %{"allow_upgrade" => -1}),
+             "routing.scoring.allow_upgrade"},
+            {put_in(config(), ["routing", "scoring"], %{"allow_upgrade" => "1"}),
+             "routing.scoring.allow_upgrade"}
+          ] do
+        assert {:error, error} = create_ws(cfg)
+        assert Exception.message(error) =~ expect
+      end
     end
   end
 end

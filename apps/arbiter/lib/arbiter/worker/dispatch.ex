@@ -70,6 +70,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.PoolReservations
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
@@ -2668,12 +2669,25 @@ defmodule Arbiter.Worker.Dispatch do
       provider = quota_gate_provider(task, load_workspace(task), opts)
 
       case Admission.admit(task, provider, admission_opts(opts)) do
-        {:ok, _admitted} -> :ok
+        {:ok, _admitted} -> reserve_pool(task, opts)
         {:error, {:spend_cap, reason}} -> hold_for_spend(task, provider, opts, reason)
         {:error, _} = refused -> refused
       end
     else
       :ok
+    end
+  end
+
+  # R9 (design §2.5): the admitted run now counts against the pool routing sent
+  # it to until that pool's next snapshot sees it, so the next dispatch in this
+  # tick prices the pool one run dearer instead of herding onto it.
+  defp reserve_pool(%Issue{id: id}, opts) do
+    case Keyword.get(opts, :routing_decision) do
+      %{"account_id" => account_id, "pool" => pool} ->
+        PoolReservations.reserve(id, account_id, pool)
+
+      _ ->
+        :ok
     end
   end
 

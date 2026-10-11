@@ -129,6 +129,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.Floors
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.PoolReservations
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ReviewerRouting
@@ -1297,11 +1298,26 @@ defmodule Arbiter.Agents.ProviderRouting do
     if ctx.scoring do
       windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
       headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
-      entry |> Map.put(:headroom, headroom) |> Map.put(:windows, windows)
+
+      entry
+      |> Map.put(:headroom, headroom)
+      |> Map.put(:windows, windows)
+      |> Map.put(:reserved, reserved(entry, quota, ctx))
     else
       Map.put(entry, :headroom, Headroom.binding(quota, {account, ctx.ws}, headroom_opts))
     end
   end
+
+  # R9 (design §2.5): runs dispatched onto this pool since its snapshot was
+  # captured. Only the scorer reads it, so `most_quota` is untouched.
+  defp reserved(%{account: account, pool: pool}, quota, ctx) do
+    PoolReservations.pending(account.id, pool, captured_at(quota), ctx.now,
+      exclude: ctx.task && Map.get(ctx.task, :id)
+    )
+  end
+
+  defp captured_at(%{captured_at: %DateTime{} = at}), do: at
+  defp captured_at(_quota), do: nil
 
   defp task_priority(%{priority: priority}) when is_integer(priority), do: priority
   defp task_priority(_task), do: nil
@@ -1444,9 +1460,15 @@ defmodule Arbiter.Agents.ProviderRouting do
       "used" => headroom && round4(headroom.used),
       "mode" => headroom && to_string(headroom.mode)
     }
+    |> put_reserved(entry)
     |> Map.merge(score_fields(Map.get(entry, :score)))
     |> maybe_put_cell(entry)
   end
+
+  defp put_reserved(record, %{reserved: n}) when is_integer(n) and n > 0,
+    do: Map.put(record, "reserved", n)
+
+  defp put_reserved(record, _entry), do: record
 
   defp score_fields(nil), do: %{}
 

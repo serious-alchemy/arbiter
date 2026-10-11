@@ -124,6 +124,8 @@ defmodule Arbiter.Application do
         Arbiter.CircuitBreaker,
         Arbiter.GitHub.Limiter,
         Arbiter.Agents.ProviderPool,
+        # R9 (bd-3go56q): in-flight run reservations per quota pool, read by the scorer.
+        Arbiter.Agents.PoolReservations,
         # bd-21bmdh: the auth-shaped dispatch hold. Pure bookkeeping (no probes,
         # no I/O), so the dispatch guard's fail-closed read of it never blocks.
         Arbiter.Agents.AuthHold,
