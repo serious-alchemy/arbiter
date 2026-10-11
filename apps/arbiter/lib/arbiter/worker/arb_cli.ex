@@ -38,10 +38,13 @@ defmodule Arbiter.Worker.ArbCli do
   one, else the image's `escript`, unprobed.
   """
 
+  alias Arbiter.Config.Paths
+
   @stamp_re ~r/\A%%.*\barb-otp=(\d+)\b/
   @header_bytes 1024
   @runtime "/opt/arbiter/otp"
   @escript_dest "/opt/arbiter/cli/arb.escript"
+  @launcher_dest "/opt/arbiter/cli/arb"
 
   # The launcher's body; `script` and `runtime` are assigned above it.
   @launcher_body ~S"""
@@ -86,6 +89,101 @@ defmodule Arbiter.Worker.ArbCli do
   echo "arb: the arbiter MCP tools work without the CLI." >&2
   exit 69
   """
+
+  @doc "Where Arbiter's worker base image keeps the Erlang/OTP runtime arb runs on."
+  @spec runtime_dir() :: String.t()
+  def runtime_dir, do: @runtime
+
+  @doc """
+  The host's `arb` escript, or `nil`: `:arb_path` when given (`nil` included),
+  else `arb` on `PATH` (`:find_executable`, default `System.find_executable/1`),
+  else where self-deploy installs it (`ARB_INSTALL_BIN`, default
+  `~/.local/bin/arb`; `:installed_arb_path` overrides it, and a test that
+  injects `:find_executable` gets no fallback, so the host's home never leaks
+  into a spec). The coordinator's own `PATH` need not carry `arb` (a systemd
+  service).
+  """
+  @spec host_escript(keyword()) :: Path.t() | nil
+  def host_escript(opts \\ []) do
+    find = Keyword.get(opts, :find_executable, &System.find_executable/1)
+    Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") || installed_arb(opts) end)
+  end
+
+  defp installed_arb(opts) do
+    path =
+      case Keyword.fetch(opts, :installed_arb_path) do
+        {:ok, p} ->
+          p
+
+        :error ->
+          if Keyword.has_key?(opts, :find_executable), do: nil, else: default_installed_arb()
+      end
+
+    if is_binary(path) and File.regular?(path), do: path
+  end
+
+  defp default_installed_arb do
+    case System.get_env("ARB_INSTALL_BIN") do
+      p when is_binary(p) and p != "" -> Path.expand(p)
+      _ -> Path.join(System.user_home!(), ".local/bin/arb")
+    end
+  end
+
+  @doc """
+  The `{host path, container path}` binds that give a container `arb`: the
+  launcher as `#{@launcher_dest}` and the escript at `escript` beside it as
+  `#{@escript_dest}`. Takes `launcher_file/1`'s options.
+  """
+  @spec mounts(Path.t(), keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def mounts(escript, opts \\ []) when is_binary(escript) do
+    with {:ok, launcher} <- launcher_file(opts) do
+      {:ok, [{launcher, @launcher_dest}, {escript, @escript_dest}]}
+    end
+  end
+
+  @doc """
+  `launcher/0` as an executable file on the host, named by its content under
+  `:launcher_dir` (default `<image root>/cli`, `Arbiter.Config.Paths.image_root/0`)
+  and written once: a container binds it read-only, and a remote node or a
+  pushed image layer fetches it by hash like any other CLI file.
+  """
+  @spec launcher_file(keyword()) :: {:ok, Path.t()} | {:error, term()}
+  def launcher_file(opts \\ []) do
+    text = launcher()
+    dir = Keyword.get_lazy(opts, :launcher_dir, fn -> Path.join(Paths.image_root(), "cli") end)
+    hash = :crypto.hash(:sha256, text) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    path = Path.join(dir, "arb-launcher-" <> hash)
+
+    if File.read(path) == {:ok, text} and executable?(path) do
+      {:ok, path}
+    else
+      write_launcher(path, text)
+    end
+  end
+
+  # Written aside and renamed into place, so a concurrent spawn never binds a
+  # half-written launcher.
+  defp write_launcher(path, text) do
+    tmp = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(tmp, text),
+         :ok <- File.chmod(tmp, 0o755),
+         :ok <- File.rename(tmp, path) do
+      {:ok, path}
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, {:arb_launcher_unwritable, path, reason}}
+    end
+  end
+
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o111) == 0o111
+      _ -> false
+    end
+  end
 
   @doc """
   The OTP release the escript at `path` was compiled on, from its `arb-otp=`

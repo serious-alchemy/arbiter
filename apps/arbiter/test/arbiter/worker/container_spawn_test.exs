@@ -15,6 +15,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   alias Arbiter.Guardrails.Projection
   alias Arbiter.Test.GitFixture
   alias Arbiter.Worker
+  alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.ContainerSpawn
@@ -440,7 +441,16 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       # The CLI mounts bind the resolved binary, not the symlink.
       assert {ctx.real_claude, "/opt/arbiter/cli/claude"} in request.cli_mounts
-      assert {ctx.arb, "/opt/arbiter/cli/arb"} in request.cli_mounts
+
+      # bd-59m96o: `arb` is the launcher that runs the escript beside it on an
+      # Erlang that can load it, never the escript itself.
+      assert {ctx.arb, "/opt/arbiter/cli/arb.escript"} in request.cli_mounts
+
+      assert {launcher, "/opt/arbiter/cli/arb"} =
+               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
+
+      assert File.read!(launcher) == ArbCli.launcher()
+      assert File.stat!(launcher).mode |> Bitwise.band(0o111) == 0o111
 
       assert request.home == Path.join(ctx.tmp_dir, "home")
       assert request.config_dir == Path.join(ctx.tmp_dir, "claude-config")
@@ -559,10 +569,19 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       assert {:ok, request} = ContainerSpawn.prepare(opts)
 
-      assert {resolved, "/opt/arbiter/cli/arb"} =
-               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
+      assert {resolved, "/opt/arbiter/cli/arb.escript"} =
+               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb.escript", 1)
 
       assert Path.basename(resolved) == "installed-arb"
+    end
+
+    test "a launcher that cannot be staged yields no arb mount, not a refused spawn", ctx do
+      blocker = Path.join(ctx.dir, "not-a-dir")
+      File.write!(blocker, "")
+      opts = Keyword.put(ctx.opts, :launcher_dir, Path.join(blocker, "cli"))
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
     end
 
     test "a missing installed arb yields no arb mount", ctx do
@@ -792,7 +811,8 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       mount_specs = mounts(argv)
       assert "#{ctx.clone}:#{ctx.clone}:rw" in mount_specs
       assert "#{ctx.real_claude}:/opt/arbiter/cli/claude:ro" in mount_specs
-      assert "#{ctx.arb}:/opt/arbiter/cli/arb:ro" in mount_specs
+      assert "#{ctx.arb}:/opt/arbiter/cli/arb.escript:ro" in mount_specs
+      assert Enum.any?(mount_specs, &String.ends_with?(&1, ":/opt/arbiter/cli/arb:ro"))
       assert "#{ctx.proxy}:#{ctx.proxy}:ro" in mount_specs
       assert "#{ctx.bridge}:#{ctx.bridge}:ro" in mount_specs
       assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in mount_specs

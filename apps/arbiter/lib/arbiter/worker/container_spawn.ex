@@ -132,6 +132,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Mergers
   alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
+  alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
@@ -549,43 +550,29 @@ defmodule Arbiter.Worker.ContainerSpawn do
     find = Keyword.get(opts, :find_executable, &System.find_executable/1)
 
     with {:ok, provider_mounts} <- provider_mounts(provider, opts, find) do
-      arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") || installed_arb(opts) end)
-
-      arb_mount =
-        case arb do
-          path when is_binary(path) ->
-            [{resolve_links(path), @cli_dir <> "/arb"}]
-
-          _ ->
-            Logger.warning("ContainerSpawn: no `arb` on PATH; the container has no arb CLI")
-            []
-        end
-
-      {:ok, provider_mounts ++ arb_mount}
+      {:ok, provider_mounts ++ arb_mounts(opts)}
     end
   end
 
-  # The coordinator's own PATH need not carry `arb` (a systemd service); fall
-  # back to where self-deploy installs it (`:installed_arb_path` overrides, for
-  # tests; tests injecting `:find_executable` otherwise get no fallback so the
-  # host's home never leaks into a spec).
-  defp installed_arb(opts) do
-    path =
-      case Keyword.fetch(opts, :installed_arb_path) do
-        {:ok, p} ->
-          p
+  # bd-59m96o: `arb` in the container is `ArbCli`'s launcher, which runs the
+  # host's escript (mounted beside it) on an Erlang that can load it, whatever
+  # Erlang the repo's image pins.
+  defp arb_mounts(opts) do
+    with path when is_binary(path) <- ArbCli.host_escript(opts),
+         {:ok, mounts} <- ArbCli.mounts(resolve_links(path), opts) do
+      mounts
+    else
+      nil ->
+        Logger.warning("ContainerSpawn: no `arb` on PATH; the container has no arb CLI")
+        []
 
-        :error ->
-          if Keyword.has_key?(opts, :find_executable), do: nil, else: default_installed_arb()
-      end
+      {:error, reason} ->
+        Logger.warning(
+          "ContainerSpawn: cannot stage the arb launcher (#{inspect(reason)}); " <>
+            "the container has no arb CLI"
+        )
 
-    if is_binary(path) and File.regular?(path), do: path
-  end
-
-  defp default_installed_arb do
-    case System.get_env("ARB_INSTALL_BIN") do
-      p when is_binary(p) and p != "" -> Path.expand(p)
-      _ -> Path.join(System.user_home!(), ".local/bin/arb")
+        []
     end
   end
 

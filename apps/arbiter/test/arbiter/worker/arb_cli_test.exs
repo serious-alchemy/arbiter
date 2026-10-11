@@ -30,6 +30,36 @@ defmodule Arbiter.Worker.ArbCliTest do
     end
   end
 
+  describe "launcher_file/1 and mounts/2" do
+    test "writes the launcher once, executable, named by its content", %{tmp_dir: dir} do
+      assert {:ok, path} = ArbCli.launcher_file(launcher_dir: dir)
+      assert Path.dirname(path) == dir
+      assert File.read!(path) == ArbCli.launcher()
+      assert Bitwise.band(File.stat!(path).mode, 0o111) == 0o111
+
+      %File.Stat{mtime: written} = File.stat!(path, time: :posix)
+      assert {:ok, ^path} = ArbCli.launcher_file(launcher_dir: dir)
+      assert File.stat!(path, time: :posix).mtime == written
+      assert File.ls!(dir) == [Path.basename(path)]
+    end
+
+    test "a launcher dir that cannot be made is an error", %{tmp_dir: dir} do
+      blocker = Path.join(dir, "a-file")
+      File.write!(blocker, "")
+
+      assert {:error, {:arb_launcher_unwritable, _path, _reason}} =
+               ArbCli.launcher_file(launcher_dir: Path.join(blocker, "cli"))
+    end
+
+    test "binds the launcher as arb and the escript beside it", %{tmp_dir: dir} do
+      assert {:ok,
+              [{launcher, "/opt/arbiter/cli/arb"}, {"/h/arb", "/opt/arbiter/cli/arb.escript"}]} =
+               ArbCli.mounts("/h/arb", launcher_dir: dir)
+
+      assert File.read!(launcher) == ArbCli.launcher()
+    end
+  end
+
   # The launcher is run for real: `sh`, `sed`, this VM's own OTP install as the
   # runtime the base image carries for arb, and a stand-in for the image's own
   # Erlang (an `erl` that prints a release and an `escript` that says it ran).

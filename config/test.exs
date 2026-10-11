@@ -178,6 +178,10 @@ scratch_root =
 config :arbiter, :scratch_root, scratch_root
 config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
 config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
+# bd-59m96o: worker-image state (base-image pins, the container's `arb`
+# launcher that `ContainerSpawn.cli_mounts/2` writes) never lands in the
+# developer's own `~/.arbiter/images`.
+config :arbiter, :image_root, Path.join(scratch_root, "images-test")
 config :arbiter, :run_tmp_sweeper, enabled: false
 config :arbiter, :test_services_reaper, enabled: false
 
