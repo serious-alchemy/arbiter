@@ -1,7 +1,7 @@
 defmodule Arbiter.Test.RaisingReplayRunner do
   @moduledoc """
   An `Arbiter.Loop.Replay.Runner` whose `layout/2` raises (bd-c7lx65), for the
-  test that a replay's record is finished whatever its runner does.
+  test that such a replay is refused before admission and leaves no record.
   """
 
   @behaviour Arbiter.Loop.Replay.Runner

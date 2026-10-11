@@ -208,7 +208,8 @@ defmodule Arbiter.Loop.ReplayIsolationTest do
           reviewer_model: "claude-opus-5-5",
           reviewer_pool: "claude",
           state: state,
-          started_at: ctx.now
+          started_at: ctx.now,
+          deadline_at: DateTime.add(ctx.now, 3600)
         })
       end
 

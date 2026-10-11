@@ -7,14 +7,30 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   a dispatch and the doctor's spawn canary do. One run, headless, with a
   deadline; the process tree (and any container) is gone when it returns.
 
-  ## Held to the workspace's policy
+  ## Held to the workspace's policy, and confined
 
   The policy is the one a dispatch on this workspace and repo would run under:
   `Arbiter.Agents.SecurityPolicy.resolve/3`, for a reviewer its review backend
   (`for_review_spawn/1`), floored by the replayed model's guardrail profile
-  (`Arbiter.Guardrails.apply_to_policy/5`). A container backend needs a private
-  clone to mount, which `layout/2` tells the harness. A provider with no
-  container wrap point runs on the bwrap path, as a dispatch of it does.
+  (`Arbiter.Guardrails.apply_to_policy/5`). A provider with no container wrap
+  point runs on the bwrap path, as a dispatch of it does.
+
+  A replayed model is untrusted, so `layout/2` refuses a side whose policy
+  leaves it without an OS jail on its way out (the adapter's
+  `egress_confinement/1` is not `:os_jail`; Claude on the host has only its
+  permission layer), and the harness refuses the replay before admission. A
+  reviewer whose review backend would leave it unjailed runs in the
+  implementer's container instead, when that one is confined. A container
+  needs a private clone to mount (`{:ok, :private_clone}`); a jailed run on
+  the host takes the sandbox (`{:ok, :sandbox}`).
+
+  ## The tests
+
+  `run(:test, spec)` runs the repo's pre-push recipe as the live commit gate
+  does for a container run: each step in a fresh container with the replayed
+  model's image, mounts and (absent) network (`ContainerSpawn.run_command/3`).
+  Never on the host, since the steps run the replayed model's code: without a
+  container it is `{:error, :not_confined}`.
 
   ## The environment
 
@@ -52,8 +68,10 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.MemoryScope
   alias Arbiter.Worker.OsProcess
+  alias Arbiter.Worker.PrepushCheck
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.SpawnEnv
 
   # Where the replayed CLI's `arb` points: the discard port, which nothing serves.
   @nowhere "http://127.0.0.1:9"
@@ -69,11 +87,18 @@ defmodule Arbiter.Loop.Replay.CliRunner do
 
   @impl true
   def layout(role, spec) do
-    {_type, policy} = policy(role, spec)
-    if ContainerSpawn.podman?(policy), do: :private_clone, else: :sandbox
+    {type, policy} = policy(role, spec)
+
+    cond do
+      not confined?(type, policy) -> {:error, {:unconfined, role, type}}
+      ContainerSpawn.podman?(policy) -> {:ok, :private_clone}
+      true -> {:ok, :sandbox}
+    end
   end
 
   @impl true
+  def run(:test, spec), do: run_tests(spec)
+
   def run(role, spec) do
     {type, policy} = policy(role, spec)
     adapter = Agents.for_type(type)
@@ -108,19 +133,98 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   defp thinking(%{thinking: level}) when is_binary(level) and level != "", do: [thinking: level]
   defp thinking(_spec), do: []
 
+  # ---- the tests ------------------------------------------------------------------
+
+  # The repo's pre-push recipe, run as the live commit gate runs it for a
+  # container run: step by step in a fresh container with the replayed run's
+  # image, mounts and (absent) network (`ContainerSpawn.run_command/3`). Never on
+  # the host: the steps run the code the replayed model wrote.
+  defp run_tests(%{recipe: recipe} = spec) do
+    {type, policy} = policy(:implement, spec)
+    label = "replay-#{spec.replay_id}-test"
+
+    if ContainerSpawn.podman?(policy) and confined?(type, policy) do
+      with {:ok, tmp} <- RunTmp.create(label) do
+        try do
+          tests_in_container(recipe, type, policy, tmp, label, spec)
+        rescue
+          error -> {:error, {:spawn_failed, Exception.message(error)}}
+        after
+          RunTmp.force_rm_rf(tmp)
+          stop_jail()
+        end
+      end
+    else
+      {:error, :not_confined}
+    end
+  end
+
+  defp tests_in_container(recipe, type, policy, tmp, label, spec) do
+    env = SpawnEnv.port_env(RunTmp.env_pairs(tmp) ++ fences(spec), Atom.to_string(type))
+
+    # The container's command is swapped for each step's own.
+    with {:ok, port_args} <-
+           ClaudeSession.port_args(
+             session_opts(type, policy, spec),
+             "sh",
+             ["sh", "-c", "true"],
+             spec.dir,
+             env,
+             owner: self(),
+             task_id: label,
+             tmp_dir: tmp
+           ) do
+      try do
+        exec = fn command, timeout_s ->
+          ContainerSpawn.run_command(port_args, command, timeout_s)
+        end
+
+        {:ok, PrepushCheck.run_steps(recipe, spec.dir, target: spec.base_sha, exec: exec)}
+      after
+        ContainerSpawn.teardown(port_args)
+      end
+    end
+  end
+
   # ---- the policy ----------------------------------------------------------------
 
+  # The implementer's policy is a dispatch's on this workspace and repo. The
+  # reviewer's is the live gate's (the review backend) unless that leaves it
+  # unjailed and the implementer's (a container) would not: a replay runs every
+  # model it runs confined.
   defp policy(role, spec) do
     type = adapter_type(spec.provider)
     resolved = SecurityPolicy.resolve(spec.workspace, %{}, spec.repo)
-    resolved = if role == :review, do: SecurityPolicy.for_review_spawn(resolved), else: resolved
+    implement = floor(resolved, type, spec)
 
     policy =
-      resolved
-      |> Guardrails.apply_to_policy(spec.workspace, type, spec.model, repo: spec.repo)
-      |> host_fallback(type)
+      if role == :review do
+        review = resolved |> SecurityPolicy.for_review_spawn() |> floor(type, spec)
+
+        if not confined?(type, review) and confined?(type, implement),
+          do: implement,
+          else: review
+      else
+        implement
+      end
 
     {type, policy}
+  end
+
+  defp floor(policy, type, spec) do
+    policy
+    |> Guardrails.apply_to_policy(spec.workspace, type, spec.model, repo: spec.repo)
+    |> host_fallback(type)
+  end
+
+  # Confined means an OS jail on the way out (a container's network namespace,
+  # agy's bwrap network jail): what keeps a run from the operator's credentials
+  # and the network. A permission layer alone (Claude on the host) is not.
+  defp confined?(type, policy) do
+    adapter = Agents.for_type(type)
+
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :egress_confinement, 1) and
+      adapter.egress_confinement(policy) == :os_jail
   end
 
   # A provider with no container wrap point (agy, grok) is never spawned under
@@ -181,7 +285,7 @@ defmodule Arbiter.Loop.Replay.CliRunner do
         do: adapter.spawn_env(agent_opts),
         else: []
 
-    Arbiter.Worker.SpawnEnv.port_env(
+    SpawnEnv.port_env(
       Credentials.workspace_pairs(spec.workspace.id, spec.provider) ++
         adapter_env ++ RunTmp.env_pairs(tmp) ++ fences(spec),
       Atom.to_string(type)

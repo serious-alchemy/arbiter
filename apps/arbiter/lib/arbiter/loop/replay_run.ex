@@ -27,16 +27,25 @@ defmodule Arbiter.Loop.ReplayRun do
       score.
     * The score: `verdict` and `converged` (round 1, by the live gate's rule),
       the CRITERIA counts, `tests` (the repo's pre-push recipe:
-      `:passed | :failed | :timeout | :error | :not_run`), `file_overlap` and
-      `line_overlap` with the merged change, and the `files` it touched.
+      `:passed | :failed | :timeout | :error | :not_run`; it runs only in the
+      replayed model's container, so a replay on the host is `:not_run`),
+      `file_overlap` and `line_overlap` with the merged change, and the
+      `files` it touched.
     * `admission`: each pool's entry at admission (exploration budget, replays
       running, expiring headroom per window, binding).
-    * `runs`: per step, its exit status, whether it timed out, its duration.
+    * `runs`: per model run (`implement`, `review`), its exit status, whether
+      it timed out, its duration and what it drew; and `tests`, the recipe's
+      steps (`%{"steps" => [...]}`) or why they could not run
+      (`%{"error" => reason}`).
+    * `started_at`, `finished_at`, and `deadline_at`: when the replay must be
+      done by whatever it runs into (both runs' timeouts, its tests' budget,
+      slack), set at admission.
 
   A `:running` row holds its seats on both pools for
-  `Arbiter.Loop.Replay.Admission` until it finishes, or until it is old enough
-  that its node must have died (`Arbiter.Loop.Replay.running/1`); the next
-  replay then finishes it as `:failed` (abandoned) and removes its checkout.
+  `Arbiter.Loop.Replay.Admission` until it finishes, or until its
+  `deadline_at`, when its node must have died (`Arbiter.Loop.Replay.running/1`);
+  the next replay then finishes it as `:failed` (abandoned) and removes its
+  checkout.
   """
 
   use Ash.Resource,
@@ -88,6 +97,7 @@ defmodule Arbiter.Loop.ReplayRun do
         :reason,
         :admission,
         :started_at,
+        :deadline_at,
         :finished_at
       ]
     end
@@ -173,6 +183,7 @@ defmodule Arbiter.Loop.ReplayRun do
     attribute :runs, :map, allow_nil?: false, default: %{}, public?: true
 
     attribute :started_at, :utc_datetime_usec, allow_nil?: false, public?: true
+    attribute :deadline_at, :utc_datetime_usec, allow_nil?: false, public?: true
     attribute :finished_at, :utc_datetime_usec, public?: true
 
     create_timestamp :inserted_at

@@ -16,26 +16,43 @@ defmodule Arbiter.Loop.Replay do
        account's credential); and the scoring reviewer, by default the one the
        fleet would use for that implementer (the cross-family projection, else
        the workspace's reviewer). Each draws on one pool.
-    3. **Admission** (`Arbiter.Loop.Replay.Admission`): only into expiring
+    3. **Confinement** (the runner's `layout/2`). A replayed model is
+       untrusted, so every model a replay runs is OS-confined (a container, or
+       a provider's own network jail; a permission layer alone is not one), or
+       the replay is refused here, before admission, with no record.
+    4. **Admission** (`Arbiter.Loop.Replay.Admission`): only into expiring
        headroom. Both pools must have room in their exploration budget (half of
        what would reset unused, in seats) beside the replays already running
        there, or the replay is refused before anything runs. Admission is
-       serialised, and the record it writes (`:running`) holds the seats.
-    4. **The sandbox** (`Arbiter.Loop.Replay.Sandbox`): a repository of its own
-       at the base commit, borrowing the main repo's objects, with no remote
-       and nothing after the base in it; seeded with dependencies as a
-       dispatch's worktree is.
-    5. **The replayed model** implements the ticket (`Arbiter.Loop.Replay.Runner`).
-    6. **The score** (`Arbiter.Loop.Replay.Score`): what it changed against the
-       base, the repo's pre-push recipe as its tests, and the overlap with the
-       merged change. Unless it changed nothing (scored without a review), the
-       reviewer's pool is admitted again, and the live ReviewGate prompt gets
-       one round-1 verdict, read by the live gate's `converged` rule.
-    7. **The record** (`Arbiter.Loop.ReplayRun`) is finished, and the sandbox
+       serialised, and the record it writes (`:running`, with the deadline it
+       must be done by) holds the seats.
+    5. **The checkout** at the base commit, seeded with dependencies as a
+       dispatch's worktree is, before any model runs in it: on the host the
+       sandbox (`Arbiter.Loop.Replay.Sandbox`), a repository of its own with no
+       remote and nothing after the base in it; for a container a read-only
+       `Arbiter.Worker.PrivateClone` whose `origin` leads nowhere.
+    6. **The replayed model** implements the ticket (`Arbiter.Loop.Replay.Runner`).
+    7. **The score** (`Arbiter.Loop.Replay.Score`): what it changed against the
+       base, the repo's pre-push recipe as its tests (in the replayed model's
+       container, never on the host: they run its code), and the overlap with
+       the merged change. Unless it changed nothing (scored without a review),
+       the reviewer's pool is admitted again, and the live ReviewGate prompt
+       gets one round-1 verdict, read by the live gate's `converged` rule.
+    8. **The record** (`Arbiter.Loop.ReplayRun`) is finished, and the checkout
        removed, whatever happened. A replay whose node stopped mid-run cannot
        clean up after itself, so each replay first sweeps: a record still
-       `:running` past the stale age is finished as abandoned, and the checkout
+       `:running` past its deadline is finished as abandoned, and the checkout
        of any replay not running now is removed.
+
+  ## Host git in a checkout a model ran in
+
+  The models can write the checkout's `.git`, and git runs programs a
+  repository's own config names. Host git runs there only while the checkout
+  is as the harness left it (`Sandbox.verify/2`; for a clone,
+  `PrivateClone.verify/1` and its `arbiter.*` markers): a replay whose
+  checkout is not is failed, unscored. A clone goes with
+  `PrivateClone.discard/2`, never `remove/1`, whose sync-back trusts those
+  markers.
 
   ## What it never does
 
@@ -73,6 +90,8 @@ defmodule Arbiter.Loop.Replay do
   alias Arbiter.Loop.Replay.Score
   alias Arbiter.Loop.Replay.Subject
   alias Arbiter.Loop.ReplayRun
+  alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.PrepushCheck
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReviewVerification
@@ -82,10 +101,10 @@ defmodule Arbiter.Loop.Replay do
   @implement_timeout_ms 60 * 60_000
   @review_timeout_ms 30 * 60_000
 
-  # A replay still `:running` this long after it started died with its node (a
-  # finished one is always finished): its seats are free again. Longer than
-  # the implement, review and test budgets put together.
-  @stale_after_s 6 * 3600
+  # On top of the runs' timeouts and the tests' budget, for the rest of a
+  # replay (the checkout and its dependencies, starting containers): a replay
+  # still `:running` past all of it died with its node.
+  @slack_ms 30 * 60_000
 
   @max_files 200
 
@@ -107,7 +126,9 @@ defmodule Arbiter.Loop.Replay do
   scored (or ran but its scoring review was not admitted: `state: :unscored`),
   `{:refused, run}` when it was not admitted, `{:failed, run}` when it broke
   after admission. `{:error, reason}`, with no record, when it could not be set
-  up: an ineligible task, an unknown or unattached account, no runner.
+  up: an ineligible task, an unknown or unattached account, no runner, or a
+  side the runner cannot confine (`{:unconfined, role, type}`, or
+  `{:layout_failed, message}` when it could not say).
 
   Options:
 
@@ -123,11 +144,16 @@ defmodule Arbiter.Loop.Replay do
       task's difficulty; the reviewer slot's config, or a cross-family
       selection's own).
     * `:tests` — run the repo's pre-push recipe as the tests signal (default
-      `true`; nothing runs when the repo has no recipe).
+      `true`). It runs only where the replayed model ran in a container, in a
+      container again; a replay on the host, or a repo with no recipe, is
+      `:not_run`.
     * `:timeout_ms` (default 60 min), `:review_timeout_ms` (default 30 min).
     * `:root` — where sandboxes live (default `<scratch_root>/replays`).
     * `:runner` — an `Arbiter.Loop.Replay.Runner` module or a two-arity
-      function; default `config :arbiter, :loop_replay_runner`.
+      function (which runs on the host); default
+      `config :arbiter, :loop_replay_runner`.
+    * `:layout` — `:sandbox` or `:private_clone` for both sides, in place of
+      the runner's `layout/2` (tests).
     * `:budget_fun` — `(account_id, pool -> budget | nil)`; default the budgets
       the live node publishes (`Admission.published/3`).
     * `:now`, and `:keep_sandbox` (default `false`) for debugging.
@@ -141,27 +167,25 @@ defmodule Arbiter.Loop.Replay do
          {:ok, task_id} <- required(opts, :task_id),
          {:ok, subject} <- Subject.resolve(task_id),
          {:ok, author} <- author(opts, subject),
-         {:ok, reviewer} <- reviewer(opts, subject, author, now) do
-      budget_fun = budget_fun(opts, subject)
+         {:ok, reviewer} <- reviewer(opts, subject, author, now),
+         ctx = %{
+           subject: subject,
+           author: author,
+           reviewer: reviewer,
+           runner: runner,
+           recipe: recipe(opts, subject),
+           budget_fun: budget_fun(opts, subject),
+           now: now,
+           opts: opts
+         },
+         {:ok, layouts} <- layouts(ctx) do
+      ctx = Map.put(ctx, :layouts, layouts)
       :ok = sweep(opts, now)
 
-      case admit(subject, author, reviewer, budget_fun, now) do
-        {:running, run} ->
-          execute(run, %{
-            subject: subject,
-            author: author,
-            reviewer: reviewer,
-            runner: runner,
-            budget_fun: budget_fun,
-            now: now,
-            opts: opts
-          })
-
-        {:refused, run} ->
-          {:refused, run}
-
-        {:error, _} = error ->
-          error
+      case admit(ctx) do
+        {:running, run} -> execute(run, ctx)
+        {:refused, run} -> {:refused, run}
+        {:error, _} = error -> error
       end
     end
   end
@@ -183,15 +207,13 @@ defmodule Arbiter.Loop.Replay do
   end
 
   @doc """
-  The replays running at `now`: `:running` and started within the last
-  #{div(@stale_after_s, 3600)} hours. Each holds a seat on both its pools.
+  The replays running at `now`: `:running` and not yet past their deadline.
+  Each holds a seat on both its pools.
   """
   @spec running(DateTime.t()) :: [ReplayRun.t()]
   def running(now \\ DateTime.utc_now()) do
-    cutoff = DateTime.add(now, -@stale_after_s, :second)
-
     ReplayRun
-    |> Ash.Query.filter(state == :running and started_at > ^cutoff)
+    |> Ash.Query.filter(state == :running and deadline_at > ^now)
     |> Ash.read!()
   end
 
@@ -202,17 +224,11 @@ defmodule Arbiter.Loop.Replay do
            Arbiter.Loop.Replay.CliRunner do
       :disabled -> {:error, :runner_disabled}
       fun when is_function(fun, 2) -> {:ok, %{run: fun, layout: &host_layout/2}}
-      module when is_atom(module) -> {:ok, %{run: &module.run/2, layout: layout_fun(module)}}
+      module when is_atom(module) -> {:ok, %{run: &module.run/2, layout: &module.layout/2}}
     end
   end
 
-  defp layout_fun(module) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :layout, 2),
-      do: &module.layout/2,
-      else: &host_layout/2
-  end
-
-  defp host_layout(_role, _spec), do: :sandbox
+  defp host_layout(_role, _spec), do: {:ok, :sandbox}
 
   defp required(opts, key) do
     case Map.get(opts, key) do
@@ -349,16 +365,47 @@ defmodule Arbiter.Loop.Replay do
       fn account_id, pool -> Admission.published(account_id, pool, subject.workspace.id) end
   end
 
+  # The repo's pre-push recipe, the tests signal: `nil` with none, or `tests: false`.
+  defp recipe(opts, subject) do
+    if Map.get(opts, :tests, true), do: PrepushCheck.resolve(subject.workspace, subject.repo)
+  end
+
+  # Where each side runs, from the runner, before admission: a side it cannot
+  # confine refuses the replay with nothing spent and no record.
+  defp layouts(ctx) do
+    case Map.get(ctx.opts, :layout) do
+      layout when layout in [:sandbox, :private_clone] ->
+        {:ok, %{implement: layout, review: layout}}
+
+      _ ->
+        with {:ok, implement} <- layout(ctx, :implement),
+             {:ok, review} <- layout(ctx, :review),
+             do: {:ok, %{implement: implement, review: review}}
+    end
+  end
+
+  defp layout(ctx, role) do
+    case ctx.runner.layout.(role, spec(ctx, role)) do
+      {:ok, layout} when layout in [:sandbox, :private_clone] -> {:ok, layout}
+      {:error, _} = error -> error
+      other -> {:error, {:layout_failed, "#{role}: #{inspect(other)}"}}
+    end
+  rescue
+    error -> {:error, {:layout_failed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:layout_failed, Exception.format_banner(kind, reason)}}
+  end
+
   # ---- admission ---------------------------------------------------------------
 
-  defp admit(subject, author, reviewer, budget_fun, now) do
+  defp admit(%{subject: subject, author: author, reviewer: reviewer, now: now} = ctx) do
     pools = [{author.account_id, author.pool}, {reviewer.account_id, reviewer.pool}]
 
     serialised(fn ->
       running = now |> running() |> Admission.running()
 
       {state, reason, entries} =
-        case Admission.check(pools, budget_fun, running) do
+        case Admission.check(pools, ctx.budget_fun, running) do
           {:ok, entries} -> {:running, nil, entries}
           {:refused, reason, entries} -> {:refused, reason, entries}
         end
@@ -371,6 +418,7 @@ defmodule Arbiter.Loop.Replay do
           reason: reason,
           admission: entries,
           started_at: now,
+          deadline_at: deadline(ctx),
           finished_at: if(state == :refused, do: DateTime.utc_now())
         })
 
@@ -383,6 +431,18 @@ defmodule Arbiter.Loop.Replay do
 
   # Two replays admitted at once must not both count the other as absent.
   defp serialised(fun), do: :global.trans({__MODULE__, self()}, fun)
+
+  # When the replay must be done by, whatever it runs into: both runs'
+  # timeouts, its tests' budget, and slack for the rest. Its seats are held
+  # until then, and past it the replay is taken for dead.
+  defp deadline(ctx) do
+    tests_ms = if tests?(ctx), do: budget_s(ctx.recipe) * 1000, else: 0
+    ms = timeout(ctx.opts, :implement) + timeout(ctx.opts, :review) + tests_ms + @slack_ms
+    DateTime.add(ctx.now, ms, :millisecond)
+  end
+
+  defp budget_s(recipe),
+    do: Map.get(recipe, :budget_seconds) || Map.get(recipe, :timeout_seconds) || 0
 
   defp record_attrs(subject, author, reviewer) do
     %{
@@ -411,9 +471,8 @@ defmodule Arbiter.Loop.Replay do
 
   # ---- the replay ----------------------------------------------------------------
 
-  # Whatever happens from here on, the record is finished: a raise anywhere
-  # (the runner's own `layout/2` included) is a failure, never a replay left
-  # `:running`.
+  # Whatever happens from here on, the record is finished: a raise anywhere is
+  # a failure, never a replay left `:running`.
   defp execute(run, ctx) do
     ctx = Map.merge(ctx, %{dir: Path.join(root(ctx.opts), run.id), run: run})
 
@@ -429,8 +488,10 @@ defmodule Arbiter.Loop.Replay do
     finish(run, outcome)
   end
 
+  # One checkout for both sides: a private clone when either runs in a
+  # container (which can mount nothing else), else the sandbox.
   defp place(ctx) do
-    layout = layout(ctx)
+    layout = if :private_clone in Map.values(ctx.layouts), do: :private_clone, else: :sandbox
     Map.merge(ctx, %{layout: layout, checkout: checkout_path(layout, ctx)})
   end
 
@@ -443,24 +504,6 @@ defmodule Arbiter.Loop.Replay do
 
   defp root(opts), do: Map.get(opts, :root) || Path.join(Paths.scratch_root(), "replays")
 
-  # The checkout the runs need: a container can only be handed a private clone
-  # (`layout/2` of the runner, for either side), anything else runs on the host
-  # in the sandbox. `:layout` overrides it (tests).
-  defp layout(ctx) do
-    case Map.get(ctx.opts, :layout) do
-      layout when layout in [:sandbox, :private_clone] ->
-        layout
-
-      _ ->
-        if Enum.any?(
-             [:implement, :review],
-             &(ctx.runner.layout.(&1, spec(ctx, &1)) == :private_clone)
-           ),
-           do: :private_clone,
-           else: :sandbox
-    end
-  end
-
   # A private clone lives where every clone does, as a leaf of the worktree root.
   defp checkout_path(:private_clone, ctx),
     do: Path.join(Paths.worktree_root(), "replay-" <> ctx.run.id)
@@ -468,49 +511,49 @@ defmodule Arbiter.Loop.Replay do
   defp checkout_path(:sandbox, ctx), do: Path.join(ctx.dir, "checkout")
 
   defp remove(%{layout: :private_clone} = ctx) do
-    remove_clone(ctx.checkout)
+    discard_clone(ctx.checkout, ctx.subject.repo_path)
     Sandbox.remove(ctx.dir)
   end
 
   defp remove(ctx), do: Sandbox.remove(ctx.dir)
 
-  # `PrivateClone.remove/1` drops the clone's gc pin in the main repo too. A
-  # clone cut short is not one yet; the leaf (named for this replay alone) goes.
-  defp remove_clone(path) do
-    case PrivateClone.remove(path) do
+  # Never `PrivateClone.remove/1`: its sync-back trusts the clone's own
+  # markers, which a model that ran in it could have rewritten. The pins go
+  # from the main repo the caller knows (`nil`: left to the worktree sweeper).
+  defp discard_clone(path, repo) do
+    case PrivateClone.discard(path, repo) do
       :ok -> :ok
-      {:error, :not_a_private_clone} -> Sandbox.remove(path)
       {:error, reason} -> Logger.warning("Loop.Replay: removing #{path}: #{inspect(reason)}")
     end
   end
 
   # A replay whose node stopped mid-run left its record `:running` and its
   # checkout on disk: nothing ran its cleanup. Before each replay, a record
-  # still `:running` past the stale age is finished as abandoned, and the
-  # checkout of every replay not running now is removed (a private clone's gc
-  # pin with it). A live replay's is never touched: its record is `:running`
-  # before its checkout exists.
+  # still `:running` past its deadline is finished as abandoned, and the
+  # checkout of every replay not running now is removed (a private clone's pins
+  # with it, in the main repo its record names). The checkouts are listed
+  # before the running replays are read: a replay's record is `:running` before
+  # its checkout exists, so a live replay's is never taken for a leftover.
   defp sweep(opts, now) do
     abandon(now)
-    live = now |> running() |> MapSet.new(& &1.id)
     root = root(opts)
-
-    for id <- uuids(root), not MapSet.member?(live, id), do: Sandbox.remove(Path.join(root, id))
-
     worktree_root = Paths.worktree_root()
+    sandboxes = uuids(root)
+    clones = uuids(worktree_root, "replay-")
+    live = now |> running() |> MapSet.new(& &1.id)
 
-    for "replay-" <> id = leaf <- uuids(worktree_root, "replay-"),
-        not MapSet.member?(live, id),
-        do: remove_clone(Path.join(worktree_root, leaf))
+    for id <- sandboxes, not MapSet.member?(live, id), do: Sandbox.remove(Path.join(root, id))
+
+    for "replay-" <> id = leaf <- clones, not MapSet.member?(live, id) do
+      discard_clone(Path.join(worktree_root, leaf), recorded_repo_path(id))
+    end
 
     :ok
   end
 
   defp abandon(now) do
-    cutoff = DateTime.add(now, -@stale_after_s, :second)
-
     ReplayRun
-    |> Ash.Query.filter(state == :running and started_at <= ^cutoff)
+    |> Ash.Query.filter(state == :running and deadline_at <= ^now)
     |> Ash.read!()
     |> Enum.each(fn run ->
       Ash.update!(
@@ -518,13 +561,24 @@ defmodule Arbiter.Loop.Replay do
         %{
           state: :failed,
           reason:
-            "abandoned: still running #{div(@stale_after_s, 3600)} hours after it " <>
-              "started (its node stopped before it finished)",
+            "abandoned: still running past its deadline (its node stopped before it finished)",
           finished_at: DateTime.utc_now()
         },
         action: :finish
       )
     end)
+  end
+
+  # The main repo a replay's clone borrows from, as its record says (never as
+  # the clone's own markers do).
+  defp recorded_repo_path(id) do
+    with {:ok, %ReplayRun{workspace_id: ws_id, repo: repo}} when is_binary(ws_id) <-
+           Ash.get(ReplayRun, id),
+         {:ok, ws} <- Ash.get(Workspace, ws_id) do
+      LocalCompare.repo_path(ws, repo)
+    else
+      _ -> nil
+    end
   end
 
   # The entries of `dir` named `prefix` and a replay id.
@@ -544,16 +598,24 @@ defmodule Arbiter.Loop.Replay do
   defp replay(%{subject: subject} = ctx) do
     with :ok <- File.mkdir_p(scratch(ctx)),
          {:ok, branch} <- checkout(ctx),
-         ctx = %{ctx | subject: Map.put(subject, :branch, branch)},
+         ctx = Map.merge(ctx, %{subject: Map.put(subject, :branch, branch), seal: seal(ctx)}),
          {:ok, known_good} <-
            Sandbox.known_good(subject.repo_path, subject.base_sha, subject.known_good_sha),
          {:ok, implemented} <-
-           call(ctx, :implement, Prompt.implement(ctx.subject, adapter(ctx.author.provider))),
-         {:ok, change} <- Sandbox.change(ctx.checkout, subject.base_sha) do
+           call(ctx, :implement, Prompt.implement(ctx.subject, adapter(ctx.author.provider))) do
+      score_change(ctx, known_good, %{"implement" => run_summary(implemented)})
+    else
+      {:error, reason} -> {:failed, %{reason: describe(reason)}}
+    end
+  end
+
+  defp score_change(ctx, known_good, runs) do
+    with :ok <- untampered(ctx),
+         {:ok, change} <- Sandbox.change(ctx.checkout, ctx.subject.base_sha) do
       measured = %{
         files: Enum.take(change.files, @max_files),
         overlap: Score.overlap(change, known_good),
-        runs: %{"implement" => run_summary(implemented)}
+        runs: runs
       }
 
       if change.files == [] do
@@ -569,17 +631,20 @@ defmodule Arbiter.Loop.Replay do
         |> review(ctx)
       end
     else
-      {:error, reason} -> {:failed, %{reason: describe(reason)}}
+      {:error, reason} -> {:failed, %{reason: describe(reason), runs: runs}}
     end
   end
 
-  defp scratch(ctx), do: Path.join(ctx.dir, "scratch")
+  defp scratch(%{dir: dir}), do: Path.join(dir, "scratch")
+  defp scratch(_ctx), do: nil
 
-  # The checkout at the base commit, and the branch it is on. On the host: the
-  # sandbox, seeded with dependencies as a dispatch's worktree is. For a
-  # container: a read-only private clone with nothing after the base in it,
-  # whose `origin` (the forge, for a review clone) is pointed nowhere so the
-  # merged change cannot be fetched; the container brings its own dependencies.
+  # The checkout at the base commit, and the branch it is on, seeded with
+  # dependencies as a dispatch's worktree is before any model runs in it
+  # (seeding can run `mix deps.get` there, which must never load a model's
+  # `mix.exs`). On the host: the sandbox. For a container: a read-only private
+  # clone with nothing after the base checked out, whose `origin` (the forge,
+  # for a review clone) is pointed nowhere so the merged change cannot be
+  # fetched.
   defp checkout(%{layout: :sandbox, checkout: checkout, subject: subject}) do
     with {:ok, _} <- Sandbox.create(subject.repo_path, subject.base_sha, checkout),
          :ok <- seed(subject, checkout) do
@@ -590,7 +655,8 @@ defmodule Arbiter.Loop.Replay do
   defp checkout(%{layout: :private_clone, checkout: checkout, subject: subject}) do
     with {:ok, _} <-
            PrivateClone.create_review(subject.repo_path, subject.base_sha, path: checkout),
-         :ok <- Sandbox.disconnect(checkout) do
+         :ok <- Sandbox.disconnect(checkout),
+         :ok <- seed(subject, checkout) do
       Sandbox.current_branch(checkout)
     end
   end
@@ -605,25 +671,61 @@ defmodule Arbiter.Loop.Replay do
     Sandbox.exclude(checkout, seeded)
   end
 
-  defp tests(%{subject: subject, checkout: checkout, opts: opts} = ctx) do
-    spec = Map.get(opts, :tests, true) && PrepushCheck.resolve(subject.workspace, subject.repo)
+  # What host git holds the checkout to once a model has run in it, taken when
+  # the harness is done with it: the sandbox's config; a clone's `arbiter.*`
+  # markers, which `PrivateClone.verify/1` does not check.
+  defp seal(%{layout: :sandbox, checkout: checkout}), do: Sandbox.seal(checkout)
+  defp seal(%{layout: :private_clone, checkout: checkout}), do: markers(checkout)
 
-    if spec do
-      # The recipe runs on the host: a private clone gets the host's
-      # dependencies now, after the container (and the change) are done with it.
-      if ctx.layout == :private_clone, do: seed(subject, checkout)
+  defp markers(clone),
+    do:
+      {PrivateClone.main_repo(clone), PrivateClone.branch(clone), PrivateClone.read_only?(clone)}
 
-      %{result: result, steps: steps} =
-        PrepushCheck.run_steps(spec, checkout, target: subject.base_sha)
+  defp untampered(%{layout: :sandbox, checkout: checkout, seal: seal}),
+    do: Sandbox.verify(checkout, seal)
 
-      %{
-        tests: tests_outcome(result),
-        tests_steps: Enum.map(steps, &Map.take(&1, [:name, :status, :exit_status, :duration_ms]))
-      }
+  defp untampered(%{layout: :private_clone, checkout: checkout, seal: sealed}) do
+    case PrivateClone.verify(checkout) do
+      :ok ->
+        if markers(checkout) == sealed,
+          do: :ok,
+          else: {:error, {:tampered, "the clone's arbiter.* markers were changed"}}
+
+      {:error, :not_a_private_clone} ->
+        {:error, {:tampered, ".git names no main repo"}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # The tests run the replayed model's code, so only where it ran in a
+  # container, in one again (the runner's `run(:test, …)`): on the host, never.
+  defp tests?(ctx), do: ctx.recipe != nil and ctx.layouts.implement == :private_clone
+
+  defp tests(ctx) do
+    if tests?(ctx) do
+      spec =
+        ctx
+        |> spec(:implement)
+        |> Map.merge(%{recipe: ctx.recipe, base_sha: ctx.subject.base_sha})
+
+      case ctx.runner.run.(:test, spec) do
+        {:ok, %{result: result, steps: steps}} ->
+          %{tests: tests_outcome(result), tests_run: %{"steps" => Enum.map(steps, &step/1)}}
+
+        {:error, reason} ->
+          %{tests: :error, tests_run: %{"error" => describe(reason)}}
+
+        other ->
+          %{tests: :error, tests_run: %{"error" => describe({:bad_runner_result, other})}}
+      end
     else
       %{tests: :not_run}
     end
   end
+
+  defp step(step), do: Map.take(step, [:name, :status, :exit_status, :duration_ms])
 
   defp tests_outcome(:ok), do: :passed
   defp tests_outcome({:failed, _status, _output}), do: :failed
@@ -643,32 +745,35 @@ defmodule Arbiter.Loop.Replay do
       {:ok, _entries} ->
         prompt = Prompt.review(ctx.subject, adapter(reviewer.provider))
 
-        with {:ok, reviewed} <- call(ctx, :review, prompt),
-             {:ok, empty?} <- Sandbox.committed_empty?(ctx.checkout, ctx.subject.base_sha) do
-          {:scored,
-           measured |> score(reviewed, empty?, ctx.subject) |> put_run("review", reviewed)}
-        else
+        case call(ctx, :review, prompt) do
+          {:ok, reviewed} -> score(put_run(measured, "review", reviewed), reviewed, ctx)
           {:error, reason} -> {:failed, Map.put(measured, :reason, describe(reason))}
         end
     end
   end
 
-  defp score(measured, reviewed, empty?, subject) do
-    {verdict, findings} = Score.verdict(reviewed.output)
-    {total, unmet} = ReviewVerification.criteria_counts(findings)
+  defp score(measured, reviewed, ctx) do
+    with :ok <- untampered(ctx),
+         {:ok, empty?} <- Sandbox.committed_empty?(ctx.checkout, ctx.subject.base_sha) do
+      {verdict, findings} = Score.verdict(reviewed.output)
+      {total, unmet} = ReviewVerification.criteria_counts(findings)
 
-    Map.merge(measured, %{
-      verdict: verdict,
-      criteria_total: total,
-      criteria_unmet: unmet,
-      converged:
-        Score.converged?(%{
-          verdict: verdict,
-          findings: findings,
-          acceptance: subject.issue.acceptance,
-          net_diff_empty?: empty?
-        })
-    })
+      {:scored,
+       Map.merge(measured, %{
+         verdict: verdict,
+         criteria_total: total,
+         criteria_unmet: unmet,
+         converged:
+           Score.converged?(%{
+             verdict: verdict,
+             findings: findings,
+             acceptance: ctx.subject.issue.acceptance,
+             net_diff_empty?: empty?
+           })
+       })}
+    else
+      {:error, reason} -> {:failed, Map.put(measured, :reason, describe(reason))}
+    end
   end
 
   defp put_run(measured, name, result), do: put_in(measured, [:runs, name], run_summary(result))
@@ -681,17 +786,13 @@ defmodule Arbiter.Loop.Replay do
     end
   end
 
-  # What a runner is told about one side's run (the prompt aside).
+  # What a runner is told about one side's run (the prompt aside). Before
+  # admission (`layout/2`) there is no replay or checkout yet.
   defp spec(ctx, role) do
-    side = if role == :implement, do: ctx.author, else: ctx.reviewer
-
-    timeout =
-      if role == :implement,
-        do: Map.get(ctx.opts, :timeout_ms, @implement_timeout_ms),
-        else: Map.get(ctx.opts, :review_timeout_ms, @review_timeout_ms)
+    side = if role == :review, do: ctx.reviewer, else: ctx.author
 
     %{
-      replay_id: ctx.run.id,
+      replay_id: replay_id(ctx),
       dir: Map.get(ctx, :checkout),
       scratch: scratch(ctx),
       prompt: nil,
@@ -701,10 +802,16 @@ defmodule Arbiter.Loop.Replay do
       thinking: side.thinking,
       workspace: ctx.subject.workspace,
       repo: ctx.subject.repo,
-      timeout_ms: timeout
+      timeout_ms: timeout(ctx.opts, role)
     }
     |> Map.merge(Map.take(ctx.opts, [:container_opts]))
   end
+
+  defp replay_id(%{run: %ReplayRun{id: id}}), do: id
+  defp replay_id(_ctx), do: nil
+
+  defp timeout(opts, :review), do: Map.get(opts, :review_timeout_ms, @review_timeout_ms)
+  defp timeout(opts, _implement), do: Map.get(opts, :timeout_ms, @implement_timeout_ms)
 
   defp run_summary(result) do
     Map.take(result, [:exit_status, :timed_out, :duration_ms, :usage])
@@ -719,9 +826,9 @@ defmodule Arbiter.Loop.Replay do
     overlap = Map.get(fields, :overlap, %{})
 
     runs =
-      case Map.get(fields, :tests_steps) do
+      case Map.get(fields, :tests_run) do
         nil -> Map.get(fields, :runs, %{})
-        steps -> Map.put(Map.get(fields, :runs, %{}), "tests", steps)
+        tests -> Map.put(Map.get(fields, :runs, %{}), "tests", tests)
       end
 
     attrs = %{
@@ -747,6 +854,9 @@ defmodule Arbiter.Loop.Replay do
 
   defp tag(:failed), do: :failed
   defp tag(_scored_or_unscored), do: :ok
+
+  defp describe({:tampered, why}),
+    do: "the checkout's git was tampered with, so host git did not run in it: " <> why
 
   defp describe({role, reason}) when role in [:implement, :review],
     do: "#{role} run failed: #{describe(reason)}"

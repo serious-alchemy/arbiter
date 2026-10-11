@@ -116,7 +116,8 @@ defmodule Arbiter.Loop.Replay.EvidenceTest do
         pool: "claude",
         difficulty: 2,
         issue_type: "feature",
-        started_at: @at
+        started_at: @at,
+        deadline_at: DateTime.add(@at, 3600)
       }
 
       ReplayRun

@@ -45,6 +45,7 @@ defmodule Arbiter.Repo.Migrations.CreateReplayRuns do
       add :admission, {:array, :map}, null: false, default: []
       add :runs, :map, null: false, default: %{}
       add :started_at, :utc_datetime_usec, null: false
+      add :deadline_at, :utc_datetime_usec, null: false
       add :finished_at, :utc_datetime_usec
       add :inserted_at, :utc_datetime_usec, null: false
       add :updated_at, :utc_datetime_usec, null: false

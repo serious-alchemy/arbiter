@@ -4,8 +4,9 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
   the live spawn path (`ClaudeSession.port_args/6`, `open_scoped_port/2`) under
   the workspace's security policy, against a stand-in `claude` on `PATH` (and a
   stand-in `podman` for the container path). It returns only the model's own
-  text, kills a run past its deadline, and hands the CLI nothing that reaches
-  production or Arbiter itself.
+  text, kills a run past its deadline, hands the CLI nothing that reaches
+  production or Arbiter itself, refuses a model it cannot confine, and runs the
+  repo's tests only in a container.
   """
   use Arbiter.DataCase, async: false
 
@@ -254,24 +255,17 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
   end
 
   describe "the security policy" do
-    test "layout/2: a container backend needs a private clone; the host does not", %{spec: spec} do
-      assert CliRunner.layout(:implement, spec) == :sandbox
-
-      podman = %{spec | workspace: podman_workspace!()}
-      assert CliRunner.layout(:implement, podman) == :private_clone
-
-      # The reviewer runs under the policy's review backend (bwrap by default).
-      assert CliRunner.layout(:review, podman) == :sandbox
+    test "layout/2 refuses a run with no OS confinement: Claude on the host is not jailed",
+         %{spec: spec} do
+      # The workspace's default backend (bwrap) leaves a Claude spawn unjailed,
+      # and a replay never runs a model it cannot confine.
+      assert {:error, {:unconfined, :implement, :claude}} = CliRunner.layout(:implement, spec)
+      assert {:error, {:unconfined, :review, :claude}} = CliRunner.layout(:review, spec)
     end
 
-    test "the scoring reviewer of a container workspace runs on the host, under its review backend",
-         %{rec: rec, spec: spec} do
-      output!(rec, [assistant("VERDICT: APPROVE\narb done")])
-
-      assert {:ok, result} = CliRunner.run(:review, %{spec | workspace: podman_workspace!()})
-
-      assert {:approve, _} = Score.verdict(result.output)
-      assert File.exists?(Path.join(rec, "env")), "spawned directly, not in a container"
+    test "the repo's tests never run on the host", %{spec: spec} do
+      assert {:error, :not_confined} =
+               CliRunner.run(:test, Map.put(spec, :recipe, recipe("true")))
     end
   end
 
@@ -348,11 +342,68 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
       refute File.exists?(Path.join(rec, "env")), "the CLI never ran on the host"
       assert_received {:ran, _, ["rm", "--force" | _]}
     end
+
+    test "layout/2: a container confines the run, and needs a private clone", %{spec: spec} do
+      podman = %{spec | workspace: podman_workspace!()}
+      assert {:ok, :private_clone} = CliRunner.layout(:implement, podman)
+
+      # The review backend (bwrap by default) would leave a Claude reviewer
+      # unjailed, so the scoring reviewer runs in the container too.
+      assert {:ok, :private_clone} = CliRunner.layout(:review, podman)
+    end
+
+    test "the scoring reviewer of a container workspace runs in the container",
+         %{rec: rec, spec: spec, clone: clone, container_opts: container_opts} do
+      output!(rec, [assistant("VERDICT: APPROVE\narb done")])
+
+      spec =
+        Map.merge(spec, %{
+          workspace: podman_workspace!(),
+          dir: clone,
+          container_opts: container_opts
+        })
+
+      assert {:ok, result} = CliRunner.run(:review, spec)
+
+      assert {:approve, _} = Score.verdict(result.output)
+      assert File.read!(Path.join(rec, "podman.log")) =~ ~r/podman run /
+      refute File.exists?(Path.join(rec, "env")), "the reviewer never ran on the host"
+    end
+
+    test "the repo's tests run in the replay's container, never on the host",
+         %{spec: spec, clone: clone, container_opts: container_opts, root: root} do
+      marker = Path.join(root, "recipe-ran-on-the-host")
+
+      spec =
+        Map.merge(spec, %{
+          workspace: podman_workspace!(),
+          dir: clone,
+          container_opts: container_opts,
+          recipe: recipe("touch #{marker}"),
+          base_sha: GitFixture.git!(clone, ["rev-parse", "HEAD"])
+        })
+
+      assert {:ok, %{result: :ok, steps: [%{name: "tests", status: :passed}]}} =
+               CliRunner.run(:test, spec)
+
+      # The step was handed to the container runner (the stand-in for `podman
+      # run`) as the container's own command, and never ran here.
+      assert_received {:ran, _podman, ["run" | _] = args}
+      assert Enum.join(args, " ") =~ "sh -c touch #{marker}"
+      refute File.exists?(marker), "the step ran in the (stand-in) container, not on the host"
+    end
   end
 
   defp podman_workspace! do
     workspace!(%{
       "agent" => %{"type" => ["claude"], "security" => %{"sandbox" => %{"backend" => "podman"}}}
     })
+  end
+
+  defp recipe(cmd) do
+    Arbiter.Worker.PrepushCheck.resolve(
+      %{config: %{"worker" => %{"pre_push_checks" => [%{"name" => "tests", "cmd" => cmd}]}}},
+      nil
+    )
   end
 end
