@@ -20,6 +20,11 @@ defmodule Arbiter.Board.WalkInputs do
       with no account behind it is `{:unmetered, provider}`, with no budget:
       the machines bound it (§3.5). A metered pool with no published budget is
       absent, and the walk reads it as closed.
+    * **Fair share (DC10, §5.3)** — a pool whose account is `budget_split: fair`
+      carries `fair: %{seats:, weights:, labels:}`: the seats each workspace
+      holds on it (the holders' tickets, resolved to their workspaces), each
+      workspace's link `weight`, and its name. The walk's skip rule reads it
+      (`Arbiter.Board.FairShare`); a `queue` pool carries none.
     * **Machines** — the primary (`"local"`: its cap and the runs holding it,
       `Arbiter.Nodes.LocalCapacity`), plus every available node while remote
       execution is on (online, healthy, a known cap, NetworkPolicy enforced),
@@ -58,7 +63,7 @@ defmodule Arbiter.Board.WalkInputs do
       workspace with no cap reads and counts nothing; the walk reads an unnamed
       repo as unbounded.
 
-  Options (all seams): `:budgets`, `:seats`, `:accounts`, `:local`
+  Options (all seams): `:budgets`, `:seats`, `:holders`, `:weights`, `:accounts`, `:local`
   (`%{cap:, used:}`), `:nodes` (overview rows), `:remote_available?`,
   `:repo_counts` (`%{{workspace_id, repo} => runs}`, or a function returning
   it), `:routing_opts` (forwarded to `availability/3`).
@@ -68,6 +73,7 @@ defmodule Arbiter.Board.WalkInputs do
 
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Accounts.WorkspaceProviderAccount
   alias Arbiter.Agents
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
@@ -106,6 +112,7 @@ defmodule Arbiter.Board.WalkInputs do
     budgets = Keyword.get_lazy(opts, :budgets, &BudgetServer.all/0)
     seats = Keyword.get_lazy(opts, :seats, &Seats.counts/0)
     accounts = Keyword.get_lazy(opts, :accounts, &read_accounts/0) |> Map.new(&{&1.id, &1})
+    fair = fair_inputs(budgets, accounts, opts)
     queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued))
     workspaces = workspaces(default, queued)
     links = links(Map.values(workspaces))
@@ -124,7 +131,7 @@ defmodule Arbiter.Board.WalkInputs do
     }
 
     %{
-      pools: budgets |> pools(seats, accounts) |> Map.merge(unmetered(links)),
+      pools: budgets |> pools(seats, accounts, fair) |> Map.merge(unmetered(links)),
       nodes: Map.put(remote, @local, local(opts)),
       repos: repos(repo_caps, opts),
       candidates: &candidates(&1, ctx)
@@ -173,22 +180,26 @@ defmodule Arbiter.Board.WalkInputs do
 
   # ---- pools ----------------------------------------------------------------
 
-  defp pools(budgets, seats, accounts) do
+  defp pools(budgets, seats, accounts, fair) do
     for %Budget{policy_workspace: nil, account: id, pool: pool} = b <- budgets, into: %{} do
       key = {id, pool}
 
-      {key,
-       %{
-         budget: b.budget,
-         seats: Map.get(seats, key, 0),
-         exempt_budget: b.exempt_budget,
-         label: pool_label(Map.get(accounts, id), pool),
-         reason: b.reason,
-         binding: b.binding,
-         cap: ceiling(b.ceiling)
-       }}
+      base = %{
+        budget: b.budget,
+        seats: Map.get(seats, key, 0),
+        exempt_budget: b.exempt_budget,
+        label: pool_label(Map.get(accounts, id), pool),
+        reason: b.reason,
+        binding: b.binding,
+        cap: ceiling(b.ceiling)
+      }
+
+      {key, put_fair(base, Map.get(fair, key))}
     end
   end
+
+  defp put_fair(pool, nil), do: pool
+  defp put_fair(pool, fair), do: Map.put(pool, :fair, fair)
 
   defp unmetered(links) do
     for {{_ws_id, provider}, nil} <- links, into: %{} do
@@ -218,6 +229,103 @@ defmodule Arbiter.Board.WalkInputs do
   end
 
   defp ceiling(_), do: nil
+
+  # ---- fair share (DC10) -----------------------------------------------------
+
+  @doc """
+  `{account_id, pool} => %{seats:, weights:, labels:}` for every published pool
+  of an account that splits `fair`; nothing is read for a board with none.
+  `accounts` is `%{id => ProviderAccount}`. Options: `:holders`, `:weights`, `:workspace_of` (`ticket_id => workspace_id`).
+  """
+  @spec fair_inputs([Budget.t()], map(), keyword()) :: %{
+          optional({String.t(), String.t()}) => map()
+        }
+  def fair_inputs(budgets, accounts, opts) do
+    pool_keys =
+      for %Budget{policy_workspace: nil, account: id, pool: pool} <- budgets,
+          match?(%ProviderAccount{budget_split: :fair}, Map.get(accounts, id)),
+          do: {id, pool}
+
+    if pool_keys == [] do
+      %{}
+    else
+      holders = Keyword.get_lazy(opts, :holders, &Seats.holders/0)
+
+      workspace_of =
+        Keyword.get_lazy(opts, :workspace_of, fn -> holder_workspaces(pool_keys, holders) end)
+
+      weights = Keyword.get_lazy(opts, :weights, fn -> read_weights(pool_keys) end)
+      names = workspace_names(workspace_of, weights)
+
+      Map.new(pool_keys, fn {account, _pool} = key ->
+        seats =
+          holders
+          |> Map.get(key, [])
+          |> Enum.map(&Map.get(workspace_of, Seats.base_task_id(&1)))
+          |> Enum.reject(&is_nil/1)
+          |> Enum.frequencies()
+
+        account_weights = Map.get(weights, account, %{})
+
+        labels =
+          Map.new(Enum.uniq(Map.keys(seats) ++ Map.keys(account_weights)), fn id ->
+            {id, Map.get(names, id, id)}
+          end)
+
+        {key, %{seats: seats, weights: account_weights, labels: labels}}
+      end)
+    end
+  rescue
+    _ -> %{}
+  end
+
+  # `ticket_id => workspace_id` for every ticket holding a seat on those pools.
+  defp holder_workspaces(pool_keys, holders) do
+    ids =
+      pool_keys
+      |> Enum.flat_map(&Map.get(holders, &1, []))
+      |> Enum.map(&Seats.base_task_id/1)
+      |> Enum.uniq()
+
+    if ids == [] do
+      %{}
+    else
+      Issue
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.Query.select([:id, :workspace_id])
+      |> Ash.read!()
+      |> Map.new(&{&1.id, &1.workspace_id})
+    end
+  end
+
+  # `account_id => %{workspace_id => weight}` from the links.
+  defp read_weights(pool_keys) do
+    ids = pool_keys |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+    WorkspaceProviderAccount
+    |> Ash.Query.filter(provider_account_id in ^ids)
+    |> Ash.read!()
+    |> Enum.group_by(& &1.provider_account_id, &{&1.workspace_id, &1.weight})
+    |> Map.new(fn {account, pairs} -> {account, Map.new(pairs)} end)
+  end
+
+  defp workspace_names(workspace_of, weights) do
+    ids =
+      (Map.values(workspace_of) ++ Enum.flat_map(Map.values(weights), &Map.keys/1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    if ids == [] do
+      %{}
+    else
+      Workspace
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.read!()
+      |> Map.new(&{&1.id, &1.name})
+    end
+  rescue
+    _ -> %{}
+  end
 
   # ---- machines -------------------------------------------------------------
 
