@@ -731,8 +731,12 @@ defmodule ArbiterCli.Cmd.Restart do
   end
 
   @doc "Print the server-is-DOWN report (JSON or text) and exit 1."
+  @spec emit_down(:json | :text, list()) :: no_return()
+  def emit_down(mode, actions), do: emit_down(mode, actions, "")
+
+  @doc "Like `emit_down/2`, appending `extra` to the report."
   @spec emit_down(:json | :text, list(), String.t()) :: no_return()
-  def emit_down(mode, actions, extra \\ "") do
+  def emit_down(mode, actions, extra) do
     message = down_message(List.keyfind(actions, :systemd_restart, 0)) <> extra
 
     case mode do
