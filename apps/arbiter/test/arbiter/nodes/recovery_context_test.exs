@@ -71,6 +71,19 @@ defmodule Arbiter.Nodes.RecoveryContextTest do
     assert {:error, :no_home_clone} = Recovery.context(run_for(task, ws, nil))
   end
 
+  test "a ReviewGate review or fix-round run resolves to the base ticket's clone",
+       %{repo: repo, task: task, ws: ws} do
+    branch = BranchNamer.derive(task)
+    {:ok, clone} = Worktree.create(repo, branch, "main", layout: :private_clone)
+
+    for synthetic <- [task.id <> "#review", task.id <> "#review#impl1"] do
+      run = %{run_for(task, ws, "/cfg/dir") | task_id: synthetic}
+      assert {:ok, ctx} = Recovery.context(run)
+      assert ctx.home == clone
+      assert ctx.branch == branch
+    end
+  end
+
   test "a run whose ticket is gone has no context", %{task: task, ws: ws} do
     run = run_for(task, ws, nil)
     assert {:error, _} = Recovery.context(%{run | task_id: "bd-nope"})

@@ -125,6 +125,11 @@ defmodule ArbiterCli.Main do
       arb server doctor   [--json]
       arb server version  [--json]
 
+      arb batch           [--file PATH] [--continue-on-error]
+                                  run many arb commands in ONE VM: one command per line from
+                                  stdin or --file, one JSON result per line. The CLI analogue
+                                  of the bulk API/MCP verbs; use it instead of shell loops.
+
       arb dashboard login [--json]   print a one-time browser login link
 
       arb workspace list
@@ -227,10 +232,15 @@ defmodule ArbiterCli.Main do
       --json               Emit machine-readable JSON (default is human-readable text)
       -w, --workspace <n>  Target workspace by name or id; overrides ARB_WORKSPACE
       -h, --help           Show usage
+      --allow-fanout, --force
+                           Override the refusal when too many `arb` VMs already run
 
   ## Env
 
       ARB_HOST       Phoenix base URL (default http://127.0.0.1:4848)
+      ARB_FANOUT_WARN / ARB_FANOUT_MAX
+                     Fan-out guard thresholds (default 16 / 64 other running `arb` VMs);
+                     ARB_ALLOW_FANOUT=1 lifts the refusal
       ARB_WORKSPACE  Workspace name or id (unset: "default", else the sole workspace); overridden by -w / --workspace
   """
 
@@ -239,6 +249,28 @@ defmodule ArbiterCli.Main do
     # not auto-start. Without this, Req.get crashes with :finch not started.
     {:ok, _} = Application.ensure_all_started(:req)
 
+    {allow_fanout?, argv} = take_allow_fanout(argv)
+    if argv != [], do: ArbiterCli.FanOut.enforce!(allow_fanout?)
+    run(argv)
+  end
+
+  # `--allow-fanout` is stripped everywhere. `--force` also lifts the refusal; it is
+  # stripped only when leading (`arb --force ticket show ...`) so subcommands with
+  # their own `--force` (e.g. `ticket claim --force`) still receive it.
+  defp take_allow_fanout(argv) do
+    {leading, rest} = Enum.split_while(argv, &String.starts_with?(&1, "-"))
+    {forced, leading} = Enum.split_with(leading, &(&1 == "--force"))
+    argv = leading ++ rest
+    allow? = forced != [] or "--allow-fanout" in argv or "--force" in argv
+
+    {allow?, Enum.reject(argv, &(&1 == "--allow-fanout"))}
+  end
+
+  @doc """
+  Run one `arb` command line (without the fan-out guard). `arb batch` calls this
+  for each line so the whole batch is one VM and one guard check.
+  """
+  def run(argv) do
     # Strip -w / --workspace from the full argv before splitting into cmd/rest,
     # so the flag works at any position (including before the subcommand).
     {flag, workspace, argv} = extract_workspace_flag(argv)

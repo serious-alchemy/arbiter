@@ -628,11 +628,34 @@ commands you'll reach for most.
 | `arb server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `arb server doctor`](#reading-arb-server-doctor) |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
+| `arb batch [--file PATH] [--continue-on-error]` | Run many `arb` commands in one VM (see below) |
 
 All commands accept `--help` and `--json` for structured output. Pre-`<resource> <verb>`
 flat commands from earlier CLI versions (`arb list`, `arb start`, `arb doctor`, …) still
 run — they print a one-line note pointing at the new form. (`arb dispatch <id>` is a
 permanent top-level shortcut for `arb ticket dispatch <id>`, not a legacy alias.)
+
+### Many commands: `arb batch`, not a shell loop
+
+Each `arb` invocation boots a full BEAM (~42 MB), so looping over `arb` in a shell
+is slow, and a backgrounded loop can exhaust RAM. `arb batch` reads one `arb` command
+per line from stdin or `--file` (shell-like quoting, `#` comments), runs them
+sequentially in a single VM over one HTTP client, and prints one JSON object per line:
+`{"line": 2, "argv": [...], "exit": 0, "output": {...}}` (`"error"` instead of
+`"output"` on failure). It stops at the first failure unless `--continue-on-error`, and
+exits non-zero if any line failed. Interactive or long-lived commands (`watch`,
+`worker log -f`, `server start|restart|deploy`, nested `batch`, …) are refused per line.
+
+    printf 'ticket show bd-1\nticket show bd-2\n' | arb batch --continue-on-error
+
+`arb batch` is the CLI analogue of the bulk API/MCP verbs, which take a list of
+operations in one call; API and MCP clients already issue many operations per
+connection. (Coalescing runs of same-verb lines into one bulk call is not done yet.)
+
+As a guard, `arb` counts the other `arb` VMs running for your user (a `/proc` read; it is
+skipped where `/proc` is unavailable). Above `ARB_FANOUT_WARN` (default 16) it warns on
+stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--force` (or `--allow-fanout`)
+or set `ARB_ALLOW_FANOUT=1`.
 
 ## Documentation
 
