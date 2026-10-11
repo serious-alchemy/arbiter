@@ -64,6 +64,7 @@ defmodule Arbiter.Loop.Replay do
   alias Arbiter.Agents
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ReviewerRouting
+  alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Config.Paths
   alias Arbiter.Loop.Replay.Admission
@@ -117,6 +118,10 @@ defmodule Arbiter.Loop.Replay do
     * `:reviewer`, `:reviewer_model` — the scoring reviewer's account and model;
       by default the fleet's reviewer for the replayed model's family, at the
       task's reviewer tier.
+    * `:thinking`, `:reviewer_thinking` — the level each side runs at; by
+      default the one a dispatch would use (the `by_difficulty` rule for the
+      task's difficulty; the reviewer slot's config, or a cross-family
+      selection's own).
     * `:tests` — run the repo's pre-push recipe as the tests signal (default
       `true`; nothing runs when the repo has no recipe).
     * `:timeout_ms` (default 60 min), `:review_timeout_ms` (default 30 min).
@@ -220,24 +225,35 @@ defmodule Arbiter.Loop.Replay do
     with {:ok, model} <- required(opts, :model),
          {:ok, ref} <- required(opts, :account),
          {:ok, account} <- account(ref),
-         :ok <- attached(account, subject.workspace) do
-      side(account, model)
+         :ok <- attached(account, subject.workspace),
+         {:ok, side} <- side(account, model) do
+      {:ok, Map.put(side, :thinking, Map.get(opts, :thinking) || dispatch_thinking(subject))}
     end
   end
 
   defp reviewer(opts, subject, author, now) do
+    with {:ok, side, selected_thinking} <- reviewer_side(opts, subject, author, now) do
+      thinking =
+        Map.get(opts, :reviewer_thinking) || selected_thinking ||
+          reviewer_block(subject.workspace)["thinking"]
+
+      {:ok, Map.put(side, :thinking, thinking)}
+    end
+  end
+
+  defp reviewer_side(opts, subject, author, now) do
     case Map.get(opts, :reviewer) do
       nil ->
         fleet_reviewer(subject, author, Map.get(opts, :reviewer_model), now)
 
       ref ->
         with {:ok, account} <- account(ref),
-             :ok <- attached(account, subject.workspace) do
-          model =
-            Map.get(opts, :reviewer_model) ||
-              predicted_model(subject, adapter(account.provider))
-
-          side(account, model)
+             :ok <- attached(account, subject.workspace),
+             model =
+               Map.get(opts, :reviewer_model) ||
+                 predicted_model(subject, adapter(account.provider)),
+             {:ok, side} <- side(account, model) do
+          {:ok, side, nil}
         end
     end
   end
@@ -251,21 +267,46 @@ defmodule Arbiter.Loop.Replay do
 
     projected =
       case ReviewerRouting.project(ws, family, tier: reviewer_tier(subject), now: now) do
-        {:ok, %{account_id: id, model: projected_model}} when is_binary(id) ->
-          {id, model || projected_model}
+        {:ok, %{account_id: id, model: projected_model} = selection} when is_binary(id) ->
+          {id, model || projected_model, Map.get(selection, :thinking)}
 
         _ ->
           type = Agents.reviewer_type(ws)
-          {Resolver.account_id(ws.id, type), model || predicted_model(subject, type)}
+          {Resolver.account_id(ws.id, type), model || predicted_model(subject, type), nil}
       end
 
     case projected do
-      {nil, _model} ->
+      {nil, _model, _thinking} ->
         {:error, :no_reviewer_account}
 
-      {id, model} ->
-        with {:ok, account} <- account(id), do: side(account, model)
+      {id, model, thinking} ->
+        with {:ok, account} <- account(id),
+             {:ok, side} <- side(account, model),
+             do: {:ok, side, thinking}
     end
+  end
+
+  # The thinking level a dispatch of the task would run at: the `by_difficulty`
+  # rule for its difficulty (never a canary's overlay; a replay is in no arm),
+  # else the worker block's (`agent.config`), as `Arbiter.Agents.Routing` reads
+  # them. The policy itself is not asked: one can keep state (a round-robin
+  # cursor) that a replay must not move.
+  defp dispatch_thinking(%{workspace: ws, difficulty: difficulty}) do
+    block = Routing.default_choice(ws).config["thinking"]
+
+    if Routing.policy_for_workspace(ws) == ByDifficulty do
+      d = ByDifficulty.effective_difficulty(difficulty)
+      rule = get_in(ws.config || %{}, ["routing", "rules", "D#{d}"]) || %{}
+      rule["thinking"] || ByDifficulty.default_mapping()[d]["thinking"] || block
+    else
+      block
+    end
+  end
+
+  # The reviewer slot's own config, as the live gate reads it.
+  defp reviewer_block(ws) do
+    get_in(ws.config || %{}, ["review_agent", "config"]) ||
+      get_in(ws.config || %{}, ["agent", "config"]) || %{}
   end
 
   defp reviewer_tier(subject),
@@ -359,10 +400,12 @@ defmodule Arbiter.Loop.Replay do
       account_id: author.account_id,
       model: author.model,
       pool: author.pool,
+      thinking: author.thinking,
       reviewer_provider: to_string(reviewer.provider),
       reviewer_account_id: reviewer.account_id,
       reviewer_model: reviewer.model,
-      reviewer_pool: reviewer.pool
+      reviewer_pool: reviewer.pool,
+      reviewer_thinking: reviewer.thinking
     }
   end
 
@@ -655,6 +698,7 @@ defmodule Arbiter.Loop.Replay do
       provider: side.provider,
       account_id: side.account_id,
       model: side.model,
+      thinking: side.thinking,
       workspace: ctx.subject.workspace,
       repo: ctx.subject.repo,
       timeout_ms: timeout

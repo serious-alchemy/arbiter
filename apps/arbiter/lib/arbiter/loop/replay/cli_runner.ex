@@ -71,16 +71,17 @@ defmodule Arbiter.Loop.Replay.CliRunner do
     label = "replay-#{spec.replay_id}-#{role}"
     :ok = Agents.prepare(spec.workspace, if(role == :review, do: :review_agent, else: :agent))
 
-    agent_opts = [
-      security: policy,
-      workspace: spec.workspace,
-      worktree_path: spec.dir,
-      task_id: label,
-      model: spec.model,
-      owner: self(),
-      timeout_ms: spec.timeout_ms,
-      sandbox_wrap: true
-    ]
+    agent_opts =
+      [
+        security: policy,
+        workspace: spec.workspace,
+        worktree_path: spec.dir,
+        task_id: label,
+        model: spec.model,
+        owner: self(),
+        timeout_ms: spec.timeout_ms,
+        sandbox_wrap: true
+      ] ++ thinking(spec)
 
     with {:ok, tmp} <- RunTmp.create(label) do
       try do
@@ -93,6 +94,10 @@ defmodule Arbiter.Loop.Replay.CliRunner do
       end
     end
   end
+
+  # The level, when the harness chose one: the adapter turns it into its own flags.
+  defp thinking(%{thinking: level}) when is_binary(level) and level != "", do: [thinking: level]
+  defp thinking(_spec), do: []
 
   # ---- the policy ----------------------------------------------------------------
 

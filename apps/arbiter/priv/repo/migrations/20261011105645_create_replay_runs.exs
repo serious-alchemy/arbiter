@@ -21,10 +21,12 @@ defmodule Arbiter.Repo.Migrations.CreateReplayRuns do
       add :account_id, :text
       add :model, :text, null: false
       add :pool, :text
+      add :thinking, :text
       add :reviewer_provider, :text
       add :reviewer_account_id, :text
       add :reviewer_model, :text
       add :reviewer_pool, :text
+      add :reviewer_thinking, :text
       add :live_provider, :text
       add :live_model, :text
       add :base_sha, :text

@@ -15,8 +15,9 @@ defmodule Arbiter.Loop.ReplayRun do
     * The subject: `task_id`, `workspace_id`, `repo`, the cell (`difficulty`,
       the first attempt's at dispatch, and `issue_type`), and what the live run
       used first (`live_provider`, `live_model`).
-    * What was replayed: `provider` (the account's), `account_id`, `model` and
-      the `pool` it draws on; the scoring reviewer's `reviewer_*` four.
+    * What was replayed: `provider` (the account's), `account_id`, `model`, the
+      `pool` it draws on and the `thinking` level it ran at; the scoring
+      reviewer's `reviewer_*` five.
     * Where: `base_sha`, `known_good_sha` and how they were found
       (`provenance`: `:pr_head` or `:squash_commit`).
     * `state`: `:running` from admission; then `:scored` (a verdict was read,
@@ -72,10 +73,12 @@ defmodule Arbiter.Loop.ReplayRun do
         :account_id,
         :model,
         :pool,
+        :thinking,
         :reviewer_provider,
         :reviewer_account_id,
         :reviewer_model,
         :reviewer_pool,
+        :reviewer_thinking,
         :live_provider,
         :live_model,
         :base_sha,
@@ -122,11 +125,13 @@ defmodule Arbiter.Loop.ReplayRun do
     attribute :account_id, :string, public?: true
     attribute :model, :string, allow_nil?: false, public?: true
     attribute :pool, :string, public?: true
+    attribute :thinking, :string, public?: true
 
     attribute :reviewer_provider, :string, public?: true
     attribute :reviewer_account_id, :string, public?: true
     attribute :reviewer_model, :string, public?: true
     attribute :reviewer_pool, :string, public?: true
+    attribute :reviewer_thinking, :string, public?: true
 
     attribute :live_provider, :string, public?: true
     attribute :live_model, :string, public?: true

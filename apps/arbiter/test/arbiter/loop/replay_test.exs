@@ -374,6 +374,32 @@ defmodule Arbiter.Loop.ReplayTest do
       assert run.file_overlap == 0.0
     end
 
+    test "each side runs at the thinking level a dispatch would give it", ctx do
+      config =
+        ctx.ws.config
+        |> Map.put("routing", %{
+          "policy" => "by_difficulty",
+          "rules" => %{"D2" => %{"model_tier" => "standard", "thinking" => "high"}}
+        })
+        |> Map.put("review_agent", %{"config" => %{"thinking" => "medium"}})
+
+      ctx = %{ctx | ws: Ash.update!(ctx.ws, %{config: config})}
+
+      assert {:ok, run} = replay(ctx)
+
+      assert_received {:implement, %{spec: %{thinking: "high"}}}
+      assert_received {:review, %{thinking: "medium"}}
+      assert {run.thinking, run.reviewer_thinking} == {"high", "medium"}
+    end
+
+    test "an explicit thinking level wins, for either side", ctx do
+      assert {:ok, run} = replay(ctx, thinking: "max", reviewer_thinking: "low")
+
+      assert_received {:implement, %{spec: %{thinking: "max"}}}
+      assert_received {:review, %{thinking: "low"}}
+      assert {run.thinking, run.reviewer_thinking} == {"max", "low"}
+    end
+
     test "the default scoring reviewer is the one the fleet would use", ctx do
       assert {:ok, run} = replay(ctx, reviewer: nil, reviewer_model: nil)
 

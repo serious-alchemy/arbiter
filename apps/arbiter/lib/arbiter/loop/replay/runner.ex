@@ -18,7 +18,8 @@ defmodule Arbiter.Loop.Replay.Runner do
     * `:prompt`;
     * `:provider` (the account's provider atom: `:claude`, `:codex`,
       `:antigravity`, …), `:account_id` and `:model`, which pin the pool the
-      run draws on: the one admitted;
+      run draws on: the one admitted; and `:thinking`, the level to run at
+      (`nil`: the adapter's default);
     * `:workspace` and `:repo`, whose security policy and guardrail profile
       the run is held to, as a dispatch is;
     * `:timeout_ms`;
@@ -51,6 +52,7 @@ defmodule Arbiter.Loop.Replay.Runner do
           provider: atom(),
           account_id: String.t(),
           model: String.t(),
+          thinking: String.t() | nil,
           workspace: Workspace.t(),
           repo: String.t() | nil,
           timeout_ms: pos_integer()

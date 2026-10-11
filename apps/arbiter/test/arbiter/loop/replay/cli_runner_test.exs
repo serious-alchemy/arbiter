@@ -147,6 +147,29 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
     |> Map.new()
   end
 
+  describe "the thinking level" do
+    test "reaches the CLI through the workspace's own thinking flags", %{rec: rec, spec: spec} do
+      ws =
+        workspace!(%{
+          "agent" => %{"config" => %{"thinking_argv" => %{"high" => ["--effort", "high"]}}}
+        })
+
+      output!(rec, [assistant("arb done")])
+
+      assert {:ok, _} =
+               CliRunner.run(:implement, Map.merge(spec, %{workspace: ws, thinking: "high"}))
+
+      assert File.read!(Path.join(rec, "argv")) =~ "--effort\nhigh\n"
+    end
+
+    test "none given, none passed", %{rec: rec, spec: spec} do
+      output!(rec, [assistant("arb done")])
+
+      assert {:ok, _} = CliRunner.run(:implement, spec)
+      refute File.read!(Path.join(rec, "argv")) =~ "--effort"
+    end
+  end
+
   describe "run/2 on the host" do
     test "runs the adapter's CLI in the checkout with the replay's model, and returns the model's own text",
          %{rec: rec, spec: spec} do
