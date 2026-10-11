@@ -21,6 +21,7 @@ defmodule ArbiterWeb.Plugs.ApiConcurrencyLimit do
   import Plug.Conn
 
   alias ArbiterWeb.ErrorResponse
+  alias ArbiterWeb.Plugs.ApiConcurrencyLimit.Counter
 
   @default_limit 128
   @retry_after "1"
@@ -37,10 +38,10 @@ defmodule ArbiterWeb.Plugs.ApiConcurrencyLimit do
         conn
 
       max ->
-        case ArbiterWeb.Plugs.ApiConcurrencyLimit.Counter.acquire(self(), max) do
+        case Counter.acquire(self(), max) do
           :ok ->
             register_before_send(conn, fn conn ->
-              ArbiterWeb.Plugs.ApiConcurrencyLimit.Counter.release(self())
+              Counter.release(self())
               conn
             end)
 
@@ -58,7 +59,7 @@ defmodule ArbiterWeb.Plugs.ApiConcurrencyLimit do
 
   @doc "Number of `/api` requests currently holding a slot."
   @spec in_flight() :: non_neg_integer()
-  def in_flight, do: ArbiterWeb.Plugs.ApiConcurrencyLimit.Counter.in_flight()
+  def in_flight, do: Counter.in_flight()
 
   defp limit do
     case Application.get_env(:arbiter_web, :api_max_concurrency, @default_limit) do

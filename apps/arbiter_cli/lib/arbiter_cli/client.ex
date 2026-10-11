@@ -421,19 +421,8 @@ defmodule ArbiterCli.Client do
       ] ++ opts ++ test_opts()
 
     case Req.request(req_opts) do
-      {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
-        {:ok, resp.body}
-
-      {:ok, %Req.Response{status: status, body: body} = resp}
-      when status == 429 or status == 503 ->
-        if status == 429 or Req.Response.get_header(resp, "retry-after") != [] do
-          {:retry_overloaded, retry_after_ms(resp), http_error(status, body)}
-        else
-          {:error, http_error(status, body)}
-        end
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, http_error(status, body)}
+      {:ok, %Req.Response{} = resp} ->
+        handle_response(resp)
 
       {:error, %{reason: :econnrefused}} ->
         {:error,
@@ -462,6 +451,21 @@ defmodule ArbiterCli.Client do
         {:error, %Error{kind: :transport, message: inspect(other)}}
     end
   end
+
+  defp handle_response(%Req.Response{status: status} = resp) when status in 200..299,
+    do: {:ok, resp.body}
+
+  defp handle_response(%Req.Response{status: status, body: body} = resp)
+       when status == 429 or status == 503 do
+    if status == 429 or Req.Response.get_header(resp, "retry-after") != [] do
+      {:retry_overloaded, retry_after_ms(resp), http_error(status, body)}
+    else
+      {:error, http_error(status, body)}
+    end
+  end
+
+  defp handle_response(%Req.Response{status: status, body: body}),
+    do: {:error, http_error(status, body)}
 
   defp retry_after_ms(resp) do
     with [value | _] <- Req.Response.get_header(resp, "retry-after"),
