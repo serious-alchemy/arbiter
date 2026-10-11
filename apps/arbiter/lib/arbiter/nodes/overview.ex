@@ -11,6 +11,10 @@ defmodule Arbiter.Nodes.Overview do
       (online is a property of the live `Arbiter.Nodes.Session`, not stored)
     * `:health`, `:agent_version`, `:server_version`, `:last_heartbeat_at`
     * `:live` runs and `:max`, the **effective** cap
+    * `:offered` — the slots on offer, `:max` less what the machine has derated itself by
+      (bd-6w7usy, `Arbiter.Machine.Derate`): `:derate` (`:none | :soft | :hard`),
+      `:derate_reason` (`"thermal 96 °C"`), `:temp_c` and `:psi` (the machine's own
+      sensing; `nil` when unknown). `contributes` and placement use `:offered`.
     * `:suggested` (what the node reported), `:override` (the operator's own
       value) and `:ceiling` (what the node's owner set on the node itself, a
       hard bound the override cannot beat)
@@ -32,6 +36,7 @@ defmodule Arbiter.Nodes.Overview do
 
   require Ash.Query
 
+  alias Arbiter.Machine.Derate
   alias Arbiter.Nodes
 
   alias Arbiter.Nodes.{
@@ -63,7 +68,7 @@ defmodule Arbiter.Nodes.Overview do
     nodes = Enum.map(Nodes.list_nodes(), &node_row(&1, Map.get(snapshots, &1.id)))
     remote_ids = snapshots |> Map.values() |> Enum.flat_map(&run_ids/1)
     local = local_row(remote_ids)
-    capacity = Capacity.breakdown(nodes: nodes, local_cap: local.max)
+    capacity = Capacity.breakdown(nodes: nodes, local_cap: local.offered)
     contributions = Map.new(capacity.nodes, &{&1.id, &1.contributes})
     nodes = Enum.map(nodes, &Map.put(&1, :contributes, Map.fetch!(contributions, &1.id)))
 
@@ -114,6 +119,9 @@ defmodule Arbiter.Nodes.Overview do
 
   defp node_row(%Node{} = node, snapshot) do
     capacity = (snapshot && snapshot.capacity) || %{}
+    max = Hello.effective_max_workers(node.max_workers, capacity)
+    pressure = (snapshot && Map.get(snapshot, :pressure)) || %{}
+    derate_level = Map.get(pressure, :level, :none)
 
     %{
       id: node.id,
@@ -130,7 +138,12 @@ defmodule Arbiter.Nodes.Overview do
       proto: snapshot && snapshot.proto,
       caps: (snapshot && snapshot.caps) || %{},
       capacity: capacity,
-      max: Hello.effective_max_workers(node.max_workers, capacity),
+      max: max,
+      offered: offered(max, run_ids(snapshot), derate_level),
+      derate: derate_level,
+      derate_reason: pressure[:reason],
+      temp_c: pressure[:temp_c],
+      psi: pressure[:psi],
       cap_source: Hello.cap_source(node.max_workers, capacity),
       suggested: positive(capacity["suggestion"]),
       override: node.max_workers,
@@ -141,6 +154,13 @@ defmodule Arbiter.Nodes.Overview do
     }
     |> Map.merge(cluster_fields(node, snapshot))
   end
+
+  # The slots a machine offers the scheduler: its cap, less what it has derated itself by
+  # (`Arbiter.Machine.Derate`). A node with no known cap offers none.
+  defp offered(max, run_ids, level) when is_integer(max),
+    do: Derate.apply_level(max, length(run_ids), level)
+
+  defp offered(_max, _run_ids, _level), do: nil
 
   # A3/A7: what a cluster node adds to its row. A node that never connected, and every
   # machine, is a machine with nothing degraded, constrained or pending.
@@ -201,6 +221,7 @@ defmodule Arbiter.Nodes.Overview do
   defp local_row(remote_run_ids) do
     suggested = LocalCapacity.suggestion()
     override = Settings.nodes_local_max_workers()
+    capacity = LocalCapacity.cap()
 
     %{
       id: Nodes.local_name(),
@@ -214,8 +235,13 @@ defmodule Arbiter.Nodes.Overview do
       server_version: Skew.primary().version,
       last_heartbeat_at: nil,
       live: local_live(remote_run_ids),
-      max: override || suggested,
-      contributes: override || suggested,
+      max: capacity.cap,
+      offered: capacity.offered,
+      derate: capacity.derate,
+      derate_reason: capacity.derate_reason,
+      temp_c: capacity.temp_c,
+      psi: local_psi(),
+      contributes: capacity.offered,
       cap_source: if(override, do: :override, else: :suggestion),
       suggested: suggested,
       override: override,
@@ -223,6 +249,13 @@ defmodule Arbiter.Nodes.Overview do
       workspace_ids: [],
       draining?: false
     }
+  end
+
+  defp local_psi do
+    case Arbiter.Machine.Monitor.current() do
+      %{psi: psi} when is_map(psi) -> Map.new(psi, fn {k, v} -> {Atom.to_string(k), v} end)
+      _ -> nil
+    end
   end
 
   # Live runs the primary itself holds: every live `Run` row that no node's

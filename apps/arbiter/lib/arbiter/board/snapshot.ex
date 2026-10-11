@@ -763,7 +763,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # A capacity read that failed plans to the primary's own cap, never to a
   # made-up install-wide number.
-  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().cap
+  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().offered
 
   defp capacity_opts(opts), do: Keyword.take(opts, [:nodes, :remote_available?])
 

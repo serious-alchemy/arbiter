@@ -86,6 +86,7 @@ defmodule Arbiter.Nodes.Session do
 
   use GenServer, restart: :temporary
 
+  alias Arbiter.Machine.Derate
   alias Arbiter.Actor
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{ClusterInstall, Hello, Liveness, Node, Reaping, RunStreams, Skew}
@@ -110,6 +111,10 @@ defmodule Arbiter.Nodes.Session do
     :proto,
     :free_mem,
     :load,
+    # bd-6w7usy: the machine's own sensing and derate decision from its last heartbeat
+    # (`%{level:, temp_c:, psi:, reason:}`); nil until a heartbeat names one, and again
+    # when a heartbeat stops naming it (unknown never derates).
+    :pressure,
     # K12: what the node says it is (`kind`, `k8s_version`, `degraded`, its `hb.capacity`) and
     # the prepare budget granted a run placed on it; a machine node leaves all but the budget
     # at these defaults. Also the session's own budgets for a held run: how long it is held
@@ -1380,7 +1385,8 @@ defmodule Arbiter.Nodes.Session do
         fenced?: false,
         runs: heartbeat_runs(payload["runs"], state.runs),
         free_mem: payload["free_mem"] || state.free_mem,
-        load: payload["load"] || state.load
+        load: payload["load"] || state.load,
+        pressure: pressure(payload)
     }
 
     state =
@@ -1397,6 +1403,24 @@ defmodule Arbiter.Nodes.Session do
       state
     end
   end
+
+  # bd-6w7usy: a heartbeat either carries the machine's derate (`derate`, `temp_c`, `psi`,
+  # `derate_reason`) or says nothing, which reads as no derate. `offered` is not kept: the
+  # agent knows only its own cap, so the primary re-derives it from the operator's
+  # (`Derate.apply_level/3` in `Overview`).
+  defp pressure(%{"derate" => level} = payload) do
+    %{
+      level: Derate.parse_level(level),
+      temp_c: number(payload["temp_c"]),
+      psi: if(is_map(payload["psi"]), do: payload["psi"]),
+      reason: if(is_binary(payload["derate_reason"]), do: payload["derate_reason"])
+    }
+  end
+
+  defp pressure(_payload), do: nil
+
+  defp number(n) when is_number(n), do: n
+  defp number(_), do: nil
 
   # `hb` carries the node's whole per-run table: it replaces ours. A heartbeat
   # without one leaves the table alone.
@@ -1558,6 +1582,7 @@ defmodule Arbiter.Nodes.Session do
       retained: state.retained,
       free_mem: state.free_mem,
       load: state.load,
+      pressure: state.pressure,
       silence_ms: state.clock.() - state.last_hb
     }
   end

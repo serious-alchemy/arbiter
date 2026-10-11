@@ -1079,6 +1079,32 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   def quota_poll_recovered, do: clear_alert(:quota_poll_failing, @quota_poll_alert_key)
 
   @doc """
+  A machine entered a hard derate (bd-6w7usy): too hot to take new work, including
+  resumes and fix passes. One alert per machine, refreshed while it lasts and
+  cleared by `machine_derate_cleared/1`. Running workers are not touched.
+  `info` carries `:reason_text`, `:temp_c` and `:offered`. Best-effort, returns `:ok`.
+  """
+  @spec machine_derated(String.t(), String.t(), map()) :: :ok
+  def machine_derated(ws_id, machine, info) when is_binary(ws_id) and is_binary(machine) do
+    reason = Map.get(info, :reason_text) || "pressure"
+
+    detail =
+      "#{machine} derated itself to hard: #{reason}. It offers no new slots (#{Map.get(info, :offered, 0)} " <>
+        "offered, running workers keep running) and holds new dispatches, resumes and fix " <>
+        "passes until the readings stay clear for the recovery window. " <>
+        "Thresholds: `arb node list`, docs/machine-derate.md. This alert clears by itself."
+
+    raise_alert(:machine_derate, machine, ws_id, "#{machine} hard derate: #{reason}", detail)
+  end
+
+  def machine_derated(_ws_id, _machine, _info), do: :ok
+
+  @doc "Clear a machine's hard-derate alert (bd-6w7usy). A no-op when none is active."
+  @spec machine_derate_cleared(String.t()) :: :ok
+  def machine_derate_cleared(machine) when is_binary(machine),
+    do: clear_alert(:machine_derate, machine)
+
+  @doc """
   Raise a stale Claude quota snapshot as a system alert (bd-2wnkoq): quota
   accounting for one provider account has been blind for longer than
   `Arbiter.Quota.StalenessWatch`'s threshold.

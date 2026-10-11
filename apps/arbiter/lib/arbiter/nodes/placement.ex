@@ -310,7 +310,7 @@ defmodule Arbiter.Nodes.Placement do
     row.state == :online and
       row.health == :ready and
       is_integer(row.max) and row.max > 0 and
-      row.live + Map.get(reserved, row.id, 0) < row.max and
+      row.live + Map.get(reserved, row.id, 0) < Arbiter.Nodes.Capacity.offered(row) and
       network_enforced?(row) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, []))
