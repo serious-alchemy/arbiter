@@ -44,8 +44,57 @@ defmodule Arbiter.Quota.HistoryTest do
     )
   end
 
+  # bd-9ntll1: the budget Budget.Server has published is read from its ETS at capture.
+  test "a capture records the pool's published budget, nil before one is published" do
+    ws = Ash.create!(Workspace, %{name: "default"})
+    account_id = quota_account_id!(ws.id)
+    table = :history_budget_table
+    prior = Application.get_env(:arbiter, :quota_budget_table)
+    Application.put_env(:arbiter, :quota_budget_table, table)
+
+    on_exit(fn ->
+      if prior,
+        do: Application.put_env(:arbiter, :quota_budget_table, prior),
+        else: Application.delete_env(:arbiter, :quota_budget_table)
+    end)
+
+    inputs = fn _calibration ->
+      [%{account_id: account_id, account: nil, pool: "claude", quota: nil, hard: :paused}]
+    end
+
+    start_supervised!(
+      {Quota.Budget.Server,
+       name: :history_budget_server,
+       table: table,
+       inputs: inputs,
+       enabled: true,
+       tick_ms: :never,
+       calibration: :never}
+    )
+
+    {:ok, _} = poll!(ws, 20, 8)
+    assert [nil, nil] = History.list(account_id) |> Enum.map(& &1.budget)
+
+    :ok = Quota.Budget.Server.recompute(:history_budget_server)
+    assert %{budget: budget} = Quota.Budget.Server.get(account_id, "claude", nil, table)
+    assert is_integer(budget)
+
+    {:ok, _} = poll!(ws, 25, 9)
+    assert [nil, nil, ^budget, ^budget] = History.list(account_id) |> Enum.map(& &1.budget)
+  end
+
+  test "capture records nil when the budget table is missing" do
+    ws = Ash.create!(Workspace, %{name: "default"})
+    account_id = quota_account_id!(ws.id)
+    Application.put_env(:arbiter, :quota_budget_table, :no_such_budget_table)
+    on_exit(fn -> Application.delete_env(:arbiter, :quota_budget_table) end)
+
+    {:ok, _} = poll!(ws, 20, 8)
+    assert [nil, nil] = History.list(account_id) |> Enum.map(& &1.budget)
+  end
+
   # bd-c1dief (DC2): every capture records the seats the account holds.
-  test "each row carries the account's live seat count; budget stays unset until DC3" do
+  test "each row carries the account's live seat count" do
     ws = Ash.create!(Workspace, %{name: "default"})
     account_id = quota_account_id!(ws.id)
 
