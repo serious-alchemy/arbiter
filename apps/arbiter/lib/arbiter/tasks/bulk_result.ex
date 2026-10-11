@@ -119,12 +119,13 @@ defmodule Arbiter.Tasks.BulkResult do
   @doc "Build the overall response from already-built outcomes."
   @spec summarize([outcome()]) :: %{results: [outcome()], counts: map()}
   def summarize(results) do
-    base = Map.new(@statuses, &{String.to_existing_atom(&1), 0})
+    freq = Enum.frequencies_by(results, & &1.status)
 
-    counts =
-      Enum.reduce(results, base, fn %{status: s}, acc ->
-        Map.update!(acc, String.to_existing_atom(s), &(&1 + 1))
-      end)
+    counts = %{
+      ok: Map.get(freq, "ok", 0),
+      refused: Map.get(freq, "refused", 0),
+      not_found: Map.get(freq, "not_found", 0)
+    }
 
     %{results: results, counts: Map.put(counts, :total, length(results))}
   end

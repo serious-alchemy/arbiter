@@ -140,7 +140,7 @@
       title: "Promote Backlog -> Queued",
       mcp: ["ticket_promote", "task_promote"],
       cli: ["arb ticket promote"],
-      rest: ["POST /api/issues/:id/promote"],
+      rest: ["POST /api/issues/:id/promote", "POST /api/issues/promote"],
       status: :full,
       divergences: ["D-T-27"]
     },
@@ -149,7 +149,7 @@
       title: "Demote to Backlog",
       mcp: ["ticket_demote", "task_demote"],
       cli: ["arb ticket demote"],
-      rest: ["POST /api/issues/:id/demote"],
+      rest: ["POST /api/issues/:id/demote", "POST /api/issues/demote"],
       status: :full
     },
     %{
@@ -157,7 +157,7 @@
       title: "Re-rank within priority band",
       mcp: ["ticket_rank", "task_rank"],
       cli: ["arb ticket rank"],
-      rest: ["PATCH /api/issues/:id/rank"],
+      rest: ["PATCH /api/issues/:id/rank", "POST /api/issues/rank"],
       status: :full
     },
     %{
@@ -165,7 +165,7 @@
       title: "Pin/unpin a card's rank (rank_pinned)",
       mcp: ["ticket_rank", "task_rank"],
       cli: ["arb ticket rank"],
-      rest: ["PATCH /api/issues/:id/rank"],
+      rest: ["PATCH /api/issues/:id/rank", "POST /api/issues/rank"],
       status: :full,
       note: "`pinned` alone pins/unpins without moving; with a move form it pins with the move (true) or moves then unpins (false)."
     },
