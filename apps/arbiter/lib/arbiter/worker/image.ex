@@ -159,6 +159,13 @@ defmodule Arbiter.Worker.Image do
   @spec label() :: String.t()
   def label, do: @label
 
+  @doc """
+  The label recording the release of the Erlang/OTP the base carries for arb
+  (bd-59m96o). Images built on the base inherit it.
+  """
+  @spec arb_otp_label() :: String.t()
+  def arb_otp_label, do: @arb_otp_label
+
   @doc "The local registry namespace of every Arbiter dev image."
   @spec registry() :: String.t()
   def registry, do: @registry
