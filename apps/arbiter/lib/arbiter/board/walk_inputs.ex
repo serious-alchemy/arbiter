@@ -51,9 +51,17 @@ defmodule Arbiter.Board.WalkInputs do
   It does not read a ticket's checkout: a card whose local worktree holds
   uncommitted work is still offered a node, which dispatch then keeps local.
 
+    * **Its repo** (DC9, `Arbiter.Worker.RepoCap`) — a candidate names the
+      `{workspace_id, repo}` of the card when that repo has a
+      `worker.repos.<repo>.max_concurrent`, and the walk's `repos` holds each
+      capped repo with the implementer runs in it now (counted live). A
+      workspace with no cap reads and counts nothing; the walk reads an unnamed
+      repo as unbounded.
+
   Options (all seams): `:budgets`, `:seats`, `:accounts`, `:local`
   (`%{cap:, used:}`), `:nodes` (overview rows), `:remote_available?`,
-  `:routing_opts` (forwarded to `availability/3`).
+  `:repo_counts` (`%{{workspace_id, repo} => runs}`, or a function returning
+  it), `:routing_opts` (forwarded to `availability/3`).
   """
 
   require Ash.Query
@@ -73,9 +81,11 @@ defmodule Arbiter.Board.WalkInputs do
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Seats
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.RepoCap
 
   @local "local"
 
@@ -99,8 +109,10 @@ defmodule Arbiter.Board.WalkInputs do
     workspaces = workspaces(default, queued)
     links = links(Map.values(workspaces))
     remote = remote_nodes(opts)
+    repo_caps = repo_caps(workspaces)
 
     ctx = %{
+      repo_caps: repo_caps,
       issues: Map.new(queued, &{&1.id, &1}),
       workspaces: workspaces,
       default: default,
@@ -113,6 +125,7 @@ defmodule Arbiter.Board.WalkInputs do
     %{
       pools: budgets |> pools(seats, accounts) |> Map.merge(unmetered(links)),
       nodes: Map.put(remote, @local, local(opts)),
+      repos: repos(repo_caps, opts),
       candidates: &candidates(&1, ctx)
     }
   end
@@ -240,6 +253,58 @@ defmodule Arbiter.Board.WalkInputs do
       is_integer(Map.get(row, :max)) and row.max > 0 and Placement.network_enforced?(row)
   end
 
+  # ---- repos (DC9) ----------------------------------------------------------
+
+  # `%{workspace_id => %{repo => cap}}` for the workspaces that cap a repo.
+  defp repo_caps(workspaces) do
+    for {id, ws} <- workspaces, caps = RepoCap.limits(ws), caps != %{}, into: %{}, do: {id, caps}
+  end
+
+  # Each capped repo and the implementer runs in it now, read live and only
+  # when some workspace caps a repo (I1: nothing is read otherwise).
+  defp repos(repo_caps, _opts) when map_size(repo_caps) == 0, do: %{}
+
+  defp repos(repo_caps, opts) do
+    counts =
+      case Keyword.get_lazy(opts, :repo_counts, fn -> &RepoCap.counts/0 end) do
+        fun when is_function(fun, 0) -> fun.()
+        counts -> counts
+      end
+
+    for {ws_id, caps} <- repo_caps, {repo, cap} <- caps, into: %{} do
+      {{ws_id, repo}, %{cap: cap, used: Map.get(counts, {ws_id, repo}, 0), label: repo}}
+    end
+  end
+
+  # The card's capped repo, as the walk keys it; nothing when the card's repo
+  # has no cap. An implicit repo resolves as dispatch does (the sole configured
+  # repo, else the workspace's `default_repo`).
+  defp put_repo(candidates, card, ctx) do
+    case card_repo(card, ctx) do
+      nil -> candidates
+      key -> Enum.map(candidates, &Map.put(&1, :repo, key))
+    end
+  end
+
+  defp card_repo(card, ctx) do
+    ws_id = Map.get(card, :workspace_id) || (ctx.default && ctx.default.id)
+
+    with %{} = caps <- Map.get(ctx.repo_caps, ws_id),
+         %{repo: stored} <- Map.get(ctx.issues, card.id),
+         repo when is_map_key(caps, repo) <- implied_repo(ws_id, stored) do
+      {ws_id, repo}
+    else
+      _ -> nil
+    end
+  end
+
+  defp implied_repo(ws_id, stored) do
+    case IssueRepo.resolve(ws_id, stored) do
+      {:ok, repo} when is_binary(repo) -> repo
+      _ -> stored
+    end
+  end
+
   # ---- candidates -----------------------------------------------------------
 
   defp candidates(card, ctx) do
@@ -253,14 +318,17 @@ defmodule Arbiter.Board.WalkInputs do
 
     cond do
       is_nil(ws) or is_nil(issue) -> {:none, "its ticket or workspace could not be read"}
-      ProviderRouting.enabled?(ws) -> routed(ws, issue, ctx)
-      true -> pooled(ws, issue, ctx)
+      ProviderRouting.enabled?(ws) -> ws |> routed(issue, ctx) |> with_repo(card, ctx)
+      true -> ws |> pooled(issue, ctx) |> with_repo(card, ctx)
     end
   rescue
     e -> {:none, "its candidates could not be read (#{Exception.message(e)})"}
   catch
     :exit, reason -> {:none, "its candidates could not be read (#{inspect(reason, limit: 5)})"}
   end
+
+  defp with_repo([_ | _] = candidates, card, ctx), do: put_repo(candidates, card, ctx)
+  defp with_repo(other, _card, _ctx), do: other
 
   defp routed(ws, issue, ctx) do
     case ProviderRouting.availability(ws, issue, Keyword.put(ctx.routing_opts, :admission, :walk)) do

@@ -18,7 +18,7 @@ defmodule Arbiter.Board.CapacityView do
         admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil | %{...}},
         pools: [pool],        # one per (account, pool); Budget.to_json/1 plus the display fields
         machines: [machine],  # the primary, then every node
-        repos: [],            # DC9 (the repo cap) fills these
+        repos: [repo],        # one per capped repo (DC9): label, cap, used, free, state
         fair_share: []        # DC10 (workspace fair share) fills these
       }
 
@@ -28,8 +28,14 @@ defmodule Arbiter.Board.CapacityView do
   only under `enforce`: under `legacy` and `shadow` the budgets are shown, but
   today's gate and caps still decide.
 
+  A repo is one `worker.repos.<repo>.max_concurrent` (`Arbiter.Worker.RepoCap`):
+  its `cap`, the implementer runs `used` now (live, with the `holders`), `free`,
+  and `state` (`free` or `full`). Only capped repos are listed. Like a pool, it
+  decides a dispatch only under `enforce`.
+
   Options (all seams): `:mode`, `:budgets`, `:holders`, `:accounts`, `:local`,
-  `:nodes`, `:remote_available?`, `:changes`, `:agreement`.
+  `:nodes`, `:remote_available?`, `:changes`, `:agreement`, `:workspaces`,
+  `:repo_holders`.
   """
 
   require Ash.Query
@@ -43,6 +49,8 @@ defmodule Arbiter.Board.CapacityView do
   alias Arbiter.Quota.Budget
   alias Arbiter.Quota.Budget.Server, as: BudgetServer
   alias Arbiter.Quota.Seats
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.RepoCap
 
   @hard_zero ~w(paused provider_refusing weekly_warning quota_stop unavailable no_reading error)
   @recent_changes 5
@@ -56,7 +64,7 @@ defmodule Arbiter.Board.CapacityView do
       admission: admission(mode, opts),
       pools: pools(opts),
       machines: machines(opts),
-      repos: [],
+      repos: repos(opts),
       fair_share: []
     }
   end
@@ -251,6 +259,49 @@ defmodule Arbiter.Board.CapacityView do
       state: state
     }
   end
+
+  # ---- repos (DC9) ----------------------------------------------------------------
+
+  defp repos(opts) do
+    workspaces = Keyword.get_lazy(opts, :workspaces, &read_workspaces/0)
+    caps = for ws <- workspaces, {repo, cap} <- RepoCap.limits(ws), do: {ws, repo, cap}
+
+    if caps == [] do
+      []
+    else
+      holders = Keyword.get_lazy(opts, :repo_holders, fn -> safe(&RepoCap.holders/0, %{}) end)
+
+      shared =
+        caps
+        |> Enum.frequencies_by(&elem(&1, 1))
+        |> Enum.filter(fn {_repo, n} -> n > 1 end)
+        |> Enum.map(&elem(&1, 0))
+
+      caps
+      |> Enum.map(fn {ws, repo, cap} -> repo_row(ws, repo, cap, holders, repo in shared) end)
+      |> Enum.sort_by(&{&1.workspace, &1.repo})
+    end
+  end
+
+  defp repo_row(ws, repo, cap, holders, shared?) do
+    held = Map.get(holders, {ws.id, repo}, [])
+
+    %{
+      repo: repo,
+      workspace: ws.name,
+      workspace_id: ws.id,
+      label: if(shared?, do: "#{ws.name}/#{repo}", else: repo),
+      cap: cap,
+      used: length(held),
+      free: max(cap - length(held), 0),
+      state: if(length(held) >= cap, do: "full", else: "free"),
+      holders: held,
+      change_command:
+        "arb config set worker.repos.#{repo}.max_concurrent N --workspace #{ws.name}"
+    }
+  end
+
+  defp read_workspaces, do: safe(fn -> Ash.read!(Workspace) end, [])
 
   defp safe(fun, default) do
     fun.()

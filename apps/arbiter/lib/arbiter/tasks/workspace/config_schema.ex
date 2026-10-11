@@ -383,8 +383,14 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       repos           map, repo name -> {seed_paths, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts},
+                      pre_push_max_attempts, max_concurrent},
                       deep-merged over the workspace-level value (per-repo wins)
+                      max_concurrent (per repo only) is a positive integer, unset
+                      by default: the most implementer runs (the implementer,
+                      a fix round, a CI fix pass, a conflict pass; never a
+                      reviewer) in that repo at once. It holds a fresh
+                      dispatch, never a follow-up, and only under
+                      scheduler_admission=enforce (DC9).
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
                       single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]

@@ -112,6 +112,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
+  alias Arbiter.Worker.RepoCap
   alias Arbiter.Worker.ResearchGrant
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
@@ -227,6 +228,7 @@ defmodule Arbiter.Worker.Dispatch do
   after
     Admission.release(task_id)
     LocalCapacity.release(task_id)
+    RepoCap.release(task_id)
   end
 
   defp dispatch_steps(task_id, opts) do
@@ -251,6 +253,7 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, opts} <- ensure_node_capacity(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
+         :ok <- ensure_repo_capacity(task, opts),
          opts = put_security_policy(task, opts),
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_active(task, opts),
@@ -1626,6 +1629,7 @@ defmodule Arbiter.Worker.Dispatch do
              :no_outpost,
              :no_session,
              :account_at_capacity,
+             :repo_at_capacity,
              :quota_held,
              :no_node_capacity,
              :provider_constraint,
@@ -2671,6 +2675,43 @@ defmodule Arbiter.Worker.Dispatch do
 
         :ok
     end
+  end
+
+  # DC9 (bd-7oy77e, design provider-dynamic-concurrency §5.2): the repo cap,
+  # `worker.repos.<repo>.max_concurrent`. A fresh dispatch whose repo already has
+  # that many implementer runs is held (`{:repo_at_capacity, info}`, which every
+  # caller handles as it does a full account); a follow-up never is. The repo
+  # is known only once `maybe_resolve_repo_for_real_work/2` has bound it, so
+  # this sits after that rather than straight after `ensure_node_capacity/2`;
+  # the node and account reservations the earlier gates took are released with
+  # this one when the dispatch returns.
+  #
+  # Until DC8 nothing may change a dispatch decision (I1, I2), so it decides only
+  # under `scheduler_admission: enforce` and reads no count otherwise.
+  # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
+  defp ensure_repo_capacity(%Issue{} = task, opts) do
+    if fresh_admission?(task, opts) and admission_enforced?(opts) do
+      admit_opts = [
+        force: Keyword.get(opts, :force_slot) == true,
+        actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
+      ]
+
+      case RepoCap.admit(task, Keyword.get(opts, :repo), admit_opts) do
+        {:ok, _admitted} -> :ok
+        {:error, _} = refused -> refused
+      end
+    else
+      :ok
+    end
+  end
+
+  defp admission_enforced?(opts) do
+    mode = Keyword.get(opts, :scheduler_admission) || Arbiter.Settings.scheduler_admission()
+    mode == :enforce
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   # RW8 (bd-3igo6h): the second admission gate, after the provider account's.
