@@ -308,6 +308,12 @@ defmodule ArbiterWeb.Api.WorkerController do
       {Arbiter.Accounts.Admission.refusal_message(info),
        %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}
 
+  # DC9: the repo is at its `worker.repos.<repo>.max_concurrent`. `over_cap` overrides.
+  defp refusal_text({:repo_at_capacity, info}, task_id, _verb),
+    do:
+      {Arbiter.Worker.RepoCap.refusal_message(info),
+       %{task_id: task_id, repo: info.repo, cap: info.cap, holders: info.holders}}
+
   # RW8: no node has a free slot (`remote_only`), or the primary's own cap holds
   # a local run. Held, not failed — it starts when capacity frees.
   defp refusal_text({:no_node_capacity, info}, task_id, _verb),

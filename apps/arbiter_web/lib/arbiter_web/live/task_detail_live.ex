@@ -1073,6 +1073,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
 
+  # DC9: the repo is at its `worker.repos.<repo>.max_concurrent`.
+  defp dispatch_failure({:repo_at_capacity, info}),
+    do: Arbiter.Worker.RepoCap.refusal_message(info)
+
   # RW8: no node free, or the primary's own cap holds a local run.
   defp dispatch_failure({:no_node_capacity, info}),
     do: Arbiter.Nodes.Placement.refusal_message(info)

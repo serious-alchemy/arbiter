@@ -720,6 +720,38 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # DC9 (docs/design/provider-dynamic-concurrency.md §5.2)
+  describe "worker.repos.<repo>.max_concurrent validation (bd-7oy77e)" do
+    test "accepts a positive integer, and leaves it unset by default" do
+      assert {:ok, ws} =
+               Ash.create(Workspace, %{
+                 name: "rc-ok-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => 2}}}}
+               })
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "max_concurrent"]) == 2
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "rc-ok-unset-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"repos" => %{"vstim" => %{"seed_paths" => []}}}}
+               })
+    end
+
+    test "rejects zero, negatives, floats, strings and booleans, naming the key" do
+      for bad <- [0, -1, 1.5, "2", true] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "rc-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => bad}}}}
+                 })
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.max_concurrent must be a positive integer"
+      end
+    end
+  end
+
   describe "worker.seed_paths validation (bd-2jerqw)" do
     test "accepts a list of strings workspace-wide and per repo" do
       assert {:ok, _} =

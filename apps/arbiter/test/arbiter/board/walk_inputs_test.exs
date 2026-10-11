@@ -353,4 +353,80 @@ defmodule Arbiter.Board.WalkInputsTest do
       assert account_id == claude.id
     end
   end
+
+  # DC9 (bd-7oy77e): the repo cap, `worker.repos.<repo>.max_concurrent`.
+  describe "the repo layer" do
+    @capped %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => 2}}}}
+
+    test "a capped repo is a set with its runs now; an uncapped one is absent" do
+      ws =
+        workspace!(%{
+          "worker" => %{
+            "repos" => %{"vstim" => %{"max_concurrent" => 2}, "arbiter" => %{"seed_paths" => []}}
+          }
+        })
+
+      walk = gather(ws, [], budgets: [], repo_counts: %{{ws.id, "vstim"} => 1})
+
+      assert walk.repos == %{{ws.id, "vstim"} => %{cap: 2, used: 1, label: "vstim"}}
+    end
+
+    test "no cap anywhere: no repo set, and no run is counted" do
+      ws = workspace!()
+      other = workspace!(%{"worker" => %{"repos" => %{"vstim" => %{"seed_paths" => []}}}})
+      boom = fn -> raise "the repo cap is unset: nothing to count" end
+      ticket = issue!(ws, %{repo: "vstim"})
+
+      walk = gather(ws, [ticket], budgets: [], repo_counts: boom)
+      assert walk.repos == %{}
+
+      # The workspace's candidates name no repo either.
+      assert [%{pool: {:unmetered, "claude"}} = candidate] = walk.candidates.(card(ticket))
+      refute Map.has_key?(candidate, :repo)
+      assert gather(other, [], budgets: [], repo_counts: boom).repos == %{}
+    end
+
+    test "a card's candidates name its (workspace, repo)" do
+      ws = workspace!(@capped)
+      ticket = issue!(ws, %{repo: "vstim"})
+
+      walk = gather(ws, [ticket], budgets: [], repo_counts: %{})
+
+      assert [%{repo: repo}] = walk.candidates.(card(ticket))
+      assert repo == {ws.id, "vstim"}
+    end
+
+    test "the walk skips a card whose repo is at its cap and places the next card" do
+      ws = workspace!(@capped)
+      full = issue!(ws, %{repo: "vstim", priority: 1})
+      other = issue!(ws, %{repo: "elsewhere", priority: 2})
+
+      walk =
+        gather(ws, [full, other], budgets: [], repo_counts: %{{ws.id, "vstim"} => 2})
+
+      plan = Scheduler.plan(%{ready: [card(full), card(other)], running: [], walk: walk})
+
+      assert plan.promote == other.id
+
+      assert %{state: :blocked, wait_cause: {:capacity, :repo}, reason: reason} =
+               Enum.find(plan.entries, &(&1.id == full.id))
+
+      assert reason == "repo vstim: 2 of 2 implementer runs"
+    end
+
+    test "a repo with room places the card and counts it for the next" do
+      ws = workspace!(@capped)
+      a = issue!(ws, %{repo: "vstim", priority: 1})
+      b = issue!(ws, %{repo: "vstim", priority: 2})
+      c = issue!(ws, %{repo: "vstim", priority: 3})
+
+      walk = gather(ws, [a, b, c], budgets: [], repo_counts: %{{ws.id, "vstim"} => 1})
+      plan = Scheduler.plan(%{ready: Enum.map([a, b, c], &card/1), running: [], walk: walk})
+
+      assert plan.promote == a.id
+
+      assert %{state: :blocked, wait_cause: {:capacity, :repo}} =
+               Enum.find(plan.entries, &(&1.id == b.id))
+    end
+  end
 end
