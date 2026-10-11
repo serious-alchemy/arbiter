@@ -286,6 +286,42 @@ boundary is `Arbiter.Worker.Jail`.**
   qwen. The network and credential limits are the jail's and the worker
   environment allowlist's, not qwen's.
 
+**What maps where (bd-az8ycn).** `Arbiter.Agents.Qwen.Security` writes the
+policy into qwen's read-only system settings (`permissions.deny`, `tools.exclude`;
+the jail binds the settings directory read-only over the writable home).
+`Security.coverage/0` records, per safe-default category, which layer carries it,
+and a test holds that list against `SecurityPolicy.safe_default_categories/0`:
+
+| Category | qwen deny rule / tool removal | Jail |
+| --- | --- | --- |
+| `:no_destructive_fs` | `Bash(rm -rf *)` and spellings, `mkfs`, `dd` | read-only root, only the worktree and home writable |
+| `:no_force_push` | `Bash(git push --force *)`, `-f` | none (best effort) |
+| `:no_secret_reads` | `Read(**/.env)`, `**/*.pem`, `**/.ssh/**`, … | credential paths hidden (`Jail.Hide`) |
+| `:no_outside_writes` | `Edit(/etc/**)`, credential dirs, the spawn's `QWEN_HOME` | read-only root |
+| `:no_pr_create` | `Bash(gh pr create *)`, `glab mr create` | none (best effort) |
+| `:no_async_wait` | none: qwen has no Monitor / scheduler tool | pid namespace: a leaked background process dies with the run |
+| `:no_public_upload` | `WebFetch(domain:<host>)`, `Bash(curl *<host>*)` | egress proxy refuses the paste hosts |
+| `:no_gh_publish` | `Bash(gh gist create *)`, `gh issue comment` | none (best effort) |
+| `:no_ci_watch` | `Bash(gh run watch *)`, `gh pr checks` | none (best effort) |
+
+`network: false` removes `web_fetch` / `web_search` and denies the network
+commands. A **review dispatch** (the policy denies `Write`) loses `edit` and
+`write_file` and gets the worktree `--ro-bind`-ed: the reviewer cannot write it
+however it tries. The rule grammar and the settings keys are qwen's documented
+ones, test-covered here but **not yet run against a live qwen**.
+
+**Network.** A jailed qwen has its own network namespace. A loopback model
+endpoint (Ollama on `127.0.0.1:11434`) is reached through a fixed-destination
+`egress_tunnels` bridge on the same port; a hosted endpoint goes through the
+filtering proxy, whose baseline is the endpoint's `host:port`, the ticket's git
+remote, the workspace's `sandbox.allow_hosts` and the ticket's `network:` grants.
+Unlike agy's, the qwen proxy **enforces** (`config :arbiter,
+:worker_qwen_egress_enforce`, default `true`): any other `CONNECT` is answered
+`403` and recorded in `egress_events`. A run that exits non-zero on such a
+refusal (`Proxy response (403)`, `CONNECT tunnel failed`, `ENETUNREACH`,
+`EAI_AGAIN`) is classified `:egress_denied`, whose remediation is an allowlist
+entry, not a re-dispatch.
+
 **Repo-config vectors.** qwen reads configuration from the checked-out
 repository, and the worker is working in a repo whose content a task author, a
 dependency or a previous worker may have written. Anything qwen loads from the

@@ -165,6 +165,12 @@ defmodule Arbiter.Worker.StopReason do
       exit, the same way `:stream_schema_drift` is: the marker is agy's own
       fixed harness wording, not model prose that could coincidentally
       appear in a real review's output.
+    * `:egress_denied` — a jailed qwen run could not reach a host the worker
+      jail's egress proxy does not allow (a proxy `403` on `CONNECT`, or no route
+      in the network namespace) and exited non-zero (bd-az8ycn). Built by
+      `Arbiter.Agents.Qwen.Egress.stop_reason/2` from the output tail. The cause
+      is the allowlist, not the task or the agent: remediation is a
+      `sandbox.allow_hosts` entry or a `network:` grant, not a re-dispatch.
     * `:spawn_failed` — a step of `Arbiter.Worker.Dispatch.dispatch/2` AFTER
       `start_worker/3` failed (e.g. a transient network/VPN outage during the
       agent subprocess spawn, or a workflow-machine attach failure). Not a
@@ -201,6 +207,8 @@ defmodule Arbiter.Worker.StopReason do
   unaffected.
   """
 
+  alias Arbiter.Agents.Qwen.Egress, as: QwenEgress
+
   @typedoc "Classified stop category."
   @type category ::
           :auth_expired
@@ -232,6 +240,7 @@ defmodule Arbiter.Worker.StopReason do
           | :node_lost
           | :pod_disrupted
           | :placement_refused
+          | :egress_denied
 
   @type t :: %__MODULE__{
           category: category(),
@@ -530,11 +539,26 @@ defmodule Arbiter.Worker.StopReason do
   def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
     # qwen's documented exit codes (auth, config, turn/token budget) are
     # authoritative and outrank incidental output vocabulary.
-    case provider_exit_reason(provider, exit_status) do
-      %__MODULE__{} = reason -> reason
-      nil -> classify_by_output(exit_status, output_lines, provider)
+    with nil <- provider_exit_reason(provider, exit_status),
+         nil <- provider_output_reason(provider, exit_status, output_lines) do
+      classify_by_output(exit_status, output_lines, provider)
     end
   end
+
+  # A jailed qwen whose connection the egress proxy refused. Ahead of the
+  # generic signatures: a refused CONNECT reads like a gateway error, and the
+  # remediation (an allowlist entry) is not "retry". A signal death or a clean
+  # exit says nothing about the network, and tool-result lines are the worker's
+  # own commands failing, not the run's stop cause (`signature_haystack/1`).
+  defp provider_output_reason("qwen", exit_status, output_lines)
+       when is_integer(exit_status) and exit_status != 0 do
+    haystack = signature_haystack(output_lines)
+
+    if is_nil(signal_for(exit_status)) and QwenEgress.denied?(haystack),
+      do: QwenEgress.stop_reason(exit_status, haystack)
+  end
+
+  defp provider_output_reason(_provider, _exit_status, _output_lines), do: nil
 
   defp provider_exit_reason("qwen", exit_status),
     do: Arbiter.Agents.Qwen.Stream.stop_reason(exit_status)
@@ -1240,6 +1264,7 @@ defmodule Arbiter.Worker.StopReason do
         :node_lost -> "node lost (run interrupted)"
         :pod_disrupted -> "pod disrupted (run interrupted)"
         :placement_refused -> "node refused the run (held)"
+        :egress_denied -> "egress denied by the worker jail (host not allowlisted)"
       end
 
     case reason.exit_status do

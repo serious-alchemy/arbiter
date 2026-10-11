@@ -203,6 +203,7 @@ defmodule Arbiter.Worker.Jail do
           optional(:home) => String.t() | nil,
           optional(:git) => git() | nil,
           optional(:writable_paths) => [String.t()],
+          optional(:readonly_paths) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
           optional(:worktree_readonly) => boolean(),
           optional(:mask_paths) => [String.t()],
@@ -237,6 +238,10 @@ defmodule Arbiter.Worker.Jail do
       exported as `HOME`, and where the per-worker toolchain dirs are made.
     * `:writable_paths` — extra writable paths (`sandbox.writable_paths`);
       normalized by `writable_paths/1`.
+    * `:readonly_paths` — absolute paths `--ro-bind-try`ed after the writable
+      worktree and `:home`, so a path inside either (qwen's system settings dir
+      under its `$HOME`, bd-az8ycn) is read-only even though its parent is
+      writable. Relative and blank entries are dropped.
     * `:env` — extra `{name, value}` pairs set inside the jail.
     * `:git_ssh_key` — the path of the worker's repo-scoped deploy key (G16, bd-9cygoo,
       `Arbiter.Worker.GitCredential`). It is bound read-only at its own path over the
@@ -284,6 +289,7 @@ defmodule Arbiter.Worker.Jail do
           network_env(network) ++
             ssh_env(network, git_ssh_key) ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
+        readonly_paths: readonly_paths(Keyword.get(opts, :readonly_paths, [])),
         network: network,
         ssh_agent: ssh_agent,
         git_ssh_key: git_ssh_key,
@@ -564,6 +570,7 @@ defmodule Arbiter.Worker.Jail do
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
+      Enum.flat_map(Map.get(spec, :readonly_paths, []), &["--ro-bind-try", &1, &1]),
       git_args(Map.get(spec, :git), worktree),
       ssh_agent_args(Map.get(spec, :ssh_agent)),
       git_key_args(Map.get(spec, :git_ssh_key)),
@@ -863,6 +870,11 @@ defmodule Arbiter.Worker.Jail do
   defp clone_guard_args(_git, _common), do: []
 
   defp bind(path), do: ["--bind", path, path]
+
+  defp readonly_paths(paths) when is_list(paths),
+    do: Enum.filter(paths, &(is_binary(&1) and Path.type(&1) == :absolute))
+
+  defp readonly_paths(_), do: []
   defp ro_bind(path), do: ["--ro-bind", path, path]
 
   @doc """

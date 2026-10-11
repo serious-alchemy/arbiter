@@ -263,6 +263,14 @@ defmodule Arbiter.Worker.JailTest do
       assert {"/h/agy", "/h/agy"} in flag_pairs(argv, "--bind")
       assert ["--chdir", "/w/wt"] in Enum.chunk_every(argv, 2, 1)
     end
+
+    test "readonly_paths are ro-bound after the writable home so they win over it (bd-az8ycn)" do
+      spec = Map.put(@spec_linked, :readonly_paths, ["/h/agy/.qwen-system"])
+      argv = Jail.argv(spec, ["qwen"])
+
+      assert {"/h/agy/.qwen-system", "/h/agy/.qwen-system"} in flag_pairs(argv, "--ro-bind-try")
+      assert index_of_flag(argv, "/h/agy/.qwen-system") > index_of_flag(argv, "/h/agy")
+    end
   end
 
   describe "escape-vector masks (bd-7o08mj)" do
@@ -730,6 +738,16 @@ defmodule Arbiter.Worker.JailTest do
 
       refute {base, base} in flag_pairs(argv, "--bind")
       assert {base, base} in flag_pairs(argv, "--ro-bind")
+    end
+
+    test "readonly_paths threads through to a --ro-bind-try, only for absolute paths", %{
+      base: base
+    } do
+      assert {:ok, argv} =
+               Jail.wrap(["qwen"], worktree: base, readonly_paths: ["/opt/ro", "relative", ""])
+
+      assert {"/opt/ro", "/opt/ro"} in flag_pairs(argv, "--ro-bind-try")
+      refute {"relative", "relative"} in flag_pairs(argv, "--ro-bind-try")
     end
 
     test "binds the worker temp root writable so a run's TMPDIR is usable (bd-5ad4ch)", %{
