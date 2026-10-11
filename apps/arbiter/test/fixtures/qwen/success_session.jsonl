@@ -1,0 +1,4 @@
+{"type":"user","sessionId":"8e0b4a52","message":{"role":"user"}}
+{"type":"system","subtype":"ui_telemetry","sessionId":"8e0b4a52-0c4e-4f43-9a6a-3d6d1f1f0a11","systemPayload":{"uiEvent":{"event.name":"qwen-code.api_response","model":"qwen3-coder:30b","input_token_count":1200,"output_token_count":40,"cached_content_token_count":0,"thoughts_token_count":0,"tool_token_count":0,"total_token_count":1240}}}
+{"type":"system","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"event.name":"qwen-code.tool_call"}}}
+{"type":"system","subtype":"ui_telemetry","sessionId":"8e0b4a52-0c4e-4f43-9a6a-3d6d1f1f0a11","systemPayload":{"uiEvent":{"event.name":"qwen-code.api_response","model":"qwen3-coder:30b","input_token_count":1300,"output_token_count":12,"cached_content_token_count":1200,"thoughts_token_count":8,"tool_token_count":0,"total_token_count":1320}}}

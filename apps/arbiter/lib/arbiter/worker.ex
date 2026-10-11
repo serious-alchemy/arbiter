@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Quota.Gate.Snapshot, as: GateSnapshot
   alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictAbortFindings
@@ -3105,11 +3106,14 @@ defmodule Arbiter.Worker do
   # `:memory_cap_exceeded` regardless of what the (bare 137) exit status or the
   # output tail suggest.
   defp stop_reason_for(session, exit_status, output_lines) do
-    case Map.get(session, :memory_cap_exceeded) do
-      %{} = info ->
+    cond do
+      info = Map.get(session, :memory_cap_exceeded) ->
         Arbiter.Worker.StopReason.memory_cap_exceeded(info, exit_status)
 
-      _ ->
+      info = Map.get(session, :qwen_retry_hold) ->
+        RetryHold.stop_reason(info, exit_status)
+
+      true ->
         Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
     end
   end
@@ -3722,6 +3726,7 @@ defmodule Arbiter.Worker do
           |> Arbiter.Worker.ClaudeSession.handle_data(fragment, eol?)
           |> count_stdout(fragment, eol?)
 
+        updated = hold_qwen_retry_loop(state, port, session, updated)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
         sync_session_meta(new_state, port)
@@ -3729,6 +3734,22 @@ defmodule Arbiter.Worker do
       :error ->
         state
     end
+  end
+
+  # bd-1po4s4: qwen's 429 retry loop spent its wall-time budget
+  # (`Qwen.RetryHold`). Kill the process tree once, leaving the port open so the
+  # normal exit path runs and `stop_reason_for/3` classifies it as a quota hold.
+  defp hold_qwen_retry_loop(state, port, before, current) do
+    if Map.get(current, :qwen_retry_hold) && !Map.get(before, :qwen_retry_hold) do
+      Logger.warning("Worker: task=#{state.task_id} qwen 429 retry budget spent; stopping run")
+
+      case safe_port_os_pid(port) do
+        {:ok, os_pid} -> OsProcess.kill_tree(os_pid)
+        _ -> :ok
+      end
+    end
+
+    current
   end
 
   # bd-4p1vui (docs/design/remote-workers.md §10.4.5): the stdout bytes a remote session has
