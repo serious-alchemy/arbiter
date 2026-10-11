@@ -957,9 +957,10 @@ it's trusted.
   checked.
 - A model, or a tier, with no rank on the ladder is never below a floor: a
   floor is only enforced where both sides are known.
+- **Per-ticket markers (R14, bd-4rq7wt), O11 resolved:** markers live in G12's `issues.permissions` as `blast:<name>` (kind `:blast`). A marker has no grant or reach: anyone with authority may add it, only the operator may remove it, and it is never projected into a run. Its tier is `guardrails.bindings."blast:<name>".min_model_tier`, else `premium`. `Floors.clamp/4` and `Floors.gate/3` take the higher of the repo floor and the ticket's marker floor; the stamp carries `source: :repo | :marker`. A ticket with no marker is byte-for-byte unchanged.
 - Not built: the coordinator-may-raise / operator-may-lower authority split on
-  `routing.floors` (config writes carry no such distinction today), and the
-  phase 2 per-ticket markers (R14). Both Loop paths — the canary and
+  `routing.floors` (config writes carry no such distinction today). Both Loop
+  paths — the canary and
   `Canary.eligible/1`'s `routing.rules`-only patch — already cannot reach it.
 
 ### 6.5 When nothing survives

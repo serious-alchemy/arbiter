@@ -203,7 +203,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   # budgets sends none of these keys and prints none of it.
   defp emit_capacity(body) do
     emit_admission(body["admission"])
-    emit_table("Providers", ~w(budget seats free why), body["budgets"], &pool_row/1)
+    emit_table("Providers", ~w(budget seats free mode why), body["budgets"], &pool_row/1)
 
     emit_table(
       "Machines",
@@ -218,9 +218,18 @@ defmodule ArbiterCli.Cmd.Scheduler do
 
   defp emit_admission(%{"label" => label} = admission) do
     IO.puts("Admission: #{label}#{admission_note(admission)}")
+    emit_overrides(admission["overrides"])
   end
 
   defp emit_admission(_none), do: :ok
+
+  # O11: accounts whose own `admission` overrides the installation key.
+  defp emit_overrides([_ | _] = overrides) do
+    list = Enum.map_join(overrides, ", ", &"#{&1["account"]}=#{&1["mode"]}")
+    IO.puts("Account overrides: #{list}")
+  end
+
+  defp emit_overrides(_none), do: :ok
 
   defp admission_note(
          %{"agreement" => %{"agrees" => agrees, "comparable" => comparable} = a} = adm
@@ -242,8 +251,14 @@ defmodule ArbiterCli.Cmd.Scheduler do
 
   defp pool_row(pool) do
     {pool["label"] || pool["pool"],
-     [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"])], pool["reason"]}
+     [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"]), mode_cell(pool)],
+     pool["reason"]}
   end
+
+  # O11: the pool's effective admission mode and where it came from.
+  defp mode_cell(%{"mode" => mode, "mode_source" => "account"}), do: "#{mode} (account)"
+  defp mode_cell(%{"mode" => mode}), do: mode
+  defp mode_cell(_), do: "-"
 
   # bd-6w7usy: `offered` is the cap less any self-derate; `why` names the reason when derated.
   defp machine_row(m) do

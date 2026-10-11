@@ -25,7 +25,9 @@ defmodule Arbiter.Accounts.FieldsTest do
 
     test "the MCP surface is the update set minus identity" do
       assert Enum.sort(Fields.names(:mcp)) ==
-               Enum.sort(~w(label plan enabled max_concurrent budget_split quota_config))
+               Enum.sort(
+                 ~w(label plan enabled max_concurrent budget_split admission quota_config)
+               )
     end
   end
 

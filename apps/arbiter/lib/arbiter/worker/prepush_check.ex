@@ -51,6 +51,22 @@ defmodule Arbiter.Worker.PrepushCheck do
   `steps` is the per-step record (`t:step_result/0`) the worker writes to the
   run (`Arbiter.Workers.RunStep` rows) and `arb worker show` renders.
 
+  ## Offline, with no per-run proxy (bd-9xcogk)
+
+  The gate never has egress of its own to rely on. A container run (local or on a node)
+  gets no egress bridge and none of the agent's `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`
+  (`Arbiter.Worker.GateEnv`); a host run has loopback proxies of the server's environment
+  unset. The deps and `_build` (with test-only NIFs such as `lazy_html`) must already be in
+  the worktree, and a copied `_build` must point at *this* worktree: before the first step
+  the gate re-points its absolute `priv`/`include` links at the worktree's own `deps/`
+  (`Arbiter.Worker.DepsRelocate.relink/1`), so a NIF an earlier seed reached through a
+  directory that is gone (or is the source checkout) is found, and Mix has no reason to
+  rebuild the dependency offline. Seeding does the same plus the manifests
+  (`Worktree.seed_compiled_deps/3`, `DepsCache.install/3`). When the deps are
+  still not there, the failure (`Error happened while installing … from precompiled
+  binary`, `Could not compile with "make"`, a failed fetch while building a dependency) is
+  infra, and the steps after the first one that hit it are skipped unrun.
+
   ## Where it runs
 
   On the host, in the worktree, under coreutils `timeout` (SIGTERM to its whole
@@ -66,6 +82,8 @@ defmodule Arbiter.Worker.PrepushCheck do
   the worktree has neither (bd-9rrrgk).
   """
 
+  alias Arbiter.Worker.DepsRelocate
+  alias Arbiter.Worker.GateEnv
   alias Arbiter.Worker.PrepushCheck.Recipe
   alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.ReleaseEnv
@@ -74,6 +92,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   @kill_after_seconds 10
   @max_output_bytes 16_000
+  @offline_deps_label "could not fetch or build a dependency (the gate has no network)"
 
   @type spec :: Recipe.spec() | map()
 
@@ -124,6 +143,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   @spec run_steps(spec(), String.t(), keyword()) :: %{result: result(), steps: [step_result()]}
   def run_steps(spec, worktree, opts \\ []) when is_binary(worktree) do
     with :ok <- check_worktree(worktree),
+         :ok <- DepsRelocate.relink(worktree),
          {:ok, exec, cleanup} <- executor(worktree, opts) do
       try do
         run_all(spec, worktree, exec, opts)
@@ -160,7 +180,7 @@ defmodule Arbiter.Worker.PrepushCheck do
             {:error, _} -> nil
           end
 
-        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp), nil)
+        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp) ++ GateEnv.host_unsets(), nil)
 
         exec = fn command, seconds ->
           args = [
@@ -184,8 +204,41 @@ defmodule Arbiter.Worker.PrepushCheck do
     deadline = System.monotonic_time(:millisecond) + budget * 1000
     touched = touched_for(steps, worktree, Keyword.get(opts, :target))
 
-    results = Enum.map(steps, &run_step(&1, worktree, touched, deadline, exec))
+    results = run_each(steps, worktree, touched, deadline, exec)
     %{result: overall(results), steps: results}
+  end
+
+  # In order. A step that found a dependency it cannot fetch or build in the gate
+  # (no network) says the same of every later step, each of which would burn its
+  # timeout retrying: they are recorded as skipped infra without running.
+  defp run_each(steps, worktree, touched, deadline, exec) do
+    {results, _halt} =
+      Enum.map_reduce(steps, nil, fn
+        step, nil ->
+          result = run_step(step, worktree, touched, deadline, exec)
+          {result, offline_deps_halt(result)}
+
+        step, label ->
+          {not_run(step, label), label}
+      end)
+
+    results
+  end
+
+  defp offline_deps_halt(%{status: :skipped, reason: :infra, output: output}) do
+    label = infra_label(output)
+    if label == @offline_deps_label, do: label
+  end
+
+  defp offline_deps_halt(_), do: nil
+
+  defp not_run(step, label) do
+    record(
+      step,
+      {:infra, label, "not run: an earlier step could not fetch or build a dependency"},
+      0,
+      0
+    )
   end
 
   # A spec built outside `Recipe` (the legacy shape) is one step.
@@ -295,6 +348,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   # `skipped: infra` and the gate fails open (bd-9rrrgk). Matched on the output
   # of a failing step only, and on phrases a code failure does not print.
   @infra_signatures [
+    {@offline_deps_label, :offline_deps},
     {"dependencies are not available (mix deps.get)",
      ~r/the dependency is not available|Unchecked dependencies for environment|Can't continue due to errors on dependencies|dependency [\w:]+ is not available|run [`"']?mix deps\.get/i},
     {"deps missing for the formatter's import_deps",
@@ -306,9 +360,36 @@ defmodule Arbiter.Worker.PrepushCheck do
   ]
 
   defp infra_signature(output) when is_binary(output) do
-    Enum.find_value(@infra_signatures, fn {label, re} ->
-      if Regex.match?(re, output), do: label
+    Enum.find_value(@infra_signatures, fn {label, matcher} ->
+      if signature_match?(matcher, output), do: label
     end)
+  end
+
+  defp signature_match?(:offline_deps, output), do: offline_deps?(output)
+  defp signature_match?(re, output), do: Regex.match?(re, output)
+
+  # A dependency the gate could not fetch or build (it has no network). The first
+  # two phrases only Mix/elixir_make print. The bare network errors (git, curl) are
+  # not specific to it, so they count only beside Mix's own report that it was
+  # fetching or compiling a dependency, and never in the output of a test run that
+  # got far enough to print an ExUnit failure summary: a failing test that prints
+  # captured git stderr is a code failure.
+  @offline_deps_strong ~r/Error happened while installing \S+ from precompiled binary|Could not compile with "make"|Could not (install|find) Hex/
+  @offline_deps_network ~r/unable to access 'https?:|Failed to connect to \S+ port \d+|Could not resolve host|Failed to fetch record for/
+  @mix_dep_context ~r/\*\* \(Mix\)|\belixir_make\b|==> \w+\nCompiling|Failed to fetch|mix deps\.(get|compile)/
+  @exunit_failures ~r/\b\d+ tests?, [1-9]\d* failures?/
+
+  defp offline_deps?(output) do
+    cond do
+      Regex.match?(@offline_deps_strong, output) ->
+        true
+
+      Regex.match?(@exunit_failures, output) ->
+        false
+
+      true ->
+        Regex.match?(@offline_deps_network, output) and Regex.match?(@mix_dep_context, output)
+    end
   end
 
   defp record(step, outcome, duration_ms, limit) do

@@ -163,6 +163,7 @@ defmodule Arbiter.Loop.FailureClassifier do
     placement_refused: {:operational, :placement_refused},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
+    container_create_failed: {:operational, :spawn_failure},
     # bd-b6noq9: the run's workspace was deleted while it was alive. Always
     # infrastructure, never agent quality — and conclusive on its own,
     # because the transcript of such a run is nothing but git failures that

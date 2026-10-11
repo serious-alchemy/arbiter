@@ -2369,7 +2369,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp floor_verdict(task, opts) do
     workspace = load_workspace(task)
 
-    case Floors.gate(workspace, Keyword.get(opts, :repo) || task.repo) do
+    case Floors.gate(workspace, Keyword.get(opts, :repo) || task.repo, task) do
       nil ->
         :ok
 
@@ -2729,7 +2729,7 @@ defmodule Arbiter.Worker.Dispatch do
   # under `scheduler_admission: enforce` and reads no count otherwise.
   # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
   defp ensure_repo_capacity(%Issue{} = task, opts) do
-    if fresh_admission?(task, opts) and admission_enforced?(opts) do
+    if fresh_admission?(task, opts) and admission_enforced?(task, opts) do
       admit_opts = [
         force: Keyword.get(opts, :force_slot) == true,
         actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
@@ -2744,13 +2744,37 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp admission_enforced?(opts) do
-    mode = Keyword.get(opts, :scheduler_admission) || Arbiter.Settings.scheduler_admission()
+  # The explicit `:scheduler_admission` opt (a test seam) wins; otherwise the
+  # effective mode of the account this dispatch runs on (O11: its override, else
+  # the installation key).
+  defp admission_enforced?(task, opts) do
+    mode =
+      case Keyword.get(opts, :scheduler_admission) do
+        nil -> dispatch_account_mode(task, opts)
+        explicit -> explicit
+      end
+
     mode == :enforce
   rescue
     _ -> false
   catch
     :exit, _ -> false
+  end
+
+  defp dispatch_account_mode(%Issue{} = task, opts) do
+    account =
+      case Keyword.get(opts, :routing_decision) do
+        %{"account_id" => id} when is_binary(id) ->
+          Arbiter.Accounts.Resolver.get(id)
+
+        _ ->
+          Arbiter.Accounts.Resolver.account(
+            task.workspace_id,
+            quota_gate_provider(task, load_workspace(task), opts)
+          )
+      end
+
+    Arbiter.Accounts.AdmissionMode.mode(account)
   end
 
   # RW8 (bd-3igo6h): the second admission gate, after the provider account's.

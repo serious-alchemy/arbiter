@@ -130,6 +130,30 @@ defmodule Arbiter.Board.AdmissionShadowTest do
       assert %{"policy" => "enforce"} = AdmissionShadow.dispatch_record(board, :enforce, "bd-a")
     end
 
+    test "with a pool resolver, the record carries the placed account's mode (O11)" do
+      resolver = fn
+        @gpt -> :enforce
+        _ -> :shadow
+      end
+
+      # the walk places bd-b on @gpt; bd-a was dispatched
+      assert %{"policy" => "enforce"} = AdmissionShadow.dispatch_record(board(), resolver, "bd-a")
+
+      claude_board =
+        board(%{
+          walk: %{
+            promote: "bd-a",
+            placements: [%{id: "bd-a", pool: @claude, node: "local"}],
+            entries: [walk_entry("bd-a", :next, nil, pair: %{pool: @claude, node: "local"})],
+            pools: @pools,
+            nodes: %{}
+          }
+        })
+
+      assert %{"policy" => "shadow"} =
+               AdmissionShadow.dispatch_record(claude_board, resolver, "bd-a")
+    end
+
     test "a walk with no candidate is not comparable" do
       board =
         board(%{

@@ -119,6 +119,22 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ "today's gate and caps still decide"
     end
 
+    test "shows each pool's effective mode and the account overrides (O11)" do
+      body =
+        capacity_body(%{"overrides" => [%{"account" => "claude:emricare", "mode" => "enforce"}]})
+
+      body =
+        update_in(body["budgets"], fn [first | rest] ->
+          [Map.merge(first, %{"mode" => "enforce", "mode_source" => "account"}) | rest]
+        end)
+
+      stub_get("/api/scheduler/status", body)
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Account overrides: claude:emricare=enforce"
+      assert out =~ "enforce (account)"
+    end
+
     test "enforce does not say shadow" do
       stub_get(
         "/api/scheduler/status",
@@ -136,8 +152,8 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
 
       assert out =~ "Providers"
-      assert out =~ ~r/claude:default\s+3\s+3\s+0\s+ceiling max_concurrent 3/
-      assert out =~ ~r/antigravity:default gemini\s+0\s+0\s+0\s+weekly 0.43 used/
+      assert out =~ ~r/claude:default\s+3\s+3\s+0\s+\S+\s+ceiling max_concurrent 3/
+      assert out =~ ~r/antigravity:default gemini\s+0\s+0\s+0\s+\S+\s+weekly 0.43 used/
       assert out =~ ~r/unmetered-pool\s+unlimited\s+2\s+unlimited/
     end
 

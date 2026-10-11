@@ -827,7 +827,7 @@ defmodule Arbiter.Agents.ProviderRouting do
       capability: capability_gate(ws, task, opts),
       scoring: scoring_config(ws, task, opts),
       allow_upgrade: allow_upgrade(ws),
-      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
+      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task), task),
       guardrails: guardrail_gate(task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws),
       walk?: walk?(opts)

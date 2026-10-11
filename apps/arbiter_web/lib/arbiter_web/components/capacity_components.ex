@@ -58,6 +58,9 @@ defmodule ArbiterWeb.CapacityComponents do
     """
   end
 
+  # O11: a pool decides under its own account's mode; older rows carry none.
+  defp pool_decides?(pool, admission), do: Map.get(pool, :decides, admission.decides)
+
   defp mode_title(%{decides: true}),
     do: "Budgets admit dispatches (scheduler_admission: enforce)."
 
@@ -84,8 +87,21 @@ defmodule ArbiterWeb.CapacityComponents do
       <p class="m-0 font-medium text-[var(--text-title)]">
         {@pool.label}: {@pool.seats} of {budget_text(@pool.budget)} seats
       </p>
-      <p :if={not @admission.decides} class="m-0 text-[10.5px] text-[var(--text-label)]">
+      <p
+        :if={not pool_decides?(@pool, @admission)}
+        class="m-0 text-[10.5px] text-[var(--text-label)]"
+      >
         Shadow: the budget is recorded beside today's decision; today's gate and caps still decide.
+      </p>
+      <p
+        :if={Map.get(@pool, :mode)}
+        class="m-0 text-[10.5px] text-[var(--text-label)]"
+        data-pool-admission={@pool.mode}
+        data-pool-admission-source={Map.get(@pool, :mode_source)}
+      >
+        Admission: {@pool.mode} ({if Map.get(@pool, :mode_source) == "account",
+          do: "this account's override",
+          else: "installation default"})
       </p>
       <p class="m-0 text-[var(--text-primary)]" data-budget-reason>{@pool.reason}</p>
       <ul

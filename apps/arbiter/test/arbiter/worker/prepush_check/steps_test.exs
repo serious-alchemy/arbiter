@@ -360,6 +360,192 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
                PrepushCheck.run_steps(spec, repo, exec: exec)
     end
 
+    # bd-9xcogk: what every step printed on bd-5w9hgm / bd-325sps once the run's
+    # egress proxy was gone and `lazy_html` (a test-only NIF dep) was not compiled.
+    @lazy_html_failure """
+    Using HTTP_PROXY: http://127.0.0.1:3128
+    Error happened while installing lazy_html from precompiled binary: cannot download: :enoent
+    fatal: unable to access 'https://github.com/lexbor/lexbor.git/': Failed to connect to 127.0.0.1 port 3128
+    ** (Mix) Could not compile with "make" (exit status: 2).
+    """
+
+    test "a dependency that cannot be built or fetched offline is infra, not a code failure",
+         %{repo: repo} do
+      exec = fn _command, _timeout_s -> {@lazy_html_failure, 1} end
+      spec = spec([step("compile", "true")])
+
+      assert %{result: {:error, {:infra, "compile", label}}, steps: [compile]} =
+               PrepushCheck.run_steps(spec, repo, exec: exec)
+
+      assert label =~ "fetch or build a dependency"
+      assert compile.status == :skipped and compile.reason == :infra
+      assert compile.output =~ "skipped: infra"
+    end
+
+    test "each piece of that failure is infra on its own", %{repo: repo} do
+      for output <- [
+            "Error happened while installing lazy_html from precompiled binary: cannot download",
+            "** (Mix) Command \"git --git-dir=.git fetch\" failed\nfatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 3128",
+            "** (Mix) Could not compile with \"make\" (exit status: 2).",
+            "** (Mix) Could not resolve host: repo.hex.pm",
+            "Failed to fetch record for 'hexpm/ash' from registry (using cache): :econnrefused"
+          ] do
+        spec = spec([step("compile", "true")])
+
+        assert %{result: {:error, {:infra, "compile", _}}} =
+                 PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {output, 1} end),
+               "not infra: #{output}"
+      end
+    end
+
+    test "a bare network error with no Mix dependency context is a code failure", %{repo: repo} do
+      spec = spec([step("tests", "true")])
+
+      out =
+        "fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 3128"
+
+      assert %{result: {:failed, 1, ^out}} =
+               PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end)
+    end
+
+    test "a real compile error that merely mentions make is still a code failure", %{repo: repo} do
+      spec = spec([step("compile", "true")])
+      out = "** (CompileError) lib/a.ex:3: undefined function make_thing/0"
+
+      assert %{result: {:failed, 1, ^out}} =
+               PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {out, 1} end)
+    end
+
+    test "once a step finds the deps unusable offline, the rest are skipped unrun", %{repo: repo} do
+      test_pid = self()
+
+      exec = fn command, _timeout_s ->
+        send(test_pid, {:ran, command})
+        {@lazy_html_failure, 1}
+      end
+
+      spec = spec([step("compile", "one"), step("credo", "two"), step("tests", "three")])
+
+      assert %{result: {:error, {:infra, "compile", _}}, steps: [first, second, third]} =
+               PrepushCheck.run_steps(spec, repo, exec: exec)
+
+      assert_received {:ran, "one"}
+      refute_received {:ran, "two"}
+      refute_received {:ran, "three"}
+
+      for step <- [first, second, third] do
+        assert step.status == :skipped and step.reason == :infra
+      end
+    end
+
+    test "bare git/curl network errors are infra only beside Mix's own dependency report",
+         %{repo: repo} do
+      spec = spec([step("compile", "true")])
+
+      infra = [
+        "==> lazy_html\nfatal: unable to access 'https://github.com/x.git/': Failed to connect to 127.0.0.1 port 3128\n** (Mix) Could not fetch",
+        "** (Mix) Failed to fetch record for 'hexpm/ash' from registry\ncurl: Could not resolve host: repo.hex.pm"
+      ]
+
+      for output <- infra do
+        assert %{result: {:error, {:infra, "compile", _}}} =
+                 PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {output, 1} end),
+               "should be infra: #{output}"
+      end
+
+      code = [
+        # a test that shells out to git and prints its captured stderr
+        "  1) test pushes (GitTest)\n     fatal: unable to access 'https://example.test/r.git/': Failed to connect to localhost port 9 after 0 ms\n\n1 test, 1 failure",
+        # the same stderr with a Mix banner earlier in the run, and a failure summary
+        "** (Mix) something\nfatal: unable to access 'https://x/': Could not resolve host: x\n12 tests, 2 failures",
+        # no Mix context at all
+        "fatal: unable to access 'https://example.test/r.git/': Failed to connect to localhost port 9"
+      ]
+
+      for output <- code do
+        assert %{result: {:failed, 1, _}} =
+                 PrepushCheck.run_steps(spec, repo, exec: fn _, _ -> {output, 1} end),
+               "should be a code failure: #{output}"
+      end
+    end
+
+    # bd-9xcogk: a worktree seeded from a compiled checkout reaches its NIF through
+    # `_build/<env>/lib/lazy_html/priv`, an absolute link into that checkout. Once the
+    # checkout (or the seed's scratch dir) is gone the gate's steps used to find no
+    # `lazy_html` and try to fetch it. Every step runs, with the NIF there, no proxy.
+    test "a freshly seeded worktree runs every step with the compiled NIF in place",
+         %{repo: repo, tmp_dir: dir} do
+      source = Path.join(dir, "source")
+      File.mkdir_p!(Path.join(source, "deps/lazy_html/priv"))
+      File.write!(Path.join(source, "deps/lazy_html/priv/lazy_html.so"), "nif\n")
+      lib = Path.join(source, "_build/test/lib/lazy_html")
+      File.mkdir_p!(Path.join(lib, "ebin"))
+      File.ln_s!(Path.join(source, "deps/lazy_html/priv"), Path.join(lib, "priv"))
+
+      assert :ok = Arbiter.Worker.Worktree.seed_compiled_deps(source, repo)
+      File.rm_rf!(source)
+
+      test_pid = self()
+      nif = Path.join(repo, "_build/test/lib/lazy_html/priv/lazy_html.so")
+
+      exec = fn command, _timeout_s ->
+        send(test_pid, {:ran, command, File.exists?(nif)})
+        {"", 0}
+      end
+
+      spec = spec([step("compile", "one"), step("credo", "two"), step("tests", "three")])
+
+      assert %{result: :ok, steps: steps} = PrepushCheck.run_steps(spec, repo, exec: exec)
+      assert Enum.all?(steps, &(&1.status == :passed))
+
+      for command <- ~w(one two three) do
+        assert_received {:ran, ^command, true}
+      end
+    end
+
+    test "the gate repairs a worktree seeded before the fix (dangling priv link) before step one",
+         %{repo: repo, tmp_dir: dir} do
+      File.mkdir_p!(Path.join(repo, "deps/lazy_html/priv"))
+      File.write!(Path.join(repo, "deps/lazy_html/priv/lazy_html.so"), "nif\n")
+      lib = Path.join(repo, "_build/test/lib/lazy_html")
+      File.mkdir_p!(lib)
+      File.ln_s!(Path.join(dir, "gone/deps/lazy_html/priv"), Path.join(lib, "priv"))
+
+      test_pid = self()
+      nif = Path.join(lib, "priv/lazy_html.so")
+
+      exec = fn command, _timeout_s ->
+        send(test_pid, {:ran, command, File.exists?(nif)})
+        {"", 0}
+      end
+
+      assert %{result: :ok} =
+               PrepushCheck.run_steps(spec([step("tests", "one")]), repo, exec: exec)
+
+      assert_received {:ran, "one", true}
+    end
+
+    test "a loopback egress proxy inherited from the server is not passed to host steps",
+         %{repo: repo} do
+      for name <- ~w(HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy) do
+        System.put_env(name, "http://127.0.0.1:3128")
+        on_exit(fn -> System.delete_env(name) end)
+      end
+
+      spec = spec([step("env", "echo \"proxy=[$HTTP_PROXY$https_proxy$ALL_PROXY]\"; exit 1")])
+      assert %{result: {:failed, 1, out}} = PrepushCheck.run_steps(spec, repo)
+      assert out =~ "proxy=[]"
+    end
+
+    test "a real (non-loopback) proxy the operator configured is kept", %{repo: repo} do
+      System.put_env("HTTPS_PROXY", "http://proxy.corp.example:8080")
+      on_exit(fn -> System.delete_env("HTTPS_PROXY") end)
+
+      spec = spec([step("env", "echo \"proxy=$HTTPS_PROXY\"; exit 1")])
+      assert %{result: {:failed, 1, out}} = PrepushCheck.run_steps(spec, repo)
+      assert out =~ "proxy=http://proxy.corp.example:8080"
+    end
+
     test "a spec without steps (the legacy shape) still runs its command", %{repo: repo} do
       legacy = %{command: "echo legacy; exit 4", timeout_seconds: 30, on_timeout: :proceed}
       assert %{result: {:failed, 4, out}} = PrepushCheck.run_steps(legacy, repo)

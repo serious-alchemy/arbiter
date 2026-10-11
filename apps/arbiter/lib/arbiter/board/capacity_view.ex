@@ -47,6 +47,7 @@ defmodule Arbiter.Board.CapacityView do
 
   require Ash.Query
 
+  alias Arbiter.Accounts.AdmissionMode
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Board.AdmissionShadowEvent
   alias Arbiter.Board.FairShare
@@ -89,15 +90,18 @@ defmodule Arbiter.Board.CapacityView do
   """
   @spec account_blocks([String.t()], keyword()) :: [map()]
   def account_blocks(account_ids, opts \\ []) do
-    mode = mode(opts)
+    install = mode(opts)
     accounts = accounts(opts)
     pools = pools(opts)
 
     for id <- account_ids do
+      %{mode: mode, source: source} = AdmissionMode.effective(Map.get(accounts, id), install)
+
       %{
         account: account_name(Map.get(accounts, id), id),
         account_id: id,
         mode: Atom.to_string(mode),
+        mode_source: Atom.to_string(source),
         decides: mode == :enforce,
         pools: Enum.filter(pools, &(&1.account == id))
       }
@@ -118,8 +122,26 @@ defmodule Arbiter.Board.CapacityView do
       mode: Atom.to_string(mode),
       label: Atom.to_string(mode),
       decides: mode == :enforce,
-      agreement: agreement(mode, opts)
+      agreement: agreement(mode, opts),
+      overrides: overrides(mode, opts)
     }
+  end
+
+  # The accounts whose own `admission` differs from the installation key, each
+  # with its effective mode (O11); an account following the key is not listed.
+  defp overrides(install, opts) do
+    opts
+    |> accounts()
+    |> Map.values()
+    |> Enum.filter(&(AdmissionMode.effective(&1, install).source == :account))
+    |> Enum.sort_by(&account_name(&1, &1.id))
+    |> Enum.map(fn account ->
+      %{
+        account: account_name(account, account.id),
+        mode: Atom.to_string(account.admission),
+        decides: account.admission == :enforce
+      }
+    end)
   end
 
   # How often the new walk and today's plan agreed, since the first record of
@@ -157,17 +179,19 @@ defmodule Arbiter.Board.CapacityView do
 
   defp pools(opts) do
     accounts = accounts(opts)
+    install = mode(opts)
     holders = Keyword.get_lazy(opts, :holders, &Seats.holders/0)
     changes = Keyword.get(opts, :changes, &read_changes/1)
 
     opts
     |> Keyword.get_lazy(:budgets, &BudgetServer.all/0)
     |> Enum.filter(&(&1.policy_workspace == nil))
-    |> Enum.map(&pool(&1, Map.get(accounts, &1.account), holders, changes))
+    |> Enum.map(&pool(&1, Map.get(accounts, &1.account), holders, changes, install))
     |> Enum.sort_by(&{&1.account_name, &1.pool})
   end
 
-  defp pool(%Budget{} = b, account, holders, changes) do
+  defp pool(%Budget{} = b, account, holders, changes, install) do
+    %{mode: mode, source: source} = AdmissionMode.effective(account, install)
     name = account_name(account, b.account)
     label = WalkInputs.pool_label(account, b.pool)
     held = Map.get(holders, {b.account, b.pool}, [])
@@ -181,6 +205,9 @@ defmodule Arbiter.Board.CapacityView do
       account_name: name,
       label: label,
       chip_label: chip_label(label),
+      mode: Atom.to_string(mode),
+      mode_source: Atom.to_string(source),
+      decides: mode == :enforce,
       state: state(b),
       holders: held,
       recent_changes: changes.({b.account, b.pool, b.policy_workspace}),
