@@ -77,6 +77,9 @@ defmodule ArbiterCli.MixProject do
     [
       {:req, "~> 0.7.3"},
       {:jason, "~> 1.4"},
+      # `arb ticket create --from-file batch.yaml` (JSON also works; YAML is the
+      # friendlier hand-written format for a ticket graph). Already in the umbrella lock.
+      {:yaml_elixir, "~> 2.11"},
       # Static analysis / security scanning. Also declared at the umbrella
       # root, which owns the shared PLT config — see the root mix.exs and the
       # `mix audit` alias there.

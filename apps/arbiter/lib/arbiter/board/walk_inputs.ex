@@ -65,6 +65,7 @@ defmodule Arbiter.Board.WalkInputs do
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Nodes.Capacity
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Overview
   alias Arbiter.Nodes.Placement
@@ -210,7 +211,7 @@ defmodule Arbiter.Board.WalkInputs do
   defp local(opts) do
     opts
     |> Keyword.get_lazy(:local, fn ->
-      %{cap: LocalCapacity.cap().cap, used: length(LocalCapacity.holders())}
+      %{cap: LocalCapacity.cap().offered, used: length(LocalCapacity.holders())}
     end)
     |> Map.put(:label, @local)
   end
@@ -223,7 +224,7 @@ defmodule Arbiter.Board.WalkInputs do
       for row <- rows, available?(row), into: %{} do
         {row.id,
          %{
-           cap: row.max,
+           cap: Capacity.offered(row),
            used: (Map.get(row, :live) || 0) + Map.get(reserved, row.id, 0),
            label: Map.get(row, :name) || row.id,
            constrained?: Map.get(row, :constrained?, false) == true,

@@ -16,6 +16,7 @@ defmodule Arbiter.NodeAgent.Protocol do
   `fence_after` are **seconds**, and `upgrade` is `%{"version", "sha256"}`.
   """
 
+  alias Arbiter.Machine.Monitor
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Retained
 
@@ -62,6 +63,21 @@ defmodule Arbiter.NodeAgent.Protocol do
     %{"seq" => seq, "runs" => live_runs(config)}
     |> put_present("load", load())
     |> put_present("free_mem", meminfo("MemAvailable"))
+    |> Map.merge(derate_fields(Monitor.current(config.monitor)))
+  end
+
+  # bd-6w7usy: what the machine sensed and decided about itself. Nothing is sent while
+  # there is no monitor (or no sample yet), so an old primary and a new agent still agree.
+  defp derate_fields(nil), do: %{}
+
+  defp derate_fields(snapshot) do
+    %{"derate" => Atom.to_string(snapshot.level), "offered" => snapshot.offered}
+    |> put_present("temp_c", snapshot.temp_c)
+    |> put_present(
+      "psi",
+      snapshot.psi && Map.new(snapshot.psi, fn {k, v} -> {Atom.to_string(k), v} end)
+    )
+    |> put_present("derate_reason", snapshot.reason_text)
   end
 
   @doc "The live runs the agent reports (`[]` until the run supervisor exists)."

@@ -87,6 +87,7 @@ defmodule Arbiter.Nodes.Session do
   use GenServer, restart: :temporary
 
   alias Arbiter.Actor
+  alias Arbiter.Machine.Derate
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{ClusterInstall, Hello, Liveness, Node, Reaping, RunStreams, Skew}
 
@@ -114,8 +115,12 @@ defmodule Arbiter.Nodes.Session do
     # the prepare budget granted a run placed on it; a machine node leaves all but the budget
     # at these defaults. Also the session's own budgets for a held run: how long it is held
     # (`hold_ms`, bd-24o760) and how long the agent has to answer an `adopt` (bd-4p1vui).
+    # `pressure` (bd-6w7usy) is the machine's own sensing and derate decision from its last
+    # heartbeat (`%{level:, temp_c:, psi:, reason:}`); nil until a heartbeat names one, and
+    # again when a heartbeat stops naming it (unknown never derates).
     info: %{
       kind: "machine",
+      pressure: nil,
       k8s_version: nil,
       degraded: [],
       readiness: [],
@@ -1228,7 +1233,8 @@ defmodule Arbiter.Nodes.Session do
             k8s_version: params["k8s_version"],
             degraded: degraded(params["degraded"]),
             readiness: readiness(kind(params["kind"]), params["readiness"]),
-            capacity: nil
+            capacity: nil,
+            pressure: nil
         },
         runs: hello_runs(hello_run_list(params)),
         retained: hello_retained(params),
@@ -1374,6 +1380,8 @@ defmodule Arbiter.Nodes.Session do
   # ---- heartbeat -----------------------------------------------------------
 
   defp stamp(state, payload) do
+    before = state.info.pressure
+
     state = %{
       state
       | last_hb: state.clock.(),
@@ -1383,12 +1391,16 @@ defmodule Arbiter.Nodes.Session do
         load: payload["load"] || state.load
     }
 
+    state = put_info(state, :pressure, pressure(payload))
+
     state =
       state
       |> heartbeat_degraded(payload)
       |> heartbeat_readiness(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
+
+    announce_derate(before, state)
 
     if state.state == :suspect do
       broadcast({:node_state, state.node_id, :online})
@@ -1397,6 +1409,55 @@ defmodule Arbiter.Nodes.Session do
       state
     end
   end
+
+  # bd-6w7usy: a heartbeat either carries the machine's derate (`derate`, `temp_c`, `psi`,
+  # `derate_reason`) or says nothing, which reads as no derate. `offered` is not kept: the
+  # agent knows only its own cap, so the primary re-derives it from the operator's
+  # (`Derate.apply_level/3` in `Overview`).
+  defp pressure(%{"derate" => level} = payload) do
+    %{
+      level: Derate.parse_level(level),
+      temp_c: number(payload["temp_c"]),
+      psi: if(is_map(payload["psi"]), do: payload["psi"]),
+      reason: if(is_binary(payload["derate_reason"]), do: payload["derate_reason"])
+    }
+  end
+
+  defp pressure(_payload), do: nil
+
+  # bd-6w7usy: entering or leaving a hard derate tells the coordinator (an alert, not a
+  # shell watch). Off the session process: it writes to the database.
+  defp announce_derate(before, state) do
+    from = level_of(before)
+    pressure = state.info.pressure
+    to = level_of(pressure)
+
+    if from != to and :hard in [from, to] do
+      event = %{
+        machine: state.name || state.node_id,
+        from: from,
+        to: to,
+        snapshot: %{
+          level: to,
+          temp_c: pressure && pressure.temp_c,
+          reason_text: (pressure && pressure.reason) || (before && before.reason),
+          offered: length(Map.keys(state.runs))
+        }
+      }
+
+      Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
+        Arbiter.Machine.Alerting.transition(event)
+      end)
+    end
+
+    :ok
+  end
+
+  defp level_of(%{level: level}), do: level
+  defp level_of(_), do: :none
+
+  defp number(n) when is_number(n), do: n
+  defp number(_), do: nil
 
   # `hb` carries the node's whole per-run table: it replaces ours. A heartbeat
   # without one leaves the table alone.
@@ -1558,6 +1619,7 @@ defmodule Arbiter.Nodes.Session do
       retained: state.retained,
       free_mem: state.free_mem,
       load: state.load,
+      pressure: state.info.pressure,
       silence_ms: state.clock.() - state.last_hb
     }
   end

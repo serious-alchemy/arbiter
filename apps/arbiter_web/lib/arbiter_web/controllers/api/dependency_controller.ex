@@ -35,8 +35,11 @@ defmodule ArbiterWeb.Api.DependencyController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.MCP.Scope
+  alias Arbiter.Tasks.BulkEdges
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.WorkerFiling
   alias ArbiterWeb.Api.WorkspaceParam
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -54,6 +57,37 @@ defmodule ArbiterWeb.Api.DependencyController do
   end
 
   def create(conn, params) do
+    if BulkEdges.bulk?(params), do: bulk_create(conn, params), else: create_one(conn, params)
+  end
+
+  # Bulk: `{edges: [{from, to, type, notes?}]}` or a bare JSON array. 200 with the
+  # per-edge results — a rejected edge (cycle, unknown ticket, a worker's
+  # disallowed edge) is that edge's `rejected` outcome and never undoes the others.
+  # Only a malformed or over-cap list is a 400.
+  defp bulk_create(conn, params) do
+    scope = conn.assigns[:mcp_scope]
+
+    case BulkEdges.fetch_edges(params) do
+      {:ok, edges} ->
+        json(
+          conn,
+          BulkEdges.run(edges,
+            created_by: Arbiter.Params.actor_label(scope),
+            authorize: &authorize_edge(scope, &1)
+          )
+        )
+
+      {:error, message} ->
+        {:error, {:invalid_request, message}}
+    end
+  end
+
+  defp authorize_edge(%Scope{tier: :worker} = scope, edge),
+    do: WorkerFiling.authorize_edge(scope, edge)
+
+  defp authorize_edge(_scope, _edge), do: :ok
+
+  defp create_one(conn, params) do
     with {:ok, from} <- require_param(params, "from_issue_id"),
          {:ok, to} <- require_param(params, "to_issue_id"),
          {:ok, type} <- require_param(params, "type"),

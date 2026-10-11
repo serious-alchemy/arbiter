@@ -30,6 +30,8 @@ defmodule Arbiter.NodeAgent.Config do
   under systemd.
   """
 
+  alias Arbiter.Machine.Derate
+
   @derive {Inspect, except: [:credential]}
   defstruct [
     :primary_url,
@@ -45,6 +47,10 @@ defmodule Arbiter.NodeAgent.Config do
     :readiness_fun,
     :max_workers,
     :proxy,
+    # bd-6w7usy: the machine monitor (`Arbiter.Machine.Monitor`) the heartbeat reads, and
+    # the thresholds it derates by (`ARB_NODE_DERATE*`, `ARB_NODE_THERMAL_*`, `ARB_NODE_MEM_*`)
+    monitor: Arbiter.NodeAgent.Monitor,
+    derate: %Derate.Config{},
     run_opts: [],
     backend: Arbiter.NodeAgent.Backend.Podman,
     hb_interval_ms: 10_000,
@@ -102,6 +108,7 @@ defmodule Arbiter.NodeAgent.Config do
            credential: credential,
            node_id: node_id,
            max_workers: max_workers(opts, env),
+           derate: derate(opts, env),
            proxy: proxy(opts, env),
            status_path: Path.join(node_home, "status.json"),
            version: Keyword.get_lazy(opts, :version, &Arbiter.Version.app_version/0)
@@ -171,6 +178,12 @@ defmodule Arbiter.NodeAgent.Config do
       {n, ""} when n > 0 -> n
       _ -> nil
     end
+  end
+
+  # Thresholds: the environment over `config :arbiter, Arbiter.NodeAgent, derate: %{...}`.
+  defp derate(opts, env) do
+    app = Map.new(app_config(opts)[:derate] || %{}, fn {k, v} -> {to_string(k), v} end)
+    Derate.Config.build(Map.merge(app, Derate.Config.env_overrides(env)))
   end
 
   defp proxy(opts, env) do

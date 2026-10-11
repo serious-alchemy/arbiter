@@ -27,6 +27,7 @@ defmodule Arbiter.MCP.Catalog do
   | Tool | Tiers | Backs onto |
   |---|---|---|
   | `ticket_create` | worker (child of own task only), coordinator | `Arbiter.Tasks.Create.run/2` (dedup, upstream drain, edges; P-14) |
+  | `ticket_create_batch` | worker (children of own task only), coordinator | `Arbiter.Tasks.BatchCreate.run/2` (tickets + edges in one transaction, in-batch refs, optional promote after the edges) |
   | `ticket_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
   | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
@@ -39,7 +40,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
-  | `dep_add` | worker (`parent_of` from own task only), coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
+  | `dep_add` | worker (`parent_of` from own task only), coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child); `edges` → `Arbiter.Tasks.BulkEdges.run/2` (per-edge results) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
   | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
@@ -199,7 +200,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list worker_runs ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset workspace_standing_order_add workspace_standing_order_remove external_review_list repo_show)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create ticket_create_batch worker_list worker_runs ticket_list usage_summarize usage_events_list usage_calibration notify_list tracker_claim tracker_sync tracker_list_issues tracker_create_ticket workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset workspace_standing_order_add workspace_standing_order_remove external_review_list repo_show)
 
   # P-13 (D-T-14): the `ticket_*` write tools return the full ticket record REST
   # returns (`Arbiter.Tasks.IssueSerializer.data/1`); `summary: true` asks for
@@ -536,6 +537,23 @@ defmodule Arbiter.MCP.Catalog do
                 "`tracker_context_ref`, so no upstream ticket is minted. Refine-session " <>
                 "children are always context-only. Pass `tracker_type` to mint anyway."
           },
+          "depends_on" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Existing ticket ids that must finish before this one: a `blocks` edge " <>
+                "(dependency → this ticket) per id, written in the same transaction as the " <>
+                "ticket. A bad id, a cross-workspace id or a cycle refuses the whole create " <>
+                "and nothing is written. Coordinator only (a worker files a plain child)."
+          },
+          "blocks" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Existing ticket ids that this one blocks: a `blocks` edge (this ticket → " <>
+                "target) per id, written atomically with the ticket like `depends_on`. " <>
+                "Coordinator only."
+          },
           "force" => %{
             "type" => "boolean",
             "description" =>
@@ -653,6 +671,82 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_create/2
+    },
+    %{
+      name: "ticket_create_batch",
+      tiers: @both,
+      description:
+        "Create many tickets and ALL their edges in one atomic call — an epic with children " <>
+          "and dependencies without N `ticket_create` + M `dep_add` calls, and without the " <>
+          "race where Autopilot claims a ticket before its edges exist. `tickets` is an array " <>
+          "(at most #{Arbiter.Tasks.BatchCreate.max_batch()}) of `ticket_create` entries; each " <>
+          "may carry a local `ref` (batch-unique name), and `parent_id` / `depends_on` / " <>
+          "`blocks` may name an existing ticket id OR the `ref` of another entry (forward refs " <>
+          "are fine). `depends_on: [x]` means x must finish first (x → this); `blocks: [x]` " <>
+          "means this blocks x. ALL-OR-NOTHING: a validation failure (unknown ref, bad repo, " <>
+          "cycle — including through existing tickets — a duplicate title without `force`, " <>
+          "a self-reference …) writes nothing and the error names the failing entry " <>
+          "(`tickets[i]`, its ref and title). Success returns `refs` (ref → id), `tickets` " <>
+          "(index, ref, id, title, state, warnings), `edges` and `counts`. `promote: true` " <>
+          "promotes every created ticket AFTER all edges exist, in the same call, and returns " <>
+          "`promote: {results, counts}` with the per-id contract of `ticket_promote` `ids` " <>
+          "(a refused promote does not undo the batch). Duplicate-title refusal is per entry " <>
+          "(`force: true` on the entry, or on the call for all). The tracker mirror runs after " <>
+          "the commit; a mirror failure is reported on that ticket (`failures`). A worker may " <>
+          "file only children of its own task (`parent_id` = its own task id) per entry, " <>
+          "with the descriptive fields, and may not use `depends_on`/`blocks`/`promote`. " <>
+          "Not available to refine sessions.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "tickets" => %{
+            "type" => "array",
+            "minItems" => 1,
+            "maxItems" => Arbiter.Tasks.BatchCreate.max_batch(),
+            "description" =>
+              "The tickets to create. Each entry takes the same fields as `ticket_create` " <>
+                "(title required) plus `ref`.",
+            "items" => %{
+              "type" => "object",
+              "properties" => %{
+                "ref" => %{
+                  "type" => "string",
+                  "description" =>
+                    "Batch-local name other entries use in `parent_id` / `depends_on` / " <>
+                      "`blocks` (letters, digits, . _ : -; unique; not an existing ticket id)."
+                },
+                "title" => %{"type" => "string"},
+                "parent_id" => %{
+                  "type" => "string",
+                  "description" => "An existing ticket id or the `ref` of another entry."
+                },
+                "depends_on" => %{"type" => "array", "items" => %{"type" => "string"}},
+                "blocks" => %{"type" => "array", "items" => %{"type" => "string"}},
+                "force" => %{"type" => "boolean"}
+              },
+              "required" => ["title"],
+              "additionalProperties" => true
+            }
+          },
+          "promote" => %{
+            "type" => "boolean",
+            "description" =>
+              "Promote every created ticket to Ready after all edges exist. Default false. " <>
+                "Coordinator only."
+          },
+          "acceptance_waived" => %{
+            "type" => "string",
+            "description" => "Shared waiver reason handed to each promote (with `promote: true`)."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" => "Skip the duplicate-title check for every entry. Default false."
+          }
+        },
+        "required" => ["tickets"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_create_batch/2
     },
     %{
       name: "ticket_update",
@@ -1060,7 +1154,14 @@ defmodule Arbiter.MCP.Catalog do
           "in a fix pass). The held card reads `blocked — conflicts with <id> (<state>)` and " <>
           "goes once the counterpart merges, closes or is parked. " <>
           "Only blocks/depends_on gate readiness, and a gating edge that would close a cycle " <>
-          "is rejected with the cycle named.",
+          "is rejected with the cycle named. " <>
+          "BULK: pass `edges` (array of `{from, to, type, notes?}`, at most " <>
+          "#{Arbiter.Tasks.BulkEdges.max_batch()}) instead of the single-edge fields. Edges " <>
+          "are applied in order, each through the single-edge rules (workspace, cycle, " <>
+          "worker restrictions) and each gets its own result; a rejected edge (cycle, unknown " <>
+          "ticket, …) does NOT roll back the others. Reply: `{results: [{index, from, to, " <>
+          ~s/type, status: "ok" | "rejected", code?, reason?}], counts: {total, ok, rejected}}`. / <>
+          "To file new tickets together with their edges atomically, use `ticket_create_batch`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1071,9 +1172,26 @@ defmodule Arbiter.MCP.Catalog do
           "created_by" => %{
             "type" => "string",
             "description" => "Ignored: the creator is derived from the token."
+          },
+          "edges" => %{
+            "type" => "array",
+            "minItems" => 1,
+            "maxItems" => Arbiter.Tasks.BulkEdges.max_batch(),
+            "description" =>
+              "Bulk alternative to the single-edge fields: edges to add, per-edge results.",
+            "items" => %{
+              "type" => "object",
+              "properties" => %{
+                "from" => %{"type" => "string", "description" => "As `from_issue_id`."},
+                "to" => %{"type" => "string", "description" => "As `to_issue_id`."},
+                "type" => %{"type" => "string"},
+                "notes" => %{"type" => "string"}
+              },
+              "required" => ["from", "to", "type"]
+            }
           }
         },
-        "required" => ["from_issue_id", "to_issue_id", "type"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.dep_add/2
@@ -3471,7 +3589,7 @@ defmodule Arbiter.MCP.Catalog do
           "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
           "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
           "and provider), `budget_exceeded` (per ticket) and `spend_cap` (per account: " <>
-          "80% of its dollar spend cap, or the cap reached). Each carries `kind`, `key`, `subject`, " <>
+          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

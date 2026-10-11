@@ -47,6 +47,8 @@ defmodule Arbiter.Nodes.Capacity do
           required(:name) => String.t() | nil,
           required(:state) => atom(),
           required(:cap) => non_neg_integer() | nil,
+          required(:offered) => non_neg_integer() | nil,
+          required(:derate) => Arbiter.Machine.Derate.level(),
           required(:live) => non_neg_integer(),
           required(:contributes) => non_neg_integer(),
           required(:reason) => nil | :remote_execution_off | atom()
@@ -63,9 +65,9 @@ defmodule Arbiter.Nodes.Capacity do
 
   @type placement :: %{cap: non_neg_integer(), free: non_neg_integer() | :unlimited}
 
-  @doc "The primary's own cap."
+  @doc "The slots the primary offers: its own cap, less what it has derated itself by (`LocalCapacity.cap/0`)."
   @spec local_cap() :: non_neg_integer()
-  def local_cap, do: LocalCapacity.cap().cap
+  def local_cap, do: LocalCapacity.cap().offered
 
   @doc """
   The whole picture. Options: `:nodes` (overview rows, or a 0-arity function
@@ -143,6 +145,7 @@ defmodule Arbiter.Nodes.Capacity do
 
   defp entry(row, remote?) do
     cap = row[:max]
+    offered = offered(row)
     available? = available?(row)
 
     %{
@@ -150,11 +153,20 @@ defmodule Arbiter.Nodes.Capacity do
       name: row[:name],
       state: row[:state],
       cap: cap,
+      offered: offered,
+      derate: Map.get(row, :derate, :none),
       live: row[:live] || 0,
-      contributes: if(remote? and available?, do: cap, else: 0),
+      contributes: if(remote? and available?, do: offered, else: 0),
       reason: unavailable_reason(row, remote?)
     }
   end
+
+  @doc """
+  The slots a node row offers the scheduler (`:offered`): its cap, less what it has
+  derated itself by (bd-6w7usy). A row with no `:offered` (built by hand) offers its cap.
+  """
+  @spec offered(map()) :: non_neg_integer() | nil
+  def offered(row), do: Map.get(row, :offered, Map.get(row, :max))
 
   defp available?(row) do
     row[:state] == :online and row[:health] == :ready and is_integer(row[:max]) and row[:max] > 0 and

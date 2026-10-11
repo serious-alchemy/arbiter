@@ -81,6 +81,15 @@
       divergences: ["D-T-4", "D-T-9", "D-T-10", "D-T-21"]
     },
     %{
+      id: "tickets/create_tickets_batch",
+      title: "Create many tickets + edges atomically (batch, in-batch refs, optional promote)",
+      mcp: ["ticket_create_batch"],
+      cli: ["arb ticket create"],
+      rest: ["POST /api/issues/batch"],
+      status: :full,
+      note: "CLI: `arb ticket create --from-file <json|yaml|->`; atomic, with a ref -> id map and optional `promote` after the edges."
+    },
+    %{
       id: "tickets/create_tracker_only_unclaimed_ticket_no",
       title: "Create tracker-only (unclaimed) ticket, no local task",
       mcp: ["tracker_create_ticket"],

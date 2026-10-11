@@ -146,8 +146,33 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
 
       assert out =~ "Machines"
-      assert out =~ ~r/local\s+6\s+3\s+3/
-      assert out =~ ~r/box\s+-\s+1\s+-/
+      assert out =~ ~r/local\s+6\s+6\s+3\s+3/
+      assert out =~ ~r/box\s+-\s+-\s+1\s+-/
+    end
+
+    test "shows a derated machine's offered slots, temperature, pressure and reason (bd-6w7usy)" do
+      hot = %{
+        "id" => "n2",
+        "name" => "ryan-oryx-pro",
+        "cap" => 6,
+        "offered" => 2,
+        "live" => 2,
+        "free" => 0,
+        "temp_c" => 96.3,
+        "psi" => %{"some_avg10" => 4.25},
+        "derate" => "hard",
+        "derate_reason" => "thermal 96 °C"
+      }
+
+      stub_get(
+        "/api/scheduler/status",
+        Map.update!(capacity_body(), "machines", &(&1 ++ [hot]))
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "offered"
+      assert out =~ ~r/ryan-oryx-pro\s+6\s+2\s+2\s+0\s+96°C\s+4.3%\s+hard derate: thermal 96 °C/
     end
 
     test "lists repo caps with their implementer runs" do

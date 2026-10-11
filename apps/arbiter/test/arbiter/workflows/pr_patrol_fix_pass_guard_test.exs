@@ -309,6 +309,68 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
     assert follow_ups() == []
   end
 
+  # bd-cfucyv: the ReviewGate's CI wait keeps the ticket stored `:active` (the
+  # board column reads "merging / awaiting_ci"), with no live run once a restart
+  # has taken the author. The ci_wait marker is what says the gate owns the CI.
+  defp put_ci_wait!(task, expires_in_s) do
+    expires = DateTime.utc_now() |> DateTime.add(expires_in_s) |> DateTime.to_iso8601()
+
+    :ok =
+      Arbiter.Tasks.PullRequest.record_review_gate(task.id, %{
+        ci_wait: %{"sha" => "0d948fdb", "round" => 1, "expires_at" => expires}
+      })
+  end
+
+  test "no CI follow-up while the ticket's ReviewGate is waiting on CI with no live run",
+       %{ws: ws} do
+    task = authored_task(ws)
+    put_ci_wait!(task, 600)
+    assert Worker.whereis(task.id) == nil
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+  end
+
+  test "an expired ci_wait marker no longer holds back the CI follow-up", %{ws: ws} do
+    task = authored_task(ws)
+    put_ci_wait!(task, -60)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Issue{}] = follow_ups()
+  end
+
+  test "a CI follow-up is still filed when the owning ticket is closed", %{ws: ws} do
+    task = authored_task(ws)
+    _ = put_state!(task, :closed)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Issue{}] = follow_ups()
+  end
+
+  test "a CI follow-up is still filed for a PR no ticket owns", %{ws: ws} do
+    task = authored_task(ws)
+    {:ok, _} = Ash.update(task, %{pr_ref: "owner/repo#999"}, action: :update)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Issue{}] = follow_ups()
+  end
+
   test "a filed CI follow-up carries the failing job and its log excerpt", %{ws: ws} do
     _task = authored_task(ws)
     base = ci_failing_stub()

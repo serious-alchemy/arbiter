@@ -87,6 +87,36 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#node-local [data-role=state]", "online")
     end
 
+    test "a self-derated node shows offered vs max, the reason and what it senses (bd-6w7usy)", %{
+      conn: conn
+    } do
+      node = enroll!("hotbox")
+      connect!(node)
+
+      {:ok, _} =
+        Arbiter.Nodes.Session.heartbeat(Registry.lookup(node.id), %{
+          "seq" => 1,
+          "derate" => "soft",
+          "derate_reason" => "thermal 91 °C",
+          "temp_c" => 91.2,
+          "psi" => %{"some_avg10" => 2.5}
+        })
+
+      {:ok, view, _} = live(conn, ~p"/nodes")
+
+      assert has_element?(
+               view,
+               "#node-#{node.id} [data-role=derate][data-level=soft]",
+               "thermal 91 °C"
+             )
+
+      assert has_element?(view, "#node-#{node.id} [data-role=derate]", "offering 0 of 4")
+      assert has_element?(view, "#node-#{node.id} [data-role=sensed]", "CPU 91°C")
+      assert has_element?(view, "#node-#{node.id} [data-role=sensed]", "memory PSI 2.5%")
+      assert has_element?(view, "#nodes-capacity-idle", "hotbox (online, derated)")
+      refute has_element?(view, "#node-local [data-role=derate]")
+    end
+
     test "shows suggested, override, ceiling and live/max for each row", %{conn: conn} do
       node = enroll!("capped", max_workers: 8)
       connect!(node, %{"capacity" => %{"suggestion" => 4, "ceiling" => 3}})

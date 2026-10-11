@@ -179,4 +179,53 @@ defmodule Arbiter.NodeAgent.ConfigTest do
     {:ok, config} = Config.load(env: env(home, cred))
     refute inspect(config) =~ "AAAA"
   end
+
+  describe "derate thresholds (bd-6w7usy)" do
+    test "default to on, soft 90 °C, hard 95 °C", %{home: home, cred: cred} do
+      assert {:ok, config} = Config.load(env: env(home, cred), app_config: [])
+      assert config.derate.enabled
+      assert config.derate.thermal_soft_c == 90.0
+      assert config.derate.thermal_hard_c == 95.0
+    end
+
+    test "come from ARB_NODE_* variables", %{home: home, cred: cred} do
+      extra = %{
+        "ARB_NODE_THERMAL_SOFT_C" => "82",
+        "ARB_NODE_THERMAL_HARD_C" => "88",
+        "ARB_NODE_MEM_FLOOR_GIB" => "6",
+        "ARB_NODE_DERATE_RECOVER_S" => "300"
+      }
+
+      assert {:ok, config} = Config.load(env: env(home, cred, extra), app_config: [])
+      assert config.derate.thermal_soft_c == 82.0
+      assert config.derate.thermal_hard_c == 88.0
+      assert config.derate.mem_floor_bytes == 6 * 1_073_741_824
+      assert config.derate.recover_s == 300
+    end
+
+    test "ARB_NODE_DERATE=off turns it off; app config fills in what the environment leaves", %{
+      home: home,
+      cred: cred
+    } do
+      assert {:ok, config} =
+               Config.load(
+                 env: env(home, cred, %{"ARB_NODE_DERATE" => "off"}),
+                 app_config: [derate: %{thermal_soft_c: 80}]
+               )
+
+      refute config.derate.enabled
+      assert config.derate.thermal_soft_c == 80.0
+    end
+
+    test "a malformed value keeps the default rather than disabling the guard", %{
+      home: home,
+      cred: cred
+    } do
+      extra = %{"ARB_NODE_THERMAL_SOFT_C" => "hot", "ARB_NODE_THERMAL_HARD_C" => ""}
+      assert {:ok, config} = Config.load(env: env(home, cred, extra), app_config: [])
+      assert config.derate.thermal_soft_c == 90.0
+      assert config.derate.thermal_hard_c == 95.0
+      assert config.derate.enabled
+    end
+  end
 end

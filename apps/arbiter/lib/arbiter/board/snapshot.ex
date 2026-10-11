@@ -663,6 +663,24 @@ defmodule Arbiter.Board.Snapshot do
   defp placement_note(workspace) do
     mode = Arbiter.Nodes.Placement.mode(workspace)
 
+    mode
+    |> capacity_hold()
+    |> Arbiter.Machine.Hold.note(Arbiter.Machine.Hold.derated(mode))
+  rescue
+    _ -> nil
+  end
+
+  # A `local_only` workspace on a derated primary is held outright: it offers no new
+  # slots whether or not something is running (bd-6w7usy).
+  defp capacity_hold(:local_only = mode) do
+    if Arbiter.Machine.Hold.derated(mode) == [],
+      do: exhausted(mode),
+      else: "held — local machine is derated"
+  end
+
+  defp capacity_hold(mode), do: exhausted(mode)
+
+  defp exhausted(mode) do
     case {mode, Arbiter.Nodes.Capacity.placement(mode)} do
       {:local_only, %{cap: 0}} ->
         "held — local capacity 0 (worker.placement is local_only and this machine's cap is 0)"
@@ -763,7 +781,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # A capacity read that failed plans to the primary's own cap, never to a
   # made-up install-wide number.
-  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().cap
+  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().offered
 
   defp capacity_opts(opts), do: Keyword.take(opts, [:nodes, :remote_available?])
 
