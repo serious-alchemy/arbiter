@@ -50,7 +50,9 @@ defmodule Arbiter.Test.QwenCli do
 
     task =
       Task.async(fn ->
-        System.cmd(executable(), ["--auth-type", "openai", "--yolo", "--bare"] ++
+        System.cmd(
+          executable(),
+          ["--auth-type", "openai", "--yolo", "--bare"] ++
             Keyword.get(opts, :extra_args, []) ++ ["-p", prompt],
           cd: cwd,
           env: env,
