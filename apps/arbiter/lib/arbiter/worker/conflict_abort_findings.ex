@@ -24,6 +24,23 @@ defmodule Arbiter.Worker.ConflictAbortFindings do
   the ReviewGate's recorded rounds by `rejected_rounds/1`), so a branch that
   never integrates cleanly still ends in an escalation.
 
+  ## A round that cannot make progress (bd-6sosvl, #772)
+
+  On v0.2.49 PR #770 conflicted with `main` after Q7 merged. The conflict round
+  ran in a podman container whose private clone had no usable `origin/main`
+  (the container cannot fetch), so the author could not merge, finished with
+  nothing committed, and the gate rejected the same head again — four rounds
+  about five minutes apart, until the cap. Two guards:
+
+    * the host provisions the CURRENT `origin/<target>` into the clone before it
+      dispatches the round (`Arbiter.Worker.Worktree.provision_target/2`), and
+      escalates `{:no_target_ref, detail}` at once if it cannot;
+    * every rejection records the branch head it was made at (`findings/3`), and
+      `no_progress?/1` is true once `no_progress_limit/0` consecutive rejections
+      carry the same head — the round before them committed nothing — so the gate
+      escalates `:conflict_no_progress` once instead of dispatching an identical
+      round again.
+
   The gate's conflict-resolver pass (`Arbiter.Workflows.MergeQueue.ConflictResolver`)
   is the Watchdog's, and exists only once a PR is open and being merged; here the
   author's own worker is the one that holds the worktree, so the author is the
@@ -36,6 +53,8 @@ defmodule Arbiter.Worker.ConflictAbortFindings do
 
   @marker "ReviewGate: branch conflicts with its target; the merge was aborted and nothing was reviewed"
   @max_rounds 3
+  @no_progress_limit 2
+  @head_label "Branch head at rejection: "
 
   @doc "The leading sentence of the gate's conflict-abort rejection."
   @spec marker() :: String.t()
@@ -47,6 +66,13 @@ defmodule Arbiter.Worker.ConflictAbortFindings do
   """
   @spec max_rounds() :: pos_integer()
   def max_rounds, do: @max_rounds
+
+  @doc """
+  How many consecutive conflict rejections at the same branch head count as no
+  progress: the round dispatched after the first one changed nothing.
+  """
+  @spec no_progress_limit() :: pos_integer()
+  def no_progress_limit, do: @no_progress_limit
 
   @doc """
   Whether `findings` is the gate's conflict-abort rejection: `marker/0` leads
@@ -61,8 +87,8 @@ defmodule Arbiter.Worker.ConflictAbortFindings do
   The findings the gate rejects with: `marker/0`, the conflicting `files` and
   how to clear them.
   """
-  @spec findings(map(), [String.t()]) :: String.t()
-  def findings(%{branch: branch, target_branch: target}, files) do
+  @spec findings(map(), [String.t()], String.t() | nil) :: String.t()
+  def findings(%{branch: branch, target_branch: target}, files, head \\ nil) do
     files_block =
       case files do
         [] -> "  (conflicting paths could not be determined)"
@@ -87,6 +113,51 @@ defmodule Arbiter.Worker.ConflictAbortFindings do
     #{files_block}
     """
     |> String.trim()
+    |> Kernel.<>(head_line(head))
+  end
+
+  defp head_line(head) when is_binary(head) and head != "", do: "\n\n" <> @head_label <> head
+  defp head_line(_head), do: ""
+
+  @doc """
+  The branch head `findings` were recorded at (`findings/3`), or `nil` when they
+  carry none.
+  """
+  @spec head_of(String.t() | nil) :: String.t() | nil
+  def head_of(findings) when is_binary(findings) do
+    case Regex.run(~r/^Branch head at rejection: (\S+)\s*$/m, findings) do
+      [_, head] -> head
+      _ -> nil
+    end
+  end
+
+  def head_of(_), do: nil
+
+  @doc """
+  Whether the last `no_progress_limit/0` conflict rejections recorded for
+  `task_id` were all made at one and the same branch head: the conflict round
+  between them committed nothing, so another identical one cannot help.
+
+  A rejection that recorded no head never counts. Best-effort like
+  `rejected_rounds/1`: a failed read is "progress".
+  """
+  @spec no_progress?(String.t()) :: boolean()
+  def no_progress?(task_id) when is_binary(task_id) do
+    heads =
+      Round
+      |> Ash.Query.filter(task_id == ^task_id and role == :review and verdict == :request_changes)
+      |> Ash.read!()
+      |> Enum.filter(&escalation?(&1.findings))
+      |> Enum.sort_by(&{&1.inserted_at, &1.fix_round_attempt || 0, &1.round}, :desc)
+      |> Enum.take(@no_progress_limit)
+      |> Enum.map(&head_of(&1.findings))
+
+    length(heads) == @no_progress_limit and is_binary(hd(heads)) and
+      length(Enum.uniq(heads)) == 1
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   @doc """

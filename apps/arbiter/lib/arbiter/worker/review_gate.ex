@@ -2664,8 +2664,13 @@ defmodule Arbiter.Worker.ReviewGate do
   # the author parks + escalates to the coordinator rather than merging stale work.
   # bd-1u15tl: `ConflictAbortFindings` owns the text, and its marker is how the
   # author's fix-round decision tells this from a code finding.
-  defp conflict_escalation(state, %{files: files}),
-    do: ConflictAbortFindings.findings(state, files)
+  #
+  # bd-6sosvl: the head it was rejected at rides in the findings, so a conflict
+  # round that committed nothing (same head, rejected again) is recognisable.
+  defp conflict_escalation(state, %{files: files}) do
+    head = Worktree.head_sha(Map.get(state, :worktree_path))
+    ConflictAbortFindings.findings(state, files, head)
+  end
 
   # A ReviewGate is NOT a worker, but it lives under Arbiter.Worker.Supervisor —
   # so a stray enumeration (dashboard / list_children) could probe it with the
