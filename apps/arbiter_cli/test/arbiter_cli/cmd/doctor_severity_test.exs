@@ -549,6 +549,22 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     end
   end
 
+  describe "pr_patrol check" do
+    test "ok when no workspace disables patrol" do
+      stub_healthy()
+      assert by_id(Checks.run(), "pr_patrol").status == :ok
+    end
+
+    test "warns naming the workspace when pr_patrol.enabled is false" do
+      ws = %{"name" => "off-ws", "config" => %{"pr_patrol" => %{"enabled" => false}}}
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [ws]}, 200}}])
+
+      result = by_id(Checks.run(), "pr_patrol")
+      assert result.status == :warn
+      assert result.detail =~ "off-ws"
+    end
+  end
+
   describe "check inventory" do
     # Every check that existed before the cleanup, by id, minus the finished
     # one-shot migration check (`legacy safe_defaults key`).
@@ -559,7 +575,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
       guardrails agy_ssh_transport tmux podman_sandbox worker_tmp worker_memory
       claude_worker_credentials grok_auth provider_accounts quota_policy
-      merge_routing nodes
+      merge_routing nodes pr_patrol
     )
 
     # bd-8t4yui: one row per provider the server's canary reports.
@@ -687,7 +703,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       assert out =~ "spawned but did not reach the agent: exit 125: bwrap: sun_path too long"
       assert out =~ "[fail] spawn canary (codex)"
       assert out =~ "could not spawn: FunctionClauseError"
-      assert out =~ ~r/1 ok .* 2 fail/
+      assert out =~ ~r/\d+ ok .* 2 fail/
     end
 
     test "a failed spawn is reported by a plain doctor too, and --json carries it" do

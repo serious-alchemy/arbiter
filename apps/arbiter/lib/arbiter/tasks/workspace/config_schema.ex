@@ -484,6 +484,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       workspace REFUSES to create an issue that names no repo.
 
     pr_patrol  (map)
+      enabled              bool — master switch; false makes PRPatrol file no
+                           follow-ups and dispatch nothing for this workspace
+                           (`arb server doctor` flags it)             (default: true)
       author_logins        list of forge logins — when non-empty, PRPatrol only
                            files follow-ups for PRs authored by one of these logins
       resolve_bot_threads  bool — resolve addressed bot/automated-reviewer review
