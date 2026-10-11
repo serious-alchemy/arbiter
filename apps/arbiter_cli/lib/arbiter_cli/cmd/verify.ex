@@ -17,12 +17,15 @@ defmodule ArbiterCli.Cmd.Verify do
   a fresh PR. Either way the evidence text is persisted on the task, so "this
   is live and working" is an auditable record rather than a memory.
 
-  Wraps `POST /api/issues/:id/verify`.
+  Wraps `POST /api/issues/:id/verify`. Several ids (or `--stdin`, one id per line;
+  at most 200) make a bulk call (`POST /api/issues/verify`) with the one shared
+  verdict: `--failed` reopens each id exactly as a single verify does. One line
+  per id, `--json` prints the per-id list, exit 1 if any id failed.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Bulk, Client, Output}
 
-  @switches [observed: :string, failed: :string, json: :boolean]
+  @switches [observed: :string, failed: :string, stdin: :boolean, json: :boolean]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -33,22 +36,36 @@ defmodule ArbiterCli.Cmd.Verify do
 
       mode = if opts[:json], do: :json, else: :text
 
-      id =
-        case rest do
-          [id] -> id
-          [] -> Output.die("verify requires a ticket id", usage_hint())
-          _ -> Output.die("verify takes exactly one positional argument: the ticket id")
-        end
-
+      bulk? = Bulk.bulk?(rest, opts)
+      ids = if bulk?, do: Bulk.collect_ids(rest, opts, "verify"), else: [single_id!(rest)]
       {outcome, evidence} = verdict!(opts)
+      body = %{"outcome" => outcome, "evidence" => evidence}
 
-      case Client.post("/api/issues/" <> id <> "/verify", %{
-             "outcome" => outcome,
-             "evidence" => evidence
-           }) do
-        {:ok, issue} -> Output.emit_issue(issue, mode)
-        {:error, err} -> Output.die(err)
-      end
+      if bulk?,
+        do: bulk(ids, body, mode),
+        else: single(hd(ids), body, mode)
+    end
+  end
+
+  defp bulk(ids, body, mode) do
+    case Client.post("/api/issues/verify", Map.put(body, "ids", ids)) do
+      {:ok, response} -> Bulk.emit(response, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp single(id, body, mode) do
+    case Client.post("/api/issues/" <> id <> "/verify", body) do
+      {:ok, issue} -> Output.emit_issue(issue, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp single_id!(rest) do
+    case rest do
+      [id] -> id
+      [] -> Output.die("verify requires a ticket id", usage_hint())
+      _ -> Output.die("verify takes exactly one positional argument: the ticket id")
     end
   end
 
