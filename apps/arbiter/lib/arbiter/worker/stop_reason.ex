@@ -527,11 +527,25 @@ defmodule Arbiter.Worker.StopReason do
   Returns a `%StopReason{}`.
   """
   @spec classify(integer() | nil, [String.t()], String.t() | nil) :: t()
+  def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
+    # qwen's documented exit codes (auth, config, turn/token budget) are
+    # authoritative and outrank incidental output vocabulary.
+    case provider_exit_reason(provider, exit_status) do
+      %__MODULE__{} = reason -> reason
+      nil -> classify_by_output(exit_status, output_lines, provider)
+    end
+  end
+
+  defp provider_exit_reason("qwen", exit_status),
+    do: Arbiter.Agents.Qwen.Stream.stop_reason(exit_status)
+
+  defp provider_exit_reason(_provider, _exit_status), do: nil
+
   # Pre-existing complexity 18 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
+  defp classify_by_output(exit_status, output_lines, provider) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
 

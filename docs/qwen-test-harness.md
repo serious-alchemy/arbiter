@@ -37,3 +37,15 @@ in `test/support/qwen_cli.ex` in the same commit.
     mix test --include live_ollama test/arbiter/test_support/qwen_ollama_live_test.exs
 
 Env: `OLLAMA_URL` (default `http://127.0.0.1:11434`), `ARB_LIVE_OLLAMA_MODEL`.
+
+## Adapter and stream fixtures (bd-1cm12v, Q2)
+
+`Arbiter.Agents.Qwen` (argv, prompt delivery, env) and `Arbiter.Agents.Qwen.Stream`
+(stream quirks, exit-code → `StopReason` table) are covered by
+`test/arbiter/agents/qwen_test.exs` and `test/arbiter/agents/qwen/stream_test.exs`,
+which replay `test/fixtures/qwen/*.jsonl`. Those fixtures are **hand-authored from
+the documented stream-json schema, not live captures** (no qwen binary or hosted
+endpoint was available). On the first host with qwen, re-record them from a real
+`qwen -o stream-json` run against the scripted server and confirm the exit codes
+53/55 (budget, no `result` line) and the argv flags (`-o stream-json --yolo --bare
+--auth-type openai --max-session-turns`) before relying on them.
