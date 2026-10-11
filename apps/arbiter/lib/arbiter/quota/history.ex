@@ -62,6 +62,20 @@ defmodule Arbiter.Quota.History do
     :exit, _ -> nil
   end
 
+  # The pool's published budget (bd-9ntll1, DC3), read from the Budget.Server
+  # ETS table. `nil` when none is published, it is `:unlimited`, or the server
+  # is down; a capture never waits on or fails because of it.
+  defp published_budget(account_id, pool) do
+    table = Application.get_env(:arbiter, :quota_budget_table, :arbiter_quota_budgets)
+
+    case Arbiter.Quota.Budget.Server.get(account_id, pool, nil, table) do
+      %{budget: n} when is_integer(n) -> n
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
   # Antigravity meters two model groups, each with its own 5h and weekly
   # window; one row per (group, window) the snapshot carries.
   defp do_record(account_id, %GoogleQuota{provider: "antigravity"} = row, seats) do
@@ -103,6 +117,8 @@ defmodule Arbiter.Quota.History do
   defp do_record(account_id, row, seats), do: append_normalized(account_id, row, seats)
 
   defp append(attrs) do
+    attrs = Map.put(attrs, :budget, published_budget(attrs.provider_account_id, attrs.bucket))
+
     QuotaSnapshot
     |> Ash.Changeset.for_create(:record, %{attrs | utilization: attrs.utilization / 1})
     |> Ash.create!()
