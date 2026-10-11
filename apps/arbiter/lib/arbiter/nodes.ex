@@ -39,7 +39,8 @@ defmodule Arbiter.Nodes do
     Node,
     NodeEvent,
     PairingRequest,
-    Registry
+    Registry,
+    Session
   }
 
   alias Arbiter.Repo
@@ -638,6 +639,7 @@ defmodule Arbiter.Nodes do
         # The intent is kept on the node first: a session whose channel is mid-reconnect
         # accepts the notify and drops it, so the next connect delivers it (bd-5v5od0).
         with {:ok, upgrade} <- upgrade_spec(node),
+             :continue <- already_on?(node, upgrade.version),
              {:ok, _} <- set_upgrade_pending(node, upgrade.version),
              pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline} do
           Registry.notify(node.id, {:upgrade, upgrade_payload(upgrade)})
@@ -651,6 +653,23 @@ defmodule Arbiter.Nodes do
 
           {:ok, upgrade}
         end
+    end
+  end
+
+  # A live node already reporting the target needs no upgrade: nothing is sent and a stale
+  # marker is dropped (`v0.2.50` and `0.2.50` are the same version).
+  defp already_on?(node, target) do
+    case Session.snapshot(node.id) do
+      %{agent_version: v} when is_binary(v) ->
+        if strip_v(v) == strip_v(target) do
+          _ = if node.upgrade_pending_to, do: set_upgrade_pending(node, nil)
+          {:ok, %{version: target}}
+        else
+          :continue
+        end
+
+      _ ->
+        :continue
     end
   end
 
