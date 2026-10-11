@@ -91,6 +91,22 @@ defmodule Arbiter.Tasks.Create do
     end
   end
 
+  @doc """
+  The dedup half of `run/2`, for `Arbiter.Tasks.BatchCreate`: `:ok`, or
+  `{:duplicate, {:local_dup, _} | {:tracker_dup, _}}`.
+  """
+  @spec check_duplicate(map(), boolean()) :: :ok | {:duplicate, Dedup.result()}
+  def check_duplicate(attrs, force?) do
+    case dedup(attrs, force?) do
+      :ok -> :ok
+      {:dup, dup} -> {:duplicate, dup}
+    end
+  end
+
+  @doc "The non-blocking filing warnings for a created ticket (missing acceptance)."
+  @spec warnings(Issue.t()) :: [String.t()]
+  def warnings(%Issue{} = issue), do: ac_warnings(issue)
+
   @doc "One operator-facing line for a `{:partial, _, failures}` result."
   @spec failure_message([failure()]) :: String.t()
   def failure_message(failures), do: Enum.map_join(failures, "; ", & &1.message)
