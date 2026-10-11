@@ -12,8 +12,8 @@ defmodule Arbiter.Worker.RepoCapTest do
   alias Arbiter.Repo
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Worker.RepoCap
   alias Arbiter.Worker.Registry, as: WorkerRegistry
+  alias Arbiter.Worker.RepoCap
 
   defp entry(key, repo, extra \\ %{}) do
     Map.merge(

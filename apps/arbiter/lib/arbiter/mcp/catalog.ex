@@ -1188,7 +1188,9 @@ defmodule Arbiter.MCP.Catalog do
               "Dispatch even though the provider account this run would use has no free slot " <>
                 "(its `max_concurrent`, or this workspace's share, is reached). Without it such a " <>
                 "dispatch is refused with the account, its cap and the runs holding it. The " <>
-                "override is recorded as an `account_cap_override` event. Defaults to false."
+                "override is recorded as an `account_cap_override` event. It also goes over a " <>
+                "full repo cap (`worker.repos.<repo>.max_concurrent`), recorded as a " <>
+                "`repo_cap_override` event. Defaults to false."
           },
           "force_quota" => %{
             "type" => "boolean",

@@ -43,7 +43,9 @@ defmodule ArbiterCli.Cmd.Dispatch do
                      workspace's share, is reached). Without it the server
                      refuses with the account, its cap and the runs holding
                      it. The override is recorded as an `account_cap_override`
-                     event. Independent of `--force`.
+                     event. It also goes over a full repo cap
+                     (`worker.repos.<repo>.max_concurrent`), recorded as a
+                     `repo_cap_override` event. Independent of `--force`.
     --force-quota    ADVANCED: bypass the quota gate for this dispatch. Use only
                      when the gate holds despite judged-important work. Requires
                      explicit authorization; the quota gate protects against
