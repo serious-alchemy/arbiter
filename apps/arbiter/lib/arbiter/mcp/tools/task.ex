@@ -707,15 +707,17 @@ defmodule Arbiter.MCP.Tools.Task do
 
   @spec task_rank(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_rank(%Scope{} = scope, %{"ids" => _} = args) do
-    with {:ok, ids} <- BulkResult.fetch_ids(args) do
-      single = Map.delete(args, "ids")
+    case BulkResult.fetch_ids(args) do
+      {:ok, ids} ->
+        single = Map.delete(args, "ids")
 
-      {:ok,
-       BulkResult.run_rank(ids, single, fn id, step_args ->
-         task_rank(scope, Map.put(step_args, "id", id))
-       end)}
-    else
-      {:error, message} -> {:error, {:invalid, message}}
+        {:ok,
+         BulkResult.run_rank(ids, single, fn id, step_args ->
+           task_rank(scope, Map.put(step_args, "id", id))
+         end)}
+
+      {:error, message} ->
+        {:error, {:invalid, message}}
     end
   end
 

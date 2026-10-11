@@ -161,7 +161,7 @@ defmodule Arbiter.MCP.Catalog do
   @bulk_max Arbiter.Tasks.BulkResult.max_batch()
   @bulk_result_doc "Bulk: pass `ids` (array, at most #{@bulk_max}) instead of `id`; each id is applied " <>
                      "independently (never all-or-nothing) and the reply is `{results: [{id, status: " <>
-                     "\"ok\" | \"refused\" | \"not_found\", reason?, ticket?}], counts: {total, ok, refused, " <>
+                     ~s/"ok" | "refused" | "not_found", reason?, ticket?}], counts: {total, ok, refused, / <>
                      "not_found}}` in input order — `ticket` is the single-id reply, `reason` explains a " <>
                      "refusal. The single-id form is unchanged."
   @bulk_ids_schema %{
