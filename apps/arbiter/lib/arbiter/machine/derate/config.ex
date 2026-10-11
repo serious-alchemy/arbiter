@@ -114,19 +114,17 @@ defmodule Arbiter.Machine.Derate.Config do
 
   def build(_), do: %__MODULE__{}
 
+  @doc "The `key => raw string` overrides an environment (a map of strings) sets."
+  @spec env_overrides(map()) :: %{String.t() => String.t()}
+  def env_overrides(env) when is_map(env) do
+    for {var, key} <- @env, value = Map.get(env, var), is_binary(value), value != "", into: %{} do
+      {key, value}
+    end
+  end
+
   @doc "Build a config from `ARB_NODE_*` environment variables (a map of strings)."
   @spec from_env(map()) :: t()
-  def from_env(env) when is_map(env) do
-    @env
-    |> Enum.flat_map(fn {var, key} ->
-      case Map.get(env, var) do
-        value when is_binary(value) -> [{key, value}]
-        _ -> []
-      end
-    end)
-    |> Map.new()
-    |> build()
-  end
+  def from_env(env) when is_map(env), do: env |> env_overrides() |> build()
 
   defp cast(:boolean, v) when is_boolean(v), do: {:ok, v}
   defp cast(:boolean, v) when v in ["true", "on", "1", "yes"], do: {:ok, true}

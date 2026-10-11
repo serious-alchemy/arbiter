@@ -164,9 +164,14 @@ defmodule Arbiter.Machine.Derate do
     mem = Map.get(readings, :mem_available)
 
     cond do
-      is_number(psi) and psi >= config.psi_some_avg10 - psi_margin -> {:soft, {:psi, psi}}
-      is_number(mem) and mem < config.mem_floor_bytes + mem_margin -> {:soft, {:mem_available, mem}}
-      true -> {:none, nil}
+      is_number(psi) and psi >= config.psi_some_avg10 - psi_margin ->
+        {:soft, {:psi, psi}}
+
+      is_number(mem) and mem < config.mem_floor_bytes + mem_margin ->
+        {:soft, {:mem_available, mem}}
+
+      true ->
+        {:none, nil}
     end
   end
 
