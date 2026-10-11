@@ -49,6 +49,7 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
         :provider,
         :provider_account_id,
         :share,
+        :weight,
         :implementer_position,
         :reviewer_position
       ]
@@ -61,7 +62,7 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
       # workspace_id/provider are the identity; re-pointing to a different
       # account is the normal edit (rotation/merge), so provider_account_id
       # stays accepted.
-      accept [:provider_account_id, :share, :implementer_position, :reviewer_position]
+      accept [:provider_account_id, :share, :weight, :implementer_position, :reviewer_position]
     end
   end
 
@@ -79,6 +80,14 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
       allow_nil? true
       description "This workspace's cap on the account's concurrency ceiling (§4)."
       constraints min: 0
+    end
+
+    attribute :weight, :integer do
+      public? true
+      allow_nil? false
+      default 1
+      description "Fair-share weight on the account (DC10, §5.3); no effect until its budget_split is fair."
+      constraints min: 1
     end
 
     # bd-64apru: the account's place in each role's preference order on this

@@ -112,6 +112,7 @@ defmodule Arbiter.Board.Scheduler do
   their `pair`; the plan carries `placements` in order.
   """
 
+  alias Arbiter.Board.FairShare
   alias Arbiter.Board.FileScope
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
@@ -492,7 +493,7 @@ defmodule Arbiter.Board.Scheduler do
   defp walk_plan(input, walk) do
     ready = input |> Map.get(:ready) |> List.wrap() |> order()
     board = walk_board(input)
-    caps = walk_caps(walk)
+    caps = walk_caps(walk, ready, board)
     used = %{pools: %{}, nodes: %{}, repos: %{}}
 
     seed = %{
@@ -505,6 +506,10 @@ defmodule Arbiter.Board.Scheduler do
       # when the edge reached only one side (the board folds both; a hand-built
       # plan may not).
       named: %{},
+      # Candidates asked so far (a card's, or another workspace's for fair share).
+      cands: %{},
+      # Seats this walk gave each workspace, per pool: `{pool, workspace} => n`.
+      ws_placed: %{},
       exhausted: exhausted(caps, used)
     }
 
@@ -526,8 +531,10 @@ defmodule Arbiter.Board.Scheduler do
     }
   end
 
-  defp walk_caps(walk) do
-    Map.new([:pools, :nodes, :repos, :candidates], &{&1, Map.get(walk, &1) || %{}})
+  defp walk_caps(walk, ready, board) do
+    [:pools, :nodes, :repos, :candidates]
+    |> Map.new(&{&1, Map.get(walk, &1) || %{}})
+    |> Map.merge(%{ready: ready, board: board})
   end
 
   defp first_id([%{id: id} | _]), do: id
@@ -570,7 +577,9 @@ defmodule Arbiter.Board.Scheduler do
   end
 
   defp place_or_wait(card, caps, acc) do
-    case candidates_for(caps.candidates, card) do
+    {candidates, acc} = cached_candidates(card, caps, acc)
+
+    case candidates do
       [_ | _] = candidates ->
         pick_pair(card, candidates, caps, acc)
 
@@ -588,14 +597,31 @@ defmodule Arbiter.Board.Scheduler do
   defp candidates_for(fun, card) when is_function(fun, 1), do: fun.(card)
   defp candidates_for(candidates, card) when is_map(candidates), do: Map.get(candidates, card.id)
 
+  defp cached_candidates(card, caps, acc) do
+    case Map.fetch(acc.cands, card.id) do
+      {:ok, result} ->
+        {result, acc}
+
+      :error ->
+        result = candidates_for(caps.candidates, card)
+        {result, put_in(acc, [:cands, card.id], result)}
+    end
+  end
+
   # §2.3: pools, then the repo, then a machine that can run the pool.
   defp pick_pair(card, candidates, caps, acc) do
     {open, closed} = Enum.split_with(candidates, &pool_room?(&1, caps, acc))
+    {open, yielded, acc} = fair_share(card, open, caps, acc)
     {in_repo, repo_full} = Enum.split_with(open, &repo_room?(&1, caps, acc))
 
     cond do
       open == [] ->
-        wait(card, {:capacity, :provider}, "waiting for " <> pools_phrase(closed, caps, acc), acc)
+        wait(
+          card,
+          {:capacity, :provider},
+          "waiting for " <> provider_phrase(yielded, closed, caps, acc),
+          acc
+        )
 
       in_repo == [] ->
         wait(card, {:capacity, :repo}, repo_phrase(hd(repo_full), caps, acc), acc)
@@ -623,6 +649,7 @@ defmodule Arbiter.Board.Scheduler do
       |> take(:pools, candidate.pool)
       |> take(:nodes, node)
       |> take(:repos, Map.get(candidate, :repo))
+      |> take_workspace(candidate.pool, card)
       |> Map.update!(:placements, &[%{id: card.id, pool: candidate.pool, node: node} | &1])
       |> Map.update!(:in_flight, &(&1 ++ [{card.id, scope_of(card)}]))
       |> Map.update!(:mutex, &Map.put(&1, card.id, @dispatching_state))
@@ -665,6 +692,151 @@ defmodule Arbiter.Board.Scheduler do
     do: update_in(acc, [:used, layer], &Map.update(&1, key, 1, fn n -> n + 1 end))
 
   defp placed(acc, layer, key), do: get_in(acc, [:used, layer, key]) || 0
+
+  defp take_workspace(acc, pool, %{workspace_id: ws}) when not is_nil(ws),
+    do: update_in(acc, [:ws_placed], &Map.update(&1, {pool, ws}, 1, fn n -> n + 1 end))
+
+  defp take_workspace(acc, _pool, _card), do: acc
+
+  # ---- workspace fair share (DC10, §5.3) --------------------------------------
+
+  # Drops, from the pools `card` could take, those it must yield to another
+  # workspace on. `{kept, yielded, acc}`; a yielded candidate carries the
+  # `FairShare.yield()` and the pool's `fair` map for its phrase.
+  defp fair_share(card, open, caps, acc) do
+    {kept, yielded, acc} =
+      Enum.reduce(open, {[], [], acc}, fn candidate, {kept, yielded, acc} ->
+        case fair_check(card, candidate, caps, acc) do
+          {:ok, acc} -> {[candidate | kept], yielded, acc}
+          {{:yield, yield, fair}, acc} -> {kept, [{candidate, yield, fair} | yielded], acc}
+        end
+      end)
+
+    {Enum.reverse(kept), Enum.reverse(yielded), acc}
+  end
+
+  defp fair_check(card, candidate, caps, acc) do
+    pool = Map.get(caps.pools, candidate.pool)
+    fair = pool && Map.get(pool, :fair)
+    budget = pool && limit(candidate, pool)
+    workspace = Map.get(card, :workspace_id)
+
+    if is_map(fair) and is_integer(budget) and not is_nil(workspace) and
+         Map.get(card, :priority) != 0 do
+      fair_decide(card, candidate.pool, workspace, budget, fair, caps, acc)
+    else
+      {:ok, acc}
+    end
+  end
+
+  defp fair_decide(card, pool_id, workspace, budget, fair, caps, acc) do
+    placed_ids = MapSet.new(acc.placements, & &1.id)
+
+    others =
+      Enum.filter(caps.ready, fn other ->
+        other.id != card.id and not MapSet.member?(placed_ids, other.id) and
+          Map.get(other, :workspace_id) not in [nil, workspace]
+      end)
+
+    holders = workspace_seats(fair, pool_id, acc)
+    potential = Enum.uniq([workspace | Map.keys(holders) ++ Enum.map(others, & &1.workspace_id)])
+    held = Map.new(potential, &{&1, Map.get(holders, &1, 0)})
+
+    # The fewer the demanders, the larger the share: at the widest demand set
+    # the share is smallest, so a workspace under that is under at any demand.
+    least = budget |> FairShare.shares(fair, potential) |> Map.fetch!(workspace)
+
+    if length(potential) == 1 or Map.fetch!(held, workspace) < least do
+      {:ok, acc}
+    else
+      {demand, acc} = fair_demand(card, pool_id, others, held, caps, acc)
+      demanders = [workspace | for({other, {true, _waiting?}} <- demand, do: other)]
+      waiting = for {other, {_demand?, true}} <- demand, do: other
+
+      case FairShare.check(workspace, budget, fair, demanders, waiting, held) do
+        :ok -> {:ok, acc}
+        {:yield, yield} -> {{:yield, yield, fair}, acc}
+      end
+    end
+  end
+
+  # Seats each workspace holds on the pool: what it holds now plus this walk's
+  # placements.
+  defp workspace_seats(fair, pool_id, acc) do
+    placed = for {{^pool_id, ws}, n} <- acc.ws_placed, into: %{}, do: {ws, n}
+    held = Map.get(fair, :seats, %{})
+
+    Map.new(Enum.uniq(Map.keys(held) ++ Map.keys(placed)), fn ws ->
+      {ws, FairShare.held(fair, ws, Map.get(placed, ws, 0))}
+    end)
+  end
+
+  # `%{workspace => {demand?, waiting?}}` for every workspace but the card's:
+  # `demand?` when it holds a seat or has an eligible Ready card for the pool,
+  # `waiting?` when that card is in the card's own effective band.
+  defp fair_demand(card, pool_id, others, held, caps, acc) do
+    band = band(card)
+
+    others
+    |> Enum.group_by(& &1.workspace_id)
+    |> Map.merge(Map.new(Map.keys(held), &{&1, []}), fn _ws, cards, _ -> cards end)
+    |> Map.delete(Map.get(card, :workspace_id))
+    |> Enum.sort()
+    |> Enum.map_reduce(acc, fn {ws, cards}, acc ->
+      {demand?, waiting?, acc} = probe(cards, pool_id, band, caps, acc)
+      {{ws, {demand? or Map.get(held, ws, 0) > 0, waiting?}}, acc}
+    end)
+    |> then(fn {demand, acc} -> {demand, acc} end)
+  end
+
+  # Walks a workspace's Ready cards in order until one in `band` can use the
+  # pool; past `band`, a card cannot matter once demand is known.
+  defp probe(cards, pool_id, band, caps, acc) do
+    Enum.reduce_while(cards, {false, false, acc}, fn other, {demand?, _waiting?, acc} ->
+      cond do
+        demand? and band(other) > band ->
+          {:halt, {demand?, false, acc}}
+
+        true ->
+          {usable?, acc} = usable?(other, pool_id, caps, acc)
+
+          cond do
+            usable? and band(other) == band -> {:halt, {true, true, acc}}
+            usable? -> {:cont, {true, false, acc}}
+            true -> {:cont, {demand?, false, acc}}
+          end
+      end
+    end)
+  end
+
+  # An eligible card: no hold of its own, and a candidate on the pool with room.
+  defp usable?(other, pool_id, caps, acc) do
+    case Lifecycle.dispatchable(ticket(other), walk_ctx(other, caps.board, acc)) do
+      :ok ->
+        {candidates, acc} = cached_candidates(other, caps, acc)
+
+        usable? =
+          is_list(candidates) and
+            Enum.any?(candidates, &(&1.pool == pool_id and pool_room?(&1, caps, acc)))
+
+        {usable?, acc}
+
+      {:held, _hold} ->
+        {false, acc}
+    end
+  end
+
+  defp band(card), do: Map.get(card, :effective_priority) || Map.get(card, :priority) || :none
+
+  defp provider_phrase(yielded, closed, caps, acc) do
+    parts =
+      Enum.map(yielded, fn {candidate, yield, fair} ->
+        "#{pool_label(candidate.pool, caps)}: #{FairShare.describe(yield, fair)}"
+      end)
+
+    parts = if closed == [], do: parts, else: parts ++ [pools_phrase(closed, caps, acc)]
+    Enum.join(parts, "; ")
+  end
 
   # ---- capacity --------------------------------------------------------------
 
