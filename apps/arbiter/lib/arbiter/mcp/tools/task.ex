@@ -13,6 +13,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
+  alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
@@ -66,8 +67,54 @@ defmodule Arbiter.MCP.Tools.Task do
 
   # ---- task_show ----------------------------------------------------------
 
+  # bd-7sxpln: `ids` reads several tickets in one batch (a constant number of
+  # queries) — the list-row shape plus `parent_id` / `depends_on` / `blocks`
+  # and epic progress, `full: true` for the full record. Unknown (or other
+  # workspace) ids are reported per id in `not_found`, not as a failure.
+  # Coordinator only: a worker reads its own ticket.
+  defp task_show_many(%Scope{tier: :coordinator} = scope, ids, args) do
+    with {:ok, full} <- Params.fetch_bool(args, "full", false),
+         {:ok, ids} <- validate_ids(ids),
+         {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
+      {issues, not_found} =
+        BulkRead.fetch_many(ids, &Tools.workspace_match?(&1.workspace_id, ws_id))
+
+      issues = BulkRead.load(issues)
+      edges = BulkRead.edges(issues)
+      views = Projection.views(issues)
+
+      tasks =
+        for issue <- issues do
+          base =
+            if full,
+              do: Tools.serialize_task(issue),
+              else: Tools.serialize_task_summary(issue, Map.fetch!(views, issue.id))
+
+          base
+          |> Map.merge(Projection.payload(Map.fetch!(views, issue.id)))
+          |> Map.merge(BulkRead.row_extras(issue, [:parent, :deps], edges))
+        end
+
+      {:ok, %{tasks: tasks, count: length(tasks), not_found: not_found}}
+    end
+  end
+
+  defp task_show_many(%Scope{}, _ids, _args),
+    do: {:error, {:unauthorized, "`ids` reads several tickets and is coordinator-only"}}
+
+  defp validate_ids(ids) when is_list(ids) and ids != [] do
+    if Enum.all?(ids, &(is_binary(&1) and &1 != "")),
+      do: {:ok, ids},
+      else: {:error, {:invalid, "`ids` must be a list of ticket id strings"}}
+  end
+
+  defp validate_ids(_), do: {:error, {:invalid, "`ids` must be a non-empty list of ticket ids"}}
+
   @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
   @spec task_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_show(%Scope{} = scope, %{"ids" => ids} = args) when not is_nil(ids),
+    do: task_show_many(scope, ids, args)
+
   def task_show(%Scope{} = scope, args) do
     with {:ok, full} <- Params.fetch_bool(args, "full", false),
          {:ok, id} <- Tools.resolve_task_id(scope, args),

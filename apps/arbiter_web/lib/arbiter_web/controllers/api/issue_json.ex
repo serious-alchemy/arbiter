@@ -61,16 +61,23 @@ defmodule ArbiterWeb.Api.IssueJSON do
   def index(%{issues: issues} = assigns) do
     views = Map.get(assigns, :views, %{})
     holds = Map.get(assigns, :holds, %{})
+    extras = Map.get(assigns, :extras, %{})
 
     rows =
       Enum.map(issues, fn issue ->
-        case Map.fetch(views, issue.id) do
-          {:ok, view} -> IssueSerializer.row(data(issue), view, Map.get(holds, issue.id))
-          :error -> data(issue)
-        end
+        row =
+          case Map.fetch(views, issue.id) do
+            {:ok, view} -> IssueSerializer.row(data(issue), view, Map.get(holds, issue.id))
+            :error -> data(issue)
+          end
+
+        Map.merge(row, Map.get(extras, issue.id, %{}))
       end)
 
-    %{data: rows} |> WorkspaceParam.echo(assigns)
+    # bd-7sxpln: a bulk `ids=` read names the ids it could not find.
+    %{data: rows}
+    |> then(&if(assigns[:not_found], do: Map.put(&1, :not_found, assigns.not_found), else: &1))
+    |> WorkspaceParam.echo(assigns)
   end
 
   @doc """
