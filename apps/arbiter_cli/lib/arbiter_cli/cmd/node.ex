@@ -611,13 +611,35 @@ defmodule ArbiterCli.Cmd.Node do
   defp offered(%{"offered" => offered}) when is_integer(offered), do: to_string(offered)
   defp offered(_), do: "-"
 
-  defp temp(%{"temp_c" => t}) when is_number(t), do: "#{round(t)}°C"
+  defp temp(%{"temp_c" => t}) do
+    case to_number(t) do
+      nil -> "-"
+      n -> "#{round(n)}°C"
+    end
+  end
+
   defp temp(_), do: "-"
 
-  defp psi(%{"psi" => %{"some_avg10" => v}}) when is_number(v),
-    do: "#{:erlang.float_to_binary(v * 1.0, decimals: 1)}%"
+  defp psi(%{"psi" => %{} = psi}) do
+    case to_number(psi["some_avg10"] || get_in(psi, ["some", "avg10"])) do
+      nil -> "-"
+      v -> "#{:erlang.float_to_binary(v * 1.0, decimals: 1)}%"
+    end
+  end
 
   defp psi(_), do: "-"
+
+  # Readings are numbers from the server, but a relayed heartbeat can carry them as strings.
+  defp to_number(v) when is_number(v), do: v
+
+  defp to_number(v) when is_binary(v) do
+    case Float.parse(v) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp to_number(_), do: nil
 
   defp derate_line(%{"derate" => level} = n) when level in ["soft", "hard"] do
     "  ↳ #{level} derate: #{n["derate_reason"] || "pressure"} — offering #{n["offered"] || 0} of " <>

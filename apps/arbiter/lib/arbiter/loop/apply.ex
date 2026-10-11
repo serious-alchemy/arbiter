@@ -34,6 +34,7 @@ defmodule Arbiter.Loop.Apply do
       operator rides along separately as the Ash actor on `persist/2`.
   """
 
+  alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Loop
   alias Arbiter.Loop.Apply.{Payload, RepoDoc}
   alias Arbiter.Loop.{Notify, PendingWrite}
@@ -170,6 +171,19 @@ defmodule Arbiter.Loop.Apply do
     end
   end
 
+  # R13 (bd-d5rdsc): an operator applying a matrix proposal merges its rows into
+  # the live competence matrix (the previous live matrix is kept for rollback).
+  # The autonomous path is `Loop.Canary`, which lands the same rows after
+  # measuring both arms.
+  def side_effect(%PendingWrite{kind: :competence_matrix, payload: payload}, _attribution, _opts) do
+    with {:ok, %{rows: rows}} <- competence_matrix_args(payload) do
+      case Arbiter.Settings.merge_competence_rows(rows) do
+        {:ok, _} -> :ok
+        {:error, err} -> {:error, {:invalid, ash_message(err)}}
+      end
+    end
+  end
+
   # Rung 2 of the destination ladder (Amendment D) — see `Loop.Apply.RepoDoc`
   # for the worktree/commit/PR mechanics this hands off to.
   def side_effect(%PendingWrite{kind: :repo_doc_patch} = row, attribution, _opts) do
@@ -210,6 +224,10 @@ defmodule Arbiter.Loop.Apply do
 
   def payload_ready?(%PendingWrite{kind: :config_set} = row) do
     with {:ok, _} <- config_set_args(row), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: :competence_matrix, payload: payload}) do
+    with {:ok, _} <- competence_matrix_args(payload), do: :ok
   end
 
   def payload_ready?(%PendingWrite{kind: :repo_doc_patch} = row) do
@@ -256,6 +274,19 @@ defmodule Arbiter.Loop.Apply do
     with {:ok, ws_id} <- Payload.workspace_id(payload, row.workspace_id),
          {:ok, patch} <- Payload.map(payload, "patch") do
       {:ok, %{ws_id: ws_id, patch: patch, unset: Map.get(payload, "unset_paths") || []}}
+    end
+  end
+
+  defp competence_matrix_args(payload) do
+    case Map.get(payload || %{}, "rows") do
+      [_ | _] = rows ->
+        case Competence.normalize_rows(rows) do
+          {:ok, normalized} -> {:ok, %{rows: normalized}}
+          {:error, msg} -> {:error, {:unmapped, msg}}
+        end
+
+      _ ->
+        {:error, {:unmapped, "this proposal carries no competence rows"}}
     end
   end
 

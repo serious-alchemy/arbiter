@@ -433,6 +433,30 @@ defmodule ArbiterCli.Cmd.NodeTest do
       refute local_line =~ "derate"
     end
 
+    test "remote rows show TEMP and PSI for string-valued or nested readings" do
+      a = Map.merge(@live_node, %{"temp_c" => "79.79", "psi" => %{"some_avg10" => "3.25"}})
+
+      b =
+        Map.merge(@live_node, %{
+          "name" => "box-2",
+          "temp_c" => 79.79,
+          "psi" => %{"some" => %{"avg10" => 0}}
+        })
+
+      stub_get("/api/nodes", %{
+        "nodes" => [a, b],
+        "local" => Map.merge(@local, %{"temp_c" => 86.0, "psi" => %{"some_avg10" => 0.0}}),
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      [_header, local_line, a_line, b_line | _] = String.split(out, "\n")
+      assert local_line =~ "86°C" and local_line =~ "0.0%"
+      assert a_line =~ "80°C" and a_line =~ "3.3%"
+      assert b_line =~ "box-2" and b_line =~ "80°C" and b_line =~ "0.0%"
+    end
+
     test "a node that reports no sensing shows dashes, not zeros" do
       stub_get("/api/nodes", %{
         "nodes" => [Map.put(@live_node, "contributes", 2)],

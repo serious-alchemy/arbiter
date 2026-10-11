@@ -639,6 +639,10 @@ defmodule Arbiter.Loop do
   # A config change sets a value; it does not add prose to the prompt.
   defp context_cost_tokens(_gist, _scope, :config_set, _payload), do: 0
 
+  # A competence-matrix row re-weights routing scores (R13); like a routing
+  # rule it adds nothing to any prompt.
+  defp context_cost_tokens(_gist, _scope, :competence_matrix, _payload), do: 0
+
   # What is left is fleet-wide prose — a skill patch or a new skill — which is
   # carried by every dispatch that materializes it, forever.
   defp context_cost_tokens(gist, _scope, _kind, payload), do: prose_tokens(payload, gist)
