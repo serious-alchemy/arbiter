@@ -20,14 +20,17 @@ defmodule Arbiter.Loop.AnalysisDifficultyFeedTest do
     %{ws: ws}
   end
 
+  # Caller options come first: `Keyword.get/2` reads the first match, so a
+  # caller's `:since` must precede the default one.
   defp analyze(ws, extra) do
     Analysis.analyze(
-      [
-        workspace_id: ws.id,
-        propose?: true,
-        record_cost?: false,
-        since: DateTime.add(DateTime.utc_now(), -10 * 86_400, :second)
-      ] ++ extra
+      extra ++
+        [
+          workspace_id: ws.id,
+          propose?: true,
+          record_cost?: false,
+          since: DateTime.add(DateTime.utc_now(), -10 * 86_400, :second)
+        ]
     )
   end
 
