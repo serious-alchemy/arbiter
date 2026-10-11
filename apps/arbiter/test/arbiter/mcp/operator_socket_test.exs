@@ -22,7 +22,10 @@ defmodule Arbiter.MCP.OperatorSocketTest do
   # Short and private: sun_path is 108 bytes, and /tmp is shared between workers.
   setup do
     dir =
-      Path.join(System.tmp_dir!(), "ops-#{System.pid()}-#{System.unique_integer([:positive])}")
+      Path.join(
+        Arbiter.Config.Paths.socket_root(),
+        "ops-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
 
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, dir: dir, path: Path.join([dir, "arbiter", "op.sock"])}

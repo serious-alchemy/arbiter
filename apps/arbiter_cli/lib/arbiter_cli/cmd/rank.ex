@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Rank do
   @moduledoc """
-  `arb ticket rank <id> --top | --bottom | --before <id> | --after <id>
+  `arb ticket rank <id> [<id> ...] [--stdin] --top | --bottom | --before <id> | --after <id>
   [--pin | --unpin]` and `arb ticket rank <id> --pin | --unpin` —
   reorder a ticket inside its workspace's rank order (bd-djapyj): the space
   `board/scheduler.ex` and Autopilot dispatch read (priority, then rank,
@@ -19,9 +19,16 @@ defmodule ArbiterCli.Cmd.Rank do
   With `--json`, prints the updated ticket plus its zero-based position
   among tickets sharing its priority (`priority_band_position`) and the
   count of tickets in that band (`priority_band_size`).
+
+  Several ids (or `--stdin`, one id per line) make a bulk call
+  (`POST /api/issues/rank`, at most 200 ids) with ONE shared move; the ids are an
+  ordered list and end up in that order (`--top`/`--bottom`: a block with the
+  first id first; `--after X`: chained after X; `--before X`: in order ahead of
+  X). One line per id, `--json` prints the per-id result list, and the exit code
+  is 1 if any id was refused or not found.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output}
+  alias ArbiterCli.{ArgParser, Bulk, Client, Output}
 
   @switches [
     json: :boolean,
@@ -30,7 +37,8 @@ defmodule ArbiterCli.Cmd.Rank do
     before: :string,
     after: :string,
     pin: :boolean,
-    unpin: :boolean
+    unpin: :boolean,
+    stdin: :boolean
   ]
 
   def run(argv) do
@@ -44,9 +52,21 @@ defmodule ArbiterCli.Cmd.Rank do
   defp do_run(argv) do
     {opts, rest, _mode} = ArgParser.parse(argv, command: "arb ticket rank", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
-    id = parse_id(rest)
     body = rank_body(opts)
 
+    if Bulk.bulk?(rest, opts),
+      do: bulk(Bulk.collect_ids(rest, opts, "rank"), body, mode),
+      else: single(parse_id(rest), body, mode)
+  end
+
+  defp bulk(ids, body, mode) do
+    case Client.post("/api/issues/rank", Map.put(body, "ids", ids)) do
+      {:ok, response} -> Bulk.emit(response, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp single(id, body, mode) do
     case Client.patch("/api/issues/" <> id <> "/rank", body) do
       {:ok, issue} -> emit(issue, mode)
       {:error, err} -> Output.die(err)
