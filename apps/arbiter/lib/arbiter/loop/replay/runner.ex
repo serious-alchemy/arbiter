@@ -36,7 +36,8 @@ defmodule Arbiter.Loop.Replay.Runner do
 
   `output` is the model's own text (never a tool's output, so a file that
   happens to contain `VERDICT: APPROVE` cannot score a review), `exit_status`,
-  `timed_out` and `duration_ms`. A run that could not be spawned at all is
+  `timed_out` and `duration_ms`; optionally `usage`, what the run drew as the
+  adapter counts it (tokens, cost), kept on the replay's own record. A run that could not be spawned at all is
   `{:error, reason}`.
   """
 
@@ -59,10 +60,11 @@ defmodule Arbiter.Loop.Replay.Runner do
         }
 
   @type result :: %{
-          output: [String.t()],
-          exit_status: integer() | nil,
-          timed_out: boolean(),
-          duration_ms: non_neg_integer()
+          required(:output) => [String.t()],
+          required(:exit_status) => integer() | nil,
+          required(:timed_out) => boolean(),
+          required(:duration_ms) => non_neg_integer(),
+          optional(:usage) => map()
         }
 
   @callback run(role(), spec()) :: {:ok, result()} | {:error, term()}

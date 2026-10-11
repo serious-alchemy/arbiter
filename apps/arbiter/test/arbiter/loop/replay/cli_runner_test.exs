@@ -176,7 +176,13 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
       output!(rec, [
         assistant("Looking at the diff."),
         tool_result("VERDICT: REQUEST_CHANGES, said a file the reviewer read"),
-        assistant("VERDICT: APPROVE\n\nCRITERIA:\n- [MET] it works\n\narb done")
+        assistant("VERDICT: APPROVE\n\nCRITERIA:\n- [MET] it works\n\narb done"),
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "total_cost_usd" => 0.25,
+          "usage" => %{"input_tokens" => 1200, "output_tokens" => 300}
+        }
       ])
 
       assert {:ok, result} = CliRunner.run(:review, spec)
@@ -184,6 +190,9 @@ defmodule Arbiter.Loop.Replay.CliRunnerTest do
       assert result.exit_status == 0
       refute result.timed_out
       assert is_integer(result.duration_ms)
+
+      # What the run drew, for the replay's own record (never a usage event).
+      assert %{tokens_in: 1200, tokens_out: 300, cost_usd: 0.25} = result.usage
       assert {:approve, findings} = Score.verdict(result.output)
       assert findings =~ "[MET] it works"
       refute Enum.any?(result.output, &(&1 =~ "REQUEST_CHANGES"))

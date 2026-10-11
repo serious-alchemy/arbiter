@@ -707,7 +707,7 @@ defmodule Arbiter.Loop.Replay do
   end
 
   defp run_summary(result) do
-    Map.take(result, [:exit_status, :timed_out, :duration_ms])
+    Map.take(result, [:exit_status, :timed_out, :duration_ms, :usage])
   end
 
   defp adapter(:antigravity), do: :gemini

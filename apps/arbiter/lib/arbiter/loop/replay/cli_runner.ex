@@ -58,6 +58,15 @@ defmodule Arbiter.Loop.Replay.CliRunner do
   # Where the replayed CLI's `arb` points: the discard port, which nothing serves.
   @nowhere "http://127.0.0.1:9"
 
+  @usage_keys [
+    :model,
+    :tokens_in,
+    :tokens_out,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd
+  ]
+
   @impl true
   def layout(role, spec) do
     {_type, policy} = policy(role, spec)
@@ -228,7 +237,8 @@ defmodule Arbiter.Loop.Replay.CliRunner do
       output: text(parser),
       exit_status: exit_status(outcome),
       timed_out: outcome == :timeout,
-      duration_ms: System.monotonic_time(:millisecond) - started
+      duration_ms: System.monotonic_time(:millisecond) - started,
+      usage: usage(adapter, parser.session)
     }
   end
 
@@ -281,6 +291,14 @@ defmodule Arbiter.Loop.Replay.CliRunner do
 
   defp text(%{text: text}),
     do: text |> Enum.reverse() |> Enum.flat_map(&String.split(&1, "\n"))
+
+  # What the run drew, as the adapter counts it, for the replay's own record: a
+  # replay writes no usage event, so live cost estimates never count it.
+  defp usage(adapter, session) do
+    if function_exported?(adapter, :usage_attrs, 1),
+      do: session |> adapter.usage_attrs() |> Map.take(@usage_keys),
+      else: %{}
+  end
 
   # The session's done detection messages its caller; a replay reads the
   # verdict from the text instead, so they are dropped.

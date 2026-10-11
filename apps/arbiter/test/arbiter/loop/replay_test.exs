@@ -180,8 +180,16 @@ defmodule Arbiter.Loop.ReplayTest do
 
   # ---- the scripted runner --------------------------------------------------------
 
-  defp result(lines),
-    do: {:ok, %{output: lines, exit_status: 0, timed_out: false, duration_ms: 5}}
+  defp result(lines) do
+    {:ok,
+     %{
+       output: lines,
+       exit_status: 0,
+       timed_out: false,
+       duration_ms: 5,
+       usage: %{tokens_in: 100, tokens_out: 20}
+     }}
+  end
 
   defp write_feature(spec) do
     commit!(spec.dir, %{"lib/feature.ex" => @feature}, "implement the feature")
@@ -308,6 +316,11 @@ defmodule Arbiter.Loop.ReplayTest do
       assert run.file_overlap == 1.0
       assert run.line_overlap == 1.0
       assert run.files == ["lib/feature.ex"]
+
+      # What each side drew is on the replay's own record, never a usage event.
+      for side <- ["implement", "review"] do
+        assert %{"usage" => %{"tokens_in" => 100, "tokens_out" => 20}} = run.runs[side]
+      end
 
       assert run.task_id == ctx.issue.id
       assert run.base_sha == ctx.base
