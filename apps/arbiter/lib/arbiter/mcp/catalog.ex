@@ -3228,6 +3228,13 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Also run the opt-in discovery model pass (one bounded model call; queues nothing). Default false."
           },
+          "difficulty_feed" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also read the per-cell `difficulty raised` rate over the window and queue " <>
+                "`:difficulty_override` proposals for cells that run high. Proposals only. " <>
+                "Default false."
+          },
           "workspace" => %{
             "type" => "string",
             "description" =>

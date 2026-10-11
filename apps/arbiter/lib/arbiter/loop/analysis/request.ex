@@ -6,7 +6,7 @@ defmodule Arbiter.Loop.Analysis.Request do
 
   One parser, so `POST /api/loop/analyze`, `POST /api/loop/propose`,
   `loop_analyze` and `loop_propose` accept the same `since` / `until` /
-  `limit` / `label` / `discover` and refuse the same malformed values. Each
+  `limit` / `label` / `discover` / `difficulty_feed` and refuse the same malformed values. Each
   adapter only maps the `{:error, message}` onto its own error shape.
 
   `limit` is clamped to `max_limit/0` (never refused for being too big). A
@@ -34,9 +34,11 @@ defmodule Arbiter.Loop.Analysis.Request do
     with {:ok, since} <- parse_window(params["since"]),
          {:ok, until} <- parse_iso(params["until"]),
          {:ok, limit} <- parse_limit(params["limit"], Keyword.get(opts, :default_limit)),
-         {:ok, discover?} <- parse_discover(params["discover"]) do
+         {:ok, discover?} <- parse_discover(params["discover"]),
+         {:ok, difficulty_feed?} <- parse_difficulty_feed(params["difficulty_feed"]) do
       {:ok,
        [discover?: discover?]
+       |> put_true(:difficulty_feed?, difficulty_feed?)
        |> put(:since, since)
        |> put(:until, until)
        |> put(:limit, limit)
@@ -91,6 +93,21 @@ defmodule Arbiter.Loop.Analysis.Request do
       :error -> {:error, "discover must be true or false"}
     end
   end
+
+  # bd-druqc1 (R12): the opt-in per-cell "difficulty raised" feed. Off unless
+  # asked for, and the key is only present when on, so the default options are
+  # exactly what they were.
+  defp parse_difficulty_feed(v) when v in [nil, ""], do: {:ok, false}
+
+  defp parse_difficulty_feed(v) do
+    case Params.boolean(v) do
+      {:ok, b} -> {:ok, b}
+      :error -> {:error, "difficulty_feed must be true or false"}
+    end
+  end
+
+  defp put_true(opts, key, true), do: Keyword.put(opts, key, true)
+  defp put_true(opts, _key, _), do: opts
 
   defp unit_seconds("d"), do: 24 * 3600
   defp unit_seconds("h"), do: 3600

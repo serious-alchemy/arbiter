@@ -149,7 +149,7 @@ defmodule ArbiterCli.Main do
                                   [--since ...] [--limit N]
 
       arb loop analyze    [--since 7d|24h|<iso>] [--until <iso>] [--limit N]
-                                  [--workspace <id>] [--propose] [--discover] [--json]
+                                  [--workspace <id>] [--propose] [--discover] [--difficulty-feed] [--json]
       arb loop pending    [--state proposed|hypothesis|...] [--kind ...]
                                   [--workspace <id>] [--limit N] [--json]
       arb loop diff       <id>
