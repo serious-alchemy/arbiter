@@ -93,13 +93,18 @@ defmodule ArbiterCli.Cmd.Restart do
 
       guard_active_workers!(force)
 
-      case perform(root, timeout_ms) do
-        {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
-        {:timeout, actions, _was_running} -> emit_timeout(mode, actions, timeout_ms)
-        {:down, actions, _was_running} -> emit_down(mode, actions)
-      end
+      root |> perform(timeout_ms) |> emit_result(mode, timeout_ms)
     end
   end
+
+  defp emit_result({:ok, actions, was_running}, mode, _timeout_ms),
+    do: emit_restarted(mode, actions, was_running)
+
+  defp emit_result({:timeout, actions, _was_running}, mode, timeout_ms),
+    do: emit_timeout(mode, actions, timeout_ms)
+
+  defp emit_result({:down, actions, _was_running}, mode, _timeout_ms),
+    do: emit_down(mode, actions)
 
   @doc """
   Stop the running Phoenix, start a fresh one, and wait up to `timeout_ms` for

@@ -399,18 +399,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
       Status.phase("restarting")
 
-      case Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms) do
-        {:ok, actions, was_running} ->
-          handle_restart_ok(ctx, actions, was_running)
-
-        {:timeout, actions, was_running} ->
-          handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
-
-        {:down, actions, _was_running} ->
-          handle_server_down(ctx, actions)
-      end
+      result = Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms)
+      handle_restart_result(result, ctx, pre_deploy_fails)
     end
   end
+
+  defp handle_restart_result({:ok, actions, was_running}, ctx, _pre_deploy_fails),
+    do: handle_restart_ok(ctx, actions, was_running)
+
+  defp handle_restart_result({:timeout, actions, was_running}, ctx, pre_deploy_fails),
+    do: handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
+
+  defp handle_restart_result({:down, actions, _was_running}, ctx, _pre_deploy_fails),
+    do: handle_server_down(ctx, actions)
 
   # Record this deploy in the status file, and make sure a halt anywhere below
   # (a failed download, a checksum mismatch, a failed backup) leaves a `failed`
