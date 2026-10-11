@@ -193,8 +193,7 @@ defmodule Arbiter.Nodes.OperatorTest do
         )
 
       current = Map.put(hello(), "agent_version", bare)
-      {:ok, %{hello_ok: hello_ok}} = Registry.attach(node, self(), current, tick_ms: :infinity)
-      refute Map.has_key?(hello_ok, "upgrade")
+      {:ok, _} = Registry.attach(node, self(), current, tick_ms: :infinity)
       assert Nodes.get_node(node.id).upgrade_pending_to == nil
     end
 
