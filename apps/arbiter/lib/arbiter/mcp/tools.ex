@@ -62,6 +62,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Reviews.Listing
   alias Arbiter.Reviews.Params, as: ReviewParams
   alias Arbiter.Reviews.Serializer
+  alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -430,7 +431,8 @@ defmodule Arbiter.MCP.Tools do
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
          {:ok, priority} <- optional_integer(args, "priority"),
          {:ok, difficulty} <- optional_integer(args, "difficulty"),
-         {:ok, engagements} <- optional_enum(args, "engagements", @engagement_modes) do
+         {:ok, engagements} <- optional_enum(args, "engagements", @engagement_modes),
+         {:ok, include} <- parse_include(args) do
       issues =
         Issue
         |> filter_workspace(ws_id)
@@ -450,8 +452,27 @@ defmodule Arbiter.MCP.Tools do
             is_nil(column) or view.column == column,
             do: {issue, view}
 
-      {:ok, %{tasks: ready_rows(rows, ws_id), count: length(rows), workspace_id: ws_id}}
+      {:ok, %{tasks: list_rows(rows, ws_id, include), count: length(rows), workspace_id: ws_id}}
     end
+  end
+
+  defp parse_include(args) do
+    case BulkRead.parse_include(Map.get(args, "include")) do
+      {:ok, include} -> {:ok, include}
+      {:error, msg} -> {:error, {:invalid, msg}}
+    end
+  end
+
+  # bd-7sxpln: epic rows carry `child_closed`/`child_total`, and `include`
+  # adds `parent_id` / `depends_on` / `blocks` — batch reads, constant in rows.
+  defp list_rows(rows, ws_id, include) do
+    issues = BulkRead.load(Enum.map(rows, &elem(&1, 0)))
+    edges = if include == [], do: %{}, else: BulkRead.edges(issues)
+    loaded = Map.new(issues, &{&1.id, &1})
+
+    rows
+    |> ready_rows(ws_id)
+    |> Enum.map(&Map.merge(&1, BulkRead.row_extras(Map.fetch!(loaded, &1.id), include, edges)))
   end
 
   # The summary rows, a Ready card the scheduler is holding carrying its
