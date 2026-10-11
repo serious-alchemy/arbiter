@@ -49,13 +49,23 @@ defmodule Arbiter.MCP.AgentConfig.QwenTest do
     assert Bitwise.band(File.stat!(settings).mode, 0o077) == 0
   end
 
-  test "a repo .mcp.json server is excluded by the allow-list flags, not spawned" do
+  test "a repo .mcp.json server is excluded by the allow-list flags, not spawned", %{base: base} do
     flags = Qwen.flags()
     assert ["--allowed-mcp-server-names", "arbiter"] = Enum.take(flags, 2)
     assert ["--allowed-tools", "mcp__arbiter"] = Enum.drop(flags, 2)
 
+    bin = Path.join(base, "bin")
+    File.mkdir_p!(bin)
+    File.write!(Path.join(bin, "qwen"), "#!/bin/sh\nexit 0\n")
+    File.chmod!(Path.join(bin, "qwen"), 0o755)
+    old_path = System.get_env("PATH")
+    System.put_env("PATH", bin)
+    on_exit(fn -> System.put_env("PATH", old_path) end)
+
     {:ok, argv} = Arbiter.Agents.Qwen.default_argv("hi", [])
-    assert Enum.join(argv, " ") =~ "--allowed-mcp-server-names arbiter --allowed-tools mcp__arbiter"
+
+    assert Enum.join(argv, " ") =~
+             "--allowed-mcp-server-names arbiter --allowed-tools mcp__arbiter"
   end
 
   test "regenerates idempotently, dropping planted servers", %{wt: wt, settings: settings} do
