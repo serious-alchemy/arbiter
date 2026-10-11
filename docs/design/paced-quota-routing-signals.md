@@ -1304,6 +1304,39 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   leaving permissioned tasks out of both arms. Auto-revert, expiry, the kill
   switch and `canary_auto_promote: false` are the routing canary's, unchanged. A
   promote merges the rows into the live matrix; a revert or expiry writes nothing.
+- **R15 as built (bd-c7lx65).** `Loop.Replay.run/1` replays one closed task on a
+  chosen (account, model). `Loop.Replay.Subject` takes a task closed `completed`
+  with no permissions; the account must be attached to the task's workspace, so
+  the run spends the pool it was admitted on. Neither the base nor the merge
+  commit is recorded, so the known-good change is the PR head the ticket
+  recorded (`merger_status`, `merge_watch`, `last_reviewed_sha`) against where it
+  left the target branch, else the commit the PR squash-merged as (`Title (#N)`),
+  whose first parent is the base. `Loop.Replay.Admission` reads `Budget.explore/2`
+  of the published budget of both pools a replay draws on, the replayed model's
+  and the scoring reviewer's (by default the fleet's: the cross-family projection,
+  else the workspace's reviewer): it starts only while `running + 1 ≤ explore` on
+  each, and the reviewer's pool is admitted again before the review spends. It
+  runs in a checkout at the base where the merged change is unreachable
+  (`Loop.Replay.Sandbox`: its own `.git` borrowing the objects, one ref, no
+  remote; under `sandbox.backend: podman`, a read-only `PrivateClone` review
+  clone whose `origin` leads nowhere), through the live spawn path
+  (`Loop.Replay.CliRunner`: the adapter's argv under the workspace's policy and
+  guardrail floor, `ClaudeSession.port_args/6`, a deadline), with only the
+  account's credential and fences on `arb`, `gh`/`glab` and git in its env. The
+  score (`Loop.Replay.Score`) is the live ReviewGate prompt's round-1 verdict read
+  by the live `converged` rule (without the live verdict re-prompt), the repo's
+  pre-push recipe as its tests, and the overlap of files and added lines with the
+  merged change. Each replay is a `replay_runs` row (`Loop.ReplayRun`), its own
+  source: nothing goes to `worker_runs`, `review_gate_rounds`, `usage_events`, the
+  ticket or the matrix, and `Loop.Replay.Evidence` summarises scored replays per
+  cell as `source: "replay"` with a weight (0.5 by default; O10). It runs in the
+  live node, which publishes the budgets (`bin/arbiter rpc
+  'Arbiter.Release.replay(…, async: true)'`); `Arbiter.Release.replay_report/1`,
+  `replay_candidates/1` and `mix arbiter.replay_report` read it.
+  `Loop.ReplayIsolationTest` pins that nothing live names it and that it calls no
+  merge, forge, tracker, dispatch or matrix path; with one eligible account,
+  routing, the gate and the seats are unchanged while replays are recorded or
+  running.
 
 - **Phase 1 delivers value with no learned model.** R4, R5, R6, R7 and R8 add
   the capability matrix and floors as hard gates, the headroom price, and the
