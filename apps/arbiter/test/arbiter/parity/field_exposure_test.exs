@@ -11,7 +11,7 @@ defmodule Arbiter.Parity.FieldExposureTest do
   alias Arbiter.Parity.FieldExposure
 
   # Call options that ride alongside the fields and are not fields themselves.
-  @call_options ~w(id force workspace assignee summary ref deps)
+  @call_options ~w(id force workspace assignee summary ref deps depends_on blocks)
 
   @manifest FieldExposure.load!()
 

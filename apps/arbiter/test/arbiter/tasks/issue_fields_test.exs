@@ -75,7 +75,7 @@ defmodule Arbiter.Tasks.IssueFieldsTest do
     # `force`, `workspace` and `id` are call options; `summary` picks the
     # response shape (P-13); `assignee` is the deprecated accept-and-ignore
     # field, never an Issue attribute.
-    @options ~w(id force workspace assignee summary)
+    @options ~w(id force workspace assignee summary depends_on blocks)
 
     defp outside(tool, allowed) do
       Enum.reject(props(tool), &(&1 in @options or &1 in allowed))

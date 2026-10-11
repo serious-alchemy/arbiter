@@ -148,20 +148,46 @@ defmodule Arbiter.Tasks.CreateTest do
       assert [] = Arbiter.Tasks.Dedup.local_matches("child", ws.id)
     end
 
-    test "an edge that fails after the create keeps the ticket and reports its id", %{ws: ws} do
+    test "blocks attach edges from the new ticket to each named ticket", %{ws: ws} do
+      {:ok, a, _} = Create.run(%{"title" => "a", "workspace_id" => ws.id}, [])
+
+      assert {:ok, blocker, _} =
+               Create.run(%{"title" => "blocker", "workspace_id" => ws.id}, blocks: [a.id])
+
+      assert {:ok, [%{edge: edge}]} = Dependencies.list(issue_id: blocker.id)
+      assert edge.type == :blocks
+      assert edge.from_issue_id == blocker.id
+      assert edge.to_issue_id == a.id
+    end
+
+    test "an edge that fails rolls the ticket back (create + edges are atomic)", %{ws: ws} do
       {:ok, parent, _} = Create.run(%{"title" => "parent", "workspace_id" => ws.id}, [])
 
       # The parent vanishes between the preflight and the edge write.
-      assert {:partial, %Issue{} = issue, [failure]} =
+      assert {:error, {:invalid, msg}} =
                Create.run(
                  %{"title" => "child", "workspace_id" => ws.id, "parent_id" => parent.id},
                  edge_writer: fn _from, _to, _type, _opts -> {:error, {:not_found, "gone"}} end
                )
 
-      assert failure.kind == :edge_failed
-      assert failure.message =~ "gone"
-      assert failure.message =~ issue.id
-      assert Ash.get!(Issue, issue.id).title == "child"
+      assert msg =~ "gone"
+      assert [] = Arbiter.Tasks.Dedup.local_matches("child", ws.id)
+    end
+
+    test "an edge that would close a cycle refuses the whole create", %{ws: ws} do
+      {:ok, a, _} = Create.run(%{"title" => "a", "workspace_id" => ws.id}, [])
+      {:ok, b, _} = Create.run(%{"title" => "b", "workspace_id" => ws.id}, [])
+      # a blocks b; a new ticket that depends on b and blocks a closes a loop.
+      {:ok, _} = Dependencies.add(a.id, b.id, :blocks)
+
+      assert {:error, {:invalid, msg}} =
+               Create.run(%{"title" => "loop", "workspace_id" => ws.id},
+                 deps: [b.id],
+                 blocks: [a.id]
+               )
+
+      assert msg =~ "cycle"
+      assert [] = Arbiter.Tasks.Dedup.local_matches("loop", ws.id)
     end
   end
 

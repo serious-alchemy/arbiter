@@ -13,6 +13,8 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Attention
+  alias Arbiter.Tasks.BatchCreate
+  alias Arbiter.Tasks.BulkEdges
   alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.BulkResult
   alias Arbiter.Tasks.Create
@@ -285,6 +287,7 @@ defmodule Arbiter.MCP.Tools.Task do
          :ok <- authorize_worker_create(scope, args, ws_id),
          {:ok, title} <- Tools.require_string(args, "title"),
          {:ok, parent_id} <- create_parent(scope, args, ws_id),
+         {:ok, edges} <- create_edges(args),
          {:ok, force?} <- Params.fetch_bool(args, "force", false),
          {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()),
          # Gate *before* title/workspace_id are forced on: those two are set by
@@ -298,6 +301,8 @@ defmodule Arbiter.MCP.Tools.Task do
 
       opts = [
         force: force?,
+        deps: edges.depends_on,
+        blocks: edges.blocks,
         created_by: Arbiter.PaperTrail.actor_label(scope),
         context: permission_context(scope)
       ]
@@ -323,6 +328,89 @@ defmodule Arbiter.MCP.Tools.Task do
         {:error, _} = err ->
           err
       end
+    end
+  end
+
+  # ---- task_create_batch ----------------------------------------------------
+
+  @doc """
+  Create many tickets and all their edges in one atomic call
+  (`Arbiter.Tasks.BatchCreate`). `tickets` is an array of `ticket_create`-shaped
+  entries, each optionally carrying a local `ref`; `parent_id` / `depends_on` /
+  `blocks` may name an existing ticket id or the `ref` of another entry. Nothing
+  is written unless every entry and edge is valid, and the error names the
+  failing entry. `promote: true` promotes every created ticket after all the
+  edges exist (per-id results, the `ticket_promote` bulk contract).
+
+  A worker may file only children of its own task (`parent_id` its own task id)
+  with the descriptive fields — per entry, exactly as `ticket_create` — and may
+  not set `depends_on` / `blocks` or `promote`. A refine session cannot call it
+  (`Arbiter.MCP.RefinePolicy`).
+  """
+  @spec task_create_batch(Scope.t(), map()) :: {:ok, map()} | {:error, term()}
+  def task_create_batch(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         :ok <- authorize_worker_batch(scope, args, ws_id),
+         {:ok, force?} <- Params.fetch_bool(args, "force", false),
+         {:ok, promote?} <- Params.fetch_bool(args, "promote", false),
+         {:ok, entries} <- BatchCreate.parse(Map.get(args, "tickets"), &batch_entry_attrs/1) do
+      opts = [
+        workspace_id: ws_id,
+        force: force?,
+        promote: promote?,
+        promote_args: batch_promote_args(args),
+        created_by: Arbiter.PaperTrail.actor_label(scope),
+        context: permission_context(scope)
+      ]
+
+      with {:ok, result} <- BatchCreate.run(entries, opts) do
+        {:ok, BatchCreate.present(result)}
+      end
+    end
+  end
+
+  # One entry's own fields, typed like `ticket_create`'s (the batch keys — `ref`,
+  # `parent_id`, `depends_on`, `blocks`, `force` — are already out).
+  defp batch_entry_attrs(entry) do
+    with {:ok, title} <- Tools.require_string(entry, "title"),
+         {:ok, attrs} <- Tools.collect_attrs(entry, task_create_spec()) do
+      {:ok, Map.put(attrs, "title", title)}
+    end
+  end
+
+  defp batch_promote_args(args) do
+    case Map.get(args, "acceptance_waived") do
+      reason when is_binary(reason) -> %{acceptance_waived: reason}
+      _ -> %{}
+    end
+  end
+
+  defp authorize_worker_batch(%Scope{tier: :worker} = scope, args, ws_id) do
+    params = args |> Map.delete("workspace") |> Map.put("workspace_id", ws_id)
+
+    case WorkerFiling.authorize_batch(scope, params) do
+      :ok -> :ok
+      {:error, why} -> {:error, {:unauthorized, "a worker-tier token #{why}"}}
+    end
+  end
+
+  defp authorize_worker_batch(_scope, _args, _ws_id), do: :ok
+
+  # `depends_on` (alias `deps`) = tickets that block the new one; `blocks` = tickets
+  # the new one blocks. Written in the same transaction as the ticket
+  # (`Arbiter.Tasks.Create`).
+  defp create_edges(args) do
+    with {:ok, lists} <-
+           Tools.collect_attrs(args, [
+             {"depends_on", :string_list},
+             {"deps", :string_list},
+             {"blocks", :string_list}
+           ]) do
+      {:ok,
+       %{
+         depends_on: Enum.uniq(Map.get(lists, "depends_on", []) ++ Map.get(lists, "deps", [])),
+         blocks: Enum.uniq(Map.get(lists, "blocks", []))
+       }}
     end
   end
 
@@ -936,6 +1024,8 @@ defmodule Arbiter.MCP.Tools.Task do
   so it also gets the cycle guard and the `parent_of` auto-close re-evaluation.
   """
   @spec dep_add(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def dep_add(%Scope{} = scope, %{"edges" => _} = args), do: bulk_dep_add(scope, args)
+
   def dep_add(%Scope{} = scope, args) do
     with {:ok, from} <- Tools.require_string(args, "from_issue_id"),
          {:ok, to} <- Tools.require_string(args, "to_issue_id"),
@@ -954,6 +1044,32 @@ defmodule Arbiter.MCP.Tools.Task do
         {:error, reason} -> Tools.dependency_error(reason)
       end
     end
+  end
+
+  # Bulk: `edges: [{from, to, type, notes?}]`. Each edge runs through the single
+  # `dep_add` above, so it meets exactly the single-call scope, workspace,
+  # worker and cycle rules, and gets its own `ok | rejected` outcome — a rejected
+  # edge never rolls back the others (`Arbiter.Tasks.BulkEdges`).
+  defp bulk_dep_add(scope, args) do
+    case BulkEdges.fetch_edges(args) do
+      {:ok, edges} ->
+        base = Map.take(args, ["workspace"])
+        {:ok, BulkEdges.run(edges, writer: &dep_add(scope, single_edge_args(base, &1)))}
+
+      {:error, message} ->
+        {:error, {:invalid, message}}
+    end
+  end
+
+  defp single_edge_args(base, edge) do
+    single =
+      Map.merge(base, %{
+        "from_issue_id" => edge.from,
+        "to_issue_id" => edge.to,
+        "type" => edge.type
+      })
+
+    if edge[:notes], do: Map.put(single, "notes", edge.notes), else: single
   end
 
   # bd-dtfe9x (D-T-21): a worker adds what `POST /api/dependencies` lets it
