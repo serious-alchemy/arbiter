@@ -136,26 +136,32 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
       # warm mount read `workspaces` 8 times on this page (10 cold).
       {:ok, warm, _html} = live(conn, ~p"/audit")
       render_async(warm)
+      # The sticky dock loads its own data in `start_async(:load)`, which
+      # `render_async(warm)` does not wait for; left alone, the warm dock's read
+      # landed inside the measured window below (bd-d78rmc: CI saw 3).
+      render_async(find_live_child(warm, "session-dock"))
 
-      # Count only reads issued directly by this test process (the dead render;
+      # Count reads issued directly by this test process (the dead render;
       # `hd(origin)`, so tasks the warm view left under it as an ancestor are
-      # excluded) and by the mounted
-      # LiveView and its tasks. The telemetry event is global, so a concurrent
-      # read by an unrelated process (bd-d78rmc: CI saw 3) is not the mount's.
+      # excluded), by the mounted LiveView and its tasks, and by its sticky dock
+      # and the dock's tasks. The telemetry event is global, so a read by an
+      # unrelated process is not the mount's.
       parent = self()
 
       found =
         queries_with_origin(fn ->
           {:ok, view, _html} = live(conn, ~p"/audit")
           render_async(view)
-          send(parent, {:view_pid, view.pid})
+          dock = find_live_child(view, "session-dock")
+          render_async(dock)
+          send(parent, {:pids, [view.pid, dock.pid]})
         end)
 
-      assert_received {:view_pid, view_pid}
+      assert_received {:pids, pids}
 
       workspace_reads =
         Enum.count(found, fn {source, _, origin} ->
-          source == "workspaces" and (hd(origin) == parent or view_pid in origin)
+          source == "workspaces" and (hd(origin) == parent or Enum.any?(pids, &(&1 in origin)))
         end)
 
       assert workspace_reads <= 2, "workspaces read #{workspace_reads} times"
