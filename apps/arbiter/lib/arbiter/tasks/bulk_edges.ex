@@ -112,6 +112,9 @@ defmodule Arbiter.Tasks.BulkEdges do
     * `:authorize` — `(edge -> :ok | {:error, message})`, run before each edge
       (a worker-tier caller's per-edge restriction); a refusal is that edge's
       `rejected` outcome and the edge is not written.
+    * `:writer` — `(edge -> {:ok, term} | {:error, reason})`, default
+      `Dependencies.add/4`. MCP passes the single `dep_add` handler so every edge
+      meets exactly the single-call scope and worker rules.
   """
   @spec run([edge()], keyword()) :: %{results: [map()], counts: map()}
   def run(edges, opts \\ []) when is_list(edges) do
@@ -128,14 +131,24 @@ defmodule Arbiter.Tasks.BulkEdges do
   defp apply_edge(edge, authorize, opts) do
     case authorize.(edge) do
       :ok ->
+        write(edge, opts)
+
+      {:error, why} ->
+        {:error, {:unauthorized, why}}
+    end
+  end
+
+  defp write(edge, opts) do
+    case Keyword.get(opts, :writer) do
+      nil ->
         add_opts =
           [created_by: Keyword.get(opts, :created_by), notes: Map.get(edge, :notes)]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
         Dependencies.add(edge.from, edge.to, edge.type, add_opts)
 
-      {:error, why} ->
-        {:error, {:unauthorized, why}}
+      writer ->
+        writer.(edge)
     end
   end
 
@@ -156,10 +169,12 @@ defmodule Arbiter.Tasks.BulkEdges do
   end
 
   defp code({kind, _msg}) when is_atom(kind), do: Atom.to_string(kind)
+  defp code({kind, _msg, _details}) when is_atom(kind), do: Atom.to_string(kind)
   defp code(%{__exception__: true}), do: "invalid"
   defp code(_), do: "invalid"
 
   defp reason_text({_kind, msg}) when is_binary(msg), do: msg
+  defp reason_text({_kind, msg, _details}) when is_binary(msg), do: msg
   defp reason_text(%{__exception__: true} = e), do: Exception.message(e)
   defp reason_text(other), do: inspect(other)
 

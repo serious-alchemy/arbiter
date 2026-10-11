@@ -56,6 +56,65 @@ defmodule Arbiter.Tasks.WorkerFiling do
   end
 
   @doc """
+  A worker's batch (`tickets: [...]`) is held to the single-create rule **per
+  entry**: every entry must be a child of the worker's own task (`parent_id` is
+  the worker's task id — an in-batch `ref` does not qualify), in its own
+  workspace, with only the descriptive fields (`ref` is the one batch-only key it
+  may add). `depends_on` / `blocks` and `promote` are coordinator authority. The
+  refusal names the entry (`tickets[i]`).
+  """
+  @spec authorize_batch(Scope.t(), map()) :: :ok | {:error, String.t()}
+  def authorize_batch(%Scope{tier: :worker} = scope, params) when is_map(params) do
+    tickets = params["tickets"]
+
+    cond do
+      params["promote"] in [true, "true"] ->
+        {:error, "may not promote the tickets it files (a new ticket starts in Backlog)"}
+
+      is_list(tickets) ->
+        tickets
+        |> Enum.with_index()
+        |> Enum.find_value(:ok, fn {entry, i} ->
+          authorize_batch_entry(scope, params, entry, i)
+        end)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp authorize_batch_entry(scope, params, %{} = entry, i) do
+    entry =
+      entry
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+      |> Map.delete("ref")
+      |> Map.put_new("workspace_id", params["workspace_id"])
+
+    case authorize_create(scope, entry) do
+      :ok -> nil
+      {:error, why} -> {:error, "tickets[#{i}]: #{why}"}
+    end
+  end
+
+  defp authorize_batch_entry(_scope, _params, _entry, _i), do: nil
+
+  @doc """
+  The single-edge rule for one edge of a bulk `dep_add`, given as the normalized
+  `%{from:, to:, type:, notes:?}` of `Arbiter.Tasks.BulkEdges`. A worker's edge
+  the rule refuses becomes that edge's `rejected` outcome; the rest still apply.
+  """
+  @spec authorize_edge(Scope.t(), map()) :: :ok | {:error, String.t()}
+  def authorize_edge(%Scope{tier: :worker} = scope, %{from: from, to: to, type: type} = edge) do
+    params =
+      %{"from_issue_id" => from, "to_issue_id" => to, "type" => to_string(type)}
+      |> then(&if(Map.has_key?(edge, :notes), do: Map.put(&1, "notes", edge.notes), else: &1))
+
+    authorize_dependency(scope, params)
+  end
+
+  def authorize_edge(%Scope{}, _edge), do: :ok
+
+  @doc """
   A worker adds the `parent_of` edge from its own task to a ticket in its
   workspace that has no parent yet — the second half of `arb create --parent`.
   """

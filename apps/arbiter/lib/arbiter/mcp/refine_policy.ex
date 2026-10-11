@@ -92,6 +92,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_scope "a refine session is bound to one workspace and one ticket"
   @deny_reason_memory "the shared memory layer is coordinator authority"
   @deny_reason_trust "earned trust is coordinator and operator authority"
+  @deny_reason_batch_create "a refine session files its children one at a time with ticket_create; batch filing is coordinator authority"
   @deny_reason_permission_request "a permission request is the worker's own; a refine session may only suggest permissions"
 
   @deny %{
@@ -102,6 +103,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "ticket_demote" => @deny_reason_lifecycle,
     "ticket_sync_upstream_close" => @deny_reason_lifecycle,
     "ticket_rank" => @deny_reason_scheduler,
+    "ticket_create_batch" => @deny_reason_batch_create,
     "ticket_resume_review" => @deny_reason_review,
     "epic_floor" => @deny_reason_scheduler,
     "ticket_handoff" => @deny_reason_ops,

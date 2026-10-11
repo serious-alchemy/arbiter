@@ -619,10 +619,49 @@ defmodule Arbiter.Tasks.BatchCreate do
     args = Keyword.get(opts, :promote_args, %{})
 
     case Ash.update(issue, args, action: :promote_to_ready) do
-      {:ok, promoted} -> {:ok, promoted}
+      {:ok, promoted} -> {:ok, %{id: promoted.id, state: to_string(promoted.state)}}
       {:error, _} = err -> err
     end
   end
+
+  @doc """
+  The wire shape of a successful `run/2`, shared by REST and MCP:
+
+      %{refs: %{ref => id}, counts: %{tickets: n, edges: n},
+        tickets: [%{index:, ref:, id:, title:, state:, warnings: […], failures: […]}],
+        edges: [%{from_issue_id:, to_issue_id:, type:}],
+        promote: %{results: […], counts: %{…}}}   # only when `promote: true`
+
+  `warnings` / `failures` appear only on a ticket that has some (a missing
+  acceptance warning; a failed tracker mirror — the ticket exists either way).
+  """
+  @spec present(map()) :: map()
+  def present(%{tickets: tickets, refs: refs, edges: edges, promote: promote}) do
+    base = %{
+      refs: refs,
+      counts: %{tickets: length(tickets), edges: length(edges)},
+      tickets: Enum.map(tickets, &present_ticket/1),
+      edges:
+        Enum.map(edges, &%{from_issue_id: &1.from, to_issue_id: &1.to, type: to_string(&1.type)})
+    }
+
+    if promote, do: Map.put(base, :promote, promote), else: base
+  end
+
+  defp present_ticket(t) do
+    %{
+      index: t.index,
+      ref: t.ref,
+      id: t.issue.id,
+      title: t.issue.title,
+      state: to_string(t.issue.state)
+    }
+    |> put_unless_empty(:warnings, t.warnings)
+    |> put_unless_empty(:failures, Enum.map(t.failures, &Map.take(&1, [:kind, :message])))
+  end
+
+  defp put_unless_empty(map, _key, []), do: map
+  defp put_unless_empty(map, key, value), do: Map.put(map, key, value)
 
   defp truthy?(v), do: v in [true, "true", "1", 1]
 

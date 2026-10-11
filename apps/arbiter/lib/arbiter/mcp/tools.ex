@@ -1819,6 +1819,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_ready(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_update_progress(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_create(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_create_batch(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_update(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_reopen(scope, args), to: Arbiter.MCP.Tools.Task
