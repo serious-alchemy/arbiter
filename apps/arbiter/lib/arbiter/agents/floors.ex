@@ -145,7 +145,7 @@ defmodule Arbiter.Agents.Floors do
   def tier_of(provider, model, agent_config) when is_binary(model) and model != "" do
     @ladder
     |> Enum.reverse()
-    |> Enum.find(&(ModelFamily.model_for_tier(provider, &1, agent_config) == model))
+    |> Enum.find(&(model in ModelFamily.models_for_tier(provider, &1, agent_config)))
   end
 
   def tier_of(_provider, _model, _agent_config), do: nil
