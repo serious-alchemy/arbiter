@@ -132,4 +132,55 @@ defmodule ArbiterCli.ClientTest do
       assert {:ok, %{"ok" => true}} = Client.get("/api/test")
     end
   end
+
+  describe "overload (429/503 + Retry-After) handling (bd-66anxj)" do
+    setup do
+      test_pid = self()
+      Process.put(:bd2_overload_sleep, fn ms -> send(test_pid, {:slept, ms}) end)
+      {:ok, calls: :counters.new(1, [])}
+    end
+
+    defp busy_then_ok(calls, busy_count, status) do
+      stub_routes([
+        {{"get", "/api/test"},
+         fn conn ->
+           :counters.add(calls, 1, 1)
+
+           if :counters.get(calls, 1) <= busy_count do
+             conn
+             |> Plug.Conn.put_resp_header("retry-after", "1")
+             |> Plug.Conn.put_status(status)
+             |> Req.Test.json(%{"error" => %{"type" => "busy", "message" => "too busy"}})
+           else
+             Req.Test.json(conn, %{"ok" => true})
+           end
+         end}
+      ])
+    end
+
+    test "retries with backoff and succeeds once the server has capacity", %{calls: calls} do
+      busy_then_ok(calls, 2, 503)
+      assert {:ok, %{"ok" => true}} = Client.get("/api/test")
+      assert :counters.get(calls, 1) == 3
+      assert_received {:slept, 1_000}
+      assert_received {:slept, 2_000}
+    end
+
+    test "gives up after bounded retries with a clear message", %{calls: calls} do
+      busy_then_ok(calls, 100, 429)
+
+      assert {:error, %Client.Error{status: 429, message: message, hint: hint}} =
+               Client.get("/api/test")
+
+      assert message =~ "server is busy"
+      assert hint =~ "shedding load"
+      assert :counters.get(calls, 1) == 4
+    end
+
+    test "a 503 without Retry-After is not retried" do
+      stub_get("/api/test", %{"error" => %{"message" => "down"}}, 503)
+      assert {:error, %Client.Error{status: 503, message: "down"}} = Client.get("/api/test")
+      refute_received {:slept, _}
+    end
+  end
 end

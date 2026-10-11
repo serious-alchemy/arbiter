@@ -52,6 +52,8 @@ defmodule ArbiterWeb.Application do
       {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
       # One-time dashboard login tokens (bd-3gycsz).
       ArbiterWeb.DashboardAuth.LoginTokens,
+      # Slot table for the `/api` concurrency limit (bd-66anxj).
+      ArbiterWeb.Plugs.ApiConcurrencyLimit.Counter,
       # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
       # {ArbiterWeb.Worker, arg},
       # Start to serve requests, typically the last entry

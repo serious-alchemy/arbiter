@@ -90,7 +90,7 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
     #{log_directives}ExecStart=#{release_bin} start
     Restart=on-failure
     RestartSec=10
-    #{oom_directive()}
+    #{oom_directive(scope)}
     [Install]
     WantedBy=#{wanted_by}
     """
@@ -127,7 +127,7 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
     Restart=on-failure
     RestartSec=10
     TimeoutStartSec=900
-    #{oom_directive()}
+    #{oom_directive(scope)}
     [Install]
     WantedBy=#{wanted_by}
     """
@@ -142,7 +142,20 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
   # scopes (`Arbiter.Worker.MemoryScope`); this is the backstop for anything
   # that still lives in the unit. An already-installed unit needs the same line
   # as a drop-in — see docs/worker-memory-cap.md — which `arb doctor` checks.
-  defp oom_directive, do: "OOMPolicy=continue\n"
+  #
+  # bd-66anxj (GitHub #720): the control plane should be the LAST thing the
+  # kernel / systemd-oomd kills, not the first (2026-10-10: it grew to 6.5 GB
+  # and was SIGKILLed as the largest process, interrupting 4 live runs).
+  # `ManagedOOMPreference=avoid` steers systemd-oomd away from the unit and is
+  # allowed unprivileged. `OOMScoreAdjust=-500` steers the kernel OOM killer
+  # but lowering oom_score_adj below the starting value needs CAP_SYS_RESOURCE,
+  # which a *user* manager lacks (the unit would fail to start with EACCES), so
+  # it is system-scope only. Workers run in their own `arb-run` scopes and are
+  # unaffected.
+  defp oom_directive(:system),
+    do: "OOMPolicy=continue\nOOMScoreAdjust=-500\nManagedOOMPreference=avoid\n"
+
+  defp oom_directive(:user), do: "OOMPolicy=continue\nManagedOOMPreference=avoid\n"
 
   # System units can order against the docker daemon; a user manager runs in
   # a different bus and can't.
