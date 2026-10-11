@@ -35,7 +35,9 @@ defmodule ArbiterWeb.NodeBridgeE2ETest do
 
   setup %{tmp_dir: tmp_dir} do
     # Short, comma-free: unix socket paths are limited to ~100 bytes.
-    root = Path.join(Arbiter.Config.Paths.socket_root(), "be-#{System.unique_integer([:positive])}")
+    root =
+      Path.join(Arbiter.Config.Paths.socket_root(), "be-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 

@@ -49,7 +49,9 @@ defmodule ArbiterWeb.NodeBridgeTest do
     Process.unlink(socket.channel_pid)
 
     # Short, comma-free: a unix socket path is limited to ~100 bytes.
-    dir = Path.join(Arbiter.Config.Paths.socket_root(), "nb-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(Arbiter.Config.Paths.socket_root(), "nb-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
 
