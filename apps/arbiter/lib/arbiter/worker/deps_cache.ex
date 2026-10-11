@@ -106,7 +106,13 @@ defmodule Arbiter.Worker.DepsCache do
           {:ok, key()} | {:error, term()}
   def key(repo_path, default_branch, image_tag, opts \\ []) do
     with :ok <- check_image(image_tag),
-         {:ok, ref} <- Image.default_ref(repo_path, default_branch),
+         {:ok, ref} <- Image.default_ref(repo_path, default_branch) do
+      key_at(repo_path, ref, image_tag, opts)
+    end
+  end
+
+  defp key_at(repo_path, ref, image_tag, opts) do
+    with :ok <- check_image(image_tag),
          {:ok, lock} <- read_lock(repo_path, ref) do
       lock_hash = digest(lock)
       name = binary_part(lock_hash, 0, 12) <> "-" <> binary_part(digest(image_tag), 0, 12)
@@ -145,11 +151,15 @@ defmodule Arbiter.Worker.DepsCache do
           {:ok, %{dir: String.t(), seeded?: boolean(), lock_hash: String.t()}} | {:error, term()}
   def ensure(repo_path, default_branch, image_tag, opts \\ []) do
     with {:ok, key} <- key(repo_path, default_branch, image_tag, opts) do
-      if complete?(key.dir) do
-        {:ok, %{dir: key.dir, seeded?: false, lock_hash: key.lock_hash}}
-      else
-        locked(key, fn -> seed_once(repo_path, key, opts) end)
-      end
+      ensure_key(repo_path, key, opts)
+    end
+  end
+
+  defp ensure_key(repo_path, key, opts) do
+    if complete?(key.dir) do
+      {:ok, %{dir: key.dir, seeded?: false, lock_hash: key.lock_hash}}
+    else
+      locked(key, fn -> seed_once(repo_path, key, opts) end)
     end
   end
 
@@ -431,8 +441,33 @@ defmodule Arbiter.Worker.DepsCache do
       Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
 
     with repo when is_binary(repo) <- PrivateClone.main_repo(worktree),
-         {:ok, cache} <- ensure(repo, base, image_tag, opts),
-         {:ok, installed} <- install(cache.dir, worktree, opts),
+         {:ok, key} <- key(repo, base, image_tag, opts) do
+      install_cache(ensure_key(repo, key, opts), worktree, opts)
+    else
+      nil -> {:error, {:not_a_private_clone, worktree}}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  `seed_worktree/3` for a checkout that has no main repo: a node's shadow clone
+  (`Arbiter.NodeAgent.Run`, bd-4uom27), seeded from the primary's bundle and so
+  carrying no deps of its own. The cache is keyed by the `mix.lock` at the checkout's
+  `HEAD` and built from that tree (`git archive`, so nothing uncommitted), inside
+  `image_tag` on this machine, so a node run gets every compiled dependency (NIFs
+  included) of its own lockfile with no fetch at run time, the way a primary-local
+  container run does. Pass `:root` and `:scratch` to keep the cache under the node's
+  home; the options are `seed_worktree/3`'s otherwise.
+  """
+  @spec seed_checkout(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def seed_checkout(worktree, image_tag, opts \\ []) do
+    with {:ok, key} <- key_at(worktree, "HEAD", image_tag, opts) do
+      install_cache(ensure_key(worktree, key, opts), worktree, opts)
+    end
+  end
+
+  defp install_cache({:ok, cache}, worktree, opts) do
+    with {:ok, installed} <- install(cache.dir, worktree, opts),
          {:ok, mix_home} <- install_home(cache.dir, Keyword.get(opts, :home), opts) do
       Logger.info(
         "DepsCache: #{worktree} #{describe(installed.method)} from #{cache.dir} " <>
@@ -440,11 +475,10 @@ defmodule Arbiter.Worker.DepsCache do
       )
 
       {:ok, cache |> Map.merge(installed) |> Map.put(:mix_home, mix_home)}
-    else
-      nil -> {:error, {:not_a_private_clone, worktree}}
-      {:error, _} = error -> error
     end
   end
+
+  defp install_cache({:error, _} = error, _worktree, _opts), do: error
 
   defp install_home(_cache_dir, nil, _opts), do: {:ok, :none}
   defp install_home(cache_dir, home, opts), do: install_mix_home(cache_dir, home, opts)

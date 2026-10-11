@@ -80,7 +80,7 @@ defmodule Arbiter.NodeAgent.Run do
   }
 
   alias Arbiter.Nodes.StdoutFrame
-  alias Arbiter.Worker.{Container, Image, TestServices}
+  alias Arbiter.Worker.{Container, DepsCache, Image, TestServices}
   alias Arbiter.Worker.ReleaseEnv
 
   require Logger
@@ -419,9 +419,10 @@ defmodule Arbiter.NodeAgent.Run do
     run_dir = Path.join([config.node_home, "runs", spec.run])
 
     with {:ok, dirs} <- make_dirs(spec, run_dir),
-         {:ok, known} <- seed_shadow(spec, config, dirs),
+         {:ok, known} <- seed_shadow(spec, config, dirs, opts),
          :ok <- seed_worktree_files(spec, dirs),
          :ok <- ensure_image(spec, opts),
+         :ok <- seed_deps(spec, dirs, config, opts),
          {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
          :ok <- seed_config(spec, dirs),
@@ -472,13 +473,13 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   # RW11: the worktree mount is a shadow clone built from the primary's seed bundle.
-  defp seed_shadow(%RunSpec{checkout: nil}, _config, _dirs), do: {:ok, nil}
+  defp seed_shadow(%RunSpec{checkout: nil}, _config, _dirs, _opts), do: {:ok, nil}
 
-  defp seed_shadow(%RunSpec{checkout: co, run: run}, config, dirs) do
+  defp seed_shadow(%RunSpec{checkout: co, run: run}, config, dirs, opts) do
     shadow = dirs["worktree"].host
+    seed = Keyword.get(opts, :checkout_fun, &Checkout.seed_from_primary/3)
 
-    with {:ok, %{known: known}} <-
-           Checkout.seed_from_primary(config, Map.put(co, :run, run), shadow),
+    with {:ok, %{known: known}} <- seed.(config, Map.put(co, :run, run), shadow),
          :ok <- check_borrowed(shadow, config) do
       {:ok, known}
     else
@@ -637,6 +638,68 @@ defmodule Arbiter.NodeAgent.Run do
 
   defp dir_name("config_dir"), do: "config"
   defp dir_name(kind), do: kind
+
+  # bd-4uom27: the shadow clone is built from a git bundle, so it has no `deps/` or
+  # `_build/`. Seed them from this node's deps cache (built inside the run's image,
+  # keyed by the checkout's `mix.lock`: every dependency compiled, NIFs included), so
+  # neither the worker nor the pre-push gate, which runs offline in this checkout
+  # after the agent has gone, has to download a precompiled NIF. Best-effort: with no
+  # lockfile, or a seed job that failed, the run starts as it always has and the
+  # worker fetches for itself.
+  defp seed_deps(%RunSpec{checkout: nil}, _dirs, _config, _opts), do: :ok
+
+  defp seed_deps(%RunSpec{} = spec, dirs, config, opts) do
+    case deps_seeder(opts) do
+      nil ->
+        :ok
+
+      seed ->
+        shadow = dirs["worktree"].host
+
+        seed_opts = [
+          home: dirs["home"] && dirs["home"].host,
+          root: Path.join(config.node_home, "deps-cache"),
+          scratch: Path.join(config.node_home, "deps-seed")
+        ]
+
+        case seed.(shadow, spec.image.tag, seed_opts ++ Keyword.take(opts, [:podman, :runner])) do
+          {:ok, _summary} ->
+            exclude_deps(shadow)
+
+          {:error, :no_lockfile} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "NodeAgent.Run: no deps cache for run #{spec.run}: #{inspect(reason, limit: 10)}"
+            )
+
+            :ok
+        end
+    end
+  end
+
+  defp deps_seeder(opts) do
+    enabled? =
+      Keyword.get(opts, :deps_cache, Application.get_env(:arbiter, :worker_deps_cache, true))
+
+    case Keyword.get(opts, :deps_fun) do
+      fun when is_function(fun, 3) and enabled? -> fun
+      nil when enabled? -> &DepsCache.seed_checkout/3
+      _ -> nil
+    end
+  end
+
+  # A repo that does not gitignore them would have the snapshot (`git add -A`) sweep
+  # the seeded copies into the bundle.
+  defp exclude_deps(shadow) do
+    info = Path.join(shadow, ".git/info")
+
+    if File.dir?(info),
+      do: File.write(Path.join(info, "exclude"), "/deps\n/_build\n", [:append])
+
+    :ok
+  end
 
   defp ensure_image(spec, opts) do
     result =

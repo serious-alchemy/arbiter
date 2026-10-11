@@ -62,10 +62,16 @@ defmodule Arbiter.Worker.PrepushCheck do
   (`Arbiter.Worker.DepsRelocate.relink/1`), so a NIF an earlier seed reached through a
   directory that is gone (or is the source checkout) is found, and Mix has no reason to
   rebuild the dependency offline. Seeding does the same plus the manifests
-  (`Worktree.seed_compiled_deps/3`, `DepsCache.install/3`). When the deps are
-  still not there, the failure (`Error happened while installing … from precompiled
-  binary`, `Could not compile with "make"`, a failed fetch while building a dependency) is
-  infra, and the steps after the first one that hit it are skipped unrun.
+  (`Worktree.seed_compiled_deps/3`, `DepsCache.install/3`). A run on a node is seeded
+  the same way from the node's own deps cache (`DepsCache.seed_checkout/3`, called by
+  `Arbiter.NodeAgent.Run`; bd-4uom27), every dependency compiled for the lockfile with
+  no list of libraries. When the deps are still not there, the failure is infra, and the
+  steps after the first one that hit it are skipped unrun. Any dependency that could not
+  be fetched or built counts, whatever the library: `Error happened while installing …
+  from precompiled binary`, `Error while downloading precompiled NIF`, `Could not compile
+  with "make"`, a failed fetch while building a dependency, and Mix's `could not compile
+  dependency :name`, except for a sibling app of an umbrella (`apps/<name>`), whose
+  compile error is the change's own.
 
   ## Where it runs
 
