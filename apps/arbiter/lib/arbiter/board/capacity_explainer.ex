@@ -62,7 +62,7 @@ defmodule Arbiter.Board.CapacityExplainer do
         }
   def explain(board, opts \\ []) when is_map(board) do
     mode = Keyword.get(opts, :mode, :legacy)
-    layers = layers(board, mode)
+    layers = layers(board, mode, Keyword.get(opts, :pool_mode))
 
     # Only the holds that have something to say: a mutex or file-overlap hold
     # is already one short line on its card.
@@ -85,7 +85,7 @@ defmodule Arbiter.Board.CapacityExplainer do
       cap: cap(board),
       holds: Map.merge(ready, quota_held),
       layers: layers,
-      budget: budget(Keyword.get(opts, :capacity), mode)
+      budget: budget(Keyword.get(opts, :capacity), Keyword.get(opts, :install_mode, mode))
     }
   end
 
@@ -97,13 +97,24 @@ defmodule Arbiter.Board.CapacityExplainer do
   # What the scheduler walk says about a card: the layer it waits on (the
   # walk's own phrase) or the pair it is planned onto. Nothing under `legacy`,
   # where no walk is planned.
-  defp layers(%{walk: %{entries: entries} = walk}, mode) when mode in [:shadow, :enforce] do
-    for entry <- entries, layer = layer(entry, walk, mode), into: %{} do
+  # `mode` only gates whether a walk is shown; whether a layer is a shadow is the
+  # mode of the account its pool belongs to (`pool_mode`, O11), else `mode`.
+  defp layers(%{walk: %{entries: entries} = walk}, mode, pool_mode)
+       when mode in [:shadow, :enforce] do
+    for entry <- entries,
+        layer = layer(entry, walk, entry_mode(entry, mode, pool_mode)),
+        into: %{} do
       {entry.id, layer}
     end
   end
 
-  defp layers(_board, _mode), do: %{}
+  defp layers(_board, _mode, _pool_mode), do: %{}
+
+  defp entry_mode(%{pair: %{pool: pool}}, _mode, pool_mode) when is_function(pool_mode, 1),
+    do: pool_mode.(pool)
+
+  defp entry_mode(_entry, _mode, pool_mode) when is_function(pool_mode, 1), do: pool_mode.(nil)
+  defp entry_mode(_entry, mode, _pool_mode), do: mode
 
   defp layer(%{wait_cause: {:capacity, layer}, reason: reason}, _walk, mode) do
     %{layer: layer, state: :waiting, text: upcase(reason), shadow?: mode != :enforce}

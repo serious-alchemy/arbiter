@@ -81,6 +81,7 @@ defmodule Arbiter.MCP.Tools.Account do
       enabled: account.enabled,
       max_concurrent: account.max_concurrent,
       budget_split: account.budget_split,
+      admission: account.admission,
       quota_config: account.quota_config || %{}
     }
   end

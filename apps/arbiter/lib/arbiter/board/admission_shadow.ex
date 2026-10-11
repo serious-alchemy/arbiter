@@ -42,15 +42,9 @@ defmodule Arbiter.Board.AdmissionShadow do
 
   @board_holds [:no_slot, :quota, :paused]
 
-  @doc "The admission mode in force; `:legacy` when it cannot be read."
+  @doc "The mode the walk is planned under: the strictest of the installation key and every account override (`Arbiter.Accounts.AdmissionMode.walk_mode/0`)."
   @spec mode() :: mode()
-  def mode do
-    Arbiter.Settings.scheduler_admission()
-  rescue
-    _ -> :legacy
-  catch
-    :exit, _ -> :legacy
-  end
+  def mode, do: Arbiter.Accounts.AdmissionMode.walk_mode()
 
   @doc "Whether `mode` plans the scheduler walk beside today's plan."
   @spec walks?(mode()) :: boolean()
@@ -62,9 +56,10 @@ defmodule Arbiter.Board.AdmissionShadow do
   The `admission_shadow` record for a dispatch of `dispatched` off `board`, or
   `nil` when the board carries no walk. String keys: it is stored as-is.
   """
-  @spec dispatch_record(map(), mode(), String.t()) :: map() | nil
+  @spec dispatch_record(map(), mode() | (term() -> mode()), String.t()) :: map() | nil
   def dispatch_record(%{walk: %{} = walk}, mode, dispatched) when is_binary(dispatched) do
     pick = walk.promote
+    mode = pick_mode(walk, mode)
 
     walk
     |> pick_fields()
@@ -81,6 +76,15 @@ defmodule Arbiter.Board.AdmissionShadow do
   end
 
   def dispatch_record(_board, _mode, _dispatched), do: nil
+
+  # `mode` is a fixed mode, or a pool-key resolver (`AdmissionMode.pool_resolver/0`):
+  # the dispatch is recorded under the mode of the account it was placed on.
+  defp pick_mode(_walk, mode) when is_atom(mode), do: mode
+
+  defp pick_mode(%{placements: [first | _]}, resolver) when is_function(resolver, 1),
+    do: resolver.(first.pool)
+
+  defp pick_mode(_walk, resolver) when is_function(resolver, 1), do: resolver.(nil)
 
   # ---- on a hold change --------------------------------------------------------
 

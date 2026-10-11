@@ -35,6 +35,7 @@ defmodule Arbiter.Accounts.Serializer do
       identity_verified_at: iso(account.identity_verified_at),
       max_concurrent: account.max_concurrent,
       budget_split: account.budget_split,
+      admission: account.admission,
       quota_config: account.quota_config || %{},
       enabled: account.enabled,
       merged_into_id: account.merged_into_id,

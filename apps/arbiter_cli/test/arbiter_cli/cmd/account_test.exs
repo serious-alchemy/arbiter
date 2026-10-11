@@ -729,6 +729,39 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "--budget-split must be queue or fair"
   end
 
+  test "account set --admission patches the override, inherit clears it, other words are rejected (O11)" do
+    stub_routes([
+      {{"patch", "/api/accounts/emricare"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(self(), {:patched, Jason.decode!(body)})
+
+         Req.Test.json(conn, %{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "emricare",
+           "enabled" => true
+         })
+       end}
+    ])
+
+    {_out, _err, 0} =
+      capture(fn -> Account.run(["set", "emricare", "--admission", "enforce"]) end)
+
+    assert_received {:patched, %{"admission" => "enforce"}}
+
+    {_out, _err, 0} =
+      capture(fn -> Account.run(["set", "emricare", "--admission", "inherit"]) end)
+
+    assert_received {:patched, %{"admission" => nil}}
+
+    {_out, err, exit_code} =
+      capture(fn -> Account.run(["set", "emricare", "--admission", "strict"]) end)
+
+    assert exit_code != 0
+    assert err =~ "--admission must be legacy, shadow, enforce or inherit"
+  end
+
   # D-A-17: a workspace *name* resolves, like every other workspace-scoped verb.
   test "account attach resolves a workspace name to its id" do
     stub_routes([

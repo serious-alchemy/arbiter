@@ -101,7 +101,7 @@ defmodule ArbiterCli.Main do
       arb account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
                           [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
       arb account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
-                          [--max-concurrent N|none] [--budget-split queue|fair] [--threshold-mode flat|paced]
+                          [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
                           [--throttle-threshold F]
                           [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
                           [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]

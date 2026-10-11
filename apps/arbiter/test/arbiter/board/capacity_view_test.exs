@@ -460,4 +460,54 @@ defmodule Arbiter.Board.CapacityViewTest do
       budget(account: @agy, pool: "antigravity:claude_and_gpt_models", budget: 4)
     ]
   end
+
+  describe "per-account admission mode (O11)" do
+    test "each pool carries its account's effective mode and where it came from" do
+      accounts = [
+        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
+        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
+      ]
+
+      view = status(accounts: accounts)
+
+      assert %{mode: "enforce", mode_source: "account", decides: true} =
+               pool(view, @acct, "claude")
+
+      assert %{mode: "shadow", mode_source: "installation", decides: false} =
+               pool(view, @agy, "antigravity:gemini_models")
+    end
+
+    test "the admission block keeps the installation mode and lists the overrides" do
+      accounts = [
+        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
+        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
+      ]
+
+      view = status(accounts: accounts)
+
+      assert %{mode: "shadow", decides: false} = view.admission
+
+      assert [%{account: "claude:default", mode: "enforce", decides: true}] =
+               view.admission.overrides
+    end
+
+    test "account_blocks report the mode per account" do
+      accounts = [
+        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
+        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
+      ]
+
+      assert [
+               %{mode: "enforce", mode_source: "account"},
+               %{mode: "shadow", mode_source: "installation"}
+             ] =
+               CapacityView.account_blocks([@acct, @agy],
+                 budgets: [],
+                 holders: %{},
+                 accounts: accounts,
+                 mode: :shadow,
+                 changes: fn _ -> [] end
+               )
+    end
+  end
 end

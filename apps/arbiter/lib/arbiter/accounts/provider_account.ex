@@ -49,6 +49,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
         :identity_verified_at,
         :max_concurrent,
         :budget_split,
+        :admission,
         :quota_config,
         :enabled,
         :merged_into_id
@@ -71,6 +72,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
         :identity_verified_at,
         :max_concurrent,
         :budget_split,
+        :admission,
         :quota_config,
         :enabled,
         :merged_into_id
@@ -158,6 +160,14 @@ defmodule Arbiter.Accounts.ProviderAccount do
       constraints one_of: [:queue, :fair]
 
       description "Workspace split of a shared account's budget (DC10, design §5.3): queue = the ES3 order alone decides; fair = a workspace at its weighted share yields to another under its share, in the same band."
+    end
+
+    attribute :admission, :atom do
+      public? true
+      allow_nil? true
+      constraints one_of: [:legacy, :shadow, :enforce]
+
+      description "Per-account scheduler_admission override (O11): legacy, shadow or enforce. nil = follow the installation-wide scheduler_admission key."
     end
 
     attribute :quota_config, :map do
