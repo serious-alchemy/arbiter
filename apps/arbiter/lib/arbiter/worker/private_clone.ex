@@ -745,6 +745,29 @@ defmodule Arbiter.Worker.PrivateClone do
     end
   end
 
+  @doc """
+  Remove the read-only clone at `path` whose main repo the caller knows to be
+  `repo`, syncing nothing back and reading nothing from the clone's own `.git`
+  (bd-c7lx65, an offline replay's clone). Whatever ran in the clone could have
+  rewritten its markers so that `remove/1` carries a branch of its choosing
+  into the main repo (`arbiter.readOnly` unset, `arbiter.branch` renamed), and
+  `verify/1` does not check them. Deletes the directory, then its pins in
+  `repo` (left to `sweep_pins/2` when `repo` is `nil`) and its ledger entry.
+  `:ok` when nothing is there.
+  """
+  @spec discard(path(), path() | nil) :: :ok | {:error, term()}
+  def discard(path, repo) when is_binary(path) do
+    case File.rm_rf(path) do
+      {:ok, _} ->
+        if is_binary(repo) and File.dir?(repo), do: unpin(repo, Path.basename(path))
+        _ = File.rm(ledger_file(path))
+        :ok
+
+      {:error, reason, file} ->
+        {:error, {:git_failed, "rm_rf failed at #{file}: #{inspect(reason)}"}}
+    end
+  end
+
   # A clone with no branch (a provision cut short, or a worker that deleted it)
   # has nothing to carry back.
   defp maybe_sync_back(path) do
