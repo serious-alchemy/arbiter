@@ -93,9 +93,9 @@ defmodule ArbiterCli.Cmd.RestartSystemdWaitTest do
     stub_systemctl([{"active", "old", ""}, {"active", "old", ""}, {"active", "new", ""}])
 
     assert {:ok, [{:systemd_restart, :ok, nil}], _} = Restart.perform("/tmp/x", 5_000)
-    # a second `show` poll was needed: the first `active` was the old instance
+    # baseline + a second poll were needed: the first `active` was the old instance
     shows = Enum.count(cmds(), &match?({"systemctl", ["--user", "show" | _]}, &1))
-    assert shows >= 4
+    assert shows >= 3
   end
 
   test "an `active` unit with a queued job is not success; stays down is reported" do

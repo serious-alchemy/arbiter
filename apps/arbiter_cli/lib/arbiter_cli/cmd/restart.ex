@@ -288,7 +288,7 @@ defmodule ArbiterCli.Cmd.Restart do
     # `--no-block`: a plain `restart` waits for the start job and hangs for as
     # long as systemd leaves that job in `waiting` (the 2026-10-11 outage). We
     # enqueue the job and watch the unit ourselves, bounded, in `await_active/2`.
-    baseline_id = unit_info()[:invocation_id]
+    baseline_id = baseline_invocation_id(unit_info())
 
     case run_cmd("systemctl", ["--user", "restart", "--no-block", "arbiter.service"],
            stderr_to_stdout: true
@@ -359,6 +359,10 @@ defmodule ArbiterCli.Cmd.Restart do
   rescue
     e in ErlangError -> Start.log_text("recovery failed: #{inspect(e.original)}")
   end
+
+  # An absent/empty InvocationID (unit never started) gives no baseline to compare.
+  defp baseline_invocation_id(%{invocation_id: id}) when id not in [nil, ""], do: id
+  defp baseline_invocation_id(_), do: nil
 
   defp settled_state(nil, _baseline_id), do: nil
 
