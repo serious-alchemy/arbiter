@@ -89,7 +89,11 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
       "memory" => %{"enableManagedAutoMemory" => false, "enableManagedAutoDream" => false},
       "telemetry" => %{"enabled" => false},
       "privacy" => %{"usageStatisticsEnabled" => false},
-      "general" => %{"disableAutoUpdate" => true, "disableUpdateNag" => true}
+      "general" => %{
+        "enableAutoUpdate" => false,
+        "disableAutoUpdate" => true,
+        "disableUpdateNag" => true
+      }
     }
   end
 

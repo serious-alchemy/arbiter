@@ -53,7 +53,7 @@ defmodule Arbiter.Agents.Qwen.ConfigDirTest do
   test "env/1 scrubs operator-inherited qwen and provider variables" do
     {:ok, env} = ConfigDir.env([])
 
-    for var <- ~w(DASHSCOPE_API_KEY QWEN_CODE_USER_SETTINGS_PATH XDG_CONFIG_HOME) do
+    for var <- ~w(DASHSCOPE_API_KEY QWEN_CODE_USER_SETTINGS_PATH XDG_CONFIG_HOME QWEN_TELEMETRY_ENABLED) do
       assert {var, false} in env
     end
   end
@@ -97,6 +97,7 @@ defmodule Arbiter.Agents.Qwen.ConfigDirTest do
       assert Enum.any?(deny, &String.contains?(&1, ".qwen"))
       assert settings["telemetry"]["enabled"] == false
       assert settings["privacy"]["usageStatisticsEnabled"] == false
+      assert settings["general"]["enableAutoUpdate"] == false
       assert settings["general"]["disableAutoUpdate"] == true
       assert settings["general"]["disableUpdateNag"] == true
       assert settings["memory"]["enableManagedAutoMemory"] == false
