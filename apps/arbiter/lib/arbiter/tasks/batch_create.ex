@@ -336,9 +336,6 @@ defmodule Arbiter.Tasks.BatchCreate do
       {:ok, :ok} ->
         {:ok, seen}
 
-      {:ok, {:error, _} = cached} ->
-        elem(cached, 1)
-
       :error ->
         case Ash.get(Issue, id) do
           {:ok, %Issue{workspace_id: ^ws_id}} ->
@@ -575,6 +572,10 @@ defmodule Arbiter.Tasks.BatchCreate do
           if truthy?(e.attrs["skip_upstream_create"]),
             do: {issue, nil},
             else: CreateUpstream.mirror(issue)
+
+        # The in-transaction `:created` broadcast fired before the commit; tell the
+        # board again now that the ticket is really there.
+        Issue.broadcast_lifecycle(:updated, issue)
 
         %{
           index: e.index,

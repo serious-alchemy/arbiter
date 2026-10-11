@@ -200,6 +200,9 @@ defmodule Arbiter.Tasks.Create do
   defp finish(issue, skip_upstream?) do
     {issue, upstream} = if skip_upstream?, do: {issue, nil}, else: CreateUpstream.mirror(issue)
 
+    # The `:created` broadcast fired inside the transaction, before the commit.
+    Issue.broadcast_lifecycle(:updated, issue)
+
     case upstream_failures(upstream) do
       [] -> {:ok, issue, ac_warnings(issue)}
       failures -> {:partial, issue, failures}
