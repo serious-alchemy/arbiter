@@ -131,8 +131,7 @@ defmodule ArbiterCli.BatchFile do
   defp yaml(text) do
     case YamlElixir.read_from_string(text) do
       {:ok, value} -> {:ok, value}
-      {:error, %{__exception__: true} = e} -> {:error, Exception.message(e)}
-      {:error, other} -> {:error, inspect(other)}
+      {:error, e} -> {:error, Exception.message(e)}
     end
   rescue
     e -> {:error, Exception.message(e)}
