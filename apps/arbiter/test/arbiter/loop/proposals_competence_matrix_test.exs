@@ -56,7 +56,13 @@ defmodule Arbiter.Loop.ProposalsCompetenceMatrixTest do
     assert c.category == "competence matrix D1"
     assert c.payload["difficulty"] == 1
     assert [row] = c.payload["rows"]
-    assert row["match"] == %{"provider" => "claude", "model" => "claude-fable-9", "difficulty" => 1}
+
+    assert row["match"] == %{
+             "provider" => "claude",
+             "model" => "claude-fable-9",
+             "difficulty" => 1
+           }
+
     assert row["review_runs"] == 3.0
     assert row["author_runs"] == 2.0
     assert length(c.task_refs) == 10

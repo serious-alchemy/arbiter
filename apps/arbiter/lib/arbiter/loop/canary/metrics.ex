@@ -24,8 +24,10 @@ defmodule Arbiter.Loop.Canary.Metrics do
   chunked so a long-running canary cannot build an unbounded statement.
   """
 
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Loop.Canary
+  alias Arbiter.Loop.Scarcity
   alias Arbiter.Repo
 
   # SQLite's default parameter ceiling is 999; 200 keeps each statement small
@@ -55,18 +57,22 @@ defmodule Arbiter.Loop.Canary.Metrics do
   @spec collect(String.t(), Canary.t()) :: map()
   def collect(workspace_id, %Canary{} = canary) do
     {runs, clamped} = workspace_id |> dispatches(canary) |> Enum.split_with(&(not &1.clamped?))
+    {runs, permissioned} = split_permissioned(runs, canary)
 
     {canary_runs, control_runs} =
       Enum.split_with(runs, &(Canary.arm(canary, &1.task_id) == :canary))
 
     task_ids = runs |> Enum.map(& &1.base_task_id) |> Enum.uniq()
     rounds = review_rounds(task_ids)
-    costs = cost_by_run(Enum.map(runs, & &1.run_id))
+    run_ids = Enum.map(runs, & &1.run_id)
+    costs = cost_by_run(run_ids)
+    draws = draw_by_run(run_ids)
 
     %{
-      canary: arm_stats(canary_runs, rounds, costs),
-      control: arm_stats(control_runs, rounds, costs),
+      canary: arm_stats(canary_runs, rounds, costs, draws),
+      control: arm_stats(control_runs, rounds, costs, draws),
       clamped: length(clamped),
+      permissioned: length(permissioned),
       difficulty: canary.difficulty,
       proposal_id: canary.proposal_id,
       min_dispatches: canary.min_dispatches,
@@ -75,7 +81,7 @@ defmodule Arbiter.Loop.Canary.Metrics do
     }
   end
 
-  defp arm_stats(runs, rounds, costs) do
+  defp arm_stats(runs, rounds, costs, draws) do
     tasks = runs |> Enum.map(& &1.base_task_id) |> Enum.uniq()
     reviewed = Enum.filter(tasks, &Map.has_key?(rounds, &1))
     first_pass = Enum.count(reviewed, &rounds[&1].first_pass_converged)
@@ -89,8 +95,23 @@ defmodule Arbiter.Loop.Canary.Metrics do
       first_pass_convergence: ratio(first_pass, length(reviewed)),
       cost_usd: Float.round(cost / 1, 4),
       review_rounds: review_rounds,
-      cost_per_round: if(review_rounds > 0, do: Float.round(cost / review_rounds, 4))
+      cost_per_round: if(review_rounds > 0, do: Float.round(cost / review_rounds, 4)),
+      draw: arm_draw(runs, draws)
     }
+  end
+
+  # The pool draw (R13): weighted tokens (`Scarcity.weighted_tokens/1`), in total
+  # and by the pool each usage row's model draws on. Reported beside first-pass
+  # convergence, never a revert trigger: a matrix change that moves work between
+  # pools is a judgement call, as cost is for a routing change.
+  defp arm_draw(runs, draws) do
+    by_pool =
+      runs
+      |> Enum.flat_map(&Map.get(draws, &1.run_id, []))
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Map.new(fn {pool, weights} -> {pool, Float.round(Enum.sum(weights) * 1.0, 1)} end)
+
+    %{weighted_tokens: (by_pool |> Map.values() |> Enum.sum()) * 1.0, by_pool: by_pool}
   end
 
   defp ratio(_n, 0), do: nil
@@ -152,6 +173,65 @@ defmodule Arbiter.Loop.Canary.Metrics do
 
       {base, %{rounds: length(rows), first_pass_converged: truthy?(first["converged"])}}
     end)
+  end
+
+  # Runs of a task that carries permissions are left out of a matrix canary's
+  # arms (§7.1: exploration never touches a ticket with reach): the dispatch
+  # overlay refuses them, so they are baseline in both arms. A routing canary
+  # has no such rule, so its measurement is exactly what it was.
+  defp split_permissioned(runs, %Canary{kind: :matrix}) do
+    excluded = runs |> Enum.map(& &1.base_task_id) |> permissioned_task_ids()
+    Enum.split_with(runs, &(not MapSet.member?(excluded, &1.base_task_id)))
+  end
+
+  defp split_permissioned(runs, _canary), do: {runs, []}
+
+  defp permissioned_task_ids(task_ids) do
+    task_ids
+    |> in_chunks(fn chunk, placeholders ->
+      query(
+        """
+        SELECT id FROM issues
+        WHERE id IN (#{placeholders})
+          AND permissions IS NOT NULL AND permissions NOT IN ('', '[]', 'null')
+        """,
+        chunk
+      )
+    end)
+    |> MapSet.new(& &1["id"])
+  end
+
+  # run id => [{pool, weighted tokens}], one entry per (provider, model) the run drew on.
+  defp draw_by_run([]), do: %{}
+
+  defp draw_by_run(run_ids) do
+    run_ids
+    |> in_chunks(fn chunk, placeholders ->
+      query(
+        """
+        SELECT worker_run_id AS run_id, provider, model,
+               SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,
+               SUM(cache_creation_tokens) AS cache_creation_tokens,
+               SUM(cache_read_tokens) AS cache_read_tokens
+        FROM usage_events
+        WHERE worker_run_id IN (#{placeholders})
+        GROUP BY worker_run_id, provider, model
+        """,
+        chunk
+      )
+    end)
+    |> Enum.group_by(& &1["run_id"], fn r ->
+      {pool(r["provider"], r["model"]), Scarcity.weighted_tokens(r)}
+    end)
+  end
+
+  defp pool(nil, _model), do: "unknown"
+
+  defp pool(provider, model) do
+    case ModelFamily.classify(provider, model) do
+      %{pool: pool} when is_binary(pool) -> pool
+      _ -> provider
+    end
   end
 
   defp cost_by_run([]), do: %{}

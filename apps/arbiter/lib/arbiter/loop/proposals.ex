@@ -491,7 +491,8 @@ defmodule Arbiter.Loop.Proposals do
         []
 
       tasks ->
-        live_rows = Keyword.get_lazy(opts, :competence_rows, &Arbiter.Agents.Routing.Competence.rows/0)
+        live_rows =
+          Keyword.get_lazy(opts, :competence_rows, &Arbiter.Agents.Routing.Competence.rows/0)
 
         CompetenceProposals.candidates(tasks, live_rows,
           workspace_id: workspace_id,

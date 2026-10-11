@@ -95,7 +95,9 @@ defmodule Arbiter.Loop.CompetenceProposals do
     end
   end
 
-  defp approve_differs?(a, b) when is_number(a) and is_number(b), do: abs(a - b) >= @approve_change
+  defp approve_differs?(a, b) when is_number(a) and is_number(b),
+    do: abs(a - b) >= @approve_change
+
   defp approve_differs?(_a, _b), do: false
 
   defp candidate(difficulty, rows, tasks, live_rows, opts) do
@@ -145,7 +147,8 @@ defmodule Arbiter.Loop.CompetenceProposals do
 
       "#{m["provider"]}/#{m["model"]} " <>
         if(live,
-          do: "live rung #{live.rung}: #{fmt(live.author_runs)} author / #{fmt(live.review_runs)} review runs",
+          do:
+            "live rung #{live.rung}: #{fmt(live.author_runs)} author / #{fmt(live.review_runs)} review runs",
           else: "no live row"
         )
     end)
@@ -157,10 +160,13 @@ defmodule Arbiter.Loop.CompetenceProposals do
   # The ids of the closed tasks behind the changed rows, so the evidence bar
   # counts real, distinct tasks.
   defp task_refs(rows, tasks) do
-    keys = MapSet.new(rows, fn %{"match" => m} -> {m["provider"], m["model"], m["difficulty"]} end)
+    keys =
+      MapSet.new(rows, fn %{"match" => m} -> {m["provider"], m["model"], m["difficulty"]} end)
 
     tasks
-    |> Enum.filter(&MapSet.member?(keys, {canonical(&1.provider), to_string(&1.model), &1.difficulty}))
+    |> Enum.filter(
+      &MapSet.member?(keys, {canonical(&1.provider), to_string(&1.model), &1.difficulty})
+    )
     |> Enum.map(& &1.task_id)
     |> Enum.uniq()
     |> Enum.sort()

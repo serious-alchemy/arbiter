@@ -111,11 +111,15 @@ defmodule Arbiter.Loop.Canary do
   moved the routing table and when it was taken back.
   """
 
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.Routing.Competence
+  alias Arbiter.Agents.Routing.Score
   alias Arbiter.Loop
   alias Arbiter.Loop.Canary.Metrics
   alias Arbiter.Loop.PendingWrite
   alias Arbiter.Messages.Escalation
+  alias Arbiter.Settings
   alias Arbiter.Tasks.Workspace
 
   require Logger
@@ -128,6 +132,7 @@ defmodule Arbiter.Loop.Canary do
     :baseline_rule,
     :started_at,
     :promote_reported_at,
+    kind: :routing,
     arm_strategy: :alternating,
     min_dispatches: 20,
     regression_tolerance: 0.0,
@@ -238,10 +243,12 @@ defmodule Arbiter.Loop.Canary do
     with block when is_map(block) <- get_in(config, @canary_path),
          "running" <- Map.get(block, "status"),
          id when is_binary(id) and id != "" <- Map.get(block, "proposal_id"),
+         {:ok, kind} <- block_kind(Map.get(block, "kind")),
          d when is_integer(d) and d in 0..@max_difficulty <- Map.get(block, "difficulty"),
-         {:ok, rule} <- validate_rule(Map.get(block, "rule")),
+         {:ok, rule} <- validate_block_rule(kind, d, Map.get(block, "rule")),
          {:ok, started_at} <- parse_started_at(Map.get(block, "started_at")) do
       %__MODULE__{
+        kind: kind,
         proposal_id: id,
         difficulty: d,
         rule: rule,
@@ -259,6 +266,22 @@ defmodule Arbiter.Loop.Canary do
   end
 
   defp from_config(_), do: nil
+
+  # A block with no `kind` is a routing-tier canary: that is every block written
+  # before R13, and it is still how one is written.
+  defp block_kind(nil), do: {:ok, :routing}
+  defp block_kind("routing"), do: {:ok, :routing}
+  defp block_kind("matrix"), do: {:ok, :matrix}
+  defp block_kind(_), do: :error
+
+  defp validate_block_rule(:routing, _difficulty, rule), do: validate_rule(rule)
+
+  defp validate_block_rule(:matrix, difficulty, rows) do
+    case validate_matrix_rows(difficulty, rows) do
+      {:ok, rows} -> {:ok, rows}
+      {:error, _} -> :error
+    end
+  end
 
   defp parse_started_at(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
@@ -320,7 +343,7 @@ defmodule Arbiter.Loop.Canary do
   """
   @spec overlay(Workspace.t() | nil, String.t() | nil, integer()) :: map() | nil
   def overlay(workspace, task_id, difficulty) do
-    with %__MODULE__{} = canary <- active(workspace),
+    with %__MODULE__{kind: :routing} = canary <- active(workspace),
          true <- canary.difficulty == difficulty,
          :canary <- arm(canary, task_id) do
       canary.rule
@@ -329,17 +352,69 @@ defmodule Arbiter.Loop.Canary do
     end
   end
 
+  @doc """
+  The competence-matrix rows to rank with, ahead of the live ones, for one
+  dispatch (R13): the canaried rows when a matrix canary is running, this task
+  is in its canary arm at its difficulty, and the ticket carries no permissions
+  (§7.1: exploration never touches a ticket with reach); `[]` otherwise.
+
+  Called by `Arbiter.Agents.ProviderRouting` on every scored dispatch, so the
+  no-canary path is a single config lookup. Like `overlay/3` it reads the opt-in
+  flag, so unsetting it is the kill switch here too.
+  """
+  @spec matrix_rows(Workspace.t() | nil, map() | nil) :: [map()]
+  def matrix_rows(workspace, task) do
+    with %__MODULE__{kind: :matrix} = canary <- active(workspace),
+         true <- matrix_in_force?(workspace),
+         %{id: task_id} when is_binary(task_id) <- task,
+         true <-
+           Routing.ByDifficulty.effective_difficulty(task_difficulty(task)) == canary.difficulty,
+         true <- permissions(task) == [],
+         :canary <- arm(canary, task_id) do
+      canary.rule
+    else
+      _ -> []
+    end
+  end
+
+  defp task_difficulty(task),
+    do: Map.get(task, :difficulty_at_dispatch) || Map.get(task, :difficulty)
+
+  defp permissions(task), do: Map.get(task, :permissions) || []
+
+  @doc """
+  Whether this workspace's scorer reads the competence matrix when it dispatches:
+  `provider_selection: scored`, `routing.scoring.mode: enforce` and
+  `routing.scoring.competence: true`. Anywhere else a matrix row changes no
+  dispatch, so a canary on it would measure nothing.
+  """
+  @spec matrix_in_force?(Workspace.t() | nil) :: boolean()
+  def matrix_in_force?(%Workspace{config: config} = ws) do
+    ProviderRouting.scored?(ws) and Score.config(ws).mode == :enforce and
+      get_in(config || %{}, ["routing", "scoring", "competence"]) == true
+  end
+
+  def matrix_in_force?(_), do: false
+
   # ---- eligibility --------------------------------------------------------
 
   @doc """
   Whether a queued proposal may be applied autonomously, and what it would do.
 
-  Returns `{:ok, %{proposal_id:, workspace_id:, difficulty:, rule:}}` or
-  `{:error, reason}` with an operator-readable reason.
+  Returns `{:ok, %{proposal_id:, workspace_id:, kind:, difficulty:, rule:}}` or
+  `{:error, reason}` with an operator-readable reason. `kind` is `:routing` for
+  a `:config_set` tier adjustment (`rule` is the tier's rule map) and `:matrix`
+  for a `:competence_matrix` proposal (`rule` is its list of rows; R13).
   """
   @spec eligible(PendingWrite.t()) ::
           {:ok,
-           %{proposal_id: String.t(), workspace_id: String.t(), difficulty: 0..5, rule: map()}}
+           %{
+             proposal_id: String.t(),
+             workspace_id: String.t(),
+             kind: :routing | :matrix,
+             difficulty: 0..5,
+             rule: map() | [map()]
+           }}
           | {:error, String.t()}
   def eligible(%PendingWrite{} = row) do
     with :ok <- check_state(row),
@@ -347,11 +422,26 @@ defmodule Arbiter.Loop.Canary do
          {:ok, ws_id} <- check_workspace_id(row),
          {:ok, ws} <- fetch_workspace(ws_id),
          :ok <- check_evidence(row, ws),
-         :ok <- check_policy(ws),
-         {:ok, difficulty, rule} <- parse_routing_patch(row.payload) do
-      {:ok, %{proposal_id: row.id, workspace_id: ws_id, difficulty: difficulty, rule: rule}}
+         :ok <- check_policy(row, ws),
+         {:ok, difficulty, rule} <- parse_patch(row) do
+      {:ok,
+       %{
+         proposal_id: row.id,
+         workspace_id: ws_id,
+         kind: canary_kind(row),
+         difficulty: difficulty,
+         rule: rule
+       }}
     end
   end
+
+  defp canary_kind(%PendingWrite{kind: :competence_matrix}), do: :matrix
+  defp canary_kind(%PendingWrite{}), do: :routing
+
+  defp parse_patch(%PendingWrite{kind: :competence_matrix, payload: payload}),
+    do: parse_matrix_patch(payload)
+
+  defp parse_patch(%PendingWrite{payload: payload}), do: parse_routing_patch(payload)
 
   defp check_state(%PendingWrite{state: :proposed, escalated_at: nil}) do
     {:error,
@@ -365,12 +455,14 @@ defmodule Arbiter.Loop.Canary do
     do:
       {:error, "state is #{state} — only a :proposed row is eligible for autonomous application"}
 
-  defp check_kind(%PendingWrite{kind: :config_set}), do: :ok
+  defp check_kind(%PendingWrite{kind: kind}) when kind in [:config_set, :competence_matrix],
+    do: :ok
 
   defp check_kind(%PendingWrite{kind: kind}) do
     {:error,
-     "kind is #{kind} — Stage 3 autonomy covers routing-tier :config_set proposals only " <>
-       "(skill bodies and standing_orders stay operator-applied)"}
+     "kind is #{kind} — Stage 3 autonomy covers routing-tier :config_set and " <>
+       ":competence_matrix proposals only (skill bodies and standing_orders stay " <>
+       "operator-applied)"}
   end
 
   defp check_workspace_id(%PendingWrite{payload: payload, workspace_id: fallback}) do
@@ -405,7 +497,19 @@ defmodule Arbiter.Loop.Canary do
     end
   end
 
-  defp check_policy(ws) do
+  defp check_policy(%PendingWrite{kind: :competence_matrix}, ws) do
+    if matrix_in_force?(ws) do
+      :ok
+    else
+      {:error,
+       "this workspace does not dispatch by the scorer's competence matrix " <>
+         "(routing.provider_selection: scored, routing.scoring.mode: enforce and " <>
+         "routing.scoring.competence: true), so a matrix row would change nothing and " <>
+         "could not be measured"}
+    end
+  end
+
+  defp check_policy(%PendingWrite{}, ws) do
     if Routing.policy_for_workspace(ws) == Routing.ByDifficulty do
       :ok
     else
@@ -501,6 +605,85 @@ defmodule Arbiter.Loop.Canary do
 
   defp validate_rule(_), do: {:error, "a canaried rule must be a non-empty map"}
 
+  # ---- matrix rows (R13) --------------------------------------------------
+
+  # §7.1 / §10: exploration within eligibility, at D0-D2. Floors, exemptions and
+  # capability rows are never canaried, and the row shape below cannot carry
+  # them: a competence row is a match plus measured figures, nothing else.
+  @max_matrix_difficulty 2
+
+  @matrix_match_keys ~w(provider model difficulty issue_type)
+  @matrix_row_keys ~w(match n rung measured_at round_1_approve reviewed_n review_rounds
+                      fix_passes attempts difficulty_raised time_to_close_mean_hours
+                      time_to_close_winsorized_mean_hours time_to_close_median_hours
+                      cost_usd_mean cost_usd_median author_runs review_runs weight time_h)
+
+  @doc "The highest difficulty a matrix canary may arm (§7.1: D0–D2)."
+  @spec max_matrix_difficulty() :: 0..5
+  def max_matrix_difficulty, do: @max_matrix_difficulty
+
+  @doc """
+  Validate a `:competence_matrix` proposal payload against the canary's narrow
+  shape: one difficulty (D0–D2) and a non-empty list of competence rows, each
+  matching exactly that difficulty and carrying only competence figures.
+  Returns `{:ok, difficulty, rows}` or an operator-readable `{:error, reason}`.
+  """
+  @spec parse_matrix_patch(term()) :: {:ok, 0..2, [map()]} | {:error, String.t()}
+  def parse_matrix_patch(payload) when is_map(payload) do
+    with {:ok, difficulty} <- matrix_difficulty(Map.get(payload, "difficulty")),
+         {:ok, rows} <- validate_matrix_rows(difficulty, Map.get(payload, "rows")) do
+      {:ok, difficulty, rows}
+    end
+  end
+
+  def parse_matrix_patch(_), do: {:error, "this proposal carries no payload"}
+
+  defp matrix_difficulty(d) when is_integer(d) and d in 0..@max_matrix_difficulty, do: {:ok, d}
+
+  defp matrix_difficulty(d),
+    do:
+      {:error,
+       "a matrix canary arms D0..D#{@max_matrix_difficulty} only (§7.1); got #{inspect(d)}"}
+
+  @doc false
+  @spec validate_matrix_rows(integer(), term()) :: {:ok, [map()]} | {:error, String.t()}
+  def validate_matrix_rows(difficulty, [_ | _] = rows) do
+    with {:ok, normalized} <- Competence.normalize_rows(rows),
+         :ok <- Enum.reduce_while(normalized, :ok, &check_matrix_row(&1, difficulty, &2)) do
+      {:ok, normalized}
+    end
+  end
+
+  def validate_matrix_rows(_difficulty, _rows),
+    do: {:error, "a matrix canary needs a non-empty list of competence rows"}
+
+  defp check_matrix_row(%{"match" => match} = row, difficulty, :ok) do
+    extra_row = Map.keys(row) -- @matrix_row_keys
+    extra_match = Map.keys(match) -- @matrix_match_keys
+
+    cond do
+      extra_row != [] ->
+        {:halt,
+         {:error,
+          "a canaried matrix row may carry competence figures only; #{inspect(extra_row)} is " <>
+            "out of scope for autonomous application"}}
+
+      extra_match != [] ->
+        {:halt,
+         {:error,
+          "a canaried matrix row matches on provider / model / difficulty / issue_type only; " <>
+            "#{inspect(extra_match)} is out of scope"}}
+
+      match["difficulty"] != difficulty ->
+        {:halt,
+         {:error,
+          "every canaried matrix row must match D#{difficulty}; got #{inspect(match["difficulty"])}"}}
+
+      true ->
+        {:cont, :ok}
+    end
+  end
+
   # ---- start --------------------------------------------------------------
 
   @doc """
@@ -536,7 +719,7 @@ defmodule Arbiter.Loop.Canary do
         "proposal_id" => proposal.id,
         "difficulty" => spec.difficulty,
         "rule" => spec.rule,
-        "baseline_rule" => baseline_rule(ws, spec.difficulty),
+        "baseline_rule" => baseline_rule(spec, ws),
         "arm" => "alternating",
         "started_at" => DateTime.to_iso8601(DateTime.utc_now()),
         "min_dispatches" => clamp_min_dispatches(configured_min_dispatches(ws)),
@@ -544,6 +727,10 @@ defmodule Arbiter.Loop.Canary do
         "max_age_days" => clamp_max_age(configured_max_age_days(ws)),
         "status" => "running"
       }
+
+      # A routing block keeps the shape it always had; only a matrix canary says
+      # which kind it is.
+      block = if spec.kind == :matrix, do: Map.put(block, "kind", "matrix"), else: block
 
       case patch(ws, %{"loop" => %{"canary" => block}}, [], attribution(proposal.id)) do
         {:ok, updated} ->
@@ -563,7 +750,12 @@ defmodule Arbiter.Loop.Canary do
 
   # What the canaried tier resolves to *without* the canary — recorded so the
   # version history says what the change was measured against.
-  defp baseline_rule(ws, difficulty) do
+  defp baseline_rule(%{kind: :matrix, rule: rows}, _ws) do
+    matches = MapSet.new(rows, & &1["match"])
+    Enum.filter(Settings.competence_matrix() || [], &MapSet.member?(matches, &1["match"]))
+  end
+
+  defp baseline_rule(%{difficulty: difficulty}, ws) do
     base = Routing.ByDifficulty.default_mapping()[difficulty] || %{}
     override = get_in(ws.config || %{}, ["routing", "rules", "D#{difficulty}"]) || %{}
     Map.merge(base, override)
@@ -712,7 +904,7 @@ defmodule Arbiter.Loop.Canary do
       "the canary ran #{age_days} day(s) without the canary arm reaching " <>
         "#{canary.min_dispatches} dispatch(es) at D#{canary.difficulty}, so it expired " <>
         "unjudged (loop.canary_max_age_days: #{canary.max_age_days}). Nothing was written to " <>
-        "routing.rules; this tier does not see enough traffic to validate the change " <>
+        "#{target_noun(canary)}; this tier does not see enough traffic to validate the change " <>
         "autonomously, so apply it by hand if you still want it"
 
     case patch(ws, %{}, ["loop.canary"], attribution(canary.proposal_id)) do
@@ -804,7 +996,8 @@ defmodule Arbiter.Loop.Canary do
   # tried. So candidates are pre-filtered to those that actually target this
   # workspace, and a start that still fails falls through to the next.
   defp maybe_start(ws, opts) do
-    Loop.list_pending(state: :proposed, kind: :config_set, workspace_id: ws.id)
+    [:config_set, :competence_matrix]
+    |> Enum.flat_map(&Loop.list_pending(state: :proposed, kind: &1, workspace_id: ws.id))
     |> Enum.filter(&targets_workspace?(&1, ws))
     |> Enum.reduce_while({:ok, :nothing_eligible}, fn row, acc ->
       case start(ws, row, opts) do
@@ -859,25 +1052,56 @@ defmodule Arbiter.Loop.Canary do
   @spec promote(Workspace.t(), t(), stats(), keyword()) ::
           {:ok, {:promoted, stats()}} | {:error, String.t()}
   def promote(%Workspace{} = ws, %__MODULE__{} = canary, stats, opts \\ []) do
-    patch_map = %{"routing" => %{"rules" => %{"D#{canary.difficulty}" => canary.rule}}}
+    with :ok <- land(canary),
+         {:ok, _updated} <- drop_for_promote(ws, canary) do
+      close_proposal(
+        canary.proposal_id,
+        :promote,
+        outcome_delta(:promote, stats),
+        promote_reason(stats),
+        opts
+      )
 
-    case patch(ws, patch_map, ["loop.canary"], attribution(canary.proposal_id)) do
-      {:ok, _updated} ->
-        close_proposal(
-          canary.proposal_id,
-          :promote,
-          outcome_delta(:promote, stats),
-          promote_reason(stats),
-          opts
-        )
-
-        notify(ws, canary, "promoted fleet-wide", promote_reason(stats))
-        {:ok, {:promoted, stats}}
-
-      {:error, reason} ->
-        {:error, "could not land the canaried rule: #{reason}"}
+      notify(ws, canary, "promoted fleet-wide", promote_reason(stats))
+      {:ok, {:promoted, stats}}
+    else
+      {:error, reason} -> {:error, "could not land the canaried #{noun(canary)}: #{reason}"}
     end
   end
+
+  # Matrix rows land in the installation's live matrix first (the previous matrix
+  # is kept for rollback) and the canary block is dropped after, so a failure in
+  # between leaves the canary running and the next tick lands the same rows again
+  # (the merge is idempotent). A routing rule has nothing to land before the
+  # block's own patch.
+  defp land(%__MODULE__{kind: :matrix, rule: rows}) do
+    case Settings.merge_competence_rows(rows) do
+      {:ok, _matrix} -> :ok
+      {:error, err} -> {:error, ash_message(err)}
+    end
+  end
+
+  defp land(%__MODULE__{}), do: :ok
+
+  defp drop_for_promote(ws, %__MODULE__{kind: :matrix} = canary),
+    do: patch(ws, %{}, ["loop.canary"], attribution(canary.proposal_id))
+
+  defp drop_for_promote(ws, %__MODULE__{} = canary) do
+    patch_map = %{"routing" => %{"rules" => %{"D#{canary.difficulty}" => canary.rule}}}
+    patch(ws, patch_map, ["loop.canary"], attribution(canary.proposal_id))
+  end
+
+  defp noun(%__MODULE__{kind: :matrix}), do: "matrix rows"
+  defp noun(%__MODULE__{}), do: "rule"
+
+  defp target_noun(%__MODULE__{kind: :matrix}), do: "the live competence matrix"
+  defp target_noun(%__MODULE__{}), do: "routing.rules"
+
+  defp describe(:matrix, rows), do: "#{length(rows)} competence matrix row(s)"
+  defp describe(:routing, rule), do: inspect(rule)
+
+  defp tier_label(%__MODULE__{kind: :matrix, difficulty: d}), do: "D#{d} competence matrix"
+  defp tier_label(%__MODULE__{difficulty: d}), do: "D#{d} routing tier"
 
   defp revert_reason(stats) do
     "first-pass convergence regressed in the canary arm: " <>
@@ -957,9 +1181,16 @@ defmodule Arbiter.Loop.Canary do
       "first_pass_convergence" => arm.first_pass_convergence,
       "cost_usd" => arm.cost_usd,
       "review_rounds" => arm.review_rounds,
-      "cost_per_round" => arm.cost_per_round
+      "cost_per_round" => arm.cost_per_round,
+      "draw" => arm_draw(arm)
     }
   end
+
+  # The pool draw (R13): weighted tokens, in total and by the pool each run drew on.
+  defp arm_draw(%{draw: draw}),
+    do: %{"weighted_tokens" => draw.weighted_tokens, "by_pool" => draw.by_pool}
+
+  defp arm_draw(_arm), do: nil
 
   # ---- plumbing -----------------------------------------------------------
 
@@ -988,13 +1219,14 @@ defmodule Arbiter.Loop.Canary do
       ws,
       %__MODULE__{
         proposal_id: proposal.id,
+        kind: spec.kind,
         difficulty: spec.difficulty,
         rule: spec.rule,
         started_at: DateTime.utc_now()
       },
       "started",
-      "canarying #{inspect(spec.rule)} at D#{spec.difficulty} on half of this workspace's " <>
-        "dispatches; it will be judged once the canary arm has #{@min_dispatches} of them"
+      "canarying #{describe(spec.kind, spec.rule)} at D#{spec.difficulty} on half of this " <>
+        "workspace's dispatches; it will be judged once the canary arm has #{@min_dispatches} of them"
     )
   end
 
@@ -1006,12 +1238,12 @@ defmodule Arbiter.Loop.Canary do
       kind: :loop_canary,
       from_ref: "loop",
       workspace_id: ws.id,
-      subject: "loop canary #{headline}: D#{canary.difficulty} routing tier",
+      subject: "loop canary #{headline}: #{tier_label(canary)}",
       body: """
       Stage 3 autonomous routing canary (proposal #{canary.proposal_id}) #{headline}.
 
       Tier:   D#{canary.difficulty}
-      Rule:   #{inspect(canary.rule)}
+      Rule:   #{describe(canary.kind, canary.rule)}
       Detail: #{detail}
 
       This ran without operator action because `loop.autonomous_routing_enabled`
@@ -1033,14 +1265,14 @@ defmodule Arbiter.Loop.Canary do
       kind: :loop_canary,
       from_ref: "loop",
       workspace_id: ws.id,
-      subject: "loop canary verdict ready: D#{canary.difficulty} routing tier (awaiting you)",
+      subject: "loop canary verdict ready: #{tier_label(canary)} (awaiting you)",
       body: """
       The routing canary (proposal #{canary.proposal_id}) reached a :promote verdict, but
       loop.canary_auto_promote is false on this workspace, so nothing was written to
-      routing.rules. The canary keeps running until you decide.
+      #{target_noun(canary)}. The canary keeps running until you decide.
 
       Tier:    D#{canary.difficulty}
-      Rule:    #{inspect(canary.rule)}
+      Rule:    #{describe(canary.kind, canary.rule)}
       Verdict: #{promote_reason(stats)}
 
       #{arm_summary("canary", stats.canary)}
@@ -1061,8 +1293,16 @@ defmodule Arbiter.Loop.Canary do
   defp arm_summary(label, arm) do
     "#{String.pad_trailing(label <> ":", 9)} #{arm.dispatches} dispatch(es), " <>
       "#{arm.reviewed_tasks} reviewed task(s), first-pass #{pct(arm.first_pass_convergence)}, " <>
-      "#{arm.review_rounds} round(s), $#{arm.cost_usd} (#{cost_per_round(arm.cost_per_round)}/round)"
+      "#{arm.review_rounds} round(s), $#{arm.cost_usd} (#{cost_per_round(arm.cost_per_round)}/round)" <>
+      draw_summary(arm)
   end
+
+  defp draw_summary(%{draw: %{weighted_tokens: tokens, by_pool: by_pool}}) when tokens > 0 do
+    pools = Enum.map_join(by_pool, ", ", fn {pool, w} -> "#{pool} #{round(w)}" end)
+    ", draw #{round(tokens)} weighted tokens (#{pools})"
+  end
+
+  defp draw_summary(_arm), do: ""
 
   defp cost_per_round(nil), do: "—"
   defp cost_per_round(c) when is_number(c), do: "$#{Float.round(c / 1, 4)}"
@@ -1106,6 +1346,7 @@ defmodule Arbiter.Loop.Canary do
     %{
       workspace_id: ws.id,
       proposal_id: canary.proposal_id,
+      kind: canary.kind,
       proposal_state: proposal_state(canary.proposal_id),
       difficulty: canary.difficulty,
       rule: canary.rule,
