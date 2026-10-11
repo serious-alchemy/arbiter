@@ -160,6 +160,43 @@ defmodule Arbiter.Loop.Replay do
   """
   @spec run(keyword()) :: result()
   def run(opts) do
+    with {:ok, ctx} <- prepare(opts), do: admit_and_run(ctx)
+  end
+
+  @doc """
+  `run/1` under `Arbiter.TaskSupervisor`, returning at once: for `bin/arbiter
+  rpc`, whose caller need not stay attached for the hour a replay can take.
+  What `run/1` would refuse before admission (`{:error, reason}`: an
+  ineligible task, an account, a model the runner cannot confine) is refused
+  here, before anything starts. Follow one that starts with
+  `Arbiter.Release.replay_report/1`.
+  """
+  @spec start(keyword()) :: DynamicSupervisor.on_start_child()
+  def start(opts) do
+    with {:ok, ctx} <- prepare(opts) do
+      Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
+        result = admit_and_run(ctx)
+        Logger.info("Loop.Replay: #{inspect(ctx.subject.task_id)}: #{describe_result(result)}")
+      end)
+    end
+  end
+
+  @doc """
+  The replays running at `now`: `:running` and not yet past their deadline.
+  Each holds a seat on both its pools.
+  """
+  @spec running(DateTime.t()) :: [ReplayRun.t()]
+  def running(now \\ DateTime.utc_now()) do
+    ReplayRun
+    |> Ash.Query.filter(state == :running and deadline_at > ^now)
+    |> Ash.read!()
+  end
+
+  # ---- setup -------------------------------------------------------------------
+
+  # Everything decided before admission. An `{:error, reason}` here leaves no
+  # record and spends nothing.
+  defp prepare(opts) do
     opts = Map.new(opts)
     now = Map.get_lazy(opts, :now, &DateTime.utc_now/0)
 
@@ -179,45 +216,19 @@ defmodule Arbiter.Loop.Replay do
            opts: opts
          },
          {:ok, layouts} <- layouts(ctx) do
-      ctx = Map.put(ctx, :layouts, layouts)
-      :ok = sweep(opts, now)
-
-      case admit(ctx) do
-        {:running, run} -> execute(run, ctx)
-        {:refused, run} -> {:refused, run}
-        {:error, _} = error -> error
-      end
+      {:ok, Map.put(ctx, :layouts, layouts)}
     end
   end
 
-  @doc """
-  Run `run/1` under `Arbiter.TaskSupervisor` and return at once: for
-  `bin/arbiter rpc`, whose caller need not stay attached for the hour a replay
-  can take. Follow it with `Arbiter.Release.replay_report/1`.
-  """
-  @spec start(keyword()) :: DynamicSupervisor.on_start_child()
-  def start(opts) do
-    Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
-      result = run(opts)
+  defp admit_and_run(ctx) do
+    :ok = sweep(ctx.opts, ctx.now)
 
-      Logger.info(
-        "Loop.Replay: #{inspect(Keyword.get(opts, :task_id))}: #{describe_result(result)}"
-      )
-    end)
+    case admit(ctx) do
+      {:running, run} -> execute(run, ctx)
+      {:refused, run} -> {:refused, run}
+      {:error, _} = error -> error
+    end
   end
-
-  @doc """
-  The replays running at `now`: `:running` and not yet past their deadline.
-  Each holds a seat on both its pools.
-  """
-  @spec running(DateTime.t()) :: [ReplayRun.t()]
-  def running(now \\ DateTime.utc_now()) do
-    ReplayRun
-    |> Ash.Query.filter(state == :running and deadline_at > ^now)
-    |> Ash.read!()
-  end
-
-  # ---- setup -------------------------------------------------------------------
 
   defp runner(opts) do
     case Map.get(opts, :runner) || Application.get_env(:arbiter, :loop_replay_runner) ||

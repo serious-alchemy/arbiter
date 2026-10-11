@@ -345,10 +345,10 @@ defmodule Arbiter.Release do
       bin/arbiter rpc 'Arbiter.Release.replay(task_id: "bd-…", account: "claude:default", model: "claude-sonnet-5-5", async: true)'
 
   `async: true` starts it under the app's task supervisor and returns
-  `{:started, pid}` at once; `replay_report/1` shows the outcome. Without it the
-  call returns the replay's result when it finishes, which can take the
-  implement, test and review budgets. Pick the task with
-  `replay_candidates/1`.
+  `{:started, pid}` at once (or the refusal, when it cannot be replayed at
+  all); `replay_report/1` shows the outcome. Without it the call returns the
+  replay's result when it finishes, which can take the implement, test and
+  review budgets. Pick the task with `replay_candidates/1`.
   """
   @spec replay(keyword()) :: Replay.result() | {:started, pid()} | {:error, term()}
   def replay(opts) do

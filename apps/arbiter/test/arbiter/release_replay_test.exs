@@ -55,10 +55,11 @@ defmodule Arbiter.ReleaseReplayTest do
     assert output =~ "replay not started: :not_found"
   end
 
-  test "replay/1 with async: true starts it under the task supervisor and returns at once" do
+  # One that starts is `Arbiter.Loop.ReplayTest`'s, which has a task to replay.
+  test "replay/1 with async: true refuses at once what cannot be replayed; nothing starts" do
     output =
-      capture_io(fn ->
-        assert {:started, pid} =
+      capture_io(:stderr, fn ->
+        assert {:error, :not_found} =
                  Arbiter.Release.replay(
                    task_id: "bd-nosuch",
                    account: "claude:none",
@@ -67,11 +68,8 @@ defmodule Arbiter.ReleaseReplayTest do
                    async: true,
                    start: false
                  )
-
-        ref = Process.monitor(pid)
-        assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
       end)
 
-    assert output =~ "replay of bd-nosuch started"
+    assert output =~ "replay not started: :not_found"
   end
 end

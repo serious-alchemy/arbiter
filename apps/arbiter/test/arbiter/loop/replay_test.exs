@@ -25,6 +25,7 @@ defmodule Arbiter.Loop.ReplayTest do
   alias Arbiter.Worker.PrepushCheck
   alias Arbiter.Worker.PrivateClone
 
+  import ExUnit.CaptureIO
   import GitFixture, only: [git!: 2, commit!: 3]
 
   @now ~U[2026-10-10 01:40:27Z]
@@ -237,20 +238,23 @@ defmodule Arbiter.Loop.ReplayTest do
   defp no_spend,
     do: fn role, _spec -> flunk("the #{role} run spent quota it was not admitted for") end
 
-  defp replay(ctx, opts \\ []) do
-    [
-      task_id: ctx.issue.id,
-      account: ctx.claude.id,
-      model: "claude-sonnet-5-5",
-      reviewer: ctx.codex.id,
-      reviewer_model: "gpt-5.5-codex",
-      root: ctx.replays,
-      now: @now,
-      budget_fun: fn _account_id, _pool -> quiet() end,
-      runner: runner(self())
-    ]
-    |> Keyword.merge(opts)
-    |> Replay.run()
+  defp replay(ctx, opts \\ []), do: ctx |> replay_opts(opts) |> Replay.run()
+
+  defp replay_opts(ctx, opts) do
+    Keyword.merge(
+      [
+        task_id: ctx.issue.id,
+        account: ctx.claude.id,
+        model: "claude-sonnet-5-5",
+        reviewer: ctx.codex.id,
+        reviewer_model: "gpt-5.5-codex",
+        root: ctx.replays,
+        now: @now,
+        budget_fun: fn _account_id, _pool -> quiet() end,
+        runner: runner(self())
+      ],
+      opts
+    )
   end
 
   defp running!(ctx, account_id, pool, started_at, deadline_at \\ nil) do
@@ -616,6 +620,42 @@ defmodule Arbiter.Loop.ReplayTest do
 
       assert message =~ "layout exploded"
       assert Ash.read!(ReplayRun) == []
+    end
+  end
+
+  describe "start/1 (for bin/arbiter rpc)" do
+    test "refuses at once what would be refused before admission; nothing starts", ctx do
+      assert {:error, {:unconfined, :review, :codex}} =
+               ctx |> replay_opts(runner: Arbiter.Test.UnconfinedReplayRunner) |> Replay.start()
+
+      output =
+        capture_io(:stderr, fn ->
+          assert {:error, {:unconfined, :review, :codex}} =
+                   ctx
+                   |> replay_opts(runner: Arbiter.Test.UnconfinedReplayRunner)
+                   |> Keyword.merge(async: true, start: false)
+                   |> Arbiter.Release.replay()
+        end)
+
+      assert output =~ "replay not started: {:unconfined, :review, :codex}"
+      assert Ash.read!(ReplayRun) == []
+    end
+
+    test "starts one that can run under the task supervisor, and returns at once", ctx do
+      output =
+        capture_io(fn ->
+          assert {:started, pid} =
+                   ctx
+                   |> replay_opts([])
+                   |> Keyword.merge(async: true, start: false)
+                   |> Arbiter.Release.replay()
+
+          ref = Process.monitor(pid)
+          assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 30_000
+        end)
+
+      assert output =~ "replay of #{ctx.issue.id} started"
+      assert [%ReplayRun{state: :scored}] = Ash.read!(ReplayRun)
     end
   end
 
