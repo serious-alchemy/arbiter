@@ -348,6 +348,9 @@ defmodule ArbiterCli.Cmd.Update do
             cli_built: cli_built
           })
 
+        {:down, actions, _was_running} ->
+          Restart.emit_down(mode, actions)
+
         {:timeout, actions, _was_running} ->
           Formatter.emit_deploy_timeout(mode, %{
             branch: @integration_branch,

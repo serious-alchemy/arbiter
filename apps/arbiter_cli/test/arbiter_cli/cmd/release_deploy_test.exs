@@ -169,9 +169,15 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
         {"systemctl", ["--user", "cat", "arbiter.service"]} ->
           if systemd?, do: {"", 0}, else: {"Unit arbiter.service could not be found.", 1}
 
-        {"systemctl", ["--user", "restart", "arbiter.service"]} ->
+        {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]} ->
           on_restart.()
           {"", 0}
+
+        {"systemctl", ["--user", "show", "arbiter.service" | _]} ->
+          case Keyword.get(opts, :active_state) do
+            nil -> {"", 0}
+            state -> {"ActiveState=#{state}\n", 0}
+          end
 
         # Non-systemd path: one listener to SIGTERM before the fresh start.
         {"lsof", _} ->
@@ -302,7 +308,23 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # Migrations are the new release's boot-time job (Arbiter.Boot.Migrator),
       # never a pre-swap eval against the still-running old server.
       refute_received {:cmd, _bin, ["eval", "Arbiter.Release.migrate"]}
-      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+    end
+
+    test "exits 1 with the DOWN report and skips the CLI install when the unit stays down",
+         %{home: home} do
+      tarball = release_tarball(@vsn)
+      stub_release(@vsn, tarball, "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n")
+      stub_cmds(active_state: "inactive")
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert out =~ "server is DOWN"
+      assert out =~ "systemctl --user daemon-reexec"
+      assert out =~ "was NOT installed"
+      assert {:ok, link} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link) == @vsn
     end
 
     test "retains the pristine tarball and its checksum beside the unpacked tree (RW4)",
@@ -389,7 +411,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert out =~ "Already on release #{@vsn}"
       # Never touched migrate or restart.
       refute_received {:cmd, _bin, ["eval", "Arbiter.Release.migrate"]}
-      refute_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
     end
   end
 
@@ -416,7 +438,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert File.exists?(Path.join(link_target, "bin/arbiter"))
 
       # Shares the install machinery with the GitHub flow — no separate swap.
-      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
     end
 
     test "retains a local tarball too, so a node can fetch exactly what was deployed (RW4)",
@@ -587,7 +609,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # Nothing was migrated, swapped, or restarted.
       refute File.exists?(Path.join(home, "current"))
       refute_received {:cmd, _bin, ["eval", "Arbiter.Release.migrate"]}
-      refute_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
     end
   end
 
@@ -745,7 +767,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # current still points at the new release — nothing was rolled back.
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == @vsn
-      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
     end
 
     test "a prior release exists (planned-downtime deploy, e.g. a DB move): still does not roll back",
@@ -984,7 +1006,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
                match?(["eval", "Arbiter.Release.migrate"], args)
              end)
 
-      assert {"systemctl", ["--user", "restart", "arbiter.service"]} in cmds
+      assert {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]} in cmds
     end
 
     test "non-systemd path orders stop → start with no migrate in between", %{home: home} do
@@ -1598,7 +1620,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # Nothing swapped, nothing restarted, the database untouched.
       assert {:ok, link} = File.read_link(Path.join(home, "current"))
       assert link == prior
-      refute_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
       assert read_db(home) == @magic <> "live-data"
 
       assert %{"state" => "failed", "tag" => @vsn, "message" => msg} = Status.read()
@@ -1642,7 +1664,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert Enum.member?(cmds, {"systemctl", ["--user", "stop", "arbiter.service"]})
 
       restarts =
-        Enum.filter(cmds, &(&1 == {"systemctl", ["--user", "restart", "arbiter.service"]}))
+        Enum.filter(
+          cmds,
+          &(&1 == {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]})
+        )
 
       assert length(restarts) == 2
 

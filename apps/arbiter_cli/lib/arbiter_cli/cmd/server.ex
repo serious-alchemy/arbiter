@@ -173,6 +173,9 @@ defmodule ArbiterCli.Cmd.Server do
           {:ok, _actions, _was_running} ->
             emit_migrate_via_restart(mode)
 
+          {:down, actions, _was_running} ->
+            Restart.emit_down(mode, actions)
+
           {:timeout, _actions, _was_running} ->
             Output.die(
               "Server did not come back up within #{div(timeout_ms, 1000)}s",

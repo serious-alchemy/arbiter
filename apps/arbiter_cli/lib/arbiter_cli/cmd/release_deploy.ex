@@ -399,15 +399,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
       Status.phase("restarting")
 
-      case Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms) do
-        {:ok, actions, was_running} ->
-          handle_restart_ok(ctx, actions, was_running)
-
-        {:timeout, actions, was_running} ->
-          handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
-      end
+      result = Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms)
+      handle_restart_result(result, ctx, pre_deploy_fails)
     end
   end
+
+  defp handle_restart_result({:ok, actions, was_running}, ctx, _pre_deploy_fails),
+    do: handle_restart_ok(ctx, actions, was_running)
+
+  defp handle_restart_result({:timeout, actions, was_running}, ctx, pre_deploy_fails),
+    do: handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
+
+  defp handle_restart_result({:down, actions, _was_running}, ctx, _pre_deploy_fails),
+    do: handle_server_down(ctx, actions)
 
   # Record this deploy in the status file, and make sure a halt anywhere below
   # (a failed download, a checksum mismatch, a failed backup) leaves a `failed`
@@ -516,6 +520,46 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         %{updated: false, version: tag, error: message}
     end
   end
+
+  # The restart never brought the unit up (systemd start job wedged, and the
+  # daemon-reexec retry did not help). The new release stays current; nothing
+  # is auto-rolled-back because a rollback restart would hit the same wedge.
+  # Say so loudly, name the exact recovery/rollback commands, and report that
+  # the matching CLI was not installed.
+  @spec handle_server_down(map(), list()) :: no_return()
+  defp handle_server_down(ctx, actions) do
+    Status.finish("failed", status_extra(ctx, %{message: "server is DOWN after deploy"}))
+
+    rollback =
+      case ctx.prior_target do
+        nil ->
+          ""
+
+        prior ->
+          "\n\nExact rollback (re-point `current` at the previous release, then start):\n" <>
+            "  ln -sfn #{prior} #{ctx.current_link}\n" <>
+            "  systemctl --user start arbiter.service" <> crossed_restore_note(ctx)
+      end
+
+    skipped =
+      "\n\nThe matching `arb` CLI (#{ctx.tag}) was NOT installed: the server is not confirmed up."
+
+    Restart.emit_down(ctx.mode, actions, rollback <> skipped)
+  end
+
+  # The new release ships migrations the prior one lacks: if it got far enough
+  # to run them, the prior release must not boot on that database.
+  defp crossed_restore_note(%{rollback_plan: %{crossed: [_ | _]}, backup: backup}) do
+    where =
+      if backup,
+        do: "restore the pre-deploy database backup #{backup.path} first",
+        else: "there is no pre-deploy backup, so check the database before rolling back"
+
+    "\n  NOTE: this release adds migrations the previous one lacks; if they already ran, " <>
+      where <> " (or start the new release instead)."
+  end
+
+  defp crossed_restore_note(_ctx), do: ""
 
   defp finish_failed(ctx, outcome) do
     {state, extra} = failure_status(outcome, ctx)
