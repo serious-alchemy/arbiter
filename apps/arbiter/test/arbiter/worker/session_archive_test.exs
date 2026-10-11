@@ -233,6 +233,22 @@ defmodule Arbiter.Worker.SessionArchiveTest do
     end
   end
 
+  describe "archive/3 — qwen chat JSONL (bd-7yj8qv Q8)" do
+    test "archives and redacts <home>/.qwen/projects/<slug>/chats/<sid>.jsonl", ctx do
+      sid = "0b9f3c1e-2f64-4c53-9a43-8f2f7c1d9a10"
+      dir = Path.join([ctx.config_dir, ".qwen", "projects", "-work-tree", "chats"])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, sid <> ".jsonl"), ~s({"k":"s3cret-token"}\n))
+
+      assert {:ok, %{status: :ok, redacted: true}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid,
+                 redact_values: ["s3cret-token"]
+               )
+
+      refute gunzip_at!(SessionArchive.path_for(ctx.run_id)) =~ "s3cret-token"
+    end
+  end
+
   describe "archive/3 — agy conversation db (bd-6nupvc T9)" do
     test "archives the raw db unredacted when no Claude JSONL exists at the same coordinates",
          ctx do
