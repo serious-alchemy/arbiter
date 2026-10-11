@@ -83,7 +83,6 @@ defmodule Arbiter.Agents.Qwen do
 
   @behaviour Arbiter.Agents.Agent
 
-  alias Arbiter.MCP.AgentConfig.Qwen, as: QwenMcp
   alias Arbiter.Agents.Qwen.ConfigDir
   alias Arbiter.Agents.Qwen.Egress, as: QwenEgress
   alias Arbiter.Agents.Qwen.Security
@@ -92,6 +91,7 @@ defmodule Arbiter.Agents.Qwen do
   alias Arbiter.Agents.Qwen.Usage
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
+  alias Arbiter.MCP.AgentConfig.Qwen, as: QwenMcp
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
