@@ -51,6 +51,13 @@ defmodule ArbiterCli.Cmd.Restart do
   @default_timeout_s 60
   @poll_interval_ms 500
 
+  # Bounded wait for the systemd unit to become active after a restart (one
+  # poll per second), and how long it may sit inactive before we treat the
+  # start job as wedged and reexec the manager.
+  @service_poll_ms 1_000
+  @service_wait_s 120
+  @service_stuck_s 30
+
   # Independent, shorter budget for the old server to release the port after
   # SIGTERM before we escalate to SIGKILL.
   @stop_timeout_ms 15_000
@@ -89,6 +96,7 @@ defmodule ArbiterCli.Cmd.Restart do
       case perform(root, timeout_ms) do
         {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
         {:timeout, actions, _was_running} -> emit_timeout(mode, actions, timeout_ms)
+        {:down, actions, _was_running} -> emit_down(mode, actions)
       end
     end
   end
@@ -106,7 +114,7 @@ defmodule ArbiterCli.Cmd.Restart do
   restart to `systemctl --user restart` instead of the SIGTERM/start dance so
   systemd remains the authoritative process supervisor.
   """
-  @spec perform(String.t(), non_neg_integer()) :: {:ok | :timeout, list(), boolean()}
+  @spec perform(String.t(), non_neg_integer()) :: {:ok | :timeout | :down, list(), boolean()}
   def perform(root, timeout_ms) do
     was_running = Doctor.reachable?()
 
@@ -120,11 +128,36 @@ defmodule ArbiterCli.Cmd.Restart do
           [stop_phoenix(port), Start.start_phoenix(root)]
       end
 
-    case Start.wait_until_green(Start.attempts_for(timeout_ms)) do
-      :ok -> {:ok, actions, was_running}
-      :timeout -> {:timeout, actions, was_running}
+    if Enum.any?(actions, &match?({:systemd_restart, :down, _}, &1)) do
+      {:down, actions, was_running}
+    else
+      case Start.wait_until_green(Start.attempts_for(timeout_ms)) do
+        :ok -> {:ok, actions, was_running}
+        :timeout -> {:timeout, actions, was_running}
+      end
     end
   end
+
+  @doc """
+  The "server is DOWN" report for a `{:down, actions, _}` result of `perform/2`:
+  what systemd said and the exact commands to bring the server back.
+  """
+  @spec down_message(tuple() | nil) :: String.t()
+  def down_message({:systemd_restart, :down, state}) do
+    """
+    server is DOWN after restart: arbiter.service is #{state || "not active"} after \
+    #{@service_wait_s}s (a systemd start job can wedge in `waiting`; a daemon-reexec was tried once).
+
+    Recover:
+      systemctl --user daemon-reexec
+      systemctl --user start arbiter.service
+      systemctl --user status arbiter.service
+    If it will not start, roll back by re-pointing `current` at the previous release \
+    (ln -sfn <releases>/<previous-tag> <releases>/current) and starting it again.\
+    """
+  end
+
+  def down_message(_), do: down_message({:systemd_restart, :down, nil})
 
   @doc """
   Stop the server and leave it stopped — the half of `perform/2` a rollback needs
@@ -247,9 +280,14 @@ defmodule ArbiterCli.Cmd.Restart do
   defp restart_via_systemd do
     Start.log_text("Restarting via systemd (systemctl --user restart arbiter.service)…")
 
-    case run_cmd("systemctl", ["--user", "restart", "arbiter.service"], stderr_to_stdout: true) do
+    # `--no-block`: a plain `restart` waits for the start job and hangs for as
+    # long as systemd leaves that job in `waiting` (the 2026-10-11 outage). We
+    # enqueue the job and watch the unit ourselves, bounded, in `await_active/2`.
+    case run_cmd("systemctl", ["--user", "restart", "--no-block", "arbiter.service"],
+           stderr_to_stdout: true
+         ) do
       {_out, 0} ->
-        {:systemd_restart, :ok, nil}
+        await_active()
 
       {out, code} ->
         Output.die(
@@ -263,6 +301,69 @@ defmodule ArbiterCli.Cmd.Restart do
         "could not run systemctl: #{inspect(e.original)}",
         "Ensure systemctl is on your PATH."
       )
+  end
+
+  # Bounded wait for arbiter.service to reach ActiveState=active. If it sits
+  # inactive/failed past `@service_stuck_s` (a start job wedged in `waiting`),
+  # try `daemon-reexec` + one more start, logged. Returns the action tuple:
+  # `:ok`, `:recovered` (needed the reexec), or `:down` with the last state.
+  # An unreadable state is "no verdict" and falls through to the doctor wait.
+  defp await_active(poll \\ 0, retried? \\ false) do
+    state = active_state()
+
+    cond do
+      state == "active" ->
+        {:systemd_restart, if(retried?, do: :recovered, else: :ok), nil}
+
+      state == nil ->
+        {:systemd_restart, :ok, nil}
+
+      poll >= @service_wait_s ->
+        {:systemd_restart, :down, state}
+
+      not retried? and poll >= @service_stuck_s and state in ["inactive", "failed"] ->
+        recover_stuck_start(state)
+        await_active(poll + 1, true)
+
+      true ->
+        sleep(@service_poll_ms)
+        await_active(poll + 1, retried?)
+    end
+  end
+
+  defp recover_stuck_start(state) do
+    Start.log_text(
+      "arbiter.service is still #{state} after #{@service_stuck_s}s (start job stuck?); " <>
+        "running `systemctl --user daemon-reexec` and starting it again…"
+    )
+
+    _ = run_cmd("systemctl", ["--user", "daemon-reexec"], stderr_to_stdout: true)
+
+    _ =
+      run_cmd("systemctl", ["--user", "start", "--no-block", "arbiter.service"],
+        stderr_to_stdout: true
+      )
+
+    :ok
+  rescue
+    e in ErlangError -> Start.log_text("recovery failed: #{inspect(e.original)}")
+  end
+
+  defp active_state do
+    case run_cmd("systemctl", ["--user", "show", "arbiter.service", "-p", "ActiveState"],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} ->
+        case out |> String.trim() |> String.replace_prefix("ActiveState=", "") do
+          "" -> nil
+          state -> state
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   # ---- stop --------------------------------------------------------------
@@ -621,6 +722,30 @@ defmodule ArbiterCli.Cmd.Restart do
     Doctor.report()
     IO.puts("")
     IO.puts("hint: tail #{Start.phoenix_log_path()} for Phoenix startup output.")
+    Output.halt(1)
+  end
+
+  @doc "Print the server-is-DOWN report (JSON or text) and exit 1."
+  @spec emit_down(:json | :text, list(), String.t()) :: no_return()
+  def emit_down(mode, actions, extra \\ "") do
+    message = down_message(List.keyfind(actions, :systemd_restart, 0)) <> extra
+
+    case mode do
+      :json ->
+        IO.puts(
+          Jason.encode!(%{
+            ok: false,
+            server_down: true,
+            actions: action_payload(actions),
+            message: message
+          })
+        )
+
+      :text ->
+        IO.puts("")
+        IO.puts(message)
+    end
+
     Output.halt(1)
   end
 

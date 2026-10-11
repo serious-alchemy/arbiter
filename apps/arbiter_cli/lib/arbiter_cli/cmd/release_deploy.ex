@@ -405,6 +405,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
         {:timeout, actions, was_running} ->
           handle_restart_timeout(ctx, actions, was_running, pre_deploy_fails)
+
+        {:down, actions, _was_running} ->
+          handle_server_down(ctx, actions)
       end
     end
   end
@@ -515,6 +518,32 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       {:error, message} ->
         %{updated: false, version: tag, error: message}
     end
+  end
+
+  # The restart never brought the unit up (systemd start job wedged, and the
+  # daemon-reexec retry did not help). The new release stays current; nothing
+  # is auto-rolled-back because a rollback restart would hit the same wedge.
+  # Say so loudly, name the exact recovery/rollback commands, and report that
+  # the matching CLI was not installed.
+  @spec handle_server_down(map(), list()) :: no_return()
+  defp handle_server_down(ctx, actions) do
+    Status.finish("failed", status_extra(ctx, %{message: "server is DOWN after deploy"}))
+
+    rollback =
+      case ctx.prior_target do
+        nil ->
+          ""
+
+        prior ->
+          "\n\nExact rollback (re-point `current` at the previous release, then start):\n" <>
+            "  ln -sfn #{prior} #{ctx.current_link}\n" <>
+            "  systemctl --user start arbiter.service"
+      end
+
+    skipped =
+      "\n\nThe matching `arb` CLI (#{ctx.tag}) was NOT installed: the server is not confirmed up."
+
+    Restart.emit_down(ctx.mode, actions, rollback <> skipped)
   end
 
   defp finish_failed(ctx, outcome) do
