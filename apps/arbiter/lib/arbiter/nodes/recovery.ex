@@ -360,7 +360,7 @@ defmodule Arbiter.Nodes.Recovery do
   """
   @spec context(Run.t()) :: {:ok, map()} | {:error, term()}
   def context(%Run{} = run) do
-    with {:ok, %Issue{} = issue} <- Ash.get(Issue, run.task_id),
+    with {:ok, %Issue{} = issue} <- Ash.get(Issue, ticket_id(run)),
          home = Worktree.worktree_path(BranchNamer.derive(issue)),
          true <- PrivateClone.clone?(home) or {:error, :no_home_clone},
          branch when is_binary(branch) <- PrivateClone.branch(home) || {:error, :no_branch} do
@@ -379,6 +379,10 @@ defmodule Arbiter.Nodes.Recovery do
   rescue
     e -> {:error, {:context_failed, Exception.message(e)}}
   end
+
+  # A ReviewGate run's `task_id` is synthetic (`<ticket>#review`, `<ticket>#review#impl<N>`);
+  # the ticket and its checkout are the base's. The run keeps its own id for run identity.
+  defp ticket_id(%Run{task_id: task_id}), do: Arbiter.Worker.ReviewGate.base_task_id(task_id)
 
   defp base_branch(%Run{workspace_id: ws_id, repo: repo}) do
     case ws_id && Ash.get(Workspace, ws_id) do
