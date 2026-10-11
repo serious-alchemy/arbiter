@@ -36,6 +36,8 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
   hand a worker a credential are unset (`false`).
   """
 
+  alias Arbiter.Agents.Qwen.Security
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.CredentialPaths
 
   require Logger
@@ -71,6 +73,14 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
   def system_settings_path(opts \\ []),
     do: Path.join([path(opts), @system_dir, @settings_file])
 
+  @doc """
+  The directory holding the read-only system settings. The jail binds it
+  read-only over the writable home, so the worker cannot rename a file of its
+  own over the settings.
+  """
+  @spec system_settings_dir(keyword()) :: String.t()
+  def system_settings_dir(opts \\ []), do: Path.join(path(opts), @system_dir)
+
   @doc "The directory holding every worker's isolated home."
   @spec home_root() :: String.t()
   def home_root, do: root()
@@ -80,11 +90,13 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
   def phone_home_env, do: @phone_home_env
 
   @doc """
-  The system settings as a map: deny baseline, memory / telemetry / update off.
+  The system settings as a map: deny baseline, memory / telemetry / update off,
+  and, when `opts[:security]` is a `SecurityPolicy`, the policy's deny rules and
+  tool removal (`Arbiter.Agents.Qwen.Security`) merged over the baseline.
   """
-  @spec system_settings() :: map()
-  def system_settings do
-    %{
+  @spec system_settings(keyword()) :: map()
+  def system_settings(opts \\ []) do
+    base = %{
       "permissions" => %{"deny" => deny_baseline()},
       "memory" => %{"enableManagedAutoMemory" => false, "enableManagedAutoDream" => false},
       "telemetry" => %{"enabled" => false},
@@ -95,7 +107,25 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
         "disableUpdateNag" => true
       }
     }
+
+    merge_policy(base, opts)
   end
+
+  defp merge_policy(base, opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy ->
+        fragment = Security.settings(policy, security_opts(opts))
+
+        base
+        |> update_in(["permissions", "deny"], &Enum.uniq(&1 ++ fragment["permissions"]["deny"]))
+        |> Map.merge(Map.delete(fragment, "permissions"))
+
+      _ ->
+        base
+    end
+  end
+
+  defp security_opts(opts), do: [qwen_home: qwen_home(opts)]
 
   @doc """
   Ensure the home, its `.qwen` directory and the system settings exist;
@@ -108,7 +138,7 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
     with :ok <- File.mkdir_p(home),
          :ok <- ensure_dir(Path.join(home, @qwen_dir)),
          :ok <- ensure_dir(Path.join(home, @system_dir)),
-         :ok <- write_settings(system_settings_path(opts)) do
+         :ok <- write_settings(system_settings_path(opts), opts) do
       {:ok, home}
     else
       {:error, reason} ->
@@ -158,10 +188,10 @@ defmodule Arbiter.Agents.Qwen.ConfigDir do
 
   # Written to a sibling and renamed over the target, so a symlink (or a
   # read-only file) left at the target is replaced rather than written through.
-  defp write_settings(path) do
+  defp write_settings(path, opts) do
     tmp = path <> ".tmp-#{System.unique_integer([:positive])}"
 
-    with :ok <- File.write(tmp, Jason.encode!(system_settings(), pretty: true), [:exclusive]),
+    with :ok <- File.write(tmp, Jason.encode!(system_settings(opts), pretty: true), [:exclusive]),
          :ok <- File.chmod(tmp, 0o444) do
       File.rename(tmp, path)
     else

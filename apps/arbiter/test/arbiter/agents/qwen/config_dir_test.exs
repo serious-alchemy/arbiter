@@ -133,6 +133,51 @@ defmodule Arbiter.Agents.Qwen.ConfigDirTest do
     end
   end
 
+  describe "system settings with a security policy" do
+    alias Arbiter.Agents.SecurityPolicy
+
+    defp read_settings(wt) do
+      [worktree: wt]
+      |> ConfigDir.system_settings_path()
+      |> File.read!()
+      |> Jason.decode!()
+    end
+
+    test "the policy's deny rules and tool removal are merged over the baseline", %{worktree: wt} do
+      base = SecurityPolicy.default()
+      policy = %{base | permissions: %{base.permissions | deny: ["Edit", "Write"]}}
+
+      {:ok, _} = ConfigDir.ensure(worktree: wt, security: policy)
+      settings = read_settings(wt)
+
+      deny = settings["permissions"]["deny"]
+      # the baseline survives ...
+      assert "Read(~/.ssh/**)" in deny
+      # ... next to the policy's categories
+      assert "Bash(gh pr create *)" in deny
+      assert "Bash(rm -rf *)" in deny
+      assert deny == Enum.uniq(deny)
+      assert Enum.sort(settings["tools"]["exclude"]) == ["edit", "write_file"]
+      # the QWEN_HOME of this very spawn is denied by its absolute path
+      assert "Edit(#{ConfigDir.qwen_home(worktree: wt)}/**)" in deny
+    end
+
+    test "a re-ensure under a different policy replaces the rules", %{worktree: wt} do
+      base = SecurityPolicy.default()
+      strict = %{base | permissions: %{base.permissions | deny: ["Write"]}}
+
+      {:ok, _} = ConfigDir.ensure(worktree: wt, security: strict)
+      {:ok, _} = ConfigDir.ensure(worktree: wt, security: base)
+
+      refute Map.has_key?(read_settings(wt), "tools")
+    end
+
+    test "system_settings_dir/1 is the directory the jail binds read-only", %{worktree: wt} do
+      assert Path.dirname(ConfigDir.system_settings_path(worktree: wt)) ==
+               ConfigDir.system_settings_dir(worktree: wt)
+    end
+  end
+
   defp tree(dir) do
     dir
     |> Path.join("**")

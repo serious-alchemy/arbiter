@@ -169,6 +169,34 @@ defmodule Arbiter.Nodes.OperatorTest do
       assert Nodes.get_node(node.id).upgrade_pending_to == nil
     end
 
+    test "a live node already on the target (v-prefix ignored) gets no upgrade and no marker",
+         %{home: home} do
+      %{tag: tag} = install_release!(home)
+      node = enroll!("current")
+      current = Map.put(hello(), "agent_version", String.trim_leading(tag, "v"))
+      {:ok, _} = Registry.attach(node, self(), current, tick_ms: :infinity)
+
+      assert {:ok, %{version: _}} = Nodes.upgrade(node, @operator)
+      refute_receive {:node_session, {:upgrade, _}}, 50
+      assert Nodes.get_node(node.id).upgrade_pending_to == nil
+    end
+
+    test "a connect with the bare version clears a v-prefixed pending marker", %{home: home} do
+      %{tag: tag} = install_release!(home)
+      bare = String.trim_leading(tag, "v")
+      node = enroll!("vprefix")
+      assert {:error, :offline} = Nodes.upgrade(node, @operator)
+
+      {:ok, _} =
+        Ash.update(Nodes.get_node(node.id), %{upgrade_pending_to: "v" <> bare},
+          action: :set_upgrade_pending
+        )
+
+      current = Map.put(hello(), "agent_version", bare)
+      {:ok, _} = Registry.attach(node, self(), current, tick_ms: :infinity)
+      assert Nodes.get_node(node.id).upgrade_pending_to == nil
+    end
+
     test "a revoked node cannot be upgraded", %{home: home} do
       install_release!(home)
       node = enroll!("gone")
