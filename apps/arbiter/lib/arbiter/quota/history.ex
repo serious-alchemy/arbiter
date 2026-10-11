@@ -19,6 +19,7 @@ defmodule Arbiter.Quota.History do
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota
+  alias Arbiter.Quota.Budget.Server
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Quota.GoogleQuota
@@ -68,7 +69,7 @@ defmodule Arbiter.Quota.History do
   defp published_budget(account_id, pool) do
     table = Application.get_env(:arbiter, :quota_budget_table, :arbiter_quota_budgets)
 
-    case Arbiter.Quota.Budget.Server.get(account_id, pool, nil, table) do
+    case Server.get(account_id, pool, nil, table) do
       %{budget: n} when is_integer(n) -> n
       _ -> nil
     end
