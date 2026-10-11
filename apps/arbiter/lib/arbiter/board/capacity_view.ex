@@ -214,11 +214,39 @@ defmodule Arbiter.Board.CapacityView do
 
   defp machines(opts) do
     local = Keyword.get_lazy(opts, :local, &local/0)
-    [machine("local", "local", local.cap, local.used, "online") | nodes(opts)]
+
+    [
+      machine(
+        "local",
+        "local",
+        local.cap,
+        local.used,
+        "online",
+        Map.take(local, [:offered, :derate, :derate_reason, :temp_c, :psi])
+      )
+      | nodes(opts)
+    ]
   end
 
   defp local do
-    %{cap: LocalCapacity.cap().cap, used: length(LocalCapacity.holders())}
+    cap = LocalCapacity.cap()
+
+    %{
+      cap: cap.cap,
+      used: length(LocalCapacity.holders()),
+      offered: cap.offered,
+      derate: cap.derate,
+      derate_reason: cap.derate_reason,
+      temp_c: cap.temp_c,
+      psi: local_psi()
+    }
+  end
+
+  defp local_psi do
+    case Arbiter.Machine.Monitor.current() do
+      %{psi: psi} when is_map(psi) -> Map.new(psi, fn {k, v} -> {Atom.to_string(k), v} end)
+      _ -> nil
+    end
   end
 
   defp nodes(opts) do
@@ -233,7 +261,8 @@ defmodule Arbiter.Board.CapacityView do
           Map.get(row, :name) || row.id,
           Map.get(row, :max),
           Map.get(row, :live) || 0,
-          to_string(Map.get(row, :state))
+          to_string(Map.get(row, :state)),
+          Map.take(row, [:offered, :derate, :derate_reason, :temp_c, :psi])
         )
       end)
     else
@@ -241,14 +270,23 @@ defmodule Arbiter.Board.CapacityView do
     end
   end
 
-  defp machine(id, name, cap, live, state) do
+  # `cap` is the machine's configured cap; `offered` what it puts up for the
+  # scheduler (the cap less any self-derate, bd-6w7usy), so `free` counts from it.
+  defp machine(id, name, cap, live, state, sensed) do
+    offered = Map.get(sensed, :offered, cap)
+
     %{
       id: id,
       name: name,
       cap: cap,
+      offered: offered,
       live: live,
-      free: if(is_integer(cap), do: max(cap - live, 0)),
-      state: state
+      free: if(is_integer(offered), do: max(offered - live, 0)),
+      state: state,
+      derate: sensed |> Map.get(:derate, :none) |> to_string(),
+      derate_reason: Map.get(sensed, :derate_reason),
+      temp_c: Map.get(sensed, :temp_c),
+      psi: Map.get(sensed, :psi)
     }
   end
 

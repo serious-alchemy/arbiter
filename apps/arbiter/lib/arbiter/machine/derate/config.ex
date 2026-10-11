@@ -96,7 +96,54 @@ defmodule Arbiter.Machine.Derate.Config do
     }
   end
 
+  @doc """
+  Check a map of overrides: every key must be a known one with a valid value, and
+  hard may not be below soft. `{:ok, map}` returns the string-keyed map to store;
+  `{:error, message}` names the first problem.
+  """
+  @spec validate(map()) :: {:ok, %{String.t() => term()}} | {:error, String.t()}
+  def validate(overrides) when is_map(overrides) do
+    Enum.reduce_while(overrides, {:ok, %{}}, fn {raw_key, raw}, {:ok, acc} ->
+      key = to_string(raw_key)
+
+      with {:ok, {_field, kind}} <- Map.fetch(@keys, key),
+           {:ok, _value} <- cast(kind, raw) do
+        {:cont, {:ok, Map.put(acc, key, raw)}}
+      else
+        :error when not is_map_key(@keys, key) ->
+          {:halt,
+           {:error, "unknown derate key #{inspect(key)} (one of #{Enum.join(keys(), ", ")})"}}
+
+        :error ->
+          {:halt, {:error, "#{key} has an invalid value #{inspect(raw)}"}}
+      end
+    end)
+    |> check_order()
+  end
+
+  defp check_order({:ok, map}) do
+    defaults = %__MODULE__{}
+    soft = float_or(map["thermal_soft_c"], defaults.thermal_soft_c)
+    hard = float_or(map["thermal_hard_c"], defaults.thermal_hard_c)
+
+    if hard < soft,
+      do: {:error, "thermal_hard_c (#{hard}) must be at least thermal_soft_c (#{soft})"},
+      else: {:ok, map}
+  end
+
+  defp check_order(error), do: error
+
+  defp float_or(nil, default), do: default
+
+  defp float_or(raw, default) do
+    case cast(:float, raw) do
+      {:ok, n} -> n
+      :error -> default
+    end
+  end
+
   @doc "Build a config from overrides (see the moduledoc)."
+
   @spec build(map() | keyword() | nil) :: t()
   def build(overrides) when is_list(overrides), do: build(Map.new(overrides))
 

@@ -702,6 +702,18 @@ defmodule Arbiter.Settings do
 
   def set_nodes_lost_after_s(_), do: {:error, :invalid_value}
 
+  @doc """
+  The primary's self-derate thresholds as stored (`machine.derate`, bd-6w7usy): a map of
+  overrides, or `nil` for every default. `Arbiter.Machine.Derate.Config.build/1` reads it.
+  """
+  @spec machine_derate() :: map() | nil
+  def machine_derate, do: read_setting(:machine_derate)
+
+  @doc "Persist the primary's self-derate overrides; `nil` clears them back to the defaults."
+  @spec set_machine_derate(map() | nil) :: {:ok, map() | nil} | {:error, term()}
+  def set_machine_derate(v) when is_nil(v) or is_map(v), do: write_setting(:machine_derate, v)
+  def set_machine_derate(_), do: {:error, :invalid_value}
+
   @doc "The operator's override of the primary's own worker cap (`local` on the nodes page), or `nil`."
   @spec nodes_local_max_workers() :: non_neg_integer() | nil
   def nodes_local_max_workers, do: read_setting(:nodes_local_max_workers)

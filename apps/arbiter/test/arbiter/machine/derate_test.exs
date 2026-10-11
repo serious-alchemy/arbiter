@@ -244,4 +244,28 @@ defmodule Arbiter.Machine.DerateTest do
       assert Derate.parse_level(nil) == :none
     end
   end
+
+  describe "Config.validate/1 (the machine.derate setting)" do
+    test "accepts known keys with valid values, normalising keys to strings" do
+      assert {:ok, %{"thermal_soft_c" => 85}} = Config.validate(%{:thermal_soft_c => 85})
+      assert {:ok, %{"enabled" => false}} = Config.validate(%{"enabled" => false})
+    end
+
+    test "refuses an unknown key rather than silently ignoring a typo" do
+      assert {:error, msg} = Config.validate(%{"thermal_sof_c" => 85})
+      assert msg =~ "unknown derate key"
+    end
+
+    test "refuses an invalid value" do
+      assert {:error, msg} = Config.validate(%{"thermal_soft_c" => "hot"})
+      assert msg =~ "thermal_soft_c"
+      assert {:error, _} = Config.validate(%{"recover_s" => 0})
+    end
+
+    test "refuses hard below soft" do
+      assert {:error, msg} = Config.validate(%{"thermal_soft_c" => 97})
+      assert msg =~ "at least"
+      assert {:ok, _} = Config.validate(%{"thermal_soft_c" => 97, "thermal_hard_c" => 99})
+    end
+  end
 end

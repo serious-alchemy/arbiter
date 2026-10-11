@@ -9,7 +9,7 @@ defmodule Arbiter.Settings.RegistryTest do
            quota_providers_shown quota_providers_hidden output_offload_enabled
            scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
            scheduling_finish_first scheduling_finish_first_max_wait_hours
-           scheduler_admission
+           scheduler_admission machine.derate
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
            nodes.registry_password nodes.registry_insecure)
@@ -355,7 +355,7 @@ defmodule Arbiter.Settings.RegistryTest do
   end
 
   describe "put/3 authority (P-20, D-C-3)" do
-    @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+    @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight machine.derate
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
                       nodes.registry_password nodes.registry_insecure)
@@ -392,6 +392,36 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:ok, 1} = Registry.put("scheduling_max_lifted_in_flight", 1, authority: :operator)
       assert {:ok, 2} = Registry.put("scheduling_max_lifted_in_flight", 2)
       assert {:ok, nil} = Registry.put("scheduling_max_lifted_in_flight", nil)
+    end
+  end
+
+  describe "machine.derate (bd-6w7usy)" do
+    test "stores a validated JSON object and reads it back as the Settings override" do
+      assert {:ok, %{"thermal_soft_c" => 85, "recover_s" => 300}} =
+               Registry.put("machine.derate", ~s({"thermal_soft_c": 85, "recover_s": 300}))
+
+      assert %{"thermal_soft_c" => 85} = Settings.machine_derate()
+      cfg = Arbiter.Machine.Derate.Config.build(Settings.machine_derate())
+      assert cfg.thermal_soft_c == 85.0
+      assert cfg.recover_s == 300
+
+      assert {:ok, nil} = Registry.put("machine.derate", nil)
+      assert Settings.machine_derate() == nil
+    end
+
+    test "refuses a typo'd key, a bad value, and a non-object" do
+      assert {:error, {:invalid, msg}} = Registry.put("machine.derate", %{"thermal_sof_c" => 85})
+      assert msg =~ "unknown derate key"
+      assert {:error, {:invalid, _}} = Registry.put("machine.derate", %{"recover_s" => "soon"})
+      assert {:error, {:invalid, _}} = Registry.put("machine.derate", 5)
+    end
+
+    test "is operator-only, and describes the defaults" do
+      assert {:error, {:unauthorized, _}} =
+               Registry.put("machine.derate", %{}, authority: :coordinator)
+
+      assert %{default: %{"thermal_soft_c" => 90.0, "thermal_hard_c" => 95.0}} =
+               Registry.describe("machine.derate")
     end
   end
 end
