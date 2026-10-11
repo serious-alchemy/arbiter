@@ -28,6 +28,7 @@ defmodule Arbiter.Loop.Scarcity.DrawShadowTest do
     mix/tasks/arbiter.budget_calibration.ex
     arbiter/board/admission_shadow_report.ex
     arbiter/board/admission_shadow_report/quota.ex
+    arbiter/quota/history.ex
   )
 
   test "no routing, gate, dispatch or board module consumes the calibration" do
