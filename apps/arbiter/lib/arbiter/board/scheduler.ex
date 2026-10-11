@@ -793,21 +793,18 @@ defmodule Arbiter.Board.Scheduler do
   # pool; past `band`, a card cannot matter once demand is known.
   defp probe(cards, pool_id, band, caps, acc) do
     Enum.reduce_while(cards, {false, false, acc}, fn other, {demand?, _waiting?, acc} ->
-      cond do
-        demand? and band(other) > band ->
-          {:halt, {demand?, false, acc}}
-
-        true ->
-          {usable?, acc} = usable?(other, pool_id, caps, acc)
-
-          cond do
-            usable? and band(other) == band -> {:halt, {true, true, acc}}
-            usable? -> {:cont, {true, false, acc}}
-            true -> {:cont, {demand?, false, acc}}
-          end
+      if demand? and band(other) > band do
+        {:halt, {demand?, false, acc}}
+      else
+        {usable?, acc} = usable?(other, pool_id, caps, acc)
+        probe_step(usable?, band(other) == band, demand?, acc)
       end
     end)
   end
+
+  defp probe_step(true, true, _demand?, acc), do: {:halt, {true, true, acc}}
+  defp probe_step(true, false, _demand?, acc), do: {:cont, {true, false, acc}}
+  defp probe_step(false, _same_band?, demand?, acc), do: {:cont, {demand?, false, acc}}
 
   # An eligible card: no hold of its own, and a candidate on the pool with room.
   defp usable?(other, pool_id, caps, acc) do

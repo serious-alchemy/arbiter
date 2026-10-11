@@ -86,7 +86,9 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
       public? true
       allow_nil? false
       default 1
+
       description "Fair-share weight on the account (DC10, §5.3); no effect until its budget_split is fair."
+
       constraints min: 1
     end
 
