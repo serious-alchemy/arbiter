@@ -51,7 +51,11 @@ defmodule Arbiter.Loop.AnalysisDifficultyFeedTest do
     future = DateTime.add(DateTime.utc_now(), 5 * 86_400, :second)
 
     assert {:ok, _} =
-             analyze(ws, difficulty_feed?: true, since: future, until: DateTime.add(future, 1, :second))
+             analyze(ws,
+               difficulty_feed?: true,
+               since: future,
+               until: DateTime.add(future, 1, :second)
+             )
 
     assert Enum.filter(overrides(ws), &(&1.payload["reason"] == "raised_rate")) == []
   end
