@@ -257,9 +257,14 @@ defmodule ArbiterWeb.Api.NodeController do
         {:error,
          {:conflict, "node not connected; the upgrade is saved and will apply on reconnect"}}
 
-      {:error, :revoked} -> {:error, {:conflict, "the node is revoked"}}
-      {:error, :unavailable} -> {:error, {:conflict, "this install has no release to serve"}}
-      {:error, other} -> {:error, other}
+      {:error, :revoked} ->
+        {:error, {:conflict, "the node is revoked"}}
+
+      {:error, :unavailable} ->
+        {:error, {:conflict, "this install has no release to serve"}}
+
+      {:error, other} ->
+        {:error, other}
     end
   end
 
