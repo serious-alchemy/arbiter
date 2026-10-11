@@ -418,20 +418,18 @@ defmodule Arbiter.Tasks.BatchCreate do
     attrs = dedup_attrs(e, ws_id)
     title = e.attrs["title"]
 
-    cond do
-      is_binary(title) and Map.has_key?(titles, norm(title)) ->
-        error(
-          :conflict,
-          e,
-          "a ticket with this title is already in the batch (tickets[#{titles[norm(title)]}]); " <>
-            "set `force: true` on this entry to file it anyway"
-        )
-
-      true ->
-        case Create.check_duplicate(attrs, false) do
-          :ok -> :ok
-          {:duplicate, dup} -> duplicate_error(e, dup)
-        end
+    if is_binary(title) and Map.has_key?(titles, norm(title)) do
+      error(
+        :conflict,
+        e,
+        "a ticket with this title is already in the batch (tickets[#{titles[norm(title)]}]); " <>
+          "set `force: true` on this entry to file it anyway"
+      )
+    else
+      case Create.check_duplicate(attrs, false) do
+        :ok -> :ok
+        {:duplicate, dup} -> duplicate_error(e, dup)
+      end
     end
   end
 

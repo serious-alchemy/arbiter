@@ -68,12 +68,8 @@ defmodule ArbiterCli.Cmd.Dep do
           switches: [type: :string, workspace: :string, json: :boolean, stdin: :boolean]
         )
 
-      stdin? = opts[:stdin] == true
-
       case rest do
-        ["add" | _] when stdin? -> add_stdin(mode)
-        ["add", from, type, to | _] -> add(from, type, to, mode)
-        ["add" | _] -> Output.die("dep add requires: <from> <type> <to>")
+        ["add" | args] -> add_cmd(args, opts[:stdin] == true, mode)
         ["rm" | positional] -> rm(positional, opts, mode)
         ["remove" | positional] -> rm(positional, opts, mode)
         ["list" | positional] -> list(positional, opts, mode)
@@ -91,6 +87,10 @@ defmodule ArbiterCli.Cmd.Dep do
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp add_cmd(_args, true, mode), do: add_stdin(mode)
+  defp add_cmd([from, type, to | _], false, mode), do: add(from, type, to, mode)
+  defp add_cmd(_args, false, _mode), do: Output.die("dep add requires: <from> <type> <to>")
 
   defp add_stdin(mode) do
     edges = "-" |> BatchFile.read!() |> BatchFile.edges!("stdin")

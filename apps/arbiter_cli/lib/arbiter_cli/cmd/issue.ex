@@ -14,6 +14,8 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--notes t] [--qa-notes t] [--deployment-notes t]
                           [--tracker-ref R] [--tracker-type T]
                           [--tracker-context-type T] [--tracker-context-ref R]
+      arb ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]
+                          (a whole ticket graph, atomically; refs, depends_on, blocks)
       arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
                           [--description d] [--notes t | --append-notes t]
                           [--acceptance a | --acceptance-file PATH]

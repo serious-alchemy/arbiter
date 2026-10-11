@@ -12,10 +12,10 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.MCP.Tools
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
-  alias Arbiter.Tasks.BatchCreate
   alias Arbiter.Tasks.Attention
-  alias Arbiter.Tasks.BulkRead
+  alias Arbiter.Tasks.BatchCreate
   alias Arbiter.Tasks.BulkEdges
+  alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.BulkResult
   alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies

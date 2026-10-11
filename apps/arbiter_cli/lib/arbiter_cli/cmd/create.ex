@@ -294,12 +294,7 @@ defmodule ArbiterCli.Cmd.Create do
   defp run_single(opts, rest, mode) do
     if opts[:promote], do: Output.die("--promote only applies to a batch (--from-file/--stdin)")
 
-    title =
-      case rest do
-        [t] -> t
-        [] -> Output.die("create requires a title argument")
-        many -> Enum.join(many, " ")
-      end
+    title = title_from!(rest)
 
     ticket_only? =
       opts[:ticket_only] == true or opts[:no_task] == true or opts[:unclaimed] == true
@@ -319,6 +314,10 @@ defmodule ArbiterCli.Cmd.Create do
       run_task_create(opts, rest, title, skip_upstream?, mode)
     end
   end
+
+  defp title_from!([t]), do: t
+  defp title_from!([]), do: Output.die("create requires a title argument")
+  defp title_from!(many), do: Enum.join(many, " ")
 
   # ---- batch: arb ticket create --from-file <path|-> / --stdin --------------
 
@@ -355,30 +354,29 @@ defmodule ArbiterCli.Cmd.Create do
     counts = body["counts"] || %{}
     IO.puts("created #{counts["tickets"] || 0} tickets, #{counts["edges"] || 0} edges")
 
-    for t <- body["tickets"] || [] do
-      name = t["ref"] || "-"
-      IO.puts("  #{name} -> #{t["id"]}  (#{t["state"]})  #{t["title"]}")
-
-      for w <- t["warnings"] || [] do
-        IO.puts(:stderr, "arb: warning: #{t["id"]}: #{w}")
-      end
-
-      for f <- t["failures"] || [] do
-        IO.puts(:stderr, "arb: warning: #{t["id"]}: #{f["message"]}")
-      end
-    end
-
-    case body["promote"] do
-      %{"results" => results, "counts" => c} ->
-        IO.puts("promoted #{c["ok"] || 0} of #{c["total"] || length(results)}")
-        Enum.each(results, &IO.puts("  " <> Bulk.line(&1)))
-
-      _ ->
-        :ok
-    end
-
+    Enum.each(body["tickets"] || [], &print_batch_ticket/1)
+    print_batch_promote(body["promote"])
     exit_unless_promoted(body)
   end
+
+  defp print_batch_ticket(t) do
+    IO.puts("  #{t["ref"] || "-"} -> #{t["id"]}  (#{t["state"]})  #{t["title"]}")
+
+    for w <- t["warnings"] || [] do
+      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{w}")
+    end
+
+    for f <- t["failures"] || [] do
+      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{f["message"]}")
+    end
+  end
+
+  defp print_batch_promote(%{"results" => results, "counts" => c}) do
+    IO.puts("promoted #{c["ok"] || 0} of #{c["total"] || length(results)}")
+    Enum.each(results, &IO.puts("  " <> Bulk.line(&1)))
+  end
+
+  defp print_batch_promote(_), do: :ok
 
   # The batch is filed either way; a refused promote is a non-zero exit so a script
   # notices that the tickets are not Ready.
