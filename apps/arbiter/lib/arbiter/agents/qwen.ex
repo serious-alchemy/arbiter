@@ -153,18 +153,27 @@ defmodule Arbiter.Agents.Qwen do
 
   defp split_argv(_), do: {:error, :no_print_slot}
 
-  defp swap_prompt(["-p", _old | flags], insert) do
-    {session_id, flags} = pop_flag(flags, "--session-id")
-    flags = drop_flag(flags, "--resume")
+  # `-p` is found by index: a previously nudged/resumed argv carries
+  # `--resume <sid>` in front of it, and the session id lives in whichever of
+  # `--session-id` / `--resume` is present.
+  defp swap_prompt(args, insert) do
+    case Enum.find_index(args, &(&1 == "-p")) do
+      nil ->
+        {:error, :no_print_slot}
 
-    case insert do
-      ["--resume", sid, prompt] -> {:ok, ["--resume", sid, "-p", prompt | flags]}
-      [prompt] when is_nil(session_id) -> {:ok, ["-p", prompt | flags]}
-      [prompt] -> {:ok, ["--resume", session_id, "-p", prompt | flags]}
+      idx ->
+        flags = args |> List.delete_at(idx) |> List.delete_at(idx)
+        {created, flags} = pop_flag(flags, "--session-id")
+        {resumed, flags} = pop_flag(flags, "--resume")
+        session_id = created || resumed
+
+        case insert do
+          ["--resume", sid, prompt] -> {:ok, ["--resume", sid, "-p", prompt | flags]}
+          [prompt] when is_nil(session_id) -> {:ok, ["-p", prompt | flags]}
+          [prompt] -> {:ok, ["--resume", session_id, "-p", prompt | flags]}
+        end
     end
   end
-
-  defp swap_prompt(_args, _insert), do: {:error, :no_print_slot}
 
   defp pop_flag(args, flag) do
     case Enum.find_index(args, &(&1 == flag)) do
@@ -172,8 +181,6 @@ defmodule Arbiter.Agents.Qwen do
       idx -> {Enum.at(args, idx + 1), args |> List.delete_at(idx) |> List.delete_at(idx)}
     end
   end
-
-  defp drop_flag(args, flag), do: args |> pop_flag(flag) |> elem(1)
 
   @doc """
   The stdin-delivery temp file of an argv built by `default_argv/2`, or `nil`

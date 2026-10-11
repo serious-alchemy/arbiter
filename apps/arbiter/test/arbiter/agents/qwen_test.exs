@@ -129,6 +129,17 @@ defmodule Arbiter.Agents.QwenTest do
       refute "--session-id" in args
     end
 
+    test "an already nudged argv can be spliced again, keeping the session id" do
+      {:ok, argv} = Qwen.default_argv("original", session_id: @sid)
+      {:ok, nudged} = Qwen.splice_prompt(argv, ["first nudge"])
+      assert {:ok, again} = Qwen.splice_prompt(nudged, ["second nudge"])
+      args = argv_tail({:ok, again})
+
+      assert ["--resume", @sid] == flag_pair(args, "--resume")
+      assert ["-p", "second nudge"] == flag_pair(args, "-p")
+      assert Enum.count(args, &(&1 == "--resume")) == 1
+    end
+
     test "no -p slot and no stashed argv shape is :no_print_slot" do
       assert {:error, :no_print_slot} = Qwen.splice_prompt(["sleep", "1"], ["x"])
     end
