@@ -957,9 +957,10 @@ it's trusted.
   checked.
 - A model, or a tier, with no rank on the ladder is never below a floor: a
   floor is only enforced where both sides are known.
+- **Per-ticket markers (R14, bd-4rq7wt), O11 resolved:** markers live in G12's `issues.permissions` as `blast:<name>` (kind `:blast`). A marker has no grant or reach: anyone with authority may add it, only the operator may remove it, and it is never projected into a run. Its tier is `guardrails.bindings."blast:<name>".min_model_tier`, else `premium`. `Floors.clamp/4` and `Floors.gate/3` take the higher of the repo floor and the ticket's marker floor; the stamp carries `source: :repo | :marker`. A ticket with no marker is byte-for-byte unchanged.
 - Not built: the coordinator-may-raise / operator-may-lower authority split on
-  `routing.floors` (config writes carry no such distinction today), and the
-  phase 2 per-ticket markers (R14). Both Loop paths — the canary and
+  `routing.floors` (config writes carry no such distinction today). Both Loop
+  paths — the canary and
   `Canary.eligible/1`'s `routing.rules`-only patch — already cannot reach it.
 
 ### 6.5 When nothing survives
@@ -1283,6 +1284,28 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   (`most_quota` ignores them) and never drop a candidate. Per
   [provider-dynamic-concurrency](provider-dynamic-concurrency.md) §8, the seat
   accounting that supersedes this reservation half belongs to DC3/DC4.
+- **R13 as built (bd-d5rdsc).** `Loop.CompetenceProposals` runs the R6 generator
+  over `SubjectStats.sample/1` (opt-in: `arb loop analyze --competence-feed`, the
+  `competence_feed` request/MCP param) and queues one `:competence_matrix`
+  `PendingWrite` per difficulty, holding only the rows that move the live matrix
+  (no cell-level live row, or `author_runs` / `review_runs` off by 20% or the
+  round-1 approve rate off by 0.1). An operator's `arb loop apply` merges the rows
+  into the live matrix (`Settings.merge_competence_rows/1`; the replaced matrix is
+  kept as the previous one). The Stage 3 canary (`Loop.Canary`) takes the same
+  rows as a `kind: "matrix"` block in `loop.canary`: eligible at D0–D2 only, rows
+  that carry nothing but competence figures (never a floor, exemption or
+  capability row), and only where the scorer reads the matrix (`provider_selection:
+  scored`, `scoring.mode: enforce`, `scoring.competence: true`). For a task in the
+  canary arm (task-id hash, salted with the proposal id) with no permissions at the
+  canaried difficulty, `ProviderRouting` ranks with the canaried rows ahead of the
+  live ones; everything else, and every workspace with no matrix canary, ranks
+  with the live rows untouched (I1), and one eligible account still returns what
+  `most_quota` returns (I2). `Canary.Metrics` reports first-pass convergence plus
+  each arm's pool draw (weighted tokens by pool; reported, not a revert trigger),
+  leaving permissioned tasks out of both arms. Auto-revert, expiry, the kill
+  switch and `canary_auto_promote: false` are the routing canary's, unchanged. A
+  promote merges the rows into the live matrix; a revert or expiry writes nothing.
+
 - **Phase 1 delivers value with no learned model.** R4, R5, R6, R7 and R8 add
   the capability matrix and floors as hard gates, the headroom price, and the
   hand competence matrix, all on top of the unchanged paced gate.

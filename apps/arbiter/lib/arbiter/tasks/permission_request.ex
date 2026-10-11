@@ -90,6 +90,13 @@ defmodule Arbiter.Tasks.PermissionRequest do
         "who may see the worktree. Ask the coordinator to add it to the ticket"}}
   end
 
+  defp requestable(%{kind: :blast, canonical: canonical}, _block) do
+    {:error,
+     {:invalid,
+      "#{canonical} is a blast-radius marker, not something a worker can be granted: it " <>
+        "raises the minimum model tier. Ask the coordinator to add it to the ticket"}}
+  end
+
   defp requestable(%{kind: :network}, _block), do: :ok
 
   defp requestable(parsed, block) do

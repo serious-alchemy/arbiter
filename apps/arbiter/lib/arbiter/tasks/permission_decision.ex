@@ -163,6 +163,7 @@ defmodule Arbiter.Tasks.PermissionDecision do
   # the permission projects (env, mounts, tunnels, the ssh agent) is fixed at spawn.
   defp effect(:network, _decision), do: :live
   defp effect(:phi_data, _decision), do: :none
+  defp effect(:blast, _decision), do: :none
   defp effect(_kind, :granted), do: :next_spawn
   defp effect(_kind, :denied), do: :none
 

@@ -219,7 +219,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                     max_tier: quarantine | probation | trusted | privileged
       bindings      map permission-name -> {grant_by: operator|coordinator, min_tier,
                     enforced_read_only, tunnels, hosts, env_from_secret, ssh_key_secret,
-                    token_secret}
+                    token_secret, min_model_tier (a `blast:<name>` marker's floor)}
       defaults      {permissions: [name, …]} granted to every ticket by default
       repos.<repo>  {defaults, subjects} — the same shapes, scoped to one repo
 
@@ -484,6 +484,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       workspace REFUSES to create an issue that names no repo.
 
     pr_patrol  (map)
+      enabled              bool — master switch; false makes PRPatrol file no
+                           follow-ups and dispatch nothing for this workspace
+                           (`arb server doctor` flags it)             (default: true)
       author_logins        list of forge logins — when non-empty, PRPatrol only
                            files follow-ups for PRs authored by one of these logins
       resolve_bot_threads  bool — resolve addressed bot/automated-reviewer review

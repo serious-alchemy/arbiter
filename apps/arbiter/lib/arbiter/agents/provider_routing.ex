@@ -140,6 +140,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Guardrails
   alias Arbiter.Guardrails.Eligibility
   alias Arbiter.Guardrails.Rules
+  alias Arbiter.Loop.Canary
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Headroom
   alias Arbiter.Quota.SpendCap
@@ -826,7 +827,7 @@ defmodule Arbiter.Agents.ProviderRouting do
       capability: capability_gate(ws, task, opts),
       scoring: scoring_config(ws, task, opts),
       allow_upgrade: allow_upgrade(ws),
-      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
+      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task), task),
       guardrails: guardrail_gate(task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws),
       walk?: walk?(opts)
@@ -898,8 +899,12 @@ defmodule Arbiter.Agents.ProviderRouting do
 
     live =
       case Keyword.fetch(opts, :estimate_fun) do
-        {:ok, fun} -> fun
-        :error -> matrices && estimator(ws, task, Keyword.put_new(opts, :rows, matrices.live))
+        {:ok, fun} ->
+          fun
+
+        :error ->
+          matrices &&
+            estimator(ws, task, Keyword.put_new(opts, :rows, live_rows(ws, task, matrices)))
       end
 
     candidate =
@@ -914,6 +919,13 @@ defmodule Arbiter.Agents.ProviderRouting do
 
     {live, candidate}
   end
+
+  # R13 (bd-d5rdsc): a running matrix canary's rows rank AHEAD of the live matrix
+  # for a task in its canary arm (`Loop.Canary.matrix_rows/2`; `[]` for every other
+  # task, and whenever no matrix canary is running, so the live rows are returned
+  # untouched). Only the live estimator takes them; the candidate matrix and the
+  # records are unchanged.
+  defp live_rows(ws, task, matrices), do: Canary.matrix_rows(ws, task) ++ matrices.live
 
   defp estimator(ws, task, opts), do: fn entry -> Competence.estimate(ws, entry, task, opts) end
 

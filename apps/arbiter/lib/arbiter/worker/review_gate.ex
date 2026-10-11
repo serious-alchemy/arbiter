@@ -356,6 +356,7 @@ defmodule Arbiter.Worker.ReviewGate do
     :gateway_error,
     :session_not_found,
     :spawn_exec_failed,
+    :container_create_failed,
     :stream_schema_drift,
     :agent_print_timeout,
     :killed,

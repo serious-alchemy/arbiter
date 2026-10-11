@@ -598,6 +598,16 @@ defmodule Arbiter.Worker.Driver do
 
         :ok
 
+      # bd-325sps: podman could not create the container, so the agent never ran. That is
+      # host load, not the task: keep the worktree for `arb worker resume` / a re-dispatch.
+      container_create_failed_run?(task_id) ->
+        Logger.info(
+          "Worker.Driver: container creation failed for task=#{task_id}; " <>
+            "keeping its worktree for the resume"
+        )
+
+        :ok
+
       # bd-a6vh2x: a run stopped on its provider's quota is queued to resume in
       # this very worktree once the account is free.
       quota_held_run?(task_id) ->
@@ -636,6 +646,20 @@ defmodule Arbiter.Worker.Driver do
   end
 
   defp cleanup_unless_merging(state), do: do_maybe_cleanup_worktree(state)
+
+  defp container_create_failed_run?(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%{stop_category: "container_create_failed"}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
 
   defp node_lost_run?(task_id) do
     Arbiter.Workers.Run

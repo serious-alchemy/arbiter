@@ -2369,7 +2369,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp floor_verdict(task, opts) do
     workspace = load_workspace(task)
 
-    case Floors.gate(workspace, Keyword.get(opts, :repo) || task.repo) do
+    case Floors.gate(workspace, Keyword.get(opts, :repo) || task.repo, task) do
       nil ->
         :ok
 

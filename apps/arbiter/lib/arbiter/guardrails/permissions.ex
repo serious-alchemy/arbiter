@@ -40,6 +40,7 @@ defmodule Arbiter.Guardrails.Permissions do
           | :prod_ssh
           | :phi_data
           | :research_read
+          | :blast
   @type parsed :: %{
           kind: kind(),
           optional?: boolean(),
@@ -48,7 +49,8 @@ defmodule Arbiter.Guardrails.Permissions do
   @type planned :: %{permission: String.t(), event: :declared | :requested | :revoked}
 
   @data_classes [:phi_data]
-  @never_optional [:prod_read, :prod_ssh, :phi_data, :research_read]
+  @never_optional [:prod_read, :prod_ssh, :phi_data, :research_read, :blast]
+  @marker_re ~r/\A[a-z][a-z0-9_]*\z/
   @research_issue_types [:task, :research]
   @host_re ~r/\A[a-z0-9]([a-z0-9.-]*[a-z0-9])?\z/
   @name_re ~r/\A[A-Za-z0-9_.-]+\z/
@@ -56,7 +58,16 @@ defmodule Arbiter.Guardrails.Permissions do
   @doc "The kinds in the vocabulary."
   @spec kinds() :: [kind()]
   def kinds,
-    do: [:network, :tracker_write, :secrets, :prod_read, :prod_ssh, :phi_data, :research_read]
+    do: [
+      :network,
+      :tracker_write,
+      :secrets,
+      :prod_read,
+      :prod_ssh,
+      :phi_data,
+      :research_read,
+      :blast
+    ]
 
   @doc "Parse one permission string into its canonical form, or an error message."
   @spec parse(term()) :: {:ok, parsed()} | {:error, String.t()}
@@ -99,6 +110,12 @@ defmodule Arbiter.Guardrails.Permissions do
     if Regex.match?(@name_re, arg), do: {:ok, arg}, else: {:error, "#{raw}: bad secret name"}
   end
 
+  defp canonical_arg(:blast, arg, raw) when is_binary(arg) do
+    if Regex.match?(@marker_re, arg), do: {:ok, arg}, else: {:error, "#{raw}: bad blast marker"}
+  end
+
+  defp canonical_arg(:blast, nil, raw), do: {:error, "#{raw}: blast needs a name"}
+
   defp canonical_arg(:secrets, nil, raw), do: {:error, "#{raw}: secrets needs a name"}
   defp canonical_arg(_kind, nil, _raw), do: {:ok, nil}
   defp canonical_arg(_kind, _arg, raw), do: {:error, "#{raw}: takes no argument"}
@@ -128,7 +145,7 @@ defmodule Arbiter.Guardrails.Permissions do
 
   defp unknown(raw) do
     "unknown permission #{inspect(raw)}; expected network:<host>[:<port>], tracker_write, " <>
-      "secrets:<name>, prod_read, prod_ssh, phi_data or research_read"
+      "secrets:<name>, prod_read, prod_ssh, phi_data, research_read or blast:<name>"
   end
 
   @doc "Canonical, sorted, de-duplicated; `nil` is `[]`."
@@ -173,6 +190,15 @@ defmodule Arbiter.Guardrails.Permissions do
     match?({:ok, %{kind: k}} when k in @data_classes, parse(canonical))
   end
 
+  @doc """
+  True for a blast-radius marker (`blast:<name>`, R14): a ticket-level floor on
+  the model tier (`Arbiter.Agents.Floors.marker_floor/2`). Like a data class it
+  has no grant and no reach: anyone with authority may add one, only the
+  operator may remove one.
+  """
+  @spec blast_marker?(String.t()) :: boolean()
+  def blast_marker?(canonical), do: match?({:ok, %{kind: :blast}}, parse(canonical))
+
   @doc "The permission without its optional marker, e.g. `network?:h:443` → `network:h:443`."
   @spec required_form(String.t()) :: String.t()
   def required_form(canonical) do
@@ -194,9 +220,14 @@ defmodule Arbiter.Guardrails.Permissions do
   @spec grant_by(String.t(), map()) :: :operator | :coordinator
   def grant_by(canonical, block) do
     case parse(canonical) do
-      {:ok, %{kind: kind} = p} when kind in @data_classes -> default_grant_by(p, nil)
-      {:ok, p} -> binding_grant_by(p, binding(block, p))
-      _ -> :operator
+      {:ok, %{kind: kind} = p} when kind in @data_classes or kind == :blast ->
+        default_grant_by(p, nil)
+
+      {:ok, p} ->
+        binding_grant_by(p, binding(block, p))
+
+      _ ->
+        :operator
     end
   end
 
@@ -269,14 +300,15 @@ defmodule Arbiter.Guardrails.Permissions do
     do: {:error, restricted("remove #{Enum.join(removed, ", ")}")}
 
   defp check_removals(removed, authority) do
-    case Enum.filter(removed, &data_class?/1) do
+    case Enum.filter(removed, &(data_class?(&1) or blast_marker?(&1))) do
       [] ->
         :ok
 
       [_ | _] = classes when authority != :operator ->
         {:error,
-         "removing #{Enum.join(classes, ", ")} loosens a restriction on who may see the " <>
-           "worktree; it is operator-only (a #{authority} token may only add it)"}
+         "removing #{Enum.join(classes, ", ")} loosens a restriction (who may see the " <>
+           "worktree, or the minimum model tier); it is operator-only (a #{authority} " <>
+           "token may only add it)"}
 
       _ ->
         :ok
