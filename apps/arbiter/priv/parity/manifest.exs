@@ -110,7 +110,7 @@
       title: "Update ticket fields",
       mcp: ["ticket_update", "task_update"],
       cli: ["arb ticket update", "arb update"],
-      rest: ["PATCH /api/issues/:id", "PUT /api/issues/:id"],
+      rest: ["PATCH /api/issues/:id", "PUT /api/issues/:id", "PATCH /api/issues"],
       status: :partial,
       divergences: ["D-T-11", "D-T-18", "D-T-19"]
     },
@@ -131,7 +131,7 @@
       title: "Close ticket",
       mcp: ["ticket_close", "task_close"],
       cli: ["arb ticket close", "arb close"],
-      rest: ["POST /api/issues/:id/close"],
+      rest: ["POST /api/issues/:id/close", "POST /api/issues/close"],
       status: :partial,
       divergences: ["D-T-12", "D-T-30"]
     },
@@ -191,7 +191,7 @@
       title: "Record verify outcome (observed/failed)",
       mcp: ["ticket_verify", "task_verify"],
       cli: ["arb ticket verify", "arb verify"],
-      rest: ["POST /api/issues/:id/verify"],
+      rest: ["POST /api/issues/:id/verify", "POST /api/issues/verify"],
       status: :full
     },
     %{

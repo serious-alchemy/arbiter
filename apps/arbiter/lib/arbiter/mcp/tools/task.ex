@@ -573,6 +573,13 @@ defmodule Arbiter.MCP.Tools.Task do
   action.
   """
   @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_update(%Scope{} = scope, %{"ids" => _} = args) do
+    case BulkResult.check_notes_replace(args) do
+      :ok -> bulk(scope, Map.delete(args, "confirm_replace_notes"), &task_update/2)
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
   def task_update(%Scope{} = scope, args) do
     assignee_warnings = AssigneeCompat.warnings(args)
 
@@ -633,6 +640,9 @@ defmodule Arbiter.MCP.Tools.Task do
   the linked tracker issue open. Coordinator only.
   """
   @spec task_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_close(%Scope{} = scope, %{"ids" => _} = args),
+    do: bulk(scope, args, &task_close/2)
+
   def task_close(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
@@ -968,6 +978,9 @@ defmodule Arbiter.MCP.Tools.Task do
   persisted on the task, so the claim is auditable rather than remembered.
   """
   @spec task_verify(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_verify(%Scope{} = scope, %{"ids" => _} = args),
+    do: bulk(scope, args, &task_verify/2)
+
   def task_verify(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
