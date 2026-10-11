@@ -408,6 +408,18 @@ defmodule ArbiterCli.Cmd.NodeTest do
       refute out =~ "idle"
     end
 
+    test "a pending upgrade shows next to the version until it is applied (bd-5v5od0)" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "upgrade_pending_to", "v0.2.49")],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "1.2.3 -> v0.2.49 (pending)"
+    end
+
     test "shows offered vs max, temperature, memory pressure and the derate reason (bd-6w7usy)" do
       hot =
         Map.merge(@live_node, %{

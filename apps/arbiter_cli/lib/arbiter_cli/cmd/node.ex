@@ -573,7 +573,7 @@ defmodule ArbiterCli.Cmd.Node do
     [
       n["name"],
       n["state"],
-      dash(n["agent_version"]),
+      version_cell(n),
       live_max(n),
       offered(n),
       temp(n),
@@ -590,7 +590,7 @@ defmodule ArbiterCli.Cmd.Node do
     [
       n["name"],
       n["state"] || n["status"],
-      dash(n["agent_version"]),
+      version_cell(n),
       live_max(n),
       offered(n),
       temp(n),
@@ -602,6 +602,12 @@ defmodule ArbiterCli.Cmd.Node do
       Enum.join(n["labels"] || [], ",")
     ]
   end
+
+  # A requested upgrade the node has not applied yet shows next to its version (bd-5v5od0).
+  defp version_cell(%{"upgrade_pending_to" => to} = n) when is_binary(to),
+    do: "#{dash(n["agent_version"])} -> #{to} (pending)"
+
+  defp version_cell(n), do: dash(n["agent_version"])
 
   defp live_max(%{"live" => live, "max" => max}), do: "#{live}/#{max || "?"}"
   defp live_max(_), do: "-"
@@ -727,11 +733,17 @@ defmodule ArbiterCli.Cmd.Node do
   defp pinned(ids) when is_list(ids) and ids != [], do: Enum.join(ids, ", ")
   defp pinned(_), do: "any workspace"
 
+  defp print_upgrade_pending(%{"upgrade_pending_to" => v}) when not is_nil(v),
+    do: IO.puts("  upgrade:       pending -> #{v}")
+
+  defp print_upgrade_pending(_n), do: :ok
+
   defp print_node(n) do
     IO.puts("#{n["name"]}")
     IO.puts("  id:            #{n["id"]}")
     IO.puts("  status:        #{n["status"]}")
     IO.puts("  version:       #{n["agent_version"] || "-"}")
+    print_upgrade_pending(n)
     IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
     if line = derate_line(n), do: IO.puts(line)
     IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")

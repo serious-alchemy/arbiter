@@ -200,7 +200,12 @@ defmodule Arbiter.Nodes.Overview do
     caps = Map.get(snapshot, :caps) || %{}
     self_upgrade? = caps["self_upgrade"] == true
 
-    base = %{image: nil, upgrade_command: nil, self_upgrade?: self_upgrade?}
+    base = %{
+      image: nil,
+      upgrade_command: nil,
+      self_upgrade?: self_upgrade?,
+      upgrade_pending_to: node.upgrade_pending_to
+    }
 
     with :cluster <- kind(node, snapshot),
          health when health in [:outdated, :ahead] <- Map.get(snapshot, :health),

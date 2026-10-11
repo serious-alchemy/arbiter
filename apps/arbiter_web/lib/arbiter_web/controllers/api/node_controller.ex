@@ -253,10 +253,18 @@ defmodule ArbiterWeb.Api.NodeController do
          {:ok, %{version: version}} <- Nodes.upgrade(node, nil) do
       json(conn, %{node: node_view(node), upgrading_to: version})
     else
-      {:error, :offline} -> {:error, {:conflict, "the node is not connected"}}
-      {:error, :revoked} -> {:error, {:conflict, "the node is revoked"}}
-      {:error, :unavailable} -> {:error, {:conflict, "this install has no release to serve"}}
-      {:error, other} -> {:error, other}
+      {:error, :offline} ->
+        {:error,
+         {:conflict, "node not connected; the upgrade is saved and will apply on reconnect"}}
+
+      {:error, :revoked} ->
+        {:error, {:conflict, "the node is revoked"}}
+
+      {:error, :unavailable} ->
+        {:error, {:conflict, "this install has no release to serve"}}
+
+      {:error, other} ->
+        {:error, other}
     end
   end
 

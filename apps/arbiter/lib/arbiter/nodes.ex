@@ -618,7 +618,8 @@ defmodule Arbiter.Nodes do
   Ask a connected node to move to the release the primary serves
   (`Nodes.Agent.artifact/0`): its channel pushes `upgrade{version, sha256}` and
   the agent's own upgrader takes it from there (§6). Writes an `upgraded`
-  event. `{:error, :offline}` with no live session, `{:error, :revoked}` for a
+  event. `{:error, :offline}` with no live session (the request is still kept on the node
+  and re-sent on its next connect, see `settle_pending_upgrade/2`), `{:error, :revoked}` for a
   revoked node, `{:error, :unavailable}` when the primary has no release to serve.
   """
   @spec upgrade(Node.t(), Actor.t() | String.t() | nil) ::
@@ -634,8 +635,11 @@ defmodule Arbiter.Nodes do
         {:error, :revoked}
 
       %Node{} = node ->
-        with pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline},
-             {:ok, upgrade} <- upgrade_spec(node) do
+        # The intent is kept on the node first: a session whose channel is mid-reconnect
+        # accepts the notify and drops it, so the next connect delivers it (bd-5v5od0).
+        with {:ok, upgrade} <- upgrade_spec(node),
+             {:ok, _} <- set_upgrade_pending(node, upgrade.version),
+             pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline} do
           Registry.notify(node.id, {:upgrade, upgrade_payload(upgrade)})
 
           record(
@@ -649,6 +653,26 @@ defmodule Arbiter.Nodes do
         end
     end
   end
+
+  defp set_upgrade_pending(node, version),
+    do: Ash.update(node, %{upgrade_pending_to: version}, action: :set_upgrade_pending)
+
+  @doc """
+  Drop a node's pending upgrade once its hello reports the requested version
+  (a leading `v` is ignored). No-op otherwise.
+  """
+  @spec settle_pending_upgrade(String.t(), String.t() | nil) :: :ok
+  def settle_pending_upgrade(node_id, agent_version) do
+    with %Node{upgrade_pending_to: pending} = node when is_binary(pending) <- get_node(node_id),
+         true <- strip_v(pending) == strip_v(agent_version) do
+      Ash.update(node, %{upgrade_pending_to: nil}, action: :set_upgrade_pending)
+    end
+
+    :ok
+  end
+
+  defp strip_v("v" <> rest), do: rest
+  defp strip_v(other), do: other
 
   # A machine moves to the tarball the primary serves; a cluster node (K9) to the
   # controller image of the same release.
