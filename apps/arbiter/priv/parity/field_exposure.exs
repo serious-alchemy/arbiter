@@ -239,6 +239,11 @@
       cli: :same,
       rest: :same
     },
+    "budget_split" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
     "identity_source" => {:internal, "set by the credential attach / login flows, never typed"},
     "identity_verified_at" => {:internal, "set by identity verification, never typed"},
     "merged_into_id" => {:internal, "written by the typed merge operation (`arb account merge`)"}
@@ -262,6 +267,7 @@
     "spend_window" => :same,
     "spend_mode" => :same,
     "spend_metered" => :same,
+    "budget_split" => :same,
     "provider_account_ref" =>
       {:internal,
        "create-only: the provider's own uuid is asserted at creation (`Arbiter.Accounts.Fields`)"},
