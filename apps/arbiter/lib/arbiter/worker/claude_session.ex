@@ -774,6 +774,9 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp normalize_event(%{provider: "grok"}, event),
     do: Arbiter.Agents.Grok.Stream.normalize_event(event)
 
+  defp normalize_event(%{provider: "qwen"}, event),
+    do: Arbiter.Agents.Qwen.Stream.normalize_event(event)
+
   defp normalize_event(_session, event), do: event
 
   # Gemini streams assistant output as `delta: true` chunks, so the `arb done`
@@ -1103,6 +1106,15 @@ defmodule Arbiter.Worker.ClaudeSession do
     update_usage(
       session,
       Arbiter.Agents.Grok.Stream.message_usage_fields(event, Map.get(session, :usage) || %{})
+    )
+  end
+
+  # qwen reports usage per assistant message too, and its budget exits (53/55)
+  # emit no `result` line at all: sum as it arrives (see `Qwen.Stream`).
+  defp absorb_usage(%{provider: "qwen"} = session, %{"type" => "assistant"} = event) do
+    update_usage(
+      session,
+      Arbiter.Agents.Qwen.Stream.message_usage_fields(event, Map.get(session, :usage) || %{})
     )
   end
 
@@ -2102,6 +2114,17 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp format_event(%{"type" => "system", "subtype" => "init"} = event, %{provider: "grok"}),
     do: [{init_summary(event, "grok"), false}]
 
+  # qwen's error `result` names its cause only in `error` / `errors[]`.
+  defp format_event(%{"type" => "result"} = event, %{provider: "qwen"}) do
+    Enum.map(
+      [result_summary(event, "qwen") | Arbiter.Agents.Qwen.Stream.error_lines(event)],
+      &{&1, false}
+    )
+  end
+
+  defp format_event(%{"type" => "system", "subtype" => "init"} = event, %{provider: "qwen"}),
+    do: [{init_summary(event, "qwen"), false}]
+
   defp format_event(event, %{provider: "codex"}),
     do: Arbiter.Agents.Codex.Stream.format_event(event)
 
@@ -2279,6 +2302,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # `⚙` footer strip, the loop failure classifier/analysis/corpus docs), all
   # provider-agnostic: keep the `⚙ <word> session <status>` shape.
   defp session_label("grok"), do: "grok"
+  defp session_label("qwen"), do: "qwen"
   defp session_label(_provider), do: "claude"
 
   defp init_summary(event, provider) do

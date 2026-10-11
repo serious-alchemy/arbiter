@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","uuid":"u0","session_id":"c0ffee00-3333-4d1b-a2d2-0c0c0c0c0c01","cwd":"/work","tools":[],"model":"nope-model","permission_mode":"yolo","qwen_code_version":"0.25.0"}
+{"type":"result","subtype":"error_during_execution","uuid":"u1","session_id":"c0ffee00-3333-4d1b-a2d2-0c0c0c0c0c01","is_error":true,"duration_ms":310,"duration_api_ms":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"total_tokens":0},"error":{"type":"Error","message":"404 model 'nope-model' not found\nrequest failed"}}
