@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Quota.Gate.Snapshot, as: GateSnapshot
   alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictAbortFindings
@@ -3110,7 +3111,7 @@ defmodule Arbiter.Worker do
         Arbiter.Worker.StopReason.memory_cap_exceeded(info, exit_status)
 
       info = Map.get(session, :qwen_retry_hold) ->
-        Arbiter.Agents.Qwen.RetryHold.stop_reason(info, exit_status)
+        RetryHold.stop_reason(info, exit_status)
 
       true ->
         Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))

@@ -94,6 +94,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.Gemini.RereadDetector
+  alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Guardrails.Events, as: GuardrailEvents
   alias Arbiter.Guardrails.Scan
   alias Arbiter.Worker
@@ -771,7 +772,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   # qwen's 429 backoff notices arrive as raw (non-JSON) lines; see `Qwen.RetryHold`.
   defp track_qwen_retry(%{provider: "qwen"} = session, line),
-    do: Arbiter.Agents.Qwen.RetryHold.track(session, line)
+    do: RetryHold.track(session, line)
 
   defp track_qwen_retry(session, _line), do: session
 
@@ -1119,7 +1120,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # qwen reports usage per assistant message too, and its budget exits (53/55)
   # emit no `result` line at all: sum as it arrives (see `Qwen.Stream`).
   defp absorb_usage(%{provider: "qwen"} = session, %{"type" => "assistant"} = event) do
-    session = Arbiter.Agents.Qwen.RetryHold.reset(session)
+    session = RetryHold.reset(session)
 
     update_usage(
       session,
