@@ -376,6 +376,18 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       end
     end
 
+    test "protects the server from the OOM killer (bd-66anxj)" do
+      user = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      system = InstallService.unit_contents(:system, "/etc/arbiter", "/etc/arbiter")
+
+      assert user =~ "\nManagedOOMPreference=avoid\n"
+      # An unprivileged user manager cannot lower oom_score_adj (EACCES).
+      refute user =~ "OOMScoreAdjust"
+
+      assert system =~ "\nManagedOOMPreference=avoid\n"
+      assert system =~ "\nOOMScoreAdjust=-500\n"
+    end
+
     test "user unit routes output to a file so logs survive reboots without journald group" do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"

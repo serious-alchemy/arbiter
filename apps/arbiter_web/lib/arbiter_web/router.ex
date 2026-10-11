@@ -60,6 +60,7 @@ defmodule ArbiterWeb.Router do
 
   pipeline :api do
     plug(:accepts, ["json"])
+    plug(ArbiterWeb.Plugs.ApiConcurrencyLimit)
     plug(ArbiterWeb.Plugs.ApiAuth)
   end
 

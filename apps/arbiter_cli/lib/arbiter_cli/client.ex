@@ -362,7 +362,50 @@ defmodule ArbiterCli.Client do
     end
   end
 
-  defp do_request(method, path, token, opts) do
+  # bd-66anxj: the server sheds load with 429/503 + `Retry-After` once its
+  # `/api` concurrency limit is hit. The request was refused before it ran, so
+  # it is safe to retry whatever the method — a few times with backoff, then
+  # surface a clear "server busy" error.
+  @max_overload_retries 3
+  @base_backoff_ms 500
+
+  defp do_request(method, path, token, opts), do: do_request(method, path, token, opts, 0)
+
+  defp do_request(method, path, token, opts, attempt) do
+    case do_request_once(method, path, token, opts) do
+      {:retry_overloaded, delay_ms, _error} when attempt < @max_overload_retries ->
+        overload_sleep(delay_ms * Integer.pow(2, attempt))
+        do_request(method, path, token, opts, attempt + 1)
+
+      {:retry_overloaded, _delay_ms, error} ->
+        {:error, overloaded_error(error, attempt)}
+
+      other ->
+        other
+    end
+  end
+
+  # Test seam: a process-dict fun replaces the real sleep.
+  defp overload_sleep(ms) do
+    case Process.get(:bd2_overload_sleep) do
+      fun when is_function(fun, 1) -> fun.(ms)
+      _ -> Process.sleep(ms)
+    end
+  end
+
+  defp overloaded_error(%Error{} = error, attempt) do
+    %{
+      error
+      | message:
+          "server is busy (HTTP #{error.status}), gave up after #{attempt + 1} attempts: " <>
+            error.message,
+        hint:
+          "The Arbiter server is shedding load; wait a moment and retry, " <>
+            "or run fewer `arb` commands at once."
+    }
+  end
+
+  defp do_request_once(method, path, token, opts) do
     url = base_url() <> path
 
     headers = auth_headers(token)
@@ -380,6 +423,14 @@ defmodule ArbiterCli.Client do
     case Req.request(req_opts) do
       {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
         {:ok, resp.body}
+
+      {:ok, %Req.Response{status: status, body: body} = resp}
+      when status == 429 or status == 503 ->
+        if status == 429 or Req.Response.get_header(resp, "retry-after") != [] do
+          {:retry_overloaded, retry_after_ms(resp), http_error(status, body)}
+        else
+          {:error, http_error(status, body)}
+        end
 
       {:ok, %Req.Response{status: status, body: body}} ->
         {:error, http_error(status, body)}
@@ -409,6 +460,15 @@ defmodule ArbiterCli.Client do
 
       {:error, other} ->
         {:error, %Error{kind: :transport, message: inspect(other)}}
+    end
+  end
+
+  defp retry_after_ms(resp) do
+    with [value | _] <- Req.Response.get_header(resp, "retry-after"),
+         {secs, ""} when secs > 0 <- Integer.parse(value) do
+      min(secs * 1_000, 5_000)
+    else
+      _ -> @base_backoff_ms
     end
   end
 
