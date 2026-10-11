@@ -71,7 +71,9 @@ defmodule ArbiterWeb.NodeAgent.RemoteWorkersE2ETest do
   setup %{tmp_dir: tmp_dir, image: image} = ctx do
     # Short and comma/colon-free: unix socket paths cap at ~100 bytes and `Container`
     # refuses a mount path with `,` or `:`; a `:tmp_dir` is named after the test.
-    root = Path.join(System.tmp_dir!(), "na-#{System.unique_integer([:positive])}")
+    root =
+      Path.join(Arbiter.Config.Paths.socket_root(), "na-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 
