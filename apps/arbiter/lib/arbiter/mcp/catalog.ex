@@ -179,7 +179,7 @@ defmodule Arbiter.MCP.Catalog do
   # authoritative atom constraints.
   @loop_states ~w(proposed hypothesis applied rejected superseded)
   @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch
-                 trust_promotion)
+                 trust_promotion competence_matrix)
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
@@ -3249,6 +3249,13 @@ defmodule Arbiter.MCP.Catalog do
               "Also read the per-cell `difficulty raised` rate over the window and queue " <>
                 "`:difficulty_override` proposals for cells that run high. Proposals only. " <>
                 "Default false."
+          },
+          "competence_feed" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also read the measured per-cell competence over the window and queue " <>
+                "`:competence_matrix` proposals for cells that move the live matrix. " <>
+                "Proposals only. Default false."
           },
           "workspace" => %{
             "type" => "string",

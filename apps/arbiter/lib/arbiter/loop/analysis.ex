@@ -128,11 +128,14 @@ defmodule Arbiter.Loop.Analysis do
       # `:proposals` is only added when the caller opted in, so a non-proposing
       # caller sees exactly the map shape it saw before Stage 2.
       if Keyword.get(opts, :propose?, false) do
+        cells = feed_cells(opts, workspace_id)
+
         %{rows: proposals, dropped: dropped} =
           Proposals.record_all(report,
             workspace_id: workspace_id,
             actor: Keyword.get(opts, :actor, "loop"),
-            difficulty_cells: difficulty_cells(opts, workspace_id)
+            difficulty_cells: feed_for(cells, opts, :difficulty_feed?),
+            competence_cells: feed_for(cells, opts, :competence_feed?)
           )
 
         envelope =
@@ -147,12 +150,13 @@ defmodule Arbiter.Loop.Analysis do
     end
   end
 
-  # R12 (bd-druqc1): the per-cell "difficulty raised" feed is opt-in
-  # (`difficulty_feed?: true`, the `difficulty_feed` request param); off, no
-  # measurement is read and the proposals are exactly what they were. The
-  # caller's `:since`/`:until` window is forwarded so evidence stays inside it.
-  defp difficulty_cells(opts, workspace_id) do
-    if Keyword.get(opts, :difficulty_feed?, false) do
+  # R12 (bd-druqc1) and R13 (bd-d5rdsc): the per-cell feeds are opt-in
+  # (`difficulty_feed?: true` / `competence_feed?: true`, the `difficulty_feed`
+  # / `competence_feed` request params); off, no measurement is read and the
+  # proposals are exactly what they were. The caller's `:since`/`:until` window
+  # is forwarded so evidence stays inside it. One sample serves both feeds.
+  defp feed_cells(opts, workspace_id) do
+    if Keyword.get(opts, :difficulty_feed?, false) or Keyword.get(opts, :competence_feed?, false) do
       window =
         [from: opts[:since], until: opts[:until]]
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
@@ -162,6 +166,8 @@ defmodule Arbiter.Loop.Analysis do
       []
     end
   end
+
+  defp feed_for(cells, opts, flag), do: if(Keyword.get(opts, flag, false), do: cells, else: [])
 
   @doc """
   Build a `%Report{}` from already-fetched corpus rows. Pure — no I/O, no writes.

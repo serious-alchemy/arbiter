@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Loop do
 
       arb loop analyze [--since 7d | <iso8601>] [--until <iso8601>]
                        [--limit N] [--workspace <id>] [--propose] [--discover]
-                       [--difficulty-feed]
+                       [--difficulty-feed] [--competence-feed]
                        [--json]
 
   `--since` accepts `7d` / `24h` / `30m` shortcuts or ISO8601 (default: last 7
@@ -200,7 +200,8 @@ defmodule ArbiterCli.Cmd.Loop do
           workspace: :string,
           propose: :boolean,
           discover: :boolean,
-          difficulty_feed: :boolean
+          difficulty_feed: :boolean,
+          competence_feed: :boolean
         ],
         aliases: [s: :since, l: :limit, w: :workspace]
       )
@@ -214,6 +215,7 @@ defmodule ArbiterCli.Cmd.Loop do
       |> maybe_put(:limit, Keyword.get(opts, :limit))
       |> maybe_put(:workspace_id, ws_id)
       |> maybe_put(:difficulty_feed, if(Keyword.get(opts, :difficulty_feed, false), do: true))
+      |> maybe_put(:competence_feed, if(Keyword.get(opts, :competence_feed, false), do: true))
 
     # Both routes are POSTs: the pass records its own `usage_events` row (and
     # `--discover` makes a model call), so neither is a GET (D-C-30).
