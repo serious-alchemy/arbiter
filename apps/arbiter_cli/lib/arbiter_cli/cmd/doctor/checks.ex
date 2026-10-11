@@ -65,6 +65,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"restart_safety", :core, nil, :always, plain(&check_restart_safety/0)},
       {"merge_routing", :core, nil, :always, plain(&check_merge_routing/0)},
       {"nodes", :core, nil, :always, plain(&check_nodes/0)},
+      {"pr_patrol", :core, nil, :always, plain(&check_pr_patrol/0)},
       {"claude_worker_credentials", :auth, nil, :always,
        plain(&check_claude_worker_credentials/0)},
       {"grok_auth", :auth, nil, :always, plain(&check_grok_auth/0)},
@@ -612,6 +613,44 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       hint:
         "These exclusions are named in `agent.security.permissions.safe_defaults_exclude`. " <>
           "Remove a category from that list to re-enable it, or leave it if intentional.",
+      blocks_readiness: false
+    }
+  end
+
+  defp check_pr_patrol do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        off =
+          for ws <- list,
+              get_in(ws, ["config", "pr_patrol", "enabled"]) in [false, "false"],
+              do: workspace_label(ws)
+
+        pr_patrol_result(off)
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("pr patrol", err)
+
+      other ->
+        unknown_result("pr patrol", other)
+    end
+  end
+
+  defp pr_patrol_result([]) do
+    %Result{
+      name: "pr patrol",
+      status: :ok,
+      detail: "enabled in every workspace",
+      blocks_readiness: false
+    }
+  end
+
+  defp pr_patrol_result(off) do
+    %Result{
+      name: "pr patrol",
+      status: :warn,
+      detail: "disabled (pr_patrol.enabled=false) in #{Enum.join(off, ", ")}",
+      hint:
+        "No PR follow-ups are filed there. Re-enable with `arb config set pr_patrol.enabled true`.",
       blocks_readiness: false
     }
   end

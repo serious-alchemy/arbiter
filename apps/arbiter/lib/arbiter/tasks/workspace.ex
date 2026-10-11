@@ -706,6 +706,21 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  Whether PRPatrol is on for this workspace, from `config["pr_patrol"]["enabled"]`.
+
+  Defaults to `true`; only `false` / `"false"` turns it off, in which case
+  PRPatrol files no follow-ups and dispatches nothing for the workspace.
+  """
+  @spec pr_patrol_enabled?(t()) :: boolean()
+  def pr_patrol_enabled?(workspace) do
+    case get_in(workspace.config || %{}, ["pr_patrol", "enabled"]) do
+      false -> false
+      "false" -> false
+      _ -> true
+    end
+  end
+
+  @doc """
   The PRPatrol author allowlist, from `config["pr_patrol"]["author_logins"]`.
 
   When set to a non-empty list of forge logins, PRPatrol files follow-ups only

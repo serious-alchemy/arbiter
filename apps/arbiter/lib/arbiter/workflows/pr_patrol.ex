@@ -287,6 +287,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     # only resets when a PR was genuinely actionable this tick.
     {dispatched_state, mr_count, dispatched_count} =
       with %Workspace{} <- workspace,
+           true <- patrol_enabled?(workspace, state.repo),
            true <- repo_still_configured?(workspace, state.repo),
            # bd-73zv62: this repo's effective merge block, not the workspace's.
            merge_ws = PRPatrolSupervisor.scope(workspace, state.repo),
@@ -340,6 +341,23 @@ defmodule Arbiter.Workflows.PRPatrol do
         workspace: workspace,
         idle_ticks: idle_ticks
     }
+  end
+
+  # `pr_patrol.enabled: false` is the operator's off switch: the tick lists,
+  # files and dispatches nothing. Logs once per disabled stretch, not per tick.
+  defp patrol_enabled?(workspace, repo) do
+    key = {__MODULE__, :disabled_logged, repo}
+
+    if Workspace.pr_patrol_enabled?(workspace) do
+      Process.delete(key)
+      true
+    else
+      if Process.put(key, true) != true do
+        Logger.info("PRPatrol[#{repo}]: disabled by pr_patrol.enabled=false; filing nothing")
+      end
+
+      false
+    end
   end
 
   defp repo_still_configured?(workspace, repo) do

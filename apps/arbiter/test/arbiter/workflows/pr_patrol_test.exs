@@ -1293,6 +1293,61 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — on/off switch (pr_patrol.enabled)" do
+    test "enabled=false → no follow-up filed despite an actionable PR", %{ws: ws} do
+      set_enabled(ws, false)
+      pulls_stub(80, "anyone")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    test "enabled=true → follow-up filed", %{ws: ws} do
+      set_enabled(ws, true)
+      pulls_stub(81, "anyone")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "81"
+    end
+
+    test "unset → follow-up filed (default on)", %{ws: ws} do
+      pulls_stub(82, "anyone")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "82"
+    end
+
+    test "Workspace.pr_patrol_enabled?/1 defaults true; false and \"false\" disable" do
+      assert Workspace.pr_patrol_enabled?(%Workspace{config: %{}})
+      assert Workspace.pr_patrol_enabled?(%Workspace{config: nil})
+
+      assert Workspace.pr_patrol_enabled?(%Workspace{
+               config: %{"pr_patrol" => %{"enabled" => true}}
+             })
+
+      refute Workspace.pr_patrol_enabled?(%Workspace{
+               config: %{"pr_patrol" => %{"enabled" => false}}
+             })
+
+      refute Workspace.pr_patrol_enabled?(%Workspace{
+               config: %{"pr_patrol" => %{"enabled" => "false"}}
+             })
+    end
+  end
+
+  defp set_enabled(ws, value) do
+    {:ok, _} =
+      Ash.update(ws, %{patch: %{"pr_patrol" => %{"enabled" => value}}}, action: :patch_config)
+  end
+
   describe "config hot-reload — changes take effect without restart" do
     test "adding author_logins after start blocks PRs by non-listed authors on next tick",
          %{ws: ws} do
