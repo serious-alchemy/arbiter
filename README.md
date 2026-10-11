@@ -654,7 +654,7 @@ connection. (Coalescing runs of same-verb lines into one bulk call is not done y
 
 As a guard, `arb` counts the other `arb` VMs running for your user (a `/proc` read; it is
 skipped where `/proc` is unavailable). Above `ARB_FANOUT_WARN` (default 16) it warns on
-stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--allow-fanout`
+stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--force` (or `--allow-fanout`)
 or set `ARB_ALLOW_FANOUT=1`.
 
 ## Documentation

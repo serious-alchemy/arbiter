@@ -232,7 +232,8 @@ defmodule ArbiterCli.Main do
       --json               Emit machine-readable JSON (default is human-readable text)
       -w, --workspace <n>  Target workspace by name or id; overrides ARB_WORKSPACE
       -h, --help           Show usage
-      --allow-fanout       Override the refusal when too many `arb` VMs already run
+      --allow-fanout, --force
+                           Override the refusal when too many `arb` VMs already run
 
   ## Env
 
@@ -253,7 +254,17 @@ defmodule ArbiterCli.Main do
     run(argv)
   end
 
-  defp take_allow_fanout(argv), do: {"--allow-fanout" in argv, argv -- ["--allow-fanout"]}
+  # `--allow-fanout` is stripped everywhere. `--force` also lifts the refusal; it is
+  # stripped only when leading (`arb --force ticket show ...`) so subcommands with
+  # their own `--force` (e.g. `ticket claim --force`) still receive it.
+  defp take_allow_fanout(argv) do
+    {leading, rest} = Enum.split_while(argv, &String.starts_with?(&1, "-"))
+    {forced, leading} = Enum.split_with(leading, &(&1 == "--force"))
+    argv = leading ++ rest
+    allow? = forced != [] or "--allow-fanout" in argv or "--force" in argv
+
+    {allow?, Enum.reject(argv, &(&1 == "--allow-fanout"))}
+  end
 
   @doc """
   Run one `arb` command line (without the fan-out guard). `arb batch` calls this

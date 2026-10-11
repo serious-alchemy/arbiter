@@ -8,7 +8,7 @@ defmodule ArbiterCli.FanOut do
     * warns on stderr above `ARB_FANOUT_WARN` (default 16), pointing at
       `arb batch` and the bulk verbs;
     * refuses (exit 1) above `ARB_FANOUT_MAX` (default 64) unless
-      `--allow-fanout` or `ARB_ALLOW_FANOUT=1` is given.
+      `--force`, `--allow-fanout` or `ARB_ALLOW_FANOUT=1` is given.
 
   The check fails open: where `/proc` is unreadable (non-Linux, a hardened
   container) the count is 0.
@@ -45,7 +45,7 @@ defmodule ArbiterCli.FanOut do
         {:refuse,
          "#{count} other `arb` processes are already running (limit #{max}); each is a full VM. " <>
            "Use `arb batch` (many commands, one VM) or a bulk verb instead, " <>
-           "or set ARB_ALLOW_FANOUT=1 / pass --allow-fanout to override."}
+           "or set ARB_ALLOW_FANOUT=1 / pass --force (or --allow-fanout) to override."}
 
       count > warn ->
         {:warn, hint(count)}

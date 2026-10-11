@@ -101,6 +101,15 @@ defmodule ArbiterCli.FanOutTest do
       assert err =~ "arb batch"
     end
 
+    test "leading --force and repeated --allow-fanout lift the refusal" do
+      Process.put(:bd2_fanout_count, 100)
+
+      for argv <- [["--force", "where"], ["where", "--allow-fanout", "--allow-fanout"]] do
+        {_out, _err, code} = capture(fn -> ArbiterCli.Main.main(argv) end)
+        assert code == 0
+      end
+    end
+
     test "warns between the thresholds but still runs" do
       Process.put(:bd2_fanout_count, 20)
       {_out, err, code} = capture(fn -> ArbiterCli.Main.main(["where"]) end)

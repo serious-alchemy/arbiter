@@ -31,7 +31,7 @@ defmodule ArbiterCli.Cmd.Batch do
 
   `ARB_FANOUT_WARN` (default 16) and `ARB_FANOUT_MAX` (default 64) tune the
   guard that warns/refuses when too many `arb` VMs are already running;
-  `--allow-fanout` or `ARB_ALLOW_FANOUT=1` overrides the refusal.
+  `--force`, `--allow-fanout` or `ARB_ALLOW_FANOUT=1` overrides the refusal.
   """
 
   alias ArbiterCli.{ArgParser, Main, Output}

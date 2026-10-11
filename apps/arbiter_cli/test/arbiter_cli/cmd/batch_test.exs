@@ -72,6 +72,20 @@ defmodule ArbiterCli.Cmd.BatchTest do
       assert second["output"]["id"] == "bd-3"
     end
 
+    test "a batch mixing read and write commands runs them in order" do
+      stub_routes([
+        {{"get", "/api/issues/bd-1"}, {%{"id" => "bd-1", "title" => "Old"}, 200}},
+        {{"patch", "/api/issues/bd-1"}, {%{"id" => "bd-1", "title" => "New"}, 200}}
+      ])
+
+      input = "ticket show bd-1\nticket update bd-1 --title New\nticket show bd-1\n"
+      {lines, _err, code} = run_batch([], input)
+      assert code == 0
+
+      assert [%{"exit" => 0}, %{"exit" => 0, "output" => %{"title" => "New"}}, %{"exit" => 0}] =
+               lines
+    end
+
     test "write commands go through too" do
       stub_routes([
         {{"patch", "/api/issues/bd-1"}, {%{"id" => "bd-1", "title" => "New"}, 200}}
