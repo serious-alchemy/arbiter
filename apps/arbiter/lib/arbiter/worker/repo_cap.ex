@@ -203,7 +203,8 @@ defmodule Arbiter.Worker.RepoCap do
 
   @doc "The ticket a registry key belongs to: the key up to its first `:` or `#`."
   @spec base_task_id(String.t()) :: String.t()
-  def base_task_id(registry_key), do: Arbiter.Quota.Seats.base_task_id(registry_key)
+  def base_task_id(registry_key) when is_binary(registry_key),
+    do: registry_key |> String.split([":", "#"], parts: 2) |> List.first()
 
   defp live_entries do
     reservations = Enum.map(pending(), &Map.put(&1, :reservation, true))
