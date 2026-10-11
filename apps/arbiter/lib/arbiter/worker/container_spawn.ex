@@ -1567,8 +1567,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   # The `podman run` argv and client env `run_command/3` runs `command` with.
   @doc false
-  @spec gate_argv(map(), String.t()) ::
-          {:ok, %{argv: [String.t()], env: list()}} | {:error, term()}
+  @spec gate_argv(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def gate_argv(%{sandbox: %{}} = port_args, command) when is_binary(command),
     do: wrap_argv(%{port_args | argv: ["sh", "-c", command]}, true)
 
