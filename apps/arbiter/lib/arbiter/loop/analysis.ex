@@ -131,7 +131,8 @@ defmodule Arbiter.Loop.Analysis do
         %{rows: proposals, dropped: dropped} =
           Proposals.record_all(report,
             workspace_id: workspace_id,
-            actor: Keyword.get(opts, :actor, "loop")
+            actor: Keyword.get(opts, :actor, "loop"),
+            difficulty_cells: difficulty_cells(opts, workspace_id)
           )
 
         envelope =
@@ -143,6 +144,17 @@ defmodule Arbiter.Loop.Analysis do
       else
         {:ok, envelope}
       end
+    end
+  end
+
+  # R12 (bd-druqc1): the per-cell "difficulty raised" feed is opt-in
+  # (`difficulty_feed?: true`); off, no measurement is read and the proposals
+  # are exactly what they were.
+  defp difficulty_cells(opts, workspace_id) do
+    if Keyword.get(opts, :difficulty_feed?, false) do
+      Arbiter.Loop.SubjectStats.sample(workspace_id: workspace_id)
+    else
+      []
     end
   end
 
