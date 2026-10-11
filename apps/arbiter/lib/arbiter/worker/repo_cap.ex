@@ -15,7 +15,7 @@ defmodule Arbiter.Worker.RepoCap do
   change a dispatch decision (I1, I2), so `Arbiter.Worker.Dispatch`'s
   `ensure_repo_capacity/2` is a no-op under `legacy` and `shadow` and never
   reads a count. The scheduler walk (`Arbiter.Board.WalkInputs`) and the
-  display (`Arbiter.Board.CapacityView`) read the same count beside today's
+  capacity display (in `Arbiter.Board`) read the same count beside today's
   decision.
 
   ## What counts
