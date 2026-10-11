@@ -139,7 +139,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
     # overlay, so a canaried rule cannot route a floored repo below its floor.
     # A no-op (and no `:floor` key) for every workspace with no floors config.
     %{default | config: Map.merge(default.config, rule)}
-    |> Floors.clamp(workspace, task.repo)
+    |> Floors.clamp(workspace, task.repo, task)
   end
 
   # A Stage 3 canary (bd-6edc0u) overlays its candidate rule on *half* the

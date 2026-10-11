@@ -12,13 +12,25 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
 
   # Every Repo query issued anywhere while `fun` runs, as `{source, sql}`.
   defp queries(fun) do
+    fun |> queries_with_origin() |> Enum.map(fn {source, sql, _origin} -> {source, sql} end)
+  end
+
+  # Like `queries/1`, but each entry also carries the issuing process and its
+  # `$callers`/`$ancestors` chain, so a caller can keep only the queries that
+  # descend from the processes under test. The telemetry event is global:
+  # without this, a query from an unrelated process (a neighbouring test's
+  # leftover task, a background worker) is counted against the mount.
+  defp queries_with_origin(fun) do
     ref = make_ref()
     parent = self()
 
     :telemetry.attach(
       ref,
       [:arbiter, :repo, :query],
-      fn _event, _m, meta, _c -> send(parent, {:query, ref, meta.source, meta.query}) end,
+      fn _event, _m, meta, _c ->
+        chain = List.wrap(Process.get(:"$callers")) ++ List.wrap(Process.get(:"$ancestors"))
+        send(parent, {:query, ref, meta.source, meta.query, [self() | chain]})
+      end,
       nil
     )
 
@@ -30,7 +42,7 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
 
     Stream.repeatedly(fn ->
       receive do
-        {:query, ^ref, source, sql} -> {source, sql}
+        {:query, ^ref, source, sql, origin} -> {source, sql, origin}
       after
         0 -> nil
       end
@@ -124,14 +136,34 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
       # warm mount read `workspaces` 8 times on this page (10 cold).
       {:ok, warm, _html} = live(conn, ~p"/audit")
       render_async(warm)
+      # The sticky dock loads its own data in `start_async(:load)`, which
+      # `render_async(warm)` does not wait for; left alone, the warm dock's read
+      # landed inside the measured window below (bd-d78rmc: CI saw 3).
+      render_async(find_live_child(warm, "session-dock"))
+
+      # Count reads issued directly by this test process (the dead render;
+      # `hd(origin)`, so tasks the warm view left under it as an ancestor are
+      # excluded), by the mounted LiveView and its tasks, and by its sticky dock
+      # and the dock's tasks. The telemetry event is global, so a read by an
+      # unrelated process is not the mount's.
+      parent = self()
 
       found =
-        queries(fn ->
+        queries_with_origin(fn ->
           {:ok, view, _html} = live(conn, ~p"/audit")
           render_async(view)
+          dock = find_live_child(view, "session-dock")
+          render_async(dock)
+          send(parent, {:pids, [view.pid, dock.pid]})
         end)
 
-      workspace_reads = Enum.count(found, fn {source, _} -> source == "workspaces" end)
+      assert_received {:pids, pids}
+
+      workspace_reads =
+        Enum.count(found, fn {source, _, origin} ->
+          source == "workspaces" and (hd(origin) == parent or Enum.any?(pids, &(&1 in origin)))
+        end)
+
       assert workspace_reads <= 2, "workspaces read #{workspace_reads} times"
     end
   end

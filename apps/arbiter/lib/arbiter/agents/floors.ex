@@ -18,6 +18,11 @@ defmodule Arbiter.Agents.Floors do
       scoring can't buy quota with quality. It is armed by
       `routing.floors.policy_floor: true`.
 
+    * **Ticket markers (R14)** — `blast:<name>` entries in the ticket's
+      `issues.permissions` (G12) raise the same floor for that ticket alone
+      (`marker_floor/2`); the higher of repo and marker floor applies. A ticket
+      with no marker behaves exactly as before.
+
   ## The clamp and the canary
 
   `clamp/3` raises `config["model_tier"]` to the repo floor and, when it did,
@@ -44,9 +49,13 @@ defmodule Arbiter.Agents.Floors do
   """
 
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Guardrails.Permissions, as: Vocabulary
   alias Arbiter.Tasks.Workspace
 
   @ladder ~w(economy standard premium flagship)
+
+  # A marker with no `guardrails.bindings."blast:<name>".min_model_tier`.
+  @default_marker_tier "premium"
 
   @type gate :: %{repo_floor: String.t() | nil, policy?: boolean()}
 
@@ -73,15 +82,62 @@ defmodule Arbiter.Agents.Floors do
   The floor gate for a dispatch in `repo`, or `nil` — the whole off path — when
   neither a repo floor nor `routing.floors.policy_floor` is configured.
   """
-  @spec gate(Workspace.t() | nil, String.t() | nil) :: gate() | nil
-  def gate(%Workspace{config: config} = workspace, repo) do
-    repo_floor = repo_floor(workspace, repo)
+  @spec gate(Workspace.t() | nil, String.t() | nil, map() | nil) :: gate() | nil
+  def gate(workspace, repo, task \\ nil)
+
+  def gate(%Workspace{config: config} = workspace, repo, task) do
+    {repo_floor, _source} = effective_repo_floor(workspace, repo, task)
     policy? = get_in(config || %{}, ["routing", "floors", "policy_floor"]) == true
 
     if repo_floor || policy?, do: %{repo_floor: repo_floor, policy?: policy?}
   end
 
-  def gate(_workspace, _repo), do: nil
+  def gate(_workspace, _repo, _task), do: nil
+
+  @doc """
+  The per-ticket blast-radius floor (R14, §6.4 phase 2): the highest tier among
+  the `blast:<name>` markers `task` carries in `issues.permissions`, as
+  `{tier, [marker]}`, or `nil` when it carries none.
+
+  A marker's tier is `guardrails.bindings."blast:<name>".min_model_tier` in the
+  workspace, else `#{@default_marker_tier}`. A ticket with no marker reads
+  nothing from the workspace at all.
+  """
+  @spec marker_floor(Workspace.t() | nil, map() | nil) :: {String.t(), [String.t()]} | nil
+  def marker_floor(workspace, %{permissions: [_ | _] = permissions}) do
+    case Enum.filter(permissions, &Vocabulary.blast_marker?/1) do
+      [] ->
+        nil
+
+      markers ->
+        tier = markers |> Enum.map(&marker_tier(workspace, &1)) |> Enum.max_by(&rank/1)
+        {tier, Enum.sort(markers)}
+    end
+  end
+
+  def marker_floor(_workspace, _task), do: nil
+
+  defp marker_tier(workspace, marker) do
+    config = (workspace && Map.get(workspace, :config)) || %{}
+
+    case get_in(config, ["guardrails", "bindings", marker, "min_model_tier"]) do
+      tier when tier in @ladder -> tier
+      _ -> @default_marker_tier
+    end
+  end
+
+  # The higher of the repo floor and the ticket's marker floor: `{tier, source}`.
+  defp effective_repo_floor(workspace, repo, task) do
+    marker_tier =
+      case marker_floor(workspace, task) do
+        {tier, _markers} -> tier
+        nil -> nil
+      end
+
+    [{repo_floor(workspace, repo), :repo}, {marker_tier, :marker}]
+    |> Enum.filter(fn {tier, _} -> is_binary(tier) end)
+    |> Enum.max_by(fn {tier, _} -> rank(tier) end, fn -> {nil, nil} end)
+  end
 
   @doc """
   Clamp the tier `choice` carries to the repo's blast-radius floor.
@@ -89,11 +145,15 @@ defmodule Arbiter.Agents.Floors do
   Returns `choice` unchanged unless its `"model_tier"` is below the floor. When
   it is raised, a pinned `"model"` that is itself below the floor is dropped
   with it (the pin belonged to the lower tier's rule), and the choice is
-  stamped `floor: %{tier:, from:, repo:}`. Idempotent.
+  stamped `floor: %{tier:, from:, repo:, source:}` (`source` is `:repo` or
+  `:marker`). With `task`, its blast-radius markers (`marker_floor/2`) count
+  too: the higher floor wins. Idempotent.
   """
-  @spec clamp(map(), Workspace.t() | nil, String.t() | nil) :: map()
-  def clamp(%{config: %{"model_tier" => tier}} = choice, workspace, repo) do
-    with floor when is_binary(floor) <- repo_floor(workspace, repo),
+  @spec clamp(map(), Workspace.t() | nil, String.t() | nil, map() | nil) :: map()
+  def clamp(choice, workspace, repo, task \\ nil)
+
+  def clamp(%{config: %{"model_tier" => tier}} = choice, workspace, repo, task) do
+    with {floor, source} when is_binary(floor) <- effective_repo_floor(workspace, repo, task),
          true <- below?(tier, floor) do
       config =
         choice.config
@@ -102,13 +162,13 @@ defmodule Arbiter.Agents.Floors do
 
       choice
       |> Map.put(:config, config)
-      |> Map.put(:floor, %{tier: floor, from: tier, repo: repo})
+      |> Map.put(:floor, %{tier: floor, from: tier, repo: repo, source: source})
     else
       _ -> choice
     end
   end
 
-  def clamp(choice, _workspace, _repo), do: choice
+  def clamp(choice, _workspace, _repo, _task), do: choice
 
   @doc "Whether `choice` was raised by `clamp/3`."
   @spec clamped?(map() | nil) :: boolean()

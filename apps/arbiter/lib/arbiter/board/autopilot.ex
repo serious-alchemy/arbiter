@@ -609,6 +609,7 @@ defmodule Arbiter.Board.Autopilot do
       # hold change under the shadow is written. `shadow_signature` is the last
       # pass's outcome on both sides, so a row is written per change, not per pass.
       admission: Keyword.get(opts, :admission, &AdmissionShadow.mode/0),
+      admission_seam?: Keyword.has_key?(opts, :admission),
       record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
       shadow_signature: nil,
       resume: Keyword.get(opts, :resume, &default_resume/3),
@@ -975,7 +976,7 @@ defmodule Arbiter.Board.Autopilot do
         {:paused, state}
 
       is_binary(Map.get(snapshot, :promote)) ->
-        extra = shadow_safely([], fn -> shadow_opts(snapshot, mode) end)
+        extra = shadow_safely([], fn -> shadow_opts(state, snapshot, mode) end)
         promote_or_hold(%{state | holds: []}, snapshot.promote, extra)
 
       true ->
@@ -988,6 +989,14 @@ defmodule Arbiter.Board.Autopilot do
   # `legacy` asks the board for nothing new; `shadow` and `enforce` ask it to
   # plan the scheduler walk beside today's plan (`Snapshot.load/1`).
   defp walk_opts(mode), do: if(AdmissionShadow.walks?(mode), do: [admission: mode], else: [])
+
+  # O11: a pass's event is recorded under the installation's mode and a dispatch
+  # under the placed account's mode; the walk-wide `mode` only gates the walk.
+  # A test-supplied `:admission` seam is the mode for both.
+  defp install_mode(%{admission_seam?: true}, mode), do: mode
+  defp install_mode(_state, _mode), do: Arbiter.Accounts.AdmissionMode.installation()
+  defp pool_resolver(%{admission_seam?: true}, mode), do: mode
+  defp pool_resolver(_state, _mode), do: Arbiter.Accounts.AdmissionMode.pool_resolver()
 
   defp admission_mode(state) do
     state.admission.()
@@ -1022,7 +1031,11 @@ defmodule Arbiter.Board.Autopilot do
       signature = {mode, AdmissionShadow.signature(snapshot)}
 
       if signature != state.shadow_signature,
-        do: record_shadow(state, AdmissionShadow.event(snapshot, mode, state.now.()))
+        do:
+          record_shadow(
+            state,
+            AdmissionShadow.event(snapshot, install_mode(state, mode), state.now.())
+          )
 
       %{state | shadow_signature: signature}
     else
@@ -1043,9 +1056,10 @@ defmodule Arbiter.Board.Autopilot do
 
   # What rides on the dispatch: the walk's decision beside today's, as
   # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
-  defp shadow_opts(snapshot, mode) do
+  defp shadow_opts(state, snapshot, mode) do
     with true <- AdmissionShadow.walks?(mode),
-         %{} = record <- AdmissionShadow.dispatch_record(snapshot, mode, snapshot.promote) do
+         resolver = pool_resolver(state, mode),
+         %{} = record <- AdmissionShadow.dispatch_record(snapshot, resolver, snapshot.promote) do
       [admission_shadow: record]
     else
       _ -> []

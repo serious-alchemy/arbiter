@@ -127,7 +127,7 @@ defmodule Arbiter.Guardrails.Projection do
       %Profile{} = profile ->
         permissions
         |> Enum.flat_map(&parse/1)
-        |> Enum.reject(&(&1.kind in [:phi_data, :research_read]))
+        |> Enum.reject(&(&1.kind in [:phi_data, :research_read, :blast]))
         |> Enum.reduce(%{sealed(role: role) | profile: profile}, &project(&1, &2, profile, block))
         |> finish()
     end

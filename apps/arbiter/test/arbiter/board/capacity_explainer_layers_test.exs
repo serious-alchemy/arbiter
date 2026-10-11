@@ -56,6 +56,40 @@ defmodule Arbiter.Board.CapacityExplainerLayersTest do
       assert layer.shadow? == true
     end
 
+    test "two accounts in different modes: only the enforcing account's layer decides (O11)" do
+      other = {"acct-2", "gpt"}
+      pair_a = %{pool: @pool, node: "local"}
+      pair_b = %{pool: other, node: "local"}
+
+      board =
+        board([
+          walk_entry("bd-a", :next, "next", nil, pair_a),
+          walk_entry("bd-b", :next, "next", nil, pair_b)
+        ])
+
+      pool_mode = fn
+        {"acct-2", _} -> :enforce
+        _ -> :shadow
+      end
+
+      assert %{layers: %{"bd-a" => a, "bd-b" => b}} =
+               CapacityExplainer.explain(board, mode: :enforce, pool_mode: pool_mode)
+
+      assert a.shadow? == true
+      assert b.shadow? == false
+    end
+
+    test "the budget popup is labelled with the installation mode, not the walk's" do
+      view = %{pools: [], machines: []}
+
+      assert %{budget: %{label: "shadow", shadow?: true}} =
+               CapacityExplainer.explain(board([]),
+                 mode: :enforce,
+                 install_mode: :shadow,
+                 capacity: view
+               )
+    end
+
     test "the node, repo layers read the same way" do
       board =
         board([

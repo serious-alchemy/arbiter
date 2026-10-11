@@ -83,6 +83,11 @@ defmodule Arbiter.Worker.StopReason do
       normally leaves *some* stderr; a truly empty capture plus a non-zero
       status points at the exec step itself, not the agent's own logic —
       the remediation is a harness/argv fix, not a task re-dispatch.
+    * `:container_create_failed` (bd-325sps) — `podman run` exited 125/126 with
+      only `Error:` lines naming a libpod/OCI creation failure (`container
+      creation timeout`, `internal libpod error`): the agent never started. Infra,
+      not the agent; the worker retries creation a bounded number of times first,
+      and the worktree is kept.
     * `:crashed` — non-zero exit with no recognized signature. The
       flag-rejection proof case (`unknown option --reasoning-effort` → immediate
       non-zero exit) lands here unless its stderr matches a more specific
@@ -210,6 +215,7 @@ defmodule Arbiter.Worker.StopReason do
           | :spend_cap
           | :trust_suspended
           | :spawn_exec_failed
+          | :container_create_failed
           | :crashed
           | :stream_schema_drift
           | :agent_print_timeout
@@ -550,6 +556,22 @@ defmodule Arbiter.Worker.StopReason do
             "External kill, OOM, or host restart. Check dmesg/host health, then re-dispatch.",
           exit_status: exit_status,
           signal: signal
+        }
+
+      # bd-325sps: the `podman run` client itself failed to create the container.
+      # The agent never started; nothing it did is in the output.
+      container_create_failure?(exit_status, output_lines) ->
+        %__MODULE__{
+          category: :container_create_failed,
+          summary:
+            "container creation failed before the agent started (exit #{exit_status}): " <>
+              creation_error_line(output_lines),
+          remediation:
+            "Transient podman/libpod infrastructure failure (often host load), not the " <>
+              "agent. The worktree is preserved: re-dispatch or `arb worker resume` once " <>
+              "the host is healthy (`podman info`, `podman ps`).",
+          exit_status: exit_status,
+          signal: nil
         }
 
       # bd-6nr53z: checked FIRST among the output signatures, ahead of every
@@ -1187,6 +1209,7 @@ defmodule Arbiter.Worker.StopReason do
         :spend_cap -> "spend cap reached (parked by the guardrail tier)"
         :trust_suspended -> "subject suspended after a critical guardrail event (parked)"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
+        :container_create_failed -> "container creation failed (infra, before the agent started)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
         :agent_print_timeout -> "agy print-mode turn timed out (partial output only)"
@@ -1336,6 +1359,43 @@ defmodule Arbiter.Worker.StopReason do
   # all — not even a blank line. Genuine crashes almost always leave *some*
   # trace. `output_lines` may contain empty-string entries from the port's
   # line-buffering, so trim before checking for emptiness.
+  # bd-325sps: libpod / OCI-runtime failures that happen while the container is
+  # being created, before the agent runs. `podman run` exits 126 (125 for its own
+  # errors) and prints only `Error: ...` lines. Requiring every non-blank line to
+  # be such an error keeps an agent that merely quotes the phrase a crash.
+  @container_create_exit_statuses [125, 126]
+  @container_create_signature ~r/container creation timeout|internal libpod error|OCI runtime create|runtime create failed|error creating container/i
+
+  @doc """
+  True when `exit_status` and `output_lines` (either order) show `podman run`
+  failing to create the container: exit 125/126 and nothing but `Error:` lines,
+  at least one of them a libpod/OCI creation failure.
+  """
+  @spec container_create_failure?(integer() | nil, [String.t()]) :: boolean()
+  def container_create_failure?(exit_status, output_lines)
+      when exit_status in @container_create_exit_statuses and is_list(output_lines) do
+    lines = non_blank_lines(output_lines)
+
+    lines != [] and Enum.all?(lines, &String.starts_with?(&1, "Error")) and
+      Enum.any?(lines, &Regex.match?(@container_create_signature, &1))
+  end
+
+  def container_create_failure?(_exit_status, _output_lines), do: false
+
+  defp non_blank_lines(output_lines) do
+    output_lines
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp creation_error_line(output_lines) do
+    output_lines
+    |> non_blank_lines()
+    |> Enum.find(&Regex.match?(@container_create_signature, &1))
+    |> String.slice(0, 200)
+  end
+
   defp blank_output?(output_lines) do
     Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
   end

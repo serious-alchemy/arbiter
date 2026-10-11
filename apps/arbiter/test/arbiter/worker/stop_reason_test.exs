@@ -660,6 +660,44 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — container_create_failed (bd-325sps, libpod creation failures)" do
+    test "exit 126 with the libpod creation timeout is an infra failure, not a crash" do
+      line = "Error: container creation timeout: internal libpod error"
+      reason = StopReason.classify(126, [line])
+      assert reason.category == :container_create_failed
+      assert reason.summary =~ "container creation"
+      assert reason.exit_status == 126
+    end
+
+    test "an OCI runtime create error at exit 126 or 125 is recognised" do
+      line = "Error: crun: creating `/x`: OCI runtime create failed: something"
+      assert StopReason.classify(126, [line]).category == :container_create_failed
+      assert StopReason.classify(125, [line]).category == :container_create_failed
+    end
+
+    test "agent output that merely mentions the phrase is still a crash" do
+      lines = [~s({"type":"assistant","text":"saw container creation timeout"}), "boom"]
+      assert StopReason.classify(126, lines).category == :crashed
+    end
+
+    test "the same text at another exit status is not a creation failure" do
+      line = "Error: container creation timeout: internal libpod error"
+      assert StopReason.classify(1, [line]).category == :crashed
+    end
+
+    test "container_create_failure?/2 is the predicate the worker retries on" do
+      line = "Error: container creation timeout: internal libpod error"
+      assert StopReason.container_create_failure?(126, [line])
+      refute StopReason.container_create_failure?(0, [line])
+      refute StopReason.container_create_failure?(126, [])
+    end
+
+    test "label is compact" do
+      reason = StopReason.classify(126, ["Error: internal libpod error"])
+      assert StopReason.label(reason) =~ "container creation failed"
+    end
+  end
+
   describe "classify/2 — spawn_exec_failed (bd-11abk2, zero-output crashes)" do
     test "exit 7 with zero output is classified as the E2BIG/MAX_ARG_STRLEN case" do
       reason = StopReason.classify(7, [])
