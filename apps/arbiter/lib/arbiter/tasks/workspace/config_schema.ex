@@ -219,7 +219,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                     max_tier: quarantine | probation | trusted | privileged
       bindings      map permission-name -> {grant_by: operator|coordinator, min_tier,
                     enforced_read_only, tunnels, hosts, env_from_secret, ssh_key_secret,
-                    token_secret}
+                    token_secret, min_model_tier (a `blast:<name>` marker's floor)}
       defaults      {permissions: [name, …]} granted to every ticket by default
       repos.<repo>  {defaults, subjects} — the same shapes, scoped to one repo
 

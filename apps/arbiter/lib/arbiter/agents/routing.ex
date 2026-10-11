@@ -53,7 +53,7 @@ defmodule Arbiter.Agents.Routing do
     |> GrokRouting.apply_choice(workspace, ByDifficulty.effective_difficulty(task.difficulty),
       task: task
     )
-    |> Floors.clamp(workspace, task.repo)
+    |> Floors.clamp(workspace, task.repo, task)
   end
 
   @doc """

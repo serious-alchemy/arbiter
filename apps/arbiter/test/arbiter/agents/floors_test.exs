@@ -258,4 +258,76 @@ defmodule Arbiter.Agents.FloorsTest do
       assert reason =~ "routing.rules"
     end
   end
+
+  describe "ticket blast-radius markers (R14)" do
+    @marker_ws put_in(@base, ["routing", "floors"], %{"repos" => %{}})
+
+    test "a blast: marker raises the tier for that ticket alone, default premium" do
+      ws = workspace!(@marker_ws, "marker-ws")
+
+      marked = %Issue{
+        id: "bd-1",
+        difficulty: 1,
+        repo: "arbiter",
+        permissions: ["blast:prod_data"]
+      }
+
+      plain = %Issue{id: "bd-2", difficulty: 1, repo: "arbiter", permissions: []}
+
+      choice = Routing.choose(marked, ws, %{})
+      assert choice.config["model_tier"] == "premium"
+      assert Floors.clamped?(choice)
+      assert %{from: "economy", tier: "premium", source: :marker} = choice.floor
+
+      # The unmarked ticket in the same repo is untouched.
+      unmarked = Routing.choose(plain, ws, %{})
+      assert unmarked.config == ByDifficulty.default_mapping()[1]
+      refute Floors.clamped?(unmarked)
+    end
+
+    test "the binding's min_model_tier sets the marker's tier; the highest marker wins" do
+      config =
+        put_in(@marker_ws, ["guardrails"], %{
+          "bindings" => %{"blast:control_plane" => %{"min_model_tier" => "flagship"}}
+        })
+
+      ws = workspace!(config, "marker-bind-ws")
+      task = %Issue{permissions: ["blast:control_plane", "blast:prod_data"]}
+
+      assert {"flagship", ["blast:control_plane", "blast:prod_data"]} =
+               Floors.marker_floor(ws, task)
+
+      choice = Routing.choose(%{task | id: "bd-1", difficulty: 0, repo: "x"}, ws, %{})
+      assert choice.config["model_tier"] == "flagship"
+    end
+
+    test "the higher of the repo floor and the marker floor applies" do
+      ws = workspace!(floors(%{"arbiter" => %{"min_model_tier" => "flagship"}}), "marker-both")
+      task = %Issue{id: "bd-1", difficulty: 0, repo: "arbiter", permissions: ["blast:prod_data"]}
+
+      choice = Routing.choose(task, ws, %{})
+      assert choice.config["model_tier"] == "flagship"
+      assert choice.floor.source == :repo
+      assert %{repo_floor: "flagship"} = Floors.gate(ws, "arbiter", task)
+    end
+
+    test "the gate arms on a marker alone, and a ticket with none is the off path" do
+      ws = workspace!(@marker_ws, "marker-gate")
+      task = %Issue{permissions: ["blast:prod_data", "network:a.example.com:443"]}
+
+      assert %{repo_floor: "premium", policy?: false} = Floors.gate(ws, "arbiter", task)
+      assert Floors.gate(ws, "arbiter", %Issue{permissions: ["tracker_write"]}) == nil
+      assert Floors.gate(ws, "arbiter") == nil
+      assert Floors.marker_floor(ws, %Issue{permissions: nil}) == nil
+    end
+
+    test "with one eligible account the marker only gates; it never adds a candidate (§9)" do
+      ws = workspace!(@marker_ws, "marker-off")
+
+      for d <- 0..4 do
+        task = %Issue{id: "bd-1", difficulty: d, repo: "arbiter", permissions: []}
+        assert Routing.choose(task, ws, %{}).config == ByDifficulty.default_mapping()[d]
+      end
+    end
+  end
 end
