@@ -24,7 +24,7 @@ defmodule Arbiter.Machine.Sensors do
 
   ## Testing
 
-  Every function takes `root:` (default `""`), a prefix for `/sys` and `/proc`,
+  Every function takes `root:` (default `""`), a prefix put in front of the absolute `/sys` and `/proc`,
   so a fixture tree stands in for the kernel.
   """
 
@@ -63,7 +63,7 @@ defmodule Arbiter.Machine.Sensors do
   @doc "Memory PSI (`/proc/pressure/memory`), or `nil`."
   @spec psi(keyword()) :: psi() | nil
   def psi(opts \\ []) do
-    with {:ok, body} <- File.read(Path.join(root(opts), "proc/pressure/memory")),
+    with {:ok, body} <- File.read(root(opts) <> "/proc/pressure/memory"),
          %{"some" => some, "full" => full} <- parse_psi(body),
          {:ok, s10} <- Map.fetch(some, "avg10"),
          {:ok, s60} <- Map.fetch(some, "avg60"),
@@ -78,7 +78,7 @@ defmodule Arbiter.Machine.Sensors do
   @doc "`MemAvailable` in bytes, or `nil`."
   @spec mem_available(keyword()) :: non_neg_integer() | nil
   def mem_available(opts \\ []) do
-    with {:ok, body} <- File.read(Path.join(root(opts), "proc/meminfo")),
+    with {:ok, body} <- File.read(root(opts) <> "/proc/meminfo"),
          [_, kb] <- Regex.run(~r/^MemAvailable:\s+(\d+) kB/m, body) do
       String.to_integer(kb) * 1024
     else
@@ -90,7 +90,7 @@ defmodule Arbiter.Machine.Sensors do
 
   defp hwmon_temp(root) do
     root
-    |> Path.join("sys/class/hwmon/hwmon*")
+    |> Kernel.<>("/sys/class/hwmon/hwmon*")
     |> Path.wildcard()
     |> Enum.filter(&(chip_name(&1) in @cpu_chips))
     |> Enum.flat_map(&chip_temps/1)
@@ -117,7 +117,7 @@ defmodule Arbiter.Machine.Sensors do
 
   defp thermal_zone_temp(root) do
     root
-    |> Path.join("sys/class/thermal/thermal_zone*")
+    |> Kernel.<>("/sys/class/thermal/thermal_zone*")
     |> Path.wildcard()
     |> Enum.filter(fn dir ->
       type = read_trim(Path.join(dir, "type"))

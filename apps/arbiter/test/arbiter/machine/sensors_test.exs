@@ -128,4 +128,21 @@ defmodule Arbiter.Machine.SensorsTest do
              mem_available: 1024 * 1024
            }
   end
+
+  # Regression: with the default root the paths must be the absolute /proc and /sys, not
+  # relative to the working directory (the fixture tests alone never exercised this).
+  @tag :tmp_dir
+  test "the default root reads the real /proc and /sys, not paths relative to the cwd", %{
+    tmp_dir: dir
+  } do
+    File.cd!(dir, fn ->
+      if File.exists?("/proc/meminfo") do
+        assert is_integer(Sensors.mem_available())
+      end
+
+      if File.exists?("/proc/pressure/memory") do
+        assert %{some_avg10: _} = Sensors.psi()
+      end
+    end)
+  end
 end
