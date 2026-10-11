@@ -3,6 +3,13 @@ import Config
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4848"))]
 
+# Max concurrent `/api` requests before the server answers 503 + Retry-After
+# (ArbiterWeb.Plugs.ApiConcurrencyLimit, bd-66anxj). `0` disables the limit.
+case Integer.parse(System.get_env("ARBITER_API_MAX_CONCURRENCY", "")) do
+  {n, ""} when n >= 0 -> config :arbiter_web, :api_max_concurrency, n
+  _ -> :ok
+end
+
 # The VM's role (docs/design/remote-workers.md §3). `ARB_ROLE=agent` makes this
 # release a node agent: it starts only `Arbiter.NodeAgent.Supervisor`, so none
 # of the primary's runtime config below applies — no SECRET_KEY_BASE, no Repo,
