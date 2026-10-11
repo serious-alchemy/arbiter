@@ -3,6 +3,7 @@ defmodule ArbiterCli.Cmd.Dep do
   Dependency subcommand router:
 
       arb dep add  <from> <type> <to>
+      arb dep add  --stdin [--json]
       arb dep rm   <from> <to> [--type T]
       arb dep list [<issue>] [--type T] [--workspace W] [--json]
 
@@ -35,9 +36,27 @@ defmodule ArbiterCli.Cmd.Dep do
 
   A `depends_on` / `blocks` edge that would close a cycle is refused, with the
   cycle named.
+
+  ## Bulk: `arb dep add --stdin`
+
+  Reads many edges from standard input and adds them in one call
+  (`POST /api/dependencies` with `edges`). Input is either a JSON array
+
+      [{"from": "bd-1", "to": "bd-2", "type": "blocks"}, ...]
+
+  (or `{"edges": [...]}`), or one `<from> <type> <to>` per line — the positional
+  order of the single form; blank lines and `#` comments are skipped.
+
+  Edges are applied in order, each through the same rules as a single `dep add`
+  (an edge sees the ones before it), and each gets its own result — `ok` or
+  `rejected` with the reason (a cycle, an unknown ticket, ...). A rejected edge does
+  **not** undo the others; arb prints one line per edge and exits 1 if any was
+  rejected. At most 200 edges per call. Wire all edges **before** promoting the
+  tickets they gate. To file new tickets together with their edges atomically use
+  `arb ticket create --from-file`.
   """
 
-  alias ArbiterCli.{ArgParser, Client, Output, Workspace}
+  alias ArbiterCli.{ArgParser, BatchFile, Client, Output, Workspace}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -46,10 +65,13 @@ defmodule ArbiterCli.Cmd.Dep do
       {opts, rest, mode} =
         ArgParser.parse(argv,
           command: "arb dep",
-          switches: [type: :string, workspace: :string, json: :boolean]
+          switches: [type: :string, workspace: :string, json: :boolean, stdin: :boolean]
         )
 
+      stdin? = opts[:stdin] == true
+
       case rest do
+        ["add" | _] when stdin? -> add_stdin(mode)
         ["add", from, type, to | _] -> add(from, type, to, mode)
         ["add" | _] -> Output.die("dep add requires: <from> <type> <to>")
         ["rm" | positional] -> rm(positional, opts, mode)
@@ -69,6 +91,39 @@ defmodule ArbiterCli.Cmd.Dep do
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp add_stdin(mode) do
+    edges = "-" |> BatchFile.read!() |> BatchFile.edges!("stdin")
+
+    case Client.post("/api/dependencies", %{"edges" => edges}) do
+      {:ok, %{"results" => results} = response} -> emit_bulk(response, results, mode)
+      {:ok, other} -> Output.die("unexpected response from the server: #{inspect(other)}")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_bulk(response, results, :json) do
+    IO.puts(Jason.encode!(response))
+    exit_unless_all_ok(results)
+  end
+
+  defp emit_bulk(response, results, :text) do
+    Enum.each(results, &IO.puts(edge_line(&1)))
+    c = response["counts"] || %{}
+    IO.puts("#{c["ok"] || 0} ok, #{c["rejected"] || 0} rejected (#{c["total"] || 0} total)")
+    exit_unless_all_ok(results)
+  end
+
+  defp exit_unless_all_ok(results) do
+    if Enum.all?(results, &(&1["status"] == "ok")), do: :ok, else: Output.halt(1)
+  end
+
+  defp edge_line(%{"status" => "ok"} = r), do: "ok         #{edge_label(r)}"
+
+  defp edge_line(r),
+    do: "#{String.pad_trailing(r["status"] || "rejected", 10)} #{edge_label(r)}: #{r["reason"]}"
+
+  defp edge_label(r), do: "#{r["from"]} -#{r["type"]}-> #{r["to"]}"
 
   defp rm(positional, opts, mode) do
     case positional do
