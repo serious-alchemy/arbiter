@@ -449,6 +449,12 @@ defmodule ArbiterWeb.Api.IssueController do
   def update(conn, %{"id" => id} = params) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
+    with {:ok, updated} <- apply_update(conn, id, params) do
+      render(conn, :show, issue: updated, warnings: assignee_warnings)
+    end
+  end
+
+  defp apply_update(conn, id, params) do
     with :ok <- IssueFields.check(params, :update),
          {:ok, issue} <- Ash.get(Issue, id),
          {:ok, params} <- resolve_permission_edits(issue, params) do
@@ -458,9 +464,7 @@ defmodule ArbiterWeb.Api.IssueController do
         |> Map.drop(["id", "workspace_id", "assignee"])
         |> coerce_atoms(@atom_fields)
 
-      with {:ok, updated} <- Ash.update(issue, attrs, context: permission_context(conn)) do
-        render(conn, :show, issue: updated, warnings: assignee_warnings)
-      end
+      Ash.update(issue, attrs, context: permission_context(conn))
     end
   end
 
@@ -476,6 +480,12 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def close(conn, %{"id" => id} = params) do
+    with {:ok, closed} <- apply_close(id, params) do
+      render(conn, :show, issue: closed)
+    end
+  end
+
+  defp apply_close(id, params) do
     reason = params["reason"]
 
     # bd-2wilou: propagate the close upstream by default (matches the `:close`
@@ -487,9 +497,8 @@ defmodule ArbiterWeb.Api.IssueController do
          args =
            %{}
            |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
-           |> Map.put(:close_upstream, close_upstream),
-         {:ok, closed} <- Ash.update(issue, args, action: :close) do
-      render(conn, :show, issue: closed)
+           |> Map.put(:close_upstream, close_upstream) do
+      Ash.update(issue, args, action: :close)
     end
   end
 
@@ -579,6 +588,64 @@ defmodule ArbiterWeb.Api.IssueController do
 
       json(conn, result)
     end
+  end
+
+  @doc """
+  `PATCH /api/issues` with `{"ids": [...], "patch": {...}}` — apply one patch to
+  every id (bd-cvyx6j). Each id goes through the same path as `PATCH
+  /api/issues/:id` (field validation, permission rules). `patch.notes` REPLACES the
+  field, so it is refused unless the body also carries `confirm_replace_notes:
+  true`; `append_notes` needs no confirmation.
+  """
+  def bulk_update(conn, params) do
+    patch = params["patch"]
+
+    if is_map(patch) and map_size(patch) > 0 do
+      with :ok <- notes_confirmed(patch, params) do
+        bulk(conn, params, fn id ->
+          with {:ok, updated} <- apply_update(conn, id, Map.put(patch, "id", id)) do
+            {:ok, ArbiterWeb.Api.IssueJSON.data(updated)}
+          end
+        end)
+      end
+    else
+      {:error, {:invalid_request, "`patch` must be a non-empty object of fields to set"}}
+    end
+  end
+
+  defp notes_confirmed(patch, params) do
+    case BulkResult.check_notes_replace(
+           Map.put(patch, "confirm_replace_notes", params["confirm_replace_notes"])
+         ) do
+      :ok -> :ok
+      {:error, message} -> {:error, {:invalid_request, message}}
+    end
+  end
+
+  @doc "`POST /api/issues/close` with `{ids, reason?, close_upstream?}` (bd-cvyx6j)."
+  def bulk_close(conn, params) do
+    shared = Map.take(params, ["reason", "close_upstream"])
+
+    bulk(conn, params, fn id ->
+      with {:ok, closed} <- apply_close(id, shared) do
+        {:ok, ArbiterWeb.Api.IssueJSON.data(closed)}
+      end
+    end)
+  end
+
+  @doc """
+  `POST /api/issues/verify` with `{ids, outcome, evidence}` (bd-cvyx6j). Each id
+  records the outcome exactly as `POST /api/issues/:id/verify` does, so a `failed`
+  outcome reopens every id parked in `:verifying`.
+  """
+  def bulk_verify(conn, params) do
+    shared = Map.take(params, ["outcome", "evidence"])
+
+    bulk(conn, params, fn id ->
+      with {:ok, updated} <- apply_verify(id, shared) do
+        {:ok, ArbiterWeb.Api.IssueJSON.data(updated)}
+      end
+    end)
   end
 
   defp bulk(conn, params, fun) do
@@ -696,12 +763,15 @@ defmodule ArbiterWeb.Api.IssueController do
   `{:conflict, msg}` / `{:invalid, msg}`.
   """
   def verify(conn, %{"id" => id} = params) do
-    outcome = params["outcome"]
-    evidence = params["evidence"]
+    with {:ok, updated} <- apply_verify(id, params) do
+      render(conn, :show, issue: updated)
+    end
+  end
 
+  defp apply_verify(id, params) do
     with {:ok, issue} <- Ash.get(Issue, id) do
-      case Verification.record_outcome(issue, outcome, evidence) do
-        {:ok, updated} -> render(conn, :show, issue: updated)
+      case Verification.record_outcome(issue, params["outcome"], params["evidence"]) do
+        {:ok, updated} -> {:ok, updated}
         {:error, reason} -> verify_error(reason)
       end
     end
