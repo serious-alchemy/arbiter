@@ -11,11 +11,7 @@ defmodule Arbiter.Parity.FieldExposureTest do
   alias Arbiter.Parity.FieldExposure
 
   # Call options that ride alongside the fields and are not fields themselves.
-<<<<<<< HEAD
-  @call_options ~w(id force workspace assignee summary ref deps depends_on blocks)
-=======
-  @call_options ~w(id force workspace assignee summary ref deps ids confirm_replace_notes)
->>>>>>> 169032e9e (CLI: arb ticket update|close|verify take several ids and --stdin; parity)
+  @call_options ~w(id force workspace assignee summary ref deps depends_on blocks ids confirm_replace_notes)
 
   @manifest FieldExposure.load!()
 
