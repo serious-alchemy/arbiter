@@ -161,6 +161,9 @@ defmodule Arbiter.Loop.FailureClassifier do
     # K12: a cluster took the pod away (A5), or a node refused the placement (A3).
     pod_disrupted: {:operational, :pod_disrupted},
     placement_refused: {:operational, :placement_refused},
+    # bd-az8ycn: the worker jail's egress proxy refused a qwen connection. The
+    # allowlist is the cause, never the agent's work.
+    egress_denied: {:operational, :egress_denied},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
     container_create_failed: {:operational, :spawn_failure},

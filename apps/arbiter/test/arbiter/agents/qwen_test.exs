@@ -62,8 +62,8 @@ defmodule Arbiter.Agents.QwenTest do
       refute Regex.match?(Qwen.done_sentinel(), "arb doneness")
     end
 
-    test "does not claim a security layer it does not have yet" do
-      refute Qwen.security_enforced?()
+    test "claims the deny layer, which rides on every spawn's system settings" do
+      assert Qwen.security_enforced?()
     end
   end
 

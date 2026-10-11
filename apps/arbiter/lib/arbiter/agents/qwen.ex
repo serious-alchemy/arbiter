@@ -36,10 +36,28 @@ defmodule Arbiter.Agents.Qwen do
   credentials never reach a worker. The endpoint (`opts[:endpoint]`, a map with
   `:base_url` / `:api_key`) and model are re-added as `OPENAI_BASE_URL`,
   `OPENAI_API_KEY` and `OPENAI_MODEL`. The per-worker HOME, settings and
-  telemetry/update switches are `Qwen.ConfigDir` (Q3); the jail and deny mapping
-  are `Qwen.Security` (Q5); provider registration and routing are Q6. Until Q5
-  lands the adapter reports `security_enforced?/0` false and no write
-  confinement.
+  telemetry/update switches are `Qwen.ConfigDir` (Q3); provider registration and
+  routing are Q6.
+
+  ## Security and the jail (Q5)
+
+  **The jail is the boundary.** A headless qwen needs `--yolo`, and a qwen deny
+  rule does not see through `bash -c`, so `Qwen.Security` (deny rules and tool
+  removal, written into the read-only system settings) only steers the model.
+  `default_argv/2` wraps qwen in `Arbiter.Worker.Jail`: read-only root, writable
+  worktree and per-worker `$HOME`, the system settings directory bound read-only
+  over that home, credential paths hidden, a pid namespace. A review dispatch
+  (the policy denies `Write`) gets the worktree `--ro-bind`-ed, so a reviewer
+  cannot write it however it tries. `:strict` fails closed when the jail cannot
+  run; other modes fall back to running unjailed (still HOME-isolated) and
+  `write_jail_warning/1` says so.
+
+  The jail also runs in its own network namespace (`Qwen.Egress`): a local
+  endpoint (Ollama on `127.0.0.1:11434`) is reached through a fixed-destination
+  `egress_tunnels` bridge, a hosted one through the filtering proxy whose
+  baseline is the endpoint's host, and every other connection is refused with a
+  `403` and recorded. A run that dies on such a refusal is classified
+  `:egress_denied`.
 
   ## Completion and failure
 
@@ -66,10 +84,20 @@ defmodule Arbiter.Agents.Qwen do
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Qwen.ConfigDir
+  alias Arbiter.Agents.Qwen.Egress, as: QwenEgress
+  alias Arbiter.Agents.Qwen.Security
   alias Arbiter.Agents.Qwen.SessionFile
   alias Arbiter.Agents.Qwen.Stream, as: QwenStream
   alias Arbiter.Agents.Qwen.Usage
+  alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Guardrails.Projection
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.Egress.JailRun
+  alias Arbiter.Worker.Jail
+  alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.Withholding
+
+  require Logger
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -98,27 +126,80 @@ defmodule Arbiter.Agents.Qwen do
   @impl true
   def done_sentinel, do: @done_regex
 
-  # No deny mapping or jail yet (Q5): do not claim a guarantee that is absent.
+  @doc """
+  `true`: the deny categories ride on every spawn's read-only system settings
+  (`Arbiter.Agents.Qwen.Security`) and the per-worker HOME that would let an
+  operator or repo settings file undercut them has no off switch. These are a
+  permission layer; `write_confinement/1` says whether the jail backs them.
+  """
   @impl true
-  def security_enforced?, do: false
+  def security_enforced?, do: true
 
+  @doc """
+  `:os_jail` when this spawn runs inside `Arbiter.Worker.Jail`
+  (`default_argv/2` jails it), `:none` otherwise.
+  """
   @impl true
-  def write_confinement(_policy), do: :none
+  def write_confinement(%SecurityPolicy{} = policy) do
+    with {:ok, _qwen} <- resolve_executable(),
+         :ok <- jail_blocker(policy) do
+      :os_jail
+    else
+      _ -> :none
+    end
+  end
+
+  @doc """
+  `:os_jail` when the spawn is jailed and the host can build the network
+  namespace (`--unshare-net`, the only route out is the egress proxy and the
+  tunnels), `:none` otherwise.
+  """
+  @impl true
+  def egress_confinement(%SecurityPolicy{} = policy) do
+    if write_confinement(policy) == :os_jail and Sandbox.network_status(policy) == :ok,
+      do: :os_jail,
+      else: :none
+  end
+
+  @doc """
+  Why a qwen spawn under `policy` would run unjailed outside `:strict`, or
+  `nil` when it is jailed, the CLI is absent, or the policy opted the sandbox
+  off on purpose.
+  """
+  @impl true
+  def write_jail_warning(%SecurityPolicy{} = policy) do
+    with {:ok, _qwen} <- resolve_executable(),
+         true <- jail_eligible?(policy),
+         {:error, reason} <- jail_blocker(policy) do
+      "qwen write jail unavailable (#{blocker_message(reason)}) — " <>
+        if(policy.permissions.mode == :strict,
+          do: ":strict dispatches of qwen are refused",
+          else: "writes are not confined to the worktree outside :strict"
+        )
+    else
+      _ -> nil
+    end
+  end
 
   @impl true
   def prepare(_workspace, _opts \\ []), do: :ok
 
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
-    with {:ok, qwen} <- resolve_executable() do
-      flags = flags(opts)
+    policy = security_policy(opts)
 
+    with {:ok, qwen} <- resolve_executable(),
+         {:ok, _sandbox} <- Sandbox.module(policy),
+         {:ok, _home} <- ensure_home(policy, opts) do
       if byte_size(prompt) > @max_prompt_argv_bytes do
-        with {:ok, tmp} <- write_prompt_tmpfile(prompt) do
-          {:ok, ["sh", "-c", @stdin_prompt_script, "sh", tmp, qwen | flags]}
+        with {:ok, tmp} <- write_prompt_tmpfile(prompt),
+             {:ok, command} <- maybe_jail([qwen | flags(opts)], opts, policy) do
+          {:ok, ["sh", "-c", @stdin_prompt_script, "sh", tmp | command]}
         end
       else
-        {:ok, ["sh", "-c", @inline_prompt_script, "sh", qwen, "-p", prompt | flags]}
+        with {:ok, command} <- maybe_jail([qwen, "-p", prompt | flags(opts)], opts, policy) do
+          {:ok, ["sh", "-c", @inline_prompt_script, "sh" | command]}
+        end
       end
     end
   end
@@ -154,6 +235,26 @@ defmodule Arbiter.Agents.Qwen do
     case ConfigDir.env(opts) do
       {:ok, env} -> env
       {:error, _} -> ConfigDir.isolation_env(ConfigDir.path(opts), opts)
+    end
+  end
+
+  # The home and the system settings (with the policy's deny rules) must exist
+  # before the jail binds them. No off switch: an un-isolated qwen worker runs
+  # with the operator's skills and MCP servers.
+  defp ensure_home(policy, opts) do
+    case Security.unmapped(policy) do
+      [] ->
+        :ok
+
+      dropped ->
+        Logger.warning(
+          "qwen has no equivalent for deny entries #{inspect(dropped)}; not enforced"
+        )
+    end
+
+    case ConfigDir.ensure(Keyword.put(opts, :security, policy)) do
+      {:ok, home} -> {:ok, home}
+      {:error, reason} -> {:error, {:qwen_home_unavailable, reason}}
     end
   end
 
@@ -268,6 +369,166 @@ defmodule Arbiter.Agents.Qwen do
       model -> ["-m", model]
     end
   end
+
+  # ---- the jail ----------------------------------------------------------
+
+  # The jail is default-on in every mode, like grok's and agy's. `:strict`
+  # fails closed when it cannot run; the other modes fall back to running
+  # unjailed (still HOME-isolated) rather than refusing.
+  defp maybe_jail(command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
+    case jail_blocker(policy) do
+      :ok -> jail(command, opts, policy, mode)
+      {:error, reason} -> jail_unavailable(mode, command, reason)
+    end
+  end
+
+  defp jail(command, opts, policy, mode) do
+    with {:ok, network} <- egress_network(opts, policy) do
+      case Sandbox.wrap(policy, command, jail_opts(opts, policy, network)) do
+        {:ok, argv} ->
+          {:ok, argv}
+
+        # The network side of the jail is not optional once it was asked for.
+        {:error, reason} when network != nil ->
+          if egress_error?(reason),
+            do: {:error, {:egress_unavailable, reason}},
+            else: jail_unavailable(mode, command, reason)
+
+        {:error, reason} ->
+          jail_unavailable(mode, command, reason)
+      end
+    end
+  end
+
+  defp jail_opts(opts, policy, network) do
+    [
+      worktree: worktree(opts),
+      home: ConfigDir.path(opts),
+      writable_paths: Map.get(policy.sandbox, :writable_paths, []),
+      worktree_readonly: review_dispatch?(policy),
+      # The settings (and so the deny rules) are not the worker's to rewrite:
+      # its home is writable, this directory inside it is not.
+      readonly_paths: [ConfigDir.system_settings_dir(opts)],
+      hide_reads: true,
+      env: [
+        {"QWEN_HOME", ConfigDir.qwen_home(opts)},
+        {"QWEN_CODE_SYSTEM_SETTINGS_PATH", ConfigDir.system_settings_path(opts)}
+      ]
+    ] ++ if(network, do: [network: network], else: [])
+  end
+
+  defp egress_error?({tag, _}) when tag in [:egress_socket_missing, :duplicate_bridge_port],
+    do: true
+
+  defp egress_error?(:socat_not_found), do: true
+  defp egress_error?(_), do: false
+
+  # The jail runs in a network namespace whose only way out is this run's proxy
+  # and bridges. `{:ok, nil}` means "no network mode": the operator switched it
+  # off (`:worker_jail_network`) or this host cannot (no `socat`, no netns), in
+  # which case the filesystem jail still applies and `arb server doctor` fails
+  # the host's network check. Once network mode applies, a proxy that cannot
+  # start is an error and never a fallback to the shared network.
+  defp egress_network(opts, policy) do
+    with true <- Application.get_env(:arbiter, :worker_jail_network, true),
+         :ok <- network_host_status(policy) do
+      start_egress(opts, policy)
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  defp network_host_status(policy) do
+    case Sandbox.network_status(policy) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        %{message: message} = Jail.explain_network(reason)
+
+        Logger.warning(
+          "qwen jail: network mode unavailable (#{message}); " <>
+            "running with the filesystem jail on the shared network"
+        )
+
+        error
+    end
+  end
+
+  defp start_egress(opts, policy) do
+    plan = QwenEgress.plan(Keyword.get(opts, :endpoint), policy)
+    projection = projection(opts)
+
+    case JailRun.start(
+           owner: Keyword.get(opts, :owner),
+           task_id: Keyword.get(opts, :task_id),
+           arb_token: Keyword.get(opts, :arb_token),
+           safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
+           worktree: worktree(opts),
+           infra: QwenEgress.baseline(plan, policy),
+           enforce: QwenEgress.enforce?(),
+           allow_local_dial: plan.allow_local_dial,
+           grants: Withholding.grants(Keyword.get(opts, :task_id), projection),
+           tunnels: plan.tunnels ++ Keyword.get(opts, :egress_tunnels, []) ++ projection.tunnels
+         ) do
+      {:ok, network, _run_id} -> {:ok, network}
+      {:error, reason} -> {:error, {:egress_unavailable, reason}}
+    end
+  end
+
+  defp projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection -> projection
+      _ -> Projection.unguarded()
+    end
+  end
+
+  defp jail_unavailable(:strict, _command, reason),
+    do: {:error, {:write_jail_unavailable, reason}}
+
+  defp jail_unavailable(_mode, command, reason) do
+    Logger.warning("qwen write jail unavailable (#{inspect(reason)}); running unjailed")
+    {:ok, command}
+  end
+
+  defp jail_blocker(%SecurityPolicy{} = policy) do
+    cond do
+      match?({:error, _}, Sandbox.module(policy)) ->
+        {:error, "sandbox.backend #{SecurityPolicy.sandbox_backend(policy)} is not implemented"}
+
+      not jail_eligible?(policy) ->
+        {:error, "sandbox.enabled is false or sandbox.filesystem is not :worktree"}
+
+      true ->
+        with {:error, reason} <- Sandbox.status(policy),
+             do: {:error, {:jail_probe_failed, reason}}
+    end
+  end
+
+  defp jail_eligible?(%SecurityPolicy{sandbox: sandbox}),
+    do: Map.get(sandbox, :enabled, true) and Map.get(sandbox, :filesystem, :worktree) == :worktree
+
+  defp blocker_message({:jail_probe_failed, reason}) do
+    case Jail.explain(reason) do
+      %{message: message, fix: nil} -> message
+      %{message: message, fix: fix} -> "#{message} — #{fix}"
+    end
+  end
+
+  defp blocker_message(reason) when is_binary(reason), do: reason
+
+  # A review dispatch carries the `Write` deny (`Dispatch.review_security_policy/2`):
+  # the jail makes that an OS guarantee by binding the worktree read-only.
+  defp review_dispatch?(%SecurityPolicy{permissions: %{deny: deny}}), do: "Write" in deny
+
+  defp security_policy(opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy -> policy
+      _ -> SecurityPolicy.default()
+    end
+  end
+
+  defp worktree(opts), do: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
 
   defp write_prompt_tmpfile(prompt) do
     tmp =
