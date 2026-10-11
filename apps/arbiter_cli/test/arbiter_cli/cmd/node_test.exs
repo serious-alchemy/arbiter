@@ -408,6 +408,45 @@ defmodule ArbiterCli.Cmd.NodeTest do
       refute out =~ "idle"
     end
 
+    test "shows offered vs max, temperature, memory pressure and the derate reason (bd-6w7usy)" do
+      hot =
+        Map.merge(@live_node, %{
+          "contributes" => 1,
+          "offered" => 1,
+          "derate" => "hard",
+          "derate_reason" => "thermal 96 °C",
+          "temp_c" => 96.4,
+          "psi" => %{"some_avg10" => 12.5}
+        })
+
+      cool = Map.merge(@local, %{"offered" => 3, "derate" => "none", "temp_c" => 61.0})
+
+      stub_get("/api/nodes", %{"nodes" => [hot], "local" => cool, "total" => 4, "warnings" => []})
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+
+      [header, local_line, node_line, derate_line | _] = String.split(out, "\n")
+      assert header =~ "OFFERED" and header =~ "TEMP" and header =~ "PSI"
+      assert local_line =~ "61°C"
+      assert node_line =~ "box-1" and node_line =~ "96°C" and node_line =~ "12.5%"
+      assert derate_line =~ "hard" and derate_line =~ "thermal 96 °C" and derate_line =~ "1 of 2"
+      refute local_line =~ "derate"
+    end
+
+    test "a node that reports no sensing shows dashes, not zeros" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      [_header, _local, node_line | _] = String.split(out, "\n")
+      assert node_line =~ "box-1"
+      refute node_line =~ "0°C"
+    end
+
     test "prints the DC1 migration's advisory under the capacity line" do
       stub_get("/api/nodes", %{
         "nodes" => [Map.put(@live_node, "contributes", 2)],
