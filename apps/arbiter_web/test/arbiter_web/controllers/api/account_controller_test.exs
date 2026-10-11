@@ -87,6 +87,30 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
     end
   end
 
+  describe "PATCH /api/accounts/:ref (DC10 — budget_split)" do
+    test "sets queue or fair, and shows it on GET", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "split-me"})
+
+      assert %{"budget_split" => "fair"} =
+               json_response(
+                 patch(conn, ~p"/api/accounts/split-me", %{budget_split: "fair"}),
+                 200
+               )
+
+      assert %{"budget_split" => "fair"} =
+               json_response(get(conn, ~p"/api/accounts/split-me"), 200)
+    end
+
+    test "422s on anything else", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "split-bad"})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/split-bad", %{budget_split: "equal"}),
+               422
+             )
+    end
+  end
+
   describe "PATCH /api/accounts/:ref (P8 — the concurrency ceiling)" do
     test "sets max_concurrent", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "ceiling"})
@@ -506,6 +530,21 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
   end
 
   describe "POST /api/accounts/:ref/attach" do
+    test "weight is stored, defaults to 1, and 422s unless a positive integer (DC10)", %{
+      conn: conn
+    } do
+      create_account!(%{provider: :claude, slug: "attach-weight-rest"})
+      ws = create_workspace!("attach-weight-rest-ws")
+      path = ~p"/api/accounts/attach-weight-rest/attach"
+      params = %{"workspace_id" => ws.id, "provider" => "claude"}
+
+      assert %{"weight" => 1} = json_response(post(conn, path, params), 201)
+      assert %{"weight" => 4} = json_response(post(conn, path, Map.put(params, "weight", 4)), 201)
+      assert %{"weight" => 4} = json_response(post(conn, path, params), 201)
+
+      assert json_response(post(conn, path, Map.put(params, "weight", 0)), 422)
+    end
+
     test "attaches a workspace to an account", %{conn: conn} do
       account = create_account!(%{provider: :claude, slug: "attach-me"})
       ws = create_workspace!("attach-rest-ws")
