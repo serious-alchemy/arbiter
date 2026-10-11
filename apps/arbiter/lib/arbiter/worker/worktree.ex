@@ -569,7 +569,6 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   defp format_reason({_tag, msg}) when is_binary(msg), do: msg
-  defp format_reason(reason), do: inspect(reason)
 
   defp ensure_origin_ref(repo_path, base_branch) do
     ref = "refs/remotes/origin/" <> base_branch
