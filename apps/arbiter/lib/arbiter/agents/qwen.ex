@@ -65,6 +65,7 @@ defmodule Arbiter.Agents.Qwen do
 
   @behaviour Arbiter.Agents.Agent
 
+  alias Arbiter.Agents.Qwen.ConfigDir
   alias Arbiter.Agents.Qwen.SessionFile
   alias Arbiter.Agents.Qwen.Stream, as: QwenStream
   alias Arbiter.Agents.Qwen.Usage
@@ -143,7 +144,17 @@ defmodule Arbiter.Agents.Qwen do
     overridden = MapSet.new(overrides, &elem(&1, 0))
 
     Enum.reject(scrubbed, fn {k, _} -> MapSet.member?(overridden, k) end) ++
-      @static_env ++ overrides
+      @static_env ++ isolation_env(opts) ++ overrides
+  end
+
+  # The worker's own HOME / QWEN_HOME, read-only system settings and the
+  # phone-home switches. A home that cannot be prepared still points at the
+  # isolated path, never the operator's.
+  defp isolation_env(opts) do
+    case ConfigDir.env(opts) do
+      {:ok, env} -> env
+      {:error, _} -> ConfigDir.isolation_env(ConfigDir.path(opts), opts)
+    end
   end
 
   defp endpoint_env(opts) do

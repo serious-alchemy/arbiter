@@ -163,6 +163,22 @@ defmodule Arbiter.Worker.JailHideTest do
       assert grok_root in dirs
     end
 
+    test "masks the operator's ~/.qwen and ~/.agents and every worker's qwen HOME (bd-2m67fw)",
+         %{fx: fx} do
+      h = fx.home
+      File.mkdir_p!(Path.join(h, ".qwen"))
+      File.mkdir_p!(Path.join(h, ".agents/skills"))
+      File.write!(Path.join(h, ".qwen/oauth_creds.json"), "SECRET-qwen")
+      qwen_root = Path.join(h, ".cache/arbiter/worker-qwen")
+      File.mkdir_p!(Path.join(qwen_root, "sibling/.qwen"))
+
+      %{dirs: dirs} = Hide.paths([{:qwen_home_root, qwen_root} | fx.opts])
+
+      assert Path.join(h, ".qwen") in dirs
+      assert Path.join(h, ".agents") in dirs
+      assert qwen_root in dirs
+    end
+
     test "skips paths that do not exist (bwrap cannot create a mount point there)",
          %{fx: fx} do
       %{dirs: dirs, files: files} = Hide.paths(fx.opts)
