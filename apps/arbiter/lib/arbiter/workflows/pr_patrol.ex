@@ -123,7 +123,6 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
   alias Arbiter.Workflows.PRPatrolSupervisor
   require Ash.Query
@@ -443,7 +442,8 @@ defmodule Arbiter.Workflows.PRPatrol do
          ) do
       {reason, extra_protocol, fingerprint} when is_binary(reason) ->
         if ci_follow_up?(extra_protocol) and
-             (fix_pass_in_flight?(pr_number, state) or merge_owns_ci?(pr_number, state)) do
+             (merge_owns_ci?(pr_number, state, reason, extra_protocol) or
+                fix_pass_in_flight?(pr_number, state)) do
           {state, false}
         else
           file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
@@ -481,42 +481,69 @@ defmodule Arbiter.Workflows.PRPatrol do
     _ -> false
   end
 
-  # bd-8r2iat: a PR whose ticket is in `:merging` is the merge Watchdog's — it
-  # polls the PR and runs the CI fix pass (`fixing_ci`) itself, and the ReviewGate
-  # owns the in_review window (`review_gate_holds?/2`). A CI follow-up filed here
-  # duplicates that, and a research worker has no CI tools to triage with
-  # (PR #705: bd-b6ct5l). Deduped by `pr_ref`, like `fix_pass_in_flight?/2`.
-  defp merge_owns_ci?(pr_number, state) do
+  # ticket (backlog / queued / active / merging / verifying) is that ticket's to
+  # fix — the merge Watchdog, the ReviewGate's CI wait, a coordinator-directed
+  # fix round, or a run the Reconciler is about to resume after a restart. A
+  # research follow-up beside it duplicates the work and has no CI tools to
+  # triage with (PR #705: bd-b6ct5l; PR #747: bd-d72qd7). The CI summary goes to
+  # the owning ticket's mailbox instead. Closed or unowned PRs (external) file
+  # as before: `authoring_task/3` never returns a closed ticket.
+  defp merge_owns_ci?(pr_number, state, reason, extra_protocol) do
     case GateActivity.authoring_task(state.workspace_id, to_string(pr_number), state.repo) do
-      %Issue{id: task_id, state: :merging} ->
+      %Issue{id: task_id, state: task_state} = task ->
         Logger.info(
           "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
-            "task #{task_id} is in Merging and the merge Watchdog owns its CI"
+            "task #{task_id} (#{task_state}) owns the PR; mailing it the CI summary"
         )
 
+        mail_owner(task, pr_number, state, reason, extra_protocol)
         true
-
-      # bd-cfucyv: a ticket whose ReviewGate is waiting on CI is stored `:active`
-      # (it only reads as Merging / awaiting_ci on the board), and after a
-      # restart no run is live to say so — the unexpired `ci_wait` marker is the
-      # durable record that the gate is handling this red CI.
-      %Issue{id: task_id} = task ->
-        if is_nil(ReviewCi.waiting(task)) do
-          false
-        else
-          Logger.info(
-            "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
-              "task #{task_id}'s ReviewGate is waiting on CI"
-          )
-
-          true
-        end
 
       _ ->
         false
     end
   rescue
     _ -> false
+  end
+
+  # One unread mailbox note per PR: patrol re-ticks every interval and
+  # the same red CI must not stack up duplicates in the ticket's inbox.
+  defp mail_owner(%Issue{id: task_id}, pr_number, state, reason, extra_protocol) do
+    subject = "CI failing on #{state.repo} PR ##{pr_number}"
+
+    body =
+      "PRPatrol saw #{state.repo} PR ##{pr_number} trigger: #{reason}. " <>
+        "This ticket owns the PR, so no follow-up task was filed; handle it here.\n\n" <>
+        extra_protocol
+
+    already_sent? =
+      Message
+      |> Ash.Query.filter(
+        to_ref == ^task_id and from_ref == "pr-patrol" and
+          subject == ^subject and is_nil(read_at) and is_nil(cleared_at)
+      )
+      |> Ash.read!()
+      |> Enum.any?()
+
+    if not already_sent? do
+      Message.send_mail(%{
+        to_ref: task_id,
+        from_ref: "pr-patrol",
+        workspace_id: state.workspace_id,
+        task_ref: task_id,
+        subject: subject,
+        body: body
+      })
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "PRPatrol: could not mail CI summary to #{task_id}: " <> Exception.message(e)
+      )
+
+      :ok
   end
 
   defp fix_pass_running?(task_id) do

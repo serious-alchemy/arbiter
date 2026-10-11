@@ -45,6 +45,22 @@ defmodule ArbiterCli.FanOutTest do
       assert FanOut.count_peers(proc_root: root) == 2
     end
 
+    # bd-59m96o: in a worker container `arb` is a launcher that runs the
+    # escript mounted beside it as `arb.escript`.
+    test "counts arb VMs a worker container's launcher started, and no other escript" do
+      in_container =
+        List.replace_at(@arb_cmdline, 6, "/opt/arbiter/cli/arb.escript")
+
+      root =
+        fake_proc([
+          {1, in_container},
+          {2, List.replace_at(@arb_cmdline, 6, "/usr/local/bin/rebar3")},
+          {3, List.replace_at(@arb_cmdline, 6, "/tmp/arb.escript.d/other")}
+        ])
+
+      assert FanOut.count_peers(proc_root: root) == 1
+    end
+
     test "fails open (0) when /proc is unavailable" do
       assert FanOut.count_peers(proc_root: "/nonexistent/proc") == 0
     end

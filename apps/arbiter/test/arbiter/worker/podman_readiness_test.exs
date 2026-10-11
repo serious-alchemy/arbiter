@@ -3,6 +3,7 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
   # no podman at all.
   use ExUnit.Case, async: true
 
+  alias Arbiter.Test.ArbEscriptFixture
   alias Arbiter.Worker.PodmanReadiness
 
   @info %{
@@ -53,6 +54,9 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
           cmd == "podman" and Enum.take(args, 2) == ["image", "exists"] ->
             "podman image exists"
 
+          cmd == "podman" and Enum.take(args, 2) == ["image", "inspect"] ->
+            "podman image inspect"
+
           true ->
             Enum.join([cmd | args], " ")
         end
@@ -78,11 +82,15 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
     end
   end
 
+  # The arb check reads the host's arb and the configured worker image unless
+  # told otherwise; these name none, so the host never decides an outcome.
   defp diagnose(runner_overrides \\ %{}, files \\ %{}) do
     PodmanReadiness.diagnose(
       runner: runner(runner_overrides),
       read_file: read_file(files),
-      user: "ryan"
+      user: "ryan",
+      arb_path: nil,
+      worker_image: nil
     )
   end
 
@@ -327,5 +335,116 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
 
     report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
     assert check(report, "socket_bridge").status == "ok"
+  end
+
+  # bd-59m96o: will `arb` run inside worker containers?
+  describe "arb_runtime" do
+    @describetag :tmp_dir
+
+    defp arb_report(opts, overrides \\ %{}) do
+      PodmanReadiness.diagnose(
+        [runner: runner(overrides), read_file: read_file(), user: "ryan", probes: [:arb]] ++ opts
+      )
+    end
+
+    test "an arb with its build stamp runs on the base image's runtime for that release", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+      c = check(arb_report(arb_path: arb, worker_image: nil), "arb_runtime")
+
+      assert c.status == "ok"
+      assert c.detail =~ "built on Erlang/OTP 29"
+      assert c.detail =~ "/opt/arbiter/otp"
+    end
+
+    test "no arb on the host is a warning, not a failure" do
+      report = arb_report(arb_path: nil, worker_image: nil)
+      c = check(report, "arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "no `arb`"
+      assert c.hint =~ "arb self-update"
+      assert report.ready
+    end
+
+    test "an arb that does not say what it was built on is a warning naming the fix", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: nil)
+      c = check(arb_report(arb_path: arb, worker_image: nil), "arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ arb
+      assert c.detail =~ "OTP #{System.otp_release()}"
+      assert c.hint =~ "arb self-update"
+    end
+
+    test "a configured worker image with no runtime for arb is flagged", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      report =
+        arb_report([arb_path: arb, worker_image: "localhost/custom:1"], %{
+          "podman image inspect" => {"<no value>\n", 0}
+        })
+
+      c = check(report, "arb_runtime")
+      assert c.status == "warn"
+      assert c.detail =~ "localhost/custom:1 carries no runtime for arb"
+      assert c.detail =~ "OTP 29 or newer"
+      assert c.hint =~ "ARBITER_BASE"
+      assert report.ready
+    end
+
+    test "a configured worker image whose runtime is older than arb is flagged", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/old:1"]
+        |> arb_report(%{"podman image inspect" => {"27\n", 0}})
+        |> check("arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "carries an OTP 27 runtime for arb"
+    end
+
+    test "a configured worker image whose runtime loads arb is ok", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/new:1"]
+        |> arb_report(%{"podman image inspect" => {"29\n", 0}})
+        |> check("arb_runtime")
+
+      assert c.status == "ok"
+      assert c.detail =~ "localhost/new:1"
+    end
+
+    test "a configured worker image that cannot be inspected is a warning", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/gone:1"]
+        |> arb_report(%{"podman image inspect" => {"Error: no such image\n", 125}})
+        |> check("arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "no such image"
+    end
+
+    test "the doctor's default probes run it; the spawn gate's and a node's do not" do
+      base = [runner: runner(), read_file: read_file(), user: "ryan"]
+      quiet = [arb_path: nil, worker_image: nil]
+
+      assert check(PodmanReadiness.diagnose(base ++ quiet), "arb_runtime")
+      refute check(PodmanReadiness.diagnose(base ++ quiet ++ [probes: []]), "arb_runtime")
+
+      refute check(
+               PodmanReadiness.diagnose(base ++ quiet ++ [probes: PodmanReadiness.node_probes()]),
+               "arb_runtime"
+             )
+    end
   end
 end
