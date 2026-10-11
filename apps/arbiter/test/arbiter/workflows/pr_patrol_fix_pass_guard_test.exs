@@ -23,6 +23,7 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
 
   require Ash.Query
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Test.StubResumeDeferrer
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
@@ -260,7 +261,7 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
 
   test "the CI follow-up is filed as before when no fix pass is queued or running",
        %{ws: ws} do
-    _task = authored_task(ws)
+    _ = put_state!(authored_task(ws), :closed)
     Req.Test.stub(@stub_name, ci_failing_stub())
     StubResumeDeferrer.reset()
 
@@ -273,6 +274,7 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
 
   test "a queued non-fix-pass resume does not hold back the CI follow-up", %{ws: ws} do
     task = authored_task(ws)
+    _ = put_state!(task, :closed)
     Req.Test.stub(@stub_name, ci_failing_stub())
     StubResumeDeferrer.reset()
     :ok = StubResumeDeferrer.defer_resume(task.id, :resume_session, [])
@@ -338,6 +340,7 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
   test "an expired ci_wait marker no longer holds back the CI follow-up", %{ws: ws} do
     task = authored_task(ws)
     put_ci_wait!(task, -60)
+    _ = put_state!(task, :closed)
     Req.Test.stub(@stub_name, ci_failing_stub())
     StubResumeDeferrer.reset()
 
@@ -345,6 +348,79 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
     :ok = PRPatrol.tick(name)
 
     assert [%Issue{}] = follow_ups()
+  end
+
+  # bd-8ztyal: any non-closed owner keeps the follow-up away and gets the CI
+  # summary in its mailbox — an active fix round, a run pending resume after a
+  # restart, or a not-yet-started ticket.
+  defp owner_mail(task_id) do
+    Message |> Ash.Query.filter(to_ref == ^task_id) |> Ash.read!()
+  end
+
+  test "an active ticket with a fix round running gets the CI summary, no follow-up",
+       %{ws: ws} do
+    task = authored_task(ws)
+    start_fix_pass_run(task, ws)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+    assert [%Message{body: body}] = owner_mail(task.id)
+    assert body =~ "mix test"
+  end
+
+  test "an active ticket whose interrupted run awaits resume after boot gets mail, no follow-up",
+       %{ws: ws} do
+    task = authored_task(ws)
+    assert Worker.whereis(task.id) == nil
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+    :ok = StubResumeDeferrer.defer_resume(task.id, :resume_session, [])
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+    assert [%Message{}] = owner_mail(task.id)
+  end
+
+  test "an active ticket with no run at all still owns the PR", %{ws: ws} do
+    task = authored_task(ws)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+    assert [%Message{}] = owner_mail(task.id)
+  end
+
+  test "a backlog ticket owning the PR gets the mail, no follow-up", %{ws: ws} do
+    task = authored_task(ws)
+    _ = put_state!(task, :backlog)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+    assert [%Message{}] = owner_mail(task.id)
+  end
+
+  test "the same CI summary is mailed to the owner only once across ticks", %{ws: ws} do
+    task = authored_task(ws)
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+    :ok = PRPatrol.tick(name)
+
+    assert [%Message{}] = owner_mail(task.id)
   end
 
   test "a CI follow-up is still filed when the owning ticket is closed", %{ws: ws} do
@@ -372,7 +448,7 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
   end
 
   test "a filed CI follow-up carries the failing job and its log excerpt", %{ws: ws} do
-    _task = authored_task(ws)
+    _ = put_state!(authored_task(ws), :closed)
     base = ci_failing_stub()
 
     Req.Test.stub(@stub_name, fn conn ->
