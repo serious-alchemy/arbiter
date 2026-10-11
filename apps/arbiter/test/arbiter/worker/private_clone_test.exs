@@ -394,6 +394,45 @@ defmodule Arbiter.Worker.PrivateCloneTest do
 
       refute File.exists?(ctx.review_path)
     end
+
+    test "discard/2 removes it syncing nothing back, whatever its own .git says (bd-c7lx65)",
+         ctx do
+      {:ok, path} =
+        PrivateClone.create_review(ctx.checkout, ctx.head, path: ctx.review_path, base: "main")
+
+      leaf = Path.basename(path)
+      # A container handed it puts it on the ledger.
+      {:ok, _mounts} = PrivateClone.mounts(path)
+      ledger = Path.join(Path.expand(ctx.worktree_root) <> ".private-clones", leaf)
+      assert File.exists?(ledger)
+
+      heads = fn ->
+        git!(ctx.checkout, [
+          "for-each-ref",
+          "--format=%(refname) %(objectname)",
+          "refs/heads",
+          "refs/remotes"
+        ])
+      end
+
+      before = heads.()
+
+      # What a model that could write the clone's .git would leave: markers
+      # that make `remove/1` carry a branch of its choosing into the main repo.
+      commit_in(path, %{"lib/x.ex" => "x\n"}, "smuggled")
+      git!(path, ["branch", "smuggled", "HEAD"])
+      git!(path, ["config", "--unset", "arbiter.readOnly"])
+      git!(path, ["config", "arbiter.branch", "smuggled"])
+      assert :ok = PrivateClone.verify(path), "the markers are not what verify/1 checks"
+
+      assert :ok = PrivateClone.discard(path, ctx.checkout)
+
+      refute File.exists?(path)
+      refute File.exists?(ledger)
+      assert pins(ctx.checkout, leaf) == []
+      assert heads.() == before
+      assert :ok = PrivateClone.discard(path, ctx.checkout)
+    end
   end
 
   describe "remove/1" do

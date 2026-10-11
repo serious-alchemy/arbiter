@@ -33,7 +33,10 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   # The budget's own modules, the supervision tree that starts its server, and
   # the scheduler walk's inputs (DC6, read only under shadow and enforce).
   # `quota/history.ex` only records the published figure on each snapshot row
-  # (bd-9ntll1); it gates nothing.
+  # (bd-9ntll1); it gates nothing. `loop/replay/admission.ex` (R15, bd-c7lx65)
+  # reads `explore/2` to admit an operator-run offline replay into expiring
+  # headroom; it gates only replays, never a dispatch, and
+  # `Arbiter.Loop.ReplayIsolationTest` pins that no live path names it.
   @allowed ~w(
     arbiter/quota/budget.ex
     arbiter/quota/budget/server.ex
@@ -43,6 +46,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     arbiter/application.ex
     arbiter/board/walk_inputs.ex
     arbiter/board/capacity_view.ex
+    arbiter/loop/replay/admission.ex
   )
 
   defp source_files(root) do

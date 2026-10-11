@@ -57,6 +57,8 @@ defmodule Arbiter.Loop do
     # AshPaperTrail version rows for PendingWrite.
     resource PendingWrite.Version
     resource FlakeEvent
+    # R15 (bd-c7lx65): offline replays of closed tasks, their own evidence source.
+    resource Arbiter.Loop.ReplayRun
   end
 
   # The documented fleet-wide evidence bar (docs/loop-review.md): ≥ 3 incidents

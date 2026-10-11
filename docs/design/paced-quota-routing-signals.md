@@ -1305,6 +1305,56 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   leaving permissioned tasks out of both arms. Auto-revert, expiry, the kill
   switch and `canary_auto_promote: false` are the routing canary's, unchanged. A
   promote merges the rows into the live matrix; a revert or expiry writes nothing.
+- **R15 as built (bd-c7lx65).** `Loop.Replay.run/1` replays one closed task on a
+  chosen (account, model). `Loop.Replay.Subject` takes a task closed `completed`
+  with no permissions; the account must be attached to the task's workspace, so
+  the run spends the pool it was admitted on. Neither the base nor the merge
+  commit is recorded, so the known-good change is the PR head the ticket
+  recorded (`merger_status`, `merge_watch`, `last_reviewed_sha`) against where it
+  left the target branch, else the commit the PR squash-merged as (`Title (#N)`),
+  whose first parent is the base. A replayed model is untrusted, so every model a
+  replay runs is OS-confined (its adapter's `egress_confinement/1` is `:os_jail`:
+  a container, or agy's network jail; Claude on the host has only its permission
+  layer) or the runner's `layout/2` refuses it before admission, with no record;
+  a reviewer whose review backend would be unjailed runs in the implementer's
+  container instead. `Loop.Replay.Admission` reads `Budget.explore/2`
+  of the published budget of both pools a replay draws on, the replayed model's
+  and the scoring reviewer's (by default the fleet's: the cross-family projection,
+  else the workspace's reviewer): it starts only while `running + 1 ≤ explore` on
+  each, and the reviewer's pool is admitted again before the review spends. A
+  `:running` record holds its seats until it finishes or its `deadline_at` (both
+  runs' timeouts, the tests' budget, slack) passes. It runs in a checkout at the
+  base, seeded before any model runs, where the merged change is unreachable
+  (`Loop.Replay.Sandbox`: its own `.git` holding its own copy of the base's
+  history, one ref, no remote; for a container, a read-only `PrivateClone` review
+  clone whose `origin` leads nowhere), through the live spawn path
+  (`Loop.Replay.CliRunner`: the adapter's argv under the workspace's policy and
+  guardrail floor, at the thinking level a dispatch would use,
+  `ClaudeSession.port_args/6`, a deadline), with only the account's credential
+  and fences on `arb`, `gh`/`glab` and git in its env. Host git runs in the
+  checkout only while it is as the harness left it (the sandbox's sealed config;
+  the clone's `verify/1` and `arbiter.*` markers), else the replay fails, and a
+  clone goes with `PrivateClone.discard/2`, which syncs nothing back. The score
+  (`Loop.Replay.Score`) is the live ReviewGate prompt's round-1 verdict read by
+  the live `converged` rule (without the live verdict re-prompt), the repo's
+  pre-push recipe as its tests (only in the replayed model's container, as the
+  live gate runs it for a container run; `:not_run` on the host, since it runs the
+  model's code), and the overlap of files and added lines with the merged change.
+  Each replay is a `replay_runs` row (`Loop.ReplayRun`, with what each run drew),
+  its own source: nothing goes to `worker_runs`, `review_gate_rounds`,
+  `usage_events`, the ticket or the matrix; a replay whose node died is finished
+  as abandoned, and its checkout removed, by the next one.
+  `Loop.Replay.Evidence` summarises scored replays per
+  cell as `source: "replay"` with a weight (0.5 by default; O10). It runs in the
+  live node, which publishes the budgets (`bin/arbiter rpc
+  'Arbiter.Release.replay(…, async: true)'`); `Arbiter.Release.replay_report/1`,
+  `replay_candidates/1` and `mix arbiter.replay_report` read it.
+  `Loop.ReplayIsolationTest` pins that nothing live names it and that it calls no
+  merge, forge, tracker, dispatch or matrix path; with one eligible account,
+  routing, the gate and the seats are unchanged while replays are recorded or
+  running. One gap is left, in the score's validity rather than in what a replay
+  can reach: a container mounts the main repo's object store (its clone borrows
+  it), so a model in one that lists every object can find the merged change.
 
 - **Phase 1 delivers value with no learned model.** R4, R5, R6, R7 and R8 add
   the capability matrix and floors as hard gates, the headroom price, and the

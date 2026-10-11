@@ -11,6 +11,9 @@ defmodule Arbiter.Release do
   alias Arbiter.Agents.Routing.ShadowReport
   alias Arbiter.Board.AdmissionShadowReport
   alias Arbiter.Loop.CompetenceGenerator
+  alias Arbiter.Loop.Replay
+  alias Arbiter.Loop.Replay.Evidence, as: ReplayEvidence
+  alias Arbiter.Loop.Replay.Subject, as: ReplaySubject
   alias Arbiter.Loop.Scarcity.Draw
   alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Settings
@@ -329,6 +332,94 @@ defmodule Arbiter.Release do
         IO.puts(:stderr, "competence matrix rollback failed: #{inspect(reason)}")
         error
     end
+  end
+
+  @doc """
+  Replay one closed task on another model, offline (bd-c7lx65, R15 of
+  `docs/design/paced-quota-routing-signals.md` §7.2-§7.3): in an isolated
+  checkout at the task's base commit, with no PR and no merge, scored against
+  the change that merged (`Arbiter.Loop.Replay.run/1`, whose options these
+  are). It is admitted only into expiring headroom, which the live node
+  publishes, so run it there:
+
+      bin/arbiter rpc 'Arbiter.Release.replay(task_id: "bd-…", account: "claude:default", model: "claude-sonnet-5-5", async: true)'
+
+  `async: true` starts it under the app's task supervisor and returns
+  `{:started, pid}` at once (or the refusal, when it cannot be replayed at
+  all); `replay_report/1` shows the outcome. Without it the call returns the
+  replay's result when it finishes, which can take the implement, test and
+  review budgets. Pick the task with `replay_candidates/1`.
+  """
+  @spec replay(keyword()) :: Replay.result() | {:started, pid()} | {:error, term()}
+  def replay(opts) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+    opts = Keyword.delete(opts, :start)
+
+    if Keyword.get(opts, :async, false) do
+      case Replay.start(Keyword.delete(opts, :async)) do
+        {:ok, pid} ->
+          IO.puts(
+            "replay of #{opts[:task_id]} started (#{inspect(pid)}); " <>
+              "see Arbiter.Release.replay_report()"
+          )
+
+          {:started, pid}
+
+        {:error, reason} = error ->
+          IO.puts(:stderr, "replay not started: #{inspect(reason)}")
+          error
+      end
+    else
+      result = Replay.run(opts)
+      IO.puts(ReplayEvidence.describe(result))
+      result
+    end
+  end
+
+  @doc """
+  Print the offline replay report (bd-c7lx65, R15): replays by state, the
+  replay evidence per competence cell (its own source, never read into the
+  live matrix), and the latest replays with their outcome or refusal.
+  Read-only; starts only the repo.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days),
+  `:workspace_id`, `:weight` and `:start` (default `true`).
+
+      bin/arbiter eval 'Arbiter.Release.replay_report()'
+  """
+  @spec replay_report(keyword()) :: ReplayEvidence.report()
+  def replay_report(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    report =
+      opts |> Keyword.take([:since, :until, :workspace_id, :weight]) |> ReplayEvidence.report()
+
+    IO.puts(ReplayEvidence.format(report))
+    report
+  end
+
+  @doc """
+  Print the closed, completed tickets an offline replay could take (bd-c7lx65,
+  R15), newest close first, each with where it would replay from or why it
+  cannot (permissions, no known-good result, …). Read-only; starts only the
+  repo.
+
+  Options: `:workspace_id`, `:repo`, `:difficulty`, `:issue_type`, `:limit`
+  (default 20) and `:start` (default `true`).
+
+      bin/arbiter eval 'Arbiter.Release.replay_candidates(difficulty: 2)'
+  """
+  @spec replay_candidates(keyword()) :: [{Arbiter.Tasks.Issue.t(), term()}]
+  def replay_candidates(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    candidates =
+      opts
+      |> Keyword.take([:workspace_id, :repo, :difficulty, :issue_type, :limit])
+      |> ReplaySubject.candidates()
+
+    IO.puts(ReplayEvidence.format_candidates(candidates))
+    candidates
   end
 
   @doc """
