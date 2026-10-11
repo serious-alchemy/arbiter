@@ -124,8 +124,58 @@ defmodule Arbiter.NodeAgent.Checkout do
   end
 
   defp build_shadow(store, shadow, branch, base, shas) do
+    kept = stash_ignored(shadow)
     File.rm_rf!(shadow)
     File.mkdir_p!(Path.dirname(shadow))
+
+    try do
+      init_shadow(store, shadow, branch, base, shas)
+    after
+      unstash_ignored(kept, shadow)
+    end
+  end
+
+  # A run re-placed under the same id (the pre-push nudge's respawn) is seeded over
+  # the shadow its first session left. The git-ignored top-level directories there
+  # (`deps/`, `_build/`, `node_modules/`) are what the agent fetched and compiled,
+  # and the pre-push recipe, which runs with no network, needs them (bd-4ld609):
+  # they are set aside across the rebuild. Everything else is rebuilt from the seed.
+  defp stash_ignored(shadow) do
+    dot_git = Path.join(shadow, ".git")
+    stash = shadow <> ".ignored"
+    File.rm_rf!(stash)
+
+    with true <- File.dir?(dot_git),
+         {:ok, out} <-
+           Git.run(
+             ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+             git_dir: dot_git,
+             work_tree: shadow
+           ) do
+      names =
+        for line <- String.split(out, "\n", trim: true),
+            name = String.trim_trailing(line, "/"),
+            name != "" and not String.contains?(name, "/") and name != ".git",
+            File.dir?(Path.join(shadow, name)),
+            do: name
+
+      File.mkdir_p!(stash)
+      Enum.each(names, &File.rename!(Path.join(shadow, &1), Path.join(stash, &1)))
+      {stash, names}
+    else
+      _ -> {stash, []}
+    end
+  end
+
+  defp unstash_ignored({stash, names}, shadow) do
+    for name <- names, File.dir?(shadow), not File.exists?(Path.join(shadow, name)) do
+      File.rename!(Path.join(stash, name), Path.join(shadow, name))
+    end
+
+    File.rm_rf!(stash)
+  end
+
+  defp init_shadow(store, shadow, branch, base, shas) do
     dot_git = Path.join(shadow, ".git")
 
     with {:ok, _} <- Git.run(["init", "-q", "-b", branch, shadow]),

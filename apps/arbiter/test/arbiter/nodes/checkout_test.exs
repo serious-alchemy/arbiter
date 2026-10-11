@@ -121,6 +121,29 @@ defmodule Arbiter.Nodes.CheckoutTest do
     end
   end
 
+  describe "re-seeding a shadow (a run re-placed after a pre-push nudge)" do
+    # The pre-push recipe runs in the shadow with no network, so the deps the first
+    # session fetched (git-ignored `deps/`, `_build/`) must survive the re-seed.
+    test "keeps the git-ignored build dirs, drops every other leftover", c do
+      File.write!(Path.join(c.home, ".gitignore"), "/deps/\n/_build/\n")
+      commit_all!(c.home, "ignore build dirs")
+
+      %{shadow: shadow} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, "deps/foo"))
+      File.write!(Path.join(shadow, "deps/foo/mix.exs"), "deps\n")
+      File.mkdir_p!(Path.join(shadow, "_build/test"))
+      File.write!(Path.join(shadow, "_build/test/x.beam"), "beam\n")
+      File.write!(Path.join(shadow, "stray.txt"), "stray\n")
+
+      %{shadow: ^shadow} = seed!(c)
+
+      assert File.read!(Path.join(shadow, "deps/foo/mix.exs")) == "deps\n"
+      assert File.read!(Path.join(shadow, "_build/test/x.beam")) == "beam\n"
+      refute File.exists?(Path.join(shadow, "stray.txt"))
+      assert File.exists?(Path.join(shadow, ".git"))
+    end
+  end
+
   describe "round trip" do
     test "exec bits, symlinks, deletions, renames and uncommitted work survive", c do
       %{shadow: shadow, info: info} = seed!(c)
