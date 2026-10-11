@@ -59,7 +59,7 @@ defmodule Arbiter.Machine.Alerting do
   defp workspace_id do
     case Ash.read(Workspace) do
       {:ok, [_ | _] = workspaces} ->
-        workspaces |> Enum.min_by(& &1.inserted_at, DateTime) |> Map.fetch!(:id)
+        workspaces |> Enum.min_by(& &1.created_at, DateTime) |> Map.fetch!(:id)
 
       _ ->
         nil

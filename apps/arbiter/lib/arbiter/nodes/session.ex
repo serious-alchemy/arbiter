@@ -1379,6 +1379,8 @@ defmodule Arbiter.Nodes.Session do
   # ---- heartbeat -----------------------------------------------------------
 
   defp stamp(state, payload) do
+    before = state.pressure
+
     state = %{
       state
       | last_hb: state.clock.(),
@@ -1395,6 +1397,8 @@ defmodule Arbiter.Nodes.Session do
       |> heartbeat_readiness(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
+
+    announce_derate(before, state)
 
     if state.state == :suspect do
       broadcast({:node_state, state.node_id, :online})
@@ -1418,6 +1422,36 @@ defmodule Arbiter.Nodes.Session do
   end
 
   defp pressure(_payload), do: nil
+
+  # bd-6w7usy: entering or leaving a hard derate tells the coordinator (an alert, not a
+  # shell watch). Off the session process: it writes to the database.
+  defp announce_derate(before, state) do
+    from = level_of(before)
+    to = level_of(state.pressure)
+
+    if from != to and :hard in [from, to] do
+      event = %{
+        machine: state.name || state.node_id,
+        from: from,
+        to: to,
+        snapshot: %{
+          level: to,
+          temp_c: state.pressure && state.pressure.temp_c,
+          reason_text: (state.pressure && state.pressure.reason) || (before && before.reason),
+          offered: length(Map.keys(state.runs))
+        }
+      }
+
+      Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
+        Arbiter.Machine.Alerting.transition(event)
+      end)
+    end
+
+    :ok
+  end
+
+  defp level_of(%{level: level}), do: level
+  defp level_of(_), do: :none
 
   defp number(n) when is_number(n), do: n
   defp number(_), do: nil

@@ -452,4 +452,52 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert %{derate: :none, offered: 4} = row(Overview.build(), "odd")
     end
   end
+
+  describe "hard-derate alerts from a node's heartbeat (bd-6w7usy)" do
+    alias Arbiter.Alerts
+    alias Arbiter.Nodes.Session
+    alias Arbiter.Tasks.Workspace
+
+    setup do
+      ws = Ash.create!(Workspace, %{name: "derate-alert-#{System.unique_integer([:positive])}"})
+      # The alert goes on the oldest workspace, which need not be this one: listen globally.
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(nil))
+      {:ok, ws: ws}
+    end
+
+    defp alert_for(name), do: Enum.find(Alerts.active(kind: :machine_derate), &(&1.key == name))
+
+    test "entering hard raises the machine_derate alert; leaving it clears it" do
+      node = enroll!("furnace")
+      connect!(node)
+      pid = Registry.lookup(node.id)
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "derate" => "soft", "temp_c" => 91.0})
+      refute alert_for("furnace")
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{
+          "seq" => 2,
+          "derate" => "hard",
+          "temp_c" => 96.0,
+          "derate_reason" => "thermal 96 °C"
+        })
+
+      # Raised from a task; its announcement is the signal.
+      assert_receive {:event, %{kind: "alert", event: "raised", alert_kind: "machine_derate"}},
+                     1_000
+
+      assert alert_for("furnace").subject =~ "thermal 96"
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 3, "derate" => "hard", "temp_c" => 96.5})
+      assert alert_for("furnace")
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 4, "derate" => "soft", "temp_c" => 88.0})
+
+      assert_receive {:event, %{kind: "alert", event: "cleared", alert_kind: "machine_derate"}},
+                     1_000
+
+      refute alert_for("furnace")
+    end
+  end
 end
