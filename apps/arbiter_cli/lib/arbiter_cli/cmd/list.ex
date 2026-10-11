@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.List do
   @moduledoc """
   `arb list [--state ...] [--type ...] [--priority N] [--difficulty N] [--labels ...]
-            [--tracker] [--workspace-id ID] [--json]`
+            [--tracker] [--with-deps] [--workspace-id ID] [--json]`
 
   Filters are passed through to `GET /api/issues` as query params
   (`--state` is the stored lifecycle state: backlog | queued | active |
@@ -10,7 +10,11 @@ defmodule ArbiterCli.Cmd.List do
   has no labels field — the flag is ignored with a stderr warning.
 
   Each row carries its lifecycle projection (`column`, `step`, `blocked_by`) —
-  see them with `--json`.
+  see them with `--json`. An epic row also carries `child_closed`/`child_total`.
+
+  `--with-deps` adds each row's `parent_id` (its parent epic, or null),
+  `depends_on` (ids gating it) and `blocks` (ids it gates) to the `--json`
+  output, read in one batch — use it instead of an `arb ticket show` per ticket.
 
   `--assignee` is deprecated (bd-1ozks5): it filtered the local `assignee`
   column, which no longer exists (Arbiter is a local single-user app). The
@@ -41,6 +45,7 @@ defmodule ArbiterCli.Cmd.List do
     workspace_id: :string,
     assignee: :string,
     tracker: :boolean,
+    with_deps: :boolean,
     json: :boolean
   ]
 
@@ -64,6 +69,7 @@ defmodule ArbiterCli.Cmd.List do
         |> put_if(:priority, opts[:priority])
         |> put_if(:difficulty, opts[:difficulty])
         |> put_if(:workspace_id, ws_id)
+        |> put_if(:include, if(opts[:with_deps], do: "parent,deps"))
 
       case fetch_tasks(params) do
         {:ok, tasks} ->

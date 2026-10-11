@@ -227,10 +227,20 @@ defmodule Arbiter.MCP.Catalog do
           "(`difficulty+type` / `difficulty` / `global` / `unrated_as_d2`) and " <>
           "`fallback_level` how coarse it is (0 = finest) — treat a coarse, small-`n` " <>
           "range as a hint, not a budget. Null when the ledger is too thin to say; " <>
-          "worker spend only, excluding coordinator-session overhead.",
+          "worker spend only, excluding coordinator-session overhead. A coordinator can pass " <>
+          "`ids` (an array) instead of `id` to read several tickets in one batch: the list-row " <>
+          "shape plus `parent_id`, `depends_on` and `blocks`, returned as `tasks`, with " <>
+          "unknown ids reported per id in `not_found`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
+          "ids" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Coordinator only: read these tickets in one call instead of `id`. Unknown ids " <>
+                "are listed in `not_found`; `full: true` returns the full record per ticket."
+          },
           "id" => %{
             "type" => "string",
             "description" =>
@@ -1952,7 +1962,10 @@ defmodule Arbiter.MCP.Catalog do
           "(all | exclude | only — ReviewPatrol review engagements, i.e. review_only tickets with a " <>
           "source_pr; default all, so nothing is hidden unless you ask). Each ticket carries " <>
           "`state`, `column`, `step`, `blocked_by` and `attention` — and, on a Ready card the " <>
-          "scheduler is holding, `hold_reason`.",
+          "scheduler is holding, `hold_reason`. An epic row carries `child_closed`/`child_total`. " <>
+          "Pass `include: \"parent,deps\"` to add each row's `parent_id` (its parent_of " <>
+          "parent or null), `depends_on` (ids gating it) and `blocks` (ids it gates), read in " <>
+          "one batch rather than a `ticket_show` per ticket.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1986,6 +1999,12 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "ReviewPatrol review engagements (review_only with a source_pr): all (default) | " <>
                 "exclude | only. A worker_review task or a PR follow-up is not an engagement."
+          },
+          "include" => %{
+            "type" => "string",
+            "description" =>
+              "Comma-separated extras per row: `parent` (adds parent_id), `deps` (adds " <>
+                "depends_on and blocks). Default none."
           }
         },
         "additionalProperties" => false
