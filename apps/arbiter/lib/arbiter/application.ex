@@ -146,6 +146,8 @@ defmodule Arbiter.Application do
         # `max_concurrent`, counted from admission until its worker registers —
         # see Arbiter.Accounts.Admission.
         {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
+        # DC9: the repo cap's reservations, the same pattern - see Arbiter.Worker.RepoCap.
+        {Registry, keys: :unique, name: Arbiter.Worker.RepoCap.Registry},
         # RW8: a dispatch placed on a node (or admitted onto the primary's own
         # cap), counted from placement until its worker registers — see
         # Arbiter.Nodes.Placement and Arbiter.Nodes.LocalCapacity.

@@ -68,6 +68,14 @@ defmodule Arbiter.Worker.Registry do
   and `model:`; both survive a rewrite that does not name them. Nothing on the
   admission path reads them.
 
+  `repo:` (DC9, `Arbiter.Worker.RepoCap`) stamps the repo the run works in, so
+  the repo cap counts implementer runs per (workspace, repo) from the registry
+  alone. It survives a rewrite too.
+
+  `repo:` (DC9, `Arbiter.Worker.RepoCap`) stamps the repo the run works in, so
+  the repo cap counts implementer runs per (workspace, repo) from the registry
+  alone. It survives a rewrite too.
+
   Must be called *from* the registered process; `Registry.update_value/3` only
   lets an owner rewrite its own value. A non-owner (or an unregistered key) is
   a no-op rather than an error — the dispatch context is an optimisation for
@@ -87,7 +95,8 @@ defmodule Arbiter.Worker.Registry do
         released: Keyword.get(opts, :released, false),
         node_id: stamped(opts, prior, :node_id, nil),
         account_id: stamped(opts, prior, :account_id, nil),
-        pool: stamped(opts, prior, :pool, pool_of(provider, Keyword.get(opts, :model)))
+        pool: stamped(opts, prior, :pool, pool_of(provider, Keyword.get(opts, :model))),
+        repo: stamped(opts, prior, :repo, nil)
       }
     end)
 
@@ -153,7 +162,8 @@ defmodule Arbiter.Worker.Registry do
             released: boolean(),
             node_id: String.t() | nil,
             account_id: String.t() | nil,
-            pool: String.t() | nil
+            pool: String.t() | nil,
+            repo: String.t() | nil
           }
         ]
   def live_dispatches do
@@ -171,7 +181,8 @@ defmodule Arbiter.Worker.Registry do
               released: Map.get(value, :released, false),
               node_id: Map.get(value, :node_id),
               account_id: Map.get(value, :account_id),
-              pool: Map.get(value, :pool)
+              pool: Map.get(value, :pool),
+              repo: Map.get(value, :repo)
             }
           ]
         else

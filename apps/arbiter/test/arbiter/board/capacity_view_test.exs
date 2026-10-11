@@ -265,10 +265,59 @@ defmodule Arbiter.Board.CapacityViewTest do
   end
 
   describe "repos and fair share" do
-    test "are empty until DC9/DC10 give them a cap" do
-      view = status()
+    alias Arbiter.Tasks.Workspace
+
+    defp ws(id, name, repos) do
+      config = %{
+        "worker" => %{
+          "repos" => Map.new(repos, fn {r, cap} -> {r, %{"max_concurrent" => cap}} end)
+        }
+      }
+
+      %Workspace{id: id, name: name, config: config}
+    end
+
+    test "are empty when no repo has a cap; fair share waits for DC10" do
+      view = status(workspaces: [ws("w1", "vstim", [])])
       assert view.repos == []
       assert view.fair_share == []
+    end
+
+    test "a capped repo shows its cap, the runs in it now and who holds them (DC9)" do
+      view =
+        status(
+          workspaces: [ws("w1", "vstim-ws", [{"vstim", 2}])],
+          repo_holders: %{{"w1", "vstim"} => ["bd-a", "bd-b:fixpass"], {"w1", "other"} => ["x"]}
+        )
+
+      assert [
+               %{
+                 repo: "vstim",
+                 label: "vstim",
+                 workspace: "vstim-ws",
+                 cap: 2,
+                 used: 2,
+                 free: 0,
+                 state: "full",
+                 holders: ["bd-a", "bd-b:fixpass"],
+                 change_command: command
+               }
+             ] = view.repos
+
+      assert command =~ "worker.repos.vstim.max_concurrent"
+    end
+
+    test "a repo with room is free; the same repo name in two workspaces is told apart" do
+      view =
+        status(
+          workspaces: [ws("w1", "a-ws", [{"vstim", 3}]), ws("w2", "b-ws", [{"vstim", 1}])],
+          repo_holders: %{{"w1", "vstim"} => ["bd-a"]}
+        )
+
+      assert [
+               %{label: "a-ws/vstim", used: 1, free: 2, state: "free"},
+               %{label: "b-ws/vstim", used: 0, free: 1, state: "free"}
+             ] = view.repos
     end
   end
 

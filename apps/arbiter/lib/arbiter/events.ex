@@ -65,6 +65,7 @@ defmodule Arbiter.Events do
   | `quota_pace_exempt` | A dispatch went ahead past its paced line on the P0 pace exemption (bd-6bxv7h). Carries `task_id`, `priority`, `provider`, `account` and `pace_exempt` (`window`, `used`, `paced`, `cap`) |
   | `slot_cap_override` | A resume of a task that released its slot went over a full concurrency cap via explicit `force` (bd-92mx1m) |
   | `account_cap_override` | A fresh dispatch went over a full provider account's cap via explicit `over_cap` (bd-8suxac). Carries `task_id`, `account`, `cap`, `holders`, `actor` |
+  | `repo_cap_override` | A fresh dispatch went over a full repo's cap (`worker.repos.<repo>.max_concurrent`, DC9) via explicit `over_cap`. Carries `task_id`, `repo`, `cap`, `holders`, `actor` |
   | `coverage_shadow` | P3 shadow mode: the review-coverage predicate and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
   | `gate_cap_hit`  | A gate escalated because its round / send-back budget ran out (bd-4qjl0q). Carries `task_id`, `gate`, `rounds` and `cap` (opt-in only) |
   | `conflict_review` | A head that followed an approved commit was classified by the conflict-resolution review path (bd-954ym8): `outcome` is `auto_cover` / `scoped_review` / `scoped_approved` / `scoped_rejected` / `fallback` (opt-in only) |
@@ -85,6 +86,7 @@ defmodule Arbiter.Events do
     * `Arbiter.Reviews.CoverageShadow.observe/1` → `:coverage_shadow`
     * `Arbiter.Worker.ResumeSlot.admit/2` → `:slot_cap_override`
     * `Arbiter.Accounts.Admission.admit/3` → `:account_cap_override`
+    * `Arbiter.Worker.RepoCap.admit/3` → `:repo_cap_override`
     * `Arbiter.Worker.ReviewGate` (round cap) and `Arbiter.Worker` (notes /
       commit gate send-back cap) → `:gate_cap_hit`
     * `Arbiter.ReviewGate.Resolutions.record/1` → `:gate_resolved`
@@ -112,7 +114,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass quota_pace_exempt slot_cap_override account_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed conflict_review)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass quota_pace_exempt slot_cap_override account_cap_override repo_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed conflict_review)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics
