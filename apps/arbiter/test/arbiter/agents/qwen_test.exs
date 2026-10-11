@@ -17,6 +17,8 @@ defmodule Arbiter.Agents.QwenTest do
       )
 
     bin = Path.join(base, "bin")
+    prev_root = Application.get_env(:arbiter, :worker_qwen_home_root)
+    Application.put_env(:arbiter, :worker_qwen_home_root, Path.join(base, "homes"))
     File.mkdir_p!(bin)
     File.write!(Path.join(bin, "qwen"), "#!/bin/sh\nexit 0\n")
     File.chmod!(Path.join(bin, "qwen"), 0o755)
@@ -26,6 +28,11 @@ defmodule Arbiter.Agents.QwenTest do
 
     on_exit(fn ->
       System.put_env("PATH", old_path)
+
+      if prev_root,
+        do: Application.put_env(:arbiter, :worker_qwen_home_root, prev_root),
+        else: Application.delete_env(:arbiter, :worker_qwen_home_root)
+
       File.rm_rf!(base)
     end)
 
@@ -112,6 +119,17 @@ defmodule Arbiter.Agents.QwenTest do
       assert {"QWEN_CODE_SUPPRESS_YOLO_WARNING", "1"} in env
       assert {"OPENAI_API_KEY", false} in env
       assert {"OPENAI_BASE_URL", false} in env
+    end
+
+    test "runs in an isolated HOME / QWEN_HOME with the phone-home switches set" do
+      env = Qwen.spawn_env(worktree: "/wt/x")
+      assert {"HOME", home} = List.keyfind(env, "HOME", 0)
+      refute home == System.user_home()
+      assert {"QWEN_HOME", Path.join(home, ".qwen")} in env
+      assert {"QWEN_CODE_MODELS_DEV", "off"} in env
+      assert {"QWEN_USAGE_STATISTICS_ENABLED", "false"} in env
+
+      assert {"QWEN_CODE_SYSTEM_SETTINGS_PATH", Path.join(home, ".qwen-system/settings.json")} in env
     end
 
     test "an endpoint passed in opts replaces the scrubbed vars" do

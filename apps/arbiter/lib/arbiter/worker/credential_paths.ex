@@ -15,7 +15,7 @@ defmodule Arbiter.Worker.CredentialPaths do
   safety net, not a jail; see the `Claude.Security` moduledoc.
   """
 
-  @dirs ~w(.claude .codex .grok .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
+  @dirs ~w(.claude .codex .grok .qwen .agents .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
   @files ~w(.netrc .pgpass .git-credentials)
 
   @doc "Credential directories, relative to the operator's home."

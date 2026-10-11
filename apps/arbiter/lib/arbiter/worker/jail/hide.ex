@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.Jail.Hide do
 
     * **Credential dirs** under the operator's home: `~/.claude`, `~/.codex`,
       `~/.grok` (the canonical grok login, whose refresh token only
-      `Arbiter.Grok.CredentialBroker` may hold), `~/.gemini` (the operator's own agy state; the worker has its isolated
+      `Arbiter.Grok.CredentialBroker` may hold), `~/.qwen` and `~/.agents` (the operator's qwen config and skills; a worker has its own `Qwen.ConfigDir` HOME), `~/.gemini` (the operator's own agy state; the worker has its isolated
       HOME), `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
       `~/.kube`, `~/.docker`; and the files `~/.netrc`, `~/.pgpass`,
       `~/.git-credentials`. `~/.grok` also holds the grok binary and its
@@ -87,7 +87,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   Options, all defaulting to the live configuration (the overrides are for
   tests): `:operator_home`, `:data_dir`, `:database`, `:accounts_root`,
   `:worktree_root`, `:log_root`, `:sessions_root`, `:agy_home_root`,
-  `:grok_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
+  `:grok_home_root`, `:qwen_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
   (the repo the worker's worktree belongs to, never hidden) and `:unmask`. `:scoped_git`
   (G16: the worker has a repo-scoped git credential, so no operator identity
   file — ssh key or gh login — is bound back).
@@ -196,6 +196,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       opt(opts, :log_root, &Paths.output_log_root/0),
       opt(opts, :agy_home_root, &Arbiter.Agents.Gemini.ConfigDir.home_root/0),
       opt(opts, :grok_home_root, &Arbiter.Agents.Grok.ConfigDir.home_root/0),
+      opt(opts, :qwen_home_root, &Arbiter.Agents.Qwen.ConfigDir.home_root/0),
       opt(opts, :claude_config_dir, &Arbiter.Agents.Claude.ConfigDir.path/0)
     ]
   end
