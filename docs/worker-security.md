@@ -258,6 +258,68 @@ validate its names, so the tool names are the ones grok printed in its own
 `system/init` (`run_terminal_command`, `write`, `search_replace`) or documents
 (`monitor`, `scheduler_*`); a misspelling would silently remove nothing.
 
+### Qwen (Qwen Code on Ollama): the permission layer is not the jail (bd-1hu98p, design bd-3km00p)
+
+Read this before running qwen workers on anything you care about. The honest
+summary: **qwen's own permission layer is a convenience, not a boundary. The
+boundary is `Arbiter.Worker.Jail`.**
+
+**Permission layer versus jail.**
+
+- *Headless shell needs yolo.* A non-interactive qwen run has nobody to answer an
+  approval prompt, so a shell tool call is either auto-approved (yolo) or never
+  runs. The qwen worker therefore runs in yolo mode, the equivalent of
+  `:bypass` for the other providers (see "Why `:bypass` is the headless-safe
+  default"). Yolo means qwen asks for nothing.
+- *Deny rules miss `bash -c`.* A deny rule such as `run_shell_command(git push)`
+  matches the command string qwen is about to run. It does not see through
+  `bash -c '…'`, `sh -c`, `eval`, a script the model just wrote, or an
+  interpreter one-liner (`python -c`). Do not read a qwen deny rule as "this
+  cannot happen"; read it as "the model is steered away from this". Unlike grok,
+  which looks inside a literal `bash -c` and checks every segment of a chain,
+  qwen gives no such guarantee.
+- *So the jail carries the weight.* Filesystem confinement (read-only root,
+  writable worktree and per-worker `HOME`, hidden secret paths, pid namespace)
+  applies to every process qwen spawns, whatever string launched it. Use
+  `security.mode: strict` where you need it to fail closed, and treat the
+  deny-style policies (`:no_force_push`, `:no_pr_create`, …) as best effort for
+  qwen. The network and credential limits are the jail's and the worker
+  environment allowlist's, not qwen's.
+
+**Repo-config vectors.** qwen reads configuration from the checked-out
+repository, and the worker is working in a repo whose content a task author, a
+dependency or a previous worker may have written. Anything qwen loads from the
+worktree is therefore an instruction channel the operator did not write:
+
+- `.mcp.json` (and qwen's project settings) can declare MCP servers, which
+  qwen starts as local processes or connects to as remote tools. A hostile
+  `.mcp.json` is arbitrary command execution under yolo, with whatever the
+  jail allows and nothing more.
+- Skills, custom commands and context files (`QWEN.md` and similar) in the repo
+  are loaded into the prompt or offered as tools, so they can steer the model
+  into the actions above.
+
+Mitigations are the same shape as everywhere else: the jail bounds what such a
+process can touch; review changes to those files like code that runs on the
+host; and do not point qwen workers at repos you do not trust more than the
+credentials you have put in reach of the jail.
+
+**Ollama context requirement.** qwen's system prompt and tool definitions are
+about 15–19K tokens. Ollama's default context window is 4096 tokens and it
+truncates silently: there is no error, the model simply never sees most of the
+instructions and behaves erratically. Start the Ollama server with
+`OLLAMA_CONTEXT_LENGTH=24576` or higher (at least 24576) before dispatching qwen
+workers, and raise it further for long tasks, accounting for the extra memory.
+
+**Background-shell rule.** A qwen worker must not start background shell
+processes (`&`, `nohup`, a detached dev server) and then end its turn to wait
+for them: the session is headless, ending the turn ends the run, and the
+background process is killed with it or leaks. The qwen prompt tells the worker
+to run every command in the foreground, bounded by `timeout`, and to finish
+long checks before declaring done. This is a prompt rule, not an enforced one;
+the same `:no_async_wait` intent that removes `Monitor`/`ScheduleWakeup` from
+other providers has no tool to remove here.
+
 ### Sandbox
 
 `filesystem: :worktree` keeps file access scoped to the handed worktree;
