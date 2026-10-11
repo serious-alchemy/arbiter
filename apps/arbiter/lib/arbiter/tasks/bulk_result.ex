@@ -72,6 +72,22 @@ defmodule Arbiter.Tasks.BulkResult do
     end
   end
 
+  @doc """
+  Guard for a bulk update: `notes` REPLACES the field, so replacing it on several
+  tickets at once needs an explicit `confirm_replace_notes: true`. (`append_notes`
+  is always fine in bulk.)
+  """
+  @spec check_notes_replace(map()) :: :ok | {:error, String.t()}
+  def check_notes_replace(params) do
+    if Map.has_key?(params, "notes") and params["confirm_replace_notes"] not in [true, "true"] do
+      {:error,
+       "`notes` replaces the field on every id: pass `confirm_replace_notes: true` to do that " <>
+         "in bulk, or use `append_notes`"}
+    else
+      :ok
+    end
+  end
+
   @doc "Apply `fun` to each id in order and build the overall response."
   @spec run([String.t()], (String.t() -> {:ok, term()} | {:error, term()})) :: %{
           results: [outcome()],

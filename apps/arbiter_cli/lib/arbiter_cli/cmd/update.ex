@@ -151,6 +151,15 @@ defmodule ArbiterCli.Cmd.Update do
   invocation with a positional argument is an edit, and a bare `arb update`
   (which previously just errored "requires a ticket id") becomes the deploy.
 
+  ## Bulk edit — `arb ticket update <id> <id> ... [flags]` / `--stdin`
+
+  Several ids (or `--stdin`, one id per line; at most 200) apply the same field
+  flags to each (`PATCH /api/issues`), one line per id (`ok` | `refused` |
+  `not_found`); `--json` prints the per-id list and the exit code is 1 if any id
+  failed. `--append-notes` works in bulk; `--notes` REPLACES every id's notes and
+  is refused unless `--confirm-replace-notes` is also given. `--resume-review`
+  is single-id only.
+
   ## Exit codes
 
     * `0` — issue patched, or deploy succeeded (or was already up to date).
@@ -158,7 +167,7 @@ defmodule ArbiterCli.Cmd.Update do
       Phoenix not coming back green after the restart.
   """
 
-  alias ArbiterCli.{AcceptanceFlags, ArgParser}
+  alias ArbiterCli.{AcceptanceFlags, ArgParser, Bulk}
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
   alias ArbiterCli.{PermissionFlags, ProviderConstraintFlags}
@@ -194,6 +203,8 @@ defmodule ArbiterCli.Cmd.Update do
     type: :string,
     pr_ref: :string,
     auto_close: :boolean,
+    stdin: :boolean,
+    confirm_replace_notes: :boolean,
     json: :boolean
   ]
 
@@ -366,12 +377,12 @@ defmodule ArbiterCli.Cmd.Update do
 
     opts = ArgParser.coerce_difficulty(opts)
 
-    id =
-      case rest do
-        [id] -> id
-        [] -> Output.die("update requires a ticket id")
-        _ -> Output.die("update takes exactly one positional argument: the ticket id")
-      end
+    bulk? = Bulk.bulk?(rest, opts)
+
+    ids =
+      if bulk?,
+        do: Bulk.collect_ids(rest, opts, "update"),
+        else: single_id!(rest)
 
     acceptance = AcceptanceFlags.resolve!(opts)
 
@@ -411,14 +422,54 @@ defmodule ArbiterCli.Cmd.Update do
       )
     end
 
-    patched =
-      if map_size(payload) > 0 do
-        case Client.patch("/api/issues/" <> id, payload) do
-          {:ok, issue} -> issue
+    if bulk?,
+      do: bulk_update(ids, payload, opts, mode),
+      else: edit_one(hd(ids), payload, opts, mode)
+  end
+
+  # bd-cvyx6j: one patch to several ids — `PATCH /api/issues {ids, patch}`.
+  # `--notes` replaces on every id, so it needs `--confirm-replace-notes`.
+  defp bulk_update(ids, payload, opts, mode) do
+    cond do
+      opts[:resume_review] ->
+        Output.die("--resume-review is not available on a bulk update; run it per ticket")
+
+      map_size(payload) == 0 ->
+        Output.die("update requires at least one field flag (e.g. --priority, --append-notes)")
+
+      Map.has_key?(payload, "notes") and opts[:confirm_replace_notes] != true ->
+        Output.die(
+          "--notes would REPLACE the notes of #{length(ids)} tickets",
+          "Use --append-notes, or add --confirm-replace-notes to replace them all."
+        )
+
+      true ->
+        body = %{"ids" => ids, "patch" => payload}
+
+        body =
+          if opts[:confirm_replace_notes],
+            do: Map.put(body, "confirm_replace_notes", true),
+            else: body
+
+        case Client.patch("/api/issues", body) do
+          {:ok, response} -> Bulk.emit(response, mode)
           {:error, err} -> Output.die(err)
         end
-      end
+    end
+  end
 
+  defp single_id!(rest) do
+    case rest do
+      [id] -> [id]
+      [] -> Output.die("update requires a ticket id")
+      _ -> Output.die("update takes exactly one positional argument: the ticket id")
+    end
+  end
+
+  defp edit_one(id, payload, opts, mode) do
+    resume? = opts[:resume_review] == true
+
+    patched = if map_size(payload) > 0, do: patch!(id, payload)
     resumed = if resume?, do: resume_review!(id)
 
     case resumed || patched do
@@ -432,6 +483,13 @@ defmodule ArbiterCli.Cmd.Update do
 
       issue ->
         Output.emit_issue(issue, mode)
+    end
+  end
+
+  defp patch!(id, payload) do
+    case Client.patch("/api/issues/" <> id, payload) do
+      {:ok, issue} -> issue
+      {:error, err} -> Output.die(err)
     end
   end
 
