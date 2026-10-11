@@ -21,7 +21,15 @@ defmodule Arbiter.Loop.Replay.Runner do
       run draws on: the one admitted;
     * `:workspace` and `:repo`, whose security policy and guardrail profile
       the run is held to, as a dispatch is;
-    * `:timeout_ms`.
+    * `:timeout_ms`;
+    * optionally `:container_opts`, stand-ins for a container spawn's host
+      tools (tests).
+
+  ## The checkout a run needs (`layout/2`, optional)
+
+  `:sandbox` for a run on the host (`Arbiter.Loop.Replay.Sandbox`), or
+  `:private_clone` for one that a container is handed, which can only mount an
+  `Arbiter.Worker.PrivateClone`. A runner without the callback runs on the host.
 
   ## The result
 
@@ -56,4 +64,8 @@ defmodule Arbiter.Loop.Replay.Runner do
         }
 
   @callback run(role(), spec()) :: {:ok, result()} | {:error, term()}
+
+  @callback layout(role(), spec()) :: :sandbox | :private_clone
+
+  @optional_callbacks layout: 2
 end

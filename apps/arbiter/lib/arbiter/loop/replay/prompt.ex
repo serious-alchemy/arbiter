@@ -41,7 +41,7 @@ defmodule Arbiter.Loop.Replay.Prompt do
     Acceptance criteria:
     #{text(issue.acceptance)}
 
-    The checkout is on branch `#{Sandbox.branch()}`, at commit #{subject.base_sha} of
+    The checkout is on branch `#{branch(subject)}`, at commit #{subject.base_sha} of
     `#{subject.target_branch}`. Make the change the ticket asks for, run the tests
     that cover it, and commit your work on this branch with git. The checkout has
     no remote: do not push and do not open a pull request; your commits are
@@ -62,7 +62,7 @@ defmodule Arbiter.Loop.Replay.Prompt do
   def review(subject, reviewer_adapter) do
     ReviewGate.review_prompt(%{
       task_id: subject.task_id,
-      branch: Sandbox.branch(),
+      branch: branch(subject),
       target_branch: subject.target_branch,
       base_sha: subject.base_sha,
       workspace_id: subject.workspace.id,
@@ -80,6 +80,9 @@ defmodule Arbiter.Loop.Replay.Prompt do
       "the work is incomplete until every tool you launched has\nfinished and you have read its result"
     )
   end
+
+  # The branch the checkout is on: the harness records it; the sandbox's by default.
+  defp branch(subject), do: Map.get(subject, :branch) || Sandbox.branch()
 
   defp text(value) when is_binary(value) do
     case String.trim(value) do

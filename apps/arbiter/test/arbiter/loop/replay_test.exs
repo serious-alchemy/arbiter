@@ -20,6 +20,7 @@ defmodule Arbiter.Loop.ReplayTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Test.GitFixture
+  alias Arbiter.Worker.PrivateClone
 
   import GitFixture, only: [git!: 2, commit!: 3]
 
@@ -383,6 +384,46 @@ defmodule Arbiter.Loop.ReplayTest do
       assert run.reviewer_pool == "claude"
       assert is_binary(run.reviewer_model)
       assert [%{"admitted" => true, "pool" => "claude"}] = run.admission
+    end
+  end
+
+  describe "a run a container is handed (layout :private_clone)" do
+    test "gets a read-only private clone at the base, whose origin leads nowhere, removed after",
+         ctx do
+      main_refs = refs(ctx.repo)
+      test_pid = self()
+
+      implement = fn spec ->
+        send(test_pid, {:clone, PrivateClone.clone?(spec.dir), PrivateClone.read_only?(spec.dir)})
+        send(test_pid, {:reachable, git!(spec.dir, ["log", "--all", "--format=%H"])})
+
+        {_, fetch} =
+          System.cmd("git", ["-C", spec.dir, "fetch", "-q", "origin"], stderr_to_stdout: true)
+
+        send(test_pid, {:fetch_status, fetch})
+        write_feature(spec)
+      end
+
+      assert {:ok, run} =
+               replay(ctx, layout: :private_clone, runner: runner(self(), implement: implement))
+
+      assert_received {:implement, seen}
+      assert seen.head == ctx.base
+      refute seen.feature?
+      assert Path.dirname(seen.spec.dir) == Arbiter.Config.Paths.worktree_root()
+      assert_received {:clone, true, true}
+      assert_received {:reachable, reachable}
+      refute reachable =~ ctx.head, "nothing after the base is reachable in the clone"
+      assert_received {:fetch_status, status} when status != 0
+
+      assert_received {:review, review}
+      assert review.prompt =~ "git diff #{ctx.base}..HEAD"
+
+      assert run.state == :scored
+      assert run.converged
+      assert run.file_overlap == 1.0
+      refute File.exists?(seen.spec.dir)
+      assert refs(ctx.repo) == main_refs, "the clone's gc pin is dropped with it"
     end
   end
 

@@ -70,6 +70,7 @@ defmodule Arbiter.Loop.Replay do
   alias Arbiter.Loop.Replay.Subject
   alias Arbiter.Loop.ReplayRun
   alias Arbiter.Worker.PrepushCheck
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Worktree
@@ -191,10 +192,18 @@ defmodule Arbiter.Loop.Replay do
     case Map.get(opts, :runner) || Application.get_env(:arbiter, :loop_replay_runner) ||
            Arbiter.Loop.Replay.CliRunner do
       :disabled -> {:error, :runner_disabled}
-      fun when is_function(fun, 2) -> {:ok, fun}
-      module when is_atom(module) -> {:ok, &module.run/2}
+      fun when is_function(fun, 2) -> {:ok, %{run: fun, layout: &host_layout/2}}
+      module when is_atom(module) -> {:ok, %{run: &module.run/2, layout: layout_fun(module)}}
     end
   end
+
+  defp layout_fun(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :layout, 2),
+      do: &module.layout/2,
+      else: &host_layout/2
+  end
+
+  defp host_layout(_role, _spec), do: :sandbox
 
   defp required(opts, key) do
     case Map.get(opts, key) do
@@ -356,8 +365,9 @@ defmodule Arbiter.Loop.Replay do
   # ---- the replay ----------------------------------------------------------------
 
   defp execute(run, ctx) do
-    dir = Path.join(root(ctx.opts), run.id)
-    ctx = Map.merge(ctx, %{dir: dir, checkout: Path.join(dir, "checkout"), run: run})
+    ctx = Map.merge(ctx, %{dir: Path.join(root(ctx.opts), run.id), run: run})
+    layout = layout(ctx)
+    ctx = Map.merge(ctx, %{layout: layout, checkout: checkout_path(layout, ctx)})
 
     outcome =
       try do
@@ -367,7 +377,7 @@ defmodule Arbiter.Loop.Replay do
       catch
         kind, reason -> {:failed, %{reason: Exception.format_banner(kind, reason)}}
       after
-        unless Map.get(ctx.opts, :keep_sandbox, false), do: Sandbox.remove(dir)
+        unless Map.get(ctx.opts, :keep_sandbox, false), do: remove(ctx)
       end
 
     finish(run, outcome)
@@ -375,15 +385,53 @@ defmodule Arbiter.Loop.Replay do
 
   defp root(opts), do: Map.get(opts, :root) || Path.join(Paths.scratch_root(), "replays")
 
-  defp replay(%{subject: subject, checkout: checkout} = ctx) do
+  # The checkout the runs need: a container can only be handed a private clone
+  # (`layout/2` of the runner, for either side), anything else runs on the host
+  # in the sandbox. `:layout` overrides it (tests).
+  defp layout(ctx) do
+    case Map.get(ctx.opts, :layout) do
+      layout when layout in [:sandbox, :private_clone] ->
+        layout
+
+      _ ->
+        if Enum.any?(
+             [:implement, :review],
+             &(ctx.runner.layout.(&1, spec(ctx, &1)) == :private_clone)
+           ),
+           do: :private_clone,
+           else: :sandbox
+    end
+  end
+
+  # A private clone lives where every clone does, as a leaf of the worktree root.
+  defp checkout_path(:private_clone, ctx),
+    do: Path.join(Paths.worktree_root(), "replay-" <> ctx.run.id)
+
+  defp checkout_path(:sandbox, ctx), do: Path.join(ctx.dir, "checkout")
+
+  defp remove(%{layout: :private_clone} = ctx) do
+    case PrivateClone.remove(ctx.checkout) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Loop.Replay: removing #{ctx.checkout}: #{inspect(reason)}")
+    end
+
+    Sandbox.remove(ctx.dir)
+  end
+
+  defp remove(ctx), do: Sandbox.remove(ctx.dir)
+
+  defp replay(%{subject: subject} = ctx) do
     with :ok <- File.mkdir_p(scratch(ctx)),
-         {:ok, _} <- Sandbox.create(subject.repo_path, subject.base_sha, checkout),
-         :ok <- seed(subject, checkout),
+         {:ok, branch} <- checkout(ctx),
+         ctx = %{ctx | subject: Map.put(subject, :branch, branch)},
          {:ok, known_good} <-
            Sandbox.known_good(subject.repo_path, subject.base_sha, subject.known_good_sha),
          {:ok, implemented} <-
-           call(ctx, :implement, Prompt.implement(subject, adapter(ctx.author.provider))),
-         {:ok, change} <- Sandbox.change(checkout, subject.base_sha) do
+           call(ctx, :implement, Prompt.implement(ctx.subject, adapter(ctx.author.provider))),
+         {:ok, change} <- Sandbox.change(ctx.checkout, subject.base_sha) do
       measured = %{
         files: Enum.take(change.files, @max_files),
         overlap: Score.overlap(change, known_good),
@@ -409,6 +457,26 @@ defmodule Arbiter.Loop.Replay do
 
   defp scratch(ctx), do: Path.join(ctx.dir, "scratch")
 
+  # The checkout at the base commit, and the branch it is on. On the host: the
+  # sandbox, seeded with dependencies as a dispatch's worktree is. For a
+  # container: a read-only private clone with nothing after the base in it,
+  # whose `origin` (the forge, for a review clone) is pointed nowhere so the
+  # merged change cannot be fetched; the container brings its own dependencies.
+  defp checkout(%{layout: :sandbox, checkout: checkout, subject: subject}) do
+    with {:ok, _} <- Sandbox.create(subject.repo_path, subject.base_sha, checkout),
+         :ok <- seed(subject, checkout) do
+      {:ok, Sandbox.branch()}
+    end
+  end
+
+  defp checkout(%{layout: :private_clone, checkout: checkout, subject: subject}) do
+    with {:ok, _} <-
+           PrivateClone.create_review(subject.repo_path, subject.base_sha, path: checkout),
+         :ok <- Sandbox.disconnect(checkout) do
+      Sandbox.current_branch(checkout)
+    end
+  end
+
   # The dependency trees a dispatch's worktree is seeded with, and excluded from
   # the change: the built-in set (`deps`, `_build`) records nothing, a
   # configured one records what it copied.
@@ -419,10 +487,14 @@ defmodule Arbiter.Loop.Replay do
     Sandbox.exclude(checkout, seeded)
   end
 
-  defp tests(%{subject: subject, checkout: checkout, opts: opts}) do
+  defp tests(%{subject: subject, checkout: checkout, opts: opts} = ctx) do
     spec = Map.get(opts, :tests, true) && PrepushCheck.resolve(subject.workspace, subject.repo)
 
     if spec do
+      # The recipe runs on the host: a private clone gets the host's
+      # dependencies now, after the container (and the change) are done with it.
+      if ctx.layout == :private_clone, do: seed(subject, checkout)
+
       %{result: result, steps: steps} =
         PrepushCheck.run_steps(spec, checkout, target: subject.base_sha)
 
@@ -483,19 +555,28 @@ defmodule Arbiter.Loop.Replay do
 
   defp put_run(measured, name, result), do: put_in(measured, [:runs, name], run_summary(result))
 
-  defp call(%{runner: runner, author: author, reviewer: reviewer} = ctx, role, prompt) do
-    side = if role == :implement, do: author, else: reviewer
+  defp call(ctx, role, prompt) do
+    case ctx.runner.run.(role, Map.put(spec(ctx, role), :prompt, prompt)) do
+      {:ok, %{output: output} = result} when is_list(output) -> {:ok, result}
+      {:error, reason} -> {:error, {role, reason}}
+      other -> {:error, {role, {:bad_runner_result, other}}}
+    end
+  end
+
+  # What a runner is told about one side's run (the prompt aside).
+  defp spec(ctx, role) do
+    side = if role == :implement, do: ctx.author, else: ctx.reviewer
 
     timeout =
       if role == :implement,
         do: Map.get(ctx.opts, :timeout_ms, @implement_timeout_ms),
         else: Map.get(ctx.opts, :review_timeout_ms, @review_timeout_ms)
 
-    spec = %{
+    %{
       replay_id: ctx.run.id,
-      dir: ctx.checkout,
+      dir: Map.get(ctx, :checkout),
       scratch: scratch(ctx),
-      prompt: prompt,
+      prompt: nil,
       provider: side.provider,
       account_id: side.account_id,
       model: side.model,
@@ -503,12 +584,7 @@ defmodule Arbiter.Loop.Replay do
       repo: ctx.subject.repo,
       timeout_ms: timeout
     }
-
-    case runner.(role, spec) do
-      {:ok, %{output: output} = result} when is_list(output) -> {:ok, result}
-      {:error, reason} -> {:error, {role, reason}}
-      other -> {:error, {role, {:bad_runner_result, other}}}
-    end
+    |> Map.merge(Map.take(ctx.opts, [:container_opts]))
   end
 
   defp run_summary(result) do

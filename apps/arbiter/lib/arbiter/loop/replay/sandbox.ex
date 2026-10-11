@@ -30,6 +30,7 @@ defmodule Arbiter.Loop.Replay.Sandbox do
   alias Arbiter.Nodes.Checkout.Git
 
   @branch "work"
+  @no_remote "file:///dev/null/arbiter-replay-has-no-remote"
 
   @type change :: %{files: [String.t()], patch: String.t()}
 
@@ -142,6 +143,25 @@ defmodule Arbiter.Loop.Replay.Sandbox do
       {:ok, %{files: split_z(names), patch: patch}}
     end
   end
+
+  @doc """
+  Point `origin` of the checkout at `dir` nowhere, for fetches as well as
+  pushes. A container can only be handed an `Arbiter.Worker.PrivateClone`,
+  whose review clone keeps the forge as `origin` for reads; a replay in one
+  must not be able to fetch the merged change. (`PrivateClone.verify/1`
+  accepts the URL keys, so the clone stays mountable.)
+  """
+  @spec disconnect(Path.t()) :: :ok | {:error, term()}
+  def disconnect(dir) do
+    case git(dir, ["config", "remote.origin.url", @no_remote]) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc "The branch the checkout at `dir` has checked out."
+  @spec current_branch(Path.t()) :: {:ok, String.t()} | {:error, term()}
+  def current_branch(dir), do: git(dir, ["symbolic-ref", "--short", "HEAD"])
 
   @doc "Delete the sandbox. Idempotent."
   @spec remove(Path.t()) :: :ok

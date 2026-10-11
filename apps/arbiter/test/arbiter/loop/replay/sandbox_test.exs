@@ -164,6 +164,24 @@ defmodule Arbiter.Loop.Replay.SandboxTest do
     end
   end
 
+  describe "disconnect/1 and current_branch/1" do
+    test "a checkout whose origin is the forge can no longer fetch from it", ctx do
+      # The workspace checkout fixture is a clone whose origin is the forge.
+      assert {_, 0} = run(ctx.repo, ["fetch", "-q", "origin"])
+
+      assert :ok = Sandbox.disconnect(ctx.repo)
+
+      assert {_, status} = run(ctx.repo, ["fetch", "-q", "origin"])
+      assert status != 0
+      assert git!(ctx.repo, ["remote", "get-url", "origin"]) =~ "file:///dev/null/"
+    end
+
+    test "the branch a checkout is on", ctx do
+      assert {:ok, "work"} = Sandbox.current_branch(sandbox!(ctx))
+      assert {:ok, "main"} = Sandbox.current_branch(ctx.repo)
+    end
+  end
+
   describe "known_good/3" do
     test "is the merged change in the main repo, base to head", ctx do
       assert {:ok, %{files: ["lib/feature.ex"], patch: patch}} =
