@@ -177,7 +177,8 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       assert {ctx.bwrap, "/opt/arbiter/cli/bwrap"} in request.cli_mounts
       # The sibling the CLI spawns by path beside itself.
       assert {ctx.host, "/opt/arbiter/cli/codex-code-mode-host"} in request.cli_mounts
-      assert {ctx.arb, "/opt/arbiter/cli/arb"} in request.cli_mounts
+      assert {ctx.arb, "/opt/arbiter/cli/arb.escript"} in request.cli_mounts
+      assert List.keymember?(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
       refute Enum.any?(request.cli_mounts, &(elem(&1, 1) == "/opt/arbiter/cli/claude"))
       refute Enum.any?(request.cli_mounts, &String.ends_with?(elem(&1, 0), "codex.js"))
     end

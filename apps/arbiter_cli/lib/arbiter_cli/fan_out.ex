@@ -121,12 +121,17 @@ defmodule ArbiterCli.FanOut do
   end
 
   @doc false
-  # An escript VM runs `... -run escript start -extra <script> args`; ours is `arb`.
+  # An escript VM runs `... -run escript start -extra <script> args`; ours is
+  # `arb`, or `arb.escript` in a worker container, where `arb` is the launcher
+  # that runs it (bd-59m96o).
   @spec arb_cmdline?([String.t()]) :: boolean()
   def arb_cmdline?(argv) do
     case Enum.drop_while(argv, &(&1 != "-extra")) do
-      ["-extra", script | _] -> "escript" in argv and Path.basename(script) == "arb"
-      _ -> false
+      ["-extra", script | _] ->
+        "escript" in argv and Path.basename(script) in ["arb", "arb.escript"]
+
+      _ ->
+        false
     end
   end
 end

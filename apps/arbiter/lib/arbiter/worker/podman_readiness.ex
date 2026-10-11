@@ -25,7 +25,9 @@ defmodule Arbiter.Worker.PodmanReadiness do
   the `:runner`, `:read_file` and `:user` options so tests stub the probes.
   """
 
+  alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.Container
+  alias Arbiter.Worker.Image
   alias Arbiter.Worker.ReleaseEnv
 
   @min_subid_range 65_536
@@ -55,8 +57,17 @@ defmodule Arbiter.Worker.PodmanReadiness do
   Probe the host. Options: `:runner` (`(cmd, args, opts -> {output, status})`),
   `:read_file` (`path -> {:ok, binary} | {:error, term}`), `:user`, `:image`
   (the probe image; default `ARBITER_PODMAN_PROBE_IMAGE` or
-  `#{@default_probe_image}`) and `:probes` (which container-starting probes to
-  run, from `:bridge` and `:teardown`; default both).
+  `#{@default_probe_image}`) and `:probes` (which probes to run past the host
+  checks: the container-starting `:bridge` and `:teardown`, and `:arb`; default
+  all three).
+
+  `:arb` (bd-59m96o) asks whether `arb` will run inside worker containers. It
+  starts nothing: it reads the host's arb (`Arbiter.Worker.ArbCli.host_escript/1`
+  options: `:arb_path`, `:find_executable`, `:installed_arb_path`) and inspects
+  the configured `:worker_container_image`, if any (`:worker_image` overrides
+  it). Every finding is a `warn`: a worker without arb still works through the
+  MCP tools. It is the primary's question, so a node's readiness leaves it out
+  (`node_probes/0`).
   """
   @spec diagnose(keyword()) :: report()
   def diagnose(opts \\ []) do
@@ -66,7 +77,7 @@ defmodule Arbiter.Worker.PodmanReadiness do
       {:ok, check} ->
         info = podman_info(opts)
 
-        probes = Keyword.get(opts, :probes, [:bridge, :teardown])
+        probes = Keyword.get(opts, :probes, [:bridge, :teardown, :arb])
 
         checks =
           [check] ++
@@ -80,7 +91,8 @@ defmodule Arbiter.Worker.PodmanReadiness do
               network_check(opts)
             ] ++
             if(:bridge in probes, do: [bridge_check(opts)], else: []) ++
-            if(:teardown in probes, do: [teardown_check(opts)], else: [])
+            if(:teardown in probes, do: [teardown_check(opts)], else: []) ++
+            if(:arb in probes, do: [arb_check(opts)], else: [])
 
         %{ready: not Enum.any?(checks, &(&1.status == "fail")), installed: true, checks: checks}
 
@@ -88,6 +100,13 @@ defmodule Arbiter.Worker.PodmanReadiness do
         %{ready: false, installed: false, checks: [check]}
     end
   end
+
+  @doc """
+  The probes a node's readiness runs: the container ones. Its `arb` comes from
+  the primary's file shelf, so the primary's doctor answers for it.
+  """
+  @spec node_probes() :: [atom()]
+  def node_probes, do: [:bridge, :teardown]
 
   # -- podman -----------------------------------------------------------------
 
@@ -521,6 +540,103 @@ defmodule Arbiter.Worker.PodmanReadiness do
     Keyword.get(opts, :image) || System.get_env("ARBITER_PODMAN_PROBE_IMAGE") ||
       @default_probe_image
   end
+
+  # -- arb in worker containers (bd-59m96o) ---------------------------------------
+
+  # A container's `arb` is the host's escript, which `ArbCli`'s launcher runs on
+  # the Erlang/OTP the base image carries for the release it was built on. What
+  # can still keep it from running is on the host (no arb; an arb from an older
+  # Arbiter that does not say what it was built on) or a configured image that
+  # is not built on that base.
+  defp arb_check(opts) do
+    case ArbCli.host_escript(
+           Keyword.take(opts, [:arb_path, :find_executable, :installed_arb_path])
+         ) do
+      nil ->
+        arb_warn(
+          "no `arb` on this host: worker containers get no arb CLI (the arbiter MCP tools still work)",
+          "Install arb on the Arbiter host (`arb self-update`), or point ARB_INSTALL_BIN at it."
+        )
+
+      path ->
+        case ArbCli.built_otp(path) do
+          {:ok, otp} ->
+            configured_image_check(otp, opts)
+
+          :error ->
+            arb_warn(
+              "#{path} does not say which Erlang/OTP release it was built on (an arb from an " <>
+                "older Arbiter): worker images give it OTP #{System.otp_release()}, the " <>
+                "server's, which loads it only if it was built on that release or an older one",
+              "Reinstall arb from this release (`arb self-update`, or `arb install-cli` in a checkout)."
+            )
+        end
+    end
+  end
+
+  defp configured_image_check(otp, opts) do
+    runs =
+      "arb (built on Erlang/OTP #{otp}) runs on the OTP #{otp} runtime worker images carry " <>
+        "for it at #{ArbCli.runtime_dir()}, whatever Erlang a repo pins"
+
+    image =
+      Keyword.get_lazy(opts, :worker_image, fn ->
+        Application.get_env(:arbiter, :worker_container_image)
+      end)
+
+    if is_binary(image) and image != "" do
+      configured_image_runtime(otp, image, runs, opts)
+    else
+      check("arb_runtime", "arb in worker containers", "ok", runs)
+    end
+  end
+
+  defp configured_image_runtime(otp, image, runs, opts) do
+    format = "{{ index .Config.Labels \"#{Image.arb_otp_label()}\" }}"
+
+    rebuild =
+      "Build #{image} FROM ${ARBITER_BASE} (Arbiter's worker base), or unset :worker_container_image."
+
+    case exec(opts, "podman", ["image", "inspect", "--format", format, image]) do
+      {out, 0} ->
+        case Integer.parse(String.trim(out)) do
+          {runtime, ""} ->
+            if runtime >= String.to_integer(otp) do
+              check(
+                "arb_runtime",
+                "arb in worker containers",
+                "ok",
+                "#{runs}; the configured worker image #{image} carries OTP #{runtime}"
+              )
+            else
+              arb_warn(
+                "the configured worker image #{image} carries an OTP #{runtime} runtime for arb, " <>
+                  "older than the OTP #{otp} arb was built on: arb runs there only if the " <>
+                  "image's own Erlang is OTP #{otp} or newer",
+                rebuild
+              )
+            end
+
+          _ ->
+            arb_warn(
+              "the configured worker image #{image} carries no runtime for arb (it is not built " <>
+                "on Arbiter's base): arb runs there only if the image's own Erlang is " <>
+                "OTP #{otp} or newer",
+              rebuild
+            )
+        end
+
+      {out, _} ->
+        arb_warn(
+          "could not inspect the configured worker image #{image}: " <>
+            String.slice(String.trim(out), 0, 200),
+          "Check `podman image exists #{image}`; a spawn pulls or fails on it the same way."
+        )
+    end
+  end
+
+  defp arb_warn(detail, hint),
+    do: check("arb_runtime", "arb in worker containers", "warn", detail, hint)
 
   # -- plumbing -----------------------------------------------------------------
 

@@ -30,6 +30,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
   # its function is how a freeze rots. A new entry here is a deliberate,
   # reviewable act; that is the point.
   @non_guard_sites [
+    # --- pr_patrol.ex ---
+    {Arbiter.Workflows.PRPatrol, :mail_owner, 5,
+     "bd-8ztyal: mails the CI summary to the ticket that owns the PR instead of filing a " <>
+       "follow-up; informational, deduped to one unread note per PR, nothing is refused"},
     # --- watchdog.ex ---
     {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
