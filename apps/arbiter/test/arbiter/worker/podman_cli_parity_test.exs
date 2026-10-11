@@ -98,8 +98,5 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
 
   defp image_source, do: File.read!(Path.join([File.cwd!(), "lib/arbiter/worker/image.ex"]))
 
-  defp base_containerfile do
-    [_, cf] = Regex.run(~r/@base_containerfile """\n(.*?)\n  """/s, image_source())
-    cf
-  end
+  defp base_containerfile, do: Arbiter.Worker.Image.base_containerfile(System.otp_release())
 end

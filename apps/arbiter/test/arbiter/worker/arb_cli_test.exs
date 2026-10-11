@@ -30,6 +30,19 @@ defmodule Arbiter.Worker.ArbCliTest do
     end
   end
 
+  describe "runtime_otp/1" do
+    test "is the release the host's arb was built on", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "31")
+      assert ArbCli.runtime_otp(arb_path: arb) == "31"
+    end
+
+    test "is the server's own release for an arb without the stamp, or no arb", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: nil)
+      assert ArbCli.runtime_otp(arb_path: arb) == System.otp_release()
+      assert ArbCli.runtime_otp(arb_path: nil) == System.otp_release()
+    end
+  end
+
   describe "launcher_file/1 and mounts/2" do
     test "writes the launcher once, executable, named by its content", %{tmp_dir: dir} do
       assert {:ok, path} = ArbCli.launcher_file(launcher_dir: dir)

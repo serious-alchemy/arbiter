@@ -95,6 +95,22 @@ defmodule Arbiter.Worker.ArbCli do
   def runtime_dir, do: @runtime
 
   @doc """
+  The OTP release of the runtime Arbiter's worker base image gives arb: the
+  one the host's escript was built on (`built_otp/1` of `host_escript/1`, which
+  takes `opts`), else, for an escript that predates the stamp or a host with
+  none, the server's own.
+  """
+  @spec runtime_otp(keyword()) :: String.t()
+  def runtime_otp(opts \\ []) do
+    with path when is_binary(path) <- host_escript(opts),
+         {:ok, otp} <- built_otp(path) do
+      otp
+    else
+      _ -> System.otp_release()
+    end
+  end
+
+  @doc """
   The host's `arb` escript, or `nil`: `:arb_path` when given (`nil` included),
   else `arb` on `PATH` (`:find_executable`, default `System.find_executable/1`),
   else where self-deploy installs it (`ARB_INSTALL_BIN`, default
