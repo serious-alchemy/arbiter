@@ -286,22 +286,6 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     """
   end
 
-  # bd-6sosvl: the host has already fetched the target into this checkout (the
-  # run may have no network or forge credential, so it could not itself), so say
-  # which ref to merge and not to go looking for a remote or a local branch.
-  defp target_note(%{target_branch: target}) when is_binary(target) do
-    """
-    The host has already fetched the current target into this checkout as
-    `origin/#{target}`: run `git merge origin/#{target}`. There is no remote to
-    fetch from here and no local `#{target}` branch to name, so do not try either.
-    If `origin/#{target}` does not resolve, say so plainly in your final output
-    instead of finishing without a commit.
-    """
-    |> String.trim()
-  end
-
-  defp target_note(_args), do: ""
-
   defp briefing(%{task_id: task_id} = args) do
     """
     ## ReviewGate requested changes — fix round #{args.attempt}
@@ -320,6 +304,22 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
 
     """
   end
+
+  # bd-6sosvl: the host has already fetched the target into this checkout (the
+  # run may have no network or forge credential, so it could not itself), so say
+  # which ref to merge and not to go looking for a remote or a local branch.
+  defp target_note(%{target_branch: target}) when is_binary(target) do
+    """
+    The host has already fetched the current target into this checkout as
+    `origin/#{target}`: run `git merge origin/#{target}`. There is no remote to
+    fetch from here and no local `#{target}` branch to name, so do not try either.
+    If `origin/#{target}` does not resolve, say so plainly in your final output
+    instead of finishing without a commit.
+    """
+    |> String.trim()
+  end
+
+  defp target_note(_args), do: ""
 
   @doc """
   Default implementation of `escalate_exhausted/4`.
