@@ -25,11 +25,22 @@ defmodule Arbiter.Accounts.FieldsTest do
 
     test "the MCP surface is the update set minus identity" do
       assert Enum.sort(Fields.names(:mcp)) ==
-               Enum.sort(~w(label plan enabled max_concurrent quota_config))
+               Enum.sort(~w(label plan enabled max_concurrent budget_split quota_config))
     end
   end
 
   describe "cast/2 (:update)" do
+    test "budget_split is queue or fair, and cannot be cleared" do
+      assert {:ok, %{budget_split: :fair}} = Fields.cast(%{"budget_split" => "fair"}, :update)
+      assert {:ok, %{budget_split: :queue}} = Fields.cast(%{"budget_split" => " Queue "}, :update)
+
+      assert {:error, {:invalid_account, "budget_split must be queue or fair"}} =
+               Fields.cast(%{"budget_split" => "equal"}, :update)
+
+      assert {:error, {:invalid_account, _}} = Fields.cast(%{"budget_split" => nil}, :update)
+      assert {:ok, %{budget_split: :fair}} = Fields.cast(%{"budget_split" => "fair"}, :create)
+    end
+
     test "casts every attribute and drops nothing" do
       assert {:ok, changes} =
                Fields.cast(

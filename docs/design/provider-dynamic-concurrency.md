@@ -819,6 +819,22 @@ pipeline in flight should count.
 | Work-conserving | With no such `v`, the card goes above its share. An idle share is borrowed, so it isn't a hard cap |
 | Preemption | None. Running work keeps its seats, and fairness converges as tickets finish |
 
+**As built (DC10, bd-ag5nlo).** `budget_split` is a `provider_accounts` column
+(`queue` | `fair`, default `queue`, set with `arb account set <ref>
+--budget-split fair` or `account_set`); `weight` is a `workspace_provider_accounts`
+column (positive integer, default 1, `arb account attach … --weight N`). The
+arithmetic is `Arbiter.Board.FairShare`; `WalkInputs` puts a `fair` map
+(`seats`, `weights`, `labels`) on a fair account's pools and the walk applies
+the skip rule in `pick_pair` (a skipped card may still take another pool; its
+reason reads `waiting for <pool>: fair share — …`). "Own-P0" is the card's own
+priority 0. "Same effective band" is `effective_priority || priority`. Demand is
+read lazily: a card's candidates for other workspaces are asked only when the
+card's workspace already holds its smallest possible share and another workspace
+has a seat or a Ready card. The share is shown in `CapacityView`'s `fair_share`
+rows (at full demand, over the workspaces linked or seated), the capacity popups
+and `arb scheduler status`. Like the rest of the walk it decides nothing until
+DC8 (I1/I2). O4 stays open: the default is `queue`.
+
 **What this guarantees.** A workspace with a P1 waiting gets its share of the
 next free seats, however many P1s another workspace queued first. Ranks are
 per workspace, so they don't order cards across workspaces anyway. Across bands,

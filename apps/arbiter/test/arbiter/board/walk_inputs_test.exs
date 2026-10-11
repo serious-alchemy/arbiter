@@ -429,4 +429,97 @@ defmodule Arbiter.Board.WalkInputsTest do
                Enum.find(plan.entries, &(&1.id == b.id))
     end
   end
+
+  describe "workspace fair share (DC10)" do
+    defp fair_setup(split) do
+      a = workspace!()
+      b = workspace!()
+      claude = account!(:claude, "shared", %{budget_split: split})
+      link!(a, claude, %{weight: 3})
+      link!(b, claude)
+      {a, b, claude}
+    end
+
+    defp fair_card(issue), do: Map.put(card(issue), :priority, issue.priority)
+
+    test "a fair account's pool carries each workspace's seats, weight and name" do
+      {a, b, claude} = fair_setup(:fair)
+      held_a = issue!(a)
+      held_b = issue!(b)
+      key = {claude.id, "claude"}
+
+      walk =
+        gather(a, [],
+          budgets: [budget(claude, "claude", 4)],
+          seats: %{key => 3},
+          holders: %{key => [held_a.id, held_a.id <> "#review", held_b.id]}
+        )
+
+      assert %{seats: seats, weights: weights, labels: labels} = walk.pools[key].fair
+      assert seats == %{a.id => 2, b.id => 1}
+      assert weights == %{a.id => 3, b.id => 1}
+      assert labels == %{a.id => a.name, b.id => b.name}
+    end
+
+    test "a queue account's pool carries no fair share" do
+      {a, _b, claude} = fair_setup(:queue)
+
+      walk = gather(a, [], budgets: [budget(claude, "claude", 4)], holders: %{})
+
+      refute Map.has_key?(walk.pools[{claude.id, "claude"}], :fair)
+    end
+
+    test "two workspaces on one account: the one at its weighted share yields" do
+      {a, b, claude} = fair_setup(:fair)
+      key = {claude.id, "claude"}
+      running = issue!(a)
+      queued_a = issue!(a, %{priority: 2})
+      queued_b = issue!(b, %{priority: 2})
+
+      # 4 seats, weights 3:1 → shares 3 and 1. a holds 3, b holds none.
+      walk =
+        gather(a, [queued_a, queued_b],
+          budgets: [budget(claude, "claude", 4)],
+          seats: %{key => 3},
+          holders: %{key => [running.id, running.id <> "#review", running.id <> ":fixpass"]}
+        )
+
+      plan =
+        Scheduler.plan(%{
+          ready: [fair_card(queued_a), fair_card(queued_b)],
+          running: [],
+          walk: walk
+        })
+
+      assert plan.promote == queued_b.id
+
+      assert %{wait_cause: {:capacity, :provider}, reason: reason} =
+               Enum.find(plan.entries, &(&1.id == queued_a.id))
+
+      assert reason =~ "fair share"
+    end
+
+    test "on a queue account the same board is decided by the order" do
+      {a, b, claude} = fair_setup(:queue)
+      key = {claude.id, "claude"}
+      queued_a = issue!(a, %{priority: 2})
+      queued_b = issue!(b, %{priority: 2})
+
+      walk =
+        gather(a, [queued_a, queued_b],
+          budgets: [budget(claude, "claude", 4)],
+          seats: %{key => 3},
+          holders: %{}
+        )
+
+      plan =
+        Scheduler.plan(%{
+          ready: [fair_card(queued_a), fair_card(queued_b)],
+          running: [],
+          walk: walk
+        })
+
+      assert plan.promote == queued_a.id
+    end
+  end
 end
