@@ -12,13 +12,25 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
 
   # Every Repo query issued anywhere while `fun` runs, as `{source, sql}`.
   defp queries(fun) do
+    fun |> queries_with_origin() |> Enum.map(fn {source, sql, _origin} -> {source, sql} end)
+  end
+
+  # Like `queries/1`, but each entry also carries the issuing process and its
+  # `$callers`/`$ancestors` chain, so a caller can keep only the queries that
+  # descend from the processes under test. The telemetry event is global:
+  # without this, a query from an unrelated process (a neighbouring test's
+  # leftover task, a background worker) is counted against the mount.
+  defp queries_with_origin(fun) do
     ref = make_ref()
     parent = self()
 
     :telemetry.attach(
       ref,
       [:arbiter, :repo, :query],
-      fn _event, _m, meta, _c -> send(parent, {:query, ref, meta.source, meta.query}) end,
+      fn _event, _m, meta, _c ->
+        chain = List.wrap(Process.get(:"$callers")) ++ List.wrap(Process.get(:"$ancestors"))
+        send(parent, {:query, ref, meta.source, meta.query, [self() | chain]})
+      end,
       nil
     )
 
@@ -30,7 +42,7 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
 
     Stream.repeatedly(fn ->
       receive do
-        {:query, ^ref, source, sql} -> {source, sql}
+        {:query, ^ref, source, sql, origin} -> {source, sql, origin}
       after
         0 -> nil
       end
@@ -125,13 +137,25 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
       {:ok, warm, _html} = live(conn, ~p"/audit")
       render_async(warm)
 
+      # Count only reads issued by this test (the dead render) and the mounted
+      # LiveView and its tasks. The telemetry event is global, so a concurrent
+      # read by an unrelated process (bd-d78rmc: CI saw 3) is not the mount's.
+      parent = self()
+
       found =
-        queries(fn ->
+        queries_with_origin(fn ->
           {:ok, view, _html} = live(conn, ~p"/audit")
           render_async(view)
+          send(parent, {:view_pid, view.pid})
         end)
 
-      workspace_reads = Enum.count(found, fn {source, _} -> source == "workspaces" end)
+      assert_received {:view_pid, view_pid}
+
+      workspace_reads =
+        Enum.count(found, fn {source, _, origin} ->
+          source == "workspaces" and (parent in origin or view_pid in origin)
+        end)
+
       assert workspace_reads <= 2, "workspaces read #{workspace_reads} times"
     end
   end
