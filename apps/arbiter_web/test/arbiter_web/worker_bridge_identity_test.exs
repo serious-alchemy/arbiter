@@ -30,7 +30,7 @@ defmodule ArbiterWeb.WorkerBridgeIdentityTest do
     {:ok, {_address, port}} = ThousandIsland.listener_info(listener)
 
     dir =
-      Path.join(Arbiter.Config.Paths.scratch_root(), "g9#{System.unique_integer([:positive])}")
+      Path.join(Arbiter.Config.Paths.socket_root(), "g9#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
