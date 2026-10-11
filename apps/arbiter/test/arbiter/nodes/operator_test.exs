@@ -141,10 +141,32 @@ defmodule Arbiter.Nodes.OperatorTest do
       assert event.detail["version"] == tag
     end
 
-    test "an offline node cannot be upgraded", %{home: home} do
-      install_release!(home)
-      assert {:error, :offline} = Nodes.upgrade(enroll!("cold"), @operator)
+    test "an offline node is not reached, but the request is kept for its next connect", %{
+      home: home
+    } do
+      %{tag: tag, sha256: sha} = install_release!(home)
+      node = enroll!("cold")
+      assert {:error, :offline} = Nodes.upgrade(node, @operator)
       assert Nodes.events(kind: :upgraded) == []
+      assert Nodes.get_node(node.id).upgrade_pending_to == tag
+      assert %{upgrade_pending_to: ^tag} = Arbiter.Nodes.Overview.get(node.id)
+
+      # Next connect: the agent is told, as hello_ok always does.
+      {:ok, %{hello_ok: hello_ok}} =
+        Registry.attach(node, self(), hello(), tick_ms: :infinity)
+
+      assert %{"upgrade" => %{"version" => ^tag, "sha256" => ^sha}} = hello_ok
+      assert Nodes.get_node(node.id).upgrade_pending_to == tag
+    end
+
+    test "a connect at the requested version clears the pending upgrade", %{home: home} do
+      %{tag: tag} = install_release!(home)
+      node = enroll!("cold2")
+      assert {:error, :offline} = Nodes.upgrade(node, @operator)
+
+      current = Map.put(hello(), "agent_version", tag)
+      {:ok, _} = Registry.attach(node, self(), current, tick_ms: :infinity)
+      assert Nodes.get_node(node.id).upgrade_pending_to == nil
     end
 
     test "a revoked node cannot be upgraded", %{home: home} do

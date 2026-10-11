@@ -573,7 +573,7 @@ defmodule ArbiterCli.Cmd.Node do
     [
       n["name"],
       n["state"],
-      dash(n["agent_version"]),
+      version_cell(n),
       live_max(n),
       offered(n),
       temp(n),
@@ -586,11 +586,17 @@ defmodule ArbiterCli.Cmd.Node do
     ]
   end
 
+  # A requested upgrade the node has not applied yet shows next to its version (bd-5v5od0).
+  defp version_cell(%{"upgrade_pending_to" => to} = n) when is_binary(to),
+    do: "#{dash(n["agent_version"])} -> #{to} (pending)"
+
+  defp version_cell(n), do: dash(n["agent_version"])
+
   defp node_cells(n) do
     [
       n["name"],
       n["state"] || n["status"],
-      dash(n["agent_version"]),
+      version_cell(n),
       live_max(n),
       offered(n),
       temp(n),
@@ -732,6 +738,7 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("  id:            #{n["id"]}")
     IO.puts("  status:        #{n["status"]}")
     IO.puts("  version:       #{n["agent_version"] || "-"}")
+    if v = n["upgrade_pending_to"], do: IO.puts("  upgrade:       pending -> #{v}")
     IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
     if line = derate_line(n), do: IO.puts(line)
     IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")

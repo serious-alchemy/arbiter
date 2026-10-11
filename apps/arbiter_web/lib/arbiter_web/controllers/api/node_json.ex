@@ -68,7 +68,8 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :allow_unenforced_network,
       :pending,
       :image,
-      :upgrade_command
+      :upgrade_command,
+      :upgrade_pending_to
     ])
     |> Map.put(:max_workers, row.override)
     |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))

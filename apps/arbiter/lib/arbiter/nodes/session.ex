@@ -1219,6 +1219,7 @@ defmodule Arbiter.Nodes.Session do
   defp apply_hello(state, params) do
     node = Nodes.get_node(state.node_id)
     agent = %{version: params["agent_version"], proto: params["proto"]}
+    Nodes.settle_pending_upgrade(state.node_id, params["agent_version"])
 
     %{
       state
@@ -1324,7 +1325,7 @@ defmodule Arbiter.Nodes.Session do
       "runs" => verdicts
     }
     |> put_limits(state)
-    |> put_upgrade(state)
+    |> put_upgrade(state, Nodes.get_node(state.node_id))
   end
 
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
@@ -1346,15 +1347,16 @@ defmodule Arbiter.Nodes.Session do
   # §6: an outdated or ahead agent is told the version to move to (a downgrade
   # after a rollback is the same message). A machine gets the tarball's sha256; a
   # cluster node gets the controller image of that version (K9).
-  defp put_upgrade(ok, %{health: health, info: %{kind: kind}})
-       when health in [:outdated, :ahead] do
-    case kind do
-      "cluster" -> put_image_upgrade(ok)
-      _ -> put_tarball_upgrade(ok)
+  # A pending operator request (bd-5v5od0) is re-sent on connect whatever the health says.
+  defp put_upgrade(ok, %{health: health, info: %{kind: kind}}, node) do
+    pending? = match?(%{upgrade_pending_to: v} when is_binary(v), node)
+
+    cond do
+      health not in [:outdated, :ahead] and not pending? -> ok
+      kind == "cluster" -> put_image_upgrade(ok)
+      true -> put_tarball_upgrade(ok)
     end
   end
-
-  defp put_upgrade(ok, _state), do: ok
 
   defp put_tarball_upgrade(ok) do
     case Nodes.Agent.artifact() do

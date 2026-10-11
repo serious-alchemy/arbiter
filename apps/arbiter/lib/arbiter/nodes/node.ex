@@ -93,6 +93,11 @@ defmodule Arbiter.Nodes.Node do
       change set_attribute(:status, :active)
     end
 
+    # bd-5v5od0: the upgrade an operator asked for, kept until the node reports that version.
+    update :set_upgrade_pending do
+      accept [:upgrade_pending_to]
+    end
+
     update :touch do
       accept [:last_seen_at]
     end
@@ -165,6 +170,13 @@ defmodule Arbiter.Nodes.Node do
     attribute :enrolled_at, :utc_datetime_usec do
       allow_nil? false
       public? true
+    end
+
+    attribute :upgrade_pending_to, :string do
+      public? true
+
+      description "bd-5v5od0: the version `arb node upgrade` asked this node to move to; " <>
+                    "re-sent on every connect until the node's hello reports it."
     end
 
     attribute :revoked_at, :utc_datetime_usec, public?: true
