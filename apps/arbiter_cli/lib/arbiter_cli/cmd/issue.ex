@@ -25,9 +25,9 @@ defmodule ArbiterCli.Cmd.Issue do
                           ("" clears a field)
       arb ticket close    <id> [--reason ...] [--no-upstream]
       arb ticket reopen   <id>
-      arb ticket promote  <id> [--waive REASON]
-      arb ticket demote   <id>
-      arb ticket rank     <id> --top | --bottom | --before <id> | --after <id> [--pin | --unpin]
+      arb ticket promote  <id> [<id> ...] [--stdin] [--waive REASON]
+      arb ticket demote   <id> [<id> ...] [--stdin]
+      arb ticket rank     <id> [<id> ...] [--stdin] --top | --bottom | --before <id> | --after <id> [--pin | --unpin]
       arb ticket rank     <id> --pin | --unpin
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
       arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"

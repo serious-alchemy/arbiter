@@ -52,6 +52,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.BulkRead
+  alias Arbiter.Tasks.BulkResult
   alias Arbiter.Tasks.Create
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.EffectivePriority
@@ -464,6 +465,80 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, issue} <- Ash.get(Issue, id),
          {:ok, demoted} <- Ash.update(issue, %{}, action: :return_to_backlog) do
       render(conn, :show, issue: demoted)
+    end
+  end
+
+  # ---- bulk forms (bd-3cyf8j) -------------------------------------------------
+  #
+  # `POST /api/issues/{promote,demote,rank}` with `{"ids": [...]}`. Each id runs the
+  # same action as its single-id route, independently; the reply is the shared
+  # `Arbiter.Tasks.BulkResult` shape: `{results: [{id, status: ok | refused |
+  # not_found, reason?, ticket?}], counts: {total, ok, refused, not_found}}`. A
+  # batch that is itself malformed (no ids, over `BulkResult.max_batch/0`) is a 400.
+  # Bulk rank takes one shared move plus an ORDERED `ids`, and leaves them in that
+  # order (see `BulkResult.run_rank/3`).
+
+  @doc "Promote every id in `ids`; an optional shared `acceptance_waived` applies to each."
+  def bulk_promote(conn, params) do
+    promote_args =
+      case params["acceptance_waived"] do
+        reason when is_binary(reason) -> %{acceptance_waived: reason}
+        _ -> %{}
+      end
+
+    bulk(conn, params, fn id ->
+      with {:ok, issue} <- Ash.get(Issue, id),
+           {:ok, promoted} <- Ash.update(issue, promote_args, action: :promote_to_ready) do
+        {:ok, ArbiterWeb.Api.IssueJSON.data(promoted)}
+      end
+    end)
+  end
+
+  @doc "Demote every id in `ids` back to Backlog."
+  def bulk_demote(conn, params) do
+    bulk(conn, params, fn id ->
+      with {:ok, issue} <- Ash.get(Issue, id),
+           {:ok, demoted} <- Ash.update(issue, %{}, action: :return_to_backlog) do
+        {:ok, ArbiterWeb.Api.IssueJSON.data(demoted)}
+      end
+    end)
+  end
+
+  @doc "Rank the ordered `ids` with one shared move (`top`, `bottom`, `before_id`, `after_id`, `pinned`)."
+  def bulk_rank(conn, params) do
+    with {:ok, ids} <- bulk_ids(params) do
+      move = Map.delete(params, "ids")
+
+      result =
+        BulkResult.run_rank(ids, move, fn id, step ->
+          with {:ok, rank_args} <- rank_args(step),
+               {:ok, issue} <- Ash.get(Issue, id),
+               {:ok, ranked} <- Arbiter.Tasks.Rank.move(issue, rank_args) do
+            {:ok,
+             Map.merge(
+               ArbiterWeb.Api.IssueJSON.data(ranked),
+               Arbiter.Tasks.Rank.band_fields(ranked)
+             )}
+          else
+            {:error, {:invalid_request, message}} -> {:error, {:invalid, message}}
+            other -> other
+          end
+        end)
+
+      json(conn, result)
+    end
+  end
+
+  defp bulk(conn, params, fun) do
+    with {:ok, ids} <- bulk_ids(params) do
+      json(conn, BulkResult.run(ids, fun))
+    end
+  end
+
+  defp bulk_ids(params) do
+    case BulkResult.fetch_ids(params) do
+      {:ok, ids} -> {:ok, ids}
+      {:error, message} -> {:error, {:invalid_request, message}}
     end
   end
 

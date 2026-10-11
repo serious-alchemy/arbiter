@@ -235,6 +235,10 @@ defmodule ArbiterWeb.Router do
     put("/issues/:id", IssueController, :update)
     post("/issues/:id/close", IssueController, :close)
     post("/issues/:id/reopen", IssueController, :reopen)
+    # bd-3cyf8j: bulk forms (body `{ids: [...]}`), per-id results.
+    post("/issues/promote", IssueController, :bulk_promote)
+    post("/issues/demote", IssueController, :bulk_demote)
+    post("/issues/rank", IssueController, :bulk_rank)
     post("/issues/:id/promote", IssueController, :promote)
     post("/issues/:id/demote", IssueController, :demote)
     post("/issues/:id/sync_upstream_close", IssueController, :sync_upstream_close)
