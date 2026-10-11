@@ -10,7 +10,7 @@ defmodule Arbiter.Test.QwenCli do
   # The qwen CLI release the scripted fixtures are verified against. qwen's flags
   # churn quickly (bd-3km00p §13), so `qwen_cli_test.exs` fails on any other
   # version until the fixtures are re-run and this pin is bumped on purpose.
-  @pinned_version "0.0.14"
+  @pinned_version "0.25.0"
 
   @spec pinned_version() :: String.t()
   def pinned_version, do: @pinned_version
@@ -44,12 +44,13 @@ defmodule Arbiter.Test.QwenCli do
       {"HOME", cwd},
       {"OPENAI_BASE_URL", base_url},
       {"OPENAI_API_KEY", Keyword.get(opts, :api_key, "test-key")},
-      {"OPENAI_MODEL", model}
+      {"OPENAI_MODEL", model},
+      {"QWEN_CODE_SUPPRESS_YOLO_WARNING", "1"}
     ]
 
     task =
       Task.async(fn ->
-        System.cmd(executable(), ["--auth-type", "openai", "--yolo", "-p", prompt],
+        System.cmd(executable(), ["--auth-type", "openai", "--yolo", "--bare", "-p", prompt],
           cd: cwd,
           env: env,
           stderr_to_stdout: true

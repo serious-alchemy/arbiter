@@ -29,7 +29,7 @@ defmodule Arbiter.Test.QwenCliTest do
     server =
       ScriptedOpenAI.start_supervised!([
         {:tool_calls,
-         [%{name: "read_file", arguments: %{"absolute_path" => Path.join(dir, "note.txt")}}]},
+         [%{name: "read_file", arguments: %{"file_path" => Path.join(dir, "note.txt")}}]},
         {:text, "done"}
       ])
 

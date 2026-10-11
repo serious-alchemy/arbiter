@@ -14,10 +14,10 @@ Deterministic tests for the qwen CLI, plus an opt-in live smoke test.
 
 ## Pinned qwen version
 
-`Arbiter.Test.QwenCli.pinned_version/0` — currently **0.0.14**. qwen's flags churn
+`Arbiter.Test.QwenCli.pinned_version/0` — currently **0.25.0**. qwen's flags churn
 quickly (bd-3km00p §13), so `qwen_cli_test.exs` fails when the installed version
 differs. **Caveat:** the harness was authored on a host without qwen installed, so
-the pin and the flags in `QwenCli.run/2` (`--auth-type openai --yolo -p`,
+the pin and the flags in `QwenCli.run/2` (`--auth-type openai --yolo --bare -p`,
 `OPENAI_*` env) have not yet been run against a real binary. The first run on a host
 with qwen must confirm or correct them.
 
