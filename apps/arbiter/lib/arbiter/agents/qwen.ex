@@ -49,6 +49,14 @@ defmodule Arbiter.Agents.Qwen do
   Budget exits 53/55 emit **no** `result` line, so usage is summed from the
   per-message usage and survives them.
 
+  ## Usage (Q7)
+
+  `usage_attrs/1` normalises the stream's usage (qwen's `input_tokens` includes
+  cache reads), reconciles it with the session JSONL at `opts[:session_file]`
+  (`Qwen.SessionFile`, which also survives a killed run), and prices it from the
+  endpoint (`Qwen.Usage.price/2`; unmetered endpoints record `0.0`). A sustained
+  429 retry loop is turned into a provider hold by `Qwen.RetryHold`.
+
   ## Not here yet
 
   `splice_prompt/2` (nudge / `--resume`) is Q8; without it the worker treats the
@@ -57,7 +65,9 @@ defmodule Arbiter.Agents.Qwen do
 
   @behaviour Arbiter.Agents.Agent
 
+  alias Arbiter.Agents.Qwen.SessionFile
   alias Arbiter.Agents.Qwen.Stream, as: QwenStream
+  alias Arbiter.Agents.Qwen.Usage
   alias Arbiter.Worker.ClaudeSession
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
@@ -159,7 +169,15 @@ defmodule Arbiter.Agents.Qwen do
   # line_cap, ...) off the same map, so start from the shape the worker builds.
   @impl true
   def init_session(opts \\ []) do
-    %{line_buf: "", output_lines: [], usage: %{}, activity: nil, activity_at: nil}
+    %{
+      line_buf: "",
+      output_lines: [],
+      usage: %{},
+      activity: nil,
+      activity_at: nil,
+      endpoint: Keyword.get(opts, :endpoint),
+      session_file: Keyword.get(opts, :session_file)
+    }
     |> Map.merge(
       ClaudeSession.build_session_config(
         Keyword.get(opts, :task_id),
@@ -190,8 +208,14 @@ defmodule Arbiter.Agents.Qwen do
   defp arms_done?(line), do: not Enum.any?(@non_arming_prefixes, &String.starts_with?(line, &1))
 
   @impl true
-  def usage_attrs(session),
-    do: ClaudeSession.usage_summary(session) |> Map.put(:provider, provider())
+  def usage_attrs(session) do
+    session
+    |> ClaudeSession.usage_summary()
+    |> Usage.normalize_stream()
+    |> Usage.reconcile(SessionFile.read(Map.get(session, :session_file)))
+    |> Usage.price(Map.get(session, :endpoint))
+    |> Map.put(:provider, provider())
+  end
 
   @doc "True when `status` is one of qwen's budget exits (53 turns, 55 tokens): no `result` line."
   @spec budget_exit?(term()) :: boolean()

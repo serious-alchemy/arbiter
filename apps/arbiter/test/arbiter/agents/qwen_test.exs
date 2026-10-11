@@ -146,7 +146,7 @@ defmodule Arbiter.Agents.QwenTest do
 
       usage = Qwen.usage_attrs(session)
       assert usage.provider == "qwen"
-      assert usage.tokens_in == 2500
+      assert usage.tokens_in == 1300
       assert usage.tokens_out == 52
       assert usage.cache_read_tokens == 1200
       assert usage.model == "qwen3-coder:30b"
@@ -169,7 +169,7 @@ defmodule Arbiter.Agents.QwenTest do
       refute Enum.any?(display, fn {l, _} -> l =~ "session done" or l =~ "session success" end)
 
       usage = Qwen.usage_attrs(session)
-      assert usage.tokens_in == 1900
+      assert usage.tokens_in == 1000
       assert usage.tokens_out == 55
       assert usage.cache_read_tokens == 900
       refute Map.get(usage, :result_subtype)

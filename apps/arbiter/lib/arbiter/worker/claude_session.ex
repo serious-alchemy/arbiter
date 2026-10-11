@@ -764,9 +764,16 @@ defmodule Arbiter.Worker.ClaudeSession do
         # not arm the sentinel (bd-c27m5o).
         session
         |> note_agy_denial_notice(line)
+        |> track_qwen_retry(line)
         |> emit_line(line, not json_shaped?(line))
     end
   end
+
+  # qwen's 429 backoff notices arrive as raw (non-JSON) lines; see `Qwen.RetryHold`.
+  defp track_qwen_retry(%{provider: "qwen"} = session, line),
+    do: Arbiter.Agents.Qwen.RetryHold.track(session, line)
+
+  defp track_qwen_retry(session, _line), do: session
 
   # grok's streaming-messages-json is Claude's wire format with a few quirks
   # (tool names, byte-array Bash results, unknown-vs-zero usage); rewrite them
@@ -1112,6 +1119,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   # qwen reports usage per assistant message too, and its budget exits (53/55)
   # emit no `result` line at all: sum as it arrives (see `Qwen.Stream`).
   defp absorb_usage(%{provider: "qwen"} = session, %{"type" => "assistant"} = event) do
+    session = Arbiter.Agents.Qwen.RetryHold.reset(session)
+
     update_usage(
       session,
       Arbiter.Agents.Qwen.Stream.message_usage_fields(event, Map.get(session, :usage) || %{})
