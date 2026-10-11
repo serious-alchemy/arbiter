@@ -989,6 +989,11 @@ defmodule Arbiter.Board.Autopilot do
   # plan the scheduler walk beside today's plan (`Snapshot.load/1`).
   defp walk_opts(mode), do: if(AdmissionShadow.walks?(mode), do: [admission: mode], else: [])
 
+  # O11: a pass's event is recorded under the installation's mode and a dispatch
+  # under the placed account's mode; the walk-wide `mode` only gates the walk.
+  defp install_mode, do: Arbiter.Accounts.AdmissionMode.installation()
+  defp pool_resolver, do: Arbiter.Accounts.AdmissionMode.pool_resolver()
+
   defp admission_mode(state) do
     state.admission.()
   rescue
@@ -1022,7 +1027,7 @@ defmodule Arbiter.Board.Autopilot do
       signature = {mode, AdmissionShadow.signature(snapshot)}
 
       if signature != state.shadow_signature,
-        do: record_shadow(state, AdmissionShadow.event(snapshot, mode, state.now.()))
+        do: record_shadow(state, AdmissionShadow.event(snapshot, install_mode(), state.now.()))
 
       %{state | shadow_signature: signature}
     else
@@ -1045,7 +1050,7 @@ defmodule Arbiter.Board.Autopilot do
   # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
   defp shadow_opts(snapshot, mode) do
     with true <- AdmissionShadow.walks?(mode),
-         %{} = record <- AdmissionShadow.dispatch_record(snapshot, mode, snapshot.promote) do
+         %{} = record <- AdmissionShadow.dispatch_record(snapshot, pool_resolver(), snapshot.promote) do
       [admission_shadow: record]
     else
       _ -> []

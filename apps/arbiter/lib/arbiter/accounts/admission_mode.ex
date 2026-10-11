@@ -67,11 +67,28 @@ defmodule Arbiter.Accounts.AdmissionMode do
     Enum.max_by([installation() | override_modes()], &Map.fetch!(@rank, &1))
   end
 
-  defp override_modes do
+  @doc """
+  A function from a walk pool key (`{account_id, pool}`, or `{:unmetered, provider}`,
+  or `nil`) to the effective mode of that pool's account, reading the accounts
+  once. Pools with no override (and unmetered pools) follow the installation key.
+  """
+  @spec pool_resolver() :: (term() -> mode())
+  def pool_resolver do
+    install = installation()
+    overrides = Map.new(overrides(), &{&1.id, &1.admission})
+
+    fn
+      {account_id, _pool} when is_binary(account_id) -> Map.get(overrides, account_id, install)
+      _ -> install
+    end
+  end
+
+  defp override_modes, do: Enum.map(overrides(), & &1.admission)
+
+  defp overrides do
     ProviderAccount
     |> Ash.Query.filter(not is_nil(admission) and is_nil(deleted_at))
     |> Ash.read!()
-    |> Enum.map(& &1.admission)
   rescue
     _ -> []
   catch

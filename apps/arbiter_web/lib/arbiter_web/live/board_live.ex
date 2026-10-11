@@ -760,7 +760,12 @@ defmodule ArbiterWeb.BoardLive do
   # The explanation is presentation: a read of it that fails leaves the board
   # as it was, with the figures and no popups.
   defp explain(board, mode, capacity) do
-    CapacityExplainer.explain(board, mode: mode, capacity: capacity)
+    CapacityExplainer.explain(board,
+      mode: mode,
+      install_mode: Arbiter.Accounts.AdmissionMode.installation(),
+      pool_mode: Arbiter.Accounts.AdmissionMode.pool_resolver(),
+      capacity: capacity
+    )
   rescue
     _ -> empty_explain()
   end
