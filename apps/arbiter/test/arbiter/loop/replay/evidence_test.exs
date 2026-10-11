@@ -157,7 +157,17 @@ defmodule Arbiter.Loop.Replay.EvidenceTest do
                "| claude | claude-sonnet-5-5 | 2 | feature | 1 | 100% (1/1) | 100% (1/1) | 0.80 | 0.40 |"
 
       assert text =~ "never read into the live competence matrix"
-      assert text =~ "no expiring headroom"
+
+      assert text =~
+               "- 2026-10-10 12:00:00Z bd-ev on claude-sonnet-5-5: scored, converged " <>
+                 "(verdict approve, tests passed, overlap 0.80/0.40)"
+
+      assert text =~
+               "- 2026-10-10 12:00:00Z bd-ev on claude-sonnet-5-5: refused, " <>
+                 "acct/claude has no expiring headroom"
+
+      assert String.printable?(text) and text == for(<<c <- text>>, c < 128, into: "", do: <<c>>),
+             "plain ASCII, whatever the operator's terminal"
     end
 
     test "nothing recorded says so" do

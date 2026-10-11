@@ -190,17 +190,17 @@ defmodule Arbiter.Loop.Replay.Evidence do
     do: "#{pct(share)} (#{round(share * n)}/#{n})"
 
   defp latest_line(%ReplayRun{} = run) do
-    "- #{stamp(run.started_at)} #{run.task_id} #{run.model} → #{run.state}#{outcome(run)}"
+    "- #{stamp(run.started_at)} #{run.task_id} on #{run.model}: #{run.state}#{outcome(run)}"
   end
 
   defp outcome(%ReplayRun{state: :scored, converged: converged} = run) do
-    ": #{if converged, do: "converged", else: "not converged"} " <>
+    ", #{if converged, do: "converged", else: "not converged"} " <>
       "(verdict #{run.verdict || "none"}, tests #{run.tests || "not run"}, " <>
       "overlap #{num(run.file_overlap)}/#{num(run.line_overlap)})" <>
       if(run.reason, do: "; " <> run.reason, else: "")
   end
 
-  defp outcome(%ReplayRun{reason: reason}) when is_binary(reason), do: ": " <> reason
+  defp outcome(%ReplayRun{reason: reason}) when is_binary(reason), do: ", " <> reason
   defp outcome(_run), do: ""
 
   defp ratio(_count, 0), do: nil
