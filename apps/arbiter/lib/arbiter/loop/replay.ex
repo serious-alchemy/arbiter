@@ -381,7 +381,8 @@ defmodule Arbiter.Loop.Replay do
          :ok <- seed(subject, checkout),
          {:ok, known_good} <-
            Sandbox.known_good(subject.repo_path, subject.base_sha, subject.known_good_sha),
-         {:ok, implemented} <- call(ctx, :implement, Prompt.implement(subject)),
+         {:ok, implemented} <-
+           call(ctx, :implement, Prompt.implement(subject, adapter(ctx.author.provider))),
          {:ok, change} <- Sandbox.change(checkout, subject.base_sha) do
       measured = %{
         files: Enum.take(change.files, @max_files),

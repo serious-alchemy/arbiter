@@ -3,10 +3,11 @@ defmodule Arbiter.Loop.Replay.Prompt do
   The two prompts of an offline replay (R15, bd-c7lx65;
   `docs/design/paced-quota-routing-signals.md` §7.2).
 
-    * `implement/1`: the ticket (title, description, acceptance criteria) for
-      the replayed model, with the one thing a replay must add: the checkout
-      has no remote, so the work is committed, never pushed. It names neither
-      the ticket's id nor its PR, and does not say the work was done before.
+    * `implement/2`: the ticket (title, description, acceptance criteria) for
+      the replayed model, with the live work prompt's async-tools rules for its
+      adapter, and the one thing a replay must add: the checkout has no remote,
+      so the work is committed, never pushed. It names neither the ticket's id
+      nor its PR, and does not say the work was done before.
     * `review/2`: the live ReviewGate's own reviewer prompt
       (`Arbiter.Worker.ReviewGate.review_prompt/1`), so the verdict and the
       CRITERIA breakdown are asked for exactly as for the round-1 verdicts live
@@ -15,12 +16,17 @@ defmodule Arbiter.Loop.Replay.Prompt do
       at the merged change (`gh pr diff`), and invite it to post to the forge.
   """
 
+  alias Arbiter.Agents
   alias Arbiter.Loop.Replay.Sandbox
+  alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ReviewGate
 
-  @doc "The replayed model's prompt for `subject` (an `Arbiter.Loop.Replay.Subject`)."
-  @spec implement(map()) :: String.t()
-  def implement(subject) do
+  @doc """
+  The replayed model's prompt for `subject` (an `Arbiter.Loop.Replay.Subject`),
+  run by the `adapter` agent type (`:claude`, `:codex`, `:gemini`, …).
+  """
+  @spec implement(map(), atom()) :: String.t()
+  def implement(subject, adapter) do
     issue = subject.issue
 
     """
@@ -41,6 +47,8 @@ defmodule Arbiter.Loop.Replay.Prompt do
     no remote: do not push and do not open a pull request; your commits are
     collected from this checkout when you finish. Work only inside it.
 
+    #{async_tools(adapter)}
+
     When you are done, print `arb done` on a line by itself.
     """
   end
@@ -60,6 +68,17 @@ defmodule Arbiter.Loop.Replay.Prompt do
       workspace_id: subject.workspace.id,
       reviewer_provider: reviewer_adapter
     })
+  end
+
+  # The live work prompt's async-tools block for this adapter, byte for byte
+  # (`PromptBuilder`'s own completion signal and coda): the replayed model works
+  # under the same operating rules a dispatch would give it.
+  defp async_tools(adapter) do
+    PromptBuilder.async_tools_section(
+      Map.get(Agents.adapters(), adapter),
+      "`arb done`",
+      "the work is incomplete until every tool you launched has\nfinished and you have read its result"
+    )
   end
 
   defp text(value) when is_binary(value) do
