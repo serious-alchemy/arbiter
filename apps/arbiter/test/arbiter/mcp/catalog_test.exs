@@ -201,4 +201,54 @@ defmodule Arbiter.MCP.CatalogTest do
       assert Enum.any?(one_of, &(&1["type"] == "string"))
     end
   end
+
+  describe "inputSchema validity" do
+    @json_types ~w(string number integer boolean object array null)
+
+    test "every tool's schema uses only valid JSON Schema type keywords" do
+      problems =
+        Enum.flat_map(Catalog.all(), fn tool -> schema_problems(tool.input_schema, tool.name) end)
+
+      assert problems == []
+    end
+
+    test "account_set's admission property has a valid type" do
+      admission = Arbiter.MCP.Catalog.AccountSchema.account_set()["properties"]["admission"]
+      assert admission["type"] == ["string", "null"]
+    end
+
+    defp schema_problems(%{} = schema, path) do
+      own =
+        case Map.fetch(schema, "type") do
+          {:ok, t} when is_binary(t) ->
+            if t in @json_types, do: [], else: [{path, t}]
+
+          {:ok, [_ | _] = ts} ->
+            if Enum.all?(ts, &(&1 in @json_types)), do: [], else: [{path, ts}]
+
+          {:ok, other} ->
+            [{path, other}]
+
+          :error ->
+            []
+        end
+
+      own ++
+        Enum.flat_map(schema, fn
+          {k, v} when k in ["properties", "$defs", "definitions"] and is_map(v) ->
+            Enum.flat_map(v, fn {n, sub} -> schema_problems(sub, "#{path}.#{n}") end)
+
+          {k, v} when k in ["items", "additionalProperties", "not"] and is_map(v) ->
+            schema_problems(v, "#{path}.#{k}")
+
+          {k, v} when k in ["anyOf", "oneOf", "allOf"] and is_list(v) ->
+            Enum.flat_map(v, &schema_problems(&1, "#{path}.#{k}"))
+
+          _ ->
+            []
+        end)
+    end
+
+    defp schema_problems(_, _), do: []
+  end
 end
