@@ -123,6 +123,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
   alias Arbiter.Workflows.PRPatrolSupervisor
   require Ash.Query
@@ -494,6 +495,22 @@ defmodule Arbiter.Workflows.PRPatrol do
         )
 
         true
+
+      # bd-cfucyv: a ticket whose ReviewGate is waiting on CI is stored `:active`
+      # (it only reads as Merging / awaiting_ci on the board), and after a
+      # restart no run is live to say so — the unexpired `ci_wait` marker is the
+      # durable record that the gate is handling this red CI.
+      %Issue{id: task_id} = task ->
+        if is_nil(ReviewCi.waiting(task)) do
+          false
+        else
+          Logger.info(
+            "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
+              "task #{task_id}'s ReviewGate is waiting on CI"
+          )
+
+          true
+        end
 
       _ ->
         false

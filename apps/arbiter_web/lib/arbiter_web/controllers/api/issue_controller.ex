@@ -5,6 +5,7 @@ defmodule ArbiterWeb.Api.IssueController do
   Routes:
 
     * `POST   /api/issues`             — :create
+    * `POST   /api/issues/batch`       — :batch_create (many tickets + edges, atomic)
     * `GET    /api/issues`             — :index (filters: state, priority,
                                         difficulty, issue_type, workspace_id)
     * `GET    /api/issues/ready`       — :ready (Issue.ready/1)
@@ -51,6 +52,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Guardrails.Authority
   alias Arbiter.Params
   alias Arbiter.Tasks.AssigneeCompat
+  alias Arbiter.Tasks.BatchCreate
   alias Arbiter.Tasks.BulkRead
   alias Arbiter.Tasks.BulkResult
   alias Arbiter.Tasks.Create
@@ -232,15 +234,58 @@ defmodule ArbiterWeb.Api.IssueController do
     end
   end
 
+  # `POST /api/issues/batch` — `{tickets: [...], promote?, force?, acceptance_waived?}`.
+  # Every entry is a `POST /api/issues` body plus an optional `ref`; `parent_id` /
+  # `depends_on` / `blocks` may name an existing id or another entry's `ref`. The
+  # whole batch is one transaction (`Arbiter.Tasks.BatchCreate`): any failure
+  # writes nothing and the error names the entry (`error.details.index`). 201 with
+  # the `refs` map on success.
+  def batch_create(conn, params) do
+    with {:ok, ws_id} <- WorkspaceParam.resolve(conn, params, :write),
+         {:ok, force?} <- params |> Params.fetch_bool("force", false) |> Params.to_rest(),
+         {:ok, promote?} <- params |> Params.fetch_bool("promote", false) |> Params.to_rest(),
+         {:ok, entries} <- BatchCreate.parse(Map.get(params, "tickets"), &batch_entry_attrs/1),
+         {:ok, result} <-
+           BatchCreate.run(entries,
+             workspace_id: ws_id,
+             force: force?,
+             promote: promote?,
+             promote_args: batch_promote_args(params),
+             created_by: Params.actor_label(conn.assigns[:mcp_scope]),
+             context: permission_context(conn)
+           ) do
+      conn |> put_status(:created) |> json(BatchCreate.present(result))
+    end
+  end
+
+  # One entry's own fields, gated and coerced exactly like a single create's.
+  defp batch_entry_attrs(entry) do
+    entry = Map.drop(entry, ["id", "assignee", "workspace", "workspace_id"])
+
+    with :ok <- IssueFields.check(entry, :create),
+         {:ok, _skip?} <-
+           entry |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
+      {:ok, entry |> Params.strip_attribution() |> coerce_atoms(@atom_fields)}
+    end
+  end
+
+  defp batch_promote_args(params) do
+    case params["acceptance_waived"] do
+      reason when is_binary(reason) -> %{acceptance_waived: reason}
+      _ -> %{}
+    end
+  end
+
   defp create_issue(conn, params, force?, ws_id) do
     assignee_warnings = AssigneeCompat.warnings(params)
 
     with :ok <- IssueFields.check(params, :create),
-         {:ok, deps} <- fetch_deps(params) do
+         {:ok, deps} <- fetch_id_lists(params, ["depends_on", "deps"]),
+         {:ok, blocks} <- fetch_id_lists(params, ["blocks"]) do
       attrs =
         params
         |> Params.strip_attribution()
-        |> Map.drop(["id", "force", "assignee", "workspace", "deps"])
+        |> Map.drop(["id", "force", "assignee", "workspace", "deps", "depends_on", "blocks"])
         |> Map.put("workspace_id", ws_id)
         |> coerce_atoms(@atom_fields)
 
@@ -249,6 +294,7 @@ defmodule ArbiterWeb.Api.IssueController do
         opts = [
           force: force?,
           deps: deps,
+          blocks: blocks,
           created_by: Params.actor_label(conn.assigns[:mcp_scope]),
           context: permission_context(conn)
         ]
@@ -258,19 +304,25 @@ defmodule ArbiterWeb.Api.IssueController do
     end
   end
 
-  # `deps` — ids of tickets that block the new one. Optional; a list of strings.
-  defp fetch_deps(%{"deps" => deps}) when is_list(deps) do
-    if Enum.all?(deps, &is_binary/1),
-      do: {:ok, deps},
-      else: {:error, {:invalid_request, "deps must be a list of ticket ids"}}
+  # `depends_on` (alias `deps`) — ids of tickets that block the new one; `blocks` —
+  # ids of tickets the new one blocks. Optional lists of strings, written in the
+  # same transaction as the ticket.
+  defp fetch_id_lists(params, keys) do
+    Enum.reduce_while(keys, {:ok, []}, fn key, {:ok, acc} ->
+      case Map.get(params, key) do
+        nil ->
+          {:cont, {:ok, acc}}
+
+        ids when is_list(ids) ->
+          if Enum.all?(ids, &is_binary/1),
+            do: {:cont, {:ok, Enum.uniq(acc ++ ids)}},
+            else: {:halt, {:error, {:invalid_request, "#{key} must be a list of ticket ids"}}}
+
+        _ ->
+          {:halt, {:error, {:invalid_request, "#{key} must be a list of ticket ids"}}}
+      end
+    end)
   end
-
-  defp fetch_deps(%{"deps" => nil}), do: {:ok, []}
-
-  defp fetch_deps(%{"deps" => _}),
-    do: {:error, {:invalid_request, "deps must be a list of ticket ids"}}
-
-  defp fetch_deps(_params), do: {:ok, []}
 
   defp respond_to_create(conn, {:ok, issue, warnings}, assignee_warnings) do
     conn

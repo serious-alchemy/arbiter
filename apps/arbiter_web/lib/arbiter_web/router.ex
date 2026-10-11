@@ -230,6 +230,8 @@ defmodule ArbiterWeb.Router do
     get("/issues/lifecycle", IssueController, :lifecycle)
     get("/issues", IssueController, :index)
     post("/issues", IssueController, :create)
+    # Batch create: many tickets + all their edges in one transaction.
+    post("/issues/batch", IssueController, :batch_create)
     get("/issues/:id", IssueController, :show)
     patch("/issues/:id", IssueController, :update)
     put("/issues/:id", IssueController, :update)

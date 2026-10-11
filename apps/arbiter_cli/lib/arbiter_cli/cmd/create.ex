@@ -3,13 +3,16 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
                        [--notes ...] [--qa-notes ...] [--deployment-notes ...]
                        [--priority N] [--difficulty N] [--type T]
-                       [--deps id1,id2] [--labels a,b]
+                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--labels a,b]
                        [--tracker-ref REF] [--tracker-type T]
                        [--tracker-context-type T] [--tracker-context-ref REF]
                        [--no-tracker] [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
                        [--require-provider P | --exclude-provider P] [--permission P]
                        [--force] [--ticket-only|--no-task|--unclaimed] [--local-only] [--json]`
+
+  `arb ticket create --from-file <batch.json|batch.yaml|-> [--promote] [--force] [--json]`
+  (or `--stdin`) files a whole ticket graph atomically — see "Batch create" below.
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
@@ -134,6 +137,46 @@ defmodule ArbiterCli.Cmd.Create do
   `--deps id1,id2` creates a `blocks` dependency for each listed issue (each
   becomes `<dep_id> blocks <new_id>`), in the same call as the create.
 
+  `--depends-on id1,id2` is the same as `--deps`. `--blocks id1,id2` goes the other
+  way: the new ticket blocks each listed issue (`<new_id> blocks <id>`). Both are
+  written in the same transaction as the ticket: a cycle or an unknown/cross-
+  workspace id refuses the create and files nothing.
+
+  ## Batch create (`--from-file` / `--stdin`)
+
+  `--from-file PATH` (`-` or `--stdin` for standard input) reads a JSON or YAML
+  document and files every ticket **and every edge in one atomic call**
+  (`POST /api/issues/batch`): all of it or nothing, so Autopilot can never claim a
+  ticket before its edges exist. The document is a list of tickets, or an object
+  `{tickets: [...], promote: true, force: true, acceptance_waived: "..."}`. Each
+  ticket takes the `POST /api/issues` fields (`title`, `description`,
+  `acceptance`, `issue_type`, `priority`, `repo`, ...) plus:
+
+    * `ref` — a batch-local name other tickets can point at;
+    * `parent_id`, `depends_on` (alias `deps`), `blocks` — each id is an existing
+      ticket id **or** the `ref` of another ticket in the file (forward refs are
+      fine).
+
+      - ref: epic
+        title: Billing rewrite
+        issue_type: epic
+      - ref: schema
+        title: Add invoices table
+        parent_id: epic
+      - ref: api
+        title: Invoice API
+        parent_id: epic
+        depends_on: [schema, bd-123]
+
+  A failure (unknown ref, cycle, bad repo, duplicate title without `force: true`
+  on that ticket, ...) files nothing and the error names the offending ticket
+  (`tickets[i]`). On success `arb` prints the `ref -> id` map. `--promote` (or
+  `promote: true` in the file) promotes every created ticket after all the edges
+  exist and prints the per-id result (exit 1 if any promote was refused; the batch
+  itself stays filed). `--force` skips the duplicate-title check for every ticket.
+  At most 100 tickets per batch. A title argument cannot be combined with
+  `--from-file`.
+
   ### Edges are the server's job (P-14, bd-apj0gq)
 
   `--deps` and `--parent` ride along in the `POST /api/issues` body: the server
@@ -175,6 +218,8 @@ defmodule ArbiterCli.Cmd.Create do
   alias ArbiterCli.{
     AcceptanceFlags,
     ArgParser,
+    BatchFile,
+    Bulk,
     Client,
     Output,
     PermissionFlags,
@@ -191,6 +236,11 @@ defmodule ArbiterCli.Cmd.Create do
     difficulty: :string,
     type: :string,
     deps: :string,
+    depends_on: :string,
+    blocks: :string,
+    from_file: :string,
+    stdin: :boolean,
+    promote: :boolean,
     labels: :string,
     assignee: :string,
     tracker_ref: :string,
@@ -233,32 +283,108 @@ defmodule ArbiterCli.Cmd.Create do
 
       opts = ArgParser.coerce_difficulty(opts)
 
-      title =
-        case rest do
-          [t] -> t
-          [] -> Output.die("create requires a title argument")
-          many -> Enum.join(many, " ")
-        end
-
-      ticket_only? =
-        opts[:ticket_only] == true or opts[:no_task] == true or opts[:unclaimed] == true
-
-      skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
-
-      if ticket_only? and skip_upstream? do
-        Output.die(
-          "--ticket-only and --no-tracker/--local-only are mutually exclusive: " <>
-            "--ticket-only creates ONLY the tracker ticket, while --no-tracker skips the tracker entirely"
-        )
-      end
-
-      if ticket_only? do
-        run_ticket_only(opts, title, mode)
+      if opts[:from_file] || opts[:stdin] do
+        run_batch(opts, rest, mode)
       else
-        run_task_create(opts, rest, title, skip_upstream?, mode)
+        run_single(opts, rest, mode)
       end
     end
   end
+
+  defp run_single(opts, rest, mode) do
+    if opts[:promote], do: Output.die("--promote only applies to a batch (--from-file/--stdin)")
+
+    title = title_from!(rest)
+
+    ticket_only? =
+      opts[:ticket_only] == true or opts[:no_task] == true or opts[:unclaimed] == true
+
+    skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
+
+    if ticket_only? and skip_upstream? do
+      Output.die(
+        "--ticket-only and --no-tracker/--local-only are mutually exclusive: " <>
+          "--ticket-only creates ONLY the tracker ticket, while --no-tracker skips the tracker entirely"
+      )
+    end
+
+    if ticket_only? do
+      run_ticket_only(opts, title, mode)
+    else
+      run_task_create(opts, rest, title, skip_upstream?, mode)
+    end
+  end
+
+  defp title_from!([t]), do: t
+  defp title_from!([]), do: Output.die("create requires a title argument")
+  defp title_from!(many), do: Enum.join(many, " ")
+
+  # ---- batch: arb ticket create --from-file <path|-> / --stdin --------------
+
+  defp run_batch(opts, rest, mode) do
+    if rest != [] do
+      Output.die(
+        "a title argument cannot be combined with --from-file/--stdin (one or the other)"
+      )
+    end
+
+    source = opts[:from_file] || "-"
+    label = if source == "-", do: "stdin", else: source
+    {tickets, doc_opts} = source |> BatchFile.read!() |> BatchFile.tickets!(label)
+    workspace_id = Workspace.id_or_halt()
+
+    payload =
+      %{"workspace_id" => workspace_id, "tickets" => tickets}
+      |> maybe_put_flag("promote", opts[:promote] == true or doc_opts["promote"] == true)
+      |> maybe_put_flag("force", opts[:force] == true or doc_opts["force"] == true)
+      |> maybe_put("acceptance_waived", doc_opts["acceptance_waived"])
+
+    case Client.post("/api/issues/batch", payload) do
+      {:ok, body} -> emit_batch(body, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_batch(body, :json) do
+    IO.puts(Jason.encode!(body))
+    exit_unless_promoted(body)
+  end
+
+  defp emit_batch(body, :text) do
+    counts = body["counts"] || %{}
+    IO.puts("created #{counts["tickets"] || 0} tickets, #{counts["edges"] || 0} edges")
+
+    Enum.each(body["tickets"] || [], &print_batch_ticket/1)
+    print_batch_promote(body["promote"])
+    exit_unless_promoted(body)
+  end
+
+  defp print_batch_ticket(t) do
+    IO.puts("  #{t["ref"] || "-"} -> #{t["id"]}  (#{t["state"]})  #{t["title"]}")
+
+    for w <- t["warnings"] || [] do
+      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{w}")
+    end
+
+    for f <- t["failures"] || [] do
+      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{f["message"]}")
+    end
+  end
+
+  defp print_batch_promote(%{"results" => results, "counts" => c}) do
+    IO.puts("promoted #{c["ok"] || 0} of #{c["total"] || length(results)}")
+    Enum.each(results, &IO.puts("  " <> Bulk.line(&1)))
+  end
+
+  defp print_batch_promote(_), do: :ok
+
+  # The batch is filed either way; a refused promote is a non-zero exit so a script
+  # notices that the tickets are not Ready.
+  defp exit_unless_promoted(%{"promote" => %{"results" => results}}) do
+    if Enum.all?(results, &(&1["status"] == "ok")), do: :ok, else: Output.halt(1)
+  end
+
+  defp exit_unless_promoted(_body), do: :ok
 
   defp run_ticket_only(opts, title, mode) do
     workspace_id = Workspace.id_or_halt()
@@ -270,6 +396,8 @@ defmodule ArbiterCli.Cmd.Create do
         {"--exclude-provider", opts[:exclude_provider]},
         {"--permission", opts[:permission]},
         {"--deps", opts[:deps]},
+        {"--depends-on", opts[:depends_on]},
+        {"--blocks", opts[:blocks]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
         {"--tracker-type", opts[:tracker_type]},
@@ -338,7 +466,9 @@ defmodule ArbiterCli.Cmd.Create do
       # tracker-linked parent to context-only), and the `blocks` edges for
       # `--deps`, in the same call — the CLI no longer orchestrates edges.
       |> maybe_put("parent_id", opts[:parent])
-      |> maybe_put_deps(opts[:deps])
+      |> maybe_put_ids("deps", opts[:deps])
+      |> maybe_put_ids("depends_on", opts[:depends_on])
+      |> maybe_put_ids("blocks", opts[:blocks])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
@@ -385,15 +515,15 @@ defmodule ArbiterCli.Cmd.Create do
 
   defp die_create(err, _mode), do: Output.die(err)
 
-  defp maybe_put_deps(payload, nil), do: payload
+  defp maybe_put_ids(payload, _key, nil), do: payload
 
-  defp maybe_put_deps(payload, raw) do
+  defp maybe_put_ids(payload, key, raw) do
     case raw
          |> String.split(",", trim: true)
          |> Enum.map(&String.trim/1)
          |> Enum.reject(&(&1 == "")) do
       [] -> payload
-      ids -> Map.put(payload, "deps", ids)
+      ids -> Map.put(payload, key, ids)
     end
   end
 

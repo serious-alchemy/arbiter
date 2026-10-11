@@ -15,6 +15,8 @@ defmodule ArbiterCli.Main do
                                   [--auto-close] [--tracker-ref R] [--tracker-type T]
                                   [--tracker-context-type T] [--tracker-context-ref R]
                                   [--require-provider p | --exclude-provider p]
+                                  [--depends-on id1,id2] [--blocks id1,id2]
+      arb ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]   (atomic graph)
       arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
                                   [--description d] [--notes t | --append-notes t]
                                   [--acceptance a | --acceptance-file PATH]
@@ -110,6 +112,7 @@ defmodule ArbiterCli.Main do
       arb account merge   <from-ref> --into <into-ref>
 
       arb dep add         <from> <type> <to>
+      arb dep add         --stdin   (JSON edges or `<from> <type> <to>` lines; per-edge results)
       arb dep remove      <from> <to>
 
       arb config get      [dotted.key] [--workspace W] [--json]
