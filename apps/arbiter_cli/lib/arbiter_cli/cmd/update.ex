@@ -469,14 +469,7 @@ defmodule ArbiterCli.Cmd.Update do
   defp edit_one(id, payload, opts, mode) do
     resume? = opts[:resume_review] == true
 
-    patched =
-      if map_size(payload) > 0 do
-        case Client.patch("/api/issues/" <> id, payload) do
-          {:ok, issue} -> issue
-          {:error, err} -> Output.die(err)
-        end
-      end
-
+    patched = if map_size(payload) > 0, do: patch!(id, payload)
     resumed = if resume?, do: resume_review!(id)
 
     case resumed || patched do
@@ -490,6 +483,13 @@ defmodule ArbiterCli.Cmd.Update do
 
       issue ->
         Output.emit_issue(issue, mode)
+    end
+  end
+
+  defp patch!(id, payload) do
+    case Client.patch("/api/issues/" <> id, payload) do
+      {:ok, issue} -> issue
+      {:error, err} -> Output.die(err)
     end
   end
 

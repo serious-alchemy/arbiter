@@ -493,11 +493,12 @@ defmodule ArbiterWeb.Api.IssueController do
     # suppresses it; junk is a 400.
     with {:ok, close_upstream} <-
            params |> Params.fetch_bool("close_upstream", true) |> Params.to_rest(),
-         {:ok, issue} <- Ash.get(Issue, id),
-         args =
-           %{}
-           |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
-           |> Map.put(:close_upstream, close_upstream) do
+         {:ok, issue} <- Ash.get(Issue, id) do
+      args =
+        %{}
+        |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
+        |> Map.put(:close_upstream, close_upstream)
+
       Ash.update(issue, args, action: :close)
     end
   end
@@ -602,14 +603,16 @@ defmodule ArbiterWeb.Api.IssueController do
 
     if is_map(patch) and map_size(patch) > 0 do
       with :ok <- notes_confirmed(patch, params) do
-        bulk(conn, params, fn id ->
-          with {:ok, updated} <- apply_update(conn, id, Map.put(patch, "id", id)) do
-            {:ok, ArbiterWeb.Api.IssueJSON.data(updated)}
-          end
-        end)
+        bulk(conn, params, &patch_one(conn, &1, patch))
       end
     else
       {:error, {:invalid_request, "`patch` must be a non-empty object of fields to set"}}
+    end
+  end
+
+  defp patch_one(conn, id, patch) do
+    with {:ok, updated} <- apply_update(conn, id, Map.put(patch, "id", id)) do
+      {:ok, ArbiterWeb.Api.IssueJSON.data(updated)}
     end
   end
 
