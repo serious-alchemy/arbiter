@@ -32,11 +32,14 @@ defmodule Arbiter.Quota.BudgetShadowTest do
 
   # The budget's own modules, the supervision tree that starts its server, and
   # the scheduler walk's inputs (DC6, read only under shadow and enforce).
+  # `quota/history.ex` only records the published figure on each snapshot row
+  # (bd-9ntll1); it gates nothing.
   @allowed ~w(
     arbiter/quota/budget.ex
     arbiter/quota/budget/server.ex
     arbiter/quota/budget/inputs.ex
     arbiter/quota/shadow_supervisor.ex
+    arbiter/quota/history.ex
     arbiter/application.ex
     arbiter/board/walk_inputs.ex
     arbiter/board/capacity_view.ex
