@@ -249,6 +249,8 @@ defmodule Arbiter.Loop.Replay.SubjectTest do
 
       assert length(Subject.candidates(workspace_id: ctx.ws.id, difficulty: 2)) == 2
       assert Subject.candidates(workspace_id: ctx.ws.id, issue_type: "bug") == []
+      assert length(Subject.candidates(workspace_id: ctx.ws.id, issue_type: "feature")) == 3
+      assert length(Subject.candidates(workspace_id: ctx.ws.id, issue_type: :feature)) == 3
       assert length(Subject.candidates(workspace_id: ctx.ws.id, limit: 1)) == 1
     end
   end
