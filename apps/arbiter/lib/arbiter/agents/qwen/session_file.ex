@@ -46,6 +46,35 @@ defmodule Arbiter.Agents.Qwen.SessionFile do
     end
   end
 
+  @doc """
+  The chat JSONL of session `session_id` under a worker's `config_dir` (its
+  isolated `$HOME`, see `Arbiter.Agents.Qwen.ConfigDir`): qwen writes
+  `<QWEN_HOME>/projects/<cwd-slug>/chats/<session_id>.jsonl`. `session_id` is
+  matched as a literal token (it is spliced into a glob).
+  """
+  @spec locate(String.t() | nil, String.t() | nil) :: {:ok, String.t()} | :not_found
+  def locate(config_dir, session_id)
+      when is_binary(config_dir) and config_dir != "" and is_binary(session_id) do
+    if Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, session_id) do
+      [".qwen", ""]
+      |> Enum.flat_map(fn root ->
+        Path.wildcard(
+          Path.join([config_dir, root, "projects", "*", "chats", session_id <> ".jsonl"])
+        )
+      end)
+      |> Enum.sort()
+      |> List.first()
+      |> case do
+        nil -> :not_found
+        path -> {:ok, path}
+      end
+    else
+      :not_found
+    end
+  end
+
+  def locate(_config_dir, _session_id), do: :not_found
+
   @doc "Read and `parse/1` a session file; `:none` if it is missing or unreadable."
   @spec read(Path.t() | nil) :: {:ok, totals()} | :none
   def read(path) when is_binary(path) do

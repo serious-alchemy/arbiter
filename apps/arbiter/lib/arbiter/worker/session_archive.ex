@@ -126,6 +126,7 @@ defmodule Arbiter.Worker.SessionArchive do
 
   require Logger
 
+  alias Arbiter.Agents.Qwen.SessionFile, as: QwenSessionFile
   alias Arbiter.Redaction
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.CodexSessionFile
@@ -406,6 +407,15 @@ defmodule Arbiter.Worker.SessionArchive do
   # (`$CODEX_HOME`, else `~/.codex`) and the file is found by thread id.
   defp locate_and_archive_codex(run_id, config_dir, session_id, opts) do
     case CodexSessionFile.locate(config_dir, session_id) do
+      {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
+      :not_found -> locate_and_archive_qwen(run_id, config_dir, session_id, opts)
+    end
+  end
+
+  # qwen's chat JSONL is line-oriented like Claude's; `config_dir` is the
+  # worker's isolated `$HOME` (`Arbiter.Agents.Qwen.ConfigDir`).
+  defp locate_and_archive_qwen(run_id, config_dir, session_id, opts) do
+    case QwenSessionFile.locate(config_dir, session_id) do
       {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
       :not_found -> {:ok, blank(run_id, :no_session_file)}
     end

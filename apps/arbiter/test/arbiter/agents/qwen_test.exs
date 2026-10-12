@@ -67,6 +67,84 @@ defmodule Arbiter.Agents.QwenTest do
     end
   end
 
+  describe "session id pre-assignment and splice_prompt/2 (Q8)" do
+    @sid "0b9f3c1e-2f64-4c53-9a43-8f2f7c1d9a10"
+
+    defp argv_tail({:ok, ["sh", "-c", _, "sh", _qwen | args]}), do: args
+
+    test "default_argv pre-assigns --session-id: the given one, else a fresh uuid" do
+      args = argv_tail(Qwen.default_argv("p", session_id: @sid))
+      assert ["--session-id", @sid] == flag_pair(args, "--session-id")
+
+      [_, generated] = flag_pair(argv_tail(Qwen.default_argv("p")), "--session-id")
+      assert {:ok, _} = Ecto.UUID.cast(generated)
+      refute generated == @sid
+    end
+
+    test "a nudge becomes --resume <pre-assigned id> with the prompt swapped" do
+      {:ok, argv} = Qwen.default_argv("original", session_id: @sid, model: "m")
+      assert {:ok, new} = Qwen.splice_prompt(argv, ["nudge text"])
+      args = argv_tail({:ok, new})
+
+      assert ["--resume", @sid] == flag_pair(args, "--resume")
+      refute "--session-id" in args
+      assert ["-p", "nudge text"] == flag_pair(args, "-p")
+      refute "original" in args
+      assert ["-m", "m"] == flag_pair(args, "-m")
+    end
+
+    test "resume inserts --resume <id> and swaps the prompt, dropping --session-id" do
+      {:ok, argv} = Qwen.default_argv("original", session_id: @sid)
+      other = "11111111-2222-4333-8444-555555555555"
+      assert {:ok, new} = Qwen.splice_prompt(argv, ["--resume", other, "keep going"])
+      args = argv_tail({:ok, new})
+
+      assert ["--resume", other] == flag_pair(args, "--resume")
+      refute "--session-id" in args
+      assert ["-p", "keep going"] == flag_pair(args, "-p")
+    end
+
+    test "an oversized stdin-delivered argv is rebuilt inline", %{qwen: qwen} do
+      {:ok, argv} = Qwen.default_argv(String.duplicate("x", 140_000), session_id: @sid)
+      tmp = Qwen.prompt_tmpfile(argv)
+      on_exit(fn -> File.rm(tmp) end)
+
+      assert {:ok, ["sh", "-c", script, "sh", ^qwen | args]} =
+               Qwen.splice_prompt(argv, ["--resume", @sid, "go on"])
+
+      assert script =~ "< /dev/null"
+      assert ["-p", "go on"] == flag_pair(args, "-p")
+      assert Qwen.prompt_tmpfile(["sh", "-c", script, "sh", qwen | args]) == nil
+    end
+
+    test "the worker's resume seam rebuilds an interrupted qwen run from its pristine argv" do
+      {:ok, argv} = Qwen.default_argv("original", session_id: @sid)
+
+      assert {:ok, %{argv: new}} =
+               Arbiter.Worker.inject_resume_argv(%{argv: argv}, @sid, "continue", "qwen")
+
+      args = argv_tail({:ok, new})
+      assert ["--resume", @sid] == flag_pair(args, "--resume")
+      assert ["-p", "continue"] == flag_pair(args, "-p")
+      refute "--session-id" in args
+    end
+
+    test "an already nudged argv can be spliced again, keeping the session id" do
+      {:ok, argv} = Qwen.default_argv("original", session_id: @sid)
+      {:ok, nudged} = Qwen.splice_prompt(argv, ["first nudge"])
+      assert {:ok, again} = Qwen.splice_prompt(nudged, ["second nudge"])
+      args = argv_tail({:ok, again})
+
+      assert ["--resume", @sid] == flag_pair(args, "--resume")
+      assert ["-p", "second nudge"] == flag_pair(args, "-p")
+      assert Enum.count(args, &(&1 == "--resume")) == 1
+    end
+
+    test "no -p slot and no stashed argv shape is :no_print_slot" do
+      assert {:error, :no_print_slot} = Qwen.splice_prompt(["sleep", "1"], ["x"])
+    end
+  end
+
   describe "default_argv/2" do
     test "builds the headless stream-json argv with the prompt inline and stdin closed", %{
       qwen: qwen

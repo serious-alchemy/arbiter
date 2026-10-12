@@ -4001,7 +4001,8 @@ defmodule Arbiter.Worker do
   # END: the first match from the front could be a workspace-level override that
   # the child never actually runs under, which would send `locate/2` to a
   # directory holding no session file and silently disable the fallback.
-  defp effective_config_dir(%{env: env}, "gemini") when is_list(env) do
+  defp effective_config_dir(%{env: env}, provider)
+       when is_list(env) and provider in ["gemini", "qwen"] do
     case env |> Enum.reverse() |> List.keyfind("HOME", 0) do
       {_k, dir} when is_binary(dir) and dir != "" -> dir
       _ -> inherited_home_dir()
@@ -4024,7 +4025,9 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp effective_config_dir(_port_args, "gemini"), do: inherited_home_dir()
+  defp effective_config_dir(_port_args, provider) when provider in ["gemini", "qwen"],
+    do: inherited_home_dir()
+
   defp effective_config_dir(_port_args, "codex"), do: Arbiter.Usage.CodexSessionFile.home_dir()
   defp effective_config_dir(_port_args, _provider), do: inherited_config_dir()
 
@@ -6782,6 +6785,7 @@ defmodule Arbiter.Worker do
       "gemini" -> Arbiter.Agents.Gemini
       "codex" -> Arbiter.Agents.Codex
       "grok" -> Arbiter.Agents.Grok
+      "qwen" -> Arbiter.Agents.Qwen
       _ -> Arbiter.Agents.Claude
     end
   end

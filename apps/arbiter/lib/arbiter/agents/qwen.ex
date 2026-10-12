@@ -75,10 +75,18 @@ defmodule Arbiter.Agents.Qwen do
   endpoint (`Qwen.Usage.price/2`; unmetered endpoints record `0.0`). A sustained
   429 retry loop is turned into a provider hold by `Qwen.RetryHold`.
 
-  ## Not here yet
+  ## Session id, resume and nudge (Q8)
 
-  `splice_prompt/2` (nudge / `--resume`) is Q8; without it the worker treats the
-  provider as "cannot be resumed in place".
+  Every spawn pre-assigns its session with `--session-id <uuid>` (`opts[:session_id]`,
+  else a fresh one), so the id is known before qwen's `init` event and a run killed
+  by a server restart can still be resumed and its chat JSONL found
+  (`Qwen.SessionFile.locate/2`, archived by `Arbiter.Worker.SessionArchive`).
+
+  `splice_prompt/2` swaps the prompt of a stashed argv. A resume
+  (`["--resume", sid, prompt]`) adds `--resume sid`; a nudge (`[prompt]`) is also
+  delivered via `--resume`, using the id the argv pre-assigned. qwen refuses
+  `--session-id` together with `--resume`, so the former is dropped. The result
+  is always the inline-prompt shape (the stdin tmpfile positional is removed).
   """
 
   @behaviour Arbiter.Agents.Agent
@@ -202,6 +210,57 @@ defmodule Arbiter.Agents.Qwen do
           {:ok, ["sh", "-c", @inline_prompt_script, "sh" | command]}
         end
       end
+    end
+  end
+
+  # Swap the prompt of a stashed `default_argv/2` invocation; see "Session id,
+  # resume and nudge" in the moduledoc. `{:error, :no_print_slot}` for an argv
+  # that is not one of ours (test fixtures / custom commands).
+  @doc false
+  @spec splice_prompt([String.t()], [String.t()]) :: {:ok, [String.t()]} | {:error, atom()}
+  def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
+    with {:ok, qwen, args} <- split_argv(argv),
+         {:ok, args} <- swap_prompt(args, insert) do
+      {:ok, ["sh", "-c", @inline_prompt_script, "sh", qwen | args]}
+    end
+  end
+
+  defp split_argv(["sh", "-c", @inline_prompt_script, "sh", qwen | args]), do: {:ok, qwen, args}
+
+  defp split_argv(["sh", "-c", @stdin_prompt_script, "sh", tmp, qwen | args]) do
+    if String.starts_with?(Path.basename(tmp), @prompt_tmp_prefix),
+      do: {:ok, qwen, ["-p", "" | args]},
+      else: {:error, :no_print_slot}
+  end
+
+  defp split_argv(_), do: {:error, :no_print_slot}
+
+  # `-p` is found by index: a previously nudged/resumed argv carries
+  # `--resume <sid>` in front of it, and the session id lives in whichever of
+  # `--session-id` / `--resume` is present.
+  defp swap_prompt(args, insert) do
+    case Enum.find_index(args, &(&1 == "-p")) do
+      nil ->
+        {:error, :no_print_slot}
+
+      idx ->
+        flags = args |> List.delete_at(idx) |> List.delete_at(idx)
+        {created, flags} = pop_flag(flags, "--session-id")
+        {resumed, flags} = pop_flag(flags, "--resume")
+        session_id = created || resumed
+
+        case insert do
+          ["--resume", sid, prompt] -> {:ok, ["--resume", sid, "-p", prompt | flags]}
+          [prompt] when is_nil(session_id) -> {:ok, ["-p", prompt | flags]}
+          [prompt] -> {:ok, ["--resume", session_id, "-p", prompt | flags]}
+        end
+    end
+  end
+
+  defp pop_flag(args, flag) do
+    case Enum.find_index(args, &(&1 == flag)) do
+      nil -> {nil, args}
+      idx -> {Enum.at(args, idx + 1), args |> List.delete_at(idx) |> List.delete_at(idx)}
     end
   end
 
@@ -344,10 +403,17 @@ defmodule Arbiter.Agents.Qwen do
   end
 
   defp flags(opts) do
-    ["-o", "stream-json", "--yolo", "--bare"] ++
+    ["-o", "stream-json", "--yolo", "--bare", "--session-id", session_id(opts)] ++
       ["--auth-type", auth_type(opts)] ++
       ["--max-session-turns", Integer.to_string(max_turns(opts))] ++
       model_flag(opts) ++ QwenMcp.flags()
+  end
+
+  defp session_id(opts) do
+    case Keyword.get(opts, :session_id) do
+      id when is_binary(id) and id != "" -> id
+      _ -> Ecto.UUID.generate()
+    end
   end
 
   defp auth_type(opts) do
