@@ -48,8 +48,11 @@ defmodule Arbiter.Mergers.Github.Config do
   alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Mergers.Github.Error
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.GitCredential
+  alias Arbiter.Worker.HostCredential
 
   @pdict_key {__MODULE__, :active_workspace_config}
+  @host_key "__host_credential"
 
   @default_base_url "https://api.github.com"
   @default_target_branch "main"
@@ -83,7 +86,9 @@ defmodule Arbiter.Mergers.Github.Config do
 
     Process.put(
       @pdict_key,
-      CredentialsRef.embed_secrets(merger_config, Workspace.secrets_map(workspace))
+      merger_config
+      |> CredentialsRef.embed_secrets(Workspace.secrets_map(workspace))
+      |> Map.put(@host_key, host_scope(workspace))
     )
 
     :ok
@@ -138,7 +143,7 @@ defmodule Arbiter.Mergers.Github.Config do
         Application.get_env(:arbiter, :github_merger_default_config) ||
         %{}
 
-    with {:ok, token} <- fetch_token(raw) do
+    with {:ok, token} <- host_or_configured_token(raw) do
       {:ok,
        %{
          base_url: stringy(Map.get(raw, "base_url")) || @default_base_url,
@@ -186,6 +191,52 @@ defmodule Arbiter.Mergers.Github.Config do
       v when is_binary(v) and v != "" -> v
       _ -> nil
     end
+  end
+
+  # bd-bsmkfu: a repo whose `git_credentials` entry is a GitHub App is opened,
+  # commented on and merged with the App's repo-restricted installation token (the
+  # PR author is the App bot), not the merger config's `credentials_ref` (the
+  # operator's classic token). Any other repo keeps `credentials_ref`. A scoped
+  # entry whose token cannot be minted is an error, never the operator's token.
+  defp host_or_configured_token(raw) do
+    case Map.get(raw, @host_key) do
+      %{workspace: workspace, repo: repo} ->
+        slug = if raw["owner"] && raw["repo"], do: "#{raw["owner"]}/#{raw["repo"]}"
+
+        case HostCredential.forge_token(workspace, repo, remote: slug) do
+          {:ok, token} when is_binary(token) ->
+            {:ok, token}
+
+          {:ok, nil} ->
+            fetch_token(raw)
+
+          {:error, reason} ->
+            {:error,
+             config_missing(
+               "the scoped GitHub App token for repo #{repo} is unavailable: " <>
+                 HostCredential.format_error(reason)
+             )}
+        end
+
+      _ ->
+        fetch_token(raw)
+    end
+  end
+
+  # The workspace and repo a scoped credential is read from: only for a repo the
+  # `scope/2`'d view names that has a scoped GitHub App entry.
+  defp host_scope(workspace) do
+    repo = Arbiter.Mergers.scoped_repo(workspace)
+
+    if is_binary(repo) and github_app_repo?(workspace, repo),
+      do: %{workspace: workspace, repo: repo}
+  end
+
+  defp github_app_repo?(workspace, repo) do
+    match?(
+      {:ok, %GitCredential{mode: :scoped, entry: %{kind: :github_app}}},
+      GitCredential.plan(workspace, repo)
+    )
   end
 
   # Resolve the token via the shared credentials_ref DSL (env: / secret: /

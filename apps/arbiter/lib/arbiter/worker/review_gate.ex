@@ -248,6 +248,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.HostCredential
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PassPlacement
   alias Arbiter.Worker.PrepushCheck.Touched
@@ -2225,7 +2226,38 @@ defmodule Arbiter.Worker.ReviewGate do
     # rebased the branch. PushState delivers that as a lease-pinned rewrite when
     # the remote still holds what this gate last saw there, and refuses it when
     # someone else has pushed.
-    case PushState.ensure_pushed(wt, branch, expected_remote: Map.get(state, :pushed_remote_head)) do
+    with {:ok, credential} <- host_credential(state, wt) do
+      push_gate(state, wt, branch, credential)
+    end
+  end
+
+  defp push_gate(state), do: {:ok, state}
+
+  # bd-bsmkfu: the host pushes for a podman fix round, and does it with the repo's
+  # scoped credential when it has one (`HostCredential`), never the operator's. A
+  # scoped credential that cannot be built refuses the review rather than pushing
+  # as the operator.
+  defp host_credential(state, wt) do
+    workspace = load_workspace(Map.get(state, :workspace_id))
+
+    case HostCredential.for_repo(workspace, Map.get(state, :repo), worktree_path: wt) do
+      {:ok, credential} ->
+        {:ok, credential}
+
+      {:error, reason} ->
+        {:error,
+         "ReviewGate refused to push `#{state.branch}` before review: " <>
+           HostCredential.format_error(reason)}
+    end
+  end
+
+  defp push_gate(state, wt, branch, credential) do
+    push_opts = [
+      expected_remote: Map.get(state, :pushed_remote_head),
+      env: HostCredential.push_env(credential)
+    ]
+
+    case PushState.ensure_pushed(wt, branch, push_opts) do
       {:ok, :already_pushed, push_state} ->
         {:ok, note_pushed_remote_head(state, push_state)}
 
@@ -2249,8 +2281,6 @@ defmodule Arbiter.Worker.ReviewGate do
         escalate_unpushed_head(state, push_state, reason)
     end
   end
-
-  defp push_gate(state), do: {:ok, state}
 
   # Only a remote head Arbiter holds locally is one it pushed or reviewed. A
   # `:behind` branch has a remote head AHEAD of the local head — commits someone

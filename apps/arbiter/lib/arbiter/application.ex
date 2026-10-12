@@ -359,6 +359,8 @@ defmodule Arbiter.Application do
         Arbiter.Usage.EstimateCache,
         # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
         Arbiter.Reports.Cache,
+        # Memoizes the host's minted GitHub App tokens (bd-bsmkfu).
+        Arbiter.Worker.HostCredential.Cache,
         # The egress proxy's grant cache, registry and per-run supervisor
         # (bd-aspkyr). Idle: nothing starts a proxy until G6 wires it.
         Arbiter.Worker.Egress.Supervisor
