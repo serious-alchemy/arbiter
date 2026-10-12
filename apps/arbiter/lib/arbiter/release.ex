@@ -479,6 +479,12 @@ defmodule Arbiter.Release do
       (`Arbiter.Boot.TicketTransitions`), so by hand it is mostly the dry
       run's check: mismatches, unmapped values, illegal transitions and the
       CFD invariant on sample days
+    * `:finding_detector` → `Arbiter.Loop.DetectorBackfill.run/2`
+      (`:category` (required), `:apply?`, `:since`, `:unit_limit`,
+      `:workspace_id`) — Stage 2 loop discovery (bd-8u2aqn): run a newly
+      merged `@finding_buckets` detector over the retained review rounds
+      (28 days / 1200 units max); idempotent. Recipe in
+      `docs/design/loop-inference-discovery-pass.md`
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
       to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
@@ -684,6 +690,32 @@ defmodule Arbiter.Release do
     end
 
     result
+  end
+
+  def backfill(:finding_detector, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+    category = Keyword.fetch!(opts, :category)
+
+    case Arbiter.Loop.DetectorBackfill.run(category, opts) do
+      {:ok, result} ->
+        IO.puts(banner("finding detector #{inspect(category)}", apply?, opts[:hint]))
+
+        IO.puts("""
+
+        span:             #{result.since} → #{result.until}#{if result.clamped?, do: " (clamped to retention)"}
+        matching units:   #{result.units}#{if result.truncated?, do: " (truncated at #{result.unit_limit})"}
+        distinct tasks:   #{result.tasks}
+        rows recorded:    #{length(result.rows)}
+        dropped:          #{length(result.dropped)}
+        """)
+
+        result
+
+      {:error, :unknown_category} ->
+        raise ArgumentError,
+              "no @finding_buckets detector produces #{inspect(category)} — merge the detector first"
+    end
   end
 
   def backfill(:task_statuses, opts) do

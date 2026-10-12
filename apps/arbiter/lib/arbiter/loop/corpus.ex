@@ -795,7 +795,34 @@ defmodule Arbiter.Loop.Corpus do
     since |> finding_units(until) |> residue_of() |> Enum.take(limit)
   end
 
+  @doc """
+  The finding units in `[since, until)` that `buckets` assigns to `category`,
+  newest-first, at most `limit`, each truncated to `residue_text_limit/0`.
+
+  This is the Stage 2 backfill's read (bd-8u2aqn). Once a detector is merged
+  its units are no longer residue (`residue_units/3` would not return them), so
+  the backfill re-reads the same `review_gate_rounds.findings` source and keeps
+  the units the *merged* allowlist maps to the new category — which, for a
+  detector appended to the list, are exactly the units that were residue
+  before the merge. One read of the findings column; never a transcript read.
+  """
+  @spec category_units(DateTime.t(), DateTime.t(), String.t(), list(), pos_integer()) ::
+          [finding_residue_unit()]
+  def category_units(%DateTime{} = since, %DateTime{} = until, category, buckets, limit)
+      when is_binary(category) and is_integer(limit) and limit > 0 do
+    since
+    |> finding_units(until)
+    |> Enum.filter(fn {_task, _run, text} ->
+      match?({^category, _}, FindingBuckets.bucket_finding(text, buckets))
+    end)
+    |> Enum.take(limit)
+    |> Enum.map(fn {task_id, run_id, text} ->
+      %{task_id: task_id, run_id: run_id, text: truncate(text, @residue_text_limit)}
+    end)
+  end
+
   # Every finding unit from a `role: review`, non-approve round in the span,
+
   # tagged `{base_task_id, run_id, text}`.
   defp finding_units(since, until) do
     review_request_changes_rounds(since, until)
