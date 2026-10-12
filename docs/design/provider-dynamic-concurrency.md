@@ -1229,6 +1229,12 @@ nothing in the budget path.
   for a slot when its own pool has a seat.
 - **E8.** Autopilot subscribes to `"board"` (`default_topics/0`); a published
   rise plans a pass under `enforce`, and a fall plans nothing.
+- **O7** (operator ruling, 2026-10-10). A ticket waiting on CI (its
+  ReviewGate's `ci_wait` marker) keeps its pin seat for
+  `ci_wait_release_minutes` (`config :arbiter, :seats`, default 10) and then
+  releases it (`Quota.Seats`); when CI returns the marker clears and the seat
+  counts again, the reviewer or CI fix pass coming back as a follow-up that no
+  full pool holds (O2).
 - **I8**, structurally (`BudgetShadowTest`): only the budget's own modules, the
   walk's inputs, the display, the replay admission, `quota/history.ex` and
   `SeatCheck` name the budget; `SeatCheck` is asked only by `Admission`,
@@ -1238,8 +1244,10 @@ nothing in the budget path.
   capacity strip (DC5's note), so a Ready card's state badge (`next`, a
   queue position, a hold) is still today's plan's, with the walk's own line
   (`data-layer-reason`) beside it; `routing_decision.budget` (DC5's note); a
-  walk that ranks a ticket's pin first; and the DC7 report does not yet split
-  the reverse records (`policy: "enforce"`) from the shadow ones.
+  walk that ranks a ticket's pin first; the DC7 report does not yet split the
+  reverse records (`policy: "enforce"`) from the shadow ones, nor record O7's
+  bursts of re-admitted follow-ups past the budget; and O7's threshold is app
+  config, not yet an `arb settings` key.
 
 ### 10.5 Rollout order
 
