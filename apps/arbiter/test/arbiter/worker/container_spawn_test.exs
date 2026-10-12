@@ -65,8 +65,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
     # Free ports: the stand-in podman runs the in-container socat on the host,
     # where the live coordinator may already hold 4848 and 3128.
-    proxy_port = free_port()
-    arb_port = free_port()
+    [proxy_port, arb_port] = free_ports(2)
 
     egress = fn _opts ->
       {:ok, [proxy_socket: proxy, proxy_port: proxy_port, bridges: [{arb_port, bridge}]], "rtest"}
@@ -1288,17 +1287,55 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
+  # Binds all `n` sockets before closing any: closing between picks lets the OS hand
+  # the same ephemeral port out twice, which `Jail.network_spec/1` refuses as
+  # `:duplicate_bridge_port` (bd-d428kx).
+  defp free_ports(n) do
+    sockets =
+      for _ <- 1..n do
+        {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+        socket
+      end
+
+    ports =
+      for socket <- sockets do
+        {:ok, port} = :inet.port(socket)
+        port
+      end
+
+    Enum.each(sockets, &:gen_tcp.close/1)
+    ports
   end
 
   defp has_inherit?(argv, name),
     do: Enum.chunk_every(argv, 2, 1) |> Enum.any?(&(&1 == ["-e", name]))
 
   defp has_literal?(argv, pair), do: has_inherit?(argv, pair)
+
+  describe "free_ports/1 (bd-d428kx)" do
+    test "never offers the same port twice in one pass" do
+      for _ <- 1..200 do
+        ports = free_ports(8)
+        assert ports == Enum.uniq(ports)
+      end
+    end
+
+    test "prepare refuses a run whose proxy and bridge share a port", ctx do
+      [port] = free_ports(1)
+      inner = Keyword.fetch!(ctx.opts, :egress)
+
+      egress = fn o ->
+        {:ok, network, id} = inner.(o)
+
+        {:ok,
+         Keyword.put(network, :proxy_port, port) |> Keyword.put(:bridges, [{port, ctx.bridge}]),
+         id}
+      end
+
+      assert {:error, {:egress_unavailable, {:duplicate_bridge_port, [^port]}}} =
+               ContainerSpawn.prepare(Keyword.put(ctx.opts, :egress, egress))
+    end
+  end
 
   describe "stop/2 (bd-9ss153)" do
     setup do
