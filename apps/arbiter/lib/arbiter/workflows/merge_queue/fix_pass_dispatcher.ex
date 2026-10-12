@@ -293,7 +293,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       layout: GitLayout.for_workspace(workspace, context.repo),
       workspace: workspace,
       workspace_id: task.workspace_id,
-      clone_path: Worktree.worktree_path(context.branch)
+      clone_path: Worktree.worktree_path(context.branch),
+      repo: context.repo
     }
 
     case PassPlacement.place(attrs, placement_opts: Map.get(args, :placement_opts, [])) do

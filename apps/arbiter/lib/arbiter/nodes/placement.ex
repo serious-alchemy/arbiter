@@ -93,6 +93,7 @@ defmodule Arbiter.Nodes.Placement do
   """
 
   alias Arbiter.Nodes.Overview
+  alias Arbiter.Worker.GitCredential
 
   @registry __MODULE__.Registry
   @modes [:local_only, :prefer_remote, :remote_only]
@@ -132,6 +133,7 @@ defmodule Arbiter.Nodes.Placement do
           | :no_private_clone
           | :local_work
           | :placement_local_only
+          | :scoped_git_credential
   @type request :: %{
           required(:task_id) => String.t(),
           required(:kind) => atom(),
@@ -142,6 +144,7 @@ defmodule Arbiter.Nodes.Placement do
           optional(:no_pr?) => boolean(),
           optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
+          optional(:scoped_git_credential?) => boolean(),
           optional(:labels) => [String.t()]
         }
   @type info :: %{
@@ -193,8 +196,29 @@ defmodule Arbiter.Nodes.Placement do
       no_checkout?(request) -> {:local_only, :no_private_clone}
       Map.get(request, :local_work?, false) -> {:local_only, :local_work}
       request.mode == :local_only -> {:local_only, :placement_local_only}
+      pushes_scoped?(request) -> {:local_only, :scoped_git_credential}
       true -> :ok
     end
+  end
+
+  # bd-21r811: a run that pushes with a repo-scoped git credential cannot go to a
+  # node (no podman secret carries the key there; `ClaudeSession` refuses it with
+  # `git_credential_unsupported`). A reviewer and an inspect-only run do not push.
+  defp pushes_scoped?(request) do
+    Map.get(request, :scoped_git_credential?, false) and
+      request.kind not in [:reviewer, :review] and not Map.get(request, :inspect?, false)
+  end
+
+  @doc """
+  Does `repo` in `workspace` resolve to a scoped `GitCredential` plan for an
+  implementer? What callers put in a request's `:scoped_git_credential?`.
+  """
+  @spec scoped_git_credential?(map() | nil, String.t() | nil) :: boolean()
+  def scoped_git_credential?(workspace, repo) do
+    match?(
+      {:ok, %GitCredential{mode: :scoped}},
+      GitCredential.plan(workspace, repo, role: :implementer)
+    )
   end
 
   # A clone-less dispatch (task/research) is local unless it is marked `inspect?`:
@@ -228,6 +252,9 @@ defmodule Arbiter.Nodes.Placement do
 
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
+  def reason_phrase(:scoped_git_credential, _),
+    do: "its repo uses a scoped git credential, which cannot be carried to a node yet"
+
   @doc """
   True when placement may return a node (`Executor.Node` exists since RW9, so the
   default is `true`; `config :arbiter, remote_execution: false` turns it off).
@@ -251,6 +278,9 @@ defmodule Arbiter.Nodes.Placement do
   @spec place(request(), keyword()) :: result()
   def place(request, opts \\ []) do
     case eligible(request) do
+      {:local_only, :scoped_git_credential} when request.mode == :remote_only ->
+        {:error, {:no_node_capacity, scoped_credential_hold(request)}}
+
       {:local_only, _reason} = why ->
         {:ok, {:local, why}}
 
@@ -259,6 +289,23 @@ defmodule Arbiter.Nodes.Placement do
           do: pick(request, opts),
           else: none(request, [])
     end
+  end
+
+  defp scoped_credential_hold(request) do
+    phrase =
+      "held — #{request.task_id} pushes with a scoped git credential, which cannot be " <>
+        "carried to a node yet"
+
+    %{
+      task_id: request.task_id,
+      node: nil,
+      mode: :remote_only,
+      reason: :scoped_git_credential,
+      message:
+        phrase <>
+          ", and worker.placement is remote_only. Run it under prefer_remote, or put the " <>
+          "repo on legacy_operator."
+    }
   end
 
   defp pick(request, opts) do

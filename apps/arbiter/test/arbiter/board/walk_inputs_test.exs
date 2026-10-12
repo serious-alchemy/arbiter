@@ -354,6 +354,68 @@ defmodule Arbiter.Board.WalkInputsTest do
     end
   end
 
+  # bd-21r811: no podman secret carries a scoped git key to a node, so the walk
+  # must not offer a node to an implementer whose repo has one.
+  describe "a repo with a scoped git credential" do
+    @scoped %{
+      "git_credentials" => %{
+        "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "TONIC_KEY"}}
+      }
+    }
+    @rows [%{id: "oryx", name: "oryx", state: :online, health: :ready, max: 3, live: 0}]
+
+    defp scoped_walk(mode, creds, issue_attrs \\ %{}) do
+      ws =
+        workspace!(
+          Map.merge(creds, %{
+            "worker" => %{"placement" => mode},
+            "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}
+          })
+        )
+
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      ticket = issue!(ws, Map.merge(%{repo: "tonic"}, issue_attrs))
+
+      walk =
+        gather(ws, [ticket],
+          budgets: [budget(claude, "claude", 9)],
+          remote_available?: true,
+          nodes: @rows
+        )
+
+      {ticket, walk}
+    end
+
+    test "prefer_remote: the implementer is offered the primary only" do
+      {ticket, walk} = scoped_walk("prefer_remote", @scoped)
+      assert [%{nodes: [["local"]]}] = walk.candidates.(card(ticket))
+    end
+
+    test "remote_only: the implementer has no machine, and the explainer names why" do
+      {ticket, walk} = scoped_walk("remote_only", @scoped)
+      assert [%{nodes: [], hold: :scoped_git_credential}] = walk.candidates.(card(ticket))
+
+      plan = Scheduler.plan(%{ready: [card(ticket)], running: [], walk: walk})
+      assert plan.promote == nil
+      assert inspect(plan) =~ "scoped git credential"
+    end
+
+    test "an inspect-only (research) run stays remote-eligible" do
+      {ticket, walk} = scoped_walk("prefer_remote", @scoped, %{issue_type: :research})
+      assert [%{nodes: [["oryx"], ["local"]]}] = walk.candidates.(card(ticket))
+    end
+
+    test "a repo on legacy_operator places as before" do
+      legacy = %{"git_credentials" => %{"legacy_operator" => true}}
+      {ticket, walk} = scoped_walk("prefer_remote", legacy)
+      assert [%{nodes: [["oryx"], ["local"]]}] = walk.candidates.(card(ticket))
+
+      {ticket, walk} = scoped_walk("remote_only", legacy)
+      assert [%{nodes: [["oryx"]]}] = walk.candidates.(card(ticket))
+    end
+  end
+
   # DC9 (bd-7oy77e): the repo cap, `worker.repos.<repo>.max_concurrent`.
   describe "the repo layer" do
     @capped %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => 2}}}}

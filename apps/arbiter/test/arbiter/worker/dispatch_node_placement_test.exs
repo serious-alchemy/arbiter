@@ -116,6 +116,27 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     end
   end
 
+  # bd-21r811: a scoped git credential cannot be carried to a node.
+  describe "a repo with a scoped git credential" do
+    defp scoped_ws!(mode) do
+      workspace!(%{
+        "worker" => %{"placement" => mode},
+        "git_credentials" => %{
+          "repos" => %{@repo => %{"kind" => "deploy_key", "key_secret" => "K"}}
+        }
+      })
+    end
+
+    test "remote_only holds the implementer with that reason instead of failing at spawn" do
+      issue = ready!(scoped_ws!("remote_only"), "scoped remote only")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman)
+      assert info.reason == :scoped_git_credential
+      assert Worker.whereis(issue.id) == nil
+      assert Ash.get!(Issue, issue.id).state == :queued
+    end
+  end
+
   # bd-cgdhlu: a `review: true` dispatch is a placement candidate when the review
   # may run in a container.
   describe "a review: true dispatch" do

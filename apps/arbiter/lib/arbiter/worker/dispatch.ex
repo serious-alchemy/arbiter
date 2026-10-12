@@ -2847,6 +2847,8 @@ defmodule Arbiter.Worker.Dispatch do
       no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
       inspect?: Keyword.get(opts, :review) != true and inspect_checkout?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
+      scoped_git_credential?:
+        Placement.scoped_git_credential?(workspace, Keyword.get(opts, :repo) || task.repo),
       mode: Placement.mode(workspace)
     }
   end

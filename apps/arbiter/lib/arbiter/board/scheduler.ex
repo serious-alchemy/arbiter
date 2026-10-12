@@ -114,6 +114,7 @@ defmodule Arbiter.Board.Scheduler do
 
   alias Arbiter.Board.FairShare
   alias Arbiter.Board.FileScope
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
 
@@ -961,7 +962,17 @@ defmodule Arbiter.Board.Scheduler do
       end)
 
     "no machine slot for #{pools} work: " <>
-      if(machines == "", do: "none can run it", else: machines)
+      cond do
+        Enum.any?(candidates, &(Map.get(&1, :hold) == :scoped_git_credential)) ->
+          Placement.reason_phrase(:scoped_git_credential, %{}) <>
+            ", and worker.placement is remote_only"
+
+        machines == "" ->
+          "none can run it"
+
+        true ->
+          machines
+      end
   end
 
   defp pool_summary(caps, acc) do
