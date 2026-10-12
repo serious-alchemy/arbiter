@@ -502,6 +502,7 @@ defmodule Arbiter.Board.WalkInputs do
 
   defp candidate(ws, issue, account, pool, provider, ctx) do
     %{pool: {account.id, pool}, nodes: groups(ws, issue, provider, ctx)}
+    |> put_hold(hold(ws, issue, provider))
     |> put_budget(account, pool, ws, issue, ctx)
   end
 
@@ -534,26 +535,55 @@ defmodule Arbiter.Board.WalkInputs do
   defp groups(ws, issue, provider, ctx) do
     mode = Placement.mode(ws)
 
-    remote_ok? =
-      mode != :local_only and ctx.remote != %{} and remote_eligible?(ws, issue, provider, mode)
+    verdict = if mode == :local_only, do: nil, else: eligibility(ws, issue, provider, mode)
 
-    node_groups(mode, remote_ok?, ctx.remote, ws.id)
+    cond do
+      # bd-21r811: a `remote_only` run that pushes with a scoped git credential has
+      # no machine (a node cannot carry the key; the primary is off limits): held.
+      mode == :remote_only and verdict == {:local_only, :scoped_git_credential} ->
+        []
+
+      true ->
+        node_groups(mode, ctx.remote != %{} and verdict == :ok, ctx.remote, ws.id)
+    end
   end
 
-  defp remote_eligible?(ws, issue, provider, mode) do
+  defp put_hold(candidate, nil), do: candidate
+  defp put_hold(candidate, hold), do: Map.put(candidate, :hold, hold)
+
+  # Why a card has no machine at all, for the capacity explainer; `nil` otherwise.
+  defp hold(ws, issue, provider) do
+    mode = Placement.mode(ws)
+
+    if mode == :remote_only and
+         eligibility(ws, issue, provider, mode) == {:local_only, :scoped_git_credential},
+       do: :scoped_git_credential
+  end
+
+  defp eligibility(ws, issue, provider, mode) do
+    no_pr? = Issue.no_pr_type?(issue.issue_type)
+
     request = %{
       task_id: issue.id,
       kind: :implementer,
       provider: provider,
       layout: layout(ws, issue),
       mode: mode,
-      no_pr?: Issue.no_pr_type?(issue.issue_type),
+      no_pr?: no_pr?,
+      # The inspect checkout is what a task/research dispatch gets by default
+      # (`Worker.Dispatch.node_request/3`), a read-only clone a node can be handed.
+      inspect?: no_pr?,
       local_work?: false,
+      scoped_git_credential?:
+        Placement.scoped_git_credential?(ws, string_or_nil(Map.get(issue, :repo))),
       workspace_id: ws.id
     }
 
-    Placement.eligible(request) == :ok
+    Placement.eligible(request)
   end
+
+  defp string_or_nil(repo) when is_binary(repo) and repo != "", do: repo
+  defp string_or_nil(_repo), do: nil
 
   defp layout(ws, issue) do
     repo =

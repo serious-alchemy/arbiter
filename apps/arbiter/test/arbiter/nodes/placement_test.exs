@@ -131,6 +131,39 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :follow_up} = Placement.eligible(%{inspect_request | kind: :follow_up})
     end
 
+    # bd-21r811: no podman secret carries a scoped git key to a node yet, so the
+    # spawn refuses it there (`git_credential_unsupported`); placement keeps it off.
+    test "an implementer whose repo has a scoped git credential is not eligible for a node" do
+      scoped = Map.put(@eligible, :scoped_git_credential?, true)
+
+      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass, :review_fix_round] do
+        assert {:local_only, :scoped_git_credential} = Placement.eligible(%{scoped | kind: kind})
+      end
+    end
+
+    test "a reviewer and an inspect-only run stay eligible beside a scoped credential" do
+      scoped = Map.put(@eligible, :scoped_git_credential?, true)
+
+      for kind <- [:reviewer, :review] do
+        assert Placement.eligible(%{scoped | kind: kind}) == :ok
+      end
+
+      assert Placement.eligible(Map.merge(scoped, %{no_pr?: true, inspect?: true})) == :ok
+    end
+
+    test "scoped_git_credential?/2 is true only for a scoped repo entry" do
+      ws = fn block -> %{config: %{"git_credentials" => block}} end
+
+      scoped = ws.(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}})
+      assert Placement.scoped_git_credential?(scoped, "tonic")
+      refute Placement.scoped_git_credential?(scoped, "other")
+
+      legacy = ws.(%{"legacy_operator" => true})
+      refute Placement.scoped_git_credential?(legacy, "tonic")
+      refute Placement.scoped_git_credential?(%{config: %{}}, "tonic")
+      refute Placement.scoped_git_credential?(nil, nil)
+    end
+
     test "a request with no checkout at all stays local even beside an inspect flag" do
       assert {:local_only, :no_private_clone} =
                Placement.eligible(Map.merge(@eligible, %{no_pr?: true, inspect?: false}))
@@ -224,6 +257,24 @@ defmodule Arbiter.Nodes.PlacementTest do
     test "local_only (the default) is always local, even with a node free" do
       assert {:ok, {:local, {:local_only, :placement_local_only}}} =
                place(%{mode: :local_only}, [row("a")])
+    end
+
+    test "a scoped-credential implementer goes local under prefer_remote, never to a node" do
+      assert {:ok, {:local, {:local_only, :scoped_git_credential}}} =
+               place(%{scoped_git_credential?: true}, [row("a")])
+    end
+
+    test "a scoped-credential implementer is held, not failed, under remote_only" do
+      assert {:error, {:no_node_capacity, info}} =
+               place(%{scoped_git_credential?: true, mode: :remote_only}, [row("a")])
+
+      assert info.reason == :scoped_git_credential
+      assert info.message =~ "scoped git credential"
+    end
+
+    test "a reviewer with a scoped credential still lands on a node" do
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{scoped_git_credential?: true, kind: :reviewer}, [row("a")])
     end
 
     test "the seam can switch remote execution off: placement is then always local" do
