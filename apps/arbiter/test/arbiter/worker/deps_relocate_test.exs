@@ -149,4 +149,38 @@ defmodule Arbiter.Worker.DepsRelocateTest do
       assert dir == Path.join(worktree, "deps/lazy_html")
     end
   end
+
+  # bd-4uom27: nothing names a library. A `rustler_precompiled` NIF (`mdex_native`)
+  # keeps its binary in a real `priv/native` inside `_build`, not behind a link, and a
+  # dependency of any other shape rides along with it.
+  describe "every compiled NIF dependency is seeded, whatever builds it" do
+    defp precompiled_nif_source(root) do
+      compiled_source(root)
+      File.mkdir_p!(Path.join(root, "deps/mdex_native/lib"))
+      native = Path.join(root, "_build/test/lib/mdex_native/priv/native")
+      File.mkdir_p!(native)
+      File.write!(Path.join(native, "libmdex_native.so"), "nif\n")
+      File.mkdir_p!(Path.join(root, "_build/test/lib/mdex_native/ebin"))
+      # A dependency with no deps/ entry is the project's own app: never seeded.
+      File.mkdir_p!(Path.join(root, "_build/test/lib/myapp/ebin"))
+      root
+    end
+
+    test "a precompiled NIF and an elixir_make NIF both survive the default seed", %{tmp_dir: tmp} do
+      source = precompiled_nif_source(Path.join(tmp, "source"))
+      worktree = Path.join(tmp, "wt")
+      File.mkdir_p!(worktree)
+
+      assert :ok = Worktree.seed_compiled_deps(source, worktree)
+      File.rm_rf!(source)
+
+      assert File.exists?(nif(worktree))
+
+      assert File.exists?(
+               Path.join(worktree, "_build/test/lib/mdex_native/priv/native/libmdex_native.so")
+             )
+
+      refute File.exists?(Path.join(worktree, "_build/test/lib/myapp"))
+    end
+  end
 end

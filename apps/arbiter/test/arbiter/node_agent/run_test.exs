@@ -667,4 +667,88 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert_gone("q3")
     end
   end
+
+  # bd-4uom27: the shadow clone has no deps; the node seeds them (every compiled NIF
+  # included) from its own cache before the container starts, so the offline pre-push
+  # gate never downloads one.
+  describe "deps for a checkout run (bd-4uom27)" do
+    defp checkout_spec(run) do
+      spec(run, %{"checkout" => %{"branch" => "feature/x", "read_only" => true}})
+    end
+
+    # Plays `Checkout.seed_from_primary/3`: a shadow with a git dir and a lockfile.
+    defp fake_checkout(config, _co, shadow) do
+      File.mkdir_p!(Path.join(shadow, ".git/info"))
+      File.mkdir_p!(Arbiter.NodeAgent.Checkout.store_objects(config))
+      File.write!(Path.join(shadow, "mix.lock"), "%{}\n")
+      {:ok, %{known: []}}
+    end
+
+    test "the shadow is seeded from the node's deps cache, keyed by image, before start",
+         %{opts: opts, home: home, stub: stub} do
+      test = self()
+
+      deps_fun = fn shadow, image_tag, seed_opts ->
+        send(test, {:deps, shadow, image_tag, seed_opts})
+        File.mkdir_p!(Path.join(shadow, "_build/test/lib/mdex_native/priv"))
+        {:ok, %{}}
+      end
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: deps_fun,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "dc1"} = Runs.assign(checkout_spec("dc1"), opts)
+      wait_event("dc1", "exit")
+
+      shadow = Path.join([home, "runs", "dc1", "worktree"])
+      assert_received {:deps, ^shadow, "localhost/arbiter-dev/beam:abc123", seed_opts}
+      assert seed_opts[:root] == Path.join(home, "deps-cache")
+      assert seed_opts[:scratch] == Path.join(home, "deps-seed")
+      assert seed_opts[:home] == Path.join([home, "runs", "dc1", "home"])
+
+      assert File.dir?(Path.join(shadow, "_build/test/lib/mdex_native/priv"))
+      assert File.read!(Path.join(shadow, ".git/info/exclude")) =~ "/_build"
+      assert File.exists?(Path.join(stub, "run.argv"))
+    end
+
+    test "a seed that fails does not refuse the run: the worker fetches for itself",
+         %{opts: opts, stub: stub} do
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: fn _, _, _ -> {:error, {:seed_failed, 1, "no network"}} end,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "dc2"} = Runs.assign(checkout_spec("dc2"), opts)
+      wait_event("dc2", "exit")
+      assert File.exists?(Path.join(stub, "run.argv"))
+    end
+
+    test "a run with no checkout, or with the cache switched off, seeds nothing", %{opts: opts} do
+      test = self()
+
+      deps_fun = fn _, _, _ ->
+        send(test, :seeded)
+        {:ok, %{}}
+      end
+
+      assert {:ok, "dc3"} =
+               Runs.assign(spec("dc3"), Keyword.merge(opts, deps_cache: true, deps_fun: deps_fun))
+
+      wait_event("dc3", "exit")
+
+      off =
+        Keyword.merge(opts, deps_cache: false, deps_fun: deps_fun, checkout_fun: &fake_checkout/3)
+
+      assert {:ok, "dc4"} = Runs.assign(checkout_spec("dc4"), off)
+      wait_event("dc4", "exit")
+
+      refute_received :seeded
+    end
+  end
 end

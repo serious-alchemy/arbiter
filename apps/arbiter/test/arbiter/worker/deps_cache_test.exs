@@ -372,4 +372,41 @@ defmodule Arbiter.Worker.DepsCacheTest do
                DepsCache.seed_worktree(ctx.checkout, @image_a, ctx.opts)
     end
   end
+
+  # bd-4uom27: a node's shadow clone has no main repo (it is built from a bundle), so
+  # the cache is keyed by, and exported from, the checkout's own HEAD.
+  describe "seed_checkout/3" do
+    test "seeds a checkout that is not a private clone from its own HEAD", ctx do
+      home = Path.join(ctx.root, "run-home")
+      File.mkdir_p!(home)
+
+      assert {:ok, summary} =
+               DepsCache.seed_checkout(ctx.checkout, @image_a, [home: home] ++ ctx.opts)
+
+      assert summary.seeded? == true
+
+      assert File.read!(Path.join(ctx.checkout, "_build/test/lib/jason/ebin/jason.beam")) ==
+               @image_a
+
+      assert File.exists?(Path.join(ctx.checkout, "deps/jason/mix.exs"))
+      assert File.exists?(Path.join(home, ".mix/archives/hex-2.0.ez"))
+
+      # The cache is the same one a private clone of the same lock and image would use.
+      assert {:ok, key} = DepsCache.key(ctx.checkout, "main", @image_a, ctx.opts)
+      assert summary.dir == key.dir
+
+      # A second checkout is a hit: no second seed job.
+      _ = runs()
+      assert {:ok, %{seeded?: false}} = DepsCache.seed_checkout(ctx.checkout, @image_a, ctx.opts)
+      assert runs() == []
+    end
+
+    test "a checkout with no mix.lock has nothing to cache", ctx do
+      GitFixture.git!(ctx.checkout, ["rm", "-q", "mix.lock"])
+      GitFixture.git!(ctx.checkout, ["commit", "-q", "-m", "no lock"])
+
+      assert {:error, :no_lockfile} = DepsCache.seed_checkout(ctx.checkout, @image_a, ctx.opts)
+      assert runs() == []
+    end
+  end
 end

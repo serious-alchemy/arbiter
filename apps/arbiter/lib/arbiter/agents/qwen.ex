@@ -91,6 +91,7 @@ defmodule Arbiter.Agents.Qwen do
   alias Arbiter.Agents.Qwen.Usage
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
+  alias Arbiter.MCP.AgentConfig.Qwen, as: QwenMcp
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
@@ -346,7 +347,7 @@ defmodule Arbiter.Agents.Qwen do
     ["-o", "stream-json", "--yolo", "--bare"] ++
       ["--auth-type", auth_type(opts)] ++
       ["--max-session-turns", Integer.to_string(max_turns(opts))] ++
-      model_flag(opts)
+      model_flag(opts) ++ QwenMcp.flags()
   end
 
   defp auth_type(opts) do
