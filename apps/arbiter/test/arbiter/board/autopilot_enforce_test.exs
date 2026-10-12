@@ -192,6 +192,17 @@ defmodule Arbiter.Board.AutopilotEnforceTest do
     end
   end
 
+  @tag capture_log: true
+  test "a walk with no entries or placements is today's plan's, and an idle pass survives it" do
+    legacy = [entry("bd-1", :blocked, hold: :no_slot, reason: "blocked — no free worker slot")]
+    broken = Map.put(board(nil, legacy, [], walk?: false), :walk, %{promote: nil})
+    pid = start(:enforce, fn -> broken end)
+
+    assert :idle = Autopilot.tick(pid)
+    assert Process.alive?(pid)
+    assert [%{id: "bd-1"}] = :sys.get_state(pid).holds
+  end
+
   test "a board without a walk dispatches today's card, with no record (fail safe)" do
     legacy = [entry("bd-1", :next)]
     pid = start(:enforce, fn -> board("bd-1", legacy, [], walk?: false) end)

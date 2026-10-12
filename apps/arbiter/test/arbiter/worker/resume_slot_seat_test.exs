@@ -122,7 +122,11 @@ defmodule Arbiter.Worker.ResumeSlotSeatTest do
       ticket = in_state(ctx.ticket, :merging)
 
       assert {:ok, :forced} =
-               admit(ticket, ctx, force: true, actor: "operator:test", seat_opts: seats(ctx, 0, 0))
+               admit(ticket, ctx,
+                 force: true,
+                 actor: "operator:test",
+                 seat_opts: seats(ctx, 0, 0)
+               )
 
       assert [%{payload: %{"cap" => 0, "actor" => "operator:test"}}] =
                Record

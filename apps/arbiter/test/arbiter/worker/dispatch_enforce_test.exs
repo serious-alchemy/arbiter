@@ -63,7 +63,10 @@ defmodule Arbiter.Worker.DispatchEnforceTest do
   defp account!(provider, attrs \\ %{}) do
     Ash.create!(
       ProviderAccount,
-      Map.merge(%{provider: provider, slug: "#{provider}-#{System.unique_integer([:positive])}"}, attrs)
+      Map.merge(
+        %{provider: provider, slug: "#{provider}-#{System.unique_integer([:positive])}"},
+        attrs
+      )
     )
   end
 
@@ -287,7 +290,11 @@ defmodule Arbiter.Worker.DispatchEnforceTest do
     end
 
     test "a held intent drops the plan: the drain re-plans" do
-      opts = [planned: %{account_id: "a", pool: "claude", node: "local"}, admission_mode: :enforce]
+      opts = [
+        planned: %{account_id: "a", pool: "claude", node: "local"},
+        admission_mode: :enforce
+      ]
+
       unrouted = Dispatch.unroute(opts)
       refute Keyword.has_key?(unrouted, :planned)
       refute Keyword.has_key?(unrouted, :admission_mode)

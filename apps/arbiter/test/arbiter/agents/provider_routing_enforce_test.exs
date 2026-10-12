@@ -42,7 +42,10 @@ defmodule Arbiter.Agents.ProviderRoutingEnforceTest do
   defp account!(provider, slug, attrs) do
     Ash.create!(
       ProviderAccount,
-      Map.merge(%{provider: provider, slug: "#{slug}-#{System.unique_integer([:positive])}"}, attrs)
+      Map.merge(
+        %{provider: provider, slug: "#{slug}-#{System.unique_integer([:positive])}"},
+        attrs
+      )
     )
   end
 
@@ -85,7 +88,13 @@ defmodule Arbiter.Agents.ProviderRoutingEnforceTest do
   end
 
   defp budget(account, pool, n),
-    do: %Budget{account: account.id, pool: pool, budget: n, binding: {:window, "5h"}, reason: "5h"}
+    do: %Budget{
+      account: account.id,
+      pool: pool,
+      budget: n,
+      binding: {:window, "5h"},
+      reason: "5h"
+    }
 
   # The claude pool has 2 free seats; codex's is full (1 of 1).
   defp opts(ctx, extra \\ []) do
@@ -129,7 +138,11 @@ defmodule Arbiter.Agents.ProviderRoutingEnforceTest do
     quotas = %{ctx.paced.id => refusing, ctx.codex.id => fresh_codex()}
 
     result =
-      ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx, quota_fun: &Map.get(quotas, &1.id)))
+      ProviderRouting.availability(
+        ctx.ws,
+        ctx.task,
+        opts(ctx, quota_fun: &Map.get(quotas, &1.id))
+      )
 
     assert reasons(result.dropped)[ctx.paced.id] == "quota_held"
   end
@@ -147,6 +160,9 @@ defmodule Arbiter.Agents.ProviderRoutingEnforceTest do
     result = ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx))
 
     # claude stays legacy (dropped on the line); codex is judged by its full pool.
-    assert reasons(result.dropped) == %{ctx.paced.id => "quota_held", ctx.codex.id => "at_capacity"}
+    assert reasons(result.dropped) == %{
+             ctx.paced.id => "quota_held",
+             ctx.codex.id => "at_capacity"
+           }
   end
 end

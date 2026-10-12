@@ -287,10 +287,11 @@ defmodule Arbiter.Agents.ProviderRouting do
   # The record, plus the available (ranked) and dropped entries behind it.
   defp run_evaluation(ws, task, opts) do
     ctx = context(ws, task, opts)
+    candidates = candidates(ws)
+    ctx = with_seat_reads(ctx, candidates)
 
     {available, dropped} =
-      ws
-      |> candidates()
+      candidates
       |> Enum.flat_map(&entries(&1, ctx))
       |> Enum.with_index()
       |> Enum.map(fn {entry, index} -> check(Map.put(entry, :index, index), ctx) end)
@@ -1311,6 +1312,24 @@ defmodule Arbiter.Agents.ProviderRouting do
       {:full, seat} -> {:drop, "at_capacity", "no free seat: #{SeatCheck.describe(seat)}"}
     end
   end
+
+  # The seat check's reads, once per evaluation rather than once per candidate:
+  # the live holders and this workspace (for the exemption). Only when a fresh
+  # dispatch has a candidate whose account is in `enforce`.
+  defp with_seat_reads(%{walk?: false, role: :main} = ctx, candidates) do
+    if Enum.any?(candidates, &enforced?(&1.account, ctx)) do
+      seat_opts =
+        ctx.seat_opts
+        |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
+        |> Keyword.put_new(:workspace, ctx.ws)
+
+      %{ctx | seat_opts: seat_opts}
+    else
+      ctx
+    end
+  end
+
+  defp with_seat_reads(ctx, _candidates), do: ctx
 
   defp free_seats(%{limit: :unlimited}), do: :unlimited
   defp free_seats(%{limit: limit, seats: seats}), do: max(limit - seats, 0)

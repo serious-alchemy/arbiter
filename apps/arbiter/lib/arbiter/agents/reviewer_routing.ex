@@ -253,10 +253,11 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp do_select(ws, task, opts) do
     ctx = context(ws, task, opts)
+    candidates = candidates(ws)
+    ctx = with_seat_reads(ctx, candidates)
 
     {available, dropped} =
-      ws
-      |> candidates()
+      candidates
       |> Enum.with_index()
       |> Enum.map(fn {candidate, index} -> check(entry(candidate, index, ctx), ctx) end)
       |> Enum.split_with(&match?({:ok, _}, &1))
@@ -895,6 +896,25 @@ defmodule Arbiter.Agents.ReviewerRouting do
         headroom = Headroom.binding(quota, {account, ctx.ws}, model: model, now: ctx.now)
         entry = Map.put(entry, :headroom, headroom)
         {:ok, if(enforced?, do: Map.put(entry, :seat_free?, seat_free?(entry, ctx)), else: entry)}
+    end
+  end
+
+  # The seat check's reads, once per selection rather than once per pool: the
+  # live holders and this workspace. Only when a candidate's account is in
+  # `enforce`.
+  defp with_seat_reads(ctx, candidates) do
+    if Enum.any?(
+         candidates,
+         &(AdmissionMode.mode(Map.get(&1, :account), ctx.install_mode) == :enforce)
+       ) do
+      seat_opts =
+        ctx.seat_opts
+        |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
+        |> Keyword.put_new(:workspace, ctx.ws)
+
+      %{ctx | seat_opts: seat_opts}
+    else
+      ctx
     end
   end
 

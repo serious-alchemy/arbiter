@@ -510,7 +510,9 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
       fake_worker(ws)
 
-      assert {:error, {:no_node_capacity, _}} = LocalCapacity.check("bd-follow-check", :resume, [])
+      assert {:error, {:no_node_capacity, _}} =
+               LocalCapacity.check("bd-follow-check", :resume, [])
+
       assert :ok = LocalCapacity.check("bd-follow-check", :resume, follow_up: true)
       refute "bd-follow-check" in LocalCapacity.holders()
     end

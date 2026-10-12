@@ -1080,8 +1080,10 @@ defmodule Arbiter.Board.Autopilot do
   defp walk_pick(_state, _snapshot, _mode), do: :today
 
   # Whether the walk decides this pass's dispatch: an `enforce` installation
-  # with a walk on the board.
-  defp walk_decides?(state, %{walk: %{}}, :enforce), do: install_mode(state, :enforce) == :enforce
+  # with a whole walk on the board (one `walk_pick/3` would also act on).
+  defp walk_decides?(state, %{walk: %{placements: _, entries: _}}, :enforce),
+    do: install_mode(state, :enforce) == :enforce
+
   defp walk_decides?(_state, _snapshot, _mode), do: false
 
   # ---- the admission shadow (DC6) --------------------------------------------

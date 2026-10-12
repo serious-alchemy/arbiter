@@ -32,7 +32,10 @@ defmodule Arbiter.Agents.ReviewerRoutingEnforceTest do
   defp account!(provider, slug, attrs \\ %{}) do
     Ash.create!(
       ProviderAccount,
-      Map.merge(%{provider: provider, slug: "#{slug}-#{System.unique_integer([:positive])}"}, attrs)
+      Map.merge(
+        %{provider: provider, slug: "#{slug}-#{System.unique_integer([:positive])}"},
+        attrs
+      )
     )
   end
 

@@ -83,7 +83,11 @@ defmodule Arbiter.Accounts.SeatCheckTest do
 
   test "a budget below the ceilings binds" do
     assert {:full, %{limit: 1, binding: :budget}} =
-             check(account(max_concurrent: 3), budgets: [budget(1)], holders: holders(1), share: 2)
+             check(account(max_concurrent: 3),
+               budgets: [budget(1)],
+               holders: holders(1),
+               share: 2
+             )
   end
 
   test "an unlimited budget leaves the ceilings, and with none the pool is unbounded" do
@@ -92,7 +96,8 @@ defmodule Arbiter.Accounts.SeatCheckTest do
     assert {:full, %{limit: 2}} =
              check(account(max_concurrent: 2), budgets: [unmetered], holders: holders(2))
 
-    assert {:ok, %{limit: :unlimited}} = check(account(), budgets: [unmetered], holders: holders(9))
+    assert {:ok, %{limit: :unlimited}} =
+             check(account(), budgets: [unmetered], holders: holders(9))
   end
 
   test "with no published budget the ceilings decide, and with none it is unbounded" do

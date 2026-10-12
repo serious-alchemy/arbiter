@@ -187,7 +187,12 @@ defmodule Arbiter.Worker.ResumeSlot do
   defp acquire_seat(%Issue{} = task, account, opts) do
     seat_opts =
       Keyword.merge(
-        [workspace_id: task.workspace_id, pool: nil, priority: task.priority, exclude_task: task.id],
+        [
+          workspace_id: task.workspace_id,
+          pool: nil,
+          priority: task.priority,
+          exclude_task: task.id
+        ],
         Keyword.get(opts, :seat_opts, [])
       )
 
@@ -196,7 +201,11 @@ defmodule Arbiter.Worker.ResumeSlot do
         {:ok, :acquired}
 
       {:full, seat} ->
-        over_cap(task, %{task_id: task.id, cap: seat.limit, holders: seat.holders, seat: seat}, opts)
+        over_cap(
+          task,
+          %{task_id: task.id, cap: seat.limit, holders: seat.holders, seat: seat},
+          opts
+        )
     end
   end
 

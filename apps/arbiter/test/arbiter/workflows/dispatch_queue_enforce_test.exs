@@ -76,7 +76,10 @@ defmodule Arbiter.Workflows.DispatchQueueEnforceTest do
     setup %{ws: ws} do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
       task = task!(ws)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, force: true, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert DispatchQueue.held?(ws.id, task.id)
       %{task: task}
     end

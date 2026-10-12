@@ -101,13 +101,26 @@ defmodule Arbiter.Accounts.SeatCheck do
   def room?(%ProviderAccount{} = account, opts \\ []), do: match?({:ok, _}, check(account, opts))
 
   @doc """
+  The live seat holders per pool (`Arbiter.Quota.Seats.holders/0`), for a caller
+  that checks several pools in one decision and passes them as `:holders`, so
+  the registry and the tickets are read once rather than once per pool.
+  """
+  @spec holders() :: %{Seats.pool_key() => [String.t()]}
+  def holders, do: Seats.holders()
+
+  @doc """
   A pool held at a **hard zero** (§3.5) by a rule the quota gate still keeps
   under `enforce` — the provider refusing, a weekly warning on hold — shaped as
   a full check with `phrase` as its reason. `Dispatch` refuses a fresh dispatch
   with it before the pool's published budget has caught up with the reading.
   `account` may be `nil` (a provider with no account behind it).
   """
-  @spec hard_zero(ProviderAccount.t() | nil, atom() | String.t() | nil, String.t() | nil, String.t()) ::
+  @spec hard_zero(
+          ProviderAccount.t() | nil,
+          atom() | String.t() | nil,
+          String.t() | nil,
+          String.t()
+        ) ::
           info()
   def hard_zero(account, provider, pool, phrase) do
     pool = pool || ModelFamily.classify((account && account.provider) || provider, nil).pool
