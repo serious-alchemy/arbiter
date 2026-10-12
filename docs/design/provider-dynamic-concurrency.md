@@ -1235,9 +1235,11 @@ nothing in the budget path.
   `ResumeSlot`, provider and reviewer routing and `Dispatch`; and only the
   Autopilot handles `budget_changed`, by planning a pass.
 - **Not done here.** E21's plan-time lift cap; replacing `#board-slots` with the
-  capacity strip (DC5's note); `routing_decision.budget` (DC5's note); a walk
-  that ranks a ticket's pin first; and the DC7 report does not yet split the
-  reverse records (`policy: "enforce"`) from the shadow ones.
+  capacity strip (DC5's note), so a Ready card's state badge (`next`, a
+  queue position, a hold) is still today's plan's, with the walk's own line
+  (`data-layer-reason`) beside it; `routing_decision.budget` (DC5's note); a
+  walk that ranks a ticket's pin first; and the DC7 report does not yet split
+  the reverse records (`policy: "enforce"`) from the shadow ones.
 
 ### 10.5 Rollout order
 
