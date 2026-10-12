@@ -12,11 +12,14 @@ defmodule Arbiter.Quota.Seats do
   A **seat** is one unit of in-flight work on an (account, pool) pair:
 
     * **The pin seat.** A ticket In progress takes one seat on its
-      implementer pin's pool, for its whole In-progress life: between rounds,
-      while its primary worker is parked on a cross-pool reviewer, and while
-      it is released to wait for CI or held for quota. (That is wider than
-      `Arbiter.Tasks.SlotGate.holds_slot?/2`, which releases the slot in those
-      last two cases; the seat is what the fix round comes back to.)
+      implementer pin's pool, for its In-progress life: between rounds, while
+      its primary worker is parked on a cross-pool reviewer, and while it is
+      held for quota. (That is wider than `Arbiter.Tasks.SlotGate.holds_slot?/2`,
+      which releases the slot in those cases; the seat is what the fix round
+      comes back to.) A ticket waiting on CI (its ReviewGate's `ci_wait`
+      marker) keeps the seat for `ci_wait_release_minutes` (`config :arbiter,
+      :seats`, default 10) and then releases it (operator ruling O7, DC8); when
+      CI returns the marker clears and the seat counts again.
     * **A sub-worker.** A live run keyed under a ticket
       (`<task>#review…`, `<task>:fixpass`, `<task>:conflict`, `<task>#impl…`)
       takes one seat per live worker on its own pool, *unless* it runs on the
@@ -49,6 +52,9 @@ defmodule Arbiter.Quota.Seats do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Worker.Registry, as: WorkerRegistry
+  alias Arbiter.Worker.ReviewCi
+
+  @default_ci_wait_release_minutes 10
 
   @type pool_key :: {account_id :: String.t(), pool :: String.t()}
   @type entry :: %{
@@ -205,8 +211,12 @@ defmodule Arbiter.Quota.Seats do
     case read_tickets(ids) do
       {:ok, tickets} ->
         known = Map.new(tickets, &{&1.id, &1})
+        released_before = DateTime.add(DateTime.utc_now(), -ci_wait_release_seconds(), :second)
 
-        for id <- ids, pin_holder?(Map.get(known, id)), into: MapSet.new(), do: id
+        for id <- ids,
+            pin_holder?(Map.get(known, id), released_before),
+            into: MapSet.new(),
+            do: id
 
       :error ->
         MapSet.new(ids)
@@ -224,10 +234,34 @@ defmodule Arbiter.Quota.Seats do
   end
 
   # No such ticket (a worker keyed on something that is not one): fail closed.
-  defp pin_holder?(nil), do: true
+  defp pin_holder?(nil, _released_before), do: true
 
-  defp pin_holder?(ticket) do
+  defp pin_holder?(ticket, released_before) do
     Lifecycle.state_of(ticket) == :active and
-      ticket.issue_type not in Issue.non_dispatchable_types()
+      ticket.issue_type not in Issue.non_dispatchable_types() and
+      not ci_wait_released?(ticket, released_before)
+  end
+
+  # O7 (operator ruling 2026-10-10, DC8): a ticket waiting on CI
+  # (`ReviewCi.waiting/2`, its ReviewGate's `ci_wait` marker) keeps its pin
+  # seat for `ci_wait_release_minutes`, then releases it. When CI returns the
+  # marker clears and the seat counts again: the reviewer or CI fix pass
+  # re-admits as a follow-up, which no full pool holds (I9). A wait with no
+  # readable start keeps the seat.
+  defp ci_wait_released?(ticket, released_before) do
+    with %{since: since} when is_binary(since) <- ReviewCi.waiting(ticket),
+         {:ok, started, _offset} <- DateTime.from_iso8601(since) do
+      DateTime.compare(started, released_before) != :gt
+    else
+      _ -> false
+    end
+  end
+
+  # `config :arbiter, :seats, ci_wait_release_minutes: n` (default 10).
+  defp ci_wait_release_seconds do
+    case :arbiter |> Application.get_env(:seats, []) |> Keyword.get(:ci_wait_release_minutes) do
+      n when is_integer(n) and n >= 0 -> n * 60
+      _ -> @default_ci_wait_release_minutes * 60
+    end
   end
 end
