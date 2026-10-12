@@ -41,6 +41,13 @@ defmodule Arbiter.Nodes.LocalCapacity do
       deadlock a ticket waiting for its own review
       (`Arbiter.Worker.ResumeSlot`'s no-deadlock rule).
 
+  Under `scheduler_admission: enforce` (DC8, design
+  `provider-dynamic-concurrency.md` §2.2, I9) a resume or re-dispatch of a ticket
+  already In progress is a follow-up too: `Worker.Dispatch` asks with
+  `follow_up: true`, and it is held only at 0 or on a hard derate, as the
+  `:zero_only` kinds are (still counted: it reserves). A resume of a ticket *not*
+  In progress (into In progress) keeps the `:at_cap` rule.
+
   A held **automatic** resume is deferred, not failed: `Worker.Dispatch` hands
   it to `Arbiter.Board.Autopilot.defer_resume/4` marked `held_for:
   :local_capacity`, and the Autopilot replays it, highest ticket priority
@@ -90,6 +97,10 @@ defmodule Arbiter.Nodes.LocalCapacity do
     conflict_pass: :zero_only,
     review_fix_round: :zero_only
   }
+
+  # The `:at_cap` kinds that run a ticket already In progress, which `follow_up:
+  # true` (DC8, `enforce`) holds only at 0 or on a hard derate.
+  @follow_up_kinds [:redispatch, :resume]
 
   @type reason :: {:local_only, Placement.reason()} | :no_node | nil
   @type info :: %{
@@ -219,7 +230,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
     * `{:error, {:no_node_capacity, info}}` — held.
 
   `request` is a `t:Arbiter.Nodes.Placement.request/0`; `opts` are
-  `Placement.place/2`'s plus `admit/3`'s `:force` and `:actor`.
+  `Placement.place/2`'s plus `admit/3`'s `:force`, `:actor` and `:follow_up`.
   """
   @spec gate(Placement.request(), keyword()) ::
           {:ok, :local} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
@@ -231,7 +242,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
       {:ok, {:local, why}} ->
         admit_opts =
           opts
-          |> Keyword.take([:force, :actor])
+          |> Keyword.take([:force, :actor, :follow_up])
           |> Keyword.merge(
             reason: why,
             provider: request.provider,
@@ -250,7 +261,9 @@ defmodule Arbiter.Nodes.LocalCapacity do
   {:no_node_capacity, info}}` (nothing reserved).
 
   Options: `:force` (go over; recorded), `:actor`, `:reason` (why the run is
-  local, for the hold phrase), `:provider`, `:workspace_id`.
+  local, for the hold phrase), `:provider`, `:workspace_id`, and `:follow_up`
+  (DC8: a resume or re-dispatch of a ticket already In progress under
+  `scheduler_admission: enforce`, held only at 0 or on a hard derate).
   """
   @spec admit(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def admit(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do
@@ -281,13 +294,31 @@ defmodule Arbiter.Nodes.LocalCapacity do
           do: :ok,
           else: refuse(task_id, kind, cap, holders(exclude_task: task_id), opts)
 
+      # DC8 (§2.2, I9): under `enforce` a resume or re-dispatch of a ticket already
+      # In progress is a follow-up. Held as the review-side follow-ups are, at 0 or
+      # on a hard derate, never for being at the cap; still counted, so it reserves.
+      :at_cap when kind in @follow_up_kinds ->
+        if Keyword.get(opts, :follow_up) == true,
+          do: admit_follow_up(task_id, kind, capacity, opts),
+          else: admit_locked(task_id, kind, cap, opts)
+
       :at_cap ->
-        :global.trans(
-          {{__MODULE__, @local}, self()},
-          fn -> admit_at_cap(task_id, kind, cap, opts) end,
-          [node()]
-        )
+        admit_locked(task_id, kind, cap, opts)
     end
+  end
+
+  defp admit_follow_up(task_id, kind, %{cap: cap} = capacity, opts) do
+    if (cap > 0 and capacity.derate != :hard) or forced?(opts),
+      do: reserve(task_id, opts),
+      else: refuse(task_id, kind, cap, holders(exclude_task: task_id), opts)
+  end
+
+  defp admit_locked(task_id, kind, cap, opts) do
+    :global.trans(
+      {{__MODULE__, @local}, self()},
+      fn -> admit_at_cap(task_id, kind, cap, opts) end,
+      [node()]
+    )
   end
 
   defp admit_at_cap(task_id, kind, cap, opts) do

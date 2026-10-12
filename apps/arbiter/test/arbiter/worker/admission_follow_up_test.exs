@@ -14,13 +14,14 @@ defmodule Arbiter.Worker.AdmissionFollowUpTest do
   What still holds a follow-up is a layer's hard zero (a machine cap of 0, as
   `:zero_only` does), which `Arbiter.Nodes.LocalCapacityTest` covers.
 
-  One rule is older than this and unchanged by every mode: the primary's cap
-  counts a *resume* at its cap (`:at_cap`, bd-b2iigy — a restart's resume sweep
-  once put 5 runs on a cap of 2), and a ReviewGate fix round re-dispatched
-  through `ReviewGateFixRoundDispatcher` is a resume. So those two cases fill
-  the account, not the machine. Nothing may change a dispatch decision before
-  DC8 (I1), so the design's "not held for being full" for a resume on a full
-  machine (§2.2) is DC8's to settle, with `ResumeSlot`'s seat check.
+  One rule is older than this: the primary's cap counts a *resume* at its cap
+  (`:at_cap`, bd-b2iigy — a restart's resume sweep once put 5 runs on a cap of
+  2), and a ReviewGate fix round re-dispatched through
+  `ReviewGateFixRoundDispatcher` is a resume. Under `legacy` and `shadow` it is
+  unchanged (I1), so the cases in the loop fill the account, not the machine.
+  DC8 settles §2.2 under `enforce`: a resume of a ticket In progress is a
+  follow-up, held by the primary's cap only at 0 (the last two describes), and
+  the gate holds a follow-up on a hard rule only, never on the paced line (O2).
   """
   use Arbiter.DataCase, async: false
 
@@ -179,6 +180,111 @@ defmodule Arbiter.Worker.AdmissionFollowUpTest do
         assert {:ok, %{worker_pid: pid}} = ConflictResolver.dispatch(context)
         TestSandbox.own!(ctx.sandbox, pid)
       end
+    end
+  end
+
+  # ---- DC8: enforce settles the node layer and drops the pace hold -------------
+
+  # The account's 5h window at 90%, past the flat 0.85 ceiling (a utilization
+  # rule, so a pace rule in the gate's terms), with the provider still accepting.
+  defp past_the_line!(account) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    Ash.create!(Arbiter.Quota.AnthropicQuota, %{
+      provider_account_id: account.id,
+      provider: "claude",
+      utilization_5h: 0.90,
+      reset_5h_at: DateTime.add(now, 9_000, :second),
+      status_5h: "allowed",
+      utilization_7d: 0.10,
+      reset_7d_at: DateTime.add(now, 302_400, :second),
+      status_7d: "allowed",
+      captured_at: now
+    })
+  end
+
+  defp mode!(mode), do: {:ok, _} = Arbiter.Settings.set_scheduler_admission(mode)
+
+  describe "a resume on a full primary (DC8 settles §2.2 on the node layer)" do
+    setup do
+      Arbiter.Test.StubResumeDeferrer.reset()
+      fill_the_machine!()
+      :ok
+    end
+
+    test "legacy: deferred, as it is today (the :at_cap rule, bd-b2iigy)", ctx do
+      mode!(:legacy)
+
+      assert {:ok, %{deferred: true, held_for: :local_capacity}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+    end
+
+    test "enforce: a follow-up of In-progress work goes over the full machine", ctx do
+      mode!(:enforce)
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+
+      TestSandbox.own!(ctx.sandbox, pid)
+    end
+
+    test "enforce: a re-dispatched ReviewGate fix round goes over the full machine too", ctx do
+      mode!(:enforce)
+
+      assert {:ok, %{worker_pid: pid}} =
+               ReviewGateFixRoundDispatcher.dispatch(%{
+                 task_id: ctx.ticket.id,
+                 attempt: 1,
+                 verdict: :request_changes,
+                 claude_command: ["true"]
+               })
+
+      TestSandbox.own!(ctx.sandbox, pid)
+    end
+
+    test "enforce: a cap of 0 is a hard zero and still holds it", ctx do
+      mode!(:enforce)
+      ResumeSlotFixture.put_local_cap(0)
+
+      assert {:ok, %{deferred: true, held_for: :local_capacity}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+    end
+  end
+
+  describe "a follow-up past the paced line (§4.5, O2)" do
+    setup ctx do
+      past_the_line!(ctx.account)
+      :ok
+    end
+
+    test "legacy: the gate holds a resume past the line in the DispatchQueue", ctx do
+      mode!(:legacy)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+    end
+
+    test "enforce: the resume goes ahead — follow-ups are held by the hard rules only", ctx do
+      mode!(:enforce)
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+
+      TestSandbox.own!(ctx.sandbox, pid)
+    end
+
+    test "enforce: a ReviewGate fix round goes ahead too", ctx do
+      mode!(:enforce)
+
+      assert {:ok, %{worker_pid: pid}} =
+               ReviewGateFixRoundDispatcher.dispatch(%{
+                 task_id: ctx.ticket.id,
+                 attempt: 1,
+                 verdict: :request_changes,
+                 claude_command: ["true"]
+               })
+
+      TestSandbox.own!(ctx.sandbox, pid)
     end
   end
 end

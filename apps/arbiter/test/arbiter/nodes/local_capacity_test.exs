@@ -487,6 +487,50 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     end
   end
 
+  # DC8 (design provider-dynamic-concurrency §2.2, I9): under
+  # `scheduler_admission: enforce` a resume or re-dispatch of a ticket already In
+  # progress is a follow-up of work in flight. `Worker.Dispatch` asks with
+  # `follow_up: true`, and the primary's cap then holds it only as it holds the
+  # review-side follow-ups: at 0, or on a hard derate. Without the option (every
+  # legacy and shadow dispatch) the `:at_cap` rule above is unchanged.
+  describe "a follow-up under enforce (follow_up: true)" do
+    test "a resume or re-dispatch goes over a cap OTHER tickets fill, and is counted", %{ws: ws} do
+      {:ok, 2} = Arbiter.Nodes.set_local_max_workers(2, nil)
+      fake_worker(ws)
+      fake_worker(ws)
+
+      for kind <- [:resume, :redispatch] do
+        assert :ok = LocalCapacity.admit("bd-follow-#{kind}", kind, follow_up: true)
+        assert "bd-follow-#{kind}" in LocalCapacity.holders()
+        LocalCapacity.release("bd-follow-#{kind}")
+      end
+    end
+
+    test "check/3 answers the same, reserving nothing", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      fake_worker(ws)
+
+      assert {:error, {:no_node_capacity, _}} = LocalCapacity.check("bd-follow-check", :resume, [])
+      assert :ok = LocalCapacity.check("bd-follow-check", :resume, follow_up: true)
+      refute "bd-follow-check" in LocalCapacity.holders()
+    end
+
+    test "a cap of 0 still holds it" do
+      {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)
+
+      assert {:error, {:no_node_capacity, %{cap: 0}}} =
+               LocalCapacity.admit("bd-follow-zero", :resume, follow_up: true)
+    end
+
+    test "a fresh implementer is not a follow-up: the option changes nothing for it", %{ws: ws} do
+      {:ok, 1} = Arbiter.Nodes.set_local_max_workers(1, nil)
+      fake_worker(ws)
+
+      assert {:error, {:no_node_capacity, _}} =
+               LocalCapacity.admit("bd-follow-fresh", :implementer, follow_up: true)
+    end
+  end
+
   describe "gate/3 (the placement-aware entry point)" do
     test "an eligible run placed on a node does not touch the primary's cap" do
       {:ok, 0} = Arbiter.Nodes.set_local_max_workers(0, nil)

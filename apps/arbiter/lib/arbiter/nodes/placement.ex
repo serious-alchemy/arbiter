@@ -264,8 +264,9 @@ defmodule Arbiter.Nodes.Placement do
 
   @doc """
   Place `request`. Options: `:nodes` (rows, or a 0-arity function returning them;
-  default `Arbiter.Nodes.Overview.node_rows/0`) and `:remote_available?` (a
-  seam over `remote_execution_available?/0`).
+  default `Arbiter.Nodes.Overview.node_rows/0`), `:remote_available?` (a
+  seam over `remote_execution_available?/0`) and `:prefer` (the node id the
+  scheduler walk planned the run on, DC8: ranked first while it is a candidate).
 
     * `{:ok, {:local, why}}` — run on the primary. `why` is `:no_node` (an
       eligible run no node could take, under `prefer_remote`) or
@@ -316,7 +317,7 @@ defmodule Arbiter.Nodes.Placement do
         reserved = reserved_counts()
         candidates = Enum.filter(rows, &candidate?(&1, request, reserved))
 
-        case rank(candidates, reserved) do
+        case candidates |> rank(reserved) |> prefer(Keyword.get(opts, :prefer)) do
           [%{constrained?: true} | _] when request.mode == :prefer_remote ->
             none(request, rows)
 
@@ -396,6 +397,18 @@ defmodule Arbiter.Nodes.Placement do
        row.name}
     end)
   end
+
+  # DC8 (`docs/design/provider-dynamic-concurrency.md` §4.4): the node the
+  # scheduler walk planned the run on goes first while it is still a candidate.
+  # A plan for the primary, or for a node that filled since, changes nothing.
+  defp prefer(ranked, node_id) when is_binary(node_id) do
+    case Enum.split_with(ranked, &(&1.id == node_id)) do
+      {[planned], rest} -> [planned | rest]
+      _ -> ranked
+    end
+  end
+
+  defp prefer(ranked, _node_id), do: ranked
 
   @doc """
   The operator-facing refusal for `{:error, {:no_node_capacity, info}}` — one

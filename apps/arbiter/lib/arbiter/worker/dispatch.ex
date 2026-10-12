@@ -982,9 +982,33 @@ defmodule Arbiter.Worker.Dispatch do
       actor: Keyword.get(opts, :slot_override_actor),
       reason: reason,
       provider: provider,
-      workspace_id: task.workspace_id
+      workspace_id: task.workspace_id,
+      follow_up: resume_follow_up?(task, opts, provider)
     ]
   end
+
+  # DC8 (design §2.2, I9): asked before routing has picked the resume's account,
+  # so the mode is that of the account the workspace meters `provider` under. A
+  # resume of a ticket In progress under `enforce` is a follow-up, held by the
+  # primary's cap only at 0 (`node_follow_up?/2` asks the same at the real gate).
+  defp resume_follow_up?(%Issue{state: :active} = task, opts, provider) do
+    case Keyword.get(opts, :scheduler_admission) do
+      nil ->
+        task.workspace_id
+        |> Arbiter.Accounts.Resolver.account(provider)
+        |> Arbiter.Accounts.AdmissionMode.mode()
+        |> Kernel.==(:enforce)
+
+      explicit ->
+        explicit == :enforce
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp resume_follow_up?(_task, _opts, _provider), do: false
 
   # Where would placement put this resume right now? `:node_possible` (a node has
   # room; the slot the probe took is given straight back), `{:local, reason}` or the
@@ -1040,7 +1064,11 @@ defmodule Arbiter.Worker.Dispatch do
           true
 
         {:local, reason} ->
-          LocalCapacity.check(task_id, :resume, reason: reason, provider: provider) == :ok
+          LocalCapacity.check(task_id, :resume,
+            reason: reason,
+            provider: provider,
+            follow_up: resume_follow_up?(task, opts, provider)
+          ) == :ok
 
         {:error, _} ->
           false
@@ -2810,9 +2838,10 @@ defmodule Arbiter.Worker.Dispatch do
   defp ensure_node_capacity(%Issue{} = task, opts) do
     workspace = load_workspace(task)
     request = node_request(task, workspace, opts)
+    gate_opts = node_gate_opts(task, opts)
 
-    case LocalCapacity.gate(request, node_gate_opts(opts)) do
-      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
+    case LocalCapacity.gate(request, gate_opts) do
+      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts, gate_opts)
       {:ok, :local} -> {:ok, opts}
       {:error, _} = held -> held
     end
@@ -2827,7 +2856,7 @@ defmodule Arbiter.Worker.Dispatch do
   # that times out or fails is a placement decision (`Publisher.fallback/2`)
   # rather than a spawn failure: `prefer_remote` runs on the primary,
   # `remote_only` is held. A node that builds its own image skips this.
-  defp image_gate(%Issue{} = task, workspace, request, node, opts) do
+  defp image_gate(%Issue{} = task, workspace, request, node, opts, gate_opts) do
     repo = Keyword.get(opts, :repo)
     image_opts = [workspace: workspace, repo: repo] ++ Keyword.take(opts, [:image, :publish])
 
@@ -2837,20 +2866,20 @@ defmodule Arbiter.Worker.Dispatch do
 
       {:error, reason} ->
         Placement.release(task.id)
-        image_fallback(Publisher.fallback(request.mode, reason), request, opts)
+        image_fallback(Publisher.fallback(request.mode, reason), request, opts, gate_opts)
     end
   end
 
-  defp image_fallback({:hold, reason}, request, _opts),
+  defp image_fallback({:hold, reason}, request, _opts, _gate_opts),
     do: {:error, {:no_node_capacity, Placement.image_hold(request, reason)}}
 
-  defp image_fallback({:local, reason}, request, opts) do
+  defp image_fallback({:local, reason}, request, opts, gate_opts) do
     Logger.warning(
       "Dispatch: no registry image for #{request.task_id} (#{inspect(reason)}); running on the primary"
     )
 
     admit_opts =
-      node_gate_opts(opts) ++
+      gate_opts ++
         [reason: :no_node, provider: request.provider, workspace_id: request.workspace_id]
 
     with :ok <- LocalCapacity.admit(request.task_id, request.kind, admit_opts), do: {:ok, opts}
@@ -2928,11 +2957,27 @@ defmodule Arbiter.Worker.Dispatch do
       (Issue.no_pr_type?(task.issue_type) and Keyword.get(opts, :provision_worktree) != true)
   end
 
-  defp node_gate_opts(opts) do
+  defp node_gate_opts(%Issue{} = task, opts) do
     [
       force: Keyword.get(opts, :force_slot) == true,
-      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
-    ] ++ Keyword.take(opts, [:nodes])
+      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by),
+      follow_up: node_follow_up?(task, opts)
+    ] ++ Keyword.take(opts, [:nodes]) ++ planned_node(opts)
+  end
+
+  # DC8 (design §2.2, I9): under `enforce` a run of a ticket already In progress
+  # (a resume, a re-dispatch) is a follow-up, which the primary's cap holds only
+  # at 0 or on a hard derate (`LocalCapacity`'s `follow_up:`). Under `legacy` and
+  # `shadow` the `:at_cap` rule is unchanged.
+  defp node_follow_up?(%Issue{state: :active} = task, opts), do: admission_enforced?(task, opts)
+  defp node_follow_up?(_task, _opts), do: false
+
+  # DC8 (§4.4): the node the scheduler walk planned the run on goes first.
+  defp planned_node(opts) do
+    case Keyword.get(opts, :planned) do
+      %{node: node} when is_binary(node) -> [prefer: node]
+      _ -> []
+    end
   end
 
   # Not admissions: a ticket already In progress (a re-dispatch or resume of
@@ -4228,7 +4273,7 @@ defmodule Arbiter.Worker.Dispatch do
     workspace = load_workspace(task)
 
     admit_opts =
-      node_gate_opts(opts) ++
+      node_gate_opts(task, opts) ++
         [
           reason: :no_node,
           provider: quota_gate_provider(task, workspace, opts),
