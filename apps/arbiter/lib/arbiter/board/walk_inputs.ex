@@ -537,14 +537,12 @@ defmodule Arbiter.Board.WalkInputs do
 
     verdict = if mode == :local_only, do: nil, else: eligibility(ws, issue, provider, mode)
 
-    cond do
-      # bd-21r811: a `remote_only` run that pushes with a scoped git credential has
-      # no machine (a node cannot carry the key; the primary is off limits): held.
-      mode == :remote_only and verdict == {:local_only, :scoped_git_credential} ->
-        []
-
-      true ->
-        node_groups(mode, ctx.remote != %{} and verdict == :ok, ctx.remote, ws.id)
+    # bd-21r811: a `remote_only` run that pushes with a scoped git credential has
+    # no machine (a node cannot carry the key; the primary is off limits): held.
+    if mode == :remote_only and verdict == {:local_only, :scoped_git_credential} do
+      []
+    else
+      node_groups(mode, ctx.remote != %{} and verdict == :ok, ctx.remote, ws.id)
     end
   end
 
