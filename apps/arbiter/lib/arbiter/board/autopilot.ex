@@ -344,7 +344,7 @@ defmodule Arbiter.Board.Autopilot do
   The PubSub topics a normally-started instance subscribes to for reactive
   triggers: `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"`,
   `Arbiter.Events`'s global `"events"` topic, and `"board"`, where
-  `Arbiter.Quota.Budget.Server` announces `{:budget_changed, …}` (DC8: a rise
+  the provider budgets' server announces `{:budget_changed, …}` (DC8: a rise
   plans a pass under `enforce`). Exposed so a test can assert against the real
   value instead of hardcoding a copy that could drift.
   """
@@ -847,7 +847,7 @@ defmodule Arbiter.Board.Autopilot do
     {:noreply, after_dispatch(state, {:error, {:exit, reason}})}
   end
 
-  # DC8 (E8, design §3.6): `Arbiter.Quota.Budget.Server` announces each published
+  # DC8 (E8, design §3.6): the provider budgets' server announces each published
   # budget change on this module's "board" topic. A rise is a freed seat: under
   # `enforce` it plans a pass, as a worker finishing does. A fall stops nothing
   # (no budget stops a run), and under `legacy` and `shadow` nothing reacts.
