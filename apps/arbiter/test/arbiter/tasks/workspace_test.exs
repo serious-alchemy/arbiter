@@ -367,6 +367,27 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert updated.config["bogus_key"] == 1
     end
 
+    test "git_credentials.repos.<repo> is settable without force; an invalid block is refused" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "git-creds-patch"})
+
+      good = %{
+        "git_credentials" => %{
+          "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "TONIC_KEY"}}
+        }
+      }
+
+      assert {:ok, updated} = Ash.update(ws, %{patch: good}, action: :patch_config)
+      assert updated.config["git_credentials"]["repos"]["tonic"]["kind"] == "deploy_key"
+
+      bad = %{"git_credentials" => %{"repos" => %{"tonic" => %{"kind" => "bogus"}}}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(updated, %{patch: bad}, action: :patch_config)
+
+      refute Exception.message(err) =~ "unknown top-level"
+      assert Exception.message(err) =~ "git_credentials.repos.tonic.kind"
+    end
+
     test "a stored unknown key does not block an unrelated patch" do
       {:ok, ws} = Ash.create(Workspace, %{name: "legacy-unknown", config: %{"legacy" => 1}})
 
@@ -490,9 +511,13 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
 
     test "reads each accepted value as an atom" do
-      for policy <- ~w(context_only inherit_parent mint) do
+      for {policy, atom} <- [
+            {"context_only", :context_only},
+            {"inherit_parent", :inherit_parent},
+            {"mint", :mint}
+          ] do
         ws = %Workspace{config: %{"tracker" => %{"child_policy" => policy}}}
-        assert Workspace.tracker_child_policy(ws) == String.to_existing_atom(policy)
+        assert Workspace.tracker_child_policy(ws) == atom
       end
     end
 

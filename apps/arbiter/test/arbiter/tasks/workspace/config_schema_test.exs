@@ -52,7 +52,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
 
     for key <- ~w(tracker merge agent review_agent security routing review_gate
                   review_automation quota loop standing_orders repo_paths
-                  pr_patrol review_patrol worker seed_paths) do
+                  pr_patrol review_patrol worker seed_paths git_credentials
+                  legacy_operator key_secret private_key_secret installation_id
+                  token_secret api_url) do
       assert text =~ key
     end
   end
