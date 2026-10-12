@@ -884,7 +884,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # free seat is noted for `rank/1`, which puts such pools first.
   defp check_quota(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
-    enforced? = AdmissionMode.mode(account, ctx.install_mode) == :enforce
+    enforced? = enforced?(account, ctx)
     gate_opts = [account: account, model: model, now: ctx.now]
     gate_opts = if enforced?, do: [{:pace, false} | gate_opts], else: gate_opts
 
@@ -903,10 +903,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # live holders and this workspace. Only when a candidate's account is in
   # `enforce`.
   defp with_seat_reads(ctx, candidates) do
-    if Enum.any?(
-         candidates,
-         &(AdmissionMode.mode(Map.get(&1, :account), ctx.install_mode) == :enforce)
-       ) do
+    if Enum.any?(candidates, &enforced?(Map.get(&1, :account), ctx)) do
       seat_opts =
         ctx.seat_opts
         |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
@@ -917,6 +914,8 @@ defmodule Arbiter.Agents.ReviewerRouting do
       ctx
     end
   end
+
+  defp enforced?(account, ctx), do: AdmissionMode.mode(account, ctx.install_mode) == :enforce
 
   defp seat_free?(%{account: account, pool: pool}, ctx) do
     SeatCheck.room?(

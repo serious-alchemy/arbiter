@@ -994,10 +994,8 @@ defmodule Arbiter.Worker.Dispatch do
   defp resume_follow_up?(%Issue{state: :active} = task, opts, provider) do
     case Keyword.get(opts, :scheduler_admission) do
       nil ->
-        task.workspace_id
-        |> Arbiter.Accounts.Resolver.account(provider)
-        |> Arbiter.Accounts.AdmissionMode.mode()
-        |> Kernel.==(:enforce)
+        account = Arbiter.Accounts.Resolver.account(task.workspace_id, provider)
+        Arbiter.Accounts.AdmissionMode.mode(account) == :enforce
 
       explicit ->
         explicit == :enforce
