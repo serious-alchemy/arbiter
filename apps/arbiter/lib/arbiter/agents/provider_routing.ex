@@ -71,6 +71,15 @@ defmodule Arbiter.Agents.ProviderRouting do
       dispatch on this account's snapshot (account ∧ workspace policy, paced
       included) for the model it would run.
 
+  For an account in `scheduler_admission: enforce` (DC8, design
+  `provider-dynamic-concurrency.md` §7, E12) feasibility is a free seat:
+  `at_capacity` is the candidate's pool at `min(budget, max_concurrent, share)`
+  seats (`Arbiter.Accounts.SeatCheck`, never for a follow-up role, which holds
+  its ticket's seat already), its `:capacity` is the pool's free seats, and
+  `quota_held` is the gate's hard rules only (`pace: false`). A dispatch the
+  scheduler walk planned (`:planned`) takes the planned account while it is
+  available.
+
   ## Ranking
 
   The survivors are ranked by `Arbiter.Quota.Headroom.binding/3` —
@@ -120,9 +129,11 @@ defmodule Arbiter.Agents.ProviderRouting do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Accounts.AdmissionMode
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderSettings
+  alias Arbiter.Accounts.SeatCheck
   alias Arbiter.Agents
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CapabilityMatrix
@@ -871,9 +882,23 @@ defmodule Arbiter.Agents.ProviderRouting do
       floor: Floors.gate(ws, repo_opt(opts) || task_repo(task), task),
       guardrails: guardrail_gate(task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws),
-      walk?: walk?(opts)
+      walk?: walk?(opts),
+      # DC8: the installation's `scheduler_admission`, which each candidate's
+      # account follows unless it overrides it. The walk asks no capacity or
+      # pace question, so it reads nothing.
+      install_mode: if(walk?(opts), do: nil, else: install_mode(opts)),
+      seat_opts: Keyword.get(opts, :seat_opts, [])
     }
   end
+
+  defp install_mode(opts) do
+    Keyword.get_lazy(opts, :scheduler_admission, &AdmissionMode.installation/0)
+  end
+
+  # DC8 (design provider-dynamic-concurrency §7, E12): whether this candidate's
+  # account admits by the budgets — its own `admission`, else the installation's.
+  defp enforced?(account, %{install_mode: install}),
+    do: AdmissionMode.mode(account, install) == :enforce
 
   # R9: `routing.scoring.allow_upgrade` (default 0: the policy's tier only).
   defp allow_upgrade(%Workspace{config: config}) do
@@ -1252,11 +1277,43 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp check_capacity(%{account: account} = entry, ctx) do
-    case Concurrency.account_headroom(account, ctx.ws, capacity_opts(ctx)) do
-      0 -> {:drop, "at_capacity", "no concurrency slot left (max_concurrent / share)"}
-      capacity -> {:ok, Map.put(entry, :capacity, capacity)}
+    if enforced?(account, ctx) do
+      check_seat(entry, ctx)
+    else
+      case Concurrency.account_headroom(account, ctx.ws, capacity_opts(ctx)) do
+        0 -> {:drop, "at_capacity", "no concurrency slot left (max_concurrent / share)"}
+        capacity -> {:ok, Map.put(entry, :capacity, capacity)}
+      end
     end
   end
+
+  # DC8 (§4.4, §7): under `enforce` a fresh dispatch is feasible on a pool with a
+  # free seat (`seats < min(budget, max_concurrent, share)`), and its capacity
+  # is that pool's free seats. A follow-up role already holds its ticket's seat,
+  # so a full pool never drops it (I9).
+  defp check_seat(entry, %{role: role}) when role != :main,
+    do: {:ok, Map.put(entry, :capacity, :unlimited)}
+
+  defp check_seat(%{account: account, pool: pool} = entry, ctx) do
+    seat_opts =
+      Keyword.merge(
+        [
+          workspace_id: ctx.ws.id,
+          pool: pool,
+          priority: task_priority(ctx.task),
+          exclude_task: ctx.task && Map.get(ctx.task, :id)
+        ],
+        ctx.seat_opts
+      )
+
+    case SeatCheck.check(account, seat_opts) do
+      {:ok, seat} -> {:ok, Map.put(entry, :capacity, free_seats(seat))}
+      {:full, seat} -> {:drop, "at_capacity", "no free seat: #{SeatCheck.describe(seat)}"}
+    end
+  end
+
+  defp free_seats(%{limit: :unlimited}), do: :unlimited
+  defp free_seats(%{limit: limit, seats: seats}), do: max(limit - seats, 0)
 
   # A follow-up role replaces the task's own workers on the account (see the
   # moduledoc's `at_capacity`); a first dispatch adds to what is running.
@@ -1316,10 +1373,14 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp spend_hold(_account, _ctx), do: :ok
 
+  # DC8: under `enforce` the gate keeps its hard rules only (`pace: false`); the
+  # paced line is the pool's budget, answered by `check_seat/2`.
   defp check_quota_window(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
+    gate_opts = [account: account, model: model, now: ctx.now]
+    gate_opts = if enforced?(account, ctx), do: [{:pace, false} | gate_opts], else: gate_opts
 
-    case ctx.gate.check(ctx.task, quota, ctx.ws, account: account, model: model, now: ctx.now) do
+    case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
       {:hold, reason} ->
         {:drop, "quota_held", Map.get(reason, :phrase)}
 

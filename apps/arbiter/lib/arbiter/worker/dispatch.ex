@@ -1992,8 +1992,11 @@ defmodule Arbiter.Worker.Dispatch do
       security: routing_security(workspace, opts),
       routing_choice: Keyword.get(opts, :routing_choice),
       repo: Keyword.get(opts, :repo),
-      # DC8 (§4.4): the scheduler walk's planned pair, preferred while available.
-      planned: Keyword.get(opts, :planned)
+      # DC8 (§4.4): the scheduler walk's planned pair, preferred while available,
+      # and the admission seams routing's seat check shares with `Admission`.
+      planned: Keyword.get(opts, :planned),
+      scheduler_admission: Keyword.get(opts, :scheduler_admission),
+      seat_opts: Keyword.get(opts, :seat_opts, [])
     ]
 
     case ProviderRouting.select(workspace, task, role, routing_opts) do

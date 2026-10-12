@@ -52,6 +52,12 @@ defmodule Arbiter.Agents.ReviewerRouting do
   Survivors are ranked by quota headroom (`Arbiter.Quota.Headroom.binding/3`),
   most first, ties to configured order, candidates with no reading last.
 
+  Under `scheduler_admission: enforce` (DC8, design `provider-dynamic-concurrency.md`
+  §4.5) a reviewer is a follow-up of work In progress: for an account in
+  `enforce`, `quota_held` is the gate's hard rules only (`pace: false`), never
+  the paced line, and a pool with no free seat (`Arbiter.Accounts.SeatCheck`)
+  ranks after every pool that has one.
+
   ## One reviewer family per task
 
   The first pass pins the chosen family on the task (`Issue.reviewer_family`).
@@ -89,8 +95,10 @@ defmodule Arbiter.Agents.ReviewerRouting do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Accounts.AdmissionMode
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderSettings
+  alias Arbiter.Accounts.SeatCheck
   alias Arbiter.Agents
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CapabilityMatrix
@@ -533,6 +541,10 @@ defmodule Arbiter.Agents.ReviewerRouting do
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
       capability: CapabilityMatrix.gate(ws, :reviewer, task_repo(task)),
       gate: Arbiter.Quota.gate_for_workspace(ws),
+      # DC8: the installation's `scheduler_admission`, which each candidate's
+      # account follows unless it overrides it, and the seat check's seams.
+      install_mode: Keyword.get_lazy(opts, :scheduler_admission, &AdmissionMode.installation/0),
+      seat_opts: Keyword.get(opts, :seat_opts, []),
       available: [],
       dropped: []
     }
@@ -659,6 +671,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       model: model,
       tier: tier,
       family: family,
+      pool: ModelFamily.classify(provider, model).pool,
       thinking: ModelFamily.reviewer_thinking(family, present(config["thinking"]))
     }
   end
@@ -865,17 +878,34 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp check_quota(%{account: nil} = entry, _ctx), do: {:ok, entry}
 
+  # DC8 (design §4.5, E10): under `enforce` a reviewer is a follow-up, so the
+  # gate keeps its hard rules only (`pace: false`), and whether its pool has a
+  # free seat is noted for `rank/1`, which puts such pools first.
   defp check_quota(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
+    enforced? = AdmissionMode.mode(account, ctx.install_mode) == :enforce
+    gate_opts = [account: account, model: model, now: ctx.now]
+    gate_opts = if enforced?, do: [{:pace, false} | gate_opts], else: gate_opts
 
-    case ctx.gate.check(ctx.task, quota, ctx.ws, account: account, model: model, now: ctx.now) do
+    case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
       {:hold, reason} ->
         {:drop, "quota_held", Map.get(reason, :phrase)}
 
       _ ->
         headroom = Headroom.binding(quota, {account, ctx.ws}, model: model, now: ctx.now)
-        {:ok, Map.put(entry, :headroom, headroom)}
+        entry = Map.put(entry, :headroom, headroom)
+        {:ok, if(enforced?, do: Map.put(entry, :seat_free?, seat_free?(entry, ctx)), else: entry)}
     end
+  end
+
+  defp seat_free?(%{account: account, pool: pool}, ctx) do
+    SeatCheck.room?(
+      account,
+      Keyword.merge(
+        [workspace_id: ctx.ws.id, pool: pool, exclude_task: ctx.task && Map.get(ctx.task, :id)],
+        ctx.seat_opts
+      )
+    )
   end
 
   defp latest_quota(%ProviderAccount{id: id, provider: provider}),
@@ -883,11 +913,15 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp latest_quota(_), do: nil
 
+  # A pool known to be full (`seat_free?: false`, only ever set under `enforce`)
+  # ranks after every other; the rest is today's order.
   defp rank(entries) do
     Enum.sort_by(entries, fn entry ->
+      seat = if Map.get(entry, :seat_free?) == false, do: 1, else: 0
+
       case Map.get(entry, :headroom) do
-        %{headroom: h} -> {0, -h, entry.index}
-        _ -> {1, 0, entry.index}
+        %{headroom: h} -> {seat, 0, -h, entry.index}
+        _ -> {seat, 1, 0, entry.index}
       end
     end)
   end
