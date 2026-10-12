@@ -456,7 +456,48 @@ defmodule Arbiter.Agents.ProviderRouting do
     _ -> nil
   end
 
+  # DC8 (design provider-dynamic-concurrency §4.4): under `enforce` the
+  # scheduler walk placed the card on a (pool, node) pair, and that pair rides
+  # in as `:planned`. Its account is taken while it is still an available
+  # candidate on the planned pool, and pinned when the ticket has no pin yet. A
+  # pin on another account that is still available wins (the walk ranks the
+  # pin first, so the two differ only across a race); anything else falls
+  # through to the usual choice.
   defp choose(base, entries, dropped, task, opts) do
+    case planned_entry(entries, task, Keyword.get(opts, :planned)) do
+      %{} = entry ->
+        if Keyword.get(opts, :pin, true) and is_nil(task.implementer_account_id),
+          do: pin(task, entry)
+
+        {:ok, selection(entry, Map.put(put_chosen(base, entry), "outcome", "planned"))}
+
+      nil ->
+        choose_unplanned(base, entries, dropped, task, opts)
+    end
+  end
+
+  defp planned_entry(entries, task, %{account_id: account_id, pool: pool})
+       when is_binary(account_id) do
+    with entry when not is_nil(entry) <-
+           Enum.find(entries, &(&1.account.id == account_id and &1.pool == pool)) ||
+             Enum.find(entries, &(&1.account.id == account_id)),
+         true <- pin_allows?(task, entries, account_id) do
+      entry
+    else
+      _ -> nil
+    end
+  end
+
+  defp planned_entry(_entries, _task, _planned), do: nil
+
+  # A ticket pinned to another account that is still available stays on it.
+  defp pin_allows?(%Issue{implementer_account_id: nil}, _entries, _account_id), do: true
+  defp pin_allows?(%Issue{implementer_account_id: account_id}, _entries, account_id), do: true
+
+  defp pin_allows?(%Issue{implementer_account_id: pinned}, entries, _account_id),
+    do: not Enum.any?(entries, &(&1.account.id == pinned))
+
+  defp choose_unplanned(base, entries, dropped, task, opts) do
     case pinned(task, entries, dropped) do
       {:pinned, entry} ->
         {:ok, selection(entry, Map.put(put_chosen(base, entry), "outcome", "pinned"))}

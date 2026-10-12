@@ -101,6 +101,35 @@ defmodule Arbiter.Accounts.SeatCheck do
   def room?(%ProviderAccount{} = account, opts \\ []), do: match?({:ok, _}, check(account, opts))
 
   @doc """
+  A pool held at a **hard zero** (§3.5) by a rule the quota gate still keeps
+  under `enforce` — the provider refusing, a weekly warning on hold — shaped as
+  a full check with `phrase` as its reason. `Dispatch` refuses a fresh dispatch
+  with it before the pool's published budget has caught up with the reading.
+  `account` may be `nil` (a provider with no account behind it).
+  """
+  @spec hard_zero(ProviderAccount.t() | nil, atom() | String.t() | nil, String.t() | nil, String.t()) ::
+          info()
+  def hard_zero(account, provider, pool, phrase) do
+    pool = pool || ModelFamily.classify((account && account.provider) || provider, nil).pool
+
+    %{
+      account_id: account && account.id,
+      account: if(account, do: label(account), else: to_string(provider)),
+      pool: pool,
+      label: if(account, do: WalkInputs.pool_label(account, pool), else: to_string(provider)),
+      limit: 0,
+      budget: 0,
+      exempt?: false,
+      max_concurrent: account && account.max_concurrent,
+      share: nil,
+      binding: :budget,
+      seats: 0,
+      holders: [],
+      reason: phrase
+    }
+  end
+
+  @doc """
   One line for a held card or a refusal: the pool, its seats against the
   limit, and what binds it — `claude:default: 3 of 3 seats (5h binds)`,
   `claude:default: 2 of 2 seats (max_concurrent 2)`.
