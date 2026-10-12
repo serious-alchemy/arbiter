@@ -110,6 +110,43 @@ A ticket's `tracker_write` permission projects a token env var (the binding's
   binding a fine-grained token scoped to the one repo. The check fails closed: if
   GitHub cannot be reached, or answers anything but 2xx, the dispatch is refused.
 
+## The host's push and PR operations (bd-bsmkfu)
+
+A podman run holds no git credential: the **host** pushes the collected branch
+after `arb done` (also a fix round's or conflict pass's rewritten branch, and the
+review gate's pre-review push) and opens, comments on and merges the PR. With a
+scoped entry for the repo the host does all of that with it, not with the
+operator's ssh/gh credentials (`Arbiter.Worker.HostCredential`):
+
+* **Push.** `git push` runs with the entry's credential: for a `github_app`, a
+  fresh installation token restricted to the repo (Contents, Pull requests and
+  Issues read/write, Metadata read), served by the same path-pinned helper; for a
+  `deploy_key`, `GIT_SSH_COMMAND` naming the key. The operator's credential
+  helpers are reset, `SSH_AUTH_SOCK`, `GIT_ASKPASS` and `SSH_ASKPASS` are unset,
+  ssh is told `IdentityAgent=none`/`IdentitiesOnly=yes` (`-F /dev/null`), and
+  prompts are off. GitHub shows the App as the pusher.
+* **PR open, comment, merge** (the GitHub merger adapter) use the same App
+  installation token when the repo's kind is `github_app`, so the App bot is the PR
+  author. The merger config's `credentials_ref` is not read for that repo. For a
+  `deploy_key` or `token` repo the adapter keeps `credentials_ref` (a deploy key
+  has no API access); the GitLab merger is unchanged.
+* The installation token is cached in memory for 30 minutes (the Watchdog polls
+  every few seconds), then minted again.
+* If the scoped credential cannot be built (the secret is gone, the mint fails),
+  the push or PR call **fails**; the host never falls back to the operator's
+  credential for a repo that has a scoped entry.
+* Repos on `legacy_operator`, or with no entry, behave as before.
+* **Remote-node runs.** The node runs the agent in a shadow clone; the branch comes
+  back to the primary, which pushes it after `arb done` through the same code, so
+  those pushes use the scoped env too (the node itself never needs a credential,
+  which is why a podman run stays remote-eligible).
+* Not covered: the Direct merger's local `git push origin <target>`, the GitLab
+  merger's branch push, and read-only `git fetch`es, which still run as the
+  operator.
+
+The App needs Pull requests **read & write**, Contents **read & write** and Issues
+**read & write** for this (the table above already asks for them).
+
 ## Limits, said plainly
 
 * **Unsandboxed Claude and Codex run as the operator's uid.** Scoping stops
