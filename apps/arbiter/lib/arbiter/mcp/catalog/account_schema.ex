@@ -13,7 +13,7 @@ defmodule Arbiter.MCP.Catalog.AccountSchema do
     attrs =
       for name <- Fields.names(:mcp), name != "quota_config", into: %{} do
         spec = Fields.get(name)
-        {name, %{"type" => json_type(spec), "description" => spec.doc}}
+        {name, Map.put(json_type(spec), "description", spec.doc)}
       end
 
     properties =
@@ -44,11 +44,15 @@ defmodule Arbiter.MCP.Catalog.AccountSchema do
     }
   end
 
-  defp json_type(%{type: :boolean}), do: "boolean"
-  defp json_type(%{type: :count}), do: ["integer", "null"]
-  defp json_type(%{type: :text}), do: ["string", "null"]
-  defp json_type(%{type: :budget_split}), do: %{"enum" => ["queue", "fair"]}
-  defp json_type(%{type: :admission}), do: %{"enum" => ["legacy", "shadow", "enforce", nil]}
+  # Each clause returns the schema fragment (`type` is only ever a JSON Schema
+  # type name or a list of them; a bare `enum` map there is invalid, bd-8p418i).
+  defp json_type(%{type: :boolean}), do: %{"type" => "boolean"}
+  defp json_type(%{type: :count}), do: %{"type" => ["integer", "null"]}
+  defp json_type(%{type: :text}), do: %{"type" => ["string", "null"]}
+  defp json_type(%{type: :budget_split}), do: %{"type" => "string", "enum" => ["queue", "fair"]}
+
+  defp json_type(%{type: :admission}),
+    do: %{"type" => ["string", "null"], "enum" => ["legacy", "shadow", "enforce", nil]}
 
   # Every quota value may be null (a clear) and numbers may arrive as strings.
   defp quota_type(:fraction), do: ["number", "string", "null"]
