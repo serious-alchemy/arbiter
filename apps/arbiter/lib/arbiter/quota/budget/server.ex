@@ -22,16 +22,17 @@ defmodule Arbiter.Quota.Budget.Server do
       {:budget_changed, %{account:, pool:, policy_workspace:}, from, to, reason}
 
   on the `board` topic (`from` is `nil` for a pool's first budget). A rise is a
-  freed seat, which Autopilot will treat as one when DC8 wires it (in shadow
-  the walk decides nothing, so nothing subscribes yet).
+  freed seat: under `enforce` `Arbiter.Board.Autopilot` plans a pass on it
+  (DC8); a fall stops nothing.
 
-  ## Nothing reads it for a decision
+  ## Who reads it
 
-  Until DC8 no admission, gate or dispatch path may read these budgets
-  (invariants I1, I2, I8; pinned by `Arbiter.Quota.BudgetShadowTest`). Its
-  readers are the scheduler walk under `scheduler_admission: shadow` or
-  `enforce` (DC6, `Arbiter.Board.WalkInputs`: recorded, never dispatched by)
-  and the board and CLI displays DC5 adds. A budget never stops running work.
+  Under `scheduler_admission: enforce` the budgets decide admission through
+  `Arbiter.Accounts.SeatCheck` (DC8). The scheduler walk reads them under
+  `shadow` and `enforce` (DC6, `Arbiter.Board.WalkInputs`), and the board and
+  CLI displays (DC5) show them. Under `legacy` no admission, gate or dispatch
+  path reads them (I1, I2; pinned by `Arbiter.Quota.BudgetShadowTest`). A budget
+  never stops running work (I8).
 
   ## Options
 

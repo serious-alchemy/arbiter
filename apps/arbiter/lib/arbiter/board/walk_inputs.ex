@@ -7,8 +7,8 @@ defmodule Arbiter.Board.WalkInputs do
 
   `Arbiter.Board.Snapshot.load/1` reads this only when `scheduler_admission`
   is `shadow` or `enforce`. Under `legacy` nothing here runs, so no admission
-  path reads a budget or a seat (I1). Until DC8 the walk it feeds decides no
-  dispatch: `Arbiter.Board.AdmissionShadow` records it beside today's. Under
+  path reads a budget or a seat (I1). Under `shadow` the walk it feeds decides
+  no dispatch: `Arbiter.Board.AdmissionShadow` records it beside today's. Under
   `enforce` (DC8) its placements are what `Arbiter.Board.Autopilot` dispatches.
 
   ## The capacity sets

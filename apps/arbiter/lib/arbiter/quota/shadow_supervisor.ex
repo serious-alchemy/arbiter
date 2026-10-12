@@ -5,8 +5,10 @@ defmodule Arbiter.Quota.ShadowSupervisor do
 
   v0.2.42 crash-looped: a `Budget.Server` that raised on every recompute
   exhausted the top-level supervisor's restart intensity, and the application
-  shut down. Nothing reads a budget until DC8, so a shadow component must never
-  be able to do that. Two layers:
+  shut down. A budget component must never be able to do that: under
+  `scheduler_admission: enforce` admission reads the published budgets
+  (`Arbiter.Accounts.SeatCheck`, DC8), and a table that is gone reads as no
+  budget, which leaves the account ceilings to decide. Two layers:
 
     * the children restart under a supervisor with a very permissive intensity,
       so a crashing server does not take its siblings or this supervisor down;

@@ -221,9 +221,9 @@ defmodule Arbiter.Board.Autopilot do
   Every pass reads `scheduler_admission` (`docs/design/provider-dynamic-concurrency.md`
   §10.1). Under `legacy`, the default, the pass is exactly as above: the board
   is asked for nothing new and the dispatch gets today's options. Under
-  `shadow` (and `enforce`, until DC8 wires it) the board also plans the
-  scheduler walk (`Arbiter.Board.Scheduler`'s `:walk`, at `board.walk`), and
-  this process records it beside today's decision and never in its place:
+  `shadow` the board also plans the scheduler walk (`Arbiter.Board.Scheduler`'s
+  `:walk`, at `board.walk`), and this process records it beside today's
+  decision and never in its place:
 
     * the card it dispatches is today's `promote`, as under `legacy` (I2), with
       the walk's decision riding along as `admission_shadow`, which the run
@@ -231,6 +231,27 @@ defmodule Arbiter.Board.Autopilot do
     * one `Arbiter.Board.AdmissionShadowEvent` row is written each time either
       side's outcome changes (`Arbiter.Board.AdmissionShadow.signature/1`),
       never once per pass.
+
+  ## Under `enforce`: the walk decides (DC8)
+
+  Under an installation in `enforce` the walk's first placement is the card
+  dispatched, and nothing goes when it places nothing (design §4.3, §4.4):
+
+    * the placement's pair rides into the dispatch as `planned: %{account_id,
+      pool, node}`, which routing, account admission (the pool's seat check)
+      and placement prefer while they still can;
+    * the **reverse shadow** rides beside it as `admission_shadow`: what
+      today's plan would have done (`AdmissionShadow.reverse_record/2`), and the
+      hold-change events are written as under `shadow`;
+    * a pool's budget that rises (`{:budget_changed, …}` on the `"board"`
+      topic) plans a pass, as a freed slot does;
+    * a resume deferred for a slot is replayed when its own pin pool has a seat
+      (`Arbiter.Worker.ResumeSlot`), not when the board's slot count frees.
+
+  An account trialling `enforce` under another installation mode (O11) has its
+  placements dispatched by the walk; every other card is today's plan's. A
+  board whose walk could not be read is today's plan's in every mode (the fail
+  safe). Switching back to `legacy` restores today's pass exactly.
   """
 
   use GenServer

@@ -2763,8 +2763,8 @@ defmodule Arbiter.Worker.Dispatch do
   # the node and account reservations the earlier gates took are released with
   # this one when the dispatch returns.
   #
-  # Until DC8 nothing may change a dispatch decision (I1, I2), so it decides only
-  # under `scheduler_admission: enforce` and reads no count otherwise.
+  # It decides only under `scheduler_admission: enforce`, with the rest of the
+  # layered admission (DC8), and reads no count otherwise (I1, I2).
   # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
   defp ensure_repo_capacity(%Issue{} = task, opts) do
     if fresh_admission?(task, opts) and admission_enforced?(task, opts) do

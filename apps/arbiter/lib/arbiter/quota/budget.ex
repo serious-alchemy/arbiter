@@ -10,15 +10,17 @@ defmodule Arbiter.Quota.Budget do
   the published budget (§3.7). `Arbiter.Quota.Budget.Server` owns the clock,
   the ETS table and the `budget_changed` event.
 
-  ## Nothing decides by it yet
+  ## Who reads it
 
-  Until DC8, nothing on an admission, gate or dispatch path may read a budget
-  (invariants I1, I2 and I8). `Arbiter.Quota.BudgetShadowTest` pins that
-  structurally. Its one reader is the scheduler walk (DC6,
-  `Arbiter.Board.WalkInputs`), which runs only under `scheduler_admission:
-  shadow` or `enforce` and is recorded beside today's decision, never in its
-  place. The budget stops nothing that runs: it is read only by admission
-  (DC8), the walk and the display.
+  Under `scheduler_admission: enforce` it decides admission (DC8): the one
+  admission-path reader is `Arbiter.Accounts.SeatCheck`, the per-pool seat check
+  `Arbiter.Accounts.Admission`, `Arbiter.Worker.ResumeSlot` and routing ask.
+  The scheduler walk (DC6, `Arbiter.Board.WalkInputs`) reads it under `shadow`
+  and `enforce`, and the displays (DC5) read it to show it. Under `legacy`
+  nothing on an admission, gate or dispatch path reads it (I1, I2);
+  `Arbiter.Quota.BudgetShadowTest` pins the readers structurally. The budget
+  stops nothing that runs: it is read only by admission, the walk and the
+  display (I8).
 
   ## The function (§3.3)
 
