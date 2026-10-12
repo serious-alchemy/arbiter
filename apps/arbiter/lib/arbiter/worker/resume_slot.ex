@@ -54,8 +54,31 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   `slot_admitted: true` marks a resume the scheduler has already admitted into
   a free slot (the Autopilot draining a deferred resume); it is not re-checked.
+
+  ## Under `scheduler_admission: enforce` (DC8)
+
+  For a ticket whose pin account (`implementer_account_id`, else the account
+  its workspace meters its last authoring provider under) is in `enforce`, the
+  slot becomes the pin pool's **seat** (`docs/design/provider-dynamic-concurrency.md`
+  §3.2, §7):
+
+    * **In progress** — the ticket holds its pin seat in every phase, held for
+      quota and idle included (the seat is wider than the slot), so a resume
+      needs nothing new: `{:ok, :held}`.
+    * **Not In progress** — the resume takes the ticket back into In progress:
+      it needs a free seat on its pin pool (`Arbiter.Accounts.SeatCheck`), and at
+      a full pool it is deferred, refused or forced exactly as at a full cap.
+    * **`follow_up: true`** — a CI fix or conflict pass
+      (`Arbiter.Workflows.MergeQueue.PassAdmission`) is a follow-up of in-flight
+      work and is never held for a full pool (I9): `{:ok, :follow_up}`.
+
+  Under `legacy` and `shadow` everything above this section is unchanged and
+  no seat is read. `:mode`, `:account` and `:seat_opts` are seams.
   """
 
+  alias Arbiter.Accounts.AdmissionMode
+  alias Arbiter.Accounts.Resolver
+  alias Arbiter.Accounts.SeatCheck
   alias Arbiter.Accounts.SlotLimit
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
@@ -72,11 +95,12 @@ defmodule Arbiter.Worker.ResumeSlot do
           required(:task_id) => String.t(),
           required(:cap) => non_neg_integer(),
           required(:holders) => [String.t()],
-          optional(:limit) => SlotLimit.t() | nil
+          optional(:limit) => SlotLimit.t() | nil,
+          optional(:seat) => SeatCheck.info()
         }
 
   @type result ::
-          {:ok, :held | :acquired | :forced | :admitted}
+          {:ok, :held | :acquired | :forced | :admitted | :follow_up}
           | {:defer, info()}
           | {:error, {:slot_cap_full, info()}}
 
@@ -99,23 +123,80 @@ defmodule Arbiter.Worker.ResumeSlot do
       own drain.
     * `:tickets` / `:cap` — seams: the tickets to count holders among and the
       effective cap, read from the repo and `Snapshot` when absent.
+    * `:follow_up` — a CI fix or conflict pass (DC8): under `enforce` never
+      held for a full pool; ignored otherwise.
   """
   @spec admit(Issue.t(), keyword()) :: result()
   def admit(%Issue{} = task, opts \\ []) do
+    if Keyword.get(opts, :slot_admitted) == true do
+      {:ok, :admitted}
+    else
+      case enforced_account(task, opts) do
+        {:enforce, account} -> admit_seat(task, account, opts)
+        :slot -> admit_slot(task, opts)
+      end
+    end
+  end
+
+  defp admit_slot(%Issue{} = task, opts) do
+    if SlotGate.holds_slot?(task, slot_opts(opts)) do
+      {:ok, :held}
+    else
+      tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
+      slot_opts = Keyword.put_new_lazy(slot_opts(opts), :idle_ids, fn -> idle_ids(tickets) end)
+      holders = holders_but(tickets, task, slot_opts)
+
+      cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
+      acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
+    end
+  end
+
+  # ---- enforce (DC8) -----------------------------------------------------------
+
+  # The pin account and its effective mode; `:slot` for today's rule. An
+  # unreadable account or mode reads as `legacy`, today's rule.
+  defp enforced_account(%Issue{} = task, opts) do
+    account = Keyword.get_lazy(opts, :account, fn -> pin_account(task) end)
+
+    if Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce,
+      do: {:enforce, account},
+      else: :slot
+  rescue
+    _ -> :slot
+  catch
+    :exit, _ -> :slot
+  end
+
+  defp pin_account(%Issue{implementer_account_id: id}) when is_binary(id), do: Resolver.get(id)
+
+  defp pin_account(%Issue{id: id, workspace_id: ws_id}) do
+    provider = Run.latest_authoring_provider(id) || Arbiter.Quota.default_provider(ws_id)
+    Resolver.account(ws_id, provider)
+  end
+
+  defp admit_seat(%Issue{} = task, account, opts) do
     cond do
-      Keyword.get(opts, :slot_admitted) == true ->
-        {:ok, :admitted}
+      Keyword.get(opts, :follow_up) == true -> {:ok, :follow_up}
+      task.state == :active -> {:ok, :held}
+      is_nil(account) -> {:ok, :acquired}
+      true -> acquire_seat(task, account, opts)
+    end
+  end
 
-      SlotGate.holds_slot?(task, slot_opts(opts)) ->
-        {:ok, :held}
+  # No predicted model here: the pin pool is the account's lowest budget (§3.1).
+  defp acquire_seat(%Issue{} = task, account, opts) do
+    seat_opts =
+      Keyword.merge(
+        [workspace_id: task.workspace_id, pool: nil, priority: task.priority, exclude_task: task.id],
+        Keyword.get(opts, :seat_opts, [])
+      )
 
-      true ->
-        tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
-        slot_opts = Keyword.put_new_lazy(slot_opts(opts), :idle_ids, fn -> idle_ids(tickets) end)
-        holders = holders_but(tickets, task, slot_opts)
+    case SeatCheck.check(account, seat_opts) do
+      {:ok, _seat} ->
+        {:ok, :acquired}
 
-        cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
-        acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
+      {:full, seat} ->
+        over_cap(task, %{task_id: task.id, cap: seat.limit, holders: seat.holders, seat: seat}, opts)
     end
   end
 
@@ -124,6 +205,13 @@ defmodule Arbiter.Worker.ResumeSlot do
   source of truth for MCP, the REST API (and so the CLI), and the dashboard.
   """
   @spec refusal_message(info()) :: String.t()
+  def refusal_message(%{task_id: task_id, seat: %{}} = info) do
+    "no free seat to resume #{task_id}: #{limit_phrase(info)}. #{task_id} is not In progress, " <>
+      "so it holds no seat on its pool and resuming it is a new admission. Wait for a seat " <>
+      "to free, or resume with force (MCP `force: true`, `arb worker resume --force`) to go " <>
+      "over — the override is recorded."
+  end
+
   def refusal_message(%{task_id: task_id} = info) do
     "no free worker slot to resume #{task_id}: #{limit_phrase(info)}. #{task_id} is not In progress, so it holds no slot " <>
       "and resuming it is a new admission. Wait for a slot to free, or " <>
@@ -138,6 +226,11 @@ defmodule Arbiter.Worker.ResumeSlot do
   refusal and the deferred-resume log line.
   """
   @spec limit_phrase(info()) :: String.t()
+  def limit_phrase(%{seat: %{} = seat, holders: [_ | _] = holders}),
+    do: "#{SeatCheck.describe(seat)}, held by #{Enum.join(holders, ", ")}"
+
+  def limit_phrase(%{seat: %{} = seat}), do: SeatCheck.describe(seat)
+
   def limit_phrase(%{limit: %{} = limit, holders: holders}),
     do: SlotLimit.describe(limit, holders)
 
@@ -190,9 +283,10 @@ defmodule Arbiter.Worker.ResumeSlot do
   defp acquire(_task, %{cap: cap, holders: holders}, _opts) when length(holders) < cap,
     do: {:ok, :acquired}
 
-  defp acquire(task, info, opts) do
-    info = Map.put(info, :limit, limit_for(task, info))
+  defp acquire(task, info, opts),
+    do: over_cap(task, Map.put(info, :limit, limit_for(task, info)), opts)
 
+  defp over_cap(task, info, opts) do
     cond do
       Keyword.get(opts, :force) == true ->
         record_override(task, info, opts)
