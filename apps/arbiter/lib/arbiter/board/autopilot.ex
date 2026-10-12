@@ -242,6 +242,7 @@ defmodule Arbiter.Board.Autopilot do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker.HeldResume
+  alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Workflows.MergeQueue.ConflictResolver
   alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
@@ -341,12 +342,14 @@ defmodule Arbiter.Board.Autopilot do
 
   @doc """
   The PubSub topics a normally-started instance subscribes to for reactive
-  triggers: `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"` and
-  `Arbiter.Events`'s global `"events"` topic. Exposed so a test can assert
-  against the real value instead of hardcoding a copy that could drift.
+  triggers: `Arbiter.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"`,
+  `Arbiter.Events`'s global `"events"` topic, and `"board"`, where
+  `Arbiter.Quota.Budget.Server` announces `{:budget_changed, …}` (DC8: a rise
+  plans a pass under `enforce`). Exposed so a test can assert against the real
+  value instead of hardcoding a copy that could drift.
   """
   @spec default_topics() :: [String.t()]
-  def default_topics, do: [@tasks_topic, @events_topic]
+  def default_topics, do: [@tasks_topic, @events_topic, @topic]
 
   @doc """
   Start the autopilot.
@@ -610,10 +613,17 @@ defmodule Arbiter.Board.Autopilot do
       # pass's outcome on both sides, so a row is written per change, not per pass.
       admission: Keyword.get(opts, :admission, &AdmissionShadow.mode/0),
       admission_seam?: Keyword.has_key?(opts, :admission),
+      # DC8 seams: the installation's own mode and a pool's account mode (O11),
+      # when a test needs them apart from `:admission`.
+      install_mode_seam: Keyword.get(opts, :install_mode),
+      pool_mode_seam: Keyword.get(opts, :pool_mode),
       record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
       shadow_signature: nil,
       resume: Keyword.get(opts, :resume, &default_resume/3),
       local_room: Keyword.get(opts, :local_room, &default_local_room?/2),
+      # DC8: under `enforce`, whether a resume deferred for a slot has a seat on
+      # its own pool now: `(task_id, kind) -> boolean`.
+      slot_room: Keyword.get(opts, :slot_room, &default_slot_room?/2),
       priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
@@ -837,7 +847,22 @@ defmodule Arbiter.Board.Autopilot do
     {:noreply, after_dispatch(state, {:error, {:exit, reason}})}
   end
 
+  # DC8 (E8, design §3.6): `Arbiter.Quota.Budget.Server` announces each published
+  # budget change on this module's "board" topic. A rise is a freed seat: under
+  # `enforce` it plans a pass, as a worker finishing does. A fall stops nothing
+  # (no budget stops a run), and under `legacy` and `shadow` nothing reacts.
+  def handle_info({:budget_changed, _pool, from, to, _reason}, state) do
+    if budget_rise?(from, to) and admission_mode(state) == :enforce,
+      do: {:noreply, request_plan(state)},
+      else: {:noreply, state}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp budget_rise?(from, :unlimited), do: from != :unlimited
+  defp budget_rise?(nil, to), do: is_integer(to) and to > 0
+  defp budget_rise?(from, to) when is_integer(from) and is_integer(to), do: to > from
+  defp budget_rise?(_from, _to), do: false
 
   # ---- reactive triggers -----------------------------------------------
 
@@ -970,19 +995,73 @@ defmodule Arbiter.Board.Autopilot do
 
     cond do
       state.deferred_resumes != [] ->
-        resume_or_wait(state, read_status, snapshot)
+        resume_or_wait(state, read_status, snapshot, mode)
 
       state.paused? ->
         {:paused, state}
 
-      is_binary(Map.get(snapshot, :promote)) ->
-        extra = shadow_safely([], fn -> shadow_opts(state, snapshot, mode) end)
-        promote_or_hold(%{state | holds: []}, snapshot.promote, extra)
-
       true ->
-        {:idle, note_holds(state, snapshot, read_status)}
+        case pass_pick(state, snapshot, mode) do
+          {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
+          nil -> {:idle, note_holds(state, snapshot, read_status, mode)}
+        end
     end
   end
+
+  # ---- under enforce: the walk decides (DC8) ----------------------------------
+
+  # The card this pass dispatches and the options riding with it. Under
+  # `enforce` the walk decides (`walk_pick/3`): its placement goes, its pair as
+  # `planned:` and today's decision beside it as the reverse shadow. Otherwise
+  # today's `promote` goes, with the walk's decision beside it under `shadow`.
+  defp pass_pick(state, snapshot, mode) do
+    case walk_pick(state, snapshot, mode) do
+      {:walk, %{id: id} = placement} ->
+        planned = [planned: AdmissionShadow.planned(placement)]
+
+        {id,
+         shadow_safely(planned, fn ->
+           planned ++ [admission_shadow: AdmissionShadow.reverse_record(snapshot, placement)]
+         end)}
+
+      {:walk, nil} ->
+        nil
+
+      :today ->
+        case Map.get(snapshot, :promote) do
+          id when is_binary(id) ->
+            {id, shadow_safely([], fn -> shadow_opts(state, snapshot, mode) end)}
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  # Who picks the card (design §10.1, O11). The Ready queue is install-wide, so
+  # under an installation in `enforce` the walk alone decides: its first
+  # placement goes, or nothing does. Under another installation mode with an
+  # account trialling `enforce`, a placement on that account's pool is the
+  # walk's to dispatch, and anything else is today's plan's. A board that
+  # carries no walk (its inputs could not be read) is today's plan's: the fail
+  # safe, whatever the mode.
+  defp walk_pick(state, %{walk: %{placements: placements}} = snapshot, :enforce) do
+    if install_mode(state, :enforce) == :enforce do
+      {:walk, List.first(placements)}
+    else
+      case AdmissionShadow.enforced_placement(snapshot, pool_resolver(state, :enforce)) do
+        nil -> :today
+        placement -> {:walk, placement}
+      end
+    end
+  end
+
+  defp walk_pick(_state, _snapshot, _mode), do: :today
+
+  # Whether the walk decides this pass's dispatch: an `enforce` installation
+  # with a walk on the board.
+  defp walk_decides?(state, %{walk: %{}}, :enforce), do: install_mode(state, :enforce) == :enforce
+  defp walk_decides?(_state, _snapshot, _mode), do: false
 
   # ---- the admission shadow (DC6) --------------------------------------------
 
@@ -992,9 +1071,15 @@ defmodule Arbiter.Board.Autopilot do
 
   # O11: a pass's event is recorded under the installation's mode and a dispatch
   # under the placed account's mode; the walk-wide `mode` only gates the walk.
-  # A test-supplied `:admission` seam is the mode for both.
+  # A test-supplied `:admission` seam is the mode for both, unless the
+  # `:install_mode` / `:pool_mode` seams name them apart.
+  defp install_mode(%{install_mode_seam: seam}, _mode) when is_atom(seam) and seam != nil,
+    do: seam
+
   defp install_mode(%{admission_seam?: true}, mode), do: mode
   defp install_mode(_state, _mode), do: Arbiter.Accounts.AdmissionMode.installation()
+
+  defp pool_resolver(%{pool_mode_seam: seam}, _mode) when is_function(seam, 1), do: seam
   defp pool_resolver(%{admission_seam?: true}, mode), do: mode
   defp pool_resolver(_state, _mode), do: Arbiter.Accounts.AdmissionMode.pool_resolver()
 
@@ -1071,12 +1156,17 @@ defmodule Arbiter.Board.Autopilot do
   # stopped looking. Record each card's reason (the one the board shows) and log
   # it when it changes, so a held queue is one line per change, not per tick.
   # An unreadable board says nothing about the queue; keep the last answer.
-  defp note_holds(state, _snapshot, :error), do: state
+  defp note_holds(state, _snapshot, :error, _mode), do: state
 
-  defp note_holds(state, snapshot, :ok) do
+  defp note_holds(state, snapshot, :ok, mode) do
+    # DC8: when the walk decides, its reasons are why nothing went.
+    source =
+      if walk_decides?(state, snapshot, mode),
+        do: snapshot.walk.entries,
+        else: Map.get(snapshot, :ready, [])
+
     holds =
-      snapshot
-      |> Map.get(:ready, [])
+      source
       |> Enum.filter(&(&1.state == :blocked))
       |> Enum.map(&%{id: &1.id, reason: &1.reason})
 
@@ -1101,8 +1191,13 @@ defmodule Arbiter.Board.Autopilot do
   # waiting for a board slot does not queue it. Slot waiters keep their arrival
   # order; local waiters go highest ticket priority first (then arrival), so a
   # restart's backlog comes back P0 first, one per free local slot.
-  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, snapshot) do
-    case next_resume(state, queue, Map.get(snapshot, :slots_free, 0)) do
+  #
+  # DC8: under `enforce` a slot is a seat on the resume's own pin pool, which the
+  # board's slot count does not see: a slot waiter is replayed when
+  # `Arbiter.Worker.ResumeSlot` finds its pool a seat (`:slot_room`), and one
+  # whose pool is full does not hold back another whose pool has room.
+  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, snapshot, mode) do
+    case next_resume(state, queue, Map.get(snapshot, :slots_free, 0), mode) do
       nil ->
         waiting(state)
 
@@ -1112,12 +1207,43 @@ defmodule Arbiter.Board.Autopilot do
     end
   end
 
-  defp resume_or_wait(state, _read_status, _snapshot), do: waiting(state)
+  defp resume_or_wait(state, _read_status, _snapshot, _mode), do: waiting(state)
 
-  defp next_resume(state, queue, slots_free) do
-    slot_waiter = if slots_free > 0, do: Enum.find(queue, &(&1.wait == :slot))
+  defp next_resume(state, queue, slots_free, mode) do
+    slot_waiter =
+      cond do
+        mode == :enforce ->
+          Enum.find(queue, &(&1.wait == :slot and slot_room?(state, &1)))
+
+        slots_free > 0 ->
+          Enum.find(queue, &(&1.wait == :slot))
+
+        true ->
+          nil
+      end
 
     slot_waiter || next_local_resume(state, queue)
+  end
+
+  defp slot_room?(%{slot_room: room}, %{task_id: task_id, kind: kind}) do
+    room.(task_id, kind)
+  rescue
+    _ -> false
+  end
+
+  # A CI fix or conflict pass is a follow-up under `enforce`, never held for a
+  # full pool; a resume asks `ResumeSlot` (the pin pool's seat check for an
+  # account in `enforce`, today's slot rule for one that is not). Asks only:
+  # the replay is admitted with `slot_admitted: true`.
+  defp default_slot_room?(_task_id, kind) when kind in [:fix_pass, :conflict], do: true
+
+  defp default_slot_room?(task_id, _kind) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{} = task} -> match?({:ok, _}, ResumeSlot.admit(task, origin: :automatic))
+      _ -> true
+    end
+  rescue
+    _ -> true
   end
 
   defp next_local_resume(state, queue) do
