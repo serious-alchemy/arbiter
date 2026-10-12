@@ -835,6 +835,13 @@ defmodule Arbiter.Loop.Analysis do
     end
   end
 
+  @doc false
+  # The suggestions `Proposals` reads `destination` / `target_metric` from, for
+  # finding categories assembled outside a full pass (the Stage 2 backfill).
+  @spec finding_suggestions([map()], keyword()) :: [map()]
+  def finding_suggestions(finding_categories, opts \\ []),
+    do: suggestions(finding_categories, evidence_bar(opts))
+
   defp suggestions(finding_categories, bar) do
     Enum.map(finding_categories, fn cat ->
       incidents = cat.incidents

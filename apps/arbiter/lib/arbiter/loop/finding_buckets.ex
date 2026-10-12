@@ -140,11 +140,25 @@ defmodule Arbiter.Loop.FindingBuckets do
   finding residue.
   """
   @spec bucket_finding(String.t()) :: {String.t(), String.t()} | nil
-  def bucket_finding(text) when is_binary(text) do
-    Enum.find_value(@finding_buckets, fn {re, cat} ->
+  def bucket_finding(text) when is_binary(text), do: bucket_finding(text, @finding_buckets)
+
+  @doc """
+  `bucket_finding/1` against an explicit allowlist. The production allowlist is
+  the compile-time `@finding_buckets`; this arity exists so the Stage 2 backfill
+  (`Arbiter.Loop.DetectorBackfill`) can be exercised against a test-only
+  fixture detector without adding a production one. It takes a caller-supplied
+  list of `{regex, category}` tuples — nothing a model produces reaches it.
+  """
+  @spec bucket_finding(String.t(), [{Regex.t(), String.t()}]) :: {String.t(), String.t()} | nil
+  def bucket_finding(text, buckets) when is_binary(text) and is_list(buckets) do
+    Enum.find_value(buckets, fn {re, cat} ->
       if Regex.match?(re, text), do: {cat, text}
     end)
   end
+
+  @doc "The compile-time `{regex, category}` allowlist, in match order."
+  @spec buckets() :: [{Regex.t(), String.t()}]
+  def buckets, do: @finding_buckets
 
   @doc """
   The exact category text `Arbiter.Loop.Analysis` emits for a context-exhaustion

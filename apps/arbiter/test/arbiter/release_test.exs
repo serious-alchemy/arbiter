@@ -142,7 +142,21 @@ defmodule Arbiter.ReleaseTest do
       assert report.inserted == 0
     end
 
-    test ":ticket_transitions runs without Mix and reports on an empty corpus" do
+    test ":finding_detector dry-runs a shipped category and refuses an unmerged one" do
+      category = hd(Arbiter.Loop.FindingBuckets.buckets()) |> elem(1)
+      report = Release.backfill(:finding_detector, category: category)
+
+      assert report.units == 0
+      assert report.applied? == false
+      assert report.unit_limit == Arbiter.Loop.DetectorBackfill.unit_limit()
+
+      assert_raise ArgumentError, fn ->
+        Release.backfill(:finding_detector, category: "never merged")
+      end
+    end
+
+    test ":ticket_transitions runs without Mix
+ and reports on an empty corpus" do
       report = Release.backfill(:ticket_transitions, [])
 
       assert report.apply? == false

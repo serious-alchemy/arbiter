@@ -397,3 +397,42 @@ Filed by this ticket:
    (no model). Depends on `bd-4f6opo`; blocked on four operator-read windows
    of Stage 1. The mechanics of taking an accepted
    candidate to a merged `@finding_buckets` tuple and backfilling it.
+
+### Stage 2 recipe: admitting an accepted detector (`Arbiter.Loop.DetectorBackfill`)
+
+Admission is a reviewed pull request — there is no auto-merge path and no
+runtime write of a regex. A model's output never reaches `DetectorBackfill`;
+its only inputs are a category already compiled into `@finding_buckets` and the
+stored `review_gate_rounds`.
+
+1. **Hand-merge the detector.** Open a PR that appends the accepted candidate's
+   `{regex, category}` tuple to `@finding_buckets` in
+   `Arbiter.Loop.FindingBuckets` (append, so existing categories keep their
+   first-match precedence), plus the category's attribution row — a bucket
+   without one fails to compile. The category is a compile-time constant, so
+   `Loop.fingerprint/1` is stable and cross-window reinforcement needs no new
+   machinery.
+2. **After the release is deployed, backfill — one step.** Dry run first (the
+   default; writes nothing):
+
+       bin/arbiter eval 'Arbiter.Release.backfill(:finding_detector, category: "<category>")'
+
+   then apply:
+
+       bin/arbiter eval 'Arbiter.Release.backfill(:finding_detector, category: "<category>", apply?: true)'
+
+   The backfill re-reads the retained findings, keeps the units the merged
+   allowlist maps to the category, and records them through the ordinary
+   `Loop.record/2` path, so the first `PendingWrite` carries measured
+   historical evidence.
+3. **Idempotent.** Re-running unions `incident_refs` / `task_refs` onto the
+   existing row; it never inserts a duplicate or changes counts for evidence
+   already seen.
+
+**Retention bound.** The backfill reaches at most **28 days** back
+(`DetectorBackfill.retention_days/0`; four default seven-day windows) and at
+most **1200 matching units** (`DetectorBackfill.unit_limit/0`; Stage 0's
+300-unit per-window residue limit × four), newest first. A `:since` older than
+the bound is clamped and a cut-off at the unit limit is reported
+(`clamped?` / `truncated?`). Older evidence is not reconstructed; the detector
+earns it forward through ordinary windows.
