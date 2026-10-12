@@ -511,9 +511,13 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
 
     test "reads each accepted value as an atom" do
-      for policy <- ~w(context_only inherit_parent mint) do
+      for {policy, atom} <- [
+            {"context_only", :context_only},
+            {"inherit_parent", :inherit_parent},
+            {"mint", :mint}
+          ] do
         ws = %Workspace{config: %{"tracker" => %{"child_policy" => policy}}}
-        assert Workspace.tracker_child_policy(ws) == String.to_existing_atom(policy)
+        assert Workspace.tracker_child_policy(ws) == atom
       end
     end
 
