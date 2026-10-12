@@ -42,7 +42,7 @@ defmodule Arbiter.Worker.PrepushCheck do
       fails open. A broken check must not strand work.
     * a step exited non-zero but its output says the *environment* is broken, not
       the code (the deps were never fetched, the tool is not in the image, the
-      container did not start; `infra_signature/1`) → the step is `:skipped` with
+      container did not start; `infra_signature/2`) → the step is `:skipped` with
       reason `:infra` and an output starting `skipped: infra (…)`, and the result
       is `{:error, {:infra, step_name, label}}`: it fails open like any other
       error, is never sent to the worker as a code failure, and so never uses one
@@ -62,10 +62,16 @@ defmodule Arbiter.Worker.PrepushCheck do
   (`Arbiter.Worker.DepsRelocate.relink/1`), so a NIF an earlier seed reached through a
   directory that is gone (or is the source checkout) is found, and Mix has no reason to
   rebuild the dependency offline. Seeding does the same plus the manifests
-  (`Worktree.seed_compiled_deps/3`, `DepsCache.install/3`). When the deps are
-  still not there, the failure (`Error happened while installing … from precompiled
-  binary`, `Could not compile with "make"`, a failed fetch while building a dependency) is
-  infra, and the steps after the first one that hit it are skipped unrun.
+  (`Worktree.seed_compiled_deps/3`, `DepsCache.install/3`). A run on a node is seeded
+  the same way from the node's own deps cache (`DepsCache.seed_checkout/3`, called by
+  `Arbiter.NodeAgent.Run`; bd-4uom27), every dependency compiled for the lockfile with
+  no list of libraries. When the deps are still not there, the failure is infra, and the
+  steps after the first one that hit it are skipped unrun. Any dependency that could not
+  be fetched or built counts, whatever the library: `Error happened while installing …
+  from precompiled binary`, `Error while downloading precompiled NIF`, `Could not compile
+  with "make"`, a failed fetch while building a dependency, and Mix's `could not compile
+  dependency :name`, except for a sibling app of an umbrella (`apps/<name>`), whose
+  compile error is the change's own.
 
   ## Where it runs
 
@@ -273,7 +279,7 @@ defmodule Arbiter.Worker.PrepushCheck do
         {:skipped, :untouched, "skipped: no touched files for this step"}
 
       {:ok, command} ->
-        command |> safe_exec(exec, seconds) |> classify()
+        command |> safe_exec(exec, seconds) |> classify(worktree)
     end
   end
 
@@ -325,17 +331,19 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   # coreutils `timeout`: 124 = the command timed out, 137 = it needed the
   # SIGKILL; 126/127 = `sh` could not exec the command itself.
-  defp classify({:error, reason}),
+  defp classify({:error, reason}, _worktree),
     do: {:error, reason, "the check could not be run: " <> inspect(reason, limit: 10)}
 
-  defp classify({_output, 0}), do: {:passed, 0, ""}
-  defp classify({output, status}) when status in [124, 137], do: {:timeout, status, tail(output)}
+  defp classify({_output, 0}, _worktree), do: {:passed, 0, ""}
 
-  defp classify({output, status}) when status in [126, 127],
+  defp classify({output, status}, _worktree) when status in [124, 137],
+    do: {:timeout, status, tail(output)}
+
+  defp classify({output, status}, _worktree) when status in [126, 127],
     do: {:error, {:not_runnable, status, tail(output)}, tail(output)}
 
-  defp classify({output, status}) do
-    case infra_signature(output) do
+  defp classify({output, status}, worktree) do
+    case infra_signature(output, worktree) do
       nil -> {:failed, status, tail(output)}
       label -> {:infra, label, tail(output)}
     end
@@ -359,38 +367,58 @@ defmodule Arbiter.Worker.PrepushCheck do
      ~r/Cannot connect to Podman|(^|\n)Error: (crun|runc|creating container|.*image (is )?not known|.*no such image|.*unable to (start|find) |.*OCI runtime)|podman: command not found/i}
   ]
 
-  defp infra_signature(output) when is_binary(output) do
+  defp infra_signature(output, worktree) when is_binary(output) do
     Enum.find_value(@infra_signatures, fn {label, matcher} ->
-      if signature_match?(matcher, output), do: label
+      if signature_match?(matcher, output, worktree), do: label
     end)
   end
 
-  defp signature_match?(:offline_deps, output), do: offline_deps?(output)
-  defp signature_match?(re, output), do: Regex.match?(re, output)
+  defp signature_match?(:offline_deps, output, worktree), do: offline_deps?(output, worktree)
+  defp signature_match?(re, output, _worktree), do: Regex.match?(re, output)
 
   # A dependency the gate could not fetch or build (it has no network). The first
-  # two phrases only Mix/elixir_make print. The bare network errors (git, curl) are
+  # phrases only Mix, elixir_make and rustler_precompiled print (any NIF library:
+  # `Error while downloading precompiled NIF`, bd-4uom27). The bare network errors (git, curl) are
   # not specific to it, so they count only beside Mix's own report that it was
   # fetching or compiling a dependency, and never in the output of a test run that
   # got far enough to print an ExUnit failure summary: a failing test that prints
   # captured git stderr is a code failure.
-  @offline_deps_strong ~r/Error happened while installing \S+ from precompiled binary|Could not compile with "make"|Could not (install|find) Hex/
+  @offline_deps_strong ~r/Error happened while installing \S+ from precompiled binary|Could not compile with "make"|Could not (install|find) Hex|[Pp]recompiled NIF/
   @offline_deps_network ~r/unable to access 'https?:|Failed to connect to \S+ port \d+|Could not resolve host|Failed to fetch record for/
   @mix_dep_context ~r/\*\* \(Mix\)|\belixir_make\b|==> \w+\nCompiling|Failed to fetch|mix deps\.(get|compile)/
   @exunit_failures ~r/\b\d+ tests?, [1-9]\d* failures?/
 
-  defp offline_deps?(output) do
+  # Mix's report that a dependency would not build. It is printed before the project's
+  # own code is compiled, so it is the environment's doing, not the change's, except
+  # for an umbrella sibling (`apps/<name>` in the worktree), which Mix also builds as a
+  # dependency of the app under test: a compile error there is the change's own.
+  @dep_compile_failed ~r/could not compile dependency :(\w+)/
+
+  defp offline_deps?(output, worktree) do
     cond do
+      # A test run that got far enough to print a failure summary compiled everything
+      # first: whatever it quotes of Mix or a NIF is test output, a code failure.
+      Regex.match?(@exunit_failures, output) ->
+        false
+
       Regex.match?(@offline_deps_strong, output) ->
         true
 
-      Regex.match?(@exunit_failures, output) ->
-        false
+      third_party_dep_failed?(output, worktree) ->
+        true
 
       true ->
         Regex.match?(@offline_deps_network, output) and Regex.match?(@mix_dep_context, output)
     end
   end
+
+  defp third_party_dep_failed?(output, worktree) do
+    @dep_compile_failed
+    |> Regex.scan(output, capture: :all_but_first)
+    |> Enum.any?(fn [name] -> not own_app?(worktree, name) end)
+  end
+
+  defp own_app?(worktree, name), do: File.dir?(Path.join([worktree, "apps", name]))
 
   defp record(step, outcome, duration_ms, limit) do
     {status, exit_status, reason, output} =
