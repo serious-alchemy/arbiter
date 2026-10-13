@@ -36,6 +36,7 @@ defmodule ArbiterWeb.ReportsLive do
   alias ArbiterWeb.CoreComponents.Feedback
   alias Phoenix.LiveView.AsyncResult
   require Ash.Query
+  require Logger
 
   @ranges ~w(7d 30d 90d all)
   @types ~w(task research bug feature epic chore decision)
@@ -183,16 +184,47 @@ defmodule ArbiterWeb.ReportsLive do
       closed: Enum.count(rows, &(&1.state == :closed)),
       open: Enum.count(rows, &(&1.state != :closed)),
       weekly: weekly,
-      throughput: Throughput.load(filters),
-      cost: Cost.load(filters),
-      flow: Flow.load(filters),
-      review_health: ReviewHealth.load(filters),
-      epic_waits: EpicWaits.load(filters),
-      attention: AttentionWaits.load(filters),
-      burn_up: BurnUp.load(filters["epic"], filters["range"]),
-      quota_pacing: QuotaPacing.load(filters["range"])
+      throughput: guard("Throughput", fn -> Throughput.load(filters) end),
+      cost: guard("Cost", fn -> Cost.load(filters) end),
+      flow: guard("Flow", fn -> Flow.load(filters) end),
+      review_health: guard("ReviewGate health", fn -> ReviewHealth.load(filters) end),
+      epic_waits: guard("Epic Ready wait", fn -> EpicWaits.load(filters) end),
+      attention: guard("Attention / wait time", fn -> AttentionWaits.load(filters) end),
+      burn_up: guard("Epic burn-up", fn -> BurnUp.load(filters["epic"], filters["range"]) end),
+      quota_pacing: guard("Quota pacing", fn -> QuotaPacing.load(filters["range"]) end)
     }
   end
+
+  # One bad loader must not blank the page: its section becomes
+  # `{:error, title}` and renders as an error box while the rest still draw.
+  defp guard(title, loader) do
+    loader.()
+  rescue
+    e ->
+      Logger.error(
+        "Reports: #{title} loader failed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
+
+      {:error, title}
+  end
+
+  attr :id, :string, required: true
+  attr :title, :string, required: true
+  attr :data, :any, required: true
+  slot :inner_block, required: true
+
+  defp guarded(%{data: {:error, _}} = assigns) do
+    ~H"""
+    <div
+      id={"reports-section-error-#{@id}"}
+      class="text-[12.5px] text-[var(--arb-fail-text)] border border-[var(--arb-fail-text)] rounded-[var(--radius-md)] p-3"
+    >
+      {@title} could not be computed. Other reports are unaffected.
+    </div>
+    """
+  end
+
+  defp guarded(assigns), do: ~H"{render_slot(@inner_block)}"
 
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn
@@ -316,7 +348,14 @@ defmodule ArbiterWeb.ReportsLive do
             </Feedback.empty_state>
           </div>
 
-          <.burn_up_section :if={@filters["epic"] != ""} burn_up={report.burn_up} />
+          <.guarded
+            :if={@filters["epic"] != ""}
+            id="burn-up"
+            title="Epic burn-up"
+            data={report.burn_up}
+          >
+            <.burn_up_section burn_up={report.burn_up} />
+          </.guarded>
 
           <div :if={report.total > 0} class="flex flex-col gap-4">
             <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -332,15 +371,29 @@ defmodule ArbiterWeb.ReportsLive do
                 points={report.weekly}
               />
             </section>
-            <.throughput_section throughput={report.throughput} />
-            <.cost_section cost={report.cost} />
-            <.flow_section flow={report.flow} />
-            <.review_health_section health={report.review_health} />
-            <.epic_waits_section waits={report.epic_waits} />
-            <.attention_section attention={report.attention} />
+            <.guarded id="throughput" title="Throughput" data={report.throughput}>
+              <.throughput_section throughput={report.throughput} />
+            </.guarded>
+            <.guarded id="cost" title="Cost" data={report.cost}>
+              <.cost_section cost={report.cost} />
+            </.guarded>
+            <.guarded id="flow" title="Flow" data={report.flow}>
+              <.flow_section flow={report.flow} />
+            </.guarded>
+            <.guarded id="review-health" title="ReviewGate health" data={report.review_health}>
+              <.review_health_section health={report.review_health} />
+            </.guarded>
+            <.guarded id="epic-waits" title="Epic Ready wait" data={report.epic_waits}>
+              <.epic_waits_section waits={report.epic_waits} />
+            </.guarded>
+            <.guarded id="attention" title="Attention / wait time" data={report.attention}>
+              <.attention_section attention={report.attention} />
+            </.guarded>
           </div>
 
-          <.quota_pacing_section accounts={report.quota_pacing} />
+          <.guarded id="quota-pacing" title="Quota pacing" data={report.quota_pacing}>
+            <.quota_pacing_section accounts={report.quota_pacing} />
+          </.guarded>
         </.async_result>
       </div>
     </Layouts.app>
