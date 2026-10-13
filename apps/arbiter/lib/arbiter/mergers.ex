@@ -98,6 +98,13 @@ defmodule Arbiter.Mergers do
     end
   end
 
+  @scoped_repo_key "__scoped_repo"
+
+  @doc "The repo a `scope/2`'d workspace view was narrowed to, or `nil`."
+  @spec scoped_repo(Workspace.t() | nil) :: String.t() | nil
+  def scoped_repo(%Workspace{config: %{@scoped_repo_key => repo}}) when is_binary(repo), do: repo
+  def scoped_repo(_), do: nil
+
   @doc """
   `workspace`, with its `merge` block replaced by `repo`'s effective one
   (`merge_config/2`).
@@ -116,12 +123,17 @@ defmodule Arbiter.Mergers do
   def scope(%Workspace{} = workspace, repo) when repo in [nil, ""], do: workspace
 
   def scope(%Workspace{config: config} = workspace, repo) when is_binary(repo) do
+    # The view remembers which repo it is for (`scoped_repo/1`), so the adapter
+    # can pick that repo's scoped forge credential (`HostCredential`). The first
+    # scope wins, so re-scoping stays a no-op.
+    config = Map.put_new(config || %{}, @scoped_repo_key, repo)
+
     case config do
       %{"merge" => merge} when is_map(merge) ->
         %{workspace | config: Map.put(config, "merge", effective_merge(merge, repo))}
 
       _ ->
-        workspace
+        %{workspace | config: config}
     end
   end
 

@@ -343,6 +343,15 @@ defmodule Arbiter.Worker.GitCredential do
     "metadata" => "read",
     "pull_requests" => "write"
   }
+  # The host's own token (`Arbiter.Worker.HostCredential`): it pushes the branch
+  # and opens, comments on and merges the PR, so it is one token with both sets.
+  # Still restricted to the one repo, and never held by a worker.
+  @host_permissions %{
+    "contents" => "write",
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write"
+  }
   # Scopes that no worker may ever hold. A classic PAT cannot be limited to a
   # repo at all, so any OAuth-scoped token is refused; these are the ones that do
   # the most damage if one is ever allowed through.
@@ -353,7 +362,9 @@ defmodule Arbiter.Worker.GitCredential do
 
   Options: `:remote` (the `owner/repo` the spawn's origin points at; the
   entry's own `remote` wins), `:tracker?` (also produce `tracker_token`),
-  `:req_options` (merged into the forge requests; tests stub with `plug:`).
+  `:req_options` (merged into the forge requests; tests stub with `plug:`),
+  `:host?` (the token is the host's, for its push and PR operations: a github_app
+  token then carries the pull-request and merge permissions).
 
   A secret that is not in the workspace's store, a token that cannot be pinned
   to one repo, or a mint that fails is an error: the spawn is refused, never
@@ -396,7 +407,7 @@ defmodule Arbiter.Worker.GitCredential do
     with {:ok, pem} <- secret(workspace, entry.private_key_secret),
          {:ok, remote} <- remote(entry, opts),
          repo = remote |> String.split("/") |> List.last(),
-         {:ok, push} <- mint(entry, pem, repo, @push_permissions, opts),
+         {:ok, push} <- mint(entry, pem, repo, push_permissions(opts), opts),
          {:ok, tracker} <- maybe_mint_tracker(entry, pem, repo, opts) do
       {:ok,
        %Material{
@@ -409,6 +420,9 @@ defmodule Arbiter.Worker.GitCredential do
        }}
     end
   end
+
+  defp push_permissions(opts),
+    do: if(Keyword.get(opts, :host?, false), do: @host_permissions, else: @push_permissions)
 
   defp maybe_mint_tracker(entry, pem, repo, opts) do
     if Keyword.get(opts, :tracker?, false),

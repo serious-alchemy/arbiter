@@ -99,6 +99,8 @@ defmodule Arbiter.Reviews.PushState do
 
     * `:remote` — remote name, default `"origin"`.
     * `:fetch?` — fetch the branch from the remote first, default `true`.
+    * `:env` — `{name, value | nil}` pairs for the network git calls (the fetch and
+      the push), e.g. the host's scoped credential (`Arbiter.Worker.HostCredential`).
   """
   @spec inspect_branch(String.t() | nil, String.t() | nil, keyword()) :: t()
   def inspect_branch(path, branch, opts \\ [])
@@ -153,7 +155,7 @@ defmodule Arbiter.Reviews.PushState do
         if Keyword.get(opts, :fetch?, true) do
           # Best effort: a fetch failure (offline, auth) leaves the cached
           # tracking ref in place and the comparison below still runs.
-          _ = git(path, ["fetch", "--quiet", remote, branch])
+          _ = git(path, ["fetch", "--quiet", remote, branch], opts)
         end
 
         ref = remote <> "/" <> branch
@@ -343,7 +345,7 @@ defmodule Arbiter.Reviews.PushState do
     remote = state.remote
     refspec = "HEAD:refs/heads/" <> branch
 
-    case git(path, ["push"] ++ lease_args ++ [remote, refspec]) do
+    case git(path, ["push"] ++ lease_args ++ [remote, refspec], opts) do
       {:ok, _out} ->
         # A successful push updates refs/remotes/<remote>/<branch> locally, so
         # the confirmation read needs no second network round trip.
@@ -454,8 +456,10 @@ defmodule Arbiter.Reviews.PushState do
   # `System.cmd/3` raises when `cd:` does not exist; a missing worktree is a
   # normal state here (it was cleaned up, the path came from stale meta), not
   # an exception.
-  defp git(path, args) do
-    case Arbiter.Worker.PrivateClone.cmd(path, args, stderr_to_stdout: true) do
+  defp git(path, args, opts \\ []) do
+    cmd_opts = [stderr_to_stdout: true, env: Keyword.get(opts, :env, [])]
+
+    case Arbiter.Worker.PrivateClone.cmd(path, args, cmd_opts) do
       {out, 0} -> {:ok, String.trim(out)}
       {_out, _code} -> :error
     end

@@ -160,6 +160,51 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       # Worker stays :running after a push failure
       assert Worker.state(pid).state == :working
     end
+
+    # bd-bsmkfu: the host push uses the repo's scoped credential, never the operator's.
+    defp scoped_workspace(secrets) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "pbp-#{System.unique_integer([:positive])}",
+          prefix: "pbp",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{
+                "stub/repo" => %{"kind" => "deploy_key", "key_secret" => "DEPLOY_KEY"}
+              }
+            }
+          },
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    defp open_with(pid, ws) do
+      Worker.open_mr(pid, "feature/abc", "Add abc", "body", %{
+        adapter: StubMerger,
+        workspace: ws,
+        strategy: :github,
+        interval_ms: 1_000_000,
+        initial_delay_ms: 1_000_000
+      })
+    end
+
+    test "a scoped credential that cannot be built refuses the push (no operator fallback)",
+         %{pid: pid, repo: repo} do
+      assert {:error, {:push_failed, {:push_failed, {:git_credential, message}}}} =
+               open_with(pid, scoped_workspace(%{}))
+
+      assert message =~ "DEPLOY_KEY"
+      refute branch_on_origin(repo.bare, "feature/abc")
+      assert StubMerger.last_open() == nil
+    end
+
+    test "a scoped credential that is available pushes and the PR opens", %{pid: pid, repo: repo} do
+      assert {:ok, _ref} = open_with(pid, scoped_workspace(%{"DEPLOY_KEY" => "PEMDATA"}))
+      assert branch_on_origin(repo.bare, "feature/abc")
+      assert StubMerger.last_open() != nil
+    end
   end
 
   # Note: the Direct-strategy push-skip path is tested by the full-integration

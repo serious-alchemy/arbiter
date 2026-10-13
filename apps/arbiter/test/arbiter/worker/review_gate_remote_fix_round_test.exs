@@ -72,20 +72,24 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     end
   end
 
-  defp workspace!(mode) do
+  defp workspace!(mode, extra_config \\ %{}) do
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "rg-rfr-#{System.unique_integer([:positive])}",
         prefix: "rf",
-        config: %{
-          "review" => %{"required" => true, "require_ci_green" => false},
-          "worker" => %{"placement" => mode},
-          "agent" => %{
-            "security" => %{
-              "repos" => %{"trib/repo" => %{"sandbox" => %{"backend" => "podman"}}}
-            }
-          }
-        }
+        config:
+          Map.merge(
+            %{
+              "review" => %{"required" => true, "require_ci_green" => false},
+              "worker" => %{"placement" => mode},
+              "agent" => %{
+                "security" => %{
+                  "repos" => %{"trib/repo" => %{"sandbox" => %{"backend" => "podman"}}}
+                }
+              }
+            },
+            extra_config
+          )
       })
 
     ws
@@ -317,6 +321,33 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
 
       git!(["fetch", "-q", "origin"], ctx.repo)
       assert sha(ctx.repo, "origin/" <> rig.branch) == theirs
+    end
+  end
+
+  describe "the host push with a scoped git credential (bd-bsmkfu)" do
+    test "one that cannot be built refuses the push; the operator's credential is not used",
+         ctx do
+      scoped = %{
+        "git_credentials" => %{
+          "repos" => %{"trib/repo" => %{"kind" => "deploy_key", "key_secret" => "GONE"}}
+        }
+      }
+
+      ctx = %{ctx | ws: workspace!("prefer_remote", scoped)}
+      rig = rig(ctx, "feature/rf-bsmkfu")
+      round1_head = sha(rig.wt, "HEAD")
+
+      start_gate(rig, ctx,
+        command: [@two_rounds, marker(ctx, rig), rig.branch],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, rig.task.id)) end, 60_000)
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], ctx.repo)
+      assert sha(ctx.repo, "origin/" <> rig.branch) == round1_head
     end
   end
 

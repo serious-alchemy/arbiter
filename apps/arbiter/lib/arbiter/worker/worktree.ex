@@ -2066,6 +2066,9 @@ defmodule Arbiter.Worker.Worktree do
       while it still points there (`--force-with-lease=<ref>:<sha>`), so a
       rewritten branch (a rebase) lands without clobbering a newer push
       (bd-19skda).
+    * `:env` — `{name, value | nil}` pairs for the git process, on top of the
+      server's own env (`nil` unsets). The host's scoped credential
+      (`Arbiter.Worker.HostCredential`) rides here.
   """
   @spec push(path(), keyword()) :: {:ok, String.t()} | {:error, error_reason()}
   def push(path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -2079,7 +2082,7 @@ defmodule Arbiter.Worker.Worktree do
           if(set_upstream, do: ["-u"], else: []) ++
           [remote, branch]
 
-      run_git(args, cd: path)
+      run_git(args, cd: path, env: Keyword.get(opts, :env, []))
     end
   end
 
@@ -2529,7 +2532,9 @@ defmodule Arbiter.Worker.Worktree do
         {:error, {:git_failed, ".git of #{cd} is not the one it was created with"}}
 
       true ->
-        case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+        cmd_opts = [stderr_to_stdout: true, cd: cd, env: Keyword.get(opts, :env, [])]
+
+        case System.cmd("git", args, cmd_opts) do
           {output, 0} -> {:ok, output}
           {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
         end
