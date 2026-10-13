@@ -6,6 +6,7 @@ defmodule Arbiter.Application do
   use Application
 
   alias Arbiter.Accounts.LoginRunner.Sweep, as: LoginSweep
+  alias Arbiter.Agents.Gemini.ModelCheck
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -512,7 +513,7 @@ defmodule Arbiter.Application do
       # bd-7wx2lh: warm the `agy models` cache and log any configured agy tier
       # model the CLI no longer serves (spawns would fall back; see ModelCheck).
       Supervisor.child_spec(
-        {Task, fn -> Arbiter.Agents.Gemini.ModelCheck.warn_at_boot() end},
+        {Task, fn -> ModelCheck.warn_at_boot() end},
         id: :agy_model_check_boot_task,
         restart: :temporary
       ),
