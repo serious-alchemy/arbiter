@@ -225,7 +225,7 @@ defmodule Arbiter.Worker.ReviewGateCrossFamilyTest do
 
       assert calls(log) == ["agy"]
       assert [line] = log_lines(log <> ".args")
-      assert line =~ "--model gemini-3.1-pro-high"
+      assert line =~ "--model gemini-3.8-flash-high"
 
       assert [round] = review_rounds(task.id)
       assert round.verdict == :approve

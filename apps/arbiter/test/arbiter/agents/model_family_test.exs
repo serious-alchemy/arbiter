@@ -20,7 +20,7 @@ defmodule Arbiter.Agents.ModelFamilyTest do
     end
 
     test "agy claude-* models are anthropic on agy's claude_and_gpt_models pool" do
-      assert ModelFamily.classify(:antigravity, "claude-opus-4-6-thinking") ==
+      assert ModelFamily.classify(:antigravity, "claude-opus-5-5-high") ==
                %{family: :anthropic, pool: "antigravity:claude_and_gpt_models"}
     end
 
@@ -61,8 +61,8 @@ defmodule Arbiter.Agents.ModelFamilyTest do
     end
 
     test "a run's recorded adapter type classifies by its model" do
-      assert ModelFamily.classify("gemini", "claude-opus-4-6-thinking").family == :anthropic
-      assert ModelFamily.classify("gemini", "gemini-3.1-pro-high").family == :google
+      assert ModelFamily.classify("gemini", "claude-opus-5-5-high").family == :anthropic
+      assert ModelFamily.classify("gemini", "gemini-3.8-flash-high").family == :google
     end
 
     test "later providers: grok is xai and ollama is local" do
@@ -82,10 +82,10 @@ defmodule Arbiter.Agents.ModelFamilyTest do
       assert ModelFamily.model_for_tier(:claude, "premium", %{}) == "opus"
       assert ModelFamily.model_for_tier(:codex, "economy", %{}) == "gpt-5.6-luna"
       assert ModelFamily.model_for_tier(:codex, "premium", %{}) == "gpt-5.6-terra"
-      assert ModelFamily.model_for_tier(:antigravity, "premium", %{}) == "gemini-3.1-pro-high"
+      assert ModelFamily.model_for_tier(:antigravity, "premium", %{}) == "gemini-3.8-flash-high"
 
       assert ModelFamily.model_for_tier(:antigravity, "flagship", %{}) ==
-               "claude-opus-4-6-thinking"
+               "claude-opus-5-5-high"
 
       # bd-ac53wz: the upstream Gemini CLI provider is gone.
       assert ModelFamily.model_for_tier(:gemini_cli, "premium", %{}) == nil

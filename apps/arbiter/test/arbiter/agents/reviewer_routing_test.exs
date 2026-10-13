@@ -320,7 +320,7 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       ws =
         workspace!(["gemini", "claude"], %{
           "review_agent" => %{
-            "config" => %{"gemini" => %{"model" => "claude-opus-4-6-thinking"}}
+            "config" => %{"gemini" => %{"model" => "claude-opus-5-5-high"}}
           }
         })
 
@@ -337,7 +337,7 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       ws =
         workspace!(["gemini", "codex"], %{
           "review_agent" => %{
-            "config" => %{"gemini" => %{"model" => "claude-opus-4-6-thinking"}}
+            "config" => %{"gemini" => %{"model" => "claude-opus-5-5-high"}}
           }
         })
 
@@ -449,7 +449,7 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
 
         assert sel.family == :google
         assert sel.tier == "premium"
-        assert sel.model == "gemini-3.1-pro-high"
+        assert sel.model == "gemini-3.8-flash-high"
         assert sel.thinking == "high"
       end
     end

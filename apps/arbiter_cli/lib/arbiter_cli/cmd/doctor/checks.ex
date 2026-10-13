@@ -69,6 +69,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"claude_worker_credentials", :auth, nil, :always,
        plain(&check_claude_worker_credentials/0)},
       {"grok_auth", :auth, nil, :always, plain(&check_grok_auth/0)},
+      {"agy_models", :auth, nil, {:provider, "gemini"}, plain(&check_agy_models/0)},
       {"provider_accounts", :auth, nil, :always, plain(&check_provider_accounts/0)},
       {"tmux", :auth, nil, :always, plain(&check_tmux/0)},
       {"quota_policy", :auth, nil, :always, plain(&check_account_policy_binding/0)},
@@ -150,6 +151,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   # The display name of a check that never ran.
   @na_names %{
+    "agy_models" => "agy tier models",
     "agy_write_jail" => "agy write jail",
     "agy_jail_escape" => "agy jail escape vectors",
     "agy_jail_reads" => "agy jail hidden reads",
@@ -1573,6 +1575,67 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
       other ->
         unknown_result("grok auth", other)
+    end
+  end
+
+  # bd-7wx2lh: the configured agy tier models (built-in defaults and workspace
+  # `tier_models` overrides) against what `agy models` serves now. agy
+  # auto-updates and drops models; a spawn naming one used to die at startup,
+  # and now falls back (see `Arbiter.Agents.Gemini.ModelCatalog`) — so a missing
+  # model is a warn naming the tier and model, not a failure. It never blocks
+  # deploy readiness. An unreadable listing is a warn too, never an ok.
+  defp check_agy_models do
+    case Client.get("/api/server/agy_models") do
+      {:ok, %{"status" => "ok"} = body} ->
+        %Result{
+          name: "agy tier models",
+          status: :ok,
+          detail:
+            "every configured tier model is listed by `agy models`#{agy_models_count(body)}",
+          blocks_readiness: false
+        }
+
+      {:ok, %{"status" => "missing", "problems" => [_ | _] = problems}} ->
+        %Result{
+          name: "agy tier models",
+          status: :warn,
+          detail:
+            "not listed by `agy models`: " <> Enum.map_join(problems, "; ", &agy_model_problem/1),
+          hint:
+            "Spawns fall back to the nearest served tier. Set `agent.config.gemini.tier_models` " <>
+              "(and `review_agent.config.gemini.tier_models`) to models `agy models` lists.",
+          blocks_readiness: false
+        }
+
+      {:ok, %{"status" => "unknown"}} ->
+        %Result{
+          name: "agy tier models",
+          status: :warn,
+          detail: "could not check: `agy models` did not return a model list",
+          hint: "Run `agy models` on the server host; is agy installed and logged in?",
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        server_error_result("agy tier models", err)
+
+      other ->
+        unknown_result("agy tier models", other)
+    end
+  end
+
+  defp agy_models_count(%{"models" => models}) when is_list(models),
+    do: " (#{length(models)} models)"
+
+  defp agy_models_count(_), do: ""
+
+  defp agy_model_problem(p) do
+    base =
+      "#{p["tier"]} → #{p["model"]} (#{p["source"]}, used by #{Enum.join(p["used_by"] || [], ", ")})"
+
+    case p["fallback"] do
+      fallback when is_binary(fallback) -> base <> ", falls back to #{fallback}"
+      _ -> base
     end
   end
 

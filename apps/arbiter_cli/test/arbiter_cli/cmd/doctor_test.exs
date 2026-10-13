@@ -163,6 +163,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   # An older server answers 404 for every /api/server endpoint it predates;
   # a route left unstubbed is a 500 and doctor now reports that as a failure.
   @server_paths [
+    "/api/server/agy_models",
     "/api/server/agy_write_jail",
     "/api/server/bind_address",
     "/api/server/claude_credentials",

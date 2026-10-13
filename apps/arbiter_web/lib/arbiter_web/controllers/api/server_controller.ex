@@ -41,6 +41,12 @@ defmodule ArbiterWeb.Api.ServerController do
       and whose Claude dispatch is now held. `arb server doctor` lists them.
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
+    * `GET /api/server/agy_models` — the configured agy tier models (built-in
+      defaults plus each agy workspace role's `tier_models` override) checked
+      against a fresh `agy models` listing (bd-7wx2lh,
+      `Arbiter.Agents.Gemini.ModelCheck`): `status` `ok` / `missing` /
+      `unknown` (listing unreadable), and a `problems` entry per missing
+      `{tier, model}` with its `source`, `used_by` and spawn-time `fallback`.
     * `GET /api/server/grok_auth` — grok's login state (bd-dpv4vt,
       `Arbiter.Grok.AuthReport`): `enabled: false` unless a workspace routes to
       or pins grok, else `state` (`logged_in` / `expired` / `refresh_unverified` /
@@ -89,6 +95,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Accounts.Enablement
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Agents.Claude.CredentialCheck
+  alias Arbiter.Agents.Gemini.ModelCheck
   alias Arbiter.Guardrails
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Egress.SelfTest
@@ -163,6 +170,9 @@ defmodule ArbiterWeb.Api.ServerController do
         end)
     })
   end
+
+  # bd-7wx2lh: do the configured agy tier models still exist in `agy models`?
+  def agy_models(conn, _params), do: json(conn, ModelCheck.report())
 
   # bd-dpv4vt: grok's login state, reported only when a workspace uses grok.
   def grok_auth(conn, _params), do: json(conn, Arbiter.Grok.AuthReport.report(probe: true))

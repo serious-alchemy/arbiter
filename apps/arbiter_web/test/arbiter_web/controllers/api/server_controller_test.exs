@@ -149,6 +149,16 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
   # bd-80ecol: `arb server doctor` lists every Claude workspace that has no
   # credential of its own — the ones that used to fall into copying the
   # operator's `.credentials.json` (mode B), and whose dispatch is now held.
+  # bd-7wx2lh: with no `agy` on the test host the listing is unreadable, which
+  # the route reports as `unknown` (never ok, never invented problems).
+  describe "GET /api/server/agy_models" do
+    test "reports an unreadable model list as unknown", %{conn: conn} do
+      resp = conn |> get("/api/server/agy_models") |> json_response(200)
+      assert resp["status"] == "unknown"
+      assert resp["problems"] == []
+    end
+  end
+
   describe "GET /api/server/grok_auth" do
     test "grok is off by default: nothing enabled, no auth state", %{conn: conn} do
       resp = conn |> get("/api/server/grok_auth") |> json_response(200)

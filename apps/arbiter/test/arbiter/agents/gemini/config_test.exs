@@ -73,13 +73,35 @@ defmodule Arbiter.Agents.Gemini.ConfigTest do
     test "resolves the agy-scoped tier map for the :agy executable" do
       assert Config.model_for_tier("economy", :agy) == "gemini-3.8-flash-low"
       assert Config.model_for_tier("standard", :agy) == "gemini-3.8-flash-medium"
-      assert Config.model_for_tier("premium", :agy) == "gemini-3.1-pro-high"
-      assert Config.model_for_tier("flagship", :agy) == "claude-opus-4-6-thinking"
+      assert Config.model_for_tier("premium", :agy) == "gemini-3.8-flash-high"
+      assert Config.model_for_tier("flagship", :agy) == "claude-opus-5-5-high"
     end
 
     test "an unknown tier returns nil for either executable" do
       assert Config.model_for_tier("nonexistent", :agy) == nil
       assert Config.model_for_tier("nonexistent", :gemini) == nil
+    end
+  end
+
+  describe "effective_tier_models/2 (bd-7wx2lh)" do
+    test "is the agy default when the raw config has no override" do
+      assert Config.effective_tier_models(%{}, :agy) == Config.default_tier_models(:agy)
+    end
+
+    test "overlays flat and gemini-namespaced overrides on the default, tier by tier" do
+      flat = %{"tier_models" => %{"premium" => "gemini-3.8-flash-medium"}}
+      nested = %{"gemini" => %{"tier_models" => %{"flagship" => "claude-opus-5-5-low"}}}
+
+      assert %{"premium" => "gemini-3.8-flash-medium", "economy" => "gemini-3.8-flash-low"} =
+               Config.effective_tier_models(flat, :agy)
+
+      assert %{"flagship" => "claude-opus-5-5-low", "premium" => "gemini-3.8-flash-high"} =
+               Config.effective_tier_models(nested, :agy)
+    end
+
+    test "the active-config arity reads the process-local config" do
+      Config.put_active(%{"tier_models" => %{"economy" => "gpt-oss-120b-medium"}})
+      assert Config.effective_tier_models(:agy)["economy"] == "gpt-oss-120b-medium"
     end
   end
 
@@ -93,8 +115,8 @@ defmodule Arbiter.Agents.Gemini.ConfigTest do
       assert Config.default_tier_models(:agy) == %{
                "economy" => "gemini-3.8-flash-low",
                "standard" => "gemini-3.8-flash-medium",
-               "premium" => "gemini-3.1-pro-high",
-               "flagship" => "claude-opus-4-6-thinking"
+               "premium" => "gemini-3.8-flash-high",
+               "flagship" => "claude-opus-5-5-high"
              }
     end
   end
