@@ -437,6 +437,40 @@ defmodule ArbiterWeb.ReportsLiveTest do
       refute has_element?(view, "#reports-quota-pacing-empty")
     end
 
+    test "a loader that raises shows an error for its section; the others still render",
+         %{conn: conn, ws: ws} do
+      issue!(ws, %{title: "still counted"})
+      {:ok, account_id} = Arbiter.Accounts.Resolver.ensure_account_id(ws.id, "claude")
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      snap =
+        Ash.create!(Arbiter.Quota.QuotaSnapshot, %{
+          provider_account_id: account_id,
+          provider: "claude",
+          window: "5h",
+          utilization: 0.1,
+          captured_at: now
+        })
+
+      # SQLite is dynamically typed: a text value in the REAL column makes the
+      # loader's arithmetic raise.
+      assert %{num_rows: 1} =
+               Arbiter.Repo.query!(
+                 "UPDATE quota_snapshots SET utilization = 'garbage' WHERE id = ?",
+                 [
+                   snap.id
+                 ]
+               )
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-section-error-quota-pacing")
+      refute has_element?(view, "#reports-failed")
+      assert has_element?(view, "#reports-tile-total")
+      assert has_element?(view, "#reports-created-chart")
+    end
+
     test "shows the empty state with no history", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/reports")
       _ = render_async(view)

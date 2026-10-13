@@ -88,5 +88,8 @@ defmodule Arbiter.Reports.QuotaPacing do
   end
 
   defp hour(%{at: at}), do: {DateTime.to_date(at), at.hour}
-  defp pct(v), do: Float.round(v * 100, 1)
+  # A column can hand back an integer (`0`, `1`) or nil; `Float.round/2` takes
+  # only floats, so coerce first.
+  defp pct(nil), do: 0.0
+  defp pct(v) when is_number(v), do: Float.round(v * 100.0, 1)
 end
