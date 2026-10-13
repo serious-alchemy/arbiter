@@ -12,9 +12,11 @@ defmodule Arbiter.Board.AdmissionShadow do
     * `shadow` — dispatch is unchanged (I2); the board also plans the
       scheduler walk (`Arbiter.Board.Snapshot.load/1`, `Arbiter.Board.WalkInputs`)
       and `Arbiter.Board.Autopilot` records it beside today's decision.
-    * `enforce` — dispatches by the walk and the budgets once DC8 wires it.
-      Until then it dispatches and records exactly as `shadow`: nothing may
-      change a dispatch decision before DC8.
+    * `enforce` (DC8) — dispatches by the walk and the budgets: the walk's
+      placement goes, its pair riding into dispatch as `planned/1`, and
+      today's decision is recorded beside it (the reverse shadow). Under an
+      installation that is not in `enforce`, only a placement on an account
+      trialling it (O11, `enforced_placement/2`) is the walk's to dispatch.
 
   ## What is recorded
 
@@ -23,7 +25,9 @@ defmodule Arbiter.Board.AdmissionShadow do
       (pool, machine) pair, whether it agrees with the card dispatched, whether
       the pass was comparable (both sides had a candidate), and — when they
       differ — why the walk would not have dispatched ours (`cause`,
-      `reason`).
+      `reason`). Under `enforce` it is `reverse_record/2` instead: the same
+      keys, with `pick` being today's plan's card and `cause` why today would
+      not have dispatched the walk's (`queued`, `legacy_hold`).
     * **On every hold change** — `signature/1` is what a pass decided on each
       side: today's pick or the head it holds and why, the walk's first
       placement or the head it skips and why, and the pools whose budget sits
@@ -31,7 +35,8 @@ defmodule Arbiter.Board.AdmissionShadow do
       (`event/3`, `record_event/1`) when the signature changes, so a steady
       board writes nothing however often it is planned.
 
-  Everything here is a record. Nothing it returns reaches a dispatch decision.
+  Everything else here is a record: only `enforced_placement/2` and
+  `planned/1` reach a dispatch, and only under `enforce`.
   """
 
   require Logger
@@ -85,6 +90,78 @@ defmodule Arbiter.Board.AdmissionShadow do
     do: resolver.(first.pool)
 
   defp pick_mode(_walk, resolver) when is_function(resolver, 1), do: resolver.(nil)
+
+  defp resolve(mode, _pool) when is_atom(mode), do: mode
+  defp resolve(resolver, pool) when is_function(resolver, 1), do: resolver.(pool)
+
+  # ---- under enforce: the walk decides (DC8) -------------------------------------
+
+  @doc """
+  The walk's first placement on a pool whose account is in `enforce` — the card
+  an `enforce` pass dispatches when the installation itself is not in `enforce`
+  (an account trialling it, O11) — or `nil`. `mode` is a fixed mode or a
+  pool-key resolver, as for `dispatch_record/3`.
+  """
+  @spec enforced_placement(map(), mode() | (term() -> mode())) :: map() | nil
+  def enforced_placement(%{walk: %{placements: placements}}, mode),
+    do: Enum.find(placements, &(resolve(mode, &1.pool) == :enforce))
+
+  def enforced_placement(_board, _mode), do: nil
+
+  @doc """
+  The pair a walk placement rides into dispatch as, `opts[:planned]` (design
+  §4.4): its account, pool and machine. A pool with no account behind it (an
+  unmetered provider) plans the machine only.
+  """
+  @spec planned(map()) :: %{account_id: String.t() | nil, pool: String.t() | nil, node: term()}
+  def planned(%{pool: {account_id, pool}, node: node}) when is_binary(account_id),
+    do: %{account_id: account_id, pool: pool, node: node}
+
+  def planned(%{node: node}), do: %{account_id: nil, pool: nil, node: node}
+
+  @doc """
+  The **reverse shadow** (§10.1-§10.2): under `enforce` the walk dispatched
+  `placement`, and this records beside it what today's plan would have done —
+  `pick` is today's `promote`, `agrees` whether that is the card dispatched, and
+  the pass is `comparable` when today had a candidate too. `cause` says why
+  today would not have dispatched ours: `queued` (it would have dispatched
+  another card first) or `legacy_hold` (it held ours, or held the queue at its
+  head; `legacy_hold` names the hold). The pair and the placement count are the
+  walk's, as in `dispatch_record/3`. String keys: it is stored as-is.
+  """
+  @spec reverse_record(map(), map()) :: map()
+  def reverse_record(%{walk: %{} = walk} = board, %{id: dispatched} = placement) do
+    pick = Map.get(board, :promote)
+    ours = board |> Map.get(:ready, []) |> Enum.find(&(&1.id == dispatched))
+    {cause, hold} = reverse_cause(board, pick, dispatched, ours)
+
+    walk
+    |> placement_fields(placement)
+    |> Map.merge(%{
+      "policy" => "enforce",
+      "dispatched" => dispatched,
+      "pick" => pick,
+      "agrees" => pick == dispatched,
+      "comparable" => not is_nil(pick),
+      "cause" => cause,
+      "legacy_hold" => hold,
+      "reason" => if(pick == dispatched, do: nil, else: ours && ours.reason),
+      "placements" => length(walk.placements)
+    })
+  end
+
+  defp reverse_cause(_board, pick, pick, _ours), do: {nil, nil}
+  defp reverse_cause(_board, _pick, _dispatched, nil), do: {"not_planned", nil}
+
+  defp reverse_cause(_board, _pick, _dispatched, %{state: :blocked, hold: hold}),
+    do: {"legacy_hold", kind_text(hold_kind(hold))}
+
+  defp reverse_cause(board, nil, _dispatched, _ours) do
+    head = legacy_head(board)
+    {"legacy_hold", head && kind_text(hold_kind(head.hold))}
+  end
+
+  defp reverse_cause(_board, _pick, _dispatched, _ours), do: {"queued", nil}
 
   # ---- on a hold change --------------------------------------------------------
 
@@ -219,19 +296,21 @@ defmodule Arbiter.Board.AdmissionShadow do
     })
   end
 
-  defp pick_fields(%{placements: [first | _]} = walk) do
-    {account_id, pool} = pool_parts(first.pool)
+  defp pick_fields(%{placements: [first | _]} = walk), do: placement_fields(walk, first)
+
+  defp pick_fields(_walk),
+    do: %{"account_id" => nil, "pool" => nil, "pool_label" => nil, "node" => nil}
+
+  defp placement_fields(walk, placement) do
+    {account_id, pool} = pool_parts(placement.pool)
 
     %{
       "account_id" => account_id,
       "pool" => pool,
-      "pool_label" => get_in(walk, [:pools, first.pool, :label]),
-      "node" => first.node
+      "pool_label" => get_in(walk, [:pools, placement.pool, :label]),
+      "node" => placement.node
     }
   end
-
-  defp pick_fields(_walk),
-    do: %{"account_id" => nil, "pool" => nil, "pool_label" => nil, "node" => nil}
 
   defp budgets(pools) do
     pools

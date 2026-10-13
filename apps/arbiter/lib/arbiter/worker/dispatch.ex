@@ -63,6 +63,7 @@ defmodule Arbiter.Worker.Dispatch do
   """
 
   alias Arbiter.Accounts.Admission
+  alias Arbiter.Accounts.SeatCheck
   alias Arbiter.Agents
   alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.Claude.CredentialCheck
@@ -243,6 +244,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
+         opts = put_admission_mode(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
          :ok <- ensure_guardrails(task, opts),
          :ok <- ensure_sandbox_backend(task, opts),
@@ -980,9 +982,31 @@ defmodule Arbiter.Worker.Dispatch do
       actor: Keyword.get(opts, :slot_override_actor),
       reason: reason,
       provider: provider,
-      workspace_id: task.workspace_id
+      workspace_id: task.workspace_id,
+      follow_up: resume_follow_up?(task, opts, provider)
     ]
   end
+
+  # DC8 (design §2.2, I9): asked before routing has picked the resume's account,
+  # so the mode is that of the account the workspace meters `provider` under. A
+  # resume of a ticket In progress under `enforce` is a follow-up, held by the
+  # primary's cap only at 0 (`node_follow_up?/2` asks the same at the real gate).
+  defp resume_follow_up?(%Issue{state: :active} = task, opts, provider) do
+    case Keyword.get(opts, :scheduler_admission) do
+      nil ->
+        account = Arbiter.Accounts.Resolver.account(task.workspace_id, provider)
+        Arbiter.Accounts.AdmissionMode.mode(account) == :enforce
+
+      explicit ->
+        explicit == :enforce
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp resume_follow_up?(_task, _opts, _provider), do: false
 
   # Where would placement put this resume right now? `:node_possible` (a node has
   # room; the slot the probe took is given straight back), `{:local, reason}` or the
@@ -1038,7 +1062,11 @@ defmodule Arbiter.Worker.Dispatch do
           true
 
         {:local, reason} ->
-          LocalCapacity.check(task_id, :resume, reason: reason, provider: provider) == :ok
+          LocalCapacity.check(task_id, :resume,
+            reason: reason,
+            provider: provider,
+            follow_up: resume_follow_up?(task, opts, provider)
+          ) == :ok
 
         {:error, _} ->
           false
@@ -1961,7 +1989,12 @@ defmodule Arbiter.Worker.Dispatch do
       override: override,
       security: routing_security(workspace, opts),
       routing_choice: Keyword.get(opts, :routing_choice),
-      repo: Keyword.get(opts, :repo)
+      repo: Keyword.get(opts, :repo),
+      # DC8 (§4.4): the scheduler walk's planned pair, preferred while available,
+      # and the admission seams routing's seat check shares with `Admission`.
+      planned: Keyword.get(opts, :planned),
+      scheduler_admission: Keyword.get(opts, :scheduler_admission),
+      seat_opts: Keyword.get(opts, :seat_opts, [])
     ]
 
     case ProviderRouting.select(workspace, task, role, routing_opts) do
@@ -2455,8 +2488,9 @@ defmodule Arbiter.Worker.Dispatch do
 
   # A held dispatch is replayed verbatim on drain; strip routing's own choice
   # so the replay routes afresh instead of reading it as a caller override.
-  # The admission shadow's record (DC6) belongs to the pass that planned the
-  # held dispatch, not to the drain's replay, so it goes too.
+  # The admission shadow's record (DC6), the walk's planned pair and the
+  # resolved admission mode (DC8) belong to the pass that planned the held
+  # dispatch, not to the drain's replay, so they go too.
   @doc false
   def unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
@@ -2469,7 +2503,9 @@ defmodule Arbiter.Worker.Dispatch do
         :routed_agent_type,
         :routed_model,
         :resolved_policy,
-        :admission_shadow
+        :admission_shadow,
+        :planned,
+        :admission_mode
       ])
 
     opts =
@@ -2672,7 +2708,7 @@ defmodule Arbiter.Worker.Dispatch do
     if fresh_admission?(task, opts) do
       provider = quota_gate_provider(task, load_workspace(task), opts)
 
-      case Admission.admit(task, provider, admission_opts(opts)) do
+      case Admission.admit(task, provider, admission_opts(task, provider, opts)) do
         {:ok, _admitted} -> reserve_pool(task, opts)
         {:error, {:spend_cap, reason}} -> hold_for_spend(task, provider, opts, reason)
         {:error, _} = refused -> refused
@@ -2725,8 +2761,8 @@ defmodule Arbiter.Worker.Dispatch do
   # the node and account reservations the earlier gates took are released with
   # this one when the dispatch returns.
   #
-  # Until DC8 nothing may change a dispatch decision (I1, I2), so it decides only
-  # under `scheduler_admission: enforce` and reads no count otherwise.
+  # It decides only under `scheduler_admission: enforce`, with the rest of the
+  # layered admission (DC8), and reads no count otherwise (I1, I2).
   # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
   defp ensure_repo_capacity(%Issue{} = task, opts) do
     if fresh_admission?(task, opts) and admission_enforced?(task, opts) do
@@ -2744,21 +2780,33 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # DC8: the `scheduler_admission` mode of the account this dispatch runs on,
+  # resolved once routing has picked that account and carried as
+  # `:admission_mode` to every gate after it: the quota gate, account admission,
+  # the primary's cap and the repo cap. `unroute/1` drops it, so a held intent
+  # is judged afresh when it drains.
+  defp put_admission_mode(%Issue{} = task, opts),
+    do: Keyword.put(opts, :admission_mode, admission_mode(task, opts))
+
+  defp admission_enforced?(task, opts) do
+    case Keyword.fetch(opts, :admission_mode) do
+      {:ok, mode} -> mode == :enforce
+      :error -> admission_mode(task, opts) == :enforce
+    end
+  end
+
   # The explicit `:scheduler_admission` opt (a test seam) wins; otherwise the
   # effective mode of the account this dispatch runs on (O11: its override, else
-  # the installation key).
-  defp admission_enforced?(task, opts) do
-    mode =
-      case Keyword.get(opts, :scheduler_admission) do
-        nil -> dispatch_account_mode(task, opts)
-        explicit -> explicit
-      end
-
-    mode == :enforce
+  # the installation key). Unreadable is `legacy`: today's gates.
+  defp admission_mode(task, opts) do
+    case Keyword.get(opts, :scheduler_admission) do
+      nil -> dispatch_account_mode(task, opts)
+      explicit -> explicit
+    end
   rescue
-    _ -> false
+    _ -> :legacy
   catch
-    :exit, _ -> false
+    :exit, _ -> :legacy
   end
 
   defp dispatch_account_mode(%Issue{} = task, opts) do
@@ -2791,9 +2839,10 @@ defmodule Arbiter.Worker.Dispatch do
   defp ensure_node_capacity(%Issue{} = task, opts) do
     workspace = load_workspace(task)
     request = node_request(task, workspace, opts)
+    gate_opts = node_gate_opts(task, opts)
 
-    case LocalCapacity.gate(request, node_gate_opts(opts)) do
-      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts)
+    case LocalCapacity.gate(request, gate_opts) do
+      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts, gate_opts)
       {:ok, :local} -> {:ok, opts}
       {:error, _} = held -> held
     end
@@ -2808,7 +2857,7 @@ defmodule Arbiter.Worker.Dispatch do
   # that times out or fails is a placement decision (`Publisher.fallback/2`)
   # rather than a spawn failure: `prefer_remote` runs on the primary,
   # `remote_only` is held. A node that builds its own image skips this.
-  defp image_gate(%Issue{} = task, workspace, request, node, opts) do
+  defp image_gate(%Issue{} = task, workspace, request, node, opts, gate_opts) do
     repo = Keyword.get(opts, :repo)
     image_opts = [workspace: workspace, repo: repo] ++ Keyword.take(opts, [:image, :publish])
 
@@ -2818,20 +2867,20 @@ defmodule Arbiter.Worker.Dispatch do
 
       {:error, reason} ->
         Placement.release(task.id)
-        image_fallback(Publisher.fallback(request.mode, reason), request, opts)
+        image_fallback(Publisher.fallback(request.mode, reason), request, opts, gate_opts)
     end
   end
 
-  defp image_fallback({:hold, reason}, request, _opts),
+  defp image_fallback({:hold, reason}, request, _opts, _gate_opts),
     do: {:error, {:no_node_capacity, Placement.image_hold(request, reason)}}
 
-  defp image_fallback({:local, reason}, request, opts) do
+  defp image_fallback({:local, reason}, request, opts, gate_opts) do
     Logger.warning(
       "Dispatch: no registry image for #{request.task_id} (#{inspect(reason)}); running on the primary"
     )
 
     admit_opts =
-      node_gate_opts(opts) ++
+      gate_opts ++
         [reason: :no_node, provider: request.provider, workspace_id: request.workspace_id]
 
     with :ok <- LocalCapacity.admit(request.task_id, request.kind, admit_opts), do: {:ok, opts}
@@ -2909,11 +2958,27 @@ defmodule Arbiter.Worker.Dispatch do
       (Issue.no_pr_type?(task.issue_type) and Keyword.get(opts, :provision_worktree) != true)
   end
 
-  defp node_gate_opts(opts) do
+  defp node_gate_opts(%Issue{} = task, opts) do
     [
       force: Keyword.get(opts, :force_slot) == true,
-      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
-    ] ++ Keyword.take(opts, [:nodes])
+      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by),
+      follow_up: node_follow_up?(task, opts)
+    ] ++ Keyword.take(opts, [:nodes]) ++ planned_node(opts)
+  end
+
+  # DC8 (design §2.2, I9): under `enforce` a run of a ticket already In progress
+  # (a resume, a re-dispatch) is a follow-up, which the primary's cap holds only
+  # at 0 or on a hard derate (`LocalCapacity`'s `follow_up:`). Under `legacy` and
+  # `shadow` the `:at_cap` rule is unchanged.
+  defp node_follow_up?(%Issue{state: :active} = task, opts), do: admission_enforced?(task, opts)
+  defp node_follow_up?(_task, _opts), do: false
+
+  # DC8 (§4.4): the node the scheduler walk planned the run on goes first.
+  defp planned_node(opts) do
+    case Keyword.get(opts, :planned) do
+      %{node: node} when is_binary(node) -> [prefer: node]
+      _ -> []
+    end
   end
 
   # Not admissions: a ticket already In progress (a re-dispatch or resume of
@@ -2926,7 +2991,7 @@ defmodule Arbiter.Worker.Dispatch do
       Arbiter.Worker.ReviewGate.base_task_id(id) == id
   end
 
-  defp admission_opts(opts) do
+  defp admission_opts(%Issue{} = task, provider, opts) do
     admission = [
       force: Keyword.get(opts, :force_slot) == true,
       skip_spend: SpendCap.bypassed?(opts),
@@ -2934,12 +2999,49 @@ defmodule Arbiter.Worker.Dispatch do
       model: Keyword.get(opts, :model)
     ]
 
-    case Keyword.get(opts, :routing_decision) do
-      %{"account_id" => account_id} when is_binary(account_id) ->
-        Keyword.put(admission, :account, Arbiter.Accounts.Resolver.get(account_id))
+    admission =
+      case Keyword.get(opts, :routing_decision) do
+        %{"account_id" => account_id} when is_binary(account_id) ->
+          Keyword.put(admission, :account, Arbiter.Accounts.Resolver.get(account_id))
+
+        _ ->
+          admission
+      end
+
+    put_seat_opts(admission, task, provider, opts)
+  end
+
+  # DC8: under `enforce` the account admits by its pool's seats. The pool is the
+  # walk's planned one when the run landed on the planned account, else the one
+  # routing chose; with neither, `Admission` takes the model's or the account's
+  # lowest budget. `:seat_opts` are `SeatCheck`'s seams (tests).
+  defp put_seat_opts(admission, task, provider, opts) do
+    case Keyword.get(opts, :admission_mode) do
+      :enforce ->
+        admission
+        |> Keyword.put(:mode, :enforce)
+        |> Keyword.put(:pool, seat_pool(admission, task, provider, opts))
+        |> Keyword.put(:seat_opts, Keyword.get(opts, :seat_opts, []))
+
+      mode when mode in [:legacy, :shadow] ->
+        Keyword.put(admission, :mode, mode)
 
       _ ->
         admission
+    end
+  end
+
+  defp seat_pool(admission, %Issue{} = task, provider, opts) do
+    account_id =
+      case Keyword.fetch(admission, :account) do
+        {:ok, account} -> account && account.id
+        :error -> Arbiter.Accounts.Resolver.account_id(task.workspace_id, provider)
+      end
+
+    case {Keyword.get(opts, :planned), Keyword.get(opts, :routing_decision)} do
+      {%{account_id: ^account_id, pool: pool}, _decision} when is_binary(pool) -> pool
+      {_planned, %{"pool" => pool}} when is_binary(pool) -> pool
+      _ -> nil
     end
   end
 
@@ -2971,10 +3073,18 @@ defmodule Arbiter.Worker.Dispatch do
     :exit, _ -> nil
   end
 
+  # DC8 (design §4.5, E9): under `scheduler_admission: enforce` the gate keeps
+  # only its hard rules (`pace: false`) for every dispatch — fresh or follow-up:
+  # the paced line is the pool's budget, which the seat check answers. A hard
+  # rule that holds a *fresh* dispatch is that pool's hard zero (§3.5): the card
+  # waits in Ready on the provider layer, refused like a full pool, and nothing
+  # is queued (§7: fresh intents are not quota-held). A follow-up held by a hard
+  # rule is still queued, as today.
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
     account = safe_gate_account(ws_id, provider)
     quota = safe_quota_latest(account, provider)
+    enforced? = admission_enforced?(task, opts)
     # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
     # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
     # verbatim on drain) must stay exactly what the caller passed, or a
@@ -2984,6 +3094,7 @@ defmodule Arbiter.Worker.Dispatch do
       provider
       |> maybe_add_gemini_model_hint(task, workspace, opts)
       |> Keyword.put(:account, account)
+      |> then(&if(enforced?, do: Keyword.put(&1, :pace, false), else: &1))
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
@@ -2991,28 +3102,65 @@ defmodule Arbiter.Worker.Dispatch do
         # cleared (bd-7gt8rm). One indexed read when none is active. No
         # snapshot is not evidence either way, so it leaves the alert alone.
         if quota, do: CoordinatorNotifier.overage_cleared(ws_id, provider)
-        record_pace_exempt(task, ws_id, provider, account, quota, workspace, gate_opts)
+
+        # Under `enforce` the gate never asked about pace, so no exemption
+        # decided anything here; the exempt budget answers it at admission.
+        unless enforced?,
+          do: record_pace_exempt(task, ws_id, provider, account, quota, workspace, gate_opts)
+
         :ok
 
+      {:hold, reason} when enforced? ->
+        if fresh_admission?(task, opts),
+          do: {:error, {:account_at_capacity, hard_zero(task, account, provider, reason, opts)}},
+          else: quota_hold(task, ws_id, provider, reason, opts)
+
       {:hold, reason} ->
-        case DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
-          :ok ->
-            {:error, {:quota_held, task.id}}
-
-          {:error, hold_err} ->
-            # The queue is unreachable — fail open so the work is not dropped.
-            require Logger
-
-            Logger.warning(
-              "Dispatch: quota gate held #{task.id} but enqueue failed " <>
-                "(#{inspect(hold_err)}); allowing dispatch to avoid dropping work"
-            )
-
-            :ok
-        end
+        quota_hold(task, ws_id, provider, reason, opts)
 
       {:overage, spend_usd} ->
         _ = DispatchQueue.record_overage(ws_id, task, spend_usd, provider)
+        :ok
+    end
+  end
+
+  # A hard rule on the pool a fresh dispatch would seat on, as the refusal a
+  # full pool gives (`Admission.refusal_message/1` renders it).
+  defp hard_zero(%Issue{} = task, account, provider, reason, opts) do
+    pool =
+      case Keyword.get(opts, :routing_decision) do
+        %{"pool" => pool} when is_binary(pool) -> pool
+        _ -> nil
+      end
+
+    seat = SeatCheck.hard_zero(account, provider, pool, DispatchQueue.reason_text(reason))
+
+    %{
+      task_id: task.id,
+      account: seat.account,
+      cap: 0,
+      holders: [],
+      pool: seat.pool,
+      seat: seat
+    }
+  end
+
+  # The quota gate's hold: the intent waits in the workspace's `DispatchQueue`,
+  # which drains it as headroom frees.
+  defp quota_hold(%Issue{} = task, ws_id, provider, reason, opts) do
+    case DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
+      :ok ->
+        {:error, {:quota_held, task.id}}
+
+      {:error, hold_err} ->
+        # The queue is unreachable — fail open so the work is not dropped.
+        require Logger
+
+        Logger.warning(
+          "Dispatch: quota gate held #{task.id} but enqueue failed " <>
+            "(#{inspect(hold_err)}); allowing dispatch to avoid dropping work"
+        )
+
         :ok
     end
   end
@@ -4126,7 +4274,7 @@ defmodule Arbiter.Worker.Dispatch do
     workspace = load_workspace(task)
 
     admit_opts =
-      node_gate_opts(opts) ++
+      node_gate_opts(task, opts) ++
         [
           reason: :no_node,
           provider: quota_gate_provider(task, workspace, opts),

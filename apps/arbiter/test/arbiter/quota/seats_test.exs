@@ -256,6 +256,71 @@ defmodule Arbiter.Quota.SeatsTest do
       assert Seats.count(ctx.claude.id, "claude") == 1
     end
 
+    # O7 (operator ruling 2026-10-10, DC8): a ticket waiting on CI keeps its pin
+    # seat for `ci_wait_release_minutes` (default 10), then releases it; when CI
+    # returns, the marker clears and the seat counts again.
+    defp waiting_on_ci!(ticket_id, since_minutes_ago, opts \\ []) do
+      now = DateTime.utc_now()
+
+      wait = %{
+        "sha" => "0123456789abcdef",
+        "since" => now |> DateTime.add(-since_minutes_ago * 60, :second) |> DateTime.to_iso8601(),
+        "expires_at" =>
+          now
+          |> DateTime.add(Keyword.get(opts, :expires_in_s, 3_600), :second)
+          |> DateTime.to_iso8601(),
+        "round" => 1
+      }
+
+      Repo.query!("UPDATE issues SET review_gate_state = ?1 WHERE id = ?2", [
+        Jason.encode!(%{"ci_wait" => wait}),
+        ticket_id
+      ])
+    end
+
+    test "O7: a ticket waiting on CI keeps its pin seat for the threshold", ctx do
+      t = ticket!(ctx.ws, :active)
+      fake_worker(t, ctx.ws, "claude", released: true)
+      waiting_on_ci!(t, 5)
+
+      assert Seats.count(ctx.claude.id, "claude") == 1
+    end
+
+    test "O7: past the threshold the wait releases the pin seat", ctx do
+      t = ticket!(ctx.ws, :active)
+      fake_worker(t, ctx.ws, "claude", released: true)
+      waiting_on_ci!(t, 15)
+
+      assert Seats.count(ctx.claude.id, "claude") == 0
+    end
+
+    test "O7: the threshold is configurable", ctx do
+      put_app_env(:arbiter, :seats, ci_wait_release_minutes: 30)
+      t = ticket!(ctx.ws, :active)
+      fake_worker(t, ctx.ws, "claude", released: true)
+      waiting_on_ci!(t, 15)
+
+      assert Seats.count(ctx.claude.id, "claude") == 1
+    end
+
+    test "O7: a wait that has expired is no wait — the seat counts again", ctx do
+      t = ticket!(ctx.ws, :active)
+      fake_worker(t, ctx.ws, "claude", released: true)
+      waiting_on_ci!(t, 30, expires_in_s: -60)
+
+      assert Seats.count(ctx.claude.id, "claude") == 1
+    end
+
+    test "O7: a sub-worker of a released ticket still seats its own pool", ctx do
+      t = ticket!(ctx.ws, :active)
+      fake_worker(t, ctx.ws, "claude", released: true)
+      fake_worker(t <> "#review", ctx.ws, "codex", account_id: ctx.codex.id)
+      waiting_on_ci!(t, 15)
+
+      assert Seats.count(ctx.claude.id, "claude") == 0
+      assert Seats.count(ctx.codex.id, "codex") == 1
+    end
+
     test "a ticket released to wait for CI keeps its pin seat", ctx do
       t = ticket!(ctx.ws, :active)
       fake_worker(t, ctx.ws, "claude", released: true)

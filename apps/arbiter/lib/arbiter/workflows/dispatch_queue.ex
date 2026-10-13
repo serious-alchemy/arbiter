@@ -127,6 +127,18 @@ defmodule Arbiter.Workflows.DispatchQueue do
       (`reroutable?/3`): the item drains early, and the same resume continues the
       work there from the preserved worktree, briefed from its git state.
 
+  ## Under `scheduler_admission: enforce` (DC8)
+
+  For a provider whose account is in `enforce` (`Arbiter.Accounts.AdmissionMode`;
+  design `provider-dynamic-concurrency.md` §7, E11), a fresh dispatch is not
+  quota-held: `Arbiter.Worker.Dispatch` refuses it as a hard zero on its pool
+  and it waits in Ready, where the scheduler walk admits it by seat. A fresh
+  quota hold still queued from before the switch is dropped at the next drain
+  rather than replayed past the walk. Pause, guardrail, spend and quota-stop
+  holds stay, and a held follow-up is re-checked on the gate's hard rules
+  alone (`pace: false`). `slot_free?/2`'s `ResumeSlot` is the pin pool's seat
+  check there.
+
   ## `:continue` — overage alert debounce
 
   When the gate returns `{:overage, spend_usd}` (dispatch proceeds past the cap),
@@ -604,6 +616,18 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp maybe_drain(%State{items: []} = state), do: state
 
   defp maybe_drain(%State{} = state) do
+    # P7 (§4.2): the gate's thresholds resolve `min(account, workspace)`, so
+    # the drain re-check has to hand it the same account `Dispatch` does or a
+    # held intent could drain on a ceiling the dispatcher would re-hold at.
+    accounts = provider_accounts(state)
+    enforced = enforced_providers(accounts)
+    state = drop_fresh_quota_holds(state, enforced)
+    drain_items(state, accounts, enforced)
+  end
+
+  defp drain_items(%State{items: []} = state, _accounts, _enforced), do: state
+
+  defp drain_items(%State{} = state, accounts, enforced) do
     # A quota-exhausted pre-flight failure holds its item until its own
     # `retry_not_before` passes (bd-8lnnnt) — set aside before the gate check
     # even runs, since the gate has no notion of this per-item hold.
@@ -624,10 +648,6 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # it would drain on Anthropic's headroom (or never drain at all, since a
     # Codex-only install has no Anthropic snapshot).
     snapshots = provider_snapshots(state)
-    # P7 (§4.2): the gate's thresholds resolve `min(account, workspace)`, so
-    # the drain re-check has to hand it the same account `Dispatch` does or a
-    # held intent could drain on a ceiling the dispatcher would re-hold at.
-    accounts = provider_accounts(state)
 
     # bd-a6grlr: a fresh dispatch is also held while its account's dollar
     # spend cap holds. The drain replays with the quota gate skipped, so this
@@ -646,7 +666,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
         provider = item_provider(item)
         quota = Map.get(snapshots, provider)
         account = Map.get(accounts, provider)
-        gate_opts = [account: account]
+        # DC8: under `enforce` a held follow-up drains on the hard rules alone.
+        gate_opts =
+          if MapSet.member?(enforced, provider),
+            do: [account: account, pace: false],
+            else: [account: account]
 
         # bd-5ef587: a pause outlives quota headroom. A paused item is released
         # only when routing now lands on a different, unpaused, ungated
@@ -665,6 +689,70 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
     %{state | items: on_hold ++ Enum.map(keep, &refresh_spend_reason(&1, spend))}
+  end
+
+  # ---- scheduler_admission: enforce (DC8) -------------------------------------
+
+  # The providers whose held intents are judged under `enforce`: the effective
+  # mode of the account each is metered under (O11). Unreadable is `legacy`.
+  defp enforced_providers(accounts) do
+    for {provider, account} <- accounts,
+        safe_mode(account) == :enforce,
+        into: MapSet.new(),
+        do: provider
+  end
+
+  defp safe_mode(account) do
+    Arbiter.Accounts.AdmissionMode.mode(account)
+  rescue
+    _ -> :legacy
+  catch
+    :exit, _ -> :legacy
+  end
+
+  # Design §7, E11: under `enforce` a fresh dispatch is not quota-held — it waits
+  # in Ready, where the scheduler walk admits it by seat and in queue order. A
+  # fresh intent the quota gate held (before the switch) is dropped rather than
+  # replayed past the walk. Pause, guardrail, spend and quota-stop holds, and a
+  # follow-up's hold, stay.
+  defp drop_fresh_quota_holds(%State{items: items} = state, enforced) do
+    if MapSet.size(enforced) == 0 do
+      state
+    else
+      {dropped, kept} =
+        Enum.split_with(
+          items,
+          &(MapSet.member?(enforced, item_provider(&1)) and fresh_quota_hold?(&1))
+        )
+
+      for item <- dropped do
+        Logger.info(
+          "DispatchQueue: dropped the held #{describe(item).intent} for #{item.task_id}: " <>
+            "under scheduler_admission: enforce a fresh dispatch is not quota-held; it waits " <>
+            "in Ready for a free seat"
+        )
+      end
+
+      %{state | items: kept}
+    end
+  end
+
+  # The quota gate's own hold (its binding map carries no `:gate`) on a dispatch
+  # that would start a ticket, not continue one.
+  defp fresh_quota_hold?(%{reason: reason, opts: opts} = item) do
+    quota_gate_reason?(reason) and not quota_resume?(item) and
+      Keyword.get(opts, :review) != true and Keyword.get(opts, :resume) != true and
+      held_fresh?(item)
+  end
+
+  defp quota_gate_reason?(%{gate: _}), do: false
+  defp quota_gate_reason?(%{} = _binding), do: true
+  defp quota_gate_reason?(_reason), do: false
+
+  # A ticket that was in Backlog or Ready when held; an unknown state is kept.
+  defp held_fresh?(%{task_id: task_id} = item) do
+    Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id and
+      Map.get(item, :held_state) in [:backlog, :queued]
   end
 
   # The spend cap's verdict for each held *fresh* dispatch that it still holds:

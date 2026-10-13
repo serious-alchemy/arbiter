@@ -954,13 +954,14 @@ defmodule Arbiter.Board.AutopilotTest do
     # topic). Each uses its own private topic — passed via `:topics` — rather
     # than the real "tasks"/"events" topics, so it isn't exposed to unrelated
     # broadcasts from other async tests in the suite.
-    test "the default topics are exactly what Issue.broadcast_lifecycle/2 and Events broadcast on" do
+    test "the default topics are exactly what Issue.broadcast_lifecycle/2, Events and the budget server broadcast on" do
       # Guards against a silent regression where `@tasks_topic`/`@events_topic`
       # (or the default passed to `Keyword.get(opts, :topics, ...)` in `init/1`)
       # drift from the strings the rest of the app actually broadcasts on —
       # every other test in this describe block passes a private `:topics`
-      # list, so none of them would catch that.
-      assert Autopilot.default_topics() == ["tasks", "events"]
+      # list, so none of them would catch that. DC8 adds "board", where
+      # `Arbiter.Quota.Budget.Server` announces `budget_changed`.
+      assert Autopilot.default_topics() == ["tasks", "events", "board"]
     end
 
     test "a task closing runs a pass when delivered over real PubSub" do

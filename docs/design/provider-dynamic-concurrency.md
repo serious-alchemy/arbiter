@@ -1100,16 +1100,18 @@ Autopilot pass.
 - **Deferred to DC8.**
   - E8's `budget_changed` subscription. In shadow the walk decides nothing, and
     the 60 s tick and today's triggers record a budget-driven change within a
-    minute.
+    minute. *Done in DC8* (§10.4, as built).
   - E21's plan-time lift cap. In shadow the walk keeps today's order, so I4
-    holds and the report compares admission, not ordering.
+    holds and the report compares admission, not ordering. *Still open after
+    DC8*: the lift cap reads the stored `slots_total` in every mode.
   - The primary's at-cap rule for a resume (bd-b2iigy), which also covers a
     ReviewGate fix round re-dispatched through `Dispatch.resume/2`. I9 holds for
     every follow-up on the provider layer, and for the review-side passes on
     the node layer (`AdmissionFollowUpTest`). A resume on a full but non-zero
     primary is still deferred, as it is today. §2.2 says it shouldn't be;
     changing that would change a legacy decision (I1), so it waits for DC8's
-    `ResumeSlot` seat check.
+    `ResumeSlot` seat check. *Settled in DC8 under `enforce`* (§10.4, as
+    built); unchanged under `legacy` and `shadow`.
 
 ### 10.3 The report
 
@@ -1172,6 +1174,80 @@ All of these, then an operator OK:
 The R6 report keeps running alongside. It compares *which account* a dispatch
 picks, and this report compares *whether and which card* is admitted, so the
 two don't confound each other.
+
+**As built (DC8, bd-30d5qo).** The operator's OK was recorded on the ticket on
+2026-10-12 (27 of 27 comparable decisions agreeing since 2026-10-11T05:58Z, read
+from `scheduler_status`'s `admission.agreement`). Everything below decides only
+for an account whose effective mode (`AdmissionMode`, O11) is `enforce`; under
+`legacy` and `shadow` every path is today's, and `AdmissionLegacyTest` traces a
+legacy board read and a legacy dispatch (each in its own process) reaching
+nothing in the budget path.
+- **The seat check.** `Arbiter.Accounts.SeatCheck` is the one admission-path
+  reader of the budget: `seats < min(budget, max_concurrent, share)` on a pool,
+  the budget being the workspace's policy variant or the account's own (the
+  exempt budget for an own-priority-exempt card), seats counted live
+  (`Quota.Seats`) less the ticket's own. A pool with no published budget fails
+  open to its ceilings. A `nil` pool takes the account's lowest budget (§3.1).
+- **Admission (E3, E4).** `Admission.admit/3` admits a fresh dispatch by the
+  seat check under the existing per-account `:global.trans`; the reservation is
+  seated on the checked pool, `force` still goes over (recorded), and a full
+  pool is `{:account_at_capacity, info}` with the seat check in `info.seat`.
+  `arb dispatch` and MCP `worker_dispatch` reach it like every other caller.
+- **The gate (E9, E10).** `Gate.gating_window/3` takes `pace: false`: the hard
+  rules (1, 2, 5) only. Every dispatch under `enforce` asks the gate that way.
+  A hard rule on a *fresh* dispatch is that pool's hard zero: it is refused
+  like a full pool and waits in Ready, and nothing is queued. A follow-up held
+  by a hard rule is queued as today. Provider routing drops a candidate for a
+  full pool (never for a follow-up role) and for a hard rule only, and its
+  `capacity` is the free seats (E12); reviewer routing drops a pool on a hard
+  rule only and ranks a pool with a free seat first.
+- **`DispatchQueue` (E11).** A fresh quota hold from before the switch is
+  dropped at the next drain; pause, guardrail, spend and quota-stop holds stay,
+  and a held follow-up drains on the hard rules alone.
+- **The planned pair (§4.4).** Under an installation in `enforce` the walk
+  decides: Autopilot dispatches its first placement with `planned: %{account_id,
+  pool, node}`, and nothing when it places nothing. Routing takes the planned
+  account while it is available (an available pin on another account wins),
+  admission seats on the planned pool, and placement ranks the planned node
+  first while it is a candidate. Under another installation mode, a placement
+  on an account trialling `enforce` is the walk's to dispatch and every other
+  card is today's plan's. A board without a walk is today's plan's in any mode.
+  The walk caps a card's budget by its link's `share`, as admission does.
+- **The reverse shadow (§10.2).** Beside every walk dispatch,
+  `AdmissionShadow.reverse_record/2` stores what today's plan would have done:
+  `pick` (today's `promote`), `agrees`, `comparable` (today had a candidate),
+  and `cause` — `queued` (today would have dispatched another card first) or
+  `legacy_hold` (today held this card or the queue, named in `legacy_hold`).
+  The hold-change events are written as under `shadow`.
+- **Follow-ups (§2.2, §4.5, I9).** `ResumeSlot` is the pin pool's seat check: a
+  ticket In progress holds its pin seat in every phase (held for quota and idle
+  included), so its resume needs nothing new; a ticket not In progress needs a
+  free seat; a CI fix or conflict pass (`PassAdmission`'s `follow_up: true`) is
+  never held for a full pool. On the node layer a resume or re-dispatch of a
+  ticket In progress is held by the primary's cap only at 0 or on a hard
+  derate (`LocalCapacity`'s `follow_up:`). Autopilot replays a resume deferred
+  for a slot when its own pool has a seat.
+- **E8.** Autopilot subscribes to `"board"` (`default_topics/0`); a published
+  rise plans a pass under `enforce`, and a fall plans nothing.
+- **O7** (operator ruling, 2026-10-10). A ticket waiting on CI (its
+  ReviewGate's `ci_wait` marker) keeps its pin seat for
+  `ci_wait_release_minutes` (`config :arbiter, :seats`, default 10) and then
+  releases it (`Quota.Seats`); when CI returns the marker clears and the seat
+  counts again, the reviewer or CI fix pass coming back as a follow-up that no
+  full pool holds (O2).
+- **I8**, structurally (`BudgetShadowTest`): only the budget's own modules, the
+  walk's inputs, the display, the replay admission, `quota/history.ex` and
+  `SeatCheck` name the budget; `SeatCheck` is asked only by `Admission`,
+  `ResumeSlot`, provider and reviewer routing and `Dispatch`; and only the
+  Autopilot handles `budget_changed`, by planning a pass.
+- **Not done here.** E21's plan-time lift cap; replacing `#board-slots` with the
+  capacity strip (DC5's note), so a Ready card's state badge (`next`, a
+  queue position, a hold) is still today's plan's, with the walk's own line
+  (`data-layer-reason`) beside it; `routing_decision.budget` (DC5's note); a
+  walk that ranks a ticket's pin first; the DC7 report does not yet split the
+  reverse records (`policy: "enforce"`) from the shadow ones, nor record O7's
+  bursts of re-admitted follow-ups past the budget; and O7's threshold is app
+  config, not yet an `arb settings` key.
 
 ### 10.5 Rollout order
 

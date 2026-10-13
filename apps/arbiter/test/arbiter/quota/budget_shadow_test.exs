@@ -14,8 +14,18 @@ defmodule Arbiter.Quota.BudgetShadowTest do
 
   DC5 (bd-2c2a4g) adds the display readers: `Arbiter.Board.CapacityView`, the one
   read model behind the board's capacity strip, `scheduler_status` and
-  `quota_get`. It is the only module outside the budget's own that names it,
-  and no admission surface, nor anything that stops a run, names `CapacityView`.
+  `quota_get`. No admission surface, nor anything that stops a run, names
+  `CapacityView`.
+
+  DC8 (bd-30d5qo) makes the budget decide under `scheduler_admission:
+  enforce`, through one module: `Arbiter.Accounts.SeatCheck`, the per-pool seat
+  check. It is the only admission-path reader of the budget; the admission
+  surfaces (`Admission`, `ResumeSlot`, provider and reviewer routing, the
+  dispatch's hard-zero refusal) ask it and never name the budget themselves,
+  and `Arbiter.Board.AdmissionLegacyTest` traces that under `legacy` nothing
+  asks it. I8 (design §11): the budget is read only by admission, the walk and
+  the display; a budget change is handled only by the Autopilot, which plans a
+  pass and stops nothing.
   """
   use Arbiter.DataCase, async: false
 
@@ -30,8 +40,9 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   # its server and inputs, or a call through an alias of any of them.
   @consumers ~r/Quota\.Budget(?!Calibration)\b|\bBudget\.(compute|publish|hysteresis|new_hysteresis|lowest|explore|expiring|Server|Inputs)\b/
 
-  # The budget's own modules, the supervision tree that starts its server, and
-  # the scheduler walk's inputs (DC6, read only under shadow and enforce).
+  # The budget's own modules, the supervision tree that starts its server, the
+  # scheduler walk's inputs (DC6, read only under shadow and enforce) and the
+  # seat check (DC8, asked only under enforce).
   # `quota/history.ex` only records the published figure on each snapshot row
   # (bd-9ntll1); it gates nothing. `loop/replay/admission.ex` (R15, bd-c7lx65)
   # reads `explore/2` to admit an operator-run offline replay into expiring
@@ -47,6 +58,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     arbiter/board/walk_inputs.ex
     arbiter/board/capacity_view.ex
     arbiter/loop/replay/admission.ex
+    arbiter/accounts/seat_check.ex
   )
 
   defp source_files(root) do
@@ -139,5 +151,51 @@ defmodule Arbiter.Quota.BudgetShadowTest do
 
     assert Concurrency.account_headroom(account, nil) == before
     assert Concurrency.limit(account, nil) == 3
+  end
+
+  # ---- I8 under enforce (DC8) -----------------------------------------------------
+
+  test "the seat check is asked only by the admission surfaces (I8)" do
+    callers =
+      @lib
+      |> source_files()
+      |> Enum.filter(&(File.read!(&1) =~ ~r/\bSeatCheck\.(check|room\?|hard_zero|describe)\(/))
+      |> Enum.map(&Path.relative_to(&1, @lib))
+      |> Enum.sort()
+
+    assert callers ==
+             Enum.sort(~w(
+               arbiter/accounts/admission.ex
+               arbiter/agents/provider_routing.ex
+               arbiter/agents/reviewer_routing.ex
+               arbiter/worker/dispatch.ex
+               arbiter/worker/resume_slot.ex
+             ))
+
+    for app <- ~w(arbiter_web arbiter_cli) do
+      root = Path.expand("../../../../#{app}/lib", __DIR__)
+      assert Enum.filter(source_files(root), &(File.read!(&1) =~ "SeatCheck")) == []
+    end
+  end
+
+  test "a budget change is handled only by the Autopilot, which plans a pass (I8)" do
+    handlers =
+      @lib
+      |> source_files()
+      |> Enum.filter(&(File.read!(&1) =~ "{:budget_changed"))
+      |> Enum.map(&Path.relative_to(&1, @lib))
+      |> Enum.sort()
+
+    # The server announces it; the Autopilot's handler only ever plans a pass
+    # (`Arbiter.Board.AutopilotEnforceTest`: a fall plans nothing).
+    assert handlers == ["arbiter/board/autopilot.ex", "arbiter/quota/budget/server.ex"]
+
+    source = File.read!(Path.join(@lib, "arbiter/board/autopilot.ex"))
+
+    [handler] =
+      Regex.run(~r/def handle_info\(\{:budget_changed.*?\n  end\n/s, source)
+
+    refute handler =~ ~r/Worker\.|stop|kill|fail/
+    assert handler =~ "request_plan"
   end
 end

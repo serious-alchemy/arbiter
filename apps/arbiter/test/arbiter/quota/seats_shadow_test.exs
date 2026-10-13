@@ -9,6 +9,11 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   DC6 (bd-9ycsk4) adds one reader: `Arbiter.Board.WalkInputs`, the scheduler
   walk's capacity sets, gathered only under `scheduler_admission: shadow` or
   `enforce` (`Arbiter.Board.AdmissionLegacyTest` pins that `legacy` reads none).
+
+  DC8 (bd-30d5qo) adds the seat check, `Arbiter.Accounts.SeatCheck`: under
+  `enforce` admission compares the seats on a pool with its budget. It is asked
+  only for an account in `enforce`; under `legacy` and `shadow` today's
+  per-account count still decides.
   """
   use Arbiter.DataCase, async: false
 
@@ -25,10 +30,11 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   @lib Path.expand("../../../lib", __DIR__)
   @consumers ~r/alias Arbiter\.Quota\.Seats|\bSeats\.(counts|count|holders|tally|base_task_id)\(/
 
-  # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only)
-  # and the capacity view (DC5, display only: it shows the live holders next to
-  # each budget and decides nothing).
-  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex arbiter/board/capacity_view.ex)
+  # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only),
+  # the capacity view (DC5, display only: it shows the live holders next to each
+  # budget and decides nothing) and the seat check (DC8, enforce only).
+  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex arbiter/board/capacity_view.ex
+              arbiter/accounts/seat_check.ex)
 
   test "only the seats module, the walk's inputs and the capacity view name it" do
     offenders =
