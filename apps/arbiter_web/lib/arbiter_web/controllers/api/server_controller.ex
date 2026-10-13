@@ -95,6 +95,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Accounts.Enablement
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Agents.Claude.CredentialCheck
+  alias Arbiter.Agents.Gemini.ModelCheck
   alias Arbiter.Guardrails
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Egress.SelfTest
@@ -171,7 +172,7 @@ defmodule ArbiterWeb.Api.ServerController do
   end
 
   # bd-7wx2lh: do the configured agy tier models still exist in `agy models`?
-  def agy_models(conn, _params), do: json(conn, Arbiter.Agents.Gemini.ModelCheck.report())
+  def agy_models(conn, _params), do: json(conn, ModelCheck.report())
 
   # bd-dpv4vt: grok's login state, reported only when a workspace uses grok.
   def grok_auth(conn, _params), do: json(conn, Arbiter.Grok.AuthReport.report(probe: true))
