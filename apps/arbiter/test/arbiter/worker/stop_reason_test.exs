@@ -1019,6 +1019,15 @@ defmodule Arbiter.Worker.StopReasonTest do
       assert StopReason.label(reason) =~ "model unavailable"
     end
 
+    test "agy's startup crash for a retired tier model (bd-7ud35b)" do
+      lines = ["Error: invalid model selection: gemini-3.1-pro-high"]
+
+      reason = StopReason.classify(1, lines, "gemini")
+      assert reason.category == :model_unavailable
+      assert reason.summary =~ "gemini-3.1-pro-high"
+      refute StopReason.classify(0, lines, "gemini").category == :model_unavailable
+    end
+
     test "the 404 for a listed model the plan cannot call" do
       lines = [
         "⚠ codex: unexpected status 404 Not Found: The model `gpt-5.5` does not exist " <>
