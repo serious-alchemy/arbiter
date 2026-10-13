@@ -224,10 +224,13 @@ defmodule Arbiter.Quota.Budget.Server do
     weights_fun = state.weights_fun
     # Not linked: a calibration that raises (DB timeout at boot, bad edge data)
     # must reach the :DOWN clause below, not take this server and its ETS table
-    # down with it.
+    # down with it. The weights are a separate read, returned either way: a
+    # failed budget calibration must not drop that day's weights (`:failed`
+    # marks it for the clause below).
     task =
       Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
-        {fun.(), safe_weights(weights_fun)}
+        weights = safe_weights(weights_fun)
+        {safe_calibration(fun), weights}
       end)
 
     Process.send_after(self(), :calibrate, @calibration_every_ms)
@@ -236,7 +239,14 @@ defmodule Arbiter.Quota.Budget.Server do
 
   def handle_info(:calibrate, state), do: {:noreply, state}
 
-  def handle_info({ref, {results, weights}}, %{calibration_task: ref} = state)
+  def handle_info({ref, {:failed, weights}}, %{calibration_task: ref} = state)
+      when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    publish_weights(state.table, weights)
+    {:noreply, %{state | calibration_task: nil}}
+  end
+
+  def handle_info({ref, {{:ok, results}, weights}}, %{calibration_task: ref} = state)
       when is_reference(ref) do
     Process.demonitor(ref, [:flush])
     publish_weights(state.table, weights)
@@ -245,14 +255,29 @@ defmodule Arbiter.Quota.Budget.Server do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{calibration_task: ref} = state) do
-    Logger.warning(
-      "Arbiter.Quota.Budget.Server: calibration failed (#{inspect(reason)}); priors stay"
-    )
-
+    log_calibration_failure(inspect(reason))
     {:noreply, %{state | calibration_task: nil}}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # A calibration that raises keeps the priors, as a crashed task does (the
+  # :DOWN clause above), but the weights read beside it still arrive.
+  defp safe_calibration(fun) do
+    {:ok, fun.()}
+  rescue
+    e ->
+      log_calibration_failure(Exception.message(e))
+      :failed
+  catch
+    :exit, reason ->
+      log_calibration_failure(inspect(reason))
+      :failed
+  end
+
+  defp log_calibration_failure(reason) do
+    Logger.warning("Arbiter.Quota.Budget.Server: calibration failed (#{reason}); priors stay")
+  end
 
   # The weights are a second read beside the calibration: when they fail the
   # calibration is kept and every seat weighs 1.

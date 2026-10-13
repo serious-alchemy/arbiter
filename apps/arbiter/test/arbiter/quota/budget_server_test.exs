@@ -347,6 +347,24 @@ defmodule Arbiter.Quota.Budget.ServerTest do
       assert log =~ "seat weights"
     end
 
+    test "a budget calibration that fails still publishes that day's weights", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {server, table} =
+            start(ctx,
+              calibration: fn -> raise "calibration boom" end,
+              weights: fn -> @weights end
+            )
+
+          await_calibration(server)
+          assert Server.seat_weights(@account, "claude", "5h", table) == %{"opus" => 3.0}
+          :ok = Server.recompute(server)
+          assert %{rho_source: :prior} = window(table, "5h")
+        end)
+
+      assert log =~ "calibration failed"
+    end
+
     test "reads are safe before the table exists" do
       assert Server.seat_weights("x", "claude", nil, :no_such_budget_table) == %{}
     end

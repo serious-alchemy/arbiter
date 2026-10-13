@@ -15,7 +15,10 @@ defmodule Arbiter.Board.SchedulerWalkWeightedTest do
 
   defp card(id), do: %{id: id, scope: MapSet.new(), blocked_by: [], conflicts_with: []}
 
-  defp plan(pool, weight, ids \\ ["bd-1", "bd-2", "bd-3", "bd-4"]) do
+  @open_node %{"local" => %{cap: 20, used: 0, label: "local"}}
+  @full_node %{"local" => %{cap: 1, used: 1, label: "local"}}
+
+  defp plan(pool, weight, ids \\ ["bd-1", "bd-2", "bd-3", "bd-4"], nodes \\ @open_node) do
     candidate = Map.merge(%{pool: @claude, nodes: ["local"]}, weight)
 
     Scheduler.plan(%{
@@ -25,7 +28,7 @@ defmodule Arbiter.Board.SchedulerWalkWeightedTest do
       paused: false,
       walk: %{
         pools: %{@claude => Map.merge(%{label: "claude:default"}, pool)},
-        nodes: %{"local" => %{cap: 20, used: 0, label: "local"}},
+        nodes: nodes,
         candidates: fn _card -> [candidate] end
       }
     })
@@ -75,6 +78,33 @@ defmodule Arbiter.Board.SchedulerWalkWeightedTest do
 
     assert placed(plan(pool, %{weight: 3.0})) == ["bd-1"]
     assert placed(plan(%{budget: 0, seats: 0, load: 0.0}, %{weight: 3.0})) == []
+  end
+
+  test "agreement with SeatCheck: the share limits seats, the budget limits weight" do
+    # Budget 10, share 3, two weight-2 seats: 2 < 3 seats and 6 ≤ 10. The
+    # candidate carries the share beside the pool's unshared budget.
+    pool = %{budget: 10, seats: 2, load: 4.0}
+
+    assert placed(plan(pool, %{weight: 2.0, share: 3})) == ["bd-1"]
+    # The share still counts seats: a third seat fills it.
+    assert placed(plan(%{pool | seats: 3, load: 6.0}, %{weight: 2.0, share: 3})) == []
+  end
+
+  describe "the pool-full diagnosis" do
+    test "a pool with room only for less than the lightest weight is full" do
+      # Load 1.5 of 2: `load < budget`, yet no seat weighs under 1.
+      pool = %{budget: 2, seats: 1, load: 1.5, min_weight: 1.0, label: "claude:default"}
+      plan = plan(pool, %{weight: 1.0}, ["bd-1"], @full_node)
+
+      assert Enum.find(plan.entries, &(&1.id == "bd-1")).wait_cause == {:capacity, :provider}
+    end
+
+    test "a pool a lighter seat still fits is not blamed" do
+      pool = %{budget: 2, seats: 1, load: 1.5, min_weight: 0.5, label: "claude:default"}
+      plan = plan(pool, %{weight: 0.5}, ["bd-1"], @full_node)
+
+      assert Enum.find(plan.entries, &(&1.id == "bd-1")).wait_cause == {:capacity, :node}
+    end
   end
 
   test "a card the pool cannot take reads as waiting for the pool" do

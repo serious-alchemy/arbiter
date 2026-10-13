@@ -1228,7 +1228,9 @@ nothing in the budget path.
   first while it is a candidate. Under another installation mode, a placement
   on an account trialling `enforce` is the walk's to dispatch and every other
   card is today's plan's. A board without a walk is today's plan's in any mode.
-  The walk caps a card's budget by its link's `share`, as admission does.
+  The walk limits a card by its link's `share` as a seat count and by the budget
+  as a weighted load, as admission does (I3); the share is never folded into the
+  budget.
 - **The reverse shadow (§10.2).** Beside every walk dispatch,
   `AdmissionShadow.reverse_record/2` stores what today's plan would have done:
   `pick` (today's `promote`), `agrees`, `comparable` (today had a candidate),

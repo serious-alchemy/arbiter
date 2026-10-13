@@ -140,7 +140,7 @@ defmodule Arbiter.Board.WalkInputs do
     %{
       pools:
         budgets
-        |> pools(seats, loads(held, seat_weights), accounts, fair)
+        |> pools(seats, loads(held, seat_weights), min_weights(seat_weights), accounts, fair)
         |> Map.merge(unmetered(links)),
       nodes: Map.put(remote, @local, local(opts)),
       repos: repos(repo_caps, opts),
@@ -232,7 +232,7 @@ defmodule Arbiter.Board.WalkInputs do
     end)
   end
 
-  defp pools(budgets, seats, loads, accounts, fair) do
+  defp pools(budgets, seats, loads, min_weights, accounts, fair) do
     for %Budget{policy_workspace: nil, account: id, pool: pool} = b <- budgets, into: %{} do
       key = {id, pool}
 
@@ -246,9 +246,23 @@ defmodule Arbiter.Board.WalkInputs do
         cap: ceiling(b.ceiling)
       }
 
-      base = if load = Map.get(loads, key), do: Map.put(base, :load, load), else: base
+      base = put_load(base, Map.get(loads, key), Map.get(min_weights, key))
       {key, put_fair(base, Map.get(fair, key))}
     end
+  end
+
+  defp put_load(pool, nil, _min_weight), do: pool
+
+  defp put_load(pool, load, min_weight),
+    do: Map.merge(pool, %{load: load, min_weight: min_weight})
+
+  # The lightest seat the pool could take: a model's weight is never below the
+  # floor, and a model with no weight weighs 1.
+  defp min_weights(seat_weights) do
+    Map.new(seat_weights, fn {key, {weights, floor}} ->
+      lightest = weights |> Map.values() |> Enum.min() |> max(floor)
+      {key, min(lightest * 1.0, 1.0)}
+    end)
   end
 
   defp put_fair(pool, nil), do: pool
@@ -577,9 +591,11 @@ defmodule Arbiter.Board.WalkInputs do
   end
 
   # The budget that binds this card on the pool, when it is not the pool's own:
-  # its workspace's policy variant, or the exempt budget for an exempt card —
-  # capped by the workspace link's `share`, as admission caps it (DC8:
-  # `min(budget, max_concurrent, share)`, `Arbiter.Accounts.SeatCheck`).
+  # its workspace's policy variant, or the exempt budget for an exempt card. The
+  # link's `share` is not folded in: it counts seats (I3), so the candidate
+  # carries it beside the budget (`put_share/2`) and the walk checks each as
+  # `Arbiter.Accounts.SeatCheck` does — the share by seat count, the budget by
+  # weighted load.
   defp put_budget(candidate, account, pool, ws, issue, ctx) do
     variant = Map.get(ctx.budgets, {account.id, pool, ws.id})
     budget = variant || Map.get(ctx.budgets, {account.id, pool, nil})
@@ -592,18 +608,8 @@ defmodule Arbiter.Board.WalkInputs do
         true -> nil
       end
 
-    case shared(own, budget, Map.get(ctx.shares, {ws.id, account.id})) do
-      nil -> candidate
-      n -> Map.put(candidate, :budget, n)
-    end
+    if is_nil(own), do: candidate, else: Map.put(candidate, :budget, own)
   end
-
-  defp shared(own, _budget, nil), do: own
-  defp shared(_own, nil, _share), do: nil
-  defp shared(nil, %Budget{budget: :unlimited}, share), do: share
-  defp shared(nil, %Budget{budget: pool_budget}, share), do: min(pool_budget, share)
-  defp shared(:unlimited, _budget, share), do: share
-  defp shared(own, _budget, share), do: min(own, share)
 
   defp exempt?(account, ws, %{priority: priority}) when is_integer(priority),
     do: Gate.pace_exempt?({account, ws}, priority)
