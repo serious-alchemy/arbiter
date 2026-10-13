@@ -371,7 +371,7 @@ defmodule Arbiter.Workflows.CodeReview do
       true ->
         body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
 
-        case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+        case submit_verdict(adapter, mr_ref, verdict, body, findings, out_of_diff, opts) do
           {:ok, response} ->
             {:ok,
              state
@@ -379,8 +379,10 @@ defmodule Arbiter.Workflows.CodeReview do
              |> Map.put(:verdict_posted, true)
              |> maybe_capture_path(response)}
 
-          {:error, _} = err ->
-            err
+          # bd-ats4ds: the review is complete; only the posting failed. Hand
+          # the findings + verdict back so the record keeps them.
+          {:error, reason} ->
+            {:error, {:post_failed, reason, verdict_salvage(state, verdict, out_of_diff)}}
         end
     end
   end
@@ -489,6 +491,33 @@ defmodule Arbiter.Workflows.CodeReview do
   # (bd-2n3qm6) — surface it as prose in the review summary instead of
   # silently dropping it, so the reviewer's out-of-diff observation still
   # reaches the PR.
+  # bd-ats4ds: GitHub 422s a review submission it can't process. Retry once
+  # with every finding spelled out (file:line + message) in the body so
+  # nothing is lost to an unanchorable line.
+  defp submit_verdict(adapter, mr_ref, verdict, body, findings, out_of_diff, opts) do
+    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+      {:error, %{kind: :validation_failed}} ->
+        retry_body =
+          verdict_summary(verdict, findings) <> out_of_diff_section(findings ++ out_of_diff)
+
+        safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, retry_body, opts])
+
+      other ->
+        other
+    end
+  end
+
+  # Findings already posted inline are not re-offered as proposed comments (a
+  # greenlight would double-post them); only the out-of-diff ones are.
+  defp verdict_salvage(state, verdict, out_of_diff) do
+    %{
+      findings: Map.get(state, :findings, []),
+      verdict: verdict,
+      proposed_comments: Enum.map(out_of_diff, &Map.put(proposed_comment(&1), :in_diff, false)),
+      check_usage: Map.get(state, :check_usage, %{})
+    }
+  end
+
   defp out_of_diff_section([]), do: ""
 
   defp out_of_diff_section(findings) do

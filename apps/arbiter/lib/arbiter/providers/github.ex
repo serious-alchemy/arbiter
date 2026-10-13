@@ -236,6 +236,17 @@ defmodule Arbiter.Providers.Github do
   defp kind_for_status(status) when status >= 500 and status < 600, do: :server_error
   defp kind_for_status(_), do: :http
 
+  # GitHub's 422 body is `{"message": "Unprocessable Entity", "errors": [...]}`;
+  # the generic message alone hides why it was rejected (bd-ats4ds).
+  defp error_message(%{"message" => msg, "errors" => errors}, _status)
+       when is_binary(msg) and is_list(errors) and errors != [] do
+    msg <> ": " <> Enum.map_join(errors, "; ", &error_detail/1)
+  end
+
   defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
+
+  defp error_detail(detail) when is_binary(detail), do: detail
+  defp error_detail(%{"message" => msg}) when is_binary(msg), do: msg
+  defp error_detail(detail), do: inspect(detail)
 end

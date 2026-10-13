@@ -1047,7 +1047,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  defp post_failed_salvage({:file_findings, {:post_failed, _adapter_error, salvage}}),
+  defp post_failed_salvage({_stage, {:post_failed, _adapter_error, salvage}}),
     do: salvage
 
   defp post_failed_salvage(_reason), do: nil
@@ -1068,7 +1068,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp extract_failure_stage(_), do: "unknown"
 
   # Normalize error reason into a concise diagnostic string.
-  defp normalize_failure_reason({:file_findings, {:post_failed, adapter_error, _salvage}}) do
+  defp normalize_failure_reason({_stage, {:post_failed, adapter_error, _salvage}}) do
     format_error(adapter_error)
   end
 

@@ -1373,7 +1373,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert :counters.get(review_counter, 1) == 1
 
       [rec] = records_for(ws.id, "octo/widget#42")
-      assert rec.status == :failed
+      assert rec.status == :completed_unposted
       assert rec.failure_stage == "verdict"
     end
   end
@@ -1773,6 +1773,127 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
   # A check runner that always reports one finding (so a request_changes verdict
   # posts a comment + a review, matching the real review path).
+  # bd-ats4ds: GitHub 422s the verdict submission (`POST .../reviews`). The
+  # review must retry once with every finding in the body, and — when posting
+  # still fails — keep the findings and verdict on the record with GitHub's
+  # error detail.
+  describe "review/1 — verdict post 422 (bd-ats4ds)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    defp stub_forge_review_post(head_sha, review_post_fun) do
+      calls = :counters.new(1, [])
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+        json = &Plug.Conn.put_resp_header(&1, "content-type", "application/json")
+
+        cond do
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+            conn
+            |> json.()
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "number" => 42,
+                "state" => "open",
+                "head" => %{"sha" => head_sha},
+                "html_url" => "https://github.com/octo/widget/pull/42"
+              })
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> json.() |> Plug.Conn.resp(200, "[]")
+
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+            conn |> json.() |> Plug.Conn.resp(201, Jason.encode!(%{"id" => 1}))
+
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            :counters.add(calls, 1, 1)
+            send(test_pid, {:review_post, Jason.decode!(raw)})
+            review_post_fun.(json.(conn), :counters.get(calls, 1))
+
+          true ->
+            conn
+            |> json.()
+            |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{path}"}))
+        end
+      end)
+    end
+
+    defp unprocessable(conn) do
+      Plug.Conn.resp(
+        conn,
+        422,
+        Jason.encode!(%{
+          "message" => "Unprocessable Entity",
+          "errors" => ["Line could not be resolved"]
+        })
+      )
+    end
+
+    test "a 422 on the verdict is retried once with every finding in the body" do
+      ws = github_ws("er-verdict422-1")
+
+      stub_forge_review_post("sha-v422-1", fn conn, n ->
+        if n == 1,
+          do: unprocessable(conn),
+          else: Plug.Conn.resp(conn, 200, Jason.encode!(%{"id" => 9}))
+      end)
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      assert_received {:review_post, %{"body" => first}}
+      refute first =~ "x.ex:1"
+      assert_received {:review_post, %{"body" => retry}}
+      assert retry =~ "x.ex:1"
+      assert retry =~ "boom"
+    end
+
+    test "when posting still fails the record keeps findings, verdict and GitHub's detail" do
+      ws = github_ws("er-verdict422-2")
+      stub_forge_review_post("sha-v422-2", fn conn, _n -> unprocessable(conn) end)
+
+      assert {:error, _reason} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert rec.status == :completed_unposted
+      assert rec.verdict == :request_changes
+      assert rec.finding_count == 1
+      assert String.contains?(rec.findings_summary || "", "x.ex")
+      assert rec.failure_stage == "verdict"
+      assert rec.failure_reason =~ "Unprocessable Entity"
+      assert rec.failure_reason =~ "Line could not be resolved"
+    end
+  end
+
   defp one_finding do
     fn _diff, _state ->
       {:ok, [%{severity: :error, file: "x.ex", line: 1, message: "boom"}]}
