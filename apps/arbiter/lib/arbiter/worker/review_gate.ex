@@ -372,6 +372,22 @@ defmodule Arbiter.Worker.ReviewGate do
     :model_unavailable
   ]
 
+  # bd-7ud35b: stop categories that mean the reviewer CLI died before it
+  # reviewed anything (an unknown model, an exec/argv failure, a container that
+  # never came up). The same workload on a DIFFERENT provider can still be
+  # reviewed, and the dead pass is not a review round.
+  @spawn_failure_categories [
+    :spawn_exec_failed,
+    :container_create_failed,
+    :spawn_failed,
+    :model_unavailable
+  ]
+
+  # bd-7ud35b: a non-zero exit with no recognised signature (`:crashed`) is
+  # still a startup crash when all it left behind is a short error banner. A
+  # reviewer that actually read the diff writes far more than this.
+  @spawn_failure_max_output_lines 5
+
   # bd-2yt0d2: what a fix round restarted after a server stop is told, ahead of the
   # ordinary revise prompt.
   @restart_revise_note """
@@ -3139,43 +3155,53 @@ defmodule Arbiter.Worker.ReviewGate do
         {:reprompt, %{state | denial_pending: false, denial_defers: state.denial_defers + 1}}
 
       :no_verdict ->
-        case classify_stop(status, state.lines) do
-          # bd-3hb4ih: a print-timeout is the one infra failure a DIFFERENT
-          # provider can still answer — the wall belongs to the CLI, not to the
-          # account or the gateway. Rotate through `review_agent.type` before
-          # conceding. Must precede the generic infra arm below, which parks.
-          %StopReason{category: :agent_print_timeout} = reason ->
-            handle_reviewer_print_timeout(state, reason)
+        reason = classify_stop(status, state.lines)
 
-          %StopReason{category: category} = reason when category in @infra_failure_categories ->
-            Logger.warning(
-              "ReviewGate: reviewer for task=#{state.task_id} died of an infrastructure " <>
-                "failure (#{category}); escalating without a re-prompt"
-            )
-
-            {:done,
-             finish(
-               state,
-               {:parked, :reviewer_failed, infra_failure_message(reason)}
-             )}
-
-          _ ->
-            # bd-869mmg round 2/3: carry the run id and scanned line counts this
-            # pass already resolved forward onto state (both as the "latest scan"
-            # and appended to the running history of every pass's scan), so a
-            # final `:no_verdict` escalation (after the re-prompt budget is spent)
-            # can both report the counts it saw and re-check every EARLIER pass's
-            # durable transcript before conceding (see `recover_verdict_from_scans/1`).
-            scan = verdict_scan_info(lines, run_id)
-
-            maybe_reprompt(
-              %{state | verdict_scan: scan, verdict_scans: [scan | state.verdict_scans]},
-              :no_verdict
-            )
-        end
+        if reviewer_spawn_failure?(status, state.lines, reason),
+          do: handle_reviewer_spawn_failure(state, reason),
+          else: finish_no_verdict(state, reason, lines, run_id)
 
       verdict ->
         dispatch_verdict(state, verdict)
+    end
+  end
+
+  # A pass that ended with no verdict and did not die at spawn. `reason` is the
+  # exit's `StopReason` (nil when it carries no known signature).
+  defp finish_no_verdict(state, reason, lines, run_id) do
+    case reason do
+      # bd-3hb4ih: a print-timeout is the one infra failure a DIFFERENT
+      # provider can still answer — the wall belongs to the CLI, not to the
+      # account or the gateway. Rotate through `review_agent.type` before
+      # conceding. Must precede the generic infra arm below, which parks.
+      %StopReason{category: :agent_print_timeout} = reason ->
+        handle_reviewer_print_timeout(state, reason)
+
+      %StopReason{category: category} = reason when category in @infra_failure_categories ->
+        Logger.warning(
+          "ReviewGate: reviewer for task=#{state.task_id} died of an infrastructure " <>
+            "failure (#{category}); escalating without a re-prompt"
+        )
+
+        {:done,
+         finish(
+           state,
+           {:parked, :reviewer_failed, infra_failure_message(reason)}
+         )}
+
+      _ ->
+        # bd-869mmg round 2/3: carry the run id and scanned line counts this
+        # pass already resolved forward onto state (both as the "latest scan"
+        # and appended to the running history of every pass's scan), so a
+        # final `:no_verdict` escalation (after the re-prompt budget is spent)
+        # can both report the counts it saw and re-check every EARLIER pass's
+        # durable transcript before conceding (see `recover_verdict_from_scans/1`).
+        scan = verdict_scan_info(lines, run_id)
+
+        maybe_reprompt(
+          %{state | verdict_scan: scan, verdict_scans: [scan | state.verdict_scans]},
+          :no_verdict
+        )
     end
   end
 
@@ -4489,6 +4515,150 @@ defmodule Arbiter.Worker.ReviewGate do
     "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end
 
+  # ---- reviewer spawn failure (bd-7ud35b) ----------------------------------
+
+  # Did the reviewer die before it reviewed anything? A non-zero exit with no
+  # verdict, where either the stop classifies as a spawn-time category (unknown
+  # model, exec/argv failure, no container) or it is an unrecognised crash that
+  # left only a short error banner. That is a property of the provider/model
+  # config, not of the diff: re-prompting the same CLI sends it the same dead
+  # argv, and counting it as an inconclusive round parks a PR no reviewer ever
+  # saw. A reviewer that read the diff and then fell over writes more than the
+  # banner, and keeps its existing handling.
+  defp reviewer_spawn_failure?(status, lines, reason)
+       when is_integer(status) and status != 0 do
+    case reason do
+      %StopReason{category: category} when category in @spawn_failure_categories ->
+        true
+
+      %StopReason{category: :crashed} ->
+        length(output_lines(lines)) <= @spawn_failure_max_output_lines
+
+      _ ->
+        false
+    end
+  end
+
+  defp reviewer_spawn_failure?(_status, _lines, _reason), do: false
+
+  defp output_lines(lines), do: Enum.reject(lines, &(String.trim(&1) == ""))
+
+  # Record the failed provider and retry the SAME pass on another one, exactly as
+  # a print-timeout does (`rotate_reviewer/5`): the round, the round cap and the
+  # verdict re-prompt budget are untouched, and no round row is written — a
+  # reviewer that never started is not a review. Nothing here can approve: the
+  # only way out is a rotated reviewer's own verdict, or an escalation.
+  defp handle_reviewer_spawn_failure(state, %StopReason{} = reason) do
+    pool = reviewer_pool(state)
+    state = record_reviewer_spawn_failure(state, reason)
+
+    Logger.warning(
+      "ReviewGate: reviewer #{provider_label(reviewer_provider_for(state))} for " <>
+        "task=#{state.task_id} failed to spawn (exit #{reason.exit_status}): " <>
+        spawn_error_text(state, reason)
+    )
+
+    if length(pool) < 2 do
+      {:done, escalate_spawn_failure(state)}
+    else
+      case next_reviewer(state, pool) do
+        {nil, _selection} -> {:done, escalate_spawn_failure(state)}
+        {next, selection} -> rotate_reviewer(state, next, pool, selection, :spawn_failure)
+      end
+    end
+  end
+
+  # Entries share `reviewer_timeouts` with the print-timeout rotation: both mean
+  # "this provider cannot answer this round", and `next_reviewer/2` already
+  # subtracts that list.
+  defp record_reviewer_spawn_failure(state, %StopReason{} = reason) do
+    entry = %{
+      kind: :spawn_failure,
+      provider: reviewer_provider_for(state),
+      model: reviewer_model_label(state),
+      round: state.round,
+      pass_id: state.current_id,
+      summary: spawn_error_text(state, reason)
+    }
+
+    %{state | reviewer_timeouts: state.reviewer_timeouts ++ [entry]}
+  end
+
+  defp spawn_failures_only?(%{reviewer_timeouts: [_ | _] = entries}),
+    do: Enum.all?(entries, &(Map.get(&1, :kind) == :spawn_failure))
+
+  defp spawn_failures_only?(_state), do: false
+
+  # What the reviewer said when it died: the first captured lines, oldest first
+  # (the banner), falling back to the classifier's summary.
+  defp spawn_error_text(state, %StopReason{} = reason) do
+    case state.lines |> Enum.reverse() |> output_lines() |> Enum.take(3) do
+      [] -> reason.summary
+      banner -> banner |> Enum.map_join(" | ", &String.trim/1) |> String.slice(0, 300)
+    end
+  end
+
+  defp reviewer_model_label(state) do
+    with %Workspace{} = ws <- load_workspace(state.workspace_id),
+         provider when not is_nil(provider) <- reviewer_provider_for(state),
+         model when is_binary(model) and model != "" <-
+           reviewer_model(state, ws, Atom.to_string(provider)) do
+      model
+    else
+      _ -> "unknown"
+    end
+  rescue
+    _ -> "unknown"
+  end
+
+  # Every eligible provider failed to spawn. Page the coordinator ONCE, as a
+  # reviewer failure (never an inconclusive verdict: no reviewer said anything),
+  # naming each provider/model and its error.
+  defp escalate_spawn_failure(state) do
+    finish(state, {:parked, :reviewer_failed, spawn_failure_message(state)})
+  end
+
+  defp spawn_failure_message(%{reviewer_timeouts: entries}) do
+    roster =
+      Enum.map_join(entries, "\n", fn entry ->
+        "reviewer failed to spawn: #{provider_label(entry.provider)}/#{entry.model}: " <>
+          "#{entry.summary} (pass #{entry.pass_id || "unknown"})"
+      end)
+
+    tried =
+      if length(entries) > 1,
+        do: "every eligible reviewer provider was tried once",
+        else: "no other eligible reviewer provider was available"
+
+    """
+    #{roster}
+
+    The reviewer never started, so no review of this diff happened and nothing was
+    approved. This is a reviewer configuration failure, not a finding about the code:
+    #{tried}. Fix the reviewer model/provider config (for example a stale tier model
+    under `review_agent`) and re-run the review.
+    """
+    |> String.trim()
+  end
+
+  defp spawn_rotation_note(state, prior, next, pool) do
+    entry = List.last(state.reviewer_timeouts)
+
+    """
+    The round #{state.round} reviewer pass on `#{provider_label(prior)}` exited before producing
+    any review output: #{provider_label(entry.provider)}/#{entry.model}: #{entry.summary}
+
+    That is a reviewer spawn failure, not an inconclusive review. The gate is retrying
+    the SAME pass on the next eligible provider: `#{provider_label(next)}`.
+
+    Reviewer pool (configured order): #{Enum.map_join(pool, ", ", &provider_label/1)}
+    Already failed this round: #{tried_label(state)}
+
+    No round was consumed and no verdict re-prompt was spent.
+    """
+    |> String.trim()
+  end
+
   # ---- reviewer print-timeout rotation (bd-3hb4ih) -----------------------
 
   # A reviewer pass ended as `:agent_print_timeout` — the reviewer CLI's OWN
@@ -4526,7 +4696,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
       case next_reviewer(state, pool) do
         {nil, _selection} -> {:done, escalate_pool_exhausted(state, pool)}
-        {next, selection} -> rotate_reviewer(state, next, pool, selection)
+        {next, selection} -> rotate_reviewer(state, next, pool, selection, :timeout)
       end
     end
   end
@@ -4666,24 +4836,12 @@ defmodule Arbiter.Worker.ReviewGate do
   # verdict re-prompt budget are all untouched, and the pass is handed the
   # IDENTICAL prompt (`state.current_prompt`) so the rotated reviewer judges the
   # same diff the timed-out one was asked about.
-  defp rotate_reviewer(state, next, pool, selection) when is_binary(state.current_prompt) do
+  defp rotate_reviewer(state, next, pool, selection, kind)
+       when is_binary(state.current_prompt) do
     stop_worker(state)
 
     prior = reviewer_provider_for(state)
-    note = rotation_note(state, prior, next, pool)
-
-    # Queryable evidence of the rotation, attributed to the provider that timed
-    # out — recorded BEFORE the pin moves, so `record_round/5` reads `prior`.
-    record_round(state, :review, :timed_out, note, converged: false)
-
-    state =
-      record_thread(
-        state,
-        :system,
-        "Round #{state.round} reviewer (#{provider_label(prior)}) timed out — " <>
-          "rotating to #{provider_label(next)}",
-        note
-      )
+    state = record_rotation(state, kind, prior, next, pool)
 
     rotated = %{
       state
@@ -4696,8 +4854,8 @@ defmodule Arbiter.Worker.ReviewGate do
     case launch_worker(rotated, id, :reviewer, state.current_prompt, state.command) do
       {:ok, rotated} ->
         Logger.warning(
-          "ReviewGate: reviewer #{provider_label(prior)} for task=#{state.task_id} hit its own " <>
-            "print-timeout on round #{state.round}; rotating to #{provider_label(next)} " <>
+          "ReviewGate: reviewer #{provider_label(prior)} for task=#{state.task_id} " <>
+            "#{rotation_cause(kind)} on round #{state.round}; rotating to #{provider_label(next)} " <>
             "(pool #{Enum.map_join(pool, ",", &provider_label/1)})"
         )
 
@@ -4715,7 +4873,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # No prompt to replay (nothing has been launched yet) — there is no "same
   # diff" to hand a second provider, so concede rather than invent one.
-  defp rotate_reviewer(state, _next, pool, _selection),
+  defp rotate_reviewer(state, _next, pool, _selection, _kind),
     do: {:done, escalate_pool_exhausted(state, pool)}
 
   # Every provider in the pool has hit its own print-timeout on this round.
@@ -4725,6 +4883,42 @@ defmodule Arbiter.Worker.ReviewGate do
   # inconclusive/no-verdict verdict: no reviewer said anything, so there is
   # nothing for an implementer to fix and a re-dispatch would time out again.
   defp escalate_pool_exhausted(state, pool) do
+    if spawn_failures_only?(state),
+      do: escalate_spawn_failure(state),
+      else: escalate_timeout_pool(state, pool)
+  end
+
+  # What a rotation leaves on record. A timeout is a `:timed_out` round row
+  # attributed to the provider that timed out (recorded BEFORE the pin moves, so
+  # `record_round/5` reads `prior`); bd-7ud35b: a spawn failure writes no round
+  # row at all, since a reviewer that never started is not a review.
+  defp record_rotation(state, :timeout, prior, next, pool) do
+    note = rotation_note(state, prior, next, pool)
+    record_round(state, :review, :timed_out, note, converged: false)
+
+    record_thread(
+      state,
+      :system,
+      "Round #{state.round} reviewer (#{provider_label(prior)}) timed out — " <>
+        "rotating to #{provider_label(next)}",
+      note
+    )
+  end
+
+  defp record_rotation(state, :spawn_failure, prior, next, pool) do
+    record_thread(
+      state,
+      :system,
+      "Round #{state.round} reviewer (#{provider_label(prior)}) failed to spawn — " <>
+        "retrying on #{provider_label(next)}",
+      spawn_rotation_note(state, prior, next, pool)
+    )
+  end
+
+  defp rotation_cause(:timeout), do: "hit its own print-timeout"
+  defp rotation_cause(:spawn_failure), do: "failed to spawn"
+
+  defp escalate_timeout_pool(state, pool) do
     msg = pool_exhausted_message(state, pool)
     payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
 

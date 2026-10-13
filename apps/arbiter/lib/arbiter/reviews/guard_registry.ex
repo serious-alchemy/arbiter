@@ -302,7 +302,10 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {ReviewGate, :handle_reviewer_print_timeout, 2},
-        {ReviewGate, :escalate_pool_exhausted, 2}
+        {ReviewGate, :handle_reviewer_spawn_failure, 2},
+        {ReviewGate, :escalate_pool_exhausted, 2},
+        {ReviewGate, :escalate_timeout_pool, 2},
+        {ReviewGate, :escalate_spawn_failure, 1}
       ],
       anchors: ["review_agent", "reviewer_timeouts", "next_reviewer_provider"],
       summary:
@@ -315,7 +318,11 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "rotation refuses outright once as many timeouts are recorded as the pool " <>
           "has entries. A pool of one never rotates and keeps G3/G4's terminal " <>
           "unchanged. The list resets per ROUND: a new round reviews a different " <>
-          "diff, so a provider that timed out on the previous one starts even again."
+          "diff, so a provider that timed out on the previous one starts even again. " <>
+          "bd-7ud35b: a reviewer that dies at startup (no output, non-zero exit) shares " <>
+          "the same list and bound as a spawn failure — it consumes no round, and once " <>
+          "every entry has failed to spawn the gate parks `:reviewer_failed`, never " <>
+          "an inconclusive verdict."
     },
     %{
       id: :empty_net_diff_approval,

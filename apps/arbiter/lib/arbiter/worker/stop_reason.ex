@@ -474,6 +474,7 @@ defmodule Arbiter.Worker.StopReason do
   @model_unavailable_signature ~r/
       the[ ]['`"]?(?<a>[\w.:\/-]+)['`"]?[ ]model[ ]is[ ]not[ ]supported[ ]when[ ]using[ ]codex
     | the[ ]model[ ]['`"]?(?<b>[\w.:\/-]+)['`"]?[ ]does[ ]not[ ]exist[ ]or[ ]you[ ]do[ ]not[ ]have[ ]access
+    | invalid[ ]model[ ]selection:?[ ]*['`"]?(?<c>[\w.:\/-]*)
   /ix
 
   # bd-1xss5z: agy's own fixed wording when its `--print-timeout` fires
@@ -664,8 +665,9 @@ defmodule Arbiter.Worker.StopReason do
           summary: "the account cannot use model #{model} (rejected before any work)",
           remediation:
             "Re-dispatching repeats the rejection. Point the workspace's Codex " <>
-              "`tier_models` (agent.config.codex.tier_models) or the requested --model at a " <>
-              "model this account's ~/.codex/models_cache.json lists and its plan can call.",
+              "`tier_models` (agent.config.codex.tier_models; the agy/gemini tier models for " <>
+              "an \"invalid model selection\") or the requested --model at a model this " <>
+              "account's CLI lists and its plan can call.",
           exit_status: exit_status,
           signal: signal
         }
@@ -1376,7 +1378,7 @@ defmodule Arbiter.Worker.StopReason do
 
   defp unavailable_model(haystack) do
     case Regex.named_captures(@model_unavailable_signature, haystack) do
-      %{"a" => a, "b" => b} -> if a == "", do: b, else: a
+      %{"a" => a, "b" => b, "c" => c} -> Enum.find([a, b, c], "(unknown)", &(&1 != ""))
       _ -> "(unknown)"
     end
   end
