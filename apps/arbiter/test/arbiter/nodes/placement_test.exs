@@ -474,4 +474,31 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:ok, {:node, %{name: "plain"}}} = place(%{mode: :remote_only}, [row("plain")])
     end
   end
+
+  # DC8 (design provider-dynamic-concurrency §4.4): the scheduler walk planned the
+  # run on a node, and dispatch prefers it while it is still a candidate.
+  describe "place/2 with a planned node (prefer:)" do
+    test "the planned node goes first, over a less loaded one" do
+      rows = [row("a"), row("b", live: 1)]
+
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, rows)
+      Placement.release("bd-place1")
+
+      assert {:ok, {:node, %{name: "b"}}} = place(%{}, rows, prefer: "node-b")
+    end
+
+    test "a planned node that has filled since is passed over for the usual rank" do
+      rows = [row("a"), row("b", live: 2)]
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, rows, prefer: "node-b")
+    end
+
+    test "a planned node the run may not use is never forced" do
+      rows = [row("a"), row("b", workspace_ids: ["another-ws"])]
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, rows, prefer: "node-b")
+    end
+
+    test "a plan for the primary changes nothing: placement ranks as it always does" do
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, [row("a")], prefer: "local")
+    end
+  end
 end

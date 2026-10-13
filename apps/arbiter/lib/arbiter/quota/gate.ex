@@ -1261,6 +1261,12 @@ defmodule Arbiter.Quota.Gate do
     * `:now` — the `DateTime` the check is evaluated at (default
       `DateTime.utc_now/0`). Drives both the paced thresholds' `elapsed` and
       the staleness checks, so a pinned clock gives a deterministic answer.
+    * `:pace` — `false` keeps only the hard rules (1, 2 and 5, as
+      `hard_stop/3` does) and drops the utilization rules (3 and 4), paced or
+      flat. Under `scheduler_admission: enforce` every dispatch asks the gate
+      this way (DC8, `docs/design/provider-dynamic-concurrency.md` §4.5): the
+      line is the provider budget's question, answered by the seat check.
+      Default `true`, the gate as it always was.
   """
   @spec gating_window(quota_source(), policy(), keyword()) :: binding_window() | nil
   def gating_window(quota, policy, opts) do
@@ -1275,7 +1281,8 @@ defmodule Arbiter.Quota.Gate do
           snapshot,
           merge_account(policy, Keyword.get(opts, :account)),
           now,
-          Keyword.get(opts, :priority)
+          Keyword.get(opts, :priority),
+          Keyword.get(opts, :pace, true) != false
         )
     end
   end
@@ -1288,7 +1295,9 @@ defmodule Arbiter.Quota.Gate do
   defp merge_account(%ProviderAccount{}, account), do: {account, nil}
   defp merge_account(workspace, account), do: {account, workspace}
 
-  defp binding(%Snapshot{} = s, policy, now, priority) do
+  # `pace?` false (DC8's `pace: false`) leaves the utilization rules out: what
+  # is left is `hard_stop/3`'s status rules, in the same order and trust.
+  defp binding(%Snapshot{} = s, policy, now, priority, pace?) do
     pace_opts = [now: now, priority: priority]
     primary? = not snapshot_stale?(s, now)
     long? = not snapshot_long_stale?(s, now)
@@ -1296,8 +1305,8 @@ defmodule Arbiter.Quota.Gate do
     [
       {primary?, &primary_status_binding/3},
       {long?, &secondary_status_binding/3},
-      {primary?, &primary_utilization_binding/3},
-      {long?, &secondary_utilization_binding/3},
+      {primary? and pace?, &primary_utilization_binding/3},
+      {long? and pace?, &secondary_utilization_binding/3},
       {long?, &secondary_warning_binding/3}
     ]
     |> Enum.filter(fn {trusted?, _rule} -> trusted? end)

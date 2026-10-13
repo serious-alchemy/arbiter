@@ -57,11 +57,28 @@ defmodule Arbiter.Accounts.Admission do
 
   Like every other read of the ceiling, an unreadable count fails **open**: a
   bug here must not stop the fleet.
+
+  ## Under `scheduler_admission: enforce` (DC8)
+
+  For an account whose effective mode is `enforce` (`Arbiter.Accounts.AdmissionMode`,
+  or the caller's `:mode`), the slot rule above becomes the pool's **seat
+  check** (`Arbiter.Accounts.SeatCheck`, design `provider-dynamic-concurrency.md`
+  §4.4): the seats on the dispatch's pool must be below `min(budget,
+  max_concurrent, share)`. The pool is the planned one (`:pool`, which
+  `Dispatch` takes from the scheduler walk's planned pair or the routing
+  decision), else the model's, else the account's lowest budget (§3.1). The
+  lock, the spend cap ahead of it, the reservation (now seated on that pool),
+  `force` and its `account_cap_override` record, and the
+  `{:account_at_capacity, info}` refusal are unchanged; the refusal's `info`
+  also carries the pool and the seat check behind it (`:seat`). Under `legacy`
+  and `shadow` nothing here reads a budget or a seat.
   """
 
+  alias Arbiter.Accounts.AdmissionMode
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Accounts.SeatCheck
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Quota.SpendCap
@@ -71,12 +88,17 @@ defmodule Arbiter.Accounts.Admission do
 
   @registry __MODULE__.Registry
 
-  @typedoc "What a refusal or an override knows about the account."
+  @typedoc """
+  What a refusal or an override knows about the account. Under `enforce` it
+  also names the `pool` and carries the `seat` check (`SeatCheck.info/0`).
+  """
   @type info :: %{
-          task_id: String.t(),
-          account: String.t(),
-          cap: non_neg_integer(),
-          holders: [String.t()]
+          required(:task_id) => String.t(),
+          required(:account) => String.t(),
+          required(:cap) => non_neg_integer(),
+          required(:holders) => [String.t()],
+          optional(:pool) => String.t() | nil,
+          optional(:seat) => SeatCheck.info()
         }
 
   @type result ::
@@ -104,7 +126,10 @@ defmodule Arbiter.Accounts.Admission do
 
   Options: `:force`, `:actor` (named in the override event), and `:account` —
   a `ProviderAccount` (or `nil`) the caller already resolved, e.g. the one a
-  routing decision picked.
+  routing decision picked. `:mode` is the account's `scheduler_admission` mode
+  (read from the account and the installation when absent); under `:enforce`,
+  `:pool` names the pool to seat on and `:seat_opts` are
+  `Arbiter.Accounts.SeatCheck.check/2`'s seams (see the moduledoc).
 
   A ticket's provider constraint (`Arbiter.Agents.ProviderConstraint`,
   bd-13pqcp) is checked before anything is counted or reserved: an account on
@@ -182,6 +207,14 @@ defmodule Arbiter.Accounts.Admission do
   one source of truth for MCP, the REST API (and so the CLI), and the dashboard.
   """
   @spec refusal_message(info()) :: String.t()
+  def refusal_message(%{task_id: task_id, account: account, seat: %{} = seat}) do
+    "provider account #{account} has no free seat to dispatch #{task_id}: " <>
+      "#{SeatCheck.describe(seat)}#{seat_holders(seat.holders)}. " <>
+      "Wait for a seat to free — Autopilot dispatches Ready tickets as seats free — " <>
+      "or dispatch over the cap (`arb dispatch --over-cap`, MCP `over_cap: true`); " <>
+      "the override is recorded."
+  end
+
   def refusal_message(%{task_id: task_id, account: account, cap: cap, holders: holders}) do
     "provider account #{account} has no free slot to dispatch #{task_id}: its cap is " <>
       "#{cap} (max_concurrent, or this workspace's share) and #{held_by(holders)}. " <>
@@ -192,6 +225,9 @@ defmodule Arbiter.Accounts.Admission do
 
   defp held_by([]), do: "nothing holds a slot (the cap itself is 0)"
   defp held_by(holders), do: "#{length(holders)} held by #{Enum.join(holders, ", ")}"
+
+  defp seat_holders([]), do: ""
+  defp seat_holders(holders), do: ", held by #{Enum.join(holders, ", ")}"
 
   # ---- internals ------------------------------------------------------------
 
@@ -207,8 +243,16 @@ defmodule Arbiter.Accounts.Admission do
 
   defp decide(%Issue{} = task, account, provider, opts) do
     with :ok <- spend_check(task, account, opts) do
-      decide_slot(task, account, provider, opts)
+      if enforced?(account, opts),
+        do: decide_seat(task, account, provider, opts),
+        else: decide_slot(task, account, provider, opts)
     end
+  end
+
+  # The caller's `:mode` (`Dispatch` passes the routed account's), else the
+  # account's own effective mode.
+  defp enforced?(account, opts) do
+    Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce
   end
 
   # A capped account reserves even with no slot ceiling, so the next admission
@@ -249,6 +293,54 @@ defmodule Arbiter.Accounts.Admission do
     end
   end
 
+  # DC8: under `enforce`, the pool's seats against `min(budget, max_concurrent,
+  # share)`. The reservation seats on the pool that was checked, so the next
+  # admission in a burst counts it there.
+  defp decide_seat(%Issue{} = task, account, provider, opts) do
+    seat_opts =
+      Keyword.merge(
+        [
+          workspace_id: task.workspace_id,
+          pool: Keyword.get(opts, :pool) || model_pool(provider, Keyword.get(opts, :model)),
+          priority: task.priority,
+          exclude_task: task.id
+        ],
+        Keyword.get(opts, :seat_opts, [])
+      )
+
+    case SeatCheck.check(account, seat_opts) do
+      {:ok, seat} ->
+        reserve(task, account, provider, Keyword.put(opts, :pool, seat.pool))
+        {:ok, :admitted}
+
+      {:full, seat} ->
+        info = seat_info(task, seat)
+
+        if Keyword.get(opts, :force) == true do
+          reserve(task, account, provider, Keyword.put(opts, :pool, seat.pool))
+          record_override(task, info, opts)
+          {:ok, :forced}
+        else
+          {:error, {:account_at_capacity, info}}
+        end
+    end
+  end
+
+  # Only an explicit model names one of agy's two pools; without one the seat
+  # check takes the account's lowest budget (§3.1).
+  defp model_pool(_provider, nil), do: nil
+  defp model_pool(provider, model), do: pool(provider, model)
+
+  defp seat_info(%Issue{id: id}, seat),
+    do: %{
+      task_id: id,
+      account: seat.account,
+      cap: seat.limit,
+      holders: seat.holders,
+      pool: seat.pool,
+      seat: seat
+    }
+
   # A second concurrent dispatch of the same task finds the key taken: the
   # first holds the slot, and only one of the two can start a worker.
   defp reserve(%Issue{id: id, workspace_id: ws_id}, %ProviderAccount{} = account, provider, opts) do
@@ -256,7 +348,7 @@ defmodule Arbiter.Accounts.Admission do
       workspace_id: ws_id,
       provider: code(provider),
       account_id: account.id,
-      pool: pool(provider, Keyword.get(opts, :model))
+      pool: Keyword.get(opts, :pool) || pool(provider, Keyword.get(opts, :model))
     }
 
     case Registry.register(@registry, id, value) do

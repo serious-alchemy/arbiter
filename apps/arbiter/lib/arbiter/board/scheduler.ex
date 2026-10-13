@@ -80,9 +80,10 @@ defmodule Arbiter.Board.Scheduler do
   Handed a `:walk` (`t:walk/0`), `plan/1` answers the same question the other
   way: by capacity, not by one board-wide slot count. Without `:walk` the plan
   is exactly the head-of-line plan above, byte for byte (I1); the walk only
-  runs where `Arbiter.Board.Snapshot` was asked for it, and until DC8 nothing
-  dispatches by it (`scheduler_admission: shadow` records it beside every
-  dispatch, `Arbiter.Board.AdmissionShadow`).
+  runs where `Arbiter.Board.Snapshot` was asked for it. Under
+  `scheduler_admission: shadow` it is recorded beside every dispatch
+  (`Arbiter.Board.AdmissionShadow`); under `enforce` (DC8) `Arbiter.Board.Autopilot`
+  dispatches its placements.
 
     1. **Capacity sets first (§4.1).** A pool is open while its seats plus this
        walk's placements are below its budget (or its exempt budget); a machine

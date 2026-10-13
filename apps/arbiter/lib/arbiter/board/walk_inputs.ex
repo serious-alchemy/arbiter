@@ -7,8 +7,9 @@ defmodule Arbiter.Board.WalkInputs do
 
   `Arbiter.Board.Snapshot.load/1` reads this only when `scheduler_admission`
   is `shadow` or `enforce`. Under `legacy` nothing here runs, so no admission
-  path reads a budget or a seat (I1). Until DC8 the walk it feeds decides no
-  dispatch: `Arbiter.Board.AdmissionShadow` records it beside today's.
+  path reads a budget or a seat (I1). Under `shadow` the walk it feeds decides
+  no dispatch: `Arbiter.Board.AdmissionShadow` records it beside today's. Under
+  `enforce` (DC8) its placements are what `Arbiter.Board.Autopilot` dispatches.
 
   ## The capacity sets
 
@@ -47,7 +48,9 @@ defmodule Arbiter.Board.WalkInputs do
       lowest budget (§3.1).
     * **The budget that binds the card there** — a policy workspace's budget
       when the card's workspace has one, and the exempt budget when the card's
-      own priority is pace-exempt on the account (R7).
+      own priority is pace-exempt on the account (R7), capped by the
+      workspace link's `share`: the same `min(budget, max_concurrent, share)`
+      admission holds it to under `enforce` (DC8, `Arbiter.Accounts.SeatCheck`).
     * **Its machines** — `node_groups/4`: the primary only, unless placement
       may send the run to a node (`Arbiter.Nodes.Placement.eligible/1`: a
       podman-backed Claude implementer with a private clone, in a workspace
@@ -63,7 +66,7 @@ defmodule Arbiter.Board.WalkInputs do
       workspace with no cap reads and counts nothing; the walk reads an unnamed
       repo as unbounded.
 
-  Options (all seams): `:budgets`, `:seats`, `:holders`, `:weights`, `:accounts`, `:local`
+  Options (all seams): `:budgets`, `:seats`, `:holders`, `:weights`, `:shares`, `:accounts`, `:local`
   (`%{cap:, used:}`), `:nodes` (overview rows), `:remote_available?`,
   `:repo_counts` (`%{{workspace_id, repo} => runs}`, or a function returning
   it), `:routing_opts` (forwarded to `availability/3`).
@@ -125,6 +128,7 @@ defmodule Arbiter.Board.WalkInputs do
       workspaces: workspaces,
       default: default,
       links: links,
+      shares: Keyword.get_lazy(opts, :shares, fn -> read_shares(Map.keys(workspaces)) end),
       budgets: Map.new(budgets, &{{&1.account, &1.pool, &1.policy_workspace}, &1}),
       remote: remote,
       routing_opts: Keyword.get(opts, :routing_opts, [])
@@ -507,25 +511,33 @@ defmodule Arbiter.Board.WalkInputs do
   end
 
   # The budget that binds this card on the pool, when it is not the pool's own:
-  # its workspace's policy variant, or the exempt budget for an exempt card.
+  # its workspace's policy variant, or the exempt budget for an exempt card —
+  # capped by the workspace link's `share`, as admission caps it (DC8:
+  # `min(budget, max_concurrent, share)`, `Arbiter.Accounts.SeatCheck`).
   defp put_budget(candidate, account, pool, ws, issue, ctx) do
     variant = Map.get(ctx.budgets, {account.id, pool, ws.id})
     budget = variant || Map.get(ctx.budgets, {account.id, pool, nil})
 
-    cond do
-      is_nil(budget) ->
-        candidate
+    own =
+      cond do
+        is_nil(budget) -> nil
+        exempt?(account, ws, issue) and is_integer(budget.exempt_budget) -> budget.exempt_budget
+        variant != nil -> budget.budget
+        true -> nil
+      end
 
-      exempt?(account, ws, issue) and is_integer(budget.exempt_budget) ->
-        Map.put(candidate, :budget, budget.exempt_budget)
-
-      variant != nil ->
-        Map.put(candidate, :budget, budget.budget)
-
-      true ->
-        candidate
+    case shared(own, budget, Map.get(ctx.shares, {ws.id, account.id})) do
+      nil -> candidate
+      n -> Map.put(candidate, :budget, n)
     end
   end
+
+  defp shared(own, _budget, nil), do: own
+  defp shared(_own, nil, _share), do: nil
+  defp shared(nil, %Budget{budget: :unlimited}, share), do: share
+  defp shared(nil, %Budget{budget: pool_budget}, share), do: min(pool_budget, share)
+  defp shared(:unlimited, _budget, share), do: share
+  defp shared(own, _budget, share), do: min(own, share)
 
   defp exempt?(account, ws, %{priority: priority}) when is_integer(priority),
     do: Gate.pace_exempt?({account, ws}, priority)
@@ -594,6 +606,19 @@ defmodule Arbiter.Board.WalkInputs do
   end
 
   # ---- reads ----------------------------------------------------------------
+
+  # `{workspace_id, account_id} => share` for every link of these workspaces
+  # that sets one; one read. An unreadable table caps nothing.
+  defp read_shares([]), do: %{}
+
+  defp read_shares(workspace_ids) do
+    WorkspaceProviderAccount
+    |> Ash.Query.filter(workspace_id in ^workspace_ids and not is_nil(share))
+    |> Ash.read!()
+    |> Map.new(&{{&1.workspace_id, &1.provider_account_id}, &1.share})
+  rescue
+    _ -> %{}
+  end
 
   defp read_accounts do
     ProviderAccount |> Ash.Query.filter(is_nil(deleted_at)) |> Ash.read!()

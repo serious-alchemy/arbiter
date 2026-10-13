@@ -93,8 +93,9 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Admission mode (provider-dynamic-concurrency §10): legacy (null; today's plan, gate " <>
           "and caps), shadow (dispatch unchanged; the scheduler walk's decision is recorded " <>
-          "beside every dispatch and hold change) or enforce (operator-only; until DC8 wires " <>
-          "it, it dispatches and records exactly as shadow). Takes effect on the next " <>
+          "beside every dispatch and hold change) or enforce (operator-only; the walk and the " <>
+          "pool budgets admit — seats < min(budget, max_concurrent, share) per pool — and " <>
+          "today's decision is recorded beside each dispatch). Takes effect on the next " <>
           "Autopilot pass.",
       operator_only_values: ["enforce"]
     },
