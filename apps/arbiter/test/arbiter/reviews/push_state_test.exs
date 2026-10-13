@@ -213,6 +213,21 @@ defmodule Arbiter.Reviews.PushStateTest do
       assert sha(repo, "origin/" <> b) == local
     end
 
+    test "pushes (and fetches) with the :env it is given, the host's scoped credential",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/x")
+      commit(repo, "a.txt")
+
+      probe = Path.join(tmp, "probe")
+      hook = Path.join(repo, ".git/hooks/pre-push")
+      File.write!(hook, "#!/bin/sh\nprintf '%s' \"${ARB_PROBE:-unset}\" > #{probe}\n")
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, :pushed, _} = PushState.ensure_pushed(repo, b, env: [{"ARB_PROBE", "scoped"}])
+      assert File.read!(probe) == "scoped"
+    end
+
     test "publishes a branch origin has never seen", %{tmp: tmp} do
       repo = init_repo(tmp)
       b = branch(repo, "feature/x")

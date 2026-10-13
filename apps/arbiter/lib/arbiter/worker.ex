@@ -4639,10 +4639,10 @@ defmodule Arbiter.Worker do
           [branch: branch] ++
             if(is_binary(start_head), do: [force_with_lease: start_head], else: [])
 
-        case Arbiter.Worker.Worktree.push(worktree, push_opts) do
-          {:ok, _} ->
-            deliver_pass(state)
-
+        with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
+             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+          deliver_pass(state)
+        else
           {:error, reason} ->
             Logger.warning(
               "Worker: host push for conflict pass failed on task=#{task_id}: #{inspect(reason)}"
@@ -5558,10 +5558,10 @@ defmodule Arbiter.Worker do
           if(is_binary(branch), do: [branch: branch], else: []) ++
           fix_pass_lease(meta)
 
-      case Arbiter.Worker.Worktree.push(worktree, push_opts) do
-        {:ok, _} ->
-          deliver_pass(state)
-
+      with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
+           {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+        deliver_pass(state)
+      else
         {:error, reason} ->
           Logger.warning(
             "Worker: git push for fix_pass failed on task=#{task_id}: #{inspect(reason)}"
@@ -9960,7 +9960,7 @@ defmodule Arbiter.Worker do
 
   defp sync_back_branch(_no_worktree, _task_id), do: :ok
 
-  defp push_for_hosted_pr(%State{meta: meta, task_id: task_id}, workspace, opts) do
+  defp push_for_hosted_pr(%State{meta: meta, task_id: task_id} = state, workspace, opts) do
     worktree = meta && Map.get(meta, :worktree_path)
 
     cond do
@@ -9986,6 +9986,7 @@ defmodule Arbiter.Worker do
         )
 
         with {:ok, push_opts} <- plan_hosted_push(worktree, task_id),
+             {:ok, push_opts} <- host_push_opts(state, workspace, push_opts),
              {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
           :ok
         else
@@ -10023,6 +10024,36 @@ defmodule Arbiter.Worker do
       end
     end
   end
+
+  # bd-bsmkfu: the host pushes a podman run's branch (its container holds no
+  # credential), and must not do it on the operator's ssh/gh credentials when the
+  # repo has a scoped one (`git_credentials.repos.<repo>`: a deploy key, token or
+  # GitHub App). `HostCredential.for_repo/3` yields that credential's env for the
+  # push (`[]` for a legacy_operator or unconfigured repo, so those push as
+  # before); a scoped credential that cannot be built refuses the push rather
+  # than falling back to the operator's. A remote-node run's branch is pushed by
+  # this same host after its `arb done`, so it goes through here too.
+  defp host_push_opts(%State{} = state, workspace, push_opts) do
+    workspace = workspace || host_push_workspace(state)
+    worktree = state.meta && Map.get(state.meta, :worktree_path)
+
+    case Arbiter.Worker.HostCredential.for_repo(workspace, state.repo, worktree_path: worktree) do
+      {:ok, credential} ->
+        {:ok, push_opts ++ [env: Arbiter.Worker.HostCredential.push_env(credential)]}
+
+      {:error, reason} ->
+        {:error, {:git_credential, Arbiter.Worker.HostCredential.format_error(reason)}}
+    end
+  end
+
+  defp host_push_workspace(%State{workspace_id: id}) when is_binary(id) do
+    case Ash.get(Arbiter.Tasks.Workspace, id) do
+      {:ok, workspace} -> workspace
+      _ -> nil
+    end
+  end
+
+  defp host_push_workspace(_state), do: nil
 
   # bd-3doy0y: a ReviewGate implementer round pushes its fix commit straight
   # to `origin/<branch>`; this worktree's local ref never sees it. If this
