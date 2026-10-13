@@ -110,6 +110,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/quota/cloud_code.ex" => :scrubbed,
+    # bd-7wx2lh: runs `agy models` via `ReleaseEnv.cmd/3` to cache the models agy serves.
+    "apps/arbiter/lib/arbiter/agents/gemini/model_catalog.ex" => :scrubbed,
     # bd-b632tz: runs the `claude` CLI to refresh the quota poller's grant.
     "apps/arbiter/lib/arbiter/quota/grant_refresher.ex" => :scrubbed,
     # bd-4f6opo: runs the `claude` CLI for the opt-in `arb loop analyze
