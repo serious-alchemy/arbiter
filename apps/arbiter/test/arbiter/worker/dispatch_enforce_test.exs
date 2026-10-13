@@ -225,7 +225,11 @@ defmodule Arbiter.Worker.DispatchEnforceTest do
                dispatch(task, seat_opts: [budgets: [budget(ctx.account, 2)]])
 
       assert %{limit: 0, pool: "claude"} = seat
-      assert Arbiter.Accounts.Admission.refusal_message(info) =~ "quota exhausted"
+      message = Arbiter.Accounts.Admission.refusal_message(info)
+      assert message =~ "quota exhausted"
+      assert message =~ "--force-quota"
+      refute message =~ "--over-cap"
+      refute message =~ "over_cap"
       refute DispatchQueue.held?(ctx.ws.id, task.id)
       assert Ash.get!(Issue, task.id).state != :active
     end

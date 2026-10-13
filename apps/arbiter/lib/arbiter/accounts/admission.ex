@@ -98,7 +98,8 @@ defmodule Arbiter.Accounts.Admission do
           required(:cap) => non_neg_integer(),
           required(:holders) => [String.t()],
           optional(:pool) => String.t() | nil,
-          optional(:seat) => SeatCheck.info()
+          optional(:seat) => SeatCheck.info(),
+          optional(:hard_zero) => boolean()
         }
 
   @type result ::
@@ -209,6 +210,15 @@ defmodule Arbiter.Accounts.Admission do
   one source of truth for MCP, the REST API (and so the CLI), and the dashboard.
   """
   @spec refusal_message(info()) :: String.t()
+  # A hard quota rule is a zero, not a full pool: `over_cap` does not go past it
+  # (the gate runs after the seat check and refuses again), only the quota bypass does.
+  def refusal_message(%{task_id: task_id, account: account, seat: %{} = seat, hard_zero: true}) do
+    "provider account #{account} cannot take #{task_id}: #{SeatCheck.describe(seat)}. " <>
+      "Wait for the rule to clear — Autopilot dispatches Ready tickets once it does — " <>
+      "or bypass the quota gate (`arb dispatch --force-quota`, MCP `force_quota: true`); " <>
+      "the override is recorded."
+  end
+
   def refusal_message(%{task_id: task_id, account: account, seat: %{} = seat}) do
     "provider account #{account} has no free seat to dispatch #{task_id}: " <>
       "#{SeatCheck.describe(seat)}#{seat_holders(seat.holders)}. " <>
