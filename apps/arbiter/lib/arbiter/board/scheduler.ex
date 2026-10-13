@@ -739,7 +739,7 @@ defmodule Arbiter.Board.Scheduler do
   defp fair_check(card, candidate, caps, acc) do
     pool = Map.get(caps.pools, candidate.pool)
     fair = pool && Map.get(pool, :fair)
-    budget = pool && limit(candidate, pool)
+    budget = pool && seat_limit(candidate, pool)
     workspace = Map.get(card, :workspace_id)
 
     if is_map(fair) and is_integer(budget) and not is_nil(workspace) and
@@ -866,9 +866,7 @@ defmodule Arbiter.Board.Scheduler do
       caps.pools == %{} ->
         {:provider, "no provider budget is published"}
 
-      not Enum.any?(caps.pools, fn {id, pool} ->
-        room?(widest(pool), weighted_seats(pool, id, acc))
-      end) ->
+      not Enum.any?(caps.pools, fn {id, pool} -> pool_open?(pool, id, acc) end) ->
         {:provider, "no pool has a free seat: " <> pool_summary(caps, acc)}
 
       caps.nodes == %{} ->
@@ -879,6 +877,21 @@ defmodule Arbiter.Board.Scheduler do
 
       true ->
         nil
+    end
+  end
+
+  # Whether any card could take a seat on the pool: with a `:min_weight` (the
+  # lightest seat the pool could hold), the budget has room for it, as the
+  # admission check reads it; with none, `load < budget`.
+  defp pool_open?(pool, id, acc) do
+    load = weighted_seats(pool, id, acc)
+
+    case Map.get(pool, :min_weight) do
+      weight when is_number(weight) and weight > 0 ->
+        weighted_room?(widest(pool), seats(pool, id, acc), load, weight)
+
+      _none ->
+        room?(widest(pool), load)
     end
   end
 
@@ -951,6 +964,17 @@ defmodule Arbiter.Board.Scheduler do
   # exempt budget when the candidate names one, else the pool's.
   defp limit(candidate, pool), do: Map.get(candidate, :budget) || pool.budget
 
+  # The seats the card may hold on the pool: the budget's, or the link's share
+  # when that is fewer. For phrases and the fair-share count, not the weighted
+  # check, which reads the budget alone (`pool_fits?/3`).
+  defp seat_limit(candidate, pool) do
+    case {limit(candidate, pool), Map.get(candidate, :share)} do
+      {limit, share} when is_integer(limit) and is_integer(share) -> min(limit, share)
+      {_limit, share} when is_integer(share) -> share
+      {limit, _share} -> limit
+    end
+  end
+
   # The most any card could use: the exempt budget when it is wider.
   defp widest(%{exempt_budget: exempt, budget: budget})
        when is_integer(exempt) and is_integer(budget),
@@ -985,7 +1009,7 @@ defmodule Arbiter.Board.Scheduler do
           "#{label}: no budget published"
 
         pool ->
-          "#{label}: #{seats(pool, candidate.pool, acc)} of #{limit(candidate, pool)} seats" <>
+          "#{label}: #{seats(pool, candidate.pool, acc)} of #{seat_limit(candidate, pool)} seats" <>
             reason_suffix(Map.get(pool, :reason))
       end
     end)

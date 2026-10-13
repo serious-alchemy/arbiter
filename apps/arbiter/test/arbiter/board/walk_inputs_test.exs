@@ -7,7 +7,7 @@ defmodule Arbiter.Board.WalkInputsTest do
   """
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
+  alias Arbiter.Accounts.{ProviderAccount, SeatCheck, WorkspaceProviderAccount}
   alias Arbiter.Board.Scheduler
   alias Arbiter.Board.WalkInputs
   alias Arbiter.Quota.Budget
@@ -589,17 +589,18 @@ defmodule Arbiter.Board.WalkInputsTest do
   # share)` on its pool (`Arbiter.Accounts.SeatCheck`); the walk plans to the
   # same number, so it does not place a card the dispatch would refuse.
   describe "a link's share (DC8)" do
-    test "caps the card's budget on that account's pool" do
+    test "names the cap on that account's pool as a seat count, not a budget" do
       ws = workspace!()
       claude = account!(:claude, "default")
       link!(ws, claude, %{share: 1})
       ticket = issue!(ws)
 
       walk = gather(ws, [ticket], budgets: [budget(claude, "claude", 3)])
-      assert [%{budget: 1}] = walk.candidates.(card(ticket))
+      assert [%{share: 1} = candidate] = walk.candidates.(card(ticket))
+      refute Map.has_key?(candidate, :budget)
     end
 
-    test "a budget below the share binds; a workspace with no share has no card budget" do
+    test "a workspace with no share has no card share" do
       ws = workspace!()
       other = workspace!()
       claude = account!(:claude, "default")
@@ -609,19 +610,20 @@ defmodule Arbiter.Board.WalkInputsTest do
       free = issue!(other)
 
       walk = gather(ws, [capped, free], budgets: [budget(claude, "claude", 1)])
-      assert [%{budget: 1}] = walk.candidates.(card(capped))
+      assert [%{share: 2}] = walk.candidates.(card(capped))
       assert [candidate] = walk.candidates.(card(free))
       refute Map.has_key?(candidate, :budget)
+      refute Map.has_key?(candidate, :share)
     end
 
-    test "an exempt card's exempt budget is capped by the share too" do
+    test "an exempt card carries its exempt budget and the share beside it" do
       ws = workspace!()
       claude = account!(:claude, "default", %{quota_config: %{"pace_exempt_priority" => 0}})
       link!(ws, claude, %{share: 2})
       urgent = issue!(ws, %{priority: 0})
 
       walk = gather(ws, [urgent], budgets: [budget(claude, "claude", 1, %{exempt_budget: 5})])
-      assert [%{budget: 2}] = walk.candidates.(card(urgent))
+      assert [%{budget: 5, share: 2}] = walk.candidates.(card(urgent))
     end
   end
 
@@ -641,6 +643,32 @@ defmodule Arbiter.Board.WalkInputsTest do
         )
 
       assert %{seats: 3, load: 3.5} = walk.pools[key]
+    end
+
+    test "a weighted pool names the lightest seat it could take" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      key = {claude.id, "claude"}
+
+      walk =
+        gather(ws, [],
+          budgets: [budget(claude, "claude", 5)],
+          seats: %{key => 1},
+          held: %{key => [{"bd-1", "opus"}]},
+          seat_weights: %{key => %{"opus" => 2.0, "haiku" => 0.5}}
+        )
+
+      assert %{min_weight: 0.5} = walk.pools[key]
+
+      heavy =
+        gather(ws, [],
+          budgets: [budget(claude, "claude", 5)],
+          seat_weights: %{key => %{"opus" => 2.0}}
+        )
+
+      # A model with no weight weighs 1, lighter than opus.
+      assert %{min_weight: 1.0} = heavy.pools[key]
     end
 
     test "the floor applies to a pool's seats" do
@@ -716,7 +744,46 @@ defmodule Arbiter.Board.WalkInputsTest do
       ticket = issue!(ws)
 
       walk = gather(ws, [ticket], budgets: [budget(claude, "claude", 5)])
-      assert [%{budget: 2, share: 2}] = walk.candidates.(card(ticket))
+      assert [%{share: 2} = candidate] = walk.candidates.(card(ticket))
+      refute Map.has_key?(candidate, :budget)
+    end
+
+    test "weighted pool: the share limits by seat count and the budget by weighted load, as SeatCheck does" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude, %{share: 2})
+      ticket = issue!(ws)
+      key = {claude.id, "claude"}
+      budgets = [budget(claude, "claude", 5)]
+      held = %{key => [{"bd-1", "opus"}]}
+      weights = %{"opus" => 2.0}
+
+      walk =
+        gather(ws, [ticket],
+          budgets: budgets,
+          seats: %{key => 1},
+          held: held,
+          seat_weights: %{key => weights}
+        )
+
+      # One seat weighing 2 of a 5 budget, one of two share seats: the share is
+      # a seat count, so the walk must not read 2 + 1 against it.
+      assert [candidate] = walk.candidates.(card(ticket))
+      refute Map.has_key?(candidate, :budget)
+      assert %{share: 2, weight: 1.0} = candidate
+
+      assert {:ok, _info} =
+               SeatCheck.check(claude,
+                 pool: "claude",
+                 workspace_id: ws.id,
+                 share: 2,
+                 budgets: budgets,
+                 holders: held,
+                 weights: fn _window -> weights end
+               )
+
+      plan = Scheduler.plan(%{ready: [card(ticket)], running: [], walk: walk})
+      assert plan.promote == ticket.id
     end
   end
 end
