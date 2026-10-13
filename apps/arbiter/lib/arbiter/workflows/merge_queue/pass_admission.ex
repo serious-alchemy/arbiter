@@ -99,10 +99,14 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
 
   defp placement_opts(args), do: Map.get(args, :placement_opts, [])
 
+  # DC8: `follow_up: true` — under `scheduler_admission: enforce` a pass is a
+  # follow-up of in-flight work, never held for a full pool (design §2.2, I9);
+  # under `legacy` and `shadow` the slot rule above is unchanged.
   defp admit_slot(task, kind, args) do
     case ResumeSlot.admit(task,
            origin: :automatic,
-           slot_admitted: Map.get(args, :slot_admitted) == true
+           slot_admitted: Map.get(args, :slot_admitted) == true,
+           follow_up: true
          ) do
       {:ok, _how} -> :ok
       {:defer, info} -> defer(task, kind, args, info)

@@ -584,4 +584,44 @@ defmodule Arbiter.Board.WalkInputsTest do
       assert plan.promote == queued_a.id
     end
   end
+
+  # DC8: under `enforce`, admission holds a card to `min(budget, max_concurrent,
+  # share)` on its pool (`Arbiter.Accounts.SeatCheck`); the walk plans to the
+  # same number, so it does not place a card the dispatch would refuse.
+  describe "a link's share (DC8)" do
+    test "caps the card's budget on that account's pool" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude, %{share: 1})
+      ticket = issue!(ws)
+
+      walk = gather(ws, [ticket], budgets: [budget(claude, "claude", 3)])
+      assert [%{budget: 1}] = walk.candidates.(card(ticket))
+    end
+
+    test "a budget below the share binds; a workspace with no share has no card budget" do
+      ws = workspace!()
+      other = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude, %{share: 2})
+      link!(other, claude)
+      capped = issue!(ws)
+      free = issue!(other)
+
+      walk = gather(ws, [capped, free], budgets: [budget(claude, "claude", 1)])
+      assert [%{budget: 1}] = walk.candidates.(card(capped))
+      assert [candidate] = walk.candidates.(card(free))
+      refute Map.has_key?(candidate, :budget)
+    end
+
+    test "an exempt card's exempt budget is capped by the share too" do
+      ws = workspace!()
+      claude = account!(:claude, "default", %{quota_config: %{"pace_exempt_priority" => 0}})
+      link!(ws, claude, %{share: 2})
+      urgent = issue!(ws, %{priority: 0})
+
+      walk = gather(ws, [urgent], budgets: [budget(claude, "claude", 1, %{exempt_budget: 5})])
+      assert [%{budget: 2}] = walk.candidates.(card(urgent))
+    end
+  end
 end

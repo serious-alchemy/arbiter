@@ -175,4 +175,84 @@ defmodule Arbiter.Board.AdmissionShadowE2ETest do
     assert run.routing_decision == nil
     assert Ash.read!(AdmissionShadowEvent) == []
   end
+
+  # ---- enforce (DC8) -----------------------------------------------------------
+
+  # The same budget reaches the walk (`walk_opts`) and the dispatch's seat check
+  # (`seat_opts`): the test env's `Budget.Server` publishes nothing.
+  defp enforcing_autopilot(account, budget, reason) do
+    budget = %Budget{
+      account: account.id,
+      pool: "claude",
+      budget: budget,
+      binding: {:window, "5h"},
+      reason: reason,
+      ceiling: %{max_concurrent: 3, share: nil}
+    }
+
+    {:ok, pid} =
+      Autopilot.start_link(
+        name: nil,
+        paused: false,
+        interval_ms: :never,
+        topics: [],
+        follow_up: false,
+        registry_settled?: fn -> true end,
+        snapshot: fn opts ->
+          Snapshot.load(Keyword.put(opts, :walk_opts, budgets: [budget]))
+        end,
+        dispatch: fn id, extra ->
+          Arbiter.Worker.Dispatch.dispatch(
+            id,
+            Keyword.merge(
+              [start_claude: true, dispatched_by: "autopilot", seat_opts: [budgets: [budget]]],
+              extra
+            )
+          )
+        end
+      )
+
+    pid
+  end
+
+  test "enforce: with the pool at 0 seats nothing goes, though today's plan would dispatch",
+       %{account: account, first: first} do
+    {:ok, "enforce"} = Arbiter.Settings.set_scheduler_admission("enforce")
+
+    assert :idle = Autopilot.tick(enforcing_autopilot(account, 0, "5h ahead of its line"), 30_000)
+    assert run_of(first.id) == nil
+    assert Ash.get!(Issue, first.id).state == :queued
+
+    # The reverse view is still recorded: today would have dispatched `first`.
+    first_id = first.id
+
+    assert [%{policy: "enforce", legacy_pick: ^first_id, walk_pick: nil}] =
+             Ash.read!(AdmissionShadowEvent)
+  end
+
+  test "enforce: with room the walk's card goes; its run carries the reverse shadow",
+       %{account: account, first: first} do
+    {:ok, "enforce"} = Arbiter.Settings.set_scheduler_admission("enforce")
+
+    assert {:ok, dispatched} =
+             Autopilot.tick(enforcing_autopilot(account, 2, "5h room for 2"), 30_000)
+
+    assert dispatched == first.id
+    run = run_of(first.id)
+    record = run.routing_decision["admission_shadow"]
+    IO.puts("\n[e2e enforce] run #{run.id} admission_shadow: #{inspect(record)}")
+
+    account_id = account.id
+
+    assert %{
+             "policy" => "enforce",
+             "dispatched" => ^dispatched,
+             "pick" => ^dispatched,
+             "agrees" => true,
+             "comparable" => true,
+             "account_id" => ^account_id,
+             "pool" => "claude",
+             "node" => "local"
+           } = record
+  end
 end

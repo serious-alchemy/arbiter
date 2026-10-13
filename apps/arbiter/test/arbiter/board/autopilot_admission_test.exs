@@ -5,10 +5,12 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
 
     * `legacy` asks the board for nothing new, dispatches with exactly today's
       options and records nothing (I1);
-    * `shadow` (and `enforce`, until DC8 wires it) dispatches exactly what
-      `legacy` would (I2), with the walk's decision riding on the dispatch as
-      `admission_shadow`, and writes an event row only when either side's
-      outcome changes.
+    * `shadow` dispatches exactly what `legacy` would (I2), with the walk's
+      decision riding on the dispatch as `admission_shadow`, and writes an
+      event row only when either side's outcome changes.
+
+  `enforce`, which dispatches by the walk (DC8), is
+  `Arbiter.Board.AutopilotEnforceTest`'s.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
@@ -129,7 +131,7 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
     end
   end
 
-  for mode <- [:shadow, :enforce] do
+  for mode <- [:shadow] do
     describe "#{mode}" do
       test "dispatches today's card, with the walk's decision riding on it" do
         mode = unquote(mode)
@@ -252,8 +254,8 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
     end
   end
 
-  property "I2: under shadow and enforce, every pass dispatches what legacy dispatches" do
-    check all(board <- board_gen(), mode <- member_of([:shadow, :enforce]), max_runs: 60) do
+  property "I2: under shadow, every pass dispatches what legacy dispatches" do
+    check all(board <- board_gen(), mode <- constant(:shadow), max_runs: 60) do
       outcomes =
         for admission <- [:legacy, mode] do
           pid = start(admission, fn _ -> board end)
