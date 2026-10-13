@@ -251,7 +251,7 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
     test "an explicit routed model is never expanded" do
       cfg =
         config(agy_tier_models: %{"economy" => [@gemini_flash, @claude_sonnet]})
-        |> put_in(["routing", "rules"], %{"D1" => %{"model" => "gemini-3.1-pro-high"}})
+        |> put_in(["routing", "rules"], %{"D1" => %{"model" => "gemini-3.8-flash-high"}})
         |> put_in(["agent", "type"], "gemini")
 
       ws = workspace!(cfg)
@@ -266,13 +266,13 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
                  opts([{agy, agy_quota(5.0, 0.0)}])
                )
 
-      assert models(selection.decision["candidates"]) == ["gemini-3.1-pro-high"]
+      assert models(selection.decision["candidates"]) == ["gemini-3.8-flash-high"]
     end
   end
 
   describe "allow_upgrade" do
     # agy defaults: economy gemini-3.8-flash-low, standard gemini-3.8-flash-medium,
-    # premium gemini-3.1-pro-high, flagship claude-opus-4-6-thinking.
+    # premium gemini-3.8-flash-high, flagship claude-opus-5-5-high.
     defp upgrade_candidates(n, difficulty, quota) do
       scoring = if n, do: %{"allow_upgrade" => n}
       ws = workspace!(config(scoring: scoring))
@@ -302,15 +302,15 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
                Enum.sort([
                  @gemini_flash,
                  "gemini-3.8-flash-medium",
-                 "gemini-3.1-pro-high",
-                 "claude-opus-4-6-thinking"
+                 "gemini-3.8-flash-high",
+                 "claude-opus-5-5-high"
                ])
     end
 
     test "the Gemini pool at its line: an upgrade reaches the idle Claude/GPT pool" do
       selection = upgrade_candidates(3, 1, agy_quota(99.0, 0.0))
 
-      assert selection.model == "claude-opus-4-6-thinking"
+      assert selection.model == "claude-opus-5-5-high"
       assert selection.decision["pool"] == @agy_claude_gpt_pool
     end
 
@@ -319,7 +319,7 @@ defmodule Arbiter.Agents.ProviderRoutingModelChoiceTest do
       selection = upgrade_candidates(3, 5, agy_quota(5.0, 0.0))
 
       assert Enum.sort(models(selection.decision["candidates"])) ==
-               ["claude-opus-4-6-thinking", "gemini-3.1-pro-high"]
+               ["claude-opus-5-5-high", "gemini-3.8-flash-high"]
     end
   end
 

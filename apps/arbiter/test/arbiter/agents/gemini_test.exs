@@ -902,7 +902,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
       assert Gemini.resolved_model([]) == nil
       assert Gemini.resolved_model(model: "gemini-2.5-flash") == "gemini-2.5-flash"
-      assert Gemini.resolved_model(model_tier: "premium") == "gemini-3.1-pro-high"
+      assert Gemini.resolved_model(model_tier: "premium") == "gemini-3.8-flash-high"
     end
   end
 
@@ -1012,8 +1012,8 @@ defmodule Arbiter.Agents.GeminiTest do
       for {tier, model} <- [
             {"economy", "gemini-3.8-flash-low"},
             {"standard", "gemini-3.8-flash-medium"},
-            {"premium", "gemini-3.1-pro-high"},
-            {"flagship", "claude-opus-4-6-thinking"}
+            {"premium", "gemini-3.8-flash-high"},
+            {"flagship", "claude-opus-5-5-high"}
           ] do
         {:ok, argv} = default_argv("the prompt", model_tier: tier)
         assert "--model" in argv
@@ -1140,18 +1140,23 @@ defmodule Arbiter.Agents.GeminiTest do
       # emit two conflicting effort signals.
       {:ok, argv} = default_argv("the prompt", model_tier: "premium", thinking: "low")
       assert "--model" in argv
-      assert "gemini-3.1-pro-high" in argv
+      assert "gemini-3.8-flash-high" in argv
       refute "--effort" in argv
     end
 
-    test "agy branch emits --effort for a suffix-free flagship model", %{tmp: tmp} do
+    test "agy branch emits --effort for a suffix-free model", %{tmp: tmp} do
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
+      # The built-in tier models all carry an effort suffix now, so a
+      # suffix-free id comes from a workspace override.
+      Gemini.Config.put_active(%{"tier_models" => %{"flagship" => "some-suffix-free-model"}})
+      on_exit(fn -> Gemini.Config.clear() end)
+
       {:ok, argv} = default_argv("the prompt", model_tier: "flagship", thinking: "high")
       assert "--model" in argv
-      assert "claude-opus-4-6-thinking" in argv
+      assert "some-suffix-free-model" in argv
       assert "--effort" in argv
       assert chunk_after(argv, "--effort") == "high"
     end
@@ -1204,6 +1209,118 @@ defmodule Arbiter.Agents.GeminiTest do
     list
     |> Enum.drop_while(&(&1 != flag))
     |> Enum.at(1)
+  end
+
+  describe "default_argv/2 unavailable agy model fallback (bd-7wx2lh)" do
+    import ExUnit.CaptureLog
+
+    alias Arbiter.Agents.Gemini.ModelCatalog
+
+    setup do
+      tmp =
+        Path.join(System.tmp_dir!(), "arbiter-gemini-agy-stub-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+      prev_probe = Application.fetch_env(:arbiter, :agy_models_probe)
+      Gemini.Config.clear()
+      ModelCatalog.reset()
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+
+        case prev_probe do
+          {:ok, v} -> Application.put_env(:arbiter, :agy_models_probe, v)
+          :error -> Application.delete_env(:arbiter, :agy_models_probe)
+        end
+
+        Gemini.Config.clear()
+        ModelCatalog.reset()
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    defp serve_models(models),
+      do: Application.put_env(:arbiter, :agy_models_probe, fn -> {:ok, models} end)
+
+    test "a tier whose model agy no longer serves falls back to the nearest available tier, logged" do
+      # The pre-fix defaults: premium/flagship named models agy dropped.
+      serve_models(["gemini-3.8-flash-low", "gemini-3.8-flash-medium"])
+
+      Gemini.Config.put_active(%{
+        "tier_models" => %{
+          "premium" => "gemini-3.1-pro-high",
+          "flagship" => "claude-opus-4-6-thinking"
+        }
+      })
+
+      log =
+        capture_log([level: :warning], fn ->
+          {:ok, argv} = default_argv("the prompt", model_tier: "premium")
+          send(self(), {:argv, argv})
+        end)
+
+      assert_received {:argv, argv}
+      refute "gemini-3.1-pro-high" in argv
+      assert chunk_after(argv, "--model") == "gemini-3.8-flash-medium"
+      assert log =~ "gemini-3.1-pro-high"
+      assert log =~ "gemini-3.8-flash-medium"
+      assert Gemini.resolved_model(model_tier: "premium") == "gemini-3.8-flash-medium"
+    end
+
+    test "falls back to another provider's model when no Gemini tier model is served" do
+      serve_models(["claude-opus-5-5-high", "claude-sonnet-5-5-high"])
+
+      capture_log([level: :warning], fn ->
+        {:ok, argv} = default_argv("the prompt", model_tier: "economy")
+        send(self(), {:argv, argv})
+      end)
+
+      assert_received {:argv, argv}
+      refute "gemini-3.8-flash-low" in argv
+      assert chunk_after(argv, "--model") == "claude-opus-5-5-high"
+    end
+
+    test "an explicit :model agy does not serve is replaced too" do
+      serve_models(["gemini-3.8-flash-medium"])
+
+      capture_log([level: :warning], fn ->
+        {:ok, argv} = default_argv("the prompt", model: "gemini-9-gone-high")
+        send(self(), {:argv, argv})
+      end)
+
+      assert_received {:argv, argv}
+      refute "gemini-9-gone-high" in argv
+      assert chunk_after(argv, "--model") == "gemini-3.8-flash-medium"
+    end
+
+    test "a served model is passed through untouched, with no warning" do
+      serve_models(["gemini-3.8-flash-medium", "gemini-3.8-flash-high"])
+
+      log =
+        capture_log([level: :warning], fn ->
+          {:ok, argv} = default_argv("the prompt", model_tier: "premium")
+          send(self(), {:argv, argv})
+        end)
+
+      assert_received {:argv, argv}
+      assert chunk_after(argv, "--model") == "gemini-3.8-flash-high"
+      refute log =~ "ModelCatalog"
+    end
+
+    test "an unreadable model list never blocks the configured model" do
+      Application.put_env(:arbiter, :agy_models_probe, fn -> {:error, :timeout} end)
+
+      {:ok, argv} = default_argv("the prompt", model_tier: "premium")
+      assert chunk_after(argv, "--model") == "gemini-3.8-flash-high"
+    end
   end
 
   describe "default_argv/2 :timeout_ms → --print-timeout (bd-1xss5z)" do

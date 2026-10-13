@@ -16,6 +16,7 @@ defmodule Arbiter.Agents.Gemini do
 
   alias Arbiter.Agents.Gemini.Config
   alias Arbiter.Agents.Gemini.ConfigDir
+  alias Arbiter.Agents.Gemini.ModelCatalog
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
@@ -922,7 +923,7 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   # bd-d2yut8 Finding 2: model ids in the agy tier map carry their own effort
-  # suffix (`-low`/`-medium`/`-high`, e.g. `gemini-3.1-pro-high`). Passing
+  # suffix (`-low`/`-medium`/`-high`, e.g. `gemini-3.8-flash-high`). Passing
   # `--effort` alongside such an id sends two conflicting effort signals with
   # undefined precedence in agy — the operator decision is "never both", so
   # `--effort` is only emitted for a suffix-free resolved model (or when no
@@ -953,7 +954,53 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  defp resolve_model(executable, opts) do
+  # bd-7wx2lh: agy auto-updates and drops models; a spawn that names one dies at
+  # startup ("invalid model selection"). The agy branch therefore checks the
+  # resolved model against `agy models` (cached, see `Gemini.ModelCatalog`) and
+  # substitutes the nearest served tier — or another provider's model — rather
+  # than launching a process that is certain to die. An unreadable model list
+  # never blocks: the configured model is used as-is.
+  defp resolve_model(:agy, opts) do
+    :agy |> configured_model(opts) |> ensure_served(opts)
+  end
+
+  defp resolve_model(executable, opts), do: configured_model(executable, opts)
+
+  defp ensure_served(nil, _opts), do: nil
+
+  defp ensure_served(model, opts) do
+    if ModelCatalog.available?(model) do
+      model
+    else
+      substitute_model(model, opts)
+    end
+  end
+
+  defp substitute_model(model, opts) do
+    tier = Keyword.get(opts, :model_tier)
+
+    case ModelCatalog.list() do
+      {:ok, available} ->
+        replacement =
+          ModelCatalog.substitute(tier, Config.effective_tier_models(:agy), available)
+
+        Logger.warning(
+          "Arbiter.Agents.Gemini: agy does not serve model #{inspect(model)}" <>
+            " (tier #{inspect(tier)}); " <>
+            if(replacement,
+              do: "falling back to #{inspect(replacement)}",
+              else: "no model is served, leaving --model to agy's default"
+            )
+        )
+
+        replacement
+
+      :unknown ->
+        model
+    end
+  end
+
+  defp configured_model(executable, opts) do
     case Keyword.get(opts, :model) do
       m when is_binary(m) and m != "" ->
         m
