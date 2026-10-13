@@ -398,6 +398,7 @@ defmodule ArbiterWeb.Router do
     get("/server/migrations", ServerController, :migrations)
     get("/server/bind_address", ServerController, :bind_address)
     get("/server/agy_write_jail", ServerController, :agy_write_jail)
+    get("/server/agy_models", ServerController, :agy_models)
     get("/server/egress_jail", ServerController, :egress_jail)
     get("/server/guardrails", ServerController, :guardrails)
     get("/server/claude_credentials", ServerController, :claude_credentials)

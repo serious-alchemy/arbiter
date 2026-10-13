@@ -1218,7 +1218,10 @@ defmodule Arbiter.Agents.GeminiTest do
 
     setup do
       tmp =
-        Path.join(System.tmp_dir!(), "arbiter-gemini-agy-stub-#{System.unique_integer([:positive])}")
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-agy-stub-#{System.unique_integer([:positive])}"
+        )
 
       File.mkdir_p!(tmp)
       agy_stub = Path.join(tmp, "agy")
@@ -1272,7 +1275,12 @@ defmodule Arbiter.Agents.GeminiTest do
       assert chunk_after(argv, "--model") == "gemini-3.8-flash-medium"
       assert log =~ "gemini-3.1-pro-high"
       assert log =~ "gemini-3.8-flash-medium"
-      assert Gemini.resolved_model(model_tier: "premium") == "gemini-3.8-flash-medium"
+
+      capture_log([level: :warning], fn ->
+        send(self(), {:resolved, Gemini.resolved_model(model_tier: "premium")})
+      end)
+
+      assert_received {:resolved, "gemini-3.8-flash-medium"}
     end
 
     test "falls back to another provider's model when no Gemini tier model is served" do

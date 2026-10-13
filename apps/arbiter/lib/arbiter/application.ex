@@ -509,6 +509,13 @@ defmodule Arbiter.Application do
         id: :review_checkout_sweep_boot_task,
         restart: :temporary
       ),
+      # bd-7wx2lh: warm the `agy models` cache and log any configured agy tier
+      # model the CLI no longer serves (spawns would fall back; see ModelCheck).
+      Supervisor.child_spec(
+        {Task, fn -> Arbiter.Agents.Gemini.ModelCheck.warn_at_boot() end},
+        id: :agy_model_check_boot_task,
+        restart: :temporary
+      ),
       Supervisor.child_spec(
         {Task, fn -> MergeQueueSupervisor.start_for_existing_workspaces() end},
         id: :merge_queue_boot_task,
