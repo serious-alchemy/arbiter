@@ -273,6 +273,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/migrations"} => :anonymous,
     {:get, "/api/server/bind_address"} => :coordinator,
     {:get, "/api/server/agy_write_jail"} => :coordinator,
+    {:get, "/api/server/agy_models"} => :coordinator,
     {:get, "/api/server/egress_jail"} => :coordinator,
     {:get, "/api/server/guardrails"} => :coordinator,
     {:get, "/api/server/claude_credentials"} => :coordinator,

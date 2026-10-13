@@ -46,8 +46,8 @@ defmodule Arbiter.Agents.Gemini.Config do
   @agy_tier_models %{
     "economy" => "gemini-3.8-flash-low",
     "standard" => "gemini-3.8-flash-medium",
-    "premium" => "gemini-3.1-pro-high",
-    "flagship" => "claude-opus-4-6-thinking"
+    "premium" => "gemini-3.8-flash-high",
+    "flagship" => "claude-opus-5-5-high"
   }
 
   # Default thinking → CLI argv tokens: agy/gemini accept reasoning effort via
@@ -181,6 +181,35 @@ defmodule Arbiter.Agents.Gemini.Config do
   end
 
   def model_for_tier(_tier, _executable), do: nil
+
+  @doc """
+  The tier → model map a spawn on `executable` would use: the built-in default
+  with the active workspace's `tier_models` override laid over it (the same
+  merge `model_for_tier/2` does tier by tier). `Arbiter.Agents.Gemini` uses it
+  to pick a stand-in when a tier's model is not served any more.
+  """
+  @spec effective_tier_models(:agy | :gemini) :: %{String.t() => String.t()}
+  def effective_tier_models(executable \\ :gemini) do
+    {:ok, cfg} = resolve()
+    effective_tier_models(cfg.raw, executable)
+  end
+
+  @doc """
+  `effective_tier_models/1` for a raw `agent.config` map (a workspace's
+  `agent.config` / `review_agent.config`, before any process-local seeding),
+  so the doctor can audit a workspace without making it the active one.
+  """
+  @spec effective_tier_models(map(), :agy | :gemini) :: %{String.t() => String.t()}
+  def effective_tier_models(raw, executable) when is_map(raw) do
+    overrides =
+      raw
+      |> ProviderConfig.apply_overrides(@provider)
+      |> Map.get("tier_models")
+      |> ProviderConfig.first_models()
+      |> Map.filter(fn {_tier, model} -> model != "" end)
+
+    Map.merge(default_tier_models(executable), overrides)
+  end
 
   @doc """
   Resolve an abstract `thinking` level to a list of CLI argv tokens to

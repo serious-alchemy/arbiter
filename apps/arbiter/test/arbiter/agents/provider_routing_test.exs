@@ -597,7 +597,7 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert agy_d2["pool"] == "antigravity:gemini_models"
       assert agy_d2["family"] == "google"
 
-      # D5 → flagship → claude-opus-4-6-thinking → the idle Claude pool: agy wins,
+      # D5 → flagship → claude-opus-5-5-high → the idle Claude pool: agy wins,
       # as Anthropic-family work.
       assert {:ok, d5} =
                ProviderRouting.select(ws, task!(ws, %{difficulty: 5}), :main, opts(pairs))
@@ -605,7 +605,7 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert d5.agent_type == :gemini
       assert d5.family == :anthropic
       assert d5.decision["pool"] == "antigravity:claude_and_gpt_models"
-      assert d5.decision["model"] == "claude-opus-4-6-thinking"
+      assert d5.decision["model"] == "claude-opus-5-5-high"
     end
   end
 

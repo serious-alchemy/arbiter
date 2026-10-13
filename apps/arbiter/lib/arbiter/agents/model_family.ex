@@ -4,7 +4,7 @@ defmodule Arbiter.Agents.ModelFamily do
   **quota pool** it draws on (bd-40pzpj). Pure: no config, no database.
 
   Provider routing spreads implementer work across families, so it needs to
-  know that an agy account running `claude-opus-4-6-thinking` is Anthropic
+  know that an agy account running `claude-opus-5-5-high` is Anthropic
   work metered on agy's `claude_and_gpt_models` pool, not Google work on its
   Gemini one:
 
@@ -56,7 +56,7 @@ defmodule Arbiter.Agents.ModelFamily do
   (`model_for_tier/3`). Today only Google has a floor: its economy/standard
   tiers are flash models, fine for implementation but not for judging another
   family's work, so a Google reviewer always runs `premium` — agy's
-  `gemini-3.1-pro-high`, the gemini CLI's `gemini-2.5-pro` — at `high`
+  `gemini-3.8-flash-high` (agy serves no Gemini Pro now), the gemini CLI's `gemini-2.5-pro` — at `high`
   effort (`reviewer_thinking/2`) unless the workspace configured one.
   """
 

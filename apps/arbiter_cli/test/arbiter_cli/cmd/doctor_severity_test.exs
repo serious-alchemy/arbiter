@@ -100,6 +100,8 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
        {%{"state" => "quiescent", "paused" => true, "safe_to_restart" => true, "in_flight" => []},
         200}},
       {{"get", "/api/server/agy_write_jail"}, {@ok_jail, 200}},
+      {{"get", "/api/server/agy_models"},
+       {%{"status" => "ok", "models" => ["gemini-3.8-flash-low"], "problems" => []}, 200}},
       {{"get", "/api/server/egress_jail"}, {%{"available" => true}, 200}},
       {{"get", "/api/server/guardrails"}, {%{"active" => false, "issues" => []}, 200}},
       {{"get", "/api/server/tmux"}, {%{"available" => true, "version" => "3.4"}, 200}},
@@ -319,6 +321,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {"/api/server/migrations", "migrations"},
       {"/api/server/bind_address", "bind_address"},
       {"/api/server/agy_write_jail", "agy_write_jail"},
+      {"/api/server/agy_models", "agy_models"},
       {"/api/server/egress_jail", "egress_jail"},
       {"/api/server/guardrails", "guardrails"},
       {"/api/server/tmux", "tmux"},
@@ -565,6 +568,72 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     end
   end
 
+  describe "agy tier models (bd-7wx2lh)" do
+    defp gemini_in_use do
+      put_in(@scope_none, ["providers", "gemini", "in_use"], true)
+    end
+
+    test "n/a when no workspace uses agy" do
+      stub_healthy()
+      assert (Checks.run() |> by_id("agy_models")).status == :na
+    end
+
+    test "ok when every configured tier model is listed by agy models" do
+      stub_healthy([{{"get", "/api/server/doctor_scope"}, {gemini_in_use(), 200}}])
+      assert (Checks.run() |> by_id("agy_models")).status == :ok
+    end
+
+    test "warns naming each missing tier and model, and where it is configured" do
+      body = %{
+        "status" => "missing",
+        "models" => ["gemini-3.8-flash-low", "claude-opus-5-5-high"],
+        "problems" => [
+          %{
+            "tier" => "premium",
+            "model" => "gemini-3.1-pro-high",
+            "source" => "default",
+            "used_by" => ["default"],
+            "fallback" => "gemini-3.8-flash-low"
+          },
+          %{
+            "tier" => "flagship",
+            "model" => "claude-opus-4-6-thinking",
+            "source" => "override",
+            "used_by" => ["default (agent)", "default (review_agent)"],
+            "fallback" => "claude-opus-5-5-high"
+          }
+        ]
+      }
+
+      stub_healthy([
+        {{"get", "/api/server/doctor_scope"}, {gemini_in_use(), 200}},
+        {{"get", "/api/server/agy_models"}, {body, 200}}
+      ])
+
+      result = Checks.run() |> by_id("agy_models")
+
+      assert result.status == :warn
+      assert result.detail =~ "premium"
+      assert result.detail =~ "gemini-3.1-pro-high"
+      assert result.detail =~ "flagship"
+      assert result.detail =~ "claude-opus-4-6-thinking"
+      assert result.detail =~ "default (agent)"
+      assert (result.hint || "") =~ "tier_models"
+      refute result.blocks_readiness
+    end
+
+    test "an unreadable agy models listing is a warn, not an ok" do
+      stub_healthy([
+        {{"get", "/api/server/doctor_scope"}, {gemini_in_use(), 200}},
+        {{"get", "/api/server/agy_models"}, {%{"status" => "unknown", "problems" => []}, 200}}
+      ])
+
+      result = Checks.run() |> by_id("agy_models")
+      assert result.status == :warn
+      assert result.detail =~ "could not"
+    end
+  end
+
   describe "check inventory" do
     # Every check that existed before the cleanup, by id, minus the finished
     # one-shot migration check (`legacy safe_defaults key`).
@@ -574,7 +643,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       erlang_distribution restart_safety safe_default_categories agy_write_jail
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
       guardrails agy_ssh_transport tmux podman_sandbox worker_tmp worker_memory
-      claude_worker_credentials grok_auth provider_accounts quota_policy
+      claude_worker_credentials grok_auth agy_models provider_accounts quota_policy
       merge_routing nodes pr_patrol
     )
 

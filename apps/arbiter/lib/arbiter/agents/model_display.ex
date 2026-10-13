@@ -22,7 +22,7 @@ defmodule Arbiter.Agents.ModelDisplay do
   | `gpt-*` (Codex)     | GPT-5.5, GPT-5 Codex, … |
 
   The agy fork's own tier map (bd-d2yut8) resolves to Gemini 3.x ids with an
-  effort suffix (`gemini-3.8-flash-low`, `gemini-3.1-pro-high`, …) — a fixed
+  effort suffix (`gemini-3.8-flash-low`, `gemini-3.8-flash-high`, …) — a fixed
   prefix can't cover every version agy might catalogue next, so those two
   rows match by family word (`flash`/`pro`) rather than a literal id.
   """
@@ -64,7 +64,7 @@ defmodule Arbiter.Agents.ModelDisplay do
 
   # agy's own catalogue (bd-d2yut8): Gemini 3.x ids carry an effort suffix
   # (`-low`/`-medium`/`-high`) after an arbitrary version number
-  # (`gemini-3.8-flash-low`, `gemini-3.1-pro-high`, …), so these match by
+  # (`gemini-3.8-flash-low`, `gemini-3.8-flash-high`, …), so these match by
   # family word rather than a fixed prefix; `claude-*-4-6*` ids already hit
   # `@rules` above (same families as native Claude), so no rule needed here.
   defp agy_family("gemini-3" <> _ = model) do
