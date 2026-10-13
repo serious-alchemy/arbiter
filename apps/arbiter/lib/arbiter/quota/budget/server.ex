@@ -42,6 +42,9 @@ defmodule Arbiter.Quota.Budget.Server do
       default is `Arbiter.Quota.Budget.Inputs.gather/1`.
     * `:calibration` — `(-> [BudgetCalibration.result])` or `:never`; run at boot
       and daily off the server process (`ρ`, `b` and `H` move slowly, §3.6).
+    * `:weights` — `(-> [SeatWeights.result])` or `:never`; run beside `:calibration`
+      (DC11): the per-model seat weights `seat_weights/4` reads. A failure here
+      leaves the budgets and the rest of the calibration alone.
     * `:tick_ms` (default from `config :arbiter, :quota_budget_server`) — or
       `:never`. `:enabled` (default `true`): a disabled server computes nothing.
   """
@@ -52,6 +55,7 @@ defmodule Arbiter.Quota.Budget.Server do
 
   alias Arbiter.Quota.Budget
   alias Arbiter.Quota.Budget.Inputs
+  alias Arbiter.Quota.SeatWeights
 
   @table :arbiter_quota_budgets
   @board_topic "board"
@@ -124,6 +128,28 @@ defmodule Arbiter.Quota.Budget.Server do
   def lookup(account_id, pool, policy_workspace, table),
     do: get(account_id, pool, policy_workspace, table)
 
+  @doc """
+  The seat weights (DC11, `Arbiter.Quota.SeatWeights`) calibrated for an account's
+  `pool`: `%{model => weight}`, empty when none was calibrated (every seat then
+  weighs 1). `window` names the window whose fit to read (the binding one); when
+  it was not fitted, or is `nil`, the first window sorted answers.
+  """
+  @spec seat_weights(String.t(), String.t() | nil, String.t() | nil, atom()) ::
+          SeatWeights.weights()
+  def seat_weights(account_id, pool, window \\ nil, table \\ @table) do
+    case :ets.lookup(table, {:weights, account_id, pool}) do
+      [{_key, by_window}] when map_size(by_window) > 0 ->
+        Map.get_lazy(by_window, window, fn ->
+          by_window |> Enum.min_by(&elem(&1, 0)) |> elem(1)
+        end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    ArgumentError -> %{}
+  end
+
   # ---- control ---------------------------------------------------------------
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -153,6 +179,7 @@ defmodule Arbiter.Quota.Budget.Server do
       tick_ms: setting(:interval_ms, opts, config, @default_tick_ms, :tick_ms),
       inputs: Keyword.get(opts, :inputs, &Inputs.gather/1),
       calibration_fun: Keyword.get(opts, :calibration, &Inputs.calibrate/0),
+      weights_fun: Keyword.get(opts, :weights, &SeatWeights.calibrate/0),
       calibration: Inputs.empty_calibration(),
       calibration_task: nil,
       hysteresis: %{},
@@ -194,18 +221,25 @@ defmodule Arbiter.Quota.Budget.Server do
 
   def handle_info(:calibrate, %{calibration_task: nil} = state) do
     fun = state.calibration_fun
+    weights_fun = state.weights_fun
     # Not linked: a calibration that raises (DB timeout at boot, bad edge data)
     # must reach the :DOWN clause below, not take this server and its ETS table
     # down with it.
-    task = Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn -> fun.() end)
+    task =
+      Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
+        {fun.(), safe_weights(weights_fun)}
+      end)
+
     Process.send_after(self(), :calibrate, @calibration_every_ms)
     {:noreply, %{state | calibration_task: task.ref}}
   end
 
   def handle_info(:calibrate, state), do: {:noreply, state}
 
-  def handle_info({ref, results}, %{calibration_task: ref} = state) when is_reference(ref) do
+  def handle_info({ref, {results, weights}}, %{calibration_task: ref} = state)
+      when is_reference(ref) do
     Process.demonitor(ref, [:flush])
+    publish_weights(state.table, weights)
     state = %{state | calibration_task: nil, calibration: Inputs.index_calibration(results)}
     {:noreply, recompute_state(state)}
   end
@@ -219,6 +253,35 @@ defmodule Arbiter.Quota.Budget.Server do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # The weights are a second read beside the calibration: when they fail the
+  # calibration is kept and every seat weighs 1.
+  defp safe_weights(:never), do: nil
+
+  defp safe_weights(fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("Arbiter.Quota.Budget.Server: seat weights failed: #{Exception.message(e)}")
+      nil
+  catch
+    :exit, reason ->
+      Logger.warning("Arbiter.Quota.Budget.Server: seat weights failed: #{inspect(reason)}")
+      nil
+  end
+
+  # `nil` (not run, or failed) keeps what is published; a list replaces it.
+  defp publish_weights(_table, nil), do: :ok
+
+  defp publish_weights(table, results) when is_list(results) do
+    :ets.match_delete(table, {{:weights, :_, :_}, :_})
+
+    results
+    |> Enum.group_by(&{&1.account_id, &1.pool}, &{&1.window, &1.weights})
+    |> Enum.each(fn {{account, pool}, by_window} ->
+      :ets.insert(table, {{:weights, account, pool}, Map.new(by_window)})
+    end)
+  end
 
   # ---- recompute -------------------------------------------------------------
 

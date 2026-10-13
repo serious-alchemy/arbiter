@@ -478,6 +478,22 @@ Each `ρ_m` has to pass the same confidence-bound test as `ρ`, or its seats
 weigh 1 as in phase 1. It also takes the same floor, so no model's seat weighs
 less than `ρ_min / ρ̄`, and none looks free.
 
+*As shipped (DC11).* `Arbiter.Quota.SeatWeights` computes the weights daily, in
+the budget server's calibration task beside `BudgetCalibration`: `c_m` from
+`Scarcity.Draw`'s fit per (account, pool, window), `τ_m` as weighted tokens per
+run-hour of model `m` (a run's hours go to its dominant model; idle seats
+cancel in the ratio), and `ρ̄` as the run-hour-weighted mean over the weighted
+models, so the account's own mix averages 1. The weights for a pool's binding
+window are read by `SeatCheck` (`Σ weights + w_new ≤ budget`, integer budget;
+the ceilings `max_concurrent` and `share` still count seats, so I3 holds) and
+by the walk (`load` on the pool, `weight` on the candidate). A model with no
+weight, or no known model (a run stamped before DC11, a first dispatch whose
+tier names none), weighs 1, so an account with no calibrated weights admits
+exactly as phase 1 does. A pool with no seat in use admits one card however
+heavy it weighs, as long as its budget is at least 1: a model that weighs more
+than the whole budget must not starve. Nothing under `legacy` or `shadow`
+admission reads the weights (I1, I2); `δ` in the price is unchanged.
+
 ### 3.5 Hard zeros, and missing readings
 
 | Condition | Budget | Reason |

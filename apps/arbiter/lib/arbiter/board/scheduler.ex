@@ -183,14 +183,18 @@ defmodule Arbiter.Board.Scheduler do
         }
 
   @typedoc """
-  A pool: its published `budget` (or `:unlimited`), the `seats` held on it now,
-  and the `exempt_budget` an exempt card may use (R7). `label` and `reason`
+  A pool: its published `budget` (or `:unlimited`), the `seats` held on it now
+  and their weighted `load` (DC11, the seat count when absent),
+  the `exempt_budget` an exempt card may use (R7) and the `cap` that counts seats.
+  `label` and `reason`
   phrase it.
   """
   @type walk_pool :: %{
           required(:budget) => non_neg_integer() | :unlimited,
           required(:seats) => non_neg_integer(),
           optional(:exempt_budget) => non_neg_integer() | nil,
+          optional(:load) => number(),
+          optional(:cap) => non_neg_integer() | nil,
           optional(:label) => String.t(),
           optional(:reason) => String.t() | nil
         }
@@ -219,7 +223,9 @@ defmodule Arbiter.Board.Scheduler do
   A candidate names its `pool`, the machines that can run it as node groups in
   preference order (`[[id]]`; a flat `[id]` is one group), and optionally the
   `budget` that binds this card there (a policy workspace's, or the exempt
-  budget for an exempt card) and its `repo`.
+  budget for an exempt card), the `weight` of the seat it takes (DC11, default 1),
+  the link `share` that counts seats
+  and its `repo`.
   """
   @type candidates ::
           [candidate()]
@@ -230,6 +236,8 @@ defmodule Arbiter.Board.Scheduler do
           required(:pool) => term(),
           required(:nodes) => [String.t()] | [[String.t()]],
           optional(:budget) => non_neg_integer() | :unlimited,
+          optional(:weight) => number(),
+          optional(:share) => pos_integer(),
           optional(:repo) => term()
         }
 
@@ -496,7 +504,7 @@ defmodule Arbiter.Board.Scheduler do
     ready = input |> Map.get(:ready) |> List.wrap() |> order()
     board = walk_board(input)
     caps = walk_caps(walk, ready, board)
-    used = %{pools: %{}, nodes: %{}, repos: %{}}
+    used = %{pools: %{}, pool_weight: %{}, nodes: %{}, repos: %{}}
 
     seed = %{
       placements: [],
@@ -649,6 +657,7 @@ defmodule Arbiter.Board.Scheduler do
     acc =
       acc
       |> take(:pools, candidate.pool)
+      |> take_weight(candidate)
       |> take(:nodes, node)
       |> take(:repos, Map.get(candidate, :repo))
       |> take_workspace(candidate.pool, card)
@@ -692,6 +701,16 @@ defmodule Arbiter.Board.Scheduler do
 
   defp take(acc, layer, key),
     do: update_in(acc, [:used, layer], &Map.update(&1, key, 1, fn n -> n + 1 end))
+
+  # DC11: a placement takes the weight of its seat (1 for a candidate that
+  # names none) on its pool, beside the seat it takes in the count.
+  defp take_weight(acc, candidate) do
+    update_in(acc, [:used, :pool_weight], fn weights ->
+      Map.update(weights, candidate.pool, weight_of(candidate), &(&1 + weight_of(candidate)))
+    end)
+  end
+
+  defp weight_of(candidate), do: Map.get(candidate, :weight) || 1
 
   defp placed(acc, layer, key), do: get_in(acc, [:used, layer, key]) || 0
 
@@ -847,7 +866,9 @@ defmodule Arbiter.Board.Scheduler do
       caps.pools == %{} ->
         {:provider, "no provider budget is published"}
 
-      not Enum.any?(caps.pools, fn {id, pool} -> room?(widest(pool), seats(pool, id, acc)) end) ->
+      not Enum.any?(caps.pools, fn {id, pool} ->
+        room?(widest(pool), weighted_seats(pool, id, acc))
+      end) ->
         {:provider, "no pool has a free seat: " <> pool_summary(caps, acc)}
 
       caps.nodes == %{} ->
@@ -864,9 +885,30 @@ defmodule Arbiter.Board.Scheduler do
   defp pool_room?(candidate, caps, acc) do
     case Map.get(caps.pools, candidate.pool) do
       nil -> false
-      pool -> room?(limit(candidate, pool), seats(pool, candidate.pool, acc))
+      pool -> pool_fits?(candidate, pool, acc)
     end
   end
+
+  # DC11 (`Arbiter.Accounts.SeatCheck`): the weighted load plus the new seat's
+  # weight within the budget, the ceiling still counting seats (I3). A pool
+  # with no seat in use takes one card however heavy, unless it is at a hard
+  # zero. With no `:load` and no `:weight` this is `seats < limit`.
+  defp pool_fits?(candidate, pool, acc) do
+    id = candidate.pool
+    seats = seats(pool, id, acc)
+
+    room?(Map.get(pool, :cap), seats) and room?(Map.get(candidate, :share), seats) and
+      weighted_room?(
+        limit(candidate, pool),
+        seats,
+        weighted_seats(pool, id, acc),
+        weight_of(candidate)
+      )
+  end
+
+  defp weighted_room?(:unlimited, _seats, _load, _weight), do: true
+  defp weighted_room?(limit, 0, _load, _weight) when is_integer(limit) and limit >= 1, do: true
+  defp weighted_room?(limit, _seats, load, weight), do: load + weight <= limit + 1.0e-9
 
   defp repo_room?(candidate, caps, acc) do
     case Map.get(caps.repos, Map.get(candidate, :repo)) do
@@ -917,8 +959,16 @@ defmodule Arbiter.Board.Scheduler do
   defp widest(pool), do: pool.budget
 
   defp seats(pool, id, acc), do: pool.seats + placed(acc, :pools, id)
+
+  # The weighted seats on the pool: the `:load` the caller measured (the seat
+  # count when it gave none) plus the weights placed so far.
+  defp weighted_seats(pool, id, acc),
+    do: Map.get(pool, :load, pool.seats) + placed_weight(acc, id)
+
+  defp placed_weight(acc, id), do: get_in(acc, [:used, :pool_weight, id]) || 0
   defp used(node, id, acc), do: node.used + placed(acc, :nodes, id)
 
+  defp room?(nil, _used), do: true
   defp room?(:unlimited, _used), do: true
   defp room?(limit, used) when is_integer(limit), do: used < limit
 

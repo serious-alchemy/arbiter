@@ -22,6 +22,7 @@ defmodule Arbiter.Board.AdmissionLegacyTest do
     Arbiter.Quota.Budget,
     Arbiter.Quota.Budget.Server,
     Arbiter.Quota.Seats,
+    Arbiter.Quota.SeatWeights,
     Arbiter.Board.WalkInputs,
     Arbiter.Accounts.SeatCheck
   ]
@@ -142,7 +143,8 @@ defmodule Arbiter.Board.AdmissionLegacyTest do
 
     assert {Arbiter.Board.WalkInputs, :gather, 3} in seen
     assert {Arbiter.Quota.Budget.Server, :all, 0} in seen
-    assert {Arbiter.Quota.Seats, :counts, 0} in seen
+    # DC11: the walk reads the seats with the model each draws on.
+    assert {Arbiter.Quota.Seats, :seats, 0} in seen
 
     # And today's card still goes, with the walk's decision beside it.
     ready_id = ready.id

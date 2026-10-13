@@ -917,11 +917,16 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp enforced?(account, ctx), do: AdmissionMode.mode(account, ctx.install_mode) == :enforce
 
-  defp seat_free?(%{account: account, pool: pool}, ctx) do
+  defp seat_free?(%{account: account, pool: pool} = entry, ctx) do
     SeatCheck.room?(
       account,
       Keyword.merge(
-        [workspace_id: ctx.ws.id, pool: pool, exclude_task: ctx.task && Map.get(ctx.task, :id)],
+        [
+          workspace_id: ctx.ws.id,
+          pool: pool,
+          model: Map.get(entry, :model),
+          exclude_task: ctx.task && Map.get(ctx.task, :id)
+        ],
         ctx.seat_opts
       )
     )

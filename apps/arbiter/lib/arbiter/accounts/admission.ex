@@ -176,7 +176,8 @@ defmodule Arbiter.Accounts.Admission do
             workspace_id: String.t() | nil,
             provider: String.t() | nil,
             account_id: String.t() | nil,
-            pool: String.t() | nil
+            pool: String.t() | nil,
+            model: String.t() | nil
           }
         ]
   def pending do
@@ -191,7 +192,8 @@ defmodule Arbiter.Accounts.Admission do
             workspace_id: ws_id,
             provider: provider,
             account_id: Map.get(value, :account_id),
-            pool: Map.get(value, :pool)
+            pool: Map.get(value, :pool),
+            model: Map.get(value, :model)
           }
         ]
       else
@@ -302,6 +304,7 @@ defmodule Arbiter.Accounts.Admission do
         [
           workspace_id: task.workspace_id,
           pool: Keyword.get(opts, :pool) || model_pool(provider, Keyword.get(opts, :model)),
+          model: Keyword.get(opts, :model),
           priority: task.priority,
           exclude_task: task.id
         ],
@@ -348,7 +351,8 @@ defmodule Arbiter.Accounts.Admission do
       workspace_id: ws_id,
       provider: code(provider),
       account_id: account.id,
-      pool: Keyword.get(opts, :pool) || pool(provider, Keyword.get(opts, :model))
+      pool: Keyword.get(opts, :pool) || pool(provider, Keyword.get(opts, :model)),
+      model: Keyword.get(opts, :model)
     }
 
     case Registry.register(@registry, id, value) do

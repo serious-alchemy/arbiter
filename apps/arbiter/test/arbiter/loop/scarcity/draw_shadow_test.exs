@@ -18,12 +18,16 @@ defmodule Arbiter.Loop.Scarcity.DrawShadowTest do
   # calibration (bd-c1dief) reuses `Calibration.fit/2` and `Draw.intervals/3`
   # and is itself pinned shadow-only by `Quota.BudgetCalibrationShadowTest`; so
   # does the admission shadow report (DC7), which only names `Draw.pool/2`.
+  # `quota/seat_weights.ex` (DC11, bd-8lsfey, R11 folded in) is the one consumer of
+  # the per-model fit: it turns it into seat weights the budget server holds, and
+  # only `SeatCheck` (enforce) and the walk read those (`SeatWeightsTest` pins it).
   @allowed ~w(
     arbiter/loop/scarcity.ex
     arbiter/loop/scarcity/draw.ex
     arbiter/loop/scarcity/calibration.ex
     arbiter/release.ex
     arbiter/quota/budget_calibration.ex
+    arbiter/quota/seat_weights.ex
     mix/tasks/arbiter.draw_calibration.ex
     mix/tasks/arbiter.budget_calibration.ex
     arbiter/board/admission_shadow_report.ex

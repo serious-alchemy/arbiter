@@ -624,4 +624,99 @@ defmodule Arbiter.Board.WalkInputsTest do
       assert [%{budget: 2}] = walk.candidates.(card(urgent))
     end
   end
+
+  describe "weighted seats (DC11)" do
+    test "a pool carries the weighted load of its seats when weights are calibrated" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      key = {claude.id, "claude"}
+
+      walk =
+        gather(ws, [],
+          budgets: [budget(claude, "claude", 5)],
+          seats: %{key => 3},
+          held: %{key => [{"bd-1", "opus"}, {"bd-2", "haiku"}, {"bd-3", nil}]},
+          seat_weights: %{key => %{"opus" => 2.0, "haiku" => 0.5}}
+        )
+
+      assert %{seats: 3, load: 3.5} = walk.pools[key]
+    end
+
+    test "the floor applies to a pool's seats" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      key = {claude.id, "claude"}
+
+      walk =
+        gather(ws, [],
+          budgets: [budget(claude, "claude", 5)],
+          seats: %{key => 1},
+          held: %{key => [{"bd-1", "tiny"}]},
+          seat_weights: %{key => %{"tiny" => 0.01}}
+        )
+
+      assert %{load: 0.25} = walk.pools[key]
+    end
+
+    test "without weights a pool has no load, and the seat count stands" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude)
+      key = {claude.id, "claude"}
+
+      walk =
+        gather(ws, [],
+          budgets: [budget(claude, "claude", 5)],
+          seats: %{key => 1},
+          held: %{key => [{"bd-1", "opus"}]},
+          seat_weights: %{}
+        )
+
+      refute Map.has_key?(walk.pools[key], :load)
+    end
+
+    test "a routed candidate carries the weight of the model it would run" do
+      ws =
+        workspace!(
+          Map.put(@most_quota, "agent", %{"type" => "claude", "config" => %{"model" => "haiku"}})
+        )
+
+      claude = account!(:claude, "claude")
+      link!(ws, claude, %{implementer_position: 0})
+      ticket = issue!(ws)
+      key = {claude.id, "claude"}
+      opts = [quota_fun: fn _ -> nil end, gemini_code: "antigravity"]
+
+      %{available: [%{model: model}]} =
+        Arbiter.Agents.ProviderRouting.availability(ws, ticket, [admission: :walk] ++ opts)
+
+      assert model == "haiku"
+
+      walk =
+        gather(ws, [ticket],
+          budgets: [budget(claude, "claude", 5)],
+          seat_weights: %{key => %{"claude-haiku-4-5" => 2.0}},
+          routing_opts: opts
+        )
+
+      assert [%{weight: weight}] = walk.candidates.(card(ticket))
+      assert weight == 2.0
+
+      plain = gather(ws, [ticket], budgets: [budget(claude, "claude", 5)], routing_opts: opts)
+      assert [candidate] = plain.candidates.(card(ticket))
+      refute Map.has_key?(candidate, :weight)
+    end
+
+    test "a link's share names a ceiling that counts seats" do
+      ws = workspace!()
+      claude = account!(:claude, "default")
+      link!(ws, claude, %{share: 2})
+      ticket = issue!(ws)
+
+      walk = gather(ws, [ticket], budgets: [budget(claude, "claude", 5)])
+      assert [%{budget: 2, share: 2}] = walk.candidates.(card(ticket))
+    end
+  end
 end

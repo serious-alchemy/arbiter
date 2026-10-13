@@ -5,6 +5,10 @@ defmodule Arbiter.Accounts.SeatCheck do
 
       seats(account, pool) < min(budget, max_concurrent, share)
 
+  with the budget term weighted (DC11, below):
+
+      Σ weights(seats) + w_new ≤ budget      and      seats < min(max_concurrent, share)
+
     * **`budget`** — the pool's published `Arbiter.Quota.Budget`
       (`Arbiter.Quota.Budget.Server`): the workspace's policy variant when the
       workspace sets its own `quota` config, else the account's own. A card whose
@@ -19,6 +23,14 @@ defmodule Arbiter.Accounts.SeatCheck do
     * **`seats`** — counted live (`Arbiter.Quota.Seats`), never from a snapshot,
       leaving out the seats of the ticket being admitted (`:exclude_task`).
 
+  **Weighted seats (DC11, bd-8lsfey).** A seat weighs `ρ_m / ρ̄` from R3's
+  per-model draw (`Arbiter.Quota.SeatWeights`, calibrated by the budget server),
+  so a premium-model seat takes more than one seat-equivalent of the budget. A
+  model with no calibrated weight, or none named, weighs 1: with no weights
+  calibrated for the pool the check is exactly `seats < budget`. The ceilings
+  count seats whatever they weigh (I3). A pool with no seat in use admits one card
+  however heavy it weighs, while its budget is at least 1.
+
   A `nil` pool (no predicted model) takes the account's lowest published budget
   and counts that pool's seats (§3.1).
 
@@ -30,8 +42,9 @@ defmodule Arbiter.Accounts.SeatCheck do
   that stops a run reads it (I8).
 
   Options: `:workspace_id`, `:pool`, `:priority` (the ticket's own),
-  `:exclude_task`, and the seams `:budgets` (a list of `Budget` structs in place
-  of the published table), `:holders` (`Seats.holders/0`'s map), `:share` and
+  `:exclude_task`, `:model` (the card's, for its weight), and the seams `:budgets` (a list of `Budget` structs in place
+  of the published table), `:holders` (`Seats.seats/0`'s map of `{holder, model}`, or bare holder ids), `:weights`
+  (a `%{model => weight}` map, or a function of the window label), `:share` and
   `:workspace` (the policy half `Gate.pace_exempt?/2` narrows the exemption by).
   """
 
@@ -43,6 +56,9 @@ defmodule Arbiter.Accounts.SeatCheck do
   alias Arbiter.Quota.Budget.Server, as: BudgetServer
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Seats
+  alias Arbiter.Quota.SeatWeights
+
+  @epsilon 1.0e-9
 
   @type binding :: :budget | :max_concurrent | :share | nil
 
@@ -59,6 +75,8 @@ defmodule Arbiter.Accounts.SeatCheck do
           binding: binding(),
           seats: non_neg_integer(),
           holders: [String.t()],
+          load: number(),
+          weight: number(),
           reason: String.t() | nil
         }
 
@@ -75,7 +93,9 @@ defmodule Arbiter.Accounts.SeatCheck do
     budget_value = budget_value(budget, exempt?)
     share = Keyword.get_lazy(opts, :share, fn -> Resolver.share(ws_id, account.provider) end)
     {limit, binding} = limit(budget_value, account.max_concurrent, share)
-    holders = holders(account.id, pool, Keyword.get(opts, :exclude_task), opts)
+    seated = seated(account.id, pool, Keyword.get(opts, :exclude_task), opts)
+    holders = Enum.map(seated, &elem(&1, 0))
+    {load, weight} = load(seated, account.id, pool, budget, opts)
 
     info = %{
       account_id: account.id,
@@ -90,10 +110,12 @@ defmodule Arbiter.Accounts.SeatCheck do
       binding: binding,
       seats: length(holders),
       holders: holders,
+      load: load,
+      weight: weight,
       reason: budget && budget.reason
     }
 
-    if free?(limit, length(holders)), do: {:ok, info}, else: {:full, info}
+    if free?(info, budget_value), do: {:ok, info}, else: {:full, info}
   end
 
   @doc "Whether `check/2` finds a free seat."
@@ -101,12 +123,39 @@ defmodule Arbiter.Accounts.SeatCheck do
   def room?(%ProviderAccount{} = account, opts \\ []), do: match?({:ok, _}, check(account, opts))
 
   @doc """
+  How many more seats like this card's fit on the pool (`:unlimited` when
+  nothing bounds it): the ceilings' room in seats, and the budget's room in
+  the new seat's weights (DC11). The scheduler walk's capacity for the pool.
+  """
+  @spec free_seats(info()) :: non_neg_integer() | :unlimited
+  def free_seats(%{limit: :unlimited}), do: :unlimited
+
+  def free_seats(%{seats: seats, max_concurrent: max_concurrent, share: share} = info) do
+    by_count = for c <- [max_concurrent, share], is_integer(c), do: max(c - seats, 0)
+    by_budget = if is_integer(info.budget), do: [budget_room(info)], else: []
+
+    case by_count ++ by_budget do
+      [] -> :unlimited
+      rooms -> Enum.min(rooms)
+    end
+  end
+
+  # An empty pool still fits one card, however heavy (see `free?/2`).
+  defp budget_room(%{budget: budget, seats: 0} = info) when budget >= 1,
+    do: max(fit(info), 1)
+
+  defp budget_room(info), do: max(fit(info), 0)
+
+  defp fit(%{budget: budget, load: load, weight: weight}),
+    do: floor((budget - load) / weight + @epsilon)
+
+  @doc """
   The live seat holders per pool (`Arbiter.Quota.Seats.holders/0`), for a caller
   that checks several pools in one decision and passes them as `:holders`, so
   the registry and the tickets are read once rather than once per pool.
   """
-  @spec holders() :: %{Seats.pool_key() => [String.t()]}
-  def holders, do: Seats.holders()
+  @spec holders() :: %{Seats.pool_key() => [{String.t(), String.t() | nil}]}
+  def holders, do: Seats.seats()
 
   @doc """
   A pool held at a **hard zero** (§3.5) by a rule the quota gate still keeps
@@ -138,6 +187,8 @@ defmodule Arbiter.Accounts.SeatCheck do
       binding: :budget,
       seats: 0,
       holders: [],
+      load: 0,
+      weight: 1,
       reason: phrase
     }
   end
@@ -148,6 +199,11 @@ defmodule Arbiter.Accounts.SeatCheck do
   `claude:default: 2 of 2 seats (max_concurrent 2)`.
   """
   @spec describe(info()) :: String.t()
+  def describe(%{label: label, seats: seats, limit: limit, load: load} = info)
+      when load != seats do
+    "#{label}: #{seats} seats weighing #{Float.round(load * 1.0, 2)} of #{limit_text(limit)} (#{why(info)})"
+  end
+
   def describe(%{label: label, seats: seats, limit: limit} = info) do
     "#{label}: #{seats} of #{limit_text(limit)} seats (#{why(info)})"
   end
@@ -218,14 +274,61 @@ defmodule Arbiter.Accounts.SeatCheck do
     end
   end
 
-  defp free?(:unlimited, _seats), do: true
-  defp free?(limit, seats), do: seats < limit
+  # The ceilings count seats (I3); the budget compares the weighted load, with
+  # the new seat's weight, against the published budget (DC11). An empty pool
+  # admits a card heavier than the budget whenever the budget is at least 1: a
+  # model that weighs more than the whole budget must not starve. A hard zero
+  # still refuses.
+  defp free?(%{seats: seats, load: load, weight: weight} = info, budget_value) do
+    ceilings_free? =
+      Enum.all?([info.max_concurrent, info.share], &(not is_integer(&1) or seats < &1))
 
-  defp holders(account_id, pool, exclude, opts) do
+    ceilings_free? and budget_free?(budget_value, seats, load, weight)
+  end
+
+  defp budget_free?(budget, _seats, _load, _weight) when not is_integer(budget), do: true
+  defp budget_free?(budget, 0, _load, _weight) when budget >= 1, do: true
+  defp budget_free?(budget, _seats, load, weight), do: load + weight <= budget + @epsilon
+
+  # `[{holder, model}]` of the pool, the excluded ticket's seats left out. The
+  # `:holders` seam may carry bare holder ids (no model known).
+  defp seated(account_id, pool, exclude, opts) do
     opts
-    |> Keyword.get_lazy(:holders, &Seats.holders/0)
+    |> Keyword.get_lazy(:holders, &Seats.seats/0)
     |> Map.get({account_id, pool}, [])
-    |> Enum.reject(&(is_binary(exclude) and Seats.base_task_id(&1) == exclude))
+    |> Enum.map(fn
+      {holder, model} -> {holder, model}
+      holder -> {holder, nil}
+    end)
+    |> Enum.reject(fn {holder, _model} ->
+      is_binary(exclude) and Seats.base_task_id(holder) == exclude
+    end)
+  end
+
+  # `{Σ weights, w_new}` (DC11). With no weights calibrated for the pool every
+  # seat weighs 1 and this is the seat count: phase 1.
+  defp load(seated, account_id, pool, budget, opts) do
+    window = budget && budget.quota_binding
+
+    case weights(account_id, pool, window, opts) do
+      weights when weights == %{} ->
+        {length(seated), 1}
+
+      weights ->
+        floor = SeatWeights.floor_ratio(budget)
+        weigh = &SeatWeights.weight(weights, &1, floor)
+        load = seated |> Enum.map(fn {_holder, model} -> weigh.(model) end) |> Enum.sum()
+        {load, weigh.(Keyword.get(opts, :model))}
+    end
+  end
+
+  # The `:weights` seam is a map, or a function of the window label.
+  defp weights(account_id, pool, window, opts) do
+    case Keyword.fetch(opts, :weights) do
+      {:ok, fun} when is_function(fun, 1) -> fun.(window)
+      {:ok, weights} when is_map(weights) -> weights
+      _ -> BudgetServer.seat_weights(account_id, pool, window)
+    end
   end
 
   # ---- words ------------------------------------------------------------------

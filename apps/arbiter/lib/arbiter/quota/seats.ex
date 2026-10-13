@@ -39,7 +39,8 @@ defmodule Arbiter.Quota.Seats do
   worker whose ticket cannot be read fails closed and seats: an unreadable
   state must never read as "nothing is running".
 
-  `holders/2` and `tally/1` are pure; `counts/0` and `count/2` read the live
+  `holders/2`, `seats/2` and `tally/1` are pure; `counts/0`, `count/2`, `holders/0` and
+  `seats/0` read the live
   state.
   """
 
@@ -99,12 +100,34 @@ defmodule Arbiter.Quota.Seats do
   @spec holders([entry()], MapSet.t(String.t())) :: %{pool_key() => [String.t()]}
   def holders(entries, %MapSet{} = pinned) do
     entries
+    |> seats(pinned)
+    |> Map.new(fn {key, list} -> {key, Enum.map(list, &elem(&1, 0))} end)
+  end
+
+  @doc """
+  `holders/2` with the model each seat draws on (DC11): `{holder, model}`, the
+  model being the one the entry was stamped or reserved with, `nil` when it
+  named none. `Arbiter.Accounts.SeatCheck` weighs the seats by it
+  (`Arbiter.Quota.SeatWeights`).
+  """
+  @spec seats([entry()], MapSet.t(String.t())) :: %{
+          pool_key() => [{String.t(), String.t() | nil}]
+        }
+  def seats(entries, %MapSet{} = pinned) do
+    entries
     |> drop_shadowed_reservations()
     |> Enum.group_by(&base_task_id(&1.registry_key))
     |> Enum.flat_map(fn {ticket, group} -> ticket_seats(ticket, group, pinned) end)
     |> Enum.reject(fn {key, _holder} -> is_nil(key) end)
     |> Enum.group_by(fn {key, _holder} -> key end, fn {_key, holder} -> holder end)
     |> Map.new(fn {key, list} -> {key, Enum.sort(list)} end)
+  end
+
+  @doc "`seats/2` over the live registry and reservations."
+  @spec seats() :: %{pool_key() => [{String.t(), String.t() | nil}]}
+  def seats do
+    entries = live_entries()
+    seats(entries, pinned(entries))
   end
 
   @doc "The ticket a registry key belongs to: the key up to its first `:` or `#`."
@@ -131,13 +154,18 @@ defmodule Arbiter.Quota.Seats do
         if reserved?(primary) or MapSet.member?(pinned, ticket), do: pool_key(primary)
       end)
 
-    pin_seat = if pin, do: [{pin, ticket}], else: []
+    pin_seat = if pin, do: [{pin, {ticket, pin_model(primaries)}}], else: []
 
     sub_seats =
-      for sub <- subs, key = pool_key(sub), key != pin, do: {key, sub.registry_key}
+      for sub <- subs,
+          key = pool_key(sub),
+          key != pin,
+          do: {key, {sub.registry_key, Map.get(sub, :model)}}
 
     pin_seat ++ sub_seats
   end
+
+  defp pin_model(primaries), do: Enum.find_value(primaries, &Map.get(&1, :model))
 
   defp pool_key(%{account_id: account, pool: pool}) when is_binary(account) and is_binary(pool),
     do: {account, pool}

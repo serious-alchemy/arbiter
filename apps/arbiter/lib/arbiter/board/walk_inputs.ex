@@ -90,6 +90,7 @@ defmodule Arbiter.Board.WalkInputs do
   alias Arbiter.Quota.Budget.Server, as: BudgetServer
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Seats
+  alias Arbiter.Quota.SeatWeights
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.Lifecycle
@@ -113,7 +114,8 @@ defmodule Arbiter.Board.WalkInputs do
   @spec gather(Workspace.t() | nil, [map()], keyword()) :: map()
   def gather(default, issues, opts \\ []) do
     budgets = Keyword.get_lazy(opts, :budgets, &BudgetServer.all/0)
-    seats = Keyword.get_lazy(opts, :seats, &Seats.counts/0)
+    {seats, held} = seats(opts)
+    seat_weights = seat_weights(budgets, opts)
     accounts = Keyword.get_lazy(opts, :accounts, &read_accounts/0) |> Map.new(&{&1.id, &1})
     fair = fair_inputs(budgets, accounts, opts)
     queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued))
@@ -130,12 +132,16 @@ defmodule Arbiter.Board.WalkInputs do
       links: links,
       shares: Keyword.get_lazy(opts, :shares, fn -> read_shares(Map.keys(workspaces)) end),
       budgets: Map.new(budgets, &{{&1.account, &1.pool, &1.policy_workspace}, &1}),
+      seat_weights: seat_weights,
       remote: remote,
       routing_opts: Keyword.get(opts, :routing_opts, [])
     }
 
     %{
-      pools: budgets |> pools(seats, accounts, fair) |> Map.merge(unmetered(links)),
+      pools:
+        budgets
+        |> pools(seats, loads(held, seat_weights), accounts, fair)
+        |> Map.merge(unmetered(links)),
       nodes: Map.put(remote, @local, local(opts)),
       repos: repos(repo_caps, opts),
       candidates: &candidates(&1, ctx)
@@ -184,7 +190,49 @@ defmodule Arbiter.Board.WalkInputs do
 
   # ---- pools ----------------------------------------------------------------
 
-  defp pools(budgets, seats, accounts, fair) do
+  # The seat counts and who holds them. `:seats` (the counts) given alone leaves
+  # `held` empty: no model is known, so every seat weighs 1.
+  defp seats(opts) do
+    case Keyword.fetch(opts, :seats) do
+      {:ok, seats} ->
+        {seats, Keyword.get(opts, :held, %{})}
+
+      :error ->
+        held = Keyword.get_lazy(opts, :held, &Seats.seats/0)
+        {Map.new(held, fn {key, list} -> {key, length(list)} end), held}
+    end
+  end
+
+  # DC11: `{account, pool} => {weights, floor}` for every pool whose seats were
+  # weighted (`Arbiter.Quota.SeatWeights`). The `:seat_weights` seam is
+  # `{account, pool} => weights`; the floor comes from the published budget.
+  defp seat_weights(budgets, opts) do
+    seam = Keyword.get(opts, :seat_weights)
+
+    for %Budget{policy_workspace: nil, account: id, pool: pool} = b <- budgets,
+        weights = pool_weights(seam, id, pool, b),
+        weights != %{},
+        into: %{},
+        do: {{id, pool}, {weights, SeatWeights.floor_ratio(b)}}
+  end
+
+  defp pool_weights(nil, id, pool, b), do: BudgetServer.seat_weights(id, pool, b.quota_binding)
+  defp pool_weights(seam, id, pool, _b), do: Map.get(seam, {id, pool})
+
+  # The weighted load of each weighted pool's seats; a pool with none has no load.
+  defp loads(held, seat_weights) do
+    Map.new(seat_weights, fn {key, {weights, floor}} ->
+      load =
+        held
+        |> Map.get(key, [])
+        |> Enum.map(fn {_holder, model} -> SeatWeights.weight(weights, model, floor) end)
+        |> Enum.sum()
+
+      {key, load}
+    end)
+  end
+
+  defp pools(budgets, seats, loads, accounts, fair) do
     for %Budget{policy_workspace: nil, account: id, pool: pool} = b <- budgets, into: %{} do
       key = {id, pool}
 
@@ -198,6 +246,7 @@ defmodule Arbiter.Board.WalkInputs do
         cap: ceiling(b.ceiling)
       }
 
+      base = if load = Map.get(loads, key), do: Map.put(base, :load, load), else: base
       {key, put_fair(base, Map.get(fair, key))}
     end
   end
@@ -446,7 +495,10 @@ defmodule Arbiter.Board.WalkInputs do
   defp routed(ws, issue, ctx) do
     case ProviderRouting.availability(ws, issue, Keyword.put(ctx.routing_opts, :admission, :walk)) do
       %{available: [_ | _] = available} ->
-        Enum.map(available, &candidate(ws, issue, &1.account, &1.pool, &1.agent_type, ctx))
+        Enum.map(
+          available,
+          &candidate(ws, issue, &1.account, &1.pool, &1.agent_type, ctx, &1.model)
+        )
 
       %{dropped: [_ | _] = dropped} ->
         from_drops(issue, dropped)
@@ -504,10 +556,24 @@ defmodule Arbiter.Board.WalkInputs do
     end
   end
 
-  defp candidate(ws, issue, account, pool, provider, ctx) do
+  defp candidate(ws, issue, account, pool, provider, ctx, model \\ nil) do
     %{pool: {account.id, pool}, nodes: groups(ws, issue, provider, ctx)}
     |> put_hold(hold(ws, issue, provider))
     |> put_budget(account, pool, ws, issue, ctx)
+    |> put_share(Map.get(ctx.shares, {ws.id, account.id}))
+    |> put_weight({account.id, pool}, model, ctx)
+  end
+
+  # DC11: the link's share counts seats, whatever they weigh (I3); and the
+  # weight of the seat this card would take, when its pool's seats are weighted.
+  defp put_share(candidate, share) when is_integer(share), do: Map.put(candidate, :share, share)
+  defp put_share(candidate, _share), do: candidate
+
+  defp put_weight(candidate, key, model, ctx) do
+    case Map.get(ctx.seat_weights, key) do
+      {weights, floor} -> Map.put(candidate, :weight, SeatWeights.weight(weights, model, floor))
+      nil -> candidate
+    end
   end
 
   # The budget that binds this card on the pool, when it is not the pool's own:

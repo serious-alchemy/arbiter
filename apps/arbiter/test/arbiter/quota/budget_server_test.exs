@@ -74,6 +74,7 @@ defmodule Arbiter.Quota.Budget.ServerTest do
       inputs: ctx.inputs,
       tick_ms: :never,
       calibration: :never,
+      weights: :never,
       enabled: true
     ]
 
@@ -287,6 +288,67 @@ defmodule Arbiter.Quota.Budget.ServerTest do
         end)
 
       assert log =~ "calibration failed"
+    end
+  end
+
+  describe "seat weights (DC11)" do
+    @weights [
+      %{account_id: @account, pool: "claude", window: "7d", weights: %{"opus" => 2.0}},
+      %{account_id: @account, pool: "claude", window: "5h", weights: %{"opus" => 3.0}}
+    ]
+
+    test "the calibration's weights are readable per (account, pool), by window", ctx do
+      {server, table} = start(ctx, calibration: fn -> [] end, weights: fn -> @weights end)
+      await_calibration(server)
+
+      assert Server.seat_weights(@account, "claude", "7d", table) == %{"opus" => 2.0}
+      assert Server.seat_weights(@account, "claude", "5h", table) == %{"opus" => 3.0}
+      # No window named, or one that was not fitted: the first window sorted.
+      assert Server.seat_weights(@account, "claude", nil, table) == %{"opus" => 3.0}
+      assert Server.seat_weights(@account, "claude", "30d", table) == %{"opus" => 3.0}
+      assert Server.seat_weights(@account, "codex", "5h", table) == %{}
+      assert Server.seat_weights("other", "claude", "5h", table) == %{}
+    end
+
+    test "weights do not appear among the budgets", ctx do
+      {server, table} = start(ctx, calibration: fn -> [] end, weights: fn -> @weights end)
+      await_calibration(server)
+      :ok = Server.recompute(server)
+
+      assert Server.all(table) |> length() == 1
+    end
+
+    test "a new calibration replaces the old weights", ctx do
+      {:ok, agent} = Agent.start_link(fn -> @weights end)
+
+      {server, table} =
+        start(ctx, calibration: fn -> [] end, weights: fn -> Agent.get(agent, & &1) end)
+
+      await_calibration(server)
+
+      Agent.update(agent, fn _ -> [] end)
+      send(server |> GenServer.whereis(), :calibrate)
+      await_calibration(server)
+
+      assert Server.seat_weights(@account, "claude", "5h", table) == %{}
+    end
+
+    test "weights that fail leave the budgets and the rest of the calibration alone", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {server, table} =
+            start(ctx, calibration: fn -> [@rung0] end, weights: fn -> raise "weights boom" end)
+
+          await_calibration(server)
+          assert %{rho_source: :fit, rho: 0.2} = window(table, "5h")
+          assert Server.seat_weights(@account, "claude", "5h", table) == %{}
+        end)
+
+      assert log =~ "seat weights"
+    end
+
+    test "reads are safe before the table exists" do
+      assert Server.seat_weights("x", "claude", nil, :no_such_budget_table) == %{}
     end
   end
 
