@@ -1,5 +1,5 @@
 defmodule Arbiter.Quota.QuotaSnapshotTest do
-  use Arbiter.DataCase, async: true
+  use Arbiter.DataCase, async: false
 
   alias Arbiter.Quota.QuotaSnapshot
 

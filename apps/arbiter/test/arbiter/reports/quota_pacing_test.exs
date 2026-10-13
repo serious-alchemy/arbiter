@@ -14,8 +14,6 @@ defmodule Arbiter.Reports.QuotaPacingTest do
     assert [%{value: 0.0, ceiling: 100.0}] =
              QuotaPacing.points([row(%{utilization: 0, ceiling: 1})])
 
-    QuotaPacing.points([row(%{utilization: 0, ceiling: 1})])
-
     assert [%{value: 100.0, ceiling: 0.0}] =
              QuotaPacing.points([row(%{utilization: 1, ceiling: 0})])
   end

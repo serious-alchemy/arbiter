@@ -63,6 +63,16 @@ defmodule Arbiter.Reports.CostTest do
 
   defp d2_row(report), do: Enum.find(report.difficulties, &(&1.difficulty == 2))
 
+  test "integer-valued cost_usd rows load without crashing", %{ws: ws} do
+    issue = closed_issue!(ws, %{difficulty: 2})
+    event!(ws, issue.id, %{cost_usd: 1})
+    event!(ws, issue.id, %{cost_usd: 0})
+
+    report = Cost.load(%{"workspace" => ws.id}, now: @now)
+
+    assert_in_delta d2_row(report).cost_usd, 1.0, 0.001
+  end
+
   test "totals match a manual usage_events sum for the workspace", %{ws: ws} do
     d2_tasks!(ws, 12)
     event!(ws, "ext:abc", %{cost_usd: 99.0})
