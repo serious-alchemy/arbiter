@@ -3141,7 +3141,8 @@ defmodule Arbiter.Worker.Dispatch do
       cap: 0,
       holders: [],
       pool: seat.pool,
-      seat: seat
+      seat: seat,
+      hard_zero: true
     }
   end
 
