@@ -81,6 +81,41 @@ defmodule Arbiter.Agents.Gemini.ModelCatalogTest do
     end
   end
 
+  describe "the real probe (a stub `agy` on :agy_cmd)" do
+    @describetag :tmp_dir
+
+    setup %{tmp_dir: tmp} do
+      prev = Application.fetch_env(:arbiter, :agy_cmd)
+
+      on_exit(fn ->
+        case prev do
+          {:ok, v} -> Application.put_env(:arbiter, :agy_cmd, v)
+          :error -> Application.delete_env(:arbiter, :agy_cmd)
+        end
+      end)
+
+      {:ok, stub: Path.join(tmp, "agy")}
+    end
+
+    test "runs `agy models` and parses its output", %{stub: stub} do
+      File.write!(stub, "#!/bin/sh\n[ \"$1\" = models ] || exit 2\ncat <<'OUT'\n#{@listing}OUT\n")
+      File.chmod!(stub, 0o755)
+      Application.put_env(:arbiter, :agy_cmd, stub)
+
+      assert {:ok, models} = ModelCatalog.refresh()
+      assert "gemini-3.8-flash-high" in models
+      assert "claude-opus-5-5-high" in models
+    end
+
+    test "a failing `agy models` is :unknown", %{stub: stub} do
+      File.write!(stub, "#!/bin/sh\nexit 1\n")
+      File.chmod!(stub, 0o755)
+      Application.put_env(:arbiter, :agy_cmd, stub)
+
+      assert ModelCatalog.refresh() == :unknown
+    end
+  end
+
   describe "available?/2" do
     test "true / false against the cached list" do
       opts = [probe: fn -> {:ok, ["gemini-3.8-flash-low"]} end, now: 0]
