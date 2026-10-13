@@ -119,7 +119,63 @@ defmodule Arbiter.Quota.SeatsTest do
     end
   end
 
+  describe "seats/2 (pure): holders with the model each seat draws on (DC11)" do
+    test "a pin seat carries its primary's model, a sub-worker its own" do
+      entries = [
+        entry("t1", @a, "claude", %{model: "opus"}),
+        entry("t1#review", @b, "codex", %{model: "gpt-5"}),
+        entry("t2", @a, "claude")
+      ]
+
+      assert Seats.seats(entries, MapSet.new(["t1", "t2"])) == %{
+               {@a, "claude"} => [{"t1", "opus"}, {"t2", nil}],
+               {@b, "codex"} => [{"t1#review", "gpt-5"}]
+             }
+    end
+
+    test "holders/2 is seats/2 without the models" do
+      entries = [entry("t1", @a, "claude", %{model: "opus"}), entry("t1#review", @b, "codex")]
+      pinned = MapSet.new(["t1"])
+
+      assert Seats.holders(entries, pinned) ==
+               Map.new(Seats.seats(entries, pinned), fn {k, l} ->
+                 {k, Enum.map(l, &elem(&1, 0))}
+               end)
+    end
+  end
+
   describe "registry stamping" do
+    test "put_dispatch stamps the model (DC11) and keeps it across a rewrite" do
+      key = "stamp-model-#{System.unique_integer([:positive])}"
+      test = self()
+
+      pid =
+        spawn(fn ->
+          {:ok, _} = Registry.register(WorkerRegistry, key, nil)
+          :ok = WorkerRegistry.put_dispatch(key, "ws", "claude", model: "opus")
+          send(test, :stamped)
+
+          receive do
+            :rewrite ->
+              :ok = WorkerRegistry.put_dispatch(key, "ws", "claude", released: true)
+              send(test, :rewritten)
+              Process.sleep(:infinity)
+          end
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      assert_receive :stamped
+
+      assert %{model: "opus"} =
+               Enum.find(WorkerRegistry.live_dispatches(), &(&1.registry_key == key))
+
+      send(pid, :rewrite)
+      assert_receive :rewritten
+
+      assert %{model: "opus", released: true} =
+               Enum.find(WorkerRegistry.live_dispatches(), &(&1.registry_key == key))
+    end
+
     test "put_dispatch stamps the account and the pool, and keeps them across a rewrite" do
       key = "stamp-#{System.unique_integer([:positive])}"
       test = self()
@@ -350,6 +406,28 @@ defmodule Arbiter.Quota.SeatsTest do
       assert_receive :reserved
 
       assert Seats.count(ctx.claude.id, "claude") == 1
+    end
+
+    test "a reservation carries the model it was admitted with (DC11)", ctx do
+      t = ticket!(ctx.ws, :ready)
+      test = self()
+
+      pid =
+        spawn(fn ->
+          issue = Ash.get!(Arbiter.Tasks.Issue, t)
+
+          {:ok, _} =
+            Arbiter.Accounts.Admission.admit(issue, :claude, account: ctx.claude, model: "opus")
+
+          send(test, :reserved)
+          Process.sleep(:infinity)
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      assert_receive :reserved
+
+      assert %{model: "opus"} =
+               Enum.find(Arbiter.Accounts.Admission.pending(), &(&1.registry_key == t))
     end
 
     test "a killed worker releases its seat with no decrement", ctx do

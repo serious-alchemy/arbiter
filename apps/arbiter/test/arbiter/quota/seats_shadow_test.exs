@@ -28,7 +28,7 @@ defmodule Arbiter.Quota.SeatsShadowTest do
   alias Arbiter.Worker.Registry, as: WorkerRegistry
 
   @lib Path.expand("../../../lib", __DIR__)
-  @consumers ~r/alias Arbiter\.Quota\.Seats|\bSeats\.(counts|count|holders|tally|base_task_id)\(/
+  @consumers ~r/alias Arbiter\.Quota\.Seats|\bSeats\.(counts|count|holders|seats|tally|base_task_id)\(/
 
   # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only),
   # the capacity view (DC5, display only: it shows the live holders next to each

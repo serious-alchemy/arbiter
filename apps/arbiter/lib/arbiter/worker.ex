@@ -3697,7 +3697,8 @@ defmodule Arbiter.Worker do
 
     [
       account_id: AccountResolver.account_id(workspace_id, code),
-      pool: Arbiter.Agents.ModelFamily.classify(code, model).pool
+      pool: Arbiter.Agents.ModelFamily.classify(code, model).pool,
+      model: model
     ]
   rescue
     _ -> []

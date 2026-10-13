@@ -96,6 +96,7 @@ defmodule Arbiter.Worker.Registry do
         node_id: stamped(opts, prior, :node_id, nil),
         account_id: stamped(opts, prior, :account_id, nil),
         pool: stamped(opts, prior, :pool, pool_of(provider, Keyword.get(opts, :model))),
+        model: stamped(opts, prior, :model, nil),
         repo: stamped(opts, prior, :repo, nil)
       }
     end)
@@ -163,6 +164,7 @@ defmodule Arbiter.Worker.Registry do
             node_id: String.t() | nil,
             account_id: String.t() | nil,
             pool: String.t() | nil,
+            model: String.t() | nil,
             repo: String.t() | nil
           }
         ]
@@ -182,6 +184,7 @@ defmodule Arbiter.Worker.Registry do
               node_id: Map.get(value, :node_id),
               account_id: Map.get(value, :account_id),
               pool: Map.get(value, :pool),
+              model: Map.get(value, :model),
               repo: Map.get(value, :repo)
             }
           ]

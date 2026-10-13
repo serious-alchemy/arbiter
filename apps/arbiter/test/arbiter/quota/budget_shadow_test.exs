@@ -43,6 +43,8 @@ defmodule Arbiter.Quota.BudgetShadowTest do
   # The budget's own modules, the supervision tree that starts its server, the
   # scheduler walk's inputs (DC6, read only under shadow and enforce) and the
   # seat check (DC8, asked only under enforce).
+  # `quota/seat_weights.ex` (DC11) reads a published budget's window rates for the
+  # weight floor; its callers are the seat check and the walk's inputs.
   # `quota/history.ex` only records the published figure on each snapshot row
   # (bd-9ntll1); it gates nothing. `loop/replay/admission.ex` (R15, bd-c7lx65)
   # reads `explore/2` to admit an operator-run offline replay into expiring
@@ -59,6 +61,7 @@ defmodule Arbiter.Quota.BudgetShadowTest do
     arbiter/board/capacity_view.ex
     arbiter/loop/replay/admission.ex
     arbiter/accounts/seat_check.ex
+    arbiter/quota/seat_weights.ex
   )
 
   defp source_files(root) do

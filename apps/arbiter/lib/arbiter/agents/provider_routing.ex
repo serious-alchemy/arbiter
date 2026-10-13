@@ -1301,6 +1301,7 @@ defmodule Arbiter.Agents.ProviderRouting do
         [
           workspace_id: ctx.ws.id,
           pool: pool,
+          model: Map.get(entry, :model),
           priority: task_priority(ctx.task),
           exclude_task: ctx.task && Map.get(ctx.task, :id)
         ],
@@ -1308,7 +1309,7 @@ defmodule Arbiter.Agents.ProviderRouting do
       )
 
     case SeatCheck.check(account, seat_opts) do
-      {:ok, seat} -> {:ok, Map.put(entry, :capacity, free_seats(seat))}
+      {:ok, seat} -> {:ok, Map.put(entry, :capacity, SeatCheck.free_seats(seat))}
       {:full, seat} -> {:drop, "at_capacity", "no free seat: #{SeatCheck.describe(seat)}"}
     end
   end
@@ -1330,9 +1331,6 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp with_seat_reads(ctx, _candidates), do: ctx
-
-  defp free_seats(%{limit: :unlimited}), do: :unlimited
-  defp free_seats(%{limit: limit, seats: seats}), do: max(limit - seats, 0)
 
   # A follow-up role replaces the task's own workers on the account (see the
   # moduledoc's `at_capacity`); a first dispatch adds to what is running.
