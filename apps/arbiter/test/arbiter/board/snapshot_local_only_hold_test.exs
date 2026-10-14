@@ -141,25 +141,35 @@ defmodule Arbiter.Board.SnapshotLocalOnlyHoldTest do
   end
 
   # The Ready-card `hold_reason` (`arb prime`, `GET /api/issues/ready`, MCP
-  # `ticket_ready`) reads the board's own plan.
+  # `ticket_ready`) reads the board's own plan, over the tickets the board reads
+  # itself: the card's repo decides its sandbox, so the board must read it.
   test "the Ready card's hold_reason names the primary's cap and the local-only reason" do
     fill_primary!()
     ws = workspace!("prefer_remote")
+    card = ready!(ws, "bwrap-repo", "local-only card")
+    podman_card = ready!(ws, "pod-repo", "a card a node may take")
 
-    {:ok, created} =
-      Ash.create(Issue, %{
-        title: "local-only card",
-        workspace_id: ws.id,
-        repo: "bwrap-repo",
-        acceptance: "- held on the primary's cap"
-      })
+    holds = ReadyHolds.for_workspace(ws.id)
 
-    {:ok, card} = Ash.update(created, %{}, action: :promote_to_ready)
-
-    reason = Map.get(ReadyHolds.for_workspace(ws.id), card.id)
+    reason = Map.get(holds, card.id)
     assert is_binary(reason)
     assert reason =~ "held — local capacity full (cap 2, 2 running)"
     assert reason =~ "run is local-only: sandbox is not podman"
     refute reason =~ "account"
+
+    refute (Map.get(holds, podman_card.id) || "") =~ "local capacity"
+  end
+
+  defp ready!(ws, repo, title) do
+    {:ok, created} =
+      Ash.create(Issue, %{
+        title: title,
+        workspace_id: ws.id,
+        repo: repo,
+        acceptance: "- placement fixture"
+      })
+
+    {:ok, card} = Ash.update(created, %{}, action: :promote_to_ready)
+    card
   end
 end
