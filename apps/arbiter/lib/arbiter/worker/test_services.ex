@@ -44,8 +44,10 @@ defmodule Arbiter.Worker.TestServices do
 
   `for_repo/1` resolves a repo's list: `config :arbiter, :worker_test_services`
   (`%{"repo" => [spec, …]}`, a spec being a preset atom, `{preset, opts}`, or a
-  full service map) over the built-in defaults for vstim (Postgres 16) and
-  tonic (Postgres 15 + S3). `%{"repo" => []}` switches a default off.
+  full service map) over the built-in default for tonic (Postgres 15 + S3).
+  `%{"repo" => []}` switches a default off. vstim has none on purpose: its
+  container starts its own per-container Postgres, and an injected
+  `DATABASE_URL` would override it.
 
   ## Containment
 
@@ -98,7 +100,6 @@ defmodule Arbiter.Worker.TestServices do
   @type started :: %{pod: String.t(), services: [String.t()], env: [{String.t(), String.t()}]}
 
   @defaults %{
-    "vstim" => [{:postgres, version: 16, database: "vstim_test"}],
     "tonic" => [{:postgres, version: 15, database: "tonic_test"}, :s3]
   }
 
