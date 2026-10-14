@@ -688,6 +688,7 @@ operator's only when nothing in the fleet can move it.
 | cause | owner | waiting on |
 |---|---|---|
 | a ReviewGate park reason | coordinator | `:review_decision` |
+| `:review_gate_not_converged` | coordinator | `:gate_decision` |
 | `:pr_closed` | coordinator | `:pr_decision` |
 | `:merge_blocked` | coordinator | `:merge_block` |
 | `:merge_blocked`, needing an approval the fleet cannot give | operator | `:approval` |

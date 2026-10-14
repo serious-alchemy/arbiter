@@ -161,6 +161,32 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
              )
     end
 
+    # bd-2j64q6: the park used to leave the ticket reading as a crashed run
+    # ("waiting on: resume"), hiding the finding behind the wrong remedy.
+    test "parks the ticket on a gate decision carrying the top finding, not run_crashed",
+         %{repo: repo, ws: ws} do
+      findings =
+        CoordinatorOnlyFindings.escalation_findings(@bd_28t80i_round3, "FULL TRANSCRIPT")
+
+      task = park_on(ws, repo, "feature/coord-attention", {:request_changes, findings})
+
+      wait_until(fn ->
+        match?(%Issue{attention_cause: :review_gate_not_converged}, Ash.get!(Issue, task.id))
+      end)
+
+      issue = Ash.get!(Issue, task.id)
+      assert issue.attention_detail =~ "VERDICT: REQUEST_CHANGES"
+
+      assert %{cause: :review_gate_not_converged, waiting_on: :gate_decision, owner: :coordinator} =
+               Arbiter.Tasks.Attention.current(issue, workers: [], now: DateTime.utc_now())
+
+      # A coordinator-mailbox escalation went out when the gate parked it.
+      assert Enum.any?(
+               Message.inbox("admiral", workspace_id: ws.id),
+               &(&1.task_ref == task.id and &1.escalation_kind == :review_gate_findings)
+             )
+    end
+
     test "a plain REQUEST_CHANGES with the same criteria shape but no tag still gets a fix round",
          %{repo: repo, ws: ws} do
       findings = """

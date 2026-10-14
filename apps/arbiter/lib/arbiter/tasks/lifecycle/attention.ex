@@ -33,6 +33,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   | cause | when | owner | waiting on |
   |---|---|---|---|
   | a ReviewGate park reason (`Arbiter.Tasks.ReviewPark.park_reasons/0`) | | coordinator | `:review_decision` |
+  | `:review_gate_not_converged` | | coordinator | `:gate_decision` |
   | `:pr_closed` | | coordinator | `:pr_decision` |
   | `:merge_blocked` | | coordinator | `:merge_block` |
   | `:merge_blocked` | the PR needs an approval the fleet cannot give | operator | `:approval` |
@@ -125,6 +126,8 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   @auto_resolving_blocks [:behind_base, :ci_failed, :ci_cancelled]
 
   @rows [
+          {:review_gate_not_converged, nil, :coordinator, :gate_decision,
+           "ReviewGate did not converge — it needs a gate decision, not a resume"},
           {:pr_closed, nil, :coordinator, :pr_decision, "its PR was closed without merging"},
           {:merge_blocked, nil, :coordinator, :merge_block, "its PR's merge is blocked"},
           {:merge_blocked, :approval, :operator, :approval,
