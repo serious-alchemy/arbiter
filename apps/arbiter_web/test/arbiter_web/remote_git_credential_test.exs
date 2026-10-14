@@ -7,7 +7,9 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
 
     * An implementer of a GitHub App repo is pushed for by the host (bd-bsmkfu): its
       container holds no credential, so nothing it is sent carries a token, and the
-      App's private key is nowhere in it.
+      App's private key is nowhere in it. `Worker.Dispatch` places it on the node, and
+      once it is done the host pushes the commit it made there and opens its PR, both
+      with the App's installation token, minted on the primary.
     * A ReviewGate fix round on a GitHub App repo pushes from its own container: it
       takes the App's short-lived installation token, minted on the primary for the
       one repo, and only that. The token reaches the container through the node's
@@ -24,12 +26,22 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
   import ExUnit.CaptureLog
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Mergers.Github
   alias Arbiter.NodeAgent.{Config, Connection, Run, Runs, Secrets, Status}
   alias Arbiter.Nodes
   alias Arbiter.Nodes.{RateLimit, Registry}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
-  alias Arbiter.Worker.{ClaudeSession, Dispatch, GitCredential}
+
+  alias Arbiter.Worker.{
+    BranchNamer,
+    ClaudeSession,
+    Dispatch,
+    GitCredential,
+    HostCredential,
+    Watchdog
+  }
+
   alias ArbiterWeb.{NodeTestEndpoint, StubPodman}
 
   @version "1.2.3"
@@ -374,8 +386,10 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
   # implementer on the node under `prefer_remote` (bd-21r811 kept it on the primary),
   # provisions its private clone, and hands the run to the node through
   # `ClaudeSession`: what the node holds of it carries neither a token nor the App's key.
+  # When the run is done, the host pushes its branch and opens its PR as the App.
   describe "Worker.Dispatch.dispatch/2 of a GitHub App repo's implementer" do
-    @repo "test/app-repo"
+    # The repo's key is its GitHub slug, which the PR is opened on.
+    @repo "acme/app-repo"
 
     setup ctx do
       repo = Path.join(ctx.root, "repo")
@@ -404,6 +418,12 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
           config: %{
             "worker" => %{"placement" => "prefer_remote"},
             "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}},
+            # The PR opens on GitHub (`Mergers.Github`, stubbed), where a github_app
+            # repo is opened with the App's token, never this operator token.
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"credentials_ref" => "operator-classic-token"}
+            },
             "git_credentials" => %{
               "repos" => %{
                 @repo => %{
@@ -427,55 +447,18 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
         })
 
       {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
-      %{dispatch_ws: ws, dispatch_issue: issue}
+      %{dispatch_ws: ws, dispatch_issue: issue, forge: forge}
     end
 
     test "is placed on the node and runs there handed no credential", ctx do
       StubPodman.write_mode(ctx.stub, "hang")
 
-      row = %{
-        id: ctx.node.id,
-        name: "cred-node",
-        state: :online,
-        health: :ready,
-        max: 2,
-        live: 0,
-        workspace_ids: [],
-        labels: [],
-        caps: %{}
-      }
-
-      sockets = Path.join(ctx.root, "dispatch-sockets")
-      File.mkdir_p!(sockets)
-      proxy = Path.join(sockets, "proxy.sock")
-      bridge = Path.join(sockets, "arb.sock")
-      File.write!(proxy, "")
-      File.write!(bridge, "")
-
-      egress = fn _opts ->
-        {:ok, [proxy_socket: proxy, proxy_port: 38_061, bridges: [{38_062, bridge}]], "rtest"}
-      end
-
       log =
         capture_all(fn ->
-          assert {:ok, %{worker_pid: pid}} =
-                   Dispatch.dispatch(ctx.dispatch_issue.id,
-                     repo: @repo,
-                     start_driver: false,
-                     start_claude: true,
-                     preflight: false,
-                     nodes: [row],
-                     image: "localhost/arbiter-dev/beam:abc123",
-                     egress: egress,
-                     claude_path: ctx.cli,
-                     arb_path: ctx.cli
-                   )
+          assert {:ok, %{worker_pid: pid}} = dispatch_to_node(ctx)
 
           # Placed on the node, not the primary.
-          assert %{node_id: node_id} =
-                   Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))
-
-          assert node_id == ctx.node.id
+          assert placed_node(pid) == ctx.node.id
 
           # The run on the node: its spec as the node received it, and everything the
           # node recorded or wrote.
@@ -497,6 +480,166 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       refute_received {:mint, _, _}
       for line <- key_lines(ctx.pem), do: refute(log =~ line)
     end
+
+    # AC1 end to end: the agent commits on the node and says `arb done`; the node's last
+    # upload brings the commit into the home clone, and the host pushes the branch and
+    # opens the PR with the App's installation token, minted here for the one repo. The
+    # node is handed neither that token nor the App's key.
+    test "the host pushes the commit made on the node and opens the PR as the App", ctx do
+      issue = ctx.dispatch_issue
+      task_id = issue.id
+      put_env_restoring(:arbiter, :host_credential_req_options, plug: {Req.Test, @http})
+      HostCredential.Cache.clear()
+      on_exit(&HostCredential.Cache.clear/0)
+      on_exit(fn -> stop_watchdog(task_id) end)
+      test = self()
+
+      Req.Test.stub(Github.HTTP, fn conn ->
+        auth = Plug.Conn.get_req_header(conn, "authorization")
+        send(test, {:github, conn.method, conn.request_path, auth})
+
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/acme/app-repo/pulls"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/acme/app-repo/pulls"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 812})
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+        end
+      end)
+
+      # The agent's work, in its shadow clone on the node.
+      File.write!(Path.join(ctx.stub, "agent_script"), ~S"""
+      cd "$1" || exit 1
+      printf 'done on the node\n' > node.txt
+      git add node.txt
+      git -c user.name=agent -c user.email=agent@example.com -c commit.gpgsign=false \
+        commit -q -m "work on the node"
+      git rev-parse HEAD > "$(dirname "$0")/node.head"
+      """)
+
+      # What a push reaches the forge with: `receive-pack` inherits the pusher's env.
+      push_env = Path.join(ctx.root, "push.env")
+      hook = Path.join([ctx.forge, "hooks", "pre-receive"])
+      File.write!(hook, "#!/bin/sh\ncat > /dev/null\nenv > '#{push_env}'\n")
+      File.chmod!(hook, 0o755)
+
+      StubPodman.write_mode(ctx.stub, "slow")
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> task_id)
+
+      log =
+        capture_all(fn ->
+          assert {:ok, %{worker_pid: pid}} = dispatch_to_node(ctx)
+          ref = Process.monitor(pid)
+          assert placed_node(pid) == ctx.node.id
+          assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
+
+          spec = node_spec()
+          refute Map.has_key?(spec.secrets, "ARB_GIT_TOKEN")
+          sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+          refute sent =~ "ghs_"
+          for line <- key_lines(ctx.pem), do: refute(sent =~ line)
+
+          # The agent prints `arb done` (`ClaudeSession` tells its Worker so) and its
+          # container exits; the node's last upload precedes the exit.
+          send(pid, {:__claude_session_done__, "arb done"})
+          _ = :sys.get_state(pid)
+          File.write!(Path.join(ctx.stub, "go"), "")
+
+          # Opening the PR ends the run.
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 30_000
+          stop_watchdog(task_id)
+        end)
+
+      head = ctx.stub |> Path.join("node.head") |> File.read!() |> String.trim()
+      branch = BranchNamer.derive(issue)
+
+      # Pushed: the forge's branch is the commit made on the node...
+      assert git_out(ctx.forge, ["rev-parse", "refs/heads/" <> branch]) == head
+
+      # ...with the App's installation token, minted on the primary for the one repo...
+      assert_received {:mint, "/app/installations/7/access_tokens", body}
+      assert body["repositories"] == ["app-repo"]
+      assert body["permissions"]["contents"] == "write"
+      assert File.read!(push_env) =~ "ARB_GIT_TOKEN=" <> @app_token
+
+      # ...and the PR is opened with it, so the App bot is its author.
+      assert_received {:github, "POST", "/repos/acme/app-repo/pulls", ["Bearer " <> @app_token]}
+      refute_received {:github, _, _, ["Bearer operator-classic-token"]}
+      assert %{state: :merging, pr_ref: pr_ref} = Ash.get!(Issue, task_id)
+      assert pr_ref =~ "812"
+
+      # The node was handed neither the token nor the key, and the log names neither.
+      seen = node_side(ctx)
+      refute seen =~ @app_token
+      refute log =~ @app_token
+
+      for line <- key_lines(ctx.pem) do
+        refute seen =~ line
+        refute log =~ line
+      end
+    end
+  end
+
+  # `Worker.Dispatch.dispatch/2` of the describe's ticket, with the node as the one
+  # placement may choose.
+  defp dispatch_to_node(ctx) do
+    row = %{
+      id: ctx.node.id,
+      name: "cred-node",
+      state: :online,
+      health: :ready,
+      max: 2,
+      live: 0,
+      workspace_ids: [],
+      labels: [],
+      caps: %{}
+    }
+
+    sockets = Path.join(ctx.root, "dispatch-sockets")
+    File.mkdir_p!(sockets)
+    proxy = Path.join(sockets, "proxy.sock")
+    bridge = Path.join(sockets, "arb.sock")
+    File.write!(proxy, "")
+    File.write!(bridge, "")
+
+    egress = fn _opts ->
+      {:ok, [proxy_socket: proxy, proxy_port: 38_061, bridges: [{38_062, bridge}]], "rtest"}
+    end
+
+    Dispatch.dispatch(ctx.dispatch_issue.id,
+      repo: @repo,
+      start_driver: false,
+      start_claude: true,
+      preflight: false,
+      nodes: [row],
+      image: "localhost/arbiter-dev/beam:abc123",
+      egress: egress,
+      claude_path: ctx.cli,
+      arb_path: ctx.cli
+    )
+  end
+
+  # The node a live dispatch was placed on (`nil`: the primary).
+  defp placed_node(pid) do
+    case Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid)) do
+      %{node_id: node_id} -> node_id
+      nil -> flunk("no live dispatch for #{inspect(pid)}")
+    end
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, pid)
+    end
+  end
+
+  defp git_out(dir, args) do
+    {out, 0} = System.cmd("git", ["-C", dir | args], stderr_to_stdout: true)
+    String.trim(out)
   end
 
   describe "a fix round of a GitHub App repo (it pushes from its container)" do
