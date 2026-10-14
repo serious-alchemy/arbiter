@@ -251,6 +251,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
   def finalizer_repos(%Workspace{} = workspace), do: ForgeRepos.slugs(workspace, @forge_opts)
 
   @doc """
+  The `repo_paths` keys that resolve to finalized forge `repo` slug
+  (`Arbiter.Mergers.ForgeRepos.repo_keys/3`, bd-3lj713).
+  """
+  @spec repo_keys(Workspace.t(), String.t()) :: [String.t()]
+  def repo_keys(%Workspace{} = workspace, repo) when is_binary(repo),
+    do: ForgeRepos.repo_keys(workspace, repo, @forge_opts)
+
+  @doc """
   `workspace` narrowed to the repo the finalized forge `repo` slug belongs to
   (`Arbiter.Mergers.ForgeRepos.scope/3`, bd-73zv62).
   """
