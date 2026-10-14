@@ -9480,6 +9480,36 @@ defmodule Arbiter.Worker do
     :error
   end
 
+  # bd-akp9ae: what a crash report and `:sys.get_status/1` print of a Worker: its
+  # state, the last message, the reason. The state holds every value its sessions were
+  # told to redact (a git token minted for a spawn, the provider token, the workspace's
+  # secrets), so each is masked wherever it appears in any of them
+  # (`Arbiter.Worker.StateRedaction`; the state's own `inspect/2` masks them too, for
+  # the stacktrace's arguments, which do not pass through here).
+  @impl true
+  def format_status(status) do
+    secrets =
+      Enum.uniq(
+        Arbiter.Worker.StateRedaction.secrets(Map.get(status, :state)) ++
+          opening_secrets(Map.get(status, :message))
+      )
+
+    Map.new(status, fn
+      {key, value} when key in [:state, :message, :reason, :log, :queue] ->
+        {key, Arbiter.Worker.StateRedaction.mask(value, secrets)}
+
+      pair ->
+        pair
+    end)
+  end
+
+  # A session being opened carries its own list, not yet in the state.
+  defp opening_secrets({:__claude_session_open__, _port_args, %{redact_values: values}})
+       when is_list(values),
+       do: values
+
+  defp opening_secrets(_message), do: []
+
   @impl true
   def terminate(reason, %State{} = state) do
     # bd-bmmj4w: kill any still-live agent FIRST, on every teardown path — not
