@@ -59,6 +59,21 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil, "ref" => ref}
   end
 
+  # bd-akp9ae: a GitHub App token carried to the node rides in the spec's secrets
+  # (the node's per-run tmpfs file), never in its env or command.
+  test "a carried git token is a secret of the spec, not env and not the command", %{
+    request: request
+  } do
+    request = Map.put(request, :git_secrets, %{"ARB_GIT_TOKEN" => "ghs_carried"})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "ghs_carried"
+    refute inspect(spec["env"]) =~ "ghs_carried"
+    refute inspect(spec["command"]) =~ "ghs_carried"
+  end
+
   test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
     assert {:ok, spec} =
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")

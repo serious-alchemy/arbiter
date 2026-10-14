@@ -882,15 +882,27 @@ defmodule Arbiter.Worker.ContainerSpawn do
   image, fetches the files, makes the run's directories and starts the
   container itself. The returned request rides in `port_args.remote`; each open
   turns it into a spec with `remote_spec/3`.
+
+  A run whose container pushes for itself (a ReviewGate fix round on a scoped
+  repo) hands its `:git_material` along (bd-akp9ae): only a GitHub App's
+  short-lived installation token may go (`GitCredential.remote_delivery/1`; any
+  other kind refuses the spawn). The token rides in the spec's `secrets`, which
+  the node writes to the run's tmpfs file and removes when the container exits,
+  is cancelled or is reaped; the helper config that uses it is ordinary env. The
+  token is revoked when the owning worker exits, however it exits
+  (`GitCredential.revoke_when_down/3`), so a copy taken off the node is dead
+  after the run.
   """
   @spec prepare_remote(keyword()) :: {:ok, map()} | {:error, term()}
   def prepare_remote(opts) when is_list(opts) do
     policy = Keyword.fetch!(opts, :policy)
     provider = provider_name(Keyword.get(opts, :provider))
     node = Keyword.fetch!(opts, :node)
+    material = Keyword.get(opts, :git_material)
 
     with :ok <- remote_provider(provider),
          :ok <- container_backend(policy, provider),
+         {:ok, git} <- GitCredential.remote_delivery(material),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
@@ -901,6 +913,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
+      :ok = GitCredential.revoke_when_down(Keyword.get(opts, :owner), material, [])
 
       {:ok,
        %{
@@ -912,6 +925,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          checkout: checkout,
          worktree_files: worktree_files,
          worktree_secrets: worktree_secrets,
+         git_secrets: git.secrets,
          home: home,
          config_dir: config_dir,
          config_files: config_files(Keyword.get(opts, :workspace)),
@@ -919,7 +933,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec, nil) ++ services.env,
+         env: container_env(spec, nil) ++ git.env ++ services.env,
          services: services.presets,
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
@@ -1311,6 +1325,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {secret, literal} = split_env(env_pairs(port_args, request))
       worktree_files = Map.get(request, :worktree_files, %{})
       worktree_secrets = Map.get(request, :worktree_secrets, %{})
+      git_secrets = Map.get(request, :git_secrets, %{})
       session = remote_session(request, port_args)
 
       {:ok,
@@ -1344,7 +1359,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
              end) ++ prompts,
          "bridges" => bridges(request.network),
          "env" => Map.new(literal),
-         "secrets" => Map.merge(Map.new(secret), worktree_secrets),
+         "secrets" =>
+           secret |> Map.new() |> Map.merge(worktree_secrets) |> Map.merge(git_secrets),
          "limits" => request.limits,
          "network" => "none",
          "services" => request.services,

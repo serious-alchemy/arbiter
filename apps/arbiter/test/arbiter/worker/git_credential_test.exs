@@ -416,6 +416,150 @@ defmodule Arbiter.Worker.GitCredentialTest do
     end
   end
 
+  # bd-akp9ae: what a run placed on a node takes of its credential. Only a GitHub
+  # App's short-lived, repo-restricted token may leave the primary; it travels as a
+  # secret value (the node's per-run tmpfs file), and the env that makes git use it
+  # names no value.
+  describe "remote_delivery/1" do
+    test "a GitHub App token is a secret value; the git config that uses it carries none" do
+      material = %Material{
+        kind: :github_app,
+        token: "ghs_carried",
+        tracker_token: "ghs_tracker",
+        remote: "acme/tonic"
+      }
+
+      assert {:ok, %{env: env, secrets: secrets}} = GitCredential.remote_delivery(material)
+
+      assert secrets == %{"ARB_GIT_TOKEN" => "ghs_carried"}
+      refute inspect(env) =~ "ghs_"
+      refute List.keymember?(env, "ARB_GIT_TOKEN", 0)
+      assert {"GIT_TERMINAL_PROMPT", "0"} in env
+      assert {"GIT_CONFIG_PARAMETERS", config} = List.keyfind(env, "GIT_CONFIG_PARAMETERS", 0)
+      # The helper answers for the one repo the token was minted for, from the env.
+      assert config =~ ~s([ "$p" = "acme/tonic" ])
+      assert config =~ "$ARB_GIT_TOKEN"
+    end
+
+    test "a deploy key or a static token never leaves the primary" do
+      for material <- [
+            %Material{kind: :deploy_key, key: "-----BEGIN KEY-----\n"},
+            %Material{kind: :token, token: "github_pat_static", remote: "acme/tonic"}
+          ] do
+        assert {:error, {:git_credential_unsupported, :remote_node}} =
+                 GitCredential.remote_delivery(material)
+      end
+    end
+
+    test "no credential delivers nothing" do
+      assert {:ok, %{env: [], secrets: %{}}} = GitCredential.remote_delivery(nil)
+    end
+  end
+
+  # bd-akp9ae: a token that left the primary (a run placed on a node) is revoked when
+  # the run ends, so a copy taken off the node is dead after the run, not for the
+  # rest of its hour.
+  describe "revoking an App installation token" do
+    defp app_material,
+      do: %Material{
+        kind: :github_app,
+        token: "ghs_push",
+        tracker_token: "ghs_tracker",
+        remote: "acme/tonic"
+      }
+
+    defp stub_revoke(status \\ 204) do
+      test_pid = self()
+
+      Req.Test.stub(@http, fn conn ->
+        send(
+          test_pid,
+          {:revoke, conn.method, conn.request_path,
+           Plug.Conn.get_req_header(conn, "authorization")}
+        )
+
+        Plug.Conn.send_resp(conn, status, "")
+      end)
+    end
+
+    test "revoke/2 deletes each token the material carries, authenticated by that token" do
+      stub_revoke()
+
+      assert :ok = GitCredential.revoke(app_material(), req_options())
+
+      assert_receive {:revoke, "DELETE", "/installation/token", ["Bearer ghs_push"]}
+      assert_receive {:revoke, "DELETE", "/installation/token", ["Bearer ghs_tracker"]}
+    end
+
+    test "a token GitHub no longer accepts (401) is already dead: revoked" do
+      stub_revoke(401)
+      assert :ok = GitCredential.revoke(app_material(), req_options())
+    end
+
+    test "any other answer is an error that names the status, never the token" do
+      stub_revoke(500)
+
+      assert {:error, {:git_credential_revoke_failed, 500}} =
+               GitCredential.revoke(app_material(), req_options())
+
+      refute inspect(GitCredential.revoke(app_material(), req_options())) =~ "ghs_"
+    end
+
+    test "a material with no App token has nothing to revoke" do
+      assert :ok = GitCredential.revoke(nil, req_options())
+      assert :ok = GitCredential.revoke(%Material{kind: :deploy_key, key: "K\n"}, req_options())
+      refute_received {:revoke, _, _, _}
+    end
+
+    test "revoke_when_down/3 revokes once the owner exits, however it exits" do
+      stub_revoke()
+
+      for reason <- [:normal, :shutdown, :kill] do
+        owner = spawn(fn -> receive do: (:stop -> :ok) end)
+        :ok = GitCredential.revoke_when_down(owner, app_material(), req_options())
+        refute_received {:revoke, _, _, _}
+
+        if reason == :normal, do: send(owner, :stop), else: Process.exit(owner, reason)
+
+        assert_receive {:revoke, "DELETE", "/installation/token", ["Bearer ghs_push"]}
+        assert_receive {:revoke, "DELETE", "/installation/token", ["Bearer ghs_tracker"]}
+      end
+    end
+
+    test "materialize/3 keeps the entry's api_url, which a revoke is sent to" do
+      Req.Test.stub(@http, fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_x", "expires_at" => "2099-01-01T00:00:00Z"})
+      end)
+
+      {_key, pem} = rsa_pem()
+
+      ws =
+        workspace(
+          %{
+            "repos" => %{
+              "tonic" => %{
+                "kind" => "github_app",
+                "app_id" => "42",
+                "installation_id" => "7",
+                "private_key_secret" => "APP_KEY",
+                "api_url" => "https://ghe.example.com/api/v3"
+              }
+            }
+          },
+          %{"APP_KEY" => pem}
+        )
+
+      assert {:ok, %Material{api_url: "https://ghe.example.com/api/v3"}} =
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
+    end
+  end
+
   describe "static token kind" do
     setup do
       ws =

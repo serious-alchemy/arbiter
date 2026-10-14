@@ -6495,10 +6495,22 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, %{state | fix_node: nil}}
   end
 
+  # A fix round on a scoped repo pushes from its own container (`fix_round_host_pushes?/4`),
+  # so its credential goes where it runs. A GitHub App's is a short-lived token minted for
+  # the round, which may go to a node (bd-akp9ae); a deploy key or a static token keeps
+  # the round on the primary, whatever `worker.placement` says (bd-21r811).
   defp fix_round_remote_possible(state, ws) do
-    if Map.get(state, :fix_round_local?, false) or scoped_credential?(ws, Map.get(state, :repo)),
-      do: :local,
-      else: :remote_possible
+    if Map.get(state, :fix_round_local?, false) or
+         uncarried_credential?(ws, Map.get(state, :repo)),
+       do: :local,
+       else: :remote_possible
+  end
+
+  defp uncarried_credential?(ws, repo) do
+    case Placement.git_credential(ws, repo) do
+      nil -> false
+      kind -> kind not in Placement.remote_git_credential_kinds()
+    end
   end
 
   defp fix_round_node(state, ws) do
@@ -6511,7 +6523,8 @@ defmodule Arbiter.Worker.ReviewGate do
       layout: fix_round_layout(state, ws, provider),
       workspace: ws,
       workspace_id: Map.get(state, :workspace_id),
-      clone_path: Map.get(state, :worktree_path)
+      clone_path: Map.get(state, :worktree_path),
+      repo: Map.get(state, :repo)
     }
 
     case PassPlacement.place(attrs, placement_opts: state.placement_opts) do
