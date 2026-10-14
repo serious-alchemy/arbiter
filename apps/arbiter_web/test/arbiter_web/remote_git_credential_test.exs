@@ -29,7 +29,7 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
   alias Arbiter.Nodes.{RateLimit, Registry}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
-  alias Arbiter.Worker.{ClaudeSession, GitCredential}
+  alias Arbiter.Worker.{ClaudeSession, Dispatch, GitCredential}
   alias ArbiterWeb.{NodeTestEndpoint, StubPodman}
 
   @version "1.2.3"
@@ -146,6 +146,8 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       end
     end)
   end
+
+  defp git!(dir, args), do: {_, 0} = System.cmd("git", ["-C", dir | args], stderr_to_stdout: true)
 
   defp rsa_pem do
     key = :public_key.generate_key({:rsa, 2048, 65_537})
@@ -364,6 +366,135 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
 
       # The var was there to send, and was held back by name.
       assert log =~ "not sending APP_PEM to the node"
+      for line <- key_lines(ctx.pem), do: refute(log =~ line)
+    end
+  end
+
+  # The production path: `Worker.Dispatch.dispatch/2` itself places a GitHub App repo's
+  # implementer on the node under `prefer_remote` (bd-21r811 kept it on the primary),
+  # provisions its private clone, and hands the run to the node through
+  # `ClaudeSession`: what the node holds of it carries neither a token nor the App's key.
+  describe "Worker.Dispatch.dispatch/2 of a GitHub App repo's implementer" do
+    @repo "test/app-repo"
+
+    setup ctx do
+      repo = Path.join(ctx.root, "repo")
+      File.mkdir_p!(Path.join(repo, "lib"))
+      git!(repo, ["init", "-q", "-b", "main"])
+      git!(repo, ["config", "user.email", "t@e.com"])
+      git!(repo, ["config", "user.name", "T"])
+      git!(repo, ["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "lib/a.txt"), "a\n")
+      git!(repo, ["add", "-A"])
+      git!(repo, ["commit", "-q", "-m", "base"])
+      forge = Path.join(ctx.root, "forge.git")
+      git!(ctx.root, ["init", "-q", "--bare", "-b", "main", forge])
+      git!(repo, ["remote", "add", "origin", forge])
+      git!(repo, ["push", "-q", "origin", "main"])
+
+      put_env_restoring(:arbiter, :repo_paths, %{@repo => repo})
+      put_env_restoring(:arbiter, :worktree_root, Path.join(ctx.root, "wt"))
+      put_env_restoring(:arbiter, :output_log_root, Path.join(ctx.root, "logs"))
+      put_env_restoring(:arbiter, :worker_deps_cache, false)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rgc-#{System.unique_integer([:positive])}",
+          prefix: "rgd#{System.unique_integer([:positive])}",
+          config: %{
+            "worker" => %{"placement" => "prefer_remote"},
+            "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}},
+            "git_credentials" => %{
+              "repos" => %{
+                @repo => %{
+                  "kind" => "github_app",
+                  "app_id" => "42",
+                  "installation_id" => "7",
+                  "private_key_secret" => "APP_KEY",
+                  "remote" => "acme/app-repo"
+                }
+              }
+            }
+          },
+          secrets: %{"APP_KEY" => ctx.pem}
+        })
+
+      {:ok, created} =
+        Ash.create(Issue, %{
+          title: "implement on a node",
+          workspace_id: ws.id,
+          acceptance: "- runs on the node"
+        })
+
+      {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
+      %{dispatch_ws: ws, dispatch_issue: issue}
+    end
+
+    test "is placed on the node and runs there handed no credential", ctx do
+      StubPodman.write_mode(ctx.stub, "hang")
+
+      row = %{
+        id: ctx.node.id,
+        name: "cred-node",
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{}
+      }
+
+      sockets = Path.join(ctx.root, "dispatch-sockets")
+      File.mkdir_p!(sockets)
+      proxy = Path.join(sockets, "proxy.sock")
+      bridge = Path.join(sockets, "arb.sock")
+      File.write!(proxy, "")
+      File.write!(bridge, "")
+
+      egress = fn _opts ->
+        {:ok, [proxy_socket: proxy, proxy_port: 38_061, bridges: [{38_062, bridge}]], "rtest"}
+      end
+
+      log =
+        capture_all(fn ->
+          assert {:ok, %{worker_pid: pid}} =
+                   Dispatch.dispatch(ctx.dispatch_issue.id,
+                     repo: @repo,
+                     start_driver: false,
+                     start_claude: true,
+                     preflight: false,
+                     nodes: [row],
+                     image: "localhost/arbiter-dev/beam:abc123",
+                     egress: egress,
+                     claude_path: ctx.cli,
+                     arb_path: ctx.cli
+                   )
+
+          # Placed on the node, not the primary.
+          assert %{node_id: node_id} =
+                   Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))
+
+          assert node_id == ctx.node.id
+
+          # The run on the node: its spec as the node received it, and everything the
+          # node recorded or wrote.
+          spec = node_spec()
+          refute Map.has_key?(spec.secrets, "ARB_GIT_TOKEN")
+          sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+          seen = node_side(ctx)
+          refute sent =~ "ghs_"
+
+          for line <- key_lines(ctx.pem) do
+            refute sent =~ line
+            refute seen =~ line
+          end
+
+          stop_worker(pid)
+        end)
+
+      # Nothing was minted for the run: the host mints only for its own push and PR.
+      refute_received {:mint, _, _}
       for line <- key_lines(ctx.pem), do: refute(log =~ line)
     end
   end
