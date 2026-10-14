@@ -57,6 +57,12 @@ defmodule Arbiter.Worker.GitCredential do
     * **Tracker** — `GH_TOKEN` for a `tracker_write` projection is the repo-scoped
       token (a second, narrower App installation token, or the `token` kind's
       own), not a binding's broad one.
+    * **A run on a remote node** (bd-akp9ae) — only a GitHub App's short-lived
+      token goes, as a secret of the run spec the node keeps on tmpfs
+      (`remote_delivery/1`), and it is revoked when the run's worker exits
+      (`revoke/2`, `revoke_when_down/3`). A deploy key or a static token never
+      leaves the primary, nor does any long-lived value the block names, even one
+      also exposed as a worker env var (`withheld_values/1`).
     * An ssh agent socket is never delivered (`SSH_AUTH_SOCK` stays unset).
   """
 

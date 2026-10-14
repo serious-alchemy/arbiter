@@ -418,7 +418,7 @@ defmodule Arbiter.Board.Snapshot do
     # the findings).
     :review_gate_state,
     # bd-akp9ae: a card's repo decides its sandbox and git credential, so whether a
-    # node may take it (`WalkInputs.eligibility/4`, `ticket_local_holds/2`).
+    # node may take it (`WalkInputs.eligibility/4`, `ticket_local_holds/1`).
     :repo
   ]
 
