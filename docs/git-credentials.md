@@ -201,8 +201,13 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
 * A token (App installation tokens last an hour) is in the worker's env for the
   run. A run longer than the token's life must be re-dispatched.
 * On a remote node only a GitHub App's short-lived token is ever carried (see
-  "Remote nodes" below); a fix round on a deploy-key or static-token repo stays on the
+  "Remote nodes" above); a fix round on a deploy-key or static-token repo stays on the
   primary.
+* A fix round on a node can read its own token (it is in the container's
+  environment). A copy the agent itself writes into its transcript or work tree stays
+  on the node with the run's directory until the node's reaper takes it (24 h). By
+  then it is dead: the token is revoked when the round's worker exits, and expires
+  within the hour.
 * The scope of a `token` is as good as the token you created: Arbiter checks it is
   not a classic PAT, not that you restricted it to one repo.
 * Enforcement of "a push to a different repo fails" is two layers: the forge (a
