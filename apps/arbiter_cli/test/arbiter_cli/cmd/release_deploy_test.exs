@@ -42,6 +42,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     # Sleep + TCP-port-free seams so restart/wait loops run instantly in tests.
     Process.put(:bd2_sleep, fn _ms -> :ok end)
     Process.put(:bd2_port_check, fn _port -> true end)
+    Process.put(:bd2_host_platform, {:linux, "x86_64"})
+    Process.put(:bd2_port_owner, fn _port -> :none end)
 
     {:ok, home: home}
   end
@@ -2042,6 +2044,83 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert {:ok, payload} = Jason.decode(String.trim(out))
       assert payload["release_repo"] == @repo
       assert payload["release_repo_source"] == "env"
+    end
+  end
+
+  # ---- host check (bd-1sqvlw) --------------------------------------------
+
+  describe "host check" do
+    test "refuses on a non-Linux host before downloading or writing anything", %{home: home} do
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert err =~ "darwin/arm64"
+      assert err =~ "hosts the server"
+      refute File.exists?(Path.join(home, "releases"))
+    end
+
+    test "--this-host does not waive the platform check" do
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--this-host"]) end)
+
+      assert code == 1
+      assert err =~ "darwin/arm64"
+    end
+
+    test "refuses with no install when ARB_HOST is non-loopback", %{home: home} do
+      System.put_env("ARB_HOST", "https://arbiter.example.com")
+      on_exit(fn -> System.delete_env("ARB_HOST") end)
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert err =~ "remote server"
+      assert err =~ "--this-host"
+      refute File.exists?(Path.join(home, "releases"))
+    end
+
+    test "refuses with no install when the loopback port is held by a non-arbiter process",
+         %{home: home} do
+      Process.put(:bd2_port_owner, fn 4848 -> :foreign end)
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert err =~ "not an Arbiter server"
+      refute File.exists?(Path.join(home, "releases"))
+    end
+
+    test "--this-host permits a first install against a remote ARB_HOST" do
+      System.put_env("ARB_HOST", "https://arbiter.example.com")
+      on_exit(fn -> System.delete_env("ARB_HOST") end)
+
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, err, _code} =
+        capture(fn -> ReleaseDeploy.run(["--this-host", "--local", "/no/such/path"]) end)
+
+      assert err =~ "does not exist"
+      refute err =~ "remote server"
+    end
+
+    test "an existing install is not treated as remote", %{home: home} do
+      System.put_env("ARB_HOST", "https://arbiter.example.com")
+      on_exit(fn -> System.delete_env("ARB_HOST") end)
+      File.mkdir_p!(Path.join(home, "releases/v0.0.1"))
+      File.ln_s!(Path.join(home, "releases/v0.0.1"), Path.join(home, "current"))
+
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, err, _code} =
+        capture(fn -> ReleaseDeploy.run(["--local", "/no/such/path"]) end)
+
+      assert err =~ "does not exist"
+      refute err =~ "remote server"
     end
   end
 end

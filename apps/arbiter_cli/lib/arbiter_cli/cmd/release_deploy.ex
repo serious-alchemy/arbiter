@@ -5,6 +5,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
+  Before downloading anything the command refuses (`HostCheck`) when this host
+  cannot run the Linux release, or when there is no install at the data home and
+  the CLI targets a remote server (non-loopback `ARB_HOST`, or a loopback port
+  held by a non-Arbiter process such as an SSH tunnel). Run it on the server
+  host; `--this-host` deliberately waives the remote-target check for a first
+  install on a fresh Linux host.
+
   `arb server deploy --local <tarball|dir>` deploys a **locally built**
   release instead — the tarball or unpacked `_build/prod/rel/arbiter`
   directory produced by `scripts/build-local-release.sh` from a fast-forwarded
@@ -174,7 +181,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
-  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, ReleaseFiles, Status}
+  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, HostCheck, ReleaseFiles, Status}
   alias ArbiterCli.{Cmd.SelfUpdate, Output, ReleaseRepo}
 
   @default_timeout_s 60
@@ -185,6 +192,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     json: :boolean,
     force: :boolean,
     local: :string,
+    this_host: :boolean,
     allow_cross_migration_rollback: :boolean,
     no_self_update: :boolean
   ]
@@ -222,6 +230,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     # the dashboard has no terminal, and the UI reads this file for the outcome.
     early_tag = opts[:version] || if(opts[:local], do: "local", else: "latest")
     Output.on_halt(fn _code, message -> Status.fail_early(early_tag, message) end)
+
+    case HostCheck.check(opts) do
+      :ok -> :ok
+      {:error, message, hint} -> Output.die(message, hint)
+    end
 
     case opts[:local] do
       nil -> deploy_from_github(run)

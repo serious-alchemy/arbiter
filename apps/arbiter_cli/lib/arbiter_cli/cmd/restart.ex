@@ -519,6 +519,22 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   end
 
+  @doc false
+  # Who holds `port`: `:arbiter` (a release or dev server), `:foreign` (anything
+  # else — e.g. an ssh tunnel), or `:none`. Never signals; read-only.
+  @spec port_owner(non_neg_integer()) :: :arbiter | :foreign | :none
+  def port_owner(port) do
+    case listeners(port) do
+      [] ->
+        :none
+
+      pids ->
+        if Enum.all?(pids, &(classify_pid(&1) in [:release, :dev_server])),
+          do: :arbiter,
+          else: :foreign
+    end
+  end
+
   defp describe_verdict(:release), do: "a release BEAM (bin/arbiter / releases/<vsn>)"
   defp describe_verdict(:unknown), do: "not a `mix phx.server` process"
   defp describe_verdict({:unreadable, r}), do: "cmdline unreadable (#{inspect(r)})"
