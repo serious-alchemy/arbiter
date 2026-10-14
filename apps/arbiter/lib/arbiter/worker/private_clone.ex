@@ -362,7 +362,7 @@ defmodule Arbiter.Worker.PrivateClone do
       case build(plan) do
         :ok ->
           :ok = Worktree.seed_worktree(repo, path, plan.seed_paths)
-          _ = AgentConfig.add_to_git_exclude(path, [".arbiter/"])
+          _ = AgentConfig.exclude_arbiter_dir(path)
           Logger.info("PrivateClone: created #{path} (#{branch} of #{repo})")
           {:ok, path}
 
