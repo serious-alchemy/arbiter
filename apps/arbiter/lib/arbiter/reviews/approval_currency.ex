@@ -14,6 +14,9 @@ defmodule Arbiter.Reviews.ApprovalCurrency do
       "require approval of the most recent push"), which our own review list
       does not show.
 
+  An approval given at the PR's current head (`adapter.self_approved_at_head?/1`)
+  stays current regardless of the forge's decision.
+
   Both capabilities are optional adapter functions. Every uncertain answer
   fails OPEN toward the pre-existing behaviour: an adapter without
   `review_decision/1`, a call that errors or raises, or a `nil` decision (no
@@ -27,7 +30,17 @@ defmodule Arbiter.Reviews.ApprovalCurrency do
   @doc "Whether `adapter` reports a current approval of ours on `mr_ref`."
   @spec current?(module(), String.t()) :: boolean()
   def current?(adapter, mr_ref) do
-    self_approved?(adapter, mr_ref) and not forge_discounts_approval?(adapter, mr_ref)
+    self_approved?(adapter, mr_ref) and
+      (approved_at_head?(adapter, mr_ref) or not forge_discounts_approval?(adapter, mr_ref))
+  end
+
+  # An approval whose commit_id is the PR head is current by definition
+  # (bd-8vb2z6); optional capability, any uncertainty reads as "not at head".
+  defp approved_at_head?(adapter, mr_ref) do
+    Code.ensure_loaded(adapter)
+
+    function_exported?(adapter, :self_approved_at_head?, 1) and
+      match?({:ok, true}, safe(fn -> adapter.self_approved_at_head?(mr_ref) end))
   end
 
   @doc """

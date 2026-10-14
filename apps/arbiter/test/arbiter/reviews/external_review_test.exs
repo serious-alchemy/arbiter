@@ -2273,6 +2273,31 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                ExternalReview.review(pr: "octo/widget#42", check_runner: runner)
     end
 
+    test "review/1 refuses an approval given at the PR head even when decision is REVIEW_REQUIRED" do
+      github_ws("er-guard-head")
+      stub_review_flow("arb-bot", "APPROVED", "REVIEW_REQUIRED", "abc")
+
+      assert {:error, {:already_approved, "octo/widget#42"}} =
+               ExternalReview.review(pr: "octo/widget#42")
+    end
+
+    test "review/1 proceeds on a stale-commit approval under REVIEW_REQUIRED" do
+      github_ws("er-guard-stale-commit")
+      stub_review_flow("arb-bot", "APPROVED", "REVIEW_REQUIRED", "old")
+      runner = fn _diff, _state -> {:ok, []} end
+
+      assert {:ok, %{mr_ref: "octo/widget#42"}} =
+               ExternalReview.review(pr: "octo/widget#42", check_runner: runner)
+    end
+
+    test "review/1 refuses a stale-commit approval when decision is APPROVED" do
+      github_ws("er-guard-stale-approved")
+      stub_review_flow("arb-bot", "APPROVED", "APPROVED", "old")
+
+      assert {:error, {:already_approved, "octo/widget#42"}} =
+               ExternalReview.review(pr: "octo/widget#42")
+    end
+
     test "review/1 still refuses when GitHub agrees the approval is current (APPROVED)" do
       github_ws("er-guard-current")
       stub_review_flow("arb-bot", "APPROVED", "APPROVED")
@@ -2649,7 +2674,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   # Full GitHub stub for a review-flow test: the guard's identity (`/user`) +
   # reviews lookups (self_login leaving `self_state`), plus the diff / comment /
   # verdict endpoints the CodeReview workflow drives. Unhandled paths → 404.
-  defp stub_review_flow(self_login, self_state, review_decision \\ nil) do
+  defp stub_review_flow(self_login, self_state, review_decision \\ nil, review_commit \\ nil) do
     Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
       path = conn.request_path
 
@@ -2673,7 +2698,13 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
           })
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
-          json(conn, [%{"user" => %{"login" => self_login}, "state" => self_state}])
+          json(conn, [
+            %{
+              "user" => %{"login" => self_login},
+              "state" => self_state,
+              "commit_id" => review_commit
+            }
+          ])
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and
             "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
