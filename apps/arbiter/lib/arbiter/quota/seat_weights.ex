@@ -47,6 +47,7 @@ defmodule Arbiter.Quota.SeatWeights do
 
   @default_days 30
   @default_floor_ratio 0.25
+  @id_chunk 500
 
   @type rate :: %{tau: float(), hours: float(), tokens: float()}
   @type weights :: %{String.t() => float()}
@@ -289,16 +290,16 @@ defmodule Arbiter.Quota.SeatWeights do
   defp read_runs(events) do
     ids = events |> Map.values() |> List.flatten() |> Enum.map(& &1.worker_run_id) |> Enum.uniq()
 
-    case ids do
-      [] ->
-        %{}
-
-      ids ->
-        Run
-        |> Ash.Query.filter(id in ^ids)
-        |> Ash.Query.select([:id, :started_at, :completed_at])
-        |> Ash.read!()
-        |> Map.new(&{&1.id, &1})
-    end
+    # ash_sqlite expands `id in ^ids` into a nested OR chain, which SQLite
+    # rejects past its expression depth (1000); read the ids in chunks.
+    ids
+    |> Enum.chunk_every(@id_chunk)
+    |> Enum.flat_map(fn chunk ->
+      Run
+      |> Ash.Query.filter(id in ^chunk)
+      |> Ash.Query.select([:id, :started_at, :completed_at])
+      |> Ash.read!()
+    end)
+    |> Map.new(&{&1.id, &1})
   end
 end
