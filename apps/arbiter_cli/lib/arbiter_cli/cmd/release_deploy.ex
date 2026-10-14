@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.ReleaseDeploy do
   @moduledoc """
   `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-  [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
+  [--this-host] [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
@@ -225,16 +225,18 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
     run = %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts}
 
+    # Refuse an unsupported or remote-targeting host before the early-halt hook is
+    # installed: this host is not the deploy target, so it must write no status file.
+    case HostCheck.check(opts) do
+      :ok -> :ok
+      {:error, message, hint} -> Output.die(message, hint)
+    end
+
     # Until `begin_status/2` takes over, a halt (repo resolution, the active-worker
     # guard, the release lookup) must still leave a record: a deploy launched from
     # the dashboard has no terminal, and the UI reads this file for the outcome.
     early_tag = opts[:version] || if(opts[:local], do: "local", else: "latest")
     Output.on_halt(fn _code, message -> Status.fail_early(early_tag, message) end)
-
-    case HostCheck.check(opts) do
-      :ok -> :ok
-      {:error, message, hint} -> Output.die(message, hint)
-    end
 
     case opts[:local] do
       nil -> deploy_from_github(run)

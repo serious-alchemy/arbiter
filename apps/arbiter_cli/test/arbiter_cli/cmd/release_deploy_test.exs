@@ -2059,6 +2059,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert err =~ "darwin/arm64"
       assert err =~ "hosts the server"
       refute File.exists?(Path.join(home, "releases"))
+      refute File.exists?(Path.join(home, "deploy-status.json"))
     end
 
     test "--this-host does not waive the platform check" do
