@@ -396,6 +396,39 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @doc """
+  GitHub's own judgment of the PR's review state — the GraphQL
+  `reviewDecision` (`"APPROVED"`, `"REVIEW_REQUIRED"`, `"CHANGES_REQUESTED"`,
+  or `nil` when no branch rule requires a review). Unlike `self_approved?/1`
+  (which only reads our latest review verdict), this reflects branch
+  protection: a stale-review dismissal or a rule that stops counting an
+  approval after new commits shows up here as `REVIEW_REQUIRED`
+  (bd-6zlfq6, see `Arbiter.Reviews.ApprovalCurrency`).
+
+  Returns `{:ok, String.t() | nil}` or `{:error, term()}`. Not part of the
+  `Merger` behaviour: an optional capability probed via `function_exported?/3`.
+  """
+  @spec review_decision(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def review_decision(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
+      case body do
+        %{"data" => %{"repository" => %{"pullRequest" => %{} = pull}}} ->
+          {:ok, Map.get(pull, "reviewDecision")}
+
+        other ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: 200,
+             message: "unexpected reviewDecision shape",
+             raw: other
+           }}
+      end
+    end
+  end
+
+  @doc """
   bd-a16rgk: best-effort fetch of a single file's content at `ref` (normally
   the PR's head SHA), so a reviewer finding that depends on code outside the
   diff can be checked before its severity is finalized instead of posted as

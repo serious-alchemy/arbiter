@@ -78,6 +78,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_automation.auto_authors"` is present, it must be a list of strings.
     * If `"review_automation.repo_overrides"` is present, it must be a map where
       every value is one of the modes above.
+    * If `"review_patrol"` is present, it must be a map. Its optional `"repos"` is a
+      map of per-repo maps whose `"doc_paths_are_code"` is a boolean or a non-empty
+      list of glob strings (bd-6zlfq6, ReviewPatrol sticky approval).
     * If `"loop"` is present, it must be a map; if `"loop.evidence_bar"` is
       present, it must be a map whose `"min_incidents"` / `"min_distinct_tasks"`
       are positive integers (the loop-proposal evidence bar, bd-9j2g3x); if
@@ -164,6 +167,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_notes_gate(Map.get(config, "notes_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
+    |> validate_review_patrol(Map.get(config, "review_patrol"))
     |> validate_quota(Map.get(config, "quota"))
     |> validate_loop(Map.get(config, "loop"))
     |> validate_attention(Map.get(config, "attention"))
@@ -1519,6 +1523,68 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_review_automation(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "review_automation must be a map")
+  end
+
+  # ReviewPatrol per-repo config (bd-6zlfq6): `review_patrol.repos.<repo>` is a map,
+  # and its `doc_paths_are_code` is a boolean or a list of non-empty glob strings.
+  # Other `review_patrol` keys (`our_login`, `debounce_ms`, ...) stay loose.
+  defp validate_review_patrol(changeset, nil), do: changeset
+
+  defp validate_review_patrol(changeset, block) when is_map(block) do
+    case Map.get(block, "repos") do
+      nil ->
+        changeset
+
+      repos when is_map(repos) ->
+        Enum.reduce(repos, changeset, fn {repo, repo_cfg}, cs ->
+          validate_review_patrol_repo(cs, repo, repo_cfg)
+        end)
+
+      _ ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "review_patrol.repos must be a map of repo name to a map"
+        )
+    end
+  end
+
+  defp validate_review_patrol(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review_patrol must be a map")
+  end
+
+  defp validate_review_patrol_repo(changeset, repo, repo_cfg) when is_map(repo_cfg) do
+    case Map.get(repo_cfg, "doc_paths_are_code") do
+      nil ->
+        changeset
+
+      bool when is_boolean(bool) ->
+        changeset
+
+      globs when is_list(globs) ->
+        if globs != [] and Enum.all?(globs, &(is_binary(&1) and String.trim(&1) != "")) do
+          changeset
+        else
+          doc_paths_error(changeset, repo)
+        end
+
+      _ ->
+        doc_paths_error(changeset, repo)
+    end
+  end
+
+  defp validate_review_patrol_repo(changeset, repo, _repo_cfg) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "review_patrol.repos.#{repo} must be a map"
+    )
+  end
+
+  defp doc_paths_error(changeset, repo) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "review_patrol.repos.#{repo}.doc_paths_are_code must be a boolean or a non-empty list of glob strings"
+    )
   end
 
   # Quota-aware dispatch throttle config (bd-7cd38f, bd-1tuxv8):
