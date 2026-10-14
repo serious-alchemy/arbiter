@@ -131,18 +131,43 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :follow_up} = Placement.eligible(%{inspect_request | kind: :follow_up})
     end
 
-    # bd-21r811: no podman secret carries a scoped git key to a node yet, so the
-    # spawn refuses it there (`git_credential_unsupported`); placement keeps it off.
-    test "an implementer whose repo has a scoped git credential is not eligible for a node" do
-      scoped = Map.put(@eligible, :scoped_git_credential?, true)
-
-      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass, :review_fix_round] do
-        assert {:local_only, :scoped_git_credential} = Placement.eligible(%{scoped | kind: kind})
+    # bd-akp9ae: a podman implementer, resume, CI fix pass or conflict pass holds no
+    # git credential in its container, here or on a node: the host pushes the branch
+    # it collects, with the repo's scoped credential (bd-bsmkfu). Nothing is carried,
+    # so no credential kind keeps it off a node.
+    test "a host-pushed kind is eligible whatever its repo's scoped credential" do
+      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass],
+          credential <- [:github_app, :deploy_key, :token] do
+        request = Map.merge(@eligible, %{kind: kind, git_credential: credential})
+        assert Placement.eligible(request) == :ok, "#{kind} with #{credential}"
       end
     end
 
+    # A ReviewGate fix round on a scoped repo pushes from its own container, so the
+    # credential goes where the run goes. A GitHub App's is a short-lived token minted
+    # on the primary for the run: carried, so the round may be placed.
+    test "a fix round, which pushes from its container, is eligible with a GitHub App" do
+      request = Map.merge(@eligible, %{kind: :review_fix_round, git_credential: :github_app})
+      assert Placement.eligible(request) == :ok
+      assert :github_app in Placement.remote_git_credential_kinds()
+    end
+
+    # bd-21r811's reason, kept for the kinds nothing carries yet: a deploy key or a
+    # static token is a long-lived secret that does not leave the primary.
+    test "a fix round with a credential kind not carried to a node stays local-only" do
+      for credential <- [:deploy_key, :token, :something_new] do
+        request = Map.merge(@eligible, %{kind: :review_fix_round, git_credential: credential})
+
+        assert {:local_only, :scoped_git_credential} = Placement.eligible(request),
+               "#{credential}"
+      end
+
+      refute :deploy_key in Placement.remote_git_credential_kinds()
+      refute :token in Placement.remote_git_credential_kinds()
+    end
+
     test "a reviewer and an inspect-only run stay eligible beside a scoped credential" do
-      scoped = Map.put(@eligible, :scoped_git_credential?, true)
+      scoped = Map.put(@eligible, :git_credential, :deploy_key)
 
       for kind <- [:reviewer, :review] do
         assert Placement.eligible(%{scoped | kind: kind}) == :ok
@@ -151,17 +176,28 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert Placement.eligible(Map.merge(scoped, %{no_pr?: true, inspect?: true})) == :ok
     end
 
-    test "scoped_git_credential?/2 is true only for a scoped repo entry" do
+    test "git_credential/2 is the kind of a scoped repo entry, nil otherwise" do
       ws = fn block -> %{config: %{"git_credentials" => block}} end
 
-      scoped = ws.(%{"repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "K"}}})
-      assert Placement.scoped_git_credential?(scoped, "tonic")
-      refute Placement.scoped_git_credential?(scoped, "other")
+      repos = %{
+        "tonic" => %{"kind" => "deploy_key", "key_secret" => "K"},
+        "vstim" => %{
+          "kind" => "github_app",
+          "app_id" => "1",
+          "installation_id" => "2",
+          "private_key_secret" => "P"
+        }
+      }
+
+      scoped = ws.(%{"repos" => repos})
+      assert Placement.git_credential(scoped, "tonic") == :deploy_key
+      assert Placement.git_credential(scoped, "vstim") == :github_app
+      assert Placement.git_credential(scoped, "other") == nil
 
       legacy = ws.(%{"legacy_operator" => true})
-      refute Placement.scoped_git_credential?(legacy, "tonic")
-      refute Placement.scoped_git_credential?(%{config: %{}}, "tonic")
-      refute Placement.scoped_git_credential?(nil, nil)
+      assert Placement.git_credential(legacy, "tonic") == nil
+      assert Placement.git_credential(%{config: %{}}, "tonic") == nil
+      assert Placement.git_credential(nil, nil) == nil
     end
 
     test "a request with no checkout at all stays local even beside an inspect flag" do
@@ -259,22 +295,44 @@ defmodule Arbiter.Nodes.PlacementTest do
                place(%{mode: :local_only}, [row("a")])
     end
 
-    test "a scoped-credential implementer goes local under prefer_remote, never to a node" do
-      assert {:ok, {:local, {:local_only, :scoped_git_credential}}} =
-               place(%{scoped_git_credential?: true}, [row("a")])
+    # bd-akp9ae: the implementer of a GitHub App repo (or any scoped repo) carries no
+    # credential: the host pushes its branch, so it is placed like any other.
+    test "a scoped-credential implementer is placed on a node under prefer_remote" do
+      for credential <- [:github_app, :deploy_key, :token] do
+        task_id = "bd-#{credential}"
+
+        assert {:ok, {:node, %{name: "a"}}} =
+                 place(%{git_credential: credential, task_id: task_id}, [row("a")])
+
+        Placement.release(task_id)
+      end
     end
 
-    test "a scoped-credential implementer is held, not failed, under remote_only" do
+    test "a deploy-key fix round goes local under prefer_remote, never to a node" do
+      assert {:ok, {:local, {:local_only, :scoped_git_credential}}} =
+               place(%{git_credential: :deploy_key, kind: :review_fix_round}, [row("a")])
+    end
+
+    test "a deploy-key fix round is held, not failed, under remote_only" do
       assert {:error, {:no_node_capacity, info}} =
-               place(%{scoped_git_credential?: true, mode: :remote_only}, [row("a")])
+               place(
+                 %{git_credential: :deploy_key, kind: :review_fix_round, mode: :remote_only},
+                 [row("a")]
+               )
 
       assert info.reason == :scoped_git_credential
       assert info.message =~ "scoped git credential"
+      assert info.message =~ "deploy_key"
+    end
+
+    test "a GitHub App fix round lands on a node" do
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{git_credential: :github_app, kind: :review_fix_round}, [row("a")])
     end
 
     test "a reviewer with a scoped credential still lands on a node" do
       assert {:ok, {:node, %{name: "a"}}} =
-               place(%{scoped_git_credential?: true, kind: :reviewer}, [row("a")])
+               place(%{git_credential: :deploy_key, kind: :reviewer}, [row("a")])
     end
 
     test "the seam can switch remote execution off: placement is then always local" do

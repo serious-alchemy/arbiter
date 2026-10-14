@@ -116,22 +116,105 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
     end
   end
 
-  # bd-21r811: a scoped git credential cannot be carried to a node.
+  # bd-akp9ae: a podman implementer holds no git credential in its container (the
+  # host pushes its branch with the repo's scoped credential, bd-bsmkfu), so a scoped
+  # repo's implementer is placed like any other: bd-21r811 kept it on the primary
+  # for a key it never carried.
   describe "a repo with a scoped git credential" do
-    defp scoped_ws!(mode) do
+    setup do
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true,
+            worker_deps_cache: false
+          ],
+          do: put_app_env(:arbiter, key, value)
+
+      :ok
+    end
+
+    defp scoped_ws!(mode, entry) do
       workspace!(%{
         "worker" => %{"placement" => mode},
-        "git_credentials" => %{
-          "repos" => %{@repo => %{"kind" => "deploy_key", "key_secret" => "K"}}
-        }
+        "git_credentials" => %{"repos" => %{@repo => entry}}
       })
     end
 
-    test "remote_only holds the implementer with that reason instead of failing at spawn" do
-      issue = ready!(scoped_ws!("remote_only"), "scoped remote only")
+    defp app_entry do
+      %{
+        "kind" => "github_app",
+        "app_id" => "42",
+        "installation_id" => "7",
+        "private_key_secret" => "APP_KEY"
+      }
+    end
 
-      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman)
-      assert info.reason == :scoped_git_credential
+    defp node_row do
+      %{
+        id: "n-scoped",
+        name: "scoped-node",
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{}
+      }
+    end
+
+    # The agent spawn, captured: where the run went and the credential it was handed.
+    defp capture_spawn do
+      test = self()
+
+      fn session_opts ->
+        send(test, {:spawned, Keyword.get(session_opts, :node), session_opts[:git_credential]})
+        {:ok, :captured}
+      end
+    end
+
+    test "a GitHub App repo's implementer is placed on a node under prefer_remote, carrying no credential" do
+      issue = ready!(scoped_ws!("prefer_remote", app_entry()), "app prefer remote")
+
+      assert {:ok, %{worker_pid: pid}} =
+               dispatch(
+                 issue,
+                 @podman ++
+                   [nodes: [node_row()], start_claude: true, claude_start: capture_spawn()]
+               )
+
+      assert_receive {:spawned, %{id: "n-scoped"}, plan}
+      # The host pushes the branch it collects (and opens the PR) with the App's
+      # token, minted on the primary; the container is handed nothing to push with.
+      assert %Arbiter.Worker.GitCredential{mode: :not_needed} = plan
+
+      assert {:ok, %{material: nil, env: [], redact: []}} =
+               Arbiter.Worker.GitCredential.prepare(plan, nil, self(), container?: true)
+
+      assert %{node_id: "n-scoped"} =
+               Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))
+    end
+
+    test "a deploy-key repo's implementer is placed on a node too: the key never leaves the primary" do
+      entry = %{"kind" => "deploy_key", "key_secret" => "K"}
+      issue = ready!(scoped_ws!("prefer_remote", entry), "deploy key prefer remote")
+
+      assert {:ok, %{worker_pid: _pid}} =
+               dispatch(
+                 issue,
+                 @podman ++
+                   [nodes: [node_row()], start_claude: true, claude_start: capture_spawn()]
+               )
+
+      assert_receive {:spawned, %{id: "n-scoped"}, %{mode: :not_needed}}
+    end
+
+    test "remote_only does not hold the implementer for its credential" do
+      issue = ready!(scoped_ws!("remote_only", app_entry()), "scoped remote only")
+
+      # No node is free: held for that, never for the credential.
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman ++ [nodes: []])
+      assert info.mode == :remote_only
+      refute Map.get(info, :reason) == :scoped_git_credential
       assert Worker.whereis(issue.id) == nil
       assert Ash.get!(Issue, issue.id).state == :queued
     end

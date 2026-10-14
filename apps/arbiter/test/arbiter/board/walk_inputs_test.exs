@@ -354,12 +354,26 @@ defmodule Arbiter.Board.WalkInputsTest do
     end
   end
 
-  # bd-21r811: no podman secret carries a scoped git key to a node, so the walk
-  # must not offer a node to an implementer whose repo has one.
+  # bd-akp9ae: a podman implementer holds no git credential in its container (the
+  # host pushes its branch with the repo's scoped credential, bd-bsmkfu), so a
+  # scoped repo's card is offered a node like any other: bd-21r811 kept it on the
+  # primary for a key it never carried.
   describe "a repo with a scoped git credential" do
     @scoped %{
       "git_credentials" => %{
         "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "TONIC_KEY"}}
+      }
+    }
+    @app %{
+      "git_credentials" => %{
+        "repos" => %{
+          "tonic" => %{
+            "kind" => "github_app",
+            "app_id" => "42",
+            "installation_id" => "7",
+            "private_key_secret" => "APP_KEY"
+          }
+        }
       }
     }
     @rows [%{id: "oryx", name: "oryx", state: :online, health: :ready, max: 3, live: 0}]
@@ -387,18 +401,24 @@ defmodule Arbiter.Board.WalkInputsTest do
       {ticket, walk}
     end
 
-    test "prefer_remote: the implementer is offered the primary only" do
-      {ticket, walk} = scoped_walk("prefer_remote", @scoped)
-      assert [%{nodes: [["local"]]}] = walk.candidates.(card(ticket))
+    test "prefer_remote: the implementer is offered the node, then the primary" do
+      for creds <- [@scoped, @app] do
+        {ticket, walk} = scoped_walk("prefer_remote", creds)
+        assert [%{nodes: [["oryx"], ["local"]]} = candidate] = walk.candidates.(card(ticket))
+        refute Map.has_key?(candidate, :hold)
+      end
     end
 
-    test "remote_only: the implementer has no machine, and the explainer names why" do
-      {ticket, walk} = scoped_walk("remote_only", @scoped)
-      assert [%{nodes: [], hold: :scoped_git_credential}] = walk.candidates.(card(ticket))
+    test "remote_only: the implementer is placed on the node, not held for its credential" do
+      for creds <- [@scoped, @app] do
+        {ticket, walk} = scoped_walk("remote_only", creds)
+        assert [%{nodes: [["oryx"]]} = candidate] = walk.candidates.(card(ticket))
+        refute Map.has_key?(candidate, :hold)
 
-      plan = Scheduler.plan(%{ready: [card(ticket)], running: [], walk: walk})
-      assert plan.promote == nil
-      assert inspect(plan) =~ "scoped git credential"
+        plan = Scheduler.plan(%{ready: [card(ticket)], running: [], walk: walk})
+        assert plan.promote == ticket.id
+        assert [%{node: "oryx"}] = plan.placements
+      end
     end
 
     test "an inspect-only (research) run stays remote-eligible" do

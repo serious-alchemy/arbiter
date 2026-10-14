@@ -84,7 +84,7 @@ defmodule Arbiter.Worker.PassPlacement do
       layout: Map.get(attrs, :layout),
       no_pr?: false,
       local_work?: local_work?(Map.get(attrs, :clone_path)),
-      scoped_git_credential?: Placement.scoped_git_credential?(workspace, Map.get(attrs, :repo)),
+      git_credential: Placement.git_credential(workspace, Map.get(attrs, :repo)),
       mode: mode
     }
 
@@ -137,7 +137,7 @@ defmodule Arbiter.Worker.PassPlacement do
       provider: "claude",
       layout: :private_clone,
       no_pr?: false,
-      scoped_git_credential?: Placement.scoped_git_credential?(workspace, Map.get(task, :repo)),
+      git_credential: Placement.git_credential(workspace, Map.get(task, :repo)),
       mode: mode
     }
 
