@@ -244,6 +244,56 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert refreshed.closed_at == nil
     end
 
+    # bd-3lj713: the ticket also showed zero ReviewGate rounds — the finalizer
+    # tore the gate down mid-pass. A merge outside the gate is the operator's
+    # call, but it must leave a trace that no review happened.
+    test "a reviewable ticket merged with no ReviewGate round records a review waiver",
+         %{ws: ws} do
+      task = create_task(ws, "260")
+      stub(pr_get_stub(260, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+      assert refreshed.notes =~ "Review waiver"
+      assert refreshed.notes =~ "no ReviewGate round"
+    end
+
+    test "a ticket that did go through a ReviewGate round gets no waiver note", %{ws: ws} do
+      task = create_task(ws, "261")
+
+      {:ok, _} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          converged: true
+        })
+
+      stub(pr_get_stub(261, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+      refute (refreshed.notes || "") =~ "Review waiver"
+    end
+
+    test "a non-PR ticket type needs no review waiver", %{ws: ws} do
+      task = create_task(ws, "262", issue_type: :task)
+      stub(pr_get_stub(262, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      refute (refreshed.notes || "") =~ "Review waiver"
+    end
+
     test "a parked task is not swept again on the next tick", %{ws: ws} do
       task = create_task(ws, "251", verify_after_deploy: true)
       # bd-842qio: only work in progress parks for verification.
@@ -1060,6 +1110,157 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       assert length(drain_paths()) == 4
+    end
+  end
+
+  # bd-3lj713 / #817: emr-bg6dwa (tonic_device, MR !29) was moved to Verifying
+  # one minute after its MR opened, while the MR was still `opened`. A GitLab
+  # ref is a bare per-project iid (`!29`), and the emricare workspace has two
+  # projects. The `emricare/tonic` finalizer swept EVERY open task with a
+  # `pr_ref` — tonic_device's included — and looked `!29` up in the tonic
+  # project, where a different, long-merged MR !29 exists.
+  describe "tick/1 — multi-project GitLab workspace (bd-3lj713)" do
+    @gitlab_stub Arbiter.Mergers.Gitlab.HTTP
+
+    setup do
+      repo_a = git_repo_with_origin("git@gitlab.com:emricare/tonic.git")
+      repo_b = git_repo_with_origin("git@gitlab.com:emricare/tonic_device.git")
+
+      prior = System.get_env("GITLAB_TOKEN")
+      System.put_env("GITLAB_TOKEN", "test-token-gl")
+
+      on_exit(fn ->
+        if prior,
+          do: System.put_env("GITLAB_TOKEN", prior),
+          else: System.delete_env("GITLAB_TOKEN")
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "mpf-gl-#{System.unique_integer([:positive])}",
+          prefix: "mpfgl#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "credentials_ref" => "env:GITLAB_TOKEN",
+                "repos" => %{
+                  "tonic" => %{"project_id" => 111},
+                  "tonic_device" => %{"project_id" => 222}
+                }
+              }
+            },
+            "repo_paths" => %{"tonic" => repo_a, "tonic_device" => repo_b}
+          }
+        })
+
+      {:ok, gl_ws: ws}
+    end
+
+    defp git_repo_with_origin(remote_url) do
+      dir = Path.join(System.tmp_dir!(), "finalizer-gl-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"], stderr_to_stdout: true)
+
+      {_, 0} =
+        System.cmd("git", ["-C", dir, "remote", "add", "origin", remote_url],
+          stderr_to_stdout: true
+        )
+
+      on_exit(fn -> File.rm_rf(dir) end)
+      dir
+    end
+
+    # project 111 (tonic): MR !29 merged. project 222 (tonic_device): `!29` in
+    # the given state. Every request path is reported to the test so it can see
+    # which project a finalizer looked in.
+    defp gitlab_stub(tonic_device_state) do
+      test_pid = self()
+
+      Req.Test.stub(@gitlab_stub, fn conn ->
+        send(test_pid, {:gitlab_path, conn.request_path})
+
+        case conn.request_path do
+          "/api/v4/projects/111/merge_requests/29" ->
+            Req.Test.json(conn, %{"iid" => 29, "state" => "merged", "sha" => "tonic-sha"})
+
+          "/api/v4/projects/222/merge_requests/29" ->
+            Req.Test.json(conn, %{
+              "iid" => 29,
+              "state" => tonic_device_state,
+              "sha" => "a121652",
+              "merge_status" => "can_be_merged",
+              "detailed_merge_status" => "mergeable"
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+    end
+
+    defp start_gitlab_finalizer(ws, slug) do
+      {pid, name} = start_finalizer(ws, repo: slug)
+      Req.Test.allow(@gitlab_stub, self(), pid)
+      name
+    end
+
+    test "another project's merged !29 does not finalize a tonic_device task", %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device")
+      gitlab_stub("opened")
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      refute_received {:gitlab_path, "/api/v4/projects/111/merge_requests/29"}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
+      stop_supervised!(MergedPRFinalizer)
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      assert_received {:gitlab_path, "/api/v4/projects/222/merge_requests/29"}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
+    end
+
+    test "an open MR never moves the ticket, whatever its merge-status fields say",
+         %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device", verify_after_deploy: true)
+      gitlab_stub("opened")
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :verifying
+    end
+
+    test "the owning project's finalizer still finalizes once its MR is merged", %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device")
+      gitlab_stub("merged")
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "a bare ref with no resolvable repo is not guessed at in a multi-project workspace",
+         %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic")
+      {:ok, task} = Ash.update(task, %{repo: nil}, action: :update)
+      gitlab_stub("opened")
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      refute_received {:gitlab_path, _}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
     end
   end
 end
