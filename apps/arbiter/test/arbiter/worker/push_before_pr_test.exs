@@ -205,6 +205,70 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       assert branch_on_origin(repo.bare, "feature/abc")
       assert StubMerger.last_open() != nil
     end
+
+    # bd-akp9ae: how a run placed on a node gets its branch pushed and its PR opened as
+    # the App. The node carries no credential; the host pushes the collected branch
+    # with the App's installation token, minted here for the one repo. A `pre-push`
+    # hook records the environment the push really ran with.
+    test "a GitHub App repo is pushed with the App's installation token, and the PR opens",
+         %{pid: pid, repo: repo} do
+      http = Arbiter.Worker.GitCredential.HTTP
+      put_app_env(:arbiter, :git_credential_req_options, plug: {Req.Test, http})
+      Arbiter.Worker.HostCredential.Cache.clear()
+      Req.Test.set_req_test_to_shared(%{async: false})
+      test = self()
+
+      Req.Test.stub(http, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test, {:mint, conn.request_path, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_HOSTPUSH42", "expires_at" => "2099-01-01T00:00:00Z"})
+      end)
+
+      key = :public_key.generate_key({:rsa, 2048, 65_537})
+      pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "pbp-#{System.unique_integer([:positive])}",
+          prefix: "pbp",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{
+                "stub/repo" => %{
+                  "kind" => "github_app",
+                  "app_id" => "42",
+                  "installation_id" => "7",
+                  "private_key_secret" => "APP_KEY",
+                  "remote" => "acme/repo"
+                }
+              }
+            }
+          },
+          secrets: %{"APP_KEY" => pem}
+        })
+
+      seen = Path.join(Path.dirname(repo.bare), "push.env")
+      hook = Path.join([repo.repo, ".git", "hooks", "pre-push"])
+      File.write!(hook, "#!/bin/sh\nenv > '#{seen}'\n")
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, _ref} = open_with(pid, ws)
+      assert branch_on_origin(repo.bare, "feature/abc")
+      assert StubMerger.last_open() != nil
+
+      assert_receive {:mint, "/app/installations/7/access_tokens", body}
+      assert body["repositories"] == ["repo"]
+      assert body["permissions"]["contents"] == "write"
+      assert body["permissions"]["pull_requests"] == "write"
+
+      env = File.read!(seen)
+      assert env =~ "ARB_GIT_TOKEN=ghs_HOSTPUSH42"
+      assert env =~ ~s([ "$p" = "acme/repo" ])
+      refute env =~ "BEGIN RSA PRIVATE KEY"
+    end
   end
 
   # Note: the Direct-strategy push-skip path is tested by the full-integration

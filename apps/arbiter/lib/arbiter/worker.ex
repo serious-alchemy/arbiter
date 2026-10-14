@@ -213,7 +213,12 @@ defmodule Arbiter.Worker do
       # Map of port -> session config + accumulator. Internal — never exposed
       # via snapshot/1; relevant fields (output_lines, exit_status) are
       # mirrored into meta for snapshot consumers.
-      claude_sessions: %{}
+      claude_sessions: %{},
+      # bd-akp9ae: every value this run's sessions were told to redact (a git
+      # token minted for the spawn, a credential the spawn env carried), kept
+      # after the session itself is gone so the archived session JSONL is
+      # scrubbed of them too. Internal — never in meta or a snapshot.
+      archive_redact: []
     ]
   end
 
@@ -2924,7 +2929,14 @@ defmodule Arbiter.Worker do
       |> maybe_put(:node_id, handle_node_id(port))
       |> note_adopted(adopted)
 
-    new_state = %State{state | claude_sessions: sessions, meta: meta}
+    new_state = %State{
+      state
+      | claude_sessions: sessions,
+        meta: meta,
+        archive_redact:
+          Enum.uniq(state.archive_redact ++ (Map.get(session_config, :redact_values) || []))
+    }
+
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
     record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
@@ -3892,11 +3904,15 @@ defmodule Arbiter.Worker do
   # error, and a run with no Claude session (workflow-mode, Gemini-driven) or
   # whose file was already pruned is a logged *result*, not a failure. The
   # redaction list is the run's own workspace secrets, resolved the same way
-  # `ClaudeSession` resolves them for the live emit path.
+  # `ClaudeSession` resolves them for the live emit path, plus every value the
+  # run's sessions redacted on that path (bd-akp9ae: a git token minted for the
+  # spawn is no workspace secret, and an agent that printed its env would
+  # otherwise leave it in the durable archive).
   defp archive_session_jsonl(%State{} = state, run) do
     {:ok, report} =
       Arbiter.Worker.SessionArchive.archive_run(run,
-        redact_values: Arbiter.Worker.WorkerEnv.secret_values(state.task_id)
+        redact_values:
+          Enum.uniq(Arbiter.Worker.WorkerEnv.secret_values(state.task_id) ++ state.archive_redact)
       )
 
     case report.status do
