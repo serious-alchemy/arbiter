@@ -454,6 +454,45 @@ defmodule Arbiter.Worker.GitCredentialTest do
     test "no credential delivers nothing" do
       assert {:ok, %{env: [], secrets: %{}}} = GitCredential.remote_delivery(nil)
     end
+
+    # What a node must never be sent, whatever else the workspace exposes: the values
+    # of the long-lived secrets its `git_credentials` name.
+    test "withheld_values/1 lists every long-lived credential the block names" do
+      {_key, pem} = rsa_pem()
+
+      ws =
+        workspace(
+          %{
+            "repos" => %{
+              "tonic" => %{
+                "kind" => "github_app",
+                "app_id" => "42",
+                "installation_id" => "7",
+                "private_key_secret" => "APP_KEY"
+              },
+              "vstim" => %{"kind" => "deploy_key", "key_secret" => "VSTIM_KEY"},
+              "infra" => %{"kind" => "token", "token_secret" => "INFRA_TOKEN"},
+              "gone" => %{"kind" => "deploy_key", "key_secret" => "NOT_SET"},
+              "scratch" => %{"legacy_operator" => true}
+            }
+          },
+          %{
+            "APP_KEY" => pem,
+            "VSTIM_KEY" => "-----BEGIN OPENSSH PRIVATE KEY-----\nvstimkey\n",
+            "INFRA_TOKEN" => "glpat-infra-0123456789abcdef",
+            "UNRELATED" => "not a git credential"
+          }
+        )
+
+      withheld = GitCredential.withheld_values(ws)
+
+      assert String.trim(pem) in withheld
+      assert "-----BEGIN OPENSSH PRIVATE KEY-----\nvstimkey" in withheld
+      assert "glpat-infra-0123456789abcdef" in withheld
+      assert length(withheld) == 3
+      assert GitCredential.withheld_values(workspace(%{}, %{"APP_KEY" => pem})) == []
+      assert GitCredential.withheld_values(nil) == []
+    end
   end
 
   # bd-akp9ae: a token that left the primary (a run placed on a node) is revoked when

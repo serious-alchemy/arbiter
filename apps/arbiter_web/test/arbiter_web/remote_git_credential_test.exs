@@ -173,14 +173,20 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
     )
   end
 
-  defp workspace!(entry, secrets) do
+  defp workspace!(entry, secrets, attrs \\ %{}) do
     {:ok, ws} =
-      Ash.create(Workspace, %{
-        name: "rgc-#{System.unique_integer([:positive])}",
-        prefix: "rgc",
-        config: %{"git_credentials" => %{"repos" => %{"tonic" => entry}}},
-        secrets: secrets
-      })
+      Ash.create(
+        Workspace,
+        Map.merge(
+          %{
+            name: "rgc-#{System.unique_integer([:positive])}",
+            prefix: "rgc",
+            config: %{"git_credentials" => %{"repos" => %{"tonic" => entry}}},
+            secrets: secrets
+          },
+          attrs
+        )
+      )
 
     ws
   end
@@ -313,6 +319,51 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       # The host mints for its own push and PR, never for this spawn.
       refute_received {:mint, _, _}
       refute_received {:revoke, _, _}
+      for line <- key_lines(ctx.pem), do: refute(log =~ line)
+    end
+
+    # The operator also exposed the App's key to workers as an env var. A local run
+    # would get it; a run on a node is sent without it: the key never leaves.
+    test "a workspace that also exposes the App's key as a worker env var sends none of it",
+         ctx do
+      ws =
+        workspace!(
+          %{
+            "kind" => "github_app",
+            "app_id" => "42",
+            "installation_id" => "7",
+            "private_key_secret" => "APP_KEY",
+            "remote" => "acme/tonic"
+          },
+          %{"APP_KEY" => ctx.pem},
+          %{worker_env: %{"APP_PEM" => %{"value" => ctx.pem, "secret" => true}}}
+        )
+
+      {task_id, pid} = worker!(ws)
+      StubPodman.write_mode(ctx.stub, "hang")
+      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+
+      log =
+        capture_all(fn ->
+          assert {:ok, {:remote, _}} = start_on_node(ctx, pid, task_id, plan)
+          assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
+
+          spec = node_spec()
+          refute Map.has_key?(spec.secrets, "APP_PEM")
+          refute Map.has_key?(spec.env, "APP_PEM")
+          sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+          seen = node_side(ctx)
+
+          for line <- key_lines(ctx.pem) do
+            refute sent =~ line
+            refute seen =~ line
+          end
+
+          stop_worker(pid)
+        end)
+
+      # The var was there to send, and was held back by name.
+      assert log =~ "not sending APP_PEM to the node"
       for line <- key_lines(ctx.pem), do: refute(log =~ line)
     end
   end

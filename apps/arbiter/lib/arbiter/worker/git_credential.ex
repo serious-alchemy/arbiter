@@ -431,16 +431,20 @@ defmodule Arbiter.Worker.GitCredential do
       else: {:ok, nil}
   end
 
-  defp secret(%Workspace{} = ws, name) when is_binary(name) do
-    store = Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+  defp secret(%Workspace{} = ws, name) when is_binary(name), do: stored(secret_store(ws), name)
+  defp secret(_workspace, name), do: {:error, {:git_credential_secret_missing, name}}
 
+  defp secret_store(%Workspace{} = ws),
+    do: Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+
+  defp secret_store(_workspace), do: %{}
+
+  defp stored(store, name) do
     case Map.get(store, name) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:git_credential_secret_missing, name}}
     end
   end
-
-  defp secret(_workspace, name), do: {:error, {:git_credential_secret_missing, name}}
 
   # A token is pinned to the repo the spawn's origin names (or the entry's own
   # `remote`); without one the helper could not refuse another repo.
@@ -949,6 +953,33 @@ defmodule Arbiter.Worker.GitCredential do
       do: {:ok, %{env: container_env(material), secrets: %{"ARB_GIT_TOKEN" => token}}}
 
   def remote_delivery(%Material{}), do: {:error, {:git_credential_unsupported, :remote_node}}
+
+  @doc """
+  The long-lived secrets the workspace's `git_credentials` name (a GitHub App's
+  private key, a deploy key, a static token), trimmed: what is never sent to a
+  node (bd-akp9ae), even when the operator also exposed one as a worker env var
+  (`Arbiter.Worker.ContainerSpawn.remote_spec/3` drops any env value carrying
+  one). A named secret that is not set contributes nothing.
+  """
+  @spec withheld_values(map() | nil) :: [String.t()]
+  def withheld_values(workspace) do
+    case block(workspace) do
+      %{"repos" => %{} = repos} when map_size(repos) > 0 ->
+        store = secret_store(workspace)
+
+        for {_repo, %{} = entry} <- repos,
+            name <- Enum.map(~w(private_key_secret key_secret token_secret), &entry[&1]),
+            is_binary(name),
+            {:ok, value} <- [stored(store, name)],
+            value = String.trim(value),
+            value != "",
+            uniq: true,
+            do: value
+
+      _ ->
+        []
+    end
+  end
 
   # ---- the spawn seam -------------------------------------------------------------------
 

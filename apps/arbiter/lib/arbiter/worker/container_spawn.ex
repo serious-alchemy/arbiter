@@ -926,6 +926,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          worktree_files: worktree_files,
          worktree_secrets: worktree_secrets,
          git_secrets: git.secrets,
+         withheld: GitCredential.withheld_values(remote_workspace(opts)),
          home: home,
          config_dir: config_dir,
          config_files: config_files(Keyword.get(opts, :workspace)),
@@ -939,6 +940,14 @@ defmodule Arbiter.Worker.ContainerSpawn do
          task_id: Keyword.get(opts, :task_id)
        }}
     end
+  end
+
+  # The workspace whose `git_credentials` say what a node must never be sent: the
+  # spawn's own, else its task's.
+  defp remote_workspace(opts) do
+    Keyword.get(opts, :workspace) || WorkerEnv.workspace_for(Keyword.get(opts, :task_id))
+  rescue
+    _ -> nil
   end
 
   # RW11 (`docs/design/remote-workers.md` §9): a worktree that is a private clone
@@ -1322,7 +1331,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
     # later re-open.
     with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, prompts} <- prompt_mounts(prompt_paths(argv)) do
-      {secret, literal} = split_env(env_pairs(port_args, request))
+      {secret, literal} =
+        port_args
+        |> env_pairs(request)
+        |> withhold(Map.get(request, :withheld, []), request.task_id)
+        |> split_env()
+
       worktree_files = Map.get(request, :worktree_files, %{})
       worktree_secrets = Map.get(request, :worktree_secrets, %{})
       git_secrets = Map.get(request, :git_secrets, %{})
@@ -1369,6 +1383,37 @@ defmodule Arbiter.Worker.ContainerSpawn do
        |> put_checkout(request.checkout)}
     end
   end
+
+  # bd-akp9ae: a long-lived git credential (`GitCredential.withheld_values/1`) never
+  # leaves the primary, even when the workspace also exposes it as a worker env var:
+  # the var is not sent, and the log names it, never its value. A worker never needs
+  # one: the host pushes for it, or it is handed a short-lived token.
+  @min_withheld_match 16
+
+  defp withhold(pairs, [], _task_id), do: pairs
+
+  defp withhold(pairs, withheld, task_id) do
+    {dropped, kept} =
+      Enum.split_with(pairs, fn {_name, value} -> withheld_value?(value, withheld) end)
+
+    if dropped != [] do
+      Logger.warning(
+        "ContainerSpawn: not sending #{Enum.map_join(dropped, ", ", &elem(&1, 0))} to the " <>
+          "node for #{task_id}: it carries a git credential that stays on the primary"
+      )
+    end
+
+    kept
+  end
+
+  defp withheld_value?(value, withheld) when is_binary(value) do
+    Enum.any?(withheld, fn secret ->
+      value == secret or
+        (byte_size(secret) >= @min_withheld_match and String.contains?(value, secret))
+    end)
+  end
+
+  defp withheld_value?(_value, _withheld), do: false
 
   # bd-4ic681: the session a `--resume` argv continues, seeded for the node. Only a
   # Claude run with a checkout context can fetch it; a session nobody holds is left

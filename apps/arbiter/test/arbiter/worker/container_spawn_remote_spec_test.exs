@@ -74,6 +74,29 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     refute inspect(spec["command"]) =~ "ghs_carried"
   end
 
+  # bd-akp9ae: a long-lived git credential (an App's private key, a deploy key, a
+  # static token) never leaves the primary, even when the workspace also exposes it
+  # as a worker env var: the spec is sent without that var.
+  test "an env value carrying a withheld credential is not sent", %{request: request} do
+    pem =
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAwithheldkeybody\n-----END RSA PRIVATE KEY-----"
+
+    request = Map.put(request, :withheld, [pem])
+
+    port_args = %{
+      argv: ["claude"],
+      env: [{"APP_PEM", pem <> "\n"}, {"WRAPPED", "key=" <> pem}, {"KEEP_ME", "plain"}]
+    }
+
+    assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args, "run-1")
+
+    sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+    refute sent =~ "withheldkeybody"
+    refute Map.has_key?(spec["secrets"], "APP_PEM")
+    refute Map.has_key?(spec["secrets"], "WRAPPED")
+    assert spec["secrets"]["KEEP_ME"] == "plain"
+  end
+
   test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
     assert {:ok, spec} =
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
