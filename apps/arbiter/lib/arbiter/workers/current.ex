@@ -41,6 +41,7 @@ defmodule Arbiter.Workers.Current do
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunState
   alias Arbiter.Workflows.DispatchQueue
 
   @recent_limit 10
@@ -154,7 +155,32 @@ defmodule Arbiter.Workers.Current do
       completed_at: nil,
       failure_reason: Map.get(meta, :failure_reason)
     })
+    |> settle_finished()
   end
+
+  # bd-2j64q6: a worker that has finished its run but is still registered (a
+  # ReviewGate-parked author) is a finished run. Its row carries the
+  # `completed_at` the process does not, and the last thing its agent said
+  # ("wrapping up") is no longer what it is doing — so the view reads as the
+  # run's row does: completed, and "finished (<outcome>)".
+  defp settle_finished(%{state: :finished} = view) do
+    label = if view.outcome, do: RunState.label(:finished, view.outcome), else: "finished"
+    meta = Map.put(Map.get(view, :meta) || %{}, :activity, label)
+    %{view | meta: meta, completed_at: completed_at(Map.get(view, :run_id))}
+  end
+
+  defp settle_finished(view), do: view
+
+  defp completed_at(run_id) when is_binary(run_id) do
+    case Ash.get(Run, run_id) do
+      {:ok, %Run{completed_at: completed_at}} -> completed_at
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp completed_at(_), do: nil
 
   defp from_row(%Run{} = run) do
     %{

@@ -8301,7 +8301,7 @@ defmodule Arbiter.Worker do
         # Turned off for this workspace: the rejection escalation
         # (`escalate_review_gate/3`) already went out, so stay silent rather than
         # paging twice about the same verdict.
-        :ok
+        raise_not_converged(state)
 
       # bd-1u15tl: the gate's own "branch conflicts with its target, merge
       # aborted" rejection is not a code finding, and a sibling ticket merging
@@ -8549,6 +8549,25 @@ defmodule Arbiter.Worker do
     )
 
     _ = dispatcher.escalate_exhausted(state.task_id, state.workspace_id, attempts, reason)
+
+    # A tuple reason (`{:no_target_ref, _}`) is an infrastructure failure a
+    # resume can clear; only the gate's own atoms mean it will not converge.
+    if is_atom(reason), do: raise_not_converged(state), else: :ok
+  end
+
+  # bd-2j64q6: the gate gave up without converging, so the ticket waits on a
+  # gate decision (amend or waive the criterion, or send it back). Left
+  # unrecorded, its failed run read as `run_crashed` / `resume` — the wrong
+  # remedy, with the finding hidden. The detail is the run's `failure_summary`
+  # (the verdict line and top finding). Best-effort, like the escalation.
+  defp raise_not_converged(%State{task_id: task_id, meta: meta}) do
+    _ =
+      Arbiter.Tasks.Attention.raise_cause(
+        task_id,
+        :review_gate_not_converged,
+        Map.get(meta, :failure_summary)
+      )
+
     :ok
   end
 

@@ -9,6 +9,9 @@ defmodule Arbiter.Tasks.Attention do
   A cause is recorded by the thing that knows it:
 
     * a ReviewGate park (`Arbiter.Tasks.ReviewPark.park/2`) — its reason;
+    * a ReviewGate that gives up on a fix round without converging (`Arbiter.Worker`,
+      `give_up_fix_round`) — `:review_gate_not_converged`, with the run's
+      `failure_summary` (the verdict line and top finding) as its detail;
     * a PR closed without merging (`Issue.pr_closed/2`) — `:pr_closed`;
     * entering verification (`:await_verification`) — `:awaiting_verification`;
     * a ticket-scoped escalation whose kind names a cause
