@@ -85,8 +85,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   ## Test services (P10, bd-dmcbos)
 
-  A repo with a service definition (`Arbiter.Worker.TestServices`: vstim gets
-  Postgres 16, tonic Postgres 15 plus an S3 store) gets a **pod** instead of a
+  A repo with a service definition (`Arbiter.Worker.TestServices`: tonic gets
+  Postgres 15 plus an S3 store; vstim has none) gets a **pod** instead of a
   bare container. `prepare/1` starts it last, with the services ready, and the
   request carries `:pod` and the worker's `DATABASE_URL` and friends. The worker
   container joins the pod (`--pod`, no `--network`/`--userns` of its own: the pod

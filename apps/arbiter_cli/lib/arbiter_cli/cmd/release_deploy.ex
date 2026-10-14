@@ -1,9 +1,16 @@
 defmodule ArbiterCli.Cmd.ReleaseDeploy do
   @moduledoc """
   `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-  [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
+  [--this-host] [--no-self-update]` — deploy the Arbiter server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
+
+  Before downloading anything the command refuses (`HostCheck`) when this host
+  cannot run the Linux release, or when there is no install at the data home and
+  the CLI targets a remote server (non-loopback `ARB_HOST`, or a loopback port
+  held by a non-Arbiter process such as an SSH tunnel). Run it on the server
+  host; `--this-host` deliberately waives the remote-target check for a first
+  install on a fresh Linux host.
 
   `arb server deploy --local <tarball|dir>` deploys a **locally built**
   release instead — the tarball or unpacked `_build/prod/rel/arbiter`
@@ -174,7 +181,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
-  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, ReleaseFiles, Status}
+  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, HostCheck, ReleaseFiles, Status}
   alias ArbiterCli.{Cmd.SelfUpdate, Output, ReleaseRepo}
 
   @default_timeout_s 60
@@ -185,6 +192,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     json: :boolean,
     force: :boolean,
     local: :string,
+    this_host: :boolean,
     allow_cross_migration_rollback: :boolean,
     no_self_update: :boolean
   ]
@@ -216,6 +224,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     end
 
     run = %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts}
+
+    # Refuse an unsupported or remote-targeting host before the early-halt hook is
+    # installed: this host is not the deploy target, so it must write no status file.
+    case HostCheck.check(opts) do
+      :ok -> :ok
+      {:error, message, hint} -> Output.die(message, hint)
+    end
 
     # Until `begin_status/2` takes over, a halt (repo resolution, the active-worker
     # guard, the release lookup) must still leave a record: a deploy launched from

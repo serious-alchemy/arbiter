@@ -38,11 +38,9 @@ defmodule Arbiter.Worker.TestServicesTest do
   end
 
   describe "for_repo/1" do
-    test "vstim gets Postgres 16, tonic Postgres 15 plus S3, anything else nothing" do
-      assert {:ok, [%{name: "postgres", image: "docker.io/library/postgres:16-alpine"} = pg]} =
-               TestServices.for_repo("vstim")
-
-      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/vstim_test"} in pg.worker_env
+    test "tonic gets Postgres 15 plus S3; vstim and anything else nothing" do
+      assert {:ok, []} = TestServices.for_repo("vstim")
+      refute Map.has_key?(TestServices.defaults(), "vstim")
 
       assert {:ok, [%{image: "docker.io/library/postgres:15-alpine"}, %{name: "s3"}]} =
                TestServices.for_repo("tonic")

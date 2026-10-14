@@ -37,15 +37,30 @@ defmodule Arbiter.Mergers.ForgeRepos do
   @doc "Every forge repo `workspace` resolves to. See the moduledoc."
   @spec list(Workspace.t(), opts()) :: [entry()]
   def list(%Workspace{} = workspace, opts \\ []) do
-    entries =
-      case repo_paths(workspace) do
-        paths when map_size(paths) == 0 -> workspace_level(workspace)
-        paths -> per_repo(workspace, paths, opts)
-      end
-
-    entries
+    workspace
+    |> entries(opts)
     |> Enum.uniq_by(& &1.slug)
     |> Enum.sort_by(& &1.slug)
+  end
+
+  @doc """
+  Every `repo_paths` key that resolves to forge `slug` — unlike `list/2`, which
+  keeps one entry per slug, this keeps them all (two keys that inherit one
+  pinned `owner/repo` / `project_id` both belong to that one slug). How a
+  per-slug process (a finalizer) tells which of the workspace's tickets are
+  its own: a GitLab ref is a bare per-project iid (`!29`), so only the
+  ticket's `repo` says which project it was filed in (bd-3lj713).
+  """
+  @spec repo_keys(Workspace.t(), String.t(), opts()) :: [String.t()]
+  def repo_keys(%Workspace{} = workspace, slug, opts \\ []) when is_binary(slug) do
+    for %{slug: ^slug, repo_key: key} when is_binary(key) <- entries(workspace, opts), do: key
+  end
+
+  defp entries(workspace, opts) do
+    case repo_paths(workspace) do
+      paths when map_size(paths) == 0 -> workspace_level(workspace)
+      paths -> per_repo(workspace, paths, opts)
+    end
   end
 
   @doc "`list/2`'s slugs — one patrol / finalizer each."

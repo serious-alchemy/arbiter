@@ -347,6 +347,55 @@ defmodule Arbiter.Worker.CommitGateTest do
       refute Map.has_key?(snap.meta, :commit_gate_reason)
     end
 
+    # bd-1ejfc1 / #813: the repo must be able to commit `.arbiter/Containerfile`
+    # (`Arbiter.Worker.Image` builds from it) and still reach the review gate.
+    test "a committed .arbiter/Containerfile passes the gate to the ReviewGate",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.mkdir_p!(Path.join(path, ".arbiter"))
+      File.write!(Path.join(path, ".arbiter/Containerfile"), "FROM scratch\n")
+      {_, 0} = git(["add", "-A"], path)
+      {_, 0} = git(["commit", "-q", "-m", "custom image"], path)
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
+
+      refute Map.has_key?(Worker.state(pid).meta, :commit_gate_reason)
+    end
+
+    test "a committed .mcp.json + .arbiter/INBOX is still refused, naming both paths",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.mkdir_p!(Path.join(path, ".arbiter"))
+      File.write!(Path.join(path, ".arbiter/Containerfile"), "FROM scratch\n")
+      File.write!(Path.join(path, ".arbiter/INBOX"), "direction\n")
+      File.write!(Path.join(path, ".mcp.json"), "{}\n")
+
+      {_, 0} =
+        git(["add", "-f", ".arbiter/Containerfile", ".arbiter/INBOX", ".mcp.json"], path)
+
+      {_, 0} = git(["commit", "-q", "-m", "oops"], path)
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == :secret_in_commit
+      refute snap.waiting_on == :review_gate
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.notes =~ "Offending path(s): .arbiter/INBOX, .mcp.json"
+      refute reloaded.notes =~ "Offending path(s): .arbiter/Containerfile"
+    end
+
     test "a live agent is terminated before the run is failed (bd-7a0pi8)",
          %{repo: repo, ws: ws} do
       # Regression for bd-7a0pi8: a premature `arb done` with zero commits used

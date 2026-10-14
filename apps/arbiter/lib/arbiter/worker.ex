@@ -7124,8 +7124,11 @@ defmodule Arbiter.Worker do
 
         :secret_in_commit ->
           "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>
-            "an Arbiter-injected agent-config file (.mcp.json / .gemini/ / .codex/). " <>
-            "These files carry per-spawn bearer tokens and must NEVER appear in VCS. " <>
+            "an Arbiter-injected agent-config file (.mcp.json / .gemini/ / .codex/ / " <>
+            ".arbiter/ other than .arbiter/Containerfile). " <>
+            "Offending path(s): #{injected_config_paths_blurb(worktree, target)}. " <>
+            "The .mcp.json / .gemini/ / .codex/ files carry per-spawn bearer tokens and " <>
+            "must NEVER appear in VCS. " <>
             "Incident response: (1) ensure the PR is squash-merged so the token leaves " <>
             "history; (2) let the 24 h TTL expire — no per-token revoke exists; " <>
             "(3) rotate SECRET_KEY_BASE only if the token's scope warrants it (nuclear: " <>
@@ -7162,6 +7165,15 @@ defmodule Arbiter.Worker do
     """
     |> String.trim()
   end
+
+  defp injected_config_paths_blurb(worktree, target) when is_binary(worktree) do
+    case Arbiter.Worker.Worktree.injected_config_paths_in_commits(worktree, target) do
+      {:ok, [_ | _] = paths} -> Enum.join(paths, ", ")
+      _ -> "(could not list them; run `git diff --name-only --diff-filter=A #{target}...HEAD`)"
+    end
+  end
+
+  defp injected_config_paths_blurb(_worktree, _target), do: "(no worktree path)"
 
   defp commit_gate_git_status(path) when is_binary(path) do
     case Arbiter.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do

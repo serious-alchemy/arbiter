@@ -609,6 +609,18 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     setup ctx do
       test_pid = self()
 
+      previous = Application.get_env(:arbiter, :worker_test_services)
+
+      Application.put_env(:arbiter, :worker_test_services, %{
+        "pgrepo" => [{:postgres, version: 16, database: "pgrepo_test"}]
+      })
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :worker_test_services, previous),
+          else: Application.delete_env(:arbiter, :worker_test_services)
+      end)
+
       runner = fn _cmd, args, _opts ->
         send(test_pid, {:podman, args})
         {"", 0}
@@ -616,7 +628,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       # prepare/1 names the repo's services; the stand-in runner answers every
       # podman call and records it.
-      %{opts: [{:repo, "vstim"}, {:services_opts, [runner: runner]} | ctx.opts], runner: runner}
+      %{opts: [{:repo, "pgrepo"}, {:services_opts, [runner: runner]} | ctx.opts], runner: runner}
     end
 
     defp podman_calls do
@@ -635,7 +647,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert request.pod == pod
 
       env = Map.new(request.env)
-      assert env["DATABASE_URL"] == "postgres://postgres:postgres@127.0.0.1:5432/vstim_test"
+      assert env["DATABASE_URL"] == "postgres://postgres:postgres@127.0.0.1:5432/pgrepo_test"
 
       # The pod exists and Postgres is ready before prepare returns.
       verbs = podman_calls() |> Enum.map(&Enum.take(&1, 2))
@@ -652,8 +664,16 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert "label=disable" in argv
       assert "#{ctx.proxy}:#{ctx.proxy}:ro" in mounts(argv)
       # And the DATABASE_URL travels as a value in the client's env, named on argv.
-      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/vstim_test"} in wrapped.env
+      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/pgrepo_test"} in wrapped.env
       refute Enum.any?(argv, &String.contains?(&1, "postgres://"))
+    end
+
+    test "vstim gets no pod and no DATABASE_URL", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(Keyword.put(ctx.opts, :repo, "vstim"))
+
+      refute Map.get(request, :pod)
+      refute List.keymember?(request.env, "DATABASE_URL", 0)
+      assert podman_calls() == []
     end
 
     test "tonic gets Postgres 15 and an S3 store in the same pod", ctx do

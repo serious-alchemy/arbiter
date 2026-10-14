@@ -100,7 +100,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   alias Arbiter.GitHub.Limiter
   alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Verification
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
@@ -232,12 +234,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
            {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
            {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id, state.repo) do
         candidates =
-          Enum.sort_by(
-            Enum.map(pr_ref_tasks, &{&1, :pr_ref}) ++
-              Enum.map(follow_up_tasks, &{&1, :source_pr}) ++
-              Enum.map(legacy_tasks, &{&1, :legacy_tracker_ref}),
-            fn {task, _rule} -> task.id end
-          )
+          (Enum.map(pr_ref_tasks, &{&1, :pr_ref}) ++ Enum.map(follow_up_tasks, &{&1, :source_pr}))
+          |> Enum.filter(fn {task, rule} -> own_ref?(workspace, task, rule, state.repo) end)
+          |> Enum.concat(Enum.map(legacy_tasks, &{&1, :legacy_tracker_ref}))
+          |> Enum.sort_by(fn {task, _rule} -> task.id end)
 
         {window, next_cursor} = window(candidates, state.cursor, state.max_checks_per_tick)
 
@@ -285,6 +285,31 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     case List.last(window) do
       {task, _kind} -> {window, task.id}
       nil -> {window, nil}
+    end
+  end
+
+  # bd-3lj713: whether `task`'s merge ref is one this finalizer — pinned to
+  # `repo` — may look up. A GitHub ref in a multi-repo workspace is qualified
+  # (`owner/repo#N`) and names its own repo, but a GitLab ref is a bare
+  # per-project iid (`!29`): `!29` in `emricare/tonic` and `!29` in
+  # `emricare/tonic_device` are unrelated MRs. Sweeping every task through
+  # every finalizer looked the iid up in the wrong project, found a long-merged
+  # MR with that number, and moved a ticket whose own MR was still open to
+  # Verifying (emr-bg6dwa). So in a workspace with more than one forge repo a
+  # bare ref belongs to the finalizer whose repo the task was filed in
+  # (`task.repo`, a `repo_paths` key); a task whose repo is unknown or maps
+  # elsewhere is not guessed at. A single-repo workspace has nothing to confuse.
+  defp own_ref?(workspace, %Issue{} = task, rule, repo) do
+    with :bare <- PatrolRepoScope.repo_of_ref(follow_up_ref(task, rule)),
+         [_, _ | _] <- MergedPRFinalizerSupervisor.finalizer_repos(workspace) do
+      repo_paths = Map.get(workspace.config || %{}, "repo_paths") || %{}
+
+      case is_binary(task.repo) && RepoConfig.find_key(repo_paths, task.repo) do
+        key when is_binary(key) -> key in MergedPRFinalizerSupervisor.repo_keys(workspace, repo)
+        _ -> false
+      end
+    else
+      _ -> true
     end
   end
 
@@ -416,6 +441,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         "(tracker=#{task.tracker_type} ref=#{task.tracker_ref}) — finalizing"
     )
 
+    task = record_review_waiver(task)
+
     Sync.lifecycle(task, :merged)
 
     # bd-9so315: the same funnel the merge queue uses — closes as before unless
@@ -445,6 +472,40 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       :ok
   end
 
+  # bd-3lj713: this sweep closes a ticket on the strength of a forge merge it
+  # did not perform, so a reviewable ticket (one that opens a PR) can reach
+  # merged/verifying without the ReviewGate ever having reviewed it — the gate
+  # is torn down mid-pass when the PR is merged by hand. That is the
+  # operator's call to make, but never a silent one: with no
+  # `Arbiter.ReviewGate.Round` on record the merge is stamped into the ticket's
+  # notes as an explicit review waiver. A failed write never blocks the close.
+  defp record_review_waiver(%Issue{} = task) do
+    if Issue.no_pr_type?(task.issue_type) or task.review_only == true or reviewed?(task) do
+      task
+    else
+      at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      line =
+        "Review waiver: PR #{task.pr_ref} was merged outside Arbiter with no ReviewGate " <>
+          "round recorded for this ticket — no automated review covered it " <>
+          "(recorded #{at} by merged_pr_finalizer)."
+
+      Logger.warning("MergedPRFinalizer: task=#{task.id} #{line}")
+      notes = [task.notes, line] |> Enum.reject(&(&1 in [nil, ""])) |> Enum.join("\n\n")
+
+      case Ash.update(task, %{notes: notes}, action: :update) do
+        {:ok, updated} -> updated
+        {:error, _} -> task
+      end
+    end
+  end
+
+  defp reviewed?(%Issue{id: task_id}) do
+    Round
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.exists?()
+  end
+
   # Determines the source PR ref for a follow-up task from the rule that
   # selected it (modern: source_pr; legacy: tracker_ref, only ever reached for a
   # task `legacy_pr_patrol_follow_up?/2` identified) and closes the task
@@ -465,6 +526,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
+  defp follow_up_ref(%Issue{pr_ref: pr_ref}, :pr_ref), do: pr_ref
   defp follow_up_ref(%Issue{source_pr: source_pr}, :source_pr), do: source_pr
   defp follow_up_ref(%Issue{tracker_ref: tracker_ref}, :legacy_tracker_ref), do: tracker_ref
 

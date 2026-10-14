@@ -396,6 +396,80 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @doc """
+  Whether our identity's latest verdict is an APPROVED review whose
+  `commit_id` equals the PR's current head SHA (bd-8vb2z6). Such an approval
+  is current by definition, whatever `reviewDecision` says. `{:ok, false}`
+  when we have no approval, it was given on an older commit, or our login
+  can't be resolved.
+
+  Optional capability probed via `function_exported?/3`.
+  """
+  @spec self_approved_at_head?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved_at_head?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          approved_commit_is_head(cfg, {owner, repo, number}, latest_verdict_for(reviews, login))
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  defp approved_commit_is_head(
+         cfg,
+         {owner, repo, number},
+         %{"state" => "APPROVED", "commit_id" => commit}
+       )
+       when is_binary(commit) do
+    with {:ok, head} <- fetch_commit_id(cfg, owner, repo, number, %{}) do
+      {:ok, head == commit}
+    end
+  end
+
+  defp approved_commit_is_head(_cfg, _ref, _verdict), do: {:ok, false}
+
+  @doc """
+  GitHub's own judgment of the PR's review state — the GraphQL
+  `reviewDecision` (`"APPROVED"`, `"REVIEW_REQUIRED"`, `"CHANGES_REQUESTED"`,
+  or `nil` when no branch rule requires a review). Unlike `self_approved?/1`
+  (which only reads our latest review verdict), this reflects branch
+  protection: a stale-review dismissal or a rule that stops counting an
+  approval after new commits shows up here as `REVIEW_REQUIRED`
+  (bd-6zlfq6, see `Arbiter.Reviews.ApprovalCurrency`).
+
+  Returns `{:ok, String.t() | nil}` or `{:error, term()}`. Not part of the
+  `Merger` behaviour: an optional capability probed via `function_exported?/3`.
+  """
+  @spec review_decision(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def review_decision(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
+      case body do
+        %{"data" => %{"repository" => %{"pullRequest" => %{} = pull}}} ->
+          {:ok, Map.get(pull, "reviewDecision")}
+
+        other ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: 200,
+             message: "unexpected reviewDecision shape",
+             raw: other
+           }}
+      end
+    end
+  end
+
+  @doc """
   bd-a16rgk: best-effort fetch of a single file's content at `ref` (normally
   the PR's head SHA), so a reviewer finding that depends on code outside the
   diff can be checked before its severity is finalized instead of posted as
@@ -1579,20 +1653,23 @@ defmodule Arbiter.Mergers.Github do
   # to one author: GitHub returns reviews chronologically, so the last verdict
   # entry for `login` is the current one — a DISMISSED that follows an APPROVED
   # correctly reads as "not currently approved".
-  defp latest_state_for(reviews, login) when is_list(reviews) and is_binary(login) do
+  defp latest_state_for(reviews, login) do
+    case latest_verdict_for(reviews, login) do
+      nil -> nil
+      review -> Map.get(review, "state")
+    end
+  end
+
+  defp latest_verdict_for(reviews, login) when is_list(reviews) and is_binary(login) do
     reviews
     |> Enum.filter(
       &(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"] and
           review_author(&1) == login)
     )
     |> List.last()
-    |> case do
-      nil -> nil
-      review -> Map.get(review, "state")
-    end
   end
 
-  defp latest_state_for(_reviews, _login), do: nil
+  defp latest_verdict_for(_reviews, _login), do: nil
 
   # An opaque debounce handle for the most recent CHANGES_REQUESTED review:
   # its numeric id when present, else its submitted_at timestamp. nil when no

@@ -40,7 +40,7 @@ defmodule Arbiter.Worker.TestServicesPodmanTest do
       File.rm_rf!(dir)
     end)
 
-    {:ok, services} = TestServices.for_repo("vstim")
+    {:ok, services} = TestServices.resolve([{:postgres, version: 16, database: "vstim_test"}])
     %{dir: dir, name: name, pod: pod, services: services}
   end
 
