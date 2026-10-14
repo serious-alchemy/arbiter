@@ -45,7 +45,16 @@ defmodule Arbiter.Nodes.Placement do
       dirty; the seed carries commits, not the work tree, and the run's snapshot
       would replace it on the way back);
     * a workspace whose `worker.placement` is `local_only`
-      (`:placement_local_only`).
+      (`:placement_local_only`);
+    * a run whose container pushes with its repo's scoped git credential (a
+      ReviewGate fix round on a scoped repo) when that credential is a deploy key
+      or a static token (`:scoped_git_credential`, bd-21r811): a long-lived secret
+      stays on the primary. A GitHub App's goes with the run as a short-lived,
+      repo-restricted installation token (`remote_git_credential_kinds/0`,
+      bd-akp9ae). Every other kind is pushed for by the host, with the repo's
+      scoped credential (bd-bsmkfu), so its container carries none, wherever it
+      runs: the request's `:git_credential` (`git_credential/2`) does not keep it
+      here.
 
   The discriminator for "podman" is `GitLayout.for_policy/1`'s `:private_clone`,
   which `SecurityPolicy` merges most-restrictive-wins, so nothing a workspace,
@@ -125,6 +134,21 @@ defmodule Arbiter.Nodes.Placement do
     :review_fix_round
   ]
 
+  # bd-akp9ae: the kinds whose container pushes for itself, and so holds the repo's
+  # scoped git credential wherever it runs: a ReviewGate fix round on a scoped repo
+  # (`ReviewGate`'s `fix_round_host_pushes?/4` is false for it). Every other remote
+  # kind runs podman on a private clone, which the host pushes for (bd-7rxy1c,
+  # bd-19skda) with the repo's scoped credential (bd-bsmkfu): its container holds
+  # none, here or on a node, so there is nothing to carry.
+  @self_pushing_kinds [:review_fix_round]
+
+  # The scoped credential kinds that can go where a self-pushing run goes: a GitHub
+  # App's is a short-lived installation token minted on the primary for the run,
+  # restricted to the one repo, delivered through the node's per-run secret channel
+  # and revoked when the run ends (`ContainerSpawn.prepare_remote/1`). A deploy key
+  # or a static token is a long-lived secret that stays on the primary.
+  @remote_git_credential_kinds [:github_app]
+
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::
           :follow_up
@@ -144,7 +168,7 @@ defmodule Arbiter.Nodes.Placement do
           optional(:no_pr?) => boolean(),
           optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
-          optional(:scoped_git_credential?) => boolean(),
+          optional(:git_credential) => GitCredential.kind() | atom() | nil,
           optional(:labels) => [String.t()]
         }
   @type info :: %{
@@ -196,29 +220,46 @@ defmodule Arbiter.Nodes.Placement do
       no_checkout?(request) -> {:local_only, :no_private_clone}
       Map.get(request, :local_work?, false) -> {:local_only, :local_work}
       request.mode == :local_only -> {:local_only, :placement_local_only}
-      pushes_scoped?(request) -> {:local_only, :scoped_git_credential}
+      carries_uncarried_credential?(request) -> {:local_only, :scoped_git_credential}
       true -> :ok
     end
   end
 
-  # bd-21r811: a run that pushes with a repo-scoped git credential cannot go to a
-  # node (no podman secret carries the key there; `ClaudeSession` refuses it with
-  # `git_credential_unsupported`). A reviewer and an inspect-only run do not push.
-  defp pushes_scoped?(request) do
-    Map.get(request, :scoped_git_credential?, false) and
-      request.kind not in [:reviewer, :review] and not Map.get(request, :inspect?, false)
+  # bd-21r811, bd-akp9ae: a run whose container pushes with the repo's scoped git
+  # credential takes it to the node, which only a GitHub App's short-lived token
+  # may do; a deploy key or a static token keeps the run on the primary (and
+  # `ClaudeSession` refuses one on a node all the same: `git_credential_unsupported`).
+  # A host-pushed kind, a reviewer and an inspect-only run carry nothing.
+  defp carries_uncarried_credential?(request) do
+    case Map.get(request, :git_credential) do
+      nil ->
+        false
+
+      kind ->
+        request.kind in @self_pushing_kinds and not Map.get(request, :inspect?, false) and
+          kind not in @remote_git_credential_kinds
+    end
   end
 
   @doc """
-  Does `repo` in `workspace` resolve to a scoped `GitCredential` plan for an
-  implementer? What callers put in a request's `:scoped_git_credential?`.
+  The scoped git credential kinds a run that pushes from its container may take to
+  a node (`[:github_app]`: a short-lived, repo-restricted installation token).
   """
-  @spec scoped_git_credential?(map() | nil, String.t() | nil) :: boolean()
-  def scoped_git_credential?(workspace, repo) do
-    match?(
-      {:ok, %GitCredential{mode: :scoped}},
-      GitCredential.plan(workspace, repo, role: :implementer)
-    )
+  @spec remote_git_credential_kinds() :: [GitCredential.kind()]
+  def remote_git_credential_kinds, do: @remote_git_credential_kinds
+
+  @doc """
+  The kind of the scoped `GitCredential` an implementer of `repo` in `workspace`
+  would push with (`:deploy_key`, `:token` or `:github_app`), or `nil` for a repo
+  with none (legacy, unconfigured). What callers put in a request's
+  `:git_credential`; `eligible/1` decides whether the run's kind carries it.
+  """
+  @spec git_credential(map() | nil, String.t() | nil) :: GitCredential.kind() | nil
+  def git_credential(workspace, repo) do
+    case GitCredential.plan(workspace, repo, role: :implementer) do
+      {:ok, %GitCredential{mode: :scoped, entry: %{kind: kind}}} -> kind
+      _ -> nil
+    end
   end
 
   # A clone-less dispatch (task/research) is local unless it is marked `inspect?`:
@@ -253,7 +294,9 @@ defmodule Arbiter.Nodes.Placement do
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
   def reason_phrase(:scoped_git_credential, _),
-    do: "its repo uses a scoped git credential, which cannot be carried to a node yet"
+    do:
+      "it pushes with its repo's scoped git credential, a deploy key or token that cannot " <>
+        "be carried to a node (only a GitHub App's short-lived token can)"
 
   @doc """
   True when placement may return a node (`Executor.Node` exists since RW9, so the
@@ -294,8 +337,9 @@ defmodule Arbiter.Nodes.Placement do
 
   defp scoped_credential_hold(request) do
     phrase =
-      "held — #{request.task_id} pushes with a scoped git credential, which cannot be " <>
-        "carried to a node yet"
+      "held — #{request.task_id} pushes with a scoped git credential " <>
+        "(#{Map.get(request, :git_credential)}), which cannot be carried to a node " <>
+        "(only a GitHub App's short-lived token can)"
 
     %{
       task_id: request.task_id,
@@ -304,8 +348,8 @@ defmodule Arbiter.Nodes.Placement do
       reason: :scoped_git_credential,
       message:
         phrase <>
-          ", and worker.placement is remote_only. Run it under prefer_remote, or put the " <>
-          "repo on legacy_operator."
+          ", and worker.placement is remote_only. Run it under prefer_remote, give the repo " <>
+          "a github_app credential, or put the repo on legacy_operator."
     }
   end
 

@@ -422,10 +422,17 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  # A run placed on another node has no podman secret to carry a key: refuse rather
-  # than run it on whatever credential the node has (bd-9cygoo).
-  defp no_remote_git_credential(nil), do: :ok
-  defp no_remote_git_credential(_), do: {:error, {:git_credential_unsupported, :remote_node}}
+  # A run placed on another node takes its git credential there only as a GitHub
+  # App's short-lived, repo-restricted token (bd-akp9ae); a deploy key or a static
+  # token is refused rather than run on whatever credential the node has (bd-9cygoo).
+  # Placement keeps such a run on the primary (`Placement.eligible/1`), so this is
+  # the guard behind it.
+  defp remote_git_credential(material) do
+    case GitCredential.remote_delivery(material) do
+      {:ok, _delivery} -> :ok
+      {:error, _} = refusal -> refusal
+    end
+  end
 
   # bd-6ircwr: the transcript snapshot is staged in this host's tmp dir and
   # bind-mounted by the local podman backend; a node cannot see it. A run promised
@@ -443,7 +450,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp prepare_remote_container(opts, policy, port_args, ctx, node) do
     provider = Keyword.get(opts, :provider) || "claude"
 
-    with :ok <- no_remote_git_credential(Keyword.get(opts, :git_material)),
+    with :ok <- remote_git_credential(Keyword.get(opts, :git_material)),
          :ok <- no_remote_research(Keyword.get(opts, :research_transcripts)),
          {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
@@ -458,7 +465,8 @@ defmodule Arbiter.Worker.ClaudeSession do
                :egress,
                :services,
                :claude_path,
-               :arb_path
+               :arb_path,
+               :git_material
              ]) ++
                [
                  provider: provider,

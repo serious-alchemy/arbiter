@@ -882,15 +882,27 @@ defmodule Arbiter.Worker.ContainerSpawn do
   image, fetches the files, makes the run's directories and starts the
   container itself. The returned request rides in `port_args.remote`; each open
   turns it into a spec with `remote_spec/3`.
+
+  A run whose container pushes for itself (a ReviewGate fix round on a scoped
+  repo) hands its `:git_material` along (bd-akp9ae): only a GitHub App's
+  short-lived installation token may go (`GitCredential.remote_delivery/1`; any
+  other kind refuses the spawn). The token rides in the spec's `secrets`, which
+  the node writes to the run's tmpfs file and removes when the container exits,
+  is cancelled or is reaped; the helper config that uses it is ordinary env. The
+  token is revoked when the owning worker exits, however it exits
+  (`GitCredential.revoke_when_down/3`), so a copy taken off the node is dead
+  after the run.
   """
   @spec prepare_remote(keyword()) :: {:ok, map()} | {:error, term()}
   def prepare_remote(opts) when is_list(opts) do
     policy = Keyword.fetch!(opts, :policy)
     provider = provider_name(Keyword.get(opts, :provider))
     node = Keyword.fetch!(opts, :node)
+    material = Keyword.get(opts, :git_material)
 
     with :ok <- remote_provider(provider),
          :ok <- container_backend(policy, provider),
+         {:ok, git} <- GitCredential.remote_delivery(material),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
@@ -901,6 +913,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
+      :ok = GitCredential.revoke_when_down(Keyword.get(opts, :owner), material, [])
 
       {:ok,
        %{
@@ -912,6 +925,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          checkout: checkout,
          worktree_files: worktree_files,
          worktree_secrets: worktree_secrets,
+         git_secrets: git.secrets,
+         withheld: GitCredential.withheld_values(remote_workspace(opts)),
          home: home,
          config_dir: config_dir,
          config_files: config_files(Keyword.get(opts, :workspace)),
@@ -919,12 +934,20 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec, nil) ++ services.env,
+         env: container_env(spec, nil) ++ git.env ++ services.env,
          services: services.presets,
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
        }}
     end
+  end
+
+  # The workspace whose `git_credentials` say what a node must never be sent: the
+  # spawn's own, else its task's.
+  defp remote_workspace(opts) do
+    Keyword.get(opts, :workspace) || WorkerEnv.workspace_for(Keyword.get(opts, :task_id))
+  rescue
+    _ -> nil
   end
 
   # RW11 (`docs/design/remote-workers.md` §9): a worktree that is a private clone
@@ -1308,9 +1331,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
     # later re-open.
     with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, prompts} <- prompt_mounts(prompt_paths(argv)) do
-      {secret, literal} = split_env(env_pairs(port_args, request))
+      {secret, literal} =
+        port_args
+        |> env_pairs(request)
+        |> withhold(Map.get(request, :withheld, []), request.task_id)
+        |> split_env()
+
       worktree_files = Map.get(request, :worktree_files, %{})
       worktree_secrets = Map.get(request, :worktree_secrets, %{})
+      git_secrets = Map.get(request, :git_secrets, %{})
       session = remote_session(request, port_args)
 
       {:ok,
@@ -1344,7 +1373,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
              end) ++ prompts,
          "bridges" => bridges(request.network),
          "env" => Map.new(literal),
-         "secrets" => Map.merge(Map.new(secret), worktree_secrets),
+         "secrets" =>
+           secret |> Map.new() |> Map.merge(worktree_secrets) |> Map.merge(git_secrets),
          "limits" => request.limits,
          "network" => "none",
          "services" => request.services,
@@ -1353,6 +1383,37 @@ defmodule Arbiter.Worker.ContainerSpawn do
        |> put_checkout(request.checkout)}
     end
   end
+
+  # bd-akp9ae: a long-lived git credential (`GitCredential.withheld_values/1`) never
+  # leaves the primary, even when the workspace also exposes it as a worker env var:
+  # the var is not sent, and the log names it, never its value. A worker never needs
+  # one: the host pushes for it, or it is handed a short-lived token.
+  @min_withheld_match 16
+
+  defp withhold(pairs, [], _task_id), do: pairs
+
+  defp withhold(pairs, withheld, task_id) do
+    {dropped, kept} =
+      Enum.split_with(pairs, fn {_name, value} -> withheld_value?(value, withheld) end)
+
+    if dropped != [] do
+      Logger.warning(
+        "ContainerSpawn: not sending #{Enum.map_join(dropped, ", ", &elem(&1, 0))} to the " <>
+          "node for #{task_id}: it carries a git credential that stays on the primary"
+      )
+    end
+
+    kept
+  end
+
+  defp withheld_value?(value, withheld) when is_binary(value) do
+    Enum.any?(withheld, fn secret ->
+      value == secret or
+        (byte_size(secret) >= @min_withheld_match and String.contains?(value, secret))
+    end)
+  end
+
+  defp withheld_value?(_value, _withheld), do: false
 
   # bd-4ic681: the session a `--resume` argv continues, seeded for the node. Only a
   # Claude run with a checkout context can fetch it; a session nobody holds is left

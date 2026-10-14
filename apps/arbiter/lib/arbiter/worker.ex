@@ -213,7 +213,12 @@ defmodule Arbiter.Worker do
       # Map of port -> session config + accumulator. Internal — never exposed
       # via snapshot/1; relevant fields (output_lines, exit_status) are
       # mirrored into meta for snapshot consumers.
-      claude_sessions: %{}
+      claude_sessions: %{},
+      # bd-akp9ae: every value this run's sessions were told to redact (a git
+      # token minted for the spawn, a credential the spawn env carried), kept
+      # after the session itself is gone so the archived session JSONL is
+      # scrubbed of them too. Internal — never in meta or a snapshot.
+      archive_redact: []
     ]
   end
 
@@ -2924,7 +2929,14 @@ defmodule Arbiter.Worker do
       |> maybe_put(:node_id, handle_node_id(port))
       |> note_adopted(adopted)
 
-    new_state = %State{state | claude_sessions: sessions, meta: meta}
+    new_state = %State{
+      state
+      | claude_sessions: sessions,
+        meta: meta,
+        archive_redact:
+          Enum.uniq(state.archive_redact ++ (Map.get(session_config, :redact_values) || []))
+    }
+
     new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
     record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
@@ -3892,11 +3904,15 @@ defmodule Arbiter.Worker do
   # error, and a run with no Claude session (workflow-mode, Gemini-driven) or
   # whose file was already pruned is a logged *result*, not a failure. The
   # redaction list is the run's own workspace secrets, resolved the same way
-  # `ClaudeSession` resolves them for the live emit path.
+  # `ClaudeSession` resolves them for the live emit path, plus every value the
+  # run's sessions redacted on that path (bd-akp9ae: a git token minted for the
+  # spawn is no workspace secret, and an agent that printed its env would
+  # otherwise leave it in the durable archive).
   defp archive_session_jsonl(%State{} = state, run) do
     {:ok, report} =
       Arbiter.Worker.SessionArchive.archive_run(run,
-        redact_values: Arbiter.Worker.WorkerEnv.secret_values(state.task_id)
+        redact_values:
+          Enum.uniq(Arbiter.Worker.WorkerEnv.secret_values(state.task_id) ++ state.archive_redact)
       )
 
     case report.status do
@@ -9475,6 +9491,36 @@ defmodule Arbiter.Worker do
 
     :error
   end
+
+  # bd-akp9ae: what a crash report and `:sys.get_status/1` print of a Worker: its
+  # state, the last message, the reason. The state holds every value its sessions were
+  # told to redact (a git token minted for a spawn, the provider token, the workspace's
+  # secrets), so each is masked wherever it appears in any of them
+  # (`Arbiter.Worker.StateRedaction`; the state's own `inspect/2` masks them too, for
+  # the stacktrace's arguments, which do not pass through here).
+  @impl true
+  def format_status(status) do
+    secrets =
+      Enum.uniq(
+        Arbiter.Worker.StateRedaction.secrets(Map.get(status, :state)) ++
+          opening_secrets(Map.get(status, :message))
+      )
+
+    Map.new(status, fn
+      {key, value} when key in [:state, :message, :reason, :log, :queue] ->
+        {key, Arbiter.Worker.StateRedaction.mask(value, secrets)}
+
+      pair ->
+        pair
+    end)
+  end
+
+  # A session being opened carries its own list, not yet in the state.
+  defp opening_secrets({:__claude_session_open__, _port_args, %{redact_values: values}})
+       when is_list(values),
+       do: values
+
+  defp opening_secrets(_message), do: []
 
   @impl true
   def terminate(reason, %State{} = state) do

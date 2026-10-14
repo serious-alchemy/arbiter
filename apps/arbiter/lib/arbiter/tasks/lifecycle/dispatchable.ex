@@ -36,6 +36,9 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     * `:guardrail` — `:ok`, or `{:hold, detail}`: no model the guardrail profiles
       allow can take the ticket, or a declared permission awaits the operator's
       grant (bd-atll60, G13);
+    * `:local_capacity` — `:ok`, or `{:hold, phrase}`: the ticket's run can only go
+      to the primary, and the primary's own cap has no room for it
+      (`Arbiter.Nodes.LocalCapacity`'s phrase, bd-akp9ae);
     * `:slots_free` — free slots; absent means "not asked".
 
   ## Holds, in precedence order
@@ -53,6 +56,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   | `{:file_overlap, files, id}` | these declared files are in flight on `id` |
   | `{:provider_constraint, detail}` | the ticket's provider constraint leaves no eligible account |
   | `{:guardrail, detail}` | no model its guardrails allow can take it, or a permission awaits the operator's grant |
+  | `{:local_capacity, phrase}` | it can only run on the primary, whose own cap is full |
   | `:paused` | the scheduler is paused |
   | `{:quota, reason}` | a quota or auth hold |
   | `:no_slot` | no free worker slot |
@@ -69,6 +73,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
           | {:file_overlap, [String.t()], String.t()}
           | {:provider_constraint, String.t()}
           | {:guardrail, String.t()}
+          | {:local_capacity, String.t()}
           | :paused
           | {:quota, String.t()}
           | :no_slot
@@ -90,7 +95,8 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
          :ok <- mutex_hold(ctx),
          :ok <- overlap_hold(ctx),
          :ok <- provider_constraint_hold(ctx),
-         :ok <- guardrail_hold(ctx) do
+         :ok <- guardrail_hold(ctx),
+         :ok <- local_capacity_hold(ctx) do
       board_hold(ctx)
     end
   end
@@ -110,6 +116,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
 
   def describe_hold({:provider_constraint, detail}), do: "provider constraint (#{detail})"
   def describe_hold({:guardrail, detail}), do: "guardrail (#{detail})"
+  def describe_hold({:local_capacity, phrase}), do: phrase
   def describe_hold(:paused), do: "scheduler paused"
   def describe_hold({:quota, reason}), do: reason
   def describe_hold(:no_slot), do: "no free worker slot"
@@ -162,6 +169,15 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   # guardrails allow exists for it, or an operator has yet to grant a permission.
   defp guardrail_hold(%{guardrail: {:hold, detail}}), do: {:held, {:guardrail, detail}}
   defp guardrail_hold(_ctx), do: :ok
+
+  # bd-akp9ae: the ticket's own block too. Its workspace places runs on nodes, but
+  # this run can only go to the primary, whose cap is full: the board-wide slot
+  # count (which counts the nodes) is not what holds it, and the card behind it may
+  # well fit on a node.
+  defp local_capacity_hold(%{local_capacity: {:hold, phrase}}),
+    do: {:held, {:local_capacity, phrase}}
+
+  defp local_capacity_hold(_ctx), do: :ok
 
   defp board_hold(%{paused: true}), do: {:held, :paused}
   defp board_hold(%{quota: {:hold, reason}}), do: {:held, {:quota, reason}}

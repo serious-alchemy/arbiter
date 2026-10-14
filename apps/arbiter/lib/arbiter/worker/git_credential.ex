@@ -57,6 +57,12 @@ defmodule Arbiter.Worker.GitCredential do
     * **Tracker** — `GH_TOKEN` for a `tracker_write` projection is the repo-scoped
       token (a second, narrower App installation token, or the `token` kind's
       own), not a binding's broad one.
+    * **A run on a remote node** (bd-akp9ae) — only a GitHub App's short-lived
+      token goes, as a secret of the run spec the node keeps on tmpfs
+      (`remote_delivery/1`), and it is revoked when the run's worker exits
+      (`revoke/2`, `revoke_when_down/3`). A deploy key or a static token never
+      leaves the primary, nor does any long-lived value the block names, even one
+      also exposed as a worker env var (`withheld_values/1`).
     * An ssh agent socket is never delivered (`SSH_AUTH_SOCK` stays unset).
   """
 
@@ -416,7 +422,8 @@ defmodule Arbiter.Worker.GitCredential do
          tracker_token: tracker,
          host: entry.host,
          username: "x-access-token",
-         remote: remote
+         remote: remote,
+         api_url: entry.api_url
        }}
     end
   end
@@ -430,16 +437,20 @@ defmodule Arbiter.Worker.GitCredential do
       else: {:ok, nil}
   end
 
-  defp secret(%Workspace{} = ws, name) when is_binary(name) do
-    store = Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+  defp secret(%Workspace{} = ws, name) when is_binary(name), do: stored(secret_store(ws), name)
+  defp secret(_workspace, name), do: {:error, {:git_credential_secret_missing, name}}
 
+  defp secret_store(%Workspace{} = ws),
+    do: Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+
+  defp secret_store(_workspace), do: %{}
+
+  defp stored(store, name) do
     case Map.get(store, name) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:git_credential_secret_missing, name}}
     end
   end
-
-  defp secret(_workspace, name), do: {:error, {:git_credential_secret_missing, name}}
 
   # A token is pinned to the repo the spawn's origin names (or the entry's own
   # `remote`); without one the helper could not refuse another repo.
@@ -490,7 +501,7 @@ defmodule Arbiter.Worker.GitCredential do
             retry: false,
             receive_timeout: 15_000
           ],
-          Keyword.get(opts, :req_options, [])
+          forge_req_options(opts)
         )
 
       case Req.post(request) do
@@ -533,6 +544,106 @@ defmodule Arbiter.Worker.GitCredential do
 
   defp b64(data), do: Base.url_encode64(data, padding: false)
 
+  # Merged into every forge request: the caller's `:req_options`, else
+  # `config :arbiter, :git_credential_req_options` (a spawn passes none; tests stub
+  # with `plug:`).
+  defp forge_req_options(opts) do
+    Keyword.get_lazy(opts, :req_options, fn ->
+      Application.get_env(:arbiter, :git_credential_req_options, [])
+    end)
+  end
+
+  # ---- revoking ----------------------------------------------------------------------
+
+  @doc """
+  Revoke the GitHub App installation tokens `material` carries (`token`, and the
+  `tracker_token` when there is one) with `DELETE /installation/token`, each
+  authenticated by itself (bd-akp9ae). A token that left the primary with a run
+  placed on a node is revoked when the run ends (`revoke_when_down/3`), so a copy
+  taken off the node is dead then, not at the end of its hour. A token GitHub
+  already refuses (401: expired or revoked) counts as revoked. Anything but an App
+  material is `:ok` with nothing sent: a deploy key or a static token never leaves
+  the primary.
+
+  An error names the status, never the token. Options: `:req_options` (else
+  `config :arbiter, :git_credential_req_options`).
+  """
+  @spec revoke(Material.t() | nil, keyword()) :: :ok | {:error, term()}
+  def revoke(material, opts \\ [])
+
+  def revoke(%Material{kind: :github_app} = material, opts) do
+    material
+    |> app_tokens()
+    |> Enum.map(&revoke_token(&1, material.api_url, opts))
+    |> Enum.find(:ok, &(&1 != :ok))
+  end
+
+  def revoke(_material, _opts), do: :ok
+
+  defp app_tokens(%Material{token: token, tracker_token: tracker}),
+    do: Enum.filter([token, tracker], &(is_binary(&1) and &1 != ""))
+
+  defp revoke_token(token, api_url, opts) do
+    request =
+      Keyword.merge(
+        [
+          url: "#{api_url || "https://api.github.com"}/installation/token",
+          headers: [
+            {"authorization", "Bearer " <> token},
+            {"accept", "application/vnd.github+json"},
+            {"x-github-api-version", "2022-11-28"}
+          ],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.delete(request) do
+      {:ok, %Req.Response{status: status}} when status in [204, 401] ->
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_revoke_failed, status}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), token, "[redacted]")
+        {:error, {:git_credential_revoke_failed, {:transport, message}}}
+    end
+  end
+
+  @doc """
+  `revoke/2` once `owner` exits, however it exits: the hook a spawn arms when it
+  takes an App token off the primary (bd-akp9ae), so the token dies with the run.
+  A revoke that fails is logged (never the token); the token then still expires
+  within its hour. Any other material arms nothing.
+  """
+  @spec revoke_when_down(pid(), Material.t() | nil, keyword()) :: :ok
+  def revoke_when_down(owner, %Material{kind: :github_app} = material, opts)
+      when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> log_revoke(revoke(material, opts), material)
+        end
+      end)
+
+    :ok
+  end
+
+  def revoke_when_down(_owner, _material, _opts), do: :ok
+
+  defp log_revoke(:ok, _material), do: :ok
+
+  defp log_revoke({:error, reason}, material) do
+    Logger.warning(
+      "GitCredential: could not revoke the GitHub App token for #{material.remote}: " <>
+        "#{inspect(reason)}; it expires within the hour"
+    )
+  end
+
   # ---- static-token scope check ---------------------------------------------------
 
   # A classic PAT answers `GET /user` with an `X-OAuth-Scopes` header; a
@@ -552,7 +663,7 @@ defmodule Arbiter.Worker.GitCredential do
           retry: false,
           receive_timeout: 10_000
         ],
-        Keyword.get(opts, :req_options, [])
+        forge_req_options(opts)
       )
 
     case Req.get(request) do
@@ -826,6 +937,55 @@ defmodule Arbiter.Worker.GitCredential do
 
   def container_env(%Material{} = material),
     do: material |> Material.env(nil) |> Enum.reject(fn {name, _} -> name == "ARB_GIT_TOKEN" end)
+
+  @doc """
+  What a run placed on a **node** takes of `material` (bd-akp9ae): `env`, the git
+  config that makes use of the credential (`container_env/1`: the helper that
+  answers only for the repo's own path, prompts off), which names no secret, and
+  `secrets`, the values the node delivers through its per-run tmpfs file
+  (`Arbiter.NodeAgent.Secrets`), never as container env. Only a GitHub App's
+  short-lived installation token, minted on the primary for the run and
+  restricted to the one repo, may leave the primary; a deploy key or a static
+  token is `{:error, {:git_credential_unsupported, :remote_node}}`. The App's
+  private key never does: it signs the mint here and nothing else.
+  """
+  @spec remote_delivery(Material.t() | nil) ::
+          {:ok, %{env: [{String.t(), String.t()}], secrets: %{String.t() => String.t()}}}
+          | {:error, {:git_credential_unsupported, :remote_node}}
+  def remote_delivery(nil), do: {:ok, %{env: [], secrets: %{}}}
+
+  def remote_delivery(%Material{kind: :github_app, token: token} = material)
+      when is_binary(token) and token != "",
+      do: {:ok, %{env: container_env(material), secrets: %{"ARB_GIT_TOKEN" => token}}}
+
+  def remote_delivery(%Material{}), do: {:error, {:git_credential_unsupported, :remote_node}}
+
+  @doc """
+  The long-lived secrets the workspace's `git_credentials` name (a GitHub App's
+  private key, a deploy key, a static token), trimmed: what is never sent to a
+  node (bd-akp9ae), even when the operator also exposed one as a worker env var
+  (`Arbiter.Worker.ContainerSpawn.remote_spec/3` drops any env value carrying
+  one). A named secret that is not set contributes nothing.
+  """
+  @spec withheld_values(map() | nil) :: [String.t()]
+  def withheld_values(workspace) do
+    case block(workspace) do
+      %{"repos" => %{} = repos} when map_size(repos) > 0 ->
+        store = secret_store(workspace)
+
+        for {_repo, %{} = entry} <- repos,
+            name <- Enum.map(~w(private_key_secret key_secret token_secret), &entry[&1]),
+            is_binary(name),
+            {:ok, value} <- [stored(store, name)],
+            value = String.trim(value),
+            value != "",
+            uniq: true,
+            do: value
+
+      _ ->
+        []
+    end
+  end
 
   # ---- the spawn seam -------------------------------------------------------------------
 

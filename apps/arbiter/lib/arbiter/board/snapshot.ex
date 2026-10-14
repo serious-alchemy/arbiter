@@ -81,6 +81,8 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.Scheduler
   alias Arbiter.Board.WalkInputs
   alias Arbiter.Guardrails.Alternatives
+  alias Arbiter.Nodes.LocalCapacity
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
@@ -289,6 +291,7 @@ defmodule Arbiter.Board.Snapshot do
         card_constraint:
           Map.merge(Map.get(input, :card_constraint, %{}), Map.get(input, :dispatch_holds, %{})),
         card_guardrail: Map.get(input, :card_guardrail, %{}),
+        card_local: Map.get(input, :card_local, %{}),
         paused: paused?
       })
 
@@ -413,7 +416,10 @@ defmodule Arbiter.Board.Snapshot do
     # reads `awaiting_ci` on its card. The scheduler counts slots from the same
     # rows, so it has to see the marker too. A small map (the round state, not
     # the findings).
-    :review_gate_state
+    :review_gate_state,
+    # bd-akp9ae: a card's repo decides its sandbox and git credential, so whether a
+    # node may take it (`WalkInputs.eligibility/4`, `ticket_local_holds/1`).
+    :repo
   ]
 
   @doc false
@@ -514,6 +520,7 @@ defmodule Arbiter.Board.Snapshot do
         Keyword.get_lazy(opts, :card_guardrail, fn ->
           ticket_guardrail_holds(workspace, issues, opts)
         end),
+      card_local: Keyword.get_lazy(opts, :card_local, fn -> ticket_local_holds(issues) end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
       local_held: Keyword.get(opts, :local_held, []),
@@ -661,7 +668,7 @@ defmodule Arbiter.Board.Snapshot do
   # RW8 hold (`held — local capacity 0 …`), so the board and the dispatcher say
   # the same thing.
   defp placement_note(workspace) do
-    mode = Arbiter.Nodes.Placement.mode(workspace)
+    mode = Placement.mode(workspace)
 
     mode
     |> capacity_hold()
@@ -781,7 +788,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # A capacity read that failed plans to the primary's own cap, never to a
   # made-up install-wide number.
-  defp fallback_capacity, do: Arbiter.Nodes.LocalCapacity.cap().offered
+  defp fallback_capacity, do: LocalCapacity.cap().offered
 
   defp capacity_opts(opts), do: Keyword.take(opts, [:nodes, :remote_available?])
 
@@ -899,7 +906,7 @@ defmodule Arbiter.Board.Snapshot do
   def capacity_terms(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
     capacity_opts = capacity_opts(opts)
     install = Arbiter.Nodes.Capacity.breakdown(capacity_opts)
-    mode = Arbiter.Nodes.Placement.mode(ws)
+    mode = Placement.mode(ws)
     placement = Arbiter.Nodes.Capacity.placement(mode, capacity_opts)
 
     {headroom, live_count, account} =
@@ -1236,6 +1243,51 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp ticket_guardrail_holds(_, _, _), do: %{}
+
+  # bd-akp9ae: a Ready card whose workspace places runs on nodes, but whose own run can
+  # only go to the primary (its repo is not sandboxed in podman, it has no checkout to
+  # hand a node, …), while the primary's own cap has no room for it, is held — by its
+  # own hold, the phrase the dispatch would be refused with (`LocalCapacity`) — rather
+  # than read as a board-wide slot hold that names whatever budget binds the count,
+  # which includes the nodes it cannot use. The card behind it may fit on a node.
+  #
+  # The verdict is asked as Claude (the one provider a node runs): a run that cannot go
+  # to a node even as Claude cannot on any provider, and routing is never asked here
+  # (a stateful policy would advance per question). A `local_only` workspace is left
+  # alone: its slot count is the primary's own. Nothing per card is read while the
+  # primary has room, nor for an empty queue.
+  @local_probe "board:local-probe"
+
+  defp ticket_local_holds(issues) do
+    queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+
+    if queued == [] or LocalCapacity.check(@local_probe, :implementer) == :ok do
+      %{}
+    else
+      queued
+      |> Enum.group_by(&Map.get(&1, :workspace_id))
+      |> Enum.flat_map(fn {ws_id, tickets} -> local_holds(safe_workspace(ws_id), tickets) end)
+      |> Map.new()
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp local_holds(%Arbiter.Tasks.Workspace{} = ws, tickets) do
+    case Placement.mode(ws) do
+      :local_only ->
+        []
+
+      mode ->
+        for ticket <- tickets,
+            {:local_only, reason} <- [WalkInputs.eligibility(ws, ticket, "claude", mode)],
+            {:error, {:no_node_capacity, %{phrase: phrase}}} <-
+              [LocalCapacity.check(ticket.id, :implementer, reason: {:local_only, reason})],
+            do: {ticket.id, {:hold, phrase}}
+    end
+  end
+
+  defp local_holds(_workspace, _tickets), do: []
 
   defp guardrail_hold(default, issue, opts) do
     ws_id = Map.get(issue, :workspace_id)

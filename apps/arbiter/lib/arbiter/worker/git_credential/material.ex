@@ -9,7 +9,9 @@ defmodule Arbiter.Worker.GitCredential.Material do
     * `:token` / `:github_app` — `token` is the push credential; `remote` is the
       `owner/repo` it is pinned to, `host` the forge host it is offered to and
       `username` the HTTP basic user. `tracker_token` is the narrower token for
-      `tracker_write` (when one was asked for).
+      `tracker_write` (when one was asked for). `api_url` is a `github_app`
+      entry's API base (GitHub Enterprise; `nil` is api.github.com), which its
+      tokens are revoked at (`Arbiter.Worker.GitCredential.revoke/2`).
   """
 
   @remote_re ~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+\z/
@@ -22,7 +24,8 @@ defmodule Arbiter.Worker.GitCredential.Material do
             tracker_token: nil,
             host: "github.com",
             username: "x-access-token",
-            remote: nil
+            remote: nil,
+            api_url: nil
 
   @type t :: %__MODULE__{
           kind: :deploy_key | :token | :github_app | nil,
@@ -31,7 +34,8 @@ defmodule Arbiter.Worker.GitCredential.Material do
           tracker_token: String.t() | nil,
           host: String.t(),
           username: String.t(),
-          remote: String.t() | nil
+          remote: String.t() | nil,
+          api_url: String.t() | nil
         }
 
   @doc """

@@ -161,6 +161,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:card_quota) => %{optional(String.t()) => quota()},
           optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:card_guardrail) => %{optional(String.t()) => :ok | {:hold, String.t()}},
+          optional(:card_local) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:dispatch_holds) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:paused) => boolean(),
           optional(:walk) => walk()
@@ -318,6 +319,10 @@ defmodule Arbiter.Board.Scheduler do
       # bd-atll60 (G13): per-ticket guardrail verdicts — no eligible model, or a
       # permission awaiting the operator. A card's own block, like the above.
       card_guardrail: Map.get(input, :card_guardrail) || %{},
+      # bd-akp9ae: per-ticket local-capacity holds — a card only the primary can
+      # run while the primary's cap is full. A card's own block too: the slot count
+      # above counts the nodes, which this card cannot use.
+      card_local: Map.get(input, :card_local) || %{},
       slots_free: Map.get(input, :slots_free, 0),
       slot_note: Map.get(input, :slot_note)
     }
@@ -426,6 +431,7 @@ defmodule Arbiter.Board.Scheduler do
       claimed: acc.mutex,
       provider_constraint: Map.get(board.card_constraint, card.id),
       guardrail: Map.get(board.card_guardrail, card.id),
+      local_capacity: Map.get(board.card_local, card.id),
       scope: scope_of(card),
       in_flight: claims(acc)
     })
@@ -485,6 +491,10 @@ defmodule Arbiter.Board.Scheduler do
   # bd-atll60 (G13): `held — guardrail (…)`.
   defp phrase({:guardrail, _detail} = hold, _mutex),
     do: "held — " <> Lifecycle.describe_hold(hold)
+
+  # bd-akp9ae: the primary's own hold, verbatim (`held — local capacity full (cap 2, 2
+  # running) (run is local-only: …)`): what the dispatch would be refused with.
+  defp phrase({:local_capacity, _phrase} = hold, _mutex), do: Lifecycle.describe_hold(hold)
 
   defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)
 

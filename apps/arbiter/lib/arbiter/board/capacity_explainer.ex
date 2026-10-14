@@ -465,6 +465,20 @@ defmodule Arbiter.Board.CapacityExplainer do
     end
   end
 
+  # bd-akp9ae: a run only this machine can take (its repo is not sandboxed in podman,
+  # …), while this machine's own worker cap is full. A free node does not help it.
+  def hold({:local_capacity, phrase}, _board, opts) do
+    %{
+      kind: :capacity,
+      badge: @capacity_badge,
+      summary:
+        "This ticket can only run on this machine#{local_only_reason(phrase)}, and this " <>
+          "machine's own worker cap is full, so a free node does not help it. It starts when " <>
+          "a run here ends, or when the cap is raised (`arb node set local --max-workers N`).",
+      details: opts[:raw] || phrase
+    }
+  end
+
   def hold(:paused, _board, opts) do
     %{
       kind: :scheduler_paused,
@@ -479,6 +493,14 @@ defmodule Arbiter.Board.CapacityExplainer do
   def hold(other, _board, opts) do
     phrase = Arbiter.Tasks.Lifecycle.describe_hold(other)
     %{kind: :other, badge: phrase, summary: phrase, details: opts[:raw] || phrase}
+  end
+
+  # The reason `LocalCapacity`'s phrase gives, `… (run is local-only: <reason>)`.
+  defp local_only_reason(phrase) do
+    case Regex.run(~r/\(run is local-only: (.+)\)\z/, phrase) do
+      [_, reason] -> " (#{reason})"
+      _ -> ""
+    end
   end
 
   # A Blocked-column ticket the quota gate is holding between rounds

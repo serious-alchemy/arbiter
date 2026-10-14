@@ -351,6 +351,89 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
     end
   end
 
+  # bd-akp9ae: a fix round on a scoped repo pushes from its own container, so its
+  # credential goes where it runs. A GitHub App's is a short-lived token minted for
+  # the round, which may go to a node; a deploy key or a static token keeps the round
+  # on the primary (bd-21r811's reason, `:scoped_git_credential`).
+  describe "a fix round on a repo with a scoped git credential (bd-akp9ae)" do
+    @http Arbiter.Worker.GitCredential.HTTP
+
+    setup do
+      # The gate's own push (before each review) mints the host's App token.
+      Req.Test.set_req_test_to_shared(%{async: false})
+      put_app_env(:arbiter, :git_credential_req_options, plug: {Req.Test, @http})
+      Arbiter.Worker.HostCredential.Cache.clear()
+
+      Req.Test.stub(@http, fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_host", "expires_at" => "2099-01-01T00:00:00Z"})
+      end)
+
+      :ok
+    end
+
+    defp scoped_ws!(entry, secrets) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-rfr-#{System.unique_integer([:positive])}",
+          prefix: "rf",
+          config: %{
+            "review" => %{"required" => true, "require_ci_green" => false},
+            "worker" => %{"placement" => "prefer_remote"},
+            "agent" => %{
+              "security" => %{
+                "repos" => %{"trib/repo" => %{"sandbox" => %{"backend" => "podman"}}}
+              }
+            },
+            "git_credentials" => %{"repos" => %{"trib/repo" => entry}}
+          },
+          secrets: secrets
+        })
+
+      ws
+    end
+
+    defp app_pem do
+      key = :public_key.generate_key({:rsa, 2048, 65_537})
+      :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
+    end
+
+    test "a GitHub App repo's fix round is placed on a node", ctx do
+      entry = %{
+        "kind" => "github_app",
+        "app_id" => "42",
+        "installation_id" => "7",
+        "private_key_secret" => "APP_KEY",
+        "remote" => "trib/repo"
+      }
+
+      ctx = %{ctx | ws: scoped_ws!(entry, %{"APP_KEY" => app_pem()})}
+      rig = rig(ctx, "feature/rf-app")
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      wait_until(fn -> :sys.get_state(gate).fix_node != nil end, 30_000)
+      assert %{id: "node-a"} = :sys.get_state(gate).fix_node
+      stop_gate(gate)
+    end
+
+    # A node with room is there; the round still runs on the primary.
+    test "a deploy-key repo's fix round stays on the primary", ctx do
+      entry = %{"kind" => "deploy_key", "key_secret" => "DEPLOY_KEY"}
+      ctx = %{ctx | ws: scoped_ws!(entry, %{"DEPLOY_KEY" => "PEMDATA"})}
+      rig = rig(ctx, "feature/rf-deploy-key")
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_hang], rounds: 2)
+
+      wait_until(fn -> Worker.whereis(impl_id(gate)) != nil end, 30_000)
+      assert :sys.get_state(gate).fix_node == nil
+      assert %{meta: meta} = Worker.state(impl_pid(:sys.get_state(gate)))
+      refute Map.has_key?(meta, :placed_node_id)
+      stop_gate(gate)
+    end
+  end
+
   describe "the node under a fix round is lost" do
     test "the round is dispatched again, placed afresh, and no round is consumed", ctx do
       rig = rig(ctx, "feature/rf-8")

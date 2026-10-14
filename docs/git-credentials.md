@@ -86,6 +86,13 @@ the workspace does not have (`git_credential_secret_missing`).
 | Unsandboxed Claude / Codex | `0600` file in a per-worker dir under `~/.cache/arbiter/scratch/git-key`, named by `GIT_SSH_COMMAND` (`ssh -F /dev/null -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none`) | `ARB_GIT_TOKEN` in the env, served by a git credential helper (below) |
 | bwrap jail (agy) | The same file, bound read-only at its own path over a blanked key dir (a sibling's key is unreachable); with any scoped credential (deploy key, token or App) no `~/.ssh` identity and no `~/.config/gh` login is bound back; the egress `ProxyCommand` is composed onto the command | env, as above |
 | podman | A podman **secret** (`podman run --secret NAME,type=mount,target=arb_git_key,uid=…,mode=0400`), created from a `0600` file that is deleted at once, removed with the container, by an owner-exit reaper and at server boot | A podman secret of `type=env` (`ARB_GIT_TOKEN`); the value is never on argv or in `podman inspect` |
+| podman on a remote node (bd-akp9ae) | **Never carried**: the run stays on the primary | **GitHub App only**: the installation token minted for the run rides in the run spec's `secrets` and reaches the container through the node's per-run tmpfs file (never argv, `-e` or the node's disk), which is removed when the container exits, is cancelled or is reaped; the token is **revoked** when the run's worker exits. A static `token` is never carried: the run stays on the primary |
+
+Under podman only one kind of run takes a credential into its container at all: a
+ReviewGate **fix round** on a repo with a scoped credential, which pushes its own
+commits. Every other podman run (the implementer, a resume, a CI fix pass, a conflict
+pass) is pushed for by the host (below), so its container, here or on a node, holds no
+git credential.
 
 Never an agent socket: `SSH_AUTH_SOCK` is not set (and `IdentityAgent=none`).
 
@@ -138,14 +145,50 @@ operator's ssh/gh credentials (`Arbiter.Worker.HostCredential`):
 * Repos on `legacy_operator`, or with no entry, behave as before.
 * **Remote-node runs.** The node runs the agent in a shadow clone; the branch comes
   back to the primary, which pushes it after `arb done` through the same code, so
-  those pushes use the scoped env too (the node itself never needs a credential,
-  which is why a podman run stays remote-eligible).
+  those pushes use the scoped env too, and the PR is opened by the App. The node
+  itself never needs a credential for an implementer, resume, fix pass or conflict
+  pass, which is why they are placed on a node whatever the repo's credential kind
+  (bd-akp9ae; bd-21r811 had kept them on the primary). A ReviewGate fix round that
+  pushes from its own container is the exception: see "Remote nodes" below.
 * Not covered: the Direct merger's local `git push origin <target>`, the GitLab
   merger's branch push, and read-only `git fetch`es, which still run as the
   operator.
 
 The App needs Pull requests **read & write**, Contents **read & write** and Issues
 **read & write** for this (the table above already asks for them).
+
+## Remote nodes (bd-akp9ae)
+
+With `worker.placement: prefer_remote` or `remote_only`, a scoped repo's work is placed
+on enrolled nodes like any other:
+
+* **Implementer, resume, CI fix pass, conflict pass**: placed on a node whatever the
+  repo's credential kind. Nothing credential-shaped is sent to the node; the host
+  pushes the branch the run brings back and opens the PR with the repo's credential
+  (above), so a GitHub App repo's PR is authored by the App.
+* **ReviewGate fix round** on a `github_app` repo: placed on a node, carrying only the
+  installation token Arbiter minted on the primary for that round. The token is
+  restricted to the one repo (`repositories`) with a worker's push permissions, and
+  lasts at most an hour. It travels in the run spec's `secrets`; the node writes it to
+  a `0600` file on tmpfs (`$XDG_RUNTIME_DIR/arbiter-node/<run>/secrets.env`), the
+  container's wrapper sources it, and the file is removed when the container exits
+  (success or failure), when the run is cancelled or quiesced, when the agent stops,
+  and by the node's reaper. It is never on argv, in `podman`'s persisted config or on
+  the node's disk, and it is redacted from the run's output and its archived
+  transcript. When the round's worker exits, however it exits, the primary
+  **revokes** the token (`DELETE /installation/token`), so a copy taken off the node
+  is dead after the run.
+* **ReviewGate fix round** on a `deploy_key` or `token` repo: stays on the primary
+  (placement reason `scoped_git_credential`); a spawn that tried it would be refused
+  (`git_credential_unsupported`). Those are long-lived secrets.
+* **Never sent to a node**: the App's private key (it only signs the mint, on the
+  primary), a deploy key, a static token. If the operator also exposed one of them to
+  workers as a `worker_env` var, that var is held back from a remote run (the
+  primary logs its name, never its value).
+
+To check a node after a run: `ls "$XDG_RUNTIME_DIR/arbiter-node"` on the node holds a
+directory only while a run is live, and `podman secret ls` lists no Arbiter git secret
+(remote runs use the tmpfs file, not podman secrets).
 
 ## Limits, said plainly
 
@@ -157,8 +200,14 @@ The App needs Pull requests **read & write**, Contents **read & write** and Issu
   process outside a jail.
 * A token (App installation tokens last an hour) is in the worker's env for the
   run. A run longer than the token's life must be re-dispatched.
-* A run placed on a remote node is refused when it needs a scoped credential
-  (no podman secret to carry it there yet).
+* On a remote node only a GitHub App's short-lived token is ever carried (see
+  "Remote nodes" above); a fix round on a deploy-key or static-token repo stays on the
+  primary.
+* A fix round on a node can read its own token (it is in the container's
+  environment). A copy the agent itself writes into its transcript or work tree stays
+  on the node with the run's directory until the node's reaper takes it (24 h). By
+  then it is dead: the token is revoked when the round's worker exits, and expires
+  within the hour.
 * The scope of a `token` is as good as the token you created: Arbiter checks it is
   not a classic PAT, not that you restricted it to one repo.
 * Enforcement of "a push to a different repo fails" is two layers: the forge (a

@@ -621,8 +621,11 @@ defmodule Arbiter.Board.WalkInputs do
 
     verdict = if mode == :local_only, do: nil, else: eligibility(ws, issue, provider, mode)
 
-    # bd-21r811: a `remote_only` run that pushes with a scoped git credential has
-    # no machine (a node cannot carry the key; the primary is off limits): held.
+    # bd-21r811: a `remote_only` run that would carry a scoped git credential no node
+    # may hold has no machine (the primary is off limits): held. Since bd-akp9ae only
+    # a run that pushes from its own container carries one (`Placement.eligible/1`),
+    # and a card's implementer is pushed for by the host, so a card is offered a
+    # node whatever its repo's credential.
     if mode == :remote_only and verdict == {:local_only, :scoped_git_credential} do
       []
     else
@@ -642,7 +645,17 @@ defmodule Arbiter.Board.WalkInputs do
        do: :scoped_git_credential
   end
 
-  defp eligibility(ws, issue, provider, mode) do
+  @doc """
+  `Arbiter.Nodes.Placement.eligible/1`'s verdict for a Ready card's implementer run
+  in workspace `ws` on `provider` under placement `mode`: the request
+  `Worker.Dispatch` would place it with, read from the card (its type and repo, the
+  repo's sandbox and git credential) with no checkout read (`local_work?` false).
+  The walk asks it per candidate provider; the board asks it for a card's own
+  local-capacity hold (`Arbiter.Board.Snapshot`).
+  """
+  @spec eligibility(map(), map(), atom() | String.t(), Placement.mode()) ::
+          :ok | {:local_only, Placement.reason()}
+  def eligibility(ws, issue, provider, mode) do
     no_pr? = Issue.no_pr_type?(issue.issue_type)
 
     request = %{
@@ -656,8 +669,7 @@ defmodule Arbiter.Board.WalkInputs do
       # (`Worker.Dispatch.node_request/3`), a read-only clone a node can be handed.
       inspect?: no_pr?,
       local_work?: false,
-      scoped_git_credential?:
-        Placement.scoped_git_credential?(ws, string_or_nil(Map.get(issue, :repo))),
+      git_credential: Placement.git_credential(ws, string_or_nil(Map.get(issue, :repo))),
       workspace_id: ws.id
     }
 
