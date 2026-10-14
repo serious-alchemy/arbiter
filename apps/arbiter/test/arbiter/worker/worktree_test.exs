@@ -1752,6 +1752,106 @@ end
     end
   end
 
+  # bd-1ejfc1 / #813: `Arbiter.Worker.Image` builds from the repo's committed
+  # `.arbiter/Containerfile`, so the gate must let exactly that one file through.
+  describe "has_injected_config_in_commits?/2 allows .arbiter/Containerfile (bd-1ejfc1)" do
+    test "false when only .arbiter/Containerfile is added", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/containerfile-add", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/Containerfile"), "FROM scratch\n")
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", ".arbiter/Containerfile"])
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "add containerfile"])
+
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
+      assert {:ok, []} = Worktree.injected_config_paths_in_commits(wt, "main")
+    end
+
+    test "still true, naming only the offenders, when Containerfile rides with INBOX", %{
+      repo: repo
+    } do
+      {:ok, wt} = Worktree.create(repo, "feature/containerfile-and-inbox", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/Containerfile"), "FROM scratch\n")
+      File.write!(Path.join(wt, ".arbiter/INBOX"), "direction\n")
+      File.write!(Path.join(wt, ".mcp.json"), "{}\n")
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          wt,
+          "add",
+          "-f",
+          ".arbiter/Containerfile",
+          ".arbiter/INBOX",
+          ".mcp.json"
+        ])
+
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "mixed"])
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+
+      assert {:ok, [".arbiter/INBOX", ".mcp.json"]} =
+               Worktree.injected_config_paths_in_commits(wt, "main")
+    end
+
+    test "a nested .arbiter/sub/Containerfile is still refused", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/containerfile-lookalike", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter/sub"))
+      File.write!(Path.join(wt, ".arbiter/sub/Containerfile"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", ".arbiter/sub/Containerfile"])
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "nested"])
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+
+      assert {:ok, [".arbiter/sub/Containerfile"]} =
+               Worktree.injected_config_paths_in_commits(wt, "main")
+    end
+  end
+
+  describe "excluded_checkout_path?/1 (RW11, bd-1ejfc1)" do
+    test "keeps .arbiter/Containerfile, drops the rest of .arbiter/ and the token files" do
+      refute Worktree.excluded_checkout_path?(".arbiter/Containerfile")
+      assert Worktree.excluded_checkout_path?(".arbiter/INBOX")
+      assert Worktree.excluded_checkout_path?(".arbiter/sub/Containerfile")
+      assert Worktree.excluded_checkout_path?(".arbiter")
+      assert Worktree.excluded_checkout_path?(".mcp.json")
+      assert Worktree.excluded_checkout_path?(".codex/config.toml")
+      assert Worktree.excluded_checkout_path?(".gemini/settings.json")
+      assert Worktree.excluded_checkout_path?("deps/x/y.ex")
+    end
+  end
+
+  describe "create/3 info/exclude lets .arbiter/Containerfile be added (bd-1ejfc1)" do
+    test "plain git add -A stages a new Containerfile but not INBOX", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/containerfile-exclude", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/Containerfile"), "FROM scratch\n")
+      File.write!(Path.join(wt, ".arbiter/INBOX"), "direction\n")
+
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-A"])
+      {staged, 0} = System.cmd("git", ["-C", wt, "diff", "--cached", "--name-only"])
+
+      assert staged =~ ".arbiter/Containerfile"
+      refute staged =~ "INBOX"
+    end
+
+    test "a legacy bare `.arbiter/` exclude line is replaced, other lines kept", %{repo: repo} do
+      {common_dir, 0} = System.cmd("git", ["-C", repo, "rev-parse", "--git-common-dir"])
+      exclude = Path.join([Path.expand(String.trim(common_dir), repo), "info", "exclude"])
+      File.mkdir_p!(Path.dirname(exclude))
+      File.write!(exclude, "# keep\n.arbiter/\n")
+
+      {:ok, wt} = Worktree.create(repo, "feature/containerfile-legacy", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/Containerfile"), "FROM scratch\n")
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-A"])
+      {staged, 0} = System.cmd("git", ["-C", wt, "diff", "--cached", "--name-only"])
+
+      assert staged =~ ".arbiter/Containerfile"
+      assert File.read!(exclude) =~ "# keep"
+    end
+  end
+
   describe "create/3 excludes .arbiter/ (bd-bhrji9)" do
     test "adds .arbiter/ to the repo's (common-dir) info/exclude on creation", %{repo: repo} do
       {:ok, wt} = Worktree.create(repo, "feature/arbiter-excl", "main")

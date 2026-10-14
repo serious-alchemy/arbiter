@@ -482,8 +482,7 @@ defmodule Arbiter.Worker.Worktree do
   # is enabled. Best-effort: `add_to_git_exclude/2` already swallows its own
   # errors so a git hiccup never blocks worktree provisioning.
   @spec ensure_arbiter_exclude(path()) :: :ok
-  defp ensure_arbiter_exclude(path),
-    do: Arbiter.MCP.AgentConfig.add_to_git_exclude(path, [".arbiter/"])
+  defp ensure_arbiter_exclude(path), do: Arbiter.MCP.AgentConfig.exclude_arbiter_dir(path)
 
   @doc """
   Refresh `repo_path`'s remote-tracking ref for `base_branch` from `origin`.
@@ -1358,6 +1357,13 @@ defmodule Arbiter.Worker.Worktree do
   # directory prefix (ends with "/", matches any path within it).
   @injected_config_patterns ~w(.mcp.json .gemini/ .codex/ .arbiter/)
 
+  # The one `.arbiter/` file that is repo content, not an Arbiter artifact:
+  # `Arbiter.Worker.Image` builds the worker image from the committed
+  # `.arbiter/Containerfile` (`git cat-file blob <ref>:.arbiter/Containerfile`),
+  # so a repo adopting a custom image must be able to commit it (bd-1ejfc1,
+  # #813). Exact path only — `.arbiter/sub/Containerfile` is still refused.
+  @committable_arbiter_files ~w(.arbiter/Containerfile)
+
   @doc """
   Return `{:ok, true}` if the branch's own committed diff (relative to its
   merge-base with `base_ref`, NOT a literal `base_ref..HEAD` two-dot diff)
@@ -1384,14 +1390,28 @@ defmodule Arbiter.Worker.Worktree do
   @spec has_injected_config_in_commits?(path(), String.t()) ::
           {:ok, boolean()} | {:error, error_reason()}
   def has_injected_config_in_commits?(path, base_ref \\ "main") when is_binary(path) do
+    {:ok, offending} = injected_config_paths_in_commits(path, base_ref)
+    {:ok, offending != []}
+  end
+
+  @doc """
+  The sorted list of Arbiter-injected paths the branch's committed diff adds —
+  the paths `has_injected_config_in_commits?/2` refuses on, so the escalation can
+  name them. `.arbiter/Containerfile` is not one (see `@committable_arbiter_files`).
+  Fails open (`{:ok, []}`) on any git error.
+  """
+  @spec injected_config_paths_in_commits(path(), String.t()) :: {:ok, [String.t()]}
+  def injected_config_paths_in_commits(path, base_ref \\ "main") when is_binary(path) do
     with base when is_binary(base) <- merge_base(path, base_ref),
          {:ok, output} <-
            run_git(["diff", "--name-only", "--diff-filter=A", base <> "..HEAD", "--"], cd: path) do
-      changed = String.split(output, "\n", trim: true)
-      found? = Enum.any?(changed, &injected_config_path?/1)
-      {:ok, found?}
+      {:ok,
+       output
+       |> String.split("\n", trim: true)
+       |> Enum.filter(&injected_config_path?/1)
+       |> Enum.sort()}
     else
-      _ -> {:ok, false}
+      _ -> {:ok, []}
     end
   end
 
@@ -1401,20 +1421,25 @@ defmodule Arbiter.Worker.Worktree do
   build-artifact root (`@ignored_artifact_paths`: `deps`, `_build`, `.hex`,
   `.run-server.sh`, ...) or per-spawn injected config (`.mcp.json`, `.gemini/`,
   `.codex/`, `.arbiter/`). Matched on the first path segment, so `deps/x/y.ex`
-  and `.mcp.json` match and `lib/deps.ex` does not.
+  and `.mcp.json` match and `lib/deps.ex` does not. The one exception is
+  `.arbiter/Containerfile` (`@committable_arbiter_files`): repo content a node
+  worker may legitimately edit, so it is kept.
   """
   @spec excluded_checkout_path?(String.t()) :: boolean()
   def excluded_checkout_path?(path) when is_binary(path) do
     [root | _] = String.split(path, "/", parts: 2)
-    root in @excluded_checkout_roots or injected_config_path?(path)
+
+    path not in @committable_arbiter_files and
+      (root in @excluded_checkout_roots or injected_config_path?(path))
   end
 
   defp injected_config_path?(file) do
-    Enum.any?(@injected_config_patterns, fn pat ->
-      if String.ends_with?(pat, "/"),
-        do: String.starts_with?(file, pat) or file == String.trim_trailing(pat, "/"),
-        else: file == pat
-    end)
+    file not in @committable_arbiter_files and
+      Enum.any?(@injected_config_patterns, fn pat ->
+        if String.ends_with?(pat, "/"),
+          do: String.starts_with?(file, pat) or file == String.trim_trailing(pat, "/"),
+          else: file == pat
+      end)
   end
 
   # ---- close-time leftovers (bd-9iv4qd) ------------------------------------
