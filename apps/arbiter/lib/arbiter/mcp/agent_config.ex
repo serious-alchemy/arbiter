@@ -118,6 +118,37 @@ defmodule Arbiter.MCP.AgentConfig do
     _ -> :ok
   end
 
+  # bd-bhrji9 / bd-1ejfc1: keep the mailbox dir `.arbiter/` out of `git add -A`
+  # but not `.arbiter/Containerfile`, the repo's custom worker image
+  # (`Arbiter.Worker.Image`), which a worker must be able to add. A bare
+  # `.arbiter/` line excludes the directory itself, which no later `!` can
+  # undo, so the entries are `.arbiter/*` + a negation, and a legacy bare
+  # `.arbiter/` line written by an earlier version is dropped. Best-effort,
+  # like `add_to_git_exclude/2`.
+  @arbiter_dir_excludes [".arbiter/*", "!.arbiter/Containerfile"]
+
+  @doc false
+  @spec exclude_arbiter_dir(Path.t()) :: :ok
+  def exclude_arbiter_dir(worktree) when is_binary(worktree) do
+    with {raw, 0} <-
+           System.cmd("git", ["-C", worktree, "rev-parse", "--git-common-dir"],
+             stderr_to_stdout: true
+           ) do
+      git_dir = Path.expand(String.trim(raw), worktree)
+      exclude_path = Path.join([git_dir, "info", "exclude"])
+
+      with {:ok, existing} <- File.read(exclude_path),
+           true <- ".arbiter/" in String.split(existing, "\n") do
+        kept = existing |> String.split("\n") |> Enum.reject(&(&1 == ".arbiter/"))
+        File.write(exclude_path, Enum.join(kept, "\n"))
+      end
+    end
+
+    add_to_git_exclude(worktree, @arbiter_dir_excludes)
+  rescue
+    _ -> :ok
+  end
+
   @doc "The adapter module for a provider atom/string, or `nil` if none is registered."
   @spec adapter_for(atom() | String.t() | nil) :: module() | nil
   def adapter_for(provider) when is_atom(provider) and not is_nil(provider),

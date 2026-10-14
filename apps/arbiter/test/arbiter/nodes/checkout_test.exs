@@ -442,6 +442,21 @@ defmodule Arbiter.Nodes.CheckoutTest do
       refute git!(c.home, ["ls-tree", "-r", "--name-only", result.snapshot]) =~ "deps/x"
     end
 
+    test "keeps a node-edited .arbiter/Containerfile while dropping other .arbiter/ files", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, ".arbiter"))
+      File.write!(Path.join(shadow, ".arbiter/Containerfile"), "FROM scratch\n")
+      File.write!(Path.join(shadow, ".arbiter/INBOX"), "direction\n")
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, result} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, ".arbiter/Containerfile")) == "FROM scratch\n"
+      refute File.exists?(Path.join(c.home, ".arbiter/INBOX"))
+      assert result.filtered == [".arbiter/INBOX"]
+    end
+
     test "a path the primary's own base tracks is not stripped when unchanged", c do
       # the base branch itself tracks `.mcp.json`
       git!(c.home, ["checkout", "-q", "main"])
