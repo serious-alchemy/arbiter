@@ -33,6 +33,36 @@ defmodule Arbiter.Worker.DepsRelocate do
   def relocate(worktree, from) when is_binary(worktree) and is_binary(from) do
     retarget_manifests(worktree, from)
     relink(worktree)
+    scrub_cmake_caches(worktree)
+  end
+
+  @doc """
+  Remove `deps/*/c_build/CMakeCache.txt` and `CMakeFiles` from `worktree` when the
+  cache's `CMAKE_CACHEFILE_DIR` is not under `worktree`. CMake refuses to reuse a
+  cache configured in another directory, so a NIF dependency (`crc32cer`) could
+  not be recompiled in the copy; with the cache gone it reconfigures cleanly. A
+  cache already bound to `worktree`, or one that cannot be read, is left alone.
+  Only the given tree is touched.
+  """
+  @spec scrub_cmake_caches(String.t()) :: :ok
+  def scrub_cmake_caches(worktree) when is_binary(worktree) do
+    for cache <- Path.wildcard(Path.join(worktree, "deps/*/c_build/CMakeCache.txt")),
+        {:ok, body} <- [File.read(cache)],
+        dir = cache_dir(body),
+        not is_nil(dir),
+        not under?(dir, worktree) do
+      File.rm(cache)
+      File.rm_rf(Path.join(Path.dirname(cache), "CMakeFiles"))
+    end
+
+    :ok
+  end
+
+  defp cache_dir(body) do
+    case Regex.run(~r/^CMAKE_CACHEFILE_DIR:[A-Z]+=(.+)$/m, body) do
+      [_, dir] -> String.trim(dir)
+      _ -> nil
+    end
   end
 
   @doc """

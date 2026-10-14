@@ -150,6 +150,67 @@ defmodule Arbiter.Worker.DepsRelocateTest do
     end
   end
 
+  # A CMake-built NIF dependency (`crc32cer`): `c_build/CMakeCache.txt` records the
+  # directory it was configured in, and CMake refuses to reuse it from another.
+  defp cmake_dep(root, dep, cache_dir) do
+    build = Path.join(root, "deps/#{dep}/c_build")
+    File.mkdir_p!(Path.join(build, "CMakeFiles"))
+    File.write!(Path.join(build, "CMakeFiles/marker"), "x\n")
+    File.write!(Path.join(build, "libnif.so"), "so\n")
+
+    File.write!(
+      Path.join(build, "CMakeCache.txt"),
+      "CMAKE_CACHEFILE_DIR:INTERNAL=#{cache_dir}\nOTHER:STRING=1\n"
+    )
+
+    build
+  end
+
+  describe "CMake cache scrubbing on seed (bug #406)" do
+    test "a cache bound to the source is scrubbed from the copy only", %{tmp_dir: tmp} do
+      source = compiled_source(Path.join(tmp, "source"))
+      src_build = cmake_dep(source, "crc32cer", Path.join(source, "deps/crc32cer/c_build"))
+      worktree = Path.join(tmp, "wt")
+      File.mkdir_p!(worktree)
+
+      assert :ok = Worktree.seed_compiled_deps(source, worktree)
+
+      wt_build = Path.join(worktree, "deps/crc32cer/c_build")
+      refute File.exists?(Path.join(wt_build, "CMakeCache.txt"))
+      refute File.exists?(Path.join(wt_build, "CMakeFiles"))
+      assert File.exists?(Path.join(wt_build, "libnif.so"))
+
+      assert File.exists?(Path.join(src_build, "CMakeCache.txt"))
+      assert File.exists?(Path.join(src_build, "CMakeFiles/marker"))
+    end
+
+    test "the same through configured seed_paths", %{tmp_dir: tmp} do
+      source = compiled_source(Path.join(tmp, "source"))
+      src_build = cmake_dep(source, "crc32cer", Path.join(source, "deps/crc32cer/c_build"))
+      worktree = Path.join(tmp, "wt")
+      File.mkdir_p!(worktree)
+
+      assert :ok = Worktree.seed_compiled_deps(source, worktree, ["deps"])
+
+      refute File.exists?(Path.join(worktree, "deps/crc32cer/c_build/CMakeCache.txt"))
+      assert File.exists?(Path.join(src_build, "CMakeCache.txt"))
+    end
+
+    test "deps without c_build and caches already bound to the worktree are untouched",
+         %{tmp_dir: tmp} do
+      worktree = Path.join(tmp, "wt")
+      bound = cmake_dep(worktree, "bound", Path.join(worktree, "deps/bound/c_build"))
+      File.mkdir_p!(Path.join(worktree, "deps/plain/lib"))
+      File.write!(Path.join(worktree, "deps/plain/lib/a.ex"), "a\n")
+
+      assert :ok = DepsRelocate.scrub_cmake_caches(worktree)
+
+      assert File.exists?(Path.join(bound, "CMakeCache.txt"))
+      assert File.exists?(Path.join(bound, "CMakeFiles/marker"))
+      assert File.exists?(Path.join(worktree, "deps/plain/lib/a.ex"))
+    end
+  end
+
   # bd-4uom27: nothing names a library. A `rustler_precompiled` NIF (`mdex_native`)
   # keeps its binary in a real `priv/native` inside `_build`, not behind a link, and a
   # dependency of any other shape rides along with it.
