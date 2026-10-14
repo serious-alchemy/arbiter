@@ -350,9 +350,8 @@ defmodule Arbiter.Mergers.Github do
          changes_requested: changes_requested,
          latest_review_id: latest_changes_requested_id(reviews),
          pipeline: pipeline,
-         ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
-         conflicting:
-           Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
+         ci_clean: merge_state(pr) == "clean",
+         conflicting: Map.get(pr, "mergeable") == false or merge_state(pr) == "dirty",
          block_reason: block_reason,
          # For `:blocked_other`, the forge rule(s) still unmet, e.g.
          # "required_deployments (staging)" — nil when there is nothing to name

@@ -1089,6 +1089,18 @@ defmodule Arbiter.Mergers.GithubTest do
       assert block_get(%{"mergeable_state" => "clean", "mergeable" => true}).block_reason == nil
     end
 
+    test "ci_clean / conflicting read REST mergeable_state and GraphQL mergeStateStatus" do
+      assert %{ci_clean: true, conflicting: false} =
+               block_get(%{"mergeable_state" => "clean", "mergeable" => true})
+
+      assert %{ci_clean: false, conflicting: true} =
+               block_get(%{"mergeable_state" => "dirty", "mergeable" => nil})
+
+      assert %{ci_clean: true, conflicting: false} = block_get(%{"mergeStateStatus" => "CLEAN"})
+      assert %{ci_clean: false, conflicting: true} = block_get(%{"mergeStateStatus" => "DIRTY"})
+      assert %{ci_clean: false, conflicting: false} = block_get(%{"mergeable_state" => "blocked"})
+    end
+
     test "dirty merge state classifies as :conflict" do
       assert block_get(%{"mergeable_state" => "dirty"}).block_reason == :conflict
     end
