@@ -13,7 +13,8 @@ defmodule Arbiter.Worker.StateRedactionTest do
         claude_sessions: %{
           a: %{redact_values: ["tok-a", "tok-b"]},
           b: %{redact_values: nil},
-          c: %{}
+          c: %{},
+          d: :not_a_session
         }
       }
 

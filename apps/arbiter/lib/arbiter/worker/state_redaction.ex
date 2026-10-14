@@ -14,13 +14,17 @@ defmodule Arbiter.Worker.StateRedaction do
 
   alias Arbiter.Redaction
 
-  @doc "The values a Worker state's sessions were told to redact."
+  @doc """
+  The values a Worker state's sessions were told to redact. Never raises: an
+  `inspect/2` that raised would print the state unmasked instead.
+  """
   @spec secrets(term()) :: [String.t()]
   def secrets(%{claude_sessions: sessions, archive_redact: archive})
       when is_map(sessions) and is_list(archive) do
     from_sessions =
-      Enum.flat_map(sessions, fn {_handle, session} ->
-        List.wrap(Map.get(session, :redact_values))
+      Enum.flat_map(sessions, fn
+        {_handle, %{redact_values: values}} when is_list(values) -> values
+        _ -> []
       end)
 
     Enum.uniq(archive ++ from_sessions)
