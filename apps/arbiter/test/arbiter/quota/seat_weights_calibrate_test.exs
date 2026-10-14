@@ -94,6 +94,18 @@ defmodule Arbiter.Quota.SeatWeightsCalibrateTest do
     assert_in_delta (weights["opus"] + weights["sonnet"]) / 2, 1.0, 1.0e-9
   end
 
+  test "an id list past SQLite's expression-depth limit still yields weights" do
+    account = Ecto.UUID.generate()
+    seed!(account)
+
+    # Past the last snapshot: they join the usage window (and the run-id list)
+    # without touching the fit.
+    for i <- 1..2000, do: run_with_event!(account, "opus", 400 + rem(i, 400), 10)
+
+    assert [%{account_id: ^account, weights: %{"opus" => _, "sonnet" => _}}] =
+             SeatWeights.calibrate(since: at(-10), until: at(1000))
+  end
+
   test "an account with too little history gets no weights, never a fabricated 1" do
     account = Ecto.UUID.generate()
     snapshot!(account, 0, 0.0)
