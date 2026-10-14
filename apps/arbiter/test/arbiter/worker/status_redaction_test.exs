@@ -112,6 +112,13 @@ defmodule Arbiter.Worker.StatusRedactionTest do
     # the report prints holds the tokens (it does not, if the crash comes first).
     assert holds?(:sys.get_state(pid), @token), "the git token is not in the state"
 
+    # The report prints the state within `inspect/2`'s element budget, which the whole
+    # term shares. The stashed spawn's env unsets each inherited var off the allowlist,
+    # one `{name, false}` per var of the host's environment: on a CI runner they spend
+    # the budget before the fields holding the tokens, which the report then elides as
+    # `...`. They hold no value, so drop them: the report prints those fields on any host.
+    :sys.replace_state(pid, &drop_unsets/1)
+
     ref = Process.monitor(pid)
 
     log =
@@ -124,15 +131,15 @@ defmodule Arbiter.Worker.StatusRedactionTest do
     # frame that raised).
     assert String.contains?(log, "terminating"), "no crash report was logged"
     assert String.contains?(log, "%Arbiter.Worker.State{"), "the report printed no state"
-
-    # A host with a long environment (CI) can push the masked fields past the logger's
-    # message cap, so the report is cut before the placeholder and shows nothing at all.
-    assert String.contains?(log, Arbiter.Redaction.placeholder()) or
-             String.contains?(log, "(truncated)"),
-           "the report masked nothing"
-
+    assert String.contains?(log, Arbiter.Redaction.placeholder()), "the report masked nothing"
     refute String.contains?(log, @token), "the crash report names the git token"
     refute String.contains?(log, @oauth), "the crash report names the provider token"
+  end
+
+  # The state with its stashed spawn's env stripped of the unset (`{name, false}`) pairs.
+  defp drop_unsets(%{meta: %{claude_spawn: %{env: env} = spawn} = meta} = state) do
+    spawn = %{spawn | env: Enum.reject(env, &match?({_name, false}, &1))}
+    %{state | meta: %{meta | claude_spawn: spawn}}
   end
 
   # Whether `term` holds `value` anywhere in it, as stored (not as inspected).
