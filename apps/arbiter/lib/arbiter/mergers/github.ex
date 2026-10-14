@@ -415,21 +415,26 @@ defmodule Arbiter.Mergers.Github do
            |> handle_json() do
       case authenticated_login(cfg) do
         login when is_binary(login) and login != "" ->
-          case latest_verdict_for(reviews, login) do
-            %{"state" => "APPROVED", "commit_id" => commit} when is_binary(commit) ->
-              with {:ok, head} <- fetch_commit_id(cfg, owner, repo, number, %{}) do
-                {:ok, head == commit}
-              end
-
-            _ ->
-              {:ok, false}
-          end
+          approved_commit_is_head(cfg, {owner, repo, number}, latest_verdict_for(reviews, login))
 
         _ ->
           {:ok, false}
       end
     end
   end
+
+  defp approved_commit_is_head(
+         cfg,
+         {owner, repo, number},
+         %{"state" => "APPROVED", "commit_id" => commit}
+       )
+       when is_binary(commit) do
+    with {:ok, head} <- fetch_commit_id(cfg, owner, repo, number, %{}) do
+      {:ok, head == commit}
+    end
+  end
+
+  defp approved_commit_is_head(_cfg, _ref, _verdict), do: {:ok, false}
 
   @doc """
   GitHub's own judgment of the PR's review state — the GraphQL
