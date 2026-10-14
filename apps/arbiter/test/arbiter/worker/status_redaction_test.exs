@@ -108,6 +108,10 @@ defmodule Arbiter.Worker.StatusRedactionTest do
   end
 
   test "a crash report names neither token", %{pid: pid} do
+    # The session's registration is a message to the worker: wait for it, so the state
+    # the report prints holds the tokens (it does not, if the crash comes first).
+    assert holds?(:sys.get_state(pid), @token), "the git token is not in the state"
+
     ref = Process.monitor(pid)
 
     log =
