@@ -68,7 +68,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.Mergers.NetDiff
-  alias Arbiter.Reviews.{Checkout, Coverage, PrState, Record}
+  alias Arbiter.Reviews.{ApprovalCurrency, Checkout, Coverage, PrState, Record}
   alias Arbiter.Tasks.{Issue, IssueRepo, RepoConfig, Workspace, Workspaces}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
@@ -591,11 +591,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp guard_self_approved(_prepared, %{force: true}), do: :ok
 
   defp guard_self_approved(%{adapter: adapter, mr_ref: mr_ref}, _opts) do
-    if function_exported?(adapter, :self_approved?, 1) do
-      case safe_call(fn -> adapter.self_approved?(mr_ref) end) do
-        {:ok, true} -> {:error, {:already_approved, mr_ref}}
-        _ -> :ok
-      end
+    if ApprovalCurrency.current?(adapter, mr_ref) do
+      {:error, {:already_approved, mr_ref}}
     else
       :ok
     end

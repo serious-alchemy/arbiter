@@ -523,6 +523,13 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
     review_patrol  (map)
       our_login  string — the fleet's own forge login, used to filter PR review
                 threads down to the ones we participated in
+      repos     (map) per-repo overrides keyed by repo name:
+        <repo>.doc_paths_are_code  true | [glob, ...] — ReviewPatrol's "approval
+                stands" skip treats doc/test-only pushes as non-invalidating; set
+                this on a repo whose deliverable IS docs (a specs repo) so its
+                markdown/doc paths count as reviewable scope. `true` covers every
+                doc file; a glob list (e.g. ["openspec/**"]) covers matching
+                paths only. Unset (default): doc paths never invalidate.
 
     Secrets referenced by any `credentials_ref: "secret:<key>"` above are managed
     with `arb workspace secret set|rm|ls` — values are never echoed back.
