@@ -2264,6 +2264,23 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                ExternalReview.dispatch(pr: "octo/widget#42")
     end
 
+    test "review/1 proceeds when GitHub no longer counts our approval (REVIEW_REQUIRED, bd-6zlfq6)" do
+      github_ws("er-guard-stale")
+      stub_review_flow("arb-bot", "APPROVED", "REVIEW_REQUIRED")
+      runner = fn _diff, _state -> {:ok, []} end
+
+      assert {:ok, %{mr_ref: "octo/widget#42", verdict: _}} =
+               ExternalReview.review(pr: "octo/widget#42", check_runner: runner)
+    end
+
+    test "review/1 still refuses when GitHub agrees the approval is current (APPROVED)" do
+      github_ws("er-guard-current")
+      stub_review_flow("arb-bot", "APPROVED", "APPROVED")
+
+      assert {:error, {:already_approved, "octo/widget#42"}} =
+               ExternalReview.review(pr: "octo/widget#42")
+    end
+
     test "proceeds when our latest verdict is not an approval (guard fails through)" do
       github_ws("er-guard-open")
       stub_review_flow("arb-bot", "CHANGES_REQUESTED")
@@ -2632,13 +2649,28 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   # Full GitHub stub for a review-flow test: the guard's identity (`/user`) +
   # reviews lookups (self_login leaving `self_state`), plus the diff / comment /
   # verdict endpoints the CodeReview workflow drives. Unhandled paths → 404.
-  defp stub_review_flow(self_login, self_state) do
+  defp stub_review_flow(self_login, self_state, review_decision \\ nil) do
     Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
       path = conn.request_path
 
       cond do
         conn.method == "GET" and path == "/user" ->
           json(conn, %{"login" => self_login})
+
+        # GitHub's own verdict on whether the PR still counts as approved
+        # (bd-6zlfq6); nil → the GraphQL route is unhandled, so the guard
+        # fails open on it.
+        conn.method == "POST" and path == "/graphql" and review_decision != nil ->
+          json(conn, %{
+            "data" => %{
+              "repository" => %{
+                "pullRequest" => %{
+                  "reviewDecision" => review_decision,
+                  "commits" => %{"nodes" => []}
+                }
+              }
+            }
+          })
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
           json(conn, [%{"user" => %{"login" => self_login}, "state" => self_state}])

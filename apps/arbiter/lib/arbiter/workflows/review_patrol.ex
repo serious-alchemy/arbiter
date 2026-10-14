@@ -66,7 +66,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       substantive in the new diff) is declined: the decision is appended to
       the engagement's `notes` (so "approval is sticky" reads as a deliberate
       decision rather than ReviewPatrol going quiet) and `last_reviewed_sha`
-      still advances, so the same push is never re-evaluated. Adapters without
+      still advances, so the same push is never re-evaluated. "Current" is
+      `Arbiter.Reviews.ApprovalCurrency`'s definition (bd-6zlfq6): the approval
+      must also still count to the forge (`adapter.review_decision/1` is not
+      `REVIEW_REQUIRED` / `CHANGES_REQUESTED`), so a branch rule that stopped
+      counting it after the push means the approval does not stand. A repo whose
+      deliverable is docs sets `review_patrol.repos.<repo>.doc_paths_are_code`
+      (`true` or a glob list) so its doc paths are reviewable scope rather than
+      exempt. Adapters without
       `self_approved?/1`, or a call that errors, fail OPEN — this gate never
       applies and behavior is unchanged from before this feature. Colleagues
       can still get a response after an approval stands via the author-reply
@@ -338,10 +345,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.Escalation
+  alias Arbiter.Reviews.ApprovalCurrency
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig}
-  alias Arbiter.Worker.ReviewAutomation
+  alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
   alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
   alias Arbiter.Workflows.ReviewPatrolSupervisor
@@ -1107,7 +1115,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
             nil
 
-          sticky_approval_blocks?(engagement, diff, adapter) ->
+          sticky_approval_blocks?(engagement, diff, adapter, workspace, repo_name) ->
             decline_for_sticky_approval(engagement, pr.head_sha)
 
           true ->
@@ -1154,22 +1162,33 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # to look again", and here somebody explicitly did. Adapters without the
   # capability (or a call that errors) fail OPEN on the override too: sticky
   # approval behaves exactly as before for those adapters.
-  defp sticky_approval_blocks?(%Issue{source_pr: source_pr}, diff, adapter) do
-    operator_currently_approved?(adapter, source_pr) and
-      not invalidating_diff?(diff) and
+  # bd-6zlfq6: "current" is `ApprovalCurrency`'s definition, which also asks the
+  # forge whether it still counts our approval (GitHub `reviewDecision`), and
+  # `doc_paths_are_code` (per-repo `review_patrol.repos.<repo>` config) keeps a
+  # docs/specs repo's markdown from being classified as non-invalidating.
+  defp sticky_approval_blocks?(%Issue{source_pr: source_pr}, diff, adapter, workspace, repo_name) do
+    ApprovalCurrency.current?(adapter, source_pr) and
+      not invalidating_diff?(diff, doc_paths_are_code(workspace, repo_name)) and
       not review_requested?(adapter, source_pr)
   end
 
-  defp operator_currently_approved?(adapter, source_pr) do
-    if function_exported?(adapter, :self_approved?, 1) do
-      case safe(fn -> adapter.self_approved?(source_pr) end) do
-        {:ok, true} -> true
-        _ -> false
-      end
-    else
-      false
+  # `review_patrol.repos.<repo>.doc_paths_are_code`: `true` (every doc file is
+  # reviewable scope) or a list of globs (only matching paths are). Anything
+  # else, or no repo name, is the default: doc paths never invalidate.
+  defp doc_paths_are_code(workspace, repo_name) when is_binary(repo_name) do
+    case get_in(workspace_config(workspace) || %{}, [
+           "review_patrol",
+           "repos",
+           repo_name,
+           "doc_paths_are_code"
+         ]) do
+      true -> true
+      globs when is_list(globs) -> Enum.filter(globs, &is_binary/1)
+      _ -> false
     end
   end
+
+  defp doc_paths_are_code(_workspace, _repo_name), do: false
 
   defp review_requested?(adapter, source_pr) do
     if function_exported?(adapter, :review_requested?, 1) do
@@ -1213,15 +1232,29 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # touches at least one file that is neither a doc file nor a test file with
   # a substantive (non-formatting-only) change. An empty diff (rebase/merge
   # with no content delta) has no such file, so it's never invalidating.
-  defp invalidating_diff?(diff) when is_binary(diff) do
+  defp invalidating_diff?(diff, doc_paths_are_code) when is_binary(diff) do
     diff
     |> diff_lines_by_file()
     |> Enum.any?(fn {file, lines} ->
-      not doc_or_test_file?(file) and not formatting_only_lines?(lines)
+      not exempt_file?(file, doc_paths_are_code) and not formatting_only_lines?(lines)
     end)
   end
 
-  defp invalidating_diff?(_diff), do: false
+  defp invalidating_diff?(_diff, _doc_paths_are_code), do: false
+
+  # A doc/test file is exempt from invalidating an approval unless the repo
+  # declares its doc paths are code (bd-6zlfq6): then a reviewable doc path is
+  # never exempt, even one that also looks like a test path (`specs/`).
+  defp exempt_file?(file, doc_paths_are_code) do
+    not reviewable_doc?(file, doc_paths_are_code) and doc_or_test_file?(file)
+  end
+
+  defp reviewable_doc?(file, true), do: doc_file?(file)
+
+  defp reviewable_doc?(file, globs) when is_list(globs),
+    do: Enum.any?(globs, &ReviewScope.glob_match?(&1, file))
+
+  defp reviewable_doc?(_file, _setting), do: false
 
   # Group a unified diff's added/removed content lines by the file they belong
   # to. The "current file" switches on each `+++ b/…` header (which follows

@@ -1295,6 +1295,47 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert err |> Exception.message() |> String.contains?("review_automation must be a map")
     end
 
+    test "accepts review_patrol.repos.<repo>.doc_paths_are_code as a boolean or glob list (bd-6zlfq6)" do
+      for {value, n} <- Enum.with_index([true, false, ["openspec/**", "docs/*.md"]]) do
+        config = %{
+          "review_patrol" => %{
+            "our_login" => "bot",
+            "repos" => %{"verus-specs" => %{"doc_paths_are_code" => value}}
+          }
+        }
+
+        assert {:ok, ws} = Ash.create(Workspace, %{name: "rp-dpc-ok#{n}", config: config})
+        assert ws.config["review_patrol"]["repos"]["verus-specs"]["doc_paths_are_code"] == value
+      end
+    end
+
+    test "rejects invalid review_patrol.repos config (bd-6zlfq6)" do
+      bad = [
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => "yes"}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => []}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => [1]}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => "true"}}, "review_patrol.repos.r must be a map"},
+        {%{"repos" => ["r"]}, "review_patrol.repos must be a map"}
+      ]
+
+      for {{block, expected}, n} <- Enum.with_index(bad) do
+        assert {:error, err} =
+                 Ash.create(Workspace, %{
+                   name: "rp-dpc-bad#{n}",
+                   config: %{"review_patrol" => block}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(expected)
+      end
+    end
+
+    test "rejects review_patrol when it is not a map (bd-6zlfq6)" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{name: "rp-dpc-bad-top", config: %{"review_patrol" => "x"}})
+
+      assert err |> Exception.message() |> String.contains?("review_patrol must be a map")
+    end
+
     test "accepts review_automation.repo_overrides with valid values" do
       config = %{
         "review_automation" => %{

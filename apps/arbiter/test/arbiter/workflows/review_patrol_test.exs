@@ -416,7 +416,8 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
            diff,
            reviews,
            our_login,
-           requested_reviewers \\ []
+           requested_reviewers \\ [],
+           review_decision \\ nil
          ) do
       test_pid = self()
 
@@ -424,6 +425,22 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         path = conn.request_path
 
         cond do
+          # GitHub's own `reviewDecision` (bd-6zlfq6). nil → the route is
+          # unhandled (500), which the sticky-approval gate treats as unknown.
+          conn.method == "POST" and path == "/graphql" and review_decision != nil ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{
+                    "reviewDecision" => review_decision,
+                    "commits" => %{"nodes" => []}
+                  }
+                }
+              }
+            })
+
           conn.method == "GET" and path == "/user" ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => our_login})
 
@@ -464,6 +481,21 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
             |> Req.Test.json(%{"message" => "unhandled #{path}"})
         end
       end)
+    end
+
+    defp doc_diff do
+      "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n" <>
+        "+++ b/docs/guide.md\n@@ -1 +1,2 @@\n context\n+a whole new paragraph\n"
+    end
+
+    # Sets `review_patrol.repos.<repo>` for the test workspace's repo ("repo").
+    defp set_patrol_repo_config(ws, repo_cfg) do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: put_in(ws.config, ["review_patrol", "repos"], %{"repo" => repo_cfg})
+        })
+
+      ws
     end
 
     test "a push touching a previously-flagged file triggers exactly one re-review", %{ws: ws} do
@@ -758,6 +790,183 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       refute_receive {:submit_review, _}
       assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "sticky approval: GitHub reports REVIEW_REQUIRED → approval does not stand, doc-only push re-reviews (bd-6zlfq6)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 428, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{
+          "severity" => "error",
+          "file" => "docs/guide.md",
+          "line" => 2,
+          "message" => "stale spec text"
+        }
+      ])
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+
+      rereview_stub_with_reviews(
+        428,
+        "newsha",
+        doc_diff(),
+        reviews,
+        "botreviewer",
+        [],
+        "REVIEW_REQUIRED"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+      assert ReviewPatrol.state(name).last_declined == []
+    end
+
+    test "sticky approval: GitHub reports CHANGES_REQUESTED → approval does not stand (bd-6zlfq6)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 429, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "docs/guide.md", "line" => 2, "message" => "x"}
+      ])
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+
+      rereview_stub_with_reviews(
+        429,
+        "newsha",
+        doc_diff(),
+        reviews,
+        "botreviewer",
+        [],
+        "CHANGES_REQUESTED"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+    end
+
+    test "sticky approval: GitHub reports APPROVED → doc-only push still declines (bd-6zlfq6)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 430, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+
+      rereview_stub_with_reviews(
+        430,
+        "newsha",
+        doc_diff(),
+        reviews,
+        "botreviewer",
+        [],
+        "APPROVED"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "doc_paths_are_code: true → a docs-only push to that repo re-reviews (bd-6zlfq6)",
+         %{ws: ws} do
+      ws = set_patrol_repo_config(ws, %{"doc_paths_are_code" => true})
+
+      eng =
+        engagement(ws, 431, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "docs/guide.md", "line" => 2, "message" => "spec"}
+      ])
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(431, "newsha", doc_diff(), reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+      assert ReviewPatrol.state(name).last_declined == []
+      assert reload(eng).last_reviewed_sha == "newsha"
+    end
+
+    test "doc_paths_are_code: glob list → matching doc paths (even under specs/) re-review (bd-6zlfq6)",
+         %{ws: ws} do
+      ws = set_patrol_repo_config(ws, %{"doc_paths_are_code" => ["openspec/**"]})
+      path = "openspec/changes/x/specs/a/spec.md"
+
+      eng =
+        engagement(ws, 432, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding(path, 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => path, "line" => 2, "message" => "spec"}
+      ])
+
+      diff =
+        "diff --git a/#{path} b/#{path}\n--- a/#{path}\n+++ b/#{path}\n" <>
+          "@@ -1 +1,2 @@\n context\n+rewritten requirement\n"
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(432, "newsha", diff, reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+    end
+
+    test "doc_paths_are_code glob list: a doc path outside the globs still declines (bd-6zlfq6)",
+         %{ws: ws} do
+      ws = set_patrol_repo_config(ws, %{"doc_paths_are_code" => ["openspec/**"]})
+
+      eng =
+        engagement(ws, 433, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(433, "newsha", doc_diff(), reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
       assert ReviewPatrol.state(name).last_declined == [eng.id]
     end
 
