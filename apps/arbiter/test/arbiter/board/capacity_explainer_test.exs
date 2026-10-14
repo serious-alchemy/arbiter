@@ -461,4 +461,23 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert hold.summary =~ "prod_ssh"
     end
   end
+
+  # bd-akp9ae: a run only this machine can take, while this machine's own cap is full.
+  describe "a local-capacity hold" do
+    test "waits for capacity on this machine, says why a node does not help, and keeps the phrase" do
+      phrase =
+        "held — local capacity full (cap 2, 2 running) (run is local-only: sandbox is not " <>
+          "podman (bwrap-jailed or unsandboxed))"
+
+      hold = CapacityExplainer.hold({:local_capacity, phrase}, %{}, raw: phrase)
+
+      assert hold.kind == :capacity
+      assert hold.badge == CapacityExplainer.capacity_badge()
+      assert hold.summary =~ "only run on this machine"
+      assert hold.summary =~ "sandbox is not podman"
+      assert hold.summary =~ "arb node set local --max-workers"
+      refute hold.summary =~ "account"
+      assert hold.details == phrase
+    end
+  end
 end

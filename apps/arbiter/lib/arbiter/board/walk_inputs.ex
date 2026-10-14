@@ -645,7 +645,17 @@ defmodule Arbiter.Board.WalkInputs do
        do: :scoped_git_credential
   end
 
-  defp eligibility(ws, issue, provider, mode) do
+  @doc """
+  `Arbiter.Nodes.Placement.eligible/1`'s verdict for a Ready card's implementer run
+  in workspace `ws` on `provider` under placement `mode`: the request
+  `Worker.Dispatch` would place it with, read from the card (its type and repo, the
+  repo's sandbox and git credential) with no checkout read (`local_work?` false).
+  The walk asks it per candidate provider; the board asks it for a card's own
+  local-capacity hold (`Arbiter.Board.Snapshot`).
+  """
+  @spec eligibility(map(), map(), atom() | String.t(), Placement.mode()) ::
+          :ok | {:local_only, Placement.reason()}
+  def eligibility(ws, issue, provider, mode) do
     no_pr? = Issue.no_pr_type?(issue.issue_type)
 
     request = %{

@@ -143,4 +143,26 @@ defmodule Arbiter.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.dispatchable(ticket(:queued), %{}) == :ok
     end
   end
+
+  describe "a local-capacity hold (bd-akp9ae)" do
+    @phrase "held — local capacity full (cap 2, 2 running) (run is local-only: sandbox is not podman)"
+
+    test "is the ticket's own hold, after the guardrail and ahead of the board-wide ones" do
+      ctx = %{local_capacity: {:hold, @phrase}, paused: true, slots_free: 0}
+
+      assert Lifecycle.dispatchable(ticket(:queued), ctx) == {:held, {:local_capacity, @phrase}}
+
+      both = Map.put(ctx, :guardrail, {:hold, "no eligible model"})
+
+      assert Lifecycle.dispatchable(ticket(:queued), both) ==
+               {:held, {:guardrail, "no eligible model"}}
+
+      assert Lifecycle.describe_hold({:local_capacity, @phrase}) == @phrase
+    end
+
+    test ":ok, or a ctx that does not ask, is not held" do
+      assert Lifecycle.dispatchable(ticket(:queued), %{local_capacity: :ok}) == :ok
+      assert Lifecycle.dispatchable(ticket(:queued), %{local_capacity: nil}) == :ok
+    end
+  end
 end
