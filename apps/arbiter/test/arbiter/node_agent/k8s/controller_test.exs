@@ -254,6 +254,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assert DateTime.diff(deadline, @t0) == 3600 + 1800
     end
 
+    # K14: the node-agent boot starts the controller before the connection, so the sink is
+    # the connection's registered name, looked up on every push.
+    test "the sink may be a registered name; nothing is sent while it is not registered",
+         env do
+      sink = :"k8s_sink_#{System.unique_integer([:positive])}"
+      controller = start_controller(env, sink: sink)
+      run1 = assign!(controller, 1)
+      set_status(env, pod_name(1), running_status())
+      observed(run1, :running)
+      refute_received {:run_push, ^run1, "run.ready", _}
+
+      Process.register(self(), sink)
+      run2 = assign!(controller, 2)
+      set_status(env, pod_name(2), running_status())
+      observed(run2, :running)
+      assert_receive {:run_push, ^run2, "run.ready", _}, 5_000
+    end
+
     test "the pod is pending, and nothing says it is running", env do
       controller = start_controller(env)
       run = assign!(controller, 1)

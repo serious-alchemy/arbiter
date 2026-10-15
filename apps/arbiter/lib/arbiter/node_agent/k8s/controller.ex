@@ -51,7 +51,8 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   ## Messages out
 
-  Pushes go to `:sink` (the connection) as `{:run_push, run, event, payload}`:
+  Pushes go to `:sink` (the connection: a pid, or a registered name looked up on every
+  push) as `{:run_push, run, event, payload}`:
   `"run.ready"`, `"run.refused"`, `"exit"`, and `"capacity"` (run `nil`) when the
   ConfigMap changes. `:observer` (tests, diagnostics) additionally gets
   `{:run_observed, run, tag, resource_version}` after each pod event is folded in.
@@ -925,6 +926,17 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   defp push(%{sink: sink}, run, event, payload) when is_pid(sink),
     do: send(sink, {:run_push, run, event, payload})
+
+  # A registered name (the node-agent boot's `Arbiter.NodeAgent.Connection`, which starts
+  # after this process and may restart under it): looked up on every push, and a push with
+  # nobody registered is dropped, as the connection drops one while it is not connected.
+  # `attach_all/2` says it all again on the next `hello_ok`.
+  defp push(%{sink: sink}, run, event, payload) when is_atom(sink) and not is_nil(sink) do
+    case Process.whereis(sink) do
+      nil -> :ok
+      pid -> send(pid, {:run_push, run, event, payload})
+    end
+  end
 
   defp push(_state, _run, _event, _payload), do: :ok
 

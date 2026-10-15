@@ -16,8 +16,10 @@ defmodule Arbiter.NodeAgent.Config do
       that file, never from the environment or argv, and never printed
       (`inspect/1` hides it).
     * `ARB_AGENT_BACKEND` — what runs the workers (`Arbiter.NodeAgent.Backend`):
-      `podman` (the default). Any other value is `{:unknown_backend, value}`,
-      which fails the agent's boot.
+      `podman` (the default) or `k8s` (a cluster controller, K14: its credential,
+      URL and data dir come from `Arbiter.NodeAgent.K8s.Boot`, which calls `load/1`
+      with them). Any other value is `{:unknown_backend, value}`, which fails the
+      agent's boot.
     * `ARB_NODE_MAX_WORKERS` — optional, a positive integer: the node owner's
       hard ceiling on concurrent workers, reported in `hello` as
       `capacity.ceiling` (§13). Anything else is ignored.
@@ -53,6 +55,9 @@ defmodule Arbiter.NodeAgent.Config do
     derate: %Derate.Config{},
     run_opts: [],
     backend: Arbiter.NodeAgent.Backend.Podman,
+    # K14: a cluster controller's own facts for `hello` (`namespace`, `k8s_version`,
+    # `self_upgrade?`), set by `Arbiter.NodeAgent.K8s.Boot`; `nil` on a machine.
+    cluster: nil,
     hb_interval_ms: 10_000,
     fence_after_ms: 60_000,
     # bd-4p1vui (§10.4.8): with no socket, runs are kept this long after the last ack
@@ -98,7 +103,7 @@ defmodule Arbiter.NodeAgent.Config do
          |> Keyword.take(
            ~w(hb_interval_ms fence_after_ms restart_grace_ms readiness_ttl_ms connect_timeout_ms
             hello_timeout_ms idle_poll_ms backoff req_options halt_fun live_runs_fun readiness_fun
-            run_opts)a
+            run_opts cluster)a
          )
          |> Keyword.merge(
            primary_url: url,
@@ -116,6 +121,14 @@ defmodule Arbiter.NodeAgent.Config do
        )}
     end
   end
+
+  @doc """
+  The backend alone (`ARB_AGENT_BACKEND`, default podman), before anything else is
+  loaded: a cluster controller (`k8s`) has no credential file to load until
+  `Arbiter.NodeAgent.K8s.Boot` has read or enrolled one.
+  """
+  @spec backend(keyword()) :: {:ok, module()} | {:error, {:unknown_backend, term()}}
+  def backend(opts \\ []), do: backend(opts, env(opts))
 
   @doc "The data dir alone (`ARB_NODE_HOME`, default `~/.arbiter-node`); needs no valid config."
   @spec node_home(keyword()) :: Path.t()

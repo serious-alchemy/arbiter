@@ -2,12 +2,13 @@ defmodule Arbiter.NodeAgent.Backend do
   @moduledoc """
   The seam between the node agent and whatever actually runs a worker
   (bd-1nfuq5 §1). The agent's connection, reaper and `hello` speak only to this
-  behaviour; `Arbiter.NodeAgent.Backend.Podman` (the RW9 run supervisor) is the
-  one implementation today.
+  behaviour. Two implementations: `Arbiter.NodeAgent.Backend.Podman` (the RW9 run
+  supervisor, a machine) and `Arbiter.NodeAgent.Backend.K8s` (the in-cluster
+  controller, K14).
 
   `ARB_AGENT_BACKEND` picks the backend (`Arbiter.NodeAgent.Config`): `podman`
-  by default, and an unknown name fails the agent's boot rather than silently
-  falling back.
+  by default, `k8s` for a cluster controller, and an unknown name fails the
+  agent's boot rather than silently falling back.
 
   Runs are addressed by run id. Mutating calls are idempotent: an unknown run is
   `{:error, :not_found}`.
@@ -94,7 +95,10 @@ defmodule Arbiter.NodeAgent.Backend do
   @doc "A new Worker on the primary takes a held `run` over (`adopt{run}`)."
   @callback adopt(run) :: :ok | {:error, :not_found | :unsupported}
 
-  @backends %{"podman" => Arbiter.NodeAgent.Backend.Podman}
+  @backends %{
+    "podman" => Arbiter.NodeAgent.Backend.Podman,
+    "k8s" => Arbiter.NodeAgent.Backend.K8s
+  }
 
   @doc "The backend names `ARB_AGENT_BACKEND` accepts."
   @spec names() :: [String.t()]
