@@ -69,7 +69,8 @@ defmodule Arbiter.NodeAgent.Retained do
            run: info.run,
            branch: info.branch,
            known: known,
-           dest: dest
+           dest: dest,
+           injected: Map.get(info, :injected, %{})
          }) do
       {:ok, %{bytes: bytes, snapshot: snapshot, tip: tip}} ->
         %{"bytes" => bytes, "snapshot" => snapshot, "tip" => tip}

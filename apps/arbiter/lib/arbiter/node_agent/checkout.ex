@@ -28,6 +28,14 @@ defmodule Arbiter.NodeAgent.Checkout do
   files. The exclude file the shadow's `.git/info/exclude` holds is honoured as
   a bandwidth optimisation only; the primary re-filters.
 
+  The snapshot starts from the tip's tree and adds the work tree's changes to it. A
+  tracked file the shadow's `info/exclude` names (the repo's own `.claude/skills/…`;
+  the primary injects its resolved skills under the same root) is therefore still
+  in the snapshot: an index that started empty ignored it, and the primary read it
+  as deleted. `:injected` (`%{path => bytes}`, what the primary seeded into the
+  shadow) is put back to the tip's state for every file the run left as injected,
+  so an injected file is never taken back even when it overwrote a tracked one.
+
   The snapshot is a commit on top of the run branch tip at
   `refs/arbiter/snapshot/<run>`. The bundle carries it, and the branch ref when
   the run committed, with `^known` prerequisites. Untracked payload over
@@ -240,7 +248,8 @@ defmodule Arbiter.NodeAgent.Checkout do
   an optional `:max_untracked_bytes`.
 
   `{:ok, %{path, bytes, snapshot, tip}}`, or `{:error, {:veto, :untracked_size, _}}`
-  when the shadow holds too much untracked payload.
+  when the shadow holds too much untracked payload. `:injected` is `%{path => bytes}`
+  of the files the primary seeded into the shadow (see the moduledoc).
   """
   @spec package(map()) :: {:ok, map()} | {:error, term()}
   def package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest} = args) do
@@ -251,7 +260,8 @@ defmodule Arbiter.NodeAgent.Checkout do
       with {:ok, tip} <- read_ref(shadow, "refs/heads/" <> branch),
            :ok <- init_snap(snap_dir, shadow),
            :ok <- untracked_cap(snap_dir, shadow, tip, cap),
-           {:ok, snapshot} <- snapshot(snap_dir, shadow, tip, run, branch),
+           {:ok, snapshot} <-
+             snapshot(snap_dir, shadow, tip, run, branch, Map.get(args, :injected, %{})),
            {:ok, bytes} <- bundle(snap_dir, run, branch, tip, known, dest) do
         {:ok, %{path: dest, bytes: bytes, snapshot: snapshot, tip: tip}}
       end
@@ -330,16 +340,58 @@ defmodule Arbiter.NodeAgent.Checkout do
     end
   end
 
-  defp snapshot(snap_dir, shadow, tip, run, branch) do
+  defp snapshot(snap_dir, shadow, tip, run, branch, injected) do
     opts = [git_dir: snap_dir, work_tree: shadow, env: index(snap_dir)]
 
-    with {:ok, _} <- Git.run(["add", "-A"], opts),
+    # Starting from the tip's tree, not an empty index: `add -A` skips an ignored
+    # path that is not already tracked, which dropped a tracked file under an
+    # excluded root from the snapshot.
+    with {:ok, _} <- Git.run(["read-tree", tip], opts),
+         {:ok, _} <- Git.run(["add", "-A"], opts),
+         :ok <- restore_injected(opts, shadow, tip, injected),
          {:ok, tree} <- Git.run(["write-tree"], opts),
          {:ok, snap} <- Git.run(["commit-tree", "-p", tip, "-m", "arbiter snapshot", tree], opts),
          {:ok, _} <- Git.run(["update-ref", Primary.snapshot_ref(run), snap], git_dir: snap_dir),
          {:ok, _} <- Git.run(["update-ref", "refs/heads/" <> branch, tip], git_dir: snap_dir) do
       File.rm(Path.join(snap_dir, "snap-index"))
       {:ok, snap}
+    end
+  end
+
+  # A file the primary injected and the run left exactly as injected is not the
+  # run's work: back to the tip's entry for the path, or out of the snapshot when
+  # the tip has none. A file the run edited or deleted is the run's, and stays.
+  defp restore_injected(_opts, _shadow, _tip, injected) when map_size(injected) == 0, do: :ok
+
+  defp restore_injected(opts, shadow, tip, injected) do
+    Enum.reduce_while(injected, :ok, fn {path, bytes}, :ok ->
+      with true <- untouched?(Path.join(shadow, path), bytes),
+           {:ok, _} <- restore_entry(opts, tip, path) do
+        {:cont, :ok}
+      else
+        false -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp untouched?(file, bytes) do
+    match?({:ok, %File.Stat{type: :regular}}, File.lstat(file)) and
+      File.read(file) == {:ok, bytes}
+  end
+
+  defp restore_entry(opts, tip, path) do
+    case Git.run(["ls-tree", "-z", tip, "--", path], opts) do
+      {:ok, ""} ->
+        Git.run(["update-index", "--force-remove", "--", path], opts)
+
+      {:ok, line} ->
+        [meta, ^path] = line |> String.trim_trailing(<<0>>) |> String.split("\t", parts: 2)
+        [mode, _type, sha] = String.split(meta, " ")
+        Git.run(["update-index", "--add", "--cacheinfo", "#{mode},#{sha},#{path}"], opts)
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -455,15 +507,24 @@ defmodule Arbiter.NodeAgent.Checkout do
   @doc """
   Snapshot the shadow and `PUT /nodes/runs/<run>/checkout`. `known` is what the
   primary told the node at seed. `{:ok, response}` is the primary's ingest
-  summary; a node-side or primary-side veto is `{:error, {:veto, ...}}`.
+  summary; a node-side or primary-side veto is `{:error, {:veto, ...}}`. `injected`
+  is as for `package/1`.
   """
-  @spec upload(Config.t(), map(), Path.t(), [String.t()]) :: {:ok, map()} | {:error, term()}
-  def upload(%Config{} = config, %{run: run, branch: branch}, shadow, known) do
+  @spec upload(Config.t(), map(), Path.t(), [String.t()], map()) ::
+          {:ok, map()} | {:error, term()}
+  def upload(%Config{} = config, %{run: run, branch: branch}, shadow, known, injected \\ %{}) do
     dest = Path.join([config.node_home, "runs", run, "checkout.bundle"])
 
     try do
       with {:ok, %{path: path, bytes: bytes}} <-
-             package(%{shadow: shadow, run: run, branch: branch, known: known, dest: dest}) do
+             package(%{
+               shadow: shadow,
+               run: run,
+               branch: branch,
+               known: known,
+               dest: dest,
+               injected: injected
+             }) do
         put_bundle(config, run, path, bytes)
       end
     after

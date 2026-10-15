@@ -1332,7 +1332,8 @@ defmodule Arbiter.Worker.Worktree do
   returns `{:ok, true}` to be safe — we'd rather skip cleanup than delete
   potentially-valuable commits.
   """
-  @spec has_commits_ahead?(path(), String.t()) :: {:ok, boolean()} | {:error, error_reason()}
+  @spec has_commits_ahead?(path(), String.t()) ::
+          {:ok, boolean()} | {:error, error_reason()}
   def has_commits_ahead?(path, base_ref \\ "main") when is_binary(path) do
     case run_git(["rev-list", "--count", base_ref <> "..HEAD"], cd: path) do
       {:ok, count_str} ->
@@ -1346,6 +1347,22 @@ defmodule Arbiter.Worker.Worktree do
         # Base ref doesn't exist or git failed — conservative: assume there
         # might be commits worth preserving.
         {:ok, true}
+    end
+  end
+
+  @doc """
+  How many commits the worktree's branch has ahead of `base_ref`, or `:unknown`
+  when git cannot say (the base does not resolve). The count behind
+  `has_commits_ahead?/2`, for a message that must not claim "no commits" when
+  there are some.
+  """
+  @spec commits_ahead_count(path(), String.t()) :: non_neg_integer() | :unknown
+  def commits_ahead_count(path, base_ref \\ "main") when is_binary(path) do
+    with {:ok, out} <- run_git(["rev-list", "--count", base_ref <> "..HEAD"], cd: path),
+         {n, _} when n >= 0 <- Integer.parse(String.trim(out)) do
+      n
+    else
+      _ -> :unknown
     end
   end
 

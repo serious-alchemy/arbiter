@@ -7111,9 +7111,7 @@ defmodule Arbiter.Worker do
     reason_blurb =
       case reason do
         :uncommitted ->
-          "the worktree has uncommitted changes (staged/unstaged/untracked) " <>
-            "but no commits made it onto branch `#{branch}`. The review gate " <>
-            "would diff `#{target}..HEAD`, see empty, and falsely report 'no work'."
+          uncommitted_blurb(worktree, branch, target, status)
 
         :no_commits ->
           "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
@@ -7164,6 +7162,51 @@ defmodule Arbiter.Worker do
     #{status}
     """
     |> String.trim()
+  end
+
+  # The :uncommitted reason says nothing about commits: the branch may well be
+  # ahead of the target (bd-diytcc), so the message reports the real state.
+  defp uncommitted_blurb(worktree, branch, target, status) do
+    ahead =
+      if is_binary(worktree),
+        do: Arbiter.Worker.Worktree.commits_ahead_count(worktree, target),
+        else: :unknown
+
+    lead =
+      case ahead do
+        0 ->
+          "the worktree has uncommitted changes (staged/unstaged/untracked) " <>
+            "but no commits made it onto branch `#{branch}`. The review gate " <>
+            "would diff `#{target}..HEAD`, see empty, and falsely report 'no work'."
+
+        n when is_integer(n) ->
+          "branch `#{branch}` is #{n} commit(s) ahead of `#{target}`, but the worktree " <>
+            "still has uncommitted changes (staged/unstaged/untracked), listed below. " <>
+            "The review gate diffs `#{target}..HEAD`, so they are not part of what " <>
+            "gets reviewed or pushed."
+
+        :unknown ->
+          "the worktree has uncommitted changes (staged/unstaged/untracked); whether " <>
+            "branch `#{branch}` has commits ahead of `#{target}` could not be determined."
+      end
+
+    deleted = tracked_deletion_count(status)
+
+    if deleted > 0 do
+      lead <>
+        " #{deleted} tracked file(s) deleted in the worktree (` D`/`D ` below): " <>
+        "if the worker did not delete them on purpose, they were lost outside the " <>
+        "worker's commits (restore with `git checkout -- <path>`)."
+    else
+      lead
+    end
+  end
+
+  defp tracked_deletion_count(status) do
+    status
+    |> String.split("\n", trim: true)
+    # `status` is the indented `git status --porcelain` block: `  XY path`.
+    |> Enum.count(&Regex.match?(~r/^  (?:D.|.D) /, &1))
   end
 
   defp injected_config_paths_blurb(worktree, target) when is_binary(worktree) do

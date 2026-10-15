@@ -598,8 +598,18 @@ defmodule Arbiter.NodeAgent.Run do
       run_config(state),
       %{run: state.spec.run, branch: state.spec.checkout.branch},
       shadow(state),
-      state.known || []
+      state.known || [],
+      injected_files(state.spec)
     )
+  end
+
+  # What the primary seeded into the shadow after the clone (`seed_worktree_files/2`):
+  # not the run's work, so the snapshot puts it back to the tip's state.
+  defp injected_files(%RunSpec{mounts: mounts}) do
+    case Enum.find(mounts, &(&1.kind == "worktree")) do
+      %{files: files} when is_map(files) -> files
+      _ -> %{}
+    end
   end
 
   defp log_checkpoint(state, {:ok, _}), do: state
@@ -1053,6 +1063,7 @@ defmodule Arbiter.NodeAgent.Run do
       branch: checkout && checkout.branch,
       base: checkout && checkout.base,
       shadow: shadow(state),
+      injected: injected_files(state.spec),
       config_dir: Path.join([run_config(state).node_home, "runs", state.spec.run, "config"])
     }
 
