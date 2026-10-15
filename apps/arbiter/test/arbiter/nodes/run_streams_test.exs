@@ -334,6 +334,18 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert Enum.any?(e, &match?({:send, _, {_, {:exit_status, 0}}}, &1))
     end
 
+    test "cursors/1 names the last cursor taken for each live opaque stream" do
+      {t, _} = S.ready(table(), "r1")
+      assert S.cursors(t) == %{}
+
+      {t, _} = S.data_cursor(t, "r1", "c1", "one\n")
+      {t, _} = S.data_cursor(t, "r1", "c2", "two\n")
+      assert S.cursors(t) == %{"r1" => "c2"}
+
+      {t, _} = S.exit(t, "r1", %{"status" => 0, "cursor" => "c2"})
+      assert S.cursors(t) == %{}
+    end
+
     test "an integer-offset stream is untouched by the opaque path" do
       {t, _} = S.ready(table(), "r1")
       {_t, e} = S.data(t, "r1", 0, "ab\n")

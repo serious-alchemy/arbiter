@@ -192,6 +192,120 @@ defmodule Arbiter.NodeAgent.PodChannel.RunsTest do
     end
   end
 
+  # K15: after a controller restart the table is empty, but the pod holds its leaves. The
+  # pod carries a record of the public facts (bridge names, leaf fingerprints, deadline), and
+  # `adopt/3` rebuilds the entry from it: nothing secret, and the same strictness.
+  describe "channel_record/2 and adopt/3 (a controller restart)" do
+    setup ctx do
+      {:ok, nonce} = Runs.register(ctx.server, spec!(), ctx.deadline)
+      :ok = Runs.bind_pod_ip(ctx.server, "run-1", @pod_ip)
+      {"run-1", files} = boot!(ctx.server, nonce)
+      {:ok, record} = Runs.channel_record(ctx.server, "run-1")
+
+      # the restart: a new, empty table over the same CA
+      fresh = start_supervised!({Runs, ca: ctx.ca, name: nil}, id: :fresh)
+      %{files: files, record: record, fresh: fresh}
+    end
+
+    test "the record is public JSON: names, fingerprints and a deadline, no key", ctx do
+      assert ctx.record["bridges"] == ["proxy", "arb"]
+      assert Map.keys(ctx.record["leaves"]) |> Enum.sort() == ~w(arb control proxy)
+      assert ctx.record["deadline"] == DateTime.to_iso8601(ctx.deadline)
+      assert {:ok, _} = Jason.encode(ctx.record)
+      refute Jason.encode!(ctx.record) =~ "PRIVATE"
+    end
+
+    test "an adopted run's leaves, from its pod, are let in exactly as before", ctx do
+      assert {:ok, :adopted} = Runs.adopt(ctx.fresh, "run-1", ctx.record)
+      :ok = Runs.bind_pod_ip(ctx.fresh, "run-1", @pod_ip)
+
+      assert {:ok, %{run: "run-1", name: "proxy"}} =
+               Runs.authorize(ctx.fresh, :bridge, der(ctx.files, "proxy"), @pod_ip)
+
+      assert {:ok, %{run: "run-1", name: "arb"}} =
+               Runs.authorize(ctx.fresh, :bridge, der(ctx.files, "arb"), @pod_ip)
+
+      assert {:ok, %{run: "run-1"}} =
+               Runs.authorize(ctx.fresh, :control, der(ctx.files, "control"), @pod_ip)
+
+      assert {:error, :wrong_purpose} =
+               Runs.authorize(ctx.fresh, :bridge, der(ctx.files, "control"), @pod_ip)
+
+      assert {:error, :wrong_ip} =
+               Runs.authorize(ctx.fresh, :bridge, der(ctx.files, "proxy"), {10, 42, 0, 99})
+    end
+
+    test "a CA-signed leaf the original table did not mint is still refused", ctx do
+      {:ok, :adopted} = Runs.adopt(ctx.fresh, "run-1", ctx.record)
+      :ok = Runs.bind_pod_ip(ctx.fresh, "run-1", @pod_ip)
+      now = DateTime.utc_now()
+      forged = Cert.leaf(ctx.ca, "run-1", "proxy", DateTime.add(now, -60), DateTime.add(now, 60))
+
+      assert {:error, :leaf_mismatch} = Runs.authorize(ctx.fresh, :bridge, forged.der, @pod_ip)
+
+      other = Cert.leaf(ctx.ca, "run-1", "git", DateTime.add(now, -60), DateTime.add(now, 60))
+      assert {:error, :unknown_bridge} = Runs.authorize(ctx.fresh, :bridge, other.der, @pod_ip)
+    end
+
+    test "an adopted run has no boot nonce, takes commands and can be released", ctx do
+      {:ok, :adopted} = Runs.adopt(ctx.fresh, "run-1", ctx.record)
+      :ok = Runs.bind_pod_ip(ctx.fresh, "run-1", @pod_ip)
+
+      assert {:error, _} = Runs.redeem(ctx.fresh, "anything", @pod_ip)
+      :ok = Runs.push_command(ctx.fresh, "run-1", %{"op" => "checkpoint"})
+      assert {:ok, [%{"op" => "checkpoint"}]} = Runs.await_commands(ctx.fresh, "run-1", 10)
+
+      :ok = Runs.release(ctx.fresh, "run-1")
+
+      assert {:error, :unknown_run} =
+               Runs.authorize(ctx.fresh, :bridge, der(ctx.files, "proxy"), @pod_ip)
+    end
+
+    test "adopting a run the table already has changes nothing", ctx do
+      assert {:ok, :present} = Runs.adopt(ctx.server, "run-1", ctx.record)
+
+      assert {:ok, %{run: "run-1"}} =
+               Runs.authorize(ctx.server, :bridge, der(ctx.files, "proxy"), @pod_ip)
+    end
+
+    test "the adopted run is dropped at its deadline like a registered one", ctx do
+      soon = DateTime.add(DateTime.utc_now(), 1)
+      {:ok, _} = Runs.register(ctx.server, spec!("run-2"), soon)
+      {:ok, record} = Runs.channel_record(ctx.server, "run-2")
+      {:ok, :adopted} = Runs.adopt(ctx.fresh, "run-2", record)
+      assert_eventually(fn -> "run-2" not in Runs.live_runs(ctx.fresh) end)
+    end
+
+    test "a damaged, expired or reserved-name record is refused", ctx do
+      assert {:error, :bad_record} = Runs.adopt(ctx.fresh, "run-1", %{})
+      assert {:error, :bad_record} = Runs.adopt(ctx.fresh, "run-1", "nope")
+
+      assert {:error, :bad_record} =
+               Runs.adopt(ctx.fresh, "run-1", put_in(ctx.record["leaves"]["proxy"], "xyz"))
+
+      assert {:error, :bad_record} =
+               Runs.adopt(
+                 ctx.fresh,
+                 "run-1",
+                 Map.delete(ctx.record["leaves"], "control") &&
+                   %{ctx.record | "leaves" => Map.delete(ctx.record["leaves"], "control")}
+               )
+
+      past = DateTime.add(DateTime.utc_now(), -5) |> DateTime.to_iso8601()
+
+      assert {:error, :deadline_passed} =
+               Runs.adopt(ctx.fresh, "run-1", %{ctx.record | "deadline" => past})
+
+      reserved = %{ctx.record | "bridges" => ["control"]}
+      assert {:error, :bad_record} = Runs.adopt(ctx.fresh, "run-1", reserved)
+      assert Runs.live_runs(ctx.fresh) == []
+    end
+
+    test "the record of an unknown run is an error", ctx do
+      assert {:error, :unknown_run} = Runs.channel_record(ctx.server, "run-nope")
+    end
+  end
+
   test "a run past its deadline is dropped by the table itself", ctx do
     soon = DateTime.add(DateTime.utc_now(), 1)
     {:ok, _} = Runs.register(ctx.server, spec!(), soon)

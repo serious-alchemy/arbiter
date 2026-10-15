@@ -329,6 +329,9 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       observed_ready(env, controller, 1)
       set_status(env, pod_name(1), terminated_status(0))
       observed(run_id(1), :exit)
+      # K15: the slot is held until the exit is out (the log tail is drained first)
+      run1 = run_id(1)
+      assert_receive {:run_push, ^run1, "exit", _}, 5_000
 
       assert {:ok, _} = Controller.assign(controller, wire(3))
     end

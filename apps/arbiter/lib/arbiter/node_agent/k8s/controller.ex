@@ -39,15 +39,39 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   nothing and reaps nothing**; cancels and signals of runs it already owns still go
   through (stopping a run is never the unsafe direction), and it keeps observing.
 
-  ## What it does not do (yet)
+  ## The run's output and its end (K15)
 
-  Log streaming into `stdout` frames (K§3.4) and holding `exit` until the final
-  checkpoint has been forwarded (K§10.3) are not in this module, and neither is the
-  node-agent boot that wires it to `Arbiter.NodeAgent.Connection` and
-  `Arbiter.NodeAgent.PodChannel` (`Arbiter.NodeAgent.Backend.K8s` is the seam). A pod
-  adopted after a restart is also unknown to the pod channel's in-memory run table
-  (K6 mints leaves in memory), so its bridges stay down until that table can be
-  rebuilt; the pod itself runs on.
+    * **`stdout`.** Once the worker container runs, an `Arbiter.NodeAgent.K8s.LogFollower`
+      reads its log and the sink gets `{:run_push, run, "stdout", {:binary, frame}}` (`ARB2`
+      frames with opaque cursors). `ack/3` is the primary's acknowledgement; `resume/2` is
+      the cursor `hello_ok` says the primary holds, applied by the `attach_all/2` that
+      follows it, which resends the frames the primary lacks. A run adopted after a restart
+      is not read until that `attach_all/2`: only then is the primary's cursor known, and
+      reading from the start would replay the run's output.
+    * **`exit` is held** (K§10.3) while the pod's `snapshotter` is still running (the final
+      checkpoint is being forwarded) and until the log tail is drained, for at most
+      `grace_s` from when the hold began (`attach_all/2` begins it again: the primary could
+      not have heard before). A held run reports `terminating` and keeps its slot and its
+      pod-channel leaves (the snapshotter uploads with the `control` leaf). The exit then
+      carries the stream's end, `cursor` (`size: 0` for a run with no output), and
+      `checkout` (`"ok"` or `"failed: …"`, from the last checkpoint upload the pod channel
+      announced as `{:pod_channel_upload, run, :checkpoint, result}`). A pod that is gone
+      (deleted from outside, or by a cancel that gave no grace) or whose worker never ran
+      is not waited for.
+    * **Adoption restores the pod channel.** The pod channel's run table is in memory, so a
+      restarted controller starts without the leaves of the pods it adopts. Each pod carries
+      the public record (`arbiter.dev/channel`, `PodChannel.Runs.channel_record/2`) written
+      at `assign`, and adopting a live pod rebuilds its entry from it
+      (`PodChannel.Runs.adopt/3`); its bridges work again once its IP is bound. A pod
+      without a record (made before K15), or whose record is refused, is still adopted and
+      its bridges stay down. A pod that had not fetched its `/boot` when the old controller
+      went away cannot be served it by the new one (the seed files were only in memory) and
+      fails its `seed` step.
+
+  ## Still not here
+
+  The numbering filter of K§3.4 item 3 (`stream_gap`): a gap in the kubelet's rotated log
+  is not detected, only unlikely (a controller outage straddling a rotation).
 
   ## Messages out
 
@@ -75,6 +99,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   alias Arbiter.NodeAgent.K8s.ControllerConfig
   alias Arbiter.NodeAgent.K8s.Informer
   alias Arbiter.NodeAgent.K8s.Lease
+  alias Arbiter.NodeAgent.K8s.LogFollower
   alias Arbiter.NodeAgent.K8s.PodSpec
   alias Arbiter.NodeAgent.K8s.PodState
   alias Arbiter.NodeAgent.K8s.Quota
@@ -89,6 +114,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   @install_label "arbiter.dev/install"
   @node_label "arbiter.dev/node"
   @run_label "arbiter.dev/run"
+  @channel_annotation "arbiter.dev/channel"
   @deadline_slack_s 1800
   @default_tick_ms 5_000
   @default_protect_s 60
@@ -144,6 +170,21 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   @spec attach_all(GenServer.server(), [String.t()]) :: :ok
   def attach_all(controller \\ __MODULE__, skip \\ []),
     do: GenServer.call(controller, {:attach_all, skip})
+
+  @doc """
+  The primary acknowledged `run`'s output up to the opaque `cursor` (K15).
+  """
+  @spec ack(GenServer.server(), String.t(), String.t()) :: :ok
+  def ack(controller \\ __MODULE__, run, cursor) when is_binary(cursor),
+    do: GenServer.cast(controller, {:ack, run, cursor})
+
+  @doc """
+  `hello_ok`'s `stdout_cursors`: the cursor the primary last took for each run, applied by
+  the `attach_all/2` that follows (K15).
+  """
+  @spec resume(GenServer.server(), %{String.t() => String.t()}) :: :ok
+  def resume(controller \\ __MODULE__, cursors) when is_map(cursors),
+    do: GenServer.call(controller, {:resume, cursors})
 
   @doc """
   Say again what the primary may have missed for one run: the answer to an `assign` it
@@ -202,6 +243,10 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       protect_s: Keyword.get(opts, :protect_s, @default_protect_s),
       runs: %{},
+      logs: %{},
+      acked: %{},
+      uploads: %{},
+      attached?: false,
       reaping: MapSet.new(),
       quota: :unknown,
       synced?: false
@@ -252,24 +297,31 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   def handle_call({:exit_ack, run}, _from, state) do
     state =
       case Map.fetch(state.runs, run) do
-        {:ok, %{phase: :exited} = entry} -> cleanup_exited(state, %{entry | acked?: true})
-        _ -> state
+        {:ok, %{phase: :exited} = entry} ->
+          cleanup_exited(stop_follower(state, run), %{entry | acked?: true})
+
+        _ ->
+          state
       end
 
     {:reply, :ok, state}
   end
 
   def handle_call({:attach_all, skip}, _from, state) do
-    for {run, entry} <- state.runs, run not in skip, do: announce(state, entry)
+    state = %{state | attached?: true}
+    state = Enum.reduce(state.runs, state, &reattach_run(&1, &2, skip))
     announce_node(state)
     {:reply, :ok, state}
   end
+
+  def handle_call({:resume, cursors}, _from, state),
+    do: {:reply, :ok, %{state | acked: Map.merge(state.acked, cursors)}}
 
   def handle_call({:attach, run}, _from, state) do
     case Map.fetch(state.runs, run) do
       {:ok, entry} ->
         announce(state, entry)
-        {:reply, :ok, state}
+        {:reply, :ok, attach_follower(state, entry)}
 
       :error ->
         {:reply, {:error, :not_found}, state}
@@ -297,8 +349,43 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   def handle_call(:tick, _from, state), do: {:reply, :ok, housekeeping(state)}
 
   @impl true
+  def handle_cast({:ack, run, cursor}, state) do
+    case state.logs do
+      %{^run => %{pid: pid}} -> LogFollower.ack(pid, cursor)
+      _ -> :ok
+    end
+
+    {:noreply, %{state | acked: Map.put(state.acked, run, cursor)}}
+  end
+
+  @impl true
   def handle_info({:pod_event, _informer, type, pod}, state),
     do: {:noreply, on_pod_event(type, pod, state)}
+
+  # K15: the follower has the whole tail; the exit may go out now.
+  def handle_info({:log_drained, run, cursor}, state) do
+    state =
+      case state.logs do
+        %{^run => log} ->
+          %{state | logs: Map.put(state.logs, run, %{log | drained?: true, position: cursor})}
+
+        _ ->
+          state
+      end
+
+    {:noreply, reevaluate(state, run)}
+  end
+
+  # K15: the pod channel forwarded a checkpoint (or failed to); the last one is the exit's.
+  def handle_info({:pod_channel_upload, run, :checkpoint, result}, state),
+    do: {:noreply, reevaluate(%{state | uploads: Map.put(state.uploads, run, result)}, run)}
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Enum.find(state.logs, fn {_run, log} -> log.ref == ref end) do
+      {run, _log} -> {:noreply, %{state | logs: Map.delete(state.logs, run)}}
+      nil -> {:noreply, state}
+    end
+  end
 
   def handle_info({:pod_synced, _informer}, state), do: {:noreply, %{state | synced?: true}}
 
@@ -382,7 +469,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
     with {:ok, nonce} <- register(state, run_spec, deadline),
          {:ok, pod} <- build(state, config, run_spec, nonce),
-         {:ok, created} <- create_pod(state, pod) do
+         {:ok, created} <- create_pod(state, annotate(state, pod, run_spec.run)) do
       {:ok, state, new_entry(run_spec.run, created, now)}
     else
       {:error, reason} ->
@@ -415,6 +502,24 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
       {:error, {:bad_config, reason}} ->
         {:error, {:refuse, :bad_spec, "config: #{inspect(reason)}"}}
+    end
+  end
+
+  # K15: the public facts of the run's pod-channel entry travel on the pod, so a controller
+  # that restarts can rebuild them when it adopts the pod.
+  defp annotate(state, pod, run) do
+    {mod, server} = state.channel
+
+    case mod.channel_record(server, run) do
+      {:ok, record} ->
+        Map.update!(pod, "metadata", fn meta ->
+          Map.update(meta, "annotations", %{@channel_annotation => Jason.encode!(record)}, fn a ->
+            Map.put(a, @channel_annotation, Jason.encode!(record))
+          end)
+        end)
+
+      {:error, _} ->
+        pod
     end
   end
 
@@ -465,7 +570,8 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       last_pod: pod,
       bound_ip: nil,
       refusal: nil,
-      registered?: true
+      registered?: true,
+      holding: nil
     }
   end
 
@@ -526,12 +632,43 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     now = state.now_fun.()
     entry = new_entry(run, pod, now)
 
-    %{
+    entry = %{
       entry
       | assigned_at: nil,
         created_at: parse_time(pod["metadata"]["creationTimestamp"]) || now,
         registered?: false
     }
+
+    restore_channel(entry, pod, state)
+  end
+
+  # K15: the pod channel's table was lost with the old controller; the record on the pod
+  # (the public facts, written at `assign`) puts a live pod's entry back, so its bridges work
+  # once its IP is bound. Anything short of that leaves the pod adopted, its bridges down.
+  defp restore_channel(entry, pod, state) do
+    with json when is_binary(json) <-
+           get_in(pod, ["metadata", "annotations", @channel_annotation]),
+         {:ok, record} <- Jason.decode(json),
+         true <- live_pod?(pod, state),
+         {mod, server} = state.channel,
+         {:ok, _} <- mod.adopt(server, entry.run, record) do
+      %{entry | registered?: true}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "k8s controller: pod channel entry of #{entry.run} not restored: #{inspect(reason, limit: 5)}"
+        )
+
+        entry
+
+      _ ->
+        entry
+    end
+  end
+
+  defp live_pod?(pod, state) do
+    {tag, _} = PodState.observe(pod, observe_opts(state, current_config(state)))
+    tag in [:pending, :starting, :running, :terminating]
   end
 
   defp observe_pod(entry, pod, state) do
@@ -563,7 +700,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   end
 
   defp pod_gone(entry, ps, pod, state, config) do
-    {entry, state} = apply_state(%{entry | last_pod: pod}, ps, state, config)
+    {entry, state} = apply_state(%{entry | last_pod: pod}, ps, state, config, false)
     mark_gone(entry, state)
   end
 
@@ -587,16 +724,18 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   defp drop(state, entry) do
     release(state, entry.run)
-    %{state | runs: Map.delete(state.runs, entry.run)}
+    %{stop_follower(state, entry.run) | runs: Map.delete(state.runs, entry.run)}
   end
 
   # --- state transitions ----------------------------------------------------------
 
   # Once a run's outcome is out (or it was refused) the pod's later states change nothing.
-  defp apply_state(%{phase: phase} = entry, _ps, state, _config) when phase != :live,
+  defp apply_state(entry, ps, state, config, hold? \\ true)
+
+  defp apply_state(%{phase: phase} = entry, _ps, state, _config, _hold?) when phase != :live,
     do: {entry, state}
 
-  defp apply_state(entry, {:pending, info} = ps, state, config) do
+  defp apply_state(entry, {:pending, info} = ps, state, config, _hold?) do
     entry = %{entry | state: :pending, detail: info}
 
     if unschedulable_for_too_long?(entry, info, state, config) do
@@ -607,30 +746,29 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     end
   end
 
-  defp apply_state(entry, {:starting, info}, state, _config),
+  defp apply_state(entry, {:starting, info}, state, _config, _hold?),
     do: {%{entry | state: :starting, detail: info}, state}
 
-  defp apply_state(entry, {:running, _}, state, _config) do
+  defp apply_state(entry, {:running, _}, state, _config, _hold?) do
     entry = %{entry | state: :running, detail: %{}}
 
     if entry.ready_sent? do
       {entry, state}
     else
       push(state, entry.run, "run.ready", RunReport.ready(entry))
-      {%{entry | ready_sent?: true}, state}
+      entry = %{entry | ready_sent?: true}
+      {entry, ensure_follower(state, entry, false)}
     end
   end
 
-  defp apply_state(entry, {:terminating, _}, state, _config),
+  # A holding run keeps the state it had: terminating.
+  defp apply_state(entry, {:terminating, _}, state, _config, _hold?),
     do: {%{entry | state: :terminating}, state}
 
-  defp apply_state(entry, {:exit, _} = ps, state, _config),
-    do: finish_exit(entry, RunReport.exit(entry, ps), state)
+  defp apply_state(entry, {tag, _} = ps, state, _config, hold?) when tag in [:exit, :interrupted],
+    do: settle(entry, ps, state, hold?)
 
-  defp apply_state(entry, {:interrupted, _} = ps, state, _config),
-    do: finish_exit(entry, RunReport.exit(entry, ps), state)
-
-  defp apply_state(entry, {:refuse, info}, state, _config),
+  defp apply_state(entry, {:refuse, info}, state, _config, _hold?),
     do: refuse(entry, info.reason, info.detail, state)
 
   defp unschedulable_for_too_long?(_entry, _info, _state, nil), do: false
@@ -646,7 +784,51 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   defp schedule_detail(_info, config),
     do: "the pod was not scheduled within #{config.timeouts["schedule_s"]}s"
 
+  # The worker's pod has an outcome. It is reported once the final checkpoint has been
+  # forwarded (the snapshotter ended) and the log tail is in the stream (K§10.3), or `grace_s`
+  # after waiting began; a pod that is gone (`hold?` false) or whose worker never ran is not
+  # waited for.
+  defp settle(entry, ps, state, hold?) do
+    state = if worker_ran?(ps), do: ensure_follower(state, entry, true), else: state
+
+    if hold?(entry, ps, state, hold?) do
+      {%{entry | state: :terminating, holding: entry.holding || state.now_fun.()}, state}
+    else
+      finish_exit(entry, RunReport.exit(entry, ps), state)
+    end
+  end
+
+  defp worker_ran?({:exit, %{reason: :init_failed}}), do: false
+  defp worker_ran?(_ps), do: true
+
+  defp hold?(_entry, _ps, _state, false), do: false
+
+  defp hold?(entry, ps, state, true) do
+    cond do
+      not worker_ran?(ps) -> false
+      hold_expired?(entry, state) -> false
+      true -> PodState.snapshotter_pending?(entry.last_pod) or undrained?(state, entry)
+    end
+  end
+
+  defp hold_expired?(%{holding: %DateTime{} = since}, state),
+    do: DateTime.diff(state.now_fun.(), since) >= grace_s(state)
+
+  defp hold_expired?(_entry, _state), do: false
+
+  # No follower: one that could not start yet (an adopted run before the first attach) is
+  # still to come; otherwise there is no log to wait for.
+  defp undrained?(state, entry) do
+    case state.logs do
+      %{} = logs when is_map_key(logs, entry.run) -> not logs[entry.run].drained?
+      _ -> not follow_now?(state, entry)
+    end
+  end
+
   defp finish_exit(entry, payload, state) do
+    payload =
+      payload |> Map.merge(stdout_end(state, entry)) |> put_checkout(state.uploads[entry.run])
+
     push(state, entry.run, "exit", payload)
     release(state, entry.run)
 
@@ -657,6 +839,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   defp refuse(entry, reason, detail, state) do
     push(state, entry.run, "run.refused", RunReport.refused(entry.run, reason, detail))
     release(state, entry.run)
+    state = stop_follower(state, entry.run)
     entry = %{entry | phase: :refused, state: :refused, refusal: {reason, detail}}
     {delete_pod(state, entry, 0), state}
   end
@@ -674,6 +857,138 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   end
 
   defp bind_ip(entry, _pod, state), do: {entry, state}
+
+  # --- the log follower and the end of the stream (K15) -------------------------------
+
+  # The worker ran, or may have: a follower reads its log from the primary's cursor. With
+  # `final?` the worker has ended: the follower drains the tail and reports `:log_drained`.
+  defp ensure_follower(state, entry, final?) do
+    case state.logs do
+      %{} = logs when is_map_key(logs, entry.run) ->
+        if final?, do: LogFollower.finish(logs[entry.run].pid)
+        state
+
+      _ ->
+        if follow_now?(state, entry), do: start_follower(state, entry, final?), else: state
+    end
+  end
+
+  # A run this process assigned has no earlier cursor; an adopted one waits for the first
+  # `attach_all/2`, which is when the primary says where it stands.
+  defp follow_now?(state, entry), do: entry.assigned_at != nil or state.attached?
+
+  defp start_follower(state, entry, final?) do
+    sink_state = %{sink: state.sink}
+    cursor = state.acked[entry.run]
+
+    {:ok, pid} =
+      LogFollower.start(
+        run: entry.run,
+        pod: entry.pod,
+        client: state.client,
+        owner: self(),
+        cursor: cursor,
+        emit: fn frame -> push(sink_state, entry.run, "stdout", {:binary, frame}) end
+      )
+
+    if final?, do: LogFollower.finish(pid)
+    log = %{pid: pid, ref: Process.monitor(pid), drained?: false, position: cursor}
+    %{state | logs: Map.put(state.logs, entry.run, log)}
+  end
+
+  defp stop_follower(state, run) do
+    case Map.pop(state.logs, run) do
+      {%{pid: pid, ref: ref}, logs} ->
+        Process.demonitor(ref, [:flush])
+        LogFollower.stop(pid)
+
+        %{
+          state
+          | logs: logs,
+            acked: Map.delete(state.acked, run),
+            uploads: Map.delete(state.uploads, run)
+        }
+
+      {nil, _} ->
+        %{state | acked: Map.delete(state.acked, run), uploads: Map.delete(state.uploads, run)}
+    end
+  end
+
+  # Whether a run's output is still the primary's to receive.
+  defp wants_follower?(%{phase: :live, holding: %DateTime{}}), do: true
+  defp wants_follower?(%{phase: :live, ready_sent?: ready?}), do: ready?
+  defp wants_follower?(%{phase: :exited, acked?: false}), do: true
+  defp wants_follower?(_entry), do: false
+
+  # The channel is up: a follower resends what the primary lacks (it is told what the primary
+  # holds); a run without one gets one, from the primary's cursor.
+  defp attach_follower(state, %{run: run} = entry) do
+    case state.logs do
+      %{^run => %{pid: pid}} ->
+        LogFollower.attach(pid, state.acked[run])
+        state
+
+      _ ->
+        if wants_follower?(entry),
+          do: start_follower(state, entry, entry.phase == :exited or entry.holding != nil),
+          else: state
+    end
+  end
+
+  defp reattach_run({run, entry}, state, skip) do
+    if run in skip do
+      state
+    else
+      announce(state, entry)
+      # the primary could not have heard the exit before: the wait for it begins again
+      entry = if entry.holding, do: %{entry | holding: state.now_fun.()}, else: entry
+      state |> put_entry(entry) |> attach_follower(entry)
+    end
+  end
+
+  # The run's pod has not changed, but something the verdict waits on has.
+  defp reevaluate(state, run) do
+    case state.runs do
+      %{^run => %{phase: :live, last_pod: pod} = entry} when is_map(pod) ->
+        config = current_config(state)
+        ps = PodState.observe(pod, observe_opts(state, config))
+        {entry, state} = apply_state(entry, ps, state, config)
+        put_entry(state, entry)
+
+      _ ->
+        state
+    end
+  end
+
+  # How the stream ended, for `exit`: the cursor of its last frame, or `size: 0` for a run
+  # that never wrote (the primary completes a stream on either).
+  defp stdout_end(state, entry) do
+    case last_cursor(state, entry.run) do
+      nil -> %{"size" => 0}
+      cursor -> %{"cursor" => cursor}
+    end
+  end
+
+  defp last_cursor(state, run) do
+    case state.logs do
+      %{^run => %{drained?: true, position: position}} -> position
+      %{^run => %{pid: pid, position: position}} -> live_position(pid, position)
+      _ -> state.acked[run]
+    end
+  end
+
+  defp live_position(pid, fallback) do
+    LogFollower.position(pid)
+  catch
+    :exit, _ -> fallback
+  end
+
+  defp put_checkout(payload, nil), do: payload
+  defp put_checkout(payload, {:ok, _}), do: Map.put(payload, "checkout", "ok")
+
+  defp put_checkout(payload, {:error, reason}),
+    do:
+      Map.put(payload, "checkout", "failed: " <> inspect(reason, limit: 5, printable_limit: 200))
 
   # --- deleting pods -------------------------------------------------------------
 
@@ -761,7 +1076,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     release(state, run)
 
     %{
-      state
+      stop_follower(state, run)
       | runs: Map.delete(state.runs, run),
         reaping: if(uid, do: MapSet.put(state.reaping, uid), else: state.reaping)
     }
@@ -805,11 +1120,21 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       end
 
     state = put_entry(state, entry)
+    state = maybe_follow(state, entry)
     entry = retry_delete(state, entry)
     state = put_entry(state, entry)
 
     if entry.phase == :exited and entry.acked?, do: cleanup_exited(state, entry), else: state
   end
+
+  # A follower that died is started again from the primary's cursor.
+  defp maybe_follow(state, %{phase: :live} = entry) do
+    if wants_follower?(entry) and not Map.has_key?(state.logs, entry.run),
+      do: ensure_follower(state, entry, entry.holding != nil),
+      else: state
+  end
+
+  defp maybe_follow(state, _entry), do: state
 
   defp retry_delete(state, %{retry_delete: grace} = entry) when is_integer(grace) do
     if leader?(state) or entry.cancelled, do: delete_pod(state, entry, grace), else: entry

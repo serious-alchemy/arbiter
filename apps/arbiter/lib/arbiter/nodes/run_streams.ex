@@ -266,6 +266,20 @@ defmodule Arbiter.Nodes.RunStreams do
     |> finish_if_complete(run)
   end
 
+  @doc """
+  The last opaque cursor taken for each run whose stream is still open (`hello_ok`'s
+  `stdout_cursors`). A node that lost its own record of what the primary holds (a cluster
+  controller that restarted, or a connection that dropped acks) resumes its stream after it
+  instead of replaying lines the owner already has.
+  """
+  @spec cursors(t()) :: %{String.t() => String.t()}
+  def cursors(%__MODULE__{streams: streams}) do
+    for {run, %{cursor: cursor, state: state}} <- streams,
+        is_binary(cursor) and state != :done,
+        into: %{},
+        do: {run, cursor}
+  end
+
   @spec exit(t(), String.t(), map()) :: {t(), [effect()]}
   def exit(table, run, payload) do
     update(table, run, fn

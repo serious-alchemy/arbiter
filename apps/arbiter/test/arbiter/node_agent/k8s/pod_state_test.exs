@@ -438,6 +438,21 @@ defmodule Arbiter.NodeAgent.K8s.PodStateTest do
     end
   end
 
+  describe "snapshotter_pending?/1 (K15)" do
+    test "true only while the snapshotter is running" do
+      assert PodState.snapshotter_pending?(exited_with([running("snapshotter")]))
+
+      refute PodState.snapshotter_pending?(
+               exited_with([terminated("snapshotter", 0, "Completed")])
+             )
+
+      refute PodState.snapshotter_pending?(exited_with([terminated("snapshotter", 137, "Error")]))
+      # no status for it at all (a pod without one): nothing to wait for
+      refute PodState.snapshotter_pending?(exited_with([]))
+      refute PodState.snapshotter_pending?(%{})
+    end
+  end
+
   describe "service sidecars (K1-A7)" do
     test "worker running while a sidecar is terminated with exit 1 -> still running" do
       pod =

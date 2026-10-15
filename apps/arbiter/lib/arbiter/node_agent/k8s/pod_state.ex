@@ -311,6 +311,17 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
     end)
   end
 
+  @doc """
+  Whether the pod's `snapshotter` is still running, i.e. (once the worker has ended) taking
+  and forwarding the final checkpoint. The controller holds `exit` while it is (K§10.3).
+  A pod with no status for it has nothing to wait for.
+  """
+  @spec snapshotter_pending?(map() | nil) :: boolean()
+  def snapshotter_pending?(%{"status" => %{"initContainerStatuses" => statuses}}),
+    do: match?({:running, _}, container_state(statuses, @snapshotter))
+
+  def snapshotter_pending?(_pod), do: false
+
   # What the snapshotter sidecar did with the final snapshot (K1-A7).
   defp snapshot(status) do
     case container_state(status["initContainerStatuses"], @snapshotter) do

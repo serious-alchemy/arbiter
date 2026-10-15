@@ -22,7 +22,21 @@ defmodule Arbiter.Test.FakePodChannel do
     end)
   end
 
+  @doc "The public record a restarted controller adopts the run from (opaque to the controller)."
+  def channel_record(_server, run), do: {:ok, %{"fake" => "record", "run" => run}}
+
+  def adopt(server, run, record) do
+    Agent.get_and_update(server, fn state ->
+      state = %{state | calls: [{:adopt, run, record} | state.calls]}
+      {Map.get(state, :adopt_result, {:ok, :adopted}), state}
+    end)
+  end
+
+  @doc "Makes the next `adopt/3` calls answer `result`."
+  def adopt_answers(server, result), do: Agent.update(server, &Map.put(&1, :adopt_result, result))
+
   def bind_pod_ip(server, run, ip) do
+
     Agent.update(server, &%{&1 | calls: [{:bind, run, ip} | &1.calls]})
   end
 

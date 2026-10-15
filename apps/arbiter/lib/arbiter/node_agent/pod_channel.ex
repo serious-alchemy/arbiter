@@ -87,6 +87,17 @@ defmodule Arbiter.NodeAgent.PodChannel do
   @spec bind_pod_ip(String.t(), :inet.ip_address()) :: :ok
   defdelegate bind_pod_ip(run, ip), to: Runs
 
+  @doc """
+  The public facts of `run` (bridge names, leaf fingerprints, deadline) that the controller
+  writes on its pod, so a restarted controller can `adopt/2` the run (K15).
+  """
+  @spec channel_record(String.t()) :: {:ok, map()} | {:error, :unknown_run}
+  defdelegate channel_record(run), to: Runs
+
+  @doc "Rebuild a run's entry from the pod's record after a controller restart (K15)."
+  @spec adopt(String.t(), term()) :: {:ok, :adopted | :present} | {:error, atom()}
+  defdelegate adopt(run, record), to: Runs
+
   @doc "The run is over: its leaves stop working at once and its nonce is gone."
   @spec release(String.t()) :: :ok
   defdelegate release(run), to: Runs
