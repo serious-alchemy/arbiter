@@ -37,7 +37,7 @@ defmodule Arbiter.NodeAgent.K8s.LogFollowerTest do
   end
 
   defp frame! do
-    assert_receive {:frame, frame}
+    assert_receive {:frame, frame}, 2_000
     assert {:ok, @run, {:cursor, cursor}, bytes} = StdoutFrame.decode(frame)
     {cursor, bytes}
   end

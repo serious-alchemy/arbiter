@@ -277,10 +277,15 @@ maps `Controller.report/1` onto the cluster `hello`/`hb` (`kind: cluster`, `capa
 needs (`ARB_POD_IP`, `ARB_NODE_IP` from the downward API;
 `Canary.targets_from_env/1`).
 
-Still not in the tree (the design's K§3.4, K§10.3 and K17): the `pods/log` follower
-that streams a worker's output to the primary, holding `exit` until the final
-checkpoint is uploaded, and run adoption across a primary restart. None of it has run
-against a real cluster yet: everything above is tested against a fake API server.
+A cluster run's output reaches the primary through the controller's `pods/log` follower,
+its `exit` waits for the pod's snapshotter (the final checkpoint) and the log tail (for at
+most `grace_s`), and a restarted controller adopts the running pods again with their pod
+channel (K15, `docs/design/remote-workers.md`). A pod that had not fetched its `/boot` when
+the old controller went away cannot be served it by the new one and fails its `seed` step.
+
+Still not in the tree (the design's K17): run adoption across a primary restart, and a
+run of any of it against a real cluster: everything above is tested against a fake API
+server.
 
 Two probes depend on what the controller can learn: `foreign` uses the cluster DNS
 Service from `/etc/resolv.conf` (a Service in another namespace, backed by pods there)
