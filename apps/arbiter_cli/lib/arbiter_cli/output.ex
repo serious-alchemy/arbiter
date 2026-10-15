@@ -464,7 +464,13 @@ defmodule ArbiterCli.Output do
   defp merge_status_label(_), do: nil
 
   defp current_run_label(%{} = run) do
-    phase = if run["phase"] in [nil, ""], do: "", else: "  phase=#{run["phase"]}"
+    phase =
+      cond do
+        is_binary(run["ci_wait_label"]) -> "  #{run["ci_wait_label"]}"
+        run["phase"] in [nil, ""] -> ""
+        true -> "  phase=#{run["phase"]}"
+      end
+
     RunLabel.label(run) <> phase <> RunLabel.node_suffix(run) <> RunLabel.run_suffix(run)
   end
 

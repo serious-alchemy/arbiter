@@ -665,7 +665,14 @@ defmodule Arbiter.Worker.ReviewCi do
   projections (`Arbiter.Tasks.Lifecycle.View`, `Arbiter.Tasks.SlotGate`).
   """
   @spec waiting(map() | nil, DateTime.t()) ::
-          %{sha: String.t(), since: String.t() | nil, round: term()} | nil
+          %{
+            sha: String.t(),
+            since: String.t() | nil,
+            round: term(),
+            polls: non_neg_integer() | nil,
+            max_polls: pos_integer() | nil
+          }
+          | nil
   def waiting(ticket, now \\ DateTime.utc_now())
 
   def waiting(%{review_gate_state: %{"ci_wait" => %{"sha" => sha} = wait}}, now)
@@ -673,7 +680,13 @@ defmodule Arbiter.Worker.ReviewCi do
     case DateTime.from_iso8601(to_string(Map.get(wait, "expires_at"))) do
       {:ok, expires, _} ->
         if DateTime.compare(now, expires) == :lt,
-          do: %{sha: sha, since: Map.get(wait, "since"), round: Map.get(wait, "round")},
+          do: %{
+            sha: sha,
+            since: Map.get(wait, "since"),
+            round: Map.get(wait, "round"),
+            polls: Map.get(wait, "polls"),
+            max_polls: Map.get(wait, "max_polls")
+          },
           else: nil
 
       _ ->
@@ -686,6 +699,24 @@ defmodule Arbiter.Worker.ReviewCi do
   @doc "The label a surface renders for a wait: `waiting on CI <short sha>`."
   @spec wait_label(%{sha: String.t()}) :: String.t()
   def wait_label(%{sha: sha}), do: "waiting on CI " <> String.slice(sha, 0, 12)
+
+  @doc """
+  The label `worker show` / `prime` render for a gate in the CI wait:
+  `awaiting CI on <short sha> (poll n/max)`. The poll part is left off for a
+  marker written before it carried the count.
+  """
+  @spec progress_label(%{sha: String.t()}) :: String.t()
+  def progress_label(%{sha: sha} = wait) do
+    base = "awaiting CI on " <> String.slice(sha, 0, 8)
+
+    case wait do
+      %{polls: polls, max_polls: max} when is_integer(polls) and is_integer(max) ->
+        "#{base} (poll #{polls}/#{max})"
+
+      _ ->
+        base
+    end
+  end
 
   @doc "The reason string recorded when the gate falls back to a reviewer-run suite."
   @spec fallback_note(String.t()) :: String.t()

@@ -450,8 +450,17 @@ defmodule Arbiter.Board.Drain do
     end
   end
 
-  defp in_flight_entry(pid, [ReviewGate], keys),
-    do: entry(:review_gate, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)
+  # A gate is not registered under a task-keyed registry entry, so the key alone
+  # left `task_id` null (bd-3726k8); the gate's own snapshot knows its task.
+  defp in_flight_entry(pid, [ReviewGate], keys) do
+    task_id =
+      case snapshot(pid) do
+        %{task_id: id} when is_binary(id) -> id
+        _ -> key_task_id(keys, pid)
+      end
+
+    entry(:review_gate, task_id, keys[pid], nil, nil, nil, pid)
+  end
 
   defp in_flight_entry(pid, [Driver], keys),
     do: entry(:driver, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)

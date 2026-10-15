@@ -430,6 +430,28 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "Fix the thing"
     end
 
+    # bd-3726k8
+    test "a worker in the CI wait is listed as awaiting CI, not as a hung gate" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [
+          %{
+            "task_id" => "bd-001",
+            "status" => "waiting",
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "workspace_id" => "ws-1",
+            "ci_wait_label" => "awaiting CI on 210c215f (poll 7/30)"
+          }
+        ],
+        []
+      )
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      assert out =~ "bd-001"
+      assert out =~ "awaiting CI on 210c215f (poll 7/30)"
+    end
+
     # bd-1uu19b AC7: a ReviewGate reviewer's worker carries no workspace of its
     # own; the server reports its run under the ticket's workspace, so the
     # active-workers section lists it — labelled with its kind and state.

@@ -117,6 +117,7 @@ defmodule Arbiter.Workers.Serializer do
       :node_name,
       :phase,
       :phase_label,
+      :ci_wait_label,
       :started_at,
       :completed_at,
       :failure_reason
@@ -180,6 +181,8 @@ defmodule Arbiter.Workers.Serializer do
       phase_label: Phase.label(Map.get(view, :phase)),
       # bd-6omte4: the dispatch the quota gate is holding for the ticket.
       held: DispatchQueue.serialize_held(Map.get(view, :held)),
+      # bd-3726k8: "awaiting CI on <sha> (poll n/max)" while the ReviewGate waits on CI.
+      ci_wait_label: Map.get(view, :ci_wait_label),
       agent_live: Map.get(view, :agent_live),
       started_at: iso(Map.get(view, :started_at)),
       completed_at: iso(Map.get(view, :completed_at)),

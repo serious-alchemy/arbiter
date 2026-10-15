@@ -598,7 +598,7 @@ defmodule ArbiterCli.Cmd.Prime do
           else: "step=#{p["current_step"]}"
 
       IO.puts(
-        "  #{p["task_id"]}  #{RunLabel.label(p)}  #{step}  repo=#{p["repo"]}" <>
+        "  #{p["task_id"]}  #{RunLabel.label(p)}#{ci_wait_part(p)}  #{step}  repo=#{p["repo"]}" <>
           RunLabel.node_suffix(p) <> RunLabel.run_suffix(p)
       )
     end)
@@ -608,6 +608,10 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Active #{worker}s ==")
     IO.puts("  (error: #{msg})")
   end
+
+  # bd-3726k8: a gate in the CI wait is not a hung one.
+  defp ci_wait_part(%{"ci_wait_label" => label}) when is_binary(label), do: "  [#{label}]"
+  defp ci_wait_part(_row), do: ""
 
   # ---- the lifecycle sections (bd-6fkgvo) --------------------------------
 
