@@ -156,8 +156,7 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
 
       test "writes an event when an outcome changes, and only then" do
         mode = unquote(mode)
-        {:ok, boards} = Agent.start_link(fn -> board(nil, "bd-2", []) end)
-        on_exit(fn -> if Process.alive?(boards), do: Agent.stop(boards) end)
+        boards = start_supervised!({Agent, fn -> board(nil, "bd-2", []) end})
 
         pid = start(mode, fn _ -> Agent.get(boards, & &1) end)
 
@@ -212,8 +211,7 @@ defmodule Arbiter.Board.AutopilotAdmissionTest do
   end
 
   test "switching back to legacy forgets the last signature" do
-    {:ok, mode} = Agent.start_link(fn -> :shadow end)
-    on_exit(fn -> if Process.alive?(mode), do: Agent.stop(mode) end)
+    mode = start_supervised!({Agent, fn -> :shadow end})
 
     pid =
       start(:shadow, fn _ -> board(nil, "bd-2", []) end,

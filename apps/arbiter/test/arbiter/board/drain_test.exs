@@ -53,8 +53,13 @@ defmodule Arbiter.Board.DrainTest do
 
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
 
+    # Tolerate a server the exiting test process is already shutting down.
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
     end)
 
     pid
