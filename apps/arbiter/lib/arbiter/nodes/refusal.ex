@@ -4,11 +4,13 @@ defmodule Arbiter.Nodes.Refusal do
   §16 amendment A3, K12).
 
   A cluster node answers an `assign` with `refuse{no_capacity | unschedulable |
-  image_unavailable | bad_spec}` when it cannot start the run: its own admission said no
-  (`no_capacity`), the scheduler could not place the pod within `schedule_s`
-  (`unschedulable`), the digest-pinned image is not pullable (`image_unavailable`), or the
-  spec has a field the pod builder cannot represent (`bad_spec`). In every case the run
-  never started, so nothing about the task or the agent failed.
+  image_unavailable | bad_spec | service_not_ready}` when it cannot start the run: its own
+  admission said no (`no_capacity`), the scheduler could not place the pod within
+  `schedule_s` (`unschedulable`), the digest-pinned image is not pullable
+  (`image_unavailable`), the spec has a field the pod builder cannot represent
+  (`bad_spec`), or a test-service sidecar crash-looped past its ready timeout before the
+  worker started (`service_not_ready`, K§3.3; K14). In every case the run never started, so
+  nothing about the task or the agent failed.
 
   `Arbiter.Worker.Dispatch` sends such a spawn error here. `hold/4`
 
@@ -31,7 +33,7 @@ defmodule Arbiter.Nodes.Refusal do
   alias Arbiter.Worker
   alias Arbiter.Worker.StopReason
 
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec)
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready)
 
   @type refusal :: %{reason: String.t(), detail: String.t() | nil}
 
@@ -78,6 +80,7 @@ defmodule Arbiter.Nodes.Refusal do
   defp phrase("unschedulable"), do: "the cluster could not schedule it in time"
   defp phrase("image_unavailable"), do: "its image is not available to the node"
   defp phrase("bad_spec"), do: "the node cannot represent its spec"
+  defp phrase("service_not_ready"), do: "a test service never became ready"
 
   defp detail_suffix(%{detail: d}) when is_binary(d) and d != "", do: ": " <> d
   defp detail_suffix(_), do: ""

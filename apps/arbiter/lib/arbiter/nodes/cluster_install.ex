@@ -9,6 +9,8 @@ defmodule Arbiter.Nodes.ClusterInstall do
       join-Secret command and the controller image.
     * `set_image_command/2` — the exact `kubectl set image` an `outdated` cluster node
       needs when its Role cannot patch its own Deployment.
+    * `controller_facts/1` — what the enrolled controller itself asks for at boot
+      (`GET /nodes/cluster`, K14): the install id, the registry, the canary's image.
 
   Nothing here handles a secret. The join token is never part of a URL or a command: the
   Secret command reads it from the operator's terminal (`read -rs`), so it stays out of
@@ -17,7 +19,9 @@ defmodule Arbiter.Nodes.ClusterInstall do
 
   alias Arbiter.NodeAgent.K8s.InstallManifest
   alias Arbiter.Nodes.Agent
+  alias Arbiter.Nodes.InstallId
   alias Arbiter.Settings
+  alias Arbiter.Worker.Image.Publisher
 
   @form_keys ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade api_cidrs cluster_cidrs)
 
@@ -70,6 +74,51 @@ defmodule Arbiter.Nodes.ClusterInstall do
 
   defp present(value, _error) when is_binary(value) and value != "", do: {:ok, value}
   defp present(_value, error), do: {:error, error}
+
+  @doc """
+  What a cluster controller asks for at every boot (`GET /nodes/cluster`, K14), before it
+  can label, build or watch a pod:
+
+    * `install_id` — `Arbiter.Nodes.InstallId`: the `arbiter.dev/install` label of every
+      pod, and what a run spec's `install` and a `reap{install}` must match;
+    * `registry` — `nodes.registry`: the prefix the pod builder pins every image under;
+    * `canary_image` — the image the NetworkPolicy canary runs: the worker image published
+      since boot when there is one, else the controller image (both digest-pinned and under
+      `registry`), `nil` while neither exists. The controller image is always the fallback
+      because the primary publishes it at every boot, before any run needs a worker image,
+      so a fresh install does not wait on a remote run to prove its network policy.
+
+  Options: `:published` (the publisher's list, a seam for tests).
+  """
+  @spec controller_facts(keyword()) :: %{
+          install_id: String.t(),
+          registry: String.t() | nil,
+          canary_image: String.t() | nil
+        }
+  def controller_facts(opts \\ []) do
+    registry = Settings.nodes_registry()
+    published = Keyword.get_lazy(opts, :published, &Publisher.published/0)
+
+    %{
+      install_id: InstallId.get(),
+      registry: registry,
+      canary_image: canary_image(published, registry)
+    }
+  end
+
+  defp canary_image(_published, registry) when registry in [nil, ""], do: nil
+
+  defp canary_image(published, registry) do
+    Enum.find_value([:worker, :controller], fn kind ->
+      Enum.find_value(published, fn
+        %{kind: ^kind, ref: ref} when is_binary(ref) ->
+          if String.starts_with?(ref, registry <> "/"), do: ref
+
+        _ ->
+          nil
+      end)
+    end)
+  end
 
   @doc """
   The controller image for `version`, as `Arbiter.Worker.Image.Publisher` publishes it

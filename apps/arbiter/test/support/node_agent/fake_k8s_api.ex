@@ -25,6 +25,14 @@ defmodule Arbiter.Test.FakeK8sApi do
     * `GET`/`PUT` on a `coordination.k8s.io` `Lease` (`put_lease/2` pre-creates one,
       `lease/2` reads it back). A `PUT` carrying a stale `resourceVersion` is a 409,
       like the real server; there is no `POST`, the install pre-creates the Lease.
+
+  K14 adds what the node-agent boot reads and writes:
+
+    * `GET`/`PUT` on `secrets` and `configmaps` (`put_secret/2`, `put_config_map/2`
+      pre-create; `secret/2`, `config_map/2` read back). As with the Lease, a `PUT`
+      with a stale `resourceVersion` is a 409, one without is unconditional, and there
+      is no `POST`: the install's placeholders are the only objects the controller writes.
+    * `GET services/<name>` (`put_service/2`).
   """
 
   use GenServer
@@ -106,7 +114,7 @@ defmodule Arbiter.Test.FakeK8sApi do
   def expire_with(api, mode) when mode in [:event, :http],
     do: GenServer.call(api, {:expire_with, mode})
 
-  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log | :quota | :lease_get | :lease_update`) answer `status` (an integer, or `{code, message}`)."
+  @doc "Makes the next `count` requests of `kind` (`:list | :watch | :create | :delete | :log | :quota | :lease_get | :lease_update | :secret_get | :secret_update | :config_map_get | :config_map_update | :service_get`) answer `status` (an integer, or `{code, message}`)."
   def fail_next(api, kind, status, count \\ 1),
     do: GenServer.call(api, {:fail, kind, status, count})
 
@@ -124,6 +132,21 @@ defmodule Arbiter.Test.FakeK8sApi do
 
   @doc "The Lease `name` as the server holds it, or nil."
   def lease(api, name), do: GenServer.call(api, {:get_lease, name})
+
+  @doc "Pre-creates (or replaces) a Secret by `metadata.name`; the server owns its resourceVersion."
+  def put_secret(api, secret), do: GenServer.call(api, {:put_object, :secret, secret})
+
+  @doc "The Secret `name` as the server holds it, or nil."
+  def secret(api, name), do: GenServer.call(api, {:get_object, :secret, name})
+
+  @doc "Pre-creates (or replaces) a ConfigMap by `metadata.name`."
+  def put_config_map(api, cm), do: GenServer.call(api, {:put_object, :config_map, cm})
+
+  @doc "The ConfigMap `name` as the server holds it, or nil."
+  def config_map(api, name), do: GenServer.call(api, {:get_object, :config_map, name})
+
+  @doc "Creates (or replaces) a Service by `metadata.name`."
+  def put_service(api, service), do: GenServer.call(api, {:put_object, :service, service})
 
   @doc """
   Sets the instant `GET /version` reports in its `Date` header (K13 clock check).
@@ -182,6 +205,7 @@ defmodule Arbiter.Test.FakeK8sApi do
        quotas: %{},
        leases: %{},
        deployments: %{},
+       objects: %{},
        followers: %{},
        finished: MapSet.new(),
        clock: nil,
@@ -380,6 +404,38 @@ defmodule Arbiter.Test.FakeK8sApi do
   end
 
   def handle_call({:get_lease, name}, _from, state), do: {:reply, state.leases[name], state}
+
+  def handle_call({:put_object, kind, object}, _from, state) do
+    name = get_in(object, ["metadata", "name"])
+    rv = state.rv + 1
+    object = put_in(object, ["metadata", "resourceVersion"], Integer.to_string(rv))
+    {:reply, object, %{state | rv: rv, objects: Map.put(state.objects, {kind, name}, object)}}
+  end
+
+  def handle_call({:get_object, kind, name}, _from, state),
+    do: {:reply, state.objects[{kind, name}], state}
+
+  # A PUT: never a create; a `resourceVersion` in the body is a precondition, none is an
+  # unconditional update (both as the real server does for Secrets and ConfigMaps).
+  def handle_call({:update_object, kind, name, object}, _from, state) do
+    case state.objects[{kind, name}] do
+      nil ->
+        {:reply, :not_found, state}
+
+      held ->
+        sent = get_in(object, ["metadata", "resourceVersion"])
+
+        if sent in [nil, get_in(held, ["metadata", "resourceVersion"])] do
+          rv = state.rv + 1
+          object = put_in(object, ["metadata", "resourceVersion"], Integer.to_string(rv))
+
+          {:reply, {:ok, object},
+           %{state | rv: rv, objects: Map.put(state.objects, {kind, name}, object)}}
+        else
+          {:reply, :conflict, state}
+        end
+    end
+  end
 
   def handle_call({:put_deployment, dep}, _from, state),
     do:
@@ -718,7 +774,44 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
     end
   end
 
+  defp route(
+         %{method: method, path_info: ["api", "v1", "namespaces", ns, resource, name]} = conn,
+         api,
+         ns,
+         body
+       )
+       when (resource in ["secrets", "configmaps"] and method in ["GET", "PUT"]) or
+              (resource == "services" and method == "GET") do
+    {kind, label} = object_kind(resource)
+    op = if method == "GET", do: :get, else: :update
+
+    with :ok <- check_fail(conn, api, fail_kind(kind, op)) do
+      reply =
+        case op do
+          :get -> FakeK8sApi.handle(api, {:get_object, kind, name}) || :not_found
+          :update -> FakeK8sApi.handle(api, {:update_object, kind, name, Jason.decode!(body)})
+        end
+
+      case reply do
+        :not_found -> status(conn, 404, "NotFound", ~s(#{label} "#{name}" not found))
+        :conflict -> status(conn, 409, "Conflict", "the object has been modified")
+        {:ok, object} -> json(conn, 200, object)
+        object -> json(conn, 200, object)
+      end
+    end
+  end
+
   defp route(conn, _api, _ns, _body), do: status(conn, 404, "NotFound", "no route")
+
+  defp object_kind("secrets"), do: {:secret, "secrets"}
+  defp object_kind("configmaps"), do: {:config_map, "configmaps"}
+  defp object_kind("services"), do: {:service, "services"}
+
+  defp fail_kind(:secret, :get), do: :secret_get
+  defp fail_kind(:secret, :update), do: :secret_update
+  defp fail_kind(:config_map, :get), do: :config_map_get
+  defp fail_kind(:config_map, :update), do: :config_map_update
+  defp fail_kind(:service, :get), do: :service_get
 
   # --- watch ----------------------------------------------------------------
 

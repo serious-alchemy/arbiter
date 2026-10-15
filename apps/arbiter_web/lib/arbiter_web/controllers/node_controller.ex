@@ -28,6 +28,9 @@ defmodule ArbiterWeb.NodeController do
     * `GET /nodes/agent/<version>.tar.gz` — the agent build the primary runs
       (`Arbiter.Nodes.Agent`), only for the version the enroll response named.
     * `GET /nodes/files/<sha256>` — the same bytes addressed by content hash.
+    * `GET /nodes/cluster` — a cluster controller's boot facts (K14): the install id,
+      `nodes.registry` and the canary's image
+      (`Arbiter.Nodes.ClusterInstall.controller_facts/1`). A machine node gets a 404.
   """
 
   use ArbiterWeb, :controller
@@ -341,6 +344,16 @@ defmodule ArbiterWeb.NodeController do
       :error -> send_shelved(conn, sha)
     end
   end
+
+  # K14: a cluster controller's boot facts (`ClusterInstall.controller_facts/1`). Only a
+  # cluster node is answered; a machine has no use for them.
+  def cluster(%Plug.Conn{assigns: %{current_node: %{kind: "cluster"}}} = conn, _params) do
+    conn
+    |> put_resp_header("cache-control", "no-store")
+    |> json(ClusterInstall.controller_facts())
+  end
+
+  def cluster(conn, _params), do: error(conn, 404, "Not a cluster node")
 
   # A file the primary published for a run (`Arbiter.Nodes.Files`: the provider
   # CLI and `arb`). The path comes from the primary's own shelf; the request

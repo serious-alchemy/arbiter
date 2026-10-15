@@ -75,4 +75,35 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
     assert ClusterInstall.image("r.example/a", "0.2.43+build/1") ==
              "r.example/a/controller:0.2.43_build_1"
   end
+
+  describe "controller_facts/1 (K14: GET /nodes/cluster)" do
+    @worker "registry.example.test/arbiter/worker@sha256:" <> String.duplicate("a", 64)
+    @controller "registry.example.test/arbiter/controller@sha256:" <> String.duplicate("b", 64)
+
+    test "names the install id and the registry" do
+      facts = ClusterInstall.controller_facts(published: [])
+
+      assert facts.install_id == Arbiter.Nodes.InstallId.get()
+      assert facts.registry == "registry.example.test/arbiter"
+      assert facts.canary_image == nil
+    end
+
+    test "the canary runs the published worker image, else the controller image" do
+      worker = %{kind: :worker, ref: @worker}
+      controller = %{kind: :controller, ref: @controller}
+
+      assert ClusterInstall.controller_facts(published: [controller, worker]).canary_image ==
+               @worker
+
+      assert ClusterInstall.controller_facts(published: [controller]).canary_image ==
+               @controller
+    end
+
+    test "an image published under another registry is not offered" do
+      {:ok, _} = Settings.set_nodes_registry("registry.example.test/moved")
+      published = [%{kind: :worker, ref: @worker}, %{kind: :controller, ref: @controller}]
+
+      assert ClusterInstall.controller_facts(published: published).canary_image == nil
+    end
+  end
 end
