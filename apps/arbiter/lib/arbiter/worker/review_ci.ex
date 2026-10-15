@@ -705,7 +705,8 @@ defmodule Arbiter.Worker.ReviewCi do
   `awaiting CI on <short sha> (poll n/max)`. The poll part is left off for a
   marker written before it carried the count.
   """
-  @spec progress_label(%{sha: String.t()}) :: String.t()
+  @spec progress_label(%{required(:sha) => String.t(), optional(atom()) => term()}) ::
+          String.t()
   def progress_label(%{sha: sha} = wait) do
     base = "awaiting CI on " <> String.slice(sha, 0, 8)
 
