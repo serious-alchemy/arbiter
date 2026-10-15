@@ -21,6 +21,7 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.WorkspaceProviderAccount
+  alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
   alias Arbiter.Loop.FlakeEvent
   alias Arbiter.Messages.Message
@@ -658,6 +659,99 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- bd-3726k8: the wait is visible ----------------------------------------
+
+  describe "observability of the CI wait (bd-3726k8)" do
+    import ExUnit.CaptureLog
+
+    setup do
+      Logger.put_module_level(ReviewGate, :info)
+      on_exit(fn -> Logger.delete_module_level(ReviewGate) end)
+    end
+
+    test "logs one line entering the wait and one line leaving it on green", ctx do
+      rig = rig(ctx, "feature/ci-log-green")
+      forge = start_forge(ctx, rig, [:running])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+          wait_until(fn -> awaiting_ci?(gate) end)
+          set_pipeline(forge, [:success])
+          wait_until(fn -> passes(rig) == 1 end, 20_000)
+          stop_gate(gate)
+        end)
+
+      entering = lines(log, "entering the CI wait")
+      assert [line] = entering
+      assert line =~ "task=#{rig.task.id}"
+      assert line =~ rig.head
+      assert line =~ @pr
+      assert line =~ "polling up to 40 times"
+
+      assert [left] = lines(log, "left the CI wait")
+      assert left =~ rig.head
+      assert left =~ "CI green"
+      assert left =~ ~r{after \d+/40 polls}
+    end
+
+    test "logs the outcome when CI is red", ctx do
+      rig = rig(ctx, "feature/ci-log-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+          wait_until(fn -> remote_head(ctx, rig) != rig.head end, 20_000)
+          stop_gate(gate)
+        end)
+
+      assert [left | _] = lines(log, "left the CI wait")
+      assert left =~ "CI red"
+    end
+
+    test "logs that CI could not vouch when the poll budget runs out", ctx do
+      rig = rig(ctx, "feature/ci-log-budget")
+      start_forge(ctx, rig, [:running])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, ci_max_polls: 3)
+          wait_until(fn -> passes(rig) == 1 end, 20_000)
+          stop_gate(gate)
+        end)
+
+      assert [left] = lines(log, "left the CI wait")
+      assert left =~ "CI could not vouch"
+      assert left =~ "3/3 polls"
+    end
+
+    test "the ticket's marker carries the poll count and the in-flight gate its task_id", ctx do
+      rig = rig(ctx, "feature/ci-poll-count")
+      start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> StubMerger.get_count(@pr) >= 4 end)
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      marker = Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]
+      assert marker["max_polls"] == 40
+      assert is_integer(marker["polls"]) and marker["polls"] >= 1
+
+      assert [entry] =
+               Drain.status().in_flight
+               |> Enum.filter(&(&1.kind == :review_gate and &1.pid == gate))
+
+      assert entry.task_id == rig.task.id
+      stop_gate(gate)
+    end
+  end
+
   # ---- AC4: the reviewer prompt and the partial-verification carve-out --------
 
   describe "partial verification (AC4)" do
@@ -1088,6 +1182,9 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     # The registry drops the killed author asynchronously; a restart starts empty.
     wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
   end
+
+  defp lines(log, needle),
+    do: log |> String.split("\n") |> Enum.filter(&String.contains?(&1, needle))
 
   defp stop_gate(gate) do
     ref = Process.monitor(gate)

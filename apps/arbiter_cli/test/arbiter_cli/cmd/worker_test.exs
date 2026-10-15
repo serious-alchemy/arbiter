@@ -100,6 +100,29 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "no live agent"
     end
 
+    # bd-3726k8: the CI wait has no agent either, but it is not a hung gate.
+    test "names the CI wait instead of reading 'in review — no live agent'" do
+      stub_get("/api/workers/bd-003", %{
+        "task_id" => "bd-003",
+        "kind" => "implement",
+        "state" => "waiting",
+        "waiting_on" => "review_gate",
+        "phase" => "in_review",
+        "phase_label" => "in review",
+        "agent_live" => false,
+        "ci_wait_label" => "awaiting CI on 210c215f (poll 7/30)",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => []
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-003"]) end)
+      assert exit_code == 0
+      assert out =~ "Phase:      awaiting CI on 210c215f (poll 7/30)"
+      refute out =~ "no live agent"
+    end
+
     # bd-6omte4: a fix round the quota gate queued is held, not failed.
     test "says a held fix round is held for quota, with provider and reason" do
       stub_get("/api/workers/bd-003", %{
@@ -416,6 +439,28 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       [dead, live] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-00"))
       assert dead =~ "no agent"
       refute live =~ "no agent"
+    end
+
+    test "a row in the CI wait names it" do
+      stub_get("/api/workers", %{
+        "data" => [
+          %{
+            "task_id" => "bd-001",
+            "kind" => "implement",
+            "state" => "waiting",
+            "phase" => "in_review",
+            "agent_live" => false,
+            "ci_wait_label" => "awaiting CI on 210c215f (poll 7/30)",
+            "current_step" => "implement",
+            "repo" => "test/repo",
+            "started_at" => "2026-05-20T19:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["list"]) end)
+      assert out =~ "awaiting CI on 210c215f (poll 7/30)"
+      refute out =~ "no agent"
     end
 
     # bd-8vnuy3: the server now sends settled + in-flight spend. A live figure

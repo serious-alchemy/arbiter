@@ -1668,8 +1668,27 @@ defmodule Arbiter.Worker.ReviewGate do
     case ci_plan(state) do
       :off -> {:proceed, ci_end_wait(state)}
       {:fallback, reason} -> {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
-      {:ok, ctx, sha} -> ci_poll(%{state | ci_ctx: ctx}, ReviewCi.new_wait(sha, ctx.budget))
+      {:ok, ctx, sha} -> ci_enter_wait(%{state | ci_ctx: ctx}, ReviewCi.new_wait(sha, ctx.budget))
     end
+  end
+
+  # The wait is otherwise silent for as long as CI takes, and reads like a hung
+  # gate: one line in, one line out (`ci_log_leave/3`).
+  defp ci_enter_wait(state, wait) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} entering the CI wait on " <>
+        "#{wait.sha} (PR #{inspect(state.ci_ctx.pr_ref)}, polling up to #{wait.max_polls} times " <>
+        "every #{state.ci_ctx.budget.interval_ms}ms)"
+    )
+
+    ci_poll(state, wait)
+  end
+
+  defp ci_log_leave(state, wait, outcome) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} left the CI wait on #{wait.sha} " <>
+        "after #{wait.polls}/#{wait.max_polls} polls: #{outcome}"
+    )
   end
 
   defp ci_plan(state) do
@@ -1772,6 +1791,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_retarget(state, wait, reading, _result), do: {state, wait, reading}
 
   defp ci_act(state, wait, :green, result) do
+    ci_log_leave(state, wait, "CI green")
     state = ci_end_wait(state)
     {:proceed, %{state | ci_green: %{sha: wait.sha, url: Map.get(result, :url)}}}
   end
@@ -1780,6 +1800,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # fix pass, and the reviewer goes ahead on the green head.
   defp ci_act(state, wait, {:flake, checks}, result) do
     ReviewCi.record_flake(state.task_id, state.repo, checks, wait.sha)
+    ci_log_leave(state, wait, "CI green after a re-run (flake)")
 
     Logger.info(
       "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} was red and went green on a " <>
@@ -1859,9 +1880,13 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp ci_act(state, _wait, {:infra, reason}, _result), do: ci_infra(state, reason)
+  defp ci_act(state, wait, {:infra, reason}, _result) do
+    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
+    ci_infra(state, reason)
+  end
 
   defp ci_act(state, wait, :fix, _result) do
+    ci_log_leave(state, wait, "CI red")
     stored = if wait.rerun, do: wait.rerun.checks, else: []
 
     checks =
@@ -1890,8 +1915,10 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp ci_act(state, _wait, {:fallback, reason}, _result),
-    do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  defp ci_act(state, wait, {:fallback, reason}, _result) do
+    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
+    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  end
 
   defp run_in_flight?(why) when is_binary(why),
     do: String.contains?(why, "a run is still running")
@@ -1979,7 +2006,10 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_schedule(state, wait) do
     token = make_ref()
     Process.send_after(self(), {:ci_poll, token}, state.ci_ctx.budget.interval_ms)
-    marked = {wait.sha, not is_nil(wait.rerun)}
+    marked = {wait.sha, not is_nil(wait.rerun), wait.polls}
+
+    since =
+      if state.ci_wait, do: state.ci_wait.since, else: DateTime.to_iso8601(DateTime.utc_now())
 
     already =
       case state.ci_wait do
@@ -1992,7 +2022,9 @@ defmodule Arbiter.Worker.ReviewGate do
     if is_nil(state.ci_wait), do: tell_author(state, {:__review_gate_ci_wait__, true})
 
     unless already do
-      extra = if wait.rerun, do: %{"rerun" => true}, else: %{}
+      # `polls` / `max_polls` let `worker show` / `prime` say how far the wait is.
+      extra = %{"polls" => wait.polls, "max_polls" => wait.max_polls, "since" => since}
+      extra = if wait.rerun, do: Map.put(extra, "rerun", true), else: extra
       marker = ReviewCi.marker(wait.sha, state.round, state.ci_ctx.budget, extra)
       ReviewCi.put_marker(state.task_id, marker)
     end
@@ -2002,7 +2034,7 @@ defmodule Arbiter.Worker.ReviewGate do
       | phase: :awaiting_ci,
         current_id: nil,
         ci_rearmed: false,
-        ci_wait: %{wait: wait, token: token, marked: marked}
+        ci_wait: %{wait: wait, token: token, marked: marked, since: since}
     }
   end
 
@@ -7558,7 +7590,8 @@ defmodule Arbiter.Worker.ReviewGate do
       # bd-cut6uv: the head a reviewer is being held back for, while it is.
       awaiting_ci: match?(%{wait: %{sha: _}}, state.ci_wait) && state.ci_wait.wait.sha,
       # RW8: why a pass is held for the primary's worker cap, while it is.
-      local_hold: state.local_hold && state.local_hold.info.phrase,
+      local_hold:
+        state.local_hold && Map.get(state.local_hold.info, :phrase, state.local_hold.info.message),
       # bd-3hb4ih: the reviewer provider this round is pinned to (nil = the
       # workspace's own first choice) and the providers that have already timed
       # out in it, so a rotation in progress is visible without reading logs.

@@ -344,7 +344,7 @@ defmodule ArbiterCli.Cmd.Worker do
     # bd-aw2cyt: the record's status outlives its agent. Say which phase the
     # work is actually in, and whether anything is running for it at all.
     if snap["phase"] do
-      IO.puts("Phase:      #{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}")
+      IO.puts("Phase:      #{phase_text(snap)}")
     end
 
     emit_held(snap["held"])
@@ -611,7 +611,7 @@ defmodule ArbiterCli.Cmd.Worker do
       phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
 
       IO.puts(
-        "  #{p["task_id"]}  #{RunLabel.label(p)}#{phase_part}#{agent_note(p)}  #{step}  " <>
+        "  #{p["task_id"]}  #{RunLabel.label(p)}#{phase_part}#{agent_note(p)}#{ci_wait_part(p)}  #{step}  " <>
           "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}" <>
           RunLabel.node_suffix(p) <>
           RunLabel.run_suffix(p)
@@ -635,7 +635,16 @@ defmodule ArbiterCli.Cmd.Worker do
   # a row that looks like work in progress with no process behind it. Only the
   # negative is worth ink; a live row is the unremarkable case, and an unknown
   # one (an older server that does not send the field) says nothing.
+  # bd-3726k8: a gate in the CI wait has no agent, which reads like a hung gate
+  # under "in review — no live agent". The server names the wait instead.
+  defp phase_text(%{"ci_wait_label" => label}) when is_binary(label), do: label
+  defp phase_text(snap), do: "#{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}"
+
+  defp ci_wait_part(%{"ci_wait_label" => label}) when is_binary(label), do: "  [#{label}]"
+  defp ci_wait_part(_row), do: ""
+
   defp agent_note(row, style \\ :short)
+  defp agent_note(%{"ci_wait_label" => label}, _style) when is_binary(label), do: ""
   defp agent_note(%{"agent_live" => false}, :long), do: " — no live agent"
   defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
   defp agent_note(_row, _style), do: ""

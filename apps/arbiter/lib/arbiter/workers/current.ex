@@ -39,6 +39,7 @@ defmodule Arbiter.Workers.Current do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
+  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
@@ -69,6 +70,7 @@ defmodule Arbiter.Workers.Current do
     |> with_workspaces()
     |> filter_workspace(Keyword.get(opts, :workspace_id))
     |> with_holds()
+    |> with_ci_waits()
   end
 
   @doc """
@@ -89,7 +91,9 @@ defmodule Arbiter.Workers.Current do
         nil
 
       current ->
-        [current] = current |> List.wrap() |> with_workspaces() |> with_holds()
+        [current] =
+          current |> List.wrap() |> with_workspaces() |> with_holds() |> with_ci_waits()
+
         %{current: current, runs: recent_runs(current, live, rows)}
     end
   end
@@ -296,6 +300,30 @@ defmodule Arbiter.Workers.Current do
         item -> Map.merge(view, %{held: DispatchQueue.describe(item), phase: :held_for_quota})
       end
     end)
+  end
+
+  # A gate sitting in the CI wait has no agent and no round, so its author reads
+  # `:in_review` with "no live agent" — the look of a hung gate. The ticket's
+  # `ci_wait` marker says what it is actually doing (bd-3726k8).
+  defp with_ci_waits(views) do
+    Enum.map(views, fn view ->
+      label = if ci_waiting_view?(view), do: ci_wait_label(view.ticket_id)
+      Map.put(view, :ci_wait_label, label)
+    end)
+  end
+
+  defp ci_waiting_view?(view),
+    do: Map.get(view, :phase) == :in_review and Map.get(view, :agent_live) != true
+
+  defp ci_wait_label(ticket_id) do
+    with {:ok, %Issue{} = issue} <- Ash.get(Issue, ticket_id),
+         %{} = wait <- ReviewCi.waiting(issue) do
+      ReviewCi.progress_label(wait)
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp filter_workspace(views, nil), do: views
