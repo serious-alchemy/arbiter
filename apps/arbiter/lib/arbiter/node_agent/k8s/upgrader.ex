@@ -47,7 +47,7 @@ defmodule Arbiter.NodeAgent.K8s.Upgrader do
     end
   end
 
-  @doc "Ask for an upgrade to `spec` (`%{\"version\", \"image\"}`): `:started | :ignored`."
+  @doc ~S[Ask for an upgrade to `spec` (`%{"version", "image"}`): `:started | :ignored`.]
   @spec request(GenServer.server(), map()) :: :started | :ignored
   def request(server \\ __MODULE__, spec), do: GenServer.call(server, {:request, spec})
 
