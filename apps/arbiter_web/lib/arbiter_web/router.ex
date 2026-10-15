@@ -98,6 +98,8 @@ defmodule ArbiterWeb.Router do
 
     get("/agent/:file", NodeController, :agent)
     get("/files/:sha", NodeController, :file)
+    # K14: a cluster controller's boot facts (install id, registry, canary image).
+    get("/cluster", NodeController, :cluster)
     # RW11 checkout sync (docs/design/remote-workers.md §9).
     get("/runs/:run/seed.bundle", NodeCheckoutController, :seed)
     put("/runs/:run/checkout", NodeCheckoutController, :checkout)

@@ -50,4 +50,36 @@ defmodule Arbiter.NodeAgent.Backend.Podman do
 
   @impl true
   def readiness, do: PodmanReadiness.diagnose(probes: PodmanReadiness.node_probes())
+
+  # -- the connection's hooks: the calls `Connection` made itself before K14 -------------
+
+  @impl true
+  def hello(config, readiness), do: Protocol.hello(config, readiness)
+
+  @impl true
+  def heartbeat(config, seq), do: Protocol.heartbeat(config, seq)
+
+  @impl true
+  def attach(run), do: Run.attach(run)
+
+  @impl true
+  def attach_all(skip), do: Runs.attach_all(skip)
+
+  @impl true
+  def detach_all, do: Runs.detach_all()
+
+  @impl true
+  def fence_all, do: Runs.fence_all()
+
+  @impl true
+  def ack(run, offset), do: Run.ack(run, offset)
+
+  @impl true
+  def exit_ack(run), do: Run.ack_exit(run)
+
+  @impl true
+  def quiesce(run), do: Run.quiesce(run)
+
+  @impl true
+  def adopt(run), do: Run.adopt(run)
 end

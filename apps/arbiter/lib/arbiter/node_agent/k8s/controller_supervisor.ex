@@ -21,7 +21,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerSupervisor do
   would go stale when they restart). Options:
 
     * `:client`, `:informer`, `:config_loader`, `:identity` (required; the controller's)
-    * `:image` (required): the digest-pinned worker image the canary pod runs
+    * `:image` (required): the digest-pinned image the canary pod runs, or a function
+      asked on every run (`ReadinessMonitor`'s `:image`)
     * `:targets`: the canary's probe targets (default `Canary.targets_from_env/0`)
     * `:listen_port`: where the monitor accepts and closes for the `controller_port`
       probe (default #{9445}; `0` picks one, `nil` opens none)

@@ -292,13 +292,18 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp release({:ok, %{version: _, path: _} = artifact}), do: {:ok, artifact}
   defp release({:error, reason}), do: {:error, {:no_release, reason}}
 
-  @doc "The (unpinned) controller Containerfile; `Image.pin/2` pins its `FROM`."
+  @doc """
+  The (unpinned) controller Containerfile; `Image.pin/2` pins its `FROM`. `socat` is there
+  for the NetworkPolicy canary (K14): before any worker image has been published, the
+  canary pod runs this image (`ClusterInstall.controller_facts/1`), and its probes and the
+  netpol gate are `sh` + `socat`.
+  """
   @spec controller_containerfile() :: String.t()
   def controller_containerfile do
     """
     #{@controller_base}
     RUN apt-get update \\
-     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libncurses6 openssl \\
+     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libncurses6 openssl socat \\
      && rm -rf /var/lib/apt/lists/* \\
      && groupadd --gid #{@controller_uid} arbiter \\
      && useradd --uid #{@controller_uid} --gid #{@controller_uid} --create-home arbiter

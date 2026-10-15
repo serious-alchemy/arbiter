@@ -354,7 +354,8 @@ defmodule Arbiter.Worker.Dispatch do
 
       {:error, reason} = err ->
         # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
-        # image_unavailable | bad_spec}`) has started nothing and failed nothing. The card is
+        # image_unavailable | bad_spec | service_not_ready}`, `Refusal.reasons/0`) has
+        # started nothing and failed nothing. The card is
         # held and its slot freed, as for any other capacity refusal, instead of failed.
         case Refusal.from_start_error(reason) do
           {:ok, refusal} ->

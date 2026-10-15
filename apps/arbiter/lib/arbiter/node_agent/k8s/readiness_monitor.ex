@@ -36,7 +36,9 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
   Options: `:client` (required), `:config_fun` (`fn -> {:ok, pod_config} | {:error, _}`,
   required: the `PodSpec` config for this run, with a fresh `boot_nonce`), `:image`
-  (the digest-pinned worker image), `:targets` (`Canary.targets_from_env/1`),
+  (the digest-pinned image the canary runs, or a `fn -> {:ok, image} | {:error, reason}`
+  asked on every run; no image is an inconclusive run), `:targets`
+  (`Canary.targets_from_env/1`),
   `:interval_ms` (default 600 000; `nil` for none), `:stale_after_ms`, `:poll_ms` /
   `:timeout_ms` (the canary's), `:listen_port`, `:notify` (a pid, also `subscribe/2`),
   `:config_loader` (a `ConfigLoader`: the monitor subscribes itself at start, so a
@@ -179,18 +181,18 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
   defp start_run(state) do
     %{client: client, config_fun: config_fun, image: image, targets: targets} = state
-    canary_opts = [image: image, targets: targets] ++ state.canary_opts
 
     task =
       Task.async(fn ->
         try do
-          case config_fun.() do
-            {:ok, config} ->
-              canary = Canary.run(client, config, canary_opts)
-              {:ok, canary, Readiness.run(client, config, canary, image: image)}
+          with {:ok, image} <- image(image),
+               {:ok, config} <- config(config_fun) do
+            canary =
+              Canary.run(client, config, [image: image, targets: targets] ++ state.canary_opts)
 
-            {:error, reason} ->
-              {:inconclusive_run, {:config, reason}}
+            {:ok, canary, Readiness.run(client, config, canary, image: image)}
+          else
+            {:error, reason} -> {:inconclusive_run, reason}
           end
         rescue
           error -> {:inconclusive_run, {:raised, Exception.message(error)}}
@@ -202,6 +204,27 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
       end)
 
     %{state | run: task}
+  end
+
+  # A fixed reference, or a function asked on every run (the K14 boot: the primary may not
+  # have published an image yet when the controller starts). No image is no canary, which
+  # is inconclusive, i.e. unenforced.
+  defp image(fun) when is_function(fun, 0) do
+    case fun.() do
+      {:ok, image} when is_binary(image) -> {:ok, image}
+      {:error, reason} -> {:error, {:no_image, reason}}
+      other -> {:error, {:no_image, other}}
+    end
+  end
+
+  defp image(image) when is_binary(image), do: {:ok, image}
+  defp image(nil), do: {:error, {:no_image, :not_configured}}
+
+  defp config(config_fun) do
+    case config_fun.() do
+      {:ok, config} -> {:ok, config}
+      {:error, reason} -> {:error, {:config, reason}}
+    end
   end
 
   defp finish_run(state, outcome) do

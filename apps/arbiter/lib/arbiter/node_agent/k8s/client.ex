@@ -3,8 +3,11 @@ defmodule Arbiter.NodeAgent.K8s.Client do
   The Kubernetes API client of the in-cluster agent (K3,
   `docs/design/remote-workers.md` k8s §3): `Req` against the API server, in-cluster
   service-account auth, and exactly the verbs the controller's RBAC grants on
-  `pods` — list, watch, create, delete — plus the `pods/log` read and follow.
-  No `exec`, no `attach`, no patch: there is nothing here the Role does not allow.
+  `pods` — list, watch, create, delete — plus the `pods/log` read and follow, and
+  the named objects the Role lists (K5, K9, K14): `resourcequotas`, the Lease, the
+  controller's own Deployment, the credential and CA Secrets, the `arbiter-ca`
+  ConfigMap and the controller's Service. No `exec`, no `attach`, no create of
+  anything but pods: there is nothing here the Role does not allow.
 
   ## Auth
 
@@ -312,6 +315,60 @@ defmodule Arbiter.NodeAgent.K8s.Client do
   defp deployment_path(client, name),
     do:
       "/apis/apps/v1/namespaces/#{client.namespace}/deployments/" <>
+        URI.encode(name, &URI.char_unreserved?/1)
+
+  # --- the node-agent boot (K14): credential, CA, Service ------------------------------
+
+  @doc """
+  A Secret by name. The Role grants `get`/`update` on `arbiter-node-credential` and
+  `arbiter-controller-ca` only: the node credential and the pod-channel CA.
+  """
+  @spec get_secret(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_secret(client, name), do: request(client, :get, core_path(client, "secrets", name), [])
+
+  @doc """
+  Replaces a Secret (`PUT`, by its own `metadata.name`). Never a create: the install's
+  placeholder must exist (`{:error, :not_found}` otherwise). A `resourceVersion` in the
+  object is a precondition (`{:error, :conflict}` when someone wrote first).
+  """
+  @spec update_secret(t(), map()) :: {:ok, map()} | {:error, error()}
+  def update_secret(client, secret), do: put_object(client, "secrets", secret)
+
+  @doc "A ConfigMap by name (the Role: `get`/`update` on `arbiter-ca` only)."
+  @spec get_config_map(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_config_map(client, name),
+    do: request(client, :get, core_path(client, "configmaps", name), [])
+
+  @doc "Replaces a ConfigMap, with the same rules as `update_secret/2`."
+  @spec update_config_map(t(), map()) :: {:ok, map()} | {:error, error()}
+  def update_config_map(client, config_map), do: put_object(client, "configmaps", config_map)
+
+  @doc """
+  A Service by name (the Role: `get` on `arbiter-controller` only; its `clusterIP` is the
+  address worker pods dial and the pod-channel certificate names).
+  """
+  @spec get_service(t(), String.t()) :: {:ok, map()} | {:error, error()}
+  def get_service(client, name),
+    do: request(client, :get, core_path(client, "services", name), [])
+
+  @doc "The API server's version (`gitVersion` of `GET /version`, e.g. `v1.31.2+k3s1`)."
+  @spec server_version(t()) :: {:ok, String.t()} | {:error, error()}
+  def server_version(client) do
+    case request(client, :get, "/version", []) do
+      {:ok, %{"gitVersion" => version}} when is_binary(version) -> {:ok, version}
+      {:ok, other} -> {:error, {:unexpected_body, other}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp put_object(client, resource, object) do
+    name = get_in(object, ["metadata", "name"])
+    request(client, :put, core_path(client, resource, name), json: object)
+  end
+
+  defp core_path(client, resource, name),
+    do:
+      "/api/v1/namespaces/#{client.namespace}/#{resource}/" <>
         URI.encode(name, &URI.char_unreserved?/1)
 
   # --- logs -------------------------------------------------------------------

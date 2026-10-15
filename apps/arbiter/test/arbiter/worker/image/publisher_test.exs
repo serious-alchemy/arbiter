@@ -381,6 +381,9 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert cf =~ "ADD release.tar.gz /opt/"
       assert cf =~ "USER 10001"
       assert cf =~ ~s(ENTRYPOINT ["/opt/arbiter/bin/arbiter", "start"])
+      # K14: the NetworkPolicy canary falls back to this image before any worker image is
+      # published, and its probes (and the netpol gate) need `socat` and `sh`.
+      assert cf =~ ~r/apt-get install [^\n]*\bsocat\b/
     end
 
     test "no retained release is an error, not a crash", %{opts: opts} do

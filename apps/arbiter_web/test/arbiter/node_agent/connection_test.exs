@@ -534,6 +534,74 @@ defmodule Arbiter.NodeAgent.ConnectionTest do
     end
   end
 
+  # K14: a backend that answers an `assign` with the k8s controller's refusal shape
+  # (`{:refuse, reason, detail}`); everything else is the machine's.
+  defmodule RefusingBackend do
+    @moduledoc false
+    alias Arbiter.NodeAgent.Backend.Podman
+
+    def start_run(%{spec: %{"run" => run}}) do
+      case run do
+        "full" ->
+          {:error, {:refuse, :no_capacity, "2 of max_concurrent 2 runs already hold a slot"}}
+
+        "broken" ->
+          {:error, {:refuse, :bad_spec, "{:unknown_mount_kind, \"nfs\"}"}}
+
+        _ ->
+          {:error, :already_running}
+      end
+    end
+
+    def attach(run) do
+      send(Application.get_env(:arbiter_web, :fake_node_test_pid), {:backend_attach, run})
+      :ok
+    end
+
+    defdelegate hello(config, readiness), to: Podman
+    defdelegate heartbeat(config, seq), to: Podman
+    defdelegate attach_all(skip), to: Podman
+    defdelegate detach_all(), to: Podman
+    defdelegate fence_all(), to: Podman
+    defdelegate inventory(), to: Podman
+    defdelegate readiness(), to: Podman
+    defdelegate capacity(), to: Podman
+  end
+
+  describe "an assign the backend refuses (K14)" do
+    test "goes back as run.refused with the backend's reason and detail", ctx do
+      start_agent(ctx, backend: RefusingBackend)
+      assert_receive {:fake_node, :channel, channel}, 5_000
+      assert_receive {:fake_node, :hello, _}, 5_000
+
+      send(channel, {:push, "assign", %{"run" => "full", "spec" => %{}}})
+
+      assert_receive {:fake_node, :unexpected,
+                      {"run.refused",
+                       %{
+                         "run" => "full",
+                         "reason" => "no_capacity",
+                         "detail" => "2 of max_concurrent 2 runs already hold a slot"
+                       }}},
+                     5_000
+
+      send(channel, {:push, "assign", %{"run" => "broken", "spec" => %{}}})
+
+      assert_receive {:fake_node, :unexpected,
+                      {"run.refused", %{"run" => "broken", "reason" => "bad_spec"}}},
+                     5_000
+    end
+
+    test "a repeated assign asks the backend to say again where the run is", ctx do
+      start_agent(ctx, backend: RefusingBackend)
+      assert_receive {:fake_node, :channel, channel}, 5_000
+      assert_receive {:fake_node, :hello, _}, 5_000
+
+      send(channel, {:push, "assign", %{"run" => "again", "spec" => %{}}})
+      assert_receive {:backend_attach, "again"}, 5_000
+    end
+  end
+
   defp flush_fake_node do
     receive do
       {:fake_node, _, _} -> flush_fake_node()

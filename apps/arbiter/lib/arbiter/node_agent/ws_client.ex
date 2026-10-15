@@ -106,12 +106,20 @@ defmodule Arbiter.NodeAgent.WsClient do
 
   defp secure(_uri, url), do: {:error, {:insecure_url, url}}
 
-  defp parse_proxy(nil), do: {:ok, nil}
+  @doc """
+  An HTTP proxy setting (`http://host:port`, a bare `host:port`, or Mint's own
+  `{:http, host, port, opts}`) as Mint's `proxy:` option; `nil` is no proxy. The k8s boot
+  hands the same value to `Req`'s `connect_options` for its HTTP calls to the primary.
+  """
+  @spec parse_proxy(term()) ::
+          {:ok, nil | {:http, String.t(), :inet.port_number(), list()}}
+          | {:error, {:bad_proxy, term()}}
+  def parse_proxy(nil), do: {:ok, nil}
 
-  defp parse_proxy({:http, host, port, _opts} = proxy) when is_binary(host) and is_integer(port),
+  def parse_proxy({:http, host, port, _opts} = proxy) when is_binary(host) and is_integer(port),
     do: {:ok, proxy}
 
-  defp parse_proxy(url) when is_binary(url) do
+  def parse_proxy(url) when is_binary(url) do
     # `HTTPS_PROXY=host:port` without a scheme is common; treat it as http.
     full = if String.contains?(url, "://"), do: url, else: "http://" <> url
 
@@ -124,7 +132,7 @@ defmodule Arbiter.NodeAgent.WsClient do
     end
   end
 
-  defp parse_proxy(other), do: {:error, {:bad_proxy, other}}
+  def parse_proxy(other), do: {:error, {:bad_proxy, other}}
 
   defp proxy_opt(nil), do: []
   defp proxy_opt(proxy), do: [proxy: proxy]

@@ -1,7 +1,7 @@
 defmodule Arbiter.Nodes.RefusalTest do
   @moduledoc """
-  K12 (A3): a node's `refuse{no_capacity | unschedulable | image_unavailable | bad_spec}` is a
-  **hold**, not a failure: the dispatch returns `{:error, {:no_node_capacity, info}}`, the
+  K12 (A3): a node's `refuse{no_capacity | unschedulable | image_unavailable | bad_spec |
+  service_not_ready}` is a **hold**, not a failure: the dispatch returns `{:error, {:no_node_capacity, info}}`, the
   ticket goes back to Ready (so the slot it took is free), the run is `interrupted` and no
   resume attempt is consumed.
   """
@@ -17,7 +17,9 @@ defmodule Arbiter.Nodes.RefusalTest do
 
   require Ash.Query
 
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec)
+  # K14: `service_not_ready` (a crash-looping test-service sidecar, K§3.3) is the cluster
+  # controller's fifth refusal; the run never started, so it is a hold like the others.
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready)
 
   describe "from_start_error/1" do
     test "recognises a refusal as the spawn error carries it" do
