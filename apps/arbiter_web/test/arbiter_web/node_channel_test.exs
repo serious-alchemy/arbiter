@@ -301,6 +301,23 @@ defmodule ArbiterWeb.NodeChannelTest do
       assert %{readiness: [%{"id" => "netpol", "status" => "fail"}]} = Session.snapshot(node.id)
     end
 
+    # K14: the controller pushes each canary verdict as it lands.
+    test "a readiness push reaches the session", %{node: node, credential: credential} do
+      {socket, _ok} =
+        join_and_hello(
+          node,
+          credential,
+          hello(%{"kind" => "cluster", "degraded" => ["netpol_unenforced"]})
+        )
+
+      checks = [%{"id" => "netpol", "name" => "n", "status" => "ok", "detail" => "enforced"}]
+      push(socket, "readiness", %{"degraded" => [], "readiness" => %{"checks" => checks}})
+      # The channel has handled the push (and cast it to the session) once this returns.
+      _ = :sys.get_state(socket.channel_pid)
+
+      assert %{degraded: [], readiness: [%{"status" => "ok"}]} = Session.snapshot(node.id)
+    end
+
     test "a machine hello_ok has no limits", %{node: node, credential: credential} do
       {_socket, ok} = join_and_hello(node, credential)
       refute Map.has_key?(ok, "limits")

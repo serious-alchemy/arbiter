@@ -179,6 +179,29 @@ defmodule Arbiter.Nodes.SessionClusterTest do
       {:ok, %{pid: pid}} = attach(node, cluster_hello())
       assert %{readiness: []} = Session.snapshot(pid)
     end
+
+    # K14: the controller pushes each canary verdict as `readiness`; the node need not wait
+    # for its next heartbeat to be placed on (or taken off placement).
+    test "a readiness push replaces degraded and the checks at once", %{node: node} do
+      {:ok, %{pid: pid}} = attach(node, cluster_hello(%{"degraded" => ["netpol_unenforced"]}))
+
+      Session.node_event(pid, "readiness", %{
+        "degraded" => [],
+        "readiness" => %{"ready" => true, "checks" => @checks}
+      })
+
+      assert %{degraded: [], readiness: [%{"id" => "netpol", "status" => "ok"} | _]} =
+               Session.snapshot(pid)
+
+      Session.node_event(pid, "readiness", %{"degraded" => ["netpol_unenforced"]})
+      assert %{degraded: ["netpol_unenforced"], readiness: [_, _]} = Session.snapshot(pid)
+    end
+
+    test "a machine's readiness push changes nothing", %{node: node} do
+      {:ok, %{pid: pid}} = attach(node, hello())
+      Session.node_event(pid, "readiness", %{"degraded" => ["netpol_unenforced"]})
+      assert %{degraded: [], readiness: []} = Session.snapshot(pid)
+    end
   end
 
   describe "capacity (A3)" do
@@ -339,7 +362,7 @@ defmodule Arbiter.Nodes.SessionClusterTest do
   end
 
   describe "refusals (A3)" do
-    for reason <- ~w(no_capacity unschedulable image_unavailable bad_spec) do
+    for reason <- ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready) do
       test "refuse{#{reason}} answers the assign with the reason", %{node: node} do
         {:ok, %{pid: pid}} = attach(node, cluster_hello())
         task = assign(pid, "r1")

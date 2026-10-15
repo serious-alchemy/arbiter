@@ -192,6 +192,83 @@ defmodule Arbiter.NodeAgent.K8s.ClientTest do
 
       assert {:error, :no_date_header} = Client.server_time(client)
     end
+
+    test "server_version reads gitVersion from GET /version", %{client: client} do
+      assert {:ok, "v1.31.2+fake"} = Client.server_version(client)
+    end
+  end
+
+  describe "secrets and config maps (K14: the credential and the CA)" do
+    defp secret(name, data),
+      do: %{"metadata" => %{"name" => name}, "type" => "Opaque", "data" => data}
+
+    test "get_secret reads one Secret; a missing one is :not_found", %{client: client, api: api} do
+      FakeK8sApi.put_secret(api, secret("arbiter-node-credential", %{"credential" => "YQ=="}))
+
+      assert {:ok,
+              %{"data" => %{"credential" => "YQ=="}, "metadata" => %{"resourceVersion" => _}}} =
+               Client.get_secret(client, "arbiter-node-credential")
+
+      assert {:error, :not_found} = Client.get_secret(client, "nope")
+    end
+
+    test "update_secret PUTs the object by its own name and returns the stored one", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.put_secret(api, secret("arbiter-controller-ca", nil))
+      {:ok, held} = Client.get_secret(client, "arbiter-controller-ca")
+
+      assert {:ok, %{"data" => %{"ca.crt" => "Yw=="}}} =
+               Client.update_secret(client, Map.put(held, "data", %{"ca.crt" => "Yw=="}))
+
+      assert %{"data" => %{"ca.crt" => "Yw=="}} =
+               FakeK8sApi.secret(api, "arbiter-controller-ca")
+
+      assert %{method: "PUT", path: "/api/v1/namespaces/arb/secrets/arbiter-controller-ca"} =
+               api |> FakeK8sApi.requests() |> List.last()
+    end
+
+    test "update_secret with a stale resourceVersion is :conflict", %{client: client, api: api} do
+      FakeK8sApi.put_secret(api, secret("arbiter-controller-ca", nil))
+      {:ok, held} = Client.get_secret(client, "arbiter-controller-ca")
+      {:ok, _} = Client.update_secret(client, Map.put(held, "data", %{"a" => "Yg=="}))
+
+      assert {:error, :conflict} =
+               Client.update_secret(client, Map.put(held, "data", %{"b" => "Yg=="}))
+    end
+
+    test "update_secret never creates: a missing Secret is :not_found", %{client: client} do
+      assert {:error, :not_found} = Client.update_secret(client, secret("absent", %{}))
+    end
+
+    test "get_config_map and update_config_map", %{client: client, api: api} do
+      FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "arbiter-ca"}})
+      assert {:ok, cm} = Client.get_config_map(client, "arbiter-ca")
+
+      assert {:ok, %{"data" => %{"ca.crt" => "PEM"}}} =
+               Client.update_config_map(client, Map.put(cm, "data", %{"ca.crt" => "PEM"}))
+
+      assert %{"data" => %{"ca.crt" => "PEM"}} = FakeK8sApi.config_map(api, "arbiter-ca")
+      assert {:error, :not_found} = Client.get_config_map(client, "other")
+    end
+
+    test "get_service reads the controller's Service", %{client: client, api: api} do
+      FakeK8sApi.put_service(api, %{
+        "metadata" => %{"name" => "arbiter-controller"},
+        "spec" => %{"clusterIP" => "10.43.98.199"}
+      })
+
+      assert {:ok, %{"spec" => %{"clusterIP" => "10.43.98.199"}}} =
+               Client.get_service(client, "arbiter-controller")
+
+      assert {:error, :not_found} = Client.get_service(client, "other")
+    end
+
+    test "an API failure is an error, not a crash", %{client: client, api: api} do
+      FakeK8sApi.fail_next(api, :secret_get, {403, "secrets is forbidden"})
+      assert {:error, {:forbidden, "secrets is forbidden"}} = Client.get_secret(client, "x")
+    end
   end
 
   describe "delete_pod/3" do

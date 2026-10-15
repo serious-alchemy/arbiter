@@ -1199,8 +1199,8 @@ defmodule Arbiter.Worker.StopReason do
 
   @doc """
   Build a `:placement_refused` reason (K12, amendment A3): the node answered the assign with
-  `refuse{reason}` (`no_capacity`, `unschedulable`, `image_unavailable`, `bad_spec`), so the
-  run never started. It is a **hold**, not a failure: interrupted, no resume attempt consumed.
+  `refuse{reason}` (`no_capacity`, `unschedulable`, `image_unavailable`, `bad_spec`,
+  `service_not_ready`), so the run never started. It is a **hold**, not a failure: interrupted, no resume attempt consumed.
   """
   @spec placement_refused(String.t(), String.t(), String.t() | nil) :: t()
   def placement_refused(node_name, reason, detail) when is_binary(node_name) do

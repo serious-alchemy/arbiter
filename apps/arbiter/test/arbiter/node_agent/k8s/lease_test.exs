@@ -212,4 +212,12 @@ defmodule Arbiter.NodeAgent.K8s.LeaseTest do
     lease = start!(client, "pod-a", interval_ms: 10)
     assert_receive {:lease, ^lease, :acquired}, 2_000
   end
+
+  # K14: a freshly started controller refuses every assign until it holds the Lease, so the
+  # first cycle is at start, not one interval (10 s) later.
+  test "the first cycle runs at start, not one interval later", %{client: client} do
+    lease = start!(client, "pod-a", interval_ms: 60_000)
+    assert_receive {:lease, ^lease, :acquired}, 2_000
+    assert Lease.held?(lease)
+  end
 end

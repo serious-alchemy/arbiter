@@ -254,6 +254,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assert DateTime.diff(deadline, @t0) == 3600 + 1800
     end
 
+    # K14: the node-agent boot starts the controller before the connection, so the sink is
+    # the connection's registered name, looked up on every push.
+    test "the sink may be a registered name; nothing is sent while it is not registered",
+         env do
+      sink = :"k8s_sink_#{System.unique_integer([:positive])}"
+      controller = start_controller(env, sink: sink)
+      run1 = assign!(controller, 1)
+      set_status(env, pod_name(1), running_status())
+      observed(run1, :running)
+      refute_received {:run_push, ^run1, "run.ready", _}
+
+      Process.register(self(), sink)
+      run2 = assign!(controller, 2)
+      set_status(env, pod_name(2), running_status())
+      observed(run2, :running)
+      assert_receive {:run_push, ^run2, "run.ready", _}, 5_000
+    end
+
     test "the pod is pending, and nothing says it is running", env do
       controller = start_controller(env)
       run = assign!(controller, 1)
@@ -717,6 +735,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assert_receive {:run_push, ^run2, "exit", %{"status" => 0}}, 5_000
     end
 
+    # K14: the primary repeats an `assign` it lost the answer to; only that run is re-said.
+    test "attach/2 re-announces one run and nothing else", env do
+      controller = start_controller(env)
+      run1 = assign!(controller, 1)
+      run2 = assign!(controller, 2)
+      set_status(env, pod_name(1), running_status())
+      observed(run1, :running)
+      set_status(env, pod_name(2), running_status())
+      observed(run2, :running)
+      flush_pushes()
+
+      assert :ok = Controller.attach(controller, run1)
+      assert_receive {:run_push, ^run1, "run.ready", _}, 5_000
+      refute_received {:run_push, ^run2, _, _}
+
+      assert {:error, :not_found} = Controller.attach(controller, "run-unknown")
+    end
+
     test "attach_all leaves out the runs the primary does not know", env do
       first = start_controller(env, id: :first_controller)
       run = assign!(first, 1)
@@ -1011,6 +1047,30 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assert_receive {:run_push, nil, "readiness",
                       %{"degraded" => [], "readiness" => %{"ready" => true}}},
                      5_000
+    end
+
+    # K14: a push made while the connection was down (the canary finishing between the
+    # connect and `hello_ok`) is dropped; `attach_all` on `hello_ok` says it again.
+    test "attach_all says the node's readiness and capacity again too", env do
+      monitor =
+        start_supervised!(
+          {Arbiter.NodeAgent.K8s.ReadinessMonitor,
+           client: env.client,
+           config_fun: fn -> {:error, :no_config} end,
+           autostart: false,
+           interval_ms: nil}
+        )
+
+      controller = start_controller(env, readiness: monitor)
+      flush_pushes()
+
+      assert :ok = Controller.attach_all(controller)
+
+      assert_receive {:run_push, nil, "readiness",
+                      %{"degraded" => ["netpol_unenforced"], "readiness" => %{"ready" => false}}},
+                     5_000
+
+      assert_receive {:run_push, nil, "capacity", %{"ceiling" => 2}}, 5_000
     end
 
     test "a good edit changes the ceiling and pushes a capacity event", env do

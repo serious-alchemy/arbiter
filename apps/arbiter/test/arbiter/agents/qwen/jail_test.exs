@@ -341,7 +341,10 @@ defmodule Arbiter.Agents.Qwen.JailTest do
     test "the control: with enforcement switched off the same CONNECT is dialled, not refused",
          %{worktree: wt} do
       Application.put_env(:arbiter, :worker_qwen_egress_enforce, false)
+      # Its own owner, so it is a second run rather than the setup's; the run lives as
+      # long as the owner, so the owner must not outlive the test.
       owner = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(owner, :kill) end)
       {jail, _, _} = split_jail(argv!(worktree: wt, owner: owner))
       sock = Enum.find(jail, &String.ends_with?(&1, ".proxy.sock"))
 

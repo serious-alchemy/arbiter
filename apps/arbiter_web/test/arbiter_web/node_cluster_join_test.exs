@@ -173,6 +173,48 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
     end
   end
 
+  # K14: what the controller asks for at every boot, before it can label or build a pod.
+  describe "GET /nodes/cluster" do
+    defp cluster_credential! do
+      {:ok, %{token: token}} = Nodes.mint_join_token([kind: "cluster", name: "k3s"], @operator)
+      conn = enroll(token, %{"kind" => "cluster"})
+      assert conn.status == 200
+      Jason.decode!(conn.resp_body)["credential"]
+    end
+
+    test "needs a node credential" do
+      assert raw(:get, "/nodes/cluster").status == 401
+
+      for token <- [Scope.mint_coordinator(nil, operator: true), "arbn_nope.nope"] do
+        assert raw(:get, "/nodes/cluster", headers: [{"authorization", "Bearer #{token}"}]).status ==
+                 401
+      end
+    end
+
+    test "answers a cluster node the install id and the registry" do
+      conn =
+        raw(:get, "/nodes/cluster",
+          headers: [{"authorization", "Bearer #{cluster_credential!()}"}]
+        )
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+      body = Jason.decode!(conn.resp_body)
+
+      assert body["install_id"] == Arbiter.Nodes.InstallId.get()
+      assert body["registry"] == @registry
+      assert Map.has_key?(body, "canary_image")
+    end
+
+    test "a machine node is refused: the facts are a cluster controller's" do
+      {:ok, %{token: token}} = Nodes.mint_join_token([], @operator)
+      credential = Jason.decode!(enroll(token, %{"name" => "box"}).resp_body)["credential"]
+
+      conn = raw(:get, "/nodes/cluster", headers: [{"authorization", "Bearer #{credential}"}])
+      assert conn.status == 404
+    end
+  end
+
   describe "POST /api/nodes/join-tokens with kind: cluster" do
     test "mints a cluster token and returns the manifest URL and the join-Secret command",
          %{release: release} do

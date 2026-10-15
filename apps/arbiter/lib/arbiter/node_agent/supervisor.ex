@@ -17,6 +17,10 @@ defmodule Arbiter.NodeAgent.Supervisor do
   `unconfigured` and the reason in the status file and runs only the task
   supervisor, so `arbiter-node status` says what is wrong instead of systemd
   crash-looping the unit.
+
+  With `ARB_AGENT_BACKEND=k8s` (a cluster controller, K14) the tree above is not
+  started: `Arbiter.NodeAgent.K8s.Boot.children/1` is, and the boot starts the
+  controller and its connection once it has a credential and an identity.
   """
   use Supervisor
 
@@ -24,6 +28,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Connection
+  alias Arbiter.NodeAgent.K8s
   alias Arbiter.NodeAgent.Runs
   alias Arbiter.NodeAgent.Status
   alias Arbiter.NodeAgent.Upgrader
@@ -35,6 +40,15 @@ defmodule Arbiter.NodeAgent.Supervisor do
 
   @impl true
   def init(opts) do
+    case Config.backend(opts) do
+      # K14: a cluster controller learns its credential and identity at boot, from the
+      # cluster and the primary, so its tree is started by `K8s.Boot` once they are known.
+      {:ok, Backend.K8s} -> Supervisor.init(K8s.Boot.children(opts), strategy: :rest_for_one)
+      _machine_or_unknown -> init_machine(opts)
+    end
+  end
+
+  defp init_machine(opts) do
     task_supervisor = {Task.Supervisor, name: Arbiter.NodeAgent.TaskSupervisor}
 
     case Config.load(opts) do

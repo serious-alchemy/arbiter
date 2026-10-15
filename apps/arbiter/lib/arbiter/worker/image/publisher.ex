@@ -190,6 +190,14 @@ defmodule Arbiter.Worker.Image.Publisher do
     end
   end
 
+  @doc """
+  What has been published since boot, newest first (`%{kind, ref, tag, at}`, one per
+  kind), without probing the registry: what a cluster controller's canary may run
+  (`Arbiter.Nodes.ClusterInstall.controller_facts/1`). `[]` when nothing is running.
+  """
+  @spec published(keyword()) :: [map()]
+  def published(opts \\ []), do: snapshot(Keyword.get(opts, :server, __MODULE__)).published
+
   defp snapshot(server) do
     GenServer.call(server, :snapshot, 5_000)
   catch
