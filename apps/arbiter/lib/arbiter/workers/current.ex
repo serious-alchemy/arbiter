@@ -93,6 +93,7 @@ defmodule Arbiter.Workers.Current do
       current ->
         [current] =
           current |> List.wrap() |> with_workspaces() |> with_holds() |> with_ci_waits()
+
         %{current: current, runs: recent_runs(current, live, rows)}
     end
   end
@@ -325,7 +326,6 @@ defmodule Arbiter.Workers.Current do
     _ -> nil
   end
 
-  defp filter_workspace(views, nil)
-, do: views
+  defp filter_workspace(views, nil), do: views
   defp filter_workspace(views, ws_id), do: Enum.filter(views, &(&1.workspace_id == ws_id))
 end

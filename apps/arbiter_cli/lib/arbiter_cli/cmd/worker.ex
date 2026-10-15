@@ -644,6 +644,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp ci_wait_part(_row), do: ""
 
   defp agent_note(row, style \\ :short)
+  defp agent_note(%{"ci_wait_label" => label}, _style) when is_binary(label), do: ""
   defp agent_note(%{"agent_live" => false}, :long), do: " — no live agent"
   defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
   defp agent_note(_row, _style), do: ""
