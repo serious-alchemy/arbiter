@@ -260,25 +260,82 @@ correctly prepared namespace; the monitor fails closed until a canary has run.
 kube-router specifically (use the rollout's step 1 for that), or the agent-to-primary
 connection.
 
-## 6. What is and is not wired (as of K13)
+## 6. What is and is not wired (as of K14)
 
 In the tree: the canary, the readiness checks, `ReadinessMonitor`, the controller
 boot (`Arbiter.NodeAgent.K8s.ControllerSupervisor`: the monitor, then the controller,
 `rest_for_one`, the monitor subscribed to the config loader), the controller
 carrying the monitor's `degraded` and readiness block in `Controller.report/1` (and
 pushing `"readiness"` after each run), the primary storing a cluster node's readiness
-from `hello` and `hb`, `GET /api/nodes` serving it, and the doctor section.
+from `hello`, `hb` and that push, `GET /api/nodes` serving it, and the doctor section.
 
-Not in the tree: `Backend.K8s`, which starts `ControllerSupervisor` under the node
-supervisor and maps `Controller.report/1` onto the cluster `hello`/`hb`
-(`readiness`, `degraded`). The controller manifest already gives the controller what
-the canary needs (`ARB_POD_IP`, `ARB_NODE_IP` from the downward API;
-`Canary.targets_from_env/1`). Until that backend exists a real cluster node reports no
-readiness block, and the doctor prints `cluster <name>: readiness … no readiness
-report yet`.
+Since K14 (bd-54nxyr) the node-agent boot is in the tree too: with
+`ARB_AGENT_BACKEND=k8s` the release starts `Arbiter.NodeAgent.K8s.Boot` (§7), which
+starts the controller under the node supervisor, and `Arbiter.NodeAgent.Backend.K8s`
+maps `Controller.report/1` onto the cluster `hello`/`hb` (`kind: cluster`, `capacity`,
+`degraded`, `readiness`). The controller manifest gives the controller what the canary
+needs (`ARB_POD_IP`, `ARB_NODE_IP` from the downward API;
+`Canary.targets_from_env/1`).
+
+Still not in the tree (the design's K§3.4, K§10.3 and K17): the `pods/log` follower
+that streams a worker's output to the primary, holding `exit` until the final
+checkpoint is uploaded, and run adoption across a primary restart. None of it has run
+against a real cluster yet: everything above is tested against a fake API server.
 
 Two probes depend on what the controller can learn: `foreign` uses the cluster DNS
 Service from `/etc/resolv.conf` (a Service in another namespace, backed by pods there)
 because the controller's Role cannot list pods outside its namespace; `node` uses the
 kubelet port. A target that cannot be named is `skipped`, shown in the detail
 (`not probed: foreign`), and never guessed.
+
+## 7. The controller's boot (K14), and when it does not come up
+
+The controller is the Arbiter release with `ARB_ROLE=agent` and
+`ARB_AGENT_BACKEND=k8s`, as the rendered Deployment runs it. Before it can label, build
+or watch a pod it has to learn who it is, so its boot (`Arbiter.NodeAgent.K8s.Boot`)
+does, on every start:
+
+1. the in-cluster API client (the `arbiter-controller` service account);
+2. the node credential: read from the Secret `arbiter-node-credential`, or, on the first
+   boot, the join token from `/etc/arb/join/token` (the `arbiter-join` Secret) redeemed
+   at `POST /nodes/enroll` and written to that Secret. The join Secret is then spent and
+   may be deleted;
+3. `GET /nodes/cluster` on the primary (with the credential): the install id the pods
+   are labelled with, `nodes.registry` and the image the canary runs (the worker image
+   published since the primary started, else the controller image);
+4. its own Deployment's uid (the pods' owner), its Service's `clusterIP` (what pods dial)
+   and the API server's Service address (what the per-pod netpol gate must not reach);
+5. then the controller: the pod channel (its CA in `arbiter-controller-ca`, the public
+   certificate in the ConfigMap `arbiter-ca`), the config loader, the pod informer, the
+   Lease, the readiness monitor and run table, the self-upgrader and the connection.
+
+A step that fails does not crash-loop the pod: the boot logs why, records it, and tries
+again (1 s doubling to 30 s). What it records is in `/tmp/arbiter-node/status.json`
+(`kubectl -n arbiter-workers exec deploy/arbiter-controller -- cat
+/tmp/arbiter-node/status.json`, or the log): `state: booting`, `boot_step` and
+`last_error` until the controller is up, then the connection's own states (`ready`
+once the primary has said `hello_ok`).
+
+| `boot_step` / log | Meaning | Do |
+|---|---|---|
+| `credential`: no node credential and no join token | first boot, the join Secret is not there yet | create it with the command "Add node" printed (`read -rs T && printf %s "$T" \| kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`). The boot re-reads the file on every try; if the kubelet has not refreshed the optional mount after a few minutes, `kubectl -n arbiter-workers rollout restart deployment/arbiter-controller` |
+| `credential`: the primary refused the join token (401) | spent, expired (15 min) or mistyped | mint a new one (`arb node add --kind cluster`), replace the Secret |
+| `store_credential` | enrolled, but the Secret could not be written (Role, placeholder missing) | fix the Role / re-apply the node manifest; the boot keeps the credential in memory and stores it on the next try, so **do not restart the pod** (the token is spent) |
+| `primary_facts`: 401 | the node was revoked or deleted on the primary | enrol again: empty `arbiter-node-credential`, new join Secret |
+| `identity`: `:no_registry` | `nodes.registry` is not set on the primary | `arb settings set nodes.registry …` |
+| `identity`: `{:deployment, …}` / `{:service, …}` | the node manifest's Deployment or Service is missing or renamed | re-apply the node manifest |
+| `start`: `{:pod_channel_ca, …}` | the CA Secret holds something that is not a valid CA | delete its data (the pods' identities are lost either way) |
+
+Environment the boot reads (all set by the rendered Deployment): `ARB_PRIMARY_URL` (or
+`ARB_NODE_URL`), `ARB_NODE_NAME`, `ARB_K8S_SELF_UPGRADE`, `ARB_NODE_PROXY` (the tailscale
+sidecar; it carries the WebSocket and every HTTP call to the primary), and the
+Kubernetes-provided `KUBERNETES_SERVICE_HOST`/`_PORT` and `HOSTNAME`. Optional:
+`ARB_NODE_HOME` (default `/tmp/arbiter-node`, the pod's one writable directory) and
+`ARB_K8S_MAX_WALL_S` (default 86 400: a pod's `activeDeadlineSeconds` is this plus 30
+minutes, the backstop for a pod whose controller is gone).
+
+**Upgrades.** An `outdated` cluster node is sent the controller image of the primary's
+release; with `ARB_K8S_SELF_UPGRADE=true` (the manifest's default) and no run live the
+controller patches its own Deployment and `Recreate` replaces it. The status file's
+`upgrade` block says `waiting_for_idle`, `patched`, `disabled` (patch it yourself with the
+`kubectl set image` command `arb node show` prints) or `failed` with the error.

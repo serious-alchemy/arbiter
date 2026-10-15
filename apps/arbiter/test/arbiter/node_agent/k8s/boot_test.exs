@@ -269,6 +269,23 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     assert [%{"name" => "controller", "image" => ^image}] = containers
   end
 
+  test "a credential that could not be stored is kept, retried, and never shown", ctx do
+    File.write!(Path.join(ctx.home, "token"), "arbj_join\n")
+    FakeK8sApi.fail_next(ctx.api, :secret_update, {403, "secrets is forbidden"}, 3)
+    boot!(ctx)
+
+    wait_until(fn -> (status(ctx)["last_error"] || "") =~ "forbidden" end)
+    # What a crash report or `:sys.get_status/1` would print of the boot's state.
+    refute inspect(:sys.get_status(Arbiter.NodeAgent.K8s.Boot)) =~ "CCCCCCCC"
+    refute File.read!(Path.join(ctx.home, "status.json")) =~ "CCCCCCCC"
+
+    # Once the API lets it, the same credential is stored: one enrolment, no second token.
+    wait_until(&booted?/0)
+    assert stored(ctx.api, "arbiter-node-credential", "credential") == @credential
+    assert_received {:primary, "POST", "/nodes/enroll", _}
+    refute_received {:primary, "POST", "/nodes/enroll", _}
+  end
+
   test "a later boot reads the Secret and never enrols", ctx do
     FakeK8sApi.put_secret(ctx.api, %{
       "metadata" => %{"name" => "arbiter-node-credential"},

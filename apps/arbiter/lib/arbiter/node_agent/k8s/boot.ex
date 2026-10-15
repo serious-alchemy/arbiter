@@ -101,6 +101,16 @@ defmodule Arbiter.NodeAgent.K8s.Boot do
   def handle_info(:boot, state), do: {:noreply, boot(state)}
   def handle_info(_other, state), do: {:noreply, state}
 
+  # A credential kept for a store retry is a secret: never in a crash report or
+  # `:sys.get_status/1`.
+  @impl true
+  def format_status(status), do: Map.update(status, :state, nil, &redact/1)
+
+  defp redact(%{unstored: credential} = state) when is_binary(credential),
+    do: %{state | unstored: "[redacted]"}
+
+  defp redact(state), do: state
+
   # -- the boot ----------------------------------------------------------------------------
 
   defp boot(state) do
@@ -141,6 +151,9 @@ defmodule Arbiter.NodeAgent.K8s.Boot do
          tree: Keyword.get(opts, :tree, [])
        ], state}
     else
+      # A step after the credential's failed: the state from before it is kept. If that
+      # still holds an unstored credential, the next try stores it again, which
+      # `Credential.store/2` answers `:ok` for the credential already there.
       {:error, step, reason} -> {:error, step, reason, state}
       {:error, step, reason, state} -> {:error, step, reason, state}
     end
