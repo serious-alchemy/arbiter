@@ -396,6 +396,25 @@ defmodule Arbiter.Nodes.SessionClusterTest do
     end
   end
 
+  describe "hello_ok.stdout_cursors (K15)" do
+    test "a blip's hello_ok names the last cursor taken for each run", %{node: node} do
+      {:ok, %{pid: pid, hello_ok: first}} = attach(node, cluster_hello())
+      refute Map.has_key?(first, "stdout_cursors")
+
+      task = assign(pid, "r1")
+      Session.node_event(pid, "run.ready", %{"run" => "r1"})
+      {:ok, _handle} = Task.await(task)
+
+      frame = StdoutFrame.encode_cursor("r1", "2026-10-06T10:00:00.1Z 1", "hi\n")
+      Session.node_event(pid, "stdout", {:binary, frame})
+
+      hello = cluster_hello(%{"runs" => [%{"id" => "r1"}]})
+      {:ok, %{hello_ok: ok}} = attach(node, hello)
+      assert ok["runs"] == %{"r1" => "known"}
+      assert ok["stdout_cursors"] == %{"r1" => "2026-10-06T10:00:00.1Z 1"}
+    end
+  end
+
   describe "pod_disrupted (A5)" do
     test "an exit flagged pod_disrupted tells the owner so", %{node: node} do
       {:ok, %{pid: pid}} = attach(node, cluster_hello())

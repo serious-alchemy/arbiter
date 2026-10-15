@@ -22,7 +22,16 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
       to the leaf this table minted** for that run and name, the name is one of the
       spec's bridges (`:bridge`) or `control` (`:control`; the two are never
       interchangeable), and the peer address is the pod's;
-    * `release/2` forgets the run (its leaves stop working at once, whatever their
+    * `channel_record/2` and `adopt/3` carry a run across a controller restart (K15): the table
+    is in memory, so a new controller starts with none, while the pod keeps running with the
+    leaves `/boot` gave it. The record is what the controller writes on the pod
+    (`arbiter.dev/channel`, an annotation) at `assign`: the bridge names, the SHA-256
+    fingerprint of each leaf and the deadline. All public: no key, no secret, no nonce.
+    `adopt/3` rebuilds the entry from it; `authorize/4` then holds the adopted run to the
+    same rules (a certificate whose fingerprint is the minted leaf's, a name from the record,
+    the pod's address once `bind_pod_ip/3` is told). A run whose `/boot` was not served
+    before the restart stays unservable: its nonce and seed files went with the memory;
+  * `release/2` forgets the run (its leaves stop working at once, whatever their
       expiry), drops its nonce and ends any waiting command poll.
 
   The run table also holds each run's **command mailbox** (`push_command/3`,
@@ -64,6 +73,22 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
           {:ok, String.t()} | {:error, atom()}
   def register(server \\ __MODULE__, %RunSpec{} = spec, %DateTime{} = deadline),
     do: GenServer.call(server, {:register, spec, deadline})
+
+  @doc """
+  The public facts of a registered run, for the pod's annotation (see the moduledoc): bridge
+  names, leaf fingerprints and the deadline, as a JSON-able map.
+  """
+  @spec channel_record(GenServer.server(), String.t()) :: {:ok, map()} | {:error, :unknown_run}
+  def channel_record(server \\ __MODULE__, run), do: GenServer.call(server, {:record, run})
+
+  @doc """
+  Rebuild `run`'s entry from the record `channel_record/2` made before a restart.
+  `{:ok, :adopted}`, `{:ok, :present}` (the table already has it: only the controller
+  restarted), or `{:error, :bad_record | :deadline_passed}`. Bind the pod's address next.
+  """
+  @spec adopt(GenServer.server(), String.t(), term()) ::
+          {:ok, :adopted | :present} | {:error, :bad_record | :deadline_passed}
+  def adopt(server \\ __MODULE__, run, record), do: GenServer.call(server, {:adopt, run, record})
 
   @doc "The informer reported `run`'s pod IP."
   @spec bind_pod_ip(GenServer.server(), String.t(), :inet.ip_address()) :: :ok
@@ -154,7 +179,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
     state = %{state | nonces: nonces}
 
     with {:ok, run} <- result,
-         %{spec: spec, leaves: leaves} <- state.runs[run] do
+         %{spec: %RunSpec{} = spec, leaves: leaves} <- state.runs[run] do
       {:reply, {:ok, run, BootBundle.build(spec, leaves)}, state}
     else
       {:error, _} = error -> {:reply, error, state}
@@ -166,6 +191,24 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
     do: {:reply, authorize_peer(state, kind, der, peer_ip), state}
 
   def handle_call({:release, run}, _from, state), do: {:reply, :ok, drop(state, run)}
+
+  def handle_call({:record, run}, _from, state) do
+    case state.runs do
+      %{^run => r} -> {:reply, {:ok, record_of(r)}, state}
+      _ -> {:reply, {:error, :unknown_run}, state}
+    end
+  end
+
+  def handle_call({:adopt, run, record}, _from, state) do
+    if Map.has_key?(state.runs, run) do
+      {:reply, {:ok, :present}, state}
+    else
+      case adopt_run(state, run, record) do
+        {:ok, state} -> {:reply, {:ok, :adopted}, state}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    end
+  end
 
   def handle_call({:push_command, run, command}, _from, state) do
     case state.runs do
@@ -241,6 +284,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
 
     run = %{
       spec: spec,
+      spec_bridges: names,
       bridges: MapSet.new(names),
       leaves: leaves,
       deadline: deadline,
@@ -252,6 +296,62 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
 
     {:ok, nonce, %{state | nonces: nonces, runs: Map.put(state.runs, spec.run, run)}}
   end
+
+  # ---- the record, across a restart ----------------------------------------------------
+
+  defp record_of(r) do
+    %{
+      "bridges" => r.spec_bridges,
+      "leaves" => Map.new(r.leaves, fn {ou, leaf} -> {ou, fingerprint(leaf)} end),
+      "deadline" => DateTime.to_iso8601(r.deadline)
+    }
+  end
+
+  defp fingerprint(%{der: der}), do: Base.encode16(:crypto.hash(:sha256, der), case: :lower)
+  defp fingerprint(%{sha256: hex}), do: hex
+
+  defp adopt_run(state, run, record) do
+    now = state.now.()
+
+    with {:ok, names, leaves, deadline} <- parse_record(record),
+         :ok <- not_expired(deadline, now) do
+      ms = min(max(DateTime.diff(deadline, now, :millisecond), 0), @max_timer_ms)
+      timer = Process.send_after(self(), {:expire, run}, ms)
+
+      entry = %{
+        spec: nil,
+        spec_bridges: names,
+        bridges: MapSet.new(names),
+        leaves: leaves,
+        deadline: deadline,
+        pod_ip: nil,
+        commands: [],
+        waiters: [],
+        timer: timer
+      }
+
+      {:ok, %{state | runs: Map.put(state.runs, run, entry)}}
+    end
+  end
+
+  defp parse_record(%{"bridges" => names, "leaves" => leaves, "deadline" => deadline})
+       when is_list(names) and is_map(leaves) and is_binary(deadline) do
+    with true <- Enum.all?(names, &(is_binary(&1) and &1 != @control)),
+         true <- Enum.sort(Map.keys(leaves)) == Enum.sort([@control | names]),
+         true <- Enum.all?(leaves, fn {_ou, hex} -> sha256_hex?(hex) end),
+         {:ok, at, _} <- DateTime.from_iso8601(deadline) do
+      {:ok, names, Map.new(leaves, fn {ou, hex} -> {ou, %{sha256: hex}} end), at}
+    else
+      _ -> {:error, :bad_record}
+    end
+  end
+
+  defp parse_record(_record), do: {:error, :bad_record}
+
+  defp sha256_hex?(hex), do: is_binary(hex) and hex =~ ~r/\A[0-9a-f]{64}\z/
+
+  defp not_expired(deadline, now),
+    do: if(DateTime.compare(deadline, now) == :gt, do: :ok, else: {:error, :deadline_passed})
 
   # ---- authorization -----------------------------------------------------------------
 
@@ -299,9 +399,12 @@ defmodule Arbiter.NodeAgent.PodChannel.Runs do
   defp same_leaf(r, ou, der) do
     case r.leaves do
       %{^ou => %{der: ^der}} -> :ok
-      _ -> {:error, :leaf_mismatch}
+      %{^ou => %{sha256: hex}} -> if fingerprint(%{der: der}) == hex, do: :ok, else: mismatch()
+      _ -> mismatch()
     end
   end
+
+  defp mismatch, do: {:error, :leaf_mismatch}
 
   # The leaves are only delivered by `/boot`, which needs the IP bound, so an
   # unbound run presenting one is an anomaly: refuse.

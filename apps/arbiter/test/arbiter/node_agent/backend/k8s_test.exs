@@ -257,10 +257,31 @@ defmodule Arbiter.NodeAgent.Backend.K8sTest do
       _ = env
     end
 
-    test "there is no stdout stream to acknowledge yet, and no adoption", _env do
-      assert :ok = Backend.K8s.ack("run-1", 10)
+    test "there is no run adoption across a primary restart, and nothing to detach", _env do
       assert {:error, :unsupported} = Backend.K8s.adopt("run-1")
       assert :ok = Backend.K8s.detach_all()
+    end
+
+    # K15
+    test "the stdout stream: frames reach the sink; resume and ack reach the follower", env do
+      {:ok, "run-1"} = start!(1)
+      running(env, 1)
+      FakeK8sApi.push_log(env.api, "arb-run-1", "one")
+      assert_receive {:run_push, "run-1", "stdout", {:binary, f1}}, 5_000
+      FakeK8sApi.push_log(env.api, "arb-run-1", "two")
+      assert_receive {:run_push, "run-1", "stdout", {:binary, f2}}, 5_000
+      {:ok, _, {:cursor, c1}, "one\n"} = Arbiter.Nodes.StdoutFrame.decode(f1)
+      {:ok, _, {:cursor, c2}, "two\n"} = Arbiter.Nodes.StdoutFrame.decode(f2)
+
+      assert :ok = Backend.K8s.resume(%{"run-1" => c1})
+      assert :ok = Backend.K8s.attach_all([])
+      assert_receive {:run_push, "run-1", "stdout", {:binary, ^f2}}, 5_000
+      refute_receive {:run_push, "run-1", "stdout", _}, 100
+
+      assert :ok = Backend.K8s.ack("run-1", c2)
+      assert :ok = Backend.K8s.ack("run-9", c2)
+      assert :ok = Backend.K8s.attach_all([])
+      refute_receive {:run_push, "run-1", "stdout", _}, 100
     end
 
     test "collect asks the run's snapshotter for a checkpoint over the pod channel", _env do

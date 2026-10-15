@@ -1331,7 +1331,17 @@ defmodule Arbiter.Nodes.Session do
       "runs" => verdicts
     }
     |> put_limits(state)
+    |> put_cursors(state)
     |> put_upgrade(state, Nodes.get_node(state.node_id))
+  end
+
+  # K15: where each opaque-cursor stream (a cluster node's) stands here, so a controller that
+  # restarted, or whose acks were lost, resumes after it. Absent when there is none.
+  defp put_cursors(ok, state) do
+    case RunStreams.cursors(state.streams) do
+      cursors when map_size(cursors) == 0 -> ok
+      cursors -> Map.put(ok, "stdout_cursors", cursors)
+    end
   end
 
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's

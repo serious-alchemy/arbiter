@@ -86,6 +86,13 @@ defmodule Arbiter.NodeAgent.Backend do
   @doc "The primary acknowledged `run`'s output up to `cursor` (`ack{run, offset}`)."
   @callback ack(run, cursor :: term()) :: :ok | {:error, :not_found}
 
+  @doc """
+  `hello_ok` names, per run, the opaque stdout cursor the primary last took (K15), just before
+  `attach_all/1`. Only a backend whose streams have such cursors implements it.
+  """
+  @callback resume(cursors :: %{String.t() => String.t()}) :: :ok
+  @optional_callbacks resume: 1
+
   @doc "The primary has `run`'s `exit` (`exit_ack{run}`): the run may go."
   @callback exit_ack(run) :: :ok | {:error, :not_found}
 

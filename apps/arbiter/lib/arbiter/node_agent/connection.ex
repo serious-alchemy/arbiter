@@ -406,6 +406,12 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # A4: an opaque-cursor stream (a cluster node's) is acknowledged by its cursor.
+  defp push(state, "ack", %{"run" => run, "cursor" => cursor}) when is_binary(cursor) do
+    backend(state).ack(run, cursor)
+    state
+  end
+
   defp push(state, "exit_ack", %{"run" => run}) do
     backend(state).exit_ack(run)
     state
@@ -585,6 +591,7 @@ defmodule Arbiter.NodeAgent.Connection do
       do: Logger.info("node agent upgrade to #{config.version} confirmed")
 
     request_upgrade(state, payload["upgrade"])
+    resume_streams(backend(state), payload["stdout_cursors"])
     attach_runs(backend(state), payload["runs"])
     Bridge.attach(bridge(state), state.client, Protocol.topic(config))
     note_boot_epoch(state, payload["boot_epoch"])
@@ -656,6 +663,16 @@ defmodule Arbiter.NodeAgent.Connection do
     end)
 
     backend.attach_all(unknown ++ held)
+  end
+
+  # K15: where the primary stands in each opaque-cursor stream, before the runs are
+  # re-attached. A backend with such streams (the cluster's) implements `resume/1`; a
+  # machine's byte offsets are resent from its own acked offset, so it has none.
+  defp resume_streams(backend, cursors) do
+    if function_exported?(backend, :resume, 1),
+      do: backend.resume(if(is_map(cursors), do: cursors, else: %{}))
+
+    :ok
   end
 
   defp held_runs(verdicts) when is_map(verdicts),
