@@ -246,6 +246,29 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     assert FakeK8sApi.config_map(ctx.api, "arbiter-ca")["data"] == %{"ca.crt" => cert}
   end
 
+  # The self-upgrade switch is read once, from the boot's environment: what `hello` reports
+  # as `caps.self_upgrade` is what the upgrader does.
+  test "the upgrader follows the boot's ARB_K8S_SELF_UPGRADE", ctx do
+    File.write!(Path.join(ctx.home, "token"), "arbj_join\n")
+    boot!(ctx)
+    wait_until(&booted?/0)
+
+    image = "#{@registry}/controller:2.0.0"
+
+    assert :started =
+             Arbiter.NodeAgent.K8s.Upgrader.request(
+               Arbiter.NodeAgent.K8s.Upgrader,
+               %{"version" => "2.0.0", "image" => image}
+             )
+
+    containers =
+      FakeK8sApi.deployment(ctx.api, "arbiter-controller")["spec"]["template"]["spec"][
+        "containers"
+      ]
+
+    assert [%{"name" => "controller", "image" => ^image}] = containers
+  end
+
   test "a later boot reads the Secret and never enrols", ctx do
     FakeK8sApi.put_secret(ctx.api, %{
       "metadata" => %{"name" => "arbiter-node-credential"},

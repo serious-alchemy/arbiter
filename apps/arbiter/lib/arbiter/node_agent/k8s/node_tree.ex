@@ -81,7 +81,12 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
            ],
            tree[:controller_supervisor] || []
          )},
-        {Upgrader, client: client, version: config.version, name: @upgrader},
+        # The switch `hello` reports as `caps.self_upgrade`, read once by the boot.
+        {Upgrader,
+         client: client,
+         version: config.version,
+         enabled?: (config.cluster || %{})[:self_upgrade?] == true,
+         name: @upgrader},
         {Connection, config: config, upgrader: @upgrader}
       ],
       strategy: :rest_for_one

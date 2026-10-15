@@ -1049,6 +1049,30 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
                      5_000
     end
 
+    # K14: a push made while the connection was down (the canary finishing between the
+    # connect and `hello_ok`) is dropped; `attach_all` on `hello_ok` says it again.
+    test "attach_all says the node's readiness and capacity again too", env do
+      monitor =
+        start_supervised!(
+          {Arbiter.NodeAgent.K8s.ReadinessMonitor,
+           client: env.client,
+           config_fun: fn -> {:error, :no_config} end,
+           autostart: false,
+           interval_ms: nil}
+        )
+
+      controller = start_controller(env, readiness: monitor)
+      flush_pushes()
+
+      assert :ok = Controller.attach_all(controller)
+
+      assert_receive {:run_push, nil, "readiness",
+                      %{"degraded" => ["netpol_unenforced"], "readiness" => %{"ready" => false}}},
+                     5_000
+
+      assert_receive {:run_push, nil, "capacity", %{"ceiling" => 2}}, 5_000
+    end
+
     test "a good edit changes the ceiling and pushes a capacity event", env do
       loader =
         start_supervised!({ConfigLoader, path: env.config_path, interval_ms: nil, notify: nil},

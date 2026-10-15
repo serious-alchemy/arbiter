@@ -261,6 +261,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   def handle_call({:attach_all, skip}, _from, state) do
     for {run, entry} <- state.runs, run not in skip, do: announce(state, entry)
+    announce_node(state)
     {:reply, :ok, state}
   end
 
@@ -888,6 +889,23 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     do: push(state, entry.run, "run.refused", RunReport.refused(entry.run, reason, detail))
 
   defp announce(_state, _entry), do: :ok
+
+  # K14: the node-level pushes (`readiness`, `capacity`) are dropped while the connection is
+  # not up, like a run's; a canary that finished between the connect and `hello_ok` would
+  # otherwise wait for the next heartbeat to reach the primary.
+  defp announce_node(state) do
+    report = build_report(state)
+
+    if state.readiness do
+      push(state, nil, "readiness", %{
+        "degraded" => report.degraded,
+        "readiness" => report.readiness
+      })
+    end
+
+    if report.capacity != %{}, do: push(state, nil, "capacity", report.capacity)
+    :ok
+  end
 
   # --- small helpers ----------------------------------------------------------------
 

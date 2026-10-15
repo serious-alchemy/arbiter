@@ -30,8 +30,8 @@ defmodule Arbiter.NodeAgent.K8s.Lease do
   controller does not wait out the duration.
 
   Options: `:client`, `:identity` (required; the pod name), `:lease_name` (default
-  `arbiter-controller`), `:interval_ms` (default 10 000; `nil` for none, tests call
-  `tick/1`), `:lease_duration_ms` (default 30 000), `:renew_deadline_ms`
+  `arbiter-controller`), `:interval_ms` (default 10 000, the first cycle at start; `nil`
+  for none, tests call `tick/1`), `:lease_duration_ms` (default 30 000), `:renew_deadline_ms`
   (default 20 000), `:clock` (a `fun() -> ms`, monotonic; tests drive it), `:notify`,
   `:name`.
   """
@@ -91,7 +91,10 @@ defmodule Arbiter.NodeAgent.K8s.Lease do
       observed: nil
     }
 
-    {:ok, schedule(state)}
+    # K14: the first cycle at once (a controller assigns nothing until it holds the
+    # Lease), then every interval; with no interval only `tick/1` cycles.
+    if is_integer(state.interval) and state.interval > 0, do: send(self(), :tick)
+    {:ok, state}
   end
 
   @impl true
