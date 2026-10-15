@@ -97,8 +97,9 @@ defmodule Arbiter.NodeAgent.K8s.UpgraderTest do
     assert image(env) == @old
 
     Agent.update(env.idle, fn _ -> true end)
-    wait_until(fn -> image(env) == @new end)
-    assert %{"state" => "patched"} = upgrade_status(env)
+    # The status is written after the PATCH returns: wait for it, not for the image.
+    wait_until(fn -> upgrade_status(env)["state"] == "patched" end)
+    assert image(env) == @new
   end
 
   test "the same request again (every hello_ok repeats it) is not a second attempt", env do
@@ -133,7 +134,7 @@ defmodule Arbiter.NodeAgent.K8s.UpgraderTest do
     assert %{"state" => "failed", "error" => error} = upgrade_status(env)
     assert error =~ "forbidden"
 
-    wait_until(fn -> image(env) == @new end)
-    assert %{"state" => "patched"} = upgrade_status(env)
+    wait_until(fn -> upgrade_status(env)["state"] == "patched" end)
+    assert image(env) == @new
   end
 end

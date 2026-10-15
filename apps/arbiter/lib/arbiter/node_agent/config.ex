@@ -130,6 +130,21 @@ defmodule Arbiter.NodeAgent.Config do
   @spec backend(keyword()) :: {:ok, module()} | {:error, {:unknown_backend, term()}}
   def backend(opts \\ []), do: backend(opts, env(opts))
 
+  @doc """
+  The primary's URL (validated as `load/1` does) and the proxy to reach it through, with
+  no credential needed: a cluster controller must reach the primary to enrol before it
+  has one (`Arbiter.NodeAgent.K8s.Boot`).
+  """
+  @spec primary_endpoint(keyword()) ::
+          {:ok, %{url: String.t(), proxy: String.t() | nil}} | {:error, term()}
+  def primary_endpoint(opts \\ []) do
+    env = env(opts)
+
+    with {:ok, url} <- primary_url(opts, env) do
+      {:ok, %{url: url, proxy: proxy(opts, env)}}
+    end
+  end
+
   @doc "The data dir alone (`ARB_NODE_HOME`, default `~/.arbiter-node`); needs no valid config."
   @spec node_home(keyword()) :: Path.t()
   def node_home(opts \\ []) do
