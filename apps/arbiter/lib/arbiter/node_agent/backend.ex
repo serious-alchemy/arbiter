@@ -58,6 +58,42 @@ defmodule Arbiter.NodeAgent.Backend do
   @doc "The readiness report for `hello` (the backend can run workers, or why not)."
   @callback readiness() :: map()
 
+  # -- the connection's hooks (K14) ---------------------------------------------------
+  #
+  # What `Arbiter.NodeAgent.Connection` does to the runs when the channel says something.
+  # The machine agent's own `Run`/`Runs` calls moved behind these unchanged
+  # (`Arbiter.NodeAgent.Backend.Podman`), so the connection names no backend.
+
+  @doc "The `hello` payload, given the readiness report `readiness/0` produced."
+  @callback hello(Arbiter.NodeAgent.Config.t(), readiness :: map()) :: map()
+
+  @doc "The `hb` payload for heartbeat number `seq`."
+  @callback heartbeat(Arbiter.NodeAgent.Config.t(), seq :: non_neg_integer()) :: map()
+
+  @doc "Say again what the primary may have missed for `run` (it repeated the `assign`)."
+  @callback attach(run) :: :ok | {:error, :not_found}
+
+  @doc "The channel is up (`hello_ok`): every run but `skip` resends what is unacknowledged."
+  @callback attach_all(skip :: [run]) :: :ok
+
+  @doc "The channel went away."
+  @callback detach_all() :: :ok
+
+  @doc "The self-fence (§10.1): stop every run."
+  @callback fence_all() :: :ok
+
+  @doc "The primary acknowledged `run`'s output up to `cursor` (`ack{run, offset}`)."
+  @callback ack(run, cursor :: term()) :: :ok | {:error, :not_found}
+
+  @doc "The primary has `run`'s `exit` (`exit_ack{run}`): the run may go."
+  @callback exit_ack(run) :: :ok | {:error, :not_found}
+
+  @doc "The primary does not know `run`, or asked for it to be collected (`quiesce{run}`)."
+  @callback quiesce(run) :: :ok | {:error, :not_found}
+
+  @doc "A new Worker on the primary takes a held `run` over (`adopt{run}`)."
+  @callback adopt(run) :: :ok | {:error, :not_found | :unsupported}
+
   @backends %{"podman" => Arbiter.NodeAgent.Backend.Podman}
 
   @doc "The backend names `ARB_AGENT_BACKEND` accepts."

@@ -158,6 +158,37 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitorTest do
     assert %{degraded: ["netpol_unenforced"]} = ReadinessMonitor.report(server)
   end
 
+  # K14: the boot hands the monitor a function, because the primary may not have published
+  # an image yet when the controller starts; each run asks again.
+  test "the image may be a function, asked again on every run", ctx do
+    script(ctx.api, @all_closed)
+    image = "#{Fx.registry()}/beam@sha256:#{Fx.digest()}"
+    asked = start_supervised!({Agent, fn -> 0 end}, id: :asked)
+
+    server =
+      start!(ctx,
+        image: fn ->
+          Agent.update(asked, &(&1 + 1))
+          {:ok, image}
+        end
+      )
+
+    assert_receive {:k8s_readiness, ^server, %{degraded: []}}, 5_000
+    assert %{degraded: []} = ReadinessMonitor.refresh(server)
+    assert Agent.get(asked, & &1) == 2
+  end
+
+  test "no image yet is inconclusive (fail closed), and names why", ctx do
+    server = start!(ctx, image: fn -> {:error, :not_published} end)
+
+    assert_receive {:k8s_readiness, ^server, report}, 5_000
+    assert report.degraded == ["netpol_unenforced"]
+    assert check(report, "netpol")["detail"] =~ "not_published"
+
+    assert FakeK8sApi.requests(ctx.api) |> Enum.filter(&(&1.method == "POST")) == [],
+           "no canary pod is created without an image"
+  end
+
   test "a throw inside a run is inconclusive too", ctx do
     server = start!(ctx, config_fun: fn -> throw(:oops) end)
 

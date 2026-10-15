@@ -7,13 +7,15 @@ defmodule Arbiter.NodeAgent.K8s.RunReport do
   maps.
 
     * `ready/1` — `run.ready`, sent at the worker container `Running`, never before;
-    * `refused/2` — `run.refused{reason, detail}`;
+    * `refused/3` — `run.refused{run, reason, detail}` (the primary takes none without
+      its `run`);
     * `exit/2` — `exit{status, oom, cancelled, reason, snapshot, …}`; a pod the
       cluster took away (eviction, preemption, node shutdown, someone's `kubectl
       delete`) carries `pod_disrupted: true` (A5) and no status;
     * `cancelled/1` — the exit of a run the controller itself deleted;
     * `inventory/1` — one run in `hello.inventory.runs` and `hb.runs`, with the state
-      vocabulary `pending | starting | running | terminating`.
+      vocabulary `pending | starting | running | terminating`, keyed `id` as the
+      primary reads it (and `run`, as the other payloads name it).
   """
 
   @type entry :: %{
@@ -25,8 +27,9 @@ defmodule Arbiter.NodeAgent.K8s.RunReport do
   @spec ready(entry()) :: map()
   def ready(entry), do: %{"run" => entry.run, "container" => entry.pod}
 
-  @spec refused(atom() | String.t(), String.t() | nil) :: map()
-  def refused(reason, detail), do: %{"reason" => to_string(reason), "detail" => detail}
+  @spec refused(String.t(), atom() | String.t(), String.t() | nil) :: map()
+  def refused(run, reason, detail),
+    do: %{"run" => run, "reason" => to_string(reason), "detail" => detail}
 
   @doc "The `exit` for a `PodState` `{:exit, info}` or `{:interrupted, info}`."
   @spec exit(entry(), {:exit | :interrupted, map()}) :: map()
@@ -65,7 +68,7 @@ defmodule Arbiter.NodeAgent.K8s.RunReport do
 
   @spec inventory(entry()) :: map()
   def inventory(entry) do
-    %{"run" => entry.run, "pod" => entry.pod, "state" => state_word(entry)}
+    %{"id" => entry.run, "run" => entry.run, "pod" => entry.pod, "state" => state_word(entry)}
     |> put_present("reason", entry |> Map.get(:detail, %{}) |> Map.get(:reason) |> word())
     |> put_present("message", entry |> Map.get(:detail, %{}) |> Map.get(:message))
   end

@@ -717,6 +717,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
       assert_receive {:run_push, ^run2, "exit", %{"status" => 0}}, 5_000
     end
 
+    # K14: the primary repeats an `assign` it lost the answer to; only that run is re-said.
+    test "attach/2 re-announces one run and nothing else", env do
+      controller = start_controller(env)
+      run1 = assign!(controller, 1)
+      run2 = assign!(controller, 2)
+      set_status(env, pod_name(1), running_status())
+      observed(run1, :running)
+      set_status(env, pod_name(2), running_status())
+      observed(run2, :running)
+      flush_pushes()
+
+      assert :ok = Controller.attach(controller, run1)
+      assert_receive {:run_push, ^run1, "run.ready", _}, 5_000
+      refute_received {:run_push, ^run2, _, _}
+
+      assert {:error, :not_found} = Controller.attach(controller, "run-unknown")
+    end
+
     test "attach_all leaves out the runs the primary does not know", env do
       first = start_controller(env, id: :first_controller)
       run = assign!(first, 1)

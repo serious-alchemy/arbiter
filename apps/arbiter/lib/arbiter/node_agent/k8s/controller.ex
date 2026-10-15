@@ -145,6 +145,13 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     do: GenServer.call(controller, {:attach_all, skip})
 
   @doc """
+  Say again what the primary may have missed for one run: the answer to an `assign` it
+  repeated (K14). `{:error, :not_found}` for a run the table does not hold.
+  """
+  @spec attach(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def attach(controller \\ __MODULE__, run), do: GenServer.call(controller, {:attach, run})
+
+  @doc """
   The primary's `reap{install, live_set}`. `%{containers: [], pods: names, dirs: []}`
   (the machine reaper's shape), `{:error, :not_leader}` without the Lease,
   `{:error, :install_mismatch | :no_install}`.
@@ -254,6 +261,17 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   def handle_call({:attach_all, skip}, _from, state) do
     for {run, entry} <- state.runs, run not in skip, do: announce(state, entry)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:attach, run}, _from, state) do
+    case Map.fetch(state.runs, run) do
+      {:ok, entry} ->
+        announce(state, entry)
+        {:reply, :ok, state}
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   def handle_call({:reap, request}, _from, state) do
@@ -635,7 +653,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   # The run never started: tell the primary, take the pod away.
   defp refuse(entry, reason, detail, state) do
-    push(state, entry.run, "run.refused", RunReport.refused(reason, detail))
+    push(state, entry.run, "run.refused", RunReport.refused(entry.run, reason, detail))
     release(state, entry.run)
     entry = %{entry | phase: :refused, state: :refused, refusal: {reason, detail}}
     {delete_pod(state, entry, 0), state}
@@ -866,7 +884,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     do: push(state, entry.run, "exit", exit)
 
   defp announce(state, %{phase: :refused, refusal: {reason, detail}} = entry),
-    do: push(state, entry.run, "run.refused", RunReport.refused(reason, detail))
+    do: push(state, entry.run, "run.refused", RunReport.refused(entry.run, reason, detail))
 
   defp announce(_state, _entry), do: :ok
 

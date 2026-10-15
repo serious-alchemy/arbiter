@@ -29,23 +29,29 @@ defmodule Arbiter.NodeAgent.Connection do
   * **Upgrade.** A `hello_ok` (or an `upgrade` push) carrying
     `upgrade{version, sha256}` goes to `Arbiter.NodeAgent.Upgrader`; the first
     `hello_ok` of a freshly upgraded agent also confirms the upgrade.
-  * **Runs (RW9).** `assign{run, spec}` starts a run (`Arbiter.NodeAgent.Runs`),
-    answered by the run's own `run.ready` / `run.refused` push; `cancel`,
-    `signal`, `ack{run, offset}` and `exit_ack{run}` address a run by id. The
-    run processes send `{:run_push, run, event, payload}` here, and this process
-    puts them on the channel (`stdout` as a binary `StdoutFrame`). On `hello_ok`
-    every run is re-attached (it resends what the primary has not acknowledged),
-    runs the primary does not know are cancelled, and on any loss the runs are
-    detached; a **fence** also stops every container (§10.1).
+  * **Runs (RW9).** `assign{run, spec}` starts a run through the backend
+    (`Arbiter.NodeAgent.Backend`: `config.backend`), answered by the run's own
+    `run.ready` / `run.refused` push; a refusal the backend states itself,
+    `{:refuse, reason, detail}` (the k8s controller's admission, K14), goes back as
+    `run.refused` with that reason. `cancel`, `signal`, `ack{run, offset}` and
+    `exit_ack{run}` address a run by id. The runs send `{:run_push, run, event,
+    payload}` here, and this process puts them on the channel (`stdout` as a binary
+    `StdoutFrame`). On `hello_ok` every run is re-attached (it resends what the
+    primary has not acknowledged), runs the primary does not know are quiesced, and
+    on any loss the runs are detached; a **fence** also stops every run (§10.1). Each
+    of these is a backend hook (`attach_all/1`, `quiesce/1`, `detach_all/0`,
+    `fence_all/0`, …), as are the `hello` and `hb` payloads, so this module names no
+    backend: the machine's are `Arbiter.NodeAgent.Backend.Podman`, a cluster
+    controller's `Arbiter.NodeAgent.Backend.K8s`.
   * **Bridges (RW10).** `Arbiter.NodeAgent.Bridge` owns the per-run listeners and
     their streams; this process attaches it to the channel on `hello_ok`,
     detaches it on any loss, and hands it the `bridge.*` events. Its pushes go
     straight to the socket, not through here.
   * **Restart recovery (RW12, §10.4–10.6).** A `hello_ok` whose per-run verdict is
     `"unknown"` (the primary restarted, or lost the run) **quiesces** that run
-    (`Arbiter.NodeAgent.Run.quiesce/1`): container stopped, snapshot bundle and
-    transcripts taken locally into `Arbiter.NodeAgent.Retained`, a `retained`
-    push. Every `hello` lists what is retained (`inventory.retained`). The primary
+    (the backend's `quiesce/1`; on a machine `Arbiter.NodeAgent.Run.quiesce/1`):
+    container stopped, snapshot bundle and transcripts taken locally into
+    `Arbiter.NodeAgent.Retained`, a `retained` push. Every `hello` lists what is retained (`inventory.retained`). The primary
     asks for it with `recover{run}` (answered by `recovered{run, …}` once the
     uploads are done) and says it may go with `retained.drop{run}`. A changed
     `boot_epoch` is logged and recorded in the status file. `reap{install,
@@ -64,8 +70,6 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
   alias Arbiter.NodeAgent.Retained
-  alias Arbiter.NodeAgent.Run
-  alias Arbiter.NodeAgent.Runs
   alias Arbiter.NodeAgent.Status
   alias Arbiter.NodeAgent.Upgrade
   alias Arbiter.NodeAgent.Upgrader
@@ -219,7 +223,7 @@ defmodule Arbiter.NodeAgent.Connection do
     grace_s = div(state.config.restart_grace_ms, 1000)
     Logger.warning("node agent fenced: no primary for #{grace_s}s; stopping its runs")
     put_status(state, %{fenced_at: DateTime.utc_now() |> DateTime.to_iso8601()})
-    Runs.fence_all()
+    backend(state).fence_all()
     {:noreply, %{state | grace_timer: nil}}
   end
 
@@ -313,7 +317,19 @@ defmodule Arbiter.NodeAgent.Connection do
 
       {:error, :already_running} ->
         # A repeated assign (the primary asked again after a blip): say where it is.
-        Run.attach(run)
+        backend(state).attach(run)
+
+      # K14: the cluster controller's admission speaks the A3 vocabulary itself
+      # (`no_capacity | unschedulable | bad_spec`, `Arbiter.Nodes.Refusal`), so its reason
+      # goes to the primary as given, never re-labelled.
+      {:error, {:refuse, reason, detail}} ->
+        Logger.warning("node agent: refused run #{inspect(run)}: #{reason} (#{detail})")
+
+        send(
+          self(),
+          {:run_push, run, "run.refused",
+           %{"run" => run, "reason" => to_string(reason), "detail" => detail}}
+        )
 
       {:error, {:refused, reason}} ->
         Logger.warning("node agent: refused run #{inspect(run)}: #{inspect(reason, limit: 5)}")
@@ -386,12 +402,12 @@ defmodule Arbiter.NodeAgent.Connection do
   end
 
   defp push(state, "ack", %{"run" => run, "offset" => offset}) when is_integer(offset) do
-    Run.ack(run, offset)
+    backend(state).ack(run, offset)
     state
   end
 
   defp push(state, "exit_ack", %{"run" => run}) do
-    Run.ack_exit(run)
+    backend(state).exit_ack(run)
     state
   end
 
@@ -417,7 +433,7 @@ defmodule Arbiter.NodeAgent.Connection do
   # bd-24o760: the primary decided a held run is to be collected, not kept.
   defp push(state, "quiesce", %{"run" => run}) when is_binary(run) do
     Logger.warning("node agent: primary asked to quiesce run #{run} for recovery")
-    Run.quiesce(run)
+    backend(state).quiesce(run)
     state
   end
 
@@ -426,9 +442,10 @@ defmodule Arbiter.NodeAgent.Connection do
   # before the run is touched.
   defp push(state, "adopt", %{"run" => run}) when is_binary(run) do
     if state.phase == :ready and MapSet.member?(state.held, run) do
-      case Run.adopt(run) do
+      case backend(state).adopt(run) do
         :ok -> Logger.info("node agent: primary adopted held run #{run}")
         {:error, :not_found} -> adopt_refused(run, "gone")
+        {:error, :unsupported} -> adopt_refused(run, "unsupported")
       end
 
       %{state | held: MapSet.delete(state.held, run)}
@@ -508,7 +525,7 @@ defmodule Arbiter.NodeAgent.Connection do
 
   defp send_hello(%{client: client, phase: phase} = state, report)
        when is_pid(client) and phase == :hello do
-    payload = Protocol.hello(state.config, jsonable(report))
+    payload = backend(state).hello(state.config, jsonable(report))
     ref = client |> WsClient.push(Protocol.topic(state.config), "hello", payload) |> ref_or_nil()
     put_status(state, %{state: "hello_sent", readiness_ready: report_ready(report)})
     %{state | hello_ref: ref}
@@ -568,7 +585,7 @@ defmodule Arbiter.NodeAgent.Connection do
       do: Logger.info("node agent upgrade to #{config.version} confirmed")
 
     request_upgrade(state, payload["upgrade"])
-    attach_runs(payload["runs"])
+    attach_runs(backend(state), payload["runs"])
     Bridge.attach(bridge(state), state.client, Protocol.topic(config))
     note_boot_epoch(state, payload["boot_epoch"])
   end
@@ -623,7 +640,7 @@ defmodule Arbiter.NodeAgent.Connection do
   # A run the primary says it does not know is not one to keep alive: its owner
   # is gone, so it is quiesced (§10.4): the container is stopped and the work is
   # retained locally for the primary to recover.
-  defp attach_runs(verdicts) do
+  defp attach_runs(backend, verdicts) do
     unknown = for {run, "unknown"} <- verdicts || %{}, do: run
     # bd-24o760: a held run is the primary's, not yet decided: neither quiesced nor attached
     # (it has no stream to resend into) until the primary says `quiesce`.
@@ -635,10 +652,10 @@ defmodule Arbiter.NodeAgent.Connection do
 
     Enum.each(unknown, fn run ->
       Logger.warning("node agent: primary does not know run #{run}; quiescing it")
-      Run.quiesce(run)
+      backend.quiesce(run)
     end)
 
-    Runs.attach_all(unknown ++ held)
+    backend.attach_all(unknown ++ held)
   end
 
   defp held_runs(verdicts) when is_map(verdicts),
@@ -680,13 +697,18 @@ defmodule Arbiter.NodeAgent.Connection do
       Logger.warning("node agent fenced: no hb_ack for #{div(config.fence_after_ms, 1000)}s")
       put_status(state, %{fenced_at: DateTime.utc_now() |> DateTime.to_iso8601()})
       # §10.1: by the time the primary declares the node lost, the containers are stopped.
-      Runs.fence_all()
+      backend(state).fence_all()
       lost(state, "fenced: no hb_ack for #{div(config.fence_after_ms, 1000)}s")
     else
       seq = state.hb_seq + 1
 
       ref =
-        WsClient.push(state.client, Protocol.topic(config), "hb", Protocol.heartbeat(config, seq))
+        WsClient.push(
+          state.client,
+          Protocol.topic(config),
+          "hb",
+          backend(state).heartbeat(config, seq)
+        )
 
       put_status(state, %{hb_seq: seq})
 
@@ -710,7 +732,7 @@ defmodule Arbiter.NodeAgent.Connection do
   # -- loss + retry -------------------------------------------------------------------------------
 
   defp lost(state, reason) do
-    Runs.detach_all()
+    backend(state).detach_all()
     Bridge.detach(bridge(state))
     if state.client, do: WsClient.close(state.client)
     if state.client_ref, do: Process.demonitor(state.client_ref, [:flush])
