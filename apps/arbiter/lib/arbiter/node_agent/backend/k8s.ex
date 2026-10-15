@@ -25,8 +25,11 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
     * `collect` asks the run's snapshotter for a checkpoint over the pod channel's
       `/commands`.
 
-  Not here yet (named so nobody assumes it): the `pods/log` follower that makes `stdout`
-  frames (K§3.4), so `ack` has nothing to move, and run adoption across a primary restart
+    * `stdout` is the controller's `pods/log` follower (K§3.4, K15): `ack` carries the
+      primary's opaque cursor to it, `resume` the cursor `hello_ok` says the primary holds
+      (before the `attach_all` that resends what it lacks).
+
+  Not here yet (named so nobody assumes it): run adoption across a primary restart
   (`caps.run_hold`/`run_adopt` are not advertised: the primary answers such runs `unknown`
   and they are quiesced). `exec` (the pre-push recipe in a run's shape) is not offered.
   """
@@ -168,9 +171,18 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
     :ok
   end
 
-  # No `pods/log` follower yet (K§3.4): no stdout stream, nothing to acknowledge.
+  # The primary's cursor for the run's `pods/log` stream (K§3.4). A cast: acks are frequent.
   @impl true
-  def ack(_run, _cursor), do: :ok
+  def ack(run, cursor) when is_binary(cursor) do
+    Controller.ack(@controller, run, cursor)
+  catch
+    :exit, _ -> :ok
+  end
+
+  def ack(_run, _offset), do: :ok
+
+  @impl true
+  def resume(cursors), do: call(:ok, &Controller.resume(&1, cursors))
 
   @impl true
   def exit_ack(run), do: call(:ok, &Controller.exit_ack(&1, run))

@@ -470,6 +470,38 @@ defmodule Arbiter.NodeAgent.K8s.ControllerRunLifecycleTest do
       assert binds.() == before_restart
     end
 
+    test "a run the pod channel lost (its table crashed) is put back from the pod's record",
+         env do
+      controller = start_controller(env)
+      run = running!(env, controller, 1)
+      assert run in FakePodChannel.live_runs(env.channel)
+
+      FakePodChannel.forget(env.channel, run)
+      refute run in FakePodChannel.live_runs(env.channel)
+
+      Controller.tick(controller)
+      assert {:adopt, run, %{"fake" => "record", "run" => run}} in calls(env)
+      assert run in FakePodChannel.live_runs(env.channel)
+      # and its address is told again
+      binds = Enum.filter(calls(env), &match?({:bind, ^run, {10, 42, 0, 17}}, &1))
+      assert length(binds) == 2
+
+      # nothing more to do on the next pass
+      Controller.tick(controller)
+      assert Enum.count(calls(env), &match?({:adopt, ^run, _}, &1)) == 1
+    end
+
+    test "a run whose channel entry cannot be put back is not retried every pass", env do
+      controller = start_controller(env)
+      run = running!(env, controller, 1)
+      FakePodChannel.forget(env.channel, run)
+      FakePodChannel.adopt_answers(env.channel, {:error, :deadline_passed})
+
+      Controller.tick(controller)
+      Controller.tick(controller)
+      assert Enum.count(calls(env), &match?({:adopt, ^run, _}, &1)) == 1
+    end
+
     test "a pod with no record (made before K15) is adopted without a channel", env do
       first = start_controller(env, 1)
       run = running!(env, first, 1)

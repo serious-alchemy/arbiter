@@ -362,6 +362,163 @@ defmodule ArbiterWeb.RemoteClusterTest do
     end
   end
 
+  # K15: a cluster run's output, its exit, and a controller restart, against the real
+  # primary session and the real pod channel (the fake API server is the kubelet).
+  describe "run completeness (K15)" do
+    @pod_ip "10.42.0.9"
+
+    defp pod_status(ctx, name, worker, snapshotter) do
+      pod = FakeK8sApi.handle(ctx.api, {:get, name})
+
+      FakeK8sApi.put_pod(
+        ctx.api,
+        Map.put(pod, "status", %{
+          "phase" => if(worker == :running, do: "Running", else: "Succeeded"),
+          "podIP" => @pod_ip,
+          "conditions" => [%{"type" => "PodScheduled", "status" => "True"}],
+          "containerStatuses" => [
+            %{
+              "name" => "worker",
+              "state" =>
+                if(worker == :running,
+                  do: %{"running" => %{}},
+                  else: %{"terminated" => %{"exitCode" => 0, "reason" => "Completed"}}
+                )
+            }
+          ],
+          "initContainerStatuses" => [
+            %{"name" => "seed", "state" => %{"terminated" => %{"exitCode" => 0}}},
+            %{
+              "name" => "snapshotter",
+              "state" =>
+                if(snapshotter == :running,
+                  do: %{"running" => %{}},
+                  else: %{"terminated" => %{"exitCode" => 0, "reason" => "Completed"}}
+                )
+            }
+          ]
+        })
+      )
+    end
+
+    defp place!(ctx, node_id, run, overrides \\ %{}) do
+      me = self()
+
+      task =
+        Task.async(fn -> Executor.prepare(%{id: node_id}, spec(run, overrides), owner: me) end)
+
+      name = "arb-" <> run
+      wait_until(fn -> FakeK8sApi.handle(ctx.api, {:get, name}) != nil end)
+      pod_status(ctx, name, :running, :running)
+      assert {:ok, %{handle: handle}} = Task.await(task, 15_000)
+      handle
+    end
+
+    test "the worker's log reaches its owner, and the exit waits for the final checkpoint",
+         ctx do
+      node_id = boot_agent(ctx)
+      lease_held!()
+      handle = place!(ctx, node_id, "run-s1")
+
+      FakeK8sApi.push_log(ctx.api, "arb-run-s1", "hello from the pod")
+      assert_receive {^handle, {:data, {:eol, "hello from the pod"}}}, 10_000
+      FakeK8sApi.push_log(ctx.api, "arb-run-s1", "second line")
+      assert_receive {^handle, {:data, {:eol, "second line"}}}, 10_000
+
+      # the worker ends; the snapshotter is still forwarding the final checkpoint
+      FakeK8sApi.push_log(ctx.api, "arb-run-s1", "the last line")
+      pod_status(ctx, "arb-run-s1", :exited, :running)
+      refute_receive {^handle, {:outcome, _}}, 400
+
+      pod_status(ctx, "arb-run-s1", :exited, :complete)
+      assert_receive {^handle, {:data, {:eol, "the last line"}}}, 10_000
+      assert_receive {^handle, {:outcome, %{exit_code: 0, oom?: false}}}, 10_000
+      assert_receive {^handle, {:exit_status, 0}}, 10_000
+
+      # the primary has the exit: the controller lets the clean pod go
+      wait_until(fn -> FakeK8sApi.handle(ctx.api, {:get, "arb-run-s1"}) == nil end)
+    end
+
+    test "a run with no output still ends", ctx do
+      node_id = boot_agent(ctx)
+      lease_held!()
+      handle = place!(ctx, node_id, "run-s2")
+      pod_status(ctx, "arb-run-s2", :exited, :complete)
+      assert_receive {^handle, {:outcome, %{exit_code: 0}}}, 10_000
+    end
+
+    test "after a controller restart the adopted pod's bridges work again and its output resumes",
+         ctx do
+      alias Arbiter.NodeAgent.PodChannel.Runs
+
+      node_id = boot_agent(ctx)
+      lease_held!()
+
+      bridges = [%{"name" => "proxy", "path" => "/var/lib/arb/run/sockets/proxy.sock"}]
+      handle = place!(ctx, node_id, "run-s3", %{"bridges" => bridges})
+      ip = {10, 42, 0, 9}
+
+      # what `/boot` gave the pod: its leaves, read back out of the tar
+      pod = FakeK8sApi.handle(ctx.api, {:get, "arb-run-s3"})
+      nonce = pod_env(pod, "ARB_BOOT_NONCE")
+      wait_until(fn -> match?({:ok, _, _}, peek_redeem(nonce, ip)) end)
+      {:ok, files} = :erl_tar.extract({:binary, redeemed_tar!()}, [:memory])
+      files = Map.new(files, fn {n, b} -> {to_string(n), b} end)
+      [{:Certificate, proxy, _}] = :public_key.pem_decode(files["tls/proxy.crt"])
+      [{:Certificate, control, _}] = :public_key.pem_decode(files["tls/control.crt"])
+
+      assert {:ok, %{run: "run-s3", name: "proxy"}} = Runs.authorize(Runs, :bridge, proxy, ip)
+
+      FakeK8sApi.push_log(ctx.api, "arb-run-s3", "before the restart")
+      assert_receive {^handle, {:data, {:eol, "before the restart"}}}, 10_000
+
+      # the controller restarts: every process of the tree, the pod channel's run table with it
+      old = Process.whereis(Runs)
+      Process.exit(Process.whereis(Arbiter.NodeAgent.PodChannel), :kill)
+      wait_until(fn -> (pid = Process.whereis(Runs)) != nil and pid != old end)
+      wait_until(fn -> "run-s3" in live_runs() end)
+
+      # the same leaves, from the same pod, are let in as before; nothing else is
+      assert {:ok, %{run: "run-s3", name: "proxy"}} = Runs.authorize(Runs, :bridge, proxy, ip)
+      assert {:ok, %{run: "run-s3"}} = Runs.authorize(Runs, :control, control, ip)
+      assert {:error, :wrong_ip} = Runs.authorize(Runs, :bridge, proxy, {10, 42, 0, 99})
+      assert :ok = Arbiter.NodeAgent.PodChannel.push_command("run-s3", %{"op" => "checkpoint"})
+
+      # and the output carries on after what the owner already has, with no replay
+      wait_until(fn -> Session.run_started?(Registry.lookup(node_id), "run-s3") end)
+      FakeK8sApi.push_log(ctx.api, "arb-run-s3", "after the restart")
+      assert_receive {^handle, {:data, {:eol, "after the restart"}}}, 15_000
+      refute_received {^handle, {:data, {:eol, "before the restart"}}}
+      refute_received {^handle, {:outcome, _}}
+    end
+
+    defp pod_env(pod, name) do
+      pod["spec"]["initContainers"]
+      |> Enum.flat_map(&(&1["env"] || []))
+      |> Enum.find_value(fn
+        %{"name" => ^name, "value" => value} -> value
+        _ -> nil
+      end)
+    end
+
+    # `Runs.redeem/3` spends the nonce, so the tar is kept from the first success.
+    defp peek_redeem(nonce, ip) do
+      result =
+        Arbiter.NodeAgent.PodChannel.Runs.redeem(Arbiter.NodeAgent.PodChannel.Runs, nonce, ip)
+
+      with {:ok, _run, tar} <- result, do: Process.put(:redeemed_tar, tar)
+      result
+    end
+
+    defp redeemed_tar!, do: Process.get(:redeemed_tar)
+
+    defp live_runs do
+      Arbiter.NodeAgent.PodChannel.Runs.live_runs(Arbiter.NodeAgent.PodChannel.Runs)
+    catch
+      :exit, _ -> []
+    end
+  end
+
   describe "self-upgrade" do
     test "an outdated cluster node patches its own Deployment to this primary's image", ctx do
       node_id = boot_agent(ctx, version: "1.0.0")

@@ -172,6 +172,19 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     do: GenServer.call(controller, {:attach_all, skip})
 
   @doc """
+  What the pod channel announces (`{:pod_channel_upload, run, :checkpoint | :transcripts,
+  result}`, the `:notify` of `Arbiter.NodeAgent.PodChannel`), delivered to the controller
+  registered under its production name; dropped when there is none (K15).
+  """
+  @spec notify(term()) :: :ok
+  def notify(message) do
+    case Process.whereis(__MODULE__) do
+      nil -> :ok
+      pid -> send(pid, message) && :ok
+    end
+  end
+
+  @doc """
   The primary acknowledged `run`'s output up to the opaque `cursor` (K15).
   """
   @spec ack(GenServer.server(), String.t(), String.t()) :: :ok
@@ -1098,12 +1111,45 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   defp schedule_tick(state), do: state
 
   defp housekeeping(state) do
-    state = refresh_quota(state)
+    state = state |> refresh_quota() |> resync_channel()
 
     state.runs
     |> Map.values()
     |> Enum.reduce(state, &tend/2)
   end
+
+  # K15: the pod channel's run table can lose runs without this process knowing (its process
+  # crashed and came back empty). A live run it no longer holds is put back from the record on
+  # its pod, once: if that fails, the run goes on without a channel.
+  defp resync_channel(state) do
+    {mod, server} = state.channel
+
+    case channel_runs(mod, server) do
+      nil ->
+        state
+
+      held ->
+        for {_run, entry} <- state.runs,
+            entry.phase == :live and entry.registered? and entry.run not in held,
+            reduce: state do
+          acc -> resync_run(acc, entry)
+        end
+    end
+  end
+
+  defp channel_runs(mod, server) do
+    mod.live_runs(server)
+  catch
+    :exit, _ -> nil
+  end
+
+  defp resync_run(state, %{last_pod: pod} = entry) when is_map(pod) do
+    entry = restore_channel(%{entry | registered?: false}, pod, state)
+    {entry, state} = bind_ip(%{entry | bound_ip: nil}, pod, state)
+    put_entry(state, entry)
+  end
+
+  defp resync_run(state, _entry), do: state
 
   # One run's periodic pass: re-evaluate time-based rows (schedule/pull timeouts), retry
   # a failed delete, and clean up what has been acknowledged.

@@ -31,6 +31,7 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
   alias Arbiter.NodeAgent.Connection
   alias Arbiter.NodeAgent.K8s.Client
   alias Arbiter.NodeAgent.K8s.ConfigLoader
+  alias Arbiter.NodeAgent.K8s.Controller
   alias Arbiter.NodeAgent.K8s.ControllerSupervisor
   alias Arbiter.NodeAgent.K8s.Informer
   alias Arbiter.NodeAgent.K8s.Lease
@@ -109,6 +110,8 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
       [
         ca_store: {CAStore.Secret, client},
         config: config,
+        # the final checkpoint's upload is what the controller holds `exit` for (K§10.3)
+        notify: &Controller.notify/1,
         server_names: [@service, "#{@service}.#{ns}", "#{@service}.#{ns}.svc"],
         server_ips: server_ips(identity.bridge_addr)
       ],

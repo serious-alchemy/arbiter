@@ -30,7 +30,8 @@ defmodule Arbiter.NodeAgent.BackendTest do
     adopt: 1
   ]
   # bd-9rrrgk: optional; a backend without it answers `{:error, :unsupported}`.
-  @optional [exec: 4]
+  # K15: `resume/1` is optional too (only a backend with opaque stdout cursors has it).
+  @optional [exec: 4, resume: 1]
 
   defp load(extra_env \\ %{}) do
     Config.load(
@@ -41,15 +42,16 @@ defmodule Arbiter.NodeAgent.BackendTest do
     )
   end
 
-  test "the behaviour declares its callbacks, plus the optional exec" do
+  test "the behaviour declares its callbacks, plus the optional exec and resume" do
     assert Enum.sort(Backend.behaviour_info(:callbacks)) == Enum.sort(@callbacks ++ @optional)
-    assert Backend.behaviour_info(:optional_callbacks) == @optional
+    assert Enum.sort(Backend.behaviour_info(:optional_callbacks)) == Enum.sort(@optional)
   end
 
   test "the podman backend implements every callback" do
     Code.ensure_loaded!(Backend.Podman)
 
-    for {fun, arity} <- @callbacks ++ @optional do
+    # a machine's byte offsets need no `resume/1`
+    for {fun, arity} <- @callbacks ++ [exec: 4] do
       assert function_exported?(Backend.Podman, fun, arity), "#{fun}/#{arity} missing"
     end
 
