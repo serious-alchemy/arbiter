@@ -852,6 +852,12 @@ defmodule Arbiter.Nodes.Session do
   # A3: the node's capacity changed (a ConfigMap edit, a quota change).
   defp node_event_apply(state, "capacity", %{} = capacity), do: put_node_capacity(state, capacity)
 
+  # K13/K14: a cluster controller's readiness canary finished (`degraded`, the checks). The
+  # same rules as a heartbeat's (cluster nodes only; a silent key changes nothing), now
+  # rather than at the next `hb`.
+  defp node_event_apply(state, "readiness", %{} = payload),
+    do: state |> heartbeat_degraded(payload) |> heartbeat_readiness(payload)
+
   # A cancel for a run the agent no longer has: it is over.
   defp node_event_apply(state, "run.gone", %{"run" => run}) do
     gone = %{
