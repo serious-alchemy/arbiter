@@ -277,6 +277,32 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert String.trim(merges) == "0"
     end
 
+    # bd-diytcc: a branch that is ahead of base but still dirty (e.g. tracked
+    # files deleted by a bad take-back) must not be reported as "no commits".
+    test "dirty tracked deletions on a branch AHEAD of base: the escalation says the branch has commits",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.write!(Path.join(path, "work.txt"), "committed work\n")
+      {_, 0} = git(["add", "work.txt"], path)
+      {_, 0} = git(["commit", "-q", "-m", "the work"], path)
+      File.rm!(Path.join(path, "README.md"))
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      assert Worker.state(pid).meta.commit_gate_reason == :uncommitted
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.notes =~ "Commit gate tripped"
+      assert reloaded.notes =~ " D README.md"
+      refute reloaded.notes =~ "no commits made it onto branch"
+      assert reloaded.notes =~ "1 commit(s) ahead of `main`"
+      assert reloaded.notes =~ "tracked file(s) deleted"
+    end
+
     # bd-4qjl0q AC6: a spent send-back budget is a cap hit on the events stream.
     test "an exhausted nudge budget emits a gate_cap_hit event", %{repo: repo, ws: ws} do
       task = new_task(ws)

@@ -213,6 +213,111 @@ defmodule Arbiter.Nodes.CheckoutTest do
     end
   end
 
+  describe "a repo that tracks files under an injected path (.claude/skills)" do
+    @tracked_skill ".claude/skills/repo-own/SKILL.md"
+    @collided_skill ".claude/skills/collides/SKILL.md"
+    @injected_skill ".claude/skills/injected/SKILL.md"
+
+    # The repo tracks two skills; the run's branch is at the same commit.
+    defp track_skills!(%{home: home}) do
+      git!(home, ["checkout", "-q", "main"])
+      File.mkdir_p!(Path.join(home, ".claude/skills/repo-own"))
+      File.mkdir_p!(Path.join(home, ".claude/skills/collides"))
+      File.write!(Path.join(home, @tracked_skill), "the repo's own skill\n")
+      File.write!(Path.join(home, @collided_skill), "the repo's collided skill\n")
+      commit_all!(home, "track skills")
+      git!(home, ["checkout", "-q", @branch])
+      git!(home, ["reset", "-q", "--hard", "main"])
+    end
+
+    # What `NodeAgent.Run` does after the seed: write the primary's injected tree
+    # over the shadow's, and exclude it.
+    defp inject_skills!(shadow) do
+      files = %{
+        @tracked_skill => "the repo's own skill\n",
+        @collided_skill => "the injected skill with the same name\n",
+        @injected_skill => "arbiter-injected\n"
+      }
+
+      for {path, body} <- files do
+        File.mkdir_p!(Path.dirname(Path.join(shadow, path)))
+        File.write!(Path.join(shadow, path), body)
+      end
+
+      File.write!(Path.join(shadow, ".git/info/exclude"), "/.claude/skills\n", [:append])
+      files
+    end
+
+    test "a clean run takes the tracked files back unchanged", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, @tracked_skill)) == "the repo's own skill\n"
+      assert File.read!(Path.join(c.home, @collided_skill)) == "the repo's collided skill\n"
+      refute File.exists?(Path.join(c.home, @injected_skill))
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+    end
+
+    test "a commit on the run does not drop the tracked files either", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.write!(Path.join(shadow, "lib/new.txt"), "new\n")
+      git!(shadow, ["add", "lib/new.txt"])
+      git!(shadow, ["commit", "-q", "-m", "run commit"])
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.exists?(Path.join(c.home, @tracked_skill))
+      assert File.exists?(Path.join(c.home, @collided_skill))
+      refute File.exists?(Path.join(c.home, @injected_skill))
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+      refute git!(c.home, ["diff", "--name-only", "main", @branch]) =~ ".claude"
+    end
+
+    test "an edit the run makes to a tracked skill is kept", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.write!(Path.join(shadow, @tracked_skill), "edited by the run\n")
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, @tracked_skill)) == "edited by the run\n"
+      refute File.exists?(Path.join(c.home, @injected_skill))
+    end
+
+    test "a tracked skill the run deleted stays deleted", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.rm!(Path.join(shadow, @tracked_skill))
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      refute File.exists?(Path.join(c.home, @tracked_skill))
+    end
+
+    test "even a node that is not told what was injected keeps the tracked files", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      inject_skills!(shadow)
+
+      assert {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.exists?(Path.join(c.home, @tracked_skill))
+      refute File.exists?(Path.join(c.home, @injected_skill))
+    end
+  end
+
   describe "seed bundle" do
     test "is thin against `have` and falls back to full for unknown shas", c do
       full = seed!(c)
