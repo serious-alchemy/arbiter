@@ -7590,7 +7590,8 @@ defmodule Arbiter.Worker.ReviewGate do
       # bd-cut6uv: the head a reviewer is being held back for, while it is.
       awaiting_ci: match?(%{wait: %{sha: _}}, state.ci_wait) && state.ci_wait.wait.sha,
       # RW8: why a pass is held for the primary's worker cap, while it is.
-      local_hold: state.local_hold && state.local_hold.info.phrase,
+      local_hold:
+        state.local_hold && Map.get(state.local_hold.info, :phrase, state.local_hold.info.message),
       # bd-3hb4ih: the reviewer provider this round is pinned to (nil = the
       # workspace's own first choice) and the providers that have already timed
       # out in it, so a rotation in progress is visible without reading logs.
