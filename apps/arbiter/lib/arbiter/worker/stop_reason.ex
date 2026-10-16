@@ -720,7 +720,11 @@ defmodule Arbiter.Worker.StopReason do
           retry_after: retry_after
         }
 
-      Regex.match?(@auth_signature, haystack) ->
+      # A Codex run that exited 0 after its own `turn.completed` summary line
+      # finished cleanly; an earlier non-fatal auth-looking line (e.g. an MCP
+      # transport warning) must not turn it into `:auth_expired`.
+      not codex_clean_completion?(exit_status, output_lines, provider) and
+          Regex.match?(@auth_signature, haystack) ->
         %__MODULE__{
           category: :auth_expired,
           summary: "agent could not authenticate (credentials expired or invalid)",
@@ -1382,6 +1386,11 @@ defmodule Arbiter.Worker.StopReason do
       _ -> "(unknown)"
     end
   end
+
+  defp codex_clean_completion?(0, output_lines, "codex"),
+    do: Enum.any?(output_lines, &String.contains?(&1, "codex session complete"))
+
+  defp codex_clean_completion?(_exit_status, _output_lines, _provider), do: false
 
   defp signature_haystack(output_lines) do
     output_lines

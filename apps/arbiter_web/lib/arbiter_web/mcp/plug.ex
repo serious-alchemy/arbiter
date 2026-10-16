@@ -58,8 +58,9 @@ defmodule ArbiterWeb.MCP.Plug do
   Every request must carry `Authorization: Bearer <scope-token>`. The token is
   decoded to an `Arbiter.MCP.Scope` (`from_token/1`); an invalid/expired/missing
   token is rejected with HTTP `401`. The SSE stream is a coordinator-tier
-  channel: a worker token is also rejected `401` on GET, so workspace isolation
-  holds. In-scope-but-not-permitted tool calls are rejected with a JSON-RPC
+  channel: a valid worker token on GET gets `405` (+ `Allow: POST`) — "no SSE
+  stream here" per the Streamable HTTP spec, so clients such as Codex's rmcp
+  don't log it as an auth failure — and workspace isolation holds. In-scope-but-not-permitted tool calls are rejected with a JSON-RPC
   **error** object (not a transport error), so the agent gets a usable "not
   allowed". Tool dispatch and capability gating live in `Arbiter.MCP.Catalog`;
   this plug only frames JSON-RPC.
@@ -123,7 +124,17 @@ defmodule ArbiterWeb.MCP.Plug do
             open_sse(conn, scope)
 
           {:ok, %Scope{}} ->
-            unauthorized(conn, :forbidden)
+            # Authenticated, but this tier gets no stream: 405 ("no SSE stream"
+            # per the MCP Streamable HTTP spec), not 401 — a 401 reads as an
+            # auth failure to the client (Codex's rmcp logs it as one).
+            conn
+            |> put_resp_header("allow", "POST")
+            |> send_json(405, %{
+              "error" => %{
+                "type" => "method_not_allowed",
+                "message" => "No SSE stream for this scope; POST JSON-RPC"
+              }
+            })
 
           {:error, reason} ->
             unauthorized(conn, reason)
@@ -175,7 +186,6 @@ defmodule ArbiterWeb.MCP.Plug do
         :expired -> "Scope token expired"
         :revoked -> "Scope token revoked — its session has ended (RFC §9.3)"
         :missing -> "Missing scope token (Authorization: Bearer <token> or ?token=<token>)"
-        :forbidden -> "Coordinator scope required for the SSE stream"
         :bridge_identity -> "Worker bridge identity unavailable or expired"
         _ -> "Invalid scope token"
       end

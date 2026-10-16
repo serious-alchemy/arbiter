@@ -480,6 +480,12 @@ defmodule Arbiter.Agents.Codex.Stream do
       message =~ ~r/hit your usage limit|usage limit (has been )?reached/i ->
         {:quota, reset_epoch(detail)}
 
+      # The MCP streamable-HTTP client's optional GET/SSE stream being refused
+      # (`rmcp::transport...: GET returned HTTP 401`) is a non-fatal MCP
+      # transport warning, not model/account auth.
+      message =~ ~r/\brmcp::/i ->
+        nil
+
       message =~
           ~r/refresh token (was )?already (used|been used)|log ?out and sign in again|refresh token.{0,30}(expired|revoked|invalid)|\b401\b|unauthorized|not logged in/i ->
         :auth
