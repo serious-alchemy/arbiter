@@ -64,6 +64,7 @@ defmodule Arbiter.Worker.Image do
   alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Pins
+  alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.ReleaseEnv
 
   require Logger
@@ -73,6 +74,9 @@ defmodule Arbiter.Worker.Image do
   # The release of the Erlang/OTP the base carries for arb (bd-59m96o); images
   # built on the base inherit it.
   @arb_otp_label "arbiter.arb-otp"
+  # KH14: images built FROM the base inherit it; `Image.Prebuilt` requires it.
+  @contract_label "arbiter.runtime-contract"
+  @contract_version "1"
   @branch_re ~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]*\z/
   @version_re ~r/\A\d+(\.\d+){0,3}\z/
   @sha_re ~r/@sha256:[0-9a-f]{64}\z/
@@ -122,6 +126,7 @@ defmodule Arbiter.Worker.Image do
     RUN mkdir -p /opt/arbiter/cli
     COPY --from=arb_otp /usr/local/lib/erlang #{ArbCli.runtime_dir()}
     LABEL #{@arb_otp_label}="#{arb_otp}"
+    LABEL #{@contract_label}="#{@contract_version}"
     #{PodScripts.image_install()}
     ENV PATH=/opt/arbiter/cli:$PATH
     """
@@ -143,16 +148,17 @@ defmodule Arbiter.Worker.Image do
         }
 
   @type plan :: %{
-          name: String.t(),
-          hash: String.t(),
-          tag: String.t(),
-          containerfile: String.t(),
-          build_args: [{String.t(), String.t()}],
-          source: :repo | :generated,
-          ref: String.t(),
-          toolchain: toolchain(),
-          pins: [{String.t(), String.t()}],
-          base: layer()
+          required(:name) => String.t(),
+          required(:hash) => String.t(),
+          required(:tag) => String.t(),
+          required(:containerfile) => String.t(),
+          required(:build_args) => [{String.t(), String.t()}],
+          required(:source) => :repo | :generated | :prebuilt,
+          required(:ref) => String.t(),
+          required(:toolchain) => toolchain() | nil,
+          required(:pins) => [{String.t(), String.t()}],
+          required(:base) => layer() | nil,
+          optional(:prebuilt) => map()
         }
 
   @doc "The label every Arbiter dev image carries (and `list/1` filters on)."
@@ -165,6 +171,13 @@ defmodule Arbiter.Worker.Image do
   """
   @spec arb_otp_label() :: String.t()
   def arb_otp_label, do: @arb_otp_label
+
+  @doc """
+  The label (and its value) that says an image satisfies the pod runtime contract:
+  the shared base sets it and a `prebuilt` image must carry it (KH14).
+  """
+  @spec contract_label() :: {String.t(), String.t()}
+  def contract_label, do: {@contract_label, @contract_version}
 
   @doc "The local registry namespace of every Arbiter dev image."
   @spec registry() :: String.t()
@@ -180,13 +193,20 @@ defmodule Arbiter.Worker.Image do
   pin store), `:defaults` (a toolchain map overriding the configured default),
   `:source` (KH11, `Arbiter.Worker.Image.RepoConfig`: `:auto` (default) takes the
   committed `.arbiter/Containerfile` when there is one, `:containerfile` insists on it,
-  `:generated` ignores it; `:prebuilt` is not built by the primary),
+  `:generated` ignores it; `:prebuilt` is `Arbiter.Worker.Image.Prebuilt.plan/3`, which
+  takes `:image` and `:registry` too),
   `:repo_name` (names the image of a repo-supplied Containerfile), `:arb_otp`
   (the release of the Erlang/OTP the base carries for arb; default
   `Arbiter.Worker.ArbCli.runtime_otp/1`, the host arb's, which takes `:arb_path`).
   """
   @spec plan(String.t(), String.t(), keyword()) :: {:ok, plan()} | {:error, term()}
   def plan(repo_path, default_branch, opts \\ []) when is_binary(repo_path) do
+    if Keyword.get(opts, :source, :auto) == :prebuilt,
+      do: Prebuilt.plan(repo_path, default_branch, opts),
+      else: plan_built(repo_path, default_branch, opts)
+  end
+
+  defp plan_built(repo_path, default_branch, opts) do
     resolver = Keyword.get_lazy(opts, :resolver, fn -> Pins.resolver(opts) end)
     arb_otp = Keyword.get_lazy(opts, :arb_otp, fn -> ArbCli.runtime_otp(opts) end)
 
@@ -282,11 +302,6 @@ defmodule Arbiter.Worker.Image do
     do:
       {:error,
        {:source_unavailable, :containerfile, "no .arbiter/Containerfile on the default branch"}}
-
-  defp choose_source(:prebuilt, _repo_cf),
-    do:
-      {:error,
-       {:source_unavailable, :prebuilt, "prebuilt images are not supported by this build yet"}}
 
   defp toolchain_source(nil, toolchain), do: {:generated, generated_containerfile(toolchain)}
   # `FROM ${ARBITER_BASE}` needs the arg declared before the first FROM.
@@ -521,7 +536,9 @@ defmodule Arbiter.Worker.Image do
   end
 
   # sobelow_skip ["CI.System"]
-  defp git(repo_path, args) do
+  @doc false
+  @spec git(String.t(), [String.t()]) :: {String.t(), non_neg_integer()}
+  def git(repo_path, args) do
     case System.find_executable("git") do
       nil ->
         {"git: not found", 127}

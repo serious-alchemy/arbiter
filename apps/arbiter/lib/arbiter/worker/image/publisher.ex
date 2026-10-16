@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   use GenServer
 
+  alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.Image.Publisher.Pipeline
   alias Arbiter.Worker.Image.Registry
   alias Arbiter.Worker.Image.RegistryReport
@@ -215,7 +216,8 @@ defmodule Arbiter.Worker.Image.Publisher do
   configured or not, reachability, what has been published since boot, the last
   publish error and the `seed_paths` entries K26 excluded, plus `registries`: one
   entry per registry in use, `nodes.registry` or a workspace's, with its
-  reachability and anonymous-read probe (`RegistryReport`). Never a password.
+  reachability and anonymous-read probe (`RegistryReport`), and `images`: one check
+  per `prebuilt` repo (`Prebuilt.report/1`, KH14). Never a password.
   """
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
@@ -227,9 +229,11 @@ defmodule Arbiter.Worker.Image.Publisher do
       |> Keyword.put_new_lazy(:anonymous_probe, &anonymous_probe/0)
       |> RegistryReport.build()
 
+    images = Prebuilt.report(opts)
+
     case Registry.fetch(opts) do
       :unset ->
-        %{configured: false, registries: registries}
+        %{configured: false, registries: registries, images: images}
 
       {:ok, cfg} ->
         %{reachable: reachable, reachable_detail: detail} =
@@ -248,7 +252,8 @@ defmodule Arbiter.Worker.Image.Publisher do
           published: snapshot.published,
           last_error: snapshot.last_error,
           seed_excluded: snapshot.seed_excluded,
-          registries: registries
+          registries: registries,
+          images: images
         }
     end
   end

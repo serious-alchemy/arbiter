@@ -2872,6 +2872,69 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       )
     end
 
+    defp image_row(extra \\ %{}) do
+      Map.merge(
+        %{
+          "workspace" => "main",
+          "repo" => "vstim",
+          "ref" => "registry.example.com/vstim/ci:main",
+          "status" => "ok",
+          "digest" => "sha256:" <> String.duplicate("a", 64),
+          "revision" => String.duplicate("b", 40),
+          "seed" => "primary",
+          "seed_note" => nil,
+          "error" => nil
+        },
+        extra
+      )
+    end
+
+    test "a prebuilt repo gets an image row with the digest and revision (KH14)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [image_row()]}
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "image vstim")
+      assert detail =~ "registry.example.com/vstim/ci:main"
+      assert detail =~ "sha256:aaaaaaaaaaaa"
+      assert detail =~ "bbbbbbbbbbbb"
+      refute Enum.any?(results, &(&1.name == "nodes"))
+    end
+
+    test "a refused prebuilt image warns with the reason (KH14)" do
+      row =
+        image_row(%{
+          "status" => "error",
+          "error" => "revision bbbbbbbbbbbb is not an ancestor of the tip of main"
+        })
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [row]}
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} = named(nodes_results(), "image vstim")
+      assert detail =~ "not an ancestor"
+      assert hint =~ "image.ref"
+    end
+
+    test "a seed fallback is shown on an ok image row (KH14)" do
+      row = image_row(%{"seed" => "primary", "seed_note" => "arbiter.seed-lock does not match"})
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [row]}
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "image vstim")
+      assert detail =~ "arbiter.seed-lock"
+    end
+
     test "each workspace/repo registry gets its own row, with the anonymous-read answer (KH12)" do
       stub_nodes(
         nodes_resp(%{

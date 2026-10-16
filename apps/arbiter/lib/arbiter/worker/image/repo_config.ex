@@ -22,8 +22,9 @@ defmodule Arbiter.Worker.Image.RepoConfig do
 
   `source` picks the image (`Image.plan/3`); `registry`, `credentials_ref` and
   `public_ok` pick where it is pushed and how
-  (`Arbiter.Worker.Image.Registry.resolve/3`, KH12). `seed` and `ref` are validated
-  and resolved here for the prebuilt work that follows (KH14).
+  (`Arbiter.Worker.Image.Registry.resolve/3`, KH12). `ref` and `seed` are read by
+  `Arbiter.Worker.Image.Prebuilt` (KH14); `seed` means nothing to the other
+  sources, whose seed layer the primary always builds.
 
   A credential and a `public_ok` belong to the registry they were written next
   to: a repo that names its own `registry` without its own `credentials_ref`

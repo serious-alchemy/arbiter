@@ -251,6 +251,86 @@ defmodule Arbiter.Worker.Image.PublisherTest do
     end
   end
 
+  describe "ensure_ready/2 with a prebuilt plan (KH14)" do
+    @ci_digest "sha256:" <> String.duplicate("f", 64)
+    @ci_ref "registry.example.com/vstim/ci@" <> @ci_digest
+
+    defp prebuilt_ctx(ctx, seed \\ :primary) do
+      plan = %{
+        tag: @ci_ref,
+        name: "prebuilt-vstim",
+        hash: "feedfacecafe",
+        containerfile: "FROM #{@ci_ref}\n",
+        build_args: [],
+        source: :prebuilt,
+        base: nil,
+        prebuilt: %{ref: "registry.example.com/vstim/ci:main", digest: @ci_digest, seed: seed}
+      }
+
+      %{ctx | plan: plan}
+    end
+
+    test "pulls the CI image by digest, overlays CLI and seed, and builds no toolchain",
+         %{opts: opts, ctx: ctx} do
+      assert {:ok, result} = Publisher.ensure_ready(prebuilt_ctx(ctx), opts)
+      msgs = drain()
+
+      assert [:cli, :seed] = Enum.map(result.layers, & &1.layer)
+      assert Arbiter.Worker.Image.Registry.digest_pinned?(result.ref)
+      assert result.ref =~ "registry.example.com/arbiter/vstim/worker@sha256:"
+
+      assert {:podman, pull} = Enum.find(msgs, &match?({:podman, ["pull" | _]}, &1))
+      assert @ci_ref in pull
+      assert "--authfile" in pull
+
+      refute :exists in msgs
+      builds = for {:build, tag, cf, _, _} <- msgs, do: {tag, cf}
+      assert [{_, cli_cf}, {_, seed_cf}] = builds
+      assert cli_cf =~ "FROM #{@ci_ref}"
+      assert seed_cf =~ "COPY deps/ /opt/arbiter/seed/deps/"
+
+      pushes = for {:push, remote} <- msgs, do: remote
+
+      assert [
+               "registry.example.com/arbiter/vstim/worker:feedfacecafe-cli" <> _,
+               "registry.example.com/arbiter/vstim/worker:feedfacecafe-cli" <> _
+             ] = pushes
+    end
+
+    test "the pull's login is the auth file, never argv", %{opts: opts, ctx: ctx} do
+      assert {:ok, _} = Publisher.ensure_ready(prebuilt_ctx(ctx), opts)
+
+      for {:podman, args} <- drain() do
+        refute Enum.any?(args, &(&1 =~ @password))
+      end
+    end
+
+    test "seed: image ships no seed layer and never runs DepsCache", %{opts: opts, ctx: ctx} do
+      opts = Keyword.put(opts, :deps_ensure, fn _, _, _, _ -> flunk("DepsCache must not run") end)
+
+      assert {:ok, result} = Publisher.ensure_ready(prebuilt_ctx(ctx, :image), opts)
+      assert [:cli] = Enum.map(result.layers, & &1.layer)
+      assert result.seed.status == :skipped
+      assert result.seed.reason =~ "image"
+    end
+
+    test "seed: none ships no seed layer", %{opts: opts, ctx: ctx} do
+      assert {:ok, result} = Publisher.ensure_ready(prebuilt_ctx(ctx, :none), opts)
+      assert [:cli] = Enum.map(result.layers, & &1.layer)
+      assert result.seed.reason =~ "none"
+    end
+
+    test "a failed pull is an error that never carries the password", %{opts: opts, ctx: ctx} do
+      failing =
+        runner(self(), %{"pull" => fn _ -> {"unauthorized #{@password}", 125} end})
+
+      assert {:error, {:pull_failed, @ci_ref, 125, tail}} =
+               Publisher.ensure_ready(prebuilt_ctx(ctx), Keyword.put(opts, :runner, failing))
+
+      refute tail =~ @password
+    end
+  end
+
   describe "ensure_ready/2 repository naming (KH11)" do
     test "every layer goes to <registry>/<repo-slug>/worker, never a shared worker repository",
          %{opts: opts, ctx: ctx} do
@@ -608,6 +688,29 @@ defmodule Arbiter.Worker.Image.PublisherTest do
         )
 
       assert %{credentials: "error: secret:NO secret_not_found"} = List.last(status.registries)
+    end
+  end
+
+  describe "status/1 images (KH14)" do
+    test "lists the prebuilt repos' checks, with or without a registry", %{opts: opts} do
+      ws = %Arbiter.Tasks.Workspace{
+        name: "w1",
+        config: %{
+          "repo_paths" => %{},
+          "worker" => %{
+            "repos" => %{
+              "ghost" => %{"image" => %{"source" => "prebuilt", "ref" => "r.example/x:1"}}
+            }
+          }
+        }
+      }
+
+      for config <- [opts[:config], %{registry: nil}] do
+        status =
+          Publisher.status(opts |> Keyword.put(:workspaces, [ws]) |> Keyword.put(:config, config))
+
+        assert [%{repo: "ghost", status: "error"}] = status.images
+      end
     end
   end
 

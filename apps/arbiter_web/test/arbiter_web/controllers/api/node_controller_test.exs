@@ -183,7 +183,7 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
 
     test "the list reports the image registry: unset by default, never the password (K8)" do
       body = json_response(get(operator_conn(), "/api/nodes"), 200)
-      assert body["registry"] == %{"configured" => false, "registries" => []}
+      assert body["registry"] == %{"configured" => false, "registries" => [], "images" => []}
 
       previous = Application.get_env(:arbiter, :image_publisher, [])
 

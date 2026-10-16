@@ -140,6 +140,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Publisher
+  alias Arbiter.Worker.Image.Registry, as: ImageRegistry
   alias Arbiter.Worker.Image.RepoConfig
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
@@ -1028,21 +1029,45 @@ defmodule Arbiter.Worker.ContainerSpawn do
     base = Mergers.base_branch(workspace, repo) || "main"
     image = RepoConfig.resolve(workspace, repo)
 
-    case Image.plan(repo_path, base, [source: image.source] ++ Keyword.get(opts, :plan, [])) do
-      {:ok, plan} ->
-        ctx = %{
-          repo: repo,
-          workspace: workspace,
-          repo_path: repo_path,
-          base: base,
-          seed_paths: SeedPaths.resolve(workspace, repo)
-        }
-
-        registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
-
-      {:error, reason} ->
-        {:error, {:image_unavailable, reason}}
+    with :ok <- prebuilt_node(image, repo, node),
+         {:ok, source_opts} <- source_opts(image, workspace, repo),
+         {:ok, plan} <- Image.plan(repo_path, base, source_opts ++ Keyword.get(opts, :plan, [])) do
+      plan_context(plan, workspace, repo, repo_path, base, node, opts)
+    else
+      {:error, reason} -> {:error, {:image_unavailable, reason}}
     end
+  end
+
+  # A prebuilt image is overlaid and pushed by the primary: only a registry node
+  # can run it (a node that builds its own image has no registry to pull from).
+  defp prebuilt_node(%{source: :prebuilt}, repo, node) do
+    if registry_node?(node), do: :ok, else: {:error, {:prebuilt_needs_registry, repo}}
+  end
+
+  defp prebuilt_node(_image, _repo, _node), do: :ok
+
+  # `Image.plan/3`'s source options; `prebuilt` also needs the repo's image
+  # settings and the registry login that reads its `ref` (KH14).
+  defp source_opts(%{source: :prebuilt} = image, workspace, repo) do
+    case ImageRegistry.resolve(workspace, repo) do
+      {:ok, cfg} -> {:ok, [source: :prebuilt, image: image, registry: cfg, repo_name: repo]}
+      :unset -> {:ok, [source: :prebuilt, image: image, repo_name: repo]}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp source_opts(image, _workspace, _repo), do: {:ok, [source: image.source]}
+
+  defp plan_context(plan, workspace, repo, repo_path, base, node, opts) do
+    ctx = %{
+      repo: repo,
+      workspace: workspace,
+      repo_path: repo_path,
+      base: base,
+      seed_paths: SeedPaths.resolve(workspace, repo)
+    }
+
+    registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
   end
 
   @doc """
@@ -1058,7 +1083,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   def preflight_image(repo_path, node, opts) do
     cond do
       not registry_node?(node) ->
-        :ok
+        prebuilt_preflight(opts)
 
       is_binary(explicit_image(opts)) ->
         with {:ok, _} <- registry_image(%{tag: explicit_image(opts), plan: nil}, node, %{}, opts),
@@ -1069,6 +1094,18 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
       true ->
         {:error, {:image_unavailable, :no_repo}}
+    end
+  end
+
+  # A repo that sources a prebuilt image cannot run on a node with no registry.
+  defp prebuilt_preflight(opts) do
+    repo = Keyword.get(opts, :repo)
+
+    with nil <- explicit_image(opts),
+         %{source: :prebuilt} <- RepoConfig.resolve(Keyword.get(opts, :workspace), repo) do
+      {:error, {:image_unavailable, {:prebuilt_needs_registry, repo}}}
+    else
+      _ -> :ok
     end
   end
 

@@ -2107,6 +2107,27 @@ worker:
 
 `seed_paths` beyond `deps`/`_build` keep K26's rule (excluded and listed by the doctor, `pipeline.ex:221-250`).
 
+**KH14 as built (bd-3ojmcv).** `Arbiter.Worker.Image.Prebuilt` (`worker/image/prebuilt.ex`) is `Image.plan/3` for `source: prebuilt` (`Image.plan/3` delegates to it; the plan has `source: :prebuilt`, `base: nil` and `prebuilt: %{ref, digest, revision, seed, seed_note}`). It trusts an image in three steps, any failure being `image_unavailable{…}` with the reason named:
+
+1. *Tag → digest.* `skopeo inspect --no-tags docker://<ref>` (`podman pull` + `image inspect` without skopeo), the repo's registry login passed as a 0600 auth file; the answer (digest and labels) is cached for five minutes. The plan's `tag` is `<ref-without-tag>@sha256:…` and its hash covers the digest and the seed mode, so a moved tag is a new image and nothing already pinned moves. A `ref` already pinned `@sha256:` must come back as that digest.
+2. *Contract.* The label `arbiter.runtime-contract=1` (set by `Image.base_containerfile/1`, so anything built `FROM ghcr.io/<owner>/arbiter-worker-base:<hash>` inherits it) and a full 40/64-hex `org.opencontainers.image.revision`; otherwise `{:contract_mismatch, "<the missing item>"}`.
+3. *Ancestry.* `git merge-base --is-ancestor <revision> refs/remotes/origin/<default>` (else `refs/heads/<default>`) in the primary's clone, re-run on every plan (only the registry answer is cached); a revision that is not an ancestor, or that the clone does not know, is `{:prebuilt_not_on_default, %{revision, branch}}`.
+
+`seed: image` compares the label `arbiter.seed-lock` with the sha256 of the default branch's `mix.lock` and falls back to `primary` (plan note `prebuilt.seed_note`, shown by the doctor) on a mismatch or a missing label; `seed: none` ships no seed layer; `seed: primary` (default) runs `DepsCache` over the pulled image. `Pipeline.publish_image/3` for a prebuilt plan pulls the pinned CI image (auth file, never argv), builds the CLI layer and the seed layer on it and pushes both to `<registry>/<repo>/worker`; there is no toolchain layer and `Builder` is not involved. A prebuilt repo needs a registry node (`caps.image = "registry"`): `ContainerSpawn.preflight_image/3` answers `{:image_unavailable, {:prebuilt_needs_registry, repo}}` for any other node. Local (podman) runs still use `Image.ensure/3` and ignore `image.source`, as since KH11. The doctor gets an `image <repo>` row per prebuilt repo (`Prebuilt.report/1`, in `GET /api/nodes` → `registry.images`): ref, digest, revision, seed mode and note, or the refusal. The CI registry login is the repo's `credentials_ref`, so a `ref` on a host other than the push `registry` is read anonymously.
+
+*What a repo's CI does* (the contract, for `.gitlab-ci.yml` / GitHub Actions):
+
+```dockerfile
+FROM ghcr.io/<owner>/arbiter-worker-base:<hash>        # <hash> is the tag the release job publishes (`mix arbiter.containerfile worker-base --pin --hash-out`); it carries arbiter.runtime-contract=1
+# the toolchain the repo needs (Erlang/Elixir/Node)
+ARG GIT_SHA
+LABEL org.opencontainers.image.revision=$GIT_SHA        # full commit id of the default-branch commit CI built from
+# optional, for `seed: image`: mix deps.get && mix deps.compile into /opt/arbiter/seed, then
+LABEL arbiter.seed-lock=<sha256sum mix.lock>
+```
+
+Push it from the default branch only (a feature-branch job that pushes the trusted tag is refused by the ancestry check, but keep the tag clean anyway), then set `worker.repos.<repo>.image` `{source: prebuilt, ref: <registry>/<path>:<tag>, registry: <where Arbiter pushes>, credentials_ref: secret:…}`. Not verified here: a real `skopeo`/`podman` round trip against a registry and a pod pulling the overlay on a cluster (the tests stub both); `arb doctor` on the running primary is the first real check.
+
 ### 20.10 C. Registries and pull secrets, per repo
 
 **Resolution order** for where a repo's images go and which credential pushes them: `worker.repos.<repo>.image.registry` → `worker.image.registry` (workspace) → the install-wide `nodes.registry` settings, which stay as the fallback so an existing install changes nothing (KH11/KH12). `Registry.fetch/1` (`registry.ex:36-57`) grows a `repo`/`workspace` context; its auth file is already keyed by registry host (`registry.ex:122-123`), so a run that must read the CI registry and write the repo registry gets one file with two `auths` entries, still 0600, never on argv. The doctor's `nodes.registry` row (reachability, last publish) becomes a row per registry in use.

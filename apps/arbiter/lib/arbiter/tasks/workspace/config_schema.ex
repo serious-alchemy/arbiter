@@ -415,9 +415,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                                          .arbiter/Containerfile when committed, else the
                                          generated toolchain image), "containerfile"
                                          (insist on it), "generated" (ignore it) or
-                                         "prebuilt" (an image the repo's CI builds; needs
-                                         ref, not built by the primary yet)
+                                         "prebuilt" (an image the repo's CI builds,
+                                         FROM ghcr.io/<owner>/arbiter-worker-base,
+                                         labelled arbiter.runtime-contract=1; needs
+                                         ref; the primary resolves it to a digest,
+                                         refuses one whose
+                                         org.opencontainers.image.revision is not an
+                                         ancestor of the default branch tip, and
+                                         overlays the CLI and seed layers) (KH14)
                         ref              prebuilt only, per repo only: image reference
+                                         (a tag or @sha256:...); read with the repo's
+                                         credentials_ref when its host is registry's
                         registry         host[:port][/path] Arbiter pushes this repo's
                                          images to
                         credentials_ref  "secret:<key>" — workspace secret holding the
@@ -430,12 +438,16 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                                          anonymous reads (default false: the
                                          publisher refuses it, images carry the
                                          real provider CLI)
-                        seed             "primary" (default), "image" or "none"
+                        seed             prebuilt only: "primary" (default; the primary
+                                         seeds deps/_build over the image), "image"
+                                         (CI seeded /opt/arbiter/seed and labelled the
+                                         image arbiter.seed-lock=<sha256 of mix.lock>;
+                                         a stale lock falls back to primary) or "none"
                       Images always go to <registry>/<repo>/worker, one repository per
                       repo; there is no shared <registry>/worker.
                       Registry resolves repo -> workspace -> the install-wide
-                      nodes.registry setting (KH12). seed and ref are validated and
-                      stored, and read once prebuilt images land (KH14).
+                      nodes.registry setting (KH12). `arb doctor` shows an `image <repo>`
+                      row for each prebuilt repo.
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,

@@ -108,4 +108,84 @@ defmodule Arbiter.Worker.ContainerSpawnRepoImageTest do
     assert :ok = ContainerSpawn.preflight_image(repo_path, build_node, opts(nil, "vstim"))
     refute_received {:published, _}
   end
+
+  describe "source: prebuilt (KH14)" do
+    @ci_digest "sha256:" <> String.duplicate("c", 64)
+
+    defp prebuilt_ws do
+      ws(%{
+        "repos" => %{
+          "vstim" => %{
+            "image" => %{
+              "source" => "prebuilt",
+              "ref" => "registry.example.com/ci/app:main",
+              "registry" => "registry.example.com/arbiter"
+            }
+          }
+        }
+      })
+    end
+
+    # A fake skopeo whose image claims `revision` as its build commit.
+    defp prebuilt_opts(revision) do
+      test = self()
+
+      runner = fn "skopeo", args, _ ->
+        send(test, {:skopeo, args})
+
+        labels = %{
+          "arbiter.runtime-contract" => "1",
+          "org.opencontainers.image.revision" => revision
+        }
+
+        {Jason.encode!(%{"Digest" => @ci_digest, "Labels" => labels}), 0}
+      end
+
+      opts(prebuilt_ws(), "vstim")
+      |> Keyword.update!(:plan, &(&1 ++ [runner: runner, cache_ttl_ms: 0]))
+    end
+
+    test "plans the CI image, trusted by digest, and publishes the overlay", %{tmp_dir: tmp} do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      tip = git!(repo_path, ["rev-parse", "HEAD"]) |> String.trim()
+
+      assert :ok = ContainerSpawn.preflight_image(repo_path, registry_node(), prebuilt_opts(tip))
+
+      assert_received {:skopeo, ["inspect" | _] = args}
+      assert "docker://registry.example.com/ci/app:main" in args
+      assert_received {:published, %{repo: "vstim", repo_path: ^repo_path}}
+    end
+
+    test "an image built from an unmerged commit is image_unavailable, nothing published", %{
+      tmp_dir: tmp
+    } do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      git!(repo_path, ["checkout", "-q", "-b", "feature"])
+      File.write!(Path.join(repo_path, "f.txt"), "f\n")
+      git!(repo_path, ["add", "-A"])
+      git!(repo_path, ["commit", "-q", "-m", "feature work"])
+      unmerged = git!(repo_path, ["rev-parse", "HEAD"]) |> String.trim()
+      git!(repo_path, ["checkout", "-q", "main"])
+
+      assert {:error, {:image_unavailable, {:prebuilt_not_on_default, %{revision: ^unmerged}}}} =
+               ContainerSpawn.preflight_image(
+                 repo_path,
+                 registry_node(),
+                 prebuilt_opts(unmerged)
+               )
+
+      refute_received {:published, _}
+    end
+
+    test "a node that builds its own image cannot run a prebuilt repo", %{tmp_dir: tmp} do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      build_node = %{id: "n2", caps: %{"image" => "build"}}
+
+      assert {:error, {:image_unavailable, {:prebuilt_needs_registry, "vstim"}}} =
+               ContainerSpawn.preflight_image(repo_path, build_node, prebuilt_opts("x"))
+
+      refute_received {:skopeo, _}
+      refute_received {:published, _}
+    end
+  end
 end
