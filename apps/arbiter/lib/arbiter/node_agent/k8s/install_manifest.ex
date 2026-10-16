@@ -674,7 +674,6 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     aux = Quota.demand_of(controller_config.services_resources)
     controller = controller_pod_demand()
     container = Quota.demand_of(Quota.controller_resources())
-    mi = 1_048_576
 
     container_max = %{
       "cpu" => fmt_cpu(max(2 * worker_cpu, container["limits.cpu"])),
