@@ -1064,7 +1064,8 @@ defmodule Arbiter.Trackers.GitHubTest do
         workspace_name: "my-ws",
         workspace_prefix: "mw",
         current_user: "gh-login-999",
-        host: "arbiter.local"
+        host: "arbiter.local",
+        assign: true
       }
 
       assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
