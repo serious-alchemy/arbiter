@@ -29,7 +29,7 @@ primary:
 
 # The controller image. Tag defaults to the chart's appVersion, which is the release.
 image:
-  repository: ghcr.io/ryanrborn/arbiter-controller
+  repository: ghcr.io/serious-alchemy/arbiter-controller
   tag: ""
   # A digest (sha256:...) wins over the tag.
   digest: ""
@@ -40,7 +40,7 @@ imagePullSecrets: []
 # Reported to the primary, which prints the exact `helm upgrade` command for this node
 # (ARB_CHART_REF). Helm owns the controller Deployment: the controller cannot repoint its
 # own image (the Role has no write verb on the Deployment, ARB_K8S_SELF_UPGRADE=false).
-chartRef: oci://ghcr.io/ryanrborn/charts/arbiter-node
+chartRef: oci://ghcr.io/serious-alchemy/charts/arbiter-node
 
 join:
   # The one-shot join token Secret (key: token), made with
