@@ -60,7 +60,7 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
   describe "GET /nodes/join/k8s.yaml" do
     test "is anonymous and renders both documents, pinned to this server's controller image",
          %{release: release} do
-      conn = raw(:get, "/nodes/join/k8s.yaml?name=mesaana-k3s&max=3")
+      conn = raw(:get, "/nodes/join/k8s.yaml?name=mesaana-k3s&max=3&primary_cidrs=100.64.0.10/32")
 
       assert conn.status == 200
       assert [type] = get_resp_header(conn, "content-type")
@@ -98,8 +98,12 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
     end
 
     test "?part= serves one half" do
-      bootstrap = raw(:get, "/nodes/join/k8s.yaml?name=n&part=bootstrap").resp_body
-      node = raw(:get, "/nodes/join/k8s.yaml?name=n&part=node").resp_body
+      bootstrap =
+        raw(:get, "/nodes/join/k8s.yaml?name=n&part=bootstrap&primary_cidrs=100.64.0.10/32").resp_body
+
+      node =
+        raw(:get, "/nodes/join/k8s.yaml?name=n&part=node&primary_cidrs=100.64.0.10/32").resp_body
+
       refute bootstrap =~ "kind: Deployment"
       assert node =~ "kind: Deployment"
       refute node =~ "kind: Namespace"
@@ -119,12 +123,12 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
 
     test "is unavailable until nodes.public_url and nodes.registry are set" do
       {:ok, _} = Arbiter.Settings.set_nodes_registry(nil)
-      conn = raw(:get, "/nodes/join/k8s.yaml?name=n")
+      conn = raw(:get, "/nodes/join/k8s.yaml?name=n&primary_cidrs=100.64.0.10/32")
       assert conn.status == 503
       assert conn.resp_body =~ "nodes.registry"
 
       {:ok, _} = Arbiter.Settings.set_nodes_public_url(nil)
-      conn = raw(:get, "/nodes/join/k8s.yaml?name=n")
+      conn = raw(:get, "/nodes/join/k8s.yaml?name=n&primary_cidrs=100.64.0.10/32")
       assert conn.status == 503
       assert conn.resp_body =~ "nodes.public_url"
     end
@@ -261,7 +265,14 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
 
     test "is refused, and mints nothing, without nodes.registry" do
       {:ok, _} = Arbiter.Settings.set_nodes_registry(nil)
-      conn = post(operator_conn(), "/api/nodes/join-tokens", %{kind: "cluster", name: "k3s"})
+
+      conn =
+        post(operator_conn(), "/api/nodes/join-tokens", %{
+          kind: "cluster",
+          name: "k3s",
+          primary_cidrs: "100.64.0.10/32"
+        })
+
       assert json_response(conn, 422)["error"]["message"] =~ "nodes.registry"
       assert Nodes.events(kind: :token_minted) == []
     end

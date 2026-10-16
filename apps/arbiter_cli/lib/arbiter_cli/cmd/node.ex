@@ -10,7 +10,9 @@ defmodule ArbiterCli.Cmd.Node do
                       It never prints the token to a pipe or a log.
       arb node add    --kind cluster --name N [--namespace NS] [--max-workers N]
                       [--cpu Q] [--memory Q] [--node-selector k=v,k=v]
-                      [--pull-secret NAME] [--reach direct|tailscale]
+                      [--pull-secret NAME] [--reach direct|tailscale|proxy]
+                      [--primary-cidrs CIDR,CIDR] [--proxy-url URL]
+                      [--proxy-cidrs CIDR,CIDR]
                       [--admission policy] [--self-upgrade on|off] [--ttl 15m]
                       [-o manifests.yaml] [--token-file PATH] [--json]
                       add a Kubernetes cluster as a node. Prints the `kubectl
@@ -73,11 +75,14 @@ defmodule ArbiterCli.Cmd.Node do
     node_selector: :string,
     pull_secret: :string,
     reach: :string,
+    primary_cidrs: :string,
+    proxy_url: :string,
+    proxy_cidrs: :string,
     admission: :string,
     self_upgrade: :string,
     output: :string
   ]
-  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach admission self_upgrade output)a
+  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach primary_cidrs proxy_url proxy_cidrs admission self_upgrade output)a
   @set_switches [
     name: :string,
     label: [:string, :keep],
@@ -193,6 +198,9 @@ defmodule ArbiterCli.Cmd.Node do
       |> put(:node_selector, opts[:node_selector])
       |> put(:pull_secret, opts[:pull_secret])
       |> put(:reach, opts[:reach])
+      |> put(:primary_cidrs, opts[:primary_cidrs])
+      |> put(:proxy_url, opts[:proxy_url])
+      |> put(:proxy_cidrs, opts[:proxy_cidrs])
       |> put(:admission, opts[:admission])
       |> put(:self_upgrade, opts[:self_upgrade])
       |> put(:ttl_seconds, ttl(opts[:ttl]))

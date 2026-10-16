@@ -13,7 +13,11 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       `arbiter-tailscale` (key `authkey`): an ephemeral, pre-authorised key tagged
       `tag:arbiter-node`. Readiness is `tailscale status` = Running, not "the proxy
       port is open": a logged-out `tailscaled` listens and answers every CONNECT
-      with 500.
+      with 500. The image is pinned to a release and a digest: the pod holds a standing
+      auth key, so a floating tag would let a registry push run as that key.
+    * `:proxy` — no sidecar: `ARB_NODE_PROXY` is the operator's own HTTP proxy
+      (`:proxy_url`), and the install's NetworkPolicy lets the controller reach that
+      proxy and nothing else (`InstallManifest`).
 
   Returns plain maps (JSON-shaped, as `PodSpec` does).
   """
@@ -21,22 +25,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
   @uid 10_001
   @name "arbiter-controller"
   @proxy_addr "127.0.0.1:1055"
-  @tailscale_image "ghcr.io/tailscale/tailscale:stable"
+  @tailscale_image "ghcr.io/tailscale/tailscale:v1.104.1@sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d"
   @tailscale_secret "arbiter-tailscale"
   @tailscale_tag "tag:arbiter-node"
   @socket "/tmp/tailscaled.sock"
 
-  @type reach :: :direct | :tailscale
+  @type reach :: :direct | :tailscale | :proxy
 
   @doc "Parse the `?reach=` query value."
   @spec parse_reach(String.t() | nil) :: {:ok, reach()} | {:error, {:bad_reach, term()}}
   def parse_reach(value) when value in [nil, "", "direct"], do: {:ok, :direct}
   def parse_reach("tailscale"), do: {:ok, :tailscale}
+  def parse_reach("proxy"), do: {:ok, :proxy}
   def parse_reach(other), do: {:error, {:bad_reach, other}}
 
   @doc """
   Options: `:image`, `:primary_url`, `:node_name` (required), `:namespace`
-  (default `arbiter-workers`), `:reach` (default `:direct`), `:self_upgrade`
+  (default `arbiter-workers`), `:reach` (default `:direct`), `:proxy_url` (required for
+  `reach: :proxy`), `:self_upgrade`
   (default `true`; `ARB_K8S_SELF_UPGRADE`, whether the Role lets the controller patch
   its own Deployment's image, see `Arbiter.NodeAgent.K8s.SelfUpgrade`).
   """
@@ -47,10 +53,11 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
     with {:ok, image} <- fetch(opts, :image),
          {:ok, primary_url} <- fetch(opts, :primary_url),
          {:ok, node_name} <- fetch(opts, :node_name),
-         true <- reach in [:direct, :tailscale] || {:error, {:bad_reach, reach}} do
+         true <- reach in [:direct, :tailscale, :proxy] || {:error, {:bad_reach, reach}},
+         {:ok, proxy_url} <- proxy_url(opts, reach) do
       namespace = Keyword.get(opts, :namespace, "arbiter-workers")
       self_upgrade = Keyword.get(opts, :self_upgrade, true) == true
-      {:ok, build(image, primary_url, node_name, namespace, reach, self_upgrade)}
+      {:ok, build(image, primary_url, node_name, namespace, {reach, proxy_url}, self_upgrade)}
     end
   end
 
@@ -60,6 +67,9 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       _ -> {:error, {:missing, key}}
     end
   end
+
+  defp proxy_url(opts, :proxy), do: fetch(opts, :proxy_url)
+  defp proxy_url(_opts, _reach), do: {:ok, nil}
 
   defp build(image, primary_url, node_name, namespace, reach, self_upgrade) do
     labels = %{"app.kubernetes.io/name" => @name}
@@ -127,14 +137,15 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
   defp field_ref(name, path),
     do: %{"name" => name, "valueFrom" => %{"fieldRef" => %{"fieldPath" => path}}}
 
-  defp proxy_env(:tailscale),
+  defp proxy_env({:tailscale, _}),
     do: [%{"name" => "ARB_NODE_PROXY", "value" => "http://" <> @proxy_addr}]
 
-  defp proxy_env(:direct), do: []
+  defp proxy_env({:proxy, url}), do: [%{"name" => "ARB_NODE_PROXY", "value" => url}]
+  defp proxy_env({:direct, _}), do: []
 
-  defp sidecar(:direct), do: []
+  defp sidecar({reach, _}) when reach in [:direct, :proxy], do: []
 
-  defp sidecar(:tailscale) do
+  defp sidecar({:tailscale, _}) do
     [
       %{
         "name" => "tailscale",
