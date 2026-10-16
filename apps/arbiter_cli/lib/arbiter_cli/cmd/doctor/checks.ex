@@ -2031,18 +2031,93 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # publishes to. No row at all while `nodes.registry` is unset. Every problem
   # is a `[warn]` like the rest of the section: a registry outage costs a
   # remote placement, never the deploy.
-  defp registry_results(%{"configured" => true} = reg) do
-    [registry_result(reg)] ++ List.wrap(registry_seed_result(reg))
+  #
+  # KH12 (§20.10): one row per registry in use. `nodes.registry` keeps its row;
+  # each registry a workspace or repo names gets a `worker.image registry <name>`
+  # row, with the anonymous-read answer for the repositories pushed there.
+  defp registry_results(%{} = reg) do
+    entries = List.wrap(reg["registries"])
+    install = Enum.find(entries, &(&1["origin"] == "install"))
+
+    installed =
+      if reg["configured"] == true,
+        do: [registry_result(reg, install)] ++ List.wrap(registry_seed_result(reg)),
+        else: []
+
+    installed ++
+      for(%{"origin" => "config"} = entry <- entries, do: config_registry_result(entry))
   end
 
   defp registry_results(_), do: []
 
-  defp registry_result(reg) do
+  defp config_registry_result(entry) do
+    name = "worker.image registry #{entry["registry"]}"
+
+    problems =
+      Enum.reject(
+        [
+          unless(entry["reachable"] == true,
+            do: "not reachable (GET /v2/: #{entry["reachable_detail"] || "no answer"})"
+          ),
+          credentials_problem(entry["credentials"]),
+          public_problem(entry)
+        ],
+        &is_nil/1
+      )
+
+    if problems == [] do
+      nodes_result(
+        name,
+        :ok,
+        "#{entry["registry"]}: " <> anonymous_summary(entry) <> public_ok_note(entry)
+      )
+    else
+      nodes_result(
+        name,
+        :warn,
+        "#{entry["registry"]}: #{Enum.join(problems, "; ")}",
+        "Check worker.image.registry / credentials_ref (`arb workspace config`) and the " <>
+          "workspace secret (`arb workspace secret`, value `user:password`). The repositories " <>
+          "hold private sources and the provider CLI: use a private registry, or set " <>
+          "`public_ok: true` on this registry to accept a public one."
+      )
+    end
+  end
+
+  defp credentials_problem("error: " <> reason), do: "credential unusable (#{reason})"
+  defp credentials_problem(_), do: nil
+
+  defp public_problem(%{"public" => [_ | _] = public, "public_ok" => false}),
+    do:
+      "answers anonymous reads for #{Enum.join(public, ", ")}; " <>
+        "pushes are refused while it does (anyone could pull the image)"
+
+  defp public_problem(_), do: nil
+
+  defp anonymous_summary(%{"anonymous" => %{} = anonymous}) when map_size(anonymous) > 0 do
+    "anonymous read: " <>
+      Enum.map_join(Enum.sort(anonymous), ", ", fn {repo, answer} -> "#{repo} #{answer}" end)
+  end
+
+  defp anonymous_summary(_), do: "no repositories"
+
+  defp public_ok_note(%{"public_ok" => true, "public" => [_ | _]}), do: " (public_ok)"
+  defp public_ok_note(_), do: ""
+
+  defp public_install_problem(%{"public" => [_ | _] = public}),
+    do:
+      "answers anonymous reads for #{Enum.join(public, ", ")} " <>
+        "(images carry the provider CLI: make the repositories private)"
+
+  defp public_install_problem(_), do: nil
+
+  defp registry_result(reg, install) do
     name = reg["registry"]
 
     problems =
       Enum.reject(
         [
+          install && public_install_problem(install),
           unless(reg["reachable"] == true,
             do: "not reachable (GET /v2/: #{reg["reachable_detail"] || "no answer"})"
           ),

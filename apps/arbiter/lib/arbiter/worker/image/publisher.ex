@@ -5,8 +5,12 @@ defmodule Arbiter.Worker.Image.Publisher do
   seed and controller images and pushes them to the `nodes.registry` settings,
   returning **digest-pinned references** for `assign.image.ref`.
 
-  With `nodes.registry` unset every entry point answers `:disabled` and runs
-  nothing, so an install that never configures a registry is unchanged.
+  With no registry (`nodes.registry` unset and none on the workspace or repo)
+  every entry point answers `:disabled` and runs nothing, so an install that
+  never configures a registry is unchanged. The run image goes to the registry
+  `Registry.resolve/3` picks for its repo (repo -> workspace -> `nodes.registry`,
+  KH12) with that registry's own credential; the controller image is always
+  `nodes.registry`'s.
 
   ## What it publishes
 
@@ -34,7 +38,9 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   ## Options
 
-  `:server`, `:timeout_ms`, `:config` (registry map, see `Registry.fetch/1`),
+  `:server`, `:timeout_ms`, `:config` (install registry map, see `Registry.fetch/1`),
+  `:anonymous_probe` (`(Registry.t, repository -> :public | :private | {:unknown, _})`,
+  the private-registry check, see `ensure_ready/2`),
   `:runner` (podman, see `Image.run/3`), `:builder`, `:scratch`, `:cli`
   (`[{host_path, container_path}]`), `:deps_ensure`
   (`(repo, base, image_tag, opts -> {:ok, %{dir:, lock_hash:}} | {:error, _})`),
@@ -46,12 +52,12 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   alias Arbiter.Worker.Image.Publisher.Pipeline
   alias Arbiter.Worker.Image.Registry
+  alias Arbiter.Worker.Image.RegistryReport
 
   require Logger
 
   @default_timeout_ms 600_000
   @default_boot_delay_ms 15_000
-  @probe_timeout_ms 3_000
 
   # -- client -------------------------------------------------------------------
 
@@ -62,22 +68,67 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   @doc """
   The run image for `ctx` (`%{plan:, repo:, repo_path:, base:, seed_paths:}`; `repo` names
-  the `<registry>/<repo>/worker` repository it is pushed to):
+  the `<registry>/<repo>/worker` repository it is pushed to; `workspace` is where
+  its registry and credential are resolved):
   `{:ok, result}` with a digest-pinned `ref`, `:disabled` when no registry is
-  configured, or `{:error, reason}` (`{:timeout, ms}`, `{:push_failed, …}`, …).
+  configured, or `{:error, reason}` (`{:timeout, ms}`, `{:push_failed, …}`,
+  `{:registry_credentials, ref, reason}`, `{:public_registry, repository}`, …).
+
+  A repository on a registry set in the workspace config (not `nodes.registry`,
+  which keeps its behaviour) that answers anonymous reads is refused, as every
+  image carries the real `claude` binary, unless that registry sets `public_ok`.
+  An answer the probe could not give is not a refusal.
   """
   @spec ensure_ready(map(), keyword()) ::
           {:ok, Pipeline.result()} | :disabled | {:error, term()}
   def ensure_ready(%{plan: _} = ctx, opts \\ []) do
-    case Registry.fetch(opts) do
+    case Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts) do
       :unset ->
         :disabled
 
+      {:error, _} = error ->
+        error
+
       {:ok, cfg} ->
         key = image_key(ctx, cfg, opts)
-        flight(key, :worker, fn -> Pipeline.publish_image(ctx, cfg, opts) end, opts)
+
+        flight(
+          key,
+          :worker,
+          fn ->
+            with :ok <- ensure_private(cfg, ctx, opts), do: Pipeline.publish_image(ctx, cfg, opts)
+          end,
+          opts
+        )
     end
   end
+
+  defp ensure_private(%Registry{origin: :config, public_ok: false} = cfg, ctx, opts) do
+    repository = Pipeline.worker_repository(ctx)
+
+    probe =
+      Keyword.get_lazy(opts, :anonymous_probe, fn ->
+        config(:anonymous_probe, &Registry.anonymous_read/2)
+      end)
+
+    case probe.(cfg, repository) do
+      :public ->
+        {:error, {:public_registry, Registry.repository(cfg, repository)}}
+
+      {:unknown, reason} ->
+        Logger.warning(
+          "Image.Publisher: could not tell whether #{Registry.repository(cfg, repository)} " <>
+            "is private: #{inspect(reason)}"
+        )
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp ensure_private(_cfg, _ctx, _opts), do: :ok
 
   # What the published image depends on: the toolchain tag, the repo (its image
   # repository) whose
@@ -165,16 +216,23 @@ defmodule Arbiter.Worker.Image.Publisher do
   @doc """
   The registry as the doctor reports it (`GET /api/nodes` → `registry`):
   configured or not, reachability, what has been published since boot, the last
-  publish error and the `seed_paths` entries K26 excluded. Never the password.
+  publish error and the `seed_paths` entries K26 excluded, plus `registries`: one
+  entry per registry in use, `nodes.registry` or a workspace's, with its
+  reachability and anonymous-read probe (`RegistryReport`). Never a password.
   """
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
+    probe = Keyword.get_lazy(opts, :probe, fn -> config(:probe, &Registry.reachable/1) end)
+    registries = RegistryReport.build(Keyword.put(opts, :probe, probe))
+
     case Registry.fetch(opts) do
       :unset ->
-        %{configured: false}
+        %{configured: false, registries: registries}
 
       {:ok, cfg} ->
-        {reachable, detail} = probe(cfg, opts)
+        %{reachable: reachable, reachable_detail: detail} =
+          Enum.find(registries, &(&1.origin == "install"))
+
         snapshot = snapshot(Keyword.get(opts, :server, __MODULE__))
 
         %{
@@ -187,7 +245,8 @@ defmodule Arbiter.Worker.Image.Publisher do
           reachable_detail: detail,
           published: snapshot.published,
           last_error: snapshot.last_error,
-          seed_excluded: snapshot.seed_excluded
+          seed_excluded: snapshot.seed_excluded,
+          registries: registries
         }
     end
   end
@@ -204,34 +263,6 @@ defmodule Arbiter.Worker.Image.Publisher do
     GenServer.call(server, :snapshot, 5_000)
   catch
     :exit, _ -> %{published: [], last_error: nil, seed_excluded: []}
-  end
-
-  defp probe(cfg, opts) do
-    probe = Keyword.get_lazy(opts, :probe, fn -> config(:probe, &default_probe/1) end)
-
-    case probe.(cfg) do
-      :ok -> {true, nil}
-      {:error, reason} -> {false, inspect(reason)}
-    end
-  end
-
-  # `GET /v2/`: 200 (open) and 401 (auth required) both mean a registry answered.
-  defp default_probe(%Registry{host: host, insecure?: insecure?}) do
-    schemes = if insecure?, do: ["https", "http"], else: ["https"]
-    transport = if insecure?, do: [transport_opts: [verify: :verify_none]], else: []
-
-    Enum.reduce_while(schemes, {:error, :unreachable}, fn scheme, _ ->
-      case Req.get("#{scheme}://#{host}/v2/",
-             retry: false,
-             receive_timeout: @probe_timeout_ms,
-             connect_options: [timeout: @probe_timeout_ms] ++ transport,
-             redirect: false
-           ) do
-        {:ok, %Req.Response{status: status}} when status in [200, 401] -> {:halt, :ok}
-        {:ok, %Req.Response{status: status}} -> {:cont, {:error, {:http_status, status}}}
-        {:error, reason} -> {:cont, {:error, reason}}
-      end
-    end)
   end
 
   defp config(key, default),

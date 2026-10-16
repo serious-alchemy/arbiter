@@ -117,7 +117,9 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   end
 
   # `<repo-slug>/worker`: the repo the context names, else the checkout's directory.
-  defp worker_repository(ctx) do
+  @doc false
+  @spec worker_repository(map()) :: String.t()
+  def worker_repository(ctx) do
     repo = Map.get(ctx, :repo)
     path = Map.get(ctx, :repo_path)
 

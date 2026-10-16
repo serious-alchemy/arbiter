@@ -10,6 +10,7 @@ defmodule Arbiter.Worker.Image.RepoConfig do
         "ref": "…",                  // prebuilt only; per repo only
         "registry": "registry.example.com/vstim",
         "credentials_ref": "secret:KEY",
+        "public_ok": false,          // allow a registry that answers anonymous reads
         "seed": "primary"            // primary (default) | image | none
       }}}}}
 
@@ -19,15 +20,22 @@ defmodule Arbiter.Worker.Image.RepoConfig do
   (`ValidateConfig` refuses it on write; this is the read-side guard for a
   hand-edited row).
 
-  Only `source` changes behaviour today (`Image.plan/3`). `registry`,
-  `credentials_ref`, `seed` and `ref` are validated and resolved here for the
-  per-repo registry and prebuilt work that follows (KH12, KH14).
+  `source` picks the image (`Image.plan/3`); `registry`, `credentials_ref` and
+  `public_ok` pick where it is pushed and how
+  (`Arbiter.Worker.Image.Registry.resolve/3`, KH12). `seed` and `ref` are validated
+  and resolved here for the prebuilt work that follows (KH14).
+
+  A credential and a `public_ok` belong to the registry they were written next
+  to: a repo that names its own `registry` without its own `credentials_ref`
+  pushes anonymously, and without its own `public_ok` is not exempt. The
+  workspace's token never goes to a different host.
 
   Every source pushes to `<registry>/<repo-slug>/worker` (`repository_name/1`):
   a repo never shares an image repository with another, so the catch-all
   `<registry>/worker` does not exist.
   """
 
+  alias Arbiter.Tasks.RepoConfig, as: RepoSettings
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.SeedPaths
 
@@ -44,6 +52,7 @@ defmodule Arbiter.Worker.Image.RepoConfig do
           ref: String.t() | nil,
           registry: String.t() | nil,
           credentials_ref: String.t() | nil,
+          public_ok: boolean(),
           seed: :primary | :image | :none
         }
 
@@ -59,12 +68,28 @@ defmodule Arbiter.Worker.Image.RepoConfig do
   @spec resolve(term(), String.t() | nil) :: t()
   def resolve(%{config: %{"worker" => %{} = worker}}, repo) do
     case SeedPaths.effective(worker, repo) do
-      %{"image" => %{} = image} -> build(image)
+      %{"image" => %{} = image} -> image |> own_registry_keys(worker, repo) |> build()
       _ -> build(%{})
     end
   end
 
   def resolve(_workspace, _repo), do: build(%{})
+
+  # The deep merge keeps the workspace's `credentials_ref`/`public_ok` under a repo
+  # that overrides `registry`; those two describe the workspace's registry only.
+  defp own_registry_keys(image, worker, repo) do
+    own = RepoSettings.find_entry(Map.get(worker, "repos"), repo)
+
+    case is_map(own) && own["image"] do
+      %{"registry" => _} = own_image ->
+        image
+        |> Map.drop(["credentials_ref", "public_ok"])
+        |> Map.merge(Map.take(own_image, ["credentials_ref", "public_ok"]))
+
+      _ ->
+        image
+    end
+  end
 
   defp build(image) do
     %{
@@ -72,6 +97,7 @@ defmodule Arbiter.Worker.Image.RepoConfig do
       ref: string(image["ref"]),
       registry: string(image["registry"]),
       credentials_ref: string(image["credentials_ref"]),
+      public_ok: image["public_ok"] == true,
       seed: enum(image["seed"], @seeds, :primary)
     }
   end

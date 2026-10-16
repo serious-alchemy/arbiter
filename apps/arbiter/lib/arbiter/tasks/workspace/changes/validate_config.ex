@@ -384,7 +384,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # KH11 (bd-cexq4j): `worker.image` / `worker.repos.<repo>.image`
   # (`Arbiter.Worker.Image.RepoConfig`). `ref` is per repo: one workspace-wide ref
   # would be a catch-all image again.
-  @image_keys ~w(source ref registry credentials_ref seed)
+  @image_keys ~w(source ref registry credentials_ref public_ok seed)
 
   defp validate_image(changeset, nil, _label, _level), do: changeset
 
@@ -395,6 +395,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_image_enum(image, "seed", RepoConfig.seeds(), label)
     |> validate_image_registry(Map.fetch(image, "registry"), label)
     |> validate_image_credentials_ref(Map.fetch(image, "credentials_ref"), label)
+    |> validate_image_public_ok(Map.fetch(image, "public_ok"), label)
     |> validate_image_ref(image, label, level)
   end
 
@@ -457,6 +458,18 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_image_credentials_ref(changeset, {:ok, _}, label),
     do: image_credentials_error(changeset, label)
+
+  defp validate_image_public_ok(changeset, :error, _label), do: changeset
+
+  defp validate_image_public_ok(changeset, {:ok, value}, _label) when is_boolean(value),
+    do: changeset
+
+  defp validate_image_public_ok(changeset, {:ok, _}, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "#{label}.public_ok must be true or false"
+    )
+  end
 
   defp image_credentials_error(changeset, label) do
     Changeset.add_error(changeset,

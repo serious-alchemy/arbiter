@@ -2787,6 +2787,122 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "password"
     end
 
+    defp config_registry(extra \\ %{}) do
+      Map.merge(
+        %{
+          "registry" => "ghcr.io/ryan",
+          "origin" => "config",
+          "repositories" => ["vstim/worker"],
+          "credentials" => "set",
+          "public_ok" => false,
+          "reachable" => true,
+          "reachable_detail" => nil,
+          "anonymous" => %{"vstim/worker" => "private"},
+          "public" => []
+        },
+        extra
+      )
+    end
+
+    test "each workspace/repo registry gets its own row, with the anonymous-read answer (KH12)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [
+              config_registry(),
+              config_registry(%{"registry" => "registry.gitlab.com/vstim"})
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "worker.image registry ghcr.io/ryan")
+      assert detail =~ "vstim/worker"
+      assert detail =~ "private"
+      assert %{status: :ok} = named(results, "worker.image registry registry.gitlab.com/vstim")
+      refute Enum.any?(results, &(&1.name == "nodes"))
+    end
+
+    test "a registry that answers anonymous reads warns unless public_ok (KH12)" do
+      public =
+        config_registry(%{
+          "anonymous" => %{"vstim/worker" => "public"},
+          "public" => ["vstim/worker"]
+        })
+
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false, "registries" => [public]}}))
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert detail =~ "anonymous"
+      assert detail =~ "vstim/worker"
+      assert hint =~ "public_ok"
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [%{public | "public_ok" => true}]
+          }
+        })
+      )
+
+      assert %{status: :ok, detail: ok_detail} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert ok_detail =~ "public_ok"
+    end
+
+    test "an unreachable registry and an unusable credential warn (KH12)" do
+      bad =
+        config_registry(%{
+          "reachable" => false,
+          "reachable_detail" => ":nxdomain",
+          "credentials" => "error: secret:GH secret_not_found",
+          "anonymous" => %{"vstim/worker" => "unknown"}
+        })
+
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false, "registries" => [bad]}}))
+
+      assert %{status: :warn, detail: detail} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert detail =~ "not reachable"
+      assert detail =~ "secret:GH"
+    end
+
+    test "nodes.registry itself warns when one of its repositories answers anonymously (KH12)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "password_set" => true,
+            "published" => [],
+            "seed_excluded" => [],
+            "registries" => [
+              config_registry(%{
+                "registry" => "registry.example.com/arb",
+                "origin" => "install",
+                "repositories" => ["controller"],
+                "anonymous" => %{"controller" => "public"},
+                "public" => ["controller"]
+              })
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :warn, detail: detail} = named(results, "nodes.registry")
+      assert detail =~ "anonymous"
+      refute Enum.any?(results, &String.starts_with?(&1.name, "worker.image registry"))
+    end
+
     test "a private endpoint is quiet; a public one warns" do
       stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
       assert %{status: :ok} = named(nodes_results(), "nodes.public_url is a private endpoint")

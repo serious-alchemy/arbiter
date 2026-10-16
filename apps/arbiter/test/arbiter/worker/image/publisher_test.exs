@@ -55,6 +55,8 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       server: server,
       builder: builder,
       config: config,
+      workspaces: [],
+      anonymous_probe: fn _cfg, _repository -> :private end,
       runner: runner(self()),
       scratch: Path.join(tmp, "scratch"),
       cli: [{claude, "/opt/arbiter/cli/claude"}, {arb, "/opt/arbiter/cli/arb"}],
@@ -279,6 +281,125 @@ defmodule Arbiter.Worker.Image.PublisherTest do
     end
   end
 
+  describe "ensure_ready/2 registry per repo (KH12)" do
+    defp workspace(worker, secrets \\ %{}) do
+      %Arbiter.Tasks.Workspace{
+        config: %{"worker" => worker},
+        encrypted_secrets:
+          secrets |> :erlang.term_to_binary() |> Arbiter.Vault.encrypt!() |> Base.encode64()
+      }
+    end
+
+    defp ghcr(extra \\ %{}) do
+      workspace(
+        %{
+          "repos" => %{
+            "vstim" => %{
+              "image" =>
+                Map.merge(
+                  %{"registry" => "ghcr.io/ryan", "credentials_ref" => "secret:GH"},
+                  extra
+                )
+            }
+          }
+        },
+        %{"GH" => "ryan:gh-token-NEVER-LOGGED"}
+      )
+    end
+
+    test "a repo's registry and workspace-secret credential replace nodes.registry's",
+         %{opts: opts, ctx: ctx} do
+      ctx = Map.put(ctx, :workspace, ghcr())
+
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+      assert result.ref =~ ~r|\Aghcr\.io/ryan/vstim/worker@sha256:|
+
+      msgs = drain()
+      assert for({:push, remote} <- msgs, do: remote) != []
+      assert Enum.all?(for({:push, r} <- msgs, do: r), &String.starts_with?(&1, "ghcr.io/ryan/"))
+
+      auths = for {:authfile, body, 0o600} <- msgs, do: Jason.decode!(body)["auths"]
+      assert auths != []
+
+      for auth <- auths do
+        assert Map.keys(auth) == ["ghcr.io"]
+        assert auth["ghcr.io"]["auth"] == Base.encode64("ryan:gh-token-NEVER-LOGGED")
+      end
+
+      refute inspect(msgs) =~ "gh-token-NEVER-LOGGED" and
+               Enum.any?(msgs, &(match?({:podman, _}, &1) and inspect(&1) =~ "gh-token"))
+    end
+
+    test "other repos of that workspace still go to nodes.registry", %{opts: opts, ctx: ctx} do
+      ctx = ctx |> Map.put(:workspace, ghcr()) |> Map.put(:repo, "other")
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+      assert result.ref =~ ~r|\Aregistry\.example\.com/arbiter/other/worker@|
+    end
+
+    test "a workspace registry alone, with no nodes.registry, still publishes",
+         %{opts: opts, ctx: ctx} do
+      opts = Keyword.put(opts, :config, %{registry: nil})
+      assert {:ok, _} = Publisher.ensure_ready(Map.put(ctx, :workspace, ghcr()), opts)
+      assert Publisher.ensure_ready(ctx, opts) == :disabled
+    end
+
+    test "a credential_ref with no such secret is an error and pushes nothing",
+         %{opts: opts, ctx: ctx} do
+      ws =
+        workspace(%{"image" => %{"registry" => "ghcr.io/ryan", "credentials_ref" => "secret:NO"}})
+
+      assert {:error, {:registry_credentials, "secret:NO", :secret_not_found}} =
+               Publisher.ensure_ready(Map.put(ctx, :workspace, ws), opts)
+
+      refute_received {:push, _}
+    end
+
+    test "a registry that answers anonymous reads is refused before anything is pushed",
+         %{opts: opts, ctx: ctx} do
+      test = self()
+
+      probe = fn cfg, repository ->
+        send(test, {:probed, cfg.registry, repository})
+        :public
+      end
+
+      assert {:error, {:public_registry, "ghcr.io/ryan/vstim/worker"}} =
+               Publisher.ensure_ready(
+                 Map.put(ctx, :workspace, ghcr()),
+                 Keyword.put(opts, :anonymous_probe, probe)
+               )
+
+      assert_received {:probed, "ghcr.io/ryan", "vstim/worker"}
+      refute_received {:push, _}
+    end
+
+    test "public_ok lets a public registry through", %{opts: opts, ctx: ctx} do
+      probe = fn _cfg, _repository -> :public end
+
+      assert {:ok, _} =
+               Publisher.ensure_ready(
+                 Map.put(ctx, :workspace, ghcr(%{"public_ok" => true})),
+                 Keyword.put(opts, :anonymous_probe, probe)
+               )
+    end
+
+    test "a probe that could not tell is not a refusal", %{opts: opts, ctx: ctx} do
+      probe = fn _cfg, _repository -> {:unknown, :timeout} end
+
+      assert {:ok, _} =
+               Publisher.ensure_ready(
+                 Map.put(ctx, :workspace, ghcr()),
+                 Keyword.put(opts, :anonymous_probe, probe)
+               )
+    end
+
+    test "nodes.registry is not probed for the refusal (existing installs unchanged)",
+         %{opts: opts, ctx: ctx} do
+      probe = fn _cfg, _repository -> flunk("must not probe nodes.registry") end
+      assert {:ok, _} = Publisher.ensure_ready(ctx, Keyword.put(opts, :anonymous_probe, probe))
+    end
+  end
+
   describe "ensure_ready/2 cache key" do
     test "two repos sharing a toolchain tag each get their own seed layer", %{
       opts: opts,
@@ -427,9 +548,72 @@ defmodule Arbiter.Worker.Image.PublisherTest do
     end
   end
 
+  describe "status/1 registries (KH12)" do
+    test "one entry per registry in use, with the anonymous-read answer per repository",
+         %{opts: opts} do
+      ws =
+        workspace(%{
+          "repos" => %{
+            "vstim" => %{"image" => %{"registry" => "ghcr.io/ryan"}},
+            "arbiter" => %{"image" => %{"registry" => "ghcr.io/ryan"}},
+            "plain" => %{}
+          }
+        })
+
+      anon = fn
+        %{registry: "ghcr.io/ryan"}, "vstim/worker" -> :public
+        %{registry: "ghcr.io/ryan"}, _ -> :private
+        _cfg, "controller" -> {:unknown, :boom}
+        _cfg, _ -> :private
+      end
+
+      status =
+        Publisher.status(
+          opts
+          |> Keyword.put(:workspaces, [ws])
+          |> Keyword.put(:anonymous_probe, anon)
+          |> Keyword.put(:probe, fn
+            %{host: "ghcr.io"} -> {:error, :nxdomain}
+            _ -> :ok
+          end)
+        )
+
+      assert [install, ghcr] = status.registries
+      assert install.registry == "registry.example.com/arbiter"
+      assert install.origin == "install"
+      assert install.reachable
+      assert install.anonymous == %{"controller" => "unknown", "plain/worker" => "private"}
+
+      assert ghcr.registry == "ghcr.io/ryan"
+      assert ghcr.origin == "config"
+      refute ghcr.reachable
+      assert ghcr.reachable_detail =~ "nxdomain"
+      assert ghcr.anonymous == %{"vstim/worker" => "public", "arbiter/worker" => "private"}
+      assert ghcr.public == ["vstim/worker"]
+      assert ghcr.credentials == "anonymous"
+      refute inspect(status) =~ @password
+    end
+
+    test "a missing credential secret is reported on the registry's entry", %{opts: opts} do
+      ws =
+        workspace(%{
+          "image" => %{"registry" => "ghcr.io/ryan", "credentials_ref" => "secret:NO"}
+        })
+
+      status =
+        Publisher.status(
+          Keyword.put(opts, :workspaces, [
+            Map.put(ws, :config, ws.config |> put_in(["repo_paths"], %{"vstim" => "/x"}))
+          ])
+        )
+
+      assert %{credentials: "error: secret:NO secret_not_found"} = List.last(status.registries)
+    end
+  end
+
   describe "status/1" do
     test "unset registry reports configured: false and probes nothing" do
-      assert %{configured: false} = Publisher.status(config: %{registry: nil})
+      assert %{configured: false} = Publisher.status(config: %{registry: nil}, workspaces: [])
     end
 
     test "never carries the password; reports reachability and published images",

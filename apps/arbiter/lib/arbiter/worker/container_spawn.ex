@@ -1032,6 +1032,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:ok, plan} ->
         ctx = %{
           repo: repo,
+          workspace: workspace,
           repo_path: repo_path,
           base: base,
           seed_paths: SeedPaths.resolve(workspace, repo)
