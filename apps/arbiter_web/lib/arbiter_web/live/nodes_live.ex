@@ -187,6 +187,13 @@ defmodule ArbiterWeb.NodesLive do
 
   def handle_event("mint", _params, socket), do: {:noreply, socket}
 
+  def handle_event("cluster_tab", %{"tab" => tab}, %{assigns: %{add: %{} = add}} = socket)
+      when tab in ["helm", "manifests"],
+      do: {:noreply, assign(socket, :add, %{add | tab: tab})}
+
+  def handle_event("toggle_split", _params, %{assigns: %{add: %{} = add}} = socket),
+    do: {:noreply, assign(socket, :add, %{add | split: not add.split})}
+
   def handle_event("set_cap", %{"node_id" => id, "max_workers" => raw}, socket) do
     case set_cap(id, String.trim(raw)) do
       :ok ->
@@ -325,6 +332,9 @@ defmodule ArbiterWeb.NodesLive do
           "ttl_minutes" => Integer.to_string(Settings.nodes_join_token_ttl_minutes())
         }),
       kind: "machine",
+      # The cluster result's tab ("helm" | "manifests") and the cluster-admin split (KH9).
+      tab: "helm",
+      split: false,
       error: nil,
       minted: nil,
       node_id: nil,
@@ -338,9 +348,11 @@ defmodule ArbiterWeb.NodesLive do
   defp add_kind(%{"kind" => "cluster"}), do: "cluster"
   defp add_kind(_params), do: "machine"
 
-  # K9 (K§2.1): a cluster is added from manifests the primary renders and a join Secret the
-  # operator creates with the token read from the terminal. It cannot take a run without an
-  # image it can pull, so the form refuses to continue until `nodes.registry` is set.
+  # K9 (K§2.1), KH9: a cluster is added with `helm install` fed by the values the primary
+  # renders (or, with `nodes.registry` set, from raw manifests) and a join Secret the
+  # operator creates with the token read from the terminal. The chart pulls its own image,
+  # so a missing `nodes.registry` only warns: it limits the raw manifests and the jobs the
+  # node can run, not the install.
   defp mint("cluster", params) do
     with {:ok, _url} <- public_url(),
          {:ok, opts} <- mint_opts(params),
@@ -390,9 +402,6 @@ defmodule ArbiterWeb.NodesLive do
       {:error, errors} when is_list(errors) ->
         {:error, Enum.join(errors, "; ") <> "."}
 
-      {:error, :no_registry} ->
-        {:error, registry_message()}
-
       {:error, :no_release} ->
         {:error, "The primary has no deployed release to name an image for."}
 
@@ -404,10 +413,6 @@ defmodule ArbiterWeb.NodesLive do
          "nodes.public_url #{url} is refused by the cluster controller (only https, or http to loopback)."}
     end
   end
-
-  defp registry_message,
-    do:
-      "nodes.registry is not set: a cluster node needs an image it can pull (see arb server doctor)."
 
   defp mint(params) do
     with {:ok, url} <- public_url(),
@@ -1100,62 +1105,37 @@ defmodule ArbiterWeb.NodesLive do
 
     ~H"""
     <div class="space-y-4">
-      <div>
-        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-          1. Apply the manifests with a kubeconfig that is cluster-admin (once). They contain
-          no secret, so they can be saved, diffed and committed:
-        </p>
-        <div class="flex items-start gap-2">
-          <code
-            id="cluster-apply-command"
-            class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
-          >
-            {@add.minted.cluster.apply_command}
-          </code>
-          <Core.copy_id
-            id={@add.minted.cluster.apply_command}
-            dom_id="copy-cluster-apply-command"
-            label="Copy the apply command"
-          />
-        </div>
-        <p class="m-0 mt-1.5 text-[11.5px] text-[var(--text-label)]">
-          The machine running kubectl may not reach the primary:
-          <a
-            id="cluster-manifests-download"
-            href={@add.minted.cluster.manifest_url}
-            download={"arbiter-#{@add.minted.cluster.node_name}.yaml"}
-            class="text-[var(--text-link)] hover:text-[var(--text-title)]"
-          >
-            download the manifests
-          </a>
-          from here and apply the file.
-        </p>
+      <div
+        id="cluster-tabs"
+        role="tablist"
+        class="flex gap-1 border-0 border-b border-solid border-[var(--border-strong)]"
+      >
+        <button
+          :for={{tab, label} <- [{"helm", "Helm"}, {"manifests", "Raw manifests"}]}
+          type="button"
+          role="tab"
+          id={"cluster-tab-#{tab}"}
+          aria-selected={to_string(@add.tab == tab)}
+          phx-click="cluster_tab"
+          phx-value-tab={tab}
+          class={[
+            "-mb-px cursor-pointer border-0 border-b-2 border-solid bg-transparent px-3 py-1.5 text-[12.5px] transition-colors",
+            if(@add.tab == tab,
+              do: "border-[var(--text-link)] text-[var(--text-title)]",
+              else: "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-title)]"
+            )
+          ]}
+        >
+          {label}
+        </button>
       </div>
-      <div>
-        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-          2. Create the join Secret. The command asks for the token without echoing it, so it
-          never reaches your shell history or a process list:
-        </p>
-        <div class="flex items-start gap-2">
-          <code
-            id="cluster-secret-command"
-            class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
-          >
-            {@add.minted.cluster.secret_command}
-          </code>
-          <Core.copy_id
-            id={@add.minted.cluster.secret_command}
-            dom_id="copy-cluster-secret-command"
-            label="Copy the Secret command"
-          />
-        </div>
-      </div>
-      <div>
-        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-          3. When it asks, paste this token. It works once and is shown only here:
-        </p>
-        <.token_box token={@add.minted.token} />
-      </div>
+
+      <%= if @add.tab == "helm" do %>
+        <.helm_steps cluster={@add.minted.cluster} split={@add.split} token={@add.minted.token} />
+      <% else %>
+        <.manifest_steps cluster={@add.minted.cluster} token={@add.minted.token} />
+      <% end %>
+
       <.join_status add={@add} />
       <p
         :if={@add.status == :connected}
@@ -1172,6 +1152,184 @@ defmodule ArbiterWeb.NodesLive do
         <% end %>
         Delete the join Secret now; it is spent.
       </p>
+    </div>
+    """
+  end
+
+  attr :cluster, :map, required: true
+  attr :split, :boolean, required: true
+  attr :token, :string, required: true
+
+  # KH9 (§20.6): the Helm install. The values file the install reads carries no secret and
+  # the numbers in it are the primary's own; the token goes into the join Secret only.
+  defp helm_steps(assigns) do
+    ~H"""
+    <div id="cluster-helm-panel" class="space-y-4">
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          1. Create the namespace and label it for Pod Security (a cluster-admin, once). The
+          chart does not create it:
+        </p>
+        <.command_block
+          id="helm-namespace-command"
+          copy_id="copy-helm-namespace-command"
+          label="Copy the namespace command"
+          command={@cluster.helm.namespace_command}
+        />
+      </div>
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          2. Create the join Secret. The command asks for the token without echoing it, so it
+          never reaches your shell history, a process list or Helm's release record:
+        </p>
+        <.command_block
+          id="helm-secret-command"
+          copy_id="copy-helm-secret-command"
+          label="Copy the Secret command"
+          command={@cluster.helm.secret_command}
+        />
+      </div>
+      <div>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          3. When it asks, paste this token. It works once and is shown only here:
+        </p>
+        <.token_box token={@token} />
+      </div>
+      <%= if @split do %>
+        <div>
+          <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+            4. A cluster-admin installs the guardrails (quota, limits, network policies):
+          </p>
+          <.command_block
+            id="helm-bootstrap-command"
+            copy_id="copy-helm-bootstrap-command"
+            label="Copy the bootstrap install command"
+            command={@cluster.helm.split.bootstrap.install_command}
+          />
+        </div>
+        <div>
+          <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+            5. A namespace admin installs the controller:
+          </p>
+          <.command_block
+            id="helm-install-command"
+            copy_id="copy-helm-install-command"
+            label="Copy the node install command"
+            command={@cluster.helm.split.node.install_command}
+          />
+        </div>
+      <% else %>
+        <div>
+          <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+            4. Install the chart. The values hold no secret and carry the quota for this size:
+          </p>
+          <.command_block
+            id="helm-install-command"
+            copy_id="copy-helm-install-command"
+            label="Copy the install command"
+            command={@cluster.helm.install_command}
+          />
+        </div>
+      <% end %>
+      <p class="m-0 text-[11.5px] text-[var(--text-label)]">
+        The machine running helm may not reach the primary:
+        <a
+          id="helm-values-download"
+          href={@cluster.helm.values_url}
+          download={"arbiter-#{@cluster.node_name}-values.yaml"}
+          class="text-[var(--text-link)] hover:text-[var(--text-title)]"
+        >
+          download the values
+        </a>
+        and pass the file to <code class="font-[family-name:var(--font-mono)]">-f</code>.
+        <button
+          type="button"
+          id="helm-split-toggle"
+          phx-click="toggle_split"
+          class="cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-[var(--text-link)] hover:text-[var(--text-title)]"
+        >
+          {if @split, do: "One principal does it all", else: "My cluster admin is someone else"}
+        </button>
+      </p>
+    </div>
+    """
+  end
+
+  attr :cluster, :map, required: true
+  attr :token, :string, required: true
+
+  defp manifest_steps(assigns) do
+    ~H"""
+    <div id="cluster-manifests-panel" class="space-y-4">
+      <p
+        :if={not @cluster.registry_set}
+        id="cluster-manifests-unavailable"
+        class="m-0 text-[12px] text-[var(--text-secondary)]"
+      >
+        The raw manifests need <code class="font-[family-name:var(--font-mono)]">nodes.registry</code>
+        (they name a controller image the primary publishes there). Use the Helm tab, or set it.
+      </p>
+      <div :if={@cluster.registry_set}>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          1. Apply the manifests with a kubeconfig that is cluster-admin (once). They contain
+          no secret, so they can be saved, diffed and committed:
+        </p>
+        <.command_block
+          id="cluster-apply-command"
+          copy_id="copy-cluster-apply-command"
+          label="Copy the apply command"
+          command={@cluster.apply_command}
+        />
+        <p class="m-0 mt-1.5 text-[11.5px] text-[var(--text-label)]">
+          The machine running kubectl may not reach the primary:
+          <a
+            id="cluster-manifests-download"
+            href={@cluster.manifest_url}
+            download={"arbiter-#{@cluster.node_name}.yaml"}
+            class="text-[var(--text-link)] hover:text-[var(--text-title)]"
+          >
+            download the manifests
+          </a>
+          from here and apply the file.
+        </p>
+      </div>
+      <div :if={@cluster.registry_set}>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          2. Create the join Secret. The command asks for the token without echoing it, so it
+          never reaches your shell history or a process list:
+        </p>
+        <.command_block
+          id="cluster-secret-command"
+          copy_id="copy-cluster-secret-command"
+          label="Copy the Secret command"
+          command={@cluster.secret_command}
+        />
+      </div>
+      <div :if={@cluster.registry_set}>
+        <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+          3. When it asks, paste this token. It works once and is shown only here:
+        </p>
+        <.token_box token={@token} />
+      </div>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :copy_id, :string, required: true
+  attr :label, :string, required: true
+  attr :command, :string, required: true
+
+  defp command_block(assigns) do
+    ~H"""
+    <div class="flex items-start gap-2">
+      <code
+        id={@id}
+        class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+      >
+        {@command}
+      </code>
+      <Core.copy_id id={@command} dom_id={@copy_id} label={@label} />
     </div>
     """
   end
@@ -1222,9 +1380,6 @@ defmodule ArbiterWeb.NodesLive do
   attr :registry_set?, :boolean, default: false
 
   defp add_node_form(assigns) do
-    assigns =
-      assign(assigns, :blocked?, assigns.add.kind == "cluster" and not assigns.registry_set?)
-
     ~H"""
     <.form
       for={@add.form}
@@ -1277,9 +1432,10 @@ defmodule ArbiterWeb.NodesLive do
           class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
         >
           <strong class="text-[var(--arb-attention)]">nodes.registry is not set.</strong>
-          A cluster node cannot take a run without an image it can pull. Set it
-          (<code class="font-[family-name:var(--font-mono)]">arb settings set nodes.registry host/path</code>),
-          then come back; <code class="font-[family-name:var(--font-mono)]">arb server doctor</code>
+          The Helm install does not need it, but this node can run no job until a repo has a
+          worker registry, and the raw manifests are unavailable. Set it
+          (<code class="font-[family-name:var(--font-mono)]">arb settings set nodes.registry host/path</code>);
+          <code class="font-[family-name:var(--font-mono)]">arb server doctor</code>
           reports what is missing.
         </div>
         <div class="grid grid-cols-2 gap-3">
@@ -1432,7 +1588,7 @@ defmodule ArbiterWeb.NodesLive do
         {@add.error}
       </p>
       <div class="flex justify-end">
-        <Core.button id="add-node-submit" type="submit" variant="primary" disabled={@blocked?}>
+        <Core.button id="add-node-submit" type="submit" variant="primary">
           Issue token
         </Core.button>
       </div>
