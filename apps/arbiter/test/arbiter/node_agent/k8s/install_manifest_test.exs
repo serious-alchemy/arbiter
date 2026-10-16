@@ -740,4 +740,147 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       )
     end
   end
+
+  describe "values/2 (KH9: GET /nodes/join/values.yaml)" do
+    @chart_schema Path.expand("../../../../../../charts/arbiter-node/values.schema.json", __DIR__)
+    @values_server [
+      primary_url: "https://arbiter.tail1234.ts.net",
+      registry: "registry.example.test/arbiter",
+      chart_ref: "oci://ghcr.io/acme/charts/arbiter-node"
+    ]
+
+    defp values!(params, server \\ @values_server) do
+      {:ok, values} = InstallManifest.values(parse!(params), server)
+      values
+    end
+
+    test "the default install carries the node's name, the primary and the cidrs" do
+      values = values!(%{"name" => "mesaana"})
+
+      assert values["mode"] == "all"
+      assert values["node"] == %{"name" => "mesaana"}
+      assert values["primary"] == %{"url" => "https://arbiter.tail1234.ts.net"}
+      assert values["concurrency"] == %{"max" => 2}
+      assert values["chartRef"] == "oci://ghcr.io/acme/charts/arbiter-node"
+      assert values["reach"] == %{"mode" => "direct"}
+
+      assert values["networkPolicy"]["controllerEgress"]["primaryCIDRs"] ==
+               String.split(@primary_cidrs, ",")
+
+      assert values["networkPolicy"]["apiServerCIDRs"] == ["10.43.0.1/32"]
+
+      assert values["workers"]["requests"] ==
+               %{"cpu" => "1", "memory" => "2Gi", "ephemeral-storage" => "4Gi"}
+
+      assert values["workers"]["limits"] == %{"cpu" => "2", "memory" => "4Gi"}
+    end
+
+    test "the quota and limit range are the raw renderer's numbers, for any sizing" do
+      params = %{"name" => "mesaana", "max" => "5", "cpu" => "500m", "memory" => "1Gi"}
+      values = values!(params)
+      docs = render!(params)
+
+      assert values["quota"]["hard"] == find(docs, "ResourceQuota")["spec"]["hard"]
+
+      [container, pod] = find(docs, "LimitRange")["spec"]["limits"]
+      limit_range = values["limitRange"]
+      assert limit_range["container"]["max"] == container["max"]
+      assert limit_range["container"]["default"] == container["default"]
+      assert limit_range["container"]["defaultRequest"] == container["defaultRequest"]
+      assert limit_range["container"]["maxLimitRequestRatio"] == container["maxLimitRequestRatio"]
+      assert limit_range["pod"]["max"] == pod["max"]
+      assert values["concurrency"]["max"] == 5
+    end
+
+    test "placement, pull secret, proxy and admission map onto the chart's keys" do
+      values =
+        values!(%{
+          "name" => "mesaana",
+          "node_selector" => "kubernetes.io/hostname=mesanna",
+          "runtime_class" => "gvisor",
+          "pull_secret" => "gitlab-registry",
+          "admission" => "policy",
+          "reach" => "proxy",
+          "proxy_url" => "http://proxy.corp.example:3128",
+          "proxy_cidrs" => "10.9.0.5/32",
+          "api_cidrs" => "192.168.5.10/32",
+          "part" => "node"
+        })
+
+      assert values["mode"] == "node"
+      assert values["placement"]["nodeSelector"] == %{"kubernetes.io/hostname" => "mesanna"}
+      assert values["placement"]["runtimeClassName"] == "gvisor"
+      assert values["admissionPolicy"] == %{"enabled" => true}
+
+      assert values["registries"] == [
+               %{"prefix" => "registry.example.test/arbiter", "pullSecret" => "gitlab-registry"}
+             ]
+
+      assert values["reach"] == %{
+               "mode" => "proxy",
+               "proxy" => %{"url" => "http://proxy.corp.example:3128", "cidrs" => ["10.9.0.5/32"]}
+             }
+
+      assert values["networkPolicy"]["apiServerCIDRs"] == ["10.43.0.1/32", "192.168.5.10/32"]
+    end
+
+    test "no worker registry is not an error unless the values need one" do
+      server = Keyword.delete(@values_server, :registry)
+
+      values = values!(%{"name" => "mesaana"}, server)
+      refute Map.has_key?(values, "registries")
+      refute Map.has_key?(values, "admissionPolicy")
+
+      for params <- [%{"admission" => "policy"}, %{"pull_secret" => "gitlab-registry"}] do
+        assert {:error, {:missing, :registry}} =
+                 InstallManifest.values(parse!(Map.put(params, "name", "mesaana")), server)
+      end
+    end
+
+    test "a missing primary URL is refused" do
+      assert {:error, {:missing, :primary_url}} =
+               InstallManifest.values(parse!(%{"name" => "mesaana"}), registry: "r/x")
+    end
+
+    test "every emitted key exists in the chart's values.schema.json" do
+      schema = @chart_schema |> File.read!() |> Jason.decode!()
+
+      for params <- [
+            %{"name" => "mesaana"},
+            %{
+              "name" => "mesaana",
+              "node_selector" => "a=b",
+              "runtime_class" => "gvisor",
+              "pull_secret" => "p",
+              "admission" => "policy",
+              "reach" => "proxy",
+              "proxy_url" => "http://proxy.corp.example:3128",
+              "proxy_cidrs" => "10.9.0.5/32"
+            }
+          ] do
+        assert unknown_keys(values!(params), schema, "$") == []
+      end
+    end
+
+    test "the YAML parses back to the values and holds no secret" do
+      {:ok, text} = InstallManifest.values_yaml(parse!(%{"name" => "mesaana"}), @values_server)
+
+      assert YamlElixir.read_from_string!(text) == values!(%{"name" => "mesaana"})
+      refute text =~ ~r/arbj_|arbn_|token/i
+    end
+
+    defp unknown_keys(%{} = map, schema, path) do
+      props = Map.get(schema, "properties", %{})
+
+      Enum.flat_map(map, fn {key, value} ->
+        case props do
+          %{^key => sub} -> unknown_keys(value, sub, path <> "." <> key)
+          _ when props == %{} -> []
+          _ -> [path <> "." <> key]
+        end
+      end)
+    end
+
+    defp unknown_keys(_scalar, _schema, _path), do: []
+  end
 end

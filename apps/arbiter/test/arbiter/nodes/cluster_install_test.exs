@@ -46,11 +46,8 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
     refute plan.secret_command =~ "arbj_"
   end
 
-  test "a cluster node needs a registry, a public URL and a release" do
+  test "a cluster node needs a public URL and a release; the registry only gates the raw manifests" do
     {:ok, _} = Settings.set_nodes_registry(nil)
-    assert {:error, :no_registry} = ClusterInstall.plan(@params, version: "1")
-
-    {:ok, _} = Settings.set_nodes_registry("registry.example.test/arbiter")
     assert {:error, :no_release} = ClusterInstall.plan(@params, version: nil)
 
     {:ok, _} = Settings.set_nodes_public_url(nil)
@@ -88,6 +85,70 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
              )
 
     assert plan.manifest_url =~ "primary_cidrs=100.64.0.10%2F32%2C100.64.0.11%2F32"
+  end
+
+  describe "plan/2 helm block (KH9)" do
+    test "the Helm install: namespace, join Secret, and the values piped into helm install" do
+      assert {:ok, %{helm: helm}} = ClusterInstall.plan(@params, version: "v0.2.43")
+
+      assert helm.chart_ref == "oci://ghcr.io/ryanrborn/charts/arbiter-node"
+      assert helm.chart_version == "0.2.43"
+      assert helm.release == "mesaana-k3s"
+
+      assert helm.values_url ==
+               "https://arbiter.tail1234.ts.net/nodes/join/values.yaml?" <>
+                 "name=mesaana-k3s&namespace=ci-workers&max=3&reach=tailscale"
+
+      assert helm.namespace_command =~ "kubectl create namespace ci-workers"
+      assert helm.namespace_command =~ "pod-security.kubernetes.io/enforce=restricted"
+      assert helm.secret_command =~ "-n ci-workers create secret generic arbiter-join"
+
+      assert helm.install_command ==
+               ~s(curl -fsSL "#{helm.values_url}" | helm install mesaana-k3s ) <>
+                 "oci://ghcr.io/ryanrborn/charts/arbiter-node --version 0.2.43 " <>
+                 "--namespace ci-workers -f -"
+    end
+
+    test "nodes.chart_ref wins over the default chart" do
+      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/arbiter-node")
+      assert {:ok, %{helm: helm}} = ClusterInstall.plan(@params, version: "1")
+      assert helm.chart_ref == "oci://registry.example.test/charts/arbiter-node"
+      assert helm.install_command =~ "oci://registry.example.test/charts/arbiter-node"
+    end
+
+    test "no nodes.registry: Helm still plans, the raw manifests are unavailable" do
+      {:ok, _} = Settings.set_nodes_registry(nil)
+
+      assert {:ok, plan} = ClusterInstall.plan(@params, version: "1")
+      assert plan.registry_set == false
+      assert plan.manifest_url == nil
+      assert plan.apply_command == nil
+      assert plan.image == nil
+      assert plan.helm.install_command =~ "helm install"
+    end
+
+    test "the release name is a valid Helm release name even for an odd node name" do
+      assert {:ok, %{helm: helm}} =
+               ClusterInstall.plan(Map.put(@params, "name", "Mesaana_K3s:prod"), version: "1")
+
+      assert helm.release == "mesaana-k3s-prod"
+    end
+
+    test "the cluster-admin split is two releases, bootstrap then node" do
+      assert {:ok, %{helm: %{split: split}}} = ClusterInstall.plan(@params, version: "1")
+
+      assert split.bootstrap.values_url =~ "part=bootstrap"
+      assert split.bootstrap.install_command =~ "helm install mesaana-k3s-bootstrap "
+      assert split.node.values_url =~ "part=node"
+      assert split.node.install_command =~ "helm install mesaana-k3s "
+    end
+
+    test "no token ever reaches a Helm command" do
+      assert {:ok, %{helm: helm}} =
+               ClusterInstall.plan(Map.merge(@params, %{"token" => "arbj_x"}), version: "1")
+
+      refute inspect(helm) =~ "arbj_"
+    end
   end
 
   test "set_image_command/2 names the controller's own Deployment and container" do
