@@ -516,6 +516,15 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
               <span>{Loop.inapplicable_reason(@selected)}</span>
             </p>
 
+            <p
+              :if={Loop.stale_reason(@selected)}
+              id="proposal-stale"
+              class="text-xs text-[var(--arb-attention)] flex items-start gap-1"
+            >
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-clock" size={16} />
+              <span>{Loop.stale_reason(@selected)}</span>
+            </p>
+
             <div>
               <p class="text-xs text-[var(--text-label)] mb-1">Unified diff</p>
               <pre

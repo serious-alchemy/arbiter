@@ -123,7 +123,10 @@ defmodule Arbiter.Loop.PendingWriteTest do
       assert promoted.state == :proposed
       assert promoted.evidence_count == 3
       assert promoted.distinct_tasks == 2
-      assert Loop.applicable?(promoted)
+
+      refute Loop.applicable?(promoted),
+             "the default candidate has an empty payload: proposed but needs authoring"
+
       assert [%Message{subject: subject}] = escalations(ws)
       assert subject =~ "loop proposal"
 
@@ -274,6 +277,50 @@ defmodule Arbiter.Loop.PendingWriteTest do
 
       assert row.state == :proposed
       assert Loop.authoring_gap(row) =~ "skill"
+    end
+
+    test "a patch-less :config_set (old difficulty-misestimate cluster shape) is not applicable and Apply refuses it",
+         %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :config_set,
+            scope: :task,
+            category: "difficulty misestimate cluster: D1 -> D2 (arbiter)",
+            payload: %{
+              "cell" => %{"from_difficulty" => 1, "to_difficulty" => 2, "repo" => "arbiter"},
+              "reason" => "rework_cluster",
+              "task_ids" => ["bd-1"]
+            }
+          })
+        )
+
+      assert row.state == :proposed
+      assert Loop.authoring_gap(row) =~ "patch"
+      refute Loop.applicable?(row)
+      assert Loop.inapplicable_reason(row) =~ "needs authoring"
+      assert {:error, {:not_applicable, reason}} = Loop.apply_pending(row.id)
+      assert reason =~ "needs authoring"
+    end
+  end
+
+  describe "stale_reason/2" do
+    test "flags an open proposal older than the window, not a fresh one", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :difficulty_override,
+            scope: :task,
+            target: "bd-1",
+            payload: %{"task_id" => "bd-1", "difficulty" => 3}
+          })
+        )
+
+      refute Loop.stale_reason(row)
+      later = DateTime.add(DateTime.utc_now(), 40 * 86_400, :second)
+      assert Loop.stale_reason(row, later) =~ "stale"
     end
   end
 
@@ -536,7 +583,7 @@ defmodule Arbiter.Loop.PendingWriteTest do
           })
         )
 
-      assert {:error, {:unmapped, msg}} = Loop.apply_pending(row.id)
+      assert {:error, {:not_applicable, msg}} = Loop.apply_pending(row.id)
       assert msg =~ "skill"
       # The row is untouched, not consumed.
       {:ok, still} = Loop.get_pending(row.id)

@@ -893,7 +893,15 @@ defmodule Arbiter.Loop do
       "#{row.target || "<subject>"} --to #{payload["to"] || "<tier>"} --reason \"…\"`"
   end
 
-  def inapplicable_reason(%PendingWrite{state: :proposed}), do: nil
+  # A `:proposed` row whose payload cannot be applied as written (e.g. a
+  # `:config_set` with no `"patch"`) is not applicable: offering Apply on it
+  # could only fail. `authoring_gap/1` and this reason share one definition.
+  def inapplicable_reason(%PendingWrite{state: :proposed} = row) do
+    case authoring_gap(row) do
+      nil -> nil
+      gap -> "needs authoring: " <> gap
+    end
+  end
 
   def inapplicable_reason(%PendingWrite{state: :hypothesis} = row) do
     bar = evidence_bar(row.workspace_id)
@@ -928,6 +936,45 @@ defmodule Arbiter.Loop do
       {:error, {_code, message}} -> message
     end
   end
+
+  @default_stale_after_days 30
+
+  @doc """
+  Why a still-open proposal (`:hypothesis` / `:proposed`) is stale, or `nil`.
+
+  A proposal is stale when it was created more than `loop.stale_after_days`
+  (workspace config, default #{@default_stale_after_days}) ago: its evidence
+  window predates whatever the routing/config looks like now, so an operator
+  should re-check it (or let the next `loop.analyze` re-propose) rather than
+  apply it blindly. Flag only — it never changes `applicable?/1`.
+  """
+  @spec stale_reason(PendingWrite.t(), DateTime.t()) :: String.t() | nil
+  def stale_reason(row, now \\ DateTime.utc_now())
+
+  def stale_reason(%PendingWrite{state: state, created_at: %DateTime{} = created} = row, now)
+      when state in @live_states do
+    days = stale_after_days(row.workspace_id)
+    age = DateTime.diff(now, created, :day)
+
+    if age > days do
+      "stale: created #{age} day(s) ago, older than the #{days}-day window; " <>
+        "re-check against current config"
+    end
+  end
+
+  def stale_reason(_row, _now), do: nil
+
+  defp stale_after_days(workspace_id) when is_binary(workspace_id) do
+    with {:ok, %Workspace{config: %{"loop" => %{"stale_after_days" => n}}}} <-
+           Ash.get(Workspace, workspace_id),
+         true <- is_integer(n) and n > 0 do
+      n
+    else
+      _ -> @default_stale_after_days
+    end
+  end
+
+  defp stale_after_days(_), do: @default_stale_after_days
 
   # `Ash.Domain` defines its own `max/2` code interface, which shadows
   # `Kernel.max/2` inside this module — hence the explicit helper.

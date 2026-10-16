@@ -485,6 +485,7 @@ defmodule ArbiterCli.Cmd.Loop do
     if row["baseline"], do: IO.puts("baseline: #{row["baseline"]}")
     if row["inapplicable_reason"], do: IO.puts("\nnot applicable: #{row["inapplicable_reason"]}")
     if row["authoring_gap"], do: IO.puts("\nneeds authoring: #{row["authoring_gap"]}")
+    if row["stale_reason"], do: IO.puts("\n#{row["stale_reason"]}")
 
     case row["diff"] do
       diff when is_binary(diff) and diff != "" -> IO.puts("\n" <> diff)
