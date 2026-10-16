@@ -1,0 +1,165 @@
+# arbiter-node: one Arbiter cluster node. docs/design/remote-workers.md §20.5-§20.7.
+#
+# Unknown keys are an install error (values.schema.json), so a typo is not a silent default.
+# Nothing here carries a secret: the join token comes from a pre-created Secret, the
+# tailscale auth key and every pull secret are referenced by NAME.
+#
+# Object names are fixed (arbiter-controller, arbiter-worker, ...): the Role's
+# resourceNames, the Service, the Lease, every worker pod's ownerReference and the
+# NetworkPolicy selectors all name them. So: ONE RELEASE PER NAMESPACE, and the release
+# name is the node name (unless node.name is set).
+#
+# The chart does not template the Namespace. Create it and label it for Pod Security
+# first; see NOTES.txt.
+
+# all        guardrails + controller (one release, by a cluster-admin)
+# bootstrap  the guardrails only (cluster-admin): PriorityClass, ResourceQuota,
+#            LimitRange, NetworkPolicies, optional RuntimeClass / admission policy
+# node       the controller only (a namespace admin): ServiceAccounts, Role, RoleBinding,
+#            config, Lease, Service, Deployment
+mode: all
+
+node:
+  # The name the primary knows this node by (ARB_NODE_NAME). Empty = the release name.
+  name: ""
+
+primary:
+  # ARB_PRIMARY_URL: where the controller dials out to (https, verified chain).
+  url: ""
+
+# The controller image. Tag defaults to the chart's appVersion, which is the release.
+image:
+  repository: ghcr.io/ryanrborn/arbiter-controller
+  tag: ""
+  # A digest (sha256:...) wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+# Names of existing docker-registry Secrets for pulling the controller image (a mirror).
+imagePullSecrets: []
+
+# Reported to the primary, which prints the exact `helm upgrade` command for this node
+# (ARB_CHART_REF). Helm owns the controller Deployment: the controller cannot repoint its
+# own image (the Role has no write verb on the Deployment, ARB_K8S_SELF_UPGRADE=false).
+chartRef: oci://ghcr.io/ryanrborn/charts/arbiter-node
+
+join:
+  # The one-shot join token Secret (key: token), made with
+  #   read -rs T && printf %s "$T" | kubectl -n NS create secret generic arbiter-join --from-file=token=/dev/stdin
+  existingSecret: arbiter-join
+  # Automation fallback ONLY, and only via `--set-file join.token=./token`: the rendered
+  # Secret, token included, is stored in Helm's release record until the release is
+  # deleted. The token is single-use and expires in 15 minutes. Never `--set join.token=`.
+  token: ""
+
+controller:
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+concurrency:
+  # max_concurrent in controller.yaml: the node's worker-pod ceiling. quota.hard below is
+  # sized for 2; change both together (the primary's values endpoint computes the numbers).
+  max: 2
+
+workers:
+  requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}
+  limits: {cpu: "2", memory: 4Gi}
+  # Optional: left out of controller.yaml when empty (the controller's defaults, 8Gi / 1Gi).
+  workSizeLimit: ""
+  tmpSizeLimit: ""
+  # {requests: {cpu, memory, ephemeral-storage}, limits: {...}} for run services; empty = default.
+  servicesResources: {}
+  # schedule_s, pull_s, boot_s, grace_s, retain_failed_s, gate_timeout_s (seconds).
+  timeouts: {}
+  # 10-3600; unset = 300.
+  snapshotIntervalS: null
+
+placement:
+  # Empty by default: workers spread across the whole cluster (§20.2).
+  nodeSelector: {}
+  tolerations: []
+  spread:
+    enabled: true
+    topologyKeys: [kubernetes.io/hostname]
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  # Off by default (§20.3). Set to a RuntimeClass that exists, e.g. gvisor.
+  runtimeClassName: ""
+  priorityClass:
+    # PriorityClass is cluster-scoped and shared by every install on the cluster: a second
+    # install must set create=false (Helm will not adopt an object another release owns).
+    create: true
+    name: arbiter-worker
+    value: -100
+
+# Renders the cluster-scoped RuntimeClass object only (the runtime itself, e.g. runsc,
+# must already be on the nodes). Its name is placement.runtimeClassName.
+runtimeClass:
+  create: false
+  handler: ""
+
+networkPolicy:
+  # The API server: the kubernetes Service's ClusterIP (10.43.0.1 on k3s) PLUS, on a
+  # CNI that evaluates egress after DNAT (k3s's kube-router), the node address(es) of the
+  # API server endpoints (`kubectl get endpoints kubernetes`) as /32s.
+  apiServerCIDRs: [10.43.0.1/32]
+  # Excluded from the wide rule that reach.mode=tailscale needs.
+  clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16]
+  controllerEgress:
+    # reach.mode=direct: the primary's address(es), never a /0. The port is primary.url's.
+    primaryCIDRs: []
+    # Extra egress rules for the controller, verbatim NetworkPolicy egress entries.
+    extra: []
+  # v1 renders plain Kubernetes policies; an FQDN-capable flavor comes later.
+  flavor: kubernetes
+
+reach:
+  # direct     the controller dials primary.url itself
+  # tailscale  a userspace tailscale sidecar (no NET_ADMIN) and ARB_NODE_PROXY; the one
+  #            case where controller egress stays wide (443, UDP 41641 and 3478)
+  # proxy      ARB_NODE_PROXY is your own HTTP proxy; egress is that proxy only
+  mode: direct
+  tailscale:
+    # Secret with key `authkey`: ephemeral, pre-authorised, tagged tag:arbiter-node.
+    authKeySecret: arbiter-tailscale
+    image:
+      repository: ghcr.io/tailscale/tailscale
+      tag: v1.104.1
+      digest: sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d
+  proxy:
+    # A bare http(s) URL without credentials.
+    url: ""
+    cidrs: []
+
+# Needs Kubernetes >= 1.30 and a cluster-admin. Requires registries[] (the image allow-list).
+admissionPolicy:
+  enabled: false
+
+# Worker image registries. `prefix` is allowed by the admission policy; `pullSecret` (an
+# existing docker-registry Secret) is referenced by every worker pod.
+registries: []
+# - prefix: registry.example.test/arbiter
+#   pullSecret: arbiter-registry
+
+# The cluster-admin's ceiling for the namespace, sized for concurrency.max=2 with the
+# default worker size (the figures InstallManifest derives). Helm has no quantity
+# arithmetic: for another shape take the numbers from the primary or edit them by hand.
+# The controller's headroom number and the `quota` readiness check show a mismatch.
+quota:
+  hard:
+    pods: "4"
+    requests.cpu: 2675m
+    requests.memory: 5Gi
+    requests.ephemeral-storage: 12544Mi
+    limits.cpu: 6300m
+    limits.memory: 11008Mi
+    limits.ephemeral-storage: 24Gi
+
+limitRange:
+  container:
+    defaultRequest: {cpu: 100m, memory: 128Mi, ephemeral-storage: 128Mi}
+    default: {cpu: 400m, memory: 256Mi, ephemeral-storage: 1Gi}
+    max: {cpu: "4", memory: 4Gi, ephemeral-storage: 9Gi}
+    maxLimitRequestRatio: {cpu: "4", memory: "2"}
+  pod:
+    max: {cpu: "4", memory: 6656Mi, ephemeral-storage: 14Gi}

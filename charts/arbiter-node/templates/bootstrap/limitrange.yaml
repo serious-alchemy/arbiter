@@ -1,0 +1,24 @@
+{{- if include "arbiter-node.bootstrap" . }}
+{{- $c := .Values.limitRange.container }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: arbiter-workers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        {{- include "arbiter-node.quantities" $c.default | trim | nindent 8 }}
+      defaultRequest:
+        {{- include "arbiter-node.quantities" $c.defaultRequest | trim | nindent 8 }}
+      max:
+        {{- include "arbiter-node.quantities" $c.max | trim | nindent 8 }}
+      maxLimitRequestRatio:
+        {{- include "arbiter-node.quantities" $c.maxLimitRequestRatio | trim | nindent 8 }}
+    - type: Pod
+      max:
+        {{- include "arbiter-node.quantities" .Values.limitRange.pod.max | trim | nindent 8 }}
+{{- end }}

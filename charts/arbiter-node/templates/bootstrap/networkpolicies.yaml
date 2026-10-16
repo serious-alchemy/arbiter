@@ -1,0 +1,145 @@
+{{- /*
+The four policies of docs/design/remote-workers.md K§9.1. There is no value that removes
+them: a node whose policies are not enforced is degraded, never silently open.
+Workers get no DNS and one destination (the controller); the controller gets the API
+server, DNS and exactly one more destination chosen by reach.mode.
+*/ -}}
+{{- if include "arbiter-node.bootstrap" . }}
+{{- $ns := .Release.Namespace }}
+{{- $labels := include "arbiter-node.labels" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-to-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 9443
+        - protocol: TCP
+          port: 9444
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-ingress-from-workers
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: 9443
+        - protocol: TCP
+          port: 9444
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.apiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if eq .Values.reach.mode "direct" }}
+    - to:
+        {{- range (required "networkPolicy.controllerEgress.primaryCIDRs is required for reach.mode=direct" .Values.networkPolicy.controllerEgress.primaryCIDRs) }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ include "arbiter-node.urlPort" (required "primary.url is required" .Values.primary.url) }}
+    {{- else if eq .Values.reach.mode "proxy" }}
+    - to:
+        {{- range (required "reach.proxy.cidrs is required for reach.mode=proxy" .Values.reach.proxy.cidrs) }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ include "arbiter-node.urlPort" (required "reach.proxy.url is required for reach.mode=proxy" .Values.reach.proxy.url) }}
+    {{- else }}
+    {{- /* The tailnet control plane and DERP relays have no stable addresses. */}}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.clusterCIDRs }}
+              - {{ . }}
+              {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: UDP
+          port: 41641
+        - protocol: UDP
+          port: 3478
+    {{- end }}
+    {{- with .Values.networkPolicy.controllerEgress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

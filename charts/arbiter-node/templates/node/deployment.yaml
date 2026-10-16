@@ -1,0 +1,149 @@
+{{- /*
+The controller (docs/design/remote-workers.md §2.2) with the reach variant of §2.3. Helm
+owns it: ARB_K8S_SELF_UPGRADE=false and the Role has no write verb on it, so the node
+reports `helm upgrade ...` instead of repointing its own image (§20.7). The pod builder
+owns the worker pods; nothing about them is a value here.
+*/ -}}
+{{- if include "arbiter-node.node" . }}
+{{- $reach := .Values.reach.mode }}
+{{- $primary := required "primary.url is required" .Values.primary.url }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbiter-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: arbiter-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: arbiter-controller
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: arbiter-controller
+      priorityClassName: {{ .Values.placement.priorityClass.name }}
+      {{- with include "arbiter-node.pullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "arbiter-node.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: ARB_ROLE
+              value: agent
+            - name: ARB_AGENT_BACKEND
+              value: k8s
+            - name: ARB_PRIMARY_URL
+              value: {{ $primary | quote }}
+            - name: ARB_NODE_NAME
+              value: {{ include "arbiter-node.nodeName" . | quote }}
+            - name: ARB_K8S_SELF_UPGRADE
+              value: "false"
+            - name: ARB_INSTALL_METHOD
+              value: helm
+            - name: ARB_HELM_RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: ARB_CHART_REF
+              value: {{ .Values.chartRef | quote }}
+            - name: ARB_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ARB_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            {{- if eq $reach "tailscale" }}
+            - name: ARB_NODE_PROXY
+              value: http://127.0.0.1:1055
+            {{- else if eq $reach "proxy" }}
+            - name: ARB_NODE_PROXY
+              value: {{ required "reach.proxy.url is required for reach.mode=proxy" .Values.reach.proxy.url | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: join
+              mountPath: /etc/arb/join
+              readOnly: true
+            - name: config
+              mountPath: /etc/arb/config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        {{- if eq $reach "tailscale" }}
+        - name: tailscale
+          image: {{ include "arbiter-node.tailscaleImage" . | quote }}
+          env:
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_OUTBOUND_HTTP_PROXY_LISTEN
+              value: 127.0.0.1:1055
+            - name: TS_EXTRA_ARGS
+              value: --advertise-tags=tag:arbiter-node
+            - name: TS_STATE_DIR
+              value: /tmp/tailscale
+            - name: TS_SOCKET
+              value: /tmp/tailscaled.sock
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.reach.tailscale.authKeySecret }}
+                  key: authkey
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |-
+                  tailscale --socket=/tmp/tailscaled.sock status --json | grep -q '"BackendState": "Running"'
+            periodSeconds: 5
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 125m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+        {{- end }}
+      volumes:
+        # The operator's one-shot Secret; optional, the controller keeps its credential in
+        # arbiter-node-credential afterwards.
+        - name: join
+          secret:
+            secretName: {{ .Values.join.existingSecret }}
+            optional: true
+        - name: config
+          configMap:
+            name: arbiter-controller-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+{{- end }}

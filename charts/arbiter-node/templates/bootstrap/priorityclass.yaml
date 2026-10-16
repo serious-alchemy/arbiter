@@ -1,0 +1,12 @@
+{{- if and (include "arbiter-node.bootstrap" .) .Values.placement.priorityClass.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.placement.priorityClass.name }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+value: {{ .Values.placement.priorityClass.value }}
+preemptionPolicy: Never
+globalDefault: false
+description: "Arbiter worker pods: every other workload wins a contention."
+{{- end }}
