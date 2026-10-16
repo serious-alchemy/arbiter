@@ -144,7 +144,9 @@ defmodule Arbiter.Nodes.ClusterInstall do
   `Arbiter.NodeAgent.K8s.InstallManifest.parse/1`). `{:error, [message]}` when a value
   is refused.
   """
-  @spec plan(map(), keyword()) :: {:ok, plan()} | {:error, [String.t()] | atom()}
+  @spec plan(map(), keyword()) ::
+          {:ok, plan()}
+          | {:error, [String.t()] | atom() | {:insecure_public_url, String.t()}}
   def plan(params, opts \\ []) do
     with {:ok, spec} <- InstallManifest.parse(params),
          {:ok, server} <- server_opts(opts) do
