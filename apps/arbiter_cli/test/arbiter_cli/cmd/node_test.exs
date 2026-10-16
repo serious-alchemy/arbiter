@@ -225,6 +225,34 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert body["primary_cidrs"] == "100.64.0.10/32"
     end
 
+    test "--registries is sent and each registry's pull-Secret command is printed (KH13)" do
+      tty(true)
+
+      pull =
+        "read -r U && read -rs P && printf '{...}' \"$U\" \"$P\" | kubectl create secret generic gitlab-vstim"
+
+      minted =
+        put_in(@cluster_minted, ["cluster", "pull_secret_commands"], [
+          %{
+            "registry" => "registry.gitlab.com/vstim/",
+            "secret" => "gitlab-vstim",
+            "command" => pull
+          }
+        ])
+
+      capture_request(:post, "/api/nodes/join-tokens", 201, minted)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ~w(--registries registry.gitlab.com/vstim/=gitlab-vstim))
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw)["registries"] == "registry.gitlab.com/vstim/=gitlab-vstim"
+      assert ("  " <> pull) in String.split(out, "\n")
+      assert out =~ "# registry.gitlab.com/vstim/"
+    end
+
     test "sends --api-cidrs: the API server's node address for post-DNAT CNIs (k3s)" do
       tty(true)
       capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
@@ -360,6 +388,144 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert decoded["cluster"]["manifest_url"] == @manifest_url
       assert decoded["cluster"]["secret_command"] == @secret
       assert decoded["token"] == @token
+    end
+
+    @values_url "https://primary.ts.net/nodes/join/values.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
+    @namespace_cmd "kubectl create namespace ci-workers && kubectl label namespace ci-workers pod-security.kubernetes.io/enforce=restricted"
+    @helm_install ~s(curl -fsSL "#{@values_url}" | helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 --namespace ci-workers -f -)
+    @values_yaml "mode: all\nnode:\n  name: mesaana-k3s\n"
+
+    @helm_minted update_in(@cluster_minted, ["cluster"], fn cluster ->
+                   Map.merge(cluster, %{
+                     "registry_set" => true,
+                     "helm" => %{
+                       "chart_ref" => "oci://ghcr.io/acme/charts/arbiter-node",
+                       "chart_version" => "0.2.43",
+                       "release" => "mesaana-k3s",
+                       "values_url" => @values_url,
+                       "namespace_command" => @namespace_cmd,
+                       "secret_command" => @secret,
+                       "install_command" => @helm_install
+                     }
+                   })
+                 end)
+
+    defp stub_values(minted) do
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        send(test, {:request, conn.method, conn.request_path})
+
+        case conn.request_path do
+          "/api/nodes/join-tokens" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(minted)
+
+          "/nodes/join/values.yaml" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/yaml")
+            |> Plug.Conn.send_resp(200, @values_yaml)
+        end
+      end)
+    end
+
+    defp tmp_path(prefix),
+      do: Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+
+    test "--format helm prints the namespace, Secret, token and install commands (KH9)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @helm_minted)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format helm)) end)
+
+      # `format` is a local choice: the primary is not asked for it.
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      refute Map.has_key?(Jason.decode!(raw), "format")
+
+      lines = String.split(out, "\n")
+      assert ("  " <> @namespace_cmd) in lines
+      assert ("  " <> @secret) in lines
+      assert ("  " <> @helm_install) in lines
+      assert ("  " <> @token) in lines
+      refute out =~ "kubectl apply"
+      refute @helm_install =~ @token
+    end
+
+    test "--format helm -o saves the values and installs from the file" do
+      tty(true)
+      stub_values(@helm_minted)
+      path = tmp_path("arb-values")
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} =
+        capture(fn -> Node.run(@cluster_argv ++ ["--format", "helm", "-o", path]) end)
+
+      assert File.read!(path) == @values_yaml
+      refute File.read!(path) =~ @token
+
+      assert out =~
+               "helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 " <>
+                 "--namespace ci-workers -f #{path}"
+
+      assert_receive {:request, "GET", "/nodes/join/values.yaml"}
+    end
+
+    test "--format values prints only the values file to stdout; the token goes to --token-file" do
+      tty(false)
+      stub_values(@helm_minted)
+      token_path = tmp_path("arb-node-token")
+      on_exit(fn -> File.rm(token_path) end)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ["--format", "values", "--token-file", token_path])
+        end)
+
+      assert out == @values_yaml
+      assert File.read!(token_path) |> String.trim() == @token
+      assert_receive {:request, "GET", "/nodes/join/values.yaml"}
+    end
+
+    test "--format values with nowhere to put the token or the values is refused before minting" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format values)) end)
+      assert code != 0
+      assert err =~ "--format values"
+      refute_received {:request, _, _, _}
+    end
+
+    test "an unknown --format is refused before minting; --format needs --kind cluster" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format yaml)) end)
+      assert code != 0
+      assert err =~ "--format"
+      refute_received {:request, _, _, _}
+
+      {_out, err, code} = capture(fn -> Node.run(~w(add --name box --format helm)) end)
+      assert code != 0
+      assert err =~ "--kind cluster"
+    end
+
+    test "without nodes.registry the default falls back to Helm: no manifest URL to apply" do
+      tty(true)
+
+      no_manifests =
+        update_in(@helm_minted, ["cluster"], fn c ->
+          Map.merge(c, %{"registry_set" => false, "manifest_url" => nil, "apply_command" => nil})
+        end)
+
+      capture_request(:post, "/api/nodes/join-tokens", 201, no_manifests)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv) end)
+
+      assert out =~ @helm_install
+      refute out =~ "kubectl apply"
+    end
+
+    test "--json carries the Helm block" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @helm_minted)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format helm --json)) end)
+
+      assert Jason.decode!(out)["cluster"]["helm"]["install_command"] == @helm_install
     end
 
     test "a cluster node needs --name, and --kind must be machine or cluster, before anything is minted" do

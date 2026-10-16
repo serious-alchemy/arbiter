@@ -134,6 +134,65 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
     end
   end
 
+  describe "GET /nodes/join/values.yaml (KH9)" do
+    test "is anonymous and returns the chart values for the query, with no secret" do
+      token = elem(Nodes.mint_join_token([kind: "cluster"], @operator), 1).token
+
+      conn =
+        raw(
+          :get,
+          "/nodes/join/values.yaml?name=mesaana&max=3&token=#{token}&primary_cidrs=100.64.0.10/32"
+        )
+
+      assert conn.status == 200
+      assert [type] = get_resp_header(conn, "content-type")
+      assert type =~ "yaml"
+
+      values = YamlElixir.read_from_string!(conn.resp_body)
+      assert values["node"] == %{"name" => "mesaana"}
+      assert values["primary"] == %{"url" => @url}
+      assert values["concurrency"] == %{"max" => 3}
+      assert values["networkPolicy"]["controllerEgress"]["primaryCIDRs"] == ["100.64.0.10/32"]
+      assert values["quota"]["hard"]["pods"] == "5"
+
+      refute conn.resp_body =~ token
+      refute conn.resp_body =~ "arbj_"
+    end
+
+    test "?part= selects the cluster-admin half" do
+      bootstrap =
+        raw(:get, "/nodes/join/values.yaml?name=n&part=bootstrap&primary_cidrs=100.64.0.10/32")
+
+      assert YamlElixir.read_from_string!(bootstrap.resp_body)["mode"] == "bootstrap"
+    end
+
+    test "a bad value is the same 422 as k8s.yaml; a missing name is one too" do
+      query = "name=n&max=0&namespace=Bad_NS"
+      conn = raw(:get, "/nodes/join/values.yaml?" <> query)
+      assert conn.status == 422
+      assert conn.resp_body == raw(:get, "/nodes/join/k8s.yaml?" <> query).resp_body
+
+      assert raw(:get, "/nodes/join/values.yaml").status == 422
+    end
+
+    test "does not need nodes.registry, unless the values name a registry" do
+      {:ok, _} = Arbiter.Settings.set_nodes_registry(nil)
+      base = "/nodes/join/values.yaml?name=n&primary_cidrs=100.64.0.10/32"
+      assert raw(:get, base).status == 200
+
+      conn = raw(:get, base <> "&admission=policy")
+      assert conn.status == 503
+      assert conn.resp_body =~ "nodes.registry"
+    end
+
+    test "is unavailable until nodes.public_url is set" do
+      {:ok, _} = Arbiter.Settings.set_nodes_public_url(nil)
+      conn = raw(:get, "/nodes/join/values.yaml?name=n&primary_cidrs=100.64.0.10/32")
+      assert conn.status == 503
+      assert conn.resp_body =~ "nodes.public_url"
+    end
+  end
+
   describe "POST /nodes/enroll with kind: cluster" do
     test "a cluster token and `kind: cluster` enrol a cluster node" do
       {:ok, %{token: token}} = Nodes.mint_join_token([kind: "cluster", name: "k3s"], @operator)
@@ -278,18 +337,28 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
       assert Nodes.events(kind: :token_minted) == []
     end
 
-    test "is refused, and mints nothing, without nodes.registry" do
+    test "returns the Helm block, and without nodes.registry only the raw manifests go missing" do
       {:ok, _} = Arbiter.Settings.set_nodes_registry(nil)
 
       conn =
         post(operator_conn(), "/api/nodes/join-tokens", %{
           kind: "cluster",
           name: "k3s",
+          namespace: "ci-workers",
           primary_cidrs: "100.64.0.10/32"
         })
 
-      assert json_response(conn, 422)["error"]["message"] =~ "nodes.registry"
-      assert Nodes.events(kind: :token_minted) == []
+      cluster = json_response(conn, 201)["cluster"]
+      assert cluster["registry_set"] == false
+      assert cluster["manifest_url"] == nil
+      assert cluster["apply_command"] == nil
+
+      helm = cluster["helm"]
+      assert helm["values_url"] =~ "#{@url}/nodes/join/values.yaml?name=k3s&namespace=ci-workers"
+      assert helm["install_command"] =~ "helm install k3s "
+      assert helm["install_command"] =~ "--namespace ci-workers"
+      assert helm["namespace_command"] =~ "kubectl create namespace ci-workers"
+      assert helm["secret_command"] =~ "-n ci-workers create secret generic arbiter-join"
     end
 
     test "a value the renderer refuses is a 422 and mints nothing" do

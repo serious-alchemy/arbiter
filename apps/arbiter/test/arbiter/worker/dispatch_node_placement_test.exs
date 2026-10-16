@@ -114,6 +114,37 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert Worker.whereis(issue.id) == nil
       assert Ash.get!(Issue, issue.id).state == :queued
     end
+
+    test "a node whose caps.registries do not cover the repo's registry is not a candidate (KH13)" do
+      ws =
+        workspace!(%{
+          "worker" => %{
+            "placement" => "remote_only",
+            "image" => %{"registry" => "registry.gitlab.com/vstim"}
+          }
+        })
+
+      issue = ready!(ws, "registry not covered")
+
+      row = %{
+        id: "n-ghcr",
+        name: "ghcr-only",
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{"image" => "registry", "registries" => ["ghcr.io/ryan/"]}
+      }
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman ++ [nodes: [row]])
+      assert info.mode == :remote_only
+      # refused at placement (no candidate), not after reserving the node and failing its image
+      refute Map.has_key?(info, :image_error)
+      assert info.nodes_known == 1
+      assert Worker.whereis(issue.id) == nil
+    end
   end
 
   # bd-akp9ae: a podman implementer holds no git credential in its container (the

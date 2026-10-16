@@ -11,6 +11,8 @@ defmodule ArbiterWeb.NodeController do
     * `GET /nodes/join/k8s.yaml` — the cluster install manifests (K9,
       `Arbiter.NodeAgent.K8s.InstallManifest`), rendered from the query string. They
       contain no secret, so the route is anonymous like the script.
+    * `GET /nodes/join/values.yaml` — the same install as `arbiter-node` Helm chart values
+      (KH9, `InstallManifest.values_yaml/2`), same parser and same `422`. No secret either.
     * `POST /nodes/enroll` — a join token **in the JSON body** (never a header
       or the query string) for a node credential. Rate limited
       (`Arbiter.Nodes.RateLimit`); every token failure is the same generic
@@ -79,6 +81,39 @@ defmodule ArbiterWeb.NodeController do
         conn
         |> put_resp_content_type("text/plain")
         |> send_resp(422, Enum.map_join(errors, "", &(&1 <> "\n")))
+
+      {:error, reason} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(503, manifest_unavailable(reason))
+    end
+  end
+
+  # KH9: `curl -fsSL "<public_url>/nodes/join/values.yaml?name=..." | helm install ... -f -`.
+  # The same query vocabulary and the same 422 as `k8s/2`. The chart pulls its controller
+  # image from its own `image.*` values, so `nodes.registry` is only needed when the values
+  # name a registry (an admission policy, a pull secret).
+  def values(conn, params) do
+    with {:ok, spec} <- parse_manifest(params),
+         {:ok, server} <- ClusterInstall.values_server(),
+         {:ok, yaml} <- InstallManifest.values_yaml(spec, server) do
+      conn
+      |> put_resp_content_type("application/yaml")
+      |> put_resp_header("cache-control", "no-cache")
+      |> send_resp(200, yaml)
+    else
+      {:error, {:invalid, errors}} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(422, Enum.map_join(errors, "", &(&1 <> "\n")))
+
+      {:error, {:missing, :registry}} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(
+          503,
+          "nodes.registry is not set on the primary; an admission policy or pull secret names a worker registry\n"
+        )
 
       {:error, reason} ->
         conn

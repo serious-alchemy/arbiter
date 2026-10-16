@@ -24,6 +24,7 @@ defmodule ArbiterWeb.NodeTierGuardTest do
   @anonymous_node_routes [
     "get /nodes/join",
     "get /nodes/join/k8s.yaml",
+    "get /nodes/join/values.yaml",
     "get /nodes/ping",
     "post /nodes/enroll",
     "post /nodes/pair",

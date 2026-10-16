@@ -279,6 +279,43 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicyTest do
                %{"kubernetes.io/metadata.name" => "arbiter-workers"}
     end
 
+    test "registries prefixes widen the image rule: both registries' images are admitted (KH13)" do
+      [policy | _] =
+        AdmissionPolicy.manifests(
+          registry: registry(),
+          registries: ["registry.gitlab.com/vstim/", "ghcr.io/ryan/"]
+        )
+
+      images = Enum.find(policy["spec"]["validations"], &(&1["message"] =~ "images come from"))
+
+      for prefix <- ["registry.gitlab.com/vstim/", "ghcr.io/ryan/", "#{registry()}/"] do
+        assert images["expression"] =~ "c.image.startsWith('#{prefix}')"
+      end
+
+      for ref <- ["registry.gitlab.com/vstim/app/worker", "ghcr.io/ryan/arbiter/worker"] do
+        pod =
+          build!(put_ref(run_spec(), "#{ref}@sha256:#{digest()}"), %{
+            registries: [
+              %{prefix: "registry.gitlab.com/vstim/", pull_secret: "a"},
+              %{prefix: "ghcr.io/ryan/", pull_secret: "b"}
+            ]
+          })
+
+        assert MiniCel.admits?(images["expression"], bindings(pod))
+      end
+
+      refute MiniCel.admits?(
+               images["expression"],
+               bindings(
+                 put_in(
+                   build!(),
+                   ["spec", "containers", Access.at(0), "image"],
+                   "evil.example/x@sha256:#{digest()}"
+                 )
+               )
+             )
+    end
+
     test "golden: the rendered policy is pinned" do
       yaml =
         AdmissionPolicy.manifests(registry: registry()) |> Enum.map_join("---\n", &golden_yaml/1)

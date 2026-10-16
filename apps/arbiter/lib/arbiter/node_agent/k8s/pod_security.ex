@@ -167,7 +167,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
   `%{rule, level, path}`.
 
   Options: `levels:` (a subset of `[:baseline, :restricted, :arbiter]`), `registry:`
-  (the image prefix; without it `:image` is skipped) and `image_prefixes:` (extra
+  (the image prefix; without it `:image` is skipped), `registries:` (KH13: further
+  image prefixes, each ending in `/`, the worker image may come from), `image_prefixes:` (extra
   allowed prefixes for service images; `docker.io/library/` is always allowed) and
   `sandbox_classes:` (the runsc-handled `RuntimeClass` names under which `hostUsers` may be
   absent, default none).
@@ -521,23 +522,24 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
         []
 
       registry ->
-        image_paths(pod, registry, ["docker.io/library/" | Keyword.get(opts, :image_prefixes, [])])
+        own = [registry <> "/" | Keyword.get(opts, :registries, [])]
+        image_paths(pod, own, ["docker.io/library/" | Keyword.get(opts, :image_prefixes, [])])
     end
   end
 
-  defp image_paths(pod, registry, service_prefixes) do
+  defp image_paths(pod, own, service_prefixes) do
     for {path, c} <- containers(pod),
-        c["imagePullPolicy"] != "IfNotPresent" or not image_ok?(c, registry, service_prefixes),
+        c["imagePullPolicy"] != "IfNotPresent" or not image_ok?(c, own, service_prefixes),
         do: path <> ".image"
   end
 
-  defp image_ok?(%{"name" => name, "image" => image}, registry, service_prefixes)
+  defp image_ok?(%{"name" => name, "image" => image}, own, service_prefixes)
        when is_binary(image) do
     if name in @own_images do
-      String.starts_with?(image, registry <> "/") and
+      Enum.any?(own, &String.starts_with?(image, &1)) and
         Regex.match?(~r/@sha256:[0-9a-f]{64}\z/, image)
     else
-      Enum.any?([registry <> "/" | service_prefixes], &String.starts_with?(image, &1))
+      Enum.any?(own ++ service_prefixes, &String.starts_with?(image, &1))
     end
   end
 
